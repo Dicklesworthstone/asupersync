@@ -37,9 +37,15 @@ match rx.recv(&cx).await {
 }
 ```
 
-- `SendWaiter` uses `Arc<AtomicBool>` for waker dedup
+- Send-side waiters live in a `TokenSlab` of registered wakers with
+  `Waker::will_wake` dedup
 - Bounded capacity with backpressure
-- `try_send()` for non-blocking attempts
+- One-call sugar exists: `tx.send(&cx, value).await` (reserve + commit),
+  `try_send()` for non-blocking attempts, `send_evict_oldest()` for
+  latest-wins overwrite
+- `rx.recv_many(&cx, &mut buf, limit).await` batches drain loops
+- `unbounded_channel()` / `unbounded()` give a synchronous, never-waiting
+  send path (caller owns memory-pressure policy)
 - `SendError` variants are `Disconnected(T)`, `Cancelled(T)`, and `Full(T)`
 
 ## Oneshot Channel
@@ -49,11 +55,13 @@ Source: `src/channel/oneshot.rs`
 Single send, single receive with two-phase send.
 
 ```rust
-let (tx, rx) = oneshot::channel::<T>();
-let permit = tx.reserve(&cx)?;
+let (tx, mut rx) = oneshot::channel::<T>();
+let permit = tx.reserve(&cx)?;   // synchronous; consumes the sender
 permit.send(value);
 let result = rx.recv(&cx).await?;
 ```
+
+One-call sugar: `tx.send(&cx, value)` (consumes sender, reserves, commits).
 
 ## Broadcast Channel
 
@@ -68,8 +76,9 @@ let mut rx1 = tx.subscribe();
 let mut rx2 = tx.subscribe();
 
 let permit = tx.reserve(&cx)?;
-permit.send(value);
+permit.send(value);              // returns receiver count (usize)
 
+// One-call sugar: tx.send(&cx, msg) -> Result<usize, SendError<T>>
 // Lagging receivers get RecvError::Lagged(n)
 ```
 
@@ -81,8 +90,9 @@ Last-value multicast. Always-current read. `watch::Sender::send(...)` is
 immediate; it does not take `Cx` and does not use reserve/commit.
 
 ```rust
-let (tx, rx) = watch::channel(initial_value);
-tx.send(new_value);
+let (tx, mut rx) = watch::channel(initial_value);
+tx.send(new_value)?;             // Result; errs only if sender marked closed
+tx.send_modify(|v| { /* read-modify-write under the send lock */ })?;
 
 rx.changed(&cx).await?;          // wait for change
 let snapshot = rx.borrow_and_clone(); // does not mark seen
@@ -96,6 +106,13 @@ let current = rx.borrow_and_update_clone(); // clones and marks seen
 Source: `src/channel/session.rs`
 
 Typed RPC with reply obligation. Reply is a linear resource.
+
+Tracked wrappers (`tracked_channel()`, `tracked_oneshot()`) thread the
+capability context and return proofs: `TrackedSender::try_reserve(&cx)` yields
+a `TrackedPermit`, and `TrackedPermit::send(value)` /
+`TrackedPermit::try_send(value)` return `CommittedProof<SendPermit>`. This
+capability-threaded, proof-returning API first shipped in v0.3.10 and was
+re-anchored as the public contract in v0.4.0.
 
 ## Sync Primitives
 
@@ -171,22 +188,29 @@ Source: `src/sync/once_cell.rs`
 
 ```rust
 let cell = OnceCell::new();
-let val = cell.get_or_init(async { compute().await }).await;
+let val = cell.get_or_init(|| async { compute().await }).await;
 ```
 
-Cancel-safe: failed init lets next caller retry.
+Takes an `FnOnce() -> Future` closure (not a bare future); `get_or_try_init`
+and `get_or_init_blocking` also exist. Cancel-safe: cancelled init leaves the
+cell uninitialized and lets the next caller retry.
 
 ### Pool
 
 Source: `src/sync/pool.rs`
 
-Object pool with per-thread caches. Uses `#[allow(unsafe_code)]` for `unsafe impl Send`.
+Cancel-safe resource pooling with obligation-based return semantics: a
+`PooledResource` returns to the pool on drop or explicit
+`return_to_pool()`. `GenericPool::new(factory, PoolConfig::default())` is the
+easy entry point; no manual `unsafe impl Send` is needed.
 
 ### ContendedMutex
 
 Source: `src/sync/contended_mutex.rs`
 
-`parking_lot::Mutex` wrapper with optional `lock-metrics` instrumentation (wait/hold time tracking).
+`std::sync::Mutex` wrapper with synchronous `lock()` (no `Cx`). With the
+`lock-metrics` feature it tracks wait/hold time, contention count, and
+acquisitions; without it, a zero-cost wrapper.
 
 ## Cancel Safety Summary
 
@@ -198,6 +222,11 @@ Source: `src/sync/contended_mutex.rs`
 | Mutex lock | waiting for lock | guard held |
 | Semaphore acquire | waiting for permits | permit held |
 | Barrier wait | waiting for peers | post-barrier |
+
+v0.4.0 hardened this layer: waiter-ID wraparound prevented, completed MPSC
+reserve repolls rejected, interrupted semaphore acquisitions restored, RwLock
+queue order preserved, OnceCell waiter state linearized, and mutex rank
+released before wakeup (see CHANGELOG v0.4.0).
 
 ## Waker Dedup Pattern
 

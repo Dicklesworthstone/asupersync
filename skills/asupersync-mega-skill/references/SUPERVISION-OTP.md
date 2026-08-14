@@ -44,6 +44,9 @@ Relevant paths:
 
 - `src/app.rs`
 - `examples/spork_minimal_supervised_app.rs`
+- `examples/appspec_reference_journey.rs` (declarative `AppSpecV1` manifest ->
+  compile -> deterministic lab proof, with the e2e artifact runner
+  `scripts/run_appspec_reference_journey_e2e.sh`)
 
 ## Supervision Strategy And Restart Policy
 
@@ -57,6 +60,13 @@ Use restart policy to encode dependency shape:
 - `OneForOne` for independent children,
 - `OneForAll` when siblings share critical state,
 - `RestForOne` when later children depend on earlier ones.
+
+Know the current restart boundary: `CompiledSupervisor` compiles the topology
+and computes deterministic restart plans (`restart_plan_for`), but tree-level
+live restart-on-failure is still pending -- a child crash under a
+`CompiledSupervisor` tree is not restarted automatically today. Live restart
+is per-actor via `Scope::spawn_supervised_actor` (`src/actor.rs`), where the
+mailbox persists across restarts and a restart budget bounds retries.
 
 Do not fake this with manual restart loops hidden inside children.
 
@@ -104,7 +114,8 @@ Important guidance:
 
 - inject registry capability through `AppSpec` / `Cx`,
 - avoid rebuilding a global singleton service locator,
-- resolve named handles explicitly with `stop_and_release()` or `abort_lease()` semantics.
+- resolve named handles explicitly: `NamedGenServerHandle::stop()` plus
+  `release_name(...)`, or `abort_lease(...)` when the name should be dropped.
 
 Relevant paths:
 

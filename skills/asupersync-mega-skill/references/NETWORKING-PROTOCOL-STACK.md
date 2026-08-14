@@ -75,6 +75,19 @@ Source: `src/net/websocket/`
 
 RFC 6455: handshake, binary/text frames, ping/pong, close frames with status codes. Split reader/writer for concurrent send/receive within same region.
 
+Conformance status: `tests/conformance` keeps both the extension-negotiation
+suite and the broader directory-backed RFC 6455 suite live (framing, masking,
+control frames, close, error handling, fragmentation) against the production
+parser and handshake surfaces. Runtime cancellation/integration behavior is
+covered by the focused `tests/e2e_websocket.rs` and `tests/e2e/websocket/`
+lanes, not by the byte-level harness alone.
+
+v0.4.4: pending close writes honor the explicit caller `Cx`. Once a Close
+frame enters `CloseSent`, explicit-`Cx` close operations return typed
+interruption instead of stranding an aborted task on a pending transport
+write; the connection owner can fail a partially written close
+deterministically.
+
 ## HTTP/1.1
 
 Source: `src/http/h1/`
@@ -83,6 +96,15 @@ Source: `src/http/h1/`
 - Connection keep-alive
 - Streaming request/response bodies
 - Integration with connection pool
+- Bodies fail closed on incomplete termination (v0.4.0)
+- Streaming request bodies execute under the request-region capability context:
+  backpressure waits, cancellation, budgets, and body-channel limits observe
+  the request lifetime, not the connection lifetime (v0.4.4)
+- Connection reuse after an unread segmented body requires a bounded
+  framing-aware drain (explicit frame/byte/time bounds); malformed, truncated,
+  over-limit, or cancelled drains close the connection fail-closed (v0.4.4)
+- Config: `Http1Config` plus additive `Http1StreamingConfig`
+  (`src/http/h1/server.rs`)
 
 ## HTTP/2
 
@@ -128,14 +150,24 @@ need, feature set, and tests.
 
 High-value current anchors:
 
-- native QUIC/TLS handshake and packet protection in `src/net/quic_native/`
-- fail-closed X.509, hostname, signature, replay, and anti-amplification tests
-- HTTP/3/QPACK bounds and H3 adapter work under `src/http/h3_native.rs`
+- native QUIC/TLS handshake and packet protection in `src/net/quic_native/`;
+  the native TLS path runs a `rustls::quic` handshake driver with
+  in-handshake X.509 chain, hostname, signature, and time checks against
+  configured roots — untrusted-root, wrong-hostname, expired-certificate,
+  and unverified-identity paths fail closed, and there is deliberately no
+  insecure skip-verify default (scope: README QUIC row,
+  `docs/quic_atp_threat_model.md`)
+- fail-closed replay and anti-amplification tests
+- HTTP/3/QPACK under `src/http/h3_native.rs`: default static-only QPACK,
+  opt-in dynamic QPACK field-section and instruction-stream state machine
+  (support matrix: `artifacts/http3_qpack_support_matrix_v1.json`)
 - ATP-over-QUIC/H3 paths under `src/net/atp/`
 
-Direct native QUIC/TLS paths rely on QUIC AEAD authentication once the verified
-1-RTT channel is established. Non-direct, non-QUIC, or cross-trust RaptorQ
-symbol paths still need explicit symbol-auth posture.
+Native ATP-over-QUIC control frames and the transfer manifest ride the
+verified handshake-derived 1-RTT STREAM path; direct single-connection
+RaptorQ symbols ride verified 1-RTT DATAGRAM packets and rely on QUIC AEAD
+authentication. Non-direct, non-QUIC, or cross-trust RaptorQ symbol planes
+retain explicit per-symbol auth posture.
 
 Current fail-closed boundaries to preserve:
 
@@ -165,44 +197,38 @@ Known active frontiers include reliable clean-source streaming, authenticated
 control-source frames, QUIC pacing/congestion, large-object clean wins,
 delta/resync planning, and no-claim boundaries for cells that remain blocked.
 
-Current encrypted QUIC frontier (refresh before citing):
+Current matrix evidence (ledger through `MATRIX-235`, 2026-07-10; refresh
+`docs/atp_rq_beat_rsync_ledger.md` before citing):
 
-- landed zero-copy receive pump, in-place AEAD unprotect, ACK fast path,
-  inc-hash-on-receive, bounded sender queues, release-on-ACK retention, and
-  delivery-clocked source-stream pacing;
-- `Buf::copy_to_bytes` plus `BytesCursor` zero-copy override are now part of the
-  protocol hot-path story;
-- retransmit-frame coalescing, requeue ordering fixes, and conservative
-  QUIC recovery drain-cap tuning landed, but absolute pacer scheduling was
-  re-refuted;
-- scoped positive claim: `50M/good/encrypted` beats tuned rsync-ssh in current
-  evidence, and `5G/perfect/encrypted` completes byte-identical after being
-  previously impossible;
-- no-claim boundary: `500M/perfect/encrypted` still loses on speed,
-  `50M/bad/encrypted` still needs a rate-climb/cliff-recovery mechanism, and
-  5G encrypted peak RSS remains a follow-up.
+- Nocrypto (`atp-rq-lab` vs tuned rsyncd) is a banked board-level win:
+  `MATRIX-212` verified all 56 rows and `MATRIX-231` closed the last
+  clean-path gaps (`500M/perfect` 0.881x, `5G/perfect` win); tree/small
+  floors stay marginal. The `500M/broken/nocrypto` win (`MATRIX-209`,
+  564.77s vs 574.46s) no longer carries a correctness asterisk —
+  `MATRIX-230` closed the residual `InconsistentEquations` as spec-expected
+  RaptorQ rank deficiency.
+- Encrypted (`atp-quic-tls13` vs rsync-over-ssh aes128gcm) is fully measured
+  (25/25 cells, `MATRIX-216`) and the lossy sub-board is all-wins
+  (`MATRIX-221`). Remaining rsync-favored territory is clean-path large +
+  tree-perfect floors, root-caused to sender duty-cycle with an ~11%
+  link-bound honest ceiling (`MATRIX-232/233`).
+- Receiver RSS is bounded (<=18MB at every size; the 5G receiver went
+  882MB -> 12MB, `MATRIX-213/216`).
+- `MATRIX-235` native-link pacing rework showed large matched-pair gains
+  (encrypted `500M/perfect` -19.5%, `50M/perfect` -58%) but had no
+  contemporaneous rsync bar; it is a landed improvement, not a banked flip.
+- Refuted levers (do not re-chase): receipt-clocked flow-control credit, BBR
+  startup shapes, >2MiB window raise, receiver ACK cadence, encrypted-tree
+  wakeup reduction (`MATRIX-222..229`, `MATRIX-234`).
 
-Current RQ/nocrypto frontier (MATRIX-207..211, July 2026):
+Do not generalize board-level nocrypto/lossy wins to encrypted clean-path
+large cells or headline "beats rsync everywhere" claims; the duty-cycle
+ceiling and shared-box tree noise are documented open bounds.
 
-- `MATRIX-207` landed the convergence-control stack for
-  `500M/broken/nocrypto`: arrival-evidence pacing loss, rank-stall congestion
-  only when arrivals corroborate wire loss, lower round-0 FEC overhead, sparse
-  residual source requests, and expected-loss-aware recommendations. It was
-  not banked because the cell reached fail-closed SHA mismatch.
-- `MATRIX-208` fixed the decode-integrity root cause by reading FEC seeds from
-  the shared staging fragment at shard-absolute offsets. That made the cell
-  sha-ok 3/3 but only statistical parity with tuned rsync.
-- `MATRIX-209` banked exactly one new ATP win:
-  `500M/broken/nocrypto` atp median 564.77s, sha-ok 3/3 plus a confirming
-  fourth rep, versus tuned rsync median 574.46s. The winning lever was
-  double-buffered encode-ahead in the RQ spray; bounded token-bucket schedule
-  credit stayed as hygiene after its speed hypothesis was refuted.
-- `MATRIX-211` one-shot packed-member commit batching is a candidate landing
-  for tree/small-file commit-write overhead. It needs quiet-box A/B matrix
-  evidence before any performance win is claimed.
-
-Do not generalize the RQ `500M/broken/nocrypto` win to encrypted-large,
-tree-small, cross-trust symbol safety, or whole-matrix success.
+Since then: v0.4.1 fixed ATP progress Streams to poll with their creation
+`Cx` (preserving sender wake registration and cancellation observation); the
+July-August commits after the ledger's last entry are correctness/hardening
+landings, not new benchmark evidence.
 
 ## Transport Layer
 
@@ -244,7 +270,10 @@ Native gRPC client/server with health checks. `CallContext::with_cx(...)` for ca
 
 Source: `src/web/`
 
-Router, extractors, middleware, request-region isolation. Request-as-region pattern for structured concurrency per request.
+Router, extractors, middleware, request-region isolation, bounded SSE
+(`Sse`/`StreamingSse`). Request-as-region pattern for structured concurrency
+per request. Deliberately bounded native primitives, not axum/warp/tower-http
+parity (see the README coverage-map paragraph for the exact boundary).
 
 ## Service Layer
 
@@ -257,6 +286,10 @@ Source: `src/service/`
 All networking layers respect:
 - Region budgets for reads/writes
 - Cancellation drains connections cleanly
+- Cancel-safety is operation-specific: atomic datagram sends and covered
+  two-phase/adapter surfaces state their guarantees, while partial byte-stream
+  operations such as `read_exact`/`write_all` retain their documented
+  cancellation boundaries
 - Lab runtime substitutes virtual TCP for deterministic network testing
 - Two-phase semantics where applicable (send permits on channels)
 - Security posture is fail-closed: tampered bytes, wrong cert/hostname, replay,

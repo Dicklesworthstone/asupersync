@@ -72,6 +72,10 @@ Relevant sources:
 Also remember:
 
 - keep `Outcome::Cancelled` and `Outcome::Panicked` distinct at policy boundaries,
+- since v0.4.4, ordinary `Cx::spawn*` preserves a task's typed result after it
+  acknowledges cancellation (a concurrent abort no longer erases it into a
+  generic join cancellation); cancellation-dominant combinators keep their
+  separately documented semantics,
 - use tighter budgets for hedges, cleanup, and adapters,
 - prefer lawful orchestration surfaces over open-coded select forests.
 
@@ -132,12 +136,21 @@ Broadly strong native surfaces:
 
 Surfaces to validate before promising downstream parity:
 
-- QUIC / HTTP3
-- some messaging integrations
+- QUIC / HTTP3 (feature-gated; the native driver now does in-handshake X.509
+  verification and fails closed, but the row is still not a generic-QUIC
+  interoperability or release-readiness claim)
+- messaging integrations (Redis/NATS/Kafka are still classified early)
+- filesystem (an early blocking-backed facade, not full `tokio::fs` parity)
 - some browser/wasm adapters
 - niche distributed paths
 
-That means the skill should steer users toward native breadth confidently, but still verify the exact advanced path they need.
+That means the skill should steer users toward native breadth confidently, but still verify the exact advanced path they need against the README coverage map and `docs/platform_capability_matrix.md`.
+
+Notable v0.4.x additions on this frontier: an explicit Linux io_uring
+capability control plane (probed modes, not performance claims), first-party
+bounded Base64/hex codecs and a parked `block_on` kernel, typed redacted
+configuration models, and bounded HTTP/1 streaming-body controls
+(`Http1StreamingConfig`, v0.4.4).
 
 ## Guidance For Ambitious Systems
 

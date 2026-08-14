@@ -12,6 +12,7 @@ Before choosing a channel or lock, decide who owns the state and lifecycle.
 | Problem Shape | Prefer |
 |--------------|--------|
 | short-lived fork/join request work | `Scope` + child regions |
+| dynamic fan-out with per-task results | `JoinSet` (`JoinSet::in_cx(cx)` or `JoinSet::new(&scope)`; `join_next` / `join_all` / `cancel_all` keep drain ownership) |
 | single-owner mailbox state | `actor` |
 | request/reply stateful service | `GenServer` |
 | many long-lived children with restart topology | `AppSpec` + `supervision` + optional `spork` |
@@ -34,8 +35,12 @@ Critical Asupersync distinction:
 
 - `mpsc` and `oneshot` are async two-phase send surfaces,
 - `broadcast` also exposes a permit path, but reserve is synchronous,
+- one-call sugar exists on all of them (`tx.send(&cx, value)`, `.await` on
+  bounded mpsc) when the value is ready now; use explicit reserve/commit when
+  the send right is held across awaits,
 - reserve/commit exists to keep work from being half-sent,
-- session reply handles are linear resources and should be treated that way.
+- session reply handles are linear resources and should be treated that way;
+  tracked session wrappers return `CommittedProof` receipts (v0.4.0 API).
 
 Good uses:
 
@@ -101,6 +106,7 @@ semantics matter more than middleware layering.
 | `timeout` | bounding one operation | explicit timeout semantics instead of ad hoc cancellation |
 | `retry` | transient failure with bounded total cost | budget-aware total retry control |
 | `hedge` | tail-latency control | explicit backup branch and loser drain |
+| `adaptive_hedge` | tail-latency control with dynamic delay | Peak-EWMA tracked hedge delay instead of a fixed one |
 | `quorum` | M-of-N success requirements | policy matches consensus-style flows |
 | `bulkhead` | isolate overload domains | one bad dependency stops poisoning siblings |
 | `rate_limit` | token-bucket throughput control | explicit backpressure and retry-after data |
@@ -151,7 +157,10 @@ semantics matter more than middleware layering.
 
 - using `Mutex` because ownership was not designed explicitly
 - stuffing long-lived service topology into naked spawned tasks
-- hand-writing `select!`-style spaghetti for timeout/retry/race logic
+- hand-writing Tokio-`select!`-style spaghetti for timeout/retry/race logic --
+  the native `race!` and N-ary heterogeneous `select!` macros are
+  drain-correct (`Cx::race_drained*` / `Scope::race_all`); only the `select!`
+  `else` form and direct `Cx::race` are drop-on-cancel
 - using `watch` to represent must-process event history
 - using `broadcast` when consumers only need the latest snapshot
 - building internal RPC with loose `mpsc` messages and no reply obligation

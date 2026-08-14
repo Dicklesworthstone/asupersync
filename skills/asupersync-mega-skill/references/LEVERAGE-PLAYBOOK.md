@@ -47,6 +47,7 @@ Relevant paths:
 - `src/gen_server.rs`
 - `src/supervision.rs`
 - `examples/spork_minimal_supervised_app.rs`
+- `examples/appspec_reference_journey.rs`
 
 ## 2.5 Promotion Triggers: When To Upgrade Your Design
 
@@ -81,6 +82,10 @@ Design advice:
 - Put always-on workers, replication loops, sidecar observers, and control-plane services under `AppSpec`.
 - Treat `AppHandle` and named-server handles as obligation-like lifecycle handles: resolve them explicitly, do not casually drop them.
 - Use restart policy and supervision strategy to encode failure domains instead of rebuilding custom watchdog threads.
+- Know the current restart boundary: `CompiledSupervisor` computes deterministic
+  restart plans, but tree-level live restart-on-failure is still pending;
+  today's live restart is per-actor via `Scope::spawn_supervised_actor`
+  (`src/actor.rs`).
 
 Relevant paths:
 
@@ -174,6 +179,9 @@ Important guidance:
 - Do not hold permits or leases across unrelated awaits.
 - Prefer `call` over `cast` when the protocol requires acknowledgement or reply ownership.
 - Use `CastOverflowPolicy` deliberately. Mailbox overflow policy is part of system semantics, not a default you should ignore.
+- Tracked session channels are capability-threaded since v0.4.0:
+  `TrackedSender::try_reserve` takes `&Cx` and `TrackedPermit::try_send`
+  returns `CommittedProof<SendPermit>`.
 
 Relevant paths:
 
@@ -247,7 +255,7 @@ Do **not** lead with these unless the target requirements justify them:
 
 For most projects, the highest-leverage path is still:
 
-- `RuntimeBuilder` + `Cx` + `Scope`
+- `#[asupersync::main]` (or `RuntimeBuilder`) + `Cx` + `Scope`
 - request/call regions
 - native `service` / `web` / `grpc`
 - native channels/sync/combinators

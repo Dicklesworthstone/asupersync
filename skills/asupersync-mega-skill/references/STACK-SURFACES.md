@@ -10,13 +10,14 @@
 | Channels / sync / time | `src/channel/`, `src/sync/`, `src/time/` | Lead with this | Strong replacement story |
 | I/O / net / bytes / codec | `src/io/`, `src/net/`, `src/bytes/`, `src/codec/` | Strong candidate; verify edge cases | Broad native services surface, not a promise of every niche op |
 | HTTP/1.1 + HTTP/2 | `src/http/` | Strong candidate | Native server/client stack exists; validate exact protocol behavior |
-| Web framework | `src/web/` | Strong candidate | axum-like API, but not axum ecosystem parity |
+| Web framework | `src/web/` | Strong candidate | Native router/extractor/middleware/SSE primitives on a local `Handler` trait; deliberately not axum/warp/tower-http parity |
 | Service / middleware | `src/service/` | Strong candidate | Native Tower-style story plus optional adapter boundary |
 | gRPC | `src/grpc/` | Strong candidate when needed | Rich surface for real service work; use auth-gated reflection in production |
 | Databases | `src/database/` | Requirement-driven native candidate | Feature-gated, native wire protocols for Pg/MySQL; SQLx macro parity is not promised |
 | Actors / GenServer / supervision / Spork | `src/actor.rs`, `src/gen_server.rs`, `src/supervision.rs` | Use when topology/state demands it | Good fit for stateful concurrency |
 | Observability | `src/observability/` | Turn on early | Much deeper than just tracing integration |
-| QUIC / HTTP3 | `src/net/quic_*`, `src/http/h3_native.rs` | Only if the requirement exists | Native fail-closed pieces exist; verify exact interoperability/protocol need |
+| QUIC / HTTP3 | `src/net/quic_*`, `src/http/h3_native.rs` | Only if the requirement exists | Native fail-closed pieces exist; `quic_native` TLS does in-handshake X.509 chain/hostname/expiry checks with no skip-verify default; still not a generic-QUIC-interop claim -- verify exact protocol need |
+| Filesystem | `src/fs/` | Requirement-driven; extra caution | Early blocking-backed async facade (`spawn_blocking_io`), not full `tokio::fs` parity |
 | ATP object transfer | `src/net/atp/`, `scripts/atp_bench/` | Only for object-transfer / benchmark lanes | Claims require matrix evidence against tuned rsync |
 | Messaging | `src/messaging/` | Only when required; verify exact feature needs | In-process pub/sub/request-reply surfaces are useful; durable/fabric compiler claims need source checks |
 | Remote / distributed | `src/remote.rs`, `src/distributed/` | Requirement-driven | Require extra source inspection |
@@ -36,6 +37,9 @@ High-level router surface:
 - `Router::routes()` and `RouteInfo` for route inventory surfaces
 - `middleware::{TimeoutLayer, CompressionLayer, RequestTraceLayer,
   CatchPanicLayer}`
+- `Sse` (finite bounded batches) and `StreamingSse` (pull API with
+  request-region and HTTP/1 drain proofs)
+- error-handler panics surface as `ASUP-E502` redacted 500 responses
 
 ### `http`
 
@@ -45,6 +49,9 @@ Client/server surfaces:
 - `http::HttpClient`
 - fluent `get` / `post` / `put` / `patch` / `delete` request builders
 - HTTP/1.1 + HTTP/2 bodies, pooling, compression, and protocol tests
+- v0.4.4: streaming request bodies run under the request-region `Cx`;
+  additive `Http1StreamingConfig` bounds body queues and unread-body drain
+  (`Http1Config` v0.4.3 struct literals keep compiling)
 
 ### `service`
 

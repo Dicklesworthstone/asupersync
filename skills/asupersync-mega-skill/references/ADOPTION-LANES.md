@@ -34,6 +34,7 @@ Choose this when:
 
 Default moves:
 
+- run the read-only planner first: `python3 scripts/migration_readiness_planner.py --project-root <proj> --output-root <out>` (see `docs/integration.md`),
 - replace runtime bootstrap first,
 - inventory every `tokio::*` and Tokio-ecosystem dependency,
 - thread `&Cx` through code you control,
@@ -45,7 +46,8 @@ Exit criteria:
 
 - Tokio is removed from core modules,
 - migrated domains use native Asupersync surfaces,
-- any remaining Tokio-only crate is isolated behind a dedicated adapter boundary.
+- any remaining Tokio-only crate is isolated behind a dedicated adapter boundary,
+- `cargo tree -e normal -i tokio` on core crates prints nothing (no-Tokio production graph).
 
 ## Lane 3: Boundary Interop
 

@@ -10,9 +10,14 @@ E(Config) -> D(Instrumentation) -> B(Regions) -> A(Tasks) -> C(Obligations)
 
 Violating this order causes deadlocks. This is enforced by:
 
-- `ShardGuard` variants with label system
-- Debug checks that verify acquisition order
-- 23 dedicated tests for lock ordering correctness
+- Named `ShardGuard` constructors that always acquire in canonical order
+- `lock_order::before_lock` / `after_lock` debug assertions on every shard
+  acquisition (`LockShard` labels)
+- Dedicated contract/audit tests, e.g. `tests/lock_order_inventory_contract.rs`
+  and `tests/runtime_no_await_while_holding_lock_audit.rs`, plus a loom lane
+  (`tests/scheduler_loom.rs`, feature `loom-tests`)
+
+Mnemonic: "Every Day Brings Another Challenge."
 
 Source: `src/runtime/sharded_state.rs`
 
@@ -32,27 +37,44 @@ Runtime state split into independently locked shards:
 
 Hot-path polling proceeds without serializing every region or obligation mutation. Each shard can be locked independently when only one table is needed.
 
+Lock nature per shard: A/B/C are Arc-shared `ContendedMutex` tables (aliased
+to scheduler/lifecycle seams via `task_shard_handle` / `region_shard_handle` /
+`obligation_shard_handle`); D is internally synchronized (short-held trace
+mutex, acquired after shard locks by convention — it is not a `LockShard`);
+E is read-only config with no lock.
+
+The sharded shape is a public opt-in: `RuntimeBuilder::with_sharded_state(true)`
+(default `RuntimeStateShape::Unified`). On sharded builds, obligation
+resolution targets shard C via wrapper-side resolution in
+`src/runtime/state.rs` (shard A then shard C, buffered effect sinks,
+post-release drain).
+
 ### Multi-Shard Operations
 
-Use `ShardGuard` to acquire multiple shards in canonical order. The guard variants enforce ordering at compile time (type system) and runtime (debug assertions).
+Use `ShardGuard` to acquire multiple shards in canonical order at runtime
+(debug assertions verify the order). Named constructors: `tasks_only` (A),
+`regions_only` (B), `obligations_only` (C), `for_spawn` (B->A),
+`for_obligation` (B->C), `for_obligation_resolve` / `for_cancel` /
+`for_task_completed` / `all` (B->A->C).
 
 ## ContendedMutex
 
 Source: `src/sync/contended_mutex.rs`
 
 Wrapper around `parking_lot::Mutex` with optional contention metrics (feature: `lock-metrics`):
-- Wait time tracking
-- Hold time tracking
+- Wait time tracking (cumulative, max, and retained percentile samples)
+- Hold time tracking (cumulative and max)
 - Contention event counting
 
 Use for all shard locks in `ShardedState`.
 
 ## Channel Waker Dedup
 
-Pattern used across the codebase: `Arc<AtomicBool>` on:
-- mpsc `SendWaiter`
-- broadcast receivers
-- watch `WatchWaiter`
+Waiter registration paths deduplicate wakeups; the canonical surviving example
+is watch's `WatchWaiter` with a shared `queued: Arc<AtomicBool>` flag
+(`src/channel/watch.rs`). The mpsc/broadcast waiter internals have been
+reworked since (waiter-ID wraparound and stale-waiter fixes in v0.4.0), so
+verify the current per-primitive mechanism in `src/channel/` before citing it.
 
 Prevents duplicate wakeups and reduces contention on the wake path.
 

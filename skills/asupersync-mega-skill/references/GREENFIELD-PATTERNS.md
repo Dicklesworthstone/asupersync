@@ -27,33 +27,29 @@ If the system has named workers, restart policy, or explicit startup/shutdown to
 
 ## Minimal Bootstrap
 
-Current bootstrap pattern from the README:
+Current bootstrap pattern from the README (`examples/onramp_level0.rs` /
+`onramp_level1.rs`):
 
 ```rust,ignore
-use asupersync::{Cx, Error};
-use asupersync::runtime::RuntimeBuilder;
+use asupersync::{main, prelude::*};
 
-async fn run(cx: &Cx) -> Result<(), Error> {
+#[main]
+async fn main(cx: &Cx) -> Result<(), Error> {
     cx.trace("worker running");
     cx.checkpoint()?;
     Ok(())
 }
-
-fn main() -> Result<(), Error> {
-    let runtime = RuntimeBuilder::current_thread().build()?;
-    let result = runtime.block_on(runtime.handle().spawn(async {
-        let cx = Cx::current().expect("runtime task Cx");
-        run(&cx).await
-    }));
-    result?;
-    Ok(())
-}
 ```
 
-Use this as the production orientation example. Keep `Cx::for_request()` and
-`Cx::for_testing()` in test/internal harnesses. `RuntimeHandle::spawn` is the
-small teaching shape; use `try_spawn` / `try_spawn_with_cx` when bootstrap
-admission failure must be handled without panicking.
+`#[main]` builds and drives the production runtime; the `cx: &Cx` parameter and
+`Result` return are optional, and the macro needs the default `proc-macros`
+feature. The graduated on-ramp (`docs/onramp.md`, `examples/onramp_level0..3.rs`)
+is the teaching path. For explicit runtime construction, use
+`RuntimeBuilder::current_thread().build()?` with `runtime.block_on(...)` and
+`runtime.handle().spawn(...)`. Keep `Cx::for_request()` and `Cx::for_testing()`
+in test/internal harnesses. `RuntimeHandle::spawn` is the small teaching shape;
+use `try_spawn` / `try_spawn_with_cx` when bootstrap admission failure must be
+handled without panicking.
 
 ## Long-Lived Service Skeleton
 
@@ -78,9 +74,12 @@ let app = AppSpec::new("api")
 Important guidance:
 
 - `AppSpec` is the right unit for long-lived service trees.
-- `AppHandle` is a real lifecycle handle; resolve it explicitly.
+- `AppHandle` is a real lifecycle handle; resolve it explicitly with
+  `stop` / `join` (it reports a leak on drop otherwise).
 - Put background loops and internal services under the app tree instead of
   smuggling them out through detached tasks.
+- For a full declarative-manifest walkthrough (`AppSpecV1` -> compile -> lab
+  proof), see `examples/appspec_reference_journey.rs`.
 
 ## Runtime Shape Is Part Of The Design
 
@@ -135,10 +134,12 @@ let ra = a.join(cx).await?;
 let rb = b.join(cx).await?;
 ```
 
-`scope!` binds the current-region scope; it does not create a fresh child-region
-boundary. `Cx::spawn_in` targets an existing scope's region. Use
-`Scope::region(...)` when a new structural child region must close to
-quiescence before you proceed.
+`scope!` and `cx.scope()` / `cx.scope_with_budget(...)` bind the current-region
+scope; they do not create a fresh child-region boundary. `Cx::spawn_in` targets
+an existing scope's region, and `JoinSet::new(&scope)` / `JoinSet::in_cx(cx)`
+owns dynamic fan-out (`join_next` for completion order, `join_all` for spawn
+order, `cancel_all` to cancel and drain). Use `Scope::region(...)` when a new
+structural child region must close to quiescence before you proceed.
 
 ## Cancellation-Safe Send Pattern
 
@@ -195,10 +196,14 @@ surface to handlers.
 
 If the app wants OTP-style components:
 
-- use `actor.rs` for bounded mailbox actors
+- use `actor.rs` for bounded mailbox actors; `Scope::spawn_supervised_actor`
+  is the live per-actor restart surface (mailbox persists across restarts)
 - use `gen_server.rs` for request/reply servers
-- use `supervision.rs` for restart topology
-- inspect `examples/spork_minimal_supervised_app.rs`
+- use `supervision.rs` for restart topology; note `CompiledSupervisor`
+  computes restart plans deterministically but tree-level live
+  restart-on-failure is still pending
+- inspect `examples/spork_minimal_supervised_app.rs` and
+  `examples/appspec_reference_journey.rs`
 
 ## Pick The Right Surface
 

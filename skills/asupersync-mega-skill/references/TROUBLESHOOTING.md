@@ -1,6 +1,10 @@
 # Troubleshooting
 
-## "ObligationLeak detected"
+Runtime diagnostics carry stable `ASUP-Exxx` error-code tokens. The canonical
+registry (with probable causes and remediation per code) is
+`docs/error_codes/registry.json`, with per-code pages under `docs/error_codes/`.
+
+## "ObligationLeak detected" (ASUP-E101)
 
 Meaning:
 
@@ -15,11 +19,12 @@ Fix:
 - always resolve the obligation explicitly
 - avoid holding it across unrelated awaits unless that is the protocol
 
-## "RegionCloseTimeout"
+## Cancel Drain Timeout (`CancelTimeout` / ASUP-E301)
 
 Meaning:
 
-- A region is trying to close but descendants or finalizers are not finishing.
+- Cancellation was requested but drain did not complete within budget: a region
+  is trying to close but descendants or finalizers are not finishing.
 
 Typical cause:
 
@@ -31,11 +36,13 @@ Fix:
 - add `cx.checkpoint()?` in loops and long-running work
 - make ownership and join paths explicit
 
-## "FuturelockViolation"
+## Futurelock Detected (ASUP-E402)
 
 Meaning:
 
-- A task is holding obligations but has stopped making observable progress.
+- A task is holding obligations but has stopped making observable progress
+  (reported as `InvariantViolation::Futurelock` /
+  `TraceEventKind::FuturelockDetected`).
 
 Typical cause:
 
@@ -46,7 +53,7 @@ Fix:
 - shorten the critical section
 - restructure to avoid waiting while holding obligation-bearing state
 
-## Deterministic Drift
+## Deterministic Drift (ASUP-E403 lab-seed-nondeterminism)
 
 Symptom:
 

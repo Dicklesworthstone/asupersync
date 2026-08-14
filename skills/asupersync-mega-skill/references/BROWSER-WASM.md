@@ -6,14 +6,30 @@ Use this only when the target actually includes browser or WASM deployment.
 
 The repo's browser story is explicit and fail-closed:
 
-- direct runtime support is for the browser main thread,
+- JS/TS packages (`@asupersync/browser` and friends, workspace version 0.4.4)
+  are GA for browser main-thread **and dedicated-worker** consumers; the
+  scoped GA signoff is `artifacts/browser_ga_final_signoff_v1.json`
+  (`pass_scoped_js_ts_ga`). Packages are still workspace-local, not yet
+  published to the npm registry.
+- service workers and shared workers are broker/coordinator-only: direct
+  `BrowserRuntime` creation fail-closes there; use the bounded broker
+  registration / coordinator attach APIs instead,
 - SSR / server / edge / Node-only contexts are bridge-only or unsupported for direct browser runtime execution,
 - canonical browser profiles are selected by feature flags.
 - `asupersync-browser-core` is the canonical browser core; `asupersync-wasm`
-  may remain as excluded/non-canonical scaffold unless `Cargo.toml` says
-  otherwise.
-- `RuntimeBuilder::browser()` is a browser-lane API, not a blanket replacement
-  for native server runtime setup.
+  is a retained non-canonical scaffold.
+- `RuntimeBuilder::browser()` is a **preview** public Rust lane:
+  dispatcher-backed, narrower than the JS/TS packages, fail-closed on
+  unsupported hosts with an inspectable execution ladder
+  (`RuntimeBuilder::inspect_browser_execution_ladder()`; key fields
+  `selected_lane`, `host_role`, `reason_code`, `preferred_lane`,
+  `downgrade_order`). Not a stable external Rust Browser Edition API.
+
+The readiness matrix (`artifacts/browser_edition_readiness_matrix_v1.json`,
+human table `docs/browser_edition_readiness_matrix.md`) binds six support
+classes to fixture evidence: Direct-runtime supported, Package ABI boundary,
+Preview public lane, Broker/coordinator-only, Bridge-only, and
+Impossible / unsupported.
 
 Use this file as the lane chooser and posture summary.
 
@@ -33,10 +49,17 @@ Exactly one canonical browser profile should be selected for wasm builds.
 
 Recommended posture:
 
-- `minimal` for closure/contract checks
-- `dev` for local diagnostics
-- `prod` for production-lean browser envelope
-- `deterministic` for replay-oriented validation
+- `minimal` for closure/ABI-contract checks (smallest artifact)
+- `dev` for local diagnostics (browser I/O enabled)
+- `prod` for production-lean browser envelope (browser I/O enabled)
+- `deterministic` for replay-oriented validation (deterministic mode + browser trace)
+
+Closure check (do not blend profiles):
+
+```bash
+cargo check --target wasm32-unknown-unknown \
+  --no-default-features --features wasm-browser-dev
+```
 
 ## Important Constraints
 
@@ -48,6 +71,16 @@ Expect browser-path exclusions around:
 - native database features
 - Kafka
 - native filesystem/process/signal/server surfaces
+- raw TCP/UDP and Unix sockets (browser networking is `fetch`, `WebSocket`,
+  and capability-gated `WebTransport` datagrams)
+
+Browser-native application-boundary helpers exist but are capability-gated:
+`MessageChannel` / `MessagePort` / `BroadcastChannel` helpers and WHATWG
+`ReadableStream` / `WritableStream` byte wrappers in `@asupersync/browser`
+require explicit `BrowserNativeMessagingCapability` /
+`BrowserNativeStreamCapability` authority, deny `capability_not_granted` and
+`degraded_mode_denied`, and report stable `ASUPERSYNC_BROWSER_NATIVE_*` error
+codes. They are guarded same-browser wrappers, not raw transport parity.
 
 ## Framework Guidance
 
@@ -71,11 +104,19 @@ Additional framework-specific guidance exists for:
 
 Only use Browser Edition directly when:
 
-- you actually target browser execution,
+- you actually target browser execution (main thread or dedicated worker),
 - you can keep runtime creation in supported client-side environments,
-- you can respect the direct-runtime vs bridge-only boundary.
+- you can respect the direct-runtime vs broker/coordinator-only vs bridge-only
+  boundaries.
 
 Otherwise stay on native server-side Asupersync or use an explicit bridge architecture.
+
+For Rust-authored browser work, the authoritative evidence path is the
+maintained fixture at `tests/fixtures/rust-browser-consumer/` plus
+`scripts/validate_rust_browser_consumer.sh`; the preview
+`RuntimeBuilder::browser()` lane layers on top of that, it does not replace it.
+Full guide: `docs/WASM.md`; command-first workflow:
+`docs/wasm_quickstart_migration.md`.
 
 ## Browser Adoption Rules That Matter
 

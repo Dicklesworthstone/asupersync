@@ -78,7 +78,13 @@ The repo already exposes knobs for:
 
 - worker and blocking pool sizing
 - poll budget / scheduling batch controls
-- cancel-streak behavior and adaptive governance
+- cancel-streak behavior and adaptive governance (adaptive cancel streak is
+  on by default at HEAD)
+- sharded backing state (`with_sharded_state(true)` opt-in; default `Unified`)
+- spawn admission (`Direct` default vs lock-free `Mailbox`)
+- explicit worker cohorts and placement mode for topology-aware steal ordering
+- capacity hints and memory-tier policies (arena temperature, trace storage
+  profile) — policy-only, no scheduling-semantics change
 - root-region limits
 - deadline monitoring
 - logical clock mode
@@ -94,6 +100,11 @@ Canonical shard order in the runtime:
 
 - `E(Config) -> D(Instrumentation) -> B(Regions) -> A(Tasks) -> C(Obligations)`
 
+The sharded shape is a public opt-in (`with_sharded_state(true)`; the default
+backing state remains `Unified`). On sharded builds, scheduler dispatch runs
+against the shard-A task table and obligation resolution targets shard C via
+wrapper-side resolution in `src/runtime/state.rs`.
+
 What downstream integrators should learn from that:
 
 - separate hot-path mutation domains when possible,
@@ -105,7 +116,11 @@ If you must lock multiple structures, define an order and document it.
 
 ## Locality Matters
 
-The runtime distinguishes local `!Send` work and stealable `Send` work.
+The runtime distinguishes local `!Send` work and stealable `Send` work, and
+can additionally order steal victims by explicit worker cohorts
+(`worker_cohorts(...)` + `scheduler_placement_mode(...)`) for NUMA-style
+topology awareness — deterministic ordering only, with the mapping supplied
+by you, never probed from the host.
 
 Downstream implication:
 
@@ -156,6 +171,8 @@ High-value operator surfaces:
 - lock metrics via `ContendedMutex`
 - progress certificates and drain phase labels
 - fairness counters such as yield/cancel streak telemetry
+- `runtime::metrics::snapshot()` CPU/churn counters (`runtime-metrics` feature)
+- resource-monitor pressure snapshots/verdicts
 
 Use these before guessing.
 

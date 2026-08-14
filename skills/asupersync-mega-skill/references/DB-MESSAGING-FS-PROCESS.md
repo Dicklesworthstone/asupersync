@@ -6,9 +6,15 @@ This file covers the broad system-integration surfaces beyond the core runtime.
 
 Native database surfaces exist behind features:
 
-- `database::sqlite`
-- `database::postgres`
-- `database::mysql`
+- `database::sqlite` — blocking-pool bridge over bundled `rusqlite` with
+  cancel-safe wrappers that respect region deadlines; row streams are
+  connection-exclusive and dropped transactions roll back eagerly (v0.4.0),
+- `database::postgres` — native binary protocol v3 directly over `TcpStream`,
+  SCRAM-SHA-256 auth,
+- `database::mysql` — native wire protocol, native + `caching_sha2` auth.
+
+All three support prepared statements, transactions, and connection reuse
+(README "Database Integration").
 
 Migration guidance:
 
@@ -24,7 +30,10 @@ Important limitation:
 
 ## Messaging
 
-Native messaging surfaces exist, but some areas remain partial.
+Native messaging surfaces exist (`src/messaging/{redis,nats,kafka}.rs`), but
+the README coverage map still classifies messaging clients as
+In progress / Early. Redis PubSub validates control acknowledgements as of
+v0.4.0.
 
 Good fits to inspect first:
 
@@ -46,7 +55,15 @@ If your workload depends on a feature that the repo classifies as partial, eithe
 
 ## Filesystem
 
-Prefer `fs::*` over `tokio::fs`.
+Prefer `fs::*` over `tokio::fs`, but note the deliberately conservative scope:
+`src/fs/` is a partial blocking-backed facade, not full `tokio::fs` parity.
+It currently exposes `File`, buffered readers/writers, metadata,
+directory/path helpers, `try_exists`, `write_atomic`, `UnixVfs`, and platform
+capability reports. Most operations are async facades over
+`spawn_blocking_io`; poll-based `File` traits still use direct blocking I/O,
+recursive directory removal and large copies inherit standard-library
+partial-state semantics, and Linux `io_uring` support is limited to
+feature-gated helper paths.
 
 Migration checklist:
 

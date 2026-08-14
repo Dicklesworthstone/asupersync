@@ -24,19 +24,20 @@ The scheduler (`src/runtime/scheduler/three_lane.rs`) uses three priority lanes:
 - During `DrainObligations` and `DrainRegions`: effective bound widens to `2 * cancel_streak_limit`
 - Workers track `fairness_yields` and `max_cancel_streak` telemetry
 
-### Adaptive Cancel Preemption (EXP3/Hedge)
+### Adaptive Cancel Preemption (Default-On)
 
-Optional deterministic no-regret online controller:
+Deterministic no-regret online controller, **enabled by default**
+(`enable_adaptive_cancel_streak = true`, epoch steps default 128):
 
-```text
-p_t(a) = (1 - gamma) * w_t(a) / sum(w_t) + gamma / K
-w_{t+1}(a) = w_t(a) * exp((gamma / K) * r_hat_t(a))
-```
-
-- Selects cancel-streak limits per epoch from candidate set (e.g., {4, 8, 16, 32})
-- Reward blends Lyapunov decrease + fairness pressure + deadline pressure
+- HEAD implements a discounted-UCB1 policy (`AdaptiveCancelStreakPolicy` in
+  `three_lane.rs`) over the fixed candidate arm set `{4, 8, 16, 32, 64}`
+  (default arm = 16), with an e-process monitor over epoch rewards
+- Reward in [0, 1] blends Lyapunov decrease + fairness pressure + deadline
+  pressure (+ fallback penalty)
 - Preserves deterministic replay semantics
-- Enable: `RuntimeBuilder::enable_adaptive_cancel_streak(true)`
+- Knobs: `enable_adaptive_cancel_streak(bool)`,
+  `adaptive_cancel_streak_epoch_steps(n)` (README still describes the earlier
+  EXP3/Hedge formulation; the shipped selector is discounted UCB1)
 
 ### Lyapunov Governor
 
@@ -59,7 +60,17 @@ State split into independently locked shards (`src/runtime/sharded_state.rs`):
 
 Multi-shard operations use `ShardGuard` with canonical order: `E -> D -> B -> A -> C`.
 
-Shard locks are `ContendedMutex` instances. Optional `lock-metrics` feature measures wait/hold times.
+Shards A/B/C are Arc-shared `ContendedMutex` instances (`task_shard_handle` /
+`region_shard_handle` / `obligation_shard_handle` alias the exact shard to
+scheduler/lifecycle seams). Shard D is internally synchronized (trace mutex
+short-held, acquired after shard locks by convention); shard E is read-only.
+Optional `lock-metrics` feature measures wait/hold times.
+
+Backing shape is `RuntimeStateShape`: default `Unified` (single-lock state);
+`RuntimeBuilder::with_sharded_state(true)` opts into `Sharded`, where workers
+dispatch against the shard-A `TaskTable` and obligation resolution targets
+shard C via wrapper-side resolution in `src/runtime/state.rs` (A-then-C guard
+order, buffered effect sinks, post-release drain).
 
 ## Worker Coordination
 
@@ -75,6 +86,11 @@ Shard locks are `ContendedMutex` instances. Optional `lock-metrics` feature meas
 - Local `!Send` tasks pinned to owner workers, routed through non-stealable queues
 - Steal paths explicitly reject moving pinned tasks across workers
 - Queue-tag membership checks on intrusive links (O(1) pop without allocation)
+- Local ready queue uses O(1) lazy-tombstone cancellation (`LocalReadyQueueInner`),
+  so mass cancellation avoids O(n^2) scan-and-remove
+- Optional topology-aware steal ordering: explicit `worker_cohorts(...)` mapping
+  plus `scheduler_placement_mode(...)` (`LocalityFirst` default / `LatencyFirst` /
+  `ThroughputFirst`); deterministic victim ordering only, no host probing
 
 ## Global Injector
 
@@ -105,20 +121,35 @@ Source: `src/runtime/region_heap.rs`
 - Generation-based O(1) cancel
 - Overflow spill for long deadlines, promoted back in range
 - Coalescing windows batch nearby wakeups with minimum-group gating
-- Benchmarked 2.67x cancel-path advantage over BTreeMap at 10K corpus
+- Benchmarked ~27x cancel-path advantage over BTreeMap at the 10K corpus
+  (release-perf profile, 2026-06-01); the wheel now also wins the mixed
+  insert/cancel/expire workload (`benches/timer_wheel.rs`)
 
 ## Runtime Builder Presets
 
 ```rust
-RuntimeBuilder::current_thread()   // CLI, simple services, determinism-first
-RuntimeBuilder::low_latency()      // Request/response APIs, latency-sensitive
-RuntimeBuilder::high_throughput()  // Queue-heavy, fan-out, high concurrency
+RuntimeBuilder::current_thread()   // CLI, simple services, determinism-first (1 worker)
+RuntimeBuilder::multi_thread()     // Deterministic default worker count (4, host-independent)
+RuntimeBuilder::low_latency()      // Request/response APIs (steal batch 4, poll budget 32)
+RuntimeBuilder::high_throughput()  // Queue-heavy, fan-out (2x default workers, steal batch 32)
 ```
 
-Key knobs: `blocking_threads(min, max)`, `poll_budget(n)`, `cancel_lane_max_streak(n)`, `enable_adaptive_cancel_streak(bool)`, `enable_governor(bool)`, `governor_interval(n)`, `root_region_limits(...)`, `deadline_monitoring(...)`, `logical_clock_mode(...)`, `cancel_attribution_config(...)`, `obligation_leak_response(...)`, `enable_time()`, `observability(...)`, `metrics(...)`.
+Key knobs: `blocking_threads(min, max)`, `poll_budget(n)` (default 128),
+`steal_batch_size(n)` (default 16), `cancel_lane_max_streak(n)` (default 16),
+`enable_adaptive_cancel_streak(bool)` (default true),
+`adaptive_cancel_streak_epoch_steps(n)`, `enable_governor(bool)`,
+`governor_interval(n)`, `with_sharded_state(bool)`, `spawn_admission(mode)`
+(`Direct` default / `Mailbox` lock-free spawn mailbox), `worker_cohorts(...)`,
+`scheduler_placement_mode(...)`, `capacity_hints(...)` /
+`expected_concurrent_tasks(n)`, `arena_temperature_policy(...)`,
+`trace_storage_profile(...)`, `root_region_limits(...)`,
+`deadline_monitoring(...)`, `logical_clock_mode(...)`,
+`cancel_attribution_config(...)`, `obligation_leak_response(...)`,
+`enable_time()`, `observability(...)`, `metrics(...)`.
 
-Configuration layering: defaults < TOML (`from_toml()` / `from_toml_str()` with
-the `config-file` feature) < env (`with_env_overrides()`) < programmatic.
+Configuration layering: defaults < TOML/JSON (`from_toml()` / `from_toml_str()`
+/ `from_json()` / `from_json_str()` with the `config-file` feature) < env
+(`with_env_overrides()`) < programmatic.
 
 Runtime CPU work added `runtime-metrics`, `runtime::metrics::snapshot()`, a
 scheduler CPU/churn benchmark, and a validation script for idle busy-spin,

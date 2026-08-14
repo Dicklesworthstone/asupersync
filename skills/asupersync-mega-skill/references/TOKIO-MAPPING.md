@@ -7,20 +7,25 @@ Use this as the first-pass replacement matrix.
 | Tokio surface | Native Asupersync surface | Guidance |
 | --- | --- | --- |
 | `#[tokio::main]` | `runtime::RuntimeBuilder` + `Runtime::block_on` | Replace bootstrap first. |
-| `tokio::spawn` | `Cx::spawn`, `Cx::spawn_in`, `RuntimeHandle::{spawn,spawn_with_cx}` | Prefer region-owned work. Use `Scope::spawn_registered` only when you already hold `&mut RuntimeState`. |
-| `tokio::task::spawn_blocking` | Asupersync blocking pool / runtime blocking helpers | Keep blocking work explicit and bounded. |
+| `tokio::spawn(fut)` | `cx.spawn(\|cx\| async move { fut.await })`, `cx.spawn_in(&scope, \|cx\| fut)`, `RuntimeHandle::{spawn,spawn_with_cx}` | Prefer region-owned work; the factory receives its own `Cx`. Use `Scope::spawn_registered` only when you already hold `&mut RuntimeState`. |
+| `tokio::task::JoinHandle<T>` | `TaskHandle<T>` | `.join(cx).await` returns `Result<T, JoinError>`; cancellation and panic remain distinct. |
+| `tokio::task::JoinSet<T>` | `JoinSet<T, E, P>` via `JoinSet::in_cx(cx)` or `JoinSet::new(&scope)` | Region-owned dynamic fan-out; `join_next`, `join_all`, `cancel_all` retain drain ownership. |
+| `tokio::select!` | `race!(cx, { a, b })` or `cx.race_drained(...)` | Returns only after the winner is selected and every loser is protocol-cancelled and drained. |
+| `tokio::join!` | `join!(a, b)`; `JoinSet::join_all(cx)` for dynamic arity | Inline branches complete together; spawned members stay region-owned. |
+| `tokio::task::spawn_blocking(f)` | `spawn_blocking(f)` | Same idea; runs the closure on a blocking pool thread. Keep blocking work explicit and bounded. |
+| `tokio::task::yield_now()` | `yield_now()` | Identical concept. |
 | `tokio::runtime::Handle` | `RuntimeHandle`, `Cx`, scoped spawn paths | Avoid ambient runtime discovery when possible. |
 
 ## Sync / Channels / Time
 
 | Tokio surface | Native Asupersync surface | Guidance |
 | --- | --- | --- |
-| `tokio::sync::mpsc` | `channel::mpsc` | Use reserve/commit patterns where offered. |
-| `tokio::sync::oneshot` | `channel::oneshot` | Preserve cancel-aware rendezvous semantics. |
-| `tokio::sync::broadcast` | `channel::broadcast` | Native fan-out path. |
-| `tokio::sync::watch` | `channel::watch` | Native latest-value propagation. |
-| `tokio::sync::{Mutex,RwLock,Semaphore,Notify,Barrier,OnceCell}` | `sync::*` | Prefer native cancel-aware primitives. |
-| `tokio::time::{sleep,interval,timeout,Instant}` | `time::*` | Prefer native time and budget-aware cancellation. |
+| `tokio::sync::mpsc` | `channel::mpsc` | Two-phase send: `tx.reserve(&cx).await?.send(val)`. Reserve is cancel-safe; commit cannot fail. |
+| `tokio::sync::oneshot` | `channel::oneshot` | Two-phase: `tx.reserve(&cx)` then `permit.send(val)`. Cancel-aware rendezvous semantics preserved. |
+| `tokio::sync::broadcast` | `channel::broadcast` | Two-phase send; lagging receivers get `RecvError::Lagged`. |
+| `tokio::sync::watch` | `channel::watch` | `rx.changed(&cx).await?` then `rx.borrow_and_clone()`. |
+| `tokio::sync::{Mutex,RwLock,Semaphore,Notify,Barrier,OnceCell}` | `sync::*` | Cancel-aware: lock/read/write/acquire/wait take `&Cx` and return `Result`. |
+| `tokio::time::{sleep,interval,timeout,Instant}` | `time::*` | Explicit time source: `sleep(now, dur)`, `timeout(now, dur, fut)`, `interval(now, dur)`; same `MissedTickBehavior` options. Works with virtual time in the lab runtime. |
 
 ## I/O / Networking
 
@@ -51,7 +56,7 @@ Use this as the first-pass replacement matrix.
 | `tokio-postgres`, native PG clients | `database::postgres` | Feature-gated native path. |
 | MySQL async clients | `database::mysql` | Feature-gated native path. |
 | SQLite async wrappers | `database::sqlite` | Feature-gated native path. |
-| `tokio::fs` | `fs::*` | Native fs path; validate niche ops. |
+| `tokio::fs` | `fs::*` | Partial blocking-backed facade, not full `tokio::fs` parity; validate niche ops. |
 | `tokio::process` | `process::*` | Native process path. |
 | `tokio::signal` | `signal::*` | Native signal path; validate exact Windows behavior if that platform matters. |
 | Redis / NATS / Kafka async crates | `messaging::*` | Use only when those integrations are truly needed, and validate exact feature needs. |
@@ -68,13 +73,13 @@ Use `asupersync-tokio-compat` when you still need:
 - Tokio I/O trait bridges
 - a Tokio-only future that panics without `Handle::current()`
 
-Compat gives you:
+Compat gives you (features: `hyper-bridge`, `tokio-io`, `tower-bridge`, `full`):
 
-- `with_tokio_context(...)`
-- Tokio/asupersync IO adapters
-- hyper executor/timer/body bridges
-- tower bridges
-- explicit cancellation modes for wrapped Tokio futures
+- `runtime::with_tokio_context(...)` (and `with_tokio_context_sync`)
+- Tokio/asupersync IO adapters: `io::TokioIo<T>`, `io::AsupersyncIo<T>` (`tokio-io`)
+- hyper executor/timer/body bridges: `hyper_bridge::{AsupersyncExecutor, AsupersyncTimer}`, `body_bridge` (`hyper-bridge`)
+- tower bridges: `tower_bridge::{FromTower, IntoTower}` (`tower-bridge`)
+- explicit cancellation modes for wrapped Tokio futures: `CancellationMode::{BestEffort, Strict, TimeoutFallback}` via `AdapterConfig`
 
 ## Partial / Unsupported Areas To Remember
 
@@ -82,6 +87,8 @@ Compat gives you:
   "prototype" posture, but still requirement-driven. Validate exact protocol
   needs and fail-closed security posture case by case.
 - SQLx compile-time `query!` macros are unsupported.
+- `fs::*` is an early blocking-backed facade (most ops route through the
+  blocking pool), not comprehensive `tokio::fs` parity.
 - `rdkafka` `StreamConsumer` still needs case-specific validation.
 - Redis cluster failover still needs case-specific validation.
 - NATS JetStream still needs case-specific validation.

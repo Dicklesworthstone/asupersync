@@ -10,10 +10,39 @@ Rules from AGENTS.md for AI coding agents working in this codebase.
    Asupersync workflow, the legacy compatibility ref is mirrored only by the
    exact command in `AGENTS.md`; do not add branch-name references to docs or
    code.
-4. **Rust 2024 edition**, nightly toolchain (pinned in `rust-toolchain.toml`).
+4. **Rust 2024 edition**, nightly toolchain (`rust-toolchain.toml` pins
+   `nightly-2026-07-05`).
 5. **Cargo only** -- no other package manager.
 6. **`#![deny(unsafe_code)]`** with per-module `#[allow(unsafe_code)]` where required.
-7. **No backwards compatibility** concern -- early development, do things the right way.
+7. **Backwards compatibility is a hard release gate.** Asupersync ships to
+   downstream production consumers; see the section below.
+
+## Backwards Compatibility (v0.4.3 Hard Gate)
+
+Current workspace version is 0.4.4 (v0.4.0 -> v0.4.4 shipped 2026-08-07 ->
+2026-08-13). For every `0.4.x` release, compatibility with the public API and
+documented behavior of **v0.4.3** is a hard release gate (AGENTS.md
+"Backwards Compatibility"):
+
+- No removal/rename/visibility reduction/signature change of public items, and
+  no documented-behavior change, without explicit written user approval for
+  that exact break. Prefer additive APIs; deprecations must keep working
+  through `0.4.x`.
+- Before release: compare the public surface against v0.4.3 and compile
+  representative downstream consumers; unexplained breaks hold the release.
+- Downstream-reported regressions must be reduced to a permanent in-repo test
+  using the same public API sequence (native runtime, not only `LabRuntime`,
+  for scheduler/cancel/wakeup/protocol semantics); that focused lane becomes a
+  permanent release blocker.
+- **Escaped-defect protocol** (AGENTS.md): reproduce on the consumer's
+  execution class, prove the formerly failing state was reached, assert exact
+  result + cleanup invariants, keep an old-red/new-green receipt, audit the
+  whole boundary with a census, wire the focused lane before broad fail-fast
+  suites (rejecting zero/filtered/ignored-test output), run the downstream
+  canary, and document the gap analysis. Weakening any of this needs explicit
+  written user approval.
+- Ignore any older repo text claiming Asupersync "has no users" or need not
+  preserve compatibility -- the user has explicitly overridden it.
 
 ## Forbidden Crates
 
@@ -34,23 +63,31 @@ turn it into the core runtime story.
 ## Compiler Checks (Mandatory After Code Changes)
 
 ```bash
-export CARGO_TARGET_DIR=/tmp/asupersync-cargo-target-$USER-$(date +%s)
-RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=$CARGO_TARGET_DIR cargo check --all-targets
-RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=$CARGO_TARGET_DIR cargo clippy --all-targets -- -D warnings
-RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=$CARGO_TARGET_DIR cargo fmt --check
+rch exec -- env CARGO_TARGET_DIR="${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_check_all_targets" cargo check --all-targets
+rch exec -- env CARGO_TARGET_DIR="${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_clippy_all_targets" cargo clippy --all-targets -- -D warnings
+rch exec -- env CARGO_TARGET_DIR="${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_fmt_check" cargo fmt --check
 ```
 
-This is the default live-`AGENTS.md` lane for substantive changes. Use a narrower
-command only when the user, bead, or proof-lane manifest explicitly narrows the
-scope. Do not silently fall back to local builds when remote `rch` proof is
-required; preserve the failing command and blocker instead. Before selecting
-proof, read live `TESTING_FOR_AGENTS.md`, coordinate before starting competing
-long-running proof jobs, and record the RCH build id, target dir, artifact root,
-and dirty-tree state for any cited result.
+Those three commands use the **default** feature set only. Every
+`required-features` target and every module behind `postgres`, `mysql`,
+`sqlite`, `tls`, `kafka`, `quic`, `messaging-fabric`, `cli`, `io-uring`, or
+`simd-intrinsics` is silently skipped by them. Before landing anything touching
+a feature-gated surface, also run (per AGENTS.md; `--keep-going` is mandatory):
 
-Repo-internal proof is not the same thing as a downstream migration inventory.
-The helper script `scripts/audit-target.sh` may run local `cargo tree` for an
-arbitrary target project; it does not satisfy an Asupersync repo proof lane.
+```bash
+rch exec -- env CARGO_TARGET_DIR=... cargo check --all-targets --all-features --keep-going
+rch exec -- env CARGO_TARGET_DIR=... cargo clippy --all-targets --all-features --keep-going -- -D warnings
+```
+
+Use a narrower command only when the user, bead, or proof-lane manifest
+explicitly narrows the scope. Do not silently fall back to local builds when
+remote `rch` proof is required; preserve the failing command and blocker
+instead. Before selecting proof, read live `TESTING_FOR_AGENTS.md`, coordinate
+before starting competing long-running proof jobs, and record the RCH build id,
+target dir, artifact root, and dirty-tree state for any cited result.
+
+Repo-internal proof is not the same thing as a downstream migration inventory;
+for that, use `scripts/migration_readiness_planner.py` (see below).
 
 ## Testing
 
@@ -61,14 +98,42 @@ Every module includes inline `#[cfg(test)]` unit tests. Tests must cover:
 
 For concurrency-sensitive behavior, prefer deterministic lab-runtime tests.
 
+### Native parked-task cancellation (release-blocking contract)
+
+Cancellation changes to `Cx`, `TaskHandle`, scheduler wakeup, spawn wrappers,
+or cancel-aware primitives MUST run the focused native lane
+(`native-parked-task-cancellation` in the proof-lane manifest):
+
+```bash
+RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=... CARGO_INCREMENTAL=0 \
+  CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' \
+  cargo test -p asupersync --locked --test runtime_abort_vs_cancel_semantics_audit -- --nocapture
+```
+
+`scripts/run_proof_checks.sh` runs this as its **first required proof**, before
+the broader rust-proof lanes (certificate verification, obligation formal
+checks, lab oracle invariants, cancellation protocol, combinator laws, TLA+
+export, trace canonicalization), the integration lanes (lease semantics, close
+quiescence, refinement conformance), and the optional Lean build.
+`tests/proof_lane_manifest_contract.rs` pins that ordering and the fail-closed
+`RCH_REQUIRE_REMOTE=1` policy; the wrapper rejects local-fallback banners and
+zero/filtered test output. Reordering, filtering, or skipping this lane is a
+release-blocking regression. Never publish terminal join results through a
+cancelled `Cx`; runtime `TaskHandle` producers use the capability-restricted
+`TaskResultSender` (a raw oneshot replacement is a release-blocking regression).
+
 ### Test Commands
 
 ```bash
-RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=$CARGO_TARGET_DIR cargo test -p asupersync <filter>
-RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=$CARGO_TARGET_DIR cargo test -p asupersync-macros
-RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=$CARGO_TARGET_DIR cargo test -p asupersync-conformance
-RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=$CARGO_TARGET_DIR cargo test -p frankenlab
+T="${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}"
+rch exec -- env CARGO_TARGET_DIR="$T/rch_target_test_all" cargo test --features test-internals <filter>
+rch exec -- env CARGO_TARGET_DIR="$T/rch_target_test_asupersync_macros" cargo test -p asupersync-macros
+rch exec -- env CARGO_TARGET_DIR="$T/rch_target_test_asupersync_conformance" cargo test -p asupersync-conformance
+rch exec -- env CARGO_TARGET_DIR="$T/rch_target_test_frankenlab" cargo test -p frankenlab
 ```
+
+(`franken-kernel`, `franken-evidence`, and `franken-decision` have analogous
+`-p` lanes.) Release/proof lanes stay fail-closed under `RCH_REQUIRE_REMOTE=1`.
 
 ### Test Categories
 
@@ -113,6 +178,9 @@ cargo bench --bench timer_wheel
 | `sqlite` / `postgres` / `mysql` | Database clients |
 | `quic` / `http3` / `atp-cli` | Feature-gated QUIC/H3/ATP surfaces; `atp-cli` implies TLS |
 | `atpd-daemon` | Unpublished ATP daemon binary gate, outside default release checks |
+| `kafka` | Kafka client integration via rdkafka |
+| `messaging-fabric` | Native FABRIC messaging lane (module wiring not fully gated yet) |
+| `compression` | HTTP response compression (gzip/deflate/Brotli) |
 | `io-uring` | Linux io_uring reactor |
 | `tower` | Tower Service adapter |
 | `ci-cross-platform` | Cross-platform CI umbrella; excludes benchmark-only Tokio quarantine |
@@ -144,6 +212,7 @@ cargo bench --bench timer_wheel
 | `rusqlite` | SQLite (optional) |
 | `proptest` | Property testing (dev) |
 | `criterion` | Benchmarks (dev) |
+| `rayon` | Data parallelism for CPU-bound work (dev/bench only) |
 
 ## Dependency Policy
 
@@ -184,6 +253,7 @@ claims.
 | `README.md` | Project overview |
 | `CHANGELOG.md` | Current release notes, Unreleased scope, and tag/release caveats |
 | `artifacts/api_surface_map_v1.json` | Machine-readable public API map |
+| `docs/error_codes/registry.json` | `ASUP-Exxx` runtime error-code registry (pinned by `tests/error_code_registry_contract.rs`) |
 | `artifacts/proof_lane_manifest_v1.json` | Proof-lane source of truth |
 | `artifacts/proof_status_snapshot_v1.json` | Current proof status snapshot |
 | `artifacts/semantic_evidence_bundles_v1.json` / `artifacts/public_guarantee_semantic_evidence_bundles_v1.json` | Claim/evidence bundles for public guarantees |
@@ -203,12 +273,13 @@ claims.
 `rch` offloads cargo builds to remote workers:
 
 ```bash
-RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=$CARGO_TARGET_DIR cargo build --release
-RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=$CARGO_TARGET_DIR cargo test
-RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=$CARGO_TARGET_DIR cargo clippy
+rch exec -- env CARGO_TARGET_DIR="${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_build" cargo build --release
+rch exec -- env CARGO_TARGET_DIR="${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_test" cargo test
 rch doctor       # health check
 rch workers probe --all  # test connectivity
 ```
+
+Add `RCH_REQUIRE_REMOTE=1` whenever the lane must fail closed on remote proof.
 
 If unavailable, preserve the remote-proof failure instead of quietly proving a
 different local command.
@@ -277,10 +348,12 @@ crypto/auth/link conditions with SHA/tamper checks and timing/byte evidence.
 
 Run sequence for serious ATP claims:
 
-1. ATP bench selftest.
-2. Release `atp` binary for the exact feature tier.
-3. `scripts/atp_bench/run_matrix_cell.sh` or the requested matrix command.
-4. `scripts/atp_bench/score_matrix.py`.
+1. `bash scripts/atp_bench/selftest_matrix.sh` (harness sanity, no root).
+2. Release `atp` binary for the exact feature tier (`--features atp-cli`).
+3. `scripts/atp_bench/matrix_bench.sh` (resumable planner; `--execute` drives
+   `run_matrix_cell.sh` per hermetic netns cell). Delta re-sync claims use
+   `scripts/atp_bench/resync_bench.sh` instead.
+4. `scripts/atp_bench/score_matrix.py` (`--fail-on-mismatch` is the CI gate).
 5. Ledger update in `docs/atp_rq_beat_rsync_ledger.md` and/or matrix artifact.
 
 Stale cells are blockers unless the claim is explicitly scoped to the fresh cell.

@@ -8,10 +8,12 @@ Use the preset that matches the workload, then tune from there:
 
 - `RuntimeBuilder::current_thread()`
   Good for CLI tools, single-tenant workers, test harnesses, and simple services where determinism and simplicity matter more than throughput.
+- `RuntimeBuilder::multi_thread()`
+  The plain default: deterministic, host-independent worker count (4). Use `ambient_default_worker_threads()` explicitly if you want host-scaled parallelism.
 - `RuntimeBuilder::low_latency()`
-  Good for request/response APIs, latency-sensitive gateways, and systems where deadline responsiveness matters.
+  Good for request/response APIs, latency-sensitive gateways, and systems where deadline responsiveness matters (steal batch 4, poll budget 32).
 - `RuntimeBuilder::high_throughput()`
-  Good for queue-heavy servers, fan-out workers, and high-concurrency services that benefit from more batching.
+  Good for queue-heavy servers, fan-out workers, and high-concurrency services that benefit from more batching (2x default workers, steal batch 32).
 
 Do not start from `high_throughput()` just because it sounds bigger. Tail behavior and shutdown behavior matter more than peak throughput in many systems.
 
@@ -19,9 +21,13 @@ Do not start from `high_throughput()` just because it sounds bigger. Tail behavi
 
 | Goal | Knobs | Advice |
 |------|-------|--------|
-| Bound sync bridges and blocking work | `blocking_threads(min, max)` | Essential when SQLite, filesystem, process, or legacy sync code is in the stack. |
+| Bound sync bridges and blocking work | `blocking_threads(min, max)`, `blocking_affinity_profile(...)` | Essential when SQLite, filesystem, process, or legacy sync code is in the stack. |
 | Tune cooperative scheduling | `poll_budget(...)`, `steal_batch_size(...)` | Change only after measurement; these affect fairness and latency. |
-| Improve shutdown/cancel-heavy behavior | `cancel_lane_max_streak(...)`, `enable_adaptive_cancel_streak(...)`, `enable_governor(...)`, `governor_interval(...)` | Worth using when cancellations are frequent or cleanup pressure is high. |
+| Improve shutdown/cancel-heavy behavior | `cancel_lane_max_streak(...)`, `enable_adaptive_cancel_streak(...)` (default on), `adaptive_cancel_streak_epoch_steps(...)`, `enable_governor(...)`, `governor_interval(...)` | Worth using when cancellations are frequent or cleanup pressure is high. |
+| Reduce state-lock contention | `with_sharded_state(true)` | Opt-in sharded backing state (default stays `Unified`); dispatch runs on shard A and obligations resolve on shard C. |
+| Route spawns off the state lock | `spawn_admission(SpawnAdmissionMode::Mailbox)` | Lock-free spawn mailbox; default is `Direct` (synchronous under the state lock). |
+| Topology-aware steal ordering | `worker_cohorts(...)`, `scheduler_placement_mode(...)` | Deterministic cohort-first victim ordering (`LocalityFirst`/`LatencyFirst`/`ThroughputFirst`); no host probing — you supply the mapping. |
+| Pre-size and tier runtime memory | `capacity_hints(...)`, `expected_concurrent_tasks(...)`, `arena_temperature_policy(...)`, `trace_storage_profile(...)` | Deterministic capacity/memory-tier policies; policy-only, no scheduling-semantics change. |
 | Bound root-level fan-out | `root_region_limits(...)` | Use for admission control on the app root; do not confuse this with per-handler concurrency limits. |
 | Attach logs and metrics | `observability(...)`, `metrics(...)` | Treat these as first-class runtime wiring, not an afterthought. |
 | Install a wall-clock timer driver explicitly | `enable_time()` | Discoverable migration aid; `build()` already installs the default driver, but this is useful when fixing no-driver sleep fallbacks. |
@@ -101,11 +107,12 @@ Those belong in `service::*`, combinators like `bulkhead`, or explicit applicati
 
 Asupersync makes leak handling explicit via `ObligationLeakResponse`.
 
-Use a deliberate policy:
+Use a deliberate policy (the shipped default is `Panic` — "no obligation
+leaks" is a fail-fast runtime invariant; tests/labs opt into softer modes):
 
-- `Log` is a practical production starting point.
-- `Panic` is appropriate in lab/CI when leaks should fail fast.
-- `Recover` is for cases where the runtime should abort the leaked obligation path and continue.
+- `Panic` (default) fails fast with diagnostic details.
+- `Log` is a practical production starting point when crashing is unacceptable.
+- `Recover` aborts the leaked obligation (best-effort cleanup) and continues.
 - `Silent` should be rare and intentional.
 
 The repo also supports threshold-based escalation via `LeakEscalation` in runtime config. Use that when you want "warn first, then hard-fail if it repeats."
@@ -123,15 +130,18 @@ Recommended pattern:
 
 Relevant APIs:
 
-- `RuntimeBuilder::from_toml(...)` / `from_toml_str(...)` with the
-  `config-file` feature
+- `RuntimeBuilder::from_toml(...)` / `from_toml_str(...)` and
+  `from_json(...)` / `from_json_str(...)` (versioned canonical JSON models,
+  secret-bearing fields redacted at serialization boundaries; v0.4.0) with
+  the `config-file` feature
 - `RuntimeBuilder::with_env_overrides()`
 
 ## Tuning Rules
 
 - Change one scheduling knob at a time and measure.
 - Pair tuning work with metrics or bench evidence.
-- Do not disable adaptive cancel behavior without a measured reason.
+- Do not disable adaptive cancel behavior without a measured reason (it is
+  enabled by default at HEAD).
 - Do not use `global_queue_limit` as fake task shedding. The runtime preserves ownership semantics; if you need real admission policy, build it at the service/app layer.
 - Browser-specific knobs like `browser_ready_handoff_limit(...)` and worker offload belong only in the browser/wasm lane.
 
@@ -150,6 +160,13 @@ High-value surfaces:
 - `TaskBlockedExplanation` for stalled-task diagnosis
 - `ObligationLeak` for linear-resource failures
 - spectral health diagnostics for wait-graph degradation
+- `runtime::metrics::snapshot()` scheduler CPU/churn counters (feature
+  `runtime-metrics`, off by default)
+- runtime pressure evidence: `RuntimePressureSnapshot` / `RuntimePressureVerdict`
+  from the resource monitor (`src/runtime/resource_monitor.rs`)
+- opt-in memory-residency policy/accounting: schema-versioned recommendation
+  and accounting snapshots (recommendation-only, mutates nothing; additive
+  `/debug/memory-residency` debug endpoint) in `src/runtime/memory_residency.rs`
 
 Relevant paths:
 
@@ -157,6 +174,8 @@ Relevant paths:
 - `src/observability/diagnostics.rs`
 - `src/observability/task_inspector.rs`
 - `src/observability/spectral_health.rs`
+- `src/runtime/resource_monitor.rs`
+- `src/runtime/memory_residency.rs`
 
 ## Practical Operator Posture
 

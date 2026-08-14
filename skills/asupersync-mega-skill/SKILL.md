@@ -14,7 +14,24 @@ For codebase orientation, types, module map, and workspace layout see [SOURCE-MA
 
 ## Quick Orient
 
-Minimal bootstrap:
+Minimal bootstrap (the blessed on-ramp entry since v0.4.x):
+
+```rust
+use asupersync::main;
+
+#[main]
+async fn main() {
+    println!("hello from asupersync");
+}
+```
+
+`#[asupersync::main]` builds and drives the production runtime
+(`examples/onramp_level0.rs`); `#[asupersync::test]` and
+`#[asupersync::lab_test]` are the matching test entry attributes. Teach the
+four-level graduated on-ramp in `docs/onramp.md` before inventing bootstrap
+patterns.
+
+Explicit bootstrap, when the app needs to own the runtime object:
 
 ```rust
 use asupersync::{Cx, Error};
@@ -37,14 +54,14 @@ fn main() -> Result<(), Error> {
 }
 ```
 
-This is the current production teaching seam: `RuntimeBuilder` creates the
-runtime, `block_on` installs an ambient runtime context, runtime-spawned tasks
-run with a runtime-owned `Cx`, and app code receives `&Cx`. Do not teach
-`Cx::for_request()` as production bootstrap; it is test/internal-harness
-material. For services, prefer request/call regions at boundaries, then
-graduate to `AppSpec` + supervision when the topology is long-lived. For
-admission-sensitive bootstrap, use `try_spawn` / `try_spawn_with_cx` and handle
-`SpawnError` explicitly.
+`RuntimeBuilder` creates the runtime, `block_on` installs an ambient runtime
+context, runtime-spawned tasks run with a runtime-owned `Cx`, and app code
+receives `&Cx`. `RuntimeHandle::request_cx_with_budget(budget)` is the blessed
+production ambient-free `Cx` entry; `Cx::for_request()` / `Cx::for_testing()`
+remain test/internal-harness material. For services, prefer request/call
+regions at boundaries, then graduate to `AppSpec` + supervision when the
+topology is long-lived. For admission-sensitive bootstrap, use `try_spawn` /
+`try_spawn_with_cx` and handle `SpawnError` explicitly.
 
 Where to focus first:
 
@@ -103,6 +120,13 @@ Default rule:
   holding `&mut RuntimeState`.
 - Add `cx.checkpoint()` in loops, retry bodies, long handlers, and shutdown-sensitive code.
 - Prefer cancel-aware primitives and two-phase effects.
+- State the v0.4.4 cancellation contract precisely: ordinary `Cx::spawn*`
+  preserves a typed result returned after cancellation acknowledgement (a
+  concurrent abort no longer erases it), but pre-first-poll cancellation and
+  cancellation-blind late values keep v0.4.3 task-level cancellation, and
+  `JoinSet`, cancellation-dominant combinators, blocking wrappers, and
+  low-level state tasks retain their separately tested policies. Neither
+  "abort always wins" nor "the value always survives" is correct.
 - Use deterministic tests as part of normal development, not as optional polish.
 - Treat `Cx::for_testing()` and `Cx::for_request()` as test/internal harness
   paths, not production architecture.
@@ -116,13 +140,14 @@ If the target system is doing real work, do not stop after "the code compiles on
 - Runtime controls are part of the architecture. See [RUNTIME-CONTROLS.md](references/RUNTIME-CONTROLS.md).
 - Long-lived state belongs in supervised structures. See [SUPERVISION-OTP.md](references/SUPERVISION-OTP.md).
 - Treat the lab runtime and operator diagnostics as part of the normal development loop. See [OBSERVABILITY-FORENSICS.md](references/OBSERVABILITY-FORENSICS.md).
-- Prefer native combinators over ad hoc `select!`-style orchestration. See [ADVANCED-FEATURES.md](references/ADVANCED-FEATURES.md).
+- Prefer native combinators — including the drain-correct native `select!` — over hand-rolled Tokio-style orchestration. See [ADVANCED-FEATURES.md](references/ADVANCED-FEATURES.md).
 - Primitive choice and scheduler cooperation materially affect leverage. See [PRIMITIVES-AND-ORCHESTRATION-CHOOSER.md](references/PRIMITIVES-AND-ORCHESTRATION-CHOOSER.md) and [PERFORMANCE-AND-SCHEDULING.md](references/PERFORMANCE-AND-SCHEDULING.md).
 
 ## Canonical Spine
 
-- Bootstrap: `runtime::RuntimeBuilder`, `Runtime`, `RuntimeHandle`
-- App code: `Cx`, `Cx::spawn`, `Cx::spawn_in`, `Scope` child regions
+- Bootstrap: `#[asupersync::main]`, `runtime::RuntimeBuilder`, `Runtime`,
+  `RuntimeHandle` (`request_cx_with_budget` for ambient-free production `Cx`)
+- App code: `Cx`, `Cx::spawn`, `Cx::spawn_in`, `Scope` child regions, `JoinSet`
 - Tests: `test_utils::{run_test, run_test_with_cx}`, `LabRuntime`, `LabConfig`,
   `LabRunReport`
 - Service boundaries: `web::request_region::{RequestRegion, RequestContext}`, `grpc::CallContext::with_cx(...)`
@@ -130,9 +155,17 @@ If the target system is doing real work, do not stop after "the code compiles on
 
 Start with RuntimeBuilder + Cx + Scope. Graduate to AppSpec + supervision when you need restart policy, named workers, or explicit application topology.
 
-Macro guidance: `scope!` binds the current-region scope; it does not create a
-fresh child-region boundary. `spawn!` needs runtime state. Manual APIs are still
-the safest authoritative path when semantics matter.
+Macro guidance: supported root macros are `scope!`, `spawn!`, `join!`,
+`join_all!`, `race!`, and `select!`, plus the `#[main]` / `#[test]` /
+`#[lab_test]` entry attributes. `race!` and blocking `select!` are
+drain-correct: they route through `Cx::race_drained*` / `Scope::race_all`, so
+every loser is protocol-cancelled **and drained** before return (branches must
+be `Send + 'static` with spawn authority; the `select!` `else` form polls once
+in source order and does not drain; `race!`'s `timeout:` path abandons by drop
+on elapsed). Use `Cx::race` directly for a drop-on-cancel select over
+non-`'static` inline futures. `scope!` binds the current-region scope; it does
+not create a fresh child-region boundary. `spawn!` needs runtime state. Manual
+APIs are still the safest authoritative path when semantics matter.
 
 Current generated API-map anchors to remember:
 
@@ -142,7 +175,11 @@ Current generated API-map anchors to remember:
   `web::middleware::{CatchPanicLayer, CompressionLayer, RequestTraceLayer,
   TimeoutLayer}`, plus `web::Router::layer`,
 - ATP/daemon, RaptorQ, observability, Spork, `runtime::RuntimeBuilder`, and
-  `Cx + Scope`.
+  `Cx + Scope`,
+- dependency-sovereignty owned modules (first-party base64/hex codecs, LZ4
+  block codec, owned regex engine, protobuf wire + OTLP proto, UTC time,
+  minimal DER) — prefer these over reintroducing the third-party crates they
+  replace.
 
 Refresh these from `/data/projects/asupersync/artifacts/api_surface_map_v1.json`
 before making precise public-surface claims.
@@ -222,8 +259,34 @@ compiler checks and testing discipline.
   Satellite, test, fuzz, benchmark, and compat carve-outs must stay documented
   and proof-checked.
 - Inside the Asupersync repo: follow live `AGENTS.md`. Never delete files
-  without permission. Work only on `main`; do not introduce legacy-branch
+  without permission. Work only on `main` — no branches, no worktrees, no
+  scratch clones, ever; the "feature branch" of a bead is the bead id + a file
+  reservation + a commit referencing it. Do not introduce legacy-branch
   references except the exact required mirror command, if still present there.
+- Backwards compatibility is a hard release gate: every `0.4.x` release must
+  preserve the `v0.4.3` public API and documented behavior (>12 production
+  consumers). Breaking anything requires the user's explicit written approval;
+  prefer additive APIs; deprecation is not removal permission. A downstream
+  escaped defect triggers the AGENTS.md escaped-defect protocol (same public
+  API sequence, proven formerly-failing state, exact result + cleanup oracle,
+  old-red/new-green receipt, permanent release-blocking lane). Note the trap:
+  `v0.3.10` shipped breaking tracked-session-channel changes under a patch
+  bump — anchor downstream compat on `v0.4.0`+; current release is `v0.4.4`.
+- Cancellation-affecting changes (Cx, TaskHandle, scheduler wakeup, spawn
+  wrappers, cancel-aware primitives) must run the release-blocking
+  `native-parked-task-cancellation` lane
+  (`cargo test --test runtime_abort_vs_cancel_semantics_audit`, remote-required;
+  first proof in `scripts/run_proof_checks.sh`). Terminal results are published
+  through the capability-restricted `TaskResultSender`, never through the
+  completed operation's cancelled `Cx`.
+- The toolchain is date-pinned (`rust-toolchain.toml`, currently
+  `nightly-2026-07-05`) so every RCH worker resolves the same nightly. Never
+  float nightly or `rustup update` as part of a lane; bumping the pin is a
+  deliberate, coordinated act.
+- Much of the tree is covered by fail-closed capability/pin inventories:
+  editing pinned source triggers transitive artifact-digest re-pins. Budget
+  for the `chore(pins)` cascade instead of treating pin-contract failures as
+  unrelated breakage.
 - Inside the Asupersync repo, trust `AGENTS.md`, `README.md`,
   `CHANGELOG.md`, `artifacts/api_surface_map_v1.json`, proof-lane manifests,
   proof-status snapshots, and benchmark matrix artifacts over remembered API
@@ -260,12 +323,25 @@ Use these compact operators for volatile repo-internal claims:
   migration readiness planner when deciding whether/how to migrate; treat
   `scripts/audit-target.sh` as quick inventory only.
 
-Current ATP evidence snapshot (refresh before citing): encrypted QUIC
-`MATRIX-205/206/210` has a measured `50M/good/encrypted` win and
-`5G/perfect/encrypted` correctness unblock, but no banked encrypted-large or
-full-matrix win; `500M/perfect/encrypted`, `50M/bad/encrypted`, and 5G
-receiver RSS remain open. RQ/nocrypto `MATRIX-207/208/209` banked exactly one
-new positive cell: `500M/broken/nocrypto` atp median 564.77s, sha-ok 3/3 plus
-a confirming fourth rep, versus tuned rsync median 574.46s. `MATRIX-210`
-QUIC drain-cap tuning and `MATRIX-211` packed-member commit batching are
-implementation landings, not banked benchmark wins without fresh matrix proof.
+Current ATP evidence snapshot (ledger last updated 2026-07-10 at MATRIX-235;
+refresh from `docs/atp_rq_beat_rsync_ledger.md` before citing):
+
+- Nocrypto (`atp-rq-lab` vs tuned rsyncd) is a banked board-level win:
+  `MATRIX-212` verified all 56 rows and `MATRIX-231` closed the last
+  clean-path gaps (`500M/perfect` 0.881x, `5G/perfect` win); tree/small
+  floors stay marginal, so say "every measured nocrypto cell", not "all".
+- Encrypted (`atp-quic-tls13` vs rsync-over-ssh aes128gcm) is fully measured
+  (25/25 cells, `MATRIX-216`) and the lossy sub-board is all-wins
+  (`MATRIX-221`). Remaining rsync-favored territory is clean-path large +
+  tree-perfect floors, root-caused to sender duty-cycle with an ~11%
+  link-bound honest ceiling (`MATRIX-232/233`).
+- `MATRIX-235` native-link pacing rework produced large matched-pair gains
+  (encrypted `500M/perfect` -19.5%, `50M/perfect` -58%) but had no
+  contemporaneous rsync bar; it is a landed improvement, not a banked flip.
+- Receiver RSS is bounded (<=18MB at every size; the 5G receiver went
+  882MB -> 12MB, `MATRIX-213/216`); the `500M/broken/nocrypto` win no longer
+  carries a correctness asterisk (`MATRIX-230` closed it as spec-expected
+  rank deficiency).
+- Refuted levers (do not re-chase): receipt-clocked flow-control credit, BBR
+  startup shapes, >2MiB window raise, receiver ACK cadence, encrypted-tree
+  wakeup reduction (`MATRIX-222..229`, `MATRIX-234`).

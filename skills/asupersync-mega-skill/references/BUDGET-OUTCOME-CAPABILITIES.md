@@ -98,16 +98,21 @@ Bad patterns:
 
 ## Cancellation Severity Matters
 
-`CancelReason` is structured, not decorative. Examples in the repo include:
+`CancelReason` is structured, not decorative. It carries a `CancelKind`;
+kinds in the repo include:
 
 - `User`
-- `Timeout`
+- `Timeout` (plus budget-exhaustion kinds `Deadline`, `PollQuota`, `CostBudget`)
 - `FailFast`
 - `RaceLost`
 - `ParentCancelled`
+- `ResourceUnavailable`
 - `Shutdown`
+- `LinkedExit` (Spork link propagation)
 
-Use that structure.
+Kinds are severity-ordered (`User < Timeout < FailFast < ParentCancelled <
+Shutdown`); strengthening keeps the max severity, and cleanup budgets scale
+inversely with severity. Use that structure.
 
 Practical policy advice:
 
@@ -125,10 +130,11 @@ The capability row is type-level and compile-time enforced:
 
 The core repo model in `src/cx/cap.rs` matters for downstream design:
 
-- capability rows are zero-cost marker types,
-- `SubsetOf` encodes monotone narrowing,
+- capability rows are zero-cost const-generic bit rows
+  (`CapSet<SPAWN, TIME, RANDOM, IO, REMOTE>`),
+- `SubsetOf` encodes monotone narrowing (pointwise ordering on the row),
 - widening is compile-time rejected,
-- marker traits are sealed to prevent external capability forgery.
+- the row traits are sealed to prevent external capability forgery.
 
 That means least privilege is not just documentation. It can be part of the
 Rust type system.
@@ -171,7 +177,8 @@ Good examples to model:
 
 ## Masking Rule
 
-`mask()` is for bounded release/finalize sections, not general control flow.
+Masking (`Cx::masked(...)`, a synchronous-closure API) is for bounded
+release/finalize sections, not general control flow.
 
 Use masking only when all of these are true:
 

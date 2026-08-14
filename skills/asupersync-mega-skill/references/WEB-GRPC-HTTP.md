@@ -12,6 +12,15 @@ Prefer:
 - request-region isolation
 - route metadata via `web::Router::routes()` and `web::RouteInfo` when an
   operator, docs, or audit surface needs to enumerate routes.
+- bounded SSE via `web::sse::Sse` (finite bounded batch responses) and
+  `StreamingSse` (pull API, proof-backed for request-region E2E and HTTP/1
+  transport drain).
+
+Scope note: the web layer is deliberately bounded native primitives (router,
+typed extractors, local `Handler` middleware, request-region helpers, SSE,
+health/static/multipart/session/security utilities) on top of the HTTP and
+service modules. It is not axum/warp/tower-http parity; see the README
+coverage-map paragraph for the exact boundary.
 
 The important architectural pattern is request-as-region:
 
@@ -65,21 +74,41 @@ Use these to make overload and tail behavior explicit instead of implicit.
 
 Concrete web middleware anchors include `web::middleware::TimeoutLayer`,
 `CompressionLayer`, `RequestTraceLayer`, and `CatchPanicLayer`, plus
-`web::Router::layer` for native composition.
+`web::Router::layer` for native composition. Since v0.4.3,
+`web::negotiate::ErrorHandlerMiddleware` converts handler/middleware
+construction and poll panics into redacted `[ASUP-E502]` 500 responses
+(structured trace events when `tracing-integration` is enabled).
 
 ## HTTP Client Pattern
 
 For outbound HTTP, prefer the native explicit-`Cx` client path:
 
-- `http::Client` for high-level pooled client usage,
-- `http::HttpClient` / fluent request builders for `get`, `post`, `put`,
-  `patch`, and `delete`,
+- `http::Client` for high-level pooled client usage (capability-gated handle,
+  no ambient global; see `Client::default_for_runtime`),
+- `http::HttpClient` / `HttpClientBuilder` and fluent request builders for
+  `get`, `post`, `put`, `patch`, and `delete`,
 - explicit timeout, header, query, body, and response handling at the request
   boundary.
 
 Do not keep `reqwest` just because the old app used it. If a Tokio-only client
 must remain temporarily, keep it behind a compat boundary and schedule its
 removal.
+
+## HTTP/1 Streaming Request Bodies (v0.4.4)
+
+The HTTP/1 server hardened streaming request-body cancellation and connection
+reuse in v0.4.4:
+
+- streaming bodies execute under the request-region capability context, so
+  backpressure waits, cancellation, budgets, and body-channel limits observe
+  the request lifetime rather than the connection lifetime;
+- if a handler leaves a segmented body unread, the server drains decoded
+  frames and chunk trailers within explicit frame, byte, and time bounds
+  before reusing the connection; malformed, truncated, over-limit, or
+  cancelled drains close it fail-closed;
+- `Http1Config` keeps its v0.4.3 shape; the new body-queue and
+  unread-body-drain limits live in the additive `Http1StreamingConfig`
+  (`src/http/h1/server.rs`).
 
 ## gRPC Pattern
 
@@ -141,7 +170,9 @@ Recommended phases:
 - HTTP stack: `http::*`
 - Router and extractors: `web::*`
 - Middleware/service composition: `service::*`
+- Server connection/shutdown plumbing: `server::*`
 - HTTP client: `http::Client`, `http::HttpClient`
+- SSE: `web::sse::{Sse, StreamingSse}`
 - gRPC: `grpc::*`
 - per-request isolation: `web::request_region::*`
 

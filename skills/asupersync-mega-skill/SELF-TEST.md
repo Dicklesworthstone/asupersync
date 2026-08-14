@@ -23,6 +23,8 @@ Trigger phrases that should select this skill:
 - "Write a LabRuntime test for this cancellation scenario."
 - "Classify this Asupersync proof result against the proof lane manifest."
 - "Does this ATP matrix cell justify a beats-rsync claim?"
+- "Is this public API change allowed under the v0.4.3 compatibility gate?"
+- "A downstream consumer reported a regression -- walk the escaped-defect protocol."
 
 ## Understanding Triggers
 - "How does Asupersync's cancellation protocol work?"
@@ -31,6 +33,8 @@ Trigger phrases that should select this skill:
 - "How does the DPOR schedule explorer work?"
 - "What's the EXP3/Hedge adaptive cancel preemption?"
 - "How do progress certificates use Freedman bounds?"
+- "What happens to a task's return value when it is aborted mid-cancellation?"
+- "Pull one big file from several donor machines at once with ATP bond-pull."
 
 ## Browser/WASM Triggers
 - "How should I use Asupersync in React/Next browser code?"

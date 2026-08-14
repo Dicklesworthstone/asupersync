@@ -9,37 +9,40 @@ Source: `src/error.rs`, `src/error/`
 ```rust
 pub struct Error {
     kind: ErrorKind,
-    category: ErrorCategory,
-    recoverability: Recoverability,
-    // ...
+    message: Option<String>,
+    source: Option<Arc<dyn std::error::Error + Send + Sync>>,
+    context: ErrorContext,
 }
 ```
 
-### ErrorKind Variants
+Category and recoverability are derived from the kind: `kind.category()`,
+`kind.recoverability()`, `kind.recovery_action()`, `kind.asup_code()`.
 
-| Kind | Meaning |
-|------|---------|
-| `Cancelled` | Operation cancelled via cancellation protocol |
-| `Timeout` | Deadline exceeded |
-| `BudgetExhausted` | Poll quota or cost quota exceeded |
-| `ObligationLeak` | Permit/ack/lease not resolved before region close |
-| `RegionCloseTimeout` | Region stuck waiting for children |
-| `FuturelockViolation` | Task holding obligations without poll progress |
-| `ChannelClosed` | Sender/receiver dropped |
-| `ChannelFull` | Bounded channel at capacity |
-| `LockPoisoned` | Panic while holding lock |
-| `IoError` | Underlying I/O error |
-| `ProtocolError` | Wire protocol violation |
-| `ConnectionError` | Connection-level failure |
-| `Internal` | Runtime internal error |
+### ErrorKind Variants (grouped, selected)
+
+| Group | Kinds |
+|-------|-------|
+| Cancellation | `Cancelled`, `CancelTimeout` (cleanup budget exceeded) |
+| Budgets | `DeadlineExceeded`, `PollQuotaExhausted`, `CostQuotaExhausted` |
+| Channels | `ChannelClosed`, `ChannelFull`, `ChannelEmpty` |
+| Obligations | `ObligationLeak`, `ObligationAlreadyResolved`, `RegionFinalized` |
+| Regions / ownership | `RegionClosed`, `TaskNotOwned`, `AdmissionDenied` |
+| RaptorQ enc/dec | `InvalidEncodingParams`, `DataTooLarge`, `EncodingFailed`, `CorruptedSymbol`, `InsufficientSymbols`, `DecodingFailed`, ... |
+| Transport | `RoutingFailed`, `DispatchFailed`, `StreamEnded`, `SinkRejected`, `ConnectionLost`, `ConnectionRefused`, `ProtocolError`, `RateLimited`, `InvalidInput`, `OperationFailed` |
+| Distributed | `RecoveryFailed`, `LeaseExpired`, `LeaseRenewalFailed`, `CoordinationFailed`, `QuorumNotReached`, `NodeUnavailable`, `PartitionDetected` |
+| Internal / config / user | `Internal`, `InvalidStateTransition`, `ConfigError`, `User` |
+
+`ErrorCategory` mirrors these groups (`Cancellation`, `Budget`, `Channel`,
+`Obligation`, `Region`, `Encoding`, `Decoding`, `Transport`, `Distributed`,
+`Internal`, `User`).
 
 ### Recoverability
 
 ```rust
 pub enum Recoverability {
-    Recoverable,     // Retry may succeed
-    NonRecoverable,  // Retry will not help
-    Unknown,         // Caller must decide
+    Transient,   // Temporary; retry may succeed
+    Permanent,   // Retry will not help
+    Unknown,     // Depends on context; caller must decide
 }
 ```
 
@@ -47,12 +50,38 @@ pub enum Recoverability {
 
 ```rust
 pub enum RecoveryAction {
-    Retry,
+    RetryImmediately,
     RetryWithBackoff(BackoffHint),
-    Abort,
+    RetryWithNewConnection,
+    Propagate,
     Escalate,
+    Custom,
 }
 ```
+
+## ASUP-Exxx Error-Code Registry
+
+Source: `docs/error_codes/registry.json` (canonical), `docs/error_codes/ASUP-Exxx.md` per-code pages.
+
+Stable user-facing error tokens in the `ASUP-Exxx` namespace; `ErrorKind::asup_code()`
+maps kinds to codes (e.g. `ObligationLeak -> ASUP-E101`, `CancelTimeout -> ASUP-E301`,
+`ConfigError -> ASUP-E901`). Ranges by area:
+
+| Range | Area |
+|-------|------|
+| E0xx | core-runtime (spawn, admission, availability, budgets) |
+| E1xx | obligations (permit/ack/lease lifecycle, leaks) |
+| E2xx | channels-sync |
+| E3xx | cancellation-drain (E301 cancel-drain-timeout, E302 race-loser-not-drained, E303 finalizer-timeout) |
+| E4xx | lab-replay (E401 replay-divergence, E402 futurelock-detected, E403 lab-seed-nondeterminism, E404 snapshot-artifact-invalid) |
+| E5xx | net-http |
+| E6xx | database |
+| E7xx | distributed-remote |
+| E8xx | raptorq |
+| E9xx | config-build |
+
+Each registry entry carries name, summary, probable causes, and remediation;
+treat the registry as the source of truth for the current code list.
 
 ## Common Runtime Errors
 
@@ -80,9 +109,10 @@ Threshold-based escalation: `LeakEscalation` in runtime config.
 
 If a leak is detected during thread unwinding, `Panic` downgrades to `Log` to avoid double-panic aborts.
 
-### "RegionCloseTimeout"
+### Cancel drain timeout (`CancelTimeout` / ASUP-E301)
 
-**Cause**: Region stuck waiting for children that won't complete.
+**Cause**: Cancellation was requested but drain did not complete within budget --
+typically a region stuck waiting for children that won't complete.
 
 ```rust
 // Fix: add checkpoints in loops
@@ -92,9 +122,12 @@ loop {
 }
 ```
 
-### "FuturelockViolation"
+### Futurelock detected (ASUP-E402)
 
-**Cause**: Task holding obligations but not making progress.
+**Cause**: Task holding obligations but not making progress. Surfaces as
+`InvariantViolation::Futurelock` in lab reports and
+`TraceEventKind::FuturelockDetected` in traces (there is no
+`FuturelockViolation` error kind).
 
 ```rust
 // WRONG: await while holding permit
@@ -125,10 +158,11 @@ permit.send(msg);
 | `SendError::Disconnected(value)` | All receivers dropped |
 | `SendError::Cancelled(value)` | Send operation cancelled |
 | `SendError::Full(value)` | Bounded channel at capacity (try_send) |
-| `RecvError::Disconnected` | All senders dropped |
+| `RecvError::Disconnected` | All senders dropped (mpsc) |
 | `RecvError::Cancelled` | Receive operation cancelled |
 | `RecvError::Empty` | No item available (try_recv) |
 | `broadcast::RecvError::Lagged(n)` | Broadcast receiver fell behind by n messages |
+| `broadcast::RecvError::Closed` | All broadcast senders dropped (broadcast/watch use `Closed`, not `Disconnected`) |
 
 ## Outcome Handling
 
@@ -145,6 +179,8 @@ match outcome {
             CancelKind::RaceLost => { /* lost a race */ }
             CancelKind::ParentCancelled => { /* parent region cancelled */ }
             CancelKind::Shutdown => { /* runtime shutdown */ }
+            // Also: Deadline, PollQuota, CostBudget (budget exhaustion)
+            // and ResourceUnavailable.
         }
     }
     Outcome::Panicked(payload) => { /* task panicked */ }

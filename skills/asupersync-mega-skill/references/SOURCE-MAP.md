@@ -3,10 +3,13 @@
 ## What Is Asupersync?
 
 A spec-first, cancel-correct, capability-secure async runtime for Rust with
-1,700+ tracked files under `src/`, including 1,100+ Rust files; the generated
-API map currently lists 120 modules and 298 root exports. Refresh live counts
+1,700+ tracked files under `src/`, including 1,400+ Rust files; the generated
+API map currently lists 120 modules and 315 root exports. Refresh live counts
 from `/data/projects/asupersync/artifacts/api_surface_map_v1.json` and
-`git ls-files` before quoting them. Not a Tokio wrapper -- a broad
+`git ls-files` before quoting them. Current workspace version is 0.4.4
+(releases v0.4.0 -> v0.4.4 shipped 2026-08-07 -> 2026-08-13); v0.4.3
+public-API compatibility is a hard release gate (AGENTS.md "Backwards
+Compatibility"). Not a Tokio wrapper -- a broad
 support-class-scoped replacement for native Asupersync designs, with stronger
 guarantees:
 
@@ -108,6 +111,8 @@ not treat them as canonical workspace members without checking `Cargo.toml`.
 | `stream/` | map, filter, merge, zip, fold, buffered, try_stream |
 | `transport/` | Router, aggregator, sink (low-level delivery) |
 | `session.rs` | Session/channel protocol surfaces and linear reply semantics |
+| `future.rs` | Crate-private blocking poll/`block_on`-style kernel (`crate::util::future`); not a public module |
+| `bin/` | Binaries: `asupersync`, `atp`, `atpd`, dependency-ledger and RaptorQ/QUIC profile tools |
 | `plan/` | DAG IR, rewrite engine, analysis lattices |
 | `observability/` | LogEntry, metrics, TaskInspector, Diagnostics, spectral health |
 | `console.rs` / `cli/` | Operator CLI and console diagnostics; `cli` is feature-gated and native-only |
@@ -140,6 +145,7 @@ not treat them as canonical workspace members without checking `Cargo.toml`.
 - `/data/projects/asupersync/Cargo.toml`
 - `/data/projects/asupersync/src/lib.rs`
 - `/data/projects/asupersync/TESTING_FOR_AGENTS.md`
+- `/data/projects/asupersync/CHANGELOG.md` (v0.4.0-v0.4.4 sections)
 - `/data/projects/asupersync/artifacts/api_surface_map_v1.json`
 
 ### 2. Integration entrypoints

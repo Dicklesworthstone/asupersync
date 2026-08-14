@@ -14,12 +14,15 @@ Important boundary rules from the repo docs:
 
 ## Feature Gates
 
-| Feature | Purpose |
-|---------|---------|
-| `hyper-bridge` | hyper runtime traits, body bridge |
-| `tokio-io` | Tokio I/O trait adapters |
-| `tower-bridge` | Tower service adapters |
-| `full` | all of the above |
+| Feature | Purpose | Entry points |
+|---------|---------|--------------|
+| `hyper-bridge` | hyper v1 runtime traits, body bridge | `hyper_bridge::{AsupersyncExecutor, AsupersyncTimer}`, `body_bridge` |
+| `tokio-io` | Tokio `AsyncRead`/`AsyncWrite` trait adapters (bidirectional) | `io::TokioIo<T>`, `io::AsupersyncIo<T>` |
+| `tower-bridge` | Tower service adapters | `tower_bridge::FromTower<S>`, `tower_bridge::IntoTower<S>` |
+| `full` | all of the above | all of the above |
+
+Always available (no feature): `runtime::with_tokio_context`, `blocking`,
+`cancel`, `AdapterConfig` / `CancellationMode`.
 
 ## When To Use It
 
@@ -63,7 +66,10 @@ Prefer this order:
 
 - `/data/projects/asupersync/asupersync-tokio-compat/Cargo.toml`
 - `/data/projects/asupersync/asupersync-tokio-compat/src/lib.rs`
+- `/data/projects/asupersync/docs/integration.md` (Tokio Migration Playbook section)
 - `/data/projects/asupersync/docs/tokio_adapter_boundary_architecture.md`
 - `/data/projects/asupersync/docs/tokio_interop_support_matrix.md`
 - `/data/projects/asupersync/docs/tokio_migration_cookbooks.md`
+- `/data/projects/asupersync/docs/migration_recipe_compiler.md`
+- `/data/projects/asupersync/scripts/migration_readiness_planner.py`
 

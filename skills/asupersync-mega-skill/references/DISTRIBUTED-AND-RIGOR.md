@@ -23,8 +23,18 @@ Key properties:
 - protocol transitions are session-typed and explicit
 - logical clock metadata travels with protocol messages
 - saga compensation is a first-class rollback model
+- a missing remote runtime fails closed to an explicit deterministic fallback
 
 This is a stronger model than "spawn some closure on another node".
+
+The shipped proof tier now includes both the deterministic virtual/lab
+baseline and a production-transport-backed loopback proof: a TCP-backed
+`RemoteRuntime` adapter (`tests/remote_transport_lifecycle_contract.rs`, over
+`asupersync::net::TcpListener`/`TcpStream`) is pinned across spawn/result,
+cancellation before ack and while running, lease renewal/expiry, idempotency
+replay, transport failures, malformed envelopes, capability denial, and the
+no-runtime fallback. No-claim boundary: discovery, TLS/authentication, WAN
+retry policy, and a frozen production wire format remain adapter-specific.
 
 ## What That Means For Downstream Integrators
 
@@ -122,6 +132,14 @@ Use it when:
 - partial replica availability is normal,
 - deterministic recovery and evidence matter.
 
+The same fountain property now powers multi-donor bonded transfers (`atp
+bond-pull`, `BondedTransfer` SDK): one receiver decodes the union of disjoint
+symbol slices from N donors, with fail-closed content agreement (each side
+derives the descriptor from its own local bytes; it is never sent on the
+wire) and the same deliberate fail-closed symbol-auth posture as single-source
+RaptorQ transport. See `RAPTORQ-DISTRIBUTED.md` for details and no-claim
+boundaries.
+
 ## The Rigor Stack: What It Buys You
 
 Asupersync includes a lot of formal and statistical machinery. Do not treat it
@@ -136,7 +154,7 @@ as decoration; translate it into operational advantage.
 | conformal calibration | thresholds with better false-alarm behavior under drift |
 | spectral health | early warning on structural wait-graph deterioration |
 | TLA+ export | bounded model-checking bridge for high-stakes invariants |
-| Lean/formal artifacts | stronger assurance on kernel semantics |
+| Lean/formal artifacts | Lean-checked model invariants (kernel model, not a proof the production runtime refines it) |
 
 ## When To Pay The Rigor Tax
 

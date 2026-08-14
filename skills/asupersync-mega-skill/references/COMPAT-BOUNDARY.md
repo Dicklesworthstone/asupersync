@@ -28,12 +28,12 @@ Typical examples:
 
 ## What Compat Actually Provides
 
-- runtime bridge: `with_tokio_context(...)`
-- sync context bridge for construction paths that need a Tokio handle
-- Tokio <-> Asupersync IO adapters
-- hyper executor/timer/body bridges
-- tower bridge
-- cancellation policies for wrapped Tokio futures
+- runtime bridge: `runtime::with_tokio_context(...)` and `AsupersyncRuntime::new(&cx).enter(...)`
+- sync context bridges for construction paths that need a Tokio handle: `with_tokio_context_sync(...)`, `blocking::with_cx_sync(...)`
+- Tokio <-> Asupersync IO adapters (`tokio-io` feature): `io::TokioIo<T>` (Asupersync stream -> Tokio/hyper traits), `io::AsupersyncIo<T>` (the reverse)
+- hyper executor/timer/body bridges (`hyper-bridge` feature): `hyper_bridge::{AsupersyncExecutor, AsupersyncTimer}`, `body_bridge`
+- tower bridge (`tower-bridge` feature): `tower_bridge::{FromTower, IntoTower}`
+- cancellation policies for wrapped Tokio futures: `AdapterConfig` with `CancellationMode::{BestEffort, Strict, TimeoutFallback}` (default is `BestEffort`)
 
 ## Recommended Boundary Shape
 
@@ -52,9 +52,9 @@ Compat exposes cancellation modes because Tokio-originated futures may not respe
 
 Prefer:
 
-- strict handling when correctness matters,
+- strict handling when correctness matters (`Strict` returns `AdapterError::CancellationIgnored` if the future completes after cancel),
 - explicit timeout fallback only when you understand the operational tradeoff,
-- best-effort only for low-risk glue where native semantics are impossible.
+- best-effort only for low-risk glue where native semantics are impossible — note this is the crate default, so set the mode deliberately.
 
 ## Removal Plan
 

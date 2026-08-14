@@ -10,15 +10,22 @@ Asupersync uses mathematically rigorous machinery where it buys real correctness
 | **Concurrency** | Near-semiring: `join (x)` and `race (+)` with algebraic laws | Lawful rewrites, DAG optimization |
 | **Budgets** | Tropical semiring: `(R u {inf}, min, +)` | Critical path computation, budget propagation |
 | **Obligations** | Linear logic: resources used exactly once | No leaks, static checking possible |
-| **Traces** | Mazurkiewicz equivalence (partial orders) | DPOR-style guided coverage, stable replay |
+| **Traces** | Mazurkiewicz equivalence (partial orders) | DPOR-style guided exploration (not certified-optimal DPOR), stable replay |
 | **Cancellation** | Two-player game with budgets | Scoped completeness when modeled responsiveness assumptions hold and budgets are sufficient |
-| **Adaptive scheduling** | EXP3/Hedge no-regret online learning | Dynamic preemption without fairness blind spots |
+| **Adaptive scheduling** | EXP3/Hedge-style no-regret online learning (shipped as discounted UCB1) | Dynamic preemption control without fairness blind spots |
 | **Drain certificates** | Signed-step range bounds + empirical phase diagnostics | Conditional, auditable drain-progress evidence |
 | **Structural diagnostics** | Spectral graph theory + conformal + e-processes | Early warning on wait-graph fragmentation |
 
 ## Formal Semantics
 
-Small-step operational semantics in `asupersync_v4_formal_semantics.md` with Lean mechanization scaffold (`formal/lean/Asupersync.lean`).
+Small-step operational semantics in `asupersync_v4_formal_semantics.md`. The Lean
+project (`formal/lean/Asupersync.lean`) checks six invariants of that abstract
+model (structured-concurrency single-owner, region-close quiescence, cancellation
+protocol, race loser drain, obligation no-leak, no ambient authority), recorded in
+`formal/lean/coverage/invariant_status_inventory.json`. These are Lean-checked
+**model** invariants only: the production Rust runtime has not been proved to
+refine that model, so this is not a mechanized proof of the executor, adapters,
+or transports.
 
 Budget composition is semiring-like:
 ```text
@@ -29,16 +36,24 @@ combine(b1, b2) =
   priority   := max(b1.priority,   b2.priority)
 ```
 
-## Regret-Bounded Adaptive Cancel Preemption (EXP3/Hedge)
+## Regret-Bounded Adaptive Cancel Preemption (EXP3/Hedge-Style)
 
 Source: `src/runtime/scheduler/three_lane.rs`
 
-Deterministic EXP3/Hedge over candidate cancel-streak limits {4, 8, 16, 32}:
+The README presents this controller family as deterministic EXP3/Hedge no-regret
+learning over candidate cancel-streak limits (e.g. `{4, 8, 16, 32}`):
 ```text
 p_t(a) = (1 - gamma) * w_t(a) / sum_b w_t(b) + gamma / K
 w_{t+1}(a) = w_t(a) * exp((gamma / K) * r_hat_t(a))
 ```
 Importance-weighted reward: `r_hat_t(a_t) = r_t / p_t(a_t)`.
+
+Implementation note: the shipped policy (`AdaptiveCancelStreakPolicy`) is a
+deterministic discounted-UCB1 bandit over arms `{4, 8, 16, 32, 64}`, updated at
+epoch boundaries (`adaptive_cancel_streak_epoch_steps`, default 128; enabled by
+default) from reward blending Lyapunov decrease, fairness pressure, and deadline
+pressure. A seeded EXP3 controller also exists in ATP transport adaptation
+(`src/net/atp/transport_rq/adaptive.rs`).
 
 Adapts to workload regime shifts while preserving deterministic replay and bounded starvation.
 
@@ -113,7 +128,7 @@ Given dependency DAG (trace poset), constructs valid linear extension minimizing
 
 Source: `src/trace/dpor.rs`, `src/trace/independence.rs`
 
-DPOR-style race detection using minimal happens-before relation (vector clocks per task) plus resource-footprint conflicts. Systematic interleaving exploration targeting truly different behaviors.
+DPOR-style race detection using minimal happens-before relation (vector clocks per task) plus resource-footprint conflicts. Detected races feed race-guided derivation of deterministic seeds in the explorer; there is no exact-prefix backtracking, so observed equivalence-class counts are campaign metrics, not a certified-optimal-DPOR completeness guarantee.
 
 ## Persistent Homology of Trace Commutation Complexes
 
