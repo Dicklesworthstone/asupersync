@@ -65,7 +65,7 @@
       "path": "artifacts/kafka_k0_baseline_disposition_v1.json",
       "byte_count": 29494,
       "record_count": 284,
-      "sha256": "03922c2077dfd53392650f63f5bd07e3fa0a6153ca374273d1f6389602af616c"
+      "sha256": "4822e3183513a09d55f2ab81aebc75e6292524177b951d4ba337a05481b27a51"
     },
     {
       "input_id": "K1-INPUT-K0-5-DOCUMENT",
@@ -73,7 +73,7 @@
       "path": "docs/kafka_k0_baseline_disposition.md",
       "byte_count": 21799,
       "record_count": 349,
-      "sha256": "4cfce1dcf95f92698db207f27b672e6bf775f83d9ae4e423e7d51701aed86630"
+      "sha256": "dacb58c86b721ccfb83af50874dcad2b22ebb7b782a5e6b8de759e6930178aca"
     },
     {
       "input_id": "K1-INPUT-K0-5-CONTRACT",
@@ -81,7 +81,7 @@
       "path": "tests/kafka_k0_baseline_disposition_contract.rs",
       "byte_count": 106003,
       "record_count": 2599,
-      "sha256": "adb7869aee3fa320df076e419f632642aa8dccf679e73ee785748ca42f290713"
+      "sha256": "353b34138ffccb9f0de8861fd6ca6ad8ec3dddcc147d88f530f3b9d2a9fbcc35"
     },
     {
       "input_id": "K1-INPUT-ADR",
@@ -525,7 +525,7 @@
     "source_pin_rollup": {
       "row_count": 266,
       "stage_counts": {"K0.1": 13, "K0.2": 8, "K0.3": 225, "K0.4": 20},
-      "canonical_json_sha256": "35cb6fc780a69425488fc5f241a066eceed33d74677e8b4a722c00ea13a01a82",
+      "canonical_json_sha256": "dbf92d1efd7cfe336640cdf0932389f12df58a80d47e712c7a0c44b22037d4a8",
       "unique_path_count": 247,
       "unique_path_set_sha256": "d5631183e1560d87aeb50ca953d836b4405110b30f81c98aab099c6a5f1eb4c3",
       "overlap_group_count": 15,
@@ -572,7 +572,7 @@
     },
     "claims_projection": {
       "child_claim_record_count": 93,
-      "child_claim_projection_sha256": "11f5ffc880c4e1dc1587733423149bae9d6dc6a0aa186a54e79c2073954ccb30",
+      "child_claim_projection_sha256": "6594af9887ddda815055e14cbc68a909c6ece34b0239576b798d00dcf287cdf6",
       "aggregate_claim_count": 7,
       "aggregate_claim_projection_sha256": "2a4867239016cef413e38d68bc1d788de89a23bac7ac08890632256013b4d1b6",
       "migration_claim_state": "BLOCKED",

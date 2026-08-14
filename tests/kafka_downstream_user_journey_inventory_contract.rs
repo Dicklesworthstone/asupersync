@@ -20,7 +20,7 @@ const DOC_PATH: &str = "docs/kafka_downstream_user_journey_inventory.md";
 const K0_1_PATH: &str = "artifacts/kafka_capability_inventory_v1.json";
 const K0_2_PATH: &str = "artifacts/kafka_incumbent_semantics_matrix_v1.json";
 const ADR_REGISTRY_PATH: &str = "artifacts/dependency_api_adr_registry_v1.json";
-const ARTIFACT_SHA256: &str = "fffb3a70e2fb3da4505a74d91f5f7a3996094ffb6292f6948404070154e795fa";
+const ARTIFACT_SHA256: &str = "5f1c551016c9647490ed8de6f413f9ed9d2cd4c1644ecad345bb5d236336b0d8";
 const DOC_SHA256: &str = "3c2f0b4fa956bc45fc5b9738f5f2349024dafb577509195e998fa72ec0d9dbb1";
 const ARTIFACT_ID: &str = "kafka-downstream-user-journey-inventory-v1";
 const PROGRAM_ID: &str = "asupersync-ir2uf0";
@@ -81,15 +81,15 @@ const DOCUMENTATION_OCCURRENCE_GROUP_COUNT: usize = 173;
 const DOCUMENTATION_PATH_SHA256: &str =
     "092daf94a5e428430bc2e6fab7a13a30649aca53e30680c300f9eb76cbbfec67";
 const DOCUMENTATION_OCCURRENCE_TUPLE_SHA256: &str =
-    "42b6ffff0e756e9a996b3bbc85e5881b03da6d8607c0c6116a5ccc11a6212e4d";
+    "411c44ac183f016c20e023b9334ff3a425927f19edf061841845cbcb9ae9a096";
 const DOCUMENTATION_LINE_TUPLE_SHA256: &str =
-    "4bdb4f93da240c842de1a27b04ae251d807bd44bad0c8a75879f58c7a6fb4753";
+    "34b284bd35ea5e0aedf996f27f6cada7514e905c0cdc9527dfe627f9809256f4";
 const DOCUMENTATION_OCCURRENCE_ID_SHA256: &str =
-    "e878e3885d8e6c5c9e4c29c45465211cf1dc9efbb8368f1dabfcbede191f4df1";
+    "40b72afa3c0d0019d89a6dafbe30ff7ab291aa4ec84e1ff89ff104429eefdb38";
 const DOCUMENTATION_CANONICAL_ID_SHA256: &str =
-    "adeccf7bf54bac013beefaf1b2f763c9e1bfc91d82ae6ec65efbf0852db5e942";
+    "eb639a6c63291a29da23d7f002dcb0b26a38f34c42ed857f6949db3a92b5328e";
 const DOCUMENTATION_REMAINDER_ID_SHA256: &str =
-    "4c33ea18a839509eaa92dff7fe1c6d45b2a9746652dcc2337800444b8827b580";
+    "bc8b80a089b9c8f8df4f55db7cc352f553c6662cc1245b98ecf9910c942c805f";
 const DOCUMENTATION_GROUP_ID_SHA256: &str =
     "5e36b023be812fd3887b84af75d46e7b220c0138317b2a4face21917bdf180dd";
 const DOCUMENTATION_SOURCE_PIN_TUPLE_SHA256: &str =

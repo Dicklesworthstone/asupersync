@@ -110,8 +110,8 @@
     },
     {
       "path": "src/runtime/config.rs",
-      "sha256": "911526ec1fbbf1b6d08dcc8a1f62b820ae755dbf35c5d30685690921eacf040c",
-      "line_count": 10769,
+      "sha256": "1d86b9650e09a072279397a785acb2a03f2e3138f1c56e9b5c1635fca901615b",
+      "line_count": 10771,
       "role": "default adaptive and optional governor sampling intervals"
     },
     {
@@ -282,10 +282,10 @@
         {"path": "src/runtime/scheduler/three_lane.rs", "line": 4577, "fragment": "fn capture_adaptive_snapshot"},
         {"path": "src/runtime/scheduler/three_lane.rs", "line": 4617, "fragment": "capture_adaptive_snapshot()"},
         {"path": "src/runtime/scheduler/three_lane.rs", "line": 6325, "fragment": "StateSnapshot::from_runtime_state_with_tasks"},
-        {"path": "src/runtime/config.rs", "line": 2231, "fragment": "enable_governor: false"},
-        {"path": "src/runtime/config.rs", "line": 2232, "fragment": "governor_interval: 32"},
-        {"path": "src/runtime/config.rs", "line": 2234, "fragment": "enable_adaptive_cancel_streak: true"},
-        {"path": "src/runtime/config.rs", "line": 2235, "fragment": "adaptive_cancel_streak_epoch_steps: 128"}
+        {"path": "src/runtime/config.rs", "line": 2233, "fragment": "enable_governor: false"},
+        {"path": "src/runtime/config.rs", "line": 2234, "fragment": "governor_interval: 32"},
+        {"path": "src/runtime/config.rs", "line": 2236, "fragment": "enable_adaptive_cancel_streak: true"},
+        {"path": "src/runtime/config.rs", "line": 2237, "fragment": "adaptive_cancel_streak_epoch_steps: 128"}
       ]
     },
     {

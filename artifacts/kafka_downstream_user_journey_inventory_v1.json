@@ -336,15 +336,15 @@
     {
       "pin_id": "KAFKA-K0-3-PIN-README",
       "path": "README.md",
-      "record_count": 2132,
-      "sha256": "dcf0576c723ebc821176144c3cc61711cc8dc31e66577a3e10f27c452ac0a8ac",
+      "record_count": 2136,
+      "sha256": "628c82315fa1be0e52a8cfeb273689f9ffd0271d21908265620ad06a426d7ec9",
       "role": "public feature and API documentation"
     },
     {
       "pin_id": "KAFKA-K0-3-PIN-AGENTS",
       "path": "AGENTS.md",
       "record_count": 1373,
-      "sha256": "d130ce47bfbb8d69ccaff640b6c4aa29eb1729baa2cfc225ba7a0a451cacb964",
+      "sha256": "9cb5c37ddc0ef3df24c3e0568102212392e377b9e149e4b0209349f80d0d015e",
       "role": "operator feature and proof policy"
     },
     {
@@ -973,7 +973,7 @@
     {"pin_id":"KAFKA-K0-3-PIN-DOC-SURFACE-042","path":"artifacts/lz4_owned_codec_corpus_v1.json","record_count":291,"sha256":"e43d62bcfad745ce839e40fa04d9bdf2f5eaa88b920804efd817c4af1b341c9b","role":"exact baseline content pin for a documentation-claim candidate surface"},
     {"pin_id":"KAFKA-K0-3-PIN-DOC-SURFACE-043","path":"artifacts/lz4_surface_artifact_inventory_v1.json","record_count":572,"sha256":"932d4f1fc81cc0081317f627feee08cee960892137f3cce62e8c23ff310600eb","role":"exact baseline content pin for a documentation-claim candidate surface"},
     {"pin_id":"KAFKA-K0-3-PIN-DOC-SURFACE-044","path":"artifacts/mock_code_finder_stale_audit_normalization_v1.json","record_count":83,"sha256":"1a0cc55611589c7a82bb4f83440747d13cd649a262933f49b54fbaff1c818119","role":"exact baseline content pin for a documentation-claim candidate surface"},
-    {"pin_id":"KAFKA-K0-3-PIN-DOC-SURFACE-045","path":"artifacts/oslock_inventory_gate_v1.json","record_count":749,"sha256":"c2aebed25dca9b8a5b5daa3ad259404b0b8aadb78bc55a99431d7f086f834bbf","role":"exact baseline content pin for a documentation-claim candidate surface"},
+    {"pin_id":"KAFKA-K0-3-PIN-DOC-SURFACE-045","path":"artifacts/oslock_inventory_gate_v1.json","record_count":749,"sha256":"a4947b042652ec69728dd36a49ebae4d244dd88233696f549793f42f44a1f235","role":"exact baseline content pin for a documentation-claim candidate surface"},
     {"pin_id":"KAFKA-K0-3-PIN-DOC-SURFACE-046","path":"artifacts/parser_fuzz_protocol_inventory_v1.json","record_count":437,"sha256":"819b3140315aeb6f722bea0516a4c85a1598a1e112347bbdeae1f53f62ad133b","role":"exact baseline content pin for a documentation-claim candidate surface"},
     {"pin_id":"KAFKA-K0-3-PIN-DOC-SURFACE-047","path":"artifacts/proof_lane_manifest_v1.json","record_count":3628,"sha256":"e7d4c8a62dff66fb0f1609faa4d5f901f2eb89d4ffb810f891871f9d0215068f","role":"exact baseline content pin for a documentation-claim candidate surface"},
     {"pin_id":"KAFKA-K0-3-PIN-DOC-SURFACE-049","path":"artifacts/roundtrip_oracle_v1.json","record_count":681,"sha256":"c41105092cf113d8df236ac34c526b20cf8e4e06e7dca4a6ac18eaa6a711487e","role":"exact baseline content pin for a documentation-claim candidate surface"},
@@ -5309,14 +5309,14 @@
     "occurrence_id_rule": "KAFKA-K0-3-DOC-OCC-{three-digit candidate-surface ordinal}-L{six-digit 1-based line}-M{three-digit 1-based non-overlapping match ordinal within line}",
     "literal_occurrence_count": 9180,
     "matching_line_count": 7778,
-    "occurrence_locator_tuple_sha256": "42b6ffff0e756e9a996b3bbc85e5881b03da6d8607c0c6116a5ccc11a6212e4d",
-    "matching_line_locator_tuple_sha256": "4bdb4f93da240c842de1a27b04ae251d807bd44bad0c8a75879f58c7a6fb4753",
-    "occurrence_id_list_sha256": "e878e3885d8e6c5c9e4c29c45465211cf1dc9efbb8368f1dabfcbede191f4df1",
+    "occurrence_locator_tuple_sha256": "411c44ac183f016c20e023b9334ff3a425927f19edf061841845cbcb9ae9a096",
+    "matching_line_locator_tuple_sha256": "34b284bd35ea5e0aedf996f27f6cada7514e905c0cdc9527dfe627f9809256f4",
+    "occurrence_id_list_sha256": "40b72afa3c0d0019d89a6dafbe30ff7ab291aa4ec84e1ff89ff104429eefdb38",
     "canonical_documentation_claim_count": 31,
     "canonical_projection_occurrence_count": 37,
-    "canonical_projection_occurrence_id_list_sha256": "adeccf7bf54bac013beefaf1b2f763c9e1bfc91d82ae6ec65efbf0852db5e942",
+    "canonical_projection_occurrence_id_list_sha256": "eb639a6c63291a29da23d7f002dcb0b26a38f34c42ed857f6949db3a92b5328e",
     "owned_unresolved_occurrence_count": 9143,
-    "owned_unresolved_occurrence_id_list_sha256": "4c33ea18a839509eaa92dff7fe1c6d45b2a9746652dcc2337800444b8827b580",
+    "owned_unresolved_occurrence_id_list_sha256": "bc8b80a089b9c8f8df4f55db7cc352f553c6662cc1245b98ecf9910c942c805f",
     "occurrence_group_count": 173,
     "occurrence_group_id_list_sha256": "5e36b023be812fd3887b84af75d46e7b220c0138317b2a4face21917bdf180dd",
     "source_pin_count_for_actual_candidate_surfaces": 149,
@@ -5374,7 +5374,7 @@
   "documentation_claim_occurrence_groups": {
     "representation": "EXPLICIT_CANONICAL_PROJECTIONS_PLUS_DERIVED_PER_SURFACE_SET_DIFFERENCE_REMAINDERS",
     "canonical_projection_groups": [
-      {"group_id":"KAFKA-K0-3-DOC-OCC-GROUP-C001","claim_id":"KAFKA-K0-3-DOC-CLAIM-001","selector_kind":"EXPLICIT_OCCURRENCE_IDS","occurrence_ids":["KAFKA-K0-3-DOC-OCC-013-L000506-M001","KAFKA-K0-3-DOC-OCC-010-L000288-M001"],"occurrence_count":2,"occurrence_id_list_sha256":"4522c4063d4188deb2d393a825f7bcc8b3d574d0cef3bfc171b42f0a2e76b35c"},
+      {"group_id":"KAFKA-K0-3-DOC-OCC-GROUP-C001","claim_id":"KAFKA-K0-3-DOC-CLAIM-001","selector_kind":"EXPLICIT_OCCURRENCE_IDS","occurrence_ids":["KAFKA-K0-3-DOC-OCC-013-L000508-M001","KAFKA-K0-3-DOC-OCC-010-L000288-M001"],"occurrence_count":2,"occurrence_id_list_sha256":"e4ee7388f3633cfbe27ee3814a6066eb51a61b94c1665ee3949818530a356b97"},
       {"group_id":"KAFKA-K0-3-DOC-OCC-GROUP-C002","claim_id":"KAFKA-K0-3-DOC-CLAIM-002","selector_kind":"EXPLICIT_OCCURRENCE_IDS","occurrence_ids":["KAFKA-K0-3-DOC-OCC-068-L000055-M001","KAFKA-K0-3-DOC-OCC-067-L000456-M001","KAFKA-K0-3-DOC-OCC-069-L000319-M001"],"occurrence_count":3,"occurrence_id_list_sha256":"cc501f3edf69bd4a8a4a71f20238485d9b110d7014dc4dd0c8a199eb33c029eb"},
       {"group_id":"KAFKA-K0-3-DOC-OCC-GROUP-C003","claim_id":"KAFKA-K0-3-DOC-CLAIM-003","selector_kind":"EXPLICIT_OCCURRENCE_IDS","occurrence_ids":["KAFKA-K0-3-DOC-OCC-070-L000089-M001","KAFKA-K0-3-DOC-OCC-074-L000056-M001"],"occurrence_count":2,"occurrence_id_list_sha256":"98c86654971e27b55776aeaf225be984f88783f80a9943e938b3cc0c833a26a8"},
       {"group_id":"KAFKA-K0-3-DOC-OCC-GROUP-C004","claim_id":"KAFKA-K0-3-DOC-CLAIM-004","selector_kind":"EXPLICIT_OCCURRENCE_IDS","occurrence_ids":["KAFKA-K0-3-DOC-OCC-113-L000044-M001","KAFKA-K0-3-DOC-OCC-054-L000322-M001"],"occurrence_count":2,"occurrence_id_list_sha256":"0496b1330236ede4b30cef3c5b510ed72f860387efdb081ec569f418456c8f33"},
@@ -5423,7 +5423,7 @@
       "derived_group_count": 142,
       "derived_group_id_list_sha256": "a52b98d4cb5460c4731c64e085e4852990fd408196c67b9c67d46cc9c5acb7d1",
       "occurrence_count": 9143,
-      "occurrence_id_list_sha256": "4c33ea18a839509eaa92dff7fe1c6d45b2a9746652dcc2337800444b8827b580",
+      "occurrence_id_list_sha256": "bc8b80a089b9c8f8df4f55db7cc352f553c6662cc1245b98ecf9910c942c805f",
       "classification": "OWNED_UNRESOLVED_CLAIM",
       "semantic_state": "UNKNOWN",
       "evidence_class": "NON_BROKER_STATIC_IDENTITY_ONLY",
@@ -5436,7 +5436,7 @@
       "canonical_and_remainder_groups_are_pairwise_disjoint": true,
       "canonical_and_remainder_union_equals_all_literal_occurrences": true,
       "expected_union_occurrence_count": 9180,
-      "expected_union_occurrence_id_list_sha256": "e878e3885d8e6c5c9e4c29c45465211cf1dc9efbb8368f1dabfcbede191f4df1",
+      "expected_union_occurrence_id_list_sha256": "40b72afa3c0d0019d89a6dafbe30ff7ab291aa4ec84e1ff89ff104429eefdb38",
       "expected_group_count": 173,
       "expected_group_id_list_sha256": "5e36b023be812fd3887b84af75d46e7b220c0138317b2a4face21917bdf180dd",
       "canonical_claim_reverse_join_is_bijective": true
@@ -5462,7 +5462,7 @@
         "KAFKA-K0-3-PIN-README",
         "KAFKA-K0-3-PIN-AGENTS"
       ],
-      "source_anchor": "README.md:506,1231,1479; AGENTS.md:288,463",
+      "source_anchor": "README.md:508,1235,1483; AGENTS.md:288,463",
       "claim": "Kafka is an optional rdkafka-backed feature and feature-gated lanes require explicit coverage",
       "freshness_state": "CURRENT_SOURCE_PINNED",
       "claim_disposition": "CURRENT",

@@ -55,8 +55,8 @@
     },
     {
       "path": "README.md",
-      "sha256": "dcf0576c723ebc821176144c3cc61711cc8dc31e66577a3e10f27c452ac0a8ac",
-      "line_count": 2132
+      "sha256": "628c82315fa1be0e52a8cfeb273689f9ffd0271d21908265620ad06a426d7ec9",
+      "line_count": 2136
     },
     {
       "path": "artifacts/dependency_capability_registry_v1.json",
