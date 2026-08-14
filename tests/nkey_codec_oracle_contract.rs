@@ -10,6 +10,8 @@
 
 #[path = "dependency_oracles/nkeys/mod.rs"]
 mod nkeys_oracle;
+#[path = "../src/security/keys/nkey_codec.rs"]
+mod owned_nkey_codec;
 
 use nkeys::{KeyPair, KeyPairType};
 use nkeys_oracle::{

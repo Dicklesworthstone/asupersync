@@ -4,6 +4,12 @@
 //! creation and rotation APIs take caller-provided entropy and timestamps so ATP
 //! daemon code can keep randomness and clocks capability-explicit.
 
+// The owned NKey codec is staged behind the library test configuration until
+// its full text/prefix substrate reaches the terminal N2 gate. Production
+// identity operations continue to use the incumbent `nkeys` crate.
+#[cfg(test)]
+mod nkey_codec;
+
 use nkeys::{KeyPair, KeyPairType};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
