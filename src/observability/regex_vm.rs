@@ -17,6 +17,7 @@ use super::regex_ir::{
     CaptureSlot, ClassId, CompileError, CompileErrorKind, CompileLimits, Instruction, Program,
     StateId,
 };
+use super::regex_lowering::{PrivateCompileError, PrivateCompileLimits, compile_private};
 use super::regex_semantics::{ByteRange, CanonicalRanges, ScalarRange};
 
 pub const VM_ID: &str = "ASUP-REGEX-THREAD-SET-VM-V1";
@@ -139,6 +140,143 @@ impl Default for IterationVmLimits {
 impl IterationVmLimits {
     const fn invariants_hold(self) -> bool {
         self.capture.invariants_hold() && self.max_matches > 0 && self.max_trace_events > 0
+    }
+}
+
+/// Immutable compile-once facade over the private checked compiler and VM.
+///
+/// The enclosing module is crate-private and compiled only with `metrics`.
+/// This type stores validated IR and the exact IR limits used to compile it;
+/// it never stores the source pattern, haystack, captures, mutable execution
+/// state, or an ambient cache. Every operation receives explicit work and
+/// memory limits, and controlled variants receive caller-owned cancellation.
+/// Public wiring and incumbent replacement remain separately owned.
+pub struct PrivateCompiledPattern {
+    program: Program,
+    compile_limits: CompileLimits,
+}
+
+impl PrivateCompiledPattern {
+    /// Compile and validate one pattern for repeated private use.
+    pub fn compile(
+        pattern: &str,
+        limits: PrivateCompileLimits,
+    ) -> Result<Self, PrivateCompileError> {
+        let program = compile_private(pattern, limits)?;
+        Ok(Self {
+            program,
+            compile_limits: limits.ir,
+        })
+    }
+
+    /// Return whether a leftmost-first match exists.
+    pub fn is_match(&self, haystack: &str, limits: CaptureVmLimits) -> Result<bool, VmError> {
+        self.captures(haystack, limits)
+            .map(|matched| matched.is_some())
+    }
+
+    /// Return whether a match exists with explicit cooperative cancellation.
+    pub fn is_match_with_control(
+        &self,
+        haystack: &str,
+        limits: CaptureVmLimits,
+        control: &mut VmCancellationControl<'_>,
+    ) -> Result<bool, VmError> {
+        self.captures_with_control(haystack, limits, control)
+            .map(|matched| matched.is_some())
+    }
+
+    /// Select one leftmost-first whole-match span.
+    pub fn find(
+        &self,
+        haystack: &str,
+        limits: CaptureVmLimits,
+    ) -> Result<Option<CaptureSpan>, VmError> {
+        self.captures(haystack, limits)
+            .map(|matched| matched.map(|selected| selected.span))
+    }
+
+    /// Select one whole-match span with explicit cooperative cancellation.
+    pub fn find_with_control(
+        &self,
+        haystack: &str,
+        limits: CaptureVmLimits,
+        control: &mut VmCancellationControl<'_>,
+    ) -> Result<Option<CaptureSpan>, VmError> {
+        self.captures_with_control(haystack, limits, control)
+            .map(|matched| matched.map(|selected| selected.span))
+    }
+
+    /// Select one leftmost-first match and its participating capture spans.
+    pub fn captures(
+        &self,
+        haystack: &str,
+        limits: CaptureVmLimits,
+    ) -> Result<Option<VmMatch>, VmError> {
+        execute_search(&self.program, haystack, self.compile_limits, limits)
+            .map(|outcome| outcome.matched)
+    }
+
+    /// Select one match and captures with explicit cooperative cancellation.
+    pub fn captures_with_control(
+        &self,
+        haystack: &str,
+        limits: CaptureVmLimits,
+        control: &mut VmCancellationControl<'_>,
+    ) -> Result<Option<VmMatch>, VmError> {
+        execute_search_with_control(
+            &self.program,
+            haystack,
+            self.compile_limits,
+            limits,
+            control,
+        )
+        .map(|outcome| outcome.matched)
+    }
+
+    /// Iterate matches deterministically under one aggregate resource budget.
+    pub fn find_iter(
+        &self,
+        haystack: &str,
+        policy: IterationPolicy,
+        limits: IterationVmLimits,
+    ) -> Result<VmIterationOutcome, VmError> {
+        execute_find_iter(&self.program, haystack, self.compile_limits, policy, limits)
+    }
+
+    /// Iterate under one aggregate resource budget and cancellation sequence.
+    pub fn find_iter_with_control(
+        &self,
+        haystack: &str,
+        policy: IterationPolicy,
+        limits: IterationVmLimits,
+        control: &mut VmCancellationControl<'_>,
+    ) -> Result<VmIterationOutcome, VmError> {
+        execute_find_iter_with_control(
+            &self.program,
+            haystack,
+            self.compile_limits,
+            policy,
+            limits,
+            control,
+        )
+    }
+}
+
+impl fmt::Debug for PrivateCompiledPattern {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PrivateCompiledPattern")
+            .field("schema_version", &self.program.schema_version)
+            .field("ir_id", &self.program.ir_id)
+            .field("states", &self.program.resources.states)
+            .field("classes", &self.program.resources.classes)
+            .field("capture_slots", &self.program.resources.capture_slots)
+            .field(
+                "accounted_memory_bytes",
+                &self.program.resources.accounted_memory_bytes,
+            )
+            .finish_non_exhaustive()
     }
 }
 
@@ -2537,6 +2675,268 @@ mod tests {
             byte_end: 0,
             scalar_start: 0,
             scalar_end: 0,
+        }
+    }
+
+    fn compile_pattern(pattern: &str) -> PrivateCompiledPattern {
+        PrivateCompiledPattern::compile(pattern, PrivateCompileLimits::default())
+            .unwrap_or_else(|error| panic!("private facade rejected {pattern:?}: {error}"))
+    }
+
+    #[test]
+    fn private_compiled_pattern_compiles_once_without_retaining_source_text() {
+        let pattern = "(?P<r3_5_private_compiled_pattern_canary>a)?b";
+        let compiled = compile_pattern(pattern);
+        let rendered = format!("{compiled:?}");
+        assert!(rendered.contains("PrivateCompiledPattern"));
+        assert!(rendered.contains("capture_slots"));
+        assert!(!rendered.contains(pattern));
+        assert!(!rendered.contains("r3_5_private_compiled_pattern_canary"));
+
+        let malformed = "r3_5_private_compiled_error_canary\\";
+        let error = PrivateCompiledPattern::compile(malformed, PrivateCompileLimits::default())
+            .expect_err("trailing escape must fail during private compilation");
+        assert_eq!(error.code(), "RGX-LEX-E003");
+        for diagnostic in [error.to_string(), format!("{error:?}")] {
+            assert!(!diagnostic.contains(malformed));
+            assert!(!diagnostic.contains("r3_5_private_compiled_error_canary"));
+        }
+    }
+
+    #[test]
+    fn private_compiled_pattern_match_find_captures_and_reuse_are_exact() {
+        let priority = compile_pattern("(a|ab)");
+        assert!(
+            priority
+                .is_match("zab", CaptureVmLimits::default())
+                .expect("match query")
+        );
+        assert!(
+            !priority
+                .is_match("zzz", CaptureVmLimits::default())
+                .expect("no-match query")
+        );
+        assert_eq!(
+            priority
+                .find("zab", CaptureVmLimits::default())
+                .expect("leftmost find"),
+            Some(CaptureSpan { start: 1, end: 2 })
+        );
+        for _ in 0..16 {
+            let selected = priority
+                .captures("zab", CaptureVmLimits::default())
+                .expect("reused capture query")
+                .expect("priority pattern matches");
+            assert_eq!(selected.span, CaptureSpan { start: 1, end: 2 });
+            assert_eq!(
+                selected.captures,
+                vec![Some(CaptureSpan { start: 1, end: 2 })]
+            );
+        }
+
+        let participation = compile_pattern("(a)?b");
+        let absent = participation
+            .captures("b", CaptureVmLimits::default())
+            .expect("optional capture query")
+            .expect("whole expression matches");
+        assert_eq!(absent.span, CaptureSpan { start: 0, end: 1 });
+        assert_eq!(absent.captures, vec![None]);
+
+        let empty = compile_pattern("");
+        assert_eq!(
+            empty
+                .find("é", CaptureVmLimits::default())
+                .expect("zero-width find"),
+            Some(CaptureSpan { start: 0, end: 0 })
+        );
+    }
+
+    #[test]
+    fn private_compiled_pattern_iteration_is_stable_and_unicode_safe() {
+        let overlapping = compile_pattern("aba");
+        let non_overlapping = overlapping
+            .find_iter(
+                "ababa",
+                IterationPolicy::NonOverlapping,
+                IterationVmLimits::default(),
+            )
+            .expect("non-overlapping iteration");
+        assert_eq!(
+            non_overlapping.replacement_spans().collect::<Vec<_>>(),
+            vec![CaptureSpan { start: 0, end: 3 }]
+        );
+        let first = overlapping
+            .find_iter(
+                "ababa",
+                IterationPolicy::Overlapping,
+                IterationVmLimits::default(),
+            )
+            .expect("overlapping iteration");
+        let second = overlapping
+            .find_iter(
+                "ababa",
+                IterationPolicy::Overlapping,
+                IterationVmLimits::default(),
+            )
+            .expect("replayed overlapping iteration");
+        assert_eq!(
+            first.replacement_spans().collect::<Vec<_>>(),
+            vec![
+                CaptureSpan { start: 0, end: 3 },
+                CaptureSpan { start: 2, end: 5 },
+            ]
+        );
+        assert_eq!(first, second);
+
+        let empty = compile_pattern("");
+        let zero_width = empty
+            .find_iter(
+                "éa",
+                IterationPolicy::NonOverlapping,
+                IterationVmLimits::default(),
+            )
+            .expect("zero-width Unicode iteration");
+        assert_eq!(
+            zero_width.replacement_spans().collect::<Vec<_>>(),
+            vec![
+                CaptureSpan { start: 0, end: 0 },
+                CaptureSpan { start: 2, end: 2 },
+                CaptureSpan { start: 3, end: 3 },
+            ]
+        );
+    }
+
+    #[test]
+    fn private_compiled_pattern_limits_cancel_exactly_and_leave_it_reusable() {
+        let compiled = compile_pattern("(a+)");
+        let input = compiled
+            .is_match(
+                "four",
+                CaptureVmLimits {
+                    vm: VmLimits {
+                        max_input_bytes: 3,
+                        ..VmLimits::default()
+                    },
+                    ..CaptureVmLimits::default()
+                },
+            )
+            .expect_err("input ceiling must fail closed");
+        assert_eq!(input.kind, VmErrorKind::InputLimit);
+        assert_eq!((input.actual, input.limit), (Some(4), Some(3)));
+
+        let seen_keys = compiled.program.states.len() * CAPTURE_SEEN_KEYS_PER_STATE;
+        let base_memory = capture_base_memory_bytes(
+            seen_keys,
+            seen_keys.min(DEFAULT_MAX_THREADS_PER_OFFSET),
+            compiled.program.capture_slots,
+            DEFAULT_MAX_TRACE_EVENTS,
+        )
+        .expect("bounded capture base memory");
+        let memory = compiled
+            .captures(
+                "a",
+                CaptureVmLimits {
+                    vm: VmLimits {
+                        max_memory_bytes: base_memory - 1,
+                        ..VmLimits::default()
+                    },
+                    ..CaptureVmLimits::default()
+                },
+            )
+            .expect_err("base memory ceiling must fail closed");
+        assert_eq!(memory.kind, VmErrorKind::MemoryLimit);
+        assert_eq!(
+            (memory.actual, memory.limit),
+            (Some(base_memory), Some(base_memory - 1))
+        );
+
+        let work = compiled
+            .find_iter(
+                "a a",
+                IterationPolicy::NonOverlapping,
+                IterationVmLimits {
+                    capture: CaptureVmLimits {
+                        vm: VmLimits {
+                            max_work_units: 1,
+                            ..VmLimits::default()
+                        },
+                        ..CaptureVmLimits::default()
+                    },
+                    ..IterationVmLimits::default()
+                },
+            )
+            .expect_err("aggregate work ceiling must fail closed");
+        assert_eq!(work.kind, VmErrorKind::WorkLimit);
+
+        let match_limit = compiled
+            .find_iter(
+                "a a",
+                IterationPolicy::NonOverlapping,
+                IterationVmLimits {
+                    max_matches: 1,
+                    ..IterationVmLimits::default()
+                },
+            )
+            .expect_err("second match exceeds the aggregate ceiling");
+        assert_eq!(match_limit.kind, VmErrorKind::MatchLimit);
+        assert_eq!((match_limit.actual, match_limit.limit), (Some(2), Some(1)));
+
+        let private_haystack = "r3_5_private_match_cancel_canary-aaaa";
+        let mut probe = |checkpoint: VmCancellationCheckpoint| checkpoint.sequence == 3;
+        let mut control =
+            VmCancellationControl::new(3, &mut probe).expect("valid cancellation control");
+        let cancelled = compiled
+            .find_iter_with_control(
+                private_haystack,
+                IterationPolicy::NonOverlapping,
+                IterationVmLimits::default(),
+                &mut control,
+            )
+            .expect_err("third aggregate checkpoint cancels iteration");
+        assert_eq!(cancelled.kind, VmErrorKind::Cancelled);
+        assert_eq!(control.cancelled_at().map(|point| point.sequence), Some(3));
+        assert!(!cancelled.to_string().contains(private_haystack));
+        assert_eq!(
+            compiled
+                .find(private_haystack, CaptureVmLimits::default())
+                .expect("compiled pattern remains reusable after cancellation"),
+            Some(CaptureSpan {
+                start: private_haystack.len() - 4,
+                end: private_haystack.len(),
+            })
+        );
+    }
+
+    #[test]
+    fn private_compiled_pattern_is_immutable_send_sync_for_shared_use() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<PrivateCompiledPattern>();
+
+        let compiled = std::sync::Arc::new(compile_pattern("(ab|a)"));
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(9));
+        let handles = (0..8)
+            .map(|_| {
+                let compiled = std::sync::Arc::clone(&compiled);
+                let barrier = std::sync::Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    for _ in 0..32 {
+                        let matched = compiled
+                            .captures("zab", CaptureVmLimits::default())
+                            .expect("shared capture query")
+                            .expect("shared pattern matches");
+                        assert_eq!(matched.span, CaptureSpan { start: 1, end: 3 });
+                        assert_eq!(
+                            matched.captures,
+                            vec![Some(CaptureSpan { start: 1, end: 3 })]
+                        );
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        barrier.wait();
+        for handle in handles {
+            handle.join().expect("shared query worker must not panic");
         }
     }
 
