@@ -172,24 +172,27 @@ ServerConfig {
 - Message size enforcement
 - Concurrent stream limits
 
-### 5. Phase 0 Authentication (src/security/)
+### 5. Authentication key provenance (`src/security/`)
 
-**WARNING: Phase 0 uses non-cryptographic authentication.**
+Symbol and control-envelope authentication uses domain-separated HMAC-SHA256,
+and `AuthKey` material is zeroized on drop. The remaining provisioning boundary
+is input entropy: `AuthKey::from_seed(u64)` is intentionally deterministic and
+therefore has at most 64 bits of entropy. SHA-256 or HKDF can distribute those
+bits across a 256-bit output, but cannot create more entropy.
 
-**Design Intent:**
-- Deterministic for lab runtime reproducibility
-- NOT suitable for production
-- Must be replaced with HMAC-SHA256 in Phase 1
+**Design intent:**
+- `from_seed` / `auth_key_seed`: deterministic tests, fixtures, and replay
+- `from_bytes`: externally generated CSPRNG or secret-manager key material
+- Production callers inject an explicit `SecurityContext`; they do not use the
+  deterministic seed knob as a secret source
 
 ```rust
-// Phase 0: Deterministic key derivation (NOT SECURE)
-pub fn from_seed(seed: u64) -> AuthKey {
-    let mut rng = DetRng::new(seed);
-    // ...
-}
+// Deterministic/replay-only:
+let fixture_key = AuthKey::from_seed(seed);
 
-// Phase 1+: Must use cryptographic primitives
-// let key = hmac::Key::new(hmac::HMAC_SHA256, key_bytes);
+// Production: `key_bytes` comes from a CSPRNG or secret manager.
+let key = AuthKey::from_bytes(key_bytes)?;
+let security = SecurityContext::new(key);
 ```
 
 **Auth Modes:**
@@ -216,7 +219,7 @@ pub fn from_seed(seed: u64) -> AuthKey {
 | T-GRPC-001 | Auth Bypass | CRITICAL | Token validation | LOW |
 | T-GRPC-002 | Request Flood | HIGH | Rate limiter | MEDIUM |
 | T-GRPC-003 | Message Bomb | CRITICAL | Size limits | LOW |
-| T-SEC-001 | Weak Auth (Phase 0) | CRITICAL | Replace in Phase 1 | CRITICAL |
+| T-SEC-001 | Predictable authentication key provisioning | HIGH | HMAC-SHA256 plus explicit 256-bit key injection; deterministic seed APIs labeled test/replay-only | HIGH if an operator uses `auth_key_seed` as a production secret |
 | T-DNS-001 | DNS Rebinding | HIGH | No protection (gap) | HIGH |
 
 ---
@@ -246,6 +249,12 @@ pub fn from_seed(seed: u64) -> AuthKey {
    - Token format validation
    - Rate limiting available
 
+5. **Symbol/control authentication**
+   - Domain-separated HMAC-SHA256
+   - Constant-time tag and key comparison
+   - `AuthKey` zeroization on drop
+   - Explicit replica-authorization receipts
+
 ### Not Implemented (Gaps)
 
 1. **HTTP/2 PING Flood Protection**
@@ -260,37 +269,25 @@ pub fn from_seed(seed: u64) -> AuthKey {
    - No CRL/OCSP checking
    - Recommendation: Add optional revocation checking
 
-4. **Phase 0 Authentication**
-   - Uses deterministic, non-cryptographic keying
-   - MUST be replaced with HMAC-SHA256 for production
+4. **Configuration-backed production key provisioning**
+   - The compatibility configuration field is a deterministic `u64` seed
+   - Production deployments must inject an explicit `SecurityContext` backed
+     by CSPRNG- or secret-manager-generated key bytes
 
 ---
 
 ## Recommendations
 
-### Immediate (Phase 0 → Phase 1)
+### Immediate
 
-1. **Replace Phase 0 Authentication**
+1. **Use externally generated production keys**
    ```rust
-   // Before (Phase 0 - NOT SECURE)
-   let key = AuthKey::from_seed(seed);
-
-   // After (Phase 1+)
-   use ring::hmac;
-   let key = hmac::Key::new(hmac::HMAC_SHA256, key_bytes);
-   let tag = hmac::sign(&key, message);
+   // `key_bytes` must come from a CSPRNG or secret manager.
+   let key = AuthKey::from_bytes(key_bytes)?;
+   let security = SecurityContext::new(key);
    ```
 
-2. **Add Key Zeroization**
-   ```rust
-   impl Drop for AuthKey {
-       fn drop(&mut self) {
-           self.bytes.zeroize();
-       }
-   }
-   ```
-
-3. **Document Security Invariants**
+2. **Keep security invariants executable**
    - Add security tests (see tests/security_invariants.rs)
    - Document all security assumptions
 

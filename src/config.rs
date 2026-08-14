@@ -634,6 +634,11 @@ pub struct SecurityConfig {
     /// Authentication mode (strict/permissive/disabled).
     pub auth_mode: AuthMode,
     /// Deterministic key seed (if provided).
+    ///
+    /// This is a reproducibility/testing convenience with at most 64 bits of
+    /// entropy, not production key provisioning. Production callers should
+    /// inject a [`SecurityContext`] built from CSPRNG- or secret-manager-backed
+    /// [`AuthKey`] material instead of configuring this field.
     pub auth_key_seed: Option<u64>,
     /// Whether to reject unauthenticated symbols.
     pub reject_unauthenticated: bool,
@@ -682,12 +687,17 @@ impl SecurityConfig {
     /// br-asupersync-x7ad3b: materializes the [`SecurityContext`] this config
     /// describes, if a deterministic key seed is configured.
     ///
-    /// When `auth_key_seed` is `Some`, the runtime derives an authentication key
-    /// from it and builds a context at the configured [`AuthMode`] (via
+    /// When `auth_key_seed` is `Some`, the runtime derives a deterministic
+    /// authentication key from it and builds a context at the configured
+    /// [`AuthMode`] (via
     /// [`SecurityContext::from_config`], a construction-time mode selection — an
     /// explicit deployment decision, not a runtime downgrade). The RaptorQ
     /// receive path consumes this so that setting `RAPTORQ_SECURITY_AUTH_KEY_SEED`
     /// / `auth_mode` actually authenticates symbols instead of being inert.
+    /// The seed has at most 64 bits of entropy; hashing it does not make it a
+    /// production-grade secret. Production construction should pass an explicit
+    /// [`SecurityContext`] backed by externally generated key material to the
+    /// RaptorQ sender/receiver APIs.
     ///
     /// Returns `None` when no seed is configured; in that case symbol
     /// authentication depends on a [`SecurityContext`] supplied at receiver

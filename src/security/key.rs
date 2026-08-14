@@ -6,22 +6,24 @@
 //!
 //! # Security Enhancements (asupersync-mjn8rx)
 //!
-//! This module has been hardened against key forgery attacks:
+//! This module has been hardened against malformed and weak key material:
 //!
-//! - **Enforced entropy validation**: All key creation paths now validate entropy
-//!   to prevent weak keys, including `from_seed()` and `from_rng()` which previously
-//!   bypassed validation and could enable signature forgery via weak keys.
+//! - **Enforced input-shape validation**: [`AuthKey::from_bytes`] rejects obvious
+//!   low-diversity and pathological bit patterns. These heuristics are defense in
+//!   depth; they do not measure entropy and cannot make predictable input secret.
 //! - **Strengthened thresholds**: Minimum entropy requirements raised from 3.1% to 25%
 //!   bit density (64-192 bits set out of 256), with 16+ distinct byte values required.
 //! - **Concentration attack prevention**: No byte value may appear >4 times in a key.
-//! - **HKDF key strengthening**: Weak RNG or seed output is automatically strengthened
-//!   using HKDF rather than rejected, ensuring availability while maintaining security.
-//! - **Defense in depth**: Multiple validation layers prevent various attack vectors.
+//! - **Deterministic derivation is labeled honestly**: [`AuthKey::from_seed`] and
+//!   [`AuthKey::from_rng`] are reproducibility conveniences, not production key
+//!   generation. SHA-256 and HKDF do not increase the entropy of their input.
+//! - **Constant-time equality**: Key comparisons examine all 32 bytes.
 
 use crate::util::DetRng;
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::{Digest, Sha256};
 use std::fmt;
+use subtle::ConstantTimeEq;
 use zeroize::ZeroizeOnDrop;
 
 type HmacSha256 = Hmac<Sha256>;
@@ -119,7 +121,8 @@ pub enum WeakKeyReason {
 /// removed (br-asupersync-4pegj0) so a key cannot be silently bit-copied past
 /// the destructor; callers that need a logical duplicate must call `.clone()`
 /// explicitly, which preserves the zeroize-on-drop contract for both copies.
-#[derive(Clone, PartialEq, Eq, Hash, ZeroizeOnDrop)]
+#[derive(Clone, Hash, ZeroizeOnDrop)]
+#[allow(clippy::derived_hash_with_manual_eq)] // PartialEq is deliberately constant-time.
 pub struct AuthKey {
     bytes: [u8; AUTH_KEY_SIZE],
 }
@@ -130,9 +133,14 @@ impl AuthKey {
     /// This uses domain-separated SHA-256 to deterministically expand the seed
     /// into 32 bytes without depending on `DetRng`'s zero-seed normalization.
     ///
-    /// **SECURITY**: Now enforces entropy validation to prevent weak seed attacks.
-    /// Even with SHA-256 expansion, pathological seeds could theoretically produce
-    /// low-entropy output. Validation prevents signature forgery via weak seeds.
+    /// # Security
+    ///
+    /// This constructor has at most 64 bits of input entropy. SHA-256 and the
+    /// fallback HKDF path distribute those bits but cannot create additional
+    /// entropy, so this API is suitable for deterministic tests, fixtures, and
+    /// reproducible simulations—not production authentication keys. Production
+    /// callers should supply 32 bytes from a CSPRNG or secret-management system
+    /// through [`Self::from_bytes`].
     #[must_use]
     pub fn from_seed(seed: u64) -> Self {
         let mut hasher = Sha256::new();
@@ -145,8 +153,9 @@ impl AuthKey {
         match Self::from_bytes(bytes) {
             Ok(key) => key,
             Err(_) => {
-                // SHA-256 should always produce strong output, but if validation
-                // fails, use HKDF to strengthen the seed further
+                // A SHA-256 output can occasionally fail the shape heuristic.
+                // HKDF deterministically remaps it; this preserves availability
+                // but does not increase the seed's 64-bit entropy.
                 Self::from_hkdf(
                     &seed.to_le_bytes(),
                     Some(b"backup-salt"),
@@ -156,11 +165,14 @@ impl AuthKey {
         }
     }
 
-    /// Creates a new key from a deterministic RNG.
+    /// Creates a new key from the deterministic replay RNG.
     ///
-    /// **SECURITY**: Now enforces entropy validation to prevent weak RNG attacks.
-    /// A compromised or misconfigured RNG could produce predictable output that
-    /// enables signature forgery. Validation provides defense-in-depth.
+    /// # Security
+    ///
+    /// [`DetRng`] is intentionally reproducible and is not a CSPRNG. This
+    /// constructor is for deterministic tests and simulations, not production
+    /// key generation. The output-shape validation below catches pathological
+    /// buffers but cannot make a predictable RNG secret.
     #[must_use]
     pub fn from_rng(rng: &mut DetRng) -> Self {
         let mut bytes = [0u8; AUTH_KEY_SIZE];
@@ -333,10 +345,13 @@ impl AuthKey {
     /// Creates a key using HKDF (HMAC-based Key Derivation Function).
     ///
     /// Performs the HKDF Extract-and-Expand process with the given input key material,
-    /// optional salt, and context information to derive a cryptographically strong key.
+    /// optional salt, and context information to derive a domain-separated key.
     ///
-    /// This is the recommended way to derive keys from potentially weak input material
-    /// as HKDF provides security against entropy distribution issues.
+    /// HKDF extracts and distributes existing entropy; it does not create entropy.
+    /// The input key material must already contain sufficient secret entropy for
+    /// the caller's threat model. A salt may be public and improves domain separation,
+    /// but does not turn a password, short integer, or predictable seed into a
+    /// production authentication secret.
     ///
     /// # Parameters
     /// * `ikm` - Input Key Material (the source entropy)
@@ -344,8 +359,9 @@ impl AuthKey {
     /// * `info` - Context information for the expand phase
     ///
     /// # Security
-    /// The resulting key is guaranteed to pass entropy validation as HKDF produces
-    /// uniformly distributed output by design.
+    /// The resulting bytes have a pseudorandom output shape, so this constructor
+    /// intentionally bypasses [`Self::from_bytes`]'s heuristic pattern checks.
+    /// That is not a claim about the entropy of `ikm`.
     #[must_use]
     pub fn from_hkdf(ikm: &[u8], salt: Option<&[u8]>, info: &[u8]) -> Self {
         const ZERO_SALT: [u8; AUTH_KEY_SIZE] = [0; AUTH_KEY_SIZE];
@@ -375,6 +391,14 @@ impl fmt::Debug for AuthKey {
         f.write_str("AuthKey(<redacted>)")
     }
 }
+
+impl PartialEq for AuthKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.bytes.ct_eq(&other.bytes).into()
+    }
+}
+
+impl Eq for AuthKey {}
 
 // ---------------------------------------------------------------------------
 // KeyRing — overlap window for key rotation (br-asupersync-bp985e)
@@ -519,6 +543,20 @@ mod tests {
         let zero = AuthKey::from_seed(0);
         let legacy_magic = AuthKey::from_seed(0x9e37_79b9_7f4a_7c15);
         assert_ne!(zero, legacy_magic);
+    }
+
+    #[test]
+    fn asupersync_8mp6md_auth_key_equality_covers_all_bytes() {
+        let baseline = AuthKey::from_seed(0x8A11_0C);
+        let same = baseline.clone();
+        let mut first_diff = baseline.clone();
+        first_diff.bytes[0] ^= 1;
+        let mut last_diff = baseline.clone();
+        last_diff.bytes[AUTH_KEY_SIZE - 1] ^= 1;
+
+        assert_eq!(baseline, same);
+        assert_ne!(baseline, first_diff);
+        assert_ne!(baseline, last_diff);
     }
 
     #[test]
