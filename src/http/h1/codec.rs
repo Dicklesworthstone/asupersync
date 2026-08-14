@@ -223,6 +223,23 @@ impl Http1Codec {
         self.max_body_size = size;
         self
     }
+
+    /// Validate one request head without consuming or copying the input.
+    ///
+    /// This additive API is intended for routing, admission, and protocol
+    /// inspection that does not need the legacy owned [`Request`] yet. It uses
+    /// this codec's configured header-size limit and returns a borrowed view
+    /// with allocation-free header iteration. The method is stateless: it does
+    /// not alter the codec state or advance `src`.
+    ///
+    /// Existing callers of [`Decoder::decode`] keep the v0.4.3-compatible
+    /// owned `Request` representation and behavior.
+    pub fn inspect_request_head<'a>(
+        &self,
+        src: &'a [u8],
+    ) -> Result<Option<BorrowedRequestHead<'a>>, HttpError> {
+        inspect_request_head_parts(src, self.max_headers_size)
+    }
 }
 
 impl Default for Http1Codec {
@@ -251,6 +268,7 @@ fn find_crlf(buf: &[u8]) -> Option<usize> {
 /// Each returned value is the index of `\r` in a valid `\r\n` pair.
 /// Used by `decode_head` to avoid repeated per-header `find_crlf` calls.
 #[inline]
+#[cfg(test)]
 fn collect_crlf_positions(buf: &[u8], out: &mut smallvec::SmallVec<[usize; 32]>) {
     out.clear();
     for idx in memchr_iter(b'\n', buf) {
@@ -274,7 +292,7 @@ fn is_valid_request_target_byte(b: u8) -> bool {
     (0x21..=0x7E).contains(&b)
 }
 
-fn parse_request_line_bytes(line: &[u8]) -> Result<(Method, String, Version), HttpError> {
+fn parse_request_line_ref(line: &[u8]) -> Result<(Method, &str, Version), HttpError> {
     // Reject bare CR embedded in the request line — only the terminating
     // CRLF may contain \r, and that has already been stripped. A bare \r
     // in the middle is a framing error / smuggling vector.
@@ -307,17 +325,17 @@ fn parse_request_line_bytes(line: &[u8]) -> Result<(Method, String, Version), Ht
 
                         validate_request_target(&method, uri)?;
 
-                        return Ok((method, uri.to_owned(), version));
+                        return Ok((method, uri, version));
                     }
                 }
             }
         }
     }
 
-    parse_request_line_bytes_slow(line)
+    parse_request_line_ref_slow(line)
 }
 
-fn parse_request_line_bytes_slow(line: &[u8]) -> Result<(Method, String, Version), HttpError> {
+fn parse_request_line_ref_slow(line: &[u8]) -> Result<(Method, &str, Version), HttpError> {
     fn next_token_bounds(bytes: &[u8], cursor: &mut usize) -> Option<(usize, usize)> {
         let start = *cursor;
         while *cursor < bytes.len() && bytes[*cursor] != b' ' {
@@ -359,6 +377,11 @@ fn parse_request_line_bytes_slow(line: &[u8]) -> Result<(Method, String, Version
 
     validate_request_target(&method, uri)?;
 
+    Ok((method, uri, version))
+}
+
+fn parse_request_line_bytes(line: &[u8]) -> Result<(Method, String, Version), HttpError> {
+    let (method, uri, version) = parse_request_line_ref(line)?;
     Ok((method, uri.to_owned(), version))
 }
 
@@ -569,14 +592,16 @@ fn parse_header_line_bytes(line_bytes: &[u8]) -> Result<(String, String), HttpEr
     let value_bytes = &line_bytes[value_start..value_end];
     let name = std::str::from_utf8(name_bytes).map_err(|_| HttpError::BadHeader)?;
 
-    // Header values might contain obs-text (bytes >= 0x80) which are not always valid UTF-8.
-    // Fall back to Latin-1 decoding if UTF-8 validation fails.
-    let value = std::str::from_utf8(value_bytes).map_or_else(
-        |_| value_bytes.iter().map(|&b| b as char).collect(),
-        std::borrow::ToOwned::to_owned,
-    );
+    Ok((name.to_owned(), header_value_to_owned(value_bytes)))
+}
 
-    Ok((name.to_owned(), value))
+/// Preserve the legacy HTTP/1 header-value representation exactly: valid
+/// UTF-8 stays UTF-8, while invalid UTF-8 is decoded byte-for-byte as Latin-1.
+fn header_value_to_owned(value: &[u8]) -> String {
+    std::str::from_utf8(value).map_or_else(
+        |_| value.iter().map(|&byte| char::from(byte)).collect(),
+        std::borrow::ToOwned::to_owned,
+    )
 }
 
 /// Parse a single `Name: Value` header line.
@@ -679,6 +704,56 @@ pub(super) fn require_transfer_encoding_chunked(value: &str) -> Result<(), HttpE
     Err(HttpError::BadTransferEncoding)
 }
 
+fn trim_header_value_bytes(value: &[u8]) -> &[u8] {
+    if let Ok(value) = std::str::from_utf8(value) {
+        return value.trim().as_bytes();
+    }
+
+    let mut start = 0;
+    while start < value.len() && char::from(value[start]).is_whitespace() {
+        start += 1;
+    }
+    let mut end = value.len();
+    while end > start && char::from(value[end - 1]).is_whitespace() {
+        end -= 1;
+    }
+    &value[start..end]
+}
+
+fn for_each_header_value_token(value: &[u8], mut visit: impl FnMut(&[u8])) {
+    if let Ok(value) = std::str::from_utf8(value) {
+        for token in value.split(',').map(str::trim).filter(|token| !token.is_empty()) {
+            visit(token.as_bytes());
+        }
+        return;
+    }
+
+    for token in value
+        .split(|&byte| byte == b',')
+        .map(trim_header_value_bytes)
+        .filter(|token| !token.is_empty())
+    {
+        visit(token);
+    }
+}
+
+fn require_transfer_encoding_chunked_bytes(value: &[u8]) -> Result<(), HttpError> {
+    let mut token_count = 0usize;
+    let mut first_is_chunked = false;
+    for_each_header_value_token(value, |token| {
+        token_count += 1;
+        if token_count == 1 {
+            first_is_chunked = token.eq_ignore_ascii_case(b"chunked");
+        }
+    });
+
+    if token_count == 1 && first_is_chunked {
+        Ok(())
+    } else {
+        Err(HttpError::BadTransferEncoding)
+    }
+}
+
 /// Append a `usize` as decimal ASCII digits to `dst`.
 pub(super) fn append_decimal(dst: &mut BytesMut, mut n: usize) {
     // Stack buffer large enough for any usize (max 20 digits on 64-bit).
@@ -763,16 +838,190 @@ fn is_content_length_name(name: &str) -> bool {
     name.as_bytes().eq_ignore_ascii_case(HEADER_CONTENT_LENGTH)
 }
 
+/// One validated HTTP/1 header borrowed directly from the caller's input.
+///
+/// This is the allocation-free counterpart to the legacy owned
+/// `(String, String)` representation. Header names are always valid ASCII.
+/// Values remain wire bytes so RFC 9110 `obs-text` does not require an eager
+/// Latin-1-to-UTF-8 allocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BorrowedHeader<'a> {
+    /// Validated field name.
+    pub name: &'a str,
+    /// Validated field value after optional whitespace trimming.
+    pub value: &'a [u8],
+}
+
+impl BorrowedHeader<'_> {
+    /// Return the value as UTF-8 when the wire bytes are valid UTF-8.
+    pub fn value_str(&self) -> Result<&str, std::str::Utf8Error> {
+        std::str::from_utf8(self.value)
+    }
+
+    /// Materialize the value using the legacy HTTP/1 decoder's exact
+    /// UTF-8-or-Latin-1 conversion.
+    #[must_use]
+    pub fn value_to_owned(&self) -> String {
+        header_value_to_owned(self.value)
+    }
+}
+
+/// Iterator over validated headers in a [`BorrowedRequestHead`].
+#[derive(Debug, Clone)]
+pub struct BorrowedHeaders<'a> {
+    remaining: &'a [u8],
+    remaining_count: usize,
+}
+
+impl<'a> Iterator for BorrowedHeaders<'a> {
+    type Item = BorrowedHeader<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.remaining_count == 0 {
+            return None;
+        }
+
+        let line_end = find_crlf(self.remaining)
+            .expect("validated borrowed request head must retain each header CRLF");
+        let line = &self.remaining[..line_end];
+        self.remaining = &self.remaining[line_end + 2..];
+        self.remaining_count -= 1;
+
+        let (colon, value_start, value_end) = parse_header_line_bounds(line)
+            .expect("validated borrowed request head must retain valid header bounds");
+        let name = std::str::from_utf8(&line[..colon])
+            .expect("validated HTTP field names are ASCII and therefore UTF-8");
+        Some(BorrowedHeader {
+            name,
+            value: &line[value_start..value_end],
+        })
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.remaining_count, Some(self.remaining_count))
+    }
+}
+
+impl ExactSizeIterator for BorrowedHeaders<'_> {}
+
+/// A validated, allocation-free view of one HTTP/1 request head.
+///
+/// The view borrows the caller's input and does not consume it. Use
+/// [`Http1Codec::inspect_request_head`] when a routing, admission, or protocol
+/// decision only needs request metadata. Existing [`Decoder`] behavior remains
+/// unchanged and still returns the legacy owned [`Request`].
+#[derive(Debug, Clone, Copy)]
+pub struct BorrowedRequestHead<'a> {
+    /// HTTP method.
+    pub method: Method,
+    /// Request target borrowed from the request line.
+    pub uri: &'a str,
+    /// HTTP version.
+    pub version: Version,
+    header_block: &'a [u8],
+    header_count: usize,
+    consumed_len: usize,
+    body_kind: BodyKind,
+}
+
+impl<'a> BorrowedRequestHead<'a> {
+    /// Iterate over validated headers without allocating.
+    #[must_use]
+    pub fn headers(&self) -> BorrowedHeaders<'a> {
+        BorrowedHeaders {
+            remaining: self.header_block,
+            remaining_count: self.header_count,
+        }
+    }
+
+    /// Number of validated headers.
+    #[must_use]
+    pub const fn header_count(&self) -> usize {
+        self.header_count
+    }
+
+    /// Number of input bytes occupied by the request line, headers, and final
+    /// empty line. The inspection API itself does not consume these bytes.
+    #[must_use]
+    pub const fn consumed_len(&self) -> usize {
+        self.consumed_len
+    }
+
+    /// Determine request-body framing from the validated headers.
+    #[must_use]
+    pub fn body_kind(&self) -> StreamingBodyKind {
+        match self.body_kind {
+            BodyKind::ContentLength(0) => StreamingBodyKind::Empty,
+            BodyKind::ContentLength(len) => StreamingBodyKind::ContentLength(len as u64),
+            BodyKind::Chunked => StreamingBodyKind::Chunked,
+        }
+    }
+
+    fn into_owned_parts(self) -> (Method, String, Version, Vec<(String, String)>, BodyKind) {
+        let mut headers = Vec::with_capacity(self.header_count);
+        headers.extend(
+            self.headers()
+                .map(|header| (header.name.to_owned(), header.value_to_owned())),
+        );
+        (
+            self.method,
+            self.uri.to_owned(),
+            self.version,
+            headers,
+            self.body_kind,
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
 enum BodyKind {
     ContentLength(usize),
     Chunked,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy)]
 #[cfg(not(target_arch = "wasm32"))]
-pub(super) struct RequestHeadPreview {
+enum PreviewHeaders<'a> {
+    Owned(&'a [(String, String)]),
+    Borrowed(BorrowedRequestHead<'a>),
+}
+
+#[derive(Debug, Clone, Copy)]
+#[cfg(not(target_arch = "wasm32"))]
+pub(super) struct RequestHeadPreview<'a> {
     pub version: Version,
-    pub headers: Vec<(String, String)>,
+    headers: PreviewHeaders<'a>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl<'a> RequestHeadPreview<'a> {
+    pub fn headers(&self) -> PreviewHeaderIter<'a> {
+        match self.headers {
+            PreviewHeaders::Owned(headers) => PreviewHeaderIter::Owned(headers.iter()),
+            PreviewHeaders::Borrowed(head) => PreviewHeaderIter::Borrowed(head.headers()),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+#[cfg(not(target_arch = "wasm32"))]
+pub(super) enum PreviewHeaderIter<'a> {
+    Owned(std::slice::Iter<'a, (String, String)>),
+    Borrowed(BorrowedHeaders<'a>),
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl<'a> Iterator for PreviewHeaderIter<'a> {
+    type Item = (&'a str, &'a [u8]);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Owned(headers) => headers
+                .next()
+                .map(|(name, value)| (name.as_str(), value.as_bytes())),
+            Self::Borrowed(headers) => headers.next().map(|header| (header.name, header.value)),
+        }
+    }
 }
 
 const MAX_CHUNK_LINE_LEN: usize = 1024;
@@ -940,23 +1189,12 @@ pub(super) fn parse_chunk_size_line(line: &[u8]) -> Result<usize, HttpError> {
     usize::from_str_radix(size_part, 16).map_err(|_| HttpError::BadChunkedEncoding)
 }
 
-/// Parse the head (request line + headers) from `src`, splitting off the
-/// consumed bytes. Returns `None` if the full header block hasn't arrived yet.
-#[allow(clippy::type_complexity)]
-fn decode_head_parts(
-    src: &[u8],
+/// Validate a request line and header block without allocating or consuming
+/// the caller's input. Returns `None` until the final empty line arrives.
+fn inspect_request_head_parts<'a>(
+    src: &'a [u8],
     max_headers_size: usize,
-) -> Result<
-    Option<(
-        usize,
-        Method,
-        String,
-        Version,
-        Vec<(String, String)>,
-        BodyKind,
-    )>,
-    HttpError,
-> {
+) -> Result<Option<BorrowedRequestHead<'a>>, HttpError> {
     // Reject bare CRs in the buffered head: HTTP/1.x line terminators MUST be
     // CRLF (RFC 9112 §2.2). A `\r` followed by anything other than `\n` is a
     // framing violation (request-smuggling vector), so fail fast instead of
@@ -1004,13 +1242,11 @@ fn decode_head_parts(
 
     let head = &src[..end];
 
-    // Single-pass: collect all CRLF positions in the header block at once.
-    // This replaces N+1 individual `find_crlf()` sub-slice calls with one
-    // `memchr_iter` pass, eliminating repeated search setup overhead.
-    let mut crlf_positions = smallvec::SmallVec::<[usize; 32]>::new();
-    collect_crlf_positions(head, &mut crlf_positions);
-
-    let request_line_end = *crlf_positions.first().ok_or(HttpError::BadRequestLine)?;
+    // Walk CRLF positions directly. The iterator is allocation-free even for
+    // the maximum 128 headers, unlike collecting offsets into a growable
+    // vector before validation.
+    let mut crlf_positions = memmem::find_iter(head, b"\r\n");
+    let request_line_end = crlf_positions.next().ok_or(HttpError::BadRequestLine)?;
     if request_line_end > MAX_REQUEST_LINE {
         return Err(HttpError::RequestLineTooLong);
     }
@@ -1018,18 +1254,14 @@ fn decode_head_parts(
         return Err(HttpError::BadRequestLine);
     }
     let request_line = &head[..request_line_end];
-    let (method, uri, version) = parse_request_line_bytes(request_line)?;
+    let (method, uri, version) = parse_request_line_ref(request_line)?;
 
-    let header_count = crlf_positions.len().saturating_sub(2);
-    if header_count > MAX_HEADERS {
-        return Err(HttpError::TooManyHeaders);
-    }
-    let mut headers = Vec::with_capacity(header_count);
-    let mut transfer_encoding_idx = None;
-    let mut content_length_idx = None;
+    let header_block_start = request_line_end + 2;
+    let mut header_count = 0usize;
+    let mut transfer_encoding = None;
+    let mut content_length = None;
     let mut cursor = request_line_end + 2;
-    // Iterate pre-computed CRLF positions (skip the first which was request line)
-    for &crlf_pos in &crlf_positions[1..] {
+    for crlf_pos in crlf_positions {
         if crlf_pos < cursor {
             continue;
         }
@@ -1037,49 +1269,67 @@ fn decode_head_parts(
         if line_len == 0 {
             break;
         }
-        let header = parse_header_line_bytes(&head[cursor..crlf_pos])?;
-        if is_transfer_encoding_name(header.0.as_str()) {
-            if transfer_encoding_idx.is_some() {
-                return Err(HttpError::DuplicateTransferEncoding);
-            }
-            transfer_encoding_idx = Some(headers.len());
-        } else if is_content_length_name(header.0.as_str()) {
-            if content_length_idx.is_some() {
-                return Err(HttpError::DuplicateContentLength);
-            }
-            content_length_idx = Some(headers.len());
+        header_count += 1;
+        if header_count > MAX_HEADERS {
+            return Err(HttpError::TooManyHeaders);
         }
 
-        headers.push(header);
+        let line = &head[cursor..crlf_pos];
+        let (colon, value_start, value_end) = parse_header_line_bounds(line)?;
+        let name = std::str::from_utf8(&line[..colon]).map_err(|_| HttpError::BadHeader)?;
+        let value = &line[value_start..value_end];
+        if is_transfer_encoding_name(name) {
+            if transfer_encoding.is_some() {
+                return Err(HttpError::DuplicateTransferEncoding);
+            }
+            transfer_encoding = Some(value);
+        } else if is_content_length_name(name) {
+            if content_length.is_some() {
+                return Err(HttpError::DuplicateContentLength);
+            }
+            content_length = Some(value);
+        }
         cursor = crlf_pos + 2;
     }
 
-    let kind = match (transfer_encoding_idx, content_length_idx) {
+    let kind = match (transfer_encoding, content_length) {
         (Some(_), Some(_)) => return Err(HttpError::AmbiguousBodyLength),
-        (Some(te_idx), None) => {
+        (Some(transfer_encoding), None) => {
             if version == Version::Http10 {
                 return Err(HttpError::BadTransferEncoding);
             }
-            require_transfer_encoding_chunked(headers[te_idx].1.as_str())?;
+            require_transfer_encoding_chunked_bytes(transfer_encoding)?;
             BodyKind::Chunked
         }
-        (None, Some(cl_idx)) => {
+        (None, Some(content_length)) => {
             // br-asupersync-lbhaf2: RFC 9112 §6.1 — Content-Length is
             // 1*DIGIT (no leading sign). Rust's usize::parse() accepts
             // '+5' which can disagree with stricter intermediaries
             // (nginx, envoy) and create a request-smuggling primitive.
             // Reject any non-digit prefix before parsing.
-            let cl_str = headers[cl_idx].1.trim();
-            if cl_str.is_empty() || !cl_str.bytes().all(|b| b.is_ascii_digit()) {
+            let content_length = trim_header_value_bytes(content_length);
+            if content_length.is_empty() || !content_length.iter().all(u8::is_ascii_digit) {
                 return Err(HttpError::BadContentLength);
             }
-            let len: usize = cl_str.parse().map_err(|_| HttpError::BadContentLength)?;
+            let content_length = std::str::from_utf8(content_length)
+                .map_err(|_| HttpError::BadContentLength)?;
+            let len: usize = content_length
+                .parse()
+                .map_err(|_| HttpError::BadContentLength)?;
             BodyKind::ContentLength(len)
         }
         (None, None) => BodyKind::ContentLength(0),
     };
 
-    Ok(Some((end, method, uri, version, headers, kind)))
+    Ok(Some(BorrowedRequestHead {
+        method,
+        uri,
+        version,
+        header_block: &head[header_block_start..],
+        header_count,
+        consumed_len: end,
+        body_kind: kind,
+    }))
 }
 
 #[allow(clippy::type_complexity)]
@@ -1087,11 +1337,11 @@ fn decode_head(
     src: &mut BytesMut,
     max_headers_size: usize,
 ) -> Result<Option<(Method, String, Version, Vec<(String, String)>, BodyKind)>, HttpError> {
-    let Some((end, method, uri, version, headers, kind)) =
-        decode_head_parts(src.as_ref(), max_headers_size)?
-    else {
+    let Some(head) = inspect_request_head_parts(src.as_ref(), max_headers_size)? else {
         return Ok(None);
     };
+    let end = head.consumed_len();
+    let (method, uri, version, headers, kind) = head.into_owned_parts();
 
     // Discard the parsed head. `advance` bumps the front offset in place;
     // `split_to(end)` would heap-allocate + memcpy an `end`-byte head (up to
@@ -1143,10 +1393,10 @@ pub(super) fn decode_streaming_request_head(
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub(super) fn preview_request_head(
-    codec: &Http1Codec,
-    src: &BytesMut,
-) -> Result<Option<RequestHeadPreview>, HttpError> {
+pub(super) fn preview_request_head<'a>(
+    codec: &'a Http1Codec,
+    src: &'a BytesMut,
+) -> Result<Option<RequestHeadPreview<'a>>, HttpError> {
     match &codec.state {
         DecodeState::Body {
             version, headers, ..
@@ -1156,20 +1406,21 @@ pub(super) fn preview_request_head(
         } => {
             return Ok(Some(RequestHeadPreview {
                 version: *version,
-                headers: headers.clone(),
+                headers: PreviewHeaders::Owned(headers),
             }));
         }
         DecodeState::Poisoned => return Err(HttpError::BadHeader),
         DecodeState::Head => {}
     }
 
-    let Some((_end, _method, _uri, version, headers, _kind)) =
-        decode_head_parts(src.as_ref(), codec.max_headers_size)?
-    else {
+    let Some(head) = codec.inspect_request_head(src.as_ref())? else {
         return Ok(None);
     };
 
-    Ok(Some(RequestHeadPreview { version, headers }))
+    Ok(Some(RequestHeadPreview {
+        version: head.version,
+        headers: PreviewHeaders::Borrowed(head),
+    }))
 }
 
 /// Extract the head fields from a `DecodeState::Body` or `DecodeState::Chunked`.
@@ -1774,10 +2025,19 @@ mod tests {
 
         assert_eq!(preview.version, Version::Http11);
         assert_eq!(
-            header_value(&preview.headers, "expect"),
-            Some("100-continue")
+            preview
+                .headers()
+                .find(|(name, _)| name.eq_ignore_ascii_case("expect"))
+                .map(|(_, value)| value),
+            Some(b"100-continue".as_slice())
         );
-        assert_eq!(header_value(&preview.headers, "content-length"), Some("5"));
+        assert_eq!(
+            preview
+                .headers()
+                .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                .map(|(_, value)| value),
+            Some(b"5".as_slice())
+        );
         assert_eq!(buf.as_ref(), raw);
 
         let mut codec = Http1Codec::new();
@@ -1789,10 +2049,19 @@ mod tests {
             .expect("pending codec state should still expose request head");
         assert_eq!(preview.version, Version::Http11);
         assert_eq!(
-            header_value(&preview.headers, "expect"),
-            Some("100-continue")
+            preview
+                .headers()
+                .find(|(name, _)| name.eq_ignore_ascii_case("expect"))
+                .map(|(_, value)| value),
+            Some(b"100-continue".as_slice())
         );
-        assert_eq!(header_value(&preview.headers, "content-length"), Some("5"));
+        assert_eq!(
+            preview
+                .headers()
+                .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                .map(|(_, value)| value),
+            Some(b"5".as_slice())
+        );
     }
 
     #[test]
