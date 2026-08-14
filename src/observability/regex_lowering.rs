@@ -16,7 +16,9 @@ use super::regex_ir::{
     ACCOUNTED_PROGRAM_BYTES, CaptureSlot, ClassId, CompileError, CompileErrorKind, CompileLimits,
     Instruction, IrClass, Program, State, StateId,
 };
-use super::regex_semantics::{CanonicalClass, CanonicalRanges, ScalarRange, SemanticLimits};
+use super::regex_semantics::{
+    CanonicalClass, CanonicalRanges, ScalarRange, SemanticErrorKind, SemanticLimits,
+};
 use super::regex_syntax::{
     AstNodeKind, Escape, ExpansionBound, Greediness, LexerLimits, NodeId, ParserLimits, Quantifier,
     RepetitionRange, SourceSpan,
@@ -64,6 +66,9 @@ pub struct LowerError {
     pub span: SourceSpan,
     pub actual: Option<u64>,
     pub limit: Option<u64>,
+    pub state: Option<usize>,
+    pub class: Option<usize>,
+    pub slot: Option<usize>,
 }
 
 impl LowerError {
@@ -73,6 +78,9 @@ impl LowerError {
             span,
             actual: None,
             limit: None,
+            state: None,
+            class: None,
+            slot: None,
         }
     }
 
@@ -86,6 +94,9 @@ impl LowerError {
             span: error.span.unwrap_or(fallback_span),
             actual: error.actual,
             limit: error.limit,
+            state: error.state.map(StateId::index),
+            class: error.class.map(ClassId::index),
+            slot: error.slot.map(CaptureSlot::index),
         }
     }
 
@@ -99,6 +110,9 @@ impl LowerError {
             span,
             actual: actual.try_into().ok(),
             limit: limit.try_into().ok(),
+            state: None,
+            class: None,
+            slot: None,
         }
     }
 
@@ -122,11 +136,220 @@ impl fmt::Display for LowerError {
         if let (Some(actual), Some(limit)) = (self.actual, self.limit) {
             write!(formatter, " actual={actual} limit={limit}")?;
         }
+        if let Some(state) = self.state {
+            write!(formatter, " state={state}")?;
+        }
+        if let Some(class) = self.class {
+            write!(formatter, " class={class}")?;
+        }
+        if let Some(slot) = self.slot {
+            write!(formatter, " slot={slot}")?;
+        }
         Ok(())
     }
 }
 
 impl std::error::Error for LowerError {}
+
+/// Aggregate limits for the private R3.5 compile boundary.
+///
+/// Every inherited lexer, parser, semantic, fold/boundary, lowering, and IR
+/// ceiling remains owned by its original stage. This value merely gives the
+/// private facade one explicit, reviewable input instead of relying on hidden
+/// defaults or dropping a stage-specific budget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PrivateCompileLimits {
+    pub lexer: LexerLimits,
+    pub parser: ParserLimits,
+    pub semantic: SemanticLimits,
+    pub fold_boundary: FoldBoundaryLimits,
+    pub ir: CompileLimits,
+}
+
+/// Stable stage identity for a private compile failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrivateCompileStage {
+    Syntax,
+    Semantics,
+    FoldBoundary,
+    Lowering,
+    IrValidation,
+}
+
+impl PrivateCompileStage {
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::Syntax => "syntax",
+            Self::Semantics => "semantics",
+            Self::FoldBoundary => "fold-boundary",
+            Self::Lowering => "lowering",
+            Self::IrValidation => "ir-validation",
+        }
+    }
+}
+
+/// Owned, source-text-free diagnostic returned by the private compiler.
+///
+/// The value retains only stable codes, source coordinates, numeric limits,
+/// and numeric IR indices. It never owns the pattern, a pattern fragment,
+/// retained-backend error text, haystack bytes, or captured text.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct PrivateCompileError {
+    code: &'static str,
+    stage: PrivateCompileStage,
+    span: SourceSpan,
+    actual: Option<u64>,
+    limit: Option<u64>,
+    state: Option<usize>,
+    class: Option<usize>,
+    slot: Option<usize>,
+}
+
+impl PrivateCompileError {
+    fn lower(error: LowerError) -> Self {
+        Self {
+            code: error.code(),
+            stage: stage_for_lower_error(error.kind),
+            span: error.span,
+            actual: error.actual,
+            limit: error.limit,
+            state: error.state,
+            class: error.class,
+            slot: error.slot,
+        }
+    }
+
+    fn ir(error: CompileError, fallback_span: SourceSpan) -> Self {
+        Self {
+            code: error.kind.code(),
+            stage: PrivateCompileStage::IrValidation,
+            span: error.span.unwrap_or(fallback_span),
+            actual: error.actual,
+            limit: error.limit,
+            state: error.state.map(StateId::index),
+            class: error.class.map(ClassId::index),
+            slot: error.slot.map(CaptureSlot::index),
+        }
+    }
+
+    pub const fn code(self) -> &'static str {
+        self.code
+    }
+
+    pub const fn stage(self) -> PrivateCompileStage {
+        self.stage
+    }
+
+    pub const fn span(self) -> SourceSpan {
+        self.span
+    }
+
+    pub const fn actual(self) -> Option<u64> {
+        self.actual
+    }
+
+    pub const fn limit(self) -> Option<u64> {
+        self.limit
+    }
+
+    pub const fn state(self) -> Option<usize> {
+        self.state
+    }
+
+    pub const fn class(self) -> Option<usize> {
+        self.class
+    }
+
+    pub const fn slot(self) -> Option<usize> {
+        self.slot
+    }
+}
+
+impl fmt::Display for PrivateCompileError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "[{}] stage={} at bytes {}..{} (scalars {}..{})",
+            self.code,
+            self.stage.code(),
+            self.span.byte_start,
+            self.span.byte_end,
+            self.span.scalar_start,
+            self.span.scalar_end
+        )?;
+        if let (Some(actual), Some(limit)) = (self.actual, self.limit) {
+            write!(formatter, " actual={actual} limit={limit}")?;
+        }
+        if let Some(state) = self.state {
+            write!(formatter, " state={state}")?;
+        }
+        if let Some(class) = self.class {
+            write!(formatter, " class={class}")?;
+        }
+        if let Some(slot) = self.slot {
+            write!(formatter, " slot={slot}")?;
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Debug for PrivateCompileError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self, formatter)
+    }
+}
+
+impl std::error::Error for PrivateCompileError {}
+
+const fn stage_for_lower_error(kind: LowerErrorKind) -> PrivateCompileStage {
+    match kind {
+        LowerErrorKind::Analysis(FoldBoundaryErrorKind::CharacterSemantics(
+            SemanticErrorKind::Lex(_) | SemanticErrorKind::Parse(_),
+        )) => PrivateCompileStage::Syntax,
+        LowerErrorKind::Analysis(FoldBoundaryErrorKind::CharacterSemantics(_)) => {
+            PrivateCompileStage::Semantics
+        }
+        LowerErrorKind::Analysis(_) => PrivateCompileStage::FoldBoundary,
+        LowerErrorKind::Compile(_) => PrivateCompileStage::IrValidation,
+        LowerErrorKind::InvalidAnalysis
+        | LowerErrorKind::MissingSemanticClass
+        | LowerErrorKind::MissingBoundary
+        | LowerErrorKind::MissingFragment
+        | LowerErrorKind::DuplicatePatch
+        | LowerErrorKind::UnresolvedPatch
+        | LowerErrorKind::NullableUnboundedRepetition
+        | LowerErrorKind::CaptureErasedByZeroRepetition
+        | LowerErrorKind::InvalidCaptureIndex => PrivateCompileStage::Lowering,
+    }
+}
+
+/// Compile one pattern through every private candidate stage and revalidate IR.
+///
+/// This is deliberately crate-private through its parent module. It does not
+/// authorize a public re-export, observability integration, compatibility
+/// shim, incumbent replacement, or dependency removal.
+pub fn compile_private(
+    pattern: &str,
+    limits: PrivateCompileLimits,
+) -> Result<Program, PrivateCompileError> {
+    let program = lower(
+        pattern,
+        limits.lexer,
+        limits.parser,
+        limits.semantic,
+        limits.fold_boundary,
+        limits.ir,
+    )
+    .map_err(PrivateCompileError::lower)?;
+    // `lower` has now enforced the configured pattern-byte ceiling, so this
+    // scalar count cannot turn an otherwise O(1) oversize rejection into an
+    // unbounded pre-validation scan.
+    let fallback_span = pattern_span(pattern);
+    program
+        .validate(limits.ir)
+        .map_err(|error| PrivateCompileError::ir(error, fallback_span))?;
+    Ok(program)
+}
 
 /// Parse, semantically normalize, and lower one pattern into a complete IR.
 ///
@@ -1392,6 +1615,132 @@ mod tests {
             FoldBoundaryLimits::default(),
             CompileLimits::default(),
         )
+    }
+
+    fn compile_default(pattern: &str) -> Result<Program, PrivateCompileError> {
+        compile_private(pattern, PrivateCompileLimits::default())
+    }
+
+    #[test]
+    fn private_compile_facade_completes_the_r3_5_owned_syntax_rows() {
+        for pattern in [
+            "(?x)ab",
+            "(?x:a\\ b)",
+            "(?x)a b",
+            "(?x)a # comment\n b",
+            "(?x)[ a-z ]",
+            "(?x)a{ 2 , 3 }",
+            "(?x)\\x { 53 }",
+            "(?x)\\p { Greek }",
+            "(?x)( ?P<name> a )",
+            "(?P<left>a)|(?P<right>b)",
+        ] {
+            let program = compile_default(pattern)
+                .unwrap_or_else(|error| panic!("private compile rejected {pattern:?}: {error}"));
+            program
+                .validate(CompileLimits::default())
+                .unwrap_or_else(|error| panic!("private IR invalid for {pattern:?}: {error}"));
+        }
+
+        let malformed = compile_default("(?x:").expect_err("unclosed flag scope must fail");
+        assert_eq!(malformed.code(), "RGX-PARSE-E003");
+        assert_eq!(malformed.stage(), PrivateCompileStage::Syntax);
+    }
+
+    #[test]
+    fn private_compile_rejects_duplicate_names_without_retaining_source_text() {
+        for pattern in [
+            "(?P<r3_5_private_pattern_canary>a)|(?P<r3_5_private_pattern_canary>b)",
+            "(?P<r3_5_private_pattern_canary>a)|(?<r3_5_private_pattern_canary>b)",
+        ] {
+            let error = compile_default(pattern).expect_err("duplicate capture name must fail");
+            assert_eq!(error.code(), "RGX-PARSE-E013");
+            assert_eq!(error.stage(), PrivateCompileStage::Syntax);
+            assert_eq!(
+                error.span().source(pattern),
+                Some("r3_5_private_pattern_canary")
+            );
+            for rendered in [error.to_string(), format!("{error:?}")] {
+                assert!(!rendered.contains("r3_5_private_pattern_canary"));
+                assert!(!rendered.contains(pattern));
+                assert!(rendered.contains("RGX-PARSE-E013"));
+            }
+        }
+    }
+
+    #[test]
+    fn private_compile_aggregates_each_stage_and_retains_typed_defer_rows() {
+        let syntax = compile_default("private-source-canary\\")
+            .expect_err("trailing escape must fail in syntax");
+        assert_eq!(syntax.code(), "RGX-LEX-E003");
+        assert_eq!(syntax.stage(), PrivateCompileStage::Syntax);
+
+        let semantic = compile_default(r"\p{DefinitelyNotAProperty}")
+            .expect_err("unknown property must fail in semantics");
+        assert_eq!(semantic.code(), "RGX-SEM-E001");
+        assert_eq!(semantic.stage(), PrivateCompileStage::Semantics);
+
+        let fold_boundary = compile_private(
+            "(?i:ab)",
+            PrivateCompileLimits {
+                fold_boundary: FoldBoundaryLimits {
+                    max_fold_atoms: 1,
+                    ..FoldBoundaryLimits::default()
+                },
+                ..PrivateCompileLimits::default()
+            },
+        )
+        .expect_err("second fold atom must exceed the private limit");
+        assert_eq!(fold_boundary.code(), "RGX-FB-E003");
+        assert_eq!(fold_boundary.stage(), PrivateCompileStage::FoldBoundary);
+
+        let nullable = compile_default("(?:a?)*").expect_err("nullable loop remains deferred");
+        assert_eq!(nullable.code(), "RGX-LOWER-E009");
+        assert_eq!(nullable.stage(), PrivateCompileStage::Lowering);
+
+        let erased = compile_default("(a){0}").expect_err("zero repeat capture remains deferred");
+        assert_eq!(erased.code(), "RGX-LOWER-E010");
+        assert_eq!(erased.stage(), PrivateCompileStage::Lowering);
+
+        let dotted_age = compile_default(r"\p{Age:16.0}")
+            .expect_err("dotted Age spelling remains explicitly deferred");
+        assert_eq!(dotted_age.code(), "RGX-LEX-E004");
+        assert_eq!(dotted_age.stage(), PrivateCompileStage::Syntax);
+
+        let ir = compile_private(
+            "ab",
+            PrivateCompileLimits {
+                ir: CompileLimits {
+                    max_states: 2,
+                    ..CompileLimits::default()
+                },
+                ..PrivateCompileLimits::default()
+            },
+        )
+        .expect_err("two consumes plus accept exceed the private IR ceiling");
+        assert_eq!(ir.code(), "RGX-IR-E005");
+        assert_eq!(ir.stage(), PrivateCompileStage::IrValidation);
+        assert_eq!(ir.actual(), Some(3));
+        assert_eq!(ir.limit(), Some(2));
+
+        for error in [
+            syntax,
+            semantic,
+            fold_boundary,
+            nullable,
+            erased,
+            dotted_age,
+            ir,
+        ] {
+            let display = error.to_string();
+            let debug = format!("{error:?}");
+            assert!(!display.contains("private-source-canary"));
+            assert!(!debug.contains("private-source-canary"));
+            assert_eq!(
+                display, debug,
+                "Debug must not widen the diagnostic surface"
+            );
+        }
     }
 
     #[test]

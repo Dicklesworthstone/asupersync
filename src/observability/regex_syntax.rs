@@ -5,6 +5,7 @@
 //! observability filter. The follow-on parser consumes these tokens.
 
 use core::fmt;
+use std::collections::BTreeMap;
 use std::ops::Range;
 
 pub const GRAMMAR_ID: &str = "ASUP-REGEX-SYNTAX-V1";
@@ -400,6 +401,8 @@ struct Lexer<'source> {
     limits: LexerLimits,
     tokens: Vec<Token>,
     classes: Vec<ClassFrame>,
+    /// The effective `x` flag for each open expression scope, including root.
+    ignore_whitespace: Vec<bool>,
 }
 
 impl<'source> Lexer<'source> {
@@ -412,11 +415,16 @@ impl<'source> Lexer<'source> {
             limits,
             tokens: Vec::with_capacity(initial_capacity),
             classes: Vec::new(),
+            ignore_whitespace: vec![false],
         }
     }
 
     fn run(mut self) -> Result<Vec<Token>, LexError> {
-        while self.cursor.peek().is_some() {
+        loop {
+            self.skip_ignored();
+            if self.cursor.peek().is_none() {
+                break;
+            }
             if self.classes.is_empty() {
                 self.lex_top_level()?;
             } else {
@@ -426,6 +434,50 @@ impl<'source> Lexer<'source> {
         let end = self.cursor.mark();
         self.emit(TokenKind::End, end)?;
         Ok(self.tokens)
+    }
+
+    fn ignores_whitespace(&self) -> bool {
+        self.ignore_whitespace.last().copied().unwrap_or(false)
+    }
+
+    fn set_ignore_whitespace(&mut self, enabled: bool) {
+        if let Some(current) = self.ignore_whitespace.last_mut() {
+            *current = enabled;
+        }
+    }
+
+    fn push_ignore_whitespace(&mut self, enabled: bool) {
+        self.ignore_whitespace.push(enabled);
+    }
+
+    fn pop_ignore_whitespace(&mut self) {
+        if self.ignore_whitespace.len() > 1 {
+            self.ignore_whitespace.pop();
+        }
+    }
+
+    /// Skip verbose-mode whitespace and line comments without copying source.
+    ///
+    /// Calls are deliberately placed only at grammar boundaries. Escaped
+    /// whitespace and `#` therefore remain literals, while ignored bytes still
+    /// contribute to the original byte/scalar spans used by diagnostics.
+    fn skip_ignored(&mut self) {
+        if !self.ignores_whitespace() {
+            return;
+        }
+        loop {
+            while self.cursor.peek().is_some_and(char::is_whitespace) {
+                self.cursor.bump();
+            }
+            if self.cursor.peek() != Some('#') {
+                break;
+            }
+            while let Some(value) = self.cursor.bump() {
+                if value == '\n' {
+                    break;
+                }
+            }
+        }
     }
 
     fn error(&self, kind: LexErrorKind, start: Mark) -> LexError {
@@ -471,7 +523,9 @@ impl<'source> Lexer<'source> {
             '(' => self.lex_group_open(start),
             ')' => {
                 self.cursor.bump();
-                self.emit(TokenKind::GroupClose, start)
+                self.emit(TokenKind::GroupClose, start)?;
+                self.pop_ignore_whitespace();
+                Ok(())
             }
             '[' => {
                 self.cursor.bump();
@@ -582,10 +636,14 @@ impl<'source> Lexer<'source> {
 
     fn lex_group_open(&mut self, start: Mark) -> Result<(), LexError> {
         self.cursor.bump();
+        self.skip_ignored();
         if !self.cursor.consume("?") {
-            return self.emit(TokenKind::GroupOpen, start);
+            self.emit(TokenKind::GroupOpen, start)?;
+            self.push_ignore_whitespace(self.ignores_whitespace());
+            return Ok(());
         }
 
+        self.skip_ignored();
         if self.cursor.consume("=") || self.cursor.consume("!") {
             return Err(self.error(LexErrorKind::UnsupportedLookaround, start));
         }
@@ -595,7 +653,9 @@ impl<'source> Lexer<'source> {
             return Err(self.error(LexErrorKind::UnsupportedLookaround, start));
         }
         if self.cursor.consume(":") {
-            return self.emit(TokenKind::NonCapturingGroupOpen, start);
+            self.emit(TokenKind::NonCapturingGroupOpen, start)?;
+            self.push_ignore_whitespace(self.ignores_whitespace());
+            return Ok(());
         }
         if self.cursor.consume("P<") {
             return self.lex_named_capture(start, NamedCaptureStyle::Python);
@@ -627,7 +687,9 @@ impl<'source> Lexer<'source> {
         if !self.cursor.consume(">") {
             return Err(self.error(LexErrorKind::MalformedGroupPrefix, start));
         }
-        self.emit(TokenKind::NamedCaptureGroupOpen { style, name }, start)
+        self.emit(TokenKind::NamedCaptureGroupOpen { style, name }, start)?;
+        self.push_ignore_whitespace(self.ignores_whitespace());
+        Ok(())
     }
 
     fn lex_flags(&mut self, start: Mark) -> Result<(), LexError> {
@@ -639,6 +701,7 @@ impl<'source> Lexer<'source> {
 
         loop {
             let current = self.cursor.mark();
+            self.skip_ignored();
             let Some(value) = self.cursor.peek() else {
                 return Err(self.error(LexErrorKind::InvalidFlag, start));
             };
@@ -647,14 +710,27 @@ impl<'source> Lexer<'source> {
                     return Err(self.error(LexErrorKind::InvalidFlag, start));
                 }
                 self.cursor.bump();
-                return self.emit(
+                self.emit(
                     TokenKind::FlagDirective {
                         set,
                         clear,
                         scoped: value == ':',
                     },
                     start,
-                );
+                )?;
+                let enabled = if set.contains(Flag::IgnoreWhitespace) {
+                    true
+                } else if clear.contains(Flag::IgnoreWhitespace) {
+                    false
+                } else {
+                    self.ignores_whitespace()
+                };
+                if value == ':' {
+                    self.push_ignore_whitespace(enabled);
+                } else {
+                    self.set_ignore_whitespace(enabled);
+                }
+                return Ok(());
             }
             if value == '-' {
                 self.cursor.bump();
@@ -681,17 +757,21 @@ impl<'source> Lexer<'source> {
 
     fn lex_counted_repetition(&mut self, start: Mark) -> Result<(), LexError> {
         self.cursor.bump();
+        self.skip_ignored();
         let min = self.lex_decimal(start)?;
+        self.skip_ignored();
         if self.cursor.consume("}") {
             return self.emit(TokenKind::Counted(RepetitionRange::Exact(min)), start);
         }
         if !self.cursor.consume(",") {
             return Err(self.error(LexErrorKind::InvalidRepetition, start));
         }
+        self.skip_ignored();
         if self.cursor.consume("}") {
             return self.emit(TokenKind::Counted(RepetitionRange::AtLeast(min)), start);
         }
         let max = self.lex_decimal(start)?;
+        self.skip_ignored();
         if !self.cursor.consume("}") || min > max {
             return Err(self.error(LexErrorKind::InvalidRepetition, start));
         }
@@ -704,7 +784,11 @@ impl<'source> Lexer<'source> {
     fn lex_decimal(&mut self, repetition_start: Mark) -> Result<u32, LexError> {
         let mut value = 0_u32;
         let mut digits = 0_usize;
-        while let Some(current) = self.cursor.peek() {
+        loop {
+            self.skip_ignored();
+            let Some(current) = self.cursor.peek() else {
+                break;
+            };
             let Some(digit) = current.to_digit(10) else {
                 break;
             };
@@ -733,7 +817,14 @@ impl<'source> Lexer<'source> {
             'n' => Escape::Control('\n'),
             'r' => Escape::Control('\r'),
             'v' => Escape::Control('\u{b}'),
-            'x' => Escape::Hex(self.lex_fixed_hex(start, 2)?),
+            'x' => {
+                self.skip_ignored();
+                if self.cursor.consume("{") {
+                    Escape::Hex(self.lex_braced_hex(start)?)
+                } else {
+                    Escape::Hex(self.lex_fixed_hex(start, 2)?)
+                }
+            }
             'u' => Escape::Unicode(self.lex_unicode_escape(start)?),
             'd' => Escape::PerlClass(PerlClass::Digit),
             'D' => Escape::PerlClass(PerlClass::NotDigit),
@@ -766,6 +857,7 @@ impl<'source> Lexer<'source> {
     fn lex_fixed_hex(&mut self, start: Mark, digits: usize) -> Result<char, LexError> {
         let mut value = 0_u32;
         for _ in 0..digits {
+            self.skip_ignored();
             let Some(current) = self.cursor.peek() else {
                 return Err(self.error(LexErrorKind::MalformedEscape, start));
             };
@@ -780,12 +872,21 @@ impl<'source> Lexer<'source> {
     }
 
     fn lex_unicode_escape(&mut self, start: Mark) -> Result<char, LexError> {
+        self.skip_ignored();
         if !self.cursor.consume("{") {
             return Err(self.error(LexErrorKind::MalformedEscape, start));
         }
+        self.lex_braced_hex(start)
+    }
+
+    fn lex_braced_hex(&mut self, start: Mark) -> Result<char, LexError> {
         let mut value = 0_u32;
         let mut digits = 0_usize;
-        while let Some(current) = self.cursor.peek() {
+        loop {
+            self.skip_ignored();
+            let Some(current) = self.cursor.peek() else {
+                break;
+            };
             let Some(digit) = current.to_digit(16) else {
                 break;
             };
@@ -797,6 +898,7 @@ impl<'source> Lexer<'source> {
             value = value.saturating_mul(16).saturating_add(digit);
             digits = digits.saturating_add(1);
         }
+        self.skip_ignored();
         if digits == 0 || !self.cursor.consume("}") {
             return Err(self.error(LexErrorKind::MalformedEscape, start));
         }
@@ -804,14 +906,17 @@ impl<'source> Lexer<'source> {
     }
 
     fn lex_unicode_class(&mut self, start: Mark, negated: bool) -> Result<Escape, LexError> {
+        self.skip_ignored();
         let name_start;
         let name;
         if self.cursor.consume("{") {
+            self.skip_ignored();
             name_start = self.cursor.mark();
             while self.cursor.peek().is_some_and(is_property_name_char) {
                 self.cursor.bump();
             }
             name = self.cursor.span_from(name_start);
+            self.skip_ignored();
             if name.byte_start == name.byte_end || !self.cursor.consume("}") {
                 return Err(self.error(LexErrorKind::MalformedEscape, start));
             }
@@ -1191,6 +1296,7 @@ pub enum ParseErrorKind {
     InvalidFlag,
     InvalidUtf8Invariant,
     UnexpectedToken,
+    DuplicateCaptureName,
 }
 
 impl ParseErrorKind {
@@ -1208,6 +1314,7 @@ impl ParseErrorKind {
             Self::InvalidFlag => "RGX-PARSE-E010",
             Self::InvalidUtf8Invariant => "RGX-PARSE-E011",
             Self::UnexpectedToken => "RGX-PARSE-E012",
+            Self::DuplicateCaptureName => "RGX-PARSE-E013",
         }
     }
 
@@ -1225,6 +1332,7 @@ impl ParseErrorKind {
             Self::InvalidRepetition => "RGX-DIAG-INVALID-REPETITION",
             Self::InvalidFlag => "RGX-DIAG-INVALID-FLAG",
             Self::InvalidUtf8Invariant => "RGX-DIAG-INVALID-UTF8",
+            Self::DuplicateCaptureName => "RGX-DIAG-DUPLICATE-CAPTURE-NAME",
         }
     }
 }
@@ -1369,7 +1477,8 @@ impl ClassParseFrame {
     }
 }
 
-struct Parser {
+struct Parser<'source> {
+    pattern: &'source str,
     tokens: Vec<Token>,
     index: usize,
     limits: ParserLimits,
@@ -1378,12 +1487,14 @@ struct Parser {
     max_nesting: usize,
     repetition_operators: usize,
     next_capture: usize,
+    named_captures: BTreeMap<&'source str, SourceSpan>,
 }
 
-impl Parser {
-    fn new(tokens: Vec<Token>, limits: ParserLimits) -> Self {
+impl<'source> Parser<'source> {
+    fn new(pattern: &'source str, tokens: Vec<Token>, limits: ParserLimits) -> Self {
         let initial_capacity = tokens.len().min(limits.max_ast_nodes).min(4_096);
         Self {
+            pattern,
             tokens,
             index: 0,
             limits,
@@ -1392,6 +1503,7 @@ impl Parser {
             max_nesting: 0,
             repetition_operators: 0,
             next_capture: 1,
+            named_captures: BTreeMap::new(),
         }
     }
 
@@ -1453,6 +1565,12 @@ impl Parser {
                     self.index += 1;
                 }
                 TokenKind::NamedCaptureGroupOpen { style, name } => {
+                    let capture_name = name
+                        .source(self.pattern)
+                        .ok_or_else(|| self.error(ParseErrorKind::UnexpectedToken, name))?;
+                    if self.named_captures.insert(capture_name, name).is_some() {
+                        return Err(self.error(ParseErrorKind::DuplicateCaptureName, name));
+                    }
                     let capture = self.next_capture;
                     self.next_capture = self.next_capture.saturating_add(1);
                     self.open_group(
@@ -2228,7 +2346,7 @@ pub fn parse(
     parser_limits: ParserLimits,
 ) -> Result<Ast, SyntaxError> {
     let tokens = lex(pattern, lexer_limits)?;
-    Parser::new(tokens, parser_limits)
+    Parser::new(pattern, tokens, parser_limits)
         .run()
         .map_err(SyntaxError::from)
 }
@@ -2956,11 +3074,6 @@ mod tests {
         assert_eq!(
             mismatches,
             vec![
-                ("(?x)a{ 2 , 3 }", true, false),
-                ("(?x)\\x { 53 }", true, false),
-                ("(?x)\\u { 53 }", true, false),
-                ("(?x)\\p { Greek }", true, false),
-                ("(?P<name>a)|(?P<name>b)", false, true),
                 ("\\p{DefinitelyNotAProperty}", false, true),
                 ("(?-u:\\pL)", false, true),
                 ("(?-u:\\xFF)", false, true),
@@ -2977,28 +3090,28 @@ mod tests {
     // owner in Agent Mail thread asupersync-5z2scg.8.3.1.4 before landing).
     #[allow(clippy::trivial_regex)]
     #[test]
-    fn minimized_semantic_divergences_remain_explicit_cutover_blockers() {
+    fn extended_mode_elides_only_grammar_ignored_text_and_preserves_spans() {
         let incumbent = IncumbentRegex::new("(?x)a b").expect("incumbent x pattern");
         assert!(incumbent.is_match("ab"));
         assert!(!incumbent.is_match("a b"));
         let whitespace = default_parse("(?x)a b").expect("candidate accepts global x");
         assert!(
-            whitespace
+            !whitespace
                 .nodes
                 .iter()
                 .any(|node| matches!(node.kind, AstNodeKind::Literal(' '))),
-            "remove this blocker only with the terminal receipt update"
+            "unescaped whitespace must be absent from the AST"
         );
 
         let incumbent = IncumbentRegex::new("(?x)a # comment\n b").expect("incumbent x comment");
         assert!(incumbent.is_match("ab"));
         let comment = default_parse("(?x)a # comment\n b").expect("candidate accepts x comment");
         assert!(
-            comment
+            !comment
                 .nodes
                 .iter()
                 .any(|node| matches!(node.kind, AstNodeKind::Literal('#'))),
-            "remove this blocker only with the terminal receipt update"
+            "verbose comments must be absent from the AST"
         );
 
         let incumbent = IncumbentRegex::new("(?x)[ a-z ]").expect("incumbent x class");
@@ -3006,11 +3119,11 @@ mod tests {
         assert!(!incumbent.is_match(" "));
         let class = default_parse("(?x)[ a-z ]").expect("candidate accepts x class");
         assert!(
-            class
+            !class
                 .nodes
                 .iter()
                 .any(|node| matches!(node.kind, AstNodeKind::ClassLiteral(' '))),
-            "remove this blocker only with the terminal receipt update"
+            "verbose class whitespace must be absent from the AST"
         );
 
         let incumbent = IncumbentRegex::new("(?x)( ?P<foo> a )").expect("incumbent spaced capture");
@@ -3020,12 +3133,86 @@ mod tests {
         );
         let capture = default_parse("(?x)( ?P<foo> a )").expect("candidate accepts spaced group");
         assert!(
-            !capture
+            capture
                 .nodes
                 .iter()
                 .any(|node| matches!(node.kind, AstNodeKind::Capture { name: Some(_), .. })),
-            "remove this blocker only with the terminal receipt update"
+            "verbose group-prefix whitespace must preserve named capture metadata"
         );
+
+        let escaped = default_parse("(?x:a\\ b)").expect("escaped space remains literal");
+        assert!(
+            escaped
+                .nodes
+                .iter()
+                .any(|node| matches!(node.kind, AstNodeKind::Escape(Escape::Literal(' '))))
+        );
+
+        let scoped = default_parse("(?x:a (?-x: b ) c)").expect("scoped x disable");
+        assert_eq!(
+            scoped
+                .nodes
+                .iter()
+                .filter(|node| matches!(node.kind, AstNodeKind::Literal(' ')))
+                .count(),
+            2,
+            "only spaces in the explicitly x-disabled scope remain literals"
+        );
+
+        for pattern in [
+            "(?x)a{ 2 , 3 }",
+            "(?x)\\x { 53 }",
+            "(?x)\\u { 53 }",
+            "(?x)\\p { Greek }",
+            "(?x)( ?: a )",
+        ] {
+            let candidate = default_parse(pattern)
+                .unwrap_or_else(|error| panic!("candidate rejected {pattern:?}: {error}"));
+            assert!(candidate.invariants_hold(pattern));
+            assert!(
+                IncumbentRegex::new(pattern).is_ok(),
+                "incumbent rejected owned verbose fixture {pattern:?}"
+            );
+        }
+
+        let malformed = default_parse("(?x:").expect_err("unclosed scoped flag group");
+        assert_eq!(parse_error_kind(&malformed), ParseErrorKind::UnclosedGroup);
+    }
+
+    #[test]
+    fn duplicate_capture_names_fail_with_a_stable_secret_safe_code() {
+        default_parse("(?P<left>a)|(?P<right>b)").expect("distinct names are valid");
+
+        for pattern in [
+            "(?P<r3_5_private_pattern_canary>a)|(?P<r3_5_private_pattern_canary>b)",
+            "(?P<r3_5_private_pattern_canary>a)|(?<r3_5_private_pattern_canary>b)",
+        ] {
+            let error = default_parse(pattern).expect_err("duplicate name must fail");
+            let SyntaxError::Parse(error) = error else {
+                panic!("duplicate name must be a parser error");
+            };
+            assert_eq!(error.kind, ParseErrorKind::DuplicateCaptureName);
+            assert_eq!(error.kind.code(), "RGX-PARSE-E013");
+            assert_eq!(
+                error.kind.diagnostic_category(),
+                "RGX-DIAG-DUPLICATE-CAPTURE-NAME"
+            );
+            assert_eq!(
+                error.span.source(pattern),
+                Some("r3_5_private_pattern_canary")
+            );
+            assert!(!error.to_string().contains("r3_5_private_pattern_canary"));
+            assert!(!format!("{error:?}").contains("r3_5_private_pattern_canary"));
+        }
+
+        let empty = default_parse("(?P<>a)").expect_err("empty name remains malformed");
+        assert!(matches!(
+            empty,
+            SyntaxError::Lex(LexError {
+                kind: LexErrorKind::MalformedGroupPrefix,
+                ..
+            })
+        ));
     }
 
     #[test]

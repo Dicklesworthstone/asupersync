@@ -372,31 +372,48 @@ impl<'pattern> SemanticCompiler<'pattern> {
 
     fn run(mut self, ast: Ast) -> Result<SemanticAnalysis, SemanticError> {
         let mut unicode_context = vec![true];
+        let mut ignore_whitespace_context = vec![false];
         let mut index = 0;
         while let Some(token) = self.tokens.get(index).copied() {
             let unicode = unicode_context.last().copied().ok_or(SemanticError {
                 kind: SemanticErrorKind::FlagContextInvariant,
                 span: token.span,
             })?;
+            let ignore_whitespace =
+                ignore_whitespace_context
+                    .last()
+                    .copied()
+                    .ok_or(SemanticError {
+                        kind: SemanticErrorKind::FlagContextInvariant,
+                        span: token.span,
+                    })?;
             match token.kind {
                 TokenKind::GroupOpen
                 | TokenKind::NonCapturingGroupOpen
                 | TokenKind::NamedCaptureGroupOpen { .. } => {
                     unicode_context.push(unicode);
+                    ignore_whitespace_context.push(ignore_whitespace);
                 }
                 TokenKind::FlagDirective { set, clear, scoped } => {
-                    let next = apply_unicode_flag(unicode, set, clear);
+                    let next_unicode = apply_unicode_flag(unicode, set, clear);
+                    let next_ignore_whitespace =
+                        apply_ignore_whitespace_flag(ignore_whitespace, set, clear);
                     if scoped {
-                        if !next {
+                        if !next_unicode {
                             let close = self.find_group_close(index)?;
-                            self.validate_byte_scope(index, close)?;
+                            self.validate_byte_scope(index, close, next_ignore_whitespace)?;
                         }
-                        unicode_context.push(next);
-                    } else if let Some(current) = unicode_context.last_mut() {
-                        if !next {
-                            self.validate_global_byte_scope(index)?;
+                        unicode_context.push(next_unicode);
+                        ignore_whitespace_context.push(next_ignore_whitespace);
+                    } else if let (Some(current_unicode), Some(current_ignore_whitespace)) = (
+                        unicode_context.last_mut(),
+                        ignore_whitespace_context.last_mut(),
+                    ) {
+                        if !next_unicode {
+                            self.validate_global_byte_scope(index, next_ignore_whitespace)?;
                         }
-                        *current = next;
+                        *current_unicode = next_unicode;
+                        *current_ignore_whitespace = next_ignore_whitespace;
                     } else {
                         return Err(SemanticError {
                             kind: SemanticErrorKind::FlagContextInvariant,
@@ -405,13 +422,17 @@ impl<'pattern> SemanticCompiler<'pattern> {
                     }
                 }
                 TokenKind::GroupClose => {
-                    if unicode_context.len() <= 1 {
+                    if unicode_context.len() <= 1
+                        || ignore_whitespace_context.len() <= 1
+                        || unicode_context.len() != ignore_whitespace_context.len()
+                    {
                         return Err(SemanticError {
                             kind: SemanticErrorKind::FlagContextInvariant,
                             span: token.span,
                         });
                     }
                     unicode_context.pop();
+                    ignore_whitespace_context.pop();
                 }
                 TokenKind::ClassOpen => {
                     let close = self.find_class_close(index)?;
@@ -419,19 +440,29 @@ impl<'pattern> SemanticCompiler<'pattern> {
                         .unicode_property_references
                         .saturating_add(self.count_unicode_properties(index, close));
                     let span = cover_spans(token.span, self.tokens[close].span);
-                    self.compile_atom(span, ClassOrigin::Bracketed, unicode)?;
+                    self.compile_atom(span, ClassOrigin::Bracketed, unicode, ignore_whitespace)?;
                     index = close;
                 }
                 TokenKind::Dot => {
-                    self.compile_atom(token.span, ClassOrigin::Dot, unicode)?;
+                    self.compile_atom(token.span, ClassOrigin::Dot, unicode, ignore_whitespace)?;
                 }
                 TokenKind::Escaped(Escape::PerlClass(class)) => {
-                    self.compile_atom(token.span, ClassOrigin::Perl(class), unicode)?;
+                    self.compile_atom(
+                        token.span,
+                        ClassOrigin::Perl(class),
+                        unicode,
+                        ignore_whitespace,
+                    )?;
                 }
                 TokenKind::Escaped(Escape::UnicodeClass { .. }) => {
                     self.unicode_property_references =
                         self.unicode_property_references.saturating_add(1);
-                    self.compile_atom(token.span, ClassOrigin::UnicodeProperty, unicode)?;
+                    self.compile_atom(
+                        token.span,
+                        ClassOrigin::UnicodeProperty,
+                        unicode,
+                        ignore_whitespace,
+                    )?;
                 }
                 TokenKind::End => break,
                 _ => {}
@@ -512,7 +543,12 @@ impl<'pattern> SemanticCompiler<'pattern> {
         })
     }
 
-    fn validate_byte_scope(&mut self, start: usize, close: usize) -> Result<(), SemanticError> {
+    fn validate_byte_scope(
+        &mut self,
+        start: usize,
+        close: usize,
+        ignore_whitespace: bool,
+    ) -> Result<(), SemanticError> {
         if let Some(property) = self.tokens[start..=close]
             .iter()
             .find(|token| matches!(token.kind, TokenKind::Escaped(Escape::UnicodeClass { .. })))
@@ -523,10 +559,14 @@ impl<'pattern> SemanticCompiler<'pattern> {
             });
         }
         let span = cover_spans(self.tokens[start].span, self.tokens[close].span);
-        self.validate_byte_fragment(span)
+        self.validate_byte_fragment(span, ignore_whitespace)
     }
 
-    fn validate_global_byte_scope(&mut self, start: usize) -> Result<(), SemanticError> {
+    fn validate_global_byte_scope(
+        &mut self,
+        start: usize,
+        ignore_whitespace: bool,
+    ) -> Result<(), SemanticError> {
         let end = self.tokens.len().saturating_sub(1);
         if let Some(property) = self.tokens[start..=end]
             .iter()
@@ -543,10 +583,14 @@ impl<'pattern> SemanticCompiler<'pattern> {
             scalar_start: self.tokens[start].span.scalar_start,
             scalar_end: self.pattern.chars().count(),
         };
-        self.validate_byte_fragment(span)
+        self.validate_byte_fragment(span, ignore_whitespace)
     }
 
-    fn validate_byte_fragment(&mut self, span: SourceSpan) -> Result<(), SemanticError> {
+    fn validate_byte_fragment(
+        &mut self,
+        span: SourceSpan,
+        ignore_whitespace: bool,
+    ) -> Result<(), SemanticError> {
         let source = span.source(self.pattern).ok_or(SemanticError {
             kind: SemanticErrorKind::FlagContextInvariant,
             span,
@@ -554,6 +598,7 @@ impl<'pattern> SemanticCompiler<'pattern> {
         let mut builder = retained_regex_syntax::ParserBuilder::new();
         builder
             .nest_limit(self.limits.backend_nesting_limit)
+            .ignore_whitespace(ignore_whitespace)
             .utf8(false);
         let hir = builder.build().parse(source).map_err(|_| SemanticError {
             kind: SemanticErrorKind::InvalidUtf8Boundary,
@@ -581,6 +626,7 @@ impl<'pattern> SemanticCompiler<'pattern> {
         span: SourceSpan,
         origin: ClassOrigin,
         unicode: bool,
+        ignore_whitespace: bool,
     ) -> Result<(), SemanticError> {
         if self.classes.len() >= self.limits.max_semantic_atoms {
             return Err(SemanticError {
@@ -601,6 +647,7 @@ impl<'pattern> SemanticCompiler<'pattern> {
         let mut builder = retained_regex_syntax::ParserBuilder::new();
         builder
             .nest_limit(self.limits.backend_nesting_limit)
+            .ignore_whitespace(ignore_whitespace)
             .unicode(unicode)
             .utf8(true);
         let hir = builder.build().parse(source).map_err(|_| SemanticError {
@@ -662,6 +709,19 @@ fn apply_unicode_flag(current: bool, set: FlagSet, clear: FlagSet) -> bool {
         current
     };
     if clear.contains(Flag::Unicode) {
+        false
+    } else {
+        enabled
+    }
+}
+
+fn apply_ignore_whitespace_flag(current: bool, set: FlagSet, clear: FlagSet) -> bool {
+    let enabled = if set.contains(Flag::IgnoreWhitespace) {
+        true
+    } else {
+        current
+    };
+    if clear.contains(Flag::IgnoreWhitespace) {
         false
     } else {
         enabled
@@ -1018,6 +1078,17 @@ mod tests {
         assert!(class.contains_scalar('Σ'));
         assert!(!class.contains_scalar('A'));
         assert!(class.ranges.is_canonical());
+    }
+
+    #[test]
+    fn extended_mode_is_preserved_for_retained_semantic_fragments() {
+        let pattern = "(?x) \\p { Greek } # semantic fragment comment\n (?x-u: \\x {41})";
+        let analysis = default_analyze(pattern).expect("extended fragments must compile");
+        assert_eq!(analysis.classes.len(), 1);
+        assert!(analysis.classes[0].contains_scalar('κ'));
+        assert!(!analysis.classes[0].contains_scalar('A'));
+        assert_eq!(analysis.resources.byte_scopes_validated, 1);
+        assert!(analysis.invariants_hold(pattern, SemanticLimits::default()));
     }
 
     #[test]
