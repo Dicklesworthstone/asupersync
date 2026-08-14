@@ -38,7 +38,8 @@ Relevant paths:
 
 Asupersync does not reduce shutdown to "wait and hope."
 
-The runtime tracks cancellation drain progress with explicit phase labels such as:
+The runtime tracks cancellation drain progress (`ProgressCertificate`) with
+explicit phase labels:
 
 - `warmup`
 - `rapid_drain`
@@ -53,9 +54,20 @@ Use this to distinguish:
 - causal chain depth problems,
 - resource/obligation leaks.
 
+Read the certificate's claims carefully (wording changed in the v0.4.x line):
+
+- The selected public concentration envelope equals the Azuma candidate; at the
+  current same-history horizon both candidate tails are algebraically `1` and
+  are NOT evidence of convergence.
+- `converging` is a separate empirical status over the complete accepted finite
+  non-negative observation history — not a future-drift, termination, or
+  probability guarantee.
+- Incomplete or invalid telemetry fails closed: the remaining-step estimate is
+  suppressed and the phase reports `warmup` until reset.
+
 Relevant paths:
 
-- `README.md`
+- `README.md` ("Range-Bounded Drain Certificates")
 - `src/cancel/progress_certificate.rs`
 
 ## Task And Wait-Graph Diagnostics
@@ -69,7 +81,8 @@ Before adding more logs, ask the runtime:
 - whether the wait graph is degrading structurally.
 
 This is what `TaskInspector`, `TaskBlockedExplanation`, `CancellationExplanation`,
-and spectral health diagnostics are for.
+and spectral health diagnostics are for. Spectral early-warning severity is a
+`none / watch / warning / critical` ladder over wait-graph connectivity trends.
 
 Relevant paths:
 
@@ -93,7 +106,7 @@ Relevant paths:
 
 - `src/lab/runtime.rs`
 - `src/trace/crashpack.rs`
-- `TESTING.md`
+- `TESTING.md` / `TESTING_FOR_AGENTS.md`
 
 ## Evidence Ledger
 
