@@ -74,7 +74,7 @@
       "path": "artifacts/kafka_k1_obligation_index_v1.json",
       "byte_count": 42758,
       "record_count": 738,
-      "sha256": "4498aa9038a2de065b49ba235301789429758d18727406ee5846e62e7818a872"
+      "sha256": "68f22529489f05de107fb137fd282ba3714ab9a357513edf5ce5ab5485b1c1d3"
     },
     {
       "input_id": "K1-5-INPUT-K1-1-DOCUMENT",
@@ -92,7 +92,7 @@
       "path": "tests/kafka_k1_client_contract.rs",
       "byte_count": 95396,
       "record_count": 2585,
-      "sha256": "f0bf8b586deb6a5f9dba01b006c5ac62e19d7b1f47364d27320025472db92695"
+      "sha256": "feccfd840fdd7c3e37776db1b7ab545fd0f6064af735789d13ac60ca02dce8bb"
     },
     {
       "input_id": "K1-5-INPUT-K1-2-ARTIFACT",
@@ -128,7 +128,7 @@
       "path": "artifacts/kafka_k1_public_api_contract_v1.json",
       "byte_count": 37850,
       "record_count": 753,
-      "sha256": "17a690a23beb43c84d2ae8376c5132e95f65c6de48eb7d2712283b16f2396013"
+      "sha256": "c563f6295da4dd251a45696ef29799e11de8b974fce1ff3df230d0cc46512e38"
     },
     {
       "input_id": "K1-5-INPUT-K1-3-DOCUMENT",
@@ -146,7 +146,7 @@
       "path": "tests/kafka_k1_public_api_contract.rs",
       "byte_count": 66553,
       "record_count": 2000,
-      "sha256": "fc662117fb5638b5a9892a3de51ed8206549cd7f86c6c82ced06e381379e04e2"
+      "sha256": "1be6a271450be2a2367da02675ac8f670322ad16eea13b1398b27d24e46b5efb"
     },
     {
       "input_id": "K1-5-INPUT-K1-4-ARTIFACT",
@@ -808,7 +808,7 @@
       "authority_path": "artifacts/kafka_broker_fixture_provenance_matrix_v1.json",
       "authority_byte_count": 119250,
       "authority_record_count": 2187,
-    "authority_sha256": "7dbc5008b3f74a0de83de8e74c82223c6d022f15c642833e2497e8161c4e1125",
+    "authority_sha256": "e69a06f898bd4993f071d9e97b04b19d73cf65338aeaa5f268db035a2f62f216",
       "executable_vector_count": 36,
       "executable_vector_id_set_sha256": "73491562ae3df3f7ea6729c30834cf3cb134a002ec5d682255277df5e508e73f",
       "vector_category_mapping_sha256": "180bb499a516f563cea8367a3e4b28e0fc74d19373b01e61dc0c3a399e3555e2",
