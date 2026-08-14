@@ -63,7 +63,7 @@
       "path": "artifacts/kafka_k1_protocol_security_support_policy_v1.json",
       "byte_count": 82164,
       "record_count": 1399,
-      "sha256": "f5bbee13ff61824383e214b45509b125989f64b140f9a42967e67534c612c435"
+      "sha256": "c72b1b12139f5d1ac9eb311bbbcf2e8db35b0cbae314f70fcafab71172096e75"
     },
     {
       "input_id": "K1-4-INPUT-K1-3",
@@ -71,7 +71,7 @@
       "path": "artifacts/kafka_k1_public_api_contract_v1.json",
       "byte_count": 37850,
       "record_count": 753,
-      "sha256": "f8d3638e522c0076064c62a00efde6d7164588be1c76c80a41c3a0ca86d2254a"
+      "sha256": "498f1d004f166de54a86581b2516815dcf28e901f0c28cbdb54d6cca94b0b44c"
     },
     {
       "input_id": "K1-4-INPUT-K0-5",
@@ -1854,7 +1854,7 @@
     "source_authority_reference_sha256": "634bb51f85fe7d54015ccc24a83b52590d23b77c11c9aa522dc89d9af88357e7",
     "no_claim_boundary_sha256": "bc5703ea9ef717f0796db249350ceafac85544acc31ef47f2da2b6ac33be9ce3",
     "authority_contract_sha256": "6a51fa1221869f3125a3ec478dc5e729eac868efc200a4779fdcaff35599cbf7",
-    "authority_input_contract_sha256": "4de38eb8881fbe71f317fabe81eba8d838350e9882e06f169250d21f60a02376",
+    "authority_input_contract_sha256": "5bb2d910aaede614b00c16a36b95d05ae56f4847cc62caf6af6a6fc02b8cb77e",
     "authority_views_contract_sha256": "b7c9cb4e15efb45cdca0c64316e4869b9cd93302205a52e4cf12ad88a19cb6b7",
     "policy_contract_sha256": "ec236faf14c33462c00c5c365e188b1a7089a3215329dd856699633ca4c2b396",
     "semantic_coverage_contract_sha256": "b86d984aa4061fe4770c4aeb7f639750193540deb4226522e48e1dfd6a441b27",

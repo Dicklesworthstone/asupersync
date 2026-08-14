@@ -107,7 +107,7 @@
       "input_id": "K1-3-INPUT-K0-3",
       "role": "DOWNSTREAM_AND_MIGRATION_AUTHORITY",
       "path": "artifacts/kafka_downstream_user_journey_inventory_v1.json",
-      "byte_count": 1171766,
+      "byte_count": 1171768,
       "record_count": 17987,
     "sha256": "fffb3a70e2fb3da4505a74d91f5f7a3996094ffb6292f6948404070154e795fa"
     },
