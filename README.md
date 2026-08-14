@@ -52,7 +52,7 @@ controlled schedules deterministic and replayable.
 | **Scoped cleanup bounds** | Budgets are sufficient conditions only where a concrete responsiveness bound is published; non-cooperative work can still delay quiescence indefinitely |
 | **No silent drops** | Covered two-phase primitives use reserve/commit so uncommitted work aborts cleanly and committed sends are never half-sent |
 | **Deterministic testing** | Lab runtime: virtual time, deterministic scheduling, trace replay |
-| **Adaptive preemption fairness** | Deterministic EXP3/Hedge policy tunes cancel streak limits with regret-bounded updates |
+| **Adaptive preemption fairness** | Default-on discounted UCB1 policy tunes cancel-streak limits over `{4, 8, 16, 32, 64}` at deterministic epoch boundaries |
 | **Drain progress certificates** | Conditional range-bounded Azuma/Freedman candidates accompany deterministic phase and projected-confidence diagnostics |
 | **Spectral early warnings** | Wait-graph spectral monitor combines conformal bounds and anytime-valid evidence |
 | **Capability security** | Runtime effect APIs flow through explicit `Cx` or capability tokens; host-boundary and test-only exceptions stay named and scoped |
@@ -106,7 +106,7 @@ If you already know tokio, this section maps the primitives you use daily to the
 | `tokio::sync::Semaphore` | `sync::Semaphore` | `sem.acquire(&cx, n).await?`. Permit is an obligation released on drop. |
 | `tokio::sync::Barrier` | `sync::Barrier` | `barrier.wait(&cx).await?`. Leader election built in (`is_leader`). |
 | `tokio::sync::Notify` | `sync::Notify` | `notify.notified().await` / `notify.notify_one()` / `notify.notify_waiters()`. |
-| `tokio::sync::OnceCell` | `sync::OnceCell` | `cell.get_or_init(async { ... }).await`. Cancel-safe: failed init lets next caller retry. |
+| `tokio::sync::OnceCell` | `sync::OnceCell` | `cell.get_or_init(|| async { ... }).await`. Cancel-safe: failed init lets next caller retry. |
 | `tokio::task::yield_now()` | `yield_now()` | Identical concept -- yields to the scheduler. |
 
 ### Three things that will surprise you
@@ -372,18 +372,20 @@ combine(b1, b2) =
 
 This is the kind of structure that lets us reason about cancellation protocols and bounded cleanup with proof-friendly, compositional rules.
 
-### Regret-Bounded Adaptive Cancel Preemption (Deterministic EXP3/Hedge)
+### Default-On Adaptive Cancel Preemption (Discounted UCB1)
 
-Scheduler preemption is not fixed to one static cancel streak limit. Workers can run a deterministic EXP3/Hedge-style policy over a bounded set of candidate limits (for example, `{4, 8, 16, 32}`), then update weights at fixed epoch boundaries from observed reward (Lyapunov decrease + fairness + deadline pressure):
+Scheduler preemption is not fixed to one static cancel-streak limit. By default,
+each worker runs a deterministic discounted-UCB1 selector over
+`{4, 8, 16, 32, 64}` (starting at `16`). At fixed epoch boundaries (128
+dispatches by default), it discounts prior pull mass by `0.95`, updates the
+selected arm from a reward that blends Lyapunov decrease with deadline, fairness, and
+fallback penalties, then chooses the next upper-confidence arm. An
+anytime-valid e-process monitors the epoch rewards. The deterministic policy
+state is part of replay, so identical schedules make identical choices.
 
-```text
-p_t(a) = (1 - γ) * w_t(a)/Σ_b w_t(b) + γ/K
-w_{t+1}(a) = w_t(a) * exp((γ / K) * r̂_t(a))
-```
-
-with importance-weighted reward `r̂_t(a_t) = r_t / p_t(a_t)` for the selected action.
-
-Why it helps: cancel-heavy workloads and latency-heavy workloads need different preemption pressure. This controller adapts online while preserving deterministic replay semantics and bounded starvation envelopes.
+This is a nonstationary stochastic-bandit controller, not an EXP3 adversarial
+no-regret claim. The separate ATP RaptorQ transport adapter has its own seeded,
+opt-in EXP3 controller; that mechanism is not the scheduler selector.
 
 ### Range-Bounded Drain Certificates (Azuma + Freedman + Phase Classification)
 
@@ -696,7 +698,7 @@ impl Cx {
     pub fn spawn_in<F, Fut, P>(&self, scope: &Scope<'_, P>, f: F)
         -> Result<TaskHandle<Fut::Output>, SpawnError>;
     pub fn checkpoint(&self) -> Result<(), Cancelled>;
-    pub fn mask(&self) -> MaskGuard;  // Defer cancellation
+    pub fn masked<F, R>(&self, f: F) -> R; // Run a synchronous closure with cancellation deferred
     pub fn trace(&self, event: TraceEvent);
     pub fn budget(&self) -> Budget;
     pub fn is_cancel_requested(&self) -> bool;
@@ -791,7 +793,7 @@ Scheduler behavior is intentionally explicit:
 - Workers track fairness telemetry (`fairness_yields`, `max_cancel_streak`) so starvation claims can be checked against runtime counters, not guesses (`src/runtime/scheduler/three_lane.rs`).
 - Local dispatch uses single-lock multi-lane pops (`try_local_any_lane` and `pop_any_lane_with_hint`) to reduce lock traffic on the hot path while keeping lane ordering rules intact (`src/runtime/scheduler/three_lane.rs`).
 - An optional Lyapunov governor can steer lane ordering from periodic runtime snapshots. It is off by default, and when enabled it runs at a configurable interval (`governor_interval`, default `32`) (`src/runtime/config.rs`, `src/runtime/builder.rs`, `src/runtime/scheduler/three_lane.rs`).
-- Adaptive cancel preemption is available as a deterministic no-regret online controller: workers run an EXP3/Hedge-style policy over candidate cancel-streak limits, updating from reward signals that blend Lyapunov decrease, fairness pressure, and deadline pressure (`src/runtime/scheduler/three_lane.rs`, `src/runtime/config.rs`, `src/runtime/builder.rs`).
+- Adaptive cancel preemption is enabled by default as a deterministic discounted-UCB1 controller: workers choose among `{4, 8, 16, 32, 64}` at fixed epoch boundaries using reward signals that blend Lyapunov decrease, fairness pressure, deadline pressure, and fallback pressure (`src/runtime/scheduler/three_lane.rs`, `src/runtime/config.rs`, `src/runtime/builder.rs`).
 - When governor mode is enabled, scheduling suggestions can be modulated by a decision contract with Bayesian posterior updates over `healthy`, `congested`, `unstable`, and `partitioned` runtime states (`src/runtime/scheduler/decision_contract.rs`, `src/runtime/scheduler/three_lane.rs`).
 - Dispatch follows an explicit multi-phase path: global lanes, fast ready paths, one local-lane lock acquisition, steal attempts, then fallback cancel handling (`src/runtime/scheduler/three_lane.rs`).
 - Worker wakeups are coordinated through round-robin targeted unparks, with a bitmask fast path when worker count is a power of two (`src/runtime/scheduler/three_lane.rs`).
@@ -1014,7 +1016,7 @@ The two-phase pattern (reserve a permit, then commit the send) is central to can
 | **Notify** | `src/sync/notify.rs` | One-time or multi-waiter notification |
 | **OnceLock** | `src/sync/once_cell.rs` | Async one-time initialization |
 | **ContendedMutex** | `src/sync/contended_mutex.rs` | Mutex with contention metrics |
-| **Pool** | `src/sync/pool.rs` | Object pool with per-thread caches |
+| **Pool** | `src/sync/pool.rs` | Object pool with obligation-tracked checkout and return-on-drop |
 
 The synchronization primitives are deterministic under the lab runtime and
 their wait queues/guards have focused cancellation and cleanup coverage.
@@ -1061,7 +1063,7 @@ The core combinators publish cancel-safety contracts, and race/select-style winn
 | `pipeline.rs` | Full sender/receiver pipelines with symbol authentication (`verify_auth`; fail-closed). The production `transport_rq` transport now forces a *deliberate* posture choice — see `asupersync-e880xo` |
 | `proof.rs` | Decode proof system for verifiable recovery |
 
-The implementation is deterministic (no randomness in lab mode) and can integrate with the security layer (`src/security/`) for per-symbol authentication tags (fail-closed when `verify_auth` is enabled — forged/contextless symbols are rejected). **REALITY (`asupersync-e880xo`): the production ATP RaptorQ transport (`src/net/atp/transport_rq`) is now fail-closed on symbol-auth posture: a default `RqConfig` is `MissingAuthenticationContext`, so `send_path`/`receive_once` refuse to run (before any network I/O) unless the caller makes a deliberate choice — `with_symbol_auth(ctx)` (every UDP symbol is signed and verified) or the explicit `allow_unauthenticated_for_trusted_transport()` opt-out (integrity-vs-manifest only). The handshake additionally rejects any posture mismatch between peers in both directions. NO-CLAIM BOUNDARY: authenticated mode protects the UDP symbol plane only; the TCP control channel + manifest are still unauthenticated, and the sibling `transport_tcp` transport has no per-symbol authentication at all (integrity-vs-manifest only). Full Byzantine-injection prevention against an active MITM therefore requires `with_symbol_auth` AND an authenticated control channel/manifest (e.g. TLS) — otherwise a MITM can substitute a matching forged manifest + symbols. Pinned end-to-end by `tests/atp_rq_symbol_auth_e2e_contract.rs` (transport truth) and `tests/decoding_secure_default.rs` (config posture).**
+The implementation is deterministic (no randomness in lab mode) and can integrate with the security layer (`src/security/`) for per-symbol authentication tags (fail-closed when `verify_auth` is enabled — forged/contextless symbols are rejected). **REALITY (`asupersync-e880xo`): the production ATP RaptorQ transport (`src/net/atp/transport_rq`) is now fail-closed on symbol-auth posture: a default `RqConfig` is `MissingAuthenticationContext`, so callers must deliberately choose `with_symbol_auth(ctx)` (every UDP symbol is signed and verified) or the explicit `allow_unauthenticated_for_trusted_transport()` opt-out (integrity-vs-manifest only). `send_path` refuses before any network I/O; `receive_once` rejects an accepted connection before any handshake, UDP exchange, or data transfer. The handshake additionally rejects any posture mismatch between peers in both directions. NO-CLAIM BOUNDARY: authenticated mode protects the UDP symbol plane only; the TCP control channel + manifest are still unauthenticated, and the sibling `transport_tcp` transport has no per-symbol authentication at all (integrity-vs-manifest only). Full Byzantine-injection prevention against an active MITM therefore requires `with_symbol_auth` AND an authenticated control channel/manifest (e.g. TLS) — otherwise a MITM can substitute a matching forged manifest + symbols. Pinned end-to-end by `tests/atp_rq_symbol_auth_e2e_contract.rs` (transport truth) and `tests/decoding_secure_default.rs` (config posture).**
 
 On the decode side, the runtime uses a policy-driven deterministic planner instead of a single fixed elimination strategy:
 
@@ -1200,12 +1202,14 @@ explicitly.
 
 Current contract:
 
-- Supported root macros in `proc-macros` builds are `scope!`, `spawn!`, `join!`, `join_all!`, and `race!`.
+- Supported root macros in `proc-macros` builds are `scope!`, `spawn!`, `join!`, `join_all!`, `race!`, and `select!`; the root also exports the `#[main]`, `#[test]`, and `#[lab_test]` entry attributes.
 - `scope!` binds a `Scope` for the current region; it does not create a fresh child-region boundary. Use `Scope::region(...)` when you need quiescence on scope exit.
 - `spawn!` requires runtime state (`state: &mut RuntimeState` or ambient `__state`) in addition to `Cx`.
-- `join!` and `join_all!` are supported today, but they still await branches sequentially.
-- `race!` expands to `Cx::race*`; losers are cancelled by drop, not drained. Use `Scope::race` when loser-drain semantics matter.
-- Minimal builds without `proc-macros` do not have a usable macro DSL fallback: `join!` and `race!` intentionally fail with `compile_error!`, while `scope!`, `spawn!`, and `join_all!` are unavailable until `proc-macros` is re-enabled.
+- `join!` and `join_all!` pin every branch once and poll all unfinished branches concurrently inside one `poll_fn`; neither macro serializes branches.
+- `race!` expands only to the drain-correct `Cx::race_drained*` family: spawned losers are protocol-cancelled and drained before return. On a `race!` `timeout:` expiry, the whole race is abandoned by drop.
+- Blocking `select!` is also drain-correct; its `else` form instead polls each branch exactly once in source order, returns immediately, and drops all still-pending branches without draining.
+- Branches used by drain-correct `race!` and blocking `select!` must be `Send + 'static`, and the `Cx` must carry spawn authority. Direct `Cx::race*` calls remain the lower-level drop-on-cancel surface for inline, non-`'static` futures.
+- Minimal builds without `proc-macros` do not have a usable macro DSL fallback: `join!` and `race!` intentionally fail with `compile_error!`, while `scope!`, `spawn!`, `join_all!`, and `select!` are unavailable until `proc-macros` is re-enabled.
 
 Compile-fail tests (via `trybuild`) verify that incorrect usage produces clear
 error messages. See `docs/macro-dsl.md` for the full pattern catalog.
@@ -1317,7 +1321,7 @@ Asupersync has formal semantics backing its engineering.
 | **Obligations** | Linear-logic discipline: resources resolved exactly once (Rust is affine, so enforcement is `#[must_use]` + runtime leak detection, not purely static) | Leaked obligations are loudly detected at region close instead of silently dropped |
 | **Traces** | Mazurkiewicz equivalence (partial orders) | DPOR-style guided exploration (not certified-optimal DPOR), stable replay |
 | **Cancellation** | Two-player game with budgets | Scoped completeness when modeled responsiveness assumptions hold and budgets are sufficient |
-| **Adaptive scheduling** | EXP3/Hedge no-regret online learning | Dynamic preemption control without fairness blind spots |
+| **Adaptive scheduling** | Discounted UCB1 over `{4, 8, 16, 32, 64}` | Default-on dynamic preemption control with deterministic epoch updates |
 | **Drain certificates** | Signed-step range bounds + empirical phase diagnostics | Conditional, auditable progress evidence for cancellation drain |
 | **Structural diagnostics** | Spectral graph theory + conformal + e-processes | Early warning on wait-graph fragmentation with calibrated alarms |
 
@@ -1331,16 +1335,16 @@ Asupersync is intentionally "math-forward": it uses advanced math and theory-gra
 
 | Mechanism | Current status |
 |-----------|----------------|
-| EXP3/Hedge scheduler control | Implemented runtime scheduling control surface |
+| Discounted-UCB1 scheduler control | Implemented, default-on runtime scheduling control surface |
 | Drain progress diagnostics | Implemented cancellation progress diagnostics |
 | Spectral wait-graph health | Implemented observability diagnostic; advisory early warning, not a standalone deadlock proof |
 | Mazurkiewicz/Foata trace canonicalization and DPOR | Implemented lab/trace exploration machinery |
 | Persistent homology trace scoring | Implemented lab exploration prototype; used to prioritize interesting schedules, not a production runtime gate |
 | Sheaf-style saga consistency and TLA+ export | Implemented analysis/export surfaces for verification workflows |
 
-### Online Control of Cancel Preemption (EXP3/Hedge)
+### Online Control of Cancel Preemption (Discounted UCB1)
 
-`src/runtime/scheduler/three_lane.rs` includes a deterministic EXP3/Hedge controller that selects cancel-streak limits per epoch from observed reward (progress + fairness + deadline components). This is the scheduler's online-control layer: it adapts to workload regime shifts while preserving deterministic replay and explicit fairness bounds.
+`src/runtime/scheduler/three_lane.rs` includes a deterministic discounted-UCB1 controller that selects cancel-streak limits from `{4, 8, 16, 32, 64}` at fixed epoch boundaries. It is enabled by default and updates from a bounded reward combining progress, fairness, deadline, and fallback components while an e-process monitors epoch rewards. This is a nonstationary stochastic-bandit control surface; the seeded opt-in EXP3 controller belongs to ATP transport adaptation, not scheduler preemption.
 
 ### Drain Progress Diagnostics (Freedman + Azuma + Phase Labels)
 
@@ -1462,7 +1466,7 @@ Asupersync is feature-light by default; the lab runtime is available without fla
 | `test-internals` | Expose test-only helpers (not for production) | No |
 | `metrics` | OpenTelemetry metrics provider (Tokio-free normal graph; OTLP protobuf helpers are fuzz/test-only) | No |
 | `tracing-integration` | Tracing spans/logging integration | No |
-| `proc-macros` | `scope!`, `spawn!`, `join!`, `join_all!`, `race!` proc macros | Yes |
+| `proc-macros` | `scope!`, `spawn!`, `join!`, `join_all!`, `race!`, `select!`, plus `#[main]`, `#[test]`, and `#[lab_test]` | Yes |
 | `nightly-outcome-try` | Nightly-only `Outcome` `Try`/residual impls that enable `?` ergonomics | Yes |
 | `tower` | Tower `Service` adapter support | No |
 | `trace-compression` | LZ4 compression for trace files | No |
@@ -2070,7 +2074,7 @@ Open an issue at https://github.com/Dicklesworthstone/asupersync/issues
 | [`docs/atp_contributor_guide.md`](./docs/atp_contributor_guide.md) | **ATP Contributor Guide**: Beads-to-code map, edit rules, proof commands, and implementation boundaries for ATP work |
 | [`docs/raptorq_baseline_bench_profile.md`](./docs/raptorq_baseline_bench_profile.md) | **RaptorQ Baseline Packet**: deterministic bench/profile corpus + repro commands |
 | [`docs/raptorq_unit_test_matrix.md`](./docs/raptorq_unit_test_matrix.md) | **RaptorQ Unit Matrix**: unit/E2E scenario coverage and replay/log schema mapping |
-| [`docs/macro-dsl.md`](./docs/macro-dsl.md) | **Macro DSL**: scope!/spawn!/join!/race! usage, patterns, examples |
+| [`docs/macro-dsl.md`](./docs/macro-dsl.md) | **Macro DSL**: `scope!`/`spawn!`/`join!`/`join_all!`/`race!`/`select!` usage, entry attributes, patterns, and examples |
 | [`docs/cancellation-testing.md`](./docs/cancellation-testing.md) | **Cancellation Testing**: deterministic injection + oracles |
 | [`docs/replay-debugging.md`](./docs/replay-debugging.md) | **Replay Debugging**: Record/replay for debugging async bugs |
 | [`docs/security_threat_model.md`](./docs/security_threat_model.md) | **Security Review**: Threat model and security invariants |

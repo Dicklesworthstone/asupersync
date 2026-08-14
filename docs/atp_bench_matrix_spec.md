@@ -5,24 +5,26 @@ Authoritative spec for the true scoring harness. Obeys the BENCHMARK INTEGRITY S
 report cv + peak/avg RSS + feedback_rounds). Gauntlet Pillar-(a): reproducible, multi-rep,
 machine-readable JSONL + scorecard, identical framework cost both engines.
 
-## Honest results so far (no-crypto tier: atp-lab vs rsync-daemon, UNCAPPED netns veth)
+## Current results
 
-| regime (loss/delay) | size | atp-rq wall | rsync-d wall | note |
-|---|---|--:|--:|---|
-| 0%/0ms (uncapped=unreal) | 10M | 0.71s | 0.108s | rsync wins (∞ local bw; atp CPU overhead) |
-| 0%/0ms | 50M | 3.42s | 0.208s | rsync wins (∞ bw) |
-| 1%/25ms | 10M | 1.01s | 1.51s | atp wins 1.5× |
-| 1%/25ms | 50M | 3.82s | 2.52s | rsync wins 1.5× |
-| 3%/50ms | 10M | 1.81s | 9.35s | **atp wins 5.2×** |
-| 3%/50ms | 50M | **123s, sha MISS** | 7.5s | **atp FAILS** ← critical |
+[`atp_rq_beat_rsync_ledger.md`](atp_rq_beat_rsync_ledger.md) is the single
+source of truth for current benchmark-cell status. The current banked record is:
+the 56-row rate-capped nocrypto sweep reached a board-level win in MATRIX-212
+and MATRIX-231; the encrypted board was measured 25/25 in MATRIX-216 and its
+lossy sub-board reached all-wins in MATRIX-221; MATRIX-230 closed the remaining
+decode-integrity asterisk by classifying the observed RaptorQ rank deficiency as
+`InsufficientRank`; MATRIX-232 records the honest clean-large, duty-cycle-bound
+ceiling; MATRIX-233 bounds the tree-perfect gap at roughly 1.3-1.6x; and the
+latest ledger entry is MATRIX-235 (2026-07-10). Consult the ledger and its
+attached run artifacts rather than copying these summaries into scorecards.
 
-**Lessons (shape the harness + the work):**
-1. ★ **CRITICAL: source-first FAILS under moderate loss at scale** (50M/3%/50ms → 123s + sha MISS).
-   Source-retransmit alone (overhead=1.0, retransmit_rounds=2, max 8192) does NOT converge for a
-   large file under real loss. ⇒ must fall back to FEC repair (the AdaptiveController's
-   `overhead_for_target` calibrated ε*) when source-retransmit isn't converging. AND investigate the
-   **sha MISS** — atp must FAIL-CLOSED, never commit mismatched/incomplete data. (Was it a silent
-   partial-commit, or a transfer error the harness scored as MISS? Determine + fix.)
+**Historical lessons that shaped the harness and the work:**
+1. ★ A pre-harness, uncapped June run once produced 50M/3%/50ms at 123s with a
+   SHA miss. That result is superseded by the rate-capped MATRIX-212/MATRIX-231
+   board and the MATRIX-230 integrity closure; it is not a current failing cell.
+   Its durable lesson remains: source retransmit alone was insufficient under
+   that regime, FEC repair must take over when it stops converging, and ATP must
+   fail closed rather than commit mismatched or incomplete data.
 2. **Uncapped netns = unrealistic "perfect" link** (∞ local bandwidth → rsync memcpy-streams, atp's
    CPU overhead loses). A real link has finite bandwidth. ⇒ **regimes MUST be rate-capped** (netem
    `rate`), else the perfect-link cell is meaningless. atp's edge is high-BDP + loss, not ∞-bw.

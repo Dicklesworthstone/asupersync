@@ -394,3 +394,72 @@ fn helper_declares_it_does_not_mutate_repo_state() {
         );
     }
 }
+
+#[test]
+fn public_docs_match_the_shipped_contracts() {
+    let root = repo_root();
+    let readme = std::fs::read_to_string(root.join("README.md")).expect("read README");
+    let agents = std::fs::read_to_string(root.join("AGENTS.md")).expect("read AGENTS");
+    let race = std::fs::read_to_string(root.join("asupersync-macros/src/race.rs"))
+        .expect("read race macro source");
+    let join = std::fs::read_to_string(root.join("asupersync-macros/src/join.rs"))
+        .expect("read join macro source");
+    let select = std::fs::read_to_string(root.join("asupersync-macros/src/select.rs"))
+        .expect("read select macro source");
+    let scheduler = std::fs::read_to_string(root.join("src/runtime/scheduler/three_lane.rs"))
+        .expect("read scheduler source");
+    let runtime_config = std::fs::read_to_string(root.join("src/runtime/config.rs"))
+        .expect("read runtime config source");
+    let cx = std::fs::read_to_string(root.join("src/cx/cx.rs")).expect("read Cx source");
+    let once_cell = std::fs::read_to_string(root.join("src/sync/once_cell.rs"))
+        .expect("read OnceCell source");
+    let pool = std::fs::read_to_string(root.join("src/sync/pool.rs")).expect("read Pool source");
+
+    for marker in [
+        "`join!` and `join_all!` pin every branch once and poll all unfinished branches concurrently inside one `poll_fn`; neither macro serializes branches.",
+        "`race!` expands only to the drain-correct `Cx::race_drained*` family: spawned losers are protocol-cancelled and drained before return.",
+        "Blocking `select!` is also drain-correct; its `else` form instead polls each branch exactly once in source order, returns immediately, and drops all still-pending branches without draining.",
+        "Supported root macros in `proc-macros` builds are `scope!`, `spawn!`, `join!`, `join_all!`, `race!`, and `select!`; the root also exports the `#[main]`, `#[test]`, and `#[lab_test]` entry attributes.",
+        "Default-On Adaptive Cancel Preemption (Discounted UCB1)",
+        "`{4, 8, 16, 32, 64}`",
+        "`cell.get_or_init(|| async { ... }).await`",
+        "pub fn masked<F, R>(&self, f: F) -> R;",
+        "Object pool with obligation-tracked checkout and return-on-drop",
+        "`send_path` refuses before any network I/O; `receive_once` rejects an accepted connection before any handshake, UDP exchange, or data transfer.",
+    ] {
+        assert!(readme.contains(marker), "README contract marker drifted: {marker}");
+    }
+
+    for stale in [
+        "they still await branches sequentially",
+        "losers are cancelled by drop, not drained",
+        "Deterministic EXP3/Hedge policy tunes cancel streak limits",
+        "EXP3/Hedge scheduler control",
+    ] {
+        assert!(
+            !readme.contains(stale),
+            "README resurrected a stale public contract: {stale}"
+        );
+    }
+
+    for marker in [
+        "Proc macros for structured concurrency (`scope!`, `spawn!`, `join!`, `join_all!`, `race!`, `select!`, plus entry attributes)",
+        "scope!, spawn!, join!, join_all!, race!, select! + entry attributes",
+        "Proc macros (scope!, spawn!, join!, join_all!, race!, select! + entry attributes)",
+    ] {
+        assert!(agents.contains(marker), "AGENTS macro list drifted: {marker}");
+    }
+
+    assert!(race.contains("(#cx).race_drained(vec!"));
+    assert!(race.contains("(#cx).race_drained_timeout("));
+    assert!(join.matches("::core::future::poll_fn").count() >= 2);
+    assert!(select.contains("(#cx).race_drained(::std::vec!"));
+    assert!(select.contains("::core::future::poll_fn"));
+    assert!(scheduler.contains("Discounted UCB1 policy for adaptive cancel-streak limits."));
+    assert!(scheduler.contains("const ADAPTIVE_STREAK_ARMS: [usize; 5] = [4, 8, 16, 32, 64];"));
+    assert!(scheduler.contains("const ADAPTIVE_UCB_DISCOUNT: f64 = 0.95;"));
+    assert!(runtime_config.contains("enable_adaptive_cancel_streak: true,"));
+    assert!(cx.contains("pub fn masked<F, R>(&self, f: F) -> R"));
+    assert!(once_cell.contains("F: FnOnce() -> Fut"));
+    assert!(pool.contains("pub fn return_to_pool"));
+}

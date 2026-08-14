@@ -1880,10 +1880,12 @@ pub enum RuntimeStateShape {
     /// shipped before br-asupersync-8fuxnt.
     #[default]
     Unified,
-    /// Independently-locked Tasks/Regions/Obligations shards. Public
-    /// opt-in via `RuntimeBuilder::with_sharded_state(true)`; workers
-    /// dispatch against shard A while the unified state remains the
-    /// region/obligation lifecycle owner (E1.2, 8fuxnt gate flipped).
+    /// Independently locked task, region, and obligation shards. Public opt-in
+    /// via `RuntimeBuilder::with_sharded_state(true)`: workers dispatch against
+    /// shard A, region lifecycle runs on shard B, and wrapper-side obligation
+    /// resolution runs on shard C. Multi-shard operations acquire A then C,
+    /// following the canonical E -> D -> B -> A -> C lock order
+    /// (8fuxnt gate; shard-C flip c3d580312).
     Sharded,
 }
 
@@ -2010,8 +2012,8 @@ pub struct RuntimeConfig {
     pub enable_read_biased_region_snapshot: bool,
     /// Enable adaptive cancel-lane streak selection.
     ///
-    /// When enabled, workers use a deterministic Hedge-style online policy
-    /// to adapt the base cancel streak limit across epochs.
+    /// When enabled, workers use a deterministic discounted-UCB1 policy over
+    /// `{4, 8, 16, 32, 64}` to adapt the base cancel-streak limit across epochs.
     pub enable_adaptive_cancel_streak: bool,
     /// Number of dispatches per adaptive cancel-streak epoch.
     ///

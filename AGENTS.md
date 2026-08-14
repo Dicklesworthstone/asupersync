@@ -239,7 +239,7 @@ This is expected to additionally surface `opentelemetry_sdk` (via the dev-dep `t
 | Crate | Purpose |
 |-------|---------|
 | `asupersync` | Main runtime crate — scheduler, regions, channels, sync, IO, net, HTTP |
-| `asupersync-macros` | Proc macros for structured concurrency (`scope!`, `spawn!`, `join!`, `race!`) |
+| `asupersync-macros` | Proc macros for structured concurrency (`scope!`, `spawn!`, `join!`, `join_all!`, `race!`, `select!`, plus entry attributes) |
 | `asupersync-browser-core` | Browser Edition Rust boundary crate for wasm-facing runtime/package surfaces |
 | `asupersync-tokio-compat` | Legacy Tokio-boundary compatibility crate kept outside the core runtime feature graph |
 | `conformance` | Conformance test suite for async runtime specifications |
@@ -269,7 +269,7 @@ wasm-browser-minimal = ["wasm-runtime"]
 test-internals = [...]         # Opt-in internal test helpers (Cx::new(), etc.) — NOT for production
 metrics = [...]                # OpenTelemetry metrics provider
 tracing-integration = [...]    # Structured logging and spans (zero-cost when disabled)
-proc-macros = [...]            # scope!, spawn!, join!, race! macros
+proc-macros = [...]            # scope!, spawn!, join!, join_all!, race!, select! + entry attributes
 tower = [...]                  # Optional Tower adapter for AsupersyncService
 trace-compression = [...]      # LZ4 compression for trace files
 debug-server = []              # Debug HTTP server for runtime inspection
@@ -835,7 +835,7 @@ asupersync/
 │   ├── config.rs                      # Runtime configuration
 │   ├── error.rs                       # Error types
 │   └── ...                            # Additional single-file modules
-├── asupersync-macros/                 # Proc macros (scope!, spawn!, join!, race!)
+├── asupersync-macros/                 # Proc macros (scope!, spawn!, join!, join_all!, race!, select! + entry attributes)
 ├── asupersync-browser-core/           # Browser Edition Rust boundary crate
 ├── asupersync-tokio-compat/           # Tokio-boundary compatibility adapters
 ├── asupersync-wasm/                   # WASM ABI/package crate (repo-local, excluded from workspace build)
