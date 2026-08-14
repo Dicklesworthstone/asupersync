@@ -20,7 +20,7 @@ const DOC_PATH: &str = "docs/kafka_downstream_user_journey_inventory.md";
 const K0_1_PATH: &str = "artifacts/kafka_capability_inventory_v1.json";
 const K0_2_PATH: &str = "artifacts/kafka_incumbent_semantics_matrix_v1.json";
 const ADR_REGISTRY_PATH: &str = "artifacts/dependency_api_adr_registry_v1.json";
-const ARTIFACT_SHA256: &str = "5dc3f07c53b71226368c79c03e68efea71ebd035a95d6e1507212aea09bab282";
+const ARTIFACT_SHA256: &str = "fffb3a70e2fb3da4505a74d91f5f7a3996094ffb6292f6948404070154e795fa";
 const DOC_SHA256: &str = "3c2f0b4fa956bc45fc5b9738f5f2349024dafb577509195e998fa72ec0d9dbb1";
 const ARTIFACT_ID: &str = "kafka-downstream-user-journey-inventory-v1";
 const PROGRAM_ID: &str = "asupersync-ir2uf0";
@@ -73,23 +73,23 @@ const PROVIDER_TEST_CANDIDATE_TUPLE_SHA256: &str =
     "1c1f5c263973f83026f7a4235cbe21252de23b4f22ba8833d5fd433659a2e255";
 const DOCUMENTATION_ACTUAL_SURFACE_COUNT: usize = 149;
 const DOCUMENTATION_SURFACE_COUNT: usize = 150;
-const DOCUMENTATION_OCCURRENCE_COUNT: usize = 9_179;
-const DOCUMENTATION_MATCHING_LINE_COUNT: usize = 7_777;
+const DOCUMENTATION_OCCURRENCE_COUNT: usize = 9_180;
+const DOCUMENTATION_MATCHING_LINE_COUNT: usize = 7_778;
 const DOCUMENTATION_CANONICAL_OCCURRENCE_COUNT: usize = 37;
-const DOCUMENTATION_REMAINDER_OCCURRENCE_COUNT: usize = 9_142;
+const DOCUMENTATION_REMAINDER_OCCURRENCE_COUNT: usize = 9_143;
 const DOCUMENTATION_OCCURRENCE_GROUP_COUNT: usize = 173;
 const DOCUMENTATION_PATH_SHA256: &str =
     "092daf94a5e428430bc2e6fab7a13a30649aca53e30680c300f9eb76cbbfec67";
 const DOCUMENTATION_OCCURRENCE_TUPLE_SHA256: &str =
-    "60137c4b78de5f7b5eaa4e4cff4ba1e70c1690c9e4fce6862586f2d617323707";
+    "42b6ffff0e756e9a996b3bbc85e5881b03da6d8607c0c6116a5ccc11a6212e4d";
 const DOCUMENTATION_LINE_TUPLE_SHA256: &str =
-    "80b1b58b871fb1d2e0ce8298533b18f3d61fd9a33ce38735302c837cfcf250aa";
+    "4bdb4f93da240c842de1a27b04ae251d807bd44bad0c8a75879f58c7a6fb4753";
 const DOCUMENTATION_OCCURRENCE_ID_SHA256: &str =
-    "b2faec65c3827b7e19a6fe8e1391330b4cacdfe19088fd5818a4ea5aad5cfe64";
+    "e878e3885d8e6c5c9e4c29c45465211cf1dc9efbb8368f1dabfcbede191f4df1";
 const DOCUMENTATION_CANONICAL_ID_SHA256: &str =
     "adeccf7bf54bac013beefaf1b2f763c9e1bfc91d82ae6ec65efbf0852db5e942";
 const DOCUMENTATION_REMAINDER_ID_SHA256: &str =
-    "eff2bc52f8f812c2be35088fa48bd18b1ab25ef784aaa4f293c4231e73f3991a";
+    "4c33ea18a839509eaa92dff7fe1c6d45b2a9746652dcc2337800444b8827b580";
 const DOCUMENTATION_GROUP_ID_SHA256: &str =
     "5e36b023be812fd3887b84af75d46e7b220c0138317b2a4face21917bdf180dd";
 const DOCUMENTATION_SOURCE_PIN_TUPLE_SHA256: &str =

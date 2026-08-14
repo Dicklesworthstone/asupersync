@@ -23,7 +23,7 @@ const BEAD_ID: &str = "asupersync-5z2scg.6.1";
 const CAPABILITY_ID: &str = "CAP-TIME-UTC-RFC3339";
 const ADR_ID: &str = "DEP-ADR-011";
 const BASELINE_REVISION: &str = "1afde84d564bd8ea876459624116f90028b80835";
-const ARTIFACT_SHA256: &str = "90f895f34534ac5445a06ec7f4c06173d333af995bc480b94d85dc428dfe1ac7";
+const ARTIFACT_SHA256: &str = "10697837d3671dc5b8776ba79cf0159dfaf0e007b4eeccff34c1256f51f7daa5";
 const DOC_BEGIN: &str = "<!-- BEGIN TIME UTC CAPABILITY INVENTORY -->";
 const DOC_END: &str = "<!-- END TIME UTC CAPABILITY INVENTORY -->";
 const CHRONO_TOKEN: &str = concat!("chrono", "::");
@@ -2787,8 +2787,8 @@ fn validate_post_a1_cli_output_extension(inventory: &Value) -> Result<(), String
             "8794fe1b0ad93d741d576c05aa1ccfe09ddd82eff0a25429ede34a909ce2dc27",
             19_716,
             "0b2c1beaa0447d9e1e7d26f4c598ef68a1fdd087",
-            "c4050dea66a46e0719ec53925beb64db42997a7612ea9de0cc9e9e775513e32d",
-            19_779,
+            "823ea8927596950fc8a2b366ccfd5a3a973ab8d7499b74463d35575200c0a5d3",
+            19_783,
             90,
             27,
             "INDEPENDENT_READ_CANCELLATION_TEST_SEAM",
@@ -3307,8 +3307,8 @@ fn validate_post_a1_conformance_raptorq_lineage_extension(inventory: &Value) -> 
         .ok_or_else(|| "line_sensitive_pin_reconciliation must be an object".to_owned())?;
     if text(reconciliation, "path") != "src/database/postgres.rs"
         || text(reconciliation, "current_sha256")
-            != "c4050dea66a46e0719ec53925beb64db42997a7612ea9de0cc9e9e775513e32d"
-        || number(reconciliation, "current_line_count") != 19_779
+            != "823ea8927596950fc8a2b366ccfd5a3a973ab8d7499b74463d35575200c0a5d3"
+        || number(reconciliation, "current_line_count") != 19_783
         || number(reconciliation, "uniform_line_delta") != 63
         || number(reconciliation, "refreshed_explicit_anchor_count") != 3
         || number(reconciliation, "refreshed_direct_source_reference_count") != 1

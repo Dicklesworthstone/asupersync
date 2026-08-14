@@ -247,8 +247,8 @@
     },
     {
       "path": "artifacts/unsafe_boundary_ledger_v1.json",
-      "sha256": "c609c6f8b4b4baa9861b875bccdb7a49b747a33e1eb91a5e2ed0bc8b292be7ce",
-      "line_count": 6338,
+      "sha256": "29f8cb1580b9b595df7c1932816a933b21fe5da23cdf4a95f5b51c52fa5b912f",
+      "line_count": 6441,
       "role": "machine inventory of low-level reactor and harness boundaries"
     },
     {
@@ -423,8 +423,8 @@
       "category": "boundary_ledger",
       "paths": ["artifacts/unsafe_boundary_ledger_v1.json", "docs/unsafe_boundary_ledger.md"],
       "anchors": ["unsafe-src-runtime-reactor-io-uring-rs", "reactor-ffi"],
-      "current_state": "FOUR_ROWS_HAVE_47_LOCATORS_OF_WHICH_20_ARE_STALE",
-      "gap": "the 26 io_uring reactor locators are exact; 20 filesystem locators retain a live pattern at a stale line and remain owned by URING-3",
+      "current_state": "FOUR_ROWS_HAVE_47_EXACT_LOCATORS",
+      "gap": "all 47 unsafe-boundary locators now match their live source lines; future source movement remains owned by URING-3",
       "owner_bead": "asupersync-sched-hot-path-perf-bt4y5f.7.3"
     },
     {
@@ -490,11 +490,11 @@
       "site_id": "unsafe-src-fs-dir-rs",
       "path": "src/fs/dir.rs",
       "recorded_locator_count": 2,
-      "exact_locator_count": 0,
-      "stale_locator_count": 2,
+      "exact_locator_count": 2,
+      "stale_locator_count": 0,
       "locators": [
-        {"kind": "allow_unsafe_code", "pattern": "#[allow(unsafe_code)]", "recorded_line": 78, "current_line": 81, "status": "STALE_LINE_LIVE_PATTERN"},
-        {"kind": "unsafe_block", "pattern": "unsafe {", "recorded_line": 83, "current_line": 86, "status": "STALE_LINE_LIVE_PATTERN"}
+        {"kind": "allow_unsafe_code", "pattern": "#[allow(unsafe_code)]", "recorded_line": 81, "current_line": 81, "status": "EXACT_LIVE_PATTERN"},
+        {"kind": "unsafe_block", "pattern": "unsafe {", "recorded_line": 86, "current_line": 86, "status": "EXACT_LIVE_PATTERN"}
       ],
       "owner_bead": "asupersync-sched-hot-path-perf-bt4y5f.7.3"
     },
@@ -502,11 +502,11 @@
       "site_id": "unsafe-src-fs-path-ops-rs",
       "path": "src/fs/path_ops.rs",
       "recorded_locator_count": 2,
-      "exact_locator_count": 0,
-      "stale_locator_count": 2,
+      "exact_locator_count": 2,
+      "stale_locator_count": 0,
       "locators": [
-        {"kind": "allow_unsafe_code", "pattern": "#[allow(unsafe_code)]", "recorded_line": 354, "current_line": 713, "status": "STALE_LINE_LIVE_PATTERN"},
-        {"kind": "unsafe_block", "pattern": "unsafe {", "recorded_line": 359, "current_line": 718, "status": "STALE_LINE_LIVE_PATTERN"}
+        {"kind": "allow_unsafe_code", "pattern": "#[allow(unsafe_code)]", "recorded_line": 713, "current_line": 713, "status": "EXACT_LIVE_PATTERN"},
+        {"kind": "unsafe_block", "pattern": "unsafe {", "recorded_line": 718, "current_line": 718, "status": "EXACT_LIVE_PATTERN"}
       ],
       "owner_bead": "asupersync-sched-hot-path-perf-bt4y5f.7.3"
     },
@@ -514,26 +514,26 @@
       "site_id": "unsafe-src-fs-uring-rs",
       "path": "src/fs/uring.rs",
       "recorded_locator_count": 17,
-      "exact_locator_count": 1,
-      "stale_locator_count": 16,
+      "exact_locator_count": 17,
+      "stale_locator_count": 0,
       "locators": [
         {"kind": "allow_unsafe_code", "pattern": "#![allow(unsafe_code)]", "recorded_line": 24, "current_line": 24, "status": "EXACT_LIVE_PATTERN"},
-        {"kind": "unsafe_block", "pattern": "let result = unsafe { libc::lseek(fd, 0, libc::SEEK_CUR) };", "recorded_line": 259, "current_line": 353, "status": "STALE_LINE_LIVE_PATTERN"},
-        {"kind": "unsafe_block", "pattern": "let fd = unsafe { libc::openat(libc::AT_FDCWD, c_path.as_ptr(), flags, mode) };", "recorded_line": 289, "current_line": 387, "status": "STALE_LINE_LIVE_PATTERN"},
-        {"kind": "unsafe_block", "pattern": "let owned_fd = unsafe { OwnedFd::from_raw_fd(fd) };", "recorded_line": 295, "current_line": 393, "status": "STALE_LINE_LIVE_PATTERN"},
-        {"kind": "unsafe_fn", "pattern": "pub unsafe fn from_raw_fd(fd: RawFd) -> io::Result<Self> {", "recorded_line": 319, "current_line": 417, "status": "STALE_LINE_LIVE_PATTERN"},
-        {"kind": "unsafe_block", "pattern": "let owned_fd = unsafe { OwnedFd::from_raw_fd(fd) };", "recorded_line": 321, "current_line": 419, "status": "STALE_LINE_LIVE_PATTERN"},
-        {"kind": "unsafe_block", "pattern": "let result = unsafe { libc::ftruncate(fd, size_off) };", "recorded_line": 456, "current_line": 561, "status": "STALE_LINE_LIVE_PATTERN"},
-        {"kind": "unsafe_block", "pattern": "let std_file = std::mem::ManuallyDrop::new(unsafe { std::fs::File::from_raw_fd(fd) });", "recorded_line": 472, "current_line": 577, "status": "STALE_LINE_LIVE_PATTERN"},
-        {"kind": "unsafe_block", "pattern": "let std_file = std::mem::ManuallyDrop::new(unsafe { std::fs::File::from_raw_fd(fd) });", "recorded_line": 479, "current_line": 584, "status": "STALE_LINE_LIVE_PATTERN"},
-        {"kind": "unsafe_block", "pattern": "let push_result = unsafe { ring.submission().push(entry) };", "recorded_line": 524, "current_line": 629, "status": "STALE_LINE_LIVE_PATTERN"},
-        {"kind": "unsafe_block", "pattern": "unsafe {", "recorded_line": 640, "current_line": 763, "status": "STALE_LINE_LIVE_PATTERN"},
-        {"kind": "unsafe_block", "pattern": "let push_result = unsafe { ring.submission().push(&entry) };", "recorded_line": 1471, "current_line": 1735, "status": "STALE_LINE_LIVE_PATTERN"},
-        {"kind": "unsafe_block", "pattern": "let file = unsafe { IoUringFile::from_raw_fd(raw_fd) }.unwrap();", "recorded_line": 1606, "current_line": 1870, "status": "STALE_LINE_LIVE_PATTERN"},
-        {"kind": "unsafe_block", "pattern": "let pipe_result = unsafe { libc::pipe(fds.as_mut_ptr()) };", "recorded_line": 1641, "current_line": 1905, "status": "STALE_LINE_LIVE_PATTERN"},
-        {"kind": "unsafe_block", "pattern": "let err = unsafe { IoUringFile::from_raw_fd(read_fd) }", "recorded_line": 1647, "current_line": 1911, "status": "STALE_LINE_LIVE_PATTERN"},
-        {"kind": "unsafe_block", "pattern": "let close_result = unsafe { libc::close(read_fd) };", "recorded_line": 1656, "current_line": 1920, "status": "STALE_LINE_LIVE_PATTERN"},
-        {"kind": "unsafe_block", "pattern": "let write_close_result = unsafe { libc::close(write_fd) };", "recorded_line": 1670, "current_line": 1934, "status": "STALE_LINE_LIVE_PATTERN"}
+        {"kind": "unsafe_block", "pattern": "let result = unsafe { libc::lseek(fd, 0, libc::SEEK_CUR) };", "recorded_line": 353, "current_line": 353, "status": "EXACT_LIVE_PATTERN"},
+        {"kind": "unsafe_block", "pattern": "let fd = unsafe { libc::openat(libc::AT_FDCWD, c_path.as_ptr(), flags, mode) };", "recorded_line": 387, "current_line": 387, "status": "EXACT_LIVE_PATTERN"},
+        {"kind": "unsafe_block", "pattern": "let owned_fd = unsafe { OwnedFd::from_raw_fd(fd) };", "recorded_line": 393, "current_line": 393, "status": "EXACT_LIVE_PATTERN"},
+        {"kind": "unsafe_fn", "pattern": "pub unsafe fn from_raw_fd(fd: RawFd) -> io::Result<Self> {", "recorded_line": 417, "current_line": 417, "status": "EXACT_LIVE_PATTERN"},
+        {"kind": "unsafe_block", "pattern": "let owned_fd = unsafe { OwnedFd::from_raw_fd(fd) };", "recorded_line": 419, "current_line": 419, "status": "EXACT_LIVE_PATTERN"},
+        {"kind": "unsafe_block", "pattern": "let result = unsafe { libc::ftruncate(fd, size_off) };", "recorded_line": 561, "current_line": 561, "status": "EXACT_LIVE_PATTERN"},
+        {"kind": "unsafe_block", "pattern": "let std_file = std::mem::ManuallyDrop::new(unsafe { std::fs::File::from_raw_fd(fd) });", "recorded_line": 577, "current_line": 577, "status": "EXACT_LIVE_PATTERN"},
+        {"kind": "unsafe_block", "pattern": "let std_file = std::mem::ManuallyDrop::new(unsafe { std::fs::File::from_raw_fd(fd) });", "recorded_line": 584, "current_line": 584, "status": "EXACT_LIVE_PATTERN"},
+        {"kind": "unsafe_block", "pattern": "let push_result = unsafe { ring.submission().push(entry) };", "recorded_line": 629, "current_line": 629, "status": "EXACT_LIVE_PATTERN"},
+        {"kind": "unsafe_block", "pattern": "unsafe {", "recorded_line": 763, "current_line": 763, "status": "EXACT_LIVE_PATTERN"},
+        {"kind": "unsafe_block", "pattern": "let push_result = unsafe { ring.submission().push(&entry) };", "recorded_line": 1735, "current_line": 1735, "status": "EXACT_LIVE_PATTERN"},
+        {"kind": "unsafe_block", "pattern": "let file = unsafe { IoUringFile::from_raw_fd(raw_fd) }.unwrap();", "recorded_line": 1870, "current_line": 1870, "status": "EXACT_LIVE_PATTERN"},
+        {"kind": "unsafe_block", "pattern": "let pipe_result = unsafe { libc::pipe(fds.as_mut_ptr()) };", "recorded_line": 1905, "current_line": 1905, "status": "EXACT_LIVE_PATTERN"},
+        {"kind": "unsafe_block", "pattern": "let err = unsafe { IoUringFile::from_raw_fd(read_fd) }", "recorded_line": 1911, "current_line": 1911, "status": "EXACT_LIVE_PATTERN"},
+        {"kind": "unsafe_block", "pattern": "let close_result = unsafe { libc::close(read_fd) };", "recorded_line": 1920, "current_line": 1920, "status": "EXACT_LIVE_PATTERN"},
+        {"kind": "unsafe_block", "pattern": "let write_close_result = unsafe { libc::close(write_fd) };", "recorded_line": 1934, "current_line": 1934, "status": "EXACT_LIVE_PATTERN"}
       ],
       "owner_bead": "asupersync-sched-hot-path-perf-bt4y5f.7.3"
     },

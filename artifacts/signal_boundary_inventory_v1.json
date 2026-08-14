@@ -71,8 +71,8 @@
     },
     {
       "path": "artifacts/unsafe_boundary_ledger_v1.json",
-      "sha256": "c609c6f8b4b4baa9861b875bccdb7a49b747a33e1eb91a5e2ed0bc8b292be7ce",
-      "line_count": 6338
+      "sha256": "29f8cb1580b9b595df7c1932816a933b21fe5da23cdf4a95f5b51c52fa5b912f",
+      "line_count": 6441
     },
     {
       "path": "src/signal/mod.rs",
