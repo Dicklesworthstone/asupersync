@@ -411,8 +411,8 @@ fn public_docs_match_the_shipped_contracts() {
     let runtime_config = std::fs::read_to_string(root.join("src/runtime/config.rs"))
         .expect("read runtime config source");
     let cx = std::fs::read_to_string(root.join("src/cx/cx.rs")).expect("read Cx source");
-    let once_cell = std::fs::read_to_string(root.join("src/sync/once_cell.rs"))
-        .expect("read OnceCell source");
+    let once_cell =
+        std::fs::read_to_string(root.join("src/sync/once_cell.rs")).expect("read OnceCell source");
     let pool = std::fs::read_to_string(root.join("src/sync/pool.rs")).expect("read Pool source");
 
     for marker in [
@@ -427,7 +427,10 @@ fn public_docs_match_the_shipped_contracts() {
         "Object pool with obligation-tracked checkout and return-on-drop",
         "`send_path` refuses before any network I/O; `receive_once` rejects an accepted connection before any handshake, UDP exchange, or data transfer.",
     ] {
-        assert!(readme.contains(marker), "README contract marker drifted: {marker}");
+        assert!(
+            readme.contains(marker),
+            "README contract marker drifted: {marker}"
+        );
     }
 
     for stale in [
@@ -447,7 +450,10 @@ fn public_docs_match_the_shipped_contracts() {
         "scope!, spawn!, join!, join_all!, race!, select! + entry attributes",
         "Proc macros (scope!, spawn!, join!, join_all!, race!, select! + entry attributes)",
     ] {
-        assert!(agents.contains(marker), "AGENTS macro list drifted: {marker}");
+        assert!(
+            agents.contains(marker),
+            "AGENTS macro list drifted: {marker}"
+        );
     }
 
     assert!(race.contains("(#cx).race_drained(vec!"));
