@@ -61,7 +61,7 @@
       "path": "artifacts/kafka_k1_protocol_security_support_policy_v1.json",
     "byte_count": 82164,
       "record_count": 1399,
-    "sha256": "7f3b1ba1b9ce89a9ed8ccf35163925fda013b5a82f76a4fa5742e2d472d1b0e9"
+    "sha256": "41f61e043862c033a614128e177e37f6b090ae38983be6366b55ccf02812352f"
     },
     {
       "input_id": "KAFKA-K2-1-INPUT-K1-5",

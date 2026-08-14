@@ -101,7 +101,7 @@
       "path": "artifacts/kafka_k1_protocol_security_support_policy_v1.json",
       "byte_count": 82164,
       "record_count": 1399,
-      "sha256": "7f3b1ba1b9ce89a9ed8ccf35163925fda013b5a82f76a4fa5742e2d472d1b0e9"
+      "sha256": "41f61e043862c033a614128e177e37f6b090ae38983be6366b55ccf02812352f"
     },
     {
       "input_id": "K1-5-INPUT-K1-2-DOCUMENT",
@@ -119,7 +119,7 @@
       "path": "tests/kafka_k1_protocol_security_support_policy_contract.rs",
       "byte_count": 51761,
       "record_count": 1477,
-      "sha256": "68cd8aa7808fbc69a60fd370afb195bcfad685c500487102e0b7183265848b67"
+      "sha256": "c96f85fbce1507c1fbb566f38ffa35b655e03c3c79c5f305a170b888bb254a71"
     },
     {
       "input_id": "K1-5-INPUT-K1-3-ARTIFACT",
