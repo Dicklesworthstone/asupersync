@@ -35,6 +35,9 @@
 //! - If ≥M tasks succeed: return Ok with successful values
 //! - If quorum impossible: return worst outcome per severity lattice
 //!   `Ok < Err < Cancelled < Panicked`
+//! - For nonzero quorums, a panic in any drained branch is catastrophic and
+//!   [`quorum_to_result`] returns [`QuorumError::Panicked`] even when enough
+//!   sibling branches succeeded. `quorum(0, N)` remains the additive identity.
 //!
 //! # Edge Cases
 //!
@@ -348,7 +351,9 @@ pub const fn quorum_achieved(required: usize, successes: usize) -> bool {
 
 /// Converts a quorum result to a Result for fail-fast handling.
 ///
-/// If the quorum was met, returns `Ok` with the successful values.
+/// If the quorum was met and no branch panicked, returns `Ok` with the
+/// successful values. For a nonzero quorum, a panic in any branch—including a
+/// drained loser—takes precedence and returns [`QuorumError::Panicked`].
 /// If the quorum was not met, returns `Err` with failure information.
 ///
 /// # Example
@@ -724,6 +729,22 @@ mod tests {
 
         assert!(values.is_err());
         assert!(matches!(values.unwrap_err(), QuorumError::Panicked(_)));
+    }
+
+    #[test]
+    fn asupersync_8mp6md_quorum_loser_panic_fails_closed() {
+        let outcomes: Vec<Outcome<i32, &str>> = vec![
+            Outcome::Ok(1),
+            Outcome::Ok(2),
+            Outcome::Panicked(PanicPayload::new("drained loser panicked")),
+        ];
+        let result = quorum_outcomes(2, outcomes);
+
+        assert!(result.quorum_met, "the numerical quorum was reached");
+        assert!(matches!(
+            quorum_to_result(result),
+            Err(QuorumError::Panicked(_))
+        ));
     }
 
     #[test]
