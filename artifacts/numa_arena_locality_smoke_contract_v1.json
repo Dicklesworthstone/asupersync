@@ -42,6 +42,10 @@
         "obligation_arena_touches_by_cohort": [768,768,128,128,128,128,128,128],
         "task_record_pool_touches_by_cohort": [3200,640,640,640,640,640,640,640]
       },
+      "expected_report_projection_tracing_integration_override": {
+        "rss_estimated_bytes": 4579328,
+        "projection_hash": 590824046390275574
+      },
       "expected_report_projection": {
         "allocator_contention_events": 50,
         "baseline_remote_touch_count": 17136,
@@ -103,6 +107,10 @@
         "obligation_arena_touches_by_cohort": [768,768,128,128,128,128,128,128],
         "task_record_pool_touches_by_cohort": [3200,640,640,640,640,640,640,640]
       },
+      "expected_report_projection_tracing_integration_override": {
+        "rss_estimated_bytes": 4579328,
+        "projection_hash": 16319984444304610262
+      },
       "expected_report_projection": {
         "allocator_contention_events": 61,
         "baseline_remote_touch_count": 17136,
@@ -118,10 +126,10 @@
         "operator_verdict": "fallback_only",
         "ownership_preserved": true,
         "placement_fingerprint": 16186555795550753782,
-        "projection_hash": 11734093094240740496,
+        "projection_hash": 7238730300032333139,
         "region_capacity": 1024,
         "remote_touch_reduction_ratio": 0.0,
-        "rss_estimated_bytes": 4317184,
+        "rss_estimated_bytes": 4526080,
         "safe_fallback_profile": "disabled",
         "scenario_id": "AA-NUMA-ARENA-LOCALITY-LOW-CONFIDENCE-FALLBACK",
         "selected_policy": "disabled",
@@ -166,6 +174,10 @@
         "obligation_arena_touches_by_cohort": [512,512,512,512,512,512,512,512],
         "task_record_pool_touches_by_cohort": [1024,1024,1024,1024,1024,1024,1024,1024]
       },
+      "expected_report_projection_tracing_integration_override": {
+        "rss_estimated_bytes": 4579328,
+        "projection_hash": 5320284201290239861
+      },
       "expected_report_projection": {
         "allocator_contention_events": 66,
         "baseline_remote_touch_count": 19712,
@@ -181,10 +193,10 @@
         "operator_verdict": "fallback_only",
         "ownership_preserved": true,
         "placement_fingerprint": 14518773727983361882,
-        "projection_hash": 9347777617409668103,
+        "projection_hash": 1316302406687632124,
         "region_capacity": 1024,
         "remote_touch_reduction_ratio": 0.0,
-        "rss_estimated_bytes": 4317184,
+        "rss_estimated_bytes": 4526080,
         "safe_fallback_profile": "disabled",
         "scenario_id": "AA-NUMA-ARENA-LOCALITY-NO-WIN-FALLBACK",
         "selected_policy": "disabled",
@@ -229,6 +241,10 @@
         "obligation_arena_touches_by_cohort": [],
         "task_record_pool_touches_by_cohort": []
       },
+      "expected_report_projection_tracing_integration_override": {
+        "rss_estimated_bytes": 4579328,
+        "projection_hash": 14785312561949101708
+      },
       "expected_report_projection": {
         "allocator_contention_events": 0,
         "baseline_remote_touch_count": 0,
@@ -244,10 +260,10 @@
         "operator_verdict": "template_only",
         "ownership_preserved": true,
         "placement_fingerprint": 675868731199239589,
-        "projection_hash": 2560198759328901990,
+        "projection_hash": 12671276796678330901,
         "region_capacity": 1024,
         "remote_touch_reduction_ratio": 0.0,
-        "rss_estimated_bytes": 4317184,
+        "rss_estimated_bytes": 4526080,
         "safe_fallback_profile": "disabled",
         "scenario_id": "AA-NUMA-ARENA-LOCALITY-REAL-HOST-TEMPLATE",
         "selected_policy": "disabled",

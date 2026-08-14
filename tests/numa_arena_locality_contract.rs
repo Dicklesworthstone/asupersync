@@ -35,6 +35,40 @@ struct NumaArenaLocalityScenario {
     requested_policy: ArenaLocalityPolicyFixture,
     workload_model: NumaArenaLocalityWorkloadFixture,
     expected_report_projection: Value,
+    #[serde(default)]
+    expected_report_projection_tracing_integration_override:
+        Option<TracingIntegrationProjectionOverride>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+struct TracingIntegrationProjectionOverride {
+    rss_estimated_bytes: u64,
+    projection_hash: u64,
+}
+
+impl NumaArenaLocalityScenario {
+    fn expected_report_projection_for_active_features(&self) -> Value {
+        let mut expected = self.expected_report_projection.clone();
+        if expected.is_null() || !cfg!(feature = "tracing-integration") {
+            return expected;
+        }
+
+        let tracing_override = self
+            .expected_report_projection_tracing_integration_override
+            .expect("pinned NUMA scenarios must cover the tracing-integration layout");
+        let expected_object = expected
+            .as_object_mut()
+            .expect("pinned NUMA report projection must be an object");
+        expected_object.insert(
+            "rss_estimated_bytes".to_string(),
+            json!(tracing_override.rss_estimated_bytes),
+        );
+        expected_object.insert(
+            "projection_hash".to_string(),
+            json!(tracing_override.projection_hash),
+        );
+        expected
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -168,6 +202,7 @@ fn default_scenarios() -> Vec<NumaArenaLocalityScenario> {
                 ],
             },
             expected_report_projection: Value::Null,
+            expected_report_projection_tracing_integration_override: None,
         },
         NumaArenaLocalityScenario {
             scenario_id: "AA-NUMA-ARENA-LOCALITY-LOW-CONFIDENCE-FALLBACK".to_string(),
@@ -208,6 +243,7 @@ fn default_scenarios() -> Vec<NumaArenaLocalityScenario> {
                 ],
             },
             expected_report_projection: Value::Null,
+            expected_report_projection_tracing_integration_override: None,
         },
         NumaArenaLocalityScenario {
             scenario_id: "AA-NUMA-ARENA-LOCALITY-NO-WIN-FALLBACK".to_string(),
@@ -246,6 +282,7 @@ fn default_scenarios() -> Vec<NumaArenaLocalityScenario> {
                 task_record_pool_touches_by_cohort: vec![1024; 8],
             },
             expected_report_projection: Value::Null,
+            expected_report_projection_tracing_integration_override: None,
         },
         NumaArenaLocalityScenario {
             scenario_id: "AA-NUMA-ARENA-LOCALITY-REAL-HOST-TEMPLATE".to_string(),
@@ -280,6 +317,7 @@ fn default_scenarios() -> Vec<NumaArenaLocalityScenario> {
                 task_record_pool_touches_by_cohort: Vec::new(),
             },
             expected_report_projection: Value::Null,
+            expected_report_projection_tracing_integration_override: None,
         },
     ]
 }
@@ -551,22 +589,50 @@ fn maybe_write_report(report: &Value) {
     .expect("write NUMA arena locality report");
 }
 
-#[test]
-fn numa_arena_locality_smoke_contract_emits_report() {
-    let scenario = load_scenario();
-    let report = build_report(&scenario);
-
-    if !scenario.expected_report_projection.is_null() {
-        assert_eq!(
-            report["report_projection"], scenario.expected_report_projection,
-            "NUMA arena locality projection should remain pinned",
-        );
-    } else {
+fn assert_report_projection_is_pinned(scenario: &NumaArenaLocalityScenario, report: &Value) {
+    let expected_projection = scenario.expected_report_projection_for_active_features();
+    if expected_projection.is_null() {
         assert!(
             report["report_projection"].is_object(),
             "NUMA arena locality smoke report should always emit a projection",
         );
+        return;
     }
+
+    let projection_profile = if cfg!(feature = "tracing-integration") {
+        "tracing-integration"
+    } else {
+        "default-layout"
+    };
+    assert_eq!(
+        report["report_projection"], expected_projection,
+        "NUMA arena locality projection should remain pinned for {projection_profile}",
+    );
+}
+
+fn assert_projection_hash_is_self_consistent(
+    scenario_id: &str,
+    profile: &str,
+    mut projection: Value,
+) {
+    let recorded_hash = projection
+        .as_object_mut()
+        .expect("pinned NUMA report projection must be an object")
+        .remove("projection_hash")
+        .and_then(|value| value.as_u64())
+        .expect("pinned NUMA report projection must include a u64 projection_hash");
+    assert_eq!(
+        hash_json(&projection),
+        recorded_hash,
+        "NUMA scenario {scenario_id} must carry a self-consistent {profile} projection hash",
+    );
+}
+
+#[test]
+fn numa_arena_locality_smoke_contract_emits_report() {
+    let scenario = load_scenario();
+    let report = build_report(&scenario);
+    assert_report_projection_is_pinned(&scenario, &report);
 
     assert_eq!(
         report["comparison"]["ownership_preserved"].as_bool(),
@@ -582,6 +648,51 @@ fn numa_arena_locality_smoke_contract_emits_report() {
     println!("NUMA_ARENA_LOCALITY_REPORT_JSON_END");
 
     maybe_write_report(&report);
+}
+
+#[test]
+fn all_pinned_numa_arena_locality_scenarios_cover_active_feature_layout() {
+    let contract: NumaArenaLocalityContract = serde_json::from_str(
+        &fs::read_to_string(DEFAULT_CONTRACT_PATH).expect("read NUMA arena locality contract"),
+    )
+    .expect("parse NUMA arena locality contract");
+
+    for scenario in contract.smoke_scenarios {
+        assert!(
+            !scenario.expected_report_projection.is_null(),
+            "artifact scenario {} must pin its default projection",
+            scenario.scenario_id,
+        );
+        let tracing_override = scenario
+            .expected_report_projection_tracing_integration_override
+            .expect("artifact scenarios must pin their tracing-integration projection override");
+        assert_projection_hash_is_self_consistent(
+            &scenario.scenario_id,
+            "default-layout",
+            scenario.expected_report_projection.clone(),
+        );
+
+        let mut tracing_projection = scenario.expected_report_projection.clone();
+        let tracing_object = tracing_projection
+            .as_object_mut()
+            .expect("pinned NUMA report projection must be an object");
+        tracing_object.insert(
+            "rss_estimated_bytes".to_string(),
+            json!(tracing_override.rss_estimated_bytes),
+        );
+        tracing_object.insert(
+            "projection_hash".to_string(),
+            json!(tracing_override.projection_hash),
+        );
+        assert_projection_hash_is_self_consistent(
+            &scenario.scenario_id,
+            "tracing-integration",
+            tracing_projection,
+        );
+
+        let report = build_report(&scenario);
+        assert_report_projection_is_pinned(&scenario, &report);
+    }
 }
 
 #[test]
