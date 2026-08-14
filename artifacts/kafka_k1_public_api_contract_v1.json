@@ -85,7 +85,7 @@
       "path": "artifacts/kafka_k0_baseline_disposition_v1.json",
       "byte_count": 29494,
       "record_count": 284,
-    "sha256": "38224a4d49981989ea13626c9d21a2e3eb78e7edaa6a48c4392214c84cdf41a5"
+    "sha256": "03922c2077dfd53392650f63f5bd07e3fa0a6153ca374273d1f6389602af616c"
     },
     {
       "input_id": "K1-3-INPUT-K0-1",
