@@ -1,8 +1,8 @@
 # Asupersync Proof Lane Dashboard - [TIMESTAMP]
 
 ## Summary
-Total lanes: 60 | Green: 13 | Yellow: 35 | Red: 0 | Unknown: 12
-Total guarantees: 60 | Green: 13 | Red: 0
+Total lanes: 61 | Green: 14 | Yellow: 35 | Red: 0 | Unknown: 12
+Total guarantees: 61 | Green: 14 | Red: 0
 
 ## Production Graph Proofs
 ✅ default-production-tokio-tree (dependency_graph)
@@ -37,6 +37,8 @@ Total guarantees: 60 | Green: 13 | Red: 0
    Representative native optional runtime surfaces parse and typecheck together wit...
 🟡 lib-tests (test_frontier)
    Runtime crate unit-test frontier including inline module tests and test-internal...
+✅ native-parked-task-cancellation (test_frontier)
+   Native current-thread and owner-local task abort plus cross-thread abort deliver...
 ❓ db-feature-lib-tests (test_frontier)
    Database-feature lib-test frontier: the database:: module tree (sqlite, postgres...
 ❓ channel-mpsc-select-e2e-public-run (test_frontier)
