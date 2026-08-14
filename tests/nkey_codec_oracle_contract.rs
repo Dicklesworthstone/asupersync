@@ -16,7 +16,8 @@ mod owned_nkey_codec;
 use nkeys::{KeyPair, KeyPairType};
 use nkeys_oracle::{
     CodecError, EncodedKind, Field, MAX_DECODED_BYTES, MAX_ENCODED_CHARS, NonCanonicalKind,
-    PROVENANCE, decode_and_verify, decoded_capacity_for, encode_with_checksum, encoded_len_for,
+    PROVENANCE, crc16_xmodem, decode_and_verify, decoded_capacity_for, encode_with_checksum,
+    encoded_len_for,
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -128,6 +129,13 @@ fn prefix_byte(key_type: &KeyPairType) -> u8 {
 
 fn packed_seed_prefix(prefix: u8) -> [u8; 2] {
     [0x90 | (prefix >> 5), (prefix & 0x1f) << 3]
+}
+
+fn independently_framed_body(body: &[u8]) -> Vec<u8> {
+    let mut frame = Vec::with_capacity(body.len() + 2);
+    frame.extend_from_slice(body);
+    frame.extend_from_slice(&crc16_xmodem(body).to_le_bytes());
+    frame
 }
 
 fn replace_ascii_byte(source: &str, index: usize, replacement: u8) -> String {
@@ -575,6 +583,79 @@ fn bounded_formulas_and_typed_failures_are_exact_redacted_and_atomic() {
         assert!(!debug.contains("SUAAAAICAMCA"));
         assert!(!display.contains("0001020304050607"));
         assert!(!debug.contains("0001020304050607"));
+    }
+}
+
+#[test]
+fn owned_base32_matches_the_frozen_independent_n1_corpus() {
+    let spec = parse_repo_json(SPEC_PATH);
+    let corpus = object(&spec, "vector_corpus");
+    let raw_seed = decode_hex_32(
+        corpus
+            .get("raw_secret_hex")
+            .and_then(Value::as_str)
+            .expect("raw secret vector"),
+    );
+    let public = decode_hex_32(
+        corpus
+            .get("ed25519_public_hex")
+            .and_then(Value::as_str)
+            .expect("public vector"),
+    );
+    let limits = owned_nkey_codec::Base32Limits::default();
+
+    for vector in corpus
+        .get("independent_ed25519_vectors")
+        .and_then(Value::as_array)
+        .expect("independent rows")
+    {
+        let key_type = key_pair_type(text(vector, "kind"));
+        let prefix = prefix_byte(&key_type);
+
+        let mut seed_body = packed_seed_prefix(prefix).to_vec();
+        seed_body.extend_from_slice(&raw_seed);
+        let seed_frame = independently_framed_body(&seed_body);
+        assert_eq!(
+            owned_nkey_codec::encode_base32(&seed_frame, limits).as_deref(),
+            Ok(text(vector, "seed"))
+        );
+        assert_eq!(
+            owned_nkey_codec::decode_base32(text(vector, "seed"), limits),
+            Ok(seed_frame)
+        );
+
+        let mut public_body = vec![prefix];
+        public_body.extend_from_slice(&public);
+        let public_frame = independently_framed_body(&public_body);
+        assert_eq!(
+            owned_nkey_codec::encode_base32(&public_frame, limits).as_deref(),
+            Ok(text(vector, "public"))
+        );
+        assert_eq!(
+            owned_nkey_codec::decode_base32(text(vector, "public"), limits),
+            Ok(public_frame)
+        );
+    }
+
+    for vector in corpus
+        .get("private_vectors")
+        .and_then(Value::as_array)
+        .expect("private rows")
+    {
+        let mut body = vec![120];
+        body.extend_from_slice(&raw_seed);
+        if text(vector, "vector_id") == "NKEY-VEC-INDEP-P-ED" {
+            body.extend_from_slice(&public);
+        }
+        let frame = independently_framed_body(&body);
+        assert_eq!(
+            owned_nkey_codec::encode_base32(&frame, limits).as_deref(),
+            Ok(text(vector, "encoded"))
+        );
+        assert_eq!(
+            owned_nkey_codec::decode_base32(text(vector, "encoded"), limits),
+            Ok(frame)
+        );
     }
 }
 
