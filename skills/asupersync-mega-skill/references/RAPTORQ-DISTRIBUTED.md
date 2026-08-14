@@ -56,7 +56,8 @@ default:
 
 - The production `transport_rq` transport refuses to run on a default
   `RqConfig`: symbol-auth mode resolves to `MissingAuthenticationContext`, so
-  `send_path`/`receive_once` error out before any network I/O unless the
+  `send_path` errors out before any network I/O and `receive_once` rejects
+  the connection before any handshake or data transfer, unless the
   caller makes a deliberate choice — `with_symbol_auth(ctx)` (every UDP
   symbol signed and verified) or the explicit
   `allow_unauthenticated_for_trusted_transport()` opt-out for loopback/lab

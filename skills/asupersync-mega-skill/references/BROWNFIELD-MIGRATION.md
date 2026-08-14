@@ -26,7 +26,7 @@ python3 scripts/migration_readiness_planner.py --project-root /path/to/rust/proj
 
 Read `summary.final_verdict` (`ready`, `needs_quarantine`, or `blocked`),
 `semantic_map.recommendations`, `operator_report.phase_plan`, and
-`operator_report.residual_risks` before editing code. The planner never mutates
+`operator_report.residual_risk_rows` before editing code. The planner never mutates
 the scanned project. See `docs/integration.md` (Tokio Migration Playbook) and
 `docs/migration_recipe_compiler.md` for turning findings into a checklist.
 

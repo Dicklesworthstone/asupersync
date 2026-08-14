@@ -44,9 +44,9 @@ These are the fastest ways to sabotage a migration.
 
 - Assuming proc macros are more authoritative than manual APIs. Current
   contract: `scope!` does not create a fresh child-region boundary (use
-  `Scope::region(...)` for quiescence on exit), `join!` / `join_all!` still
-  await branches sequentially, and `race!` / blocking `select!` drain losers
-  (branches must be `Send + 'static` with spawn authority).
+  `Scope::region(...)` for quiescence on exit), `join!` / `join_all!` poll
+  branches concurrently in one `poll_fn`, and `race!` / blocking `select!`
+  drain losers (branches must be `Send + 'static` with spawn authority).
 - Working around cancellation by smuggling results out of tasks: since v0.4.4,
   ordinary `Cx::spawn*` preserves a task's typed result after it acknowledges
   cancellation, so a concurrent abort does not erase it.

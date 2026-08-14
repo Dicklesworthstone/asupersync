@@ -6,7 +6,7 @@ description: >-
 
 # Asupersync Mega Skill
 
-Asupersync is a spec-first, cancel-correct, capability-secure async runtime for Rust. Not a Tokio wrapper -- a broad, support-class-scoped replacement for native Asupersync designs, with stronger guarantees around structured concurrency, obligation tracking, deterministic testing, and capability security. Exact adapter, web, browser, protocol, and benchmark parity must still be checked against live docs and proof artifacts.
+Asupersync is a spec-first, cancel-correct, capability-secure async runtime for Rust. Not a Tokio wrapper -- a broad, support-class-scoped replacement for Tokio stacks, with stronger guarantees around structured concurrency, obligation tracking, deterministic testing, and capability security. Exact adapter, web, browser, protocol, and benchmark parity must still be checked against live docs and proof artifacts.
 
 This skill is primarily for agents integrating Asupersync into other projects or extracting maximum architectural leverage from it in greenfield systems. It also covers repo-internal work when that is the actual task.
 
@@ -56,7 +56,7 @@ fn main() -> Result<(), Error> {
 
 `RuntimeBuilder` creates the runtime, `block_on` installs an ambient runtime
 context, runtime-spawned tasks run with a runtime-owned `Cx`, and app code
-receives `&Cx`. `RuntimeHandle::request_cx_with_budget(budget)` is the blessed
+receives `&Cx`. `Runtime::request_cx_with_budget(budget)` is the blessed
 production ambient-free `Cx` entry; `Cx::for_request()` / `Cx::for_testing()`
 remain test/internal-harness material. For services, prefer request/call
 regions at boundaries, then graduate to `AppSpec` + supervision when the
@@ -145,8 +145,9 @@ If the target system is doing real work, do not stop after "the code compiles on
 
 ## Canonical Spine
 
-- Bootstrap: `#[asupersync::main]`, `runtime::RuntimeBuilder`, `Runtime`,
-  `RuntimeHandle` (`request_cx_with_budget` for ambient-free production `Cx`)
+- Bootstrap: `#[asupersync::main]`, `runtime::RuntimeBuilder`, `Runtime`
+  (`Runtime::request_cx_with_budget` for ambient-free production `Cx`),
+  `RuntimeHandle`
 - App code: `Cx`, `Cx::spawn`, `Cx::spawn_in`, `Scope` child regions, `JoinSet`
 - Tests: `test_utils::{run_test, run_test_with_cx}`, `LabRuntime`, `LabConfig`,
   `LabRunReport`
@@ -176,10 +177,11 @@ Current generated API-map anchors to remember:
   TimeoutLayer}`, plus `web::Router::layer`,
 - ATP/daemon, RaptorQ, observability, Spork, `runtime::RuntimeBuilder`, and
   `Cx + Scope`,
-- dependency-sovereignty owned modules (first-party base64/hex codecs, LZ4
-  block codec, owned regex engine, protobuf wire + OTLP proto, UTC time,
-  minimal DER) — prefer these over reintroducing the third-party crates they
-  replace.
+- dependency-sovereignty owned modules (first-party base64/hex codecs, owned
+  regex engine, protobuf wire + OTLP proto, UTC time, minimal DER, plus a
+  not-yet-wired LZ4 block codec) — prefer these over reintroducing the
+  third-party crates they replace; cutover status per module is tracked by
+  the dependency capability inventories, not assumed.
 
 Refresh these from `/data/projects/asupersync/artifacts/api_surface_map_v1.json`
 before making precise public-surface claims.
@@ -327,14 +329,16 @@ Current ATP evidence snapshot (ledger last updated 2026-07-10 at MATRIX-235;
 refresh from `docs/atp_rq_beat_rsync_ledger.md` before citing):
 
 - Nocrypto (`atp-rq-lab` vs tuned rsyncd) is a banked board-level win:
-  `MATRIX-212` verified all 56 rows and `MATRIX-231` closed the last
-  clean-path gaps (`500M/perfect` 0.881x, `5G/perfect` win); tree/small
-  floors stay marginal, so say "every measured nocrypto cell", not "all".
+  `MATRIX-212` swept 56 rows (55 valid rows all sha-ok; one benign
+  port-collision exclusion) and `MATRIX-231` closed the last clean-path gaps
+  (`500M/perfect` 0.881x, `5G/perfect` win); tree/small floors stay
+  marginal, so say "every measured nocrypto cell", not "all".
 - Encrypted (`atp-quic-tls13` vs rsync-over-ssh aes128gcm) is fully measured
   (25/25 cells, `MATRIX-216`) and the lossy sub-board is all-wins
   (`MATRIX-221`). Remaining rsync-favored territory is clean-path large +
-  tree-perfect floors, root-caused to sender duty-cycle with an ~11%
-  link-bound honest ceiling (`MATRIX-232/233`).
+  tree-perfect floors, root-caused to sender duty-cycle: ~11% link-bound
+  honest ceiling on clean-large, a separate ~1.3-1.6x bound on tree-perfect
+  (`MATRIX-232/233`).
 - `MATRIX-235` native-link pacing rework produced large matched-pair gains
   (encrypted `500M/perfect` -19.5%, `50M/perfect` -58%) but had no
   contemporaneous rsync bar; it is a landed improvement, not a banked flip.

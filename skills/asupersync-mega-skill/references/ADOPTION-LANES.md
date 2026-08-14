@@ -47,7 +47,7 @@ Exit criteria:
 - Tokio is removed from core modules,
 - migrated domains use native Asupersync surfaces,
 - any remaining Tokio-only crate is isolated behind a dedicated adapter boundary,
-- `cargo tree -e normal -i tokio` on core crates prints nothing (no-Tokio production graph).
+- `cargo tree -e normal -i tokio` on core crates prints `warning: nothing to print.` (no-Tokio production graph).
 
 ## Lane 3: Boundary Interop
 

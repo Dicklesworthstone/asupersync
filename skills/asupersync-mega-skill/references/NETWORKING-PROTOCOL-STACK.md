@@ -201,17 +201,19 @@ Current matrix evidence (ledger through `MATRIX-235`, 2026-07-10; refresh
 `docs/atp_rq_beat_rsync_ledger.md` before citing):
 
 - Nocrypto (`atp-rq-lab` vs tuned rsyncd) is a banked board-level win:
-  `MATRIX-212` verified all 56 rows and `MATRIX-231` closed the last
-  clean-path gaps (`500M/perfect` 0.881x, `5G/perfect` win); tree/small
-  floors stay marginal. The `500M/broken/nocrypto` win (`MATRIX-209`,
+  `MATRIX-212` swept 56 rows (55 valid rows all sha-ok; one benign
+  port-collision exclusion) and `MATRIX-231` closed the last clean-path gaps
+  (`500M/perfect` 0.881x, `5G/perfect` win); tree/small floors stay
+  marginal. The `500M/broken/nocrypto` win (`MATRIX-209`,
   564.77s vs 574.46s) no longer carries a correctness asterisk —
   `MATRIX-230` closed the residual `InconsistentEquations` as spec-expected
   RaptorQ rank deficiency.
 - Encrypted (`atp-quic-tls13` vs rsync-over-ssh aes128gcm) is fully measured
   (25/25 cells, `MATRIX-216`) and the lossy sub-board is all-wins
   (`MATRIX-221`). Remaining rsync-favored territory is clean-path large +
-  tree-perfect floors, root-caused to sender duty-cycle with an ~11%
-  link-bound honest ceiling (`MATRIX-232/233`).
+  tree-perfect floors, root-caused to sender duty-cycle: ~11% link-bound
+  honest ceiling on clean-large, a separate ~1.3-1.6x bound on tree-perfect
+  (`MATRIX-232/233`).
 - Receiver RSS is bounded (<=18MB at every size; the 5G receiver went
   882MB -> 12MB, `MATRIX-213/216`).
 - `MATRIX-235` native-link pacing rework showed large matched-pair gains

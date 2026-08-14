@@ -61,7 +61,7 @@ Use `ShardGuard` to acquire multiple shards in canonical order at runtime
 
 Source: `src/sync/contended_mutex.rs`
 
-Wrapper around `parking_lot::Mutex` with optional contention metrics (feature: `lock-metrics`):
+Wrapper around `std::sync::Mutex` (synchronous `lock()`, no `Cx`) with optional contention metrics (feature: `lock-metrics`):
 - Wait time tracking (cumulative, max, and retained percentile samples)
 - Hold time tracking (cumulative and max)
 - Contention event counting

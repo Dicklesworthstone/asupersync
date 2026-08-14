@@ -159,8 +159,9 @@ semantics matter more than middleware layering.
 - stuffing long-lived service topology into naked spawned tasks
 - hand-writing Tokio-`select!`-style spaghetti for timeout/retry/race logic --
   the native `race!` and N-ary heterogeneous `select!` macros are
-  drain-correct (`Cx::race_drained*` / `Scope::race_all`); only the `select!`
-  `else` form and direct `Cx::race` are drop-on-cancel
+  drain-correct (`Cx::race_drained*` / `Scope::race_all`); the `select!`
+  `else` form, direct `Cx::race*`, and `race!`'s elapsed `timeout:` path are
+  drop-on-cancel
 - using `watch` to represent must-process event history
 - using `broadcast` when consumers only need the latest snapshot
 - building internal RPC with loose `mpsc` messages and no reply obligation

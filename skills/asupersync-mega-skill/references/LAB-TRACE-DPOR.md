@@ -42,7 +42,7 @@ Deterministic and seed-bound. Pre-poll and post-poll injection points:
 
 Presets: `with_light_chaos()`, `with_heavy_chaos()`, `with_chaos(...)` for focused campaigns.
 
-Targeted await-point cancellation injection (`CancellationInjector`, `AwaitPoint`) lives in `src/lab/injection.rs`.
+Targeted await-point cancellation injection (`CancellationInjector`, `AwaitPoint`) is defined in `src/lab/instrumented_future.rs` (re-exported from `lab`) and driven by `src/lab/injection.rs`.
 
 ### Snapshots
 

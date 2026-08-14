@@ -273,8 +273,9 @@ claims.
 `rch` offloads cargo builds to remote workers:
 
 ```bash
-rch exec -- env CARGO_TARGET_DIR="${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_build" cargo build --release
-rch exec -- env CARGO_TARGET_DIR="${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_test" cargo test
+rch exec -- env CARGO_TARGET_DIR="${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_build_release" cargo build --release
+rch exec -- env CARGO_TARGET_DIR="${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_test_all" cargo test --features test-internals
+rch exec -- env CARGO_TARGET_DIR="${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_clippy" cargo clippy
 rch doctor       # health check
 rch workers probe --all  # test connectivity
 ```
@@ -353,7 +354,8 @@ Run sequence for serious ATP claims:
 3. `scripts/atp_bench/matrix_bench.sh` (resumable planner; `--execute` drives
    `run_matrix_cell.sh` per hermetic netns cell). Delta re-sync claims use
    `scripts/atp_bench/resync_bench.sh` instead.
-4. `scripts/atp_bench/score_matrix.py` (`--fail-on-mismatch` is the CI gate).
+4. `scripts/atp_bench/score_matrix.py` (`--fail-on-mismatch` is the harness's
+   fail-closed scoring gate; no GitHub CI job runs it).
 5. Ledger update in `docs/atp_rq_beat_rsync_ledger.md` and/or matrix artifact.
 
 Stale cells are blockers unless the claim is explicitly scoped to the fresh cell.

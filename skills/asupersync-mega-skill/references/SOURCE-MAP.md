@@ -10,7 +10,7 @@ from `/data/projects/asupersync/artifacts/api_surface_map_v1.json` and
 (releases v0.4.0 -> v0.4.4 shipped 2026-08-07 -> 2026-08-13); v0.4.3
 public-API compatibility is a hard release gate (AGENTS.md "Backwards
 Compatibility"). Not a Tokio wrapper -- a broad
-support-class-scoped replacement for native Asupersync designs, with stronger
+support-class-scoped replacement for Tokio stacks, with stronger
 guarantees:
 
 - **Structured concurrency**: every task owned by a region; region close = quiescence

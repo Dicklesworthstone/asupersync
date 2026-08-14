@@ -179,9 +179,10 @@ Important guidance:
 - Do not hold permits or leases across unrelated awaits.
 - Prefer `call` over `cast` when the protocol requires acknowledgement or reply ownership.
 - Use `CastOverflowPolicy` deliberately. Mailbox overflow policy is part of system semantics, not a default you should ignore.
-- Tracked session channels are capability-threaded since v0.4.0:
+- Tracked session channels are capability-threaded:
   `TrackedSender::try_reserve` takes `&Cx` and `TrackedPermit::try_send`
-  returns `CommittedProof<SendPermit>`.
+  returns `CommittedProof<SendPermit>` (shipped in v0.3.10 under an incorrect
+  patch bump; v0.4.0 is the policy-correct compatibility anchor).
 
 Relevant paths:
 
