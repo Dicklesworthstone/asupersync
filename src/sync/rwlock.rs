@@ -286,8 +286,11 @@ impl<T> RwLock<T> {
     /// Tries to acquire a read guard without waiting.
     #[inline]
     pub fn try_read(&self) -> Result<RwLockReadGuard<'_, T>, TryReadError> {
-        self.try_acquire_read_state()?;
-        Ok(RwLockReadGuard { lock: self })
+        let lock_order = self.try_acquire_read_state()?;
+        Ok(RwLockReadGuard {
+            lock: self,
+            lock_order,
+        })
     }
 
     /// Acquires a write guard asynchronously, waiting if necessary.
@@ -308,8 +311,11 @@ impl<T> RwLock<T> {
     /// Tries to acquire a write guard without waiting.
     #[inline]
     pub fn try_write(&self) -> Result<RwLockWriteGuard<'_, T>, TryWriteError> {
-        self.try_acquire_write_state()?;
-        Ok(RwLockWriteGuard { lock: self })
+        let lock_order = self.try_acquire_write_state()?;
+        Ok(RwLockWriteGuard {
+            lock: self,
+            lock_order,
+        })
     }
 
     /// Returns a mutable reference to the inner value.
@@ -324,7 +330,7 @@ impl<T> RwLock<T> {
     }
 
     #[inline]
-    fn try_acquire_read_state(&self) -> Result<(), TryReadError> {
+    fn try_acquire_read_state(&self) -> Result<lock_ordering::GuardLockOrder, TryReadError> {
         let mut state = self.state.lock();
         if self.is_poisoned() {
             return Err(TryReadError::Poisoned);
@@ -346,15 +352,11 @@ impl<T> RwLock<T> {
         drop(state);
 
         // Record lock acquisition for ordering tracking
-        if let Some(rank) = self.rank {
-            lock_ordering::record_acquire(self.name, rank);
-        }
-
-        Ok(())
+        Ok(lock_ordering::record_guard_acquire(self.name, self.rank))
     }
 
     #[inline]
-    fn try_acquire_write_state(&self) -> Result<(), TryWriteError> {
+    fn try_acquire_write_state(&self) -> Result<lock_ordering::GuardLockOrder, TryWriteError> {
         let mut state = self.state.lock();
         if self.is_poisoned() {
             return Err(TryWriteError::Poisoned);
@@ -376,11 +378,7 @@ impl<T> RwLock<T> {
         drop(state);
 
         // Record lock acquisition for ordering tracking
-        if let Some(rank) = self.rank {
-            lock_ordering::record_acquire(self.name, rank);
-        }
-
-        Ok(())
+        Ok(lock_ordering::record_guard_acquire(self.name, self.rank))
     }
 
     #[inline]
@@ -818,12 +816,16 @@ impl<'a, T, Caps> Future for ReadFuture<'a, '_, T, Caps> {
                         // ordering as immediate acquisition.
                         if let Some(rank) = this.lock.rank {
                             lock_ordering::check_acquire(this.lock.name, rank);
-                            lock_ordering::record_acquire(this.lock.name, rank);
                         }
+                        let lock_order =
+                            lock_ordering::record_guard_acquire(this.lock.name, this.lock.rank);
 
                         this.waiter_id = None;
                         this.completed = true;
-                        return Poll::Ready(Ok(RwLockReadGuard { lock: this.lock }));
+                        return Poll::Ready(Ok(RwLockReadGuard {
+                            lock: this.lock,
+                            lock_order,
+                        }));
                     }
                 }
             }
@@ -838,12 +840,14 @@ impl<'a, T, Caps> Future for ReadFuture<'a, '_, T, Caps> {
                 drop(state);
 
                 // Record lock acquisition for ordering tracking
-                if let Some(rank) = this.lock.rank {
-                    lock_ordering::record_acquire(this.lock.name, rank);
-                }
+                let lock_order =
+                    lock_ordering::record_guard_acquire(this.lock.name, this.lock.rank);
 
                 this.completed = true;
-                return Poll::Ready(Ok(RwLockReadGuard { lock: this.lock }));
+                return Poll::Ready(Ok(RwLockReadGuard {
+                    lock: this.lock,
+                    lock_order,
+                }));
             }
 
             if queued_waker.is_none() {
@@ -932,8 +936,9 @@ impl<'a, T, Caps> Future for WriteFuture<'a, '_, T, Caps> {
                         // ordering as immediate acquisition.
                         if let Some(rank) = this.lock.rank {
                             lock_ordering::check_acquire(this.lock.name, rank);
-                            lock_ordering::record_acquire(this.lock.name, rank);
                         }
+                        let lock_order =
+                            lock_ordering::record_guard_acquire(this.lock.name, this.lock.rank);
 
                         let mut state = this.lock.state.lock();
                         this.waiter_id = None;
@@ -943,7 +948,10 @@ impl<'a, T, Caps> Future for WriteFuture<'a, '_, T, Caps> {
                         }
                         drop(state);
                         this.completed = true;
-                        return Poll::Ready(Ok(RwLockWriteGuard { lock: this.lock }));
+                        return Poll::Ready(Ok(RwLockWriteGuard {
+                            lock: this.lock,
+                            lock_order,
+                        }));
                     }
                 }
             }
@@ -962,12 +970,14 @@ impl<'a, T, Caps> Future for WriteFuture<'a, '_, T, Caps> {
                 drop(state);
 
                 // Record lock acquisition for ordering tracking
-                if let Some(rank) = this.lock.rank {
-                    lock_ordering::record_acquire(this.lock.name, rank);
-                }
+                let lock_order =
+                    lock_ordering::record_guard_acquire(this.lock.name, this.lock.rank);
 
                 this.completed = true;
-                return Poll::Ready(Ok(RwLockWriteGuard { lock: this.lock }));
+                return Poll::Ready(Ok(RwLockWriteGuard {
+                    lock: this.lock,
+                    lock_order,
+                }));
             }
 
             if queued_waker.is_none() {
@@ -1005,6 +1015,7 @@ impl<T, Caps> Drop for WriteFuture<'_, '_, T, Caps> {
 #[must_use = "guard will be immediately released if not held"]
 pub struct RwLockReadGuard<'a, T> {
     lock: &'a RwLock<T>,
+    lock_order: lock_ordering::GuardLockOrder,
 }
 
 unsafe impl<T: Send + Sync> Send for RwLockReadGuard<'_, T> {}
@@ -1028,12 +1039,10 @@ impl<T: std::fmt::Debug> std::fmt::Debug for RwLockReadGuard<'_, T> {
 impl<T> Drop for RwLockReadGuard<'_, T> {
     #[inline]
     fn drop(&mut self) {
+        // End diagnostic ownership before release_reader can invoke a
+        // user-controlled Waker that panics.
+        lock_ordering::record_guard_release(&mut self.lock_order);
         self.lock.release_reader();
-
-        // Record lock release for ordering tracking
-        if let Some(rank) = self.lock.rank {
-            lock_ordering::record_release(self.lock.name, rank);
-        }
     }
 }
 
@@ -1041,6 +1050,7 @@ impl<T> Drop for RwLockReadGuard<'_, T> {
 #[must_use = "guard will be immediately released if not held"]
 pub struct RwLockWriteGuard<'a, T> {
     lock: &'a RwLock<T>,
+    lock_order: lock_ordering::GuardLockOrder,
 }
 
 unsafe impl<T: Send> Send for RwLockWriteGuard<'_, T> {}
@@ -1076,12 +1086,8 @@ impl<T> Drop for RwLockWriteGuard<'_, T> {
         if std::thread::panicking() {
             self.lock.poisoned.store(true, Ordering::Release);
         }
+        lock_ordering::record_guard_release(&mut self.lock_order);
         self.lock.release_writer();
-
-        // Record lock release for ordering tracking
-        if let Some(rank) = self.lock.rank {
-            lock_ordering::record_release(self.lock.name, rank);
-        }
     }
 }
 
@@ -1101,9 +1107,13 @@ impl<'a, T> RwLockWriteGuard<'a, T> {
     /// let read_guard = write_guard.downgrade();
     /// assert_eq!(*read_guard, 42);
     /// ```
-    pub fn downgrade(self) -> RwLockReadGuard<'a, T> {
+    pub fn downgrade(mut self) -> RwLockReadGuard<'a, T> {
+        let lock_order = lock_ordering::take_guard_lock_order(&mut self.lock_order);
         let md = std::mem::ManuallyDrop::new(self);
-        let read_guard = RwLockReadGuard { lock: md.lock };
+        let read_guard = RwLockReadGuard {
+            lock: md.lock,
+            lock_order,
+        };
 
         // Atomically transition from writer to reader
         let reader_wakers = {
@@ -1137,6 +1147,7 @@ impl<'a, T> RwLockWriteGuard<'a, T> {
 #[must_use = "guard will be immediately released if not held"]
 pub struct OwnedRwLockReadGuard<T> {
     lock: Arc<RwLock<T>>,
+    lock_order: lock_ordering::GuardLockOrder,
 }
 
 impl<T> OwnedRwLockReadGuard<T> {
@@ -1152,8 +1163,8 @@ impl<T> OwnedRwLockReadGuard<T> {
 
     /// Tries to acquire an owned read guard without waiting.
     pub fn try_read(lock: Arc<RwLock<T>>) -> Result<Self, TryReadError> {
-        lock.try_acquire_read_state()?;
-        Ok(Self { lock })
+        let lock_order = lock.try_acquire_read_state()?;
+        Ok(Self { lock, lock_order })
     }
 
     /// Executes a closure with shared access to the data.
@@ -1184,12 +1195,8 @@ impl<T: std::fmt::Debug> std::fmt::Debug for OwnedRwLockReadGuard<T> {
 impl<T> Drop for OwnedRwLockReadGuard<T> {
     #[inline]
     fn drop(&mut self) {
+        lock_ordering::record_guard_release(&mut self.lock_order);
         self.lock.release_reader();
-
-        // Record lock release for ordering tracking
-        if let Some(rank) = self.lock.rank {
-            lock_ordering::record_release(self.lock.name, rank);
-        }
     }
 }
 
@@ -1197,6 +1204,7 @@ impl<T> Drop for OwnedRwLockReadGuard<T> {
 #[must_use = "guard will be immediately released if not held"]
 pub struct OwnedRwLockWriteGuard<T> {
     lock: Arc<RwLock<T>>,
+    lock_order: lock_ordering::GuardLockOrder,
 }
 
 impl<T> OwnedRwLockWriteGuard<T> {
@@ -1213,8 +1221,8 @@ impl<T> OwnedRwLockWriteGuard<T> {
 
     /// Tries to acquire an owned write guard without waiting.
     pub fn try_write(lock: Arc<RwLock<T>>) -> Result<Self, TryWriteError> {
-        lock.try_acquire_write_state()?;
-        Ok(Self { lock })
+        let lock_order = lock.try_acquire_write_state()?;
+        Ok(Self { lock, lock_order })
     }
 
     /// Executes a closure with exclusive access to the data.
@@ -1255,12 +1263,8 @@ impl<T> Drop for OwnedRwLockWriteGuard<T> {
         if std::thread::panicking() {
             self.lock.poisoned.store(true, Ordering::Release);
         }
+        lock_ordering::record_guard_release(&mut self.lock_order);
         self.lock.release_writer();
-
-        // Record lock release for ordering tracking
-        if let Some(rank) = self.lock.rank {
-            lock_ordering::record_release(self.lock.name, rank);
-        }
     }
 }
 
@@ -1280,11 +1284,12 @@ impl<T> OwnedRwLockWriteGuard<T> {
     /// let read_guard = write_guard.downgrade();
     /// read_guard.with_read(|data| assert_eq!(*data, 42));
     /// ```
-    pub fn downgrade(self) -> OwnedRwLockReadGuard<T> {
+    pub fn downgrade(mut self) -> OwnedRwLockReadGuard<T> {
+        let lock_order = lock_ordering::take_guard_lock_order(&mut self.lock_order);
         let md = std::mem::ManuallyDrop::new(self);
         let lock = unsafe { std::ptr::read(&md.lock) };
 
-        let read_guard = OwnedRwLockReadGuard { lock };
+        let read_guard = OwnedRwLockReadGuard { lock, lock_order };
 
         // Atomically transition from writer to reader
         let reader_wakers = {
@@ -1376,13 +1381,15 @@ impl<T, Caps> Future for OwnedReadFuture<'_, T, Caps> {
                         // ordering as immediate acquisition.
                         if let Some(rank) = this.lock.rank {
                             lock_ordering::check_acquire(this.lock.name, rank);
-                            lock_ordering::record_acquire(this.lock.name, rank);
                         }
+                        let lock_order =
+                            lock_ordering::record_guard_acquire(this.lock.name, this.lock.rank);
 
                         this.waiter_id = None;
                         this.completed = true;
                         return Poll::Ready(Ok(OwnedRwLockReadGuard {
                             lock: Arc::clone(&this.lock),
+                            lock_order,
                         }));
                     }
                 }
@@ -1398,13 +1405,13 @@ impl<T, Caps> Future for OwnedReadFuture<'_, T, Caps> {
                 drop(state);
 
                 // Record lock acquisition for ordering tracking
-                if let Some(rank) = this.lock.rank {
-                    lock_ordering::record_acquire(this.lock.name, rank);
-                }
+                let lock_order =
+                    lock_ordering::record_guard_acquire(this.lock.name, this.lock.rank);
 
                 this.completed = true;
                 return Poll::Ready(Ok(OwnedRwLockReadGuard {
                     lock: Arc::clone(&this.lock),
+                    lock_order,
                 }));
             }
 
@@ -1500,8 +1507,9 @@ impl<T, Caps> Future for OwnedWriteFuture<'_, T, Caps> {
                         // ordering as immediate acquisition.
                         if let Some(rank) = this.lock.rank {
                             lock_ordering::check_acquire(this.lock.name, rank);
-                            lock_ordering::record_acquire(this.lock.name, rank);
                         }
+                        let lock_order =
+                            lock_ordering::record_guard_acquire(this.lock.name, this.lock.rank);
 
                         let mut state = this.lock.state.lock();
                         this.waiter_id = None;
@@ -1513,6 +1521,7 @@ impl<T, Caps> Future for OwnedWriteFuture<'_, T, Caps> {
                         this.completed = true;
                         return Poll::Ready(Ok(OwnedRwLockWriteGuard {
                             lock: Arc::clone(&this.lock),
+                            lock_order,
                         }));
                     }
                 }
@@ -1532,13 +1541,13 @@ impl<T, Caps> Future for OwnedWriteFuture<'_, T, Caps> {
                 drop(state);
 
                 // Record lock acquisition for ordering tracking
-                if let Some(rank) = this.lock.rank {
-                    lock_ordering::record_acquire(this.lock.name, rank);
-                }
+                let lock_order =
+                    lock_ordering::record_guard_acquire(this.lock.name, this.lock.rank);
 
                 this.completed = true;
                 return Poll::Ready(Ok(OwnedRwLockWriteGuard {
                     lock: Arc::clone(&this.lock),
+                    lock_order,
                 }));
             }
 

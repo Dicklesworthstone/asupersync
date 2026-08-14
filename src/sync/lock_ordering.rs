@@ -1,7 +1,8 @@
 //! Runtime lock ordering enforcement for deadlock prevention.
 //!
 //! Implements the asupersync lock hierarchy: E(Config) -> D(Instrumentation) -> B(Regions) -> A(Tasks) -> C(Obligations).
-//! In debug builds or with `lock-metrics` feature, tracks lock acquisition order per thread and panics on violations.
+//! In debug builds or with `lock-metrics` feature, tracks lock acquisition order per task
+//! (falling back to the current thread outside a runtime) and panics on violations.
 //! In release builds without `lock-metrics`, all checks are compiled away for zero cost.
 //!
 //! # Cross-Module Enforcement
@@ -13,7 +14,13 @@
 #[cfg(any(debug_assertions, feature = "lock-metrics"))]
 use std::cell::RefCell;
 #[cfg(any(debug_assertions, feature = "lock-metrics"))]
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+#[cfg(any(debug_assertions, feature = "lock-metrics"))]
+use std::hash::{Hash, Hasher};
+#[cfg(any(debug_assertions, feature = "lock-metrics"))]
+use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(any(debug_assertions, feature = "lock-metrics"))]
+use std::sync::{Arc, LazyLock, Mutex as StdMutex, MutexGuard as StdMutexGuard};
 
 const LOCK_ORDER_VIOLATION_CODE: &str = "ASUP-E205";
 
@@ -156,6 +163,103 @@ pub struct LockInfo {
     /// Lock module recorded for ordering checks.
     pub module: LockModule,
 }
+
+/// Stable owner of one lock-order tracking scope.
+///
+/// Runtime tasks retain the same `Cx` allocation while the scheduler moves
+/// their future between workers, so its address is a stable migration-safe
+/// identity. Synchronous callers without an installed `Cx` retain the legacy
+/// per-thread behavior.
+#[cfg(any(debug_assertions, feature = "lock-metrics"))]
+#[derive(Clone)]
+enum LockOrderOwner {
+    Task(Arc<parking_lot::RwLock<crate::types::CxInner>>),
+    Thread(std::thread::ThreadId),
+}
+
+#[cfg(any(debug_assertions, feature = "lock-metrics"))]
+impl std::fmt::Debug for LockOrderOwner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Task(inner) => f
+                .debug_tuple("Task")
+                .field(&(Arc::as_ptr(inner).cast::<()>() as usize))
+                .finish(),
+            Self::Thread(id) => f.debug_tuple("Thread").field(id).finish(),
+        }
+    }
+}
+
+#[cfg(any(debug_assertions, feature = "lock-metrics"))]
+impl PartialEq for LockOrderOwner {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Task(left), Self::Task(right)) => Arc::ptr_eq(left, right),
+            (Self::Thread(left), Self::Thread(right)) => left == right,
+            _ => false,
+        }
+    }
+}
+
+#[cfg(any(debug_assertions, feature = "lock-metrics"))]
+impl Eq for LockOrderOwner {}
+
+#[cfg(any(debug_assertions, feature = "lock-metrics"))]
+impl Hash for LockOrderOwner {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        std::mem::discriminant(self).hash(state);
+        match self {
+            Self::Task(inner) => (Arc::as_ptr(inner).cast::<()>() as usize).hash(state),
+            Self::Thread(id) => id.hash(state),
+        }
+    }
+}
+
+#[cfg(any(debug_assertions, feature = "lock-metrics"))]
+#[derive(Debug, Clone)]
+struct TrackedLock {
+    acquisition_id: u64,
+    info: LockInfo,
+}
+
+#[cfg(any(debug_assertions, feature = "lock-metrics"))]
+#[derive(Debug, Default)]
+struct HeldLockState {
+    ranks: BTreeSet<LockRank>,
+    locks: BTreeMap<LockRank, Vec<TrackedLock>>,
+}
+
+/// Exact ownership token carried by movable lock guards.
+///
+/// The token intentionally has no `Drop` implementation: leaking a real guard
+/// must leave the diagnostic record live, just as the lock remains held.
+#[cfg(any(debug_assertions, feature = "lock-metrics"))]
+#[derive(Debug)]
+pub(crate) struct LockOrderToken {
+    owner: LockOrderOwner,
+    acquisition_id: u64,
+}
+
+/// Per-guard tracking state.
+///
+/// This is zero-sized when lock-order instrumentation is disabled, preserving
+/// the release-build layout and zero-cost contract of the synchronization
+/// guards.
+#[cfg(any(debug_assertions, feature = "lock-metrics"))]
+pub(crate) type GuardLockOrder = Option<LockOrderToken>;
+
+#[cfg(not(any(debug_assertions, feature = "lock-metrics")))]
+pub(crate) type GuardLockOrder = ();
+
+#[cfg(any(debug_assertions, feature = "lock-metrics"))]
+type HeldLocksByOwner = HashMap<LockOrderOwner, HeldLockState>;
+
+#[cfg(any(debug_assertions, feature = "lock-metrics"))]
+static HELD_LOCKS_BY_OWNER: LazyLock<StdMutex<HeldLocksByOwner>> =
+    LazyLock::new(|| StdMutex::new(HashMap::new()));
+
+#[cfg(any(debug_assertions, feature = "lock-metrics"))]
+static NEXT_ACQUISITION_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Owned violation details captured while the held-lock tables are borrowed.
 ///
@@ -462,14 +566,133 @@ fn allowed_unranked_reason(name: &str) -> Option<&'static str> {
     }
 }
 
-// Thread-local storage for tracking held lock ranks and modules.
-// Only compiled in debug builds.
+// The atlas remains thread-local because it is a diagnostic observation log.
+// Held-lock state is task-owned (or thread-owned outside a runtime) below so a
+// Send future can migrate without corrupting the deadlock detector.
 #[cfg(any(debug_assertions, feature = "lock-metrics"))]
 thread_local! {
-    static HELD_RANKS: RefCell<BTreeSet<LockRank>> = const { RefCell::new(BTreeSet::new()) };
-    static HELD_LOCKS: RefCell<BTreeMap<LockRank, Vec<LockInfo>>> = const { RefCell::new(BTreeMap::new()) };
     static ORDER_EDGES: RefCell<BTreeSet<LockOrderEdge>> = const { RefCell::new(BTreeSet::new()) };
     static ORDER_VIOLATIONS: RefCell<Vec<LockOrderViolation>> = const { RefCell::new(Vec::new()) };
+}
+
+#[cfg(any(debug_assertions, feature = "lock-metrics"))]
+fn current_owner() -> LockOrderOwner {
+    if let Some(inner) = crate::cx::Cx::with_current(|cx| Arc::clone(&cx.inner)) {
+        LockOrderOwner::Task(inner)
+    } else {
+        LockOrderOwner::Thread(std::thread::current().id())
+    }
+}
+
+#[cfg(any(debug_assertions, feature = "lock-metrics"))]
+fn held_locks_by_owner() -> StdMutexGuard<'static, HeldLocksByOwner> {
+    HELD_LOCKS_BY_OWNER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+#[cfg(any(debug_assertions, feature = "lock-metrics"))]
+fn current_held_snapshot() -> (BTreeSet<LockRank>, BTreeMap<LockRank, Vec<LockInfo>>) {
+    let owner = current_owner();
+    let tracker = held_locks_by_owner();
+    let Some(state) = tracker.get(&owner) else {
+        return (BTreeSet::new(), BTreeMap::new());
+    };
+    let locks = state
+        .locks
+        .iter()
+        .map(|(rank, entries)| {
+            (
+                *rank,
+                entries.iter().map(|entry| entry.info.clone()).collect(),
+            )
+        })
+        .collect();
+    (state.ranks.clone(), locks)
+}
+
+#[cfg(any(debug_assertions, feature = "lock-metrics"))]
+fn next_acquisition_id() -> u64 {
+    let id = NEXT_ACQUISITION_ID.fetch_add(1, Ordering::Relaxed);
+    assert_ne!(id, 0, "lock-order acquisition id space exhausted");
+    id
+}
+
+#[cfg(any(debug_assertions, feature = "lock-metrics"))]
+fn insert_tracked_lock(lock_name: &str, rank: LockRank, module: LockModule) -> LockOrderToken {
+    let owner = current_owner();
+    let acquisition_id = next_acquisition_id();
+    let mut tracker = held_locks_by_owner();
+    let state = tracker.entry(owner.clone()).or_default();
+    state.ranks.insert(rank);
+    state.locks.entry(rank).or_default().push(TrackedLock {
+        acquisition_id,
+        info: LockInfo {
+            name: lock_name.to_string(),
+            rank,
+            module,
+        },
+    });
+    LockOrderToken {
+        owner,
+        acquisition_id,
+    }
+}
+
+#[cfg(any(debug_assertions, feature = "lock-metrics"))]
+fn remove_tracked_lock(token: LockOrderToken) {
+    let mut tracker = held_locks_by_owner();
+    let remove_owner = if let Some(state) = tracker.get_mut(&token.owner) {
+        let mut removed_rank = None;
+        for (rank, entries) in &mut state.locks {
+            if let Some(index) = entries
+                .iter()
+                .position(|entry| entry.acquisition_id == token.acquisition_id)
+            {
+                entries.remove(index);
+                if entries.is_empty() {
+                    removed_rank = Some(*rank);
+                }
+                break;
+            }
+        }
+        if let Some(rank) = removed_rank {
+            state.locks.remove(&rank);
+            state.ranks.remove(&rank);
+        }
+        state.locks.is_empty()
+    } else {
+        false
+    };
+    if remove_owner {
+        tracker.remove(&token.owner);
+    }
+}
+
+#[cfg(any(debug_assertions, feature = "lock-metrics"))]
+fn remove_current_matching_lock(lock_name: &str, rank: LockRank, module: LockModule) {
+    let owner = current_owner();
+    let mut tracker = held_locks_by_owner();
+    let remove_owner = if let Some(state) = tracker.get_mut(&owner) {
+        if let Some(entries) = state.locks.get_mut(&rank) {
+            if let Some(index) = entries
+                .iter()
+                .rposition(|entry| entry.info.name == lock_name && entry.info.module == module)
+            {
+                entries.remove(index);
+            }
+            if entries.is_empty() {
+                state.locks.remove(&rank);
+                state.ranks.remove(&rank);
+            }
+        }
+        state.locks.is_empty()
+    } else {
+        false
+    };
+    if remove_owner {
+        tracker.remove(&owner);
+    }
 }
 
 /// Check if acquiring a lock of the given rank would violate ordering.
@@ -493,26 +716,16 @@ pub fn check_acquire(lock_name: &str, rank: LockRank) {
 pub fn check_acquire_with_module(lock_name: &str, rank: LockRank, module: LockModule) {
     #[cfg(any(debug_assertions, feature = "lock-metrics"))]
     {
-        let violation = HELD_RANKS.with(|held_ranks| {
-            HELD_LOCKS.with(|held_locks| {
-                let held_ranks_ref = held_ranks.borrow();
-                let held_locks_ref = held_locks.borrow();
+        let (held_ranks, held_locks) = current_held_snapshot();
+        record_order_edges(lock_name, rank, module, &held_locks);
 
-                record_order_edges(lock_name, rank, module, &held_locks_ref);
-
-                // Basic rank ordering check
-                if let Some(&highest_held) = held_ranks_ref.iter().last() {
-                    if rank < highest_held {
-                        return Some(PendingLockOrderViolation::RankOrder {
-                            held_rank: highest_held,
-                        });
-                    }
-                }
-
-                // Cross-module pattern validation
-                detect_cross_module_violation(rank, module, &held_locks_ref)
-            })
-        });
+        let violation = held_ranks
+            .iter()
+            .next_back()
+            .copied()
+            .filter(|highest_held| rank < *highest_held)
+            .map(|held_rank| PendingLockOrderViolation::RankOrder { held_rank })
+            .or_else(|| detect_cross_module_violation(rank, module, &held_locks));
 
         if let Some(violation) = violation {
             record_order_violation(
@@ -641,24 +854,6 @@ fn emit_lock_order_violation(
     module: LockModule,
     violation: PendingLockOrderViolation,
 ) -> ! {
-    // This is both a structural invariant and a guard against regressing panic
-    // hook reentrancy: both bookkeeping cells must be mutably borrowable at the
-    // exact point where the synchronous panic hook is about to run.
-    HELD_RANKS.with(|held_ranks| {
-        drop(
-            held_ranks
-                .try_borrow_mut()
-                .expect("lock-order rank state must be unborrowed before panic emission"),
-        );
-    });
-    HELD_LOCKS.with(|held_locks| {
-        drop(
-            held_locks
-                .try_borrow_mut()
-                .expect("lock-order detail state must be unborrowed before panic emission"),
-        );
-    });
-
     match violation {
         PendingLockOrderViolation::RankOrder { held_rank } => {
             panic!(
@@ -708,7 +903,7 @@ fn emit_lock_order_violation(
 pub fn record_acquire(lock_name: &str, rank: LockRank) {
     #[cfg(any(debug_assertions, feature = "lock-metrics"))]
     {
-        record_acquire_with_module(lock_name, rank, LockModule::from_name(lock_name));
+        let _ = insert_tracked_lock(lock_name, rank, LockModule::from_name(lock_name));
     }
 
     #[cfg(not(debug_assertions))]
@@ -723,23 +918,7 @@ pub fn record_acquire(lock_name: &str, rank: LockRank) {
 pub fn record_acquire_with_module(lock_name: &str, rank: LockRank, module: LockModule) {
     #[cfg(any(debug_assertions, feature = "lock-metrics"))]
     {
-        HELD_RANKS.with(|held_ranks| {
-            HELD_LOCKS.with(|held_locks| {
-                held_ranks.borrow_mut().insert(rank);
-
-                let lock_info = LockInfo {
-                    name: lock_name.to_string(),
-                    rank,
-                    module,
-                };
-
-                held_locks
-                    .borrow_mut()
-                    .entry(rank)
-                    .or_insert_with(Vec::new)
-                    .push(lock_info);
-            });
-        });
+        let _ = insert_tracked_lock(lock_name, rank, module);
     }
 
     #[cfg(not(debug_assertions))]
@@ -769,29 +948,7 @@ pub fn record_release(lock_name: &str, rank: LockRank) {
 pub fn record_release_with_module(lock_name: &str, rank: LockRank, module: LockModule) {
     #[cfg(any(debug_assertions, feature = "lock-metrics"))]
     {
-        HELD_RANKS.with(|held_ranks| {
-            HELD_LOCKS.with(|held_locks| {
-                let mut held_locks_mut = held_locks.borrow_mut();
-
-                if let Some(locks_at_rank) = held_locks_mut.get_mut(&rank) {
-                    // Remove one matching held lock. Multiple guards can share
-                    // the same diagnostic name, so releasing one guard must not
-                    // erase the remaining acquisitions for that rank.
-                    if let Some(index) = locks_at_rank
-                        .iter()
-                        .rposition(|lock| lock.name == lock_name && lock.module == module)
-                    {
-                        locks_at_rank.remove(index);
-                    }
-
-                    // If no more locks at this rank, remove the rank entirely
-                    if locks_at_rank.is_empty() {
-                        held_locks_mut.remove(&rank);
-                        held_ranks.borrow_mut().remove(&rank);
-                    }
-                }
-            });
-        });
+        remove_current_matching_lock(lock_name, rank, module);
     }
 
     #[cfg(not(debug_assertions))]
@@ -800,12 +957,48 @@ pub fn record_release_with_module(lock_name: &str, rank: LockRank, module: LockM
     }
 }
 
+/// Record one movable guard acquisition and return its exact tracking state.
+#[inline]
+pub(crate) fn record_guard_acquire(lock_name: &str, rank: Option<LockRank>) -> GuardLockOrder {
+    #[cfg(any(debug_assertions, feature = "lock-metrics"))]
+    {
+        rank.map(|rank| insert_tracked_lock(lock_name, rank, LockModule::from_name(lock_name)))
+    }
+
+    #[cfg(not(any(debug_assertions, feature = "lock-metrics")))]
+    {
+        let _ = (lock_name, rank);
+    }
+}
+
+/// Release the exact acquisition represented by movable guard tracking state.
+#[inline]
+pub(crate) fn record_guard_release(lock_order: &mut GuardLockOrder) {
+    #[cfg(any(debug_assertions, feature = "lock-metrics"))]
+    {
+        if let Some(token) = lock_order.take() {
+            remove_tracked_lock(token);
+        }
+    }
+
+    #[cfg(not(any(debug_assertions, feature = "lock-metrics")))]
+    {
+        let _ = lock_order;
+    }
+}
+
+/// Transfer movable guard tracking state without releasing it.
+#[inline]
+pub(crate) fn take_guard_lock_order(lock_order: &mut GuardLockOrder) -> GuardLockOrder {
+    std::mem::take(lock_order)
+}
+
 /// Get the currently held lock ranks for debugging.
 /// Only available in debug builds.
 #[cfg(any(debug_assertions, feature = "lock-metrics"))]
 #[allow(dead_code)]
 pub fn current_held_ranks() -> Vec<LockRank> {
-    HELD_RANKS.with(|held| held.borrow().iter().copied().collect())
+    current_held_snapshot().0.into_iter().collect()
 }
 
 /// Get detailed information about all currently held locks for debugging.
@@ -813,7 +1006,7 @@ pub fn current_held_ranks() -> Vec<LockRank> {
 #[cfg(any(debug_assertions, feature = "lock-metrics"))]
 #[allow(dead_code)]
 pub fn current_held_locks() -> BTreeMap<LockRank, Vec<LockInfo>> {
-    HELD_LOCKS.with(|held| held.borrow().clone())
+    current_held_snapshot().1
 }
 
 /// Clear all held lock tracking (for testing purposes only).
@@ -821,8 +1014,7 @@ pub fn current_held_locks() -> BTreeMap<LockRank, Vec<LockInfo>> {
 #[cfg(any(debug_assertions, feature = "lock-metrics"))]
 #[allow(dead_code)]
 pub fn clear_held_locks() {
-    HELD_RANKS.with(|held_ranks| held_ranks.borrow_mut().clear());
-    HELD_LOCKS.with(|held_locks| held_locks.borrow_mut().clear());
+    held_locks_by_owner().remove(&current_owner());
     clear_lock_order_atlas();
 }
 
@@ -1425,5 +1617,167 @@ mod tests {
         record_release_with_module("tasks_duplicate", LockRank::Tasks, LockModule::Runtime);
         assert!(current_held_locks().is_empty());
         assert!(current_held_ranks().is_empty());
+    }
+
+    #[test]
+    #[cfg(any(debug_assertions, feature = "lock-metrics"))]
+    fn guard_token_follows_task_context_across_worker_migration() {
+        let cx = crate::Cx::for_testing();
+        let token = {
+            let _current = crate::Cx::set_current(Some(cx.clone()));
+            clear_held_locks();
+            let token = record_guard_acquire("tasks_migrating_guard", Some(LockRank::Tasks));
+            assert_eq!(current_held_ranks(), vec![LockRank::Tasks]);
+            token
+        };
+
+        let worker = std::thread::spawn(move || {
+            let _current = crate::Cx::set_current(Some(cx));
+            assert_eq!(
+                current_held_ranks(),
+                vec![LockRank::Tasks],
+                "the migrated task must retain its held-rank view"
+            );
+
+            let inversion = std::panic::catch_unwind(|| {
+                check_acquire("config_after_migration", LockRank::Config);
+            });
+            assert!(
+                inversion.is_err(),
+                "migration must not hide a real rank inversion"
+            );
+
+            let mut token = token;
+            record_guard_release(&mut token);
+            assert!(current_held_locks().is_empty());
+            assert!(current_held_ranks().is_empty());
+            clear_held_locks();
+        });
+        worker.join().expect("migration worker should complete");
+    }
+
+    #[test]
+    #[cfg(any(debug_assertions, feature = "lock-metrics"))]
+    fn exact_guard_token_cannot_erase_another_tasks_same_name_lock() {
+        let first_cx = crate::Cx::for_testing();
+        let second_cx = crate::Cx::for_testing();
+
+        let first_token = {
+            let _current = crate::Cx::set_current(Some(first_cx));
+            clear_held_locks();
+            record_guard_acquire("tasks_same_name", Some(LockRank::Tasks))
+        };
+
+        let _current = crate::Cx::set_current(Some(second_cx));
+        clear_held_locks();
+        let mut second_token = record_guard_acquire("tasks_same_name", Some(LockRank::Tasks));
+
+        let mut first_token = first_token;
+        record_guard_release(&mut first_token);
+        let held = current_held_locks();
+        assert_eq!(held[&LockRank::Tasks].len(), 1);
+        assert_eq!(held[&LockRank::Tasks][0].name, "tasks_same_name");
+
+        record_guard_release(&mut second_token);
+        assert!(current_held_locks().is_empty());
+        clear_held_locks();
+    }
+
+    #[test]
+    #[cfg(any(debug_assertions, feature = "lock-metrics"))]
+    fn shipped_send_guards_release_exact_tracking_after_worker_migration() {
+        fn drop_on_matching_task<T: Send>(cx: &crate::Cx, guard: T) {
+            let cx = cx.clone();
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(move || {
+                        let _current = crate::Cx::set_current(Some(cx));
+                        assert_eq!(current_held_ranks(), vec![LockRank::Tasks]);
+                        drop(guard);
+                        assert!(current_held_locks().is_empty());
+                    })
+                    .join()
+                    .expect("guard migration worker should complete");
+            });
+        }
+
+        let cx = crate::Cx::for_testing();
+
+        let mutex = std::sync::Arc::new(crate::sync::Mutex::with_name(
+            "tasks_owned_mutex_migration",
+            1_u8,
+        ));
+        let mutex_guard = {
+            let _current = crate::Cx::set_current(Some(cx.clone()));
+            crate::sync::OwnedMutexGuard::try_lock(std::sync::Arc::clone(&mutex))
+                .expect("owned mutex should be immediately available")
+        };
+        drop_on_matching_task(&cx, mutex_guard);
+
+        let mapped_guard = {
+            let _current = crate::Cx::set_current(Some(cx.clone()));
+            crate::sync::OwnedMutexGuard::try_lock(std::sync::Arc::clone(&mutex))
+                .expect("owned mutex should remain available")
+                .map(|value| value)
+        };
+        drop_on_matching_task(&cx, mapped_guard);
+
+        let rwlock = crate::sync::RwLock::with_name("tasks_rwlock_migration", 1_u8);
+        let read_guard = {
+            let _current = crate::Cx::set_current(Some(cx.clone()));
+            rwlock.try_read().expect("read guard should be available")
+        };
+        drop_on_matching_task(&cx, read_guard);
+
+        let write_guard = {
+            let _current = crate::Cx::set_current(Some(cx.clone()));
+            rwlock.try_write().expect("write guard should be available")
+        };
+        drop_on_matching_task(&cx, write_guard);
+
+        let owned_rwlock = std::sync::Arc::new(crate::sync::RwLock::with_name(
+            "tasks_owned_rwlock_migration",
+            1_u8,
+        ));
+        let owned_read = {
+            let _current = crate::Cx::set_current(Some(cx.clone()));
+            crate::sync::OwnedRwLockReadGuard::try_read(std::sync::Arc::clone(&owned_rwlock))
+                .expect("owned read guard should be available")
+        };
+        drop_on_matching_task(&cx, owned_read);
+
+        let owned_write = {
+            let _current = crate::Cx::set_current(Some(cx.clone()));
+            crate::sync::OwnedRwLockWriteGuard::try_write(std::sync::Arc::clone(&owned_rwlock))
+                .expect("owned write guard should be available")
+        };
+        drop_on_matching_task(&cx, owned_write);
+
+        let semaphore = crate::sync::Semaphore::with_name("tasks_semaphore_migration", 1);
+        let permit = {
+            let _current = crate::Cx::set_current(Some(cx.clone()));
+            semaphore
+                .try_acquire(1)
+                .expect("borrowed permit should be available")
+        };
+        drop_on_matching_task(&cx, permit);
+
+        let owned_semaphore = std::sync::Arc::new(crate::sync::Semaphore::with_name(
+            "tasks_owned_semaphore_migration",
+            1,
+        ));
+        let owned_permit = {
+            let _current = crate::Cx::set_current(Some(cx.clone()));
+            crate::sync::OwnedSemaphorePermit::try_acquire(
+                std::sync::Arc::clone(&owned_semaphore),
+                1,
+            )
+            .expect("owned permit should be available")
+        };
+        drop_on_matching_task(&cx, owned_permit);
+
+        let _current = crate::Cx::set_current(Some(cx));
+        assert!(current_held_locks().is_empty());
+        clear_held_locks();
     }
 }

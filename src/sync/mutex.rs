@@ -258,12 +258,11 @@ impl<T> Mutex<T> {
         drop(state);
 
         // Record lock acquisition for ordering tracking
-        if let Some(rank) = self.rank {
-            lock_ordering::record_acquire(self.name, rank);
-        }
+        let lock_order = lock_ordering::record_guard_acquire(self.name, self.rank);
 
         Ok(MutexGuard {
             mutex: self,
+            lock_order,
             _not_send: PhantomData,
         })
     }
@@ -332,7 +331,7 @@ impl<T> Mutex<T> {
     }
 
     #[inline]
-    fn unlock(&self) {
+    fn unlock(&self, mut lock_order: lock_ordering::GuardLockOrder) {
         // Extract the waker to wake outside the lock to prevent deadlocks.
         // Waking while holding the lock can cause priority inversion or deadlock
         // if the woken task tries to acquire another mutex.
@@ -349,13 +348,11 @@ impl<T> Mutex<T> {
             }
         };
 
-        // The mutex is no longer held, so update thread-local lock-order state
+        // The mutex is no longer held, so update task-owned lock-order state
         // before invoking user-controlled wake code. A synchronous Waker may
         // re-enter a lower-ranked mutex, and a panicking Waker must not leave a
         // phantom held rank behind.
-        if let Some(rank) = self.rank {
-            lock_ordering::record_release(self.name, rank);
-        }
+        lock_ordering::record_guard_release(&mut lock_order);
 
         // Wake outside the lock and after recording the rank release.
         if let Some((id, waker)) = granted {
@@ -552,12 +549,12 @@ impl<'a, T, Caps> Future for LockFuture<'a, '_, T, Caps> {
                         self.completed = true;
 
                         // Record lock acquisition for ordering tracking
-                        if let Some(rank) = self.mutex.rank {
-                            lock_ordering::record_acquire(self.mutex.name, rank);
-                        }
+                        let lock_order =
+                            lock_ordering::record_guard_acquire(self.mutex.name, self.mutex.rank);
 
                         return Poll::Ready(Ok(MutexGuard {
                             mutex: self.mutex,
+                            lock_order,
                             _not_send: PhantomData,
                         }));
                     }
@@ -594,12 +591,12 @@ impl<'a, T, Caps> Future for LockFuture<'a, '_, T, Caps> {
                 self.completed = true;
 
                 // Record lock acquisition for ordering tracking
-                if let Some(rank) = self.mutex.rank {
-                    lock_ordering::record_acquire(self.mutex.name, rank);
-                }
+                let lock_order =
+                    lock_ordering::record_guard_acquire(self.mutex.name, self.mutex.rank);
 
                 return Poll::Ready(Ok(MutexGuard {
                     mutex: self.mutex,
+                    lock_order,
                     _not_send: PhantomData,
                 }));
             }
@@ -658,9 +655,10 @@ impl<T, Caps> Drop for LockFuture<'_, '_, T, Caps> {
 
 /// A guard that releases the mutex when dropped.
 ///
-/// A borrowed guard is deliberately not [`Send`]: releasing a ranked mutex
-/// updates thread-local lock-order state, so acquisition and release must happen
-/// on the same OS thread.
+/// A borrowed guard remains deliberately not [`Send`] as part of the shipped
+/// 0.4.x contract and to keep cross-worker ownership explicit. Use
+/// [`OwnedMutexGuard`] when a guard must move with a task. Lock-order tracking
+/// for movable owned guards is task-owned and migration-safe.
 ///
 /// ```compile_fail,E0277
 /// use asupersync::sync::Mutex;
@@ -674,6 +672,7 @@ impl<T, Caps> Drop for LockFuture<'_, '_, T, Caps> {
 #[must_use = "guard will be immediately released if not held"]
 pub struct MutexGuard<'a, T> {
     mutex: &'a Mutex<T>,
+    lock_order: lock_ordering::GuardLockOrder,
     // Raw-pointer ownership markers are neither Send nor Sync. The explicit
     // Sync impl below restores only the sharing property that is sound here.
     _not_send: PhantomData<*mut ()>,
@@ -710,7 +709,8 @@ impl<T> Drop for MutexGuard<'_, T> {
         if std::thread::panicking() {
             self.mutex.poison();
         }
-        self.mutex.unlock();
+        self.mutex
+            .unlock(lock_ordering::take_guard_lock_order(&mut self.lock_order));
     }
 }
 
@@ -723,10 +723,12 @@ impl<'a, T> MutexGuard<'a, T> {
     {
         let data = NonNull::from(f(&mut *self));
         let mutex = self.mutex;
+        let lock_order = lock_ordering::take_guard_lock_order(&mut self.lock_order);
         let _guard = ManuallyDrop::new(self);
         MappedMutexGuard {
             mutex,
             data,
+            lock_order,
             _marker: PhantomData,
         }
     }
@@ -741,10 +743,12 @@ impl<'a, T> MutexGuard<'a, T> {
         let data = f(&mut *self).map(NonNull::from);
         if let Some(data) = data {
             let mutex = self.mutex;
+            let lock_order = lock_ordering::take_guard_lock_order(&mut self.lock_order);
             let _guard = ManuallyDrop::new(self);
             Ok(MappedMutexGuard {
                 mutex,
                 data,
+                lock_order,
                 _marker: PhantomData,
             })
         } else {
@@ -758,6 +762,7 @@ impl<'a, T> MutexGuard<'a, T> {
 pub struct MappedMutexGuard<'a, T, U: ?Sized> {
     mutex: &'a Mutex<T>,
     data: NonNull<U>,
+    lock_order: lock_ordering::GuardLockOrder,
     _marker: PhantomData<&'a mut U>,
 }
 
@@ -794,7 +799,8 @@ impl<T, U: ?Sized> Drop for MappedMutexGuard<'_, T, U> {
         if std::thread::panicking() {
             self.mutex.poison();
         }
-        self.mutex.unlock();
+        self.mutex
+            .unlock(lock_ordering::take_guard_lock_order(&mut self.lock_order));
     }
 }
 
@@ -807,10 +813,12 @@ impl<'a, T, U: ?Sized> MappedMutexGuard<'a, T, U> {
     {
         let data = NonNull::from(f(&mut *self));
         let mutex = self.mutex;
+        let lock_order = lock_ordering::take_guard_lock_order(&mut self.lock_order);
         let _guard = ManuallyDrop::new(self);
         MappedMutexGuard {
             mutex,
             data,
+            lock_order,
             _marker: PhantomData,
         }
     }
@@ -825,10 +833,12 @@ impl<'a, T, U: ?Sized> MappedMutexGuard<'a, T, U> {
         let data = f(&mut *self).map(NonNull::from);
         if let Some(data) = data {
             let mutex = self.mutex;
+            let lock_order = lock_ordering::take_guard_lock_order(&mut self.lock_order);
             let _guard = ManuallyDrop::new(self);
             Ok(MappedMutexGuard {
                 mutex,
                 data,
+                lock_order,
                 _marker: PhantomData,
             })
         } else {
@@ -841,6 +851,7 @@ impl<'a, T, U: ?Sized> MappedMutexGuard<'a, T, U> {
 #[must_use = "guard will be immediately released if not held"]
 pub struct OwnedMutexGuard<T> {
     mutex: Arc<Mutex<T>>,
+    lock_order: lock_ordering::GuardLockOrder,
 }
 
 unsafe impl<T: Send> Send for OwnedMutexGuard<T> {}
@@ -851,8 +862,10 @@ impl<T> OwnedMutexGuard<T> {
     pub async fn lock<Caps>(mutex: Arc<Mutex<T>>, cx: &Cx<Caps>) -> Result<Self, LockError> {
         // Acquire through the borrowed-guard path, then suppress that guard's
         // Drop so the held lock transfers to the returned owned guard.
-        let _borrowed_guard = std::mem::ManuallyDrop::new(mutex.as_ref().lock(cx).await?);
-        Ok(Self { mutex })
+        let mut borrowed_guard = mutex.as_ref().lock(cx).await?;
+        let lock_order = lock_ordering::take_guard_lock_order(&mut borrowed_guard.lock_order);
+        let _borrowed_guard = std::mem::ManuallyDrop::new(borrowed_guard);
+        Ok(Self { mutex, lock_order })
     }
 
     /// Tries to acquire the mutex without waiting.
@@ -879,11 +892,9 @@ impl<T> OwnedMutexGuard<T> {
         }
 
         // Record lock acquisition for ordering tracking
-        if let Some(rank) = mutex.rank {
-            lock_ordering::record_acquire(mutex.name, rank);
-        }
+        let lock_order = lock_ordering::record_guard_acquire(mutex.name, mutex.rank);
 
-        Ok(Self { mutex })
+        Ok(Self { mutex, lock_order })
     }
 
     /// Projects this owned guard onto a subcomponent while keeping the mutex locked.
@@ -894,10 +905,12 @@ impl<T> OwnedMutexGuard<T> {
     {
         let data = NonNull::from(f(&mut *self));
         let mutex = unsafe { std::ptr::read(&self.mutex) };
+        let lock_order = lock_ordering::take_guard_lock_order(&mut self.lock_order);
         let _guard = ManuallyDrop::new(self);
         OwnedMappedMutexGuard {
             mutex,
             data,
+            lock_order,
             _marker: PhantomData,
         }
     }
@@ -912,10 +925,12 @@ impl<T> OwnedMutexGuard<T> {
         let data = f(&mut *self).map(NonNull::from);
         if let Some(data) = data {
             let mutex = unsafe { std::ptr::read(&self.mutex) };
+            let lock_order = lock_ordering::take_guard_lock_order(&mut self.lock_order);
             let _guard = ManuallyDrop::new(self);
             Ok(OwnedMappedMutexGuard {
                 mutex,
                 data,
+                lock_order,
                 _marker: PhantomData,
             })
         } else {
@@ -944,7 +959,8 @@ impl<T> Drop for OwnedMutexGuard<T> {
         if std::thread::panicking() {
             self.mutex.poison();
         }
-        self.mutex.unlock();
+        self.mutex
+            .unlock(lock_ordering::take_guard_lock_order(&mut self.lock_order));
     }
 }
 
@@ -953,6 +969,7 @@ impl<T> Drop for OwnedMutexGuard<T> {
 pub struct OwnedMappedMutexGuard<T, U: ?Sized> {
     mutex: Arc<Mutex<T>>,
     data: NonNull<U>,
+    lock_order: lock_ordering::GuardLockOrder,
     _marker: PhantomData<*mut U>,
 }
 
@@ -988,7 +1005,8 @@ impl<T, U: ?Sized> Drop for OwnedMappedMutexGuard<T, U> {
         if std::thread::panicking() {
             self.mutex.poison();
         }
-        self.mutex.unlock();
+        self.mutex
+            .unlock(lock_ordering::take_guard_lock_order(&mut self.lock_order));
     }
 }
 
@@ -1001,10 +1019,12 @@ impl<T, U: ?Sized> OwnedMappedMutexGuard<T, U> {
     {
         let data = NonNull::from(f(&mut *self));
         let mutex = unsafe { std::ptr::read(&self.mutex) };
+        let lock_order = lock_ordering::take_guard_lock_order(&mut self.lock_order);
         let _guard = ManuallyDrop::new(self);
         OwnedMappedMutexGuard {
             mutex,
             data,
+            lock_order,
             _marker: PhantomData,
         }
     }
@@ -1019,10 +1039,12 @@ impl<T, U: ?Sized> OwnedMappedMutexGuard<T, U> {
         let data = f(&mut *self).map(NonNull::from);
         if let Some(data) = data {
             let mutex = unsafe { std::ptr::read(&self.mutex) };
+            let lock_order = lock_ordering::take_guard_lock_order(&mut self.lock_order);
             let _guard = ManuallyDrop::new(self);
             Ok(OwnedMappedMutexGuard {
                 mutex,
                 data,
+                lock_order,
                 _marker: PhantomData,
             })
         } else {
@@ -1925,8 +1947,9 @@ mod tests {
                 let holder =
                     LabRuntimeTarget::spawn(&holder_spawn_cx, Budget::INFINITE, async move {
                         // This task intentionally holds the lock across yields. Use
-                        // the owned guard: the borrowed guard is !Send because its
-                        // drop path maintains OS-thread-local lock-order state.
+                        // the owned guard: the borrowed guard intentionally preserves
+                        // its shipped !Send contract, while the owned guard is the
+                        // explicit migration-safe path.
                         let mut guard = OwnedMutexGuard::lock(holder_mutex, &holder_task_cx)
                             .await
                             .expect("holder lock should succeed");

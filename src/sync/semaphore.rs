@@ -439,7 +439,7 @@ impl Semaphore {
                 semaphore: self,
                 count: 0,
                 obligation: None,
-                release_lock_order_on_drop: false,
+                lock_order: Default::default(),
             });
         }
 
@@ -467,9 +467,7 @@ impl Semaphore {
             self.permits_shadow.store(state.permits, Ordering::Relaxed);
 
             // Record lock acquisition for ordering tracking
-            if let Some(rank) = self.rank {
-                lock_ordering::record_acquire(self.name, rank);
-            }
+            let lock_order = lock_ordering::record_guard_acquire(self.name, self.rank);
 
             Ok(SemaphorePermit {
                 // br-asupersync-13jmt3: static description avoids the
@@ -482,7 +480,7 @@ impl Semaphore {
                     .and_then(|cx| reserve_permit_obligation(cx.region_id())),
                 semaphore: self,
                 count,
-                release_lock_order_on_drop: true,
+                lock_order,
             })
         } else {
             Err(TryAcquireError)
@@ -536,7 +534,7 @@ struct AcquisitionRollbackGuard<'a> {
     semaphore: &'a Semaphore,
     count: usize,
     obligation: Option<ObligationToken<SemaphorePermitKind>>,
-    release_lock_order_on_drop: bool,
+    lock_order: lock_ordering::GuardLockOrder,
     armed: bool,
 }
 
@@ -547,7 +545,7 @@ impl<'a> AcquisitionRollbackGuard<'a> {
             semaphore,
             count,
             obligation: None,
-            release_lock_order_on_drop: false,
+            lock_order: Default::default(),
             armed: false,
         }
     }
@@ -560,10 +558,7 @@ impl<'a> AcquisitionRollbackGuard<'a> {
     #[inline]
     fn record_lock_acquire(&mut self) {
         if let Some(rank) = self.semaphore.rank {
-            lock_ordering::record_acquire(self.semaphore.name, rank);
-            // Set this only after recording succeeds. A diagnostic panic
-            // before insertion must not release an older same-name permit.
-            self.release_lock_order_on_drop = true;
+            self.lock_order = lock_ordering::record_guard_acquire(self.semaphore.name, Some(rank));
         }
     }
 
@@ -579,10 +574,9 @@ impl<'a> AcquisitionRollbackGuard<'a> {
             obligation: self.obligation.take(),
             semaphore: self.semaphore,
             count: self.count,
-            release_lock_order_on_drop: self.release_lock_order_on_drop,
+            lock_order: lock_ordering::take_guard_lock_order(&mut self.lock_order),
         };
         self.armed = false;
-        self.release_lock_order_on_drop = false;
         permit
     }
 
@@ -592,9 +586,9 @@ impl<'a> AcquisitionRollbackGuard<'a> {
             obligation: self.obligation.take(),
             semaphore,
             count: self.count,
+            lock_order: lock_ordering::take_guard_lock_order(&mut self.lock_order),
         };
         self.armed = false;
-        self.release_lock_order_on_drop = false;
         permit
     }
 }
@@ -618,11 +612,7 @@ impl Drop for AcquisitionRollbackGuard<'_> {
         }
         drop(state);
 
-        if self.release_lock_order_on_drop {
-            if let Some(rank) = self.semaphore.rank {
-                lock_ordering::record_release(self.semaphore.name, rank);
-            }
-        }
+        lock_ordering::record_guard_release(&mut self.lock_order);
     }
 }
 
@@ -671,7 +661,7 @@ impl<'a, Caps> Future for AcquireFuture<'a, '_, Caps> {
                 semaphore: self.semaphore,
                 count: 0,
                 obligation: None,
-                release_lock_order_on_drop: false,
+                lock_order: Default::default(),
             }));
         }
 
@@ -822,7 +812,7 @@ pub struct SemaphorePermit<'a> {
     obligation: Option<ObligationToken<SemaphorePermitKind>>,
     semaphore: &'a Semaphore,
     count: usize,
-    release_lock_order_on_drop: bool,
+    lock_order: lock_ordering::GuardLockOrder,
 }
 
 impl SemaphorePermit<'_> {
@@ -847,13 +837,18 @@ impl SemaphorePermit<'_> {
     /// This transfers ownership of the obligation to the caller.
     /// The permit is consumed and will not release permits back to the semaphore.
     #[inline]
-    pub(crate) fn into_parts(mut self) -> (usize, Option<ObligationToken<SemaphorePermitKind>>) {
+    pub(crate) fn into_parts(
+        mut self,
+    ) -> (
+        usize,
+        Option<ObligationToken<SemaphorePermitKind>>,
+        lock_ordering::GuardLockOrder,
+    ) {
         let count = self.count;
         let obligation = self.obligation.take();
+        let lock_order = lock_ordering::take_guard_lock_order(&mut self.lock_order);
         self.count = 0; // Prevent Drop from releasing permits
-        // The owned permit now owns the debug lock-order release.
-        self.release_lock_order_on_drop = false;
-        (count, obligation)
+        (count, obligation, lock_order)
     }
 
     /// Commits the permit explicitly, releasing it back to the semaphore.
@@ -874,15 +869,11 @@ impl Drop for SemaphorePermit<'_> {
         if let Some(obligation) = self.obligation.take() {
             let _proof = obligation.commit();
         }
+        // End diagnostic ownership before add_permits can dispatch arbitrary
+        // user Wakers. A panicking Waker must not strand a phantom held rank.
+        lock_ordering::record_guard_release(&mut self.lock_order);
         if self.count > 0 {
             self.semaphore.add_permits(self.count);
-        }
-
-        // Record lock release for ordering tracking
-        if self.release_lock_order_on_drop {
-            if let Some(rank) = self.semaphore.rank {
-                lock_ordering::record_release(self.semaphore.name, rank);
-            }
         }
 
         // Ordinary RAII drop is the normal release path for semaphore permits.
@@ -899,6 +890,7 @@ pub struct OwnedSemaphorePermit {
     obligation: Option<ObligationToken<SemaphorePermitKind>>,
     semaphore: std::sync::Arc<Semaphore>,
     count: usize,
+    lock_order: lock_ordering::GuardLockOrder,
 }
 
 impl OwnedSemaphorePermit {
@@ -914,6 +906,7 @@ impl OwnedSemaphorePermit {
                 obligation: None,
                 semaphore,
                 count: 0,
+                lock_order: Default::default(),
             });
         }
         OwnedAcquireFuture {
@@ -935,11 +928,12 @@ impl OwnedSemaphorePermit {
         let permit = semaphore.try_acquire(count)?;
         // Transfer ownership: extract the obligation token so the OwnedSemaphorePermit
         // will handle both permit release and obligation lifecycle in its own Drop.
-        let (count, obligation) = permit.into_parts();
+        let (count, obligation, lock_order) = permit.into_parts();
         Ok(Self {
             obligation,
             semaphore,
             count,
+            lock_order,
         })
     }
 
@@ -959,11 +953,12 @@ impl OwnedSemaphorePermit {
         let permit = semaphore.try_acquire(count)?;
         // Transfer ownership: extract the obligation token so the OwnedSemaphorePermit
         // will handle both permit release and obligation lifecycle in its own Drop.
-        let (count, obligation) = permit.into_parts();
+        let (count, obligation, lock_order) = permit.into_parts();
         Ok(Self {
             obligation,
             semaphore: semaphore.clone(),
             count,
+            lock_order,
         })
     }
 
@@ -977,20 +972,8 @@ impl OwnedSemaphorePermit {
     /// Forgets the permit without releasing it back to the semaphore.
     #[inline]
     pub fn forget(mut self) {
-        // Release the lock-order rank if this permit recorded an acquire
-        // (count>0 permits do; count==0 fast paths skip record_acquire). We are
-        // about to zero `count`, after which Drop's `count > 0` gate would skip
-        // the release and leave a phantom held rank in the deadlock-detection
-        // tracker → false-positive "DEADLOCK PREVENTION" panic on the next
-        // lower-ranked acquire. Forgetting the permit means the thread no longer
-        // holds this lock for ordering purposes, even though the permit count is
-        // not returned to the semaphore. Mirrors the borrowed permit, whose
-        // `forget` leaves `release_lock_order_on_drop` set so its Drop releases.
-        if self.count > 0 {
-            if let Some(rank) = self.semaphore.rank {
-                lock_ordering::record_release(self.semaphore.name, rank);
-            }
-        }
+        // Forgetting leaks capacity but ends this guard's lock-order lifetime.
+        lock_ordering::record_guard_release(&mut self.lock_order);
         self.count = 0;
         if let Some(obligation) = self.obligation.take() {
             let _proof = obligation.abort();
@@ -1011,19 +994,9 @@ impl Drop for OwnedSemaphorePermit {
         if let Some(obligation) = self.obligation.take() {
             let _proof = obligation.commit();
         }
+        lock_ordering::record_guard_release(&mut self.lock_order);
         if self.count > 0 {
             self.semaphore.add_permits(self.count);
-
-            // Record lock release for ordering tracking. Gated on count > 0
-            // because count==0 permits never call `record_acquire` (every
-            // count==0 construction path — async/sync fast paths — skips it),
-            // so emitting a release for them would be unmatched and could
-            // erase the tracking entry of a real live permit on this thread,
-            // corrupting deadlock-detection state. Mirrors the borrowed
-            // `SemaphorePermit`'s `release_lock_order_on_drop` gate.
-            if let Some(rank) = self.semaphore.rank {
-                lock_ordering::record_release(self.semaphore.name, rank);
-            }
         }
     }
 }
@@ -1108,6 +1081,7 @@ impl<Caps> Future for OwnedAcquireFuture<Caps> {
                 obligation: None,
                 semaphore: this.semaphore.clone(),
                 count: 0,
+                lock_order: Default::default(),
             }));
         }
 
