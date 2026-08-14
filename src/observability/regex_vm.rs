@@ -2881,7 +2881,12 @@ mod tests {
         assert_eq!(match_limit.kind, VmErrorKind::MatchLimit);
         assert_eq!((match_limit.actual, match_limit.limit), (Some(2), Some(1)));
 
-        let private_haystack = "r3_5_private_match_cancel_canary-aaaa";
+        let private_haystack = "r3_5_probe-aaaa";
+        assert_eq!(
+            private_haystack.find('a'),
+            Some(private_haystack.len() - 4),
+            "the reuse probe must have no earlier match"
+        );
         let mut probe = |checkpoint: VmCancellationCheckpoint| checkpoint.sequence == 3;
         let mut control =
             VmCancellationControl::new(3, &mut probe).expect("valid cancellation control");
