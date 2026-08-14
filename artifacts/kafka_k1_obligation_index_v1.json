@@ -525,7 +525,7 @@
     "source_pin_rollup": {
       "row_count": 266,
       "stage_counts": {"K0.1": 13, "K0.2": 8, "K0.3": 225, "K0.4": 20},
-      "canonical_json_sha256": "18a9734b9103ebfde882e4379a7ec8e991ec32664084f44715fd2bc40b8300ca",
+      "canonical_json_sha256": "35cb6fc780a69425488fc5f241a066eceed33d74677e8b4a722c00ea13a01a82",
       "unique_path_count": 247,
       "unique_path_set_sha256": "d5631183e1560d87aeb50ca953d836b4405110b30f81c98aab099c6a5f1eb4c3",
       "overlap_group_count": 15,
