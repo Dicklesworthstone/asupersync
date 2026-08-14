@@ -267,7 +267,7 @@
       "pin_id": "KAFKA-K0-4-PIN-001-K0-3-AUTHORITY",
       "path": "artifacts/kafka_downstream_user_journey_inventory_v1.json",
       "sha256": "fffb3a70e2fb3da4505a74d91f5f7a3996094ffb6292f6948404070154e795fa",
-      "byte_count": 1171766,
+      "byte_count": 1171768,
       "record_count": 17987
     },
     {

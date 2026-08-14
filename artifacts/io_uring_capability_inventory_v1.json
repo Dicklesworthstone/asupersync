@@ -211,7 +211,7 @@
     },
     {
       "path": "tests/io_uring_capability_inventory_contract.rs",
-      "sha256": "062d151cd1767b3693fa11d878533cacefbe3ba1ab5d223230f213af56b849e2",
+      "sha256": "eb1b674f4a72adcd937638399770ec6313c074124f4d8f7a9abd58e2d1ebaeda",
       "line_count": 1211,
       "role": "machine contract for the frozen inventory and decision policy"
     },
