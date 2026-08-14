@@ -383,9 +383,13 @@ fn dependency_edge_is_exact_optional_and_already_locked() {
 
     let lock = read(CARGO_LOCK_PATH);
     assert!(lock.contains("name = \"regex-syntax\"\nversion = \"0.8.11\""));
+    let root_package = format!(
+        "name = \"asupersync\"\nversion = \"{}\"",
+        env!("CARGO_PKG_VERSION")
+    );
     let root = lock
         .split("[[package]]")
-        .find(|package| package.contains("name = \"asupersync\"\nversion = \"0.4.3\""))
+        .find(|package| package.contains(&root_package))
         .expect("root package must exist");
     assert!(root.contains("\"regex-syntax\""));
 }

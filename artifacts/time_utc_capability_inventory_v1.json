@@ -1195,11 +1195,11 @@
     "cross_file_consumer_anchor_count": 34,
     "cross_file_direct_source_anchor_count": 41,
     "declared_consumer_unique_direct_source_anchor_count": 76,
-    "literal_operation_projection_sha256": "a99e910a9793650e07f345f91dbbbabec6e28f118ac57887035344dd040125ac",
-    "literal_source_projection_sha256": "5ef63aba768de40b2cf0a84e514fc184df6d57f93869f2a8108b3c2b9c4a87e2",
+    "literal_operation_projection_sha256": "7576c14d2950116f79111225a7cac6f61755eccd09c26aa9476841c004a3eae1",
+    "literal_source_projection_sha256": "bdfdb42f121b7614fe82ccc24c9d14e691bff86054782ad11c78cf854e9f2d0a",
     "path_classification_projection_sha256": "5f60bb8b7deb36b1aac2123747fd1be426f1888fc759f46afe3baae103dc3b63",
-    "literal_override_projection_sha256": "ea3196fcf2526570e2d848036125a226047dccc9acf570dbe53cd92835287f02",
-    "additional_derived_projection_sha256": "df697103ce3389ef4c0fe5db8cb04f75fee90336c4e917401bf763fd454889f2",
+    "literal_override_projection_sha256": "194275e94001e0b048499cce9765365db2fffc9cf256d8a2e93489f1a97ee2e6",
+    "additional_derived_projection_sha256": "a32e839f13b56abfe4c80070dc20df15fdc26a6c9a63c36487492f7771e77e3b",
     "cross_file_consumer_projection_sha256": "ca8cec49608f6762b7984ba4bc3b6e3b816ecee73cb008510ea11c1677fa728c",
     "semantic_consumer_boundary": "Include nonliteral consumers through the first semantic compare, arithmetic, format, serialize, persist, retain, return, extract, or embed boundary in a Chrono-bearing source path; exclude cross-file propagation, external consumers, and later container or arbitrary-byte taint.",
     "cross_file_consumer_boundary": "Include the first explicit embedding, constructor, return, or statically generic JSON value serialization boundary in a different source file when a timestamp-bearing public carrier flows from a direct Chrono producer to a declared in-repository consumer; exclude later encoding or rendering calls, later container propagation, distinct file or standard-output sink anchors, dynamic dispatch, external consumers, and ambiguous provenance.",
@@ -1725,7 +1725,7 @@
       {
         "use_id": "TIME-LITERAL-OVERRIDE-POSTGRES-18142",
         "path": "src/database/postgres.rs",
-        "line": 18142,
+        "line": 18146,
         "source_anchor": "(epoch + chrono::TimeDelta::days(days)).to_string()",
         "operation": "add a PostgreSQL day offset to the calendar epoch and render expected DATE text",
         "cfg_or_wiring": "FEATURE_POSTGRES_AND_CFG_TEST_IN_MODULE",
@@ -1735,7 +1735,7 @@
       {
         "use_id": "TIME-LITERAL-OVERRIDE-POSTGRES-18153",
         "path": "src/database/postgres.rs",
-        "line": 18153,
+        "line": 18157,
         "source_anchor": "(epoch + chrono::TimeDelta::microseconds(micros)).to_string()",
         "operation": "add a PostgreSQL microsecond offset to the midnight epoch and render expected TIMESTAMP text",
         "cfg_or_wiring": "FEATURE_POSTGRES_AND_CFG_TEST_IN_MODULE",
@@ -2056,11 +2056,11 @@
       {
         "use_id": "TIME-DERIVED-POSTGRES-MIDNIGHT-CONSTRUCTION-18151",
         "derivation_sources": [
-          "src/database/postgres.rs:18149"
+          "src/database/postgres.rs:18153"
         ],
         "consumer_category_id": "TIME-CONSUMER-DATABASE-MESSAGING-ARITHMETIC",
         "path": "src/database/postgres.rs",
-        "line": 18151,
+        "line": 18155,
         "source_anchor": ".and_hms_opt(0, 0, 0)",
         "operation": "extend the PostgreSQL calendar epoch date to a midnight timestamp",
         "cfg_or_wiring": "FEATURE_POSTGRES_AND_CFG_TEST_IN_MODULE",
@@ -5502,7 +5502,7 @@
       "refreshed_explicit_anchor_count": 3,
       "refreshed_direct_source_reference_count": 1,
       "previous_direct_source_id": "src/database/postgres.rs:18086",
-      "current_direct_source_id": "src/database/postgres.rs:18149",
+      "current_direct_source_id": "src/database/postgres.rs:18153",
       "refreshed_anchor_ids": [
         "TIME-DERIVED-POSTGRES-MIDNIGHT-CONSTRUCTION-18151",
         "TIME-LITERAL-OVERRIDE-POSTGRES-18142",
@@ -5515,9 +5515,9 @@
         "additional_derived": "b20b65d03be1995802d929275531ac96a8a66ec06c1c64f0bf887ee27803f674"
       },
       "current_projection_sha256": {
-        "literal_operation": "a99e910a9793650e07f345f91dbbbabec6e28f118ac57887035344dd040125ac",
-        "literal_source": "5ef63aba768de40b2cf0a84e514fc184df6d57f93869f2a8108b3c2b9c4a87e2",
-        "literal_override": "ea3196fcf2526570e2d848036125a226047dccc9acf570dbe53cd92835287f02",
+        "literal_operation": "7576c14d2950116f79111225a7cac6f61755eccd09c26aa9476841c004a3eae1",
+        "literal_source": "bdfdb42f121b7614fe82ccc24c9d14e691bff86054782ad11c78cf854e9f2d0a",
+        "literal_override": "194275e94001e0b048499cce9765365db2fffc9cf256d8a2e93489f1a97ee2e6",
         "additional_derived": "6b1a4e86af89748dd08fef01e10c2417b9641ba1bf0f262a59ce57f0dd21ad44"
       },
       "additional_derived_projection_change_includes_new_history_row": true,

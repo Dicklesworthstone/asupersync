@@ -47,12 +47,12 @@
     },
     {
       "path": "artifacts/proof_lane_manifest_v1.json",
-      "sha256": "48aa00d8a55544da5609b81c959c108aada1797eaffaf079bca975b0ed734fa0",
+      "sha256": "e7d4c8a62dff66fb0f1609faa4d5f901f2eb89d4ffb810f891871f9d0215068f",
       "covers": "RCH lane command policy and cache-hit claim scopes"
     },
     {
       "path": "artifacts/proof_status_snapshot_v1.json",
-      "sha256": "6965235ed8273a7e85c91de081a6a7a75f6a87d4cd584c5ee0c6f3c3dfb16baa",
+      "sha256": "86f85f67d25ce312d8ac00b0fe4401210002067a9bae80ff8a0f746d2f676fbf",
       "covers": "fresh pass, approved cache hit, rerun-required, blocked, no-win, and unsupported status rows"
     },
     {

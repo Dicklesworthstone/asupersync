@@ -384,7 +384,8 @@ fn cancel_flow_documented_in_builder_or_task_handle() {
     let task_handle = read("src/runtime/task_handle.rs");
 
     assert!(
-        task_handle.contains("This is a request") && task_handle.contains("checkpoint"),
+        task_handle.contains("This is cooperative cancellation, not forced future destruction")
+            && task_handle.contains("cancellation-aware checkpoint"),
         "REGRESSION: TaskHandle::abort no longer documents \
          the request/checkpoint protocol. Future maintainers \
          may add an abort_handle expecting tokio-style \

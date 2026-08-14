@@ -250,7 +250,7 @@
         {"path": "src/channel/oneshot.rs", "line": 159, "fragment": "struct OneShotInner<T>"},
         {"path": "src/channel/oneshot.rs", "line": 391, "fragment": "pub struct Sender<T>"},
         {"path": "src/channel/oneshot.rs", "line": 1099, "fragment": "pub struct Receiver<T>"},
-        {"path": "src/cx/cx.rs", "line": 4655, "fragment": "let shared_tx = Arc::new(std::sync::Mutex::new(Some(result_tx)))"}
+        {"path": "src/cx/cx.rs", "line": 4664, "fragment": "let shared_tx = Arc::new(std::sync::Mutex::new(Some(result_tx)))"}
       ]
     }
   ],
@@ -307,7 +307,7 @@
       "must_preserve": "the observer resolves exactly once; no typed-cancellation claim is added to this family",
       "anchors": [
         {"path": "src/runtime/builder.rs", "line": 4380, "fragment": "if let Some(mailbox) = &self.spawn_mailbox"},
-        {"path": "src/runtime/spawn_mailbox.rs", "line": 1117, "fragment": "pub fn resolve_failed(self, error: SpawnError)"}
+        {"path": "src/runtime/spawn_mailbox.rs", "line": 1118, "fragment": "pub fn resolve_failed(self, error: SpawnError)"}
       ]
     },
     {
@@ -349,8 +349,8 @@
       "incumbent_contract": "Cx::spawn and Cx::spawn_in return SpawnError::RuntimeUnavailable and never panic",
       "must_preserve": "no handle is returned for a request that was never published",
       "anchors": [
-        {"path": "src/cx/cx.rs", "line": 4055, "fragment": "pub fn spawn<F, Fut>("},
-        {"path": "src/cx/cx.rs", "line": 4150, "fragment": "pub fn spawn_in<F, Fut, P>("}
+        {"path": "src/cx/cx.rs", "line": 4056, "fragment": "pub fn spawn<F, Fut>("},
+        {"path": "src/cx/cx.rs", "line": 4152, "fragment": "pub fn spawn_in<F, Fut, P>("}
       ]
     },
     {
@@ -383,7 +383,7 @@
       "must_preserve": "panic stays typed for this family",
       "anchors": [
         {"path": "src/runtime/task_handle.rs", "line": 14, "fragment": "pub enum JoinError"},
-        {"path": "src/cx/cx.rs", "line": 4623, "fragment": "fn spawn_via_gateway<F, Fut>("}
+        {"path": "src/cx/cx.rs", "line": 4632, "fragment": "fn spawn_via_gateway<F, Fut>("}
       ]
     },
     {
@@ -393,7 +393,7 @@
       "incumbent_contract": "the completion slot or closed-channel mapping yields JoinError::Cancelled with the strongest available reason",
       "must_preserve": "every accepted request terminates its handle and preserves cancellation attribution",
       "anchors": [
-        {"path": "src/cx/cx.rs", "line": 4709, "fragment": "let request = SpawnRequest::new_with_factory"},
+        {"path": "src/cx/cx.rs", "line": 4718, "fragment": "let request = SpawnRequest::new_with_factory"},
         {"path": "src/runtime/task_handle.rs", "line": 831, "fragment": "impl<T> std::future::Future for JoinFuture"}
       ]
     },
@@ -461,10 +461,10 @@
       "trace": "TaskSpawnEnqueued is recorded before each request becomes visible",
       "capacity": "global mailbox is unbounded; admission quotas fail later and explicitly",
       "anchors": [
-        {"path": "src/runtime/spawn_mailbox.rs", "line": 901, "fragment": "pub struct SpawnRequest"},
-        {"path": "src/runtime/spawn_mailbox.rs", "line": 1247, "fragment": "pub fn enqueue(&self, request: SpawnRequest, now: Time)"},
-        {"path": "src/runtime/spawn_mailbox.rs", "line": 1412, "fragment": "pub fn enqueue_and_notify(&self, request: SpawnRequest)"},
-        {"path": "src/cx/cx.rs", "line": 4731, "fragment": "gateway.enqueue_and_notify(request)?"}
+        {"path": "src/runtime/spawn_mailbox.rs", "line": 902, "fragment": "pub struct SpawnRequest"},
+        {"path": "src/runtime/spawn_mailbox.rs", "line": 1249, "fragment": "pub fn enqueue(&self, request: SpawnRequest, now: Time)"},
+        {"path": "src/runtime/spawn_mailbox.rs", "line": 1414, "fragment": "pub fn enqueue_and_notify(&self, request: SpawnRequest)"},
+        {"path": "src/cx/cx.rs", "line": 4740, "fragment": "gateway.enqueue_and_notify(request)?"}
       ]
     },
     "consumer_now": {

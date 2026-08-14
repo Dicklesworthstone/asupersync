@@ -145,6 +145,7 @@ fn should_skip_dir(path: &Path) -> bool {
         name,
         ".beads" | ".git" | "target" | "node_modules" | ".pytest_cache" | ".ruff_cache"
     ) || name.starts_with(".rch-target")
+        || name.starts_with(".rch-tmp")
         || name.starts_with("rch_target")
 }
 

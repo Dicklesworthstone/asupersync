@@ -23,7 +23,7 @@ const BEAD_ID: &str = "asupersync-5z2scg.6.1";
 const CAPABILITY_ID: &str = "CAP-TIME-UTC-RFC3339";
 const ADR_ID: &str = "DEP-ADR-011";
 const BASELINE_REVISION: &str = "1afde84d564bd8ea876459624116f90028b80835";
-const ARTIFACT_SHA256: &str = "b89e57dd71ab5d47e4405579cbf94e5a1e8c181e93132338ba286054e607bbcb";
+const ARTIFACT_SHA256: &str = "90f895f34534ac5445a06ec7f4c06173d333af995bc480b94d85dc428dfe1ac7";
 const DOC_BEGIN: &str = "<!-- BEGIN TIME UTC CAPABILITY INVENTORY -->";
 const DOC_END: &str = "<!-- END TIME UTC CAPABILITY INVENTORY -->";
 const CHRONO_TOKEN: &str = concat!("chrono", "::");
@@ -33,17 +33,17 @@ const CENSUS_PROJECTION_SHA256: &str =
 const CENSUS_PATHS_SHA256: &str =
     "f16dea3b2143a0502579cdde842a5b00694031ec504eb674750554f6030f9700";
 const LITERAL_OPERATION_PROJECTION_SHA256: &str =
-    "a99e910a9793650e07f345f91dbbbabec6e28f118ac57887035344dd040125ac";
+    "7576c14d2950116f79111225a7cac6f61755eccd09c26aa9476841c004a3eae1";
 const LITERAL_SOURCE_PROJECTION_SHA256: &str =
-    "5ef63aba768de40b2cf0a84e514fc184df6d57f93869f2a8108b3c2b9c4a87e2";
+    "bdfdb42f121b7614fe82ccc24c9d14e691bff86054782ad11c78cf854e9f2d0a";
 const PATH_CLASSIFICATION_PROJECTION_SHA256: &str =
     "5f60bb8b7deb36b1aac2123747fd1be426f1888fc759f46afe3baae103dc3b63";
 const LITERAL_OVERRIDE_PROJECTION_SHA256: &str =
-    "ea3196fcf2526570e2d848036125a226047dccc9acf570dbe53cd92835287f02";
+    "194275e94001e0b048499cce9765365db2fffc9cf256d8a2e93489f1a97ee2e6";
 const ALIAS_CLASSIFICATION_PROJECTION_SHA256: &str =
     "867c7f39911b829635b5a28413179e8cc2d4156f0cfe2a1218fbb3f4819c5118";
 const ADDITIONAL_DERIVED_PROJECTION_SHA256: &str =
-    "df697103ce3389ef4c0fe5db8cb04f75fee90336c4e917401bf763fd454889f2";
+    "a32e839f13b56abfe4c80070dc20df15fdc26a6c9a63c36487492f7771e77e3b";
 const RAPTORQ_LINEAGE_ADDITIONAL_DERIVED_PROJECTION_SHA256: &str =
     "6b1a4e86af89748dd08fef01e10c2417b9641ba1bf0f262a59ce57f0dd21ad44";
 const CROSS_FILE_CONSUMER_PROJECTION_SHA256: &str =
@@ -3313,7 +3313,7 @@ fn validate_post_a1_conformance_raptorq_lineage_extension(inventory: &Value) -> 
         || number(reconciliation, "refreshed_explicit_anchor_count") != 3
         || number(reconciliation, "refreshed_direct_source_reference_count") != 1
         || text(reconciliation, "previous_direct_source_id") != "src/database/postgres.rs:18086"
-        || text(reconciliation, "current_direct_source_id") != "src/database/postgres.rs:18149"
+        || text(reconciliation, "current_direct_source_id") != "src/database/postgres.rs:18153"
         || text(reconciliation, "classification")
             != "LINE_ONLY_SHIFT_FROM_PREVIOUSLY_CLASSIFIED_READ_CANCELLATION_SEAM"
         || reconciliation

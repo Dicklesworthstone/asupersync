@@ -596,8 +596,8 @@
       "expected_frequency": "primary registration normally once per task; auxiliary refresh per cancel-aware future poll; dispatch on cancellation",
       "semantic_payload": "deduplicated wake ownership, not an immutable cancellation reason",
       "anchors": [
-        {"path": "src/types/task_context.rs", "line": 979, "fragment": "pub(crate) fn cancel_waker_snapshot"},
-        {"path": "src/types/task_context.rs", "line": 1004, "fragment": "pub(crate) fn take_cancel_wakers"},
+        {"path": "src/types/task_context.rs", "line": 981, "fragment": "pub(crate) fn cancel_waker_snapshot"},
+        {"path": "src/types/task_context.rs", "line": 1006, "fragment": "pub(crate) fn take_cancel_wakers"},
         {"path": "src/cx/cx.rs", "line": 3172, "fragment": "fn refresh_cancel_waker"},
         {"path": "src/channel/oneshot.rs", "line": 865, "fragment": "fn refresh_cancel_waker"},
         {"path": "src/sync/barrier.rs", "line": 489, "fragment": "Clear the Cx registration first"},

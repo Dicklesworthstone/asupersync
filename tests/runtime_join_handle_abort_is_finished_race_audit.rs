@@ -397,8 +397,7 @@ fn stable_cancellation_envelope_is_shared_for_cross_thread_propagation() {
     let source = read("src/types/task_context.rs");
 
     assert!(
-        source.contains("pub(crate) struct CxCancellationState {")
-            && source.contains("requested: std::sync::atomic::AtomicBool,")
+        source.contains("pub(crate) type CxCancellationState = std::sync::atomic::AtomicBool;",)
             && source.contains("cancellation: std::sync::Arc<CxCancellationState>,")
             && source.contains("std::sync::Arc::clone(&self.cancellation)"),
         "REGRESSION: CxInner cancellation is no longer a private \

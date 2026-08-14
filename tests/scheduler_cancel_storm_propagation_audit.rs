@@ -218,8 +218,7 @@ fn cancellation_envelope_is_stable_arc_for_single_release_publish() {
     let source = read("src/types/task_context.rs");
 
     assert!(
-        source.contains("pub(crate) struct CxCancellationState {")
-            && source.contains("requested: std::sync::atomic::AtomicBool,")
+        source.contains("pub(crate) type CxCancellationState = std::sync::atomic::AtomicBool;",)
             && source.contains("cancellation: std::sync::Arc<CxCancellationState>,")
             && source.contains("std::sync::Arc::clone(&self.cancellation)"),
         "REGRESSION: CxInner cancellation is no longer a private stable \

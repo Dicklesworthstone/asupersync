@@ -2,13 +2,13 @@
   "schema_version": 1,
   "artifact": "unsafe_boundary_ledger_v1",
   "generated_from": {
-    "source_revision": "195add219024f19e5be0696e7aa6da5452b282ce",
-    "scan_mode": "committed_HEAD_only",
+    "source_revision": "3ad241b4d50d31e86b565dcaf5f1bd637c99e73a",
+    "scan_mode": "current_worktree_exact",
     "worktree_dirty_at_generation": true,
-    "scan_command": "git ls-tree -r --name-only HEAD | filter *.rs plus syntax scan for allow(unsafe_code), unsafe blocks, unsafe fn, unsafe impl, unsafe trait; comments and string literals ignored for unsafe syntax matches",
+    "scan_command": "tests/unsafe_boundary_ledger_contract.rs exact syntax scan over repository Rust sources, excluding build, dependency-cache, VCS, and coordination directories; comments and string literals ignored for unsafe syntax matches",
     "notes": [
-      "The repository had peer-owned dirty source files at generation time; this ledger inventories committed HEAD so the artifact is reproducible from the source revision recorded here.",
-      "UNSAFE-2 catch-up refreshed operation_locators to exact committed-source line numbers and added rows for src/bin/atp.rs and tests/net_unix_stream_ancillary.rs.",
+      "The release repair reconciled every operation locator against the exact current worktree selected for the v0.4.4 remote release gates.",
+      "The scanner excludes RCH temporary Cargo homes so third-party registry sources cannot be misclassified as repository unsafe boundaries.",
       "asupersync-ntizv refreshed the src/process.rs live locators and safety contract for exact-image Windows pipes, process attributes, CreateProcessW, and Job Object ownership.",
       "Passing the contract proves source/ledger locator alignment only; category evidence still controls any safety claim."
     ]
@@ -334,17 +334,17 @@
     }
   },
   "summary": {
-    "boundary_rows": 97,
-    "operation_count": 881,
+    "boundary_rows": 100,
+    "operation_count": 892,
     "operation_kind_counts": {
-      "allow_unsafe_code": 100,
-      "unsafe_block": 653,
+      "allow_unsafe_code": 106,
+      "unsafe_block": 664,
       "unsafe_fn": 102,
       "unsafe_impl": 20,
       "unsafe_trait": 0
     },
     "category_counts": {
-      "atp-platform-boundary": 2,
+      "atp-platform-boundary": 4,
       "browser-boundary": 1,
       "channel-test-boundary": 2,
       "compat-boundary": 2,
@@ -353,7 +353,7 @@
       "env-var-mutation": 6,
       "filesystem-ffi": 3,
       "fuzz-target": 28,
-      "network-ffi": 3,
+      "network-ffi": 4,
       "observability-test-boundary": 1,
       "platform-resource-metrics": 2,
       "process-signal-ffi": 3,
@@ -407,28 +407,23 @@
       ],
       "operation_locators": [
         {
-          "kind": "unsafe_block",
-          "line": 198,
-          "pattern": "unsafe {"
-        },
-        {
           "kind": "allow_unsafe_code",
-          "line": 253,
+          "line": 244,
           "pattern": "#[allow(unsafe_code)]"
         },
         {
           "kind": "unsafe_block",
-          "line": 267,
+          "line": 258,
           "pattern": "let uninit = unsafe { hyper_buf.as_mut() };"
         },
         {
           "kind": "unsafe_block",
-          "line": 272,
+          "line": 263,
           "pattern": "let buf = unsafe { std::slice::from_raw_parts_mut(uninit.as_mut_ptr().cast::<u8>(), len) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 278,
+          "line": 269,
           "pattern": "unsafe { hyper_buf.advance(n) };"
         }
       ]
@@ -1652,12 +1647,12 @@
       "operation_locators": [
         {
           "kind": "allow_unsafe_code",
-          "line": 5039,
+          "line": 11866,
           "pattern": "#[allow(unsafe_code)]"
         },
         {
           "kind": "unsafe_block",
-          "line": 5046,
+          "line": 11874,
           "pattern": "unsafe {"
         }
       ]
@@ -1683,32 +1678,32 @@
         },
         {
           "kind": "unsafe_block",
-          "line": 1078,
+          "line": 1175,
           "pattern": "let result = unsafe { libc::kill(pid, 0) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 1698,
+          "line": 1795,
           "pattern": "let term_result = unsafe { libc::kill(native_pid, libc::SIGTERM) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 1709,
+          "line": 1806,
           "pattern": "let check_result = unsafe { libc::kill(native_pid, 0) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 1718,
+          "line": 1815,
           "pattern": "let _ = unsafe { libc::kill(native_pid, libc::SIGKILL) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 1735,
+          "line": 1832,
           "pattern": "let errno = unsafe { *libc::__errno_location() };"
         },
         {
           "kind": "unsafe_block",
-          "line": 1868,
+          "line": 1965,
           "pattern": "let signal_result = unsafe { libc::kill(native_pid, libc::SIGHUP) };"
         }
       ]
@@ -1729,73 +1724,73 @@
       "operation_locators": [
         {
           "kind": "allow_unsafe_code",
-          "line": 2717,
+          "line": 2768,
+          "pattern": "#[allow(unsafe_code)]"
+        },
+        {
+          "kind": "allow_unsafe_code",
+          "line": 2796,
+          "pattern": "#[allow(unsafe_code)]"
+        },
+        {
+          "kind": "allow_unsafe_code",
+          "line": 2826,
+          "pattern": "#[allow(unsafe_code)]"
+        },
+        {
+          "kind": "allow_unsafe_code",
+          "line": 2834,
+          "pattern": "#[allow(unsafe_code)]"
+        },
+        {
+          "kind": "allow_unsafe_code",
+          "line": 2845,
           "pattern": "#[allow(unsafe_code)]"
         },
         {
           "kind": "unsafe_block",
-          "line": 2724,
+          "line": 2775,
           "pattern": "unsafe { Waker::from_raw(raw) }"
         },
         {
-          "kind": "allow_unsafe_code",
-          "line": 2745,
-          "pattern": "#[allow(unsafe_code)]"
-        },
-        {
-          "kind": "unsafe_fn",
-          "line": 2746,
-          "pattern": "unsafe fn clone_waker(data: *const ()) -> RawWaker {"
-        },
-        {
           "kind": "unsafe_block",
-          "line": 2751,
+          "line": 2802,
           "pattern": "let probe = ManuallyDrop::new(unsafe {"
         },
         {
-          "kind": "allow_unsafe_code",
-          "line": 2775,
-          "pattern": "#[allow(unsafe_code)]"
-        },
-        {
-          "kind": "unsafe_fn",
-          "line": 2776,
-          "pattern": "unsafe fn wake(data: *const ()) {"
-        },
-        {
           "kind": "unsafe_block",
-          "line": 2779,
+          "line": 2830,
           "pattern": "let probe = unsafe { Arc::<RawWakerProbe>::from_raw(data.cast::<RawWakerProbe>()) };"
         },
         {
-          "kind": "allow_unsafe_code",
-          "line": 2783,
-          "pattern": "#[allow(unsafe_code)]"
-        },
-        {
-          "kind": "unsafe_fn",
-          "line": 2784,
-          "pattern": "unsafe fn wake_by_ref(data: *const ()) {"
-        },
-        {
           "kind": "unsafe_block",
-          "line": 2788,
+          "line": 2839,
           "pattern": "let probe = ManuallyDrop::new(unsafe {"
         },
         {
-          "kind": "allow_unsafe_code",
-          "line": 2794,
-          "pattern": "#[allow(unsafe_code)]"
+          "kind": "unsafe_block",
+          "line": 2849,
+          "pattern": "drop(unsafe { Arc::<RawWakerProbe>::from_raw(data.cast::<RawWakerProbe>()) });"
         },
         {
           "kind": "unsafe_fn",
-          "line": 2795,
-          "pattern": "unsafe fn drop_waker(data: *const ()) {"
+          "line": 2797,
+          "pattern": "unsafe fn clone_waker(data: *const ()) -> RawWaker {"
         },
         {
-          "kind": "unsafe_block",
-          "line": 2798,
-          "pattern": "drop(unsafe { Arc::<RawWakerProbe>::from_raw(data.cast::<RawWakerProbe>()) });"
+          "kind": "unsafe_fn",
+          "line": 2827,
+          "pattern": "unsafe fn wake(data: *const ()) {"
+        },
+        {
+          "kind": "unsafe_fn",
+          "line": 2835,
+          "pattern": "unsafe fn wake_by_ref(data: *const ()) {"
+        },
+        {
+          "kind": "unsafe_fn",
+          "line": 2846,
+          "pattern": "unsafe fn drop_waker(data: *const ()) {"
         }
       ]
     },
@@ -1815,73 +1810,73 @@
       "operation_locators": [
         {
           "kind": "allow_unsafe_code",
-          "line": 1401,
+          "line": 1470,
+          "pattern": "#[allow(unsafe_code)]"
+        },
+        {
+          "kind": "allow_unsafe_code",
+          "line": 1498,
+          "pattern": "#[allow(unsafe_code)]"
+        },
+        {
+          "kind": "allow_unsafe_code",
+          "line": 1527,
+          "pattern": "#[allow(unsafe_code)]"
+        },
+        {
+          "kind": "allow_unsafe_code",
+          "line": 1535,
+          "pattern": "#[allow(unsafe_code)]"
+        },
+        {
+          "kind": "allow_unsafe_code",
+          "line": 1545,
           "pattern": "#[allow(unsafe_code)]"
         },
         {
           "kind": "unsafe_block",
-          "line": 1408,
+          "line": 1477,
           "pattern": "unsafe { Waker::from_raw(raw) }"
         },
         {
-          "kind": "allow_unsafe_code",
-          "line": 1429,
-          "pattern": "#[allow(unsafe_code)]"
-        },
-        {
-          "kind": "unsafe_fn",
-          "line": 1430,
-          "pattern": "unsafe fn clone_waker(data: *const ()) -> RawWaker {"
-        },
-        {
           "kind": "unsafe_block",
-          "line": 1434,
+          "line": 1503,
           "pattern": "let probe = ManuallyDrop::new(unsafe {"
         },
         {
-          "kind": "allow_unsafe_code",
-          "line": 1458,
-          "pattern": "#[allow(unsafe_code)]"
-        },
-        {
-          "kind": "unsafe_fn",
-          "line": 1459,
-          "pattern": "unsafe fn wake(data: *const ()) {"
-        },
-        {
           "kind": "unsafe_block",
-          "line": 1462,
+          "line": 1531,
           "pattern": "let probe = unsafe { Arc::<RawWakerProbe>::from_raw(data.cast::<RawWakerProbe>()) };"
         },
         {
-          "kind": "allow_unsafe_code",
-          "line": 1466,
-          "pattern": "#[allow(unsafe_code)]"
-        },
-        {
-          "kind": "unsafe_fn",
-          "line": 1467,
-          "pattern": "unsafe fn wake_by_ref(data: *const ()) {"
-        },
-        {
           "kind": "unsafe_block",
-          "line": 1470,
+          "line": 1539,
           "pattern": "let probe = ManuallyDrop::new(unsafe {"
         },
         {
-          "kind": "allow_unsafe_code",
-          "line": 1476,
-          "pattern": "#[allow(unsafe_code)]"
+          "kind": "unsafe_block",
+          "line": 1549,
+          "pattern": "drop(unsafe { Arc::<RawWakerProbe>::from_raw(data.cast::<RawWakerProbe>()) });"
         },
         {
           "kind": "unsafe_fn",
-          "line": 1477,
-          "pattern": "unsafe fn drop_waker(data: *const ()) {"
+          "line": 1499,
+          "pattern": "unsafe fn clone_waker(data: *const ()) -> RawWaker {"
         },
         {
-          "kind": "unsafe_block",
-          "line": 1480,
-          "pattern": "drop(unsafe { Arc::<RawWakerProbe>::from_raw(data.cast::<RawWakerProbe>()) });"
+          "kind": "unsafe_fn",
+          "line": 1528,
+          "pattern": "unsafe fn wake(data: *const ()) {"
+        },
+        {
+          "kind": "unsafe_fn",
+          "line": 1536,
+          "pattern": "unsafe fn wake_by_ref(data: *const ()) {"
+        },
+        {
+          "kind": "unsafe_fn",
+          "line": 1546,
+          "pattern": "unsafe fn drop_waker(data: *const ()) {"
         }
       ]
     },
@@ -1901,22 +1896,22 @@
       "operation_locators": [
         {
           "kind": "allow_unsafe_code",
-          "line": 1177,
+          "line": 1348,
           "pattern": "#[allow(unsafe_code)]"
         },
         {
           "kind": "allow_unsafe_code",
-          "line": 1290,
+          "line": 1534,
           "pattern": "#[allow(unsafe_code)]"
         },
         {
           "kind": "unsafe_block",
-          "line": 1294,
+          "line": 1538,
           "pattern": "unsafe { std::env::set_var(\"RAPTORQ_ENCODING_SYMBOL_SIZE\", \"512\") };"
         },
         {
           "kind": "unsafe_block",
-          "line": 1298,
+          "line": 1542,
           "pattern": "unsafe { std::env::remove_var(\"RAPTORQ_ENCODING_SYMBOL_SIZE\") };"
         }
       ]
@@ -1937,12 +1932,12 @@
       "operation_locators": [
         {
           "kind": "allow_unsafe_code",
-          "line": 1184,
+          "line": 1205,
           "pattern": "#[allow(unsafe_code)] // see SAFETY note below."
         },
         {
           "kind": "unsafe_block",
-          "line": 1192,
+          "line": 1213,
           "pattern": "unsafe {"
         }
       ]
@@ -1963,22 +1958,22 @@
       "operation_locators": [
         {
           "kind": "allow_unsafe_code",
-          "line": 9558,
+          "line": 10035,
           "pattern": "#[allow(unsafe_code)]"
         },
         {
           "kind": "unsafe_block",
-          "line": 9565,
+          "line": 10042,
           "pattern": "unsafe { std::env::set_var(\"SSL_CERT_FILE\", \"/definitely/not/a/postgres-ca.pem\") };"
         },
         {
           "kind": "unsafe_block",
-          "line": 9572,
+          "line": 10049,
           "pattern": "unsafe { std::env::set_var(\"SSL_CERT_FILE\", value) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 9576,
+          "line": 10053,
           "pattern": "unsafe { std::env::remove_var(\"SSL_CERT_FILE\") };"
         }
       ]
@@ -1999,12 +1994,12 @@
       "operation_locators": [
         {
           "kind": "allow_unsafe_code",
-          "line": 78,
+          "line": 81,
           "pattern": "#[allow(unsafe_code)]"
         },
         {
           "kind": "unsafe_block",
-          "line": 83,
+          "line": 86,
           "pattern": "unsafe {"
         }
       ]
@@ -2025,12 +2020,12 @@
       "operation_locators": [
         {
           "kind": "allow_unsafe_code",
-          "line": 354,
+          "line": 713,
           "pattern": "#[allow(unsafe_code)]"
         },
         {
           "kind": "unsafe_block",
-          "line": 359,
+          "line": 718,
           "pattern": "unsafe {"
         }
       ]
@@ -2056,83 +2051,83 @@
         },
         {
           "kind": "unsafe_block",
-          "line": 259,
+          "line": 353,
           "pattern": "let result = unsafe { libc::lseek(fd, 0, libc::SEEK_CUR) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 289,
+          "line": 387,
           "pattern": "let fd = unsafe { libc::openat(libc::AT_FDCWD, c_path.as_ptr(), flags, mode) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 295,
-          "pattern": "let owned_fd = unsafe { OwnedFd::from_raw_fd(fd) };"
-        },
-        {
-          "kind": "unsafe_fn",
-          "line": 319,
-          "pattern": "pub unsafe fn from_raw_fd(fd: RawFd) -> io::Result<Self> {"
-        },
-        {
-          "kind": "unsafe_block",
-          "line": 321,
+          "line": 393,
           "pattern": "let owned_fd = unsafe { OwnedFd::from_raw_fd(fd) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 456,
+          "line": 419,
+          "pattern": "let owned_fd = unsafe { OwnedFd::from_raw_fd(fd) };"
+        },
+        {
+          "kind": "unsafe_block",
+          "line": 561,
           "pattern": "let result = unsafe { libc::ftruncate(fd, size_off) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 472,
+          "line": 577,
           "pattern": "let std_file = std::mem::ManuallyDrop::new(unsafe { std::fs::File::from_raw_fd(fd) });"
         },
         {
           "kind": "unsafe_block",
-          "line": 479,
+          "line": 584,
           "pattern": "let std_file = std::mem::ManuallyDrop::new(unsafe { std::fs::File::from_raw_fd(fd) });"
         },
         {
           "kind": "unsafe_block",
-          "line": 524,
+          "line": 629,
           "pattern": "let push_result = unsafe { ring.submission().push(entry) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 640,
+          "line": 763,
           "pattern": "unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 1471,
+          "line": 1735,
           "pattern": "let push_result = unsafe { ring.submission().push(&entry) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 1606,
+          "line": 1870,
           "pattern": "let file = unsafe { IoUringFile::from_raw_fd(raw_fd) }.unwrap();"
         },
         {
           "kind": "unsafe_block",
-          "line": 1641,
+          "line": 1905,
           "pattern": "let pipe_result = unsafe { libc::pipe(fds.as_mut_ptr()) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 1647,
+          "line": 1911,
           "pattern": "let err = unsafe { IoUringFile::from_raw_fd(read_fd) }"
         },
         {
           "kind": "unsafe_block",
-          "line": 1656,
+          "line": 1920,
           "pattern": "let close_result = unsafe { libc::close(read_fd) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 1670,
+          "line": 1934,
           "pattern": "let write_close_result = unsafe { libc::close(write_fd) };"
+        },
+        {
+          "kind": "unsafe_fn",
+          "line": 417,
+          "pattern": "pub unsafe fn from_raw_fd(fd: RawFd) -> io::Result<Self> {"
         }
       ]
     },
@@ -2152,32 +2147,32 @@
       "operation_locators": [
         {
           "kind": "allow_unsafe_code",
-          "line": 276,
+          "line": 279,
           "pattern": "#[allow(unsafe_code)]"
-        },
-        {
-          "kind": "unsafe_block",
-          "line": 278,
-          "pattern": "unsafe {"
         },
         {
           "kind": "allow_unsafe_code",
-          "line": 288,
+          "line": 291,
           "pattern": "#[allow(unsafe_code)]"
-        },
-        {
-          "kind": "unsafe_block",
-          "line": 290,
-          "pattern": "unsafe {"
         },
         {
           "kind": "allow_unsafe_code",
-          "line": 736,
+          "line": 739,
           "pattern": "#[allow(unsafe_code)]"
         },
         {
           "kind": "unsafe_block",
-          "line": 737,
+          "line": 281,
+          "pattern": "unsafe {"
+        },
+        {
+          "kind": "unsafe_block",
+          "line": 293,
+          "pattern": "unsafe {"
+        },
+        {
+          "kind": "unsafe_block",
+          "line": 740,
           "pattern": "unsafe {"
         }
       ]
@@ -2198,12 +2193,12 @@
       "operation_locators": [
         {
           "kind": "allow_unsafe_code",
-          "line": 3113,
+          "line": 3091,
           "pattern": "#[allow(unsafe_code)]"
         },
         {
           "kind": "unsafe_block",
-          "line": 3114,
+          "line": 3092,
           "pattern": "unsafe {"
         }
       ]
@@ -2230,6 +2225,114 @@
       ]
     },
     {
+      "site_id": "unsafe-src-net-atp-transport-common-metadata-rs",
+      "path": "src/net/atp/transport_common/metadata.rs",
+      "category": "atp-platform-boundary",
+      "scope": "file-or-item-boundary",
+      "feature_or_platform_gate": "see source cfg attributes and Cargo feature gates",
+      "why_safe_rust_is_insufficient": "Windows metadata, reparse-tag, and attribute operations require raw platform calls that safe Rust does not expose.",
+      "safety_invariant": "Every raw handle and metadata buffer must remain valid for the call, kernel-returned lengths must be bounded, and path-policy checks must fail closed.",
+      "expected_evidence": "Category-specific evidence is defined in docs/unsafe_boundary_ledger.md; this row records the current exact boundary and remains subject to the category review workflow.",
+      "explicit_no_claims": [
+        "This locator row is static source-accounting evidence, not fresh execution proof for every platform path.",
+        "Passing the ledger contract does not by itself prove runtime safety or cross-platform correctness."
+      ],
+      "operation_locators": [
+        {
+          "kind": "allow_unsafe_code",
+          "line": 232,
+          "pattern": "#[allow(unsafe_code)] // Win32 tag query over an RAII-owned std::fs::File handle."
+        },
+        {
+          "kind": "allow_unsafe_code",
+          "line": 2422,
+          "pattern": "#[allow(unsafe_code)] // Stable Win32 file identity query over an RAII-owned std::fs::File."
+        },
+        {
+          "kind": "allow_unsafe_code",
+          "line": 2698,
+          "pattern": "#[allow(unsafe_code)] // Win32 metadata update through an RAII-owned file handle."
+        },
+        {
+          "kind": "unsafe_block",
+          "line": 250,
+          "pattern": "let queried = unsafe {"
+        },
+        {
+          "kind": "unsafe_block",
+          "line": 2456,
+          "pattern": "let queried = unsafe {"
+        },
+        {
+          "kind": "unsafe_block",
+          "line": 2720,
+          "pattern": "if unsafe {"
+        }
+      ]
+    },
+    {
+      "site_id": "unsafe-src-net-atp-transport-common-mirror-rs",
+      "path": "src/net/atp/transport_common/mirror.rs",
+      "category": "atp-platform-boundary",
+      "scope": "file-or-item-boundary",
+      "feature_or_platform_gate": "see source cfg attributes and Cargo feature gates",
+      "why_safe_rust_is_insufficient": "Windows mirror path and handle validation requires raw platform calls that safe Rust does not expose.",
+      "safety_invariant": "Mirror handles must have one owner, returned path buffers must be length-checked, and descendant validation must fail closed before mutation.",
+      "expected_evidence": "Category-specific evidence is defined in docs/unsafe_boundary_ledger.md; this row records the current exact boundary and remains subject to the category review workflow.",
+      "explicit_no_claims": [
+        "This locator row is static source-accounting evidence, not fresh execution proof for every platform path.",
+        "Passing the ledger contract does not by itself prove runtime safety or cross-platform correctness."
+      ],
+      "operation_locators": [
+        {
+          "kind": "allow_unsafe_code",
+          "line": 257,
+          "pattern": "#[allow(unsafe_code)] // Query the kernel-resolved name for an RAII-owned handle."
+        },
+        {
+          "kind": "allow_unsafe_code",
+          "line": 333,
+          "pattern": "#[allow(unsafe_code)] // Delete one proven-contained no-follow handle without mutating inode attrs."
+        },
+        {
+          "kind": "unsafe_block",
+          "line": 276,
+          "pattern": "let len = unsafe {"
+        },
+        {
+          "kind": "unsafe_block",
+          "line": 400,
+          "pattern": "if unsafe {"
+        }
+      ]
+    },
+    {
+      "site_id": "unsafe-src-net-udp-rs",
+      "path": "src/net/udp.rs",
+      "category": "network-ffi",
+      "scope": "file-or-item-boundary",
+      "feature_or_platform_gate": "see source cfg attributes and Cargo feature gates",
+      "why_safe_rust_is_insufficient": "Suppressing Windows UDP connection-reset behavior requires the platform ioctl surface.",
+      "safety_invariant": "The socket handle must remain borrowed and valid for the ioctl, and platform errors must be returned without changing socket ownership.",
+      "expected_evidence": "Category-specific evidence is defined in docs/unsafe_boundary_ledger.md; this row records the current exact boundary and remains subject to the category review workflow.",
+      "explicit_no_claims": [
+        "This locator row is static source-accounting evidence, not fresh execution proof for every platform path.",
+        "Passing the ledger contract does not by itself prove runtime safety or cross-platform correctness."
+      ],
+      "operation_locators": [
+        {
+          "kind": "allow_unsafe_code",
+          "line": 46,
+          "pattern": "#[allow(unsafe_code)]"
+        },
+        {
+          "kind": "unsafe_block",
+          "line": 63,
+          "pattern": "let result = unsafe {"
+        }
+      ]
+    },
+    {
       "site_id": "unsafe-src-net-tcp-stream-rs",
       "path": "src/net/tcp/stream.rs",
       "category": "network-ffi",
@@ -2250,67 +2353,67 @@
         },
         {
           "kind": "unsafe_block",
-          "line": 1975,
+          "line": 2131,
           "pattern": "let result = unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 1989,
+          "line": 2145,
           "pattern": "let get_result = unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 2337,
+          "line": 2493,
           "pattern": "let result = unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 2354,
+          "line": 2510,
           "pattern": "let result = unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 2388,
+          "line": 2544,
           "pattern": "let result = unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 2405,
+          "line": 2561,
           "pattern": "let result = unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 2441,
+          "line": 2597,
           "pattern": "let result = unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 2455,
+          "line": 2611,
           "pattern": "let result = unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 2469,
+          "line": 2625,
           "pattern": "let result = unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 2507,
+          "line": 2663,
           "pattern": "let result = unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 2549,
+          "line": 2705,
           "pattern": "let result = unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 2594,
+          "line": 2750,
           "pattern": "let result = unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 2608,
+          "line": 2764,
           "pattern": "let result = unsafe {"
         }
       ]
@@ -2506,147 +2609,147 @@
         },
         {
           "kind": "unsafe_block",
-          "line": 1228,
+          "line": 1231,
           "pattern": "if unsafe { GetExitCodeProcess(self.process.as_raw_handle(), &mut code) } == 0 {"
         },
         {
           "kind": "unsafe_block",
-          "line": 1249,
+          "line": 1252,
           "pattern": "let wait = unsafe { WaitForSingleObject(self.process.as_raw_handle(), 0) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 1260,
+          "line": 1263,
           "pattern": "let wait = unsafe { WaitForSingleObject(self.process.as_raw_handle(), INFINITE) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 1273,
+          "line": 1276,
           "pattern": "if unsafe { TerminateJobObject(self.job.as_raw_handle(), 1) } == 0 {"
         },
         {
           "kind": "unsafe_block",
-          "line": 1296,
+          "line": 1299,
           "pattern": "let _ = unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 1308,
+          "line": 1311,
           "pattern": "if unsafe { InitializeProcThreadAttributeList(pointer, attribute_count, 0, &mut bytes) }"
         },
         {
           "kind": "unsafe_block",
-          "line": 1329,
+          "line": 1332,
           "pattern": "if unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 1356,
+          "line": 1359,
           "pattern": "unsafe { DeleteProcThreadAttributeList(self.pointer) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 1367,
+          "line": 1370,
           "pattern": "let _ = unsafe { CloseHandle(handle) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 1385,
+          "line": 1388,
           "pattern": "Ok(unsafe { OwnedHandle::from_raw_handle(handle) })"
         },
         {
           "kind": "unsafe_block",
-          "line": 1404,
+          "line": 1407,
           "pattern": "if unsafe { CreatePipe(&mut read, &mut write, &mut security, 0) } == 0 {"
         },
         {
           "kind": "unsafe_block",
-          "line": 1420,
+          "line": 1423,
           "pattern": "if unsafe { SetHandleInformation(handle.as_raw_handle(), HANDLE_FLAG_INHERIT, 0) } == 0 {"
         },
         {
           "kind": "unsafe_block",
-          "line": 1439,
+          "line": 1442,
           "pattern": "let raw = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 1443,
+          "line": 1446,
           "pattern": "if unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 1643,
+          "line": 1646,
           "pattern": "if unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 2059,
+          "line": 2062,
           "pattern": "unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 3114,
+          "line": 3117,
           "pattern": "let _ = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 4085,
+          "line": 4088,
           "pattern": "let _ = unsafe { libc::kill(pid.cast_signed(), libc::SIGKILL) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 4125,
+          "line": 4128,
           "pattern": "let _ = unsafe { libc::kill(pid.cast_signed(), libc::SIGKILL) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 4309,
+          "line": 4312,
           "pattern": "let waited = unsafe { libc::waitpid(pid, &raw mut status, libc::WNOHANG) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 4352,
+          "line": 4355,
           "pattern": "let waited = unsafe { libc::waitpid(pid, &raw mut status, libc::WNOHANG) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 4778,
+          "line": 4781,
           "pattern": "let sigterm_result = unsafe { libc::kill(pid.cast_signed(), libc::SIGTERM) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 4790,
+          "line": 4793,
           "pattern": "let still_alive = unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 4801,
+          "line": 4804,
           "pattern": "let sigkill_result = unsafe { libc::kill(pid.cast_signed(), libc::SIGKILL) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 4871,
+          "line": 4874,
           "pattern": "let process_gone = unsafe { libc::kill(pid.cast_signed(), 0) == -1 }"
         },
         {
           "kind": "unsafe_block",
-          "line": 4947,
+          "line": 4950,
           "pattern": "let our_pgid = unsafe { libc::getpgid(0) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 4952,
+          "line": 4955,
           "pattern": "let read_isolated_pgid = || -> libc::pid_t { unsafe { libc::getpgid(isolated_pid) } };"
         },
         {
           "kind": "unsafe_block",
-          "line": 5006,
+          "line": 5009,
           "pattern": "let read_target_pgid = || -> libc::pid_t { unsafe { libc::getpgid(target_pid) } };"
         },
         {
           "kind": "unsafe_block",
-          "line": 5070,
+          "line": 5073,
           "pattern": "let child_alive = unsafe { libc::kill(isolated_pid, 0) == 0 };"
         }
       ]
@@ -3702,22 +3805,22 @@
       "operation_locators": [
         {
           "kind": "allow_unsafe_code",
-          "line": 4498,
+          "line": 4841,
           "pattern": "#[allow(unsafe_code)]"
         },
         {
           "kind": "unsafe_block",
-          "line": 6091,
+          "line": 7376,
           "pattern": "unsafe { std::env::set_var(k, v) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 6096,
+          "line": 7381,
           "pattern": "unsafe { std::env::remove_var(k) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 6121,
+          "line": 7406,
           "pattern": "unsafe { std::env::remove_var(var) };"
         }
       ]
@@ -3738,37 +3841,37 @@
       "operation_locators": [
         {
           "kind": "allow_unsafe_code",
-          "line": 464,
+          "line": 523,
           "pattern": "#[allow(unsafe_code)]"
         },
         {
           "kind": "unsafe_block",
-          "line": 489,
+          "line": 548,
           "pattern": "unsafe { std::env::set_var(var, val) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 492,
+          "line": 551,
           "pattern": "unsafe { std::env::remove_var(var) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 504,
+          "line": 563,
           "pattern": "unsafe { std::env::set_var(k, v) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 509,
+          "line": 568,
           "pattern": "unsafe { std::env::remove_var(k) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 533,
+          "line": 592,
           "pattern": "unsafe { std::env::remove_var(var) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 814,
+          "line": 896,
           "pattern": "unsafe {"
         }
       ]
@@ -4396,122 +4499,122 @@
       "operation_locators": [
         {
           "kind": "allow_unsafe_code",
-          "line": 5404,
+          "line": 5408,
           "pattern": "#[allow(unsafe_code)]"
         },
         {
-          "kind": "unsafe_block",
-          "line": 5409,
-          "pattern": "let rc = unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) };"
+          "kind": "allow_unsafe_code",
+          "line": 5467,
+          "pattern": "#[allow(unsafe_code)]"
+        },
+        {
+          "kind": "allow_unsafe_code",
+          "line": 5536,
+          "pattern": "#[allow(unsafe_code)]"
+        },
+        {
+          "kind": "allow_unsafe_code",
+          "line": 5572,
+          "pattern": "#[allow(unsafe_code)]"
+        },
+        {
+          "kind": "allow_unsafe_code",
+          "line": 5633,
+          "pattern": "#[allow(unsafe_code)]"
+        },
+        {
+          "kind": "allow_unsafe_code",
+          "line": 5662,
+          "pattern": "#[allow(unsafe_code)]"
+        },
+        {
+          "kind": "allow_unsafe_code",
+          "line": 5699,
+          "pattern": "#[allow(unsafe_code)]"
+        },
+        {
+          "kind": "allow_unsafe_code",
+          "line": 5745,
+          "pattern": "#[allow(unsafe_code)]"
+        },
+        {
+          "kind": "allow_unsafe_code",
+          "line": 5778,
+          "pattern": "#[allow(unsafe_code)]"
+        },
+        {
+          "kind": "allow_unsafe_code",
+          "line": 5899,
+          "pattern": "#[allow(unsafe_code, clippy::unnecessary_cast)]"
+        },
+        {
+          "kind": "allow_unsafe_code",
+          "line": 5914,
+          "pattern": "#[allow(unsafe_code, clippy::unnecessary_cast)]"
         },
         {
           "kind": "unsafe_block",
           "line": 5413,
+          "pattern": "let rc = unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) };"
+        },
+        {
+          "kind": "unsafe_block",
+          "line": 5417,
           "pattern": "let usage = unsafe { usage.assume_init() };"
         },
         {
-          "kind": "allow_unsafe_code",
-          "line": 5463,
-          "pattern": "#[allow(unsafe_code)]"
-        },
-        {
           "kind": "unsafe_block",
-          "line": 5468,
+          "line": 5472,
           "pattern": "let n = unsafe { libc::getloadavg(loads.as_mut_ptr(), 3) };"
         },
         {
-          "kind": "allow_unsafe_code",
-          "line": 5532,
-          "pattern": "#[allow(unsafe_code)]"
-        },
-        {
           "kind": "unsafe_block",
-          "line": 5539,
+          "line": 5543,
           "pattern": "let ok = unsafe { GetProcessHandleCount(GetCurrentProcess(), &mut handle_count) };"
         },
         {
-          "kind": "allow_unsafe_code",
-          "line": 5568,
-          "pattern": "#[allow(unsafe_code)]"
-        },
-        {
           "kind": "unsafe_block",
-          "line": 5573,
+          "line": 5577,
           "pattern": "let pid = unsafe { GetCurrentProcessId() };"
         },
         {
-          "kind": "allow_unsafe_code",
-          "line": 5629,
-          "pattern": "#[allow(unsafe_code)]"
-        },
-        {
           "kind": "unsafe_block",
-          "line": 5639,
+          "line": 5643,
           "pattern": "let ok = unsafe { GetSystemTimes(&mut idle, &mut kernel, &mut user) };"
         },
         {
-          "kind": "allow_unsafe_code",
-          "line": 5658,
-          "pattern": "#[allow(unsafe_code)]"
-        },
-        {
-          "kind": "allow_unsafe_code",
-          "line": 5695,
-          "pattern": "#[allow(unsafe_code)]"
-        },
-        {
           "kind": "unsafe_block",
-          "line": 5732,
+          "line": 5736,
           "pattern": "let row = unsafe { std::ptr::read_unaligned(rows_ptr.add(index)) };"
         },
         {
-          "kind": "allow_unsafe_code",
-          "line": 5741,
-          "pattern": "#[allow(unsafe_code)]"
-        },
-        {
           "kind": "unsafe_block",
-          "line": 5753,
+          "line": 5757,
           "pattern": "unsafe { GetExtendedTcpTable(table, size, 0, family, TCP_TABLE_OWNER_PID_ALL, 0) }"
         },
         {
-          "kind": "allow_unsafe_code",
-          "line": 5774,
-          "pattern": "#[allow(unsafe_code)]"
-        },
-        {
           "kind": "unsafe_block",
-          "line": 5782,
+          "line": 5786,
           "pattern": "unsafe { GetExtendedUdpTable(table, size, 0, family, UDP_TABLE_OWNER_PID, 0) }"
-        },
-        {
-          "kind": "allow_unsafe_code",
-          "line": 5895,
-          "pattern": "#[allow(unsafe_code, clippy::unnecessary_cast)]"
-        },
-        {
-          "kind": "unsafe_block",
-          "line": 5899,
-          "pattern": "let rc = unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, rlim.as_mut_ptr()) };"
         },
         {
           "kind": "unsafe_block",
           "line": 5903,
-          "pattern": "let rlim = unsafe { rlim.assume_init() };"
-        },
-        {
-          "kind": "allow_unsafe_code",
-          "line": 5910,
-          "pattern": "#[allow(unsafe_code, clippy::unnecessary_cast)]"
+          "pattern": "let rc = unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, rlim.as_mut_ptr()) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 5914,
+          "line": 5907,
+          "pattern": "let rlim = unsafe { rlim.assume_init() };"
+        },
+        {
+          "kind": "unsafe_block",
+          "line": 5919,
           "pattern": "let rc = unsafe { libc::getrlimit(libc::RLIMIT_AS, rlim.as_mut_ptr()) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 5918,
+          "line": 5923,
           "pattern": "let rlim = unsafe { rlim.assume_init() };"
         }
       ]
@@ -4711,17 +4814,17 @@
       "operation_locators": [
         {
           "kind": "allow_unsafe_code",
-          "line": 856,
+          "line": 1484,
           "pattern": "#[allow(unsafe_code)]"
         },
         {
           "kind": "allow_unsafe_code",
-          "line": 916,
+          "line": 1544,
           "pattern": "#[allow(unsafe_code)]"
         },
         {
           "kind": "allow_unsafe_code",
-          "line": 1042,
+          "line": 1749,
           "pattern": "#[allow(unsafe_code)]"
         }
       ],
@@ -4780,93 +4883,23 @@
           "pattern": "#![allow(unsafe_code)]"
         },
         {
-          "kind": "unsafe_impl",
-          "line": 108,
-          "pattern": "unsafe impl<T: Send> Send for Mutex<T> {}"
-        },
-        {
-          "kind": "unsafe_impl",
-          "line": 109,
-          "pattern": "unsafe impl<T: Send> Sync for Mutex<T> {}"
-        },
-        {
-          "kind": "unsafe_impl",
-          "line": 561,
-          "pattern": "unsafe impl<T: Sync> Sync for MutexGuard<'_, T> {}"
-        },
-        {
           "kind": "unsafe_block",
-          "line": 574,
+          "line": 697,
           "pattern": "unsafe { &*self.mutex.data.get() }"
         },
         {
           "kind": "unsafe_block",
-          "line": 581,
+          "line": 704,
           "pattern": "unsafe { &mut *self.mutex.data.get() }"
         },
         {
-          "kind": "unsafe_impl",
-          "line": 648,
-          "pattern": "unsafe impl<T, U: ?Sized + Sync> Sync for MappedMutexGuard<'_, T, U> {}"
-        },
-        {
           "kind": "unsafe_block",
-          "line": 663,
+          "line": 781,
           "pattern": "unsafe { self.data.as_ref() }"
         },
         {
           "kind": "unsafe_block",
-          "line": 670,
-          "pattern": "unsafe { self.data.as_mut() }"
-        },
-        {
-          "kind": "unsafe_impl",
-          "line": 733,
-          "pattern": "unsafe impl<T: Send> Send for OwnedMutexGuard<T> {}"
-        },
-        {
-          "kind": "unsafe_impl",
-          "line": 734,
-          "pattern": "unsafe impl<T: Sync> Sync for OwnedMutexGuard<T> {}"
-        },
-        {
-          "kind": "unsafe_block",
-          "line": 779,
-          "pattern": "let mutex = unsafe { std::ptr::read(&self.mutex) };"
-        },
-        {
-          "kind": "unsafe_block",
-          "line": 797,
-          "pattern": "let mutex = unsafe { std::ptr::read(&self.mutex) };"
-        },
-        {
-          "kind": "unsafe_block",
-          "line": 814,
-          "pattern": "unsafe { &*self.mutex.data.get() }"
-        },
-        {
-          "kind": "unsafe_block",
-          "line": 821,
-          "pattern": "unsafe { &mut *self.mutex.data.get() }"
-        },
-        {
-          "kind": "unsafe_impl",
-          "line": 847,
-          "pattern": "unsafe impl<T: Send, U: ?Sized + Send> Send for OwnedMappedMutexGuard<T, U> {}"
-        },
-        {
-          "kind": "unsafe_impl",
-          "line": 848,
-          "pattern": "unsafe impl<T: Send, U: ?Sized + Sync> Sync for OwnedMappedMutexGuard<T, U> {}"
-        },
-        {
-          "kind": "unsafe_block",
-          "line": 863,
-          "pattern": "unsafe { self.data.as_ref() }"
-        },
-        {
-          "kind": "unsafe_block",
-          "line": 870,
+          "line": 788,
           "pattern": "unsafe { self.data.as_mut() }"
         },
         {
@@ -4878,6 +4911,76 @@
           "kind": "unsafe_block",
           "line": 914,
           "pattern": "let mutex = unsafe { std::ptr::read(&self.mutex) };"
+        },
+        {
+          "kind": "unsafe_block",
+          "line": 931,
+          "pattern": "unsafe { &*self.mutex.data.get() }"
+        },
+        {
+          "kind": "unsafe_block",
+          "line": 938,
+          "pattern": "unsafe { &mut *self.mutex.data.get() }"
+        },
+        {
+          "kind": "unsafe_block",
+          "line": 975,
+          "pattern": "unsafe { self.data.as_ref() }"
+        },
+        {
+          "kind": "unsafe_block",
+          "line": 982,
+          "pattern": "unsafe { self.data.as_mut() }"
+        },
+        {
+          "kind": "unsafe_block",
+          "line": 1003,
+          "pattern": "let mutex = unsafe { std::ptr::read(&self.mutex) };"
+        },
+        {
+          "kind": "unsafe_block",
+          "line": 1021,
+          "pattern": "let mutex = unsafe { std::ptr::read(&self.mutex) };"
+        },
+        {
+          "kind": "unsafe_impl",
+          "line": 108,
+          "pattern": "unsafe impl<T: Send> Send for Mutex<T> {}"
+        },
+        {
+          "kind": "unsafe_impl",
+          "line": 109,
+          "pattern": "unsafe impl<T: Send> Sync for Mutex<T> {}"
+        },
+        {
+          "kind": "unsafe_impl",
+          "line": 684,
+          "pattern": "unsafe impl<T: Sync> Sync for MutexGuard<'_, T> {}"
+        },
+        {
+          "kind": "unsafe_impl",
+          "line": 766,
+          "pattern": "unsafe impl<T, U: ?Sized + Sync> Sync for MappedMutexGuard<'_, T, U> {}"
+        },
+        {
+          "kind": "unsafe_impl",
+          "line": 846,
+          "pattern": "unsafe impl<T: Send> Send for OwnedMutexGuard<T> {}"
+        },
+        {
+          "kind": "unsafe_impl",
+          "line": 847,
+          "pattern": "unsafe impl<T: Sync> Sync for OwnedMutexGuard<T> {}"
+        },
+        {
+          "kind": "unsafe_impl",
+          "line": 959,
+          "pattern": "unsafe impl<T: Send, U: ?Sized + Send> Send for OwnedMappedMutexGuard<T, U> {}"
+        },
+        {
+          "kind": "unsafe_impl",
+          "line": 960,
+          "pattern": "unsafe impl<T: Send, U: ?Sized + Sync> Sync for OwnedMappedMutexGuard<T, U> {}"
         }
       ]
     },
@@ -4897,7 +5000,7 @@
       "operation_locators": [
         {
           "kind": "allow_unsafe_code",
-          "line": 4427,
+          "line": 5255,
           "pattern": "#[allow(unsafe_code)]"
         }
       ],
@@ -4921,83 +5024,83 @@
       "operation_locators": [
         {
           "kind": "allow_unsafe_code",
-          "line": 64,
+          "line": 70,
           "pattern": "#![allow(unsafe_code)]"
         },
         {
-          "kind": "unsafe_impl",
-          "line": 208,
-          "pattern": "unsafe impl<T: Send> Send for RwLock<T> {}"
-        },
-        {
-          "kind": "unsafe_impl",
-          "line": 209,
-          "pattern": "unsafe impl<T: Send + Sync> Sync for RwLock<T> {}"
-        },
-        {
-          "kind": "unsafe_impl",
-          "line": 894,
-          "pattern": "unsafe impl<T: Send + Sync> Send for RwLockReadGuard<'_, T> {}"
-        },
-        {
-          "kind": "unsafe_impl",
-          "line": 895,
-          "pattern": "unsafe impl<T: Send + Sync> Sync for RwLockReadGuard<'_, T> {}"
-        },
-        {
           "kind": "unsafe_block",
-          "line": 902,
-          "pattern": "unsafe { &*self.lock.data.get() }"
-        },
-        {
-          "kind": "unsafe_impl",
-          "line": 930,
-          "pattern": "unsafe impl<T: Send> Send for RwLockWriteGuard<'_, T> {}"
-        },
-        {
-          "kind": "unsafe_impl",
-          "line": 933,
-          "pattern": "unsafe impl<T: Send + Sync> Sync for RwLockWriteGuard<'_, T> {}"
-        },
-        {
-          "kind": "unsafe_block",
-          "line": 940,
+          "line": 1018,
           "pattern": "unsafe { &*self.lock.data.get() }"
         },
         {
           "kind": "unsafe_block",
-          "line": 947,
+          "line": 1056,
+          "pattern": "unsafe { &*self.lock.data.get() }"
+        },
+        {
+          "kind": "unsafe_block",
+          "line": 1063,
           "pattern": "unsafe { &mut *self.lock.data.get() }"
         },
         {
           "kind": "unsafe_block",
-          "line": 1051,
+          "line": 1165,
           "pattern": "f(unsafe { &*self.lock.data.get() })"
         },
         {
           "kind": "unsafe_block",
-          "line": 1060,
+          "line": 1174,
           "pattern": "unsafe { &*self.lock.data.get() }"
         },
         {
           "kind": "unsafe_block",
-          "line": 1112,
+          "line": 1226,
           "pattern": "f(unsafe { &mut *self.lock.data.get() })"
         },
         {
           "kind": "unsafe_block",
-          "line": 1121,
+          "line": 1235,
           "pattern": "unsafe { &*self.lock.data.get() }"
         },
         {
           "kind": "unsafe_block",
-          "line": 1128,
+          "line": 1242,
           "pattern": "unsafe { &mut *self.lock.data.get() }"
         },
         {
           "kind": "unsafe_block",
-          "line": 1171,
+          "line": 1285,
           "pattern": "let lock = unsafe { std::ptr::read(&md.lock) };"
+        },
+        {
+          "kind": "unsafe_impl",
+          "line": 222,
+          "pattern": "unsafe impl<T: Send> Send for RwLock<T> {}"
+        },
+        {
+          "kind": "unsafe_impl",
+          "line": 223,
+          "pattern": "unsafe impl<T: Send + Sync> Sync for RwLock<T> {}"
+        },
+        {
+          "kind": "unsafe_impl",
+          "line": 1010,
+          "pattern": "unsafe impl<T: Send + Sync> Send for RwLockReadGuard<'_, T> {}"
+        },
+        {
+          "kind": "unsafe_impl",
+          "line": 1011,
+          "pattern": "unsafe impl<T: Send + Sync> Sync for RwLockReadGuard<'_, T> {}"
+        },
+        {
+          "kind": "unsafe_impl",
+          "line": 1046,
+          "pattern": "unsafe impl<T: Send> Send for RwLockWriteGuard<'_, T> {}"
+        },
+        {
+          "kind": "unsafe_impl",
+          "line": 1049,
+          "pattern": "unsafe impl<T: Send + Sync> Sync for RwLockWriteGuard<'_, T> {}"
         }
       ]
     },
@@ -5017,22 +5120,22 @@
       "operation_locators": [
         {
           "kind": "allow_unsafe_code",
-          "line": 3437,
+          "line": 4156,
           "pattern": "#[allow(unsafe_code)]"
         },
         {
           "kind": "allow_unsafe_code",
-          "line": 4431,
+          "line": 5227,
           "pattern": "#[allow(unsafe_code)]"
         },
         {
           "kind": "unsafe_block",
-          "line": 4439,
+          "line": 5235,
           "pattern": "unsafe { std::env::set_var(\"ASUPERSYNC_TEST_ARTIFACTS_DIR\", tmp.display().to_string()) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 4496,
+          "line": 5292,
           "pattern": "unsafe { std::env::remove_var(\"ASUPERSYNC_TEST_ARTIFACTS_DIR\") };"
         }
       ]
@@ -5474,29 +5577,29 @@
           "pattern": "#![allow(unsafe_code)]"
         },
         {
-          "kind": "unsafe_impl",
-          "line": 42,
-          "pattern": "unsafe impl GlobalAlloc for CountingAllocator {"
-        },
-        {
-          "kind": "unsafe_fn",
-          "line": 43,
-          "pattern": "unsafe fn alloc(&self, layout: Layout) -> *mut u8 {"
-        },
-        {
           "kind": "unsafe_block",
-          "line": 48,
+          "line": 51,
           "pattern": "unsafe { System.alloc(layout) }"
         },
         {
+          "kind": "unsafe_block",
+          "line": 55,
+          "pattern": "unsafe { System.dealloc(ptr, layout) }"
+        },
+        {
           "kind": "unsafe_fn",
-          "line": 51,
+          "line": 46,
+          "pattern": "unsafe fn alloc(&self, layout: Layout) -> *mut u8 {"
+        },
+        {
+          "kind": "unsafe_fn",
+          "line": 54,
           "pattern": "unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {"
         },
         {
-          "kind": "unsafe_block",
-          "line": 52,
-          "pattern": "unsafe { System.dealloc(ptr, layout) }"
+          "kind": "unsafe_impl",
+          "line": 45,
+          "pattern": "unsafe impl GlobalAlloc for CountingAllocator {"
         }
       ]
     },
@@ -6079,17 +6182,17 @@
         },
         {
           "kind": "unsafe_block",
-          "line": 644,
+          "line": 651,
           "pattern": "let mut pinned = unsafe { Pin::new_unchecked(&mut s) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 692,
+          "line": 699,
           "pattern": "let mut pinned = unsafe { Pin::new_unchecked(&mut s) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 718,
+          "line": 725,
           "pattern": "let mut pinned = unsafe { Pin::new_unchecked(&mut s) };"
         }
       ]
@@ -6156,27 +6259,27 @@
         },
         {
           "kind": "unsafe_block",
-          "line": 81,
+          "line": 90,
           "pattern": "let waited = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 104,
+          "line": 113,
           "pattern": "let probe = unsafe { libc::kill(pid, 0) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 122,
+          "line": 131,
           "pattern": "let handle = unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 133,
+          "line": 142,
           "pattern": "let wait_result = unsafe { WaitForSingleObject(handle, 0) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 134,
+          "line": 143,
           "pattern": "unsafe {"
         }
       ]
