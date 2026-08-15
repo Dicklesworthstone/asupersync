@@ -959,6 +959,10 @@ pub fn record_release_with_module(lock_name: &str, rank: LockRank, module: LockM
 
 /// Record one movable guard acquisition and return its exact tracking state.
 #[inline]
+#[allow(
+    clippy::single_option_map,
+    reason = "this boundary centralizes cfg-dependent guard instrumentation for every sync primitive"
+)]
 pub(crate) fn record_guard_acquire(lock_name: &str, rank: Option<LockRank>) -> GuardLockOrder {
     #[cfg(any(debug_assertions, feature = "lock-metrics"))]
     {

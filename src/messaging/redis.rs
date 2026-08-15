@@ -851,7 +851,7 @@ impl RespValue {
                         value: RespValue::Attribute(_),
                         next,
                     } => i = next,
-                    decoded => return Ok(decoded),
+                    decoded @ Decoded::Ok { .. } => return Ok(decoded),
                 }
             }
         }
