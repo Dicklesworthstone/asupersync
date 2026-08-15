@@ -8,6 +8,10 @@
 //! production-cutover readiness.
 
 #![allow(missing_docs)]
+#![allow(
+    clippy::redundant_pub_crate,
+    reason = "path-imported production and oracle modules retain their sibling-module visibility contracts"
+)]
 
 #[path = "dependency_oracles/nkeys/mod.rs"]
 mod nkeys_oracle;
