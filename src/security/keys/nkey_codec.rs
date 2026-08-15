@@ -14,6 +14,15 @@ pub(super) const MAX_BODY_BYTES: usize = 65;
 pub(super) const MAX_FRAME_BYTES: usize = MAX_BODY_BYTES + CHECKSUM_BYTES;
 pub(super) const BASE32_ALPHABET: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
 pub(super) const MAX_BASE32_ENCODED_CHARS: usize = 108;
+pub(super) const SEED_PREFIX_OUTER: u8 = 0x90;
+pub(super) const SEED_PAYLOAD_BYTES: usize = 32;
+pub(super) const SEED_BODY_BYTES: usize = 2 + SEED_PAYLOAD_BYTES;
+pub(super) const SEED_FRAME_BYTES: usize = SEED_BODY_BYTES + CHECKSUM_BYTES;
+pub(super) const SEED_ENCODED_CHARS: usize = 58;
+
+const SEED_PREFIX_OUTER_MASK: u8 = 0xf8;
+const SEED_PREFIX_COMPONENT_MASK: u8 = 0x1f;
+const SEED_PREFIX_UNUSED_MASK: u8 = 0x07;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct Base32Limits {
@@ -57,6 +66,9 @@ pub(super) enum NonCanonicalReason {
     Separator,
     TrailingBits,
     RoundTrip,
+    SeedOuter,
+    SeedPrefixAlignment,
+    SeedUnusedBits,
 }
 
 impl NonCanonicalReason {
@@ -68,6 +80,9 @@ impl NonCanonicalReason {
             Self::Separator => "separator",
             Self::TrailingBits => "trailing-bits",
             Self::RoundTrip => "round-trip",
+            Self::SeedOuter => "seed-outer-prefix",
+            Self::SeedPrefixAlignment => "seed-inner-prefix-alignment",
+            Self::SeedUnusedBits => "seed-prefix-unused-bits",
         }
     }
 }
@@ -418,6 +433,118 @@ pub(super) fn split_and_verify_checksum(frame: &[u8]) -> Result<&[u8], NkeyCodec
     Ok(body)
 }
 
+/// Packs an aligned semantic-prefix byte into the canonical two-byte seed form.
+///
+/// This byte-level primitive deliberately accepts every aligned prefix and does
+/// not decide which semantic key kinds are allowed. That policy belongs to the
+/// typed key-construction layer.
+pub(super) fn pack_seed_prefix(inner_prefix: u8) -> Result<[u8; 2], NkeyCodecError> {
+    if inner_prefix & SEED_PREFIX_UNUSED_MASK != 0 {
+        return Err(NkeyCodecError::NonCanonical {
+            reason: NonCanonicalReason::SeedPrefixAlignment,
+            index: None,
+        });
+    }
+
+    Ok([
+        SEED_PREFIX_OUTER | (inner_prefix >> 5),
+        (inner_prefix & SEED_PREFIX_COMPONENT_MASK) << 3,
+    ])
+}
+
+/// Unpacks the canonical two-byte seed prefix without assigning a key kind.
+pub(super) fn unpack_seed_prefix(packed: [u8; 2]) -> Result<u8, NkeyCodecError> {
+    if packed[0] & SEED_PREFIX_OUTER_MASK != SEED_PREFIX_OUTER {
+        return Err(NkeyCodecError::NonCanonical {
+            reason: NonCanonicalReason::SeedOuter,
+            index: Some(0),
+        });
+    }
+    if packed[1] & SEED_PREFIX_UNUSED_MASK != 0 {
+        return Err(NkeyCodecError::NonCanonical {
+            reason: NonCanonicalReason::SeedUnusedBits,
+            index: Some(1),
+        });
+    }
+
+    let inner_prefix =
+        ((packed[0] & SEED_PREFIX_UNUSED_MASK) << 5) | ((packed[1] & SEED_PREFIX_OUTER_MASK) >> 3);
+    if inner_prefix & SEED_PREFIX_UNUSED_MASK != 0 {
+        return Err(NkeyCodecError::NonCanonical {
+            reason: NonCanonicalReason::SeedPrefixAlignment,
+            index: Some(1),
+        });
+    }
+    Ok(inner_prefix)
+}
+
+/// Encodes one exact-width seed payload with canonical prefix and checksum.
+pub(super) fn encode_seed_payload(
+    inner_prefix: u8,
+    payload: &[u8],
+) -> Result<String, NkeyCodecError> {
+    if payload.len() != SEED_PAYLOAD_BYTES {
+        return Err(NkeyCodecError::Length {
+            phase: CodecPhase::ChecksumBody,
+            actual: payload.len(),
+            expected: SEED_PAYLOAD_BYTES,
+        });
+    }
+
+    let packed = pack_seed_prefix(inner_prefix)?;
+    let mut body = Vec::with_capacity(SEED_BODY_BYTES);
+    body.extend_from_slice(&packed);
+    body.extend_from_slice(payload);
+    let frame = append_checksum(&body)?;
+    encode_base32(&frame, Base32Limits::default())
+}
+
+/// Decodes and verifies one canonical seed without assigning a semantic kind.
+pub(super) fn decode_seed_payload(
+    encoded: &str,
+) -> Result<(u8, [u8; SEED_PAYLOAD_BYTES]), NkeyCodecError> {
+    if encoded.len() != SEED_ENCODED_CHARS {
+        return Err(NkeyCodecError::Length {
+            phase: CodecPhase::Base32Input,
+            actual: encoded.len(),
+            expected: SEED_ENCODED_CHARS,
+        });
+    }
+
+    let frame = decode_base32(encoded, Base32Limits::default())?;
+    if frame.len() != SEED_FRAME_BYTES {
+        return Err(NkeyCodecError::Length {
+            phase: CodecPhase::ChecksumFrame,
+            actual: frame.len(),
+            expected: SEED_FRAME_BYTES,
+        });
+    }
+    let body = split_and_verify_checksum(&frame)?;
+    if body.len() != SEED_BODY_BYTES {
+        return Err(NkeyCodecError::Length {
+            phase: CodecPhase::ChecksumBody,
+            actual: body.len(),
+            expected: SEED_BODY_BYTES,
+        });
+    }
+
+    let (packed_bytes, payload_bytes) = body.split_at(2);
+    let packed = <[u8; 2]>::try_from(packed_bytes).map_err(|_| NkeyCodecError::Length {
+        phase: CodecPhase::ChecksumBody,
+        actual: body.len(),
+        expected: SEED_BODY_BYTES,
+    })?;
+    let inner_prefix = unpack_seed_prefix(packed)?;
+    let payload = <[u8; SEED_PAYLOAD_BYTES]>::try_from(payload_bytes).map_err(|_| {
+        NkeyCodecError::Length {
+            phase: CodecPhase::ChecksumBody,
+            actual: body.len(),
+            expected: SEED_BODY_BYTES,
+        }
+    })?;
+    Ok((inner_prefix, payload))
+}
+
 fn ensure_body_limit(body_len: usize) -> Result<(), NkeyCodecError> {
     if body_len > MAX_BODY_BYTES {
         return Err(NkeyCodecError::Resource {
@@ -676,6 +803,112 @@ mod tests {
         assert_eq!(rejected_trailing_forms, 98);
     }
 
+    #[test]
+    fn ver_a1_asupersync_dep_p4_nkeys_poc60v_1_2_4_776511a1edc8_local_invariants() {
+        assert_eq!(pack_seed_prefix(0), Ok([0x90, 0x00]));
+        assert_eq!(pack_seed_prefix(160), Ok([0x95, 0x00]));
+        assert_eq!(pack_seed_prefix(184), Ok([0x95, 0xc0]));
+
+        let mut aligned_rows = 0usize;
+        for inner_prefix in (u8::MIN..=u8::MAX).step_by(8) {
+            let packed = pack_seed_prefix(inner_prefix).expect("every aligned prefix packs");
+            assert_eq!(
+                unpack_seed_prefix(packed),
+                Ok(inner_prefix),
+                "aligned prefix {inner_prefix:#04x}"
+            );
+            assert_eq!(packed[0] & SEED_PREFIX_OUTER_MASK, SEED_PREFIX_OUTER);
+            assert_eq!(packed[1] & SEED_PREFIX_UNUSED_MASK, 0);
+            aligned_rows += 1;
+        }
+        assert_eq!(aligned_rows, 32);
+
+        let mut rejected_unaligned = 0usize;
+        for inner_prefix in u8::MIN..=u8::MAX {
+            if inner_prefix & SEED_PREFIX_UNUSED_MASK == 0 {
+                continue;
+            }
+            assert_eq!(
+                pack_seed_prefix(inner_prefix),
+                Err(NkeyCodecError::NonCanonical {
+                    reason: NonCanonicalReason::SeedPrefixAlignment,
+                    index: None,
+                })
+            );
+            rejected_unaligned += 1;
+        }
+        assert_eq!(rejected_unaligned, 224);
+
+        assert_eq!(
+            unpack_seed_prefix([0x88, 0]),
+            Err(NkeyCodecError::NonCanonical {
+                reason: NonCanonicalReason::SeedOuter,
+                index: Some(0),
+            })
+        );
+        assert_eq!(
+            unpack_seed_prefix([0x90, 1]),
+            Err(NkeyCodecError::NonCanonical {
+                reason: NonCanonicalReason::SeedUnusedBits,
+                index: Some(1),
+            })
+        );
+        assert_eq!(
+            unpack_seed_prefix([0x90, 8]),
+            Err(NkeyCodecError::NonCanonical {
+                reason: NonCanonicalReason::SeedPrefixAlignment,
+                index: Some(1),
+            })
+        );
+
+        let payload = [0x5a; SEED_PAYLOAD_BYTES];
+        let encoded = encode_seed_payload(160, &payload).expect("canonical User seed encoding");
+        assert_eq!(encoded.len(), SEED_ENCODED_CHARS);
+        assert_eq!(decode_seed_payload(&encoded), Ok((160, payload)));
+
+        for wrong_len in [0, 1, SEED_PAYLOAD_BYTES - 1, SEED_PAYLOAD_BYTES + 1] {
+            let payload = vec![0xa5; wrong_len];
+            assert_eq!(
+                encode_seed_payload(160, &payload),
+                Err(NkeyCodecError::Length {
+                    phase: CodecPhase::ChecksumBody,
+                    actual: wrong_len,
+                    expected: SEED_PAYLOAD_BYTES,
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn ver_a1_asupersync_dep_p4_nkeys_poc60v_1_2_4_776511a1edc8_property_matrix() {
+        for seed in 0u8..64 {
+            let inner_prefix = (seed % 32) * 8;
+            let mut payload = [0u8; SEED_PAYLOAD_BYTES];
+            for (index, byte) in payload.iter_mut().enumerate() {
+                *byte = seed
+                    .wrapping_mul(29)
+                    .wrapping_add(u8::try_from(index).expect("payload index is bounded"));
+            }
+
+            let encoded = encode_seed_payload(inner_prefix, &payload)
+                .expect("bounded deterministic case encodes");
+            assert_eq!(decode_seed_payload(&encoded), Ok((inner_prefix, payload)));
+
+            let mut checksum_mutation = decode_base32(&encoded, Base32Limits::default())
+                .expect("generated encoding decodes");
+            let checksum_index = checksum_mutation.len() - 1;
+            checksum_mutation[checksum_index] ^= 1;
+            let checksum_mutation = encode_base32(&checksum_mutation, Base32Limits::default())
+                .expect("checksum mutation re-encodes canonically");
+            assert_eq!(
+                decode_seed_payload(&checksum_mutation),
+                Err(NkeyCodecError::Checksum {
+                    body_len: SEED_BODY_BYTES,
+                })
+            );
+        }
+    }
+
     fn reference_crc16_xmodem(body: &[u8]) -> u16 {
         let mut remainder = 0u16;
         for byte in body {
@@ -815,6 +1048,9 @@ mod tests {
             NonCanonicalReason::Separator,
             NonCanonicalReason::TrailingBits,
             NonCanonicalReason::RoundTrip,
+            NonCanonicalReason::SeedOuter,
+            NonCanonicalReason::SeedPrefixAlignment,
+            NonCanonicalReason::SeedUnusedBits,
         ] {
             assert!(!reason.as_str().is_empty());
         }
