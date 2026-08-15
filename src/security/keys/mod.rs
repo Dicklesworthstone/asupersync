@@ -1423,6 +1423,23 @@ mod tests {
 
     #[test]
     fn owned_secret_canary_is_redacted_from_formatting_errors_and_panics() {
+        #[derive(Clone)]
+        struct TraceBuffer(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+        impl std::io::Write for TraceBuffer {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0
+                    .lock()
+                    .expect("trace buffer lock")
+                    .extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
         const CANARY: &[u8; 32] = b"NKEY-SECRET-CANARY-0123456789ABC";
         let canary_text = std::str::from_utf8(CANARY).expect("ASCII canary");
         let seed = NkeyEd25519Seed::from_bytes(NkeyEd25519Kind::User, *CANARY);
@@ -1459,6 +1476,191 @@ mod tests {
             .expect("panic text");
         assert!(!panic_text.contains(canary_text));
         assert!(panic_text.contains("<redacted>"));
+
+        let trace_bytes = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let writer_bytes = std::sync::Arc::clone(&trace_bytes);
+        let disposition_error = NkeyOwnedKeyError::SecretDisposition {
+            disposition: NkeySecretDisposition::InProcessOperation,
+        };
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(move || TraceBuffer(std::sync::Arc::clone(&writer_bytes)))
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!(
+                seed = ?seed,
+                curve = ?curve,
+                export = ?export,
+                error = ?disposition_error,
+                "NKey secret redaction canary"
+            );
+        });
+        let trace = String::from_utf8(trace_bytes.lock().expect("trace buffer lock").clone())
+            .expect("trace output is UTF-8");
+        assert!(!trace.contains(canary_text));
+        assert!(trace.contains("<redacted>"));
+    }
+
+    #[test]
+    fn ver_a1_asupersync_dep_p4_nkeys_poc60v_1_3_5e81559b363d__local_invariants() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        fn assert_copy<T: Copy>() {}
+
+        assert_copy::<NkeyEd25519PublicKey>();
+        assert_copy::<NkeyCurvePublicKey>();
+        assert_send_sync::<NkeyEd25519Seed>();
+        assert_send_sync::<NkeyEd25519PrivateKey>();
+        assert_send_sync::<NkeyCurveSecretKey>();
+        assert!(mem::needs_drop::<NkeyEd25519Seed>());
+        assert!(mem::needs_drop::<NkeyEd25519PrivateKey>());
+        assert!(mem::needs_drop::<NkeyCurveSecretKey>());
+
+        let user = NkeyEd25519PublicKey::from_bytes(NkeyEd25519Kind::User, [0x41; 32]);
+        let curve = NkeyCurvePublicKey::from_bytes([0x41; 32]);
+        assert_eq!(user.kind(), NkeyEd25519Kind::User);
+        assert_eq!(user.as_bytes(), &[0x41; 32]);
+        assert_eq!(curve.as_bytes(), &[0x41; 32]);
+        assert_ne!(format!("{user:?}"), format!("{curve:?}"));
+
+        let seed = NkeyEd25519Seed::from_bytes(NkeyEd25519Kind::User, [0x51; 32]);
+        assert!(matches!(
+            seed.export_secret(NkeySecretDisposition::InProcessOperation),
+            Err(NkeyOwnedKeyError::SecretDisposition {
+                disposition: NkeySecretDisposition::InProcessOperation
+            })
+        ));
+    }
+
+    #[test]
+    fn ver_a1_asupersync_dep_p4_nkeys_poc60v_1_3_5e81559b363d__property_matrix() {
+        const KINDS: [NkeyEd25519Kind; 7] = [
+            NkeyEd25519Kind::Account,
+            NkeyEd25519Kind::Cluster,
+            NkeyEd25519Kind::Module,
+            NkeyEd25519Kind::Server,
+            NkeyEd25519Kind::Operator,
+            NkeyEd25519Kind::User,
+            NkeyEd25519Kind::Service,
+        ];
+
+        for case in 0u8..64 {
+            let kind = KINDS[usize::from(case) % KINDS.len()];
+            let bytes = [case; NKEY_KEY_BYTES];
+            let public = NkeyEd25519PublicKey::try_from_slice(kind, &bytes)
+                .expect("every exact-width public key is retained exactly");
+            let curve_public = NkeyCurvePublicKey::try_from_slice(&bytes)
+                .expect("every exact-width Curve public key is retained exactly");
+            let seed = NkeyEd25519Seed::try_from_slice(kind, &bytes)
+                .expect("every exact-width seed is retained exactly");
+            let curve_secret = NkeyCurveSecretKey::try_from_slice(&bytes)
+                .expect("every exact-width Curve secret is retained exactly");
+
+            assert_eq!(public.kind(), kind);
+            assert_eq!(public.as_bytes(), &bytes);
+            assert_eq!(curve_public.as_bytes(), &bytes);
+
+            let seed_export = seed
+                .export_secret(NkeySecretDisposition::PlaintextSerialization)
+                .expect("explicit serialization disposition permits a guarded export");
+            let curve_export = curve_secret
+                .export_secret(NkeySecretDisposition::PlaintextExport)
+                .expect("explicit export disposition permits a guarded export");
+            assert_eq!(seed_export.as_bytes(), &bytes);
+            assert_eq!(curve_export.as_bytes(), &bytes);
+            assert_eq!(
+                seed_export.disposition(),
+                NkeySecretDisposition::PlaintextSerialization
+            );
+            assert_eq!(
+                curve_export.disposition(),
+                NkeySecretDisposition::PlaintextExport
+            );
+        }
+    }
+
+    #[test]
+    fn ver_a1_asupersync_dep_p4_nkeys_poc60v_1_3_5e81559b363d__lab_lifecycle() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+        struct SecretDropProbe {
+            _secret: NkeyCurveSecretKey,
+            drops: Arc<AtomicUsize>,
+        }
+
+        impl Drop for SecretDropProbe {
+            fn drop(&mut self) {
+                self.drops.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let entered = Arc::new(AtomicBool::new(false));
+        let drops = Arc::new(AtomicUsize::new(0));
+        let task_entered = Arc::clone(&entered);
+        let task_drops = Arc::clone(&drops);
+        let probe = SecretDropProbe {
+            _secret: NkeyCurveSecretKey::from_bytes([0x73; NKEY_KEY_BYTES]),
+            drops: task_drops,
+        };
+
+        let mut runtime = crate::lab::runtime::LabRuntime::new(
+            crate::lab::config::LabConfig::new(37)
+                .max_steps(128)
+                .panic_on_leak(false),
+        );
+        let root = runtime.state.create_root_region(crate::Budget::INFINITE);
+        let (task_id, _handle) = runtime
+            .state
+            .create_task(root, crate::Budget::INFINITE, async move {
+                let _probe = probe;
+                task_entered.store(true, Ordering::SeqCst);
+                crate::runtime::yield_now::yield_now().await;
+                std::future::pending::<()>().await;
+            })
+            .expect("create secret-owning task");
+        runtime
+            .scheduler
+            .lock()
+            .schedule(task_id, crate::Budget::INFINITE.priority);
+        runtime.step_for_test();
+
+        assert!(
+            entered.load(Ordering::SeqCst),
+            "task reached secret-owning state"
+        );
+        assert_eq!(
+            drops.load(Ordering::SeqCst),
+            0,
+            "secret remains owned before cancellation"
+        );
+
+        let reason = crate::CancelReason::user("NKey secret lifecycle test");
+        let effects = runtime.state.cancel_task(task_id, &reason);
+        let (cancelled, wake_effects) = effects.into_parts();
+        assert!(cancelled, "cancellation is recorded for the live task");
+        runtime
+            .scheduler
+            .lock()
+            .schedule_cancel(task_id, reason.cleanup_budget().priority);
+        wake_effects.dispatch();
+        runtime.run_until_quiescent();
+
+        assert_eq!(
+            drops.load(Ordering::SeqCst),
+            1,
+            "secret owner drops exactly once"
+        );
+        assert_eq!(
+            runtime.state.live_task_count(),
+            0,
+            "cancelled task is retired"
+        );
+        assert_eq!(
+            runtime.state.pending_obligation_count(),
+            0,
+            "secret lifecycle leaves no pending obligations"
+        );
     }
 
     #[test]
