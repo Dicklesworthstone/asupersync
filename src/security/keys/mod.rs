@@ -454,6 +454,11 @@ impl fmt::Debug for NkeyEd25519PublicKey {
 /// `serde::Serialize`. Plaintext extraction requires an explicit
 /// [`NkeySecretDisposition`].
 ///
+/// Drop zeroizes only this value's narrow internal byte array. Construction
+/// copies caller-provided bytes; callers remain responsible for erasing their
+/// source buffer and any other copies, allocator remnants, compiler
+/// temporaries, registers, swap, crash dumps, or persisted representations.
+///
 /// ```compile_fail
 /// use asupersync::security::{NkeyEd25519Kind, NkeyEd25519Seed};
 /// let seed = NkeyEd25519Seed::from_bytes(NkeyEd25519Kind::User, [7; 32]);
@@ -521,6 +526,11 @@ impl fmt::Display for NkeyEd25519Seed {
 }
 
 /// Owned, explicitly typed 64-byte expanded Ed25519 private material.
+///
+/// Drop zeroizes only this value's narrow internal byte array. Construction
+/// copies caller-provided bytes; callers remain responsible for erasing their
+/// source buffer and any other copies, allocator remnants, compiler
+/// temporaries, registers, swap, crash dumps, or persisted representations.
 pub struct NkeyEd25519PrivateKey {
     kind: NkeyEd25519Kind,
     secret: NkeySecretBytes<NKEY_ED25519_PRIVATE_BYTES>,
@@ -623,6 +633,11 @@ impl fmt::Debug for NkeyCurvePublicKey {
 ///
 /// This type is separate from every Ed25519 signing form and cannot satisfy
 /// [`NkeyEd25519SigningMaterial`].
+///
+/// Drop zeroizes only this value's narrow internal byte array. Construction
+/// copies caller-provided bytes; callers remain responsible for erasing their
+/// source buffer and any other copies, allocator remnants, compiler
+/// temporaries, registers, swap, crash dumps, or persisted representations.
 ///
 /// ```compile_fail
 /// use asupersync::security::{NkeyCurveSecretKey, NkeyEd25519SigningMaterial};
@@ -1302,7 +1317,7 @@ mod tests {
         assert_eq!(user.into_bytes(), [0x11; 32]);
         assert_eq!(curve.into_bytes(), [0x11; 32]);
         assert_eq!(
-            NkeyEd25519PublicKey::try_from_slice(NkeyEd25519Kind::User, &[1; 32]),
+            NkeyEd25519PublicKey::try_from_slice(NkeyEd25519Kind::User, &[0x11; 32]),
             Ok(user)
         );
         assert_eq!(NkeyCurvePublicKey::try_from_slice(&[0x11; 32]), Ok(curve));

@@ -855,6 +855,81 @@ mod tests {
     }
 
     #[test]
+    #[allow(non_snake_case)]
+    fn ver_a1_asupersync_dep_p4_nkeys_poc60v_1_3_5e81559b363d__downstream_consumer() {
+        use asupersync::security::{
+            NKEY_ED25519_PRIVATE_BYTES, NKEY_KEY_BYTES, NkeyCurvePublicKey, NkeyCurveSecretKey,
+            NkeyEd25519Kind, NkeyEd25519PrivateKey, NkeyEd25519PublicKey, NkeyEd25519Seed,
+            NkeyEd25519SigningMaterial, NkeyOwnedKeyError, NkeyOwnedKeyForm, NkeySecretDisposition,
+        };
+
+        fn assert_copy<T: Copy>() {}
+        fn signing_kind<T: NkeyEd25519SigningMaterial>(value: &T) -> NkeyEd25519Kind {
+            value.kind()
+        }
+
+        assert_eq!(NKEY_KEY_BYTES, 32);
+        assert_eq!(NKEY_ED25519_PRIVATE_BYTES, 64);
+        assert_copy::<NkeyEd25519PublicKey>();
+        assert_copy::<NkeyCurvePublicKey>();
+
+        let user_kind: NkeyEd25519Kind = "User".parse().expect("exact public role");
+        assert_eq!(user_kind, NkeyEd25519Kind::User);
+        assert!("user".parse::<NkeyEd25519Kind>().is_err());
+
+        let public = NkeyEd25519PublicKey::from_bytes(user_kind, [0x51; NKEY_KEY_BYTES]);
+        assert_eq!(public.kind(), user_kind);
+        assert_eq!(public.as_bytes(), &[0x51; NKEY_KEY_BYTES]);
+        assert_eq!(
+            NkeyCurvePublicKey::from_bytes([0x71; NKEY_KEY_BYTES]).as_bytes(),
+            &[0x71; NKEY_KEY_BYTES]
+        );
+
+        const CANARY: &[u8; NKEY_KEY_BYTES] = b"NKEY-DOWNSTREAM-CANARY-012345678";
+        let canary_text = std::str::from_utf8(CANARY).expect("ASCII canary");
+        let seed = NkeyEd25519Seed::from_bytes(user_kind, *CANARY);
+        let private = NkeyEd25519PrivateKey::from_bytes(
+            NkeyEd25519Kind::Operator,
+            [0x42; NKEY_ED25519_PRIVATE_BYTES],
+        );
+        let curve = NkeyCurveSecretKey::from_bytes(*CANARY);
+        assert_eq!(signing_kind(&seed), NkeyEd25519Kind::User);
+        assert_eq!(signing_kind(&private), NkeyEd25519Kind::Operator);
+
+        assert!(matches!(
+            seed.export_secret(NkeySecretDisposition::InProcessOperation),
+            Err(NkeyOwnedKeyError::SecretDisposition {
+                disposition: NkeySecretDisposition::InProcessOperation
+            })
+        ));
+        let export = seed
+            .export_secret(NkeySecretDisposition::PlaintextExport)
+            .expect("explicit downstream export");
+        assert!(export.as_bytes().as_slice() == CANARY.as_slice());
+
+        for rendered in [
+            format!("{seed:?}"),
+            seed.to_string(),
+            format!("{curve:?}"),
+            curve.to_string(),
+            format!("{export:?}"),
+            export.to_string(),
+        ] {
+            assert!(!rendered.contains(canary_text));
+            assert!(rendered.to_ascii_lowercase().contains("redacted"));
+        }
+
+        assert_eq!(
+            NkeyEd25519PublicKey::try_from_slice(user_kind, &[0; NKEY_KEY_BYTES - 1]),
+            Err(NkeyOwnedKeyError::Length {
+                form: NkeyOwnedKeyForm::Ed25519Public,
+                actual: NKEY_KEY_BYTES - 1,
+                expected: NKEY_KEY_BYTES,
+            })
+        );
+    }
+
+    #[test]
     fn standalone_lockfile_pins_consumer_resolution() {
         let lock_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.lock");
         let lock = std::fs::read_to_string(&lock_path).expect("standalone Cargo.lock");
