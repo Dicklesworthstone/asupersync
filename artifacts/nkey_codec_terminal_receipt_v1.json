@@ -1,0 +1,97 @@
+{
+  "schema_version": 1,
+  "artifact_id": "nkey-codec-terminal-receipt-v1",
+  "program_id": "dependency-sovereignty",
+  "bead_id": "asupersync-dep-p4-nkeys-poc60v.1.2.4",
+  "capability_id": "CAP-NKEY-CODEC",
+  "captured_date_utc": "2026-08-15",
+  "scope": "Terminal N2 byte-codec receipt for canonical two-byte seed-prefix packing, bounded Base32 and CRC composition, exact N1 corpus reproduction, typed structural rejection, and deterministic generated inputs. Semantic key-kind acceptance remains N4-owned.",
+  "source_pins": [
+    {
+      "path": "src/security/keys/nkey_codec.rs",
+      "sha256": "00f9459761381e8ff0d1e8ff77da2a51555715c0c59f7322a9e0cec4656a6ec3",
+      "line_count": 1074,
+      "role": "owned allocation-bounded Base32, CRC, and structural seed-prefix primitives"
+    },
+    {
+      "path": "tests/dependency_oracles/nkeys/mod.rs",
+      "sha256": "ec34dd7f5b9675e85bf3e2599856682c5dfa15044f39517d86395565ff721eea",
+      "line_count": 500,
+      "role": "test-only independent codec oracle and pinned upstream provenance"
+    },
+    {
+      "path": "artifacts/nkey_normative_spec_v1.json",
+      "sha256": "dd1d4fcf010e9cf6ba974a8f009a5038970c4f0663fb797c49a3eb04588a458d",
+      "line_count": 1266,
+      "role": "normative N1 format and corpus authority"
+    }
+  ],
+  "upstream_provenance": {
+    "rust_incumbent_package": "nkeys",
+    "rust_incumbent_version": "0.4.5",
+    "rust_incumbent_checksum": "879011babc47a1c7fdf5a935ae3cfe94f34645ca0cac1c7f6424b36fc743d1bf",
+    "official_go_package": "github.com/nats-io/nkeys",
+    "official_go_version": "0.4.16",
+    "official_go_commit": "c1eebf38bd8b1b1021b45b5f8f403052ac042dc5",
+    "license_spdx": "Apache-2.0"
+  },
+  "corpus_digests": {
+    "independent_ed25519_vectors": "5e6026c0aa5e2f833c3cbc5cb2cd2e12c50cb9f2797324a8e3f18411f3b8f726",
+    "private_vectors": "8ecb645e10141193cef4fd2a6f9877b3949df4e8c4d70057853e61f0ff24d868",
+    "official_historical_vectors": "bc0d8a282b54779e0de7e4c9b387ce468a3915305fbcc2a17a24485443da6296",
+    "malformed_vectors": "75b855bfa2b3d4c5e30b50e7e0ae67d53092ce0ec02318eff24a119c120e806d",
+    "cross_prefix_vectors": "dca4cfb3cd05d1cd08555f49978f4f930d9d6e75c185a243a5b84704e8b13437"
+  },
+  "coverage": {
+    "aligned_prefix_rows": 32,
+    "unaligned_prefix_rejections": 224,
+    "deterministic_generated_cases": 64,
+    "independent_ed25519_rows": 8,
+    "private_layout_rows": 2,
+    "official_historical_rows": 3,
+    "malformed_rows": 7,
+    "cross_prefix_rows": 3,
+    "unknown_aligned_prefix_is_structurally_valid": true,
+    "semantic_prefix_policy_owner": "asupersync-dep-p4-nkeys-poc60v.1.4"
+  },
+  "resource_envelope": {
+    "checksum_bytes": 2,
+    "max_body_bytes": 65,
+    "max_frame_bytes": 67,
+    "max_base32_decoded_bytes": 67,
+    "max_base32_encoded_chars": 108,
+    "seed_payload_bytes": 32,
+    "seed_body_bytes": 34,
+    "seed_frame_bytes": 36,
+    "seed_encoded_chars": 58,
+    "generated_case_count": 64,
+    "allocation_rule": "Reject encoded or decoded lengths above the fixed envelope before allocation or checksum work."
+  },
+  "decision": {
+    "terminal_receipt_complete": true,
+    "implementation_state": "COMPLETE",
+    "incumbent_state": "KEEP_INCUMBENT",
+    "cutover_eligible": false,
+    "dependency_removal_authorized": false,
+    "production_integration_authorized": false,
+    "semantic_prefix_policy_complete": false,
+    "on_new_divergence": "KEEP_INCUMBENT_AND_REOPEN_N2"
+  },
+  "validation_contract": {
+    "focused_test_target": "nkey_codec_oracle_contract",
+    "remote_required": true,
+    "local_fallback_allowed": false,
+    "terminal_evidence_rule": "Only a terminal RCH exit for the focused contract may validate this receipt; admission, queueing, or static inspection is not runtime proof."
+  },
+  "no_claim_boundaries": [
+    "does_not_prove_key_construction",
+    "does_not_prove_signer_policy",
+    "does_not_prove_secret_disposition_or_zeroization",
+    "does_not_prove_authentication",
+    "does_not_prove_performance",
+    "does_not_prove_broad_workspace_health",
+    "does_not_authorize_production_integration_or_cutover",
+    "does_not_authorize_dependency_removal",
+    "does_not_prove_release_readiness"
+  ]
+}

@@ -1,6 +1,7 @@
 //! Executable pre-cutover contract for the bounded NKey codec oracle.
 //!
-//! Bead: `asupersync-dep-p4-nkeys-poc60v.1.2.1`.
+//! Beads: `asupersync-dep-p4-nkeys-poc60v.1.2.1` through
+//! `asupersync-dep-p4-nkeys-poc60v.1.2.4`.
 //! The incumbent remains the production implementation. This test-only lane
 //! proves byte-codec comparisons and graph isolation only; it does not prove
 //! signer authorization, secret zeroization, cryptographic soundness, or
@@ -26,6 +27,7 @@ use std::path::{Path, PathBuf};
 
 const POLICY_PATH: &str = "artifacts/dependency_oracle_policy_v1.json";
 const SPEC_PATH: &str = "artifacts/nkey_normative_spec_v1.json";
+const RECEIPT_PATH: &str = "artifacts/nkey_codec_terminal_receipt_v1.json";
 const HARNESS_PATH: &str = "tests/dependency_oracles/nkeys";
 const MODULE_PATH: &str = "tests/dependency_oracles/nkeys/mod.rs";
 const ORACLE_ID: &str = "nkeys-reference";
@@ -36,6 +38,11 @@ fn repo_root() -> PathBuf {
 
 fn read_repo_file(path: &str) -> String {
     std::fs::read_to_string(repo_root().join(path))
+        .unwrap_or_else(|error| panic!("failed to read {path}: {error}"))
+}
+
+fn read_repo_bytes(path: &str) -> Vec<u8> {
+    std::fs::read(repo_root().join(path))
         .unwrap_or_else(|error| panic!("failed to read {path}: {error}"))
 }
 
@@ -73,6 +80,20 @@ fn text<'a>(value: &'a Value, key: &str) -> &'a str {
         .get(key)
         .and_then(Value::as_str)
         .unwrap_or_else(|| panic!("{key} must be a string"))
+}
+
+fn number(value: &Value, key: &str) -> u64 {
+    value
+        .get(key)
+        .and_then(Value::as_u64)
+        .unwrap_or_else(|| panic!("{key} must be an unsigned integer"))
+}
+
+fn boolean(value: &Value, key: &str) -> bool {
+    value
+        .get(key)
+        .and_then(Value::as_bool)
+        .unwrap_or_else(|| panic!("{key} must be a boolean"))
 }
 
 fn find_row<'a>(rows: &'a [Value], key: &str, expected: &str) -> &'a Value {
@@ -376,6 +397,196 @@ fn provenance_policy_and_corpus_are_pinned_and_fail_closed() {
 }
 
 #[test]
+fn terminal_receipt_pins_the_complete_n2_surface_without_cutover_overclaim() {
+    let receipt = parse_repo_json(RECEIPT_PATH);
+    assert_eq!(number(&receipt, "schema_version"), 1);
+    assert_eq!(
+        text(&receipt, "artifact_id"),
+        "nkey-codec-terminal-receipt-v1"
+    );
+    assert_eq!(text(&receipt, "program_id"), "dependency-sovereignty");
+    assert_eq!(
+        text(&receipt, "bead_id"),
+        "asupersync-dep-p4-nkeys-poc60v.1.2.4"
+    );
+    assert_eq!(text(&receipt, "capability_id"), "CAP-NKEY-CODEC");
+
+    let pins = array(&receipt, "source_pins");
+    assert_eq!(pins.len(), 3);
+    assert_eq!(
+        pins.iter()
+            .map(|pin| text(pin, "path").to_owned())
+            .collect::<BTreeSet<_>>(),
+        [
+            "artifacts/nkey_normative_spec_v1.json",
+            "src/security/keys/nkey_codec.rs",
+            "tests/dependency_oracles/nkeys/mod.rs",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
+    );
+    for pin in pins {
+        let path = text(pin, "path");
+        let bytes = read_repo_bytes(path);
+        assert_eq!(
+            text(pin, "sha256"),
+            sha256_hex(&bytes),
+            "{path} digest drifted"
+        );
+        assert_eq!(
+            number(pin, "line_count"),
+            u64::try_from(read_repo_file(path).lines().count())
+                .expect("repository line count fits in u64"),
+            "{path} line count drifted"
+        );
+        assert!(!text(pin, "role").is_empty());
+    }
+
+    let upstream = Value::Object(object(&receipt, "upstream_provenance").clone());
+    assert_eq!(
+        text(&upstream, "rust_incumbent_package"),
+        PROVENANCE.rust_package
+    );
+    assert_eq!(
+        text(&upstream, "rust_incumbent_version"),
+        PROVENANCE.rust_version
+    );
+    assert_eq!(
+        text(&upstream, "rust_incumbent_checksum"),
+        PROVENANCE.rust_checksum
+    );
+    assert_eq!(
+        text(&upstream, "official_go_package"),
+        PROVENANCE.official_go_package
+    );
+    assert_eq!(
+        text(&upstream, "official_go_version"),
+        PROVENANCE.official_go_version
+    );
+    assert_eq!(
+        text(&upstream, "official_go_commit"),
+        PROVENANCE.official_go_commit
+    );
+
+    let digests = Value::Object(object(&receipt, "corpus_digests").clone());
+    for (key, expected) in [
+        (
+            "independent_ed25519_vectors",
+            PROVENANCE.independent_rows_sha256,
+        ),
+        ("private_vectors", PROVENANCE.private_rows_sha256),
+        (
+            "official_historical_vectors",
+            PROVENANCE.official_rows_sha256,
+        ),
+        ("malformed_vectors", PROVENANCE.malformed_rows_sha256),
+        ("cross_prefix_vectors", PROVENANCE.cross_prefix_rows_sha256),
+    ] {
+        assert_eq!(text(&digests, key), expected, "{key} receipt drifted");
+    }
+
+    let spec = parse_repo_json(SPEC_PATH);
+    let corpus = object(&spec, "vector_corpus");
+    let coverage = Value::Object(object(&receipt, "coverage").clone());
+    assert_eq!(number(&coverage, "aligned_prefix_rows"), 32);
+    assert_eq!(number(&coverage, "unaligned_prefix_rejections"), 224);
+    assert_eq!(number(&coverage, "deterministic_generated_cases"), 64);
+    for (receipt_key, corpus_key) in [
+        ("independent_ed25519_rows", "independent_ed25519_vectors"),
+        ("private_layout_rows", "private_vectors"),
+        ("official_historical_rows", "official_historical_vectors"),
+        ("malformed_rows", "malformed_vectors"),
+        ("cross_prefix_rows", "cross_prefix_vectors"),
+    ] {
+        assert_eq!(
+            number(&coverage, receipt_key),
+            u64::try_from(
+                corpus
+                    .get(corpus_key)
+                    .and_then(Value::as_array)
+                    .unwrap_or_else(|| panic!("missing {corpus_key}"))
+                    .len()
+            )
+            .expect("corpus row count fits in u64")
+        );
+    }
+    assert!(boolean(
+        &coverage,
+        "unknown_aligned_prefix_is_structurally_valid"
+    ));
+    assert_eq!(
+        text(&coverage, "semantic_prefix_policy_owner"),
+        "asupersync-dep-p4-nkeys-poc60v.1.4"
+    );
+
+    let resources = Value::Object(object(&receipt, "resource_envelope").clone());
+    for (key, expected) in [
+        ("checksum_bytes", owned_nkey_codec::CHECKSUM_BYTES),
+        ("max_body_bytes", owned_nkey_codec::MAX_BODY_BYTES),
+        ("max_frame_bytes", owned_nkey_codec::MAX_FRAME_BYTES),
+        (
+            "max_base32_decoded_bytes",
+            owned_nkey_codec::MAX_FRAME_BYTES,
+        ),
+        (
+            "max_base32_encoded_chars",
+            owned_nkey_codec::MAX_BASE32_ENCODED_CHARS,
+        ),
+        ("seed_payload_bytes", owned_nkey_codec::SEED_PAYLOAD_BYTES),
+        ("seed_body_bytes", owned_nkey_codec::SEED_BODY_BYTES),
+        ("seed_frame_bytes", owned_nkey_codec::SEED_FRAME_BYTES),
+        ("seed_encoded_chars", owned_nkey_codec::SEED_ENCODED_CHARS),
+        ("generated_case_count", 64),
+    ] {
+        assert_eq!(
+            number(&resources, key),
+            u64::try_from(expected).expect("resource bound fits in u64"),
+            "{key} drifted"
+        );
+    }
+
+    let decision = Value::Object(object(&receipt, "decision").clone());
+    assert!(boolean(&decision, "terminal_receipt_complete"));
+    assert_eq!(text(&decision, "implementation_state"), "COMPLETE");
+    assert_eq!(text(&decision, "incumbent_state"), "KEEP_INCUMBENT");
+    for key in [
+        "cutover_eligible",
+        "dependency_removal_authorized",
+        "production_integration_authorized",
+        "semantic_prefix_policy_complete",
+    ] {
+        assert!(!boolean(&decision, key), "{key} must remain false");
+    }
+
+    let validation = Value::Object(object(&receipt, "validation_contract").clone());
+    assert_eq!(
+        text(&validation, "focused_test_target"),
+        "nkey_codec_oracle_contract"
+    );
+    assert!(boolean(&validation, "remote_required"));
+    assert!(!boolean(&validation, "local_fallback_allowed"));
+
+    assert_eq!(
+        string_set(&receipt, "no_claim_boundaries"),
+        [
+            "does_not_prove_key_construction",
+            "does_not_prove_signer_policy",
+            "does_not_prove_secret_disposition_or_zeroization",
+            "does_not_prove_authentication",
+            "does_not_prove_performance",
+            "does_not_prove_broad_workspace_health",
+            "does_not_authorize_production_integration_or_cutover",
+            "does_not_authorize_dependency_removal",
+            "does_not_prove_release_readiness",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
+    );
+}
+
+#[test]
 fn manifest_and_lock_keep_the_oracle_out_of_normal_build_and_release_graphs() {
     let edges = nkey_and_reference_client_edges();
     assert_eq!(
@@ -616,6 +827,24 @@ fn owned_base32_matches_the_frozen_independent_n1_corpus() {
         seed_body.extend_from_slice(&raw_seed);
         let seed_frame = independently_framed_body(&seed_body);
         assert_eq!(
+            owned_nkey_codec::pack_seed_prefix(prefix),
+            Ok(packed_seed_prefix(prefix)),
+            "{} prefix packing",
+            text(vector, "vector_id")
+        );
+        assert_eq!(
+            owned_nkey_codec::encode_seed_payload(prefix, &raw_seed).as_deref(),
+            Ok(text(vector, "seed")),
+            "{} composed seed encoding",
+            text(vector, "vector_id")
+        );
+        assert_eq!(
+            owned_nkey_codec::decode_seed_payload(text(vector, "seed")),
+            Ok((prefix, raw_seed)),
+            "{} composed seed decoding",
+            text(vector, "vector_id")
+        );
+        assert_eq!(
             owned_nkey_codec::encode_base32(&seed_frame, limits).as_deref(),
             Ok(text(vector, "seed"))
         );
@@ -657,6 +886,61 @@ fn owned_base32_matches_the_frozen_independent_n1_corpus() {
             Ok(frame)
         );
     }
+}
+
+#[test]
+fn prefix_composition_rejects_structural_mutations_before_key_construction() {
+    let spec = parse_repo_json(SPEC_PATH);
+    let corpus = object(&spec, "vector_corpus");
+    let raw_seed = decode_hex_32(
+        corpus
+            .get("raw_secret_hex")
+            .and_then(Value::as_str)
+            .expect("raw secret vector"),
+    );
+
+    let encode_mutated_seed = |packed: [u8; 2]| {
+        let mut body = packed.to_vec();
+        body.extend_from_slice(&raw_seed);
+        let frame = independently_framed_body(&body);
+        owned_nkey_codec::encode_base32(&frame, owned_nkey_codec::Base32Limits::default())
+            .expect("structural mutation remains valid Base32 with a valid checksum")
+    };
+
+    for (packed, expected) in [
+        ([0x88, 0], owned_nkey_codec::NonCanonicalReason::SeedOuter),
+        (
+            [0x90, 1],
+            owned_nkey_codec::NonCanonicalReason::SeedUnusedBits,
+        ),
+        (
+            [0x90, 8],
+            owned_nkey_codec::NonCanonicalReason::SeedPrefixAlignment,
+        ),
+    ] {
+        let encoded = encode_mutated_seed(packed);
+        let before = encoded.clone();
+        assert!(matches!(
+            owned_nkey_codec::decode_seed_payload(&encoded),
+            Err(owned_nkey_codec::NkeyCodecError::NonCanonical { reason, .. })
+                if reason == expected
+        ));
+        assert_eq!(encoded, before, "failed decode remains caller-atomic");
+    }
+
+    let known_unknown = find_row(
+        corpus
+            .get("cross_prefix_vectors")
+            .and_then(Value::as_array)
+            .expect("cross-prefix rows"),
+        "vector_id",
+        "NKEY-VEC-CROSS-UNKNOWN-SEED-24",
+    );
+    assert_eq!(
+        owned_nkey_codec::decode_seed_payload(text(known_unknown, "input")),
+        Ok((24, raw_seed)),
+        "N2 proves structural prefix validity only; N4 owns the allowed-kind policy"
+    );
 }
 
 #[test]
@@ -759,6 +1043,13 @@ fn official_rows_match_or_preserve_the_known_curve_no_claim_boundary() {
     let incumbent = KeyPair::from_seed(text(account, "seed")).expect("incumbent Account decode");
     assert_eq!(incumbent.key_pair_type(), KeyPairType::Account);
     assert_eq!(incumbent.public_key(), text(account, "public"));
+    assert_eq!(
+        owned_nkey_codec::decode_seed_payload(text(account, "seed")),
+        Ok((
+            0,
+            <[u8; 32]>::try_from(&account_body[2..]).expect("Account payload")
+        ))
+    );
 
     let user = find_row(rows, "vector_id", "NKEY-VEC-GO-BENCH-U");
     let user_body = decode_and_verify(EncodedKind::Seed, text(user, "seed"))
@@ -770,6 +1061,13 @@ fn official_rows_match_or_preserve_the_known_curve_no_claim_boundary() {
             .key_pair_type(),
         KeyPairType::User
     );
+    assert_eq!(
+        owned_nkey_codec::decode_seed_payload(text(user, "seed")),
+        Ok((
+            160,
+            <[u8; 32]>::try_from(&user_body[2..]).expect("User payload")
+        ))
+    );
 
     let curve = find_row(rows, "vector_id", "NKEY-VEC-RUST-GO-X25519");
     let curve_body = decode_and_verify(EncodedKind::Seed, text(curve, "seed"))
@@ -778,6 +1076,13 @@ fn official_rows_match_or_preserve_the_known_curve_no_claim_boundary() {
         nkeys::decode_seed(text(curve, "seed")).expect("incumbent Curve codec decode");
     assert_eq!(prefix, 184);
     assert_eq!(&curve_body[2..], raw.as_slice());
+    assert_eq!(
+        owned_nkey_codec::decode_seed_payload(text(curve, "seed")),
+        Ok((
+            184,
+            <[u8; 32]>::try_from(raw.as_slice()).expect("Curve payload")
+        ))
+    );
     assert_ne!(
         KeyPair::from_seed(text(curve, "seed"))
             .expect("observed base KeyPair Curve decode")
