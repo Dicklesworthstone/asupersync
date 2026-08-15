@@ -491,6 +491,18 @@ fn terminal_receipt_pins_the_complete_n2_surface_without_cutover_overclaim() {
     let coverage = Value::Object(object(&receipt, "coverage").clone());
     assert_eq!(number(&coverage, "aligned_prefix_rows"), 32);
     assert_eq!(number(&coverage, "unaligned_prefix_rejections"), 224);
+    assert_eq!(number(&coverage, "packed_prefix_pair_rows"), 65_536);
+    assert_eq!(number(&coverage, "canonical_packed_prefix_rows"), 32);
+    assert_eq!(number(&coverage, "packed_seed_outer_rejections"), 63_488);
+    assert_eq!(
+        number(&coverage, "packed_seed_unused_bits_rejections"),
+        1_792
+    );
+    assert_eq!(number(&coverage, "packed_seed_alignment_rejections"), 224);
+    assert_eq!(
+        number(&coverage, "malformed_packed_prefix_rejections"),
+        65_504
+    );
     assert_eq!(number(&coverage, "deterministic_generated_cases"), 64);
     for (receipt_key, corpus_key) in [
         ("independent_ed25519_rows", "independent_ed25519_vectors"),
@@ -940,6 +952,63 @@ fn prefix_composition_rejects_structural_mutations_before_key_construction() {
         owned_nkey_codec::decode_seed_payload(text(known_unknown, "input")),
         Ok((24, raw_seed)),
         "N2 proves structural prefix validity only; N4 owns the allowed-kind policy"
+    );
+}
+
+#[test]
+fn every_packed_seed_prefix_pair_is_classified_exhaustively() {
+    let mut accepted = 0usize;
+    let mut rejected_outer = 0usize;
+    let mut rejected_unused_bits = 0usize;
+    let mut rejected_alignment = 0usize;
+
+    for word in u16::MIN..=u16::MAX {
+        let packed = word.to_be_bytes();
+        let expected = if packed[0] & 0xf8 != 0x90 {
+            rejected_outer += 1;
+            Err(owned_nkey_codec::NkeyCodecError::NonCanonical {
+                reason: owned_nkey_codec::NonCanonicalReason::SeedOuter,
+                index: Some(0),
+            })
+        } else if packed[1] & 0x07 != 0 {
+            rejected_unused_bits += 1;
+            Err(owned_nkey_codec::NkeyCodecError::NonCanonical {
+                reason: owned_nkey_codec::NonCanonicalReason::SeedUnusedBits,
+                index: Some(1),
+            })
+        } else {
+            let inner_prefix = ((packed[0] & 0x07) << 5) | ((packed[1] & 0xf8) >> 3);
+            if inner_prefix & 0x07 != 0 {
+                rejected_alignment += 1;
+                Err(owned_nkey_codec::NkeyCodecError::NonCanonical {
+                    reason: owned_nkey_codec::NonCanonicalReason::SeedPrefixAlignment,
+                    index: Some(1),
+                })
+            } else {
+                accepted += 1;
+                assert_eq!(
+                    owned_nkey_codec::pack_seed_prefix(inner_prefix),
+                    Ok(packed),
+                    "accepted packed pair {packed:02x?} must round-trip"
+                );
+                Ok(inner_prefix)
+            }
+        };
+
+        assert_eq!(
+            owned_nkey_codec::unpack_seed_prefix(packed),
+            expected,
+            "packed pair {packed:02x?} was misclassified"
+        );
+    }
+
+    assert_eq!(accepted, 32);
+    assert_eq!(rejected_outer, 63_488);
+    assert_eq!(rejected_unused_bits, 1_792);
+    assert_eq!(rejected_alignment, 224);
+    assert_eq!(
+        rejected_outer + rejected_unused_bits + rejected_alignment,
+        65_504
     );
 }
 

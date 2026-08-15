@@ -45,6 +45,12 @@
   "coverage": {
     "aligned_prefix_rows": 32,
     "unaligned_prefix_rejections": 224,
+    "packed_prefix_pair_rows": 65536,
+    "canonical_packed_prefix_rows": 32,
+    "packed_seed_outer_rejections": 63488,
+    "packed_seed_unused_bits_rejections": 1792,
+    "packed_seed_alignment_rejections": 224,
+    "malformed_packed_prefix_rejections": 65504,
     "deterministic_generated_cases": 64,
     "independent_ed25519_rows": 8,
     "private_layout_rows": 2,
