@@ -89,8 +89,8 @@
       "SerializationFormat::Custom"
     ],
     "totals": {
-      "rust_files": 4335,
-      "serde_json::": 6341,
+      "rust_files": 4338,
+      "serde_json::": 6346,
       "rmp_serde::": 70,
       "bincode::": 32,
       "SerializationFormat::": 160,
@@ -101,7 +101,7 @@
       {
         "path": "src",
         "classification": "MIXED_PRODUCTION_AND_INLINE_TEST; SEMANTIC unless an explicit persisted/public surface overrides it",
-        "rust_files": 1451,
+        "rust_files": 1452,
         "serde_json::": 2459,
         "rmp_serde::": 48,
         "bincode::": 21,
@@ -112,8 +112,8 @@
       {
         "path": "tests",
         "classification": "TEST_OR_EXTERNAL_CONSUMER_EVIDENCE; no production compatibility claim",
-        "rust_files": 1915,
-        "serde_json::": 3312,
+        "rust_files": 1917,
+        "serde_json::": 3317,
         "rmp_serde::": 9,
         "bincode::": 11,
         "SerializationFormat::": 23,
@@ -1144,7 +1144,7 @@
     },
     {
       "path": "src/distributed/snapshot.rs",
-      "sha256": "d6e7dc3c5cf90d44435984e5134ac0ff3bb12b47d65d6fd1ecd64e18813f120d"
+      "sha256": "4bd4bb7d1cc953f977b0a7da03728f176cda3caa85e443995b41eca1f3241023"
     },
     {
       "path": "src/bin/asupersync.rs",
@@ -1172,11 +1172,11 @@
     },
     {
       "path": "tests/fixtures/dependency-capability-baseline-consumer/src/lib.rs",
-      "sha256": "a28cd08953d5eb112db6ba43d69ebeb262f74f15f4c36f51753df0cfb8c598ea"
+      "sha256": "30ff1e567a41f74b869f4b47ead951618331130f13ae7edd570a8a7013d57744"
     },
     {
       "path": "tests/fixtures/dependency-capability-baseline-consumer/Cargo.lock",
-      "sha256": "1c68bb36d8a237eb9009c18d7afc0e1b6eb2383a35a5d59ea563950bd6645c78"
+      "sha256": "52d8942c499184fb7faabf3ad0d3a4ffff91935e1a173efb02728239b3197435"
     },
     {
       "path": "tests/fixtures/typed-format-cross-version-consumer/Cargo.toml",
@@ -1200,7 +1200,7 @@
     },
     {
       "path": "scripts/run_dependency_sovereignty_e2e.sh",
-      "sha256": "388af46854549b837e7de602fbb84f99d26dcf2fef6b7e4f8575f1f6478d33a0"
+      "sha256": "f2deaf18dd793e3df114c300ffaa15445ccbf0040f9cc3c5b56e89fd19665ccc"
     },
     {
       "path": "tests/raptorq_journal_kill_recover_replay_e2e.rs",

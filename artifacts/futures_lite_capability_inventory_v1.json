@@ -197,8 +197,8 @@
     "current_source_pins": [
       {
         "path": "src/future.rs",
-        "sha256": "e50101022865b42d1a9a506388824e0e0d5187223df47f3473db056023dd904b",
-        "line_count": 1477
+        "sha256": "f70205cd4c9fb28e12c19ddee5726a11e466daef7dbd30d05b0474f7b665e5ba",
+        "line_count": 1479
       },
       {
         "path": "src/util/mod.rs",
@@ -407,8 +407,8 @@
     "visibility": "crate-private alongside-incumbent",
     "current_source_pin": {
       "path": "src/future.rs",
-      "sha256": "e50101022865b42d1a9a506388824e0e0d5187223df47f3473db056023dd904b",
-      "line_count": 1477
+      "sha256": "f70205cd4c9fb28e12c19ddee5726a11e466daef7dbd30d05b0474f7b665e5ba",
+      "line_count": 1479
     },
     "helper_projection": {
       "path": "src/future.rs",
@@ -516,8 +516,8 @@
     "current_source_pins": [
       {
         "path": "src/future.rs",
-        "sha256": "e50101022865b42d1a9a506388824e0e0d5187223df47f3473db056023dd904b",
-        "line_count": 1477
+        "sha256": "f70205cd4c9fb28e12c19ddee5726a11e466daef7dbd30d05b0474f7b665e5ba",
+        "line_count": 1479
       },
       {
         "path": "src/web/middleware.rs",
@@ -631,14 +631,14 @@
       "unit": "non-overlapping textual token occurrences in current tracked Rust source, excluding this contract",
       "ordering": "bytewise path order; digest input is path, tab, decimal count, newline",
       "file_count": 317,
-      "token_count": 1385,
-      "digest_sha256": "e339bb63c52a610e693f70d181fb3e2ca860ac2b2f6f99abde444608ecd1e3f4",
+      "token_count": 1387,
+      "digest_sha256": "d510a06c005b90dc9016bea04a65897ca9e29fd0833c5cf3f7a917c47a1ebe9b",
       "scope_rows": [
         {
           "scope": "src",
           "file_count": 152,
-          "token_count": 830,
-          "digest_sha256": "60826b0bb766ae95646864d2c1236f3ec9d3bd8d9ba4bbb8a9f175b31d84b269"
+          "token_count": 832,
+          "digest_sha256": "a7aa4776ac107be1a5ff05d0fe55eb67f8bf4e76e9139fdbad37585902558813"
         },
         {
           "scope": "tests",
@@ -688,8 +688,8 @@
       {
         "group_id": "FUT-A8-SERVICES",
         "file_count": 33,
-        "token_count": 195,
-        "digest_sha256": "8f35f46341fab463da6265b8248a75221881074d4f797f95c6a8399e9e98a705"
+        "token_count": 197,
+        "digest_sha256": "43fcec15bd176215b9d66948d9e4b45a3eeabe6e83191d11bcee7b0eca218d62"
       },
       {
         "group_id": "FUT-A9-ATP-DEV",
@@ -1668,13 +1668,13 @@
     },
     {
       "path": "tests/fixtures/dependency-capability-baseline-consumer/Cargo.lock",
-      "sha256": "1c68bb36d8a237eb9009c18d7afc0e1b6eb2383a35a5d59ea563950bd6645c78",
+      "sha256": "52d8942c499184fb7faabf3ad0d3a4ffff91935e1a173efb02728239b3197435",
       "line_count": 2021
     },
     {
       "path": "tests/fixtures/dependency-capability-baseline-consumer/src/lib.rs",
-      "sha256": "a28cd08953d5eb112db6ba43d69ebeb262f74f15f4c36f51753df0cfb8c598ea",
-      "line_count": 940
+      "sha256": "30ff1e567a41f74b869f4b47ead951618331130f13ae7edd570a8a7013d57744",
+      "line_count": 1015
     }
   ],
   "rollback_triggers": [

@@ -321,8 +321,8 @@
       },
       {
         "path": "src/messaging/redis.rs",
-        "sha256": "5a739d23b48b1d4b0866f6456dfe828b33d79945b393031d4918d3d7df190d53",
-        "line_count": 12286
+        "sha256": "e15df52f98062fc15594626a1418ac4082ca6517817599cf54310f6e2a1199fb",
+        "line_count": 12998
       },
       {
         "path": "src/messaging/jetstream.rs",
@@ -1195,8 +1195,8 @@
     "cross_file_consumer_anchor_count": 34,
     "cross_file_direct_source_anchor_count": 41,
     "declared_consumer_unique_direct_source_anchor_count": 76,
-    "literal_operation_projection_sha256": "7576c14d2950116f79111225a7cac6f61755eccd09c26aa9476841c004a3eae1",
-    "literal_source_projection_sha256": "bdfdb42f121b7614fe82ccc24c9d14e691bff86054782ad11c78cf854e9f2d0a",
+    "literal_operation_projection_sha256": "0a37d054eaa2677355b75f7788b46d51dc6b6dc1072b8fd26b49c44d3d387cb9",
+    "literal_source_projection_sha256": "3a25d366e0388bb559881b71823c2d42be3e45ff7e05fee0324f24dcd2c7fcec",
     "path_classification_projection_sha256": "5f60bb8b7deb36b1aac2123747fd1be426f1888fc759f46afe3baae103dc3b63",
     "literal_override_projection_sha256": "194275e94001e0b048499cce9765365db2fffc9cf256d8a2e93489f1a97ee2e6",
     "additional_derived_projection_sha256": "a32e839f13b56abfe4c80070dc20df15fdc26a6c9a63c36487492f7771e77e3b",
@@ -5515,8 +5515,8 @@
         "additional_derived": "b20b65d03be1995802d929275531ac96a8a66ec06c1c64f0bf887ee27803f674"
       },
       "current_projection_sha256": {
-        "literal_operation": "7576c14d2950116f79111225a7cac6f61755eccd09c26aa9476841c004a3eae1",
-        "literal_source": "bdfdb42f121b7614fe82ccc24c9d14e691bff86054782ad11c78cf854e9f2d0a",
+        "literal_operation": "0a37d054eaa2677355b75f7788b46d51dc6b6dc1072b8fd26b49c44d3d387cb9",
+        "literal_source": "3a25d366e0388bb559881b71823c2d42be3e45ff7e05fee0324f24dcd2c7fcec",
         "literal_override": "194275e94001e0b048499cce9765365db2fffc9cf256d8a2e93489f1a97ee2e6",
         "additional_derived": "6b1a4e86af89748dd08fef01e10c2417b9641ba1bf0f262a59ce57f0dd21ad44"
       },

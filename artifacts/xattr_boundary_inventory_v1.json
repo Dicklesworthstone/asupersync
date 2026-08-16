@@ -90,8 +90,8 @@
     },
     {
       "path": "scripts/run_dependency_sovereignty_e2e.sh",
-      "sha256": "388af46854549b837e7de602fbb84f99d26dcf2fef6b7e4f8575f1f6478d33a0",
-      "line_count": 1276
+      "sha256": "f2deaf18dd793e3df114c300ffaa15445ccbf0040f9cc3c5b56e89fd19665ccc",
+      "line_count": 1314
     }
   ],
   "reviewed_upstream_sources": {

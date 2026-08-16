@@ -45,8 +45,8 @@ const PREDECESSOR_PATH: &str = "artifacts/regex_vm_core_contract_v1.json";
 const TERMINAL_PATH: &str = "artifacts/regex_compiler_terminal_receipt_v1.json";
 const LOWERING_PATH: &str = "artifacts/regex_priority_capture_lowering_contract_v1.json";
 const VM_SOURCE_PATH: &str = "src/observability/regex_vm.rs";
-const TERMINAL_SHA256: &str = "14e895e467f6265988b93b487c320ba1035067784b46ba54457d6df57609711e";
-const LOWERING_SHA256: &str = "1b492bcdf6f056e917ec1f91b80a1167e1f3e7466abc39caa7efdcb4cdee6397";
+const TERMINAL_SHA256: &str = "a54b66fcdf926d52faad6d2b343f4b98862646fa5027d8ec0ddca23509745b3e";
+const LOWERING_SHA256: &str = "a3a6e50a9f828b2bc3baed499b2246287926cccc7a2a53955a1e535bdaf936a1";
 const FROZEN_R3_4_2_VM_SHA256: &str =
     "5b27779e8384d5746b471064820f87410b3ccc5dea06ac637890eefc460ef0ee";
 

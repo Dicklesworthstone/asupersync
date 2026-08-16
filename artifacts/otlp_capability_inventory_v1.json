@@ -105,8 +105,8 @@
     },
     {
       "path": "tests/fixtures/dependency-capability-baseline-consumer/src/lib.rs",
-      "sha256": "a28cd08953d5eb112db6ba43d69ebeb262f74f15f4c36f51753df0cfb8c598ea",
-      "line_count": 940
+      "sha256": "30ff1e567a41f74b869f4b47ead951618331130f13ae7edd570a8a7013d57744",
+      "line_count": 1015
     }
   ],
   "feature_profiles": [

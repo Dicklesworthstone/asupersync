@@ -12,7 +12,7 @@
 use crate::cx::Cx;
 use crate::time::{TimerDriverHandle, TimerHandle};
 use crate::trace::TraceEvent;
-use crate::types::Time;
+use crate::types::{CancelKind, Time};
 use parking_lot::Mutex;
 use std::future::Future;
 use std::pin::Pin;
@@ -713,10 +713,18 @@ impl Future for Sleep {
         // parent waits for an aborted sleeping child to join.
         //
         // `Sleep` has no error output, so early readiness is the only compatible
-        // way to deliver cancellation. The surrounding task observes the
-        // acknowledgement and may run its normal cleanup before returning. Drop
-        // cancels the registered timer and records the cancellation trace event.
-        if Cx::current().is_some_and(|current| current.checkpoint().is_err()) {
+        // way to deliver an explicit cancellation. Deadline/timeout cancellation
+        // is intentionally excluded: request-budget combinators own that outcome,
+        // and letting the handler continue after its sleep would turn a timeout
+        // into a successful response. The surrounding task may run its normal
+        // cleanup before returning. Drop cancels the registered timer and records
+        // the cancellation trace event.
+        if Cx::current().is_some_and(|current| {
+            current.is_cancel_requested()
+                && !current.cancelled_by(CancelKind::Timeout)
+                && !current.cancelled_by(CancelKind::Deadline)
+                && current.checkpoint().is_err()
+        }) {
             self.polled
                 .store(true, std::sync::atomic::Ordering::Relaxed);
             self.completed

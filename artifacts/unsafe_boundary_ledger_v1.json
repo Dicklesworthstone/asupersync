@@ -1894,25 +1894,25 @@
         "Test-only, conformance, fuzz, and compat-boundary rows do not prove core runtime production safety."
       ],
       "operation_locators": [
-        {
-          "kind": "allow_unsafe_code",
-          "line": 1348,
-          "pattern": "#[allow(unsafe_code)]"
-        },
-        {
-          "kind": "allow_unsafe_code",
-          "line": 1534,
-          "pattern": "#[allow(unsafe_code)]"
-        },
-        {
-          "kind": "unsafe_block",
-          "line": 1538,
-          "pattern": "unsafe { std::env::set_var(\"RAPTORQ_ENCODING_SYMBOL_SIZE\", \"512\") };"
-        },
-        {
-          "kind": "unsafe_block",
-          "line": 1542,
-          "pattern": "unsafe { std::env::remove_var(\"RAPTORQ_ENCODING_SYMBOL_SIZE\") };"
+      {
+        "kind": "allow_unsafe_code",
+        "line": 1358,
+        "pattern": "#[allow(unsafe_code)]"
+      },
+      {
+        "kind": "allow_unsafe_code",
+        "line": 1544,
+        "pattern": "#[allow(unsafe_code)]"
+      },
+      {
+        "kind": "unsafe_block",
+        "line": 1548,
+        "pattern": "unsafe { std::env::set_var(\"RAPTORQ_ENCODING_SYMBOL_SIZE\", \"512\") };"
+      },
+      {
+        "kind": "unsafe_block",
+        "line": 1552,
+        "pattern": "unsafe { std::env::remove_var(\"RAPTORQ_ENCODING_SYMBOL_SIZE\") };"
         }
       ]
     },
@@ -2353,67 +2353,67 @@
         },
         {
           "kind": "unsafe_block",
-          "line": 2131,
+        "line": 2264,
           "pattern": "let result = unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 2145,
+        "line": 2278,
           "pattern": "let get_result = unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 2493,
+        "line": 2626,
           "pattern": "let result = unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 2510,
+        "line": 2643,
           "pattern": "let result = unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 2544,
+        "line": 2677,
           "pattern": "let result = unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 2561,
+        "line": 2694,
           "pattern": "let result = unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 2597,
+        "line": 2730,
           "pattern": "let result = unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 2611,
+        "line": 2744,
           "pattern": "let result = unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 2625,
+        "line": 2758,
           "pattern": "let result = unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 2663,
+        "line": 2796,
           "pattern": "let result = unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 2705,
+        "line": 2838,
           "pattern": "let result = unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 2750,
+        "line": 2883,
           "pattern": "let result = unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 2764,
+        "line": 2897,
           "pattern": "let result = unsafe {"
         }
       ]
@@ -4633,25 +4633,25 @@
         "Test-only, conformance, fuzz, and compat-boundary rows do not prove core runtime production safety."
       ],
       "operation_locators": [
-        {
-          "kind": "allow_unsafe_code",
-          "line": 710,
-          "pattern": "#[allow(unsafe_code)]"
-        },
-        {
-          "kind": "unsafe_block",
-          "line": 722,
-          "pattern": "let pre = unsafe { *bytes_ptr };"
-        },
-        {
-          "kind": "unsafe_block",
-          "line": 729,
-          "pattern": "unsafe {"
-        },
-        {
-          "kind": "unsafe_block",
-          "line": 734,
-          "pattern": "let post = unsafe { *bytes_ptr };"
+      {
+        "kind": "allow_unsafe_code",
+        "line": 748,
+        "pattern": "#[allow(unsafe_code)]"
+      },
+      {
+        "kind": "unsafe_block",
+        "line": 760,
+        "pattern": "let pre = unsafe { *bytes_ptr };"
+      },
+      {
+        "kind": "unsafe_block",
+        "line": 767,
+        "pattern": "unsafe {"
+      },
+      {
+        "kind": "unsafe_block",
+        "line": 772,
+        "pattern": "let post = unsafe { *bytes_ptr };"
         }
       ]
     },
@@ -4884,57 +4884,57 @@
         },
         {
           "kind": "unsafe_block",
-          "line": 697,
+        "line": 696,
           "pattern": "unsafe { &*self.mutex.data.get() }"
         },
         {
           "kind": "unsafe_block",
-          "line": 704,
+        "line": 703,
           "pattern": "unsafe { &mut *self.mutex.data.get() }"
         },
         {
           "kind": "unsafe_block",
-          "line": 781,
+        "line": 786,
           "pattern": "unsafe { self.data.as_ref() }"
         },
         {
           "kind": "unsafe_block",
-          "line": 788,
+        "line": 793,
           "pattern": "unsafe { self.data.as_mut() }"
         },
         {
           "kind": "unsafe_block",
-          "line": 896,
+        "line": 907,
           "pattern": "let mutex = unsafe { std::ptr::read(&self.mutex) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 914,
+        "line": 927,
           "pattern": "let mutex = unsafe { std::ptr::read(&self.mutex) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 931,
+        "line": 946,
           "pattern": "unsafe { &*self.mutex.data.get() }"
         },
         {
           "kind": "unsafe_block",
-          "line": 938,
+        "line": 953,
           "pattern": "unsafe { &mut *self.mutex.data.get() }"
         },
         {
           "kind": "unsafe_block",
-          "line": 975,
+        "line": 992,
           "pattern": "unsafe { self.data.as_ref() }"
         },
         {
           "kind": "unsafe_block",
-          "line": 982,
+        "line": 999,
           "pattern": "unsafe { self.data.as_mut() }"
         },
         {
           "kind": "unsafe_block",
-          "line": 1003,
+        "line": 1041,
           "pattern": "let mutex = unsafe { std::ptr::read(&self.mutex) };"
         },
         {
@@ -4954,32 +4954,32 @@
         },
         {
           "kind": "unsafe_impl",
-          "line": 684,
+        "line": 683,
           "pattern": "unsafe impl<T: Sync> Sync for MutexGuard<'_, T> {}"
         },
         {
           "kind": "unsafe_impl",
-          "line": 766,
+        "line": 771,
           "pattern": "unsafe impl<T, U: ?Sized + Sync> Sync for MappedMutexGuard<'_, T, U> {}"
         },
         {
           "kind": "unsafe_impl",
-          "line": 846,
+        "line": 857,
           "pattern": "unsafe impl<T: Send> Send for OwnedMutexGuard<T> {}"
         },
         {
           "kind": "unsafe_impl",
-          "line": 847,
+        "line": 858,
           "pattern": "unsafe impl<T: Sync> Sync for OwnedMutexGuard<T> {}"
         },
         {
           "kind": "unsafe_impl",
-          "line": 959,
+        "line": 976,
           "pattern": "unsafe impl<T: Send, U: ?Sized + Send> Send for OwnedMappedMutexGuard<T, U> {}"
         },
         {
           "kind": "unsafe_impl",
-          "line": 960,
+        "line": 977,
           "pattern": "unsafe impl<T: Send, U: ?Sized + Sync> Sync for OwnedMappedMutexGuard<T, U> {}"
         }
       ]
@@ -5029,47 +5029,47 @@
         },
         {
           "kind": "unsafe_block",
-          "line": 1018,
+        "line": 1029,
           "pattern": "unsafe { &*self.lock.data.get() }"
         },
         {
           "kind": "unsafe_block",
-          "line": 1056,
+        "line": 1066,
           "pattern": "unsafe { &*self.lock.data.get() }"
         },
         {
           "kind": "unsafe_block",
-          "line": 1063,
+        "line": 1073,
           "pattern": "unsafe { &mut *self.lock.data.get() }"
         },
         {
           "kind": "unsafe_block",
-          "line": 1165,
+        "line": 1176,
           "pattern": "f(unsafe { &*self.lock.data.get() })"
         },
         {
           "kind": "unsafe_block",
-          "line": 1174,
+        "line": 1185,
           "pattern": "unsafe { &*self.lock.data.get() }"
         },
         {
           "kind": "unsafe_block",
-          "line": 1226,
+        "line": 1234,
           "pattern": "f(unsafe { &mut *self.lock.data.get() })"
         },
         {
           "kind": "unsafe_block",
-          "line": 1235,
+        "line": 1243,
           "pattern": "unsafe { &*self.lock.data.get() }"
         },
         {
           "kind": "unsafe_block",
-          "line": 1242,
+        "line": 1250,
           "pattern": "unsafe { &mut *self.lock.data.get() }"
         },
         {
           "kind": "unsafe_block",
-          "line": 1285,
+        "line": 1290,
           "pattern": "let lock = unsafe { std::ptr::read(&md.lock) };"
         },
         {
@@ -5084,22 +5084,22 @@
         },
         {
           "kind": "unsafe_impl",
-          "line": 1010,
+        "line": 1021,
           "pattern": "unsafe impl<T: Send + Sync> Send for RwLockReadGuard<'_, T> {}"
         },
         {
           "kind": "unsafe_impl",
-          "line": 1011,
+        "line": 1022,
           "pattern": "unsafe impl<T: Send + Sync> Sync for RwLockReadGuard<'_, T> {}"
         },
         {
           "kind": "unsafe_impl",
-          "line": 1046,
+        "line": 1056,
           "pattern": "unsafe impl<T: Send> Send for RwLockWriteGuard<'_, T> {}"
         },
         {
           "kind": "unsafe_impl",
-          "line": 1049,
+        "line": 1059,
           "pattern": "unsafe impl<T: Send + Sync> Sync for RwLockWriteGuard<'_, T> {}"
         }
       ]

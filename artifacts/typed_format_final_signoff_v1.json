@@ -84,7 +84,7 @@
   "source_contracts": [
     {
       "path": "artifacts/typed_format_registry_v1.json",
-      "sha256": "40b489171053feaadd714deb269e2760fc0d52cf77e80d6581c6a0bae17efb09",
+      "sha256": "458630838fdc39c99f8faeaed36095281af43f421402f25d54a89dd9297cce42",
       "role": "canonical row-level inventory, pins, corpora, consumers, and A6 decisions"
     },
     {
@@ -129,12 +129,12 @@
     },
     {
       "path": "tests/fixtures/dependency-capability-baseline-consumer/src/lib.rs",
-      "sha256": "a28cd08953d5eb112db6ba43d69ebeb262f74f15f4c36f51753df0cfb8c598ea",
+      "sha256": "30ff1e567a41f74b869f4b47ead951618331130f13ae7edd570a8a7013d57744",
       "role": "standalone arbitrary-Serde and custom-codec downstream fixture"
     },
     {
       "path": "tests/fixtures/dependency-capability-baseline-consumer/Cargo.lock",
-      "sha256": "1c68bb36d8a237eb9009c18d7afc0e1b6eb2383a35a5d59ea563950bd6645c78",
+      "sha256": "52d8942c499184fb7faabf3ad0d3a4ffff91935e1a173efb02728239b3197435",
       "role": "locked downstream incumbent dependency graph"
     },
     {
@@ -149,7 +149,7 @@
     },
     {
       "path": "tests/typed_format_registry_contract.rs",
-      "sha256": "e959c9c7dcede4722c5134e12b1838439301c0c6a2e9b2e1b864eb588726ca60",
+      "sha256": "f844c4b51931853ae128230c63f1530dda50e3cd6e686f0ed6e0be0c07bf1387",
       "role": "row-level registry, pin, corpus, consumer, and documentation verifier"
     }
   ],

@@ -1904,6 +1904,37 @@ fn diagnostics_are_stable_and_fully_mapped() {
     );
 }
 
+fn nested_manifest_references_asupersync(repo_path: &Path, primary_manifest: &Path) -> bool {
+    let mut pending = vec![repo_path.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&directory) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_dir() {
+                if !matches!(
+                    path.file_name().and_then(|name| name.to_str()),
+                    Some(".git" | "target" | "node_modules")
+                ) {
+                    pending.push(path);
+                }
+            } else if file_type.is_file()
+                && path != primary_manifest
+                && path.file_name().and_then(|name| name.to_str()) == Some("Cargo.toml")
+                && std::fs::read_to_string(&path)
+                    .is_ok_and(|manifest| manifest.contains("asupersync"))
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 #[test]
 fn downstream_consumers_are_real_cycle_aware_manifests() {
     let registry = registry();
@@ -1934,8 +1965,12 @@ fn downstream_consumers_are_real_cycle_aware_manifests() {
             let manifest = std::fs::read_to_string(manifest_path)
                 .unwrap_or_else(|error| panic!("{consumer_id}: cannot read manifest: {error}"));
             assert!(
-                manifest.contains("asupersync"),
-                "{consumer_id}: manifest no longer references asupersync"
+                manifest.contains("asupersync")
+                    || nested_manifest_references_asupersync(
+                        Path::new(repo_path),
+                        Path::new(manifest_path),
+                    ),
+                "{consumer_id}: neither the root manifest nor a workspace member references asupersync"
             );
         } else {
             unavailable_manifests.push(manifest_path.to_owned());

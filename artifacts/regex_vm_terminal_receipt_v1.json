@@ -7,10 +7,10 @@
   "generated_at_utc": "2026-07-26T06:56:02Z",
   "authority": {
     "compiler_terminal_path": "artifacts/regex_compiler_terminal_receipt_v1.json",
-    "compiler_terminal_sha256": "14e895e467f6265988b93b487c320ba1035067784b46ba54457d6df57609711e",
+    "compiler_terminal_sha256": "a54b66fcdf926d52faad6d2b343f4b98862646fa5027d8ec0ddca23509745b3e",
     "compiler_disposition": "KEEP_INCUMBENT_DEFER",
     "iteration_predecessor_path": "artifacts/regex_vm_iteration_contract_v1.json",
-    "iteration_predecessor_sha256": "aab91806c80c4936feea2ddae90cfa4db26e83083c0732fecb67f5d17b8574af",
+    "iteration_predecessor_sha256": "eee49ff99abf5622f6d5090cc54c3735dc6803593995cd0d02cbe68fb5491349",
     "incumbent": "regex@1.13.1",
     "production_cutover_eligible": false
   },
@@ -29,8 +29,8 @@
     },
     {
       "path": "src/observability/regex_vm.rs",
-      "sha256": "c4dd00a1346a5954a2ff5d1a12b0c567d8c0b15cf45977c5d987503513bdf673",
-      "bytes": 115185,
+      "sha256": "68f5b24f8ba6cfc454d8287e2285b2a30f572fa8b168e94d316375d7c00bb2e5",
+      "bytes": 130259,
       "revision": "asupersync-5z2scg.8.3.4.4"
     },
     {

@@ -1231,7 +1231,6 @@ fn public_generic_and_container_invariants_match_source() {
         "const SNAP_VERSION: u8 = 2;",
         "bincode::config::legacy()",
         "const SNAPSHOT_ARENA_ID_MAX_INDEX: u32 = 1_000_000;",
-        "const SNAPSHOT_ARENA_ID_MAX_GENERATION: u32 = 10_000;",
     ] {
         assert!(
             snapshot.contains(expected),
