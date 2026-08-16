@@ -699,6 +699,31 @@ impl Future for Sleep {
 
     #[allow(clippy::too_many_lines)]
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        assert!(
+            !self.completed.load(std::sync::atomic::Ordering::Acquire),
+            "Sleep polled after completion"
+        );
+
+        // `Sleep` is a cancellation point when it runs under an ambient task
+        // context. Cancellation publication wakes the parked task through the
+        // scheduler's task Waker; the follow-up poll must then acknowledge the
+        // request and complete the wait instead of re-parking until the timer's
+        // original deadline. This is especially important for current-thread
+        // runtimes: no second worker exists to make unrelated progress while a
+        // parent waits for an aborted sleeping child to join.
+        //
+        // `Sleep` has no error output, so early readiness is the only compatible
+        // way to deliver cancellation. The surrounding task observes the
+        // acknowledgement and may run its normal cleanup before returning. Drop
+        // cancels the registered timer and records the cancellation trace event.
+        if Cx::current().is_some_and(|current| current.checkpoint().is_err()) {
+            self.polled
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            self.completed
+                .store(true, std::sync::atomic::Ordering::Release);
+            return Poll::Ready(());
+        }
+
         // Prefer an explicitly bound timer driver; otherwise use the ambient
         // runtime driver when one exists.
         let (ambient_timer_driver, trace) = Cx::current().map_or_else(

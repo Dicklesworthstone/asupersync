@@ -58,6 +58,13 @@ _No changes yet._
   post-connect `WSAENOTCONN` retries retain a bounded real-time settling floor,
   preventing the first TLS write from exhausting its retry budget in
   microseconds ([#62](https://github.com/Dicklesworthstone/asupersync/issues/62)).
+- **Cancelling a timer-parked native task now wakes it immediately.** `Sleep`
+  acknowledges ambient task cancellation on the cancellation-triggered repoll,
+  completes the wait so structured cleanup can run, and drops its armed timer
+  instead of leaving `abort()` + `join()` blocked until the original deadline.
+  Permanent current-thread tests reproduce both the cross-thread
+  `Cx::cancel_with` and nested `abort()` + `join()` sequences with a genuinely
+  armed ten-second timer ([#61](https://github.com/Dicklesworthstone/asupersync/issues/61)).
 - **Native task abort now preserves an acknowledged cancellation result.** A
   task parked on a cancel-aware primitive can observe cancellation, return its
   public `Cancelled` value, and complete cleanup without a concurrent abort

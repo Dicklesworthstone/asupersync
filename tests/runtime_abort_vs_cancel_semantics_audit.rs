@@ -135,6 +135,7 @@ use asupersync::channel::oneshot;
 use asupersync::cx::Cx;
 use asupersync::io::{AsyncRead, AsyncWrite, ReadBuf};
 use asupersync::net::websocket::{CloseReason, Message, WebSocket, WebSocketConfig, WsError};
+use asupersync::runtime::reactor::create_reactor;
 use asupersync::runtime::{JoinError, RuntimeBuilder, RuntimeState, yield_now};
 use asupersync::sync::{
     AcquireError, LockError, Mutex, OwnedMutexGuard, OwnedSemaphorePermit, Semaphore,
@@ -147,6 +148,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::task::{Context, Poll};
+use std::time::{Duration, Instant};
 
 fn read(rel: &str) -> String {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(rel);
@@ -207,6 +209,17 @@ fn task_handle_constructor_census() -> BTreeMap<String, usize> {
         }
     }
     census
+}
+
+async fn drive_until_flag(flag: &AtomicBool, budget: Duration) -> bool {
+    let started = Instant::now();
+    while started.elapsed() < budget {
+        if flag.load(Ordering::Acquire) {
+            return true;
+        }
+        yield_now().await;
+    }
+    flag.load(Ordering::Acquire)
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -300,6 +313,141 @@ fn abort_repolls_a_mutex_parked_operation_to_graceful_cancellation() {
             "graceful cancellation must unlink the parked mutex waiter before the holder unlocks",
         );
         drop(holder);
+    }));
+}
+
+#[test]
+fn cross_thread_cx_cancel_wakes_a_timer_parked_native_task() {
+    let runtime = RuntimeBuilder::current_thread()
+        .with_reactor(create_reactor().expect("create native reactor"))
+        .build()
+        .expect("build current-thread runtime");
+    let parked = Arc::new(AtomicBool::new(false));
+    let completed_after_sleep = Arc::new(AtomicBool::new(false));
+    let child_cx_slot = Arc::new(std::sync::Mutex::new(None));
+    let child_parked = Arc::clone(&parked);
+    let child_completed = Arc::clone(&completed_after_sleep);
+    let child_slot = Arc::clone(&child_cx_slot);
+
+    runtime
+        .handle()
+        .try_spawn_with_cx(move |child_cx| async move {
+            *child_slot.lock().expect("child Cx slot") = Some(child_cx.clone());
+            {
+                let mut sleeper = std::pin::pin!(asupersync::time::sleep(
+                    child_cx.now(),
+                    Duration::from_secs(10),
+                ));
+                std::future::poll_fn(|poll_cx| {
+                    let poll = sleeper.as_mut().poll(poll_cx);
+                    if poll.is_pending() {
+                        child_parked.store(true, Ordering::Release);
+                    }
+                    poll
+                })
+                .await;
+            }
+            child_completed.store(true, Ordering::Release);
+        })
+        .expect("spawn timer-parked native task");
+
+    assert!(
+        runtime.block_on(drive_until_flag(&parked, Duration::from_secs(2))),
+        "the reporter-shaped task must poll and arm its 10-second sleep before cancellation",
+    );
+    let child_cx = child_cx_slot
+        .lock()
+        .expect("child Cx slot")
+        .clone()
+        .expect("timer-parked task must publish its Cx");
+    let timer = child_cx
+        .timer_driver()
+        .expect("native task must inherit the runtime timer driver");
+    assert_eq!(
+        timer.pending_count(),
+        1,
+        "the long timer must be registered before the cross-thread cancel fires",
+    );
+
+    std::thread::spawn(move || {
+        child_cx.cancel_with(CancelKind::Shutdown, Some("external shutdown"));
+    })
+    .join()
+    .expect("cross-thread Cx cancellation must not panic");
+
+    assert!(
+        runtime.block_on(drive_until_flag(
+            &completed_after_sleep,
+            Duration::from_secs(1),
+        )),
+        "Cx::cancel_with must wake a task parked in sleep(10s) and let its cleanup continuation run promptly",
+    );
+    assert_eq!(
+        timer.pending_count(),
+        0,
+        "the cancelled sleep must remove its timer registration before the task completes",
+    );
+}
+
+#[test]
+fn abort_and_join_complete_promptly_for_a_timer_parked_native_child() {
+    let runtime = RuntimeBuilder::current_thread()
+        .with_reactor(create_reactor().expect("create native reactor"))
+        .build()
+        .expect("build current-thread runtime");
+
+    runtime.block_on(runtime.handle().spawn(async {
+        let cx = Cx::current().expect("runtime task installs a current Cx");
+        let parked = Arc::new(AtomicBool::new(false));
+        let child_parked = Arc::clone(&parked);
+        let mut child = cx
+            .spawn(move |child_cx| async move {
+                let mut sleeper = std::pin::pin!(asupersync::time::sleep(
+                    child_cx.now(),
+                    Duration::from_secs(10),
+                ));
+                std::future::poll_fn(|poll_cx| {
+                    let poll = sleeper.as_mut().poll(poll_cx);
+                    if poll.is_pending() {
+                        child_parked.store(true, Ordering::Release);
+                    }
+                    poll
+                })
+                .await;
+            })
+            .expect("spawn timer-parked native child");
+
+        assert!(
+            drive_until_flag(&parked, Duration::from_secs(2)).await,
+            "the child must poll and arm its 10-second sleep before abort",
+        );
+        let timer = cx
+            .timer_driver()
+            .expect("native task must inherit the runtime timer driver");
+        assert_eq!(
+            timer.pending_count(),
+            1,
+            "the child timer must be live before abort",
+        );
+
+        child.abort();
+        let started = Instant::now();
+        let result = child.join(&cx).await;
+        let elapsed = started.elapsed();
+        assert_eq!(
+            result,
+            Ok(()),
+            "Sleep has no error output, so acknowledged cancellation completes the wait and preserves the child's cleanup result",
+        );
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "abort+join of a sleep(10s)-parked child must complete promptly, took {elapsed:?}",
+        );
+        assert_eq!(
+            timer.pending_count(),
+            0,
+            "joining the cancelled child must leave no registered timer behind",
+        );
     }));
 }
 
