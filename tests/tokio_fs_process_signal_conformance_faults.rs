@@ -367,20 +367,15 @@ fn fi_fs_02_write_to_readonly() {
     let path = dir.join("readonly.txt");
     std::fs::write(&path, b"original").expect("setup");
 
-    // Make read-only
-    let mut perms = std::fs::metadata(&path).unwrap().permissions();
-    perms.set_readonly(true);
-    std::fs::set_permissions(&path, perms).unwrap();
-
-    let result = std::fs::write(&path, b"overwrite attempt");
-    assert!(result.is_err(), "Writing to read-only file must error");
-
-    // Cleanup: restore permissions before removal
-    let mut perms = std::fs::metadata(&path).unwrap().permissions();
-    #[allow(clippy::permissions_set_readonly_false)]
-    perms.set_readonly(false);
-    std::fs::set_permissions(&path, perms).unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
+    // Access mode, unlike Unix permission bits, cannot be bypassed by a
+    // privileged RCH worker. This keeps the fault deterministic under root.
+    let mut read_only = std::fs::File::open(&path).expect("open read-only handle");
+    let result = std::io::Write::write_all(&mut read_only, b"overwrite attempt");
+    assert!(
+        result.is_err(),
+        "Writing through a read-only file handle must error"
+    );
+    assert_eq!(std::fs::read(&path).expect("read original"), b"original");
 }
 
 #[test]

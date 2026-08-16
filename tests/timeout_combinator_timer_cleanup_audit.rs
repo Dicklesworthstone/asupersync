@@ -204,10 +204,16 @@ fn sleep_poll_ready_branch_cancels_timer_immediately() {
         .expect("complete_ready_registration helper");
     let helper_end = (helper_start + 1200).min(source.len());
     let helper_body = &source[helper_start..helper_end];
+    let take_body = source_between(
+        &source,
+        "fn take_active_registration(",
+        "\n    fn cancel_active_registration",
+    );
 
     assert!(
         body.contains("self.complete_ready_registration(now, self.timer_driver_for_poll())")
-            && helper_body.contains("state.timer_handle.take()")
+            && helper_body.contains("self.take_active_registration()")
+            && take_body.contains("state.timer_handle.take()")
             && helper_body.contains("driver.cancel(&handle)"),
         "REGRESSION: Sleep::poll_with_time Ready branch no longer \
          cancels the timer through complete_ready_registration. \
@@ -232,9 +238,9 @@ fn sleep_reset_after_cancels_old_timer_before_re_registration() {
     let body = &source[start..start + body_end];
 
     assert!(
-        body.contains("state.timer_handle.take()") && body.contains("driver.cancel(&handle);"),
+        body.contains("self.reset(now.saturating_add_nanos(duration_to_nanos(duration)))"),
         "REGRESSION: reset_after no longer cancels the old \
-         timer before re-registration. Repeated reset_after \
+         timer through the authoritative reset path. Repeated reset_after \
          calls accumulate stale timer registrations in the \
          driver — measurable leak under high-frequency \
          reset (e.g., interval timer).",

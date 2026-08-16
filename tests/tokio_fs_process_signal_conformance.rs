@@ -292,19 +292,15 @@ fn ff_05_write_to_readonly_file() {
     let path = dir.path().join("readonly.txt");
     std::fs::write(&path, b"original").expect("write");
 
-    // Make read-only
-    let mut perms = std::fs::metadata(&path).expect("meta").permissions();
-    perms.set_readonly(true);
-    std::fs::set_permissions(&path, perms).expect("set_permissions");
-
-    // Try to write
-    let result = std::fs::OpenOptions::new().write(true).open(&path);
+    // Opening without write access is deterministic even when the test runs
+    // as root, which can otherwise bypass mode-bit based read-only fixtures.
+    let mut read_only = std::fs::File::open(&path).expect("open read-only handle");
+    let result = std::io::Write::write_all(&mut read_only, b"overwrite attempt");
     assert!(
         result.is_err(),
-        "Opening read-only file for write should fail"
+        "Writing through a read-only file handle should fail"
     );
-    let err = result.unwrap_err();
-    assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+    assert_eq!(std::fs::read(&path).expect("read original"), b"original");
 }
 
 #[test]

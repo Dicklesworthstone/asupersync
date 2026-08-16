@@ -524,6 +524,7 @@ impl Sleep {
         self.ready = Arc::new(AtomicBool::new(false));
         let (handle, driver, fallback_handles) = {
             let mut state = self.state.lock();
+            state.waker = None;
             let mut handles = std::mem::take(&mut state.zombie_fallbacks);
             if let Some(fallback) = state.fallback.take() {
                 request_stop_fallback(&fallback);
@@ -559,42 +560,7 @@ impl Sleep {
     /// Any registered timer is cancelled and will be re-registered on next poll.
     #[inline]
     pub fn reset_after(&mut self, now: Time, duration: Duration) {
-        self.deadline = now.saturating_add_nanos(duration_to_nanos(duration));
-        self.polled
-            .store(false, std::sync::atomic::Ordering::Relaxed);
-        self.completed
-            .store(false, std::sync::atomic::Ordering::Relaxed);
-        self.ready = Arc::new(AtomicBool::new(false));
-        let (handle, driver, fallback_handles) = {
-            let mut state = self.state.lock();
-            let mut handles = std::mem::take(&mut state.zombie_fallbacks);
-            if let Some(fallback) = state.fallback.take() {
-                request_stop_fallback(&fallback);
-                handles.push(fallback.join);
-            }
-            // The new deadline gets a fresh registration on the next poll; clear
-            // the clamp flag so it is recomputed rather than left stale
-            // (br-asupersync-sleep-horizon-early-youlxs).
-            state.registered_partial = false;
-            (
-                state.timer_handle.take(),
-                state.timer_driver.take(),
-                handles,
-            )
-        };
-
-        // Intentionally detach threads to avoid blocking the executor
-        drop(fallback_handles);
-
-        // Cancel any existing timer - will be re-registered on next poll
-        if let (Some(handle), Some(driver)) = (handle, driver) {
-            let trace = Cx::current().and_then(|current| current.trace_buffer());
-            if let Some(trace) = trace.as_ref() {
-                let now = driver.now();
-                trace.record_event(|seq| TraceEvent::timer_cancelled(seq, now, handle.id()));
-            }
-            let _ = driver.cancel(&handle);
-        }
+        self.reset(now.saturating_add_nanos(duration_to_nanos(duration)));
     }
 
     /// Returns true if this sleep has been polled at least once.
@@ -1692,6 +1658,13 @@ mod tests {
             "reset cancels previous timer",
             0,
             timer.pending_count()
+        );
+        let reset_released_waker = sleep.state.lock().waker.is_none();
+        crate::assert_with_log!(
+            reset_released_waker,
+            "reset releases previous task waker",
+            true,
+            reset_released_waker
         );
         crate::assert_with_log!(
             sleep.deadline() == Time::from_secs(10),

@@ -240,10 +240,16 @@ fn sleep_ready_branch_cancels_timer_handle_if_any() {
         helper_marker,
         "\n    /// Returns whether this sleep uses a custom time source.",
     );
+    let take_window = source_between(
+        &source,
+        "fn take_active_registration(",
+        "\n    fn cancel_active_registration",
+    );
 
     assert!(
         body_window.contains("self.complete_ready_registration(now, self.timer_driver_for_poll())")
-            && helper_window.contains("state.timer_handle.take()")
+            && helper_window.contains("self.take_active_registration()")
+            && take_window.contains("state.timer_handle.take()")
             && helper_window.contains("driver.cancel(&handle)"),
         "REGRESSION: Sleep::poll_with_time Ready branch no \
          longer cancels any registered timer handle. \
