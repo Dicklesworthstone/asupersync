@@ -20,7 +20,7 @@ const DOC_PATH: &str = "docs/kafka_downstream_user_journey_inventory.md";
 const K0_1_PATH: &str = "artifacts/kafka_capability_inventory_v1.json";
 const K0_2_PATH: &str = "artifacts/kafka_incumbent_semantics_matrix_v1.json";
 const ADR_REGISTRY_PATH: &str = "artifacts/dependency_api_adr_registry_v1.json";
-const ARTIFACT_SHA256: &str = "848e69a1144ee42618968ca63869f325586caf0f578bf101b6135bb8575585c9";
+const ARTIFACT_SHA256: &str = "03c8c03bd4ff7553756ebcde676e4e446d2a375eea20c79598274e0a892d0ce0";
 const DOC_SHA256: &str = "3c2f0b4fa956bc45fc5b9738f5f2349024dafb577509195e998fa72ec0d9dbb1";
 const ARTIFACT_ID: &str = "kafka-downstream-user-journey-inventory-v1";
 const PROGRAM_ID: &str = "asupersync-ir2uf0";
@@ -81,15 +81,15 @@ const DOCUMENTATION_OCCURRENCE_GROUP_COUNT: usize = 173;
 const DOCUMENTATION_PATH_SHA256: &str =
     "092daf94a5e428430bc2e6fab7a13a30649aca53e30680c300f9eb76cbbfec67";
 const DOCUMENTATION_OCCURRENCE_TUPLE_SHA256: &str =
-    "c5cbe83e0426671392900a2330a83175edc0aeb4cc213cbbbd7e008ff5897d09";
+    "6e8eefd7603e9a2916db40ae5a931d0e2ad387c81a2ca19f309a9ff97e47daef";
 const DOCUMENTATION_LINE_TUPLE_SHA256: &str =
-    "107d5cc5eb88c842c0339e842f62b3902b6eb4d45a7ee5c0410a555cf5c918a1";
+    "b6220c97f12c39ff3647f62ac57371552f99fb7a29173cb503f79cbc8319cf6d";
 const DOCUMENTATION_OCCURRENCE_ID_SHA256: &str =
-    "9e69a255fefac14ac027e82b97381ad4b811e8e6a4d8169e9d45492626e1fe14";
+    "9eaeca6bbb0a6be0c3ba69d73c032ee3f5b38f48decc1f5dedc319ab2167c4d1";
 const DOCUMENTATION_CANONICAL_ID_SHA256: &str =
     "eb639a6c63291a29da23d7f002dcb0b26a38f34c42ed857f6949db3a92b5328e";
 const DOCUMENTATION_REMAINDER_ID_SHA256: &str =
-    "de89a74d1ecc8dae964412f12cddb09f168e8d9bd27258d9462a8629c41fc97b";
+    "c0ef7869d266a01ad875f3b8fab0c07bfde30fde0dcbf810f285baa4832113d3";
 const DOCUMENTATION_GROUP_ID_SHA256: &str =
     "5e36b023be812fd3887b84af75d46e7b220c0138317b2a4face21917bdf180dd";
 const DOCUMENTATION_SOURCE_PIN_TUPLE_SHA256: &str =

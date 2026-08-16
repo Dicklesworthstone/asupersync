@@ -12,13 +12,16 @@ Asupersync is a spec-first, cancel-correct, capability-secure async runtime for 
 
 Scope window: current work through 2026-08-16, reconstructed from git history,
 beads, benchmark ledgers, and live repo artifacts; the previous published
-GitHub Release/tag baseline is `v0.4.3`.
+GitHub Release/tag baseline is `v0.4.4`.
 
 ## Version Timeline
 
-- **v0.4.4 Release**: patch release restoring acknowledged native-task
-  cancellation, preserving the complete v0.4.3 public surface, and hardening
-  HTTP/1 streaming request-body cancellation and connection reuse.
+- **v0.4.5 Release**: patch release fixing timer-parked cancellation and
+  driverless Windows connects while preserving the complete v0.4.3 public
+  surface.
+- **v0.4.4 Release**: patch release preserving acknowledged native-task
+  cancellation and hardening HTTP/1 streaming request-body cancellation and
+  connection reuse.
 - **v0.4.3 Release**: patch release for panic containment across the owned
   future boundary and web error-handler middleware.
 - **v0.4.2 Release**: patch release for the owned safe blocking kernel and its
@@ -47,10 +50,17 @@ _No changes yet._
 
 ---
 
-## [v0.4.4] - 2026-08-16
+## [v0.4.5] - 2026-08-16
 
 ### Runtime correctness
 
+- **Cancelling a timer-parked native task now wakes it immediately.** `Sleep`
+  acknowledges explicit task cancellation on the cancellation-triggered
+  repoll, completes the wait so structured cleanup can run, and drops its armed
+  timer instead of leaving `abort()` + `join()` blocked until the original
+  deadline. Deadline and timeout cancellation remain owned by their
+  request-budget combinators, so they cannot be mistaken for successful sleeps
+  ([#61](https://github.com/Dicklesworthstone/asupersync/issues/61)).
 - **Driverless Windows TCP connects wait for kernel writability.** Embedded
   consumers that drive Asupersync futures from an external executor no longer
   trust an early `getpeername()` success as proof that Winsock finished the
@@ -58,13 +68,45 @@ _No changes yet._
   post-connect `WSAENOTCONN` retries retain a bounded real-time settling floor,
   preventing the first TLS write from exhausting its retry budget in
   microseconds ([#62](https://github.com/Dicklesworthstone/asupersync/issues/62)).
-- **Cancelling a timer-parked native task now wakes it immediately.** `Sleep`
-  acknowledges ambient task cancellation on the cancellation-triggered repoll,
-  completes the wait so structured cleanup can run, and drops its armed timer
-  instead of leaving `abort()` + `join()` blocked until the original deadline.
-  Permanent current-thread tests reproduce both the cross-thread
-  `Cx::cancel_with` and nested `abort()` + `join()` sequences with a genuinely
-  armed ten-second timer ([#61](https://github.com/Dicklesworthstone/asupersync/issues/61)).
+- **Redis RESP3 streaming is linear and attribute-correct.** Incremental frame
+  scanning no longer reprocesses an ever-growing prefix, nested attributes are
+  skipped without desynchronizing pipelined replies, and public attribute
+  decoding remains intact.
+- **Quorum, snapshot, and lock-tracking edge cases are corrected.** Quorum is
+  computed over eligible replica attempts, drained panics cannot satisfy a
+  nonzero quorum, arena generations are no longer rejected by an artificial
+  cap, and lock-order tracking survives task migration.
+
+### Security and protocols
+
+- **Owned NKey primitives now cover the bounded codec substrate.** The release
+  adds CRC16, RFC 4648 Base32, seed-prefix packing, typed Ed25519/Curve key
+  forms, lifecycle/redaction coverage, and constant-time key comparison while
+  keeping deterministic seed constructors explicitly test-only.
+- **HTTP/1 borrowed request heads avoid needless allocation.** Additive public
+  borrowed-head APIs feed the server parse path without changing the existing
+  owned request surfaces.
+- **SQLite lifecycle parity is exercised through the supported adapter.** The
+  cycle-safe downstream harness now covers the intended P2 lifecycle scenarios
+  without introducing another runtime into the core crate.
+
+### Compatibility and release evidence
+
+- **The v0.4.3 public surface remains the patch-line compatibility floor.** No
+  public item was removed or renamed, and the timer cancellation repair is an
+  internal behavioral correction covered by permanent native-runtime
+  regression tests.
+- **Release contracts were reconciled to the published source tree.** The
+  focused failure batch, dependency inventories, and source-pinned evidence
+  now agree with the 0.4.5 package inputs; these receipts remain scoped and do
+  not replace the terminal workspace release gate.
+
+---
+
+## [v0.4.4] - 2026-08-13
+
+### Runtime correctness
+
 - **Native task abort now preserves an acknowledged cancellation result.** A
   task parked on a cancel-aware primitive can observe cancellation, return its
   public `Cancelled` value, and complete cleanup without a concurrent abort
@@ -1890,7 +1932,8 @@ The initial tagged milestone establishing the core async runtime with structured
 
 ---
 
-[Unreleased]: https://github.com/Dicklesworthstone/asupersync/compare/v0.4.4...HEAD
+[Unreleased]: https://github.com/Dicklesworthstone/asupersync/compare/v0.4.5...HEAD
+[v0.4.5]: https://github.com/Dicklesworthstone/asupersync/compare/v0.4.4...v0.4.5
 [v0.4.4]: https://github.com/Dicklesworthstone/asupersync/compare/v0.4.3...v0.4.4
 [v0.4.3]: https://github.com/Dicklesworthstone/asupersync/compare/v0.4.2...v0.4.3
 [v0.4.2]: https://github.com/Dicklesworthstone/asupersync/compare/v0.4.1...v0.4.2

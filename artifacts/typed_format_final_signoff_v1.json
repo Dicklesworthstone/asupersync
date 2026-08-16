@@ -84,7 +84,7 @@
   "source_contracts": [
     {
       "path": "artifacts/typed_format_registry_v1.json",
-      "sha256": "458630838fdc39c99f8faeaed36095281af43f421402f25d54a89dd9297cce42",
+      "sha256": "8a781592a3921aee9266e89669ed574faae08fbf1e20617916744d318b9b2f3e",
       "role": "canonical row-level inventory, pins, corpora, consumers, and A6 decisions"
     },
     {
@@ -134,7 +134,7 @@
     },
     {
       "path": "tests/fixtures/dependency-capability-baseline-consumer/Cargo.lock",
-      "sha256": "52d8942c499184fb7faabf3ad0d3a4ffff91935e1a173efb02728239b3197435",
+      "sha256": "494718f99308186e8f6e9bea112332a2bab30ee7193b3f46d31b53a2cfa5c4ab",
       "role": "locked downstream incumbent dependency graph"
     },
     {

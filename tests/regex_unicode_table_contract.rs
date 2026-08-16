@@ -309,19 +309,19 @@ fn validate_contract(contract: &Value, inventory: &Value, terminal: &Value) -> R
     let expected_source_digests = BTreeMap::from([
         (
             "Cargo.toml",
-            "fee2c185ab94fd33867a800f7faa8857b8d6204dba7e16eefe510a31fc691c04",
+            "e998db4199267aa7166b67e36e69db213c2f755cebd6e6e91bb5a7e35204e0f3",
         ),
         (
             "Cargo.lock",
-            "620579cbaad5dd73da0e70aa21d3a3bf928126ac2920077802e7a3058c522821",
+            "e0be65699715c92ae75dbc96292635e4d0aec7ef6f404c8a85793b9e58b98946",
         ),
         (
             INVENTORY_PATH,
-            "8b9a0339b2d12da58f536d1c65f8587554e381a2992e23380636af283ddcb981",
+            "b6879d378563da4434c01bb5b409fcbef707a8ec081832850cdd53444127cb39",
         ),
         (
             TERMINAL_RECEIPT_PATH,
-            "b907da76bfa07912dc1de684cedd44e1d182cded681803c4205f7ae86a0b2ee1",
+            "3f0fcc6d4d19e830fac5eb0070d7a6e8d7a644ce77f78bf77b87edc8f2c334df",
         ),
     ]);
     let digest_rows = array(contract, "source_digests")?;

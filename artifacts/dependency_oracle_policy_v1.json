@@ -30,61 +30,61 @@
     "source_pins": [
       {
         "path": "Cargo.toml",
-        "sha256": "fee2c185ab94fd33867a800f7faa8857b8d6204dba7e16eefe510a31fc691c04",
+        "sha256": "e998db4199267aa7166b67e36e69db213c2f755cebd6e6e91bb5a7e35204e0f3",
         "line_count": 1057,
         "scope": "root-package-and-workspace"
       },
       {
         "path": "Cargo.lock",
-        "sha256": "620579cbaad5dd73da0e70aa21d3a3bf928126ac2920077802e7a3058c522821",
+        "sha256": "e0be65699715c92ae75dbc96292635e4d0aec7ef6f404c8a85793b9e58b98946",
         "line_count": 4666,
         "scope": "resolved-package-version-source-and-checksum"
       },
       {
         "path": "asupersync-macros/Cargo.toml",
-        "sha256": "75e991cf690fe2f64db0e7f931e584f7348fdb4c926b68bd417b18ddc2fc7bdb",
+        "sha256": "460bfa8d2a0cee9be97f83d757acddb4e9899eb26c6f7c7febd326c65cc79f88",
         "line_count": 37,
         "scope": "workspace-member"
       },
       {
         "path": "asupersync-browser-core/Cargo.toml",
-        "sha256": "37df2c5395338078b291cd476b33fed079b86ce61d7c2ccd8e2e9e9576e4f350",
+        "sha256": "65258e26a19dda6488786c024ba16ddd419f0038a661f4c8397e24ee5f1e2b4f",
         "line_count": 76,
         "scope": "workspace-member"
       },
       {
         "path": "asupersync-tokio-compat/Cargo.toml",
-        "sha256": "58db91bbb5a83d59ec84c856f26bbb3aff9dae76f345d8db8c858b639b1cc803",
+        "sha256": "11f8bf09a437ce80ec00745ec2de774a45291eb76aad8bd9ab4724a8ff885671",
         "line_count": 68,
         "scope": "workspace-member"
       },
       {
         "path": "conformance/Cargo.toml",
-        "sha256": "c08888393c4325550cc6714f39df24acab91e261e2548859e83ff7c5ff0beafb",
+        "sha256": "7f923c2826c7631f554dd86d3108dc96467404a07a8b6d485fa0054e419d42a4",
         "line_count": 214,
         "scope": "workspace-conformance-member"
       },
       {
         "path": "franken_kernel/Cargo.toml",
-        "sha256": "d7d3263d5293e63b9df95fdf42538b2d842d12ef76e01cf62af2eb221b8fb626",
+        "sha256": "423de882500457345da50ef79de1f4d1068876f4e020fa6cb2078398ae41709f",
         "line_count": 29,
         "scope": "workspace-member"
       },
       {
         "path": "franken_evidence/Cargo.toml",
-        "sha256": "d956cfa4619bab4301f360e970c94513cb9474ea11849e1be837d734a6a21f59",
+        "sha256": "9c3ac8d88d7b5fddeda52f03fc895031a7fe5630afc347fb12a24ff69fe6ba6b",
         "line_count": 31,
         "scope": "workspace-member"
       },
       {
         "path": "franken_decision/Cargo.toml",
-        "sha256": "22b30f5acd126e5875092b0ce1428b3ff1cd30e38757ee4b92b89a5ad2869cbe",
+        "sha256": "2163ea967c2aac9a2971019196d4f6e67b8353a978c9b6c34db5a30f46084669",
         "line_count": 32,
         "scope": "workspace-member"
       },
       {
         "path": "frankenlab/Cargo.toml",
-        "sha256": "7a43a49efd3d1ceeeb992c06aec7e3033c38f4b375c4629d1141059862ec112a",
+        "sha256": "7cf1edffe21caeb7f3ccbc28f1837d28a8c1f99ca945520c8bc3cb320ecc8658",
         "line_count": 33,
         "scope": "workspace-member"
       },
@@ -108,7 +108,7 @@
       },
       {
         "path": "asupersync-wasm/Cargo.toml",
-        "sha256": "968a804931e136be4c0a8f943cb9c85c5b03d586733cb72be6e1543701170b19",
+        "sha256": "35782919478cdac57bbcdb00c976e0592e5ee32fcb80ca3f38d3cd1622b94aba",
         "line_count": 60,
         "scope": "explicitly-excluded-wasm-project"
       },

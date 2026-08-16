@@ -1375,13 +1375,13 @@
     "source_pins": [
       {
         "path": "Cargo.toml",
-        "sha256": "fee2c185ab94fd33867a800f7faa8857b8d6204dba7e16eefe510a31fc691c04",
+        "sha256": "e998db4199267aa7166b67e36e69db213c2f755cebd6e6e91bb5a7e35204e0f3",
         "line_count": 1057,
         "role": "unconditional normal hashbrown dependency declaration and feature profiles"
       },
       {
         "path": "Cargo.lock",
-        "sha256": "620579cbaad5dd73da0e70aa21d3a3bf928126ac2920077802e7a3058c522821",
+        "sha256": "e0be65699715c92ae75dbc96292635e4d0aec7ef6f404c8a85793b9e58b98946",
         "line_count": 4666,
         "role": "direct hashbrown 0.17.1 resolution plus transitive 0.16.1 and 0.17.1 graph context"
       },
@@ -1441,8 +1441,8 @@
       },
       {
         "path": "scripts/run_dependency_sovereignty_e2e.sh",
-        "sha256": "388af46854549b837e7de602fbb84f99d26dcf2fef6b7e4f8575f1f6478d33a0",
-        "line_count": 1276,
+        "sha256": "f2deaf18dd793e3df114c300ffaa15445ccbf0040f9cc3c5b56e89fd19665ccc",
+        "line_count": 1314,
         "role": "retained dependency-sovereignty scenario catalog lacking reactor_registration_churn"
       },
       {
@@ -1753,13 +1753,13 @@
     "source_pins": [
       {
         "path": "Cargo.toml",
-        "sha256": "fee2c185ab94fd33867a800f7faa8857b8d6204dba7e16eefe510a31fc691c04",
+        "sha256": "e998db4199267aa7166b67e36e69db213c2f755cebd6e6e91bb5a7e35204e0f3",
         "line_count": 1057,
         "role": "default and benchmark-adapters feature boundary plus optional dependency declarations"
       },
       {
         "path": "Cargo.lock",
-        "sha256": "620579cbaad5dd73da0e70aa21d3a3bf928126ac2920077802e7a3058c522821",
+        "sha256": "e0be65699715c92ae75dbc96292635e4d0aec7ef6f404c8a85793b9e58b98946",
         "line_count": 4666,
         "role": "locked num_cpus, whoami, and sysinfo package identities"
       },
@@ -1813,8 +1813,8 @@
       },
       {
         "path": "scripts/run_dependency_sovereignty_e2e.sh",
-        "sha256": "388af46854549b837e7de602fbb84f99d26dcf2fef6b7e4f8575f1f6478d33a0",
-        "line_count": 1276,
+        "sha256": "f2deaf18dd793e3df114c300ffaa15445ccbf0040f9cc3c5b56e89fd19665ccc",
+        "line_count": 1314,
         "role": "scenario catalog and retained evidence schema"
       }
     ],
@@ -2051,19 +2051,19 @@
     "source_pins": [
       {
         "path": "Cargo.toml",
-        "sha256": "fee2c185ab94fd33867a800f7faa8857b8d6204dba7e16eefe510a31fc691c04",
+        "sha256": "e998db4199267aa7166b67e36e69db213c2f755cebd6e6e91bb5a7e35204e0f3",
         "line_count": 1057,
         "role": "default, proc-macros, and test-internals feature edges plus optional dependency declarations"
       },
       {
         "path": "Cargo.lock",
-        "sha256": "620579cbaad5dd73da0e70aa21d3a3bf928126ac2920077802e7a3058c522821",
+        "sha256": "e0be65699715c92ae75dbc96292635e4d0aec7ef6f404c8a85793b9e58b98946",
         "line_count": 4666,
         "role": "root dependency edge and visibility 0.1.1 transitive package identity"
       },
       {
         "path": "asupersync-macros/Cargo.toml",
-        "sha256": "75e991cf690fe2f64db0e7f931e584f7348fdb4c926b68bd417b18ddc2fc7bdb",
+        "sha256": "460bfa8d2a0cee9be97f83d757acddb4e9899eb26c6f7c7febd326c65cc79f88",
         "line_count": 37,
         "role": "owned proc-macro crate dependencies, trybuild harness, and root dev-dependency topology"
       },
@@ -2099,8 +2099,8 @@
       },
       {
         "path": "src/net/tcp/stream.rs",
-        "sha256": "ca7fc4cbd26cbf5985c46939c3deea36e25505537b5f494f99de04ef70c45798",
-        "line_count": 2776,
+        "sha256": "6c4fb29d9224963d3aedd13cd6e3d25c4daea2814eff349b368bc5ce7b9b21d4",
+        "line_count": 2909,
         "role": "one pub(crate) test constructor with target-conditioned body behavior"
       },
       {
@@ -2129,8 +2129,8 @@
       },
       {
         "path": "tests/fixtures/dependency-capability-baseline-consumer/src/lib.rs",
-        "sha256": "a28cd08953d5eb112db6ba43d69ebeb262f74f15f4c36f51753df0cfb8c598ea",
-        "line_count": 940,
+        "sha256": "30ff1e567a41f74b869f4b47ead951618331130f13ae7edd570a8a7013d57744",
+        "line_count": 1015,
         "role": "standalone public consumer source with no visibility-specific journey"
       }
     ],
@@ -2461,13 +2461,13 @@
     "source_pins": [
       {
         "path": "Cargo.toml",
-        "sha256": "fee2c185ab94fd33867a800f7faa8857b8d6204dba7e16eefe510a31fc691c04",
+        "sha256": "e998db4199267aa7166b67e36e69db213c2f755cebd6e6e91bb5a7e35204e0f3",
         "line_count": 1057,
         "role": "unconditional direct slab dependency declaration and default feature boundary"
       },
       {
         "path": "Cargo.lock",
-        "sha256": "620579cbaad5dd73da0e70aa21d3a3bf928126ac2920077802e7a3058c522821",
+        "sha256": "e0be65699715c92ae75dbc96292635e4d0aec7ef6f404c8a85793b9e58b98946",
         "line_count": 4666,
         "role": "root direct edge and slab 0.4.12 package identity"
       },
@@ -2479,8 +2479,8 @@
       },
       {
         "path": "src/sync/semaphore.rs",
-        "sha256": "244c8dc608d4d75d3272bd588e90889d6582f3dabf92f4dc2261f2ea68ce496c",
-        "line_count": 5375,
+        "sha256": "b4c492ffe3f49752b378b8d52fdf34d0c8338070af294ae3874aba0c116b8641",
+        "line_count": 5349,
         "role": "generation-checked FIFO semaphore waiter registry and cancellation unlinking"
       },
       {
@@ -2533,8 +2533,8 @@
       },
       {
         "path": "scripts/run_dependency_sovereignty_e2e.sh",
-        "sha256": "388af46854549b837e7de602fbb84f99d26dcf2fef6b7e4f8575f1f6478d33a0",
-        "line_count": 1276,
+        "sha256": "f2deaf18dd793e3df114c300ffaa15445ccbf0040f9cc3c5b56e89fd19665ccc",
+        "line_count": 1314,
         "role": "dependency-sovereignty runner with neither declared token-slab scenario"
       },
       {
@@ -2937,8 +2937,8 @@
       },
       {
         "path": "scripts/run_dependency_sovereignty_e2e.sh",
-        "sha256": "388af46854549b837e7de602fbb84f99d26dcf2fef6b7e4f8575f1f6478d33a0",
-        "line_count": 1276,
+        "sha256": "f2deaf18dd793e3df114c300ffaa15445ccbf0040f9cc3c5b56e89fd19665ccc",
+        "line_count": 1314,
         "role": "declared UTC and ATP version scenario routes without replay in this audit"
       },
       {

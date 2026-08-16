@@ -21,7 +21,7 @@
       "bead_id": "asupersync-dep-p1-foundations-upksjk.3",
       "role": "ORACLE_POLICY",
       "path": "artifacts/dependency_oracle_policy_v1.json",
-      "sha256": "0cf8ea87af34a65ef952d6de5a6c304ffb583056a3a64f99cfae13832f8ddf98"
+      "sha256": "313eb455fcf25452ac02b177f175442a836a4068c5040f5cdca15b748785be47"
     },
     {
       "bead_id": "asupersync-dep-p1-foundations-upksjk.5.4",
@@ -34,7 +34,7 @@
       "bead_id": "asupersync-dep-p1-foundations-upksjk.5.2",
       "role": "CAPABILITY_BASELINE",
       "path": "artifacts/dependency_capability_baseline_v1.json",
-      "sha256": "0a0b2e9a736b803adb720154464f4f180b41d360f207418776361bf5d920009e"
+      "sha256": "a113ad6e25b10e0ea17a289ac14676b136fd72e31863f66e651131276054e2dc"
     },
     {
       "bead_id": "asupersync-dep-p1-foundations-upksjk.5.3",

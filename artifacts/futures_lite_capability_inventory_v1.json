@@ -702,7 +702,7 @@
       {
         "path": "Cargo.toml",
         "baseline_sha256": "5eb3d7f25fb2584dcc7dd4dc3addb59573d08a7404b4ffca1356e53a93cfb2e0",
-        "current_sha256": "fee2c185ab94fd33867a800f7faa8857b8d6204dba7e16eefe510a31fc691c04",
+        "current_sha256": "e998db4199267aa7166b67e36e69db213c2f755cebd6e6e91bb5a7e35204e0f3",
         "current_line_count": 1057,
         "classification": "CAPABILITY_PROJECTION_UNCHANGED",
         "projection": "root futures-lite manifest requirement",
@@ -711,7 +711,7 @@
       {
         "path": "Cargo.lock",
         "baseline_sha256": "9fa12e8af1e6b15a3070d88d62b2b81b8ba49c0e9d8592c1d1682f1cd72a4461",
-        "current_sha256": "620579cbaad5dd73da0e70aa21d3a3bf928126ac2920077802e7a3058c522821",
+        "current_sha256": "e0be65699715c92ae75dbc96292635e4d0aec7ef6f404c8a85793b9e58b98946",
         "current_line_count": 4666,
         "classification": "CAPABILITY_PROJECTION_UNCHANGED",
         "projection": "resolved futures-lite package block",
@@ -1598,17 +1598,17 @@
   "source_pins": [
     {
       "path": "Cargo.toml",
-      "sha256": "fee2c185ab94fd33867a800f7faa8857b8d6204dba7e16eefe510a31fc691c04",
+      "sha256": "e998db4199267aa7166b67e36e69db213c2f755cebd6e6e91bb5a7e35204e0f3",
       "line_count": 1057
     },
     {
       "path": "Cargo.lock",
-      "sha256": "620579cbaad5dd73da0e70aa21d3a3bf928126ac2920077802e7a3058c522821",
+      "sha256": "e0be65699715c92ae75dbc96292635e4d0aec7ef6f404c8a85793b9e58b98946",
       "line_count": 4666
     },
     {
       "path": "asupersync-tokio-compat/Cargo.toml",
-      "sha256": "58db91bbb5a83d59ec84c856f26bbb3aff9dae76f345d8db8c858b639b1cc803",
+      "sha256": "11f8bf09a437ce80ec00745ec2de774a45291eb76aad8bd9ab4724a8ff885671",
       "line_count": 68
     },
     {
@@ -1668,7 +1668,7 @@
     },
     {
       "path": "tests/fixtures/dependency-capability-baseline-consumer/Cargo.lock",
-      "sha256": "52d8942c499184fb7faabf3ad0d3a4ffff91935e1a173efb02728239b3197435",
+      "sha256": "494718f99308186e8f6e9bea112332a2bab30ee7193b3f46d31b53a2cfa5c4ab",
       "line_count": 2021
     },
     {

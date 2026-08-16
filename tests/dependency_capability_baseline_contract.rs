@@ -1714,21 +1714,21 @@ fn tempfile_claim_time_profile_checkpoint_is_source_pinned_and_fail_closed() {
         (
             "Cargo.lock",
             (
-                "620579cbaad5dd73da0e70aa21d3a3bf928126ac2920077802e7a3058c522821",
+                "e0be65699715c92ae75dbc96292635e4d0aec7ef6f404c8a85793b9e58b98946",
                 4666_u64,
             ),
         ),
         (
             "Cargo.toml",
             (
-                "fee2c185ab94fd33867a800f7faa8857b8d6204dba7e16eefe510a31fc691c04",
+                "e998db4199267aa7166b67e36e69db213c2f755cebd6e6e91bb5a7e35204e0f3",
                 1057_u64,
             ),
         ),
         (
             "artifacts/dependency_capability_baseline_v1.json",
             (
-                "0a0b2e9a736b803adb720154464f4f180b41d360f207418776361bf5d920009e",
+                "a113ad6e25b10e0ea17a289ac14676b136fd72e31863f66e651131276054e2dc",
                 3210_u64,
             ),
         ),
@@ -3271,8 +3271,8 @@ fn phase2_terminal_readiness_frontier_is_exact_and_fail_closed() {
         (
             "scripts/run_dependency_sovereignty_e2e.sh",
             (
-                "388af46854549b837e7de602fbb84f99d26dcf2fef6b7e4f8575f1f6478d33a0",
-                1276_u64,
+                "f2deaf18dd793e3df114c300ffaa15445ccbf0040f9cc3c5b56e89fd19665ccc",
+                1314_u64,
             ),
         ),
         (

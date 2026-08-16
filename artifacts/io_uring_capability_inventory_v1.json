@@ -97,7 +97,7 @@
   "source_pins": [
     {
       "path": "Cargo.toml",
-      "sha256": "fee2c185ab94fd33867a800f7faa8857b8d6204dba7e16eefe510a31fc691c04",
+      "sha256": "e998db4199267aa7166b67e36e69db213c2f755cebd6e6e91bb5a7e35204e0f3",
       "line_count": 1057,
       "role": "io-uring feature and optional dependency edge"
     },
@@ -187,8 +187,8 @@
     },
     {
       "path": "src/net/tcp/stream.rs",
-      "sha256": "ca7fc4cbd26cbf5985c46939c3deea36e25505537b5f494f99de04ef70c45798",
-      "line_count": 2776,
+      "sha256": "6c4fb29d9224963d3aedd13cd6e3d25c4daea2814eff349b368bc5ce7b9b21d4",
+      "line_count": 2909,
       "role": "full TCP stream ordinary socket I/O plus generic readiness"
     },
     {
@@ -247,7 +247,7 @@
     },
     {
       "path": "artifacts/unsafe_boundary_ledger_v1.json",
-      "sha256": "29f8cb1580b9b595df7c1932816a933b21fe5da23cdf4a95f5b51c52fa5b912f",
+      "sha256": "3e3df000734069fb50e2bfc0a831ae7fd873f43c696c06deca2acd40450217f3",
       "line_count": 6441,
       "role": "machine inventory of low-level reactor and harness boundaries"
     },

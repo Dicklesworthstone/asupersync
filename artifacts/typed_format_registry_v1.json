@@ -1052,11 +1052,11 @@
   "source_pins": [
     {
       "path": "Cargo.toml",
-      "sha256": "fee2c185ab94fd33867a800f7faa8857b8d6204dba7e16eefe510a31fc691c04"
+      "sha256": "e998db4199267aa7166b67e36e69db213c2f755cebd6e6e91bb5a7e35204e0f3"
     },
     {
       "path": "Cargo.lock",
-      "sha256": "620579cbaad5dd73da0e70aa21d3a3bf928126ac2920077802e7a3058c522821"
+      "sha256": "e0be65699715c92ae75dbc96292635e4d0aec7ef6f404c8a85793b9e58b98946"
     },
     {
       "path": "src/types/mod.rs",
@@ -1176,7 +1176,7 @@
     },
     {
       "path": "tests/fixtures/dependency-capability-baseline-consumer/Cargo.lock",
-      "sha256": "52d8942c499184fb7faabf3ad0d3a4ffff91935e1a173efb02728239b3197435"
+      "sha256": "494718f99308186e8f6e9bea112332a2bab30ee7193b3f46d31b53a2cfa5c4ab"
     },
     {
       "path": "tests/fixtures/typed-format-cross-version-consumer/Cargo.toml",

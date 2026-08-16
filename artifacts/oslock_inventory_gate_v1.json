@@ -40,12 +40,12 @@
   "source_pins": [
     {
       "path": "Cargo.toml",
-      "sha256": "fee2c185ab94fd33867a800f7faa8857b8d6204dba7e16eefe510a31fc691c04",
+      "sha256": "e998db4199267aa7166b67e36e69db213c2f755cebd6e6e91bb5a7e35204e0f3",
       "line_count": 1057
     },
     {
       "path": "Cargo.lock",
-      "sha256": "620579cbaad5dd73da0e70aa21d3a3bf928126ac2920077802e7a3058c522821",
+      "sha256": "e0be65699715c92ae75dbc96292635e4d0aec7ef6f404c8a85793b9e58b98946",
       "line_count": 4666
     },
     {
@@ -55,7 +55,7 @@
     },
     {
       "path": "README.md",
-      "sha256": "628c82315fa1be0e52a8cfeb273689f9ffd0271d21908265620ad06a426d7ec9",
+      "sha256": "87adc141bdda7d410972fa3f5a55f2d4ebda7d0cec06867f2db4a83d0fd8df79",
       "line_count": 2136
     },
     {

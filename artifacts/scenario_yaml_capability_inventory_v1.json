@@ -61,12 +61,12 @@
   "source_pins": [
     {
       "path": "Cargo.toml",
-      "sha256": "fee2c185ab94fd33867a800f7faa8857b8d6204dba7e16eefe510a31fc691c04",
+      "sha256": "e998db4199267aa7166b67e36e69db213c2f755cebd6e6e91bb5a7e35204e0f3",
       "line_count": 1057
     },
     {
       "path": "Cargo.lock",
-      "sha256": "620579cbaad5dd73da0e70aa21d3a3bf928126ac2920077802e7a3058c522821",
+      "sha256": "e0be65699715c92ae75dbc96292635e4d0aec7ef6f404c8a85793b9e58b98946",
       "line_count": 4666
     },
     {
@@ -96,7 +96,7 @@
     },
     {
       "path": "frankenlab/Cargo.toml",
-      "sha256": "7a43a49efd3d1ceeeb992c06aec7e3033c38f4b375c4629d1141059862ec112a",
+      "sha256": "7cf1edffe21caeb7f3ccbc28f1837d28a8c1f99ca945520c8bc3cb320ecc8658",
       "line_count": 33
     },
     {
@@ -211,7 +211,7 @@
     },
     {
       "path": "artifacts/dependency_capability_baseline_v1.json",
-      "sha256": "0a0b2e9a736b803adb720154464f4f180b41d360f207418776361bf5d920009e",
+      "sha256": "a113ad6e25b10e0ea17a289ac14676b136fd72e31863f66e651131276054e2dc",
       "line_count": 3210
     },
     {

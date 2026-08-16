@@ -39,7 +39,7 @@
       "path": "artifacts/kafka_k1_obligation_index_v1.json",
       "byte_count": 42758,
       "record_count": 738,
-      "sha256": "54313af50a81f04d6e8ef36df6d3825c3c7c164229d972795d2848dc7943add0"
+      "sha256": "1863c841c2fc7fa7cf32d4615ae2463899eff0e204ee11ccc56a8420d59c83ac"
     },
     {
       "input_id": "K1-4-INPUT-K1-1-DOCUMENT",
@@ -55,23 +55,23 @@
       "path": "tests/kafka_k1_client_contract.rs",
       "byte_count": 95396,
       "record_count": 2585,
-      "sha256": "bddf32cb099f6f11c52da8436baebc8b8ea1ffb3db903138c3b7fa33c910f36a"
+      "sha256": "bb3b9e5e5b5ae0476949fd267e2fe0138dd012149e278d91d22d4e46ce4e4335"
     },
     {
       "input_id": "K1-4-INPUT-K1-2",
       "role": "PROTOCOL_SECURITY_AND_SUPPORT_POLICY",
       "path": "artifacts/kafka_k1_protocol_security_support_policy_v1.json",
-      "byte_count": 82164,
+      "byte_count": 82176,
       "record_count": 1399,
-      "sha256": "8babec3cfad6ca98d1a7f06ee8bf21d4a1729436b7f557dc0b2caca99a46f993"
+      "sha256": "472bdb21c5f8b3384e092674d58f93b9dc6491eed271e1ef38c613ec6d27041d"
     },
     {
       "input_id": "K1-4-INPUT-K1-3",
       "role": "PUBLIC_API_CONFIGURATION_AND_ERROR_CONTRACT",
       "path": "artifacts/kafka_k1_public_api_contract_v1.json",
-      "byte_count": 37854,
+      "byte_count": 37858,
       "record_count": 753,
-      "sha256": "7029a1327def8b0c2c791ddcd86e86f2c5fcddbb8cb1c7cbdc4ccf9a74b8e9aa"
+      "sha256": "44a9c48e835f231ab383a3466856ca8346efc62df7946201527cee256b6a7e4b"
     },
     {
       "input_id": "K1-4-INPUT-K0-5",
@@ -79,7 +79,7 @@
       "path": "artifacts/kafka_k0_baseline_disposition_v1.json",
       "byte_count": 29494,
       "record_count": 284,
-      "sha256": "e4f9d410c74996a17f9c9a2aec425cd88f9e5f38694f872da84d0fdfca057806"
+      "sha256": "0a1b5ec73ad7b486c94d1d5935daf30ce1821b4a3573ae171d9f2cdc23565fa3"
     },
     {
       "input_id": "K1-4-INPUT-K0-2",
@@ -87,7 +87,7 @@
       "path": "artifacts/kafka_incumbent_semantics_matrix_v1.json",
       "byte_count": 228933,
       "record_count": 2560,
-      "sha256": "d56395eff2787929c2c5205c4afa55963516c01873a5508e0e1813e684cb7f81"
+      "sha256": "01859a17bbb5b136f697ff08c68bb9c878e80cfbf0f5f86f28d1d4fe04263dc9"
     },
     {
       "input_id": "K1-4-INPUT-K0-4",
@@ -95,7 +95,7 @@
       "path": "artifacts/kafka_broker_fixture_provenance_matrix_v1.json",
       "byte_count": 119250,
       "record_count": 2187,
-      "sha256": "5996e721586cf498368d3c648b058092dc9a18e3afe01a8a9b2aa32cb6e2c831"
+      "sha256": "f0b899ea8d0f608bf80619fa06f2bb835793c18c0ed514887cca42398bae2513"
     },
     {
       "input_id": "K1-4-INPUT-ADR",
@@ -143,7 +143,7 @@
       "path": "Cargo.toml",
       "byte_count": 37619,
       "record_count": 1057,
-      "sha256": "fee2c185ab94fd33867a800f7faa8857b8d6204dba7e16eefe510a31fc691c04"
+      "sha256": "e998db4199267aa7166b67e36e69db213c2f755cebd6e6e91bb5a7e35204e0f3"
     },
     {
       "input_id": "K1-4-INPUT-LOCKFILE",
@@ -151,7 +151,7 @@
       "path": "Cargo.lock",
       "byte_count": 114614,
       "record_count": 4666,
-      "sha256": "620579cbaad5dd73da0e70aa21d3a3bf928126ac2920077802e7a3058c522821"
+      "sha256": "e0be65699715c92ae75dbc96292635e4d0aec7ef6f404c8a85793b9e58b98946"
     }
   ],
   "authority_views": {
@@ -1854,7 +1854,7 @@
     "source_authority_reference_sha256": "634bb51f85fe7d54015ccc24a83b52590d23b77c11c9aa522dc89d9af88357e7",
     "no_claim_boundary_sha256": "bc5703ea9ef717f0796db249350ceafac85544acc31ef47f2da2b6ac33be9ce3",
     "authority_contract_sha256": "6a51fa1221869f3125a3ec478dc5e729eac868efc200a4779fdcaff35599cbf7",
-    "authority_input_contract_sha256": "052f2a30248c687ea020d2e52c6e1342ff9756bc3fbd74ab94dcb21cf18908eb",
+    "authority_input_contract_sha256": "207ca142f801b5ffda2cd5ee45d7fb23743c7509b5fe79d6c864909e3ea68700",
     "authority_views_contract_sha256": "b7c9cb4e15efb45cdca0c64316e4869b9cd93302205a52e4cf12ad88a19cb6b7",
     "policy_contract_sha256": "ec236faf14c33462c00c5c365e188b1a7089a3215329dd856699633ca4c2b396",
     "semantic_coverage_contract_sha256": "b86d984aa4061fe4770c4aeb7f639750193540deb4226522e48e1dfd6a441b27",
