@@ -1503,7 +1503,7 @@ mod tests {
     }
 
     #[test]
-    fn ver_a1_asupersync_dep_p4_nkeys_poc60v_1_3_5e81559b363d__local_invariants() {
+    fn ver_a1_asupersync_dep_p4_nkeys_poc60v_1_3_5e81559b363d_local_invariants() {
         fn assert_send_sync<T: Send + Sync>() {}
         fn assert_copy<T: Copy>() {}
 
@@ -1533,7 +1533,7 @@ mod tests {
     }
 
     #[test]
-    fn ver_a1_asupersync_dep_p4_nkeys_poc60v_1_3_5e81559b363d__property_matrix() {
+    fn ver_a1_asupersync_dep_p4_nkeys_poc60v_1_3_5e81559b363d_property_matrix() {
         const KINDS: [NkeyEd25519Kind; 7] = [
             NkeyEd25519Kind::Account,
             NkeyEd25519Kind::Cluster,
@@ -1580,7 +1580,7 @@ mod tests {
     }
 
     #[test]
-    fn ver_a1_asupersync_dep_p4_nkeys_poc60v_1_3_5e81559b363d__lab_lifecycle() {
+    fn ver_a1_asupersync_dep_p4_nkeys_poc60v_1_3_5e81559b363d_lab_lifecycle() {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
