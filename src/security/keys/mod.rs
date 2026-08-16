@@ -1615,8 +1615,14 @@ mod tests {
             .create_task(root, crate::Budget::INFINITE, async move {
                 let _probe = probe;
                 task_entered.store(true, Ordering::SeqCst);
-                crate::runtime::yield_now::yield_now().await;
-                std::future::pending::<()>().await;
+                loop {
+                    crate::runtime::yield_now::yield_now().await;
+                    if crate::cx::Cx::with_current(|cx| cx.checkpoint().is_err())
+                        .expect("lab task installs a current Cx")
+                    {
+                        break;
+                    }
+                }
             })
             .expect("create secret-owning task");
         runtime

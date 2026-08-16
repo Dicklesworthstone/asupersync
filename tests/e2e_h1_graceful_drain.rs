@@ -121,6 +121,24 @@ fn drain_completes_in_flight_requests() {
             manager.begin_drain(Duration::from_secs(10)),
             "begin_drain transitions Running -> Draining"
         );
+
+        // `begin_drain` changes the manager state synchronously, while the
+        // listener records its request snapshot when the drain supervisor
+        // starts. Keep every handler parked until that snapshot is observable;
+        // otherwise a fast handler can finish between those two events and
+        // make this fixture race its own release signal.
+        for _ in 0..400 {
+            if stats_handle.snapshot().drains_started_total == 1 {
+                break;
+            }
+            asupersync::time::sleep(asupersync::time::wall_now(), Duration::from_millis(5)).await;
+        }
+        assert_eq!(
+            stats_handle.snapshot().drains_started_total,
+            1,
+            "drain supervisor captured the in-flight snapshot before handler release"
+        );
+
         // Release every parked handler; the drain window is generous, so all
         // of them complete gracefully.
         released.store(true, Ordering::Release);

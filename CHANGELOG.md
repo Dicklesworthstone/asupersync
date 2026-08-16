@@ -10,7 +10,7 @@ Asupersync is a spec-first, cancel-correct, capability-secure async runtime for 
 - Commit links point to representative commits, not exhaustive lists.
 - Organized by landed capabilities within each version, not by diff order.
 
-Scope window: current work through 2026-08-13, reconstructed from git history,
+Scope window: current work through 2026-08-16, reconstructed from git history,
 beads, benchmark ledgers, and live repo artifacts; the previous published
 GitHub Release/tag baseline is `v0.4.3`.
 
@@ -47,10 +47,17 @@ _No changes yet._
 
 ---
 
-## [v0.4.4] - 2026-08-13
+## [v0.4.4] - 2026-08-16
 
 ### Runtime correctness
 
+- **Driverless Windows TCP connects wait for kernel writability.** Embedded
+  consumers that drive Asupersync futures from an external executor no longer
+  trust an early `getpeername()` success as proof that Winsock finished the
+  connection. The fallback observes a concrete writable event, and transient
+  post-connect `WSAENOTCONN` retries retain a bounded real-time settling floor,
+  preventing the first TLS write from exhausting its retry budget in
+  microseconds ([#62](https://github.com/Dicklesworthstone/asupersync/issues/62)).
 - **Native task abort now preserves an acknowledged cancellation result.** A
   task parked on a cancel-aware primitive can observe cancellation, return its
   public `Cancelled` value, and complete cleanup without a concurrent abort

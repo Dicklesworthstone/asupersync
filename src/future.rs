@@ -454,7 +454,9 @@ mod tests {
     use std::rc::Rc;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
+    #[cfg(target_os = "linux")]
+    use std::time::Instant;
 
     #[cfg(target_os = "linux")]
     fn process_cpu_ticks() -> u64 {

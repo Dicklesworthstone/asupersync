@@ -14,6 +14,8 @@ use crate::net::tcp::traits::TcpStreamApi;
 use crate::runtime::io_driver::IoRegistration;
 use crate::runtime::reactor::Interest;
 #[cfg(not(target_arch = "wasm32"))]
+use crate::runtime::reactor::{Events, Reactor, Token, create_reactor};
+#[cfg(not(target_arch = "wasm32"))]
 use crate::time::TimeoutFuture;
 use crate::types::Time;
 #[cfg(not(target_arch = "wasm32"))]
@@ -53,25 +55,34 @@ pub struct TcpStream {
     inner: Arc<net::TcpStream>,
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     shutdown_on_drop: bool,
-    /// Windows-only retry budget for the transient post-connect `WSAENOTCONN`
-    /// (os error 10057). A non-blocking `connect()` is reported complete by
-    /// `getpeername` (see `connect_from_socket`), but the socket — notably
-    /// behind a Winsock LSP (antivirus / VPN / firewall) — can still be not
-    /// yet send-ready, so the first `send`/`recv` momentarily returns "not
-    /// connected". The poll paths treat that as retryable (exactly like
-    /// `WouldBlock`) until the connection settles, bounded by this counter so a
-    /// genuinely unconnectable socket still surfaces the error.
+    /// Windows-only retry budget for a transient post-connect `WSAENOTCONN`
+    /// (os error 10057). Connect completion is readiness-gated, but Winsock
+    /// providers can still briefly reject the first `send` or `recv`. The poll
+    /// paths treat that as retryable (like `WouldBlock`) until the connection
+    /// settles, bounded by this counter so a genuinely unusable socket still
+    /// surfaces the error.
     #[cfg(target_os = "windows")]
     connect_settle_retries: u32,
+    /// Wall-clock start of the current post-connect settling window. This
+    /// prevents a driverless executor from exhausting the poll-count budget in
+    /// microseconds through immediate self-wakes.
+    #[cfg(target_os = "windows")]
+    connect_settle_started_at: Option<Time>,
 }
 
 /// Maximum number of poll-path retries of a transient post-connect
 /// `WSAENOTCONN` before it is surfaced as a hard error
 /// (see [`TcpStream::connect_settle_retries`]). A genuinely settling connection
-/// becomes send-ready well within this budget; the bound only guarantees that a
-/// socket that never connects cannot spin forever.
+/// becomes send-ready well within this budget. Both this count and the minimum
+/// real-time settling window must be exhausted before the error is surfaced.
 #[cfg(target_os = "windows")]
 const MAX_CONNECT_SETTLE_RETRIES: u32 = 4096;
+
+/// Minimum real time allowed for a Windows socket to settle after its first
+/// transient post-connect `WSAENOTCONN`, even if a driverless executor burns
+/// through the poll-count budget via immediate self-wakes.
+#[cfg(target_os = "windows")]
+const MIN_CONNECT_SETTLE_TIME: Duration = Duration::from_millis(100);
 
 /// Configuration for TCP Keepalive behavior.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -285,6 +296,8 @@ impl TcpStream {
                 shutdown_on_drop: true,
                 #[cfg(target_os = "windows")]
                 connect_settle_retries: 0,
+                #[cfg(target_os = "windows")]
+                connect_settle_started_at: None,
             })
         }
     }
@@ -301,6 +314,30 @@ impl TcpStream {
             shutdown_on_drop: true,
             #[cfg(target_os = "windows")]
             connect_settle_retries: 0,
+            #[cfg(target_os = "windows")]
+            connect_settle_started_at: None,
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn clear_connect_settle_retry(&mut self) {
+        self.connect_settle_retries = 0;
+        self.connect_settle_started_at = None;
+    }
+
+    #[cfg(target_os = "windows")]
+    fn should_retry_connect_settle(&mut self) -> bool {
+        let now = crate::time::wall_now();
+        let started = *self.connect_settle_started_at.get_or_insert(now);
+        let count_budget_remains = self.connect_settle_retries < MAX_CONNECT_SETTLE_RETRIES;
+        let time_floor_remains =
+            now.duration_since(started) < duration_to_nanos_saturating(MIN_CONNECT_SETTLE_TIME);
+
+        if count_budget_remains || time_floor_remains {
+            self.connect_settle_retries = self.connect_settle_retries.saturating_add(1);
+            true
+        } else {
+            false
         }
     }
 
@@ -356,29 +393,29 @@ impl TcpStream {
         // 2. Attempt connect (non-blocking)
         let sock_addr = SockAddr::from(addr);
         let registration = match socket.connect(&sock_addr) {
-            Ok(()) => None,
+            Ok(()) => {
+                // On Windows, `connect()` and `getpeername()` can both report
+                // success before some network providers make the socket
+                // send-ready. Kernel writable readiness is the authoritative
+                // completion signal, including for the immediate-Ok branch.
+                #[cfg(target_os = "windows")]
+                {
+                    wait_for_connect(&socket).await?
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    None
+                }
+            }
             Err(err) if connect_in_progress(&err) => wait_for_connect(&socket).await?,
             Err(err) => return Err(err),
         };
 
-        // #35: on Windows, a non-blocking `connect()` can return Ok while
-        // the kernel-side connection setup is still pending (especially on
-        // loopback paths and async LSP shims). The userland socket then
-        // looks connected from our side, but the first send / recv hits
-        // WSAENOTCONN (os error 10057) — visible to callers as
-        // "TLS connect failed: I/O error: A request to send or receive
-        // data was disallowed because the socket is not connected".
-        //
-        // Defensively probe `peer_addr()` after Ok. If the socket isn't
-        // actually connected yet, treat it as "connect in progress" and
-        // route through wait_for_connect so the IO reactor can wait for
-        // the writable readiness that signals connect completion. Same
-        // behaviour applies on the WouldBlock/EINPROGRESS branch above,
-        // which already takes that path.
-        //
-        // peer_addr() is cheap on connected sockets across platforms and
-        // is also a no-op for already-validated paths, so this stays a
-        // strict subset of the prior behaviour for non-Windows targets.
+        // On non-Windows targets, retain the defensive peer check for an
+        // immediate-Ok connect. Windows has already passed through writable
+        // readiness above; `getpeername()` is not used there as a completion
+        // oracle because some Winsock providers report it prematurely (#62).
+        #[cfg(not(target_os = "windows"))]
         let registration = if registration.is_none() {
             match socket.peer_addr() {
                 Ok(_) => None,
@@ -916,6 +953,16 @@ fn connect_in_progress(err: &io::Error) -> bool {
 
 #[cfg(not(target_arch = "wasm32"))]
 async fn wait_for_connect(socket: &Socket) -> io::Result<Option<IoRegistration>> {
+    // The normal driver registration is waker-oriented: a task wake does not
+    // identify which source woke it. On Windows that is insufficient because
+    // `getpeername()` can report success before the connect is send-ready.
+    // Use the same platform reactor abstraction as the runtime, but observe
+    // its concrete writable event directly.
+    if cfg!(target_os = "windows") {
+        wait_for_connect_fallback(socket).await?;
+        return Ok(None);
+    }
+
     let Some(driver) = Cx::current().and_then(|cx| cx.io_driver_handle()) else {
         wait_for_connect_fallback(socket).await?;
         return Ok(None);
@@ -1025,25 +1072,58 @@ fn rearm_connect_registration(
 
 #[cfg(not(target_arch = "wasm32"))]
 async fn wait_for_connect_fallback(socket: &Socket) -> io::Result<()> {
-    std::future::poll_fn(|cx| {
-        if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
-            return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
-        }
+    const CONNECT_TOKEN: Token = Token::new(0);
 
-        if let Some(err) = socket.take_error()? {
-            return Poll::Ready(Err(err));
-        }
+    let reactor = create_reactor()?;
+    reactor.register(socket, CONNECT_TOKEN, Interest::WRITABLE)?;
+    let mut events = Events::with_capacity(1);
 
-        match socket.peer_addr() {
-            Ok(_) => Poll::Ready(Ok(())),
-            Err(err) if err.kind() == io::ErrorKind::NotConnected => {
-                fallback_rewake(cx);
-                Poll::Pending
-            }
-            Err(err) => Poll::Ready(Err(err)),
-        }
+    let result = std::future::poll_fn(|cx| {
+        poll_connect_fallback_ready(socket, reactor.as_ref(), &mut events, CONNECT_TOKEN, cx)
     })
-    .await
+    .await;
+
+    // The private reactor is dropped with this future, so cleanup is already
+    // bounded on cancellation. Explicit deregistration keeps successful and
+    // ordinary error paths tidy without masking the connect result.
+    drop(reactor.deregister(CONNECT_TOKEN));
+    result
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn poll_connect_fallback_ready(
+    socket: &Socket,
+    reactor: &dyn Reactor,
+    events: &mut Events,
+    token: Token,
+    cx: &Context<'_>,
+) -> Poll<io::Result<()>> {
+    if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
+        return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+    }
+
+    if let Some(err) = socket.take_error()? {
+        return Poll::Ready(Err(err));
+    }
+
+    match reactor.poll(events, Some(FALLBACK_IO_BACKOFF)) {
+        Ok(_) if events.iter().any(|event| event.token == token) => {
+            if let Some(err) = socket.take_error()? {
+                Poll::Ready(Err(err))
+            } else {
+                Poll::Ready(Ok(()))
+            }
+        }
+        Ok(_) => {
+            fallback_rewake(cx);
+            Poll::Pending
+        }
+        Err(err) if err.kind() == io::ErrorKind::Interrupted => {
+            fallback_rewake(cx);
+            Poll::Pending
+        }
+        Err(err) => Poll::Ready(Err(err)),
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1065,7 +1145,7 @@ impl AsyncRead for TcpStream {
                 buf.advance(n);
                 #[cfg(target_os = "windows")]
                 {
-                    this.connect_settle_retries = 0;
+                    this.clear_connect_settle_retry();
                 }
                 Poll::Ready(Ok(()))
             }
@@ -1079,11 +1159,10 @@ impl AsyncRead for TcpStream {
             // first recv (see `connect_settle_retries`) — wait for readiness and
             // retry instead of failing, bounded so a dead socket still errors.
             #[cfg(target_os = "windows")]
-            Err(ref e)
-                if e.kind() == io::ErrorKind::NotConnected
-                    && this.connect_settle_retries < MAX_CONNECT_SETTLE_RETRIES =>
-            {
-                this.connect_settle_retries += 1;
+            Err(e) if e.kind() == io::ErrorKind::NotConnected => {
+                if !this.should_retry_connect_settle() {
+                    return Poll::Ready(Err(e));
+                }
                 if let Err(err) = this.register_interest(cx, Interest::READABLE) {
                     return Poll::Ready(Err(err));
                 }
@@ -1125,7 +1204,7 @@ impl AsyncReadVectored for TcpStream {
             Ok(n) => {
                 #[cfg(target_os = "windows")]
                 {
-                    this.connect_settle_retries = 0;
+                    this.clear_connect_settle_retry();
                 }
                 Poll::Ready(Ok(n))
             }
@@ -1138,11 +1217,10 @@ impl AsyncReadVectored for TcpStream {
             // Windows: tolerate the transient post-connect `WSAENOTCONN`
             // (see `connect_settle_retries`); retry until the socket settles.
             #[cfg(target_os = "windows")]
-            Err(ref e)
-                if e.kind() == io::ErrorKind::NotConnected
-                    && this.connect_settle_retries < MAX_CONNECT_SETTLE_RETRIES =>
-            {
-                this.connect_settle_retries += 1;
+            Err(e) if e.kind() == io::ErrorKind::NotConnected => {
+                if !this.should_retry_connect_settle() {
+                    return Poll::Ready(Err(e));
+                }
                 if let Err(err) = this.register_interest(cx, Interest::READABLE) {
                     return Poll::Ready(Err(err));
                 }
@@ -1184,7 +1262,7 @@ impl AsyncWrite for TcpStream {
             Ok(n) => {
                 #[cfg(target_os = "windows")]
                 {
-                    this.connect_settle_retries = 0;
+                    this.clear_connect_settle_retry();
                 }
                 Poll::Ready(Ok(n))
             }
@@ -1194,18 +1272,16 @@ impl AsyncWrite for TcpStream {
                 }
                 Poll::Pending
             }
-            // Windows: a freshly-connected socket (notably behind a Winsock LSP)
-            // can momentarily report `WSAENOTCONN` (os error 10057) on the first
-            // send even though `getpeername` already declared connect complete.
-            // Treat it as "connect still settling": wait for writable and retry
-            // instead of failing the (e.g. TLS) handshake, bounded so a socket
-            // that never connects still surfaces the error.
+            // Windows: a freshly-connected socket can momentarily report
+            // `WSAENOTCONN` (os error 10057) on the first send even after the
+            // connect readiness event. Treat it as "connect still settling":
+            // wait for writable and retry instead of failing the (e.g. TLS)
+            // handshake, bounded by both poll count and real elapsed time.
             #[cfg(target_os = "windows")]
-            Err(ref e)
-                if e.kind() == io::ErrorKind::NotConnected
-                    && this.connect_settle_retries < MAX_CONNECT_SETTLE_RETRIES =>
-            {
-                this.connect_settle_retries += 1;
+            Err(e) if e.kind() == io::ErrorKind::NotConnected => {
+                if !this.should_retry_connect_settle() {
+                    return Poll::Ready(Err(e));
+                }
                 if let Err(err) = this.register_interest(cx, Interest::WRITABLE) {
                     return Poll::Ready(Err(err));
                 }
@@ -1231,7 +1307,7 @@ impl AsyncWrite for TcpStream {
             Ok(n) => {
                 #[cfg(target_os = "windows")]
                 {
-                    this.connect_settle_retries = 0;
+                    this.clear_connect_settle_retry();
                 }
                 Poll::Ready(Ok(n))
             }
@@ -1244,11 +1320,10 @@ impl AsyncWrite for TcpStream {
             // Windows: tolerate the transient post-connect `WSAENOTCONN`
             // (see `connect_settle_retries`); retry until the socket settles.
             #[cfg(target_os = "windows")]
-            Err(ref e)
-                if e.kind() == io::ErrorKind::NotConnected
-                    && this.connect_settle_retries < MAX_CONNECT_SETTLE_RETRIES =>
-            {
-                this.connect_settle_retries += 1;
+            Err(e) if e.kind() == io::ErrorKind::NotConnected => {
+                if !this.should_retry_connect_settle() {
+                    return Poll::Ready(Err(e));
+                }
                 if let Err(err) = this.register_interest(cx, Interest::WRITABLE) {
                     return Poll::Ready(Err(err));
                 }
@@ -1588,7 +1663,18 @@ mod tests {
         );
         assert_eq!(stream.connect_settle_retries, 1);
 
+        // Burning the count budget through immediate self-wakes is not enough
+        // to fail before the real-time floor has elapsed.
         stream.connect_settle_retries = MAX_CONNECT_SETTLE_RETRIES;
+        let before_floor = Pin::new(&mut stream).poll_write(&mut cx, b"tls client hello");
+        assert!(
+            before_floor.is_pending(),
+            "the real-time floor must outlive the exhausted poll-count budget"
+        );
+
+        stream.connect_settle_retries = MAX_CONNECT_SETTLE_RETRIES;
+        stream.connect_settle_started_at = Some(crate::time::wall_now());
+        std::thread::sleep(MIN_CONNECT_SETTLE_TIME);
         let bounded = Pin::new(&mut stream).poll_write(&mut cx, b"tls client hello");
         match bounded {
             Poll::Ready(Err(err)) => {
@@ -1840,15 +1926,62 @@ mod tests {
     }
 
     #[test]
-    fn tcp_connect_local_listener() {
+    fn driverless_connect_waits_until_first_write_is_usable() {
+        use crate::io::AsyncWriteExt;
+
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
         let addr = listener.local_addr().expect("local addr");
 
-        let handle = std::thread::spawn(move || future::block_on(TcpStream::connect(addr)));
+        let handle = std::thread::spawn(move || {
+            future::block_on(async move {
+                let mut stream = TcpStream::connect(addr).await?;
+                stream.write_all(b"ready").await?;
+                io::Result::Ok(stream)
+            })
+        });
 
-        let _ = listener.accept().expect("accept");
+        let (mut accepted, _) = listener.accept().expect("accept");
+        let mut marker = [0_u8; 5];
+        accepted
+            .read_exact(&mut marker)
+            .expect("the first post-connect write is immediately usable");
+        assert_eq!(&marker, b"ready");
         let stream = handle.join().expect("join").expect("connect");
         assert!(stream.peer_addr().is_ok());
+    }
+
+    #[test]
+    fn driverless_connect_does_not_trust_peer_addr_before_writable() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("local addr");
+        let client = net::TcpStream::connect(addr).expect("connect client");
+        let (_accepted, _) = listener.accept().expect("accept client");
+        client.set_nonblocking(true).expect("set nonblocking");
+        let socket = Socket::from(client);
+        assert!(
+            socket.peer_addr().is_ok(),
+            "fixture starts with a peer-visible socket"
+        );
+
+        let reactor = LabReactor::new();
+        let token = Token::new(73);
+        reactor
+            .register(&socket, token, Interest::WRITABLE)
+            .expect("register fixture socket");
+        let mut events = Events::with_capacity(1);
+        let waker = noop_waker();
+        let cx = Context::from_waker(&waker);
+
+        assert!(
+            poll_connect_fallback_ready(&socket, &reactor, &mut events, token, &cx).is_pending(),
+            "peer_addr success alone must not complete a driverless connect"
+        );
+
+        reactor.set_ready(token, crate::runtime::reactor::Event::writable(token));
+        assert!(matches!(
+            poll_connect_fallback_ready(&socket, &reactor, &mut events, token, &cx),
+            Poll::Ready(Ok(()))
+        ));
     }
 
     #[test]

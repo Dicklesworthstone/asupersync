@@ -275,7 +275,7 @@ Env	agent_swarm/release_proof_aggregator.rs	616	std::env::var_os(	let home = std
 Env	atp/daemon_control.rs	602	std::env::var_os(	std::env::var_os().as_deref(),
 Env	atp/logging/failure_bundle.rs	471	env::var(	if let Ok(value) = env::var(var) {
 Env	bytes/profiling.rs	129	std::env::var(	val = if std::env::var().is_ok() {
-Env	config.rs	927	std::env::vars(	for (key, value) in std::env::vars() {
+Env	config.rs	937	std::env::vars(	for (key, value) in std::env::vars() {
 Env	console.rs	981	std::env::var(	std::env::var(key).ok()
 Env	database/postgres.rs	4165	std::env::var(	if let Ok(ca_path) = std::env::var() {
 Env	decoding.rs	240	std::env::var_os(	if std::env::var_os().is_none() {
@@ -347,7 +347,7 @@ Io	http/h1/http_client.rs	2530	TcpStream::	let mut stream = TcpStream::connect(a
 Io	http/h1/listener.rs	373	TcpListener::	let tcp_listener = TcpListener::bind(addr).await?;
 Io	http/h2/listener.rs	2029	TcpListener::	let tcp_listener = TcpListener::bind(addr).await?;
 Io	messaging/nats.rs	1623	TcpStream::	let stream = TcpStream::connect(addr).await?;
-Io	messaging/redis.rs	1922	TcpStream::	let tcp_stream = TcpStream::connect(addr).await?;
+Io	messaging/redis.rs	2529	TcpStream::	let tcp_stream = TcpStream::connect(addr).await?;
 Io	messaging/stream.rs	532	File::open(	let file = File::open(path).map_err(|error| StreamError::wal_io(, path, &error))?;
 Io	net/atp/sdk/bonded.rs	429	TcpListener::	let listener = TcpListener::bind(self.listen).await?;
 Io	net/atp/sdk/session.rs	350	std::net::TcpStream	std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(250)).map(|_| ())
@@ -419,8 +419,8 @@ Io	net/tcp/listener.rs	398	TcpListener::	TcpListener::poll_accept(self, cx)
 Io	net/tcp/socket.rs	167	TcpListener::	TcpListener::from_std(socket.into())
 Io	net/tcp/socket.rs	213	TcpStream::	TcpStream::connect_from_socket(socket, addr).await
 Io	net/tcp/split.rs	940	TcpStream::	Ok(super::stream::TcpStream::from_parts(
-Io	net/tcp/stream.rs	247	TcpStream::	TcpStream::connect_timeout(addr, timeout).await?
-Io	net/tcp/stream.rs	249	TcpStream::	TcpStream::connect(addr).await?
+Io	net/tcp/stream.rs	258	TcpStream::	TcpStream::connect_timeout(addr, timeout).await?
+Io	net/tcp/stream.rs	260	TcpStream::	TcpStream::connect(addr).await?
 Io	net/tcp/traits.rs	287	std::net::TcpListener	let listener: std::net::TcpListener = socket.into();
 Io	net/tcp/traits.rs	288	TcpListener::	match super::listener::TcpListener::from_std(listener) {
 Io	net/websocket/client.rs	1039	TcpStream::	TcpStream::connect_timeout(addr, timeout).await
@@ -428,7 +428,7 @@ Io	net/websocket/client.rs	1041	TcpStream::	TcpStream::connect(addr).await
 Io	process.rs	1057	std::fs::OpenOptions	let file = std::fs::OpenOptions::new()
 Io	runtime/reactor/io_uring.rs	532	TcpListener::	let listener = match TcpListener::bind((Ipv4Addr::LOCALHOST, 0)) {
 Io	runtime/reactor/io_uring.rs	572	TcpStream::	let client = match TcpStream::connect_timeout(&address, Duration::from_secs(1)) {
-Io	security/keys/mod.rs	642	File::open(	if let Ok(dir) = fs::File::open(parent) {
+Io	security/keys/mod.rs	1255	File::open(	if let Ok(dir) = fs::File::open(parent) {
 Io	tls/connector.rs	641	std::fs::read(	let Ok(pem_data) = std::fs::read(path) else {
 Io	tls/types.rs	241	std::fs::read(	let pem = std::fs::read(path.as_ref())
 Io	tls/types.rs	69	std::fs::read(	let pem = std::fs::read(path.as_ref())
