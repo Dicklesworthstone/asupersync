@@ -52,6 +52,12 @@ GitHub Release/tag baseline is `v0.4.5`.
   dropped.** A task that retains its completed `Sleep` can no longer retain the
   timer-wheel entry, stored waker, or fallback-thread state after explicit
   cancellation.
+- **Lab runs can capture and force an exact bounded dispatch projection.** The
+  opt-in lab-only authority binds each task generation to its modeled worker,
+  scheduler lane, deterministic step, and virtual time before polling, and
+  refuses stale, reordered, partial, or resource-exhausting projections without
+  falling back to RNG scheduling. This is the executable replay substrate; it
+  does not yet provide schedule minimization or a persisted replay artifact.
 
 ### Security and protocols
 

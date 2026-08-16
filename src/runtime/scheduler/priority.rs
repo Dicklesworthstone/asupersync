@@ -1174,6 +1174,58 @@ impl Scheduler {
         self.ready_lane.clear();
         self.scheduled.clear();
     }
+
+    /// Takes one exact task from its authoritative lane without consulting the
+    /// normal scheduler selector.
+    ///
+    /// Lazy cancel promotion can leave tombstones in the timed or ready heaps,
+    /// so lane discovery deliberately resolves `Cancel > Timed > Ready` before
+    /// mutating any queue. A lane mismatch or future timed deadline leaves the
+    /// scheduler byte-for-byte unchanged.
+    pub(crate) fn take_exact(
+        &mut self,
+        task: TaskId,
+        expected_lane: DispatchLane,
+        now: Time,
+    ) -> Result<(), ExactDispatchError> {
+        if !self.scheduled.contains(task) {
+            return Err(ExactDispatchError::NotScheduled);
+        }
+
+        let timed_deadline = self
+            .timed_lane
+            .iter()
+            .filter(|entry| entry.task == task)
+            .map(|entry| entry.deadline)
+            .min();
+        let actual_lane = if self.cancel_lane.iter().any(|entry| entry.task == task) {
+            DispatchLane::Cancel
+        } else if timed_deadline.is_some() {
+            DispatchLane::Timed
+        } else if self.ready_lane.iter().any(|entry| entry.task == task) {
+            DispatchLane::Ready
+        } else {
+            return Err(ExactDispatchError::QueueInvariant);
+        };
+
+        if actual_lane != expected_lane {
+            return Err(ExactDispatchError::LaneMismatch {
+                actual: actual_lane,
+            });
+        }
+        if let Some(deadline) = timed_deadline {
+            if deadline > now {
+                return Err(ExactDispatchError::TimedNotDue { deadline });
+            }
+        }
+
+        let removed = self.scheduled.remove(task);
+        debug_assert!(removed, "exact task was checked as scheduled");
+        self.cancel_lane.retain(|entry| entry.task != task);
+        self.timed_lane.retain(|entry| entry.task != task);
+        self.ready_lane.retain(|entry| entry.task != task);
+        Ok(())
+    }
 }
 
 /// Scheduler operating mode.
@@ -1239,6 +1291,29 @@ pub enum DispatchLane {
     Ready,
     /// Task was stolen from another worker.
     Stolen,
+}
+
+/// Why an exact lab-only dispatch could not be taken from this scheduler.
+///
+/// This stays crate-private: production schedulers choose work according to
+/// their normal policy. The deterministic lab runtime uses it to force a
+/// previously recorded choice without falling back to a different task.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExactDispatchError {
+    /// The full task generation is not scheduled.
+    NotScheduled,
+    /// The task is scheduled in the timed lane but its deadline is in the future.
+    TimedNotDue {
+        /// Earliest recorded deadline for this task.
+        deadline: Time,
+    },
+    /// The task is runnable, but through a different lane than the receipt requires.
+    LaneMismatch {
+        /// Actual authoritative lane after lazy-promotion resolution.
+        actual: DispatchLane,
+    },
+    /// The dedup set says the task is scheduled, but no authoritative lane entry exists.
+    QueueInvariant,
 }
 
 impl ScheduleCertificate {
@@ -1505,6 +1580,62 @@ mod tests {
             sched.is_in_cancel_lane(task(2))
         );
         crate::test_complete!("is_in_cancel_lane");
+    }
+
+    #[test]
+    fn exact_dispatch_is_lane_generation_and_deadline_bound() {
+        init_test("exact_dispatch_is_lane_generation_and_deadline_bound");
+
+        let mut ready = Scheduler::new();
+        ready.schedule(task(1), 7);
+        assert_eq!(
+            ready.take_exact(task(1), DispatchLane::Cancel, Time::ZERO),
+            Err(ExactDispatchError::LaneMismatch {
+                actual: DispatchLane::Ready
+            })
+        );
+        assert_eq!(ready.len(), 1, "lane mismatch must not dequeue");
+        assert_eq!(
+            ready.take_exact(task(1), DispatchLane::Ready, Time::ZERO),
+            Ok(())
+        );
+        assert!(ready.is_empty());
+
+        let deadline = Time::from_nanos(9);
+        let mut timed = Scheduler::new();
+        timed.schedule_timed(task(2), deadline);
+        assert_eq!(
+            timed.take_exact(task(2), DispatchLane::Timed, Time::from_nanos(8)),
+            Err(ExactDispatchError::TimedNotDue { deadline })
+        );
+        assert_eq!(timed.len(), 1, "future timed refusal must not dequeue");
+        assert_eq!(
+            timed.take_exact(task(2), DispatchLane::Timed, deadline),
+            Ok(())
+        );
+
+        let mut promoted = Scheduler::new();
+        promoted.schedule(task(3), 1);
+        promoted.move_to_cancel_lane(task(3), 9);
+        assert_eq!(
+            promoted.take_exact(task(3), DispatchLane::Ready, Time::ZERO),
+            Err(ExactDispatchError::LaneMismatch {
+                actual: DispatchLane::Cancel
+            })
+        );
+        assert_eq!(
+            promoted.take_exact(task(3), DispatchLane::Cancel, Time::ZERO),
+            Ok(())
+        );
+        assert_eq!(
+            promoted.take_exact(
+                TaskId::from_arena(ArenaIndex::new(3, 1)),
+                DispatchLane::Cancel,
+                Time::ZERO,
+            ),
+            Err(ExactDispatchError::NotScheduled)
+        );
+        crate::test_complete!("exact_dispatch_is_lane_generation_and_deadline_bound");
     }
 
     #[test]

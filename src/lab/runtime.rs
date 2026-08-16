@@ -17,6 +17,7 @@ use crate::runtime::deadline_monitor::{
     DeadlineMonitor, DeadlineWarning, MonitorConfig, default_warning_handler,
 };
 use crate::runtime::reactor::LabReactor;
+use crate::runtime::scheduler::priority::ExactDispatchError;
 use crate::runtime::scheduler::{DispatchLane, ScheduleCertificate};
 use crate::time::VirtualClock;
 use crate::trace::TraceBufferHandle;
@@ -26,14 +27,14 @@ use crate::trace::crashpack::{
 };
 use crate::trace::event::TraceEventKind;
 use crate::trace::recorder::TraceRecorder;
-use crate::trace::replay::{ReplayEvent, ReplayTrace, TraceMetadata};
+use crate::trace::replay::{CompactTaskId, ReplayEvent, ReplayTrace, TraceMetadata};
 use crate::trace::scoring::seed_fingerprint;
 use crate::trace::{TraceData, TraceEvent, check_refinement_firewall};
 use crate::trace::{canonicalize::trace_fingerprint, certificate::TraceCertificate};
 use crate::types::Time;
 use crate::types::{ObligationId, RegionId, TaskId};
 use crate::util::det_hash::{DetHashMap, DetHashSet};
-use crate::util::{DetEntropy, DetRng};
+use crate::util::{ArenaIndex, DetEntropy, DetRng};
 use parking_lot::Mutex;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -58,6 +59,399 @@ pub struct LabTraceCertificateSummary {
     pub event_count: u64,
     /// Hash of scheduling decisions (from [`ScheduleCertificate`]).
     pub schedule_hash: u64,
+}
+
+/// Schema version for the exact lab dispatch projection.
+pub const FORCED_SCHEDULE_SCHEMA_VERSION: u32 = 1;
+
+/// One scheduler choice captured before the selected task was polled.
+///
+/// Unlike [`ReplayEvent::TaskScheduled`], this lab-only projection retains the
+/// modeled worker and authoritative lane. That distinction is load-bearing for
+/// exact replay: a task chosen from the wrong lane can change cancellation and
+/// fairness semantics even when the task ID happens to match.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ForcedDispatch {
+    task: CompactTaskId,
+    worker: u32,
+    lane: DispatchLane,
+    at_step: u64,
+    at_nanos: u64,
+}
+
+impl ForcedDispatch {
+    /// Full arena identity (slot plus generation) of the selected task.
+    #[must_use]
+    pub const fn task(&self) -> CompactTaskId {
+        self.task
+    }
+
+    /// Modeled worker that performed the dispatch.
+    #[must_use]
+    pub const fn worker(&self) -> u32 {
+        self.worker
+    }
+
+    /// Authoritative lane used for the dispatch.
+    #[must_use]
+    pub const fn lane(&self) -> DispatchLane {
+        self.lane
+    }
+
+    /// Deterministic lab step at which the task was selected.
+    #[must_use]
+    pub const fn at_step(&self) -> u64 {
+        self.at_step
+    }
+
+    /// Virtual time observed when the task was selected.
+    #[must_use]
+    pub const fn at_nanos(&self) -> u64 {
+        self.at_nanos
+    }
+}
+
+/// Complete, versioned exact-dispatch projection from one lab execution.
+///
+/// The projection is deliberately not a production scheduler-control format.
+/// It can only be applied to a fresh [`LabRuntime`] with the same configuration,
+/// and every task generation, worker, lane, step, and virtual-time value is
+/// revalidated before polling.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForcedSchedule {
+    version: u32,
+    seed: u64,
+    config_hash: u64,
+    dispatches: Vec<ForcedDispatch>,
+    terminal_steps: u64,
+    terminal_nanos: u64,
+    terminal_schedule_hash: u64,
+    terminal_quiescent: bool,
+    truncated: bool,
+}
+
+impl ForcedSchedule {
+    /// Projection schema version.
+    #[must_use]
+    pub const fn version(&self) -> u32 {
+        self.version
+    }
+
+    /// Source lab seed.
+    #[must_use]
+    pub const fn seed(&self) -> u64 {
+        self.seed
+    }
+
+    /// Stable source execution-configuration hash.
+    #[must_use]
+    pub const fn config_hash(&self) -> u64 {
+        self.config_hash
+    }
+
+    /// Ordered exact dispatches.
+    #[must_use]
+    pub fn dispatches(&self) -> &[ForcedDispatch] {
+        &self.dispatches
+    }
+
+    /// Source run terminal step.
+    #[must_use]
+    pub const fn terminal_steps(&self) -> u64 {
+        self.terminal_steps
+    }
+
+    /// Source run terminal virtual time.
+    #[must_use]
+    pub const fn terminal_nanos(&self) -> u64 {
+        self.terminal_nanos
+    }
+
+    /// Source run terminal schedule-certificate hash.
+    #[must_use]
+    pub const fn terminal_schedule_hash(&self) -> u64 {
+        self.terminal_schedule_hash
+    }
+}
+
+/// Caller-owned admission limits for forced lab execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ForcedScheduleLimits {
+    /// Maximum number of dispatch records the caller will admit.
+    pub max_dispatches: usize,
+    /// Maximum lab steps the forced runner may execute.
+    pub max_steps: u64,
+}
+
+impl ForcedScheduleLimits {
+    /// Creates explicit forced-execution limits.
+    #[must_use]
+    pub const fn new(max_dispatches: usize, max_steps: u64) -> Self {
+        Self {
+            max_dispatches,
+            max_steps,
+        }
+    }
+}
+
+/// Successful exact forced-schedule execution receipt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ForcedScheduleReport {
+    /// Number of exact dispatch records consumed.
+    pub dispatches: usize,
+    /// Number of lab steps executed by this call.
+    pub steps: u64,
+    /// Terminal virtual time.
+    pub terminal_nanos: u64,
+    /// Terminal schedule-certificate hash.
+    pub schedule_hash: u64,
+    /// Whether the runtime reached structured quiescence.
+    pub quiescent: bool,
+}
+
+/// Fail-closed forced-schedule admission or execution error.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ForcedScheduleError {
+    /// Recording was requested with a zero event limit.
+    #[error("forced schedule recording requires a nonzero dispatch limit")]
+    ZeroRecordingLimit,
+    /// A recorder is already active on this runtime.
+    #[error("forced schedule recording is already active")]
+    RecordingAlreadyActive,
+    /// No recorder is active on this runtime.
+    #[error("forced schedule recording is not active")]
+    RecordingNotActive,
+    /// The source execution exceeded its recording limit.
+    #[error("forced schedule recording exceeded its limit of {max_dispatches} dispatches")]
+    RecordingLimitExceeded {
+        /// Configured source recording limit.
+        max_dispatches: usize,
+    },
+    /// The projection schema is unsupported.
+    #[error("forced schedule schema mismatch: expected {expected}, found {found}")]
+    SchemaMismatch {
+        /// Supported schema.
+        expected: u32,
+        /// Supplied schema.
+        found: u32,
+    },
+    /// The projection is from a different deterministic seed.
+    #[error("forced schedule seed mismatch: expected {expected}, found {found}")]
+    SeedMismatch {
+        /// Runtime seed.
+        expected: u64,
+        /// Projection seed.
+        found: u64,
+    },
+    /// The projection is from a different lab configuration.
+    #[error("forced schedule config mismatch: expected {expected:#x}, found {found:#x}")]
+    ConfigMismatch {
+        /// Runtime configuration hash.
+        expected: u64,
+        /// Projection configuration hash.
+        found: u64,
+    },
+    /// Forced execution only starts from a pristine runtime clock/certificate.
+    #[error("forced schedule requires a pristine runtime (steps={steps}, decisions={decisions})")]
+    RuntimeAlreadyStarted {
+        /// Runtime steps already executed.
+        steps: u64,
+        /// Schedule decisions already recorded.
+        decisions: u64,
+    },
+    /// The source projection was incomplete or did not reach quiescence.
+    #[error("forced schedule source projection is partial")]
+    PartialSource,
+    /// Caller-owned dispatch admission was exceeded.
+    #[error("forced schedule has {found} dispatches, limit is {limit}")]
+    DispatchLimitExceeded {
+        /// Supplied number of dispatches.
+        found: usize,
+        /// Caller-owned limit.
+        limit: usize,
+    },
+    /// Caller-owned step budget was exhausted.
+    #[error("forced schedule work limit exhausted at {steps} steps (limit {limit})")]
+    WorkLimitExceeded {
+        /// Steps consumed by this invocation.
+        steps: u64,
+        /// Caller-owned limit.
+        limit: u64,
+    },
+    /// Dispatch steps are not strictly increasing.
+    #[error(
+        "forced schedule step order is invalid at dispatch {index}: previous {previous}, next {next}"
+    )]
+    StepOrder {
+        /// Offending dispatch index.
+        index: usize,
+        /// Previous step.
+        previous: u64,
+        /// Next step.
+        next: u64,
+    },
+    /// Dispatch virtual time moved backwards.
+    #[error(
+        "forced schedule virtual time moved backwards at dispatch {index}: previous {previous}, next {next}"
+    )]
+    TimeOrder {
+        /// Offending dispatch index.
+        index: usize,
+        /// Previous virtual time.
+        previous: u64,
+        /// Next virtual time.
+        next: u64,
+    },
+    /// Runnable work appeared before the next recorded dispatch step.
+    #[error("runnable work appeared at step {actual} before recorded step {expected}")]
+    EarlyRunnable {
+        /// Recorded next dispatch step.
+        expected: u64,
+        /// Current step.
+        actual: u64,
+    },
+    /// The runner passed the next recorded dispatch step.
+    #[error("forced schedule missed dispatch {index}: expected step {expected}, reached {actual}")]
+    StepMismatch {
+        /// Dispatch index.
+        index: usize,
+        /// Recorded step.
+        expected: u64,
+        /// Current step.
+        actual: u64,
+    },
+    /// The virtual clock did not match the recorded dispatch.
+    #[error(
+        "forced schedule time mismatch at dispatch {index}: expected {expected}, found {actual}"
+    )]
+    TimeMismatch {
+        /// Dispatch index.
+        index: usize,
+        /// Recorded virtual time.
+        expected: u64,
+        /// Runtime virtual time.
+        actual: u64,
+    },
+    /// The recorded worker is not part of this runtime.
+    #[error("forced schedule worker {worker} is unavailable (worker count {worker_count})")]
+    WorkerUnavailable {
+        /// Recorded worker.
+        worker: u32,
+        /// Runtime worker count.
+        worker_count: usize,
+    },
+    /// The exact task generation is absent or already completed.
+    #[error("forced schedule task {task:?} is unavailable at dispatch {index}")]
+    TaskUnavailable {
+        /// Dispatch index.
+        index: usize,
+        /// Full compact task identity.
+        task: CompactTaskId,
+    },
+    /// The task's authoritative worker differs from the recorded worker.
+    #[error(
+        "forced schedule worker mismatch at dispatch {index}: expected {expected}, found {actual}"
+    )]
+    WorkerMismatch {
+        /// Dispatch index.
+        index: usize,
+        /// Recorded worker.
+        expected: u32,
+        /// Actual assigned worker.
+        actual: u32,
+    },
+    /// The task's authoritative lane differs from the recorded lane.
+    #[error(
+        "forced schedule lane mismatch at dispatch {index}: expected {expected:?}, found {actual:?}"
+    )]
+    LaneMismatch {
+        /// Dispatch index.
+        index: usize,
+        /// Recorded lane.
+        expected: DispatchLane,
+        /// Actual lane.
+        actual: DispatchLane,
+    },
+    /// A timed task was selected before its deadline.
+    #[error(
+        "forced schedule timed task is not due at dispatch {index}: deadline {deadline}, now {now}"
+    )]
+    TimedNotDue {
+        /// Dispatch index.
+        index: usize,
+        /// Recorded task deadline.
+        deadline: u64,
+        /// Current virtual time.
+        now: u64,
+    },
+    /// Scheduler membership and lane queues disagree.
+    #[error("forced schedule queue invariant failed at dispatch {index}")]
+    QueueInvariant {
+        /// Dispatch index.
+        index: usize,
+    },
+    /// The projection ended while runnable or live work remained.
+    #[error("forced schedule exhausted after {consumed} dispatches before terminal quiescence")]
+    ScheduleExhausted {
+        /// Dispatches consumed.
+        consumed: usize,
+    },
+    /// Terminal schedule hash differed from the source receipt.
+    #[error("forced schedule certificate mismatch: expected {expected:#x}, found {actual:#x}")]
+    CertificateMismatch {
+        /// Source schedule hash.
+        expected: u64,
+        /// Replayed schedule hash.
+        actual: u64,
+    },
+    /// Terminal step or virtual time differed from the source receipt.
+    #[error(
+        "forced schedule terminal mismatch: expected step/time {expected_steps}/{expected_nanos}, found {actual_steps}/{actual_nanos}"
+    )]
+    TerminalMismatch {
+        /// Source terminal step.
+        expected_steps: u64,
+        /// Source terminal virtual time.
+        expected_nanos: u64,
+        /// Replay terminal step.
+        actual_steps: u64,
+        /// Replay terminal virtual time.
+        actual_nanos: u64,
+    },
+}
+
+#[derive(Debug)]
+struct ForcedScheduleRecorder {
+    max_dispatches: usize,
+    dispatches: Vec<ForcedDispatch>,
+    truncated: bool,
+}
+
+enum LabDispatchMode<'a> {
+    Normal,
+    Forced {
+        expected: Option<(usize, &'a ForcedDispatch)>,
+    },
+}
+
+fn compact_task_id(compact: CompactTaskId) -> TaskId {
+    let (index, generation) = compact.unpack();
+    TaskId::from_arena(ArenaIndex::new(index, generation))
+}
+
+fn forced_schedule_config_hash(config: &LabConfig) -> u64 {
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = crate::util::DetHasher::for_lab();
+    "asupersync.lab.forced-schedule.config.v1".hash(&mut hasher);
+    LabConfigSummary::from_config(config)
+        .config_hash()
+        .hash(&mut hasher);
+    config.auto_advance_time.hash(&mut hasher);
+    config.enable_cancellation_oracle.hash(&mut hasher);
+    config.panic_on_cancellation_violation.hash(&mut hasher);
+    config.oracle_selection.hash(&mut hasher);
+    hasher.finish()
 }
 
 /// Why a [`LabRuntime::run_with_auto_advance`] loop terminated.
@@ -811,6 +1205,8 @@ pub struct LabRuntime {
     seen_reactor_chaos_stats: ChaosStats,
     /// Replay recorder for deterministic trace capture.
     replay_recorder: TraceRecorder,
+    /// Optional bounded recorder for exact lab dispatch choices.
+    forced_schedule_recorder: Option<ForcedScheduleRecorder>,
     /// Optional deadline monitor for warning callbacks.
     deadline_monitor: Option<DeadlineMonitor>,
     /// Oracle suite for invariant verification.
@@ -893,6 +1289,7 @@ impl LabRuntime {
             chaos_stats: ChaosStats::new(),
             seen_reactor_chaos_stats: ChaosStats::new(),
             replay_recorder,
+            forced_schedule_recorder: None,
             deadline_monitor: None,
             oracles: OracleSuite::new(),
             certificate: ScheduleCertificate::new(),
@@ -979,6 +1376,248 @@ impl LabRuntime {
         // Take ownership by replacing with a disabled recorder
         let recorder = std::mem::replace(&mut self.replay_recorder, TraceRecorder::disabled());
         recorder.finish()
+    }
+
+    /// Starts bounded capture of exact task/worker/lane/step/time dispatches.
+    ///
+    /// Capture is opt-in and lab-only. Reaching the bound does not perturb the
+    /// source execution, but finishing the recorder then fails closed instead
+    /// of returning a partial schedule.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ForcedScheduleError::ZeroRecordingLimit`] for a zero bound or
+    /// [`ForcedScheduleError::RecordingAlreadyActive`] when capture is active.
+    pub fn start_forced_schedule_recording(
+        &mut self,
+        max_dispatches: usize,
+    ) -> Result<(), ForcedScheduleError> {
+        if max_dispatches == 0 {
+            return Err(ForcedScheduleError::ZeroRecordingLimit);
+        }
+        if self.forced_schedule_recorder.is_some() {
+            return Err(ForcedScheduleError::RecordingAlreadyActive);
+        }
+        if self.steps != 0 || self.certificate.decisions() != 0 {
+            return Err(ForcedScheduleError::RuntimeAlreadyStarted {
+                steps: self.steps,
+                decisions: self.certificate.decisions(),
+            });
+        }
+        self.forced_schedule_recorder = Some(ForcedScheduleRecorder {
+            max_dispatches,
+            dispatches: Vec::new(),
+            truncated: false,
+        });
+        Ok(())
+    }
+
+    /// Finishes exact dispatch capture and binds it to terminal runtime state.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error when capture was not active or its event bound was
+    /// exceeded. A non-quiescent source is represented in the returned receipt
+    /// and is rejected by [`Self::run_forced_schedule`].
+    pub fn finish_forced_schedule_recording(
+        &mut self,
+    ) -> Result<ForcedSchedule, ForcedScheduleError> {
+        let recorder = self
+            .forced_schedule_recorder
+            .take()
+            .ok_or(ForcedScheduleError::RecordingNotActive)?;
+        if recorder.truncated {
+            return Err(ForcedScheduleError::RecordingLimitExceeded {
+                max_dispatches: recorder.max_dispatches,
+            });
+        }
+        Ok(ForcedSchedule {
+            version: FORCED_SCHEDULE_SCHEMA_VERSION,
+            seed: self.config.seed,
+            config_hash: forced_schedule_config_hash(&self.config),
+            dispatches: recorder.dispatches,
+            terminal_steps: self.steps,
+            terminal_nanos: self.now().as_nanos(),
+            terminal_schedule_hash: self.certificate.hash(),
+            terminal_quiescent: self.is_quiescent(),
+            truncated: false,
+        })
+    }
+
+    /// Executes an exact recorded dispatch projection on this fresh lab runtime.
+    ///
+    /// The next recorded task is removed from its exact authoritative queue
+    /// before it is polled. There is no RNG-scheduler fallback: missing, early,
+    /// stale, wrong-worker, wrong-lane, wrong-time, or extra work returns a typed
+    /// error while leaving the mismatched task unpolled.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ForcedScheduleError`] for incompatible or partial receipts,
+    /// exhausted caller limits, or the first execution divergence.
+    pub fn run_forced_schedule(
+        &mut self,
+        schedule: &ForcedSchedule,
+        limits: ForcedScheduleLimits,
+    ) -> Result<ForcedScheduleReport, ForcedScheduleError> {
+        self.validate_forced_schedule(schedule, limits)?;
+
+        let start_steps = self.steps;
+        let mut consumed = 0usize;
+        while self.steps < schedule.terminal_steps {
+            let used = self.steps.saturating_sub(start_steps);
+            if used >= limits.max_steps {
+                return Err(ForcedScheduleError::WorkLimitExceeded {
+                    steps: used,
+                    limit: limits.max_steps,
+                });
+            }
+
+            let next = schedule.dispatches.get(consumed);
+            if let Some(dispatch) = next {
+                let target = Time::from_nanos(dispatch.at_nanos);
+                let can_auto_advance = self.scheduler.lock().is_empty()
+                    && self.spawn_mailbox.is_empty()
+                    && !self.state.has_deferred_cancel_dispatches()
+                    && self.now() < target
+                    && self.next_auto_advance_deadline() == Some(target);
+                if can_auto_advance {
+                    self.advance_time_to(target);
+                    let _ = self.pump_due_system_events();
+                }
+            }
+
+            if self.step_with_forced_dispatch(next.map(|dispatch| (consumed, dispatch)))? {
+                consumed = consumed.saturating_add(1);
+            }
+        }
+
+        // A source using auto-advance can reach its final virtual timestamp
+        // after the last task dispatch (for example, while draining a reactor
+        // event that does not wake another task). Reproduce that one bounded
+        // terminal jump only when the runtime independently exposes the exact
+        // recorded timer/reactor deadline. A caller-mutated timestamp or an
+        // unrecorded manual clock jump is not self-authenticating. If the real
+        // deadline makes work runnable, the missing dispatch below is still
+        // rejected rather than selected by the normal scheduler.
+        let terminal_target = Time::from_nanos(schedule.terminal_nanos);
+        if consumed == schedule.dispatches.len()
+            && self.scheduler.lock().is_empty()
+            && self.spawn_mailbox.is_empty()
+            && !self.state.has_deferred_cancel_dispatches()
+            && self.now() < terminal_target
+            && self.next_auto_advance_deadline() == Some(terminal_target)
+        {
+            self.advance_time_to(terminal_target);
+            let _ = self.pump_due_system_events();
+        }
+
+        if consumed != schedule.dispatches.len() || !self.is_quiescent() {
+            return Err(ForcedScheduleError::ScheduleExhausted { consumed });
+        }
+        let actual_nanos = self.now().as_nanos();
+        if self.steps != schedule.terminal_steps || actual_nanos != schedule.terminal_nanos {
+            return Err(ForcedScheduleError::TerminalMismatch {
+                expected_steps: schedule.terminal_steps,
+                expected_nanos: schedule.terminal_nanos,
+                actual_steps: self.steps,
+                actual_nanos,
+            });
+        }
+        let actual_hash = self.certificate.hash();
+        if actual_hash != schedule.terminal_schedule_hash {
+            return Err(ForcedScheduleError::CertificateMismatch {
+                expected: schedule.terminal_schedule_hash,
+                actual: actual_hash,
+            });
+        }
+
+        Ok(ForcedScheduleReport {
+            dispatches: consumed,
+            steps: self.steps.saturating_sub(start_steps),
+            terminal_nanos: actual_nanos,
+            schedule_hash: actual_hash,
+            quiescent: true,
+        })
+    }
+
+    fn validate_forced_schedule(
+        &self,
+        schedule: &ForcedSchedule,
+        limits: ForcedScheduleLimits,
+    ) -> Result<(), ForcedScheduleError> {
+        if schedule.version != FORCED_SCHEDULE_SCHEMA_VERSION {
+            return Err(ForcedScheduleError::SchemaMismatch {
+                expected: FORCED_SCHEDULE_SCHEMA_VERSION,
+                found: schedule.version,
+            });
+        }
+        if schedule.seed != self.config.seed {
+            return Err(ForcedScheduleError::SeedMismatch {
+                expected: self.config.seed,
+                found: schedule.seed,
+            });
+        }
+        let config_hash = forced_schedule_config_hash(&self.config);
+        if schedule.config_hash != config_hash {
+            return Err(ForcedScheduleError::ConfigMismatch {
+                expected: config_hash,
+                found: schedule.config_hash,
+            });
+        }
+        if self.steps != 0 || self.certificate.decisions() != 0 {
+            return Err(ForcedScheduleError::RuntimeAlreadyStarted {
+                steps: self.steps,
+                decisions: self.certificate.decisions(),
+            });
+        }
+        if schedule.truncated || !schedule.terminal_quiescent {
+            return Err(ForcedScheduleError::PartialSource);
+        }
+        if schedule.dispatches.len() > limits.max_dispatches {
+            return Err(ForcedScheduleError::DispatchLimitExceeded {
+                found: schedule.dispatches.len(),
+                limit: limits.max_dispatches,
+            });
+        }
+        if schedule.terminal_steps > limits.max_steps {
+            return Err(ForcedScheduleError::WorkLimitExceeded {
+                steps: schedule.terminal_steps,
+                limit: limits.max_steps,
+            });
+        }
+
+        let worker_count = self.config.worker_count.max(1);
+        let mut previous_step = 0u64;
+        let mut previous_nanos = 0u64;
+        for (index, dispatch) in schedule.dispatches.iter().enumerate() {
+            if dispatch.at_step <= previous_step {
+                return Err(ForcedScheduleError::StepOrder {
+                    index,
+                    previous: previous_step,
+                    next: dispatch.at_step,
+                });
+            }
+            if dispatch.at_nanos < previous_nanos {
+                return Err(ForcedScheduleError::TimeOrder {
+                    index,
+                    previous: previous_nanos,
+                    next: dispatch.at_nanos,
+                });
+            }
+            if dispatch.worker as usize >= worker_count {
+                return Err(ForcedScheduleError::WorkerUnavailable {
+                    worker: dispatch.worker,
+                    worker_count,
+                });
+            }
+            previous_step = dispatch.at_step;
+            previous_nanos = dispatch.at_nanos;
+        }
+        if previous_step > schedule.terminal_steps || previous_nanos > schedule.terminal_nanos {
+            return Err(ForcedScheduleError::PartialSource);
+        }
+        Ok(())
     }
 
     /// Returns true if chaos injection is enabled.
@@ -1988,6 +2627,22 @@ impl LabRuntime {
     /// Executes a single step.
     #[allow(clippy::too_many_lines)]
     fn step(&mut self) {
+        self.step_inner(LabDispatchMode::Normal)
+            .expect("normal lab scheduling cannot produce a forced-schedule error");
+    }
+
+    fn step_with_forced_dispatch(
+        &mut self,
+        expected: Option<(usize, &ForcedDispatch)>,
+    ) -> Result<bool, ForcedScheduleError> {
+        self.step_inner(LabDispatchMode::Forced { expected })
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn step_inner(
+        &mut self,
+        dispatch_mode: LabDispatchMode<'_>,
+    ) -> Result<bool, ForcedScheduleError> {
         self.steps += 1;
         self.drain_deferred_cancel_dispatches();
         self.drain_spawn_admissions();
@@ -2000,7 +2655,7 @@ impl LabRuntime {
         {
             // Bound each deterministic step: reentrant cancellation gets the
             // next step, and ordinary ready work cannot overtake it.
-            return;
+            return Ok(false);
         }
         let rng_value = self.rng.next_u64();
         if self.steps < 50 {
@@ -2023,17 +2678,70 @@ impl LabRuntime {
         // Use higher bits of rng_value since xorshift64 has poor low-bit entropy
         let worker_hint = ((rng_value >> 32) as usize) % worker_count;
         let now = self.now();
-        let (task_id, dispatch_lane) = {
+        let (task_id, dispatch_lane, dispatch_worker) = {
             let mut sched = self.scheduler.lock();
-            if let Some((tid, lane)) = sched.pop_for_worker(worker_hint, rng_value, now) {
-                (tid, lane)
-            } else if let Some(tid) = sched.steal_for_worker(worker_hint, rng_value.rotate_left(17))
-            {
-                (tid, DispatchLane::Stolen)
-            } else {
-                drop(sched);
-                self.check_deadline_monitor();
-                return;
+            match dispatch_mode {
+                LabDispatchMode::Normal => {
+                    if let Some((tid, lane)) = sched.pop_for_worker(worker_hint, rng_value, now) {
+                        (tid, lane, worker_hint)
+                    } else if let Some(tid) =
+                        sched.steal_for_worker(worker_hint, rng_value.rotate_left(17))
+                    {
+                        (tid, DispatchLane::Stolen, worker_hint)
+                    } else {
+                        drop(sched);
+                        self.check_deadline_monitor();
+                        return Ok(false);
+                    }
+                }
+                LabDispatchMode::Forced {
+                    expected: Some((index, dispatch)),
+                } => {
+                    if self.steps < dispatch.at_step {
+                        if sched.has_runnable_work(now) {
+                            return Err(ForcedScheduleError::EarlyRunnable {
+                                expected: dispatch.at_step,
+                                actual: self.steps,
+                            });
+                        }
+                        drop(sched);
+                        self.check_deadline_monitor();
+                        return Ok(false);
+                    }
+                    if self.steps > dispatch.at_step {
+                        return Err(ForcedScheduleError::StepMismatch {
+                            index,
+                            expected: dispatch.at_step,
+                            actual: self.steps,
+                        });
+                    }
+                    if now.as_nanos() != dispatch.at_nanos {
+                        return Err(ForcedScheduleError::TimeMismatch {
+                            index,
+                            expected: dispatch.at_nanos,
+                            actual: now.as_nanos(),
+                        });
+                    }
+                    let task_id = compact_task_id(dispatch.task);
+                    sched.take_forced(
+                        task_id,
+                        dispatch.worker as usize,
+                        dispatch.lane,
+                        now,
+                        index,
+                    )?;
+                    (task_id, dispatch.lane, dispatch.worker as usize)
+                }
+                LabDispatchMode::Forced { expected: None } => {
+                    if !sched.is_empty() {
+                        return Err(ForcedScheduleError::ScheduleExhausted {
+                            consumed: self.certificate.decisions() as usize,
+                        });
+                    }
+                    drop(sched);
+                    self.check_deadline_monitor();
+                    return Ok(false);
+                }
             }
         };
 
@@ -2043,11 +2751,25 @@ impl LabRuntime {
         self.certificate.record(task_id, dispatch_lane, self.steps);
         self.replay_recorder
             .record_task_scheduled(task_id, self.steps);
+        if let Some(recorder) = &mut self.forced_schedule_recorder {
+            if recorder.dispatches.len() < recorder.max_dispatches {
+                recorder.dispatches.push(ForcedDispatch {
+                    task: task_id.into(),
+                    worker: u32::try_from(dispatch_worker)
+                        .expect("lab worker index is bounded by LabConfig::worker_count"),
+                    lane: dispatch_lane,
+                    at_step: self.steps,
+                    at_nanos: now.as_nanos(),
+                });
+            } else {
+                recorder.truncated = true;
+            }
+        }
 
         // 2. Pre-poll chaos injection
         if self.inject_pre_poll_chaos(task_id) {
             // Chaos caused the task to be skipped (e.g., cancelled, budget exhausted)
-            return;
+            return Ok(true);
         }
 
         // 3. Prepare context, enforce budget, and take any cached wakers.
@@ -2167,7 +2889,7 @@ impl LabRuntime {
             stored.poll(&mut cx)
         } else {
             // Task lost (should not happen if consistent)
-            return;
+            return Ok(true);
         };
 
         // Record the poll so futurelock detection uses the correct idle step count.
@@ -2381,6 +3103,7 @@ impl LabRuntime {
         }
 
         self.check_deadline_monitor();
+        Ok(true)
     }
 
     fn check_deadline_monitor(&mut self) {
@@ -3432,6 +4155,12 @@ impl LabScheduler {
         self.scheduled.is_empty()
     }
 
+    fn has_runnable_work(&mut self, now: Time) -> bool {
+        self.workers
+            .iter_mut()
+            .any(|worker| worker.has_runnable_work(now))
+    }
+
     /// Returns the configured cancel streak limit for lab scheduling.
     #[must_use]
     pub fn cancel_streak_limit(&self) -> usize {
@@ -3626,6 +4355,94 @@ impl LabScheduler {
         }
 
         None
+    }
+
+    fn take_forced(
+        &mut self,
+        task: TaskId,
+        expected_worker: usize,
+        expected_lane: DispatchLane,
+        now: Time,
+        index: usize,
+    ) -> Result<(), ForcedScheduleError> {
+        if expected_worker >= self.workers.len() {
+            return Err(ForcedScheduleError::WorkerUnavailable {
+                worker: u32::try_from(expected_worker).unwrap_or(u32::MAX),
+                worker_count: self.workers.len(),
+            });
+        }
+        if !self.scheduled.contains(&task) {
+            return Err(ForcedScheduleError::TaskUnavailable {
+                index,
+                task: task.into(),
+            });
+        }
+        let actual_worker =
+            self.assignment_for(task)
+                .ok_or(ForcedScheduleError::TaskUnavailable {
+                    index,
+                    task: task.into(),
+                })?;
+
+        let queue_lane = if expected_lane == DispatchLane::Stolen {
+            if expected_worker == actual_worker {
+                return Err(ForcedScheduleError::LaneMismatch {
+                    index,
+                    expected: DispatchLane::Stolen,
+                    actual: DispatchLane::Ready,
+                });
+            }
+            DispatchLane::Ready
+        } else {
+            if expected_worker != actual_worker {
+                return Err(ForcedScheduleError::WorkerMismatch {
+                    index,
+                    expected: u32::try_from(expected_worker).unwrap_or(u32::MAX),
+                    actual: u32::try_from(actual_worker).unwrap_or(u32::MAX),
+                });
+            }
+            expected_lane
+        };
+
+        match self.workers[actual_worker].take_exact(task, queue_lane, now) {
+            Ok(()) => {}
+            Err(ExactDispatchError::NotScheduled) => {
+                return Err(ForcedScheduleError::TaskUnavailable {
+                    index,
+                    task: task.into(),
+                });
+            }
+            Err(ExactDispatchError::TimedNotDue { deadline }) => {
+                return Err(ForcedScheduleError::TimedNotDue {
+                    index,
+                    deadline: deadline.as_nanos(),
+                    now: now.as_nanos(),
+                });
+            }
+            Err(ExactDispatchError::LaneMismatch { actual }) => {
+                return Err(ForcedScheduleError::LaneMismatch {
+                    index,
+                    expected: expected_lane,
+                    actual,
+                });
+            }
+            Err(ExactDispatchError::QueueInvariant) => {
+                return Err(ForcedScheduleError::QueueInvariant { index });
+            }
+        }
+
+        let removed = self.scheduled.remove(&task);
+        debug_assert!(removed, "forced task was checked in lab scheduled set");
+        if expected_lane == DispatchLane::Stolen {
+            self.set_assignment(task, expected_worker);
+            self.cancel_streak[expected_worker] = 0;
+        } else if expected_lane == DispatchLane::Cancel {
+            self.cancel_streak[actual_worker] = self.cancel_streak[actual_worker].saturating_add(1);
+        } else {
+            self.cancel_streak[actual_worker] = 0;
+        }
+        self.rearm_spurious_wake(task);
+        Ok(())
     }
 
     fn forget_task(&mut self, task: TaskId) {
@@ -7168,6 +7985,296 @@ mod tests {
     // =========================================================================
     // Replay severity correctness (bd-beuyd)
     // =========================================================================
+
+    fn forced_schedule_fixture(config: LabConfig, observations: Arc<Mutex<Vec<u8>>>) -> LabRuntime {
+        let mut runtime = LabRuntime::new(config);
+        let root = runtime.state.create_root_region(Budget::INFINITE);
+        for label in 0..3u8 {
+            let observations = Arc::clone(&observations);
+            let (task, _handle) = runtime
+                .state
+                .create_task(root, Budget::INFINITE, async move {
+                    observations.lock().push(label);
+                    futures_lite::future::yield_now().await;
+                    observations.lock().push(label + 10);
+                })
+                .expect("create forced-schedule fixture task");
+            runtime.scheduler.lock().schedule(task, label);
+        }
+        runtime
+    }
+
+    #[test]
+    fn forced_schedule_replay_executes_recorded_choices_before_polling() {
+        init_test("forced_schedule_replay_executes_recorded_choices_before_polling");
+        let config = LabConfig::new(0xF0CE_D5CE).worker_count(2).max_steps(128);
+        let source_observations = Arc::new(Mutex::new(Vec::new()));
+        let mut source = forced_schedule_fixture(config.clone(), Arc::clone(&source_observations));
+        source
+            .start_forced_schedule_recording(32)
+            .expect("start exact dispatch capture");
+        let source_report = source.run_until_quiescent_with_report();
+        assert!(source_report.quiescent, "source fixture must quiesce");
+        let schedule = source
+            .finish_forced_schedule_recording()
+            .expect("complete exact dispatch projection");
+        assert_eq!(schedule.version(), FORCED_SCHEDULE_SCHEMA_VERSION);
+        assert_eq!(schedule.seed(), config.seed);
+        assert_eq!(schedule.dispatches().len(), 6);
+        assert_eq!(
+            schedule.terminal_schedule_hash(),
+            source_report.trace_certificate.schedule_hash
+        );
+
+        let replay_observations = Arc::new(Mutex::new(Vec::new()));
+        let mut replay = forced_schedule_fixture(config, Arc::clone(&replay_observations));
+        let receipt = replay
+            .run_forced_schedule(&schedule, ForcedScheduleLimits::new(32, 128))
+            .expect("recorded dispatch projection must execute exactly");
+
+        assert!(receipt.quiescent);
+        assert_eq!(receipt.dispatches, schedule.dispatches().len());
+        assert_eq!(receipt.steps, schedule.terminal_steps());
+        assert_eq!(receipt.terminal_nanos, schedule.terminal_nanos());
+        assert_eq!(receipt.schedule_hash, schedule.terminal_schedule_hash());
+        assert_eq!(*replay_observations.lock(), *source_observations.lock());
+        crate::test_complete!("forced_schedule_replay_executes_recorded_choices_before_polling");
+    }
+
+    #[test]
+    fn forced_schedule_mutations_refuse_before_the_wrong_poll() {
+        init_test("forced_schedule_mutations_refuse_before_the_wrong_poll");
+        let config = LabConfig::new(0xF0CE_D5CE).worker_count(2).max_steps(128);
+        let source_observations = Arc::new(Mutex::new(Vec::new()));
+        let mut source = forced_schedule_fixture(config.clone(), source_observations);
+        source
+            .start_forced_schedule_recording(32)
+            .expect("start exact dispatch capture");
+        assert!(source.run_until_quiescent_with_report().quiescent);
+        let schedule = source
+            .finish_forced_schedule_recording()
+            .expect("complete exact dispatch projection");
+
+        let mut wrong_tick = schedule.clone();
+        for dispatch in &mut wrong_tick.dispatches {
+            dispatch.at_step += 1;
+        }
+        wrong_tick.terminal_steps += 1;
+        let observations = Arc::new(Mutex::new(Vec::new()));
+        let mut replay = forced_schedule_fixture(config.clone(), Arc::clone(&observations));
+        assert!(matches!(
+            replay.run_forced_schedule(&wrong_tick, ForcedScheduleLimits::new(32, 128)),
+            Err(ForcedScheduleError::EarlyRunnable { .. })
+        ));
+        assert!(
+            observations.lock().is_empty(),
+            "tick mismatch polled a task"
+        );
+        assert!(
+            replay.run_until_quiescent_with_report().quiescent,
+            "tick refusal corrupted runnable work"
+        );
+        assert_eq!(observations.lock().len(), 6);
+
+        let mut wrong_time = schedule.clone();
+        for dispatch in &mut wrong_time.dispatches {
+            dispatch.at_nanos += 1;
+        }
+        wrong_time.terminal_nanos += 1;
+        let observations = Arc::new(Mutex::new(Vec::new()));
+        let mut replay = forced_schedule_fixture(config.clone(), Arc::clone(&observations));
+        assert!(matches!(
+            replay.run_forced_schedule(&wrong_time, ForcedScheduleLimits::new(32, 128)),
+            Err(ForcedScheduleError::TimeMismatch { index: 0, .. })
+        ));
+        assert!(
+            observations.lock().is_empty(),
+            "time mismatch polled a task"
+        );
+        assert!(
+            replay.run_until_quiescent_with_report().quiescent,
+            "time refusal corrupted runnable work"
+        );
+        assert_eq!(observations.lock().len(), 6);
+
+        let mut wrong_task = schedule.clone();
+        wrong_task.dispatches[0].task.0 ^= 1;
+        let observations = Arc::new(Mutex::new(Vec::new()));
+        let mut replay = forced_schedule_fixture(config.clone(), Arc::clone(&observations));
+        assert!(matches!(
+            replay.run_forced_schedule(&wrong_task, ForcedScheduleLimits::new(32, 128)),
+            Err(ForcedScheduleError::TaskUnavailable { index: 0, .. })
+        ));
+        assert!(
+            observations.lock().is_empty(),
+            "generation mismatch polled a task"
+        );
+        assert!(
+            replay.run_until_quiescent_with_report().quiescent,
+            "task refusal corrupted runnable work"
+        );
+        assert_eq!(observations.lock().len(), 6);
+
+        let mut wrong_worker = schedule.clone();
+        wrong_worker.dispatches[0].worker ^= 1;
+        let observations = Arc::new(Mutex::new(Vec::new()));
+        let mut replay = forced_schedule_fixture(config.clone(), Arc::clone(&observations));
+        assert!(matches!(
+            replay.run_forced_schedule(&wrong_worker, ForcedScheduleLimits::new(32, 128)),
+            Err(ForcedScheduleError::WorkerMismatch { index: 0, .. })
+                | Err(ForcedScheduleError::LaneMismatch { index: 0, .. })
+        ));
+        assert!(
+            observations.lock().is_empty(),
+            "worker mismatch polled a task"
+        );
+        assert!(
+            replay.run_until_quiescent_with_report().quiescent,
+            "worker refusal corrupted runnable work"
+        );
+        assert_eq!(observations.lock().len(), 6);
+
+        let mut wrong_lane = schedule.clone();
+        wrong_lane.dispatches[0].lane = match wrong_lane.dispatches[0].lane {
+            DispatchLane::Cancel => DispatchLane::Ready,
+            DispatchLane::Timed | DispatchLane::Ready | DispatchLane::Stolen => {
+                DispatchLane::Cancel
+            }
+        };
+        let observations = Arc::new(Mutex::new(Vec::new()));
+        let mut replay = forced_schedule_fixture(config.clone(), Arc::clone(&observations));
+        assert!(matches!(
+            replay.run_forced_schedule(&wrong_lane, ForcedScheduleLimits::new(32, 128)),
+            Err(ForcedScheduleError::LaneMismatch { index: 0, .. })
+                | Err(ForcedScheduleError::WorkerMismatch { index: 0, .. })
+        ));
+        assert!(
+            observations.lock().is_empty(),
+            "lane mismatch polled a task"
+        );
+        assert!(
+            replay.run_until_quiescent_with_report().quiescent,
+            "lane refusal corrupted runnable work"
+        );
+        assert_eq!(observations.lock().len(), 6);
+
+        let mut wrong_order = schedule.clone();
+        wrong_order.dispatches.swap(0, 1);
+        let observations = Arc::new(Mutex::new(Vec::new()));
+        let mut replay = forced_schedule_fixture(config, Arc::clone(&observations));
+        assert!(matches!(
+            replay.run_forced_schedule(&wrong_order, ForcedScheduleLimits::new(32, 128)),
+            Err(ForcedScheduleError::StepOrder { .. })
+        ));
+        assert!(
+            observations.lock().is_empty(),
+            "order mismatch polled a task"
+        );
+        assert!(
+            replay.run_until_quiescent_with_report().quiescent,
+            "order refusal corrupted runnable work"
+        );
+        assert_eq!(observations.lock().len(), 6);
+        crate::test_complete!("forced_schedule_mutations_refuse_before_the_wrong_poll");
+    }
+
+    #[test]
+    fn forced_schedule_partial_and_resource_limited_receipts_fail_closed() {
+        init_test("forced_schedule_partial_and_resource_limited_receipts_fail_closed");
+        let config = LabConfig::new(0xF0CE_D5CE).max_steps(128);
+
+        let mut source = LabRuntime::new(config.clone());
+        source
+            .start_forced_schedule_recording(1)
+            .expect("start empty terminal-time capture");
+        source.advance_time_to(Time::from_nanos(17));
+        let terminal_time_only = source
+            .finish_forced_schedule_recording()
+            .expect("finish empty terminal-time capture");
+        assert!(terminal_time_only.dispatches().is_empty());
+        let mut replay = LabRuntime::new(config.clone());
+        assert!(matches!(
+            replay.run_forced_schedule(&terminal_time_only, ForcedScheduleLimits::new(1, 1)),
+            Err(ForcedScheduleError::TerminalMismatch {
+                expected_nanos: 17,
+                actual_nanos: 0,
+                ..
+            })
+        ));
+
+        let observations = Arc::new(Mutex::new(Vec::new()));
+        let mut source = forced_schedule_fixture(config.clone(), observations);
+        source
+            .start_forced_schedule_recording(32)
+            .expect("start deliberately partial capture");
+        let partial = source
+            .finish_forced_schedule_recording()
+            .expect("partial source is represented, not silently promoted");
+        let observations = Arc::new(Mutex::new(Vec::new()));
+        let mut replay = forced_schedule_fixture(config.clone(), Arc::clone(&observations));
+        assert_eq!(
+            replay.run_forced_schedule(&partial, ForcedScheduleLimits::new(32, 128)),
+            Err(ForcedScheduleError::PartialSource)
+        );
+        assert!(observations.lock().is_empty());
+
+        let observations = Arc::new(Mutex::new(Vec::new()));
+        let mut source = forced_schedule_fixture(config.clone(), observations);
+        source
+            .start_forced_schedule_recording(1)
+            .expect("start deliberately bounded capture");
+        assert!(source.run_until_quiescent_with_report().quiescent);
+        assert!(matches!(
+            source.finish_forced_schedule_recording(),
+            Err(ForcedScheduleError::RecordingLimitExceeded { max_dispatches: 1 })
+        ));
+
+        let observations = Arc::new(Mutex::new(Vec::new()));
+        let mut source = forced_schedule_fixture(config.clone(), observations);
+        source
+            .start_forced_schedule_recording(32)
+            .expect("start exact dispatch capture");
+        assert!(source.run_until_quiescent_with_report().quiescent);
+        let schedule = source
+            .finish_forced_schedule_recording()
+            .expect("complete exact dispatch projection");
+
+        let observations = Arc::new(Mutex::new(Vec::new()));
+        let mut replay = forced_schedule_fixture(config.clone(), observations);
+        assert!(matches!(
+            replay.run_forced_schedule(&schedule, ForcedScheduleLimits::new(1, 128)),
+            Err(ForcedScheduleError::DispatchLimitExceeded { .. })
+        ));
+
+        let observations = Arc::new(Mutex::new(Vec::new()));
+        let mut replay = forced_schedule_fixture(config.clone(), Arc::clone(&observations));
+        assert!(matches!(
+            replay.run_forced_schedule(&schedule, ForcedScheduleLimits::new(32, 1)),
+            Err(ForcedScheduleError::WorkLimitExceeded { .. })
+        ));
+        assert!(observations.lock().is_empty());
+
+        let mut mismatched_config = config.clone();
+        mismatched_config.enable_cancellation_oracle = !config.enable_cancellation_oracle;
+        let observations = Arc::new(Mutex::new(Vec::new()));
+        let mut replay = forced_schedule_fixture(mismatched_config, Arc::clone(&observations));
+        assert!(matches!(
+            replay.run_forced_schedule(&schedule, ForcedScheduleLimits::new(32, 128)),
+            Err(ForcedScheduleError::ConfigMismatch { .. })
+        ));
+        assert!(observations.lock().is_empty());
+
+        let mut truncated = schedule.clone();
+        truncated.dispatches.pop();
+        let observations = Arc::new(Mutex::new(Vec::new()));
+        let mut replay = forced_schedule_fixture(config, observations);
+        assert!(matches!(
+            replay.run_forced_schedule(&truncated, ForcedScheduleLimits::new(32, 128)),
+            Err(ForcedScheduleError::ScheduleExhausted { .. })
+                | Err(ForcedScheduleError::CertificateMismatch { .. })
+        ));
+        crate::test_complete!("forced_schedule_partial_and_resource_limited_receipts_fail_closed");
+    }
 
     /// Regression test: replay recorder must capture the actual completion
     /// severity from the finalized task record, not always `Severity::Ok`.
