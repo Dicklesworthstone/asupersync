@@ -10,7 +10,7 @@
 //!
 //! ── The critical check ──────────────────────────────────
 //!
-//! `src/time/sleep.rs:459-473` defines `poll_with_time`:
+//! `src/time/sleep.rs` defines `poll_with_time`:
 //!
 //! ```ignore
 //! pub fn poll_with_time(&self, now: Time) -> Poll<()> {
@@ -18,6 +18,7 @@
 //!     self.polled.store(true, Relaxed);
 //!     if self.ready.swap(false, AcqRel) || now >= self.deadline {
 //!         self.completed.store(true, Release);
+//!         self.complete_ready_registration(now, self.timer_driver_for_poll());
 //!         Poll::Ready(())
 //!     } else {
 //!         Poll::Pending
@@ -67,13 +68,13 @@
 //!
 //! ── No timer registration on immediate Ready ────────────
 //!
-//! The `Future::poll` impl (sleep.rs:480) delegates to
-//! `poll_with_time`. The Ready branch (lines 502-519)
-//! attempts to cancel any registered timer, but for the
+//! The `Future::poll` impl delegates to `poll_with_time`.
+//! `poll_with_time` clears any registered timer before returning
+//! Ready, but for the
 //! already-past case NO TIMER WAS EVER REGISTERED — the
 //! Ready return happens BEFORE the registration block
-//! (which only runs in the Pending branch at lines
-//! 521+). So the past-deadline path is allocation-free
+//! (which only runs in the Pending branch). So the
+//! past-deadline path is allocation-free
 //! and timer-free.
 //!
 //! ── No hang risk ────────────────────────────────────────
@@ -217,17 +218,20 @@ fn sleep_main_poll_delegates_to_poll_with_time() {
 
 #[test]
 fn sleep_ready_branch_cancels_timer_handle_if_any() {
-    // Pin: when poll_with_time returns Ready, the outer
-    // Future::poll cancels any registered timer handle.
+    // Pin: before poll_with_time returns Ready, it clears any
+    // registered timer handle.
     // This is harmless on the past-deadline path (no
     // timer ever registered) but matters when ready was
     // signalled by a fired timer. The actual cancellation
-    // may live in a helper, but Future::poll must route
-    // the Ready branch through that helper.
+    // lives in a helper, and the Ready branch must route through it.
     let source = read("src/time/sleep.rs");
 
-    let fn_marker = "fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {";
-    let body_window = source_between(&source, fn_marker, "\n}\n\nimpl Drop for Sleep");
+    let fn_marker = "pub fn poll_with_time(&self, now: Time) -> Poll<()> {";
+    let body_window = source_between(
+        &source,
+        fn_marker,
+        "\n    pub(crate) fn poll_ready_with_time",
+    );
 
     let helper_marker =
         "fn complete_ready_registration(&self, now: Time, timer_driver: Option<TimerDriverHandle>)";
@@ -238,11 +242,10 @@ fn sleep_ready_branch_cancels_timer_handle_if_any() {
     );
 
     assert!(
-        body_window.contains("Poll::Ready(()) => {")
-            && body_window.contains("self.complete_ready_registration(now, timer_driver.clone())")
+        body_window.contains("self.complete_ready_registration(now, self.timer_driver_for_poll())")
             && helper_window.contains("state.timer_handle.take()")
             && helper_window.contains("driver.cancel(&handle)"),
-        "REGRESSION: Sleep::Future::poll Ready branch no \
+        "REGRESSION: Sleep::poll_with_time Ready branch no \
          longer cancels any registered timer handle. \
          Could leak timer-wheel slots after firing.",
     );
@@ -261,7 +264,7 @@ fn sleep_ready_branch_runs_before_pending_branch_setup() {
 
     assert!(
         body_window.contains("match self.poll_with_time(now) {")
-            && body_window.contains("Poll::Ready(()) => {")
+            && body_window.contains("Poll::Ready(()) => Poll::Ready(()),")
             && body_window.contains("Poll::Pending => {"),
         "REGRESSION: Sleep::Future::poll no longer dispatches \
          on poll_with_time's result via match. Ready and \

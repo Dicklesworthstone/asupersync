@@ -22,43 +22,43 @@
 //!   When the inner fut completes BEFORE the deadline:
 //!     1. race observes the inner fut Ready.
 //!     2. race drops the Sleep loser.
-//!     3. Sleep::Drop fires (sleep.rs:693-723) — cancels the
-//!        registered TimerHandle via `driver.cancel(&handle)`.
+//!     3. Sleep::Drop delegates to `cancel_active_registration`
+//!        — cancels the registered TimerHandle via
+//!        `driver.cancel(&handle)`.
 //!     4. Trace event `timer_cancelled` fires for
 //!        observability.
 //!
-//!   Timer cancellation paths (4 distinct):
+//!   Timer cleanup paths (4 distinct):
 //!
-//!   1. **`Sleep::Drop`** (sleep.rs:693-723): when the Sleep
-//!      future is dropped (e.g., race drops the loser),
-//!      Drop takes the timer_handle + timer_driver out of
-//!      the state and calls `driver.cancel(&handle)`. The
+//!   1. **`Sleep::Drop`**: when the Sleep future is dropped
+//!      (e.g., race drops the loser), Drop delegates to the
+//!      shared cancellation helper, which takes the
+//!      timer_handle + timer_driver out of the state and
+//!      calls `driver.cancel(&handle)`. The
 //!      `let _ =` ignores the cancel result (the timer may
 //!      have already fired — both branches are safe).
 //!
-//!   2. **`Sleep::poll` Ready branch**: when poll_with_time
-//!      returns Ready, the outer poll fn routes through
+//!   2. **`Sleep::poll_with_time` Ready branch**: when the
+//!      deadline is ready, `poll_with_time` routes through
 //!      `complete_ready_registration`, which takes the
 //!      registered handle and cancels it via
 //!      `driver.cancel(&handle)`. This handles the case
 //!      where the deadline arrives BEFORE the future is
-//:      dropped (e.g., the timer fires and the next poll
+//!      dropped (e.g., the timer fires and the next poll
 //!      completes Ready).
 //!
-//!   3. **`Sleep::reset_after`** (sleep.rs:398-431): when
+//!   3. **`Sleep::reset_after`**: when
 //!      the Sleep is reset to a new deadline, the OLD
 //!      timer is cancelled before the new one is
 //!      registered. Prevents stale-timer accumulation
 //!      under repeated reset.
 //!
-//!   4. **`Sleep::reset`** (sleep.rs:380-391, similar
-//!      pattern at sleep.rs:560 for driver migration):
-//:      same cancel-on-replace pattern.
+//!   4. **`Sleep::reset`** (plus driver migration): same
+//!      cancel-on-replace pattern.
 //!
-//!   Each cancel path also emits a `TraceEvent::timer_cancelled`
-//!   trace event so operators can see when timers are
-//!   cleaned up — debugging timer-leak suspicions has
-//!   structured observability.
+//!   Cancellation paths emit `TraceEvent::timer_cancelled`;
+//!   normal completion emits `TraceEvent::timer_fired`.
+//!   Operators can therefore distinguish both terminal paths.
 //!
 //! Verdict: **SOUND**. Timer cleanup is enforced in 4
 //! distinct paths. The Sleep::Drop path is the structural
@@ -73,7 +73,7 @@
 //!   - removed the Sleep Drop impl (would leak timer
 //!     handles indefinitely — the timer driver fires
 //!     callbacks for tasks that no longer exist, wasting
-//:     CPU and memory),
+//!     CPU and memory),
 //!   - removed the Ready-branch driver.cancel call (would
 //!     leak the just-fired timer's bookkeeping until the
 //!     Sleep itself is dropped — minor leak, but
@@ -98,10 +98,22 @@ fn read(rel: &str) -> String {
     std::fs::read_to_string(&path).expect("read source file")
 }
 
+fn source_between<'a>(source: &'a str, start_marker: &str, end_marker: &str) -> &'a str {
+    let start = source
+        .find(start_marker)
+        .unwrap_or_else(|| panic!("missing {start_marker}"));
+    let end = source[start..]
+        .find(end_marker)
+        .map(|offset| start + offset)
+        .unwrap_or_else(|| panic!("missing {end_marker} after {start_marker}"));
+    &source[start..end]
+}
+
 #[test]
 fn sleep_drop_impl_cancels_registered_timer() {
-    // Pin (link 1): Sleep::Drop takes the timer_handle +
-    // timer_driver from state and calls driver.cancel(&handle).
+    // Pin (link 1): Sleep::Drop delegates to the shared helper,
+    // which takes the timer_handle + timer_driver from state and
+    // calls driver.cancel(&handle).
     // This is the structural guarantee for the operator's
     // scenario — fut-completes-first → race drops Sleep →
     // Drop cancels timer.
@@ -112,8 +124,22 @@ fn sleep_drop_impl_cancels_registered_timer() {
     let body_end = source[start..].find("\n}\n").expect("Sleep Drop close");
     let body = &source[start..start + body_end];
 
+    let cancel_body = source_between(
+        &source,
+        "fn cancel_active_registration(&self) {",
+        "\n    fn complete_ready_registration",
+    );
+    let take_body = source_between(
+        &source,
+        "fn take_active_registration(",
+        "\n    fn cancel_active_registration",
+    );
+
     assert!(
-        body.contains("state.timer_handle.take()") && body.contains("state.timer_driver.take()"),
+        body.contains("self.cancel_active_registration();")
+            && cancel_body.contains("self.take_active_registration()")
+            && take_body.contains("state.timer_handle.take()")
+            && take_body.contains("state.timer_driver.take()"),
         "REGRESSION: Sleep::Drop no longer takes timer_handle \
          + timer_driver from state. The cancel call has \
          nothing to cancel — timer leaks until the driver \
@@ -121,7 +147,7 @@ fn sleep_drop_impl_cancels_registered_timer() {
     );
 
     assert!(
-        body.contains("driver.cancel(&handle);"),
+        cancel_body.contains("driver.cancel(&handle);"),
         "REGRESSION: Sleep::Drop no longer calls \
          driver.cancel(&handle). Registered timers persist \
          past Sleep drop — leak in the timer-driver wheel \
@@ -132,10 +158,8 @@ fn sleep_drop_impl_cancels_registered_timer() {
 
 #[test]
 fn sleep_drop_emits_timer_cancelled_trace_event_for_observability() {
-    // Pin (link 4): Sleep::Drop emits a TraceEvent::
-    // timer_cancelled so operators can audit the timer
-    // lifecycle. Without it, debugging timer leaks is
-    // blind.
+    // Pin (link 4): Sleep::Drop delegates to the cancellation
+    // helper that emits TraceEvent::timer_cancelled.
     let source = read("src/time/sleep.rs");
 
     let impl_marker = "impl Drop for Sleep {";
@@ -143,8 +167,15 @@ fn sleep_drop_emits_timer_cancelled_trace_event_for_observability() {
     let body_end = source[start..].find("\n}\n").expect("Sleep Drop close");
     let body = &source[start..start + body_end];
 
+    let cancel_body = source_between(
+        &source,
+        "fn cancel_active_registration(&self) {",
+        "\n    fn complete_ready_registration",
+    );
+
     assert!(
-        body.contains("TraceEvent::timer_cancelled(seq, now, handle.id())"),
+        body.contains("self.cancel_active_registration();")
+            && cancel_body.contains("TraceEvent::timer_cancelled(seq, now, handle.id())"),
         "REGRESSION: Sleep::Drop no longer emits the \
          timer_cancelled trace event. Operators lose \
          visibility into timer lifecycle — leak suspicions \
@@ -154,21 +185,17 @@ fn sleep_drop_emits_timer_cancelled_trace_event_for_observability() {
 
 #[test]
 fn sleep_poll_ready_branch_cancels_timer_immediately() {
-    // Pin (link 2): the Sleep::poll Ready branch cancels
-    // the timer immediately when the deadline fires. This
+    // Pin (link 2): the Sleep::poll_with_time Ready branch
+    // clears the timer immediately when the deadline fires. This
     // handles the case where the deadline arrives BEFORE
     // the future is dropped.
     let source = read("src/time/sleep.rs");
 
-    let fn_marker = "fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {";
-    let start = source.find(fn_marker).expect("Sleep::poll fn");
-    let window_end = (start + 8000).min(source.len());
-    let safe_end = source
-        .char_indices()
-        .map(|(i, _)| i)
-        .rfind(|&i| i <= window_end)
-        .unwrap_or(window_end);
-    let body = &source[start..safe_end];
+    let body = source_between(
+        &source,
+        "pub fn poll_with_time(&self, now: Time) -> Poll<()> {",
+        "\n    pub(crate) fn poll_ready_with_time",
+    );
 
     let helper_marker =
         "fn complete_ready_registration(&self, now: Time, timer_driver: Option<TimerDriverHandle>)";
@@ -179,11 +206,10 @@ fn sleep_poll_ready_branch_cancels_timer_immediately() {
     let helper_body = &source[helper_start..helper_end];
 
     assert!(
-        body.contains("Poll::Ready(()) => {")
-            && body.contains("self.complete_ready_registration(now, timer_driver.clone())")
+        body.contains("self.complete_ready_registration(now, self.timer_driver_for_poll())")
             && helper_body.contains("state.timer_handle.take()")
             && helper_body.contains("driver.cancel(&handle)"),
-        "REGRESSION: Sleep::poll Ready branch no longer \
+        "REGRESSION: Sleep::poll_with_time Ready branch no longer \
          cancels the timer through complete_ready_registration. \
          The just-fired timer's bookkeeping persists until \
          Sleep::Drop runs — minor leak, but measurable in \
@@ -217,7 +243,8 @@ fn sleep_reset_after_cancels_old_timer_before_re_registration() {
 
 #[test]
 fn sleep_drop_clears_waker_to_release_task_reference() {
-    // Pin (audit): Sleep::Drop also clears state.waker.
+    // Pin (audit): the shared cleanup used by Sleep::Drop also
+    // clears state.waker.
     // Without this, the waker holds a strong reference to
     // the task, preventing the tasks Cx from dropping —
     // unbounded lifetime extension under sustained
@@ -229,8 +256,15 @@ fn sleep_drop_clears_waker_to_release_task_reference() {
     let body_end = source[start..].find("\n}\n").expect("Sleep Drop close");
     let body = &source[start..start + body_end];
 
+    let take_body = source_between(
+        &source,
+        "fn take_active_registration(",
+        "\n    fn cancel_active_registration",
+    );
+
     assert!(
-        body.contains("state.waker = None;"),
+        body.contains("self.cancel_active_registration();")
+            && take_body.contains("state.waker = None;"),
         "REGRESSION: Sleep::Drop no longer clears the waker. \
          The waker holds a strong reference to the tasks \
          WakeState — preventing task drop and silently \
@@ -240,8 +274,8 @@ fn sleep_drop_clears_waker_to_release_task_reference() {
 
 #[test]
 fn sleep_drop_uses_safe_let_underscore_for_cancel_result() {
-    // Pin (audit): Sleep::Drop uses `let _ = driver.cancel
-    // (&handle)` — ignoring the cancel result. Without
+    // Pin (audit): the shared cancellation helper uses
+    // `let _ = driver.cancel(&handle)` — ignoring the result. Without
     // the discard, a panic in the driver could escape and
     // double-panic during destructor unwind.
     let source = read("src/time/sleep.rs");
@@ -251,8 +285,15 @@ fn sleep_drop_uses_safe_let_underscore_for_cancel_result() {
     let body_end = source[start..].find("\n}\n").expect("Sleep Drop close");
     let body = &source[start..start + body_end];
 
+    let cancel_body = source_between(
+        &source,
+        "fn cancel_active_registration(&self) {",
+        "\n    fn complete_ready_registration",
+    );
+
     assert!(
-        body.contains("let _ = driver.cancel(&handle);"),
+        body.contains("self.cancel_active_registration();")
+            && cancel_body.contains("let _ = driver.cancel(&handle);"),
         "REGRESSION: Sleep::Drop no longer discards the \
          cancel result. A failure return would propagate \
          (or panic) in Drop — destructor double-panic \
@@ -262,8 +303,8 @@ fn sleep_drop_uses_safe_let_underscore_for_cancel_result() {
 
 #[test]
 fn sleep_drop_detaches_fallback_threads_to_avoid_blocking() {
-    // Pin (audit): Sleep::Drop drops the fallback_handles
-    // Vec without joining — `drop(fallback_handles)`. This
+    // Pin (audit): the shared cleanup used by Sleep::Drop drops
+    // fallback_handles without joining. This
     // detaches background threads. Joining would block the
     // executor; detaching lets them complete in their own
     // time.
@@ -274,8 +315,15 @@ fn sleep_drop_detaches_fallback_threads_to_avoid_blocking() {
     let body_end = source[start..].find("\n}\n").expect("Sleep Drop close");
     let body = &source[start..start + body_end];
 
+    let cancel_body = source_between(
+        &source,
+        "fn cancel_active_registration(&self) {",
+        "\n    fn complete_ready_registration",
+    );
+
     assert!(
-        body.contains("drop(fallback_handles);"),
+        body.contains("self.cancel_active_registration();")
+            && cancel_body.contains("drop(fallback_handles);"),
         "REGRESSION: Sleep::Drop no longer detaches \
          fallback_handles. Either it joins (would block \
          the executor) or it leaks (background threads \

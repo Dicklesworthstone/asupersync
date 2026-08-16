@@ -623,11 +623,57 @@ impl Sleep {
                 .is_some()
     }
 
+    /// Detach every resource owned by the current wait without blocking the
+    /// executor. A completed future may legally remain allocated indefinitely,
+    /// so terminal cleanup cannot be deferred to `Drop`.
+    fn take_active_registration(
+        &self,
+    ) -> (
+        Option<TimerHandle>,
+        Option<TimerDriverHandle>,
+        Vec<std::thread::JoinHandle<()>>,
+    ) {
+        let mut state = self.state.lock();
+        state.waker = None;
+        state.registered_partial = false;
+
+        let mut fallback_handles = std::mem::take(&mut state.zombie_fallbacks);
+        if let Some(fallback) = state.fallback.take() {
+            request_stop_fallback(&fallback);
+            fallback_handles.push(fallback.join);
+        }
+
+        (
+            state.timer_handle.take(),
+            state.timer_driver.take(),
+            fallback_handles,
+        )
+    }
+
+    fn cancel_active_registration(&self) {
+        let (handle, driver, fallback_handles) = self.take_active_registration();
+
+        // Joining an arbitrary fallback thread would block the executor. The
+        // stop request above wakes it, and dropping these handles detaches it.
+        drop(fallback_handles);
+
+        if let (Some(handle), Some(driver)) = (handle, driver) {
+            let trace = Cx::current().and_then(|current| current.trace_buffer());
+            if let Some(trace) = trace.as_ref() {
+                let now = driver.now();
+                trace.record_event(|seq| TraceEvent::timer_cancelled(seq, now, handle.id()));
+            }
+            let _ = driver.cancel(&handle);
+        }
+    }
+
     fn complete_ready_registration(&self, now: Time, timer_driver: Option<TimerDriverHandle>) {
-        let (handle, driver) = {
-            let mut state = self.state.lock();
-            (state.timer_handle.take(), state.timer_driver.clone())
-        };
+        let (handle, driver, fallback_handles) = self.take_active_registration();
+
+        // See `cancel_active_registration`: terminal completion must release
+        // task references promptly without synchronously joining OS threads.
+        drop(fallback_handles);
+
         if let Some(handle) = handle {
             let trace = Cx::current().and_then(|current| current.trace_buffer());
             if let Some(trace) = trace.as_ref() {
@@ -670,6 +716,7 @@ impl Sleep {
         if self.ready.swap(false, Ordering::AcqRel) || now >= self.deadline {
             self.completed
                 .store(true, std::sync::atomic::Ordering::Release);
+            self.complete_ready_registration(now, self.timer_driver_for_poll());
             Poll::Ready(())
         } else {
             Poll::Pending
@@ -717,8 +764,8 @@ impl Future for Sleep {
         // is intentionally excluded: request-budget combinators own that outcome,
         // and letting the handler continue after its sleep would turn a timeout
         // into a successful response. The surrounding task may run its normal
-        // cleanup before returning. Drop cancels the registered timer and records
-        // the cancellation trace event.
+        // cleanup before returning. Terminal cleanup below cancels the registered
+        // timer immediately; a completed future may outlive the surrounding task.
         if Cx::current().is_some_and(|current| {
             current.is_cancel_requested()
                 && !current.cancelled_by(CancelKind::Timeout)
@@ -729,6 +776,7 @@ impl Future for Sleep {
                 .store(true, std::sync::atomic::Ordering::Relaxed);
             self.completed
                 .store(true, std::sync::atomic::Ordering::Release);
+            self.cancel_active_registration();
             return Poll::Ready(());
         }
 
@@ -797,11 +845,7 @@ impl Future for Sleep {
         }
 
         match self.poll_with_time(now) {
-            Poll::Ready(()) => {
-                // Cancel any registered timer on completion.
-                self.complete_ready_registration(now, timer_driver.clone());
-                Poll::Ready(())
-            }
+            Poll::Ready(()) => Poll::Ready(()),
             Poll::Pending => {
                 let mut state = self.state.lock();
                 let finished_handles = take_finished_fallbacks(&mut state);
@@ -1000,34 +1044,7 @@ impl Future for Sleep {
 
 impl Drop for Sleep {
     fn drop(&mut self) {
-        let (handle, driver, fallback_handles) = {
-            let mut state = self.state.lock();
-            // Clear waker to release task reference immediately, preventing
-            // unbounded lifetime extension if background thread is running.
-            state.waker = None;
-            let mut handles = std::mem::take(&mut state.zombie_fallbacks);
-            if let Some(fallback) = state.fallback.take() {
-                request_stop_fallback(&fallback);
-                handles.push(fallback.join);
-            }
-            (
-                state.timer_handle.take(),
-                state.timer_driver.take(),
-                handles,
-            )
-        };
-
-        // Intentionally detach threads to avoid blocking the executor
-        drop(fallback_handles);
-
-        if let (Some(handle), Some(driver)) = (handle, driver) {
-            let trace = Cx::current().and_then(|current| current.trace_buffer());
-            if let Some(trace) = trace.as_ref() {
-                let now = driver.now();
-                trace.record_event(|seq| TraceEvent::timer_cancelled(seq, now, handle.id()));
-            }
-            let _ = driver.cancel(&handle);
-        }
+        self.cancel_active_registration();
     }
 }
 

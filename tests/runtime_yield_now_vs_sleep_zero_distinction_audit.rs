@@ -306,7 +306,7 @@ fn sleep_state_does_not_register_timer_for_already_past_deadline() {
     // The Ready branch comes BEFORE the Pending branch.
     // The Pending branch registers the timer; Ready doesnt.
     assert!(
-        body.contains("Poll::Ready(()) => {"),
+        body.contains("Poll::Ready(()) => Poll::Ready(()),"),
         "REGRESSION: Sleep::poll no longer matches \
          Poll::Ready. The Ready branch is what skips timer \
          registration for sleep(0).",

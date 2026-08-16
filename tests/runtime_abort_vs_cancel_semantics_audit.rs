@@ -323,31 +323,47 @@ fn cross_thread_cx_cancel_wakes_a_timer_parked_native_task() {
         .build()
         .expect("build current-thread runtime");
     let parked = Arc::new(AtomicBool::new(false));
-    let completed_after_sleep = Arc::new(AtomicBool::new(false));
+    let sleep_returned = Arc::new(AtomicBool::new(false));
+    let release_child = Arc::new(AtomicBool::new(false));
+    let child_finished = Arc::new(AtomicBool::new(false));
     let child_cx_slot = Arc::new(std::sync::Mutex::new(None));
     let child_parked = Arc::clone(&parked);
-    let child_completed = Arc::clone(&completed_after_sleep);
+    let child_sleep_returned = Arc::clone(&sleep_returned);
+    let child_release = Arc::clone(&release_child);
+    let child_finished_flag = Arc::clone(&child_finished);
     let child_slot = Arc::clone(&child_cx_slot);
 
     runtime
         .handle()
         .try_spawn_with_cx(move |child_cx| async move {
             *child_slot.lock().expect("child Cx slot") = Some(child_cx.clone());
-            {
-                let mut sleeper = std::pin::pin!(asupersync::time::sleep(
-                    child_cx.now(),
-                    Duration::from_secs(10),
-                ));
-                std::future::poll_fn(|poll_cx| {
-                    let poll = sleeper.as_mut().poll(poll_cx);
-                    if poll.is_pending() {
-                        child_parked.store(true, Ordering::Release);
-                    }
-                    poll
-                })
-                .await;
-            }
-            child_completed.store(true, Ordering::Release);
+            let mut sleeper = std::pin::pin!(asupersync::time::sleep(
+                child_cx.now(),
+                Duration::from_secs(10),
+            ));
+            std::future::poll_fn(|poll_cx| {
+                let poll = sleeper.as_mut().poll(poll_cx);
+                if poll.is_pending() {
+                    child_parked.store(true, Ordering::Release);
+                }
+                poll
+            })
+            .await;
+            child_sleep_returned.store(true, Ordering::Release);
+
+            // Keep the completed `Sleep` alive until the parent verifies that
+            // terminal completion, rather than `Drop`, removed its registration.
+            std::future::poll_fn(|poll_cx| {
+                if child_release.load(Ordering::Acquire) {
+                    Poll::Ready(())
+                } else {
+                    poll_cx.waker().wake_by_ref();
+                    Poll::Pending
+                }
+            })
+            .await;
+            assert!(sleeper.as_ref().was_polled());
+            child_finished_flag.store(true, Ordering::Release);
         })
         .expect("spawn timer-parked native task");
 
@@ -376,16 +392,23 @@ fn cross_thread_cx_cancel_wakes_a_timer_parked_native_task() {
     .expect("cross-thread Cx cancellation must not panic");
 
     assert!(
-        runtime.block_on(drive_until_flag(
-            &completed_after_sleep,
-            Duration::from_secs(1),
-        )),
-        "Cx::cancel_with must wake a task parked in sleep(10s) and let its cleanup continuation run promptly",
+        runtime.block_on(drive_until_flag(&sleep_returned, Duration::from_secs(1))),
+        "Cx::cancel_with must wake a task parked in sleep(10s) and complete the wait promptly",
+    );
+    assert!(
+        !child_finished.load(Ordering::Acquire),
+        "the child must retain the completed Sleep during the registration assertion",
     );
     assert_eq!(
         timer.pending_count(),
         0,
-        "the cancelled sleep must remove its timer registration before the task completes",
+        "the cancelled sleep must remove its timer registration before the completed future is dropped",
+    );
+
+    release_child.store(true, Ordering::Release);
+    assert!(
+        runtime.block_on(drive_until_flag(&child_finished, Duration::from_secs(1))),
+        "the child must finish after the parent releases its retained Sleep",
     );
 }
 
