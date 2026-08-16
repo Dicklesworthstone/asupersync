@@ -80,13 +80,13 @@
   "source_contracts": [
     {
       "path": "Cargo.toml",
-      "sha256": "19623432b6cccd05753907b39a14306a1813c0b2d4fac6a34b028226c4b75f7a",
+      "sha256": "b756e9baf054ce93b8bc8a305d29b347f3ae6e269fcd12cbe57b0662d0b98276",
       "line_count": 1057,
       "role": "tls feature and x509-parser dependency baseline"
     },
     {
       "path": "Cargo.lock",
-      "sha256": "e0be65699715c92ae75dbc96292635e4d0aec7ef6f404c8a85793b9e58b98946",
+      "sha256": "83c11d5b3882a757b586ba96e2bd3b86d8c49c516ea0896909f148f3f9bee53e",
       "line_count": 4666,
       "role": "resolved dependency baseline"
     },
@@ -116,7 +116,7 @@
     },
     {
       "path": "artifacts/x509_validation_ownership_inventory_v1.json",
-      "sha256": "53dd75dd375da36d6080729ca8c10db5a5da4b35ab8b35bc552298d66256af10",
+      "sha256": "6ace041a4b1061ab3cfd94dc132df5ee6b9ae82ff2f5dbb7e17413da28d5d575",
       "line_count": 1073,
       "role": "A1 call-site, owner, residue, and routed-gap authority"
     },
@@ -134,7 +134,7 @@
     },
     {
       "path": "artifacts/x509_standard_verifier_delegation_v1.json",
-      "sha256": "5185fa89e3836fae4b1942955aabae3e4047880aab630752881c5e48fc12e6fb",
+      "sha256": "00c4b1706e5be3a133947963084e118b1b2cddc9bb46f7c8bc4a016ec2a2ad0a",
       "line_count": 345,
       "role": "A2 standard-first delegation and retained-policy authority"
     },

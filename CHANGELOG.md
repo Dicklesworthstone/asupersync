@@ -16,6 +16,9 @@ GitHub Release/tag baseline is `v0.4.5`.
 
 ## Version Timeline
 
+- **v0.4.6 Release**: patch release tightening HTTP/1 framing parsing and
+  completing `Sleep` timer/waker cleanup without changing the v0.4.3 public
+  surface.
 - **v0.4.5 Release**: patch release fixing timer-parked cancellation and
   driverless Windows connects while preserving the complete v0.4.3 public
   surface.
@@ -46,12 +49,15 @@ GitHub Release/tag baseline is `v0.4.5`.
 
 ## [Unreleased]
 
+## [v0.4.6] - 2026-08-16
+
 ### Runtime correctness
 
 - **Cancelled sleeps release timer registrations before the completed future is
   dropped.** A task that retains its completed `Sleep` can no longer retain the
   timer-wheel entry, stored waker, or fallback-thread state after explicit
-  cancellation.
+  cancellation. Resetting a sleep also clears the prior waker and delegates
+  through one authoritative registration-cleanup path.
 
 ### Security and protocols
 
@@ -62,6 +68,17 @@ GitHub Release/tag baseline is `v0.4.5`.
   streaming, and pooled-client paths. The client also rejects signed or empty
   URL/proxy ports, non-three-digit CONNECT statuses, and invalid manually
   serialized CONNECT header fields.
+
+### Compatibility and release evidence
+
+- **The v0.4.3 public surface remains the patch-line compatibility floor.** The
+  release changes private cleanup and parser validation only; it removes or
+  renames no public item and adds no required public field.
+- **Native cancellation, timer cleanup, HTTP/1 parsing, and filesystem/process
+  conformance regressions are permanent release blockers.** The release gate
+  includes the downstream abort/join sequence, exact timer-registration and
+  waker cleanup, RFC OWS rejection cases, and deterministic read-only-file
+  failure checks that remain valid under privileged remote workers.
 
 ---
 
@@ -1947,7 +1964,8 @@ The initial tagged milestone establishing the core async runtime with structured
 
 ---
 
-[Unreleased]: https://github.com/Dicklesworthstone/asupersync/compare/v0.4.5...HEAD
+[Unreleased]: https://github.com/Dicklesworthstone/asupersync/compare/v0.4.6...HEAD
+[v0.4.6]: https://github.com/Dicklesworthstone/asupersync/compare/v0.4.5...v0.4.6
 [v0.4.5]: https://github.com/Dicklesworthstone/asupersync/compare/v0.4.4...v0.4.5
 [v0.4.4]: https://github.com/Dicklesworthstone/asupersync/compare/v0.4.3...v0.4.4
 [v0.4.3]: https://github.com/Dicklesworthstone/asupersync/compare/v0.4.2...v0.4.3
