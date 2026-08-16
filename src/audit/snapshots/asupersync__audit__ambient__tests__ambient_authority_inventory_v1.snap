@@ -341,9 +341,9 @@ Io	database/postgres.rs	8530	std::net::TcpListener	let listener = match std::net
 Io	database/postgres.rs	8538	std::net::TcpStream	let std_stream = match std::net::TcpStream::connect(addr) {
 Io	database/postgres.rs	8546	TcpStream::	let stream = match crate::net::TcpStream::from_std(std_stream) {
 Io	grpc/server.rs	1969	std::net::TcpListener	let listener = std::net::TcpListener::bind(addr).map_err(|error| {
-Io	http/h1/http_client.rs	2017	TcpStream::	TcpStream::connect_socket_addr(socket_addr)
-Io	http/h1/http_client.rs	2022	TcpStream::	TcpStream::connect(addr)
-Io	http/h1/http_client.rs	2530	TcpStream::	let mut stream = TcpStream::connect(addr)
+Io	http/h1/http_client.rs	2014	TcpStream::	TcpStream::connect_socket_addr(socket_addr)
+Io	http/h1/http_client.rs	2019	TcpStream::	TcpStream::connect(addr)
+Io	http/h1/http_client.rs	2531	TcpStream::	let mut stream = TcpStream::connect(addr)
 Io	http/h1/listener.rs	373	TcpListener::	let tcp_listener = TcpListener::bind(addr).await?;
 Io	http/h2/listener.rs	2029	TcpListener::	let tcp_listener = TcpListener::bind(addr).await?;
 Io	messaging/nats.rs	1623	TcpStream::	let stream = TcpStream::connect(addr).await?;
@@ -479,7 +479,7 @@ Spawn	signal/shutdown.rs	493	std::thread::Builder	std::thread::Builder::new()
 Spawn	signal/signal.rs	223	thread::Builder	thread::Builder::new()
 Spawn	signal/signal.rs	360	thread::Builder	let poller_handle = thread::Builder::new()
 Spawn	time/sleep.rs	134	std::thread::Builder	let handle = std::thread::Builder::new()
-Spawn	time/sleep.rs	947	std::thread::spawn	let handle = std::thread::spawn(move || {
+Spawn	time/sleep.rs	991	std::thread::spawn	let handle = std::thread::spawn(move || {
 Time	agent_swarm/control_plane.rs	1210	SystemTime::now()	last_updated: SystemTime::now(),
 Time	agent_swarm/control_plane.rs	1238	SystemTime::now()	measured_at: SystemTime::now(),
 Time	agent_swarm/control_plane.rs	627	SystemTime::now()	SystemTime::now()

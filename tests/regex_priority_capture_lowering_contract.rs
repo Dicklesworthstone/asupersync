@@ -34,7 +34,7 @@ const SOURCE_PATH: &str = "src/observability/regex_lowering.rs";
 const IR_SOURCE_PATH: &str = "src/observability/regex_ir.rs";
 const SEMANTIC_TERMINAL_PATH: &str = "artifacts/regex_semantic_terminal_receipt_v1.json";
 const FROZEN_SOURCE_SHA256: &str =
-    "c7e1765ee2499829a63711d10a8de591f8d59a78897f53e7e13de5599021ed64";
+    "ca5a1bf0113e7c7ce0a77d489501a823d9153229d064ca7a5584e931f3dce8f0";
 const FROZEN_IR_SOURCE_SHA256: &str =
     "de4906beb838fda2c57bccfdb16316e8de661e564940a47e7b9b87f065311cb3";
 const FROZEN_TERMINAL_SHA256: &str =

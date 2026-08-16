@@ -56,7 +56,7 @@
     {
       "bead_id": "asupersync-5z2scg.8.3.3.3",
       "path": "artifacts/regex_priority_capture_lowering_contract_v1.json",
-      "sha256": "a9af4009265150f76e9e1296bb5b5dc4dd27f11d7a48d4576dec3b4328a47b60",
+      "sha256": "fc8905c651face14d832d878daf88602478d9bfe4d39e1752e62f76049b9d1e1",
       "disposition": "STAGED_PRIORITY_CAPTURE_LOWERING"
     }
   ],
@@ -87,8 +87,8 @@
     },
     {
       "path": "src/observability/regex_lowering.rs",
-      "sha256": "c7e1765ee2499829a63711d10a8de591f8d59a78897f53e7e13de5599021ed64",
-      "bytes": 68943,
+      "sha256": "ca5a1bf0113e7c7ce0a77d489501a823d9153229d064ca7a5584e931f3dce8f0",
+      "bytes": 69039,
       "revision": "432be7270481c5439db00f79910465a269512266"
     }
   ],

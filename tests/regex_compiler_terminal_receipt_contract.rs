@@ -159,7 +159,7 @@ fn terminal_validate(value: &Value) -> Result<(), String> {
         ),
         (
             "artifacts/regex_priority_capture_lowering_contract_v1.json",
-            "a9af4009265150f76e9e1296bb5b5dc4dd27f11d7a48d4576dec3b4328a47b60",
+            "fc8905c651face14d832d878daf88602478d9bfe4d39e1752e62f76049b9d1e1",
         ),
     ];
     if predecessors.len() != expected_predecessors.len() {

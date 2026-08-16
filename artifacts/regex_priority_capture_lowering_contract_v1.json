@@ -39,8 +39,8 @@
   "sources": [
     {
       "path": "src/observability/regex_lowering.rs",
-      "sha256": "c7e1765ee2499829a63711d10a8de591f8d59a78897f53e7e13de5599021ed64",
-      "bytes": 68943,
+      "sha256": "ca5a1bf0113e7c7ce0a77d489501a823d9153229d064ca7a5584e931f3dce8f0",
+      "bytes": 69039,
       "role": "bounded priority, capture, repetition and scoped-flag lowering"
     },
     {

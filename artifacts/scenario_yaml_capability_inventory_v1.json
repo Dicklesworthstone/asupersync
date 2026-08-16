@@ -166,8 +166,8 @@
     },
     {
       "path": "src/http/h1/codec.rs",
-      "sha256": "503bc5269073d04f9505162863c876d4cc73d124247253395b4cd0ab018e6076",
-      "line_count": 3317
+      "sha256": "8c6a3b4a46189d6bc4380382c8177e1a53b280efe9fb11a4a8b30c77ef7e4702",
+      "line_count": 3368
     },
     {
       "path": "src/observability/diagnostics.rs",

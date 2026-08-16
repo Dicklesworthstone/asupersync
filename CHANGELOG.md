@@ -11,8 +11,8 @@ Asupersync is a spec-first, cancel-correct, capability-secure async runtime for 
 - Organized by landed capabilities within each version, not by diff order.
 
 Scope window: current work through 2026-08-16, reconstructed from git history,
-beads, benchmark ledgers, and live repo artifacts; the previous published
-GitHub Release/tag baseline is `v0.4.4`.
+beads, benchmark ledgers, and live repo artifacts; the latest published
+GitHub Release/tag baseline is `v0.4.5`.
 
 ## Version Timeline
 
@@ -46,7 +46,22 @@ GitHub Release/tag baseline is `v0.4.4`.
 
 ## [Unreleased]
 
-_No changes yet._
+### Runtime correctness
+
+- **Cancelled sleeps release timer registrations before the completed future is
+  dropped.** A task that retains its completed `Sleep` can no longer retain the
+  timer-wheel entry, stored waker, or fallback-thread state after explicit
+  cancellation.
+
+### Security and protocols
+
+- **HTTP/1 framing and connection tokens now use RFC OWS exactly.**
+  `Content-Length`, `Transfer-Encoding`, `Connection`, `Expect`, `Host`, and
+  `Retry-After` parsing trims only SP/HTAB, preventing Unicode whitespace or
+  `obs-text` from creating parser disagreements across request, response,
+  streaming, and pooled-client paths. The client also rejects signed or empty
+  URL/proxy ports, non-three-digit CONNECT statuses, and invalid manually
+  serialized CONNECT header fields.
 
 ---
 

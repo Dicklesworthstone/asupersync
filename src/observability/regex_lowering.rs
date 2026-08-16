@@ -1669,6 +1669,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::literal_string_with_formatting_args)] // Regex property syntax uses braces.
     fn private_compile_aggregates_each_stage_and_retains_typed_defer_rows() {
         let syntax = compile_default("private-source-canary\\")
             .expect_err("trailing escape must fail in syntax");
