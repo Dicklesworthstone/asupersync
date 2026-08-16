@@ -258,7 +258,7 @@
           "async-api"
         ]
       },
-      "lockfile_sha256": "10bdf05816639c155355e1260fc74da267739f120346525c0ff6387bbc0c76ef",
+      "lockfile_sha256": "7b57b6c40a2b93ca7acd4b435d14a69512a743bfd6612529602b1342f3a703fc",
       "cargo_profile": "dev",
       "target": "x86_64-unknown-linux-gnu",
       "host": "linux-x86_64-trj"

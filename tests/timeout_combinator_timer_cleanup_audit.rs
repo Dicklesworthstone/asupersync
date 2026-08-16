@@ -162,7 +162,7 @@ fn sleep_poll_ready_branch_cancels_timer_immediately() {
 
     let fn_marker = "fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {";
     let start = source.find(fn_marker).expect("Sleep::poll fn");
-    let window_end = (start + 4000).min(source.len());
+    let window_end = (start + 8000).min(source.len());
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
