@@ -30,7 +30,7 @@
   "source_pins": [
     {
       "path": "Cargo.toml",
-      "sha256": "e998db4199267aa7166b67e36e69db213c2f755cebd6e6e91bb5a7e35204e0f3",
+      "sha256": "19623432b6cccd05753907b39a14306a1813c0b2d4fac6a34b028226c4b75f7a",
       "line_count": 1057
     },
     {
@@ -55,7 +55,7 @@
     },
     {
       "path": "artifacts/dependency_capability_baseline_v1.json",
-      "sha256": "a113ad6e25b10e0ea17a289ac14676b136fd72e31863f66e651131276054e2dc",
+      "sha256": "a62fbf265ca2b38d60417cc785abbeac7014982fa0d9cd8714eaaa58e426ce03",
       "line_count": 3210
     },
     {

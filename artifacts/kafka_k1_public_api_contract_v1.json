@@ -61,7 +61,7 @@
       "path": "artifacts/kafka_k1_obligation_index_v1.json",
       "byte_count": 42758,
       "record_count": 738,
-      "sha256": "1863c841c2fc7fa7cf32d4615ae2463899eff0e204ee11ccc56a8420d59c83ac"
+      "sha256": "6393898bbbeb4e11a32e96043d6e014fe0d0041d5cc67eb79598662069fe90bf"
     },
     {
       "input_id": "K1-3-INPUT-K1-1-DOCUMENT",
@@ -77,7 +77,7 @@
       "path": "tests/kafka_k1_client_contract.rs",
       "byte_count": 95396,
       "record_count": 2585,
-      "sha256": "bb3b9e5e5b5ae0476949fd267e2fe0138dd012149e278d91d22d4e46ce4e4335"
+      "sha256": "e7fd424a8aca1f96ca0f82339522451278b26c83db5e9f0d9e35369a72e46eb6"
     },
     {
       "input_id": "K1-3-INPUT-K0-5",
@@ -85,7 +85,7 @@
       "path": "artifacts/kafka_k0_baseline_disposition_v1.json",
       "byte_count": 29494,
       "record_count": 284,
-      "sha256": "0a1b5ec73ad7b486c94d1d5935daf30ce1821b4a3573ae171d9f2cdc23565fa3"
+      "sha256": "fea82cba304d6b89e71f4160258be15ee8d1e1f4131f377f8aa5e2609bcfc9dc"
     },
     {
       "input_id": "K1-3-INPUT-K0-1",
@@ -93,7 +93,7 @@
       "path": "artifacts/kafka_capability_inventory_v1.json",
       "byte_count": 41921,
       "record_count": 1015,
-    "sha256": "12ca1122a89f5f3a7676c70b847b5dc306c3a592b28826dd975e4304ef2f17fd"
+    "sha256": "bf832e00206dc464f6b1df9a57535d8a9866a4f16d1142b8cb54ae652ca83ace"
     },
     {
       "input_id": "K1-3-INPUT-K0-2",
@@ -101,7 +101,7 @@
       "path": "artifacts/kafka_incumbent_semantics_matrix_v1.json",
       "byte_count": 228933,
       "record_count": 2560,
-      "sha256": "01859a17bbb5b136f697ff08c68bb9c878e80cfbf0f5f86f28d1d4fe04263dc9"
+      "sha256": "e0751a154d57e708eaffe933492adf0f4db6b473f9b19e32b34f4544f2c221a2"
     },
     {
       "input_id": "K1-3-INPUT-K0-3",
@@ -109,7 +109,7 @@
       "path": "artifacts/kafka_downstream_user_journey_inventory_v1.json",
       "byte_count": 1171867,
       "record_count": 17987,
-      "sha256": "03c8c03bd4ff7553756ebcde676e4e446d2a375eea20c79598274e0a892d0ce0"
+      "sha256": "506f6a1d6a74afd55ec9ed3121b43342c1d2fc5dba2ebb670ea7205fb2fe8c37"
     },
     {
       "input_id": "K1-3-INPUT-ADR",
@@ -147,9 +147,9 @@
       "input_id": "K1-3-INPUT-MANIFEST",
       "role": "CURRENT_FEATURE_GRAPH_SOURCE",
       "path": "Cargo.toml",
-      "byte_count": 37619,
+      "byte_count": 37631,
       "record_count": 1057,
-      "sha256": "e998db4199267aa7166b67e36e69db213c2f755cebd6e6e91bb5a7e35204e0f3"
+      "sha256": "19623432b6cccd05753907b39a14306a1813c0b2d4fac6a34b028226c4b75f7a"
     }
   ],
   "coverage_model": {

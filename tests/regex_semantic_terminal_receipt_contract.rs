@@ -108,7 +108,7 @@ fn terminal_validate(value: &Value) -> Result<(), String> {
     let expected_predecessors = [
         (
             "artifacts/regex_unicode_table_contract_v1.json",
-            "e9dd1bc482216f45d7748d0772dec891530fd846439f755f454c8082259c49c4",
+            "9ed2c71d91244d4c96752010aa73512c0764767e31b5f2a9605b5501237aea3b",
         ),
         (
             "artifacts/regex_character_semantics_contract_v1.json",

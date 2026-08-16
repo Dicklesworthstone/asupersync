@@ -21,7 +21,7 @@
   "source_pins": [
     {
       "path": "artifacts/regex_privacy_capability_inventory_v1.json",
-      "sha256": "b6879d378563da4434c01bb5b409fcbef707a8ec081832850cdd53444127cb39",
+      "sha256": "ed0bc86ce195d3f223a67251a396643a3d4f4d069bbd8bbacd59f544b449d479",
       "line_count": 1014,
       "role": "R1 executable syntax and negative-class inventory"
     },
@@ -39,7 +39,7 @@
     },
     {
       "path": "Cargo.toml",
-      "sha256": "e998db4199267aa7166b67e36e69db213c2f755cebd6e6e91bb5a7e35204e0f3",
+      "sha256": "19623432b6cccd05753907b39a14306a1813c0b2d4fac6a34b028226c4b75f7a",
       "line_count": 1057,
       "role": "direct dependency and feature declaration"
     },

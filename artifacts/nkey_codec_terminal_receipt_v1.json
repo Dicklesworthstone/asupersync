@@ -15,13 +15,13 @@
     },
     {
       "path": "tests/dependency_oracles/nkeys/mod.rs",
-      "sha256": "f4163c6154d300cefcf1f7ae6e2a75816c725010735404ee08470a8c8b4adf3f",
+      "sha256": "dffa4f2f890ea716a20446187b11fe05c9683e4f74a661bf3247dbc81b76fcfd",
       "line_count": 500,
       "role": "test-only independent codec oracle and pinned upstream provenance"
     },
     {
       "path": "artifacts/nkey_normative_spec_v1.json",
-      "sha256": "ac05ef5ca310a82cc502083c19f494f9394913b0e56c562777f0153be69fabec",
+      "sha256": "678fd1678b5af613ce58f5bfd759427396b96aaf1d55da2add5b7c7eef670099",
       "line_count": 1266,
       "role": "normative N1 format and corpus authority"
     }

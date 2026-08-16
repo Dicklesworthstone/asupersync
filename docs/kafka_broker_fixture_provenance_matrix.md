@@ -253,7 +253,7 @@ Key current source pins are retained so drift is visible:
 
 | Path | SHA-256 | Lines |
 |---|---|---:|
-| `Cargo.toml` | `e998db4199267aa7166b67e36e69db213c2f755cebd6e6e91bb5a7e35204e0f3` | 1057 |
+| `Cargo.toml` | `19623432b6cccd05753907b39a14306a1813c0b2d4fac6a34b028226c4b75f7a` | 1057 |
 | `Cargo.lock` | `e0be65699715c92ae75dbc96292635e4d0aec7ef6f404c8a85793b9e58b98946` | 4666 |
 | `src/messaging/kafka.rs` | `5fe763229f2940793bf79739718afc20002ac40b614c35ff0ea475d45fb5aaf1` | 4335 |
 | `src/messaging/kafka_consumer.rs` | `82646e24d6e8ebdc07f5ea3a283f681b59855b952e5f86adf575ddc04ee6f61d` | 2757 |

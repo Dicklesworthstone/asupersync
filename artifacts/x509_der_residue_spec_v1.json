@@ -50,7 +50,7 @@
       "normalized_a1_derived_fields": {
         "path": "artifacts/x509_standard_verifier_delegation_v1.json",
         "field": "sha256",
-      "reviewed_value": "cda63258ced5891c1d0f83f2e41ce5cb2e72c15738f184ae30e75aae009cc593",
+      "reviewed_value": "5185fa89e3836fae4b1942955aabae3e4047880aab630752881c5e48fc12e6fb",
         "reason": "The live A2 whole-file identity changes when its excluded A1 content pin is reconciled; the A3 normative projection retains the exact A2 identity independently reviewed for this specification."
       },
       "normalized_release_manifest_fields": {
@@ -80,7 +80,7 @@
   "source_contracts": [
     {
       "path": "Cargo.toml",
-      "sha256": "e998db4199267aa7166b67e36e69db213c2f755cebd6e6e91bb5a7e35204e0f3",
+      "sha256": "19623432b6cccd05753907b39a14306a1813c0b2d4fac6a34b028226c4b75f7a",
       "line_count": 1057,
       "role": "tls feature and x509-parser dependency baseline"
     },
@@ -116,7 +116,7 @@
     },
     {
       "path": "artifacts/x509_validation_ownership_inventory_v1.json",
-      "sha256": "6bac333facffaec7c976397a38314df163f76eddccc6fdc09e4b656af5fb51a5",
+      "sha256": "53dd75dd375da36d6080729ca8c10db5a5da4b35ab8b35bc552298d66256af10",
       "line_count": 1073,
       "role": "A1 call-site, owner, residue, and routed-gap authority"
     },
@@ -134,7 +134,7 @@
     },
     {
       "path": "artifacts/x509_standard_verifier_delegation_v1.json",
-      "sha256": "cda63258ced5891c1d0f83f2e41ce5cb2e72c15738f184ae30e75aae009cc593",
+      "sha256": "5185fa89e3836fae4b1942955aabae3e4047880aab630752881c5e48fc12e6fb",
       "line_count": 345,
       "role": "A2 standard-first delegation and retained-policy authority"
     },

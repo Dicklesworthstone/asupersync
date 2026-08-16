@@ -104,7 +104,7 @@
       "pin_id": "KAFKA-K0-2-PIN-K0-1-ARTIFACT",
       "path": "artifacts/kafka_capability_inventory_v1.json",
       "record_count": 1015,
-      "sha256": "12ca1122a89f5f3a7676c70b847b5dc306c3a592b28826dd975e4304ef2f17fd",
+      "sha256": "bf832e00206dc464f6b1df9a57535d8a9866a4f16d1142b8cb54ae652ca83ace",
       "role": "exact public-surface and cfg-branch authority"
     },
     {
@@ -2533,7 +2533,7 @@
     "helper_ids_unique": true,
     "public_methods_exactly_once": true,
     "configuration_fields_exactly_once": true,
-    "source_pin_map_sha256": "b5460f4ceb6653ecd1f126ec7a02e7e224eeb603f8d1acb5efb7ba8967474c55",
+    "source_pin_map_sha256": "bbb2731665557625af54a4084ff425da3475b869180c685b8a70b0e5e4191b27",
     "all_row_source_anchor_map_sha256": "a895bcf372e6fcdd834fea2ca918e1bbc22623193098e0f4ebda684ef7735d33",
     "public_entry_anchor_map_sha256": "8deea5e3080636eed2b7282749ce52b9b22642829b7f74b101bf8769817428e6",
     "row_gap_owner_map_sha256": "5c4cb0c1edc74b5f8de090bd8f166de14e8f263d4b681d5fa23cdcb20a1ea760",
