@@ -836,7 +836,12 @@ check_stub_ratchet_assets_are_audited() {
 check_no_unimplemented_in_examples_and_tests() {
     local matches
     if command -v ast-grep >/dev/null 2>&1; then
-        matches="$(ast-grep run -l Rust -p "${TERM_UNIMPLEMENTED}"'!()' "${PROJECT_ROOT}/examples" "${PROJECT_ROOT}/tests" 2>/dev/null || true)"
+        # RCH workers can expose the host CPU count even when the build is
+        # admitted into a much smaller slot/cgroup budget.  ast-grep's default
+        # heuristic then oversubscribes the worker badly for this tiny scan.
+        # One worker keeps the structural match exact and makes the release
+        # gate's resource use independent of host topology.
+        matches="$(ast-grep run --threads 1 -l Rust -p "${TERM_UNIMPLEMENTED}"'!()' "${PROJECT_ROOT}/examples" "${PROJECT_ROOT}/tests" 2>/dev/null || true)"
     else
         matches="$(rg -n '^[^"]*'"${TERM_UNIMPLEMENTED}"'!\(\)' "${PROJECT_ROOT}/examples" "${PROJECT_ROOT}/tests" || true)"
     fi
