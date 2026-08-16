@@ -51,12 +51,12 @@
     "files": [
       {
         "path": "Cargo.toml",
-        "sha256": "19623432b6cccd05753907b39a14306a1813c0b2d4fac6a34b028226c4b75f7a",
+        "sha256": "b756e9baf054ce93b8bc8a305d29b347f3ae6e269fcd12cbe57b0662d0b98276",
         "line_count": 1057
       },
       {
         "path": "Cargo.lock",
-        "sha256": "e0be65699715c92ae75dbc96292635e4d0aec7ef6f404c8a85793b9e58b98946",
+        "sha256": "83c11d5b3882a757b586ba96e2bd3b86d8c49c516ea0896909f148f3f9bee53e",
         "line_count": 4666
       },
       {
@@ -66,7 +66,7 @@
       },
       {
         "path": "conformance/Cargo.toml",
-        "sha256": "7f923c2826c7631f554dd86d3108dc96467404a07a8b6d485fa0054e419d42a4",
+        "sha256": "038d1e75b40127b96a4caa57a701ceb3557c1a97e0783d5b27299065aade2963",
         "line_count": 214
       },
       {
@@ -211,7 +211,7 @@
       },
       {
         "path": "artifacts/dependency_capability_baseline_v1.json",
-      "sha256": "a62fbf265ca2b38d60417cc785abbeac7014982fa0d9cd8714eaaa58e426ce03",
+      "sha256": "de3f62dd0179e5e1eeb256e6ccb1172ef3f455bf6a9bd504fe10ae8ffe633726",
         "line_count": 3210
       },
       {

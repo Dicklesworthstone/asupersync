@@ -65,7 +65,7 @@
       "path": "artifacts/kafka_k0_baseline_disposition_v1.json",
       "byte_count": 29494,
       "record_count": 284,
-      "sha256": "6d2067ef7349e02a5c2ed9255d5c9f1bb4deff1615d3b9a13d3f2a9e078b5b1b"
+      "sha256": "bcfdfc0070606a3ab4cbf28b688075f1e644eee531a3204e6b8b38ed85db4e52"
     },
     {
       "input_id": "K1-INPUT-K0-5-DOCUMENT",
@@ -73,7 +73,7 @@
       "path": "docs/kafka_k0_baseline_disposition.md",
       "byte_count": 21799,
       "record_count": 349,
-      "sha256": "6ea2dcbf80957cf3f733718efb294f5cabe68edc236577a0e81dc069d6816174"
+      "sha256": "158981998edcc8aba1383763243db0a342e8c10898e1acd97ff78bb90f45e699"
     },
     {
       "input_id": "K1-INPUT-K0-5-CONTRACT",
@@ -81,7 +81,7 @@
       "path": "tests/kafka_k0_baseline_disposition_contract.rs",
       "byte_count": 106003,
       "record_count": 2599,
-      "sha256": "ad43b795859b432694c4c2d2eec80e600f12394fe91e8a3d999b87e38bf74320"
+      "sha256": "ddb739ff7e2e02d65d34600b39451b7faad12713b1038ef4d739486f3fc6c39e"
     },
     {
       "input_id": "K1-INPUT-ADR",
@@ -121,7 +121,7 @@
       "path": "Cargo.toml",
       "byte_count": 37631,
       "record_count": 1057,
-      "sha256": "19623432b6cccd05753907b39a14306a1813c0b2d4fac6a34b028226c4b75f7a"
+      "sha256": "b756e9baf054ce93b8bc8a305d29b347f3ae6e269fcd12cbe57b0662d0b98276"
     },
     {
       "input_id": "K1-INPUT-RECORD-BATCH-CODEC",
@@ -525,13 +525,13 @@
     "source_pin_rollup": {
       "row_count": 266,
       "stage_counts": {"K0.1": 13, "K0.2": 8, "K0.3": 225, "K0.4": 20},
-      "canonical_json_sha256": "897faae6427aad66f13232983842eebfcdf5057412959ac7d0a6211d1ba4ca7f",
+      "canonical_json_sha256": "3dcc4d549d79f9ba1b0b538ed1fd1a821f761bd5fc1a3e510f913a8583a48de7",
       "unique_path_count": 247,
       "unique_path_set_sha256": "d5631183e1560d87aeb50ca953d836b4405110b30f81c98aab099c6a5f1eb4c3",
       "overlap_group_count": 15,
       "overlap_pin_row_count": 34,
       "overlap_pin_tuple_rule": "For each source-pin row whose path occurs in more than one child packet, serialize path<TAB>child<TAB>pin_id<TAB>sha256; bytewise sort the records and append one LF per row.",
-      "overlap_pin_projection_sha256": "304efbc7c355889f9146308820afea43c9cf6592ab257cd42732244e0d50ebea",
+      "overlap_pin_projection_sha256": "cb3df3304c3cff8c83f427b34bfe60ba16132afa5ba939c72647557fd5611175",
       "conflicting_overlap_groups": []
     },
     "unknown_blockers": {

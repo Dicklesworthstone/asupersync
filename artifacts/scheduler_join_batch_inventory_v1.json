@@ -122,7 +122,7 @@
   "source_pins": [
     {
       "path": "Cargo.toml",
-      "sha256": "19623432b6cccd05753907b39a14306a1813c0b2d4fac6a34b028226c4b75f7a",
+      "sha256": "b756e9baf054ce93b8bc8a305d29b347f3ae6e269fcd12cbe57b0662d0b98276",
       "line_count": 1057,
       "role": "existing spawn_throughput benchmark registration and feature gate"
     },

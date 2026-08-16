@@ -967,7 +967,7 @@
     },
     {
       "path": "tests/protobuf_owned_otlp_schema_contract.rs",
-      "sha256": "3f0733f6f666914f42dd24e56cfeb69f38c6120ad1fe29b64d25ce5521776a8b",
+      "sha256": "1c15a4e04d2ffe469449b54d85ec18a0c2255b02f3d69a172edd1062afcead9f",
       "line_count": 2200,
       "anchors": ["The JSON-shaped fixture is not protobuf wire evidence", "Generated request builders are test/fuzz gated"]
     },
@@ -979,13 +979,13 @@
     },
     {
       "path": "artifacts/otlp_capability_inventory_v1.json",
-      "sha256": "ea7fb540191b029478ffdca0a7faf09f6fa599bbcbf209bbaf084aba1edbe93d",
+      "sha256": "c13b0a3944b054eaaa42f0e02b92bd92aec00050ad56706029436bf60176fc00",
       "line_count": 985,
       "anchors": ["SHIPPED_VIA_DEPENDENCY", "OTLP-GAP-01", "asupersync-5z2scg.2.3"]
     },
     {
       "path": "artifacts/protobuf_owned_otlp_schema_v1.json",
-      "sha256": "d65b440810bccacd5d67680357b878b8458a828917490291d04808563937fc93",
+      "sha256": "86dfc597e681a8d71ff67d1554284d4d8e32da8043e8f6054e2c45392ca2eb5f",
       "line_count": 1126,
       "anchors": ["NEW_A3_SCHEMA_POLICY_NOT_INCUMBENT_PARITY", "data_points_per_metric", "signal_construction_separation"]
     },

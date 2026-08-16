@@ -21,7 +21,7 @@
     },
     {
       "path": "artifacts/nkey_normative_spec_v1.json",
-      "sha256": "678fd1678b5af613ce58f5bfd759427396b96aaf1d55da2add5b7c7eef670099",
+      "sha256": "f73a24fc4875df27026485cfa6d8577e599902d9fc4eeed17631b958b8f573f9",
       "line_count": 1266,
       "role": "normative N1 format and corpus authority"
     }
