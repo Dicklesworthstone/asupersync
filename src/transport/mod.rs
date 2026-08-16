@@ -13,6 +13,7 @@ pub mod half_close_conformance_tests;
 pub mod router;
 pub mod sink;
 pub mod stream;
+#[cfg(test)]
 mod tests;
 
 pub use aggregator::{
