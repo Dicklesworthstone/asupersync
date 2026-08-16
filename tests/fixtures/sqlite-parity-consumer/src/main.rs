@@ -11,10 +11,18 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use asupersync::database::{SqliteConnection, SqliteValue as AsupersyncValue};
-use asupersync::future::yield_now;
-use asupersync::runtime::{BlockingPoolHandle, RuntimeBuilder};
+use asupersync::runtime::{BlockingPoolHandle, RuntimeBuilder, yield_now};
 use asupersync::sync::{AcquireError, OwnedSemaphorePermit, Semaphore};
 use asupersync::{Cx, Outcome};
+use asupersync_compat::Cx as CompatCx;
+use asupersync_compat::runtime::{
+    BlockingPoolHandle as CompatBlockingPoolHandle, RuntimeBuilder as CompatRuntimeBuilder,
+    yield_now as compat_yield_now,
+};
+use asupersync_compat::sync::{
+    AcquireError as CompatAcquireError, OwnedSemaphorePermit as CompatOwnedSemaphorePermit,
+    Semaphore as CompatSemaphore,
+};
 use fsqlite::{AsyncConnection as FrankenConnection, FrankenError, SqliteValue as FrankenValue};
 use fsqlite_types::cx::Cx as FrankenCx;
 use serde::{Deserialize, Serialize};
@@ -464,7 +472,7 @@ async fn run_asupersync_scenario(vector: &Vector, cx: &Cx) -> Result<ScenarioOut
 }
 
 fn run_frankensqlite(vector: &Vector) -> Result<VectorResult, String> {
-    let runtime = RuntimeBuilder::current_thread()
+    let runtime = CompatRuntimeBuilder::current_thread()
         .blocking_threads(2, 2)
         .build()
         .map_err(|error| format!("build FrankenSQLite parity runtime: {error}"))?;
@@ -473,12 +481,13 @@ fn run_frankensqlite(vector: &Vector) -> Result<VectorResult, String> {
         .blocking_handle()
         .ok_or_else(|| "FrankenSQLite parity runtime has no blocking pool".to_owned())?;
     let outcome = runtime.block_on(async {
-        let native_cx = Cx::current()
-            .ok_or_else(|| "FrankenSQLite runtime did not install native Cx".to_owned())?;
+        let native_cx = CompatCx::current().ok_or_else(|| {
+            "FrankenSQLite compatibility runtime did not install native Cx".to_owned()
+        })?;
         run_frankensqlite_scenario(vector, &native_cx).await
     })?;
     drop(runtime);
-    let outcome = finalize_runtime_quiescence(outcome, &blocking, "frankensqlite")?;
+    let outcome = finalize_compat_runtime_quiescence(outcome, &blocking, "frankensqlite")?;
     Ok(VectorResult {
         vector_id: vector.id.clone(),
         outcome,
@@ -488,7 +497,7 @@ fn run_frankensqlite(vector: &Vector) -> Result<VectorResult, String> {
 
 async fn run_frankensqlite_scenario(
     vector: &Vector,
-    native_cx: &Cx,
+    native_cx: &CompatCx,
 ) -> Result<ScenarioOutcome, String> {
     match &vector.scenario {
         Scenario::InMemoryConfiguration { busy_timeout_ms } => {
@@ -583,19 +592,20 @@ async fn run_frankensqlite_scenario(
         }
         Scenario::AdmissionExhaustion { capacity } => {
             let local_cx = attached_franken_cx(native_cx);
-            let semaphore = Arc::new(Semaphore::new(*capacity));
-            let holder = OwnedSemaphorePermit::acquire(Arc::clone(&semaphore), native_cx, 1)
+            let semaphore = Arc::new(CompatSemaphore::new(*capacity));
+            let holder = CompatOwnedSemaphorePermit::acquire(Arc::clone(&semaphore), native_cx, 1)
                 .await
                 .map_err(|error| format!("FrankenSQLite acquire holder: {error}"))?;
             let mut connection = FrankenConnection::open(&local_cx, ":memory:")
                 .await
                 .map_err(|error| format!("FrankenSQLite pool scenario open: {error}"))?;
-            let mut waiter = spawn_parked_checkout(native_cx, Arc::clone(&semaphore)).await?;
+            let mut waiter =
+                spawn_parked_compat_checkout(native_cx, Arc::clone(&semaphore)).await?;
             franken_close(&mut connection, &local_cx).await?;
-            abort_and_drain_checkout(native_cx, &semaphore, &mut waiter).await?;
+            abort_and_drain_compat_checkout(native_cx, &semaphore, &mut waiter).await?;
             drop(holder);
             let telemetry = semaphore.telemetry_snapshot(0x53514c32);
-            verify_admission_recovered(&telemetry, *capacity)?;
+            verify_compat_admission_recovered(&telemetry, *capacity)?;
             Ok(success_outcome(
                 "private_memory_opened",
                 "common_defaults_accepted",
@@ -715,6 +725,28 @@ fn finalize_runtime_quiescence(
     Ok(outcome)
 }
 
+fn finalize_compat_runtime_quiescence(
+    mut outcome: ScenarioOutcome,
+    blocking: &CompatBlockingPoolHandle,
+    engine: &str,
+) -> Result<ScenarioOutcome, String> {
+    let pending = blocking.pending_count();
+    let busy = blocking.busy_threads();
+    let active = blocking.active_threads();
+    if !blocking.is_shutdown() || pending != 0 || busy != 0 || active != 0 {
+        return Err(format!(
+            "{engine} compatibility runtime did not quiesce: shutdown={} pending={pending} busy={busy} active={active}",
+            blocking.is_shutdown()
+        ));
+    }
+    outcome.resource_state.blocking_pending = pending as u64;
+    outcome.resource_state.blocking_busy = busy as u64;
+    outcome.resource_state.blocking_active = active as u64;
+    outcome.resource_state.region_state = "closed".to_owned();
+    outcome.resource_state.background_work = "none_observed_after_runtime_shutdown".to_owned();
+    Ok(outcome)
+}
+
 async fn asupersync_open_memory(cx: &Cx) -> Result<SqliteConnection, String> {
     asupersync_outcome(SqliteConnection::open_in_memory(cx).await, "in-memory open")
 }
@@ -738,7 +770,7 @@ async fn configure_and_probe_asupersync(
 ) -> Result<(), String> {
     asupersync_outcome(
         connection
-            .execute_batch(
+            .execute_batch_unchecked(
                 cx,
                 &format!("PRAGMA foreign_keys = ON; PRAGMA busy_timeout = {busy_timeout_ms};"),
             )
@@ -800,8 +832,11 @@ async fn query_asupersync_i64(
     cx: &Cx,
     sql: &str,
 ) -> Result<i64, String> {
-    let row = asupersync_outcome(connection.query_row(cx, sql, &[]).await, "query PRAGMA")?
-        .ok_or_else(|| "asupersync PRAGMA returned no row".to_owned())?;
+    let row = asupersync_outcome(
+        connection.query_row_unchecked(cx, sql, &[]).await,
+        "query PRAGMA",
+    )?
+    .ok_or_else(|| "asupersync PRAGMA returned no row".to_owned())?;
     match row.get_idx(0) {
         Ok(AsupersyncValue::Integer(value)) => Ok(*value),
         other => Err(format!("asupersync PRAGMA returned non-integer: {other:?}")),
@@ -816,7 +851,7 @@ async fn asupersync_close(connection: &SqliteConnection, cx: &Cx) -> Result<(), 
     Ok(())
 }
 
-fn attached_franken_cx(native_cx: &Cx) -> FrankenCx {
+fn attached_franken_cx(native_cx: &CompatCx) -> FrankenCx {
     let local_cx = FrankenCx::new();
     local_cx.set_native_cx(native_cx.clone());
     local_cx
@@ -953,6 +988,55 @@ async fn abort_and_drain_checkout(
     Ok(())
 }
 
+async fn spawn_parked_compat_checkout(
+    cx: &CompatCx,
+    semaphore: Arc<CompatSemaphore>,
+) -> Result<asupersync_compat::runtime::TaskHandle<Result<(), CompatAcquireError>>, String> {
+    if semaphore.try_acquire(1).is_ok() {
+        return Err("consumer compatibility admission pool was not saturated".to_owned());
+    }
+    let waiter_semaphore = Arc::clone(&semaphore);
+    let mut waiter = cx
+        .spawn(move |waiter_cx| async move {
+            CompatOwnedSemaphorePermit::acquire(waiter_semaphore, &waiter_cx, 1)
+                .await
+                .map(drop)
+        })
+        .map_err(|error| format!("spawn compatibility checkout waiter: {error}"))?;
+    for _ in 0..256 {
+        if semaphore.telemetry_snapshot(0x53514c32).waiter_count == 1 {
+            return Ok(waiter);
+        }
+        compat_yield_now().await;
+    }
+    waiter.abort();
+    let _ = waiter.join(cx).await;
+    Err("compatibility checkout waiter never reached the saturated admission queue".to_owned())
+}
+
+async fn abort_and_drain_compat_checkout(
+    cx: &CompatCx,
+    semaphore: &CompatSemaphore,
+    waiter: &mut asupersync_compat::runtime::TaskHandle<Result<(), CompatAcquireError>>,
+) -> Result<(), String> {
+    if semaphore.telemetry_snapshot(0x53514c32).waiter_count != 1 {
+        return Err(
+            "compatibility checkout was not in flight when connection close completed".to_owned(),
+        );
+    }
+    waiter.abort();
+    match waiter.join(cx).await {
+        Ok(Err(CompatAcquireError::Cancelled))
+        | Err(asupersync_compat::runtime::JoinError::Cancelled(_)) => {}
+        other => {
+            return Err(format!(
+                "parked compatibility checkout did not drain as a recognized cancellation: {other:?}"
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn verify_admission_recovered(
     telemetry: &asupersync::sync::SyncTelemetrySnapshot,
     capacity: usize,
@@ -965,6 +1049,23 @@ fn verify_admission_recovered(
     {
         return Err(format!(
             "consumer admission pool did not recover: {telemetry:?}"
+        ));
+    }
+    Ok(())
+}
+
+fn verify_compat_admission_recovered(
+    telemetry: &asupersync_compat::sync::SyncTelemetrySnapshot,
+    capacity: usize,
+) -> Result<(), String> {
+    if telemetry.capacity != capacity
+        || telemetry.available_units != capacity
+        || telemetry.occupied_units != 0
+        || telemetry.waiter_count != 0
+        || telemetry.cancellation_count != 1
+    {
+        return Err(format!(
+            "consumer compatibility admission pool did not recover: {telemetry:?}"
         ));
     }
     Ok(())

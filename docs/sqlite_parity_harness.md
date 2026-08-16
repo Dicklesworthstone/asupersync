@@ -15,13 +15,14 @@ FrankenSQLite depends on Asupersync, so adding `fsqlite` to Asupersync's normal
 or dev graph would create a cycle. The neutral manifest instead points its
 direct Asupersync dependency at this checkout, pins the public FrankenSQLite Git
 source to release `v0.1.18`
-(`92f9e9833f859ebcbe27e9fef16d9cad4372bbd7`), and patches the crates.io
-Asupersync edge in FrankenSQLite onto that same local package. This is the
-coherent combined-graph shape identified by the graph-budget prerequisite:
-there is one Asupersync package and one native `Cx`/runtime type identity. P2
-enables the pinned `fsqlite` `async-api` feature and directly names its matching
-`fsqlite-types` package so the neutral consumer can attach the runtime's native
-`Cx` to the FrankenSQLite capability context.
+(`92f9e9833f859ebcbe27e9fef16d9cad4372bbd7`). That release depends on
+Asupersync 0.3.x, whose public `Cx` and runtime types are not interchangeable
+with the current 0.4.4 types. The consumer therefore names the published
+0.3.10 package explicitly as `asupersync-compat`, runs each adapter inside its
+own matching runtime, and compares only the declared public lifecycle outcome.
+P2 enables the pinned `fsqlite` `async-api` feature and directly names its
+matching `fsqlite-types` package so the two runtime boundaries remain visible
+rather than being hidden behind an ineffective Cargo patch.
 
 The first clean attempt used the newer remote tip
 `31fc4a3b3a108dc49243157ea29fb1ddfcb06fdc`. That selected native graph did not
@@ -55,11 +56,15 @@ The six scenarios are:
 - `SQLITE-PARITY-P2-OPEN-FAILURE-003`: deterministic rejection when a unique
   database path has a missing parent directory.
 - `SQLITE-PARITY-P2-CANCELLED-OPEN-004`: pre-cancelled open, including native
-  `Cx` propagation into the FrankenSQLite context.
+  `Cx` propagation from the matching 0.3.10 compatibility runtime into the
+  FrankenSQLite context.
 - `SQLITE-PARITY-P2-POOL-CANCEL-005`: a consumer-owned admission semaphore is
   saturated, the second checkout is proven parked, the live connection closes,
-  the waiter is aborted and drained as graceful cancellation, and the sole
-  permit is restored exactly once.
+  the waiter is aborted and drained as the engine's public cancellation form,
+  and the sole permit is restored exactly once. The 0.4.4 path requires the
+  graceful inner `AcquireError::Cancelled`; the pinned 0.3.10 compatibility
+  path may report the legacy outer task-cancelled join, which is normalized
+  only after the waiter and permit cleanup checks pass.
 - `SQLITE-PARITY-P2-URI-UNSUPPORTED-006`: the harness records that neither P2
   adapter exposes a common SQLite URI-filename contract. It does not pretend a
   `Path` or `String` filename API carries URI flag semantics.
@@ -98,10 +103,11 @@ against the vector rather than accepting a free-form success note.
 
 ## Interpretation boundary
 
-The combined-graph prerequisite remains terminal `DEFER`: the patched graph
-fixes the duplicate-runtime coherence defect, but the proposal added 33 unique
-crates and its binary-size/compile-time cells remained blocked under the
-recorded RCH root constraint. A successful P2 run proves only the six declared
+The combined-graph prerequisite remains terminal `DEFER`: the proposal added
+33 unique crates and its binary-size/compile-time cells remained blocked under
+the recorded RCH root constraint. The P2 consumer's explicit compatibility
+runtime is test-fixture isolation, not approval to add FrankenSQLite to the
+Asupersync workspace graph. A successful P2 run proves only the six declared
 open/configuration/admission/bridge lifecycle scenarios in this neutral
 consumer. It does not authorize dependency cutover, remove
 `rusqlite`/`sqlparser`, prove transaction/statement/value/interrupt parity owned

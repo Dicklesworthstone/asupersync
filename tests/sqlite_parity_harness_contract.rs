@@ -22,7 +22,7 @@ fn sha256(source: &str) -> String {
 }
 
 #[test]
-fn dependency_direction_is_cycle_safe_and_runtime_is_unified() {
+fn dependency_direction_is_cycle_safe_and_runtime_boundaries_are_explicit() {
     let root_manifest = ROOT_MANIFEST.to_ascii_lowercase();
     assert!(!root_manifest.contains("fsqlite"));
     assert!(!root_manifest.contains("frankensqlite"));
@@ -37,14 +37,20 @@ fn dependency_direction_is_cycle_safe_and_runtime_is_unified() {
     assert!(CONSUMER_MANIFEST.contains("rev = \"92f9e9833f859ebcbe27e9fef16d9cad4372bbd7\""));
     assert!(CONSUMER_MANIFEST.contains("features = [\"native\", \"async-api\"]"));
     assert!(CONSUMER_MANIFEST.contains("fsqlite-types = { git ="));
-    assert!(CONSUMER_MANIFEST.contains("[patch.crates-io]"));
+    assert!(
+        CONSUMER_MANIFEST
+            .contains("asupersync-compat = { package = \"asupersync\", version = \"=0.3.10\"")
+    );
+    assert!(!CONSUMER_MANIFEST.contains("[patch.crates-io]"));
     assert!(CONSUMER_LOCK.contains("name = \"asupersync-sqlite-parity-consumer\""));
     assert!(CONSUMER_LOCK.contains("name = \"fsqlite\""));
     assert_eq!(
         CONSUMER_LOCK.matches("name = \"asupersync\"").count(),
-        1,
-        "the patched consumer must resolve exactly one asupersync package"
+        2,
+        "the consumer must resolve the current engine and pinned compatibility runtime"
     );
+    assert!(CONSUMER_LOCK.contains("\"asupersync 0.3.10\""));
+    assert!(CONSUMER_LOCK.contains("\"asupersync 0.4.4\""));
     assert!(CONSUMER_LOCK.contains(
         "git+https://github.com/Dicklesworthstone/frankensqlite.git?rev=92f9e9833f859ebcbe27e9fef16d9cad4372bbd7#92f9e9833f859ebcbe27e9fef16d9cad4372bbd7"
     ));

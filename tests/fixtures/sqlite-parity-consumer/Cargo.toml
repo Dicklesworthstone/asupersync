@@ -11,13 +11,8 @@ resolver = "3"
 
 [dependencies]
 asupersync = { path = "../../..", features = ["sqlite"] }
+asupersync-compat = { package = "asupersync", version = "=0.3.10", default-features = false }
 fsqlite = { git = "https://github.com/Dicklesworthstone/frankensqlite.git", rev = "92f9e9833f859ebcbe27e9fef16d9cad4372bbd7", default-features = false, features = ["native", "async-api"] }
 fsqlite-types = { git = "https://github.com/Dicklesworthstone/frankensqlite.git", rev = "92f9e9833f859ebcbe27e9fef16d9cad4372bbd7", default-features = false, features = ["native"] }
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"
-
-# FrankenSQLite's published graph names asupersync from crates.io. Collapse that
-# edge onto the same local package used by this consumer so Cx/runtime types are
-# coherent and only one asupersync package is linked.
-[patch.crates-io]
-asupersync = { path = "../../.." }
