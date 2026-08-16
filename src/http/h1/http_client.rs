@@ -39,6 +39,7 @@
 
 use crate::cx::Cx;
 use crate::http::h1::client::{ClientStreamingResponse, Http1Client};
+use crate::http::h1::codec::{for_each_header_value_token, validate_header_field};
 use crate::http::h1::types::{
     Method, MultipartForm, Request, Response, Version, url_encode_params,
 };
@@ -458,9 +459,7 @@ impl ParsedUrl {
             let host_str = &authority[..=bracket_end];
             let rest = &authority[bracket_end.saturating_add(1)..];
             if let Some(port_str) = rest.strip_prefix(':') {
-                let port: u16 = port_str
-                    .parse()
-                    .map_err(|_| ClientError::InvalidUrl(format!("invalid port: {port_str}")))?;
+                let port = parse_explicit_port(port_str)?;
                 (host_str.to_owned(), port)
             } else if rest.is_empty() {
                 let default_port = match scheme {
@@ -481,9 +480,7 @@ impl ParsedUrl {
             (authority.to_owned(), default_port)
         } else if let Some(i) = authority.rfind(':') {
             let port_str = &authority[i.saturating_add(1)..];
-            let port: u16 = port_str
-                .parse()
-                .map_err(|_| ClientError::InvalidUrl(format!("invalid port: {port_str}")))?;
+            let port = parse_explicit_port(port_str)?;
             (authority[..i].to_owned(), port)
         } else {
             let default_port = match scheme {
@@ -2484,9 +2481,7 @@ fn parse_host_port(authority: &str, default_port: u16) -> Result<(String, u16), 
             return Ok((host, default_port));
         }
         if let Some(port_str) = rest.strip_prefix(':') {
-            let port = port_str
-                .parse::<u16>()
-                .map_err(|_| ClientError::InvalidUrl(format!("invalid port: {port_str}")))?;
+            let port = parse_explicit_port(port_str)?;
             return Ok((host, port));
         }
         return Err(ClientError::InvalidUrl(format!(
@@ -2500,9 +2495,7 @@ fn parse_host_port(authority: &str, default_port: u16) -> Result<(String, u16), 
     }
 
     if let Some((host, port_str)) = authority.rsplit_once(':') {
-        let port = port_str
-            .parse::<u16>()
-            .map_err(|_| ClientError::InvalidUrl(format!("invalid port: {port_str}")))?;
+        let port = parse_explicit_port(port_str)?;
         if host.is_empty() {
             return Err(ClientError::InvalidUrl("empty host".into()));
         }
@@ -2510,6 +2503,14 @@ fn parse_host_port(authority: &str, default_port: u16) -> Result<(String, u16), 
     }
 
     Ok((authority.to_owned(), default_port))
+}
+
+fn parse_explicit_port(port: &str) -> Result<u16, ClientError> {
+    if port.is_empty() || !port.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(ClientError::InvalidUrl(format!("invalid port: {port}")));
+    }
+    port.parse::<u16>()
+        .map_err(|_| ClientError::InvalidUrl(format!("invalid port: {port}")))
 }
 
 fn absolute_request_target(parsed: &ParsedUrl) -> String {
@@ -2777,7 +2778,11 @@ fn retry_after_delay(headers: &[(String, String)]) -> Option<std::time::Duration
 }
 
 fn parse_retry_after_delta(value: &str) -> Option<std::time::Duration> {
-    let seconds = value.trim().parse::<u64>().ok()?;
+    let value = crate::http::h1::codec::trim_ows(value);
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let seconds = value.parse::<u64>().ok()?;
     Some(std::time::Duration::from_secs(seconds))
 }
 
@@ -2819,10 +2824,15 @@ fn io_error_looks_like_stale_reuse(err: &io::Error) -> bool {
 
 fn header_has_token(headers: &[(String, String)], name: &str, token: &str) -> bool {
     headers.iter().any(|(header_name, header_value)| {
-        header_name.eq_ignore_ascii_case(name)
-            && header_value
-                .split(',')
-                .any(|part| part.trim().eq_ignore_ascii_case(token))
+        if !header_name.eq_ignore_ascii_case(name) {
+            return false;
+        }
+
+        let mut found = false;
+        for_each_header_value_token(header_value.as_bytes(), |part| {
+            found |= part.eq_ignore_ascii_case(token.as_bytes());
+        });
+        found
     })
 }
 
@@ -2910,10 +2920,6 @@ fn find_headers_end(buf: &[u8]) -> Option<usize> {
     memmem::find(buf, b"\r\n\r\n").map(|idx| idx.saturating_add(4))
 }
 
-fn contains_ctl_line_break(s: &str) -> bool {
-    s.chars().any(|c| matches!(c, '\r' | '\n'))
-}
-
 fn contains_ctl_or_whitespace(s: &str) -> bool {
     s.chars().any(|c| c.is_ascii_control() || c.is_whitespace())
 }
@@ -2999,21 +3005,16 @@ fn validate_connect_inputs(
 ) -> Result<(), ClientError> {
     validate_connect_authority_form(target_authority)?;
     if let Some(ua) = user_agent
-        && contains_ctl_line_break(ua)
+        && validate_header_field("User-Agent", ua).is_err()
     {
         return Err(ClientError::InvalidConnectInput(
-            "User-Agent header contains invalid control characters".into(),
+            "User-Agent header is not a valid HTTP field".into(),
         ));
     }
     for (name, value) in extra_headers {
-        if name.trim().is_empty() {
+        if validate_header_field(name, value).is_err() {
             return Err(ClientError::InvalidConnectInput(
-                "header name cannot be empty".into(),
-            ));
-        }
-        if contains_ctl_line_break(name) || contains_ctl_line_break(value) {
-            return Err(ClientError::InvalidConnectInput(
-                "header name/value cannot contain CR or LF".into(),
+                "header name/value is not a valid HTTP field".into(),
             ));
         }
     }
@@ -3033,6 +3034,11 @@ fn parse_connect_status_line(line: &str) -> Result<(u16, String), ClientError> {
     if Version::from_bytes(version.as_bytes()).is_none() {
         return Err(ClientError::HttpError(
             crate::http::h1::codec::HttpError::UnsupportedVersion,
+        ));
+    }
+    if status.len() != 3 || !status.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(ClientError::HttpError(
+            crate::http::h1::codec::HttpError::BadRequestLine,
         ));
     }
     let code = status
@@ -3243,8 +3249,14 @@ mod tests {
 
     #[test]
     fn parse_url_invalid_port() {
-        let result = ParsedUrl::parse("http://example.com:abc/path");
-        assert!(result.is_err());
+        for url in [
+            "http://example.com:abc/path",
+            "http://example.com:+80/path",
+            "http://example.com:/path",
+            "http://[::1]:+80/path",
+        ] {
+            assert!(ParsedUrl::parse(url).is_err(), "invalid port in {url:?}");
+        }
     }
 
     #[test]
@@ -3293,6 +3305,20 @@ mod tests {
                 matches!(error, ClientError::InvalidUrl(ref message)
                     if message.contains("authority cannot contain control characters or whitespace")),
                 "unexpected error for {proxy_url:?}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_proxy_endpoint_rejects_non_digit_ports() {
+        for proxy_url in [
+            "http://proxy.local:+8080",
+            "http://proxy.local:",
+            "http://[::1]:+8080",
+        ] {
+            assert!(
+                parse_proxy_endpoint(proxy_url).is_err(),
+                "invalid proxy port in {proxy_url:?}",
             );
         }
     }
@@ -4600,20 +4626,48 @@ mod tests {
     }
 
     #[test]
+    fn connect_tunnel_rejects_non_three_digit_status() {
+        for response in [
+            "HTTP/1.1 +20 Invalid\r\n\r\n",
+            "HTTP/1.1 20 Invalid\r\n\r\n",
+            "HTTP/1.1 2000 Invalid\r\n\r\n",
+        ] {
+            let io = ConnectTestIo::new(response);
+            assert!(
+                block_on(establish_http_connect_tunnel(
+                    io,
+                    "example.com:443",
+                    None,
+                    &[],
+                ))
+                .is_err(),
+                "invalid CONNECT status in {response:?}",
+            );
+        }
+    }
+
+    #[test]
     fn connect_tunnel_rejects_header_injection() {
-        let io = ConnectTestIo::new("HTTP/1.1 200 OK\r\n\r\n");
-        let err = block_on(establish_http_connect_tunnel(
-            io,
-            "example.com:443",
-            None,
-            &[("X-Test".into(), "ok\r\nbad".into())],
-        ))
-        .expect_err("CRLF in header value must be rejected");
-        match err {
-            ClientError::InvalidConnectInput(msg) => {
-                assert!(msg.contains("header name/value"));
+        for (user_agent, headers) in [
+            (None, vec![("X-Test".to_string(), "ok\r\nbad".to_string())]),
+            (None, vec![("Bad Header".to_string(), "value".to_string())]),
+            (None, vec![("X-Test".to_string(), "bad\0value".to_string())]),
+            (Some("bad\0agent"), Vec::new()),
+        ] {
+            let io = ConnectTestIo::new("HTTP/1.1 200 OK\r\n\r\n");
+            let err = block_on(establish_http_connect_tunnel(
+                io,
+                "example.com:443",
+                user_agent,
+                &headers,
+            ))
+            .expect_err("invalid CONNECT header input must be rejected");
+            match err {
+                ClientError::InvalidConnectInput(msg) => {
+                    assert!(msg.contains("valid HTTP field"));
+                }
+                other => panic!("unexpected error: {other:?}"),
             }
-            other => panic!("unexpected error: {other:?}"),
         }
     }
 
@@ -4773,7 +4827,9 @@ mod tests {
             None
         );
         assert_eq!(parse_retry_after_delta("-1"), None);
+        assert_eq!(parse_retry_after_delta("+1"), None);
         assert_eq!(parse_retry_after_delta("abc"), None);
+        assert_eq!(parse_retry_after_delta("\u{a0}12\u{a0}"), None);
     }
 
     #[test]
@@ -4801,6 +4857,19 @@ mod tests {
         assert!(header_has_token(&headers, "connection", "keep-alive"));
         assert!(header_has_token(&headers, "connection", "upgrade"));
         assert!(!header_has_token(&headers, "connection", "close"));
+
+        let ascii_ows = vec![("Connection".to_string(), "\t keep-alive \t".to_string())];
+        assert!(header_has_token(&ascii_ows, "connection", "keep-alive"));
+
+        let unicode_whitespace = vec![(
+            "Connection".to_string(),
+            "\u{a0}keep-alive\u{a0}".to_string(),
+        )];
+        assert!(!header_has_token(
+            &unicode_whitespace,
+            "connection",
+            "keep-alive"
+        ));
     }
 
     #[test]

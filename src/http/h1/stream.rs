@@ -28,7 +28,8 @@ use crate::channel::mpsc::{RecvError, SendError};
 use crate::cx::{CancelWakerToken, Cx};
 use crate::http::body::{Body, Frame, HeaderMap, HeaderName, HeaderValue, SizeHint};
 use crate::http::h1::codec::{
-    HttpError, is_forbidden_trailer, parse_chunk_size_line, validate_header_field,
+    HttpError, is_forbidden_trailer, parse_chunk_size_line, parse_header_line,
+    require_transfer_encoding_chunked, trim_ows, validate_header_field,
 };
 use crate::types::CancelKind;
 
@@ -1375,24 +1376,18 @@ impl IncomingRequestBodyWriter {
 
                     let line_str =
                         std::str::from_utf8(line.as_ref()).map_err(|_| HttpError::BadHeader)?;
-                    let Some(colon) = line_str.find(':') else {
-                        return Err(HttpError::BadHeader);
-                    };
-
-                    let name = line_str[..colon].trim();
-                    let value = line_str[colon + 1..].trim();
-                    validate_header_field(name, value)?;
+                    let (name, value) = parse_header_line(line_str)?;
                     // br-asupersync-135g0e: RFC 9110 §6.5.1 forbids trailers that
                     // affect framing, routing, request modifiers, auth, payload
                     // processing, or cache control. The codec request path rejects
                     // these; mirror it here so the streaming body path can't be used
                     // to smuggle a Content-Length / Transfer-Encoding override past
                     // an intermediary that merges trailers into the header set.
-                    if is_forbidden_trailer(name) {
+                    if is_forbidden_trailer(&name) {
                         return Err(HttpError::BadHeader);
                     }
                     self.trailers.append(
-                        HeaderName::from_string(name),
+                        HeaderName::from_string(&name),
                         HeaderValue::from_bytes(value.as_bytes()),
                     );
                 }
@@ -1921,7 +1916,14 @@ impl RequestHead {
         self.headers
             .iter()
             .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
-            .and_then(|(_, value)| value.parse().ok())
+            .and_then(|(_, value)| {
+                let value = trim_ows(value);
+                if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+                    None
+                } else {
+                    value.parse().ok()
+                }
+            })
     }
 
     /// Returns true if Transfer-Encoding: chunked is set (strict single-token check).
@@ -1929,8 +1931,11 @@ impl RequestHead {
     pub fn is_chunked(&self) -> bool {
         self.headers.iter().any(|(name, value)| {
             name.eq_ignore_ascii_case("transfer-encoding")
-                && value.split(',').count() == 1
-                && value.trim().eq_ignore_ascii_case("chunked")
+                // Preserve this public helper's established single-token
+                // behavior: a trailing/leading empty list element such as
+                // `chunked,` is not the one supported coding.
+                && !value.contains(',')
+                && require_transfer_encoding_chunked(value).is_ok()
         })
     }
 
@@ -2828,6 +2833,52 @@ mod tests {
             headers: vec![],
         };
         assert_eq!(empty_head.body_kind(), BodyKind::Empty);
+    }
+
+    #[test]
+    fn request_head_framing_uses_only_rfc_ows() {
+        let ascii_ows = RequestHead {
+            method: super::super::types::Method::Post,
+            uri: "/upload".to_string(),
+            version: super::super::types::Version::Http11,
+            headers: vec![
+                ("Content-Length".to_string(), "\t 5 \t".to_string()),
+                ("Transfer-Encoding".to_string(), "\t chunked \t".to_string()),
+            ],
+        };
+        assert_eq!(ascii_ows.content_length(), Some(5));
+        assert!(ascii_ows.is_chunked());
+
+        let unicode_whitespace = RequestHead {
+            method: super::super::types::Method::Post,
+            uri: "/upload".to_string(),
+            version: super::super::types::Version::Http11,
+            headers: vec![
+                ("Content-Length".to_string(), "\u{a0}5\u{a0}".to_string()),
+                (
+                    "Transfer-Encoding".to_string(),
+                    "\u{a0}chunked\u{a0}".to_string(),
+                ),
+            ],
+        };
+        assert_eq!(unicode_whitespace.content_length(), None);
+        assert!(!unicode_whitespace.is_chunked());
+
+        let signed_content_length = RequestHead {
+            method: super::super::types::Method::Post,
+            uri: "/upload".to_string(),
+            version: super::super::types::Version::Http11,
+            headers: vec![("Content-Length".to_string(), "+5".to_string())],
+        };
+        assert_eq!(signed_content_length.content_length(), None);
+
+        let trailing_empty_coding = RequestHead {
+            method: super::super::types::Method::Post,
+            uri: "/upload".to_string(),
+            version: super::super::types::Version::Http11,
+            headers: vec![("Transfer-Encoding".to_string(), "chunked,".to_string())],
+        };
+        assert!(!trailing_empty_coding.is_chunked());
     }
 
     #[test]

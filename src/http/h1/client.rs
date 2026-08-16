@@ -7,7 +7,7 @@ use crate::codec::Encoder;
 use crate::http::body::{Body, Frame, HeaderMap, HeaderName, HeaderValue, SizeHint};
 use crate::http::h1::codec::{
     ChunkedBodyDecoder, HttpError, append_chunk_size_line, append_decimal, is_forbidden_trailer,
-    parse_chunk_size_line, parse_header_line, require_transfer_encoding_chunked,
+    parse_chunk_size_line, parse_header_line, require_transfer_encoding_chunked, trim_ows,
     unique_header_value, validate_header_field,
 };
 use crate::http::h1::types::{Method, Request, Response, Version};
@@ -191,7 +191,7 @@ fn response_body_kind(
         // intermediaries (nginx/envoy) and is a response-smuggling primitive.
         // Reject any non-digit input before parsing, mirroring the hardened
         // server request path in codec.rs.
-        let cl_str = cl.trim();
+        let cl_str = trim_ows(cl);
         if cl_str.is_empty() || !cl_str.bytes().all(|b| b.is_ascii_digit()) {
             return Err(HttpError::BadContentLength);
         }
@@ -320,7 +320,7 @@ impl Http1ClientCodec {
                     if let Some(cl) = cl {
                         // RFC 9110 §8.6: Content-Length = 1*DIGIT (no sign);
                         // reject non-digit input (smuggling parity with codec.rs).
-                        let cl_str = cl.trim();
+                        let cl_str = trim_ows(cl);
                         if cl_str.is_empty() || !cl_str.bytes().all(|b| b.is_ascii_digit()) {
                             return Err(HttpError::BadContentLength);
                         }
@@ -520,7 +520,7 @@ impl crate::codec::Encoder<Request> for Http1ClientCodec {
             if let Some(cl) = cl {
                 // RFC 9110 §8.6: Content-Length = 1*DIGIT (no sign); reject
                 // non-digit input (smuggling parity with codec.rs).
-                let cl_str = cl.trim();
+                let cl_str = trim_ows(cl);
                 if cl_str.is_empty() || !cl_str.bytes().all(|b| b.is_ascii_digit()) {
                     return Err(HttpError::BadContentLength);
                 }
@@ -726,7 +726,7 @@ impl Http1Client {
         let request_method = req.method.clone();
 
         let expect_continue = unique_header_value(&req.headers, "Expect")?
-            .is_some_and(|value| value.trim().eq_ignore_ascii_case("100-continue"));
+            .is_some_and(|value| trim_ows(value).eq_ignore_ascii_case("100-continue"));
 
         // Encode request to bytes (reuse the existing validated encoder).
         let mut codec = Http1ClientCodec::new();
@@ -1126,23 +1126,17 @@ impl<T> ClientIncomingBody<T> {
 
                     let line_str =
                         std::str::from_utf8(line.as_ref()).map_err(|_| HttpError::BadHeader)?;
-                    let Some(colon) = line_str.find(':') else {
-                        return Err(HttpError::BadHeader);
-                    };
-
-                    let name = line_str[..colon].trim();
-                    let value = line_str[colon + 1..].trim();
-                    validate_header_field(name, value)?;
+                    let (name, value) = parse_header_line(line_str)?;
                     // br-asupersync-135g0e: RFC 9110 §6.5.1 forbids framing /
                     // routing / auth / payload / cache-control trailers in either
                     // direction. Mirror the codec path so a response trailer can't
                     // smuggle a Content-Length / Transfer-Encoding override into an
                     // intermediary that merges trailers into the header set.
-                    if is_forbidden_trailer(name) {
+                    if is_forbidden_trailer(&name) {
                         return Err(HttpError::BadHeader);
                     }
                     trailers.append(
-                        HeaderName::from_string(name),
+                        HeaderName::from_string(&name),
                         HeaderValue::from_bytes(value.as_bytes()),
                     );
                 }
@@ -1912,6 +1906,53 @@ mod tests {
     }
 
     #[test]
+    fn response_framing_uses_only_rfc_ows() {
+        let mut codec = Http1ClientCodec::new();
+        let mut buf = BytesMut::from(
+            &b"HTTP/1.1 200 OK\r\nContent-Length: \xC2\xA05\xC2\xA0\r\n\r\nhello"[..],
+        );
+        assert!(matches!(
+            codec.decode(&mut buf),
+            Err(HttpError::BadContentLength)
+        ));
+
+        let mut codec = Http1ClientCodec::new();
+        let mut buf = BytesMut::from(
+            &b"HTTP/1.1 200 OK\r\nTransfer-Encoding: \xC2\xA0chunked\xC2\xA0\r\n\r\n0\r\n\r\n"[..],
+        );
+        assert!(matches!(
+            codec.decode(&mut buf),
+            Err(HttpError::BadTransferEncoding)
+        ));
+
+        let mut codec = Http1ClientCodec::new();
+        let mut buf =
+            BytesMut::from(&b"HTTP/1.1 200 OK\r\nContent-Length:\t 5 \t\r\n\r\nhello"[..]);
+        assert_eq!(codec.decode(&mut buf).unwrap().unwrap().body, b"hello");
+
+        let headers = vec![("Content-Length".to_string(), "\u{a0}5\u{a0}".to_string())];
+        assert!(matches!(
+            response_body_kind(&headers, 200, &Method::Get, usize::MAX),
+            Err(HttpError::BadContentLength)
+        ));
+
+        let mut codec = Http1ClientCodec::new();
+        let request = Request {
+            method: Method::Post,
+            uri: "/".to_string(),
+            version: Version::Http11,
+            headers,
+            body: b"hello".to_vec(),
+            trailers: Vec::new(),
+            peer_addr: None,
+        };
+        assert!(matches!(
+            crate::codec::Encoder::encode(&mut codec, request, &mut BytesMut::new()),
+            Err(HttpError::BadContentLength)
+        ));
+    }
+
+    #[test]
     fn encode_request() {
         let mut codec = Http1ClientCodec::new();
         let req = Request {
@@ -1982,6 +2023,16 @@ mod tests {
         assert_eq!(resp.trailers.len(), 2);
         assert_eq!(resp.trailers[0].0, "X-Trailer");
         assert_eq!(resp.trailers[0].1, "one");
+    }
+
+    #[test]
+    fn decode_chunked_response_preserves_non_ows_trailer_bytes() {
+        let mut codec = Http1ClientCodec::new();
+        let raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n\
+                    1\r\nx\r\n0\r\nX-Trailer: \xC2\xA0one\xC2\xA0\r\n\r\n";
+        let mut buf = BytesMut::from(&raw[..]);
+        let resp = codec.decode(&mut buf).unwrap().unwrap();
+        assert_eq!(resp.trailers[0].1, "\u{a0}one\u{a0}");
     }
 
     #[test]

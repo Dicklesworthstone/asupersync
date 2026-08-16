@@ -9,7 +9,8 @@ use crate::bytes::BytesMut;
 use crate::codec::{Encoder, Framed};
 use crate::cx::Cx;
 use crate::http::h1::codec::{
-    Http1Codec, HttpError, decode_streaming_request_head, preview_request_head,
+    Http1Codec, HttpError, decode_streaming_request_head, for_each_header_value_token,
+    preview_request_head, trim_ows, trim_ows_bytes,
 };
 use crate::http::h1::stream::{
     BodyKind, IncomingBodyDrainProgress, IncomingBodyError, IncomingRequestBody,
@@ -282,7 +283,7 @@ impl Http1StreamingConfig {
 
 /// Parses the client `Request-Timeout` header into a duration.
 ///
-/// Accepted forms (after ASCII-whitespace trim): a bare integer meaning
+/// Accepted forms (after RFC OWS (SP / HTAB) trim): a bare integer meaning
 /// **milliseconds** (`"1500"`), or an integer with an `ms`, `s`, or `m`
 /// suffix (`"1500ms"`, `"5s"`, `"2m"`). Fail-closed on anything else:
 ///
@@ -304,7 +305,7 @@ pub(crate) fn parse_request_timeout_header(headers: &[(String, String)]) -> Opti
             found = Some(value);
         }
     }
-    let value = found?.trim();
+    let value = trim_ows(found?);
     let (digits, unit): (&str, fn(u64) -> Duration) = if let Some(d) = value.strip_suffix("ms") {
         (d, Duration::from_millis)
     } else if let Some(d) = value.strip_suffix('s') {
@@ -328,8 +329,8 @@ pub(crate) fn parse_request_timeout_header(headers: &[(String, String)]) -> Opti
 /// value (strip port, lowercase, IPv6 brackets handled). Returns
 /// `None` if the value is malformed.
 fn parse_host_header_host(value: &str) -> Option<String> {
-    let value = value.trim();
-    if value.is_empty() {
+    let value = trim_ows(value);
+    if !is_valid_host_component(value) {
         return None;
     }
     // IPv6 literals: `[::1]:8080` or `[::1]`. The last ':' OUTSIDE the
@@ -338,7 +339,7 @@ fn parse_host_header_host(value: &str) -> Option<String> {
         let close = stripped.find(']')?;
         let host = &stripped[..close];
         let remainder = &stripped[(close + 1)..];
-        if host.is_empty() {
+        if !is_valid_host_component(host) {
             return None;
         }
         if !remainder.is_empty() {
@@ -352,12 +353,23 @@ fn parse_host_header_host(value: &str) -> Option<String> {
     // Plain host or `host:port` — split on the last ':' and reject
     // malformed suffixes rather than silently truncating them.
     if let Some((host, port)) = value.rsplit_once(':') {
-        if host.is_empty() || host.contains(':') || !is_valid_host_port(port) {
+        if host.is_empty()
+            || host.contains(':')
+            || !is_valid_host_component(host)
+            || !is_valid_host_port(port)
+        {
             return None;
         }
         return Some(host.to_ascii_lowercase());
     }
     Some(value.to_ascii_lowercase())
+}
+
+fn is_valid_host_component(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .chars()
+            .all(|ch| !ch.is_control() && !ch.is_whitespace())
 }
 
 fn is_valid_host_port(port: &str) -> bool {
@@ -1641,7 +1653,7 @@ fn classify_expectation_from_pairs<'a>(
             continue;
         }
         saw_expect = true;
-        for_each_wire_header_token(value, |token| {
+        for_each_header_value_token(value, |token| {
             if token.eq_ignore_ascii_case(b"100-continue") {
                 saw_continue = true;
             } else {
@@ -1683,7 +1695,7 @@ fn request_expects_body_header_pairs<'a>(
 ) -> bool {
     for (name, value) in headers {
         if name.eq_ignore_ascii_case("content-length") {
-            let value = trim_wire_header_value(value);
+            let value = trim_ows_bytes(value);
             if !value.is_empty()
                 && value.iter().all(u8::is_ascii_digit)
                 && std::str::from_utf8(value)
@@ -1697,50 +1709,13 @@ fn request_expects_body_header_pairs<'a>(
         }
         if name.eq_ignore_ascii_case("transfer-encoding") {
             let mut chunked = false;
-            for_each_wire_header_token(value, |token| {
+            for_each_header_value_token(value, |token| {
                 chunked |= token.eq_ignore_ascii_case(b"chunked");
             });
             return chunked;
         }
     }
     false
-}
-
-fn trim_wire_header_value(value: &[u8]) -> &[u8] {
-    if let Ok(value) = std::str::from_utf8(value) {
-        return value.trim().as_bytes();
-    }
-
-    let mut start = 0usize;
-    while start < value.len() && char::from(value[start]).is_whitespace() {
-        start += 1;
-    }
-    let mut end = value.len();
-    while end > start && char::from(value[end - 1]).is_whitespace() {
-        end -= 1;
-    }
-    &value[start..end]
-}
-
-fn for_each_wire_header_token(value: &[u8], mut visit: impl FnMut(&[u8])) {
-    if let Ok(value) = std::str::from_utf8(value) {
-        for token in value
-            .split(',')
-            .map(str::trim)
-            .filter(|token| !token.is_empty())
-        {
-            visit(token.as_bytes());
-        }
-        return;
-    }
-
-    for token in value
-        .split(|&byte| byte == b',')
-        .map(trim_wire_header_value)
-        .filter(|token| !token.is_empty())
-    {
-        visit(token);
-    }
 }
 
 fn expectation_response(version: Version, action: ExpectationAction) -> Option<Response> {
@@ -1785,13 +1760,13 @@ fn should_close_connection_parts(
     // Check explicit Connection header from client (RFC 9110 §7.6.1: comma-separated tokens)
     for (name, value) in headers {
         if name.eq_ignore_ascii_case("connection") {
-            for token in value.split(',').map(str::trim) {
-                if token.eq_ignore_ascii_case("close") {
+            for_each_header_value_token(value.as_bytes(), |token| {
+                if token.eq_ignore_ascii_case(b"close") {
                     has_close = true;
-                } else if token.eq_ignore_ascii_case("keep-alive") {
+                } else if token.eq_ignore_ascii_case(b"keep-alive") {
                     has_keep_alive = true;
                 }
-            }
+            });
         }
     }
 
@@ -1855,10 +1830,14 @@ fn add_connection_keep_alive(resp: &mut Response) {
 fn response_requests_close(resp: &Response) -> bool {
     for (name, value) in &resp.headers {
         if name.eq_ignore_ascii_case("connection") {
-            for token in value.split(',').map(str::trim) {
-                if token.eq_ignore_ascii_case("close") {
-                    return true;
+            let mut requests_close = false;
+            for_each_header_value_token(value.as_bytes(), |token| {
+                if token.eq_ignore_ascii_case(b"close") {
+                    requests_close = true;
                 }
+            });
+            if requests_close {
+                return true;
             }
         }
     }
@@ -2334,6 +2313,17 @@ mod tests {
         assert_eq!(parse_host_header_host("2001:db8::1").as_deref(), None);
         assert_eq!(parse_host_header_host(""), None);
         assert_eq!(parse_host_header_host("   "), None);
+        assert_eq!(
+            parse_host_header_host("\t example.com \t").as_deref(),
+            Some("example.com")
+        );
+        assert_eq!(parse_host_header_host("\u{a0}example.com\u{a0}"), None);
+        assert_eq!(parse_host_header_host("\u{a0}example.com:443"), None);
+        assert_eq!(
+            parse_host_header_host("münich.example").as_deref(),
+            Some("münich.example"),
+            "OWS hardening must not narrow the previously accepted non-whitespace Unicode host surface",
+        );
     }
 
     #[test]
@@ -2345,6 +2335,32 @@ mod tests {
             vec![("Connection".into(), "keep-alive".into())],
         );
         assert!(!should_close_connection(&req, &config, &state));
+    }
+
+    #[test]
+    fn connection_tokens_use_only_rfc_ows() {
+        let config = Http1Config::default();
+        let state = ConnectionState::new(crate::types::Time::ZERO);
+
+        let ascii_ows = make_request(
+            Version::Http10,
+            vec![("Connection".into(), "\t keep-alive \t".into())],
+        );
+        assert!(!should_close_connection(&ascii_ows, &config, &state));
+
+        let unicode_whitespace = make_request(
+            Version::Http10,
+            vec![("Connection".into(), "\u{a0}keep-alive\u{a0}".into())],
+        );
+        assert!(should_close_connection(
+            &unicode_whitespace,
+            &config,
+            &state
+        ));
+
+        let response =
+            Response::new(200, "OK", Vec::new()).with_header("Connection", "\u{a0}close\u{a0}");
+        assert!(!response_requests_close(&response));
     }
 
     #[test]
@@ -2592,6 +2608,36 @@ mod tests {
     fn classify_expectation_rejects_unsupported_expectation() {
         let req = make_request(Version::Http11, vec![("Expect".into(), "foo".into())]);
         assert_eq!(classify_expectation(&req), ExpectationAction::Reject);
+    }
+
+    #[test]
+    fn expectation_and_body_preview_use_only_rfc_ows() {
+        let unicode_expect = make_request(
+            Version::Http11,
+            vec![("Expect".into(), "\u{a0}100-continue\u{a0}".into())],
+        );
+        assert_eq!(
+            classify_expectation(&unicode_expect),
+            ExpectationAction::Reject
+        );
+
+        let ascii_ows_expect = make_request(
+            Version::Http11,
+            vec![("Expect".into(), "\t 100-continue \t".into())],
+        );
+        assert_eq!(
+            classify_expectation(&ascii_ows_expect),
+            ExpectationAction::Continue
+        );
+
+        assert!(!request_expects_body_headers(&[(
+            "Content-Length".into(),
+            "\u{a0}5\u{a0}".into(),
+        )]));
+        assert!(!request_expects_body_headers(&[(
+            "Transfer-Encoding".into(),
+            "\u{a0}chunked\u{a0}".into(),
+        )]));
     }
 
     #[test]
@@ -3216,6 +3262,7 @@ mod tests {
             "184467440737s", // overflow-adjacent garbage length
             "5ss",
             "ms",
+            "\u{a0}5s\u{a0}",
         ];
         for value in bad_values {
             let headers = vec![("Request-Timeout".to_string(), value.to_string())];

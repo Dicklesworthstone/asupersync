@@ -706,49 +706,33 @@ pub(super) fn unique_header_value<'a>(
 }
 
 pub(super) fn require_transfer_encoding_chunked(value: &str) -> Result<(), HttpError> {
-    let mut tokens = value.split(',').map(str::trim).filter(|t| !t.is_empty());
-    let first = tokens.next().ok_or(HttpError::BadTransferEncoding)?;
-    if tokens.next().is_some() {
-        // We only support the simplest/secure subset for now: `chunked` only.
-        return Err(HttpError::BadTransferEncoding);
-    }
-    if first.eq_ignore_ascii_case("chunked") {
-        return Ok(());
-    }
-    Err(HttpError::BadTransferEncoding)
+    require_transfer_encoding_chunked_bytes(value.as_bytes())
 }
 
-fn trim_header_value_bytes(value: &[u8]) -> &[u8] {
-    if let Ok(value) = std::str::from_utf8(value) {
-        return value.trim().as_bytes();
-    }
-
+/// Trim HTTP optional whitespace (OWS), which RFC 9110 defines as SP / HTAB.
+/// Unicode whitespace and Latin-1 `obs-text` are data, not framing whitespace;
+/// accepting them here can make this parser disagree with an intermediary.
+pub(super) fn trim_ows_bytes(value: &[u8]) -> &[u8] {
     let mut start = 0;
-    while start < value.len() && char::from(value[start]).is_whitespace() {
+    while start < value.len() && matches!(value[start], b' ' | b'\t') {
         start += 1;
     }
     let mut end = value.len();
-    while end > start && char::from(value[end - 1]).is_whitespace() {
+    while end > start && matches!(value[end - 1], b' ' | b'\t') {
         end -= 1;
     }
     &value[start..end]
 }
 
-fn for_each_header_value_token(value: &[u8], mut visit: impl FnMut(&[u8])) {
-    if let Ok(value) = std::str::from_utf8(value) {
-        for token in value
-            .split(',')
-            .map(str::trim)
-            .filter(|token| !token.is_empty())
-        {
-            visit(token.as_bytes());
-        }
-        return;
-    }
+pub(super) fn trim_ows(value: &str) -> &str {
+    std::str::from_utf8(trim_ows_bytes(value.as_bytes()))
+        .expect("trimming ASCII OWS preserves UTF-8 boundaries")
+}
 
+pub(super) fn for_each_header_value_token(value: &[u8], mut visit: impl FnMut(&[u8])) {
     for token in value
         .split(|&byte| byte == b',')
-        .map(trim_header_value_bytes)
+        .map(trim_ows_bytes)
         .filter(|token| !token.is_empty())
     {
         visit(token);
@@ -1391,7 +1375,7 @@ fn inspect_request_head_parts(
             // '+5' which can disagree with stricter intermediaries
             // (nginx, envoy) and create a request-smuggling primitive.
             // Reject any non-digit prefix before parsing.
-            let content_length = trim_header_value_bytes(content_length);
+            let content_length = trim_ows_bytes(content_length);
             if content_length.is_empty() || !content_length.iter().all(u8::is_ascii_digit) {
                 return Err(HttpError::BadContentLength);
             }
@@ -1690,7 +1674,7 @@ impl Encoder<Response> for Http1Codec {
                 // br-asupersync-lbhaf2: same digit-only validation on the
                 // encode side. Reject Content-Length values like '+5' that
                 // Rust parse accepts but the spec rejects.
-                let cl_str = cl.trim();
+                let cl_str = trim_ows(cl);
                 if cl_str.is_empty() || !cl_str.bytes().all(|b| b.is_ascii_digit()) {
                     return Err(HttpError::BadContentLength);
                 }
@@ -2188,7 +2172,7 @@ mod tests {
     }
 
     #[test]
-    fn borrowed_request_head_preserves_legacy_unicode_and_latin1_trimming() {
+    fn borrowed_and_owned_framing_reject_non_rfc_ows() {
         for content_length in [
             "\u{2003}5\u{2003}".as_bytes().to_vec(),
             vec![0xA0, b'5', 0xA0],
@@ -2198,15 +2182,16 @@ mod tests {
             raw.extend_from_slice(b"\r\n\r\nhello");
 
             let codec = Http1Codec::new();
-            let head = codec
-                .inspect_request_head(&raw)
-                .unwrap()
-                .expect("complete request head");
-            assert_eq!(head.body_kind(), StreamingBodyKind::ContentLength(5));
+            assert!(matches!(
+                codec.inspect_request_head(&raw),
+                Err(HttpError::BadContentLength)
+            ));
 
             let mut owned_codec = Http1Codec::new();
-            let owned = decode_one(&mut owned_codec, &raw).unwrap().unwrap();
-            assert_eq!(owned.body, b"hello");
+            assert!(matches!(
+                decode_one(&mut owned_codec, &raw),
+                Err(HttpError::BadContentLength)
+            ));
         }
     }
 
@@ -2438,6 +2423,72 @@ mod tests {
             b"POST / HTTP/1.1\r\nTransfer-Encoding: gzip, chunked\r\n\r\n0\r\n\r\n",
         );
         assert!(matches!(result, Err(HttpError::BadTransferEncoding)));
+    }
+
+    #[test]
+    fn framing_ows_is_strictly_space_or_tab() {
+        // RFC 9110 defines OWS as SP / HTAB. Treating Unicode whitespace or
+        // Latin-1 obs-text as OWS can make two HTTP hops disagree about the
+        // framing value, which is a request-smuggling primitive.
+        let content_length_cases: [&[u8]; 2] = [
+            b"POST / HTTP/1.1\r\nContent-Length: \xC2\xA05\xC2\xA0\r\n\r\nhello",
+            b"POST / HTTP/1.1\r\nContent-Length: \xA05\xA0\r\n\r\nhello",
+        ];
+        for request in content_length_cases {
+            let codec = Http1Codec::new();
+            assert!(matches!(
+                codec.inspect_request_head(request),
+                Err(HttpError::BadContentLength)
+            ));
+
+            let mut codec = Http1Codec::new();
+            assert!(matches!(
+                decode_one(&mut codec, request),
+                Err(HttpError::BadContentLength)
+            ));
+        }
+
+        let transfer_encoding_cases: [&[u8]; 2] = [
+            b"POST / HTTP/1.1\r\nTransfer-Encoding: \xC2\xA0chunked\xC2\xA0\r\n\r\n0\r\n\r\n",
+            b"POST / HTTP/1.1\r\nTransfer-Encoding: \xA0chunked\xA0\r\n\r\n0\r\n\r\n",
+        ];
+        for request in transfer_encoding_cases {
+            let codec = Http1Codec::new();
+            assert!(matches!(
+                codec.inspect_request_head(request),
+                Err(HttpError::BadTransferEncoding)
+            ));
+
+            let mut codec = Http1Codec::new();
+            assert!(matches!(
+                decode_one(&mut codec, request),
+                Err(HttpError::BadTransferEncoding)
+            ));
+        }
+
+        let valid_ows = b"POST / HTTP/1.1\r\nContent-Length:\t 5 \t\r\n\r\nhello";
+        let codec = Http1Codec::new();
+        assert!(codec.inspect_request_head(valid_ows).unwrap().is_some());
+        let mut codec = Http1Codec::new();
+        assert!(decode_one(&mut codec, valid_ows).unwrap().is_some());
+
+        let mut encoded = BytesMut::new();
+        let mut codec = Http1Codec::new();
+        let response = Response::new(200, "OK", b"hello".to_vec())
+            .with_header("Content-Length", "\u{a0}5\u{a0}");
+        assert!(matches!(
+            codec.encode(response, &mut encoded),
+            Err(HttpError::BadContentLength)
+        ));
+
+        let mut encoded = BytesMut::new();
+        let mut codec = Http1Codec::new();
+        let response = Response::new(200, "OK", b"hello".to_vec())
+            .with_header("Transfer-Encoding", "\u{a0}chunked\u{a0}");
+        assert!(matches!(
+            codec.encode(response, &mut encoded),
+            Err(HttpError::BadTransferEncoding)
+        ));
     }
 
     #[test]
