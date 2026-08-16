@@ -1,6 +1,7 @@
 {
-  "schema_version": 1,
-  "bead_id": "asupersync-ym2wtv.2.1",
+  "schema_version": 2,
+  "phase1_bead_id": "asupersync-ym2wtv.2.1",
+  "phase2_bead_id": "asupersync-ym2wtv.2.2",
   "capability_id": "CAP-SQLITE",
   "placement": {
     "kind": "neutral_standalone_consumer",
@@ -11,7 +12,7 @@
     "asupersync_root_has_frankensqlite_edge": false,
     "runtime_unification": "[patch.crates-io] asupersync points to the same local source as the direct dependency"
   },
-  "pins": {
+  "phase1_pins": {
     "asupersync": {
       "source": "local_path",
       "revision": "57b95c31df8bd5b2541a7427cbd6a6bccb78f2e5",
@@ -33,7 +34,7 @@
     "target": "x86_64-unknown-linux-gnu",
     "host": "linux-x86_64-rch-worker"
   },
-  "vector_contract": {
+  "phase1_vector_contract": {
     "path": "artifacts/sqlite_conformance_vectors_v1.json",
     "sha256": "1aebfcf33decb88cd359d507f9b504fcd5f0f35d5e47795e445bba42dcb0e856",
     "schema_version": 1,
@@ -51,7 +52,7 @@
       "unsupported_capability"
     ]
   },
-  "execution": {
+  "phase1_execution": {
     "status": "PASS",
     "worker": "vmi1227854",
     "remote_exit_code": 0,
@@ -227,13 +228,70 @@
       }
     }
   },
-  "validation_frontier": {
+  "phase2": {
+    "scope": "open_configuration_pool_admission_blocking_bridge_cx_cancellation_shutdown_and_quiescence",
+    "pins": {
+      "asupersync": {
+        "source": "clean_overlay",
+        "revision": "67313f3e87c206299cf2c6b4f75fb6124d517a39+sqlite-p2-overlay",
+        "features": [
+          "sqlite"
+        ]
+      },
+      "frankensqlite": {
+        "source": "https://github.com/Dicklesworthstone/frankensqlite.git",
+        "revision": "92f9e9833f859ebcbe27e9fef16d9cad4372bbd7",
+        "release_tag": "v0.1.18",
+        "packages": [
+          "fsqlite",
+          "fsqlite-types"
+        ],
+        "features": [
+          "native",
+          "async-api"
+        ]
+      },
+      "lockfile_sha256": "00500b558af0915a8dad4fa919b901e5f5d96ffc7913c0b69e745abd2819ebb7",
+      "cargo_profile": "dev",
+      "target": "x86_64-unknown-linux-gnu",
+      "host": "linux-x86_64-rch-worker"
+    },
+    "vector_contract": {
+      "path": "artifacts/sqlite_conformance_vectors_v1.json",
+      "sha256": "d0b9a13962113942029b6cdc72226da1092a15d42c9cc52b873607262f2956cd",
+      "schema_version": 2,
+      "deterministic_validation": "tests/sqlite_parity_harness_contract.rs",
+      "vector_ids": [
+        "SQLITE-PARITY-P2-MEMORY-CONFIG-001",
+        "SQLITE-PARITY-P2-PATH-OPEN-002",
+        "SQLITE-PARITY-P2-OPEN-FAILURE-003",
+        "SQLITE-PARITY-P2-CANCELLED-OPEN-004",
+        "SQLITE-PARITY-P2-POOL-CANCEL-005",
+        "SQLITE-PARITY-P2-URI-UNSUPPORTED-006"
+      ],
+      "resource_invariants": [
+        "connection_closed_or_not_opened",
+        "open_transactions_zero",
+        "admission_waiters_zero",
+        "admission_permits_restored",
+        "blocking_pending_busy_active_zero_after_runtime_shutdown",
+        "region_closed"
+      ]
+    },
+    "execution": {
+      "status": "BLOCKED_REMOTE_ADMISSION",
+      "remote_job_created": false,
+      "diagnostic": "remote build admission is paused while daemon restart remediation is active",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec --base 67313f3e87c206299cf2c6b4f75fb6124d517a39 --clean-overlay --overlay-path artifacts/sqlite_conformance_vectors_v1.json --overlay-path tests/fixtures/sqlite-parity-consumer/Cargo.toml --overlay-path tests/fixtures/sqlite-parity-consumer/Cargo.lock --overlay-path tests/fixtures/sqlite-parity-consumer/src/main.rs -- env ASUPERSYNC_SOURCE_REVISION=67313f3e87c206299cf2c6b4f75fb6124d517a39+sqlite-p2-overlay SQLITE_PARITY_TARGET=x86_64-unknown-linux-gnu SQLITE_PARITY_HOST=linux-x86_64-rch-worker CARGO_TARGET_DIR=/tmp/rch_target_asupersync_sqlite_parity_p2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo run --locked --manifest-path tests/fixtures/sqlite-parity-consumer/Cargo.toml"
+    }
+  },
+  "phase1_validation_frontier": {
     "newer_revision": "31fc4a3b3a108dc49243157ea29fb1ddfcb06fdc",
     "status": "BLOCKED_UPSTREAM_COMPILE",
     "receipt": "A clean remote native-feature compile failed in fsqlite-btree because synchronous cursor adapters received Future-returning pager operations. The harness therefore pins the newest checked release tag used by this receipt instead of misreporting the current remote tip as runnable.",
     "no_claim": "This receipt diagnoses only the selected combined graph and does not establish that every feature profile or later FrankenSQLite revision is unbuildable."
   },
-  "verification": {
+  "phase1_verification": {
     "consumer_clippy": {
       "status": "PASS",
       "remote_exit_code": 0,
@@ -261,9 +319,9 @@
   },
   "no_claims": [
     "No dependency cutover or rusqlite/sqlparser removal is authorized.",
-    "This smoke vector does not establish the eight-family semantic parity campaign.",
-    "none_observed background work is not a proof of global task or resource quiescence.",
-    "The graph-budget DEFER remains terminal for this prerequisite and is not converted to PASS by a smoke run.",
+    "The six P2 vectors do not establish the transaction, statement, value, interrupt, concurrency or aggregate parity families owned by later children.",
+    "Runtime-local closed and zero-count receipts do not prove process-global task or resource quiescence.",
+    "The graph-budget DEFER remains terminal for this prerequisite and is not converted to PASS by a P2 run.",
     "No claim is made about FrankenSQLite performance, maturity, or release readiness."
   ]
 }

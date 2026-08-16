@@ -180,6 +180,7 @@ version = "0.0.0"
 dependencies = [
  "asupersync",
  "fsqlite",
+ "fsqlite-types",
  "serde",
  "serde_json",
 ]
