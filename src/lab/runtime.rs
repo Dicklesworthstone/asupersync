@@ -8681,6 +8681,13 @@ mod tests {
             all_indices
         );
 
+        let exact_observations = Arc::new(Mutex::new(Vec::new()));
+        let mut exact_replay =
+            forced_schedule_fixture(config.clone(), Arc::clone(&exact_observations));
+        let exact_report = exact_replay
+            .run_forced_schedule(&schedule, ForcedScheduleLimits::new(32, 128))
+            .expect("complete source schedule must still replay exactly");
+
         let full_observations = Arc::new(Mutex::new(Vec::new()));
         let mut full_replay =
             forced_schedule_fixture(config.clone(), Arc::clone(&full_observations));
@@ -8699,7 +8706,15 @@ mod tests {
             full_report.lab.trace_certificate.schedule_hash,
             schedule.terminal_schedule_hash()
         );
+        assert_eq!(full_report.lab.steps_total, exact_report.steps);
+        assert_eq!(full_report.lab.now_nanos, exact_report.terminal_nanos);
+        assert_eq!(
+            full_report.lab.trace_certificate.schedule_hash,
+            exact_report.schedule_hash
+        );
+        assert_eq!(full_report.lab.quiescent, exact_report.quiescent);
         assert_eq!(*full_observations.lock(), *source_observations.lock());
+        assert_eq!(*full_observations.lock(), *exact_observations.lock());
 
         let retained = schedule
             .derive_candidate(&[1], limits)
