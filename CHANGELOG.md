@@ -10,7 +10,7 @@ Asupersync is a spec-first, cancel-correct, capability-secure async runtime for 
 - Commit links point to representative commits, not exhaustive lists.
 - Organized by landed capabilities within each version, not by diff order.
 
-Scope window: current work through 2026-08-16, reconstructed from git history,
+Scope window: current work through 2026-08-17, reconstructed from git history,
 beads, benchmark ledgers, and live repo artifacts; the latest published
 GitHub Release/tag baseline is `v0.4.5`.
 
@@ -49,7 +49,7 @@ GitHub Release/tag baseline is `v0.4.5`.
 
 ## [Unreleased]
 
-## [v0.4.6] - 2026-08-16
+## [v0.4.6] - 2026-08-17
 
 ### Runtime correctness
 
@@ -63,11 +63,18 @@ GitHub Release/tag baseline is `v0.4.5`.
   terminal certificate as a candidate result. This is the executable replay
   and delta-debugging substrate; it does not yet provide a failure classifier,
   minimizer, workload codec, or persisted replay artifact.
+- **Lab command publication is ordered ahead of virtual-time jumps and retained
+  candidate dispatches.** Managed spawns and deferred cancellation commands can
+  no longer sit outside an empty scheduler while auto-advance skips to a later
+  timer/reactor deadline. Exact dispatch also treats lazy cancel promotion as
+  authoritative over stale ready/timed heap entries.
 - **Cancelled sleeps release timer registrations before the completed future is
   dropped.** A task that retains its completed `Sleep` can no longer retain the
   timer-wheel entry, stored waker, or fallback-thread state after explicit
   cancellation. Resetting a sleep also clears the prior waker and delegates
-  through one authoritative registration-cleanup path.
+  through one authoritative registration-cleanup path. Detached custom-clock
+  fallback threads preserve their terminal wake without consuming the waker of
+  a replacement registration or fallback-to-driver transition.
 
 ### Security and protocols
 
