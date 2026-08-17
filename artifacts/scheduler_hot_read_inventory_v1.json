@@ -128,8 +128,8 @@
     },
     {
       "path": "src/lab/runtime.rs",
-      "sha256": "9fd30eaa888fb9ad291de8cb78897a15fac939b28acfff0ed277cea60e8e2d84",
-      "line_count": 10859,
+      "sha256": "fe5bb43219081c086adda403a8cd41c33d1fe6f7d2519656021993c110eca69d",
+      "line_count": 11246,
       "role": "deterministic scheduler cancellation writer and alternate reader model"
     },
     {
