@@ -531,7 +531,7 @@
       "overlap_group_count": 15,
       "overlap_pin_row_count": 34,
       "overlap_pin_tuple_rule": "For each source-pin row whose path occurs in more than one child packet, serialize path<TAB>child<TAB>pin_id<TAB>sha256; bytewise sort the records and append one LF per row.",
-      "overlap_pin_projection_sha256": "babf714165ec76b2ee26cb4309273b918189679bdc50714f0178270d3c0c4595",
+      "overlap_pin_projection_sha256": "903c0f547cb957fc894d06ad3488effe349f06f5538423db1c1ee01c9f450d82",
       "conflicting_overlap_groups": []
     },
     "unknown_blockers": {

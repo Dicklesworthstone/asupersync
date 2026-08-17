@@ -392,7 +392,7 @@
     {
       "pin_id": "KAFKA-K0-4-PIN-019-K0-2-CONTRACT",
       "path": "tests/kafka_incumbent_semantics_matrix_contract.rs",
-      "sha256": "e38aa1c672bb90915f2cc056f90a8fb6b457ee9e8c405b436e37c9a557b5c5ad",
+      "sha256": "919826590975e812ee6cae135bca03140bdb98ea71bb79773ab21304a8165276",
       "byte_count": 69501,
       "record_count": 1696
     },
