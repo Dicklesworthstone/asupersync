@@ -85,7 +85,7 @@ impl ReassemblyBuffer {
 
     /// Insert a data segment into the buffer
     pub fn insert_segment(&mut self, mut segment: DataSegment) -> Outcome<Vec<Bytes>, StreamError> {
-        let mut segment_end = match segment.checked_end_offset() {
+        let segment_end = match segment.checked_end_offset() {
             Some(end) => end,
             None => {
                 return Outcome::err(StreamError::InvalidState {
@@ -95,28 +95,26 @@ impl ReassemblyBuffer {
             }
         };
 
-        // Handle overlap with already delivered data
-        if segment.offset < self.next_offset {
-            if segment_end <= self.next_offset {
-                // Completely duplicate (already delivered), ignore it
-                return Outcome::ok(Vec::new());
-            }
-            // Partially duplicate, truncate the already-delivered portion
-            let duplicate_len = (self.next_offset - segment.offset) as usize;
-            segment.data = segment.data.slice(duplicate_len..);
-            segment.offset = self.next_offset;
-            segment_end = match segment.checked_end_offset() {
-                Some(end) => end,
-                None => {
-                    return Outcome::err(StreamError::InvalidState {
-                        stream_id: StreamId::new(0),
-                        state: "Stream segment offset overflow".to_string(),
-                    });
-                }
-            };
+        // Final-size validation uses the original frame end, before trimming
+        // already-delivered bytes. A FIN on an otherwise duplicate frame still
+        // establishes the stream's final size, while any data beyond a known
+        // final size or a newly declared final size below previously observed
+        // data is a protocol violation.
+        let highest_observed = self
+            .segments
+            .values()
+            .fold(self.next_offset, |highest, buffered| {
+                highest.max(buffered.end_offset())
+            });
+        if let Some(existing_final_size) = self.final_size
+            && segment_end > existing_final_size
+        {
+            return Outcome::err(StreamError::FinalSizeMismatch {
+                stream_id: StreamId::new(0),
+                expected: existing_final_size,
+                actual: segment_end,
+            });
         }
-
-        // Check for final size consistency
         let pending_final_size = if segment.is_final {
             let segment_final_size = segment_end;
             if let Some(existing_final_size) = self.final_size {
@@ -128,10 +126,33 @@ impl ReassemblyBuffer {
                     });
                 }
             }
+            if segment_final_size < highest_observed {
+                return Outcome::err(StreamError::FinalSizeMismatch {
+                    stream_id: StreamId::new(0),
+                    expected: highest_observed,
+                    actual: segment_final_size,
+                });
+            }
             Some(segment_final_size)
         } else {
             None
         };
+
+        // Handle overlap with already delivered data only after validating FIN.
+        // A duplicate retransmission may be the frame that newly carries FIN.
+        if segment.offset < self.next_offset {
+            if segment_end <= self.next_offset {
+                if let Some(final_size) = pending_final_size {
+                    self.final_size = Some(final_size);
+                    self.received_final = true;
+                }
+                return Outcome::ok(Vec::new());
+            }
+            // Partially duplicate, truncate the already-delivered portion.
+            let duplicate_len = (self.next_offset - segment.offset) as usize;
+            segment.data = segment.data.slice(duplicate_len..);
+            segment.offset = self.next_offset;
+        }
 
         let uncovered_segments = match self.uncovered_segments(segment) {
             Ok(segments) => segments,
@@ -592,6 +613,80 @@ mod tests {
         assert_eq!(delivered.len(), 2);
         assert_eq!(&delivered[0][..], b"hello");
         assert_eq!(&delivered[1][..], b"world");
+        assert!(buffer.is_complete());
+    }
+
+    #[test]
+    fn data_beyond_known_final_size_is_rejected_without_mutation() {
+        let mut buffer = ReassemblyBuffer::new(10000);
+        assert!(
+            buffer
+                .insert_segment(DataSegment::new(5, Bytes::from_static(b"world"), true))
+                .expect("out-of-order final segment")
+                .is_empty()
+        );
+        assert_eq!(buffer.final_size(), Some(10));
+        assert_eq!(buffer.buffered_data_size(), 5);
+
+        let rejected = buffer.insert_segment(DataSegment::new(10, Bytes::from_static(b"!"), false));
+        assert!(matches!(
+            rejected,
+            Outcome::Err(StreamError::FinalSizeMismatch {
+                expected: 10,
+                actual: 11,
+                ..
+            })
+        ));
+        assert_eq!(buffer.final_size(), Some(10));
+        assert_eq!(buffer.buffered_data_size(), 5);
+        assert_eq!(buffer.buffered_segments(), 1);
+    }
+
+    #[test]
+    fn final_size_below_buffered_data_is_rejected_without_mutation() {
+        let mut buffer = ReassemblyBuffer::new(10000);
+        assert!(
+            buffer
+                .insert_segment(DataSegment::new(10, Bytes::from_static(b"world"), false))
+                .expect("buffer data above the receive head")
+                .is_empty()
+        );
+
+        let rejected =
+            buffer.insert_segment(DataSegment::new(0, Bytes::from_static(b"hello"), true));
+        assert!(matches!(
+            rejected,
+            Outcome::Err(StreamError::FinalSizeMismatch {
+                expected: 15,
+                actual: 5,
+                ..
+            })
+        ));
+        assert_eq!(buffer.final_size(), None);
+        assert!(!buffer.received_final_segment());
+        assert_eq!(buffer.buffered_data_size(), 5);
+        assert_eq!(buffer.buffered_segments(), 1);
+    }
+
+    #[test]
+    fn duplicate_delivered_fin_establishes_completion() {
+        let mut buffer = ReassemblyBuffer::new(10000);
+        assert_eq!(
+            buffer
+                .insert_segment(DataSegment::new(0, Bytes::from_static(b"hello"), false))
+                .expect("deliver data without FIN"),
+            vec![Bytes::from_static(b"hello")]
+        );
+        assert!(!buffer.is_complete());
+
+        assert!(
+            buffer
+                .insert_segment(DataSegment::new(0, Bytes::from_static(b"hello"), true))
+                .expect("duplicate retransmission carries FIN")
+                .is_empty()
+        );
+        assert_eq!(buffer.final_size(), Some(5));
+        assert!(buffer.received_final_segment());
         assert!(buffer.is_complete());
     }
 
