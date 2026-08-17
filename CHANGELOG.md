@@ -12,7 +12,7 @@ Asupersync is a spec-first, cancel-correct, capability-secure async runtime for 
 
 Scope window: current work through 2026-08-17, reconstructed from git history,
 beads, benchmark ledgers, and live repo artifacts; the latest published
-GitHub Release/tag baseline is `v0.4.5`.
+GitHub Release/tag baseline is `v0.4.6`.
 
 ## Version Timeline
 
@@ -48,6 +48,29 @@ GitHub Release/tag baseline is `v0.4.5`.
 ---
 
 ## [Unreleased]
+
+### Runtime correctness
+
+- **Runtime-handle tasks now have an additive typed join path.**
+  `RuntimeHandle::spawn_checked` and `try_spawn_checked` return a
+  `CheckedJoinHandle<T>` whose future resolves to `Result<T, JoinError>`, so
+  runtime shutdown is distinguishable from a user-task panic without
+  unwinding the observer. The established `RuntimeHandle::spawn` and
+  `JoinHandle<T>` signatures and panic-propagating behavior remain unchanged
+  for v0.4.3 compatibility ([#59](https://github.com/Dicklesworthstone/asupersync/issues/59)).
+
+### Security and protocols
+
+- **QUIC handshake duplicate detection now runs after authentication.** A
+  cleartext long header that reused an accepted packet number could previously
+  bypass packet unprotection and be reported as a successful receive. Duplicate
+  packets now authenticate before idempotent suppression, and the path RTT used
+  by source-stream BDP admission is initialized only by authenticated handshake
+  traffic, and packet-history exhaustion is likewise evaluated only after
+  authentication. Reordered CRYPTO buffering now caps both payload bytes and
+  disjoint range metadata, closing a tiny-frame memory-amplification path;
+  rejected conflicting or oversized fragments also leave previously accepted
+  reassembly state intact.
 
 ## [v0.4.6] - 2026-08-17
 

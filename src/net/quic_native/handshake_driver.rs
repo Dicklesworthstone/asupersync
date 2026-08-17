@@ -71,6 +71,10 @@ const MAX_SEEN_HANDSHAKE_PACKETS: usize = HANDSHAKE_MAX_FLIGHTS * HANDSHAKE_RECE
 /// Bound CRYPTO data held behind a gap so an unauthenticated peer cannot grow
 /// handshake memory without limit.
 const MAX_BUFFERED_HANDSHAKE_CRYPTO_BYTES: usize = 1024 * 1024;
+/// Bound metadata as well as payload bytes. Without a range-count cap, a peer
+/// can spend very little of the byte budget on thousands of one-byte ranges
+/// while forcing substantially larger `BTreeMap` node allocations.
+const MAX_BUFFERED_HANDSHAKE_CRYPTO_RANGES: usize = 4096;
 const HANDSHAKE_SERVER_NO_PEER_IDLE_LIMIT: usize = 8;
 
 /// AEAD authentication tag length for the QUIC AES-128-GCM suite.
@@ -321,40 +325,67 @@ impl HandshakeCryptoReassembler {
             return Ok(Vec::new());
         }
 
-        let mut merged_start = offset;
-        let mut merged = data.to_vec();
-        loop {
-            let merged_len = u64::try_from(merged.len())
-                .map_err(|_| handshake_failure("crypto_offset_overflow"))?;
-            let merged_end = merged_start
-                .checked_add(merged_len)
-                .ok_or_else(|| handshake_failure("crypto_offset_overflow"))?;
-            let overlapping = self.pending.iter().find_map(|(&start, bytes)| {
-                let len = u64::try_from(bytes.len()).ok()?;
-                let end = start.checked_add(len)?;
-                (start <= merged_end && end >= merged_start).then_some(start)
-            });
-            let Some(existing_start) = overlapping else {
-                break;
-            };
-            let Some(existing) = self.pending.remove(&existing_start) else {
-                return Err(handshake_failure("crypto_reassembly_state"));
-            };
-            self.pending_bytes = self
-                .pending_bytes
-                .checked_sub(existing.len())
-                .ok_or_else(|| handshake_failure("crypto_reassembly_state"))?;
-            (merged_start, merged) =
-                merge_crypto_ranges(merged_start, &merged, existing_start, &existing)?;
-        }
+        // Build the merged candidate transactionally. Overlapping ranges are
+        // removed temporarily so transitive adjacency remains easy to detect,
+        // but every error path restores the exact accepted state. In
+        // particular, a conflicting or oversized fragment must not erase
+        // bytes that authenticated packets already contributed.
+        let original_pending_bytes = self.pending_bytes;
+        let mut removed = Vec::new();
+        let candidate = (|| {
+            let mut merged_start = offset;
+            let mut merged = data.to_vec();
+            loop {
+                let merged_len = u64::try_from(merged.len())
+                    .map_err(|_| handshake_failure("crypto_offset_overflow"))?;
+                let merged_end = merged_start
+                    .checked_add(merged_len)
+                    .ok_or_else(|| handshake_failure("crypto_offset_overflow"))?;
+                let overlapping = self.pending.iter().find_map(|(&start, bytes)| {
+                    let len = u64::try_from(bytes.len()).ok()?;
+                    let end = start.checked_add(len)?;
+                    (start <= merged_end && end >= merged_start).then_some(start)
+                });
+                let Some(existing_start) = overlapping else {
+                    break;
+                };
+                let Some(existing) = self.pending.remove(&existing_start) else {
+                    return Err(handshake_failure("crypto_reassembly_state"));
+                };
+                let existing_len = existing.len();
+                let merged_range =
+                    merge_crypto_ranges(merged_start, &merged, existing_start, &existing);
+                removed.push((existing_start, existing));
+                self.pending_bytes = self
+                    .pending_bytes
+                    .checked_sub(existing_len)
+                    .ok_or_else(|| handshake_failure("crypto_reassembly_state"))?;
+                (merged_start, merged) = merged_range?;
+            }
 
-        let new_pending_bytes = self
-            .pending_bytes
-            .checked_add(merged.len())
-            .ok_or_else(|| handshake_failure("crypto_buffer_limit"))?;
-        if new_pending_bytes > MAX_BUFFERED_HANDSHAKE_CRYPTO_BYTES {
-            return Err(handshake_failure("crypto_buffer_limit"));
-        }
+            let new_pending_bytes = self
+                .pending_bytes
+                .checked_add(merged.len())
+                .ok_or_else(|| handshake_failure("crypto_buffer_limit"))?;
+            if new_pending_bytes > MAX_BUFFERED_HANDSHAKE_CRYPTO_BYTES {
+                return Err(handshake_failure("crypto_buffer_limit"));
+            }
+            if self.pending.len() >= MAX_BUFFERED_HANDSHAKE_CRYPTO_RANGES {
+                return Err(handshake_failure("crypto_range_limit"));
+            }
+            Ok((merged_start, merged, new_pending_bytes))
+        })();
+        let (merged_start, merged, new_pending_bytes) = match candidate {
+            Ok(candidate) => candidate,
+            Err(err) => {
+                for (start, bytes) in removed {
+                    let displaced = self.pending.insert(start, bytes);
+                    debug_assert!(displaced.is_none(), "removed CRYPTO range key was reused");
+                }
+                self.pending_bytes = original_pending_bytes;
+                return Err(err);
+            }
+        };
         self.pending.insert(merged_start, merged);
         self.pending_bytes = new_pending_bytes;
 
@@ -627,15 +658,10 @@ impl QuicHandshakeDriver {
         let Some(space) = long_packet_type_space(long_header.packet_type) else {
             return Err(handshake_failure("unexpected_long_packet_type"));
         };
-        if let Some(index) = handshake_packet_space_index(space) {
-            let seen = &self.handshake_recv_packet_numbers[index];
-            if seen.contains(&long_header.packet_number) {
-                return Ok(peer_src_cid);
-            }
-            if seen.len() >= MAX_SEEN_HANDSHAKE_PACKETS {
-                return Err(handshake_failure("handshake_packet_history_exhausted"));
-            }
-        }
+        let space_index = handshake_packet_space_index(space)
+            .ok_or_else(|| handshake_failure("unexpected_crypto_packet_space"))?;
+        let already_seen =
+            self.handshake_recv_packet_numbers[space_index].contains(&long_header.packet_number);
         if consumed > packet.len() {
             return Err(handshake_failure("packet_header_overrun"));
         }
@@ -667,15 +693,30 @@ impl QuicHandshakeDriver {
             .unprotect_packet(&protected, header_bytes)
             .map_err(|_| handshake_failure("packet_unprotect"))?;
 
+        // A packet number is only a replay key after the packet authenticates.
+        // Returning before AEAD verification would let an attacker forge the
+        // cleartext long header of a previously seen packet number and have the
+        // receive loop treat it as successful handshake traffic (including RTT
+        // sampling) without possessing the packet-protection key.
+        if already_seen {
+            return Ok(peer_src_cid);
+        }
+        if self.handshake_recv_packet_numbers[space_index].len() >= MAX_SEEN_HANDSHAKE_PACKETS {
+            // The packet number and therefore the history-cap decision are
+            // authoritative only after packet authentication. Keeping this
+            // check below unprotection prevents a forged cleartext header from
+            // turning an otherwise ignorable packet into a fatal exhaustion
+            // result.
+            return Err(handshake_failure("handshake_packet_history_exhausted"));
+        }
+
         // asupersync's frame codec decodes over a `&[u8]` (which implements the
         // crate `Buf`), advancing the slice; mirror `NativeQuicConnection::decode_frames`.
         let mut buf: &[u8] = &unprotected.plaintext;
         while !buf.is_empty() {
             match QuicFrame::decode(&mut buf).map_err(|_| handshake_failure("frame_decode"))? {
                 Some(QuicFrame::Crypto { offset, data }) => {
-                    let index = handshake_packet_space_index(space)
-                        .ok_or_else(|| handshake_failure("unexpected_crypto_packet_space"))?;
-                    let ready = self.handshake_crypto_reassembly[index]
+                    let ready = self.handshake_crypto_reassembly[space_index]
                         .push(offset.value(), data.as_ref())?;
                     for contiguous in ready {
                         self.read_handshake(&contiguous)?;
@@ -687,9 +728,7 @@ impl QuicHandshakeDriver {
                 None => break,
             }
         }
-        if let Some(index) = handshake_packet_space_index(space) {
-            self.handshake_recv_packet_numbers[index].insert(long_header.packet_number);
-        }
+        self.handshake_recv_packet_numbers[space_index].insert(long_header.packet_number);
         Ok(peer_src_cid)
     }
 
@@ -908,16 +947,20 @@ pub async fn client_handshake_over_udp(
                 return Err(handshake_failure("client_handshake_recv_timeout"));
             }
         };
-        if driver.path_rtt_estimate_micros.is_none() && !received.is_empty() {
-            driver.path_rtt_estimate_micros =
-                Some(u64::try_from(flight_sent_at.elapsed().as_micros()).unwrap_or(u64::MAX));
-        }
         // Pump after EACH packet: e.g. after the server's Initial (ServerHello)
         // the client must pump to install Handshake keys BEFORE it can unprotect
         // the server's Handshake-level flight that may arrive in the same batch.
         for packet in &received {
             match driver.recv_handshake_packet(&packet.data) {
-                Ok(_) => {}
+                Ok(_) => {
+                    // Only authenticated handshake traffic may establish the
+                    // path RTT used by the source-stream BDP admission cap.
+                    if driver.path_rtt_estimate_micros.is_none() {
+                        driver.path_rtt_estimate_micros = Some(
+                            u64::try_from(flight_sent_at.elapsed().as_micros()).unwrap_or(u64::MAX),
+                        );
+                    }
+                }
                 Err(err) if is_stale_handshake_packet_error(&err) => {
                     let _ = retransmit_handshake_flight(cx, endpoint, &last_flight).await?;
                     continue;
@@ -1296,6 +1339,70 @@ WkX8ykcdUfalGtZ1XFOTo+aaWs+3gyI1\n\
     }
 
     #[test]
+    fn crypto_reassembler_bounds_disjoint_range_metadata() {
+        let mut reassembler = HandshakeCryptoReassembler::default();
+        for index in 0..MAX_BUFFERED_HANDSHAKE_CRYPTO_RANGES {
+            let offset = 1 + u64::try_from(index).expect("range index fits u64") * 2;
+            assert!(
+                reassembler
+                    .push(offset, b"x")
+                    .expect("range below metadata cap")
+                    .is_empty()
+            );
+        }
+
+        assert!(matches!(
+            reassembler.push(
+                1 + u64::try_from(MAX_BUFFERED_HANDSHAKE_CRYPTO_RANGES)
+                    .expect("range limit fits u64")
+                    * 2,
+                b"x",
+            ),
+            Err(QuicTlsError::CryptoProviderFailure {
+                provider: "rustls-quic-handshake",
+                code: "crypto_range_limit",
+            })
+        ));
+        assert_eq!(
+            reassembler.pending.len(),
+            MAX_BUFFERED_HANDSHAKE_CRYPTO_RANGES,
+            "rejecting excess metadata must leave the accepted range set bounded"
+        );
+    }
+
+    #[test]
+    fn crypto_reassembler_rejection_preserves_accepted_ranges() {
+        let mut reassembler = HandshakeCryptoReassembler::default();
+        reassembler
+            .push(1, b"accepted")
+            .expect("buffer accepted range behind initial gap");
+        let accepted = reassembler.pending.clone();
+        let accepted_bytes = reassembler.pending_bytes;
+
+        assert!(matches!(
+            reassembler.push(2, b"conflict"),
+            Err(QuicTlsError::CryptoProviderFailure {
+                provider: "rustls-quic-handshake",
+                code: "crypto_overlap_conflict",
+            })
+        ));
+        assert_eq!(reassembler.pending, accepted);
+        assert_eq!(reassembler.pending_bytes, accepted_bytes);
+
+        let mut oversized = vec![0_u8; MAX_BUFFERED_HANDSHAKE_CRYPTO_BYTES + 1];
+        oversized[..8].copy_from_slice(b"accepted");
+        assert!(matches!(
+            reassembler.push(1, &oversized),
+            Err(QuicTlsError::CryptoProviderFailure {
+                provider: "rustls-quic-handshake",
+                code: "crypto_buffer_limit",
+            })
+        ));
+        assert_eq!(reassembler.pending, accepted);
+        assert_eq!(reassembler.pending_bytes, accepted_bytes);
+    }
+
+    #[test]
     fn protected_crypto_packets_reassemble_when_lower_packet_number_arrives_late() {
         let alpn = vec![ATP_QUIC_ALPN.to_vec()];
         let server_cfg =
@@ -1371,6 +1478,19 @@ WkX8ykcdUfalGtZ1XFOTo+aaWs+3gyI1\n\
         server
             .recv_handshake_packet(&second)
             .expect("exact packet-number duplicate must be idempotent");
+
+        let mut forged_duplicate = second;
+        let final_byte = forged_duplicate
+            .last_mut()
+            .expect("protected packet includes an authentication tag");
+        *final_byte ^= 1;
+        assert!(matches!(
+            server.recv_handshake_packet(&forged_duplicate),
+            Err(QuicTlsError::CryptoProviderFailure {
+                provider: "rustls-quic-handshake",
+                code: "packet_unprotect",
+            })
+        ));
     }
 
     #[test]

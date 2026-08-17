@@ -3937,7 +3937,7 @@ impl<T> JoinHandle<T> {
             return true;
         }
         let guard = lock_state(&self.state);
-        guard.result.is_some() || Arc::strong_count(&self.state) == 1
+        guard.is_terminal() || Arc::strong_count(&self.state) == 1
     }
 }
 
@@ -3953,7 +3953,7 @@ impl<T> Future for JoinHandle<T> {
         let mut guard = lock_state(&this.state);
         match guard.result.take() {
             None => {
-                if Arc::strong_count(&this.state) == 1 {
+                if guard.cancel_reason.is_some() || Arc::strong_count(&this.state) == 1 {
                     // The executor side was dropped without producing a result or panic payload
                     // (e.g. the runtime was shut down and tasks were force-cancelled).
                     this.completed = true;
@@ -4361,13 +4361,13 @@ impl RuntimeInner {
         F::Output: Send + 'static,
     {
         let join_state = Arc::new(Mutex::new(JoinState::new()));
-        let join_state_for_task = Arc::clone(&join_state);
+        let task_producer = JoinProducer::new(Arc::clone(&join_state));
 
         let wrapped = async move {
             // Ensure panics in the spawned task don't take down a worker thread. If the join
             // handle is awaited, we re-raise the original panic payload on the awaiter.
             let result = CatchUnwind { inner: future }.await;
-            complete_task(&join_state_for_task, result);
+            task_producer.complete(result);
         };
 
         // Mailbox admission mode (br-asupersync-dx-core-api-v2-u1z5hn.1.3):
@@ -4382,7 +4382,7 @@ impl RuntimeInner {
                 .root_pending_spawns
                 .as_ref()
                 .map(|counter| counter.reserve());
-            let join_state_for_cancel = Arc::clone(&join_state);
+            let cancel_producer = JoinProducer::new(Arc::clone(&join_state));
             let provisional = mailbox.allocate_task_id();
             let outcome_wrapped = async move {
                 wrapped.await;
@@ -4395,12 +4395,12 @@ impl RuntimeInner {
                 crate::runtime::stored_task::StoredTask::new_with_id(outcome_wrapped, provisional),
             )
             .with_unadmitted_cancel(Box::new(move |reason| {
-                complete_task(
-                    &join_state_for_cancel,
-                    Err(Box::new(format!(
-                        "spawn cancelled before admission: {reason}"
-                    ))),
-                );
+                // Keep admission cancellation distinct from generic runtime
+                // shutdown for the checked join path. The callback owns its
+                // own producer lease so dropping the stored task first cannot
+                // race a less-specific shutdown result ahead of this reason.
+                // Legacy joins still receive their established panic payload.
+                cancel_producer.cancel(reason);
             }));
             if let Some(reservation) = reservation {
                 request = request.with_pending_reservation(reservation);
@@ -4592,15 +4592,23 @@ impl Drop for RuntimeInner {
 
 struct JoinState<T> {
     result: Option<std::thread::Result<T>>,
+    cancel_reason: Option<crate::types::CancelReason>,
     waker: Option<Waker>,
+    producers: usize,
 }
 
 impl<T> JoinState<T> {
     fn new() -> Self {
         Self {
             result: None,
+            cancel_reason: None,
             waker: None,
+            producers: 0,
         }
+    }
+
+    fn is_terminal(&self) -> bool {
+        self.result.is_some() || self.cancel_reason.is_some()
     }
 }
 
@@ -4608,6 +4616,7 @@ fn lock_state<T>(state: &Mutex<T>) -> MutexGuard<'_, T> {
     state.lock()
 }
 
+#[cfg(test)]
 fn complete_task<T>(state: &Arc<Mutex<JoinState<T>>>, output: std::thread::Result<T>) {
     let waker = {
         let mut guard = lock_state(state);
@@ -4616,6 +4625,210 @@ fn complete_task<T>(state: &Arc<Mutex<JoinState<T>>>, output: std::thread::Resul
     };
     if let Some(waker) = waker {
         waker.wake();
+    }
+}
+
+/// Failure-aware join handle returned by [`RuntimeHandle::spawn_checked`].
+///
+/// Unlike the legacy [`JoinHandle`], task cancellation and task panic are
+/// ordinary typed results. This surface is additive so v0.4.3 callers that
+/// await `RuntimeHandle::spawn` continue to compile and retain their established
+/// panic-propagating behavior.
+#[must_use = "checked join handles must be awaited to observe task failure"]
+pub struct CheckedJoinHandle<T> {
+    inner: JoinHandle<T>,
+}
+
+impl<T> CheckedJoinHandle<T> {
+    fn new(inner: JoinHandle<T>) -> Self {
+        Self { inner }
+    }
+
+    /// Returns true if the task has reached a terminal result.
+    #[must_use]
+    pub fn is_finished(&self) -> bool {
+        self.inner.is_finished()
+    }
+}
+
+impl<T> Future for CheckedJoinHandle<T> {
+    type Output = Result<T, crate::runtime::JoinError>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = &mut self.get_mut().inner;
+        if this.completed {
+            return Poll::Ready(Err(crate::runtime::JoinError::PolledAfterCompletion));
+        }
+        let mut guard = lock_state(&this.state);
+        if let Some(reason) = guard.cancel_reason.take() {
+            this.completed = true;
+            return Poll::Ready(Err(crate::runtime::JoinError::Cancelled(reason)));
+        }
+        match guard.result.take() {
+            None => {
+                if Arc::strong_count(&this.state) == 1 {
+                    this.completed = true;
+                    return Poll::Ready(Err(crate::runtime::JoinError::Cancelled(
+                        crate::types::CancelReason::shutdown(),
+                    )));
+                }
+                if !guard
+                    .waker
+                    .as_ref()
+                    .is_some_and(|w| w.will_wake(cx.waker()))
+                {
+                    guard.waker = Some(cx.waker().clone());
+                }
+                Poll::Pending
+            }
+            Some(Ok(output)) => {
+                this.completed = true;
+                Poll::Ready(Ok(output))
+            }
+            Some(Err(payload)) => {
+                this.completed = true;
+                let message = crate::cx::scope::payload_to_string(&payload);
+                // A caught panic payload may itself have a panicking destructor.
+                // Match the existing task-panic transport and retain only its
+                // stable string representation at this boundary.
+                std::mem::forget(payload);
+                Poll::Ready(Err(crate::runtime::JoinError::Panicked(
+                    crate::types::PanicPayload::new(message),
+                )))
+            }
+        }
+    }
+}
+
+impl RuntimeHandle {
+    /// Spawn a task whose join future reports cancellation and panic as typed
+    /// [`JoinError`](crate::runtime::JoinError) values.
+    ///
+    /// This is the failure-aware counterpart to [`spawn`](Self::spawn). The
+    /// legacy method remains unchanged for v0.4.x compatibility: awaiting its
+    /// [`JoinHandle`] still returns `T` and resumes task panics. New code that
+    /// needs to supervise runtime shutdown should prefer this method.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the runtime is no longer available or if the root region
+    /// rejects admission. Use [`RuntimeHandle::try_spawn_checked`] to handle
+    /// those admission failures explicitly.
+    pub fn spawn_checked<F>(&self, future: F) -> CheckedJoinHandle<F::Output>
+    where
+        F: Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        self.try_spawn_checked(future)
+            .expect("failed to create runtime task")
+    }
+
+    /// Spawn a task with typed join errors, returning runtime-availability or
+    /// admission errors instead of panicking.
+    pub fn try_spawn_checked<F>(
+        &self,
+        future: F,
+    ) -> Result<CheckedJoinHandle<F::Output>, SpawnError>
+    where
+        F: Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        self.try_spawn(future).map(CheckedJoinHandle::new)
+    }
+}
+
+/// Executor-side completion lease for a runtime-handle task.
+///
+/// Mailbox admission owns a second lease through its cancellation callback.
+/// Dropping the stored future before invoking that callback therefore cannot
+/// transiently publish a generic shutdown result ahead of the specific
+/// admission-cancellation reason. Once the final live producer disappears
+/// without a terminal value, the join is completed as shutdown and its waker
+/// is dispatched.
+struct JoinProducer<T> {
+    state: Arc<Mutex<JoinState<T>>>,
+    active: bool,
+}
+
+impl<T> JoinProducer<T> {
+    fn new(state: Arc<Mutex<JoinState<T>>>) -> Self {
+        {
+            let mut guard = lock_state(&state);
+            guard.producers = guard
+                .producers
+                .checked_add(1)
+                .expect("runtime join producer count overflow");
+        }
+        Self {
+            state,
+            active: true,
+        }
+    }
+
+    fn complete(mut self, output: std::thread::Result<T>) {
+        let waker = {
+            let state = Arc::clone(&self.state);
+            let mut guard = lock_state(&state);
+            let published = guard.result.is_none() && guard.cancel_reason.is_none();
+            if published {
+                guard.result = Some(output);
+            }
+            self.release_locked(&mut guard);
+            if published { guard.waker.take() } else { None }
+        };
+        if let Some(waker) = waker {
+            waker.wake();
+        }
+    }
+
+    fn cancel(mut self, reason: crate::types::CancelReason) {
+        let waker = {
+            let state = Arc::clone(&self.state);
+            let mut guard = lock_state(&state);
+            let published = guard.result.is_none() && guard.cancel_reason.is_none();
+            if published {
+                let legacy_payload = format!("spawn cancelled before admission: {reason}");
+                guard.cancel_reason = Some(reason);
+                guard.result = Some(Err(Box::new(legacy_payload)));
+            }
+            self.release_locked(&mut guard);
+            if published { guard.waker.take() } else { None }
+        };
+        if let Some(waker) = waker {
+            waker.wake();
+        }
+    }
+
+    fn release_locked(&mut self, guard: &mut JoinState<T>) {
+        debug_assert!(self.active, "join producer released twice");
+        debug_assert!(guard.producers > 0, "join producer count underflow");
+        self.active = false;
+        guard.producers = guard
+            .producers
+            .checked_sub(1)
+            .expect("runtime join producer count underflow");
+    }
+}
+
+impl<T> Drop for JoinProducer<T> {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+        let waker = {
+            let state = Arc::clone(&self.state);
+            let mut guard = lock_state(&state);
+            self.release_locked(&mut guard);
+            if guard.producers == 0 && guard.result.is_none() && guard.cancel_reason.is_none() {
+                guard.cancel_reason = Some(crate::types::CancelReason::shutdown());
+                guard.waker.take()
+            } else {
+                None
+            }
+        };
+        if let Some(waker) = waker {
+            waker.wake();
+        }
     }
 }
 
@@ -8187,6 +8400,189 @@ worker_threads = 16
             join.as_ref().get_ref().is_finished(),
             "join handle should remain finished after the terminal dropped-task poll"
         );
+    }
+
+    #[test]
+    fn checked_join_reports_runtime_shutdown_without_unwinding() {
+        init_test_logging();
+
+        let runtime = RuntimeBuilder::new()
+            .worker_threads(1)
+            .build()
+            .expect("runtime build");
+        let runtime_handle = runtime.handle();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let join = runtime_handle.spawn_checked(async move {
+            started_tx.send(()).expect("report task start");
+            std::future::pending::<u8>().await
+        });
+        started_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("task must reach its pending state before runtime shutdown");
+
+        drop(runtime_handle);
+        drop(runtime);
+
+        let observer = RuntimeBuilder::current_thread()
+            .build()
+            .expect("observer runtime build");
+        let result = observer.block_on(join);
+        assert!(matches!(
+            result,
+            Err(crate::runtime::JoinError::Cancelled(CancelReason {
+                kind: crate::types::CancelKind::Shutdown,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn checked_join_reports_current_thread_shutdown_before_first_poll() {
+        init_test_logging();
+
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime build");
+        let join = runtime.handle().spawn_checked(std::future::pending::<u8>());
+        drop(runtime);
+
+        let observer = RuntimeBuilder::current_thread()
+            .build()
+            .expect("observer runtime build");
+        assert!(matches!(
+            observer.block_on(join),
+            Err(crate::runtime::JoinError::Cancelled(CancelReason {
+                kind: crate::types::CancelKind::Shutdown,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn checked_join_pending_observer_is_woken_by_runtime_shutdown() {
+        init_test_logging();
+
+        let runtime = RuntimeBuilder::new()
+            .worker_threads(1)
+            .build()
+            .expect("runtime build");
+        let runtime_handle = runtime.handle();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let mut join = Box::pin(runtime_handle.spawn_checked(async move {
+            started_tx.send(()).expect("report task start");
+            std::future::pending::<u8>().await
+        }));
+        started_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("task must reach its pending state before runtime shutdown");
+
+        let observer_waker = Arc::new(ThreadWaker {
+            thread: std::thread::current(),
+            woken: AtomicBool::new(false),
+        });
+        let waker = Waker::from(Arc::clone(&observer_waker));
+        let mut cx = Context::from_waker(&waker);
+        assert!(matches!(join.as_mut().poll(&mut cx), Poll::Pending));
+        assert!(!observer_waker.woken.load(Ordering::Acquire));
+
+        drop(runtime_handle);
+        drop(runtime);
+
+        assert!(
+            observer_waker.woken.load(Ordering::Acquire),
+            "dropping the executor side must wake an already-pending checked join"
+        );
+        assert!(matches!(
+            join.as_mut().poll(&mut cx),
+            Poll::Ready(Err(crate::runtime::JoinError::Cancelled(CancelReason {
+                kind: crate::types::CancelKind::Shutdown,
+                ..
+            })))
+        ));
+    }
+
+    #[test]
+    fn checked_join_types_unadmitted_cancellation_without_changing_legacy_payload() {
+        init_test_logging();
+
+        let reason = CancelReason::user("mailbox admission refused");
+        let expected_legacy_payload = format!("spawn cancelled before admission: {reason}");
+
+        let checked_state = Arc::new(Mutex::new(JoinState::<u8>::new()));
+        JoinProducer::new(Arc::clone(&checked_state)).cancel(reason.clone());
+        let mut checked = std::pin::pin!(CheckedJoinHandle::new(JoinHandle::new(checked_state)));
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        assert!(matches!(
+            checked.as_mut().poll(&mut cx),
+            Poll::Ready(Err(crate::runtime::JoinError::Cancelled(actual))) if actual == reason
+        ));
+
+        let legacy_state = Arc::new(Mutex::new(JoinState::<u8>::new()));
+        JoinProducer::new(Arc::clone(&legacy_state)).cancel(reason);
+        let mut legacy = std::pin::pin!(JoinHandle::new(legacy_state));
+        let observed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = legacy.as_mut().poll(&mut cx);
+        }));
+        assert_eq!(
+            panic_payload_to_string(observed.expect_err("legacy join must retain its panic path")),
+            expected_legacy_payload,
+            "the additive checked API must not rewrite the v0.4.3 legacy panic payload"
+        );
+    }
+
+    #[test]
+    fn checked_join_preserves_task_panic_as_typed_error() {
+        init_test_logging();
+
+        let runtime = RuntimeBuilder::new()
+            .worker_threads(1)
+            .build()
+            .expect("runtime build");
+        let join = runtime
+            .handle()
+            .spawn_checked(async { panic!("checked-join boom") });
+
+        let result = runtime.block_on(join);
+        match result {
+            Err(crate::runtime::JoinError::Panicked(payload)) => assert_eq!(
+                payload.message(),
+                "checked-join boom",
+                "typed checked join must retain the task panic message"
+            ),
+            other => panic!("task panic must be a typed checked-join error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn checked_join_repoll_returns_polled_after_completion() {
+        init_test_logging();
+
+        let state = Arc::new(Mutex::new(JoinState::new()));
+        complete_task(&state, Ok(17_u8));
+        let mut join = std::pin::pin!(CheckedJoinHandle::new(JoinHandle::new(state)));
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        assert!(matches!(join.as_mut().poll(&mut cx), Poll::Ready(Ok(17))));
+        assert!(matches!(
+            join.as_mut().poll(&mut cx),
+            Poll::Ready(Err(crate::runtime::JoinError::PolledAfterCompletion))
+        ));
+    }
+
+    #[test]
+    fn checked_join_is_finished_when_cancellation_is_published() {
+        let state = Arc::new(Mutex::new(JoinState::<u8>::new()));
+        let executor_ref = Arc::clone(&state);
+        lock_state(&state).cancel_reason = Some(CancelReason::shutdown());
+        let join = CheckedJoinHandle::new(JoinHandle::new(state));
+
+        assert!(
+            join.is_finished(),
+            "typed cancellation is terminal before the executor releases its final state ref"
+        );
+        drop(executor_ref);
     }
 
     /// br-asupersync-3lk5n2: a Runtime's `request_cx_with_budget`

@@ -128,8 +128,8 @@
     },
     {
       "path": "src/runtime/builder.rs",
-      "sha256": "23c05e47a35816fe0bfc2a3333ac0eb91a0768f373a842fece3a776edf886982",
-      "line_count": 8662,
+      "sha256": "370a2d5659a86290c8418b7b9f7e379a76e2b68e1b43e7e56c229d9acc6e8146",
+      "line_count": 9058,
       "role": "public request-scoped Cx entry plus legacy RuntimeHandle spawn, JoinHandle state, completion, admission, and shutdown"
     },
     {
@@ -229,7 +229,7 @@
         {"path": "src/runtime/builder.rs", "line": 3920, "fragment": "pub struct JoinHandle<T>"},
         {"path": "src/runtime/builder.rs", "line": 3944, "fragment": "impl<T> Future for JoinHandle<T>"},
         {"path": "src/runtime/builder.rs", "line": 4593, "fragment": "struct JoinState<T>"},
-        {"path": "src/runtime/builder.rs", "line": 4611, "fragment": "fn complete_task<T>"}
+        {"path": "src/runtime/builder.rs", "line": 4620, "fragment": "fn complete_task<T>"}
       ]
     },
     {
@@ -274,7 +274,7 @@
       "must_preserve": "exactly one terminal value is observable",
       "anchors": [
         {"path": "src/runtime/builder.rs", "line": 3954, "fragment": "match guard.result.take()"},
-        {"path": "src/runtime/builder.rs", "line": 4611, "fragment": "fn complete_task<T>"}
+        {"path": "src/runtime/builder.rs", "line": 4620, "fragment": "fn complete_task<T>"}
       ]
     },
     {
@@ -285,7 +285,7 @@
       "must_preserve": "no lost wake and no callback under the completion mutex",
       "anchors": [
         {"path": "src/runtime/builder.rs", "line": 3969, "fragment": "guard.waker = Some(cx.waker().clone())"},
-        {"path": "src/runtime/builder.rs", "line": 4611, "fragment": "fn complete_task<T>"}
+        {"path": "src/runtime/builder.rs", "line": 4620, "fragment": "fn complete_task<T>"}
       ]
     },
     {
