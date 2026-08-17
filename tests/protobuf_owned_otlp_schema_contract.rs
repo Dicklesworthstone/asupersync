@@ -1886,22 +1886,15 @@ fn validate_live_repository_pins(value: &Value) -> ValidationResult {
             return Err(format!("live repository source drifted: {path}"));
         }
     }
-    let stale_lock = array(authority, "excluded_authorities")?
+    // `fuzz/Cargo.lock` is intentionally ignored and excluded from repository
+    // authority. A clean checkout must therefore validate without ambient
+    // ignored files; the exact observed stale digest/version is already frozen
+    // by `validate_identity_and_authority` above.
+    if array(authority, "repository_source_baseline")?
         .iter()
-        .find(|row| row.get("path").and_then(Value::as_str) == Some("fuzz/Cargo.lock"))
-        .ok_or_else(|| "stale fuzz lock exclusion is required".to_owned())?;
-    let stale_path = text(stale_lock, "path")?;
-    let stale_bytes = read_repo_bytes(stale_path);
-    if sha256_hex(&stale_bytes) != text(stale_lock, "sha256")? {
-        return Err("excluded fuzz lock drifted from its recorded stale state".to_owned());
-    }
-    let stale_text = String::from_utf8(stale_bytes).map_err(|error| error.to_string())?;
-    let stale_packages = stale_text
-        .split("[[package]]")
-        .filter(|block| block.contains("name = \"opentelemetry-proto\""))
-        .collect::<Vec<_>>();
-    if stale_packages.len() != 1 || !stale_packages[0].contains("version = \"0.31.0\"") {
-        return Err("excluded fuzz lock must remain explicitly stale at 0.31.0".to_owned());
+        .any(|pin| pin.get("path").and_then(Value::as_str) == Some("fuzz/Cargo.lock"))
+    {
+        return Err("excluded fuzz lock must not become repository authority".to_owned());
     }
     Ok(())
 }
