@@ -91,6 +91,7 @@ impl<T> BlockingOneshot<T> {
             BlockingOneshotReceiver {
                 state,
                 completed: false,
+                closed_fallback: None,
             },
         )
     }
@@ -135,6 +136,14 @@ impl<T> Drop for BlockingOneshot<T> {
 struct BlockingOneshotReceiver<T> {
     state: Arc<Mutex<BlockingOneshotState<T>>>,
     completed: bool,
+    closed_fallback: Option<Box<dyn FnOnce() -> T + Send + 'static>>,
+}
+
+impl<T> BlockingOneshotReceiver<T> {
+    fn with_closed_fallback(mut self, fallback: impl FnOnce() -> T + Send + 'static) -> Self {
+        self.closed_fallback = Some(Box::new(fallback));
+        self
+    }
 }
 
 impl<T> Drop for BlockingOneshotReceiver<T> {
@@ -166,6 +175,9 @@ impl<T> std::future::Future for BlockingOneshotReceiver<T> {
             result.map_or_else(
                 || {
                     if closed_without_result {
+                        if let Some(fallback) = this.closed_fallback.take() {
+                            return std::task::Poll::Ready(fallback());
+                        }
                         panic!("blocking operation ended without producing a result"); // ubs:ignore - invariant violation
                     } else {
                         panic!("blocking operation polled after completion"); // ubs:ignore - invariant violation
@@ -241,8 +253,28 @@ where
     F: FnOnce() -> T + Send + 'static,
     T: Send + 'static,
 {
+    // Keep the user closure recoverable until a pool worker actually claims it.
+    // A pool may reject the task because shutdown won the submission race, or
+    // cancel a queued task after its last worker failed to start. Both paths
+    // drop the task closure (and therefore `tx`) without running it. Treat that
+    // as the same deterministic inline fallback used when a runtime has no
+    // blocking pool, rather than turning ordinary shutdown/resource pressure
+    // into the internal "ended without producing a result" panic.
+    let work = Arc::new(Mutex::new(Some(f)));
+    let pool_work = Arc::clone(&work);
     let (tx, rx) = BlockingOneshot::new();
+    let rx = rx.with_closed_fallback(move || {
+        let f = work
+            .lock()
+            .take()
+            .expect("rejected blocking operation must retain its closure");
+        f()
+    });
     let handle = pool.spawn(move || {
+        let f = pool_work
+            .lock()
+            .take()
+            .expect("blocking operation closure claimed exactly once");
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
         tx.send(result);
     });
@@ -451,6 +483,26 @@ mod tests {
             thread_id
         );
         crate::test_complete!("spawn_blocking_inline_when_no_pool");
+    }
+
+    #[test]
+    fn spawn_blocking_falls_back_when_pool_rejects_submission() {
+        init_test("spawn_blocking_falls_back_when_pool_rejects_submission");
+        let pool = crate::runtime::BlockingPool::new(1, 1);
+        let handle = pool.handle();
+        pool.shutdown();
+        let caller = std::thread::current().id();
+
+        let (value, execution_thread) = future::block_on(spawn_blocking_on_pool(handle, || {
+            (42_u32, std::thread::current().id())
+        }));
+
+        assert_eq!(value, 42);
+        assert_eq!(
+            execution_thread, caller,
+            "a shutdown-rejected blocking operation must use the documented inline fallback",
+        );
+        crate::test_complete!("spawn_blocking_falls_back_when_pool_rejects_submission");
     }
 
     #[test]

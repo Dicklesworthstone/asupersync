@@ -183,7 +183,7 @@ use crate::types::{Budget, CancelAttributionConfig};
 use crate::util::EntropySource;
 #[cfg(target_arch = "wasm32")]
 use js_sys::{Reflect, global};
-use parking_lot::{Mutex, MutexGuard};
+use parking_lot::{Condvar, Mutex, MutexGuard};
 use std::cell::RefCell;
 use std::future::Future;
 use std::io;
@@ -191,7 +191,7 @@ use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::{Arc, Weak};
 use std::task::{Context, Poll, Waker};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use thiserror::Error as ThisError;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::JsValue;
@@ -3610,59 +3610,155 @@ impl Runtime {
     /// blocks inside `poll` (in violation of the cooperative contract) keeps
     /// its worker from returning, so plain drop can wait forever ([#60]).
     ///
-    /// This method is the bounded alternative. It signals scheduler shutdown
-    /// immediately, then runs the normal teardown on a background reaper
-    /// thread and waits up to `timeout` for it to complete.
+    /// This method is the bounded alternative. It synchronously closes every
+    /// runtime-owned spawn gateway, then a background reaper waits for any
+    /// already-started publication, coordinates scheduler and blocking-pool
+    /// shutdown, and runs the normal teardown. The caller waits at most
+    /// `timeout` for that teardown to complete.
     ///
     /// Returns `true` when teardown fully completed within the bound.
     ///
-    /// Returns `false` when the bound elapsed first. In that case teardown
-    /// continues on the detached reaper thread, which owns the final strong
-    /// runtime reference: the scheduler, runtime state, timer/IO drivers, and
-    /// blocking pool all remain alive for as long as any blocked worker can
-    /// still touch them, and are released when those workers finally return
-    /// (possibly never, if a task never unblocks — those resources are then
-    /// held until process exit). Join handles for unfinished tasks observe
-    /// cancellation exactly as with ordinary runtime drop.
+    /// Returns `false` when the bound elapsed first or the reaper thread could
+    /// not be created. After a timeout, teardown continues on the detached
+    /// reaper thread, which retains a strong runtime reference while any cloned
+    /// `Runtime` or strong [`RuntimeHandle`] remains. This ensures the final,
+    /// potentially unbounded destructor also runs on the reaper rather than on
+    /// whichever application thread releases the last external owner. If
+    /// thread creation itself fails, new spawn admission remains closed and a
+    /// bounded best effort signals the scheduler after any in-flight
+    /// publication that finishes within the bound. Blocking-pool admission
+    /// closes synchronously in every case, while scheduler shutdown follows
+    /// the admitted publication boundary. The reaper performs the pool's
+    /// potentially blocking condition-variable coordination. A blocking
+    /// wrapper that has reached the scheduler but not yet submitted its closure
+    /// may therefore observe pool shutdown; the blocking submission boundary
+    /// handles that rejection through its deterministic fallback.
+    /// The runtime is then intentionally retained until process exit instead of
+    /// running an unbounded destructor on this caller. In either case,
+    /// scheduler state, runtime state, timer/IO drivers, and the blocking pool
+    /// remain alive for as long as a blocked worker can still touch them. Join
+    /// handles for unfinished tasks observe cancellation exactly as with
+    /// ordinary runtime drop.
     ///
-    /// Cloned `Runtime`s and strong [`RuntimeHandle`]s keep the runtime alive
-    /// as usual: if other strong references exist when this is called, the
-    /// reaper thread merely drops this reference and final teardown is
-    /// deferred to the last one.
+    /// Cloned `Runtime`s and strong [`RuntimeHandle`]s keep the runtime alive as
+    /// usual. The reaper waits until they are released; if that happens within
+    /// the bound, this method can still return `true`. A successful `true`
+    /// result therefore always means that final teardown actually completed.
     ///
     /// [#60]: https://github.com/Dicklesworthstone/asupersync/issues/60
     #[must_use = "the return value reports whether teardown completed within the bound"]
     pub fn shutdown_timeout(self, timeout: Duration) -> bool {
-        // Publish the worker-stop signal from the caller's thread first so
-        // cooperative workers begin exiting while the reaper thread starts.
-        // `ThreeLaneScheduler::shutdown` is an idempotent shared flag, so the
-        // second signal from `RuntimeInner::drop` on the reaper is harmless.
-        self.inner.scheduler.shutdown();
+        self.shutdown_timeout_with_spawner(timeout, |job| {
+            std::thread::Builder::new()
+                .name("asupersync-shutdown".into())
+                .spawn(job)
+                .is_ok()
+        })
+    }
 
-        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
-        let spawned = std::thread::Builder::new()
-            .name("asupersync-shutdown".into())
-            .spawn(move || {
-                drop(self);
-                let _ = done_tx.send(());
-            });
-        match spawned {
-            // `Disconnected` (reaper panicked before sending) reports `false`;
-            // a successful send within the bound reports `true`.
-            Ok(_reaper) => done_rx.recv_timeout(timeout).is_ok(),
-            Err(_) => {
-                // Thread creation failed (resource exhaustion). The closure —
-                // and with it `self` — was dropped inside `spawn`, so the
-                // normal blocking teardown already ran inline on this thread.
-                true
-            }
+    fn shutdown_timeout_with_spawner(
+        self,
+        timeout: Duration,
+        spawn: impl FnOnce(Box<dyn FnOnce() + Send + 'static>) -> bool,
+    ) -> bool {
+        let started = Instant::now();
+
+        // Close every runtime-wired spawn gateway before handing teardown to
+        // the reaper. A producer that already acquired a publication guard is
+        // allowed to finish; the reaper waits for those guards before stopping
+        // the scheduler. New RuntimeHandle and retained-Cx spawns fail closed.
+        let spawn_publishers = self.inner.close_spawn_admission();
+        // The pool is independently safe to close now: an admitted
+        // Cx::spawn_blocking wrapper that reaches the pool after this boundary
+        // uses the blocking bridge's deterministic inline fallback. Closing it
+        // synchronously also prevents a previously issued BlockingPoolHandle
+        // from admitting unrelated work while shutdown waits for a scheduler
+        // publication to finish.
+        if let Some(pool) = self.inner.blocking_pool.as_ref() {
+            pool.close_admission();
         }
+        if spawn_publishers
+            .as_ref()
+            .is_none_or(|publishers| publishers.strong_count() == 0)
+        {
+            // With no admitted scheduler publication in flight, stop scheduler
+            // admission now too. Otherwise the reaper defers that signal until
+            // the publication boundary completes.
+            self.inner.begin_shutdown();
+        }
+        let fallback_publishers = spawn_publishers.clone();
+        let shutdown_complete = Arc::clone(&self.inner.shutdown_completion);
+
+        // The token owner is the sole teardown reaper. A concurrent or later
+        // shutdown call must release its strong Runtime reference and wait on
+        // the shared final-teardown latch; starting another retaining reaper
+        // would leave both reapers waiting forever for Arc uniqueness.
+        if spawn_publishers.is_none() {
+            drop(self);
+            return shutdown_complete.wait_with_budget(started, timeout);
+        }
+
+        // Keep one caller-owned reference outside the spawn closure. If the OS
+        // refuses the thread, `Builder::spawn` drops its closure; moving `self`
+        // directly into that closure would therefore run the unbounded runtime
+        // destructor on this caller and defeat the method's central guarantee.
+        let retained = Arc::new(Mutex::new(Some(self)));
+        let reaper_retained = Arc::clone(&retained);
+        let reaper_completion = Arc::clone(&shutdown_complete);
+        let job = Box::new(move || {
+            let Some(Runtime { mut inner }) = reaper_retained.lock().take() else {
+                return;
+            };
+            RuntimeInner::wait_for_spawn_publishers(spawn_publishers.as_ref());
+            inner.signal_shutdown();
+            loop {
+                match Arc::try_unwrap(inner) {
+                    Ok(inner) => {
+                        drop(inner);
+                        reaper_completion.signal();
+                        break;
+                    }
+                    Err(retained_inner) => {
+                        inner = retained_inner;
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                }
+            }
+        });
+        if !spawn(job) {
+            // Thread creation failed, so make a bounded best effort to let an
+            // in-flight publication finish before stopping the scheduler. If
+            // it does not finish within the caller's bound, retain the still-
+            // live runtime rather than stranding that publication or running
+            // the unbounded destructor inline.
+            while fallback_publishers
+                .as_ref()
+                .is_some_and(|publishers| publishers.strong_count() > 0)
+                && started.elapsed() < timeout
+            {
+                std::thread::yield_now();
+            }
+            if fallback_publishers
+                .as_ref()
+                .is_none_or(|publishers| publishers.strong_count() == 0)
+                && let Some(runtime) = retained.lock().as_ref()
+            {
+                runtime.inner.begin_shutdown();
+            }
+            std::mem::forget(retained);
+            return false;
+        }
+        drop(retained);
+
+        // The shared latch is signalled only after RuntimeInner::drop returns
+        // normally, after worker joins and mailbox cleanup both completed.
+        shutdown_complete.wait_with_budget(started, timeout)
     }
 
     /// Shut down the runtime without waiting for teardown to finish.
     ///
     /// Equivalent to [`shutdown_timeout`](Self::shutdown_timeout) with a zero
-    /// bound: scheduler shutdown is signalled, teardown proceeds on a
+    /// bound: new spawn admission closes synchronously, teardown proceeds on a
     /// detached background thread, and this call returns immediately. See
     /// [`shutdown_timeout`](Self::shutdown_timeout) for the ownership rules
     /// that keep a still-blocked worker's state alive.
@@ -3755,6 +3851,7 @@ impl Runtime {
     where
         F: FnOnce() + Send + 'static,
     {
+        let _spawn_guard = self.inner.spawn_liveness_guard().ok()?;
         self.inner.blocking_pool.as_ref().map(|pool| pool.spawn(f))
     }
 
@@ -3769,6 +3866,7 @@ impl Runtime {
     where
         F: FnOnce() + Send + 'static,
     {
+        let _spawn_guard = self.inner.spawn_liveness_guard().ok()?;
         self.inner
             .blocking_pool
             .as_ref()
@@ -3953,6 +4051,7 @@ impl RuntimeHandle {
         F: FnOnce() + Send + 'static,
     {
         let inner = self.try_inner().ok()?;
+        let _spawn_guard = inner.spawn_liveness_guard().ok()?;
         inner.blocking_pool.as_ref().map(|pool| pool.spawn(f))
     }
 
@@ -3969,6 +4068,7 @@ impl RuntimeHandle {
         F: FnOnce() + Send + 'static,
     {
         let inner = self.try_inner().ok()?;
+        let _spawn_guard = inner.spawn_liveness_guard().ok()?;
         inner
             .blocking_pool
             .as_ref()
@@ -4072,6 +4172,56 @@ impl<F: Future> Future for CatchUnwind<F> {
     }
 }
 
+struct RuntimeShutdownCompletion {
+    completed_at: Mutex<Option<Instant>>,
+    condvar: Condvar,
+}
+
+impl RuntimeShutdownCompletion {
+    fn new() -> Self {
+        Self {
+            completed_at: Mutex::new(None),
+            condvar: Condvar::new(),
+        }
+    }
+
+    fn signal(&self) {
+        let mut completed_at = self.completed_at.lock();
+        if completed_at.is_none() {
+            *completed_at = Some(Instant::now());
+        }
+        self.condvar.notify_all();
+    }
+
+    #[cfg(test)]
+    fn wait_timeout(&self, timeout: Duration) -> bool {
+        let started = Instant::now();
+        self.wait_with_budget(started, timeout)
+    }
+
+    fn wait_with_budget(&self, started: Instant, timeout: Duration) -> bool {
+        let mut completed_at = self.completed_at.lock();
+        loop {
+            if let Some(completed_at) = *completed_at {
+                return completed_at.saturating_duration_since(started) <= timeout;
+            }
+            let remaining = timeout.saturating_sub(started.elapsed());
+            if remaining.is_zero() {
+                return false;
+            }
+            if self
+                .condvar
+                .wait_for(&mut completed_at, remaining)
+                .timed_out()
+            {
+                return completed_at.as_ref().is_some_and(|completed_at| {
+                    completed_at.saturating_duration_since(started) <= timeout
+                });
+            }
+        }
+    }
+}
+
 struct RuntimeInner {
     config: RuntimeConfig,
     state: Arc<crate::sync::ContendedMutex<RuntimeState>>,
@@ -4094,7 +4244,7 @@ struct RuntimeInner {
     spawn_clock: Option<TimerDriverHandle>,
     /// Keeps the producer-side spawn gateway live exactly as long as the
     /// runtime inner remains live. Retained `Cx` values hold only weak tokens.
-    _spawn_liveness: Option<Arc<()>>,
+    spawn_liveness: Mutex<Option<Arc<()>>>,
     /// Blocking pool for synchronous operations.
     blocking_pool: Option<crate::runtime::blocking_pool::BlockingPool>,
     /// Shutdown sender for the deadline monitor thread.
@@ -4118,9 +4268,51 @@ struct RuntimeInner {
     /// arena (which would require a deeper structured-spawn
     /// refactor) but the determinism breach is closed.
     request_task_counter: std::sync::atomic::AtomicU32,
+    /// Shared success latch for every bounded-shutdown caller. The sole reaper
+    /// signals it only after `RuntimeInner::drop` returns normally.
+    shutdown_completion: Arc<RuntimeShutdownCompletion>,
 }
 
 impl RuntimeInner {
+    fn spawn_liveness_guard(&self) -> Result<Arc<()>, SpawnError> {
+        self.spawn_liveness
+            .lock()
+            .as_ref()
+            .map(Arc::clone)
+            .ok_or(SpawnError::RuntimeUnavailable)
+    }
+
+    fn close_spawn_admission(&self) -> Option<Weak<()>> {
+        self.spawn_liveness.lock().take().map(|token| {
+            let publishers = Arc::downgrade(&token);
+            drop(token);
+            publishers
+        })
+    }
+
+    fn wait_for_spawn_publishers(publishers: Option<&Weak<()>>) {
+        while publishers.is_some_and(|publishers| publishers.strong_count() > 0) {
+            std::thread::park_timeout(Duration::from_millis(1));
+        }
+    }
+
+    fn begin_shutdown(&self) {
+        self.scheduler.shutdown();
+        if let Some(pool) = self.blocking_pool.as_ref() {
+            // The bounded caller must not wait on the pool's coordination
+            // mutex. Atomically close admission here; the reaper performs the
+            // mutex-coordinated condition-variable wake below.
+            pool.close_admission();
+        }
+    }
+
+    fn signal_shutdown(&self) {
+        self.begin_shutdown();
+        if let Some(pool) = self.blocking_pool.as_ref() {
+            pool.shutdown();
+        }
+    }
+
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     fn initialize_runtime_state(
         config: &RuntimeConfig,
@@ -4367,11 +4559,12 @@ impl RuntimeInner {
                 spawn_mailbox,
                 root_pending_spawns,
                 spawn_clock,
-                _spawn_liveness: Some(spawn_liveness),
+                spawn_liveness: Mutex::new(Some(spawn_liveness)),
                 blocking_pool,
                 deadline_monitor_shutdown: deadline_monitor.shutdown,
                 deadline_monitor_thread: deadline_monitor.thread,
                 request_task_counter: std::sync::atomic::AtomicU32::new(1),
+                shutdown_completion: Arc::new(RuntimeShutdownCompletion::new()),
             },
             workers,
         )
@@ -4427,6 +4620,7 @@ impl RuntimeInner {
         F: Future + Send + 'static,
         F::Output: Send + 'static,
     {
+        let spawn_guard = self.spawn_liveness_guard()?;
         let join_state = Arc::new(Mutex::new(JoinState::new()));
         let task_producer = JoinProducer::new(Arc::clone(&join_state));
 
@@ -4478,6 +4672,7 @@ impl RuntimeInner {
                 .map_or(crate::types::Time::ZERO, TimerDriverHandle::now);
             mailbox.enqueue(request, now);
             self.scheduler.notify_spawn_enqueued();
+            drop(spawn_guard);
             return Ok(JoinHandle::new(join_state));
         }
 
@@ -4511,6 +4706,7 @@ impl RuntimeInner {
         };
 
         self.scheduler.inject_ready(task_id, Budget::new().priority);
+        drop(spawn_guard);
         spawn_effects.dispatch();
 
         Ok(JoinHandle::new(join_state))
@@ -4529,6 +4725,7 @@ impl RuntimeInner {
         use crate::runtime::StoredTask;
         use crate::types::Outcome;
 
+        let spawn_guard = self.spawn_liveness_guard()?;
         let dispatch_table = self.scheduler.dispatch_task_table();
         let (task_id, spawn_effects) = {
             let mut guard = self
@@ -4588,6 +4785,7 @@ impl RuntimeInner {
         };
 
         self.scheduler.inject_ready(task_id, Budget::new().priority);
+        drop(spawn_guard);
         spawn_effects.dispatch();
 
         Ok(())
@@ -4595,6 +4793,7 @@ impl RuntimeInner {
 
     /// Returns a handle to the blocking pool, if configured.
     fn blocking_handle(&self) -> Option<crate::runtime::blocking_pool::BlockingPoolHandle> {
+        let _spawn_guard = self.spawn_liveness_guard().ok()?;
         self.blocking_pool
             .as_ref()
             .map(crate::runtime::blocking_pool::BlockingPool::handle)
@@ -4603,11 +4802,7 @@ impl RuntimeInner {
 
 impl Drop for RuntimeInner {
     fn drop(&mut self) {
-        let spawn_liveness = self._spawn_liveness.take().map(|token| {
-            let weak = Arc::downgrade(&token);
-            drop(token);
-            weak
-        });
+        let spawn_liveness = self.close_spawn_admission();
         let gateway_mailbox = {
             let state = self
                 .state
@@ -4617,6 +4812,18 @@ impl Drop for RuntimeInner {
                 .spawn_gateway()
                 .map(|gateway| Arc::clone(gateway.mailbox()))
         };
+
+        // A producer that upgraded the liveness token before drop began is
+        // entitled to finish publishing while workers can still admit the
+        // request. Waiting only after scheduler shutdown and worker joins
+        // leaves a race where the producer publishes into a stopped runtime;
+        // mailbox mode can clean that request up later, but the legacy direct
+        // path has already stored and scheduled a task. Close admission first,
+        // then let every admitted publication reach its scheduling boundary
+        // before stopping any consumer.
+        if let Some(liveness) = spawn_liveness.as_ref() {
+            Self::wait_for_spawn_publishers(Some(liveness));
+        }
 
         // Signal deadline monitor to stop, then join its thread.
         if let Some(shutdown) = self.deadline_monitor_shutdown.take() {
@@ -4636,10 +4843,7 @@ impl Drop for RuntimeInner {
         }
         drop(handles);
 
-        if let (Some(liveness), Some(mailbox)) = (spawn_liveness, gateway_mailbox) {
-            while liveness.strong_count() > 0 {
-                std::thread::yield_now();
-            }
+        if let Some(mailbox) = gateway_mailbox {
             let mut cancelled = Vec::new();
             while mailbox.dequeue_handle_cancels_into(64, &mut cancelled) > 0 {
                 for request in cancelled.drain(..) {
@@ -5174,6 +5378,193 @@ mod tests {
                 |message| (*message).to_string(),
             ),
         }
+    }
+
+    #[test]
+    fn shutdown_timeout_stays_bounded_when_reaper_spawn_is_refused() {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("build runtime");
+        let runtime_inner = Arc::downgrade(&runtime.inner);
+        let completed =
+            runtime.shutdown_timeout_with_spawner(Duration::from_secs(60), |_job| false);
+
+        assert!(!completed, "a refused reaper spawn is not a clean teardown");
+        assert!(
+            runtime_inner.upgrade().is_some(),
+            "spawn refusal must retain the runtime instead of dropping it inline"
+        );
+    }
+
+    #[test]
+    fn shutdown_completion_reports_late_teardown_after_deadline() {
+        let completion = RuntimeShutdownCompletion::new();
+        let started = Instant::now();
+        std::thread::sleep(Duration::from_millis(20));
+        completion.signal();
+
+        assert!(
+            !completion.wait_with_budget(started, Duration::from_millis(5)),
+            "completion observed after the caller's deadline must remain a timeout"
+        );
+        assert!(
+            completion.wait_timeout(Duration::ZERO),
+            "a later caller must still observe already-completed teardown"
+        );
+    }
+
+    #[test]
+    fn shutdown_timeout_reports_incomplete_while_a_strong_clone_remains() {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("build runtime");
+        let runtime_inner = Arc::downgrade(&runtime.inner);
+        let shutdown_complete = Arc::clone(&runtime.inner.shutdown_completion);
+        let retained = runtime.clone();
+
+        assert!(
+            !runtime.shutdown_timeout(Duration::ZERO),
+            "shutdown cannot report complete while another Runtime owns the inner state"
+        );
+
+        drop(retained);
+        assert!(
+            shutdown_complete.wait_timeout(Duration::from_secs(10)),
+            "the reaper must finish after the last external owner is released"
+        );
+        assert!(runtime_inner.upgrade().is_none());
+    }
+
+    #[test]
+    fn repeated_shutdown_timeout_calls_share_one_reaper() {
+        let first = RuntimeBuilder::current_thread()
+            .build()
+            .expect("build runtime");
+        let second = first.clone();
+
+        assert!(
+            !first.shutdown_timeout(Duration::ZERO),
+            "the first call cannot finish while the second Runtime remains"
+        );
+        assert!(
+            second.shutdown_timeout(Duration::from_secs(10)),
+            "the second caller must release its Arc and observe the first reaper's completion"
+        );
+    }
+
+    #[test]
+    fn shutdown_waits_for_inflight_spawn_publication_before_stopping_scheduler() {
+        let runtime = RuntimeBuilder::current_thread()
+            .blocking_threads(1, 1)
+            .build()
+            .expect("build runtime");
+        let retained = runtime.clone();
+        let shutdown_complete = Arc::clone(&runtime.inner.shutdown_completion);
+        let retained_blocking_handle = runtime
+            .blocking_handle()
+            .expect("configured runtime exposes its blocking pool");
+        let publisher = runtime
+            .inner
+            .spawn_liveness_guard()
+            .expect("runtime accepts spawn publication");
+
+        assert!(!runtime.shutdown_timeout(Duration::ZERO));
+        assert!(
+            !retained.inner.scheduler.is_shutdown(),
+            "the scheduler must remain live until the admitted publication finishes"
+        );
+        assert!(
+            retained
+                .inner
+                .blocking_pool
+                .as_ref()
+                .expect("configured blocking pool")
+                .is_shutdown(),
+            "blocking-pool admission must close even while scheduler publication is in flight"
+        );
+        let rejected = retained_blocking_handle.spawn(|| {
+            panic!("retained blocking handle must not admit work during shutdown");
+        });
+        assert!(rejected.is_cancelled());
+        assert!(rejected.wait_timeout(Duration::from_secs(1)));
+
+        drop(publisher);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !retained.inner.scheduler.is_shutdown() {
+            assert!(
+                Instant::now() < deadline,
+                "the reaper must signal shutdown after publication finishes"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(
+            retained
+                .inner
+                .blocking_pool
+                .as_ref()
+                .expect("configured blocking pool")
+                .is_shutdown(),
+            "blocking-pool admission must remain closed after publication completes"
+        );
+        drop(retained);
+        assert!(shutdown_complete.wait_timeout(Duration::from_secs(10)));
+    }
+
+    #[test]
+    fn shutdown_timeout_closes_all_runtime_owned_spawn_surfaces() {
+        let runtime = RuntimeBuilder::current_thread()
+            .blocking_threads(1, 1)
+            .build()
+            .expect("build runtime");
+        let retained_runtime = runtime.clone();
+        let retained_handle = runtime.handle();
+        let retained_cx = runtime.request_cx_with_budget(Budget::INFINITE);
+        let retained_blocking_handle = runtime
+            .blocking_handle()
+            .expect("configured runtime exposes its blocking pool");
+        let shutdown_complete = Arc::clone(&runtime.inner.shutdown_completion);
+
+        assert!(runtime.blocking_handle().is_some());
+        assert!(
+            !runtime.shutdown_timeout(Duration::ZERO),
+            "strong runtime owners keep final teardown incomplete"
+        );
+
+        assert!(matches!(
+            retained_handle.try_spawn(async {}),
+            Err(SpawnError::RuntimeUnavailable)
+        ));
+        assert!(matches!(
+            retained_handle.try_spawn_with_cx(|_| async {}),
+            Err(SpawnError::RuntimeUnavailable)
+        ));
+        assert!(matches!(
+            retained_cx.spawn(|_| async { 1_u8 }),
+            Err(SpawnError::RuntimeUnavailable)
+        ));
+        assert!(matches!(
+            retained_cx.spawn_blocking(|_| 1_u8),
+            Err(SpawnError::RuntimeUnavailable)
+        ));
+        assert!(matches!(
+            retained_cx.spawn_local(|_| async { 1_u8 }),
+            Err(SpawnError::RuntimeUnavailable)
+        ));
+        assert!(retained_runtime.spawn_blocking(|| {}).is_none());
+        assert!(retained_handle.spawn_blocking(|| {}).is_none());
+        assert!(retained_runtime.blocking_handle().is_none());
+        assert!(retained_handle.blocking_handle().is_none());
+        let rejected_blocking_task = retained_blocking_handle.spawn(|| {
+            panic!("a retained blocking handle must not run after shutdown starts");
+        });
+        assert!(rejected_blocking_task.is_cancelled());
+        assert!(rejected_blocking_task.wait_timeout(Duration::from_secs(1)));
+
+        drop(retained_cx);
+        drop(retained_blocking_handle);
+        drop(retained_handle);
+        drop(retained_runtime);
+        assert!(shutdown_complete.wait_timeout(Duration::from_secs(10)));
     }
 
     #[derive(Default)]

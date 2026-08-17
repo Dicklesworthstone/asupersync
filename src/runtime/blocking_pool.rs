@@ -734,12 +734,23 @@ impl BlockingPool {
         self.inner.shutdown.load(Ordering::Acquire)
     }
 
+    /// Closes admission without waiting for the pool coordination mutex.
+    ///
+    /// Runtime bounded shutdown uses this as its caller-thread linearization
+    /// point: submissions that race the store either completed admission
+    /// before it or observe shutdown and fail closed. A reaper must still call
+    /// [`shutdown`](Self::shutdown) to coordinate the condition-variable wake
+    /// without a lost-wakeup race.
+    pub(crate) fn close_admission(&self) {
+        self.inner.shutdown.store(true, Ordering::Release);
+    }
+
     /// Initiates shutdown of the pool.
     ///
     /// No new tasks will be accepted. Pending tasks will continue to execute.
     pub fn shutdown(&self) {
         let _guard = self.inner.mutex.lock();
-        self.inner.shutdown.store(true, Ordering::Release);
+        self.close_admission();
         self.inner.condvar.notify_all();
     }
 
@@ -2029,6 +2040,28 @@ mod tests {
         assert!(pool.is_shutdown());
 
         assert!(pool.shutdown_and_wait(Duration::from_secs(2)));
+    }
+
+    #[test]
+    fn close_admission_does_not_wait_for_coordination_mutex() {
+        let pool = Arc::new(BlockingPool::new(0, 1));
+        let coordination_guard = pool.inner.mutex.lock();
+        let (closed_tx, closed_rx) = std::sync::mpsc::channel();
+        let closer_pool = Arc::clone(&pool);
+        let closer = std::thread::spawn(move || {
+            closer_pool.close_admission();
+            closed_tx.send(()).expect("report admission closure");
+        });
+
+        let closed_without_lock = closed_rx.recv_timeout(Duration::from_secs(1)).is_ok();
+        drop(coordination_guard);
+        closer.join().expect("admission closer joins");
+        assert!(
+            closed_without_lock,
+            "admission closure must not wait for the coordination mutex"
+        );
+        assert!(pool.is_shutdown());
+        pool.shutdown();
     }
 
     #[test]
