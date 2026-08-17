@@ -481,7 +481,7 @@
       "semantic_authority_path": "artifacts/kafka_incumbent_semantics_matrix_v1.json",
       "semantic_authority_byte_count": 228933,
       "semantic_authority_record_count": 2560,
-      "semantic_authority_sha256": "b6bb6c628d54ceedf101d2c92ea73c6fd6a846156668a042c21edbf47bd5dea7",
+      "semantic_authority_sha256": "f765ee7b16e53d23f2d448aeb1cae083d1f480d35ec0ab03fc980bab5353edff",
       "semantic_row_count": 97,
       "classification_counts": {
         "RESOURCE": 43,
@@ -1539,7 +1539,7 @@
   "shadow_semantic_operation_partition": {
     "authority_path": "artifacts/kafka_incumbent_semantics_matrix_v1.json#/operations",
     "authority_via_child_stage": "K1.3",
-    "authority_file_sha256": "b6bb6c628d54ceedf101d2c92ea73c6fd6a846156668a042c21edbf47bd5dea7",
+    "authority_file_sha256": "f765ee7b16e53d23f2d448aeb1cae083d1f480d35ec0ab03fc980bab5353edff",
     "authority_semantic_row_count": 38,
     "semantic_operation_id_set_sha256": "01a40fb40520c2ee2016e0b6c51ca9083fd6cb019bbb369d28e86fca73f88eed",
     "semantic_operation_id_set_rule": "Bytewise sort 38 unique UTF-8 semantic IDs, append one LF per ID, and SHA-256.",

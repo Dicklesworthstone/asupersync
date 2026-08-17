@@ -702,7 +702,7 @@
       {
         "path": "Cargo.toml",
         "baseline_sha256": "5eb3d7f25fb2584dcc7dd4dc3addb59573d08a7404b4ffca1356e53a93cfb2e0",
-        "current_sha256": "b756e9baf054ce93b8bc8a305d29b347f3ae6e269fcd12cbe57b0662d0b98276",
+        "current_sha256": "10cc88160555e6bdc8761284cb2172e9cae03e2e624791005f59e542ccce8a68",
         "current_line_count": 1057,
         "classification": "CAPABILITY_PROJECTION_UNCHANGED",
         "projection": "root futures-lite manifest requirement",
@@ -711,7 +711,7 @@
       {
         "path": "Cargo.lock",
         "baseline_sha256": "9fa12e8af1e6b15a3070d88d62b2b81b8ba49c0e9d8592c1d1682f1cd72a4461",
-        "current_sha256": "83c11d5b3882a757b586ba96e2bd3b86d8c49c516ea0896909f148f3f9bee53e",
+        "current_sha256": "63a7b56a74734433596b77b692d373fab2a6a6e66a2cd7ebcb261a4e24308cfc",
         "current_line_count": 4666,
         "classification": "CAPABILITY_PROJECTION_UNCHANGED",
         "projection": "resolved futures-lite package block",
@@ -1598,17 +1598,17 @@
   "source_pins": [
     {
       "path": "Cargo.toml",
-      "sha256": "b756e9baf054ce93b8bc8a305d29b347f3ae6e269fcd12cbe57b0662d0b98276",
+      "sha256": "10cc88160555e6bdc8761284cb2172e9cae03e2e624791005f59e542ccce8a68",
       "line_count": 1057
     },
     {
       "path": "Cargo.lock",
-      "sha256": "83c11d5b3882a757b586ba96e2bd3b86d8c49c516ea0896909f148f3f9bee53e",
+      "sha256": "63a7b56a74734433596b77b692d373fab2a6a6e66a2cd7ebcb261a4e24308cfc",
       "line_count": 4666
     },
     {
       "path": "asupersync-tokio-compat/Cargo.toml",
-      "sha256": "5940d55141b7dd8d679b63689b57ae03e310e07f03bd6ee654060c893e8b9ba2",
+      "sha256": "1534c135d51544912e8557a8a9267b33d339ad0c5e135f1ca8a25078a2530b79",
       "line_count": 68
     },
     {

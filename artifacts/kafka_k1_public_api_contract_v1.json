@@ -93,7 +93,7 @@
       "path": "artifacts/kafka_capability_inventory_v1.json",
       "byte_count": 41921,
       "record_count": 1015,
-      "sha256": "585c5f0797c86bb76d3072bff80490e77a3a3c4713cfc8b2c0074d5bad6438fd"
+      "sha256": "8f576e0ac050e8ec0b38dab9be7e1edc119f8d79345a26b2a80f000cf1d7df57"
     },
     {
       "input_id": "K1-3-INPUT-K0-2",
@@ -101,7 +101,7 @@
       "path": "artifacts/kafka_incumbent_semantics_matrix_v1.json",
       "byte_count": 228933,
       "record_count": 2560,
-      "sha256": "b6bb6c628d54ceedf101d2c92ea73c6fd6a846156668a042c21edbf47bd5dea7"
+      "sha256": "f765ee7b16e53d23f2d448aeb1cae083d1f480d35ec0ab03fc980bab5353edff"
     },
     {
       "input_id": "K1-3-INPUT-K0-3",
@@ -149,7 +149,7 @@
       "path": "Cargo.toml",
       "byte_count": 37631,
       "record_count": 1057,
-      "sha256": "b756e9baf054ce93b8bc8a305d29b347f3ae6e269fcd12cbe57b0662d0b98276"
+      "sha256": "10cc88160555e6bdc8761284cb2172e9cae03e2e624791005f59e542ccce8a68"
     }
   ],
   "coverage_model": {

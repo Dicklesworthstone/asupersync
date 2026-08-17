@@ -87,7 +87,7 @@
       "path": "artifacts/kafka_incumbent_semantics_matrix_v1.json",
       "byte_count": 228933,
       "record_count": 2560,
-      "sha256": "b6bb6c628d54ceedf101d2c92ea73c6fd6a846156668a042c21edbf47bd5dea7"
+      "sha256": "f765ee7b16e53d23f2d448aeb1cae083d1f480d35ec0ab03fc980bab5353edff"
     },
     {
       "input_id": "K1-4-INPUT-K0-4",
@@ -143,7 +143,7 @@
       "path": "Cargo.toml",
       "byte_count": 37631,
       "record_count": 1057,
-      "sha256": "b756e9baf054ce93b8bc8a305d29b347f3ae6e269fcd12cbe57b0662d0b98276"
+      "sha256": "10cc88160555e6bdc8761284cb2172e9cae03e2e624791005f59e542ccce8a68"
     },
     {
       "input_id": "K1-4-INPUT-LOCKFILE",
@@ -151,7 +151,7 @@
       "path": "Cargo.lock",
       "byte_count": 114614,
       "record_count": 4666,
-      "sha256": "83c11d5b3882a757b586ba96e2bd3b86d8c49c516ea0896909f148f3f9bee53e"
+      "sha256": "63a7b56a74734433596b77b692d373fab2a6a6e66a2cd7ebcb261a4e24308cfc"
     }
   ],
   "authority_views": {

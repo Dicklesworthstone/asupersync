@@ -49,7 +49,7 @@
       "authority_revision_state": "PRESENT_MATCHES_BASELINE",
       "inventory_state": "K0_1_SOURCE_REACHABILITY_FROZEN",
       "files": [
-        {"role":"ARTIFACT","path":"artifacts/kafka_capability_inventory_v1.json","byte_count":41921,"record_count":1015,"sha256":"585c5f0797c86bb76d3072bff80490e77a3a3c4713cfc8b2c0074d5bad6438fd"},
+        {"role":"ARTIFACT","path":"artifacts/kafka_capability_inventory_v1.json","byte_count":41921,"record_count":1015,"sha256":"8f576e0ac050e8ec0b38dab9be7e1edc119f8d79345a26b2a80f000cf1d7df57"},
         {"role":"DOCUMENT","path":"docs/kafka_capability_inventory.md","byte_count":9106,"record_count":189,"sha256":"8307d3e1fc99fc98f90d8b21c69753c867804ee97cb0ac70361d2f68eda4f305"},
         {"role":"CONTRACT","path":"tests/kafka_capability_inventory_contract.rs","byte_count":28870,"record_count":853,"sha256":"204ff7d5911aa8759a9e5e87df7707e1de406dbdf92bd1ba0787a63093354634"}
       ]
@@ -64,7 +64,7 @@
       "authority_revision_state": "PRESENT_MATCHES_BASELINE",
       "inventory_state": "K0_2_INCUMBENT_SEMANTICS_FROZEN",
       "files": [
-        {"role":"ARTIFACT","path":"artifacts/kafka_incumbent_semantics_matrix_v1.json","byte_count":228933,"record_count":2560,"sha256":"b6bb6c628d54ceedf101d2c92ea73c6fd6a846156668a042c21edbf47bd5dea7"},
+        {"role":"ARTIFACT","path":"artifacts/kafka_incumbent_semantics_matrix_v1.json","byte_count":228933,"record_count":2560,"sha256":"f765ee7b16e53d23f2d448aeb1cae083d1f480d35ec0ab03fc980bab5353edff"},
         {"role":"DOCUMENT","path":"docs/kafka_incumbent_semantics_matrix.md","byte_count":31495,"record_count":536,"sha256":"7cf46fb6eaa7ded66b6d1d04a7c711f4ce687252bb42eaa05d77e3a5e4b79ff5"},
         {"role":"CONTRACT","path":"tests/kafka_incumbent_semantics_matrix_contract.rs","byte_count":69501,"record_count":1696,"sha256":"42aa307cf457b1265f082cda8b6e163322d7bebcf45d617360f9a2a87a88cbf0"}
       ]

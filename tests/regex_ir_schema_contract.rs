@@ -35,7 +35,7 @@ const TERMINAL_PATH: &str = "artifacts/regex_semantic_terminal_receipt_v1.json";
 const FROZEN_SOURCE_SHA256: &str =
     "de4906beb838fda2c57bccfdb16316e8de661e564940a47e7b9b87f065311cb3";
 const FROZEN_TERMINAL_SHA256: &str =
-    "139bfa189252df82fc62376efc23079b2ba0a56cc3f423d696750c0c3cedd77f";
+    "c03f55834a0af59f169bb8641f27df4e36b19c38f805bfdf6682d9fb633f74f6";
 
 fn read(path: &str) -> String {
     fs::read_to_string(path).unwrap_or_else(|error| panic!("read {path}: {error}"))

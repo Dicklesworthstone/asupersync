@@ -856,8 +856,8 @@ Time	net/quic_native/connection_manager.rs	394	Instant::now()	last_activity: Ins
 Time	net/quic_native/endpoint.rs	381	Instant::now()	let batch_start = Instant::now();
 Time	net/quic_native/endpoint.rs	421	Instant::now()	receive_time: Instant::now(),
 Time	net/quic_native/endpoint.rs	541	Instant::now()	let batch_start = Instant::now();
-Time	net/quic_native/handshake_driver.rs	727	Instant::now()	let mut flight_sent_at = Instant::now();
-Time	net/quic_native/handshake_driver.rs	746	Instant::now()	flight_sent_at = Instant::now();
+Time	net/quic_native/handshake_driver.rs	922	Instant::now()	let mut flight_sent_at = Instant::now();
+Time	net/quic_native/handshake_driver.rs	944	Instant::now()	flight_sent_at = Instant::now();
 Time	net/quic_native/managed_endpoint.rs	285	std::time::SystemTime::now()	std::time::SystemTime::now()
 Time	net/quic_native/managed_endpoint.rs	444	Instant::now()	let now = Instant::now();
 Time	net/quic_native/managed_endpoint.rs	478	Instant::now()	let closed_connections = self.connection_router.close_all(cx, Instant::now(), 0)?;
