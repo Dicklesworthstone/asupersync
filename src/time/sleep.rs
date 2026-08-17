@@ -6,8 +6,8 @@
 //! # Timer Driver Integration
 //!
 //! When a timer driver is available via `Cx::current()`, Sleep registers
-//! with the driver's timer wheel for efficient wakeups. Without a driver,
-//! Sleep falls back to spawning an OS thread for timing (less efficient).
+//! with the driver's timer wheel for efficient wakeups. Without one, wall-clock
+//! sleeps share a fallback timer; a custom injected clock may use a helper thread.
 
 use crate::cx::Cx;
 use crate::time::{TimerDriverHandle, TimerHandle};
@@ -979,7 +979,23 @@ impl Future for Sleep {
                             }
 
                             ready_for_thread.store(true, Ordering::Release);
-                            let waker = state_clone.lock().waker.take();
+                            let waker = {
+                                let mut state = state_clone.lock();
+                                // Reset/completion detaches without joining. A
+                                // retired thread can therefore reach this point
+                                // after a replacement registration installed a
+                                // new waker. Only the still-current fallback may
+                                // consume that shared waker.
+                                let current = state
+                                    .fallback
+                                    .as_ref()
+                                    .map(|fallback| Arc::clone(&fallback.stop));
+                                fallback_waker_for_completion(
+                                    current.as_ref(),
+                                    &stop_for_thread,
+                                    &mut state.waker,
+                                )
+                            };
                             if let Some(waker) = waker {
                                 waker.wake();
                             }
@@ -1011,6 +1027,24 @@ impl Future for Sleep {
 impl Drop for Sleep {
     fn drop(&mut self) {
         self.cancel_active_registration();
+    }
+}
+
+#[inline]
+fn fallback_waker_for_completion(
+    current: Option<&Arc<AtomicBool>>,
+    registration: &Arc<AtomicBool>,
+    waker: &mut Option<Waker>,
+) -> Option<Waker> {
+    if current.is_some_and(|current| Arc::ptr_eq(current, registration)) {
+        waker.take()
+    } else {
+        // The registration was detached by reset, completion, or a switch to
+        // a timer driver after its final stop check. Its ready latch is still
+        // authoritative across a driver transition, so preserve wake delivery;
+        // cloning avoids stealing the replacement registration's waker. After
+        // reset this is merely a permitted spurious wake of the reused future.
+        waker.clone()
     }
 }
 
@@ -1573,6 +1607,46 @@ mod tests {
         }
 
         Waker::from(Arc::new(FlagWaker { flag }))
+    }
+
+    #[test]
+    fn stale_fallback_registration_cannot_claim_replacement_waker() {
+        init_test("stale_fallback_registration_cannot_claim_replacement_waker");
+        let stale_registration = Arc::new(AtomicBool::new(true));
+        let current_registration = Arc::new(AtomicBool::new(false));
+        let woke = Arc::new(AtomicBool::new(false));
+        let mut replacement_waker = Some(waker_that_sets(Arc::clone(&woke)));
+
+        let stale_wake = fallback_waker_for_completion(
+            Some(&current_registration),
+            &stale_registration,
+            &mut replacement_waker,
+        )
+        .expect("stale completion preserves wake delivery without claiming ownership");
+        assert!(replacement_waker.is_some());
+        assert!(!woke.load(Ordering::SeqCst));
+        stale_wake.wake();
+        assert!(woke.load(Ordering::SeqCst));
+        woke.store(false, Ordering::SeqCst);
+
+        let detached_wake =
+            fallback_waker_for_completion(None, &stale_registration, &mut replacement_waker)
+                .expect("driver transition preserves wake delivery without claiming ownership");
+        assert!(replacement_waker.is_some());
+        detached_wake.wake();
+        assert!(woke.load(Ordering::SeqCst));
+        woke.store(false, Ordering::SeqCst);
+
+        fallback_waker_for_completion(
+            Some(&current_registration),
+            &current_registration,
+            &mut replacement_waker,
+        )
+        .expect("current fallback owns the replacement waker")
+        .wake();
+        assert!(replacement_waker.is_none());
+        assert!(woke.load(Ordering::SeqCst));
+        crate::test_complete!("stale_fallback_registration_cannot_claim_replacement_waker");
     }
 
     #[test]
