@@ -367,10 +367,18 @@ impl HandshakeCryptoReassembler {
                 .pending_bytes
                 .checked_add(merged.len())
                 .ok_or_else(|| handshake_failure("crypto_buffer_limit"))?;
-            if new_pending_bytes > MAX_BUFFERED_HANDSHAKE_CRYPTO_BYTES {
+            // A range beginning at the current receive head is removed again
+            // immediately below and fed to rustls. Rejecting that range merely
+            // because either retained-data budget is full would let a peer fill
+            // the cap behind a gap and make the one fragment capable of
+            // advancing the stream permanently inadmissible. The wire packet
+            // already bounds immediately deliverable input; these limits bound
+            // only bytes and tree nodes retained behind a gap.
+            let drains_from_head = merged_start == self.next_offset;
+            if !drains_from_head && new_pending_bytes > MAX_BUFFERED_HANDSHAKE_CRYPTO_BYTES {
                 return Err(handshake_failure("crypto_buffer_limit"));
             }
-            if self.pending.len() >= MAX_BUFFERED_HANDSHAKE_CRYPTO_RANGES {
+            if !drains_from_head && self.pending.len() >= MAX_BUFFERED_HANDSHAKE_CRYPTO_RANGES {
                 return Err(handshake_failure("crypto_range_limit"));
             }
             Ok((merged_start, merged, new_pending_bytes))
@@ -1368,6 +1376,30 @@ WkX8ykcdUfalGtZ1XFOTo+aaWs+3gyI1\n\
             MAX_BUFFERED_HANDSHAKE_CRYPTO_RANGES,
             "rejecting excess metadata must leave the accepted range set bounded"
         );
+
+        assert_eq!(
+            reassembler
+                .push(0, b"x")
+                .expect("receive-head data must remain admissible at the metadata cap"),
+            vec![b"xx".to_vec()],
+            "receive-head data and its adjacent successor are delivered immediately"
+        );
+        assert_eq!(
+            reassembler.pending.len(),
+            MAX_BUFFERED_HANDSHAKE_CRYPTO_RANGES - 1,
+            "delivering the receive head must remove its adjacent retained range"
+        );
+        assert_eq!(
+            reassembler
+                .push(2, b"x")
+                .expect("filling the remaining head gap must drain its successor"),
+            vec![b"xx".to_vec()]
+        );
+        assert_eq!(
+            reassembler.pending.len(),
+            MAX_BUFFERED_HANDSHAKE_CRYPTO_RANGES - 2,
+            "closing the head gap must reduce retained metadata"
+        );
     }
 
     #[test]
@@ -1400,6 +1432,36 @@ WkX8ykcdUfalGtZ1XFOTo+aaWs+3gyI1\n\
         ));
         assert_eq!(reassembler.pending, accepted);
         assert_eq!(reassembler.pending_bytes, accepted_bytes);
+    }
+
+    #[test]
+    fn crypto_reassembler_byte_cap_does_not_block_receive_head() {
+        let mut reassembler = HandshakeCryptoReassembler::default();
+        assert!(
+            reassembler
+                .push(2, &vec![0_u8; MAX_BUFFERED_HANDSHAKE_CRYPTO_BYTES])
+                .expect("fill retained byte budget behind a gap")
+                .is_empty()
+        );
+        assert_eq!(
+            reassembler.pending_bytes,
+            MAX_BUFFERED_HANDSHAKE_CRYPTO_BYTES
+        );
+
+        assert_eq!(
+            reassembler
+                .push(0, b"x")
+                .expect("isolated receive-head byte must bypass retained byte cap"),
+            vec![b"x".to_vec()]
+        );
+        let ready = reassembler
+            .push(1, b"x")
+            .expect("closing the final gap must drain byte-capped successor");
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].len(), MAX_BUFFERED_HANDSHAKE_CRYPTO_BYTES + 1);
+        assert_eq!(&ready[0][..2], b"x\0");
+        assert!(reassembler.pending.is_empty());
+        assert_eq!(reassembler.pending_bytes, 0);
     }
 
     #[test]

@@ -152,7 +152,19 @@ impl ReassemblyBuffer {
                 reason: "Reassembly buffer size overflow".to_string(),
             });
         };
-        if buffered_after_insert > self.max_buffered_data {
+        // A fragment at the receive head is delivered immediately below. Let a
+        // packet-sized head fragment through even when out-of-order successors
+        // already fill the retained-byte budget; otherwise a peer can fill the
+        // budget behind a gap and make that gap permanently impossible to
+        // close. Still reject any single incoming fragment larger than the
+        // configured budget so this exemption cannot bypass the per-frame DoS
+        // bound.
+        let drains_from_head = uncovered_segments
+            .first()
+            .is_some_and(|segment| segment.offset == self.next_offset);
+        if buffered_after_insert > self.max_buffered_data
+            && (!drains_from_head || new_data_size > self.max_buffered_data)
+        {
             return Outcome::err(StreamError::ConnectionError {
                 reason: "Reassembly buffer limit exceeded".to_string(),
             });
@@ -168,9 +180,6 @@ impl ReassemblyBuffer {
         // with every now-contiguous buffered successor. Reject only growth
         // that remains buffered; otherwise reaching the cap would make the
         // one fragment capable of reducing it impossible to accept.
-        let drains_from_head = uncovered_segments
-            .first()
-            .is_some_and(|segment| segment.offset == self.next_offset);
         if !drains_from_head && segments_after_insert > MAX_BUFFERED_REASSEMBLY_SEGMENTS {
             return Outcome::err(StreamError::ConnectionError {
                 reason: "Reassembly segment limit exceeded".to_string(),
@@ -463,6 +472,34 @@ mod tests {
 
         let result = buffer.insert_segment(large_segment);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn byte_limit_does_not_block_receive_head() {
+        let mut buffer = ReassemblyBuffer::new(4);
+        assert!(
+            buffer
+                .insert_segment(DataSegment::new(2, Bytes::from_static(b"tail"), false))
+                .expect("fill retained byte budget behind a gap")
+                .is_empty()
+        );
+        assert_eq!(buffer.buffered_data_size(), 4);
+
+        let head = buffer
+            .insert_segment(DataSegment::new(0, Bytes::from_static(b"h"), false))
+            .expect("receive-head data must remain admissible at the byte cap");
+        assert_eq!(head, vec![Bytes::from_static(b"h")]);
+        assert_eq!(buffer.buffered_data_size(), 4);
+
+        let drained = buffer
+            .insert_segment(DataSegment::new(1, Bytes::from_static(b"i"), false))
+            .expect("closing the head gap must drain its retained successor");
+        assert_eq!(
+            drained,
+            vec![Bytes::from_static(b"i"), Bytes::from_static(b"tail")]
+        );
+        assert_eq!(buffer.buffered_data_size(), 0);
+        assert_eq!(buffer.next_expected_offset(), 6);
     }
 
     #[test]
