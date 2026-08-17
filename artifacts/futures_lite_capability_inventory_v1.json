@@ -631,14 +631,14 @@
       "unit": "non-overlapping textual token occurrences in current tracked Rust source, excluding this contract",
       "ordering": "bytewise path order; digest input is path, tab, decimal count, newline",
       "file_count": 317,
-      "token_count": 1387,
-      "digest_sha256": "d510a06c005b90dc9016bea04a65897ca9e29fd0833c5cf3f7a917c47a1ebe9b",
+      "token_count": 1388,
+      "digest_sha256": "a16055bdaeed34a25499caca0fec297698bc826d031f5283d7f6f2e65e9af06d",
       "scope_rows": [
         {
           "scope": "src",
           "file_count": 152,
-          "token_count": 832,
-          "digest_sha256": "a7aa4776ac107be1a5ff05d0fe55eb67f8bf4e76e9139fdbad37585902558813"
+          "token_count": 833,
+          "digest_sha256": "c98785ea1c977af24d0cbfb758a5f5f51ca969dea6bf81db96d957b20f161385"
         },
         {
           "scope": "tests",
@@ -676,8 +676,8 @@
       {
         "group_id": "FUT-A6-CORE",
         "file_count": 43,
-        "token_count": 260,
-        "digest_sha256": "13478c4c3f637238c09e2b47f8769600d8875c8aedab4183f84c7824fda60cb9"
+        "token_count": 261,
+        "digest_sha256": "9c4ba87400fcfbb7b889918823cd9b53e6a5e1edc27ee82815ea24d64c6aa04f"
       },
       {
         "group_id": "FUT-A7-IO",

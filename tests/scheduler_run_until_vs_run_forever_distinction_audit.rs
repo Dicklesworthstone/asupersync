@@ -305,17 +305,16 @@ fn lab_run_until_idle_runs_until_scheduler_is_empty() {
         .expect("run_until_idle close");
     let body = &source[start..start + body_end];
 
-    // The exit condition grew cancel-liveness legs (pending handle-cancel
-    // mailbox entries and deferred cancel dispatches must also be drained
-    // before idling — the zc5865-class block_on liveness fixes); it still
-    // keys off scheduler emptiness rather than full quiescence.
+    // The exit condition drains cancellation intake, then also admits pending
+    // scheduler commands before declaring the lab idle. It still keys off
+    // scheduler/dispatch emptiness rather than full structured quiescence.
     assert!(
         body.contains("let is_empty = self.scheduler.lock().is_empty();")
-            && body.contains("if is_empty")
-            && body.contains("handle_cancels_are_empty()")
-            && body.contains("has_deferred_cancel_dispatches()"),
+            && body.contains("self.drain_handle_cancel_requests();")
+            && body.contains("self.drain_deferred_cancel_dispatches();")
+            && body.contains("if is_empty && !self.has_pending_dispatch_commands()"),
         "REGRESSION: run_until_idle no longer uses \
-         scheduler.is_empty (plus drained cancel intake) as its exit \
+         scheduler.is_empty (plus drained cancel/dispatch intake) as its exit \
          condition. The weaker-drain semantics is broken — either it \
          conflates with run_until_quiescent (silent \
          strengthening) or never exits.",

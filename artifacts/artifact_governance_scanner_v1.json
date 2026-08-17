@@ -570,7 +570,7 @@
       {
         "path_alias_id": "base64-baseline",
         "source_artifact": "artifacts/base64_capability_inventory_v1.json",
-        "source_artifact_sha256": "20dbe5267ac0ad91cdb7955d534b8e32f926032ecbdf3ccaa1e46725f27e6fe5",
+        "source_artifact_sha256": "4ab274ade5dff212e26eca77c8604a00c1a21346d1000df0db4e674cbd815fac",
         "target_artifact": "artifacts/dependency_capability_baseline_v1.json",
         "stored_target_sha256": "de3f62dd0179e5e1eeb256e6ccb1172ef3f455bf6a9bd504fe10ae8ffe633726",
         "stored_target_line_count": 3210,
@@ -578,7 +578,7 @@
         "live_target_line_count": 3210,
         "pin_state_at_capture": "current",
         "edge_classification": "current_forward_reference",
-        "source_node": "artifacts/base64_capability_inventory_v1.json@20dbe5267ac0ad91cdb7955d534b8e32f926032ecbdf3ccaa1e46725f27e6fe5",
+        "source_node": "artifacts/base64_capability_inventory_v1.json@4ab274ade5dff212e26eca77c8604a00c1a21346d1000df0db4e674cbd815fac",
         "target_node": "artifacts/dependency_capability_baseline_v1.json@de3f62dd0179e5e1eeb256e6ccb1172ef3f455bf6a9bd504fe10ae8ffe633726"
       },
       {
@@ -588,7 +588,7 @@
         "target_artifact": "artifacts/base64_capability_inventory_v1.json",
         "stored_target_sha256": "28171082ff529b93cbe951b9de84db9423b8922fde531c82aa21051b933c83eb",
         "stored_target_line_count": 417,
-        "live_target_sha256": "20dbe5267ac0ad91cdb7955d534b8e32f926032ecbdf3ccaa1e46725f27e6fe5",
+        "live_target_sha256": "4ab274ade5dff212e26eca77c8604a00c1a21346d1000df0db4e674cbd815fac",
         "live_target_line_count": 1018,
         "pin_state_at_capture": "historical",
         "edge_classification": "historical_back_reference",

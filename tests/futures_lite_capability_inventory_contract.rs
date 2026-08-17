@@ -760,9 +760,9 @@ fn validate_current_snapshot(inventory: &Value) -> Result<(), String> {
         .get("current_occurrence")
         .expect("current occurrence snapshot");
     if current.get("file_count").and_then(Value::as_u64) != Some(317)
-        || current.get("token_count").and_then(Value::as_u64) != Some(1387)
+        || current.get("token_count").and_then(Value::as_u64) != Some(1388)
         || text(current, "digest_sha256")
-            != "d510a06c005b90dc9016bea04a65897ca9e29fd0833c5cf3f7a917c47a1ebe9b"
+            != "a16055bdaeed34a25499caca0fec297698bc826d031f5283d7f6f2e65e9af06d"
         || array(current, "scope_rows").len() != 6
         || array(snapshot, "current_migration_reservation_groups").len() != 4
     {
