@@ -59,12 +59,12 @@
   "source_pins": [
     {
       "path": "Cargo.toml",
-      "sha256": "b756e9baf054ce93b8bc8a305d29b347f3ae6e269fcd12cbe57b0662d0b98276",
+      "sha256": "10cc88160555e6bdc8761284cb2172e9cae03e2e624791005f59e542ccce8a68",
       "line_count": 1057
     },
     {
       "path": "Cargo.lock",
-      "sha256": "83c11d5b3882a757b586ba96e2bd3b86d8c49c516ea0896909f148f3f9bee53e",
+      "sha256": "63a7b56a74734433596b77b692d373fab2a6a6e66a2cd7ebcb261a4e24308cfc",
       "line_count": 4666
     },
     {
@@ -89,8 +89,8 @@
     },
     {
       "path": "src/net/quic_native/handshake_driver.rs",
-      "sha256": "51e50620ca4e6006485e31d1b8ece4fc56d29fc36e7a346258c4607af1fa3548",
-      "line_count": 1438
+      "sha256": "45f42e39f573517fd9e71c2c3315e0c05c305e8d896fc75862e85287a85cf7ca",
+      "line_count": 1896
     },
     {
       "path": "src/net/quic_native/tls.rs",
@@ -99,8 +99,8 @@
     },
     {
       "path": "src/net/quic_native/connection.rs",
-      "sha256": "eda77f83448a4dcf8d3762b391dc5122a36c3f3ed821a5a9ae813dd57e2f5e05",
-      "line_count": 4299
+      "sha256": "f2248d472a86a00141980127cbf94076df80b21ea85fb5f221da7d78b56ebb49",
+      "line_count": 4375
     },
     {
       "path": "src/bin/atp.rs",
@@ -114,7 +114,7 @@
     },
     {
       "path": "artifacts/dependency_capability_baseline_v1.json",
-      "sha256": "de3f62dd0179e5e1eeb256e6ccb1172ef3f455bf6a9bd504fe10ae8ffe633726",
+      "sha256": "fbf80e6f473c511dfdd3a4d0a2aa2598cb84fb0e25a2fcf63c049335dda52d40",
       "line_count": 3210
     },
     {

@@ -299,6 +299,13 @@ const MAX_ACK_FRAME_RANGES: usize = 96;
 /// insertion. Dropping older ranges is permitted by RFC 9000 §13.2.3.
 const MAX_TRACKED_ACK_RANGES: usize = MAX_ACK_FRAME_RANGES * 4;
 
+/// Maximum number of disjoint receive fragments buffered for one stream.
+///
+/// Flow control bounds bytes, but without a separate metadata bound an
+/// authenticated peer can fill the receive window with tiny disjoint ranges
+/// and amplify each byte into a tree node plus reassembly work.
+const MAX_BUFFERED_STREAM_REASSEMBLY_FRAGMENTS: usize = 4096;
+
 /// Maximum number of outbound DATAGRAM payloads queued before `send_datagram`
 /// drops the oldest queued payload to keep the unreliable send path bounded.
 const MAX_OUTBOUND_DATAGRAMS: usize = 256;
@@ -828,6 +835,21 @@ impl NativeQuicConnection {
     ) -> Result<(), NativeQuicConnectionError> {
         checkpoint(cx)?;
         self.ensure_stream_active_state()?;
+        if self
+            .streams
+            .stream_reassembly_fragment_limit_would_be_exceeded(
+                id,
+                offset,
+                data.len() as u64,
+                is_fin,
+                MAX_BUFFERED_STREAM_REASSEMBLY_FRAGMENTS,
+            )
+            .map_err(map_stream_table_error)?
+        {
+            return Err(NativeQuicConnectionError::InvalidState(
+                "stream receive reassembly fragment limit exceeded",
+            ));
+        }
         self.streams
             .receive_stream_bytes(id, offset, data, is_fin)
             .map_err(map_stream_table_error)?;
@@ -2880,6 +2902,60 @@ mod tests {
             QuicFrame::MaxStreamData { stream_id, maximum_stream_data }
                 if stream_id.value() == stream.0 && maximum_stream_data.value() > 100
         )));
+    }
+
+    #[test]
+    fn stream_receive_reassembly_fragment_count_is_bounded_before_mutation() {
+        let cx = test_cx();
+        let mut conn = established_conn();
+        let stream = conn.open_local_bidi(&cx).expect("open");
+
+        // Leave one metadata slot reserved for the readable head fragment.
+        for fragment in 0..MAX_BUFFERED_STREAM_REASSEMBLY_FRAGMENTS - 1 {
+            let offset = 1 + (fragment as u64 * 2);
+            conn.receive_stream_bytes(&cx, stream, offset, Bytes::from_static(b"x"), false)
+                .expect("fragment within metadata limit");
+        }
+
+        let rejected_offset = 1 + ((MAX_BUFFERED_STREAM_REASSEMBLY_FRAGMENTS - 1) as u64 * 2);
+        let err = conn
+            .receive_stream_bytes(
+                &cx,
+                stream,
+                rejected_offset,
+                Bytes::from_static(b"x"),
+                false,
+            )
+            .expect_err("fragment beyond metadata limit must fail closed");
+        assert_eq!(
+            err,
+            NativeQuicConnectionError::InvalidState(
+                "stream receive reassembly fragment limit exceeded"
+            )
+        );
+
+        conn.receive_stream_bytes(&cx, stream, 1, Bytes::from_static(b"x"), false)
+            .expect("duplicate fragment at the limit does not add metadata");
+        assert!(
+            conn.read_stream_bytes(&cx, stream, 1)
+                .expect("read after rejected fragment")
+                .is_empty(),
+            "rejected fragment must not fill the head-of-line gap"
+        );
+
+        conn.receive_stream_bytes(&cx, stream, 0, Bytes::from_static(b"x"), false)
+            .expect("head-of-line fragment must remain admissible at the metadata cap");
+        assert_eq!(
+            conn.read_stream_bytes(&cx, stream, 1)
+                .expect("read head fragment"),
+            Bytes::from_static(b"x")
+        );
+        assert_eq!(
+            conn.read_stream_bytes(&cx, stream, 1)
+                .expect("read formerly blocked successor"),
+            Bytes::from_static(b"x"),
+            "filling the head gap must restore forward progress"
+        );
     }
 
     #[test]

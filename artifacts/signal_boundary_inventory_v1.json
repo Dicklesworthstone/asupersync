@@ -41,12 +41,12 @@
   "source_pins": [
     {
       "path": "Cargo.toml",
-      "sha256": "b756e9baf054ce93b8bc8a305d29b347f3ae6e269fcd12cbe57b0662d0b98276",
+      "sha256": "10cc88160555e6bdc8761284cb2172e9cae03e2e624791005f59e542ccce8a68",
       "line_count": 1057
     },
     {
       "path": "Cargo.lock",
-      "sha256": "83c11d5b3882a757b586ba96e2bd3b86d8c49c516ea0896909f148f3f9bee53e",
+      "sha256": "63a7b56a74734433596b77b692d373fab2a6a6e66a2cd7ebcb261a4e24308cfc",
       "line_count": 4666
     },
     {
@@ -71,7 +71,7 @@
     },
     {
       "path": "artifacts/unsafe_boundary_ledger_v1.json",
-      "sha256": "3e3df000734069fb50e2bfc0a831ae7fd873f43c696c06deca2acd40450217f3",
+      "sha256": "71c972f0cc6dd59c92a78ea0474b019fc8bfbfc8a0d6e9129b787152f4396c48",
       "line_count": 6441
     },
     {

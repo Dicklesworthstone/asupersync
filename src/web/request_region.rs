@@ -2490,20 +2490,33 @@ mod tests {
         }
 
         /// br-asupersync-bmc8m5 commit semantics on the server hop: a
-        /// handler that observes the cancel during the drain grace and
-        /// completes gets its response committed, not discarded.
+        /// handler that observes connection cancellation during the drain
+        /// grace and completes gets its response committed, not discarded.
+        ///
+        /// This uses an explicit connection-cancel transition instead of a
+        /// tiny wall-clock deadline. The latter can expire before the first
+        /// handler poll when the full suite is under load, which tests the
+        /// pre-handler gate rather than the drain-commit boundary.
         #[test]
-        fn hop_deadline_drain_commits_completed_response() {
+        fn hop_connection_drain_commits_completed_response() {
             block_on(async {
-                let now = crate::time::wall_now();
-                let budget = Budget::INFINITE.tightened_by_timeout(now, Duration::from_millis(20));
-                let region =
-                    ServerRequestRegion::mint("test", budget, now).expect("runtime installed");
-                let handler = std::future::poll_fn(|task_cx| {
+                let conn_cx = Cx::for_testing();
+                let conn_for_handler = conn_cx.clone();
+                let region = ServerRequestRegion::mint("test", Budget::INFINITE, NOW)
+                    .expect("runtime installed");
+                let mut connection_cancelled = false;
+                let handler = std::future::poll_fn(move |task_cx| {
                     Cx::with_current(|cx| {
                         if cx.is_cancel_requested() {
                             std::task::Poll::Ready(42_u32)
                         } else {
+                            if !connection_cancelled {
+                                connection_cancelled = true;
+                                conn_for_handler.cancel_with(
+                                    CancelKind::User,
+                                    Some("peer disconnected during response build"),
+                                );
+                            }
                             cx.register_cancel_waker(task_cx.waker());
                             std::task::Poll::Pending
                         }
@@ -2512,8 +2525,8 @@ mod tests {
                 });
                 let outcome = region
                     .run_with_protocol_drain(
-                        RequestBudgetSource::ServerConfig,
-                        None,
+                        RequestBudgetSource::Inherited,
+                        Some(conn_cx),
                         Duration::from_millis(500),
                         handler,
                     )

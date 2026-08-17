@@ -455,6 +455,27 @@ impl QuicStream {
         len: u64,
         is_fin: bool,
     ) -> Result<u64, QuicStreamError> {
+        let end = self.validate_receive_segment(offset, len, is_fin)?;
+        let flow_delta = self.recv_credit.consume_to(end)?;
+        if is_fin {
+            if let Err(err) = self.set_final_size(end) {
+                self.recv_credit.release(flow_delta);
+                return Err(err);
+            }
+        }
+        if len > 0 {
+            self.insert_recv_range(offset, end);
+            self.advance_contiguous_recv_offset();
+        }
+        Ok(flow_delta)
+    }
+
+    fn validate_receive_segment(
+        &self,
+        offset: u64,
+        len: u64,
+        is_fin: bool,
+    ) -> Result<u64, QuicStreamError> {
         if let Some((code, final_size)) = self.recv_reset {
             return Err(QuicStreamError::ReceiveReset { code, final_size });
         }
@@ -472,18 +493,19 @@ impl QuicStream {
                 received: end,
             });
         }
-        let flow_delta = self.recv_credit.consume_to(end)?;
+        let prior_used = self.recv_credit.used();
+        self.recv_credit
+            .can_consume(end.saturating_sub(prior_used))?;
         if is_fin {
-            if let Err(err) = self.set_final_size(end) {
-                self.recv_credit.release(flow_delta);
-                return Err(err);
+            let highest_observed = prior_used.max(end);
+            if end < highest_observed || self.final_size.is_some_and(|existing| existing != end) {
+                return Err(QuicStreamError::InvalidFinalSize {
+                    final_size: end,
+                    received: highest_observed,
+                });
             }
         }
-        if len > 0 {
-            self.insert_recv_range(offset, end);
-            self.advance_contiguous_recv_offset();
-        }
-        Ok(flow_delta)
+        Ok(end)
     }
 
     /// Receive bytes on this stream at an explicit offset.
@@ -855,6 +877,38 @@ impl QuicStream {
                 .insert(cursor, data.slice(data_cursor..data_cursor + tail_len));
         }
         Ok(())
+    }
+
+    fn additional_recv_chunk_count(&self, offset: u64, len: u64) -> Result<usize, QuicStreamError> {
+        let end = offset
+            .checked_add(len)
+            .ok_or(QuicStreamError::OffsetOverflow { offset, len })?;
+        if len == 0 || end <= self.read_offset {
+            return Ok(0);
+        }
+
+        let mut cursor = offset.max(self.read_offset);
+        let mut additional = 0usize;
+        for (&start, chunk) in self.recv_chunks.range(..end) {
+            let chunk_end =
+                start
+                    .checked_add(chunk.len() as u64)
+                    .ok_or(QuicStreamError::OffsetOverflow {
+                        offset: start,
+                        len: chunk.len() as u64,
+                    })?;
+            if chunk_end <= cursor {
+                continue;
+            }
+            if cursor < start {
+                additional = additional.saturating_add(1);
+            }
+            cursor = cursor.max(chunk_end);
+        }
+        if cursor < end {
+            additional = additional.saturating_add(1);
+        }
+        Ok(additional)
     }
 }
 
@@ -1273,6 +1327,49 @@ impl StreamTable {
             self.wake_reader(id);
         }
         Ok(())
+    }
+
+    /// Check whether accepting a STREAM payload would exceed a fragment cap.
+    ///
+    /// This is a read-only preflight so callers can reject hostile
+    /// fragmentation before flow-control or reassembly state is mutated.
+    pub(crate) fn stream_reassembly_fragment_limit_would_be_exceeded(
+        &self,
+        id: StreamId,
+        offset: u64,
+        len: u64,
+        is_fin: bool,
+        limit: usize,
+    ) -> Result<bool, StreamTableError> {
+        if id.direction() == StreamDirection::Unidirectional && id.is_local_for(self.role) {
+            return Err(StreamTableError::StreamNotReadable(id));
+        }
+        let end = offset
+            .checked_add(len)
+            .ok_or(QuicStreamError::OffsetOverflow { offset, len })?;
+        let stream = self.stream(id)?;
+        let connection_delta = end.saturating_sub(stream.recv_credit.used());
+        self.recv_connection_credit
+            .can_consume(connection_delta)
+            .map_err(|err| StreamTableError::Stream(QuicStreamError::Flow(err)))?;
+        stream.validate_receive_segment(offset, len, is_fin)?;
+        let additional = stream.additional_recv_chunk_count(offset, len)?;
+        let projected = stream.recv_chunks.len().saturating_add(additional);
+
+        // Reserve one node for the chunk at `read_offset`. Without that
+        // reservation, a peer can fill every slot with out-of-order chunks and
+        // make the one frame that closes the head-of-line gap inadmissible.
+        // The readable head is unique, so this keeps the total node count at
+        // `limit` while preserving forward progress.
+        let readable_head_present = stream.recv_chunks.contains_key(&stream.read_offset);
+        let incoming_makes_head_readable =
+            len > 0 && offset <= stream.read_offset && end > stream.read_offset;
+        let projected_out_of_order = projected.saturating_sub(usize::from(
+            readable_head_present || incoming_makes_head_readable,
+        ));
+        let max_out_of_order = limit.saturating_sub(1);
+
+        Ok(projected > limit || projected_out_of_order > max_out_of_order)
     }
 
     /// Receive STREAM payload bytes on one stream at an explicit offset.

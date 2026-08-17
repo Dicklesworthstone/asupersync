@@ -12,10 +12,13 @@ Asupersync is a spec-first, cancel-correct, capability-secure async runtime for 
 
 Scope window: current work through 2026-08-17, reconstructed from git history,
 beads, benchmark ledgers, and live repo artifacts; the latest published
-GitHub Release/tag baseline is `v0.4.6`.
+GitHub Release/tag baseline is `v0.4.7`.
 
 ## Version Timeline
 
+- **v0.4.7 Release**: patch release adding typed runtime-handle join outcomes
+  and hardening authenticated QUIC/ATP reassembly while preserving the v0.4.3
+  public compatibility floor.
 - **v0.4.6 Release**: patch release tightening HTTP/1 framing parsing and
   completing `Sleep` timer/waker cleanup without changing the v0.4.3 public
   surface.
@@ -49,6 +52,8 @@ GitHub Release/tag baseline is `v0.4.6`.
 
 ## [Unreleased]
 
+## [v0.4.7] - 2026-08-17
+
 ### Runtime correctness
 
 - **Runtime-handle tasks now have an additive typed join path.**
@@ -71,6 +76,19 @@ GitHub Release/tag baseline is `v0.4.6`.
   disjoint range metadata, closing a tiny-frame memory-amplification path;
   rejected conflicting or oversized fragments also leave previously accepted
   reassembly state intact.
+- **QUIC and ATP stream reassembly now bound fragment metadata independently
+  of buffered bytes.** Authenticated peers can no longer turn a bounded receive
+  window into an unbounded number of ordered-map nodes using tiny disjoint
+  stream fragments. Limit rejection occurs before flow-control, final-size, or
+  buffered-byte state changes, and harmless duplicate fragments remain
+  accepted at the cap.
+
+### Compatibility and release evidence
+
+- **The v0.4.3 public surface remains the patch-line compatibility floor.**
+  The typed join API is additive; established runtime spawning and join
+  behavior remain functional. The reassembly limits use existing internal and
+  error surfaces without removing, renaming, or narrowing a public API.
 
 ## [v0.4.6] - 2026-08-17
 
@@ -2004,7 +2022,8 @@ The initial tagged milestone establishing the core async runtime with structured
 
 ---
 
-[Unreleased]: https://github.com/Dicklesworthstone/asupersync/compare/v0.4.6...HEAD
+[Unreleased]: https://github.com/Dicklesworthstone/asupersync/compare/v0.4.7...HEAD
+[v0.4.7]: https://github.com/Dicklesworthstone/asupersync/compare/v0.4.6...v0.4.7
 [v0.4.6]: https://github.com/Dicklesworthstone/asupersync/compare/v0.4.5...v0.4.6
 [v0.4.5]: https://github.com/Dicklesworthstone/asupersync/compare/v0.4.4...v0.4.5
 [v0.4.4]: https://github.com/Dicklesworthstone/asupersync/compare/v0.4.3...v0.4.4

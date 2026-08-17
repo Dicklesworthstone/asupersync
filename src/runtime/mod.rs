@@ -210,8 +210,8 @@ pub use builder::{
     BrowserRuntime, BrowserRuntimeBuildError, BrowserRuntimeBuilder, BrowserRuntimeSelectionResult,
     BrowserServiceWorkerBrokerSupportDiagnostics, BrowserServiceWorkerBrokerSupportReason,
     BrowserSharedWorkerCoordinatorSupportDiagnostics, BrowserSharedWorkerCoordinatorSupportReason,
-    BrowserWorkerFallbackTarget, DeadlineMonitoringBuilder, JoinHandle, Runtime, RuntimeBuilder,
-    RuntimeHandle,
+    BrowserWorkerFallbackTarget, CheckedJoinHandle, DeadlineMonitoringBuilder, JoinHandle, Runtime,
+    RuntimeBuilder, RuntimeHandle,
 };
 pub use cache::{
     ArtifactCache, ArtifactCacheConfig, ArtifactMemoryPressureSnapshot, ArtifactMetadata,
