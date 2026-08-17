@@ -1213,9 +1213,11 @@ impl Scheduler {
                 actual: actual_lane,
             });
         }
-        if let Some(deadline) = timed_deadline {
-            if deadline > now {
-                return Err(ExactDispatchError::TimedNotDue { deadline });
+        if actual_lane == DispatchLane::Timed {
+            if let Some(deadline) = timed_deadline {
+                if deadline > now {
+                    return Err(ExactDispatchError::TimedNotDue { deadline });
+                }
             }
         }
 
@@ -1626,6 +1628,15 @@ mod tests {
         assert_eq!(
             promoted.take_exact(task(3), DispatchLane::Cancel, Time::ZERO),
             Ok(())
+        );
+
+        let mut timed_promoted = Scheduler::new();
+        timed_promoted.schedule_timed(task(4), Time::from_secs(60));
+        timed_promoted.move_to_cancel_lane(task(4), 9);
+        assert_eq!(
+            timed_promoted.take_exact(task(4), DispatchLane::Cancel, Time::ZERO),
+            Ok(()),
+            "cancel promotion must override a future timed tombstone"
         );
         assert_eq!(
             promoted.take_exact(
