@@ -49,6 +49,8 @@ GitHub Release/tag baseline is `v0.4.5`.
 
 ## [Unreleased]
 
+## [v0.4.6] - 2026-08-16
+
 ### Runtime correctness
 
 - **Lab runs can capture and force an exact bounded dispatch projection.** The
@@ -61,11 +63,6 @@ GitHub Release/tag baseline is `v0.4.5`.
   terminal certificate as a candidate result. This is the executable replay
   and delta-debugging substrate; it does not yet provide a failure classifier,
   minimizer, workload codec, or persisted replay artifact.
-
-## [v0.4.6] - 2026-08-16
-
-### Runtime correctness
-
 - **Cancelled sleeps release timer registrations before the completed future is
   dropped.** A task that retains its completed `Sleep` can no longer retain the
   timer-wheel entry, stored waker, or fallback-thread state after explicit
