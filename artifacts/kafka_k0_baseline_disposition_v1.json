@@ -81,7 +81,7 @@
       "files": [
         {"role":"ARTIFACT","path":"artifacts/kafka_downstream_user_journey_inventory_v1.json","byte_count":1171867,"record_count":17987,"sha256":"dd8277e09864965f74d97d70406d722fd149636a010decb12113f6f7cd67dca3"},
         {"role":"DOCUMENT","path":"docs/kafka_downstream_user_journey_inventory.md","byte_count":40662,"record_count":612,"sha256":"3c2f0b4fa956bc45fc5b9738f5f2349024dafb577509195e998fa72ec0d9dbb1"},
-        {"role":"CONTRACT","path":"tests/kafka_downstream_user_journey_inventory_contract.rs","byte_count":216695,"record_count":5381,"sha256":"136eb3fc3dc6390b1aaac4c7b9abc1379e3eebeef65d5da6d0f3fd203ec1544f"}
+        {"role":"CONTRACT","path":"tests/kafka_downstream_user_journey_inventory_contract.rs","byte_count":216695,"record_count":5381,"sha256":"53436ee60641a09ab991977f74e6fd2207bb99bd586321b4a511ee28e8f9a6f2"}
       ]
     },
     {

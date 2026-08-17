@@ -65,7 +65,7 @@
       "path": "artifacts/kafka_k0_baseline_disposition_v1.json",
       "byte_count": 29494,
       "record_count": 284,
-      "sha256": "9aefd06db08fa4c33704f5c55322f468d3adb232145e426d4e213e2caa18d67d"
+      "sha256": "48efc0401e535a96b59b48354d19cb3d0040d71fb1ebd9af11a4355c785bac03"
     },
     {
       "input_id": "K1-INPUT-K0-5-DOCUMENT",
@@ -81,7 +81,7 @@
       "path": "tests/kafka_k0_baseline_disposition_contract.rs",
       "byte_count": 106003,
       "record_count": 2599,
-      "sha256": "5e13f9d614708a06d0c47c0cef9714be5da4bbbf8d537cf3b58b663f0b79bf42"
+      "sha256": "26e71c9e1f0e6945ff49376069b23c0c486c86834523359eeef40e5e80cb1e9b"
     },
     {
       "input_id": "K1-INPUT-ADR",
@@ -140,7 +140,7 @@
       "locator": "capabilities[capability_id=CAP-KAFKA]",
       "row_count": 1,
       "canonicalization": "Recursively key-sort and compactly serialize the selected object with one trailing LF.",
-      "sha256": "66f63f8d4457680cccb5b43b0ec6405e509c9b91fbbe7cd38483579e66a3f636"
+      "sha256": "834c0bb0f30adf65ad27256fbae9f903fe9945e37a7d010f90d38971802c74ea"
     },
     {
       "pin_id": "K1-ROW-CAPABILITY-TERMINAL-OWNERS",
@@ -148,7 +148,7 @@
       "locator": "graph_signoff_report.terminal_owner_remaps[capability_id=CAP-KAFKA]",
       "row_count": 2,
       "canonicalization": "Recursively key-sort and compactly serialize each selected object, bytewise sort the records, and append one LF per record.",
-      "sha256": "9ee55f5f9dd97abbb5086769fd240fd47781cc04476614d9acb3135d40c69af9"
+      "sha256": "834c0bb0f30adf65ad27256fbae9f903fe9945e37a7d010f90d38971802c74ea"
     },
     {
       "pin_id": "K1-ROW-CAPABILITY-JOURNEY",
@@ -156,7 +156,7 @@
       "locator": "journey_inventory[capability_ids contains CAP-KAFKA]",
       "row_count": 1,
       "canonicalization": "Recursively key-sort and compactly serialize each selected object, bytewise sort the records, and append one LF per record.",
-      "sha256": "575a3a723a65ae2295d1e007d6b69cb8c8868c11d071b1327dc85d92964418d1"
+      "sha256": "834c0bb0f30adf65ad27256fbae9f903fe9945e37a7d010f90d38971802c74ea"
     },
     {
       "pin_id": "K1-ROW-ADR-ROSTER",
@@ -164,7 +164,7 @@
       "locator": "roster[adr_id=DEP-ADR-009]",
       "row_count": 1,
       "canonicalization": "Recursively key-sort and compactly serialize the selected object with one trailing LF.",
-      "sha256": "0f254f77c395f50de22a3d65ed5636457c719c88f6bd9fa1eb4b9c918b590927"
+      "sha256": "4765bb6d17b676fd63529ee75047477656851474300601e05cbc5492b32f9dbc"
     },
     {
       "pin_id": "K1-ROW-ADR-DECISION",
@@ -172,7 +172,7 @@
       "locator": "adrs[adr_id=DEP-ADR-009]",
       "row_count": 1,
       "canonicalization": "Recursively key-sort and compactly serialize the selected object with one trailing LF.",
-    "sha256": "755b30159dfabe677cb5455910754f3abe7913e93baa8a60a023cc3af2ed4aa4"
+    "sha256": "4765bb6d17b676fd63529ee75047477656851474300601e05cbc5492b32f9dbc"
     },
     {
       "pin_id": "K1-ROW-ADR-LOSS-FIXTURE",
@@ -180,7 +180,7 @@
       "locator": "known_loss_fixtures[adr_id=DEP-ADR-009]",
       "row_count": 1,
       "canonicalization": "Recursively key-sort and compactly serialize each selected object, bytewise sort the records, and append one LF per record.",
-      "sha256": "86704c0c660c9136f762f5c1ee203ff1bf88efc08ca3424c4ffd0dcfad3ae9a8"
+      "sha256": "4765bb6d17b676fd63529ee75047477656851474300601e05cbc5492b32f9dbc"
     }
   ],
   "tracker_topology": {
