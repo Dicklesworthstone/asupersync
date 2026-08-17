@@ -2106,6 +2106,10 @@ fn g2_f8_wavefront_closure_evidence() {
     use asupersync::raptorq::systematic::SystematicEncoder;
     use std::time::Instant;
 
+    const TRACKED_ARTIFACT_PATH: &str = "artifacts/raptorq_track_f_wavefront_pipeline_v1.json";
+    let tracked_artifact_before =
+        std::fs::read(TRACKED_ARTIFACT_PATH).expect("tracked F8 closure artifact must be readable");
+
     struct F8Scenario {
         id: &'static str,
         k: usize,
@@ -2388,10 +2392,12 @@ fn g2_f8_wavefront_closure_evidence() {
     let json_str = serde_json::to_string_pretty(&report).unwrap();
     eprintln!("G2-F8-WAVEFRONT-CLOSURE-V1: {json_str}");
 
-    // Write artifact.
-    std::fs::write(
-        "artifacts/raptorq_track_f_wavefront_pipeline_v1.json",
-        &json_str,
-    )
-    .expect("Failed to write F8 wavefront artifact");
+    // This executable gate may emit fresh timing diagnostics, but it must not
+    // rewrite checked-in evidence with host-load-dependent measurements.
+    let tracked_artifact_after = std::fs::read(TRACKED_ARTIFACT_PATH)
+        .expect("tracked F8 closure artifact must remain readable");
+    assert_eq!(
+        tracked_artifact_after, tracked_artifact_before,
+        "F8 evidence gate must not mutate the tracked closure artifact"
+    );
 }
