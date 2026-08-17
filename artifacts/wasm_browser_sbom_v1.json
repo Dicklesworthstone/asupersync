@@ -19,42 +19,42 @@
   "rust_packages": [
     {
       "name": "asupersync",
-      "version": "0.4.6",
+      "version": "0.4.7",
       "source": "workspace"
     },
     {
       "name": "asupersync-browser-core",
-      "version": "0.4.6",
+      "version": "0.4.7",
       "source": "workspace"
     },
     {
       "name": "asupersync-conformance",
-      "version": "0.4.6",
+      "version": "0.4.7",
       "source": "workspace"
     }
   ],
   "npm_packages": [
     {
       "name": "@asupersync/browser-core",
-      "version": "0.4.6",
+      "version": "0.4.7",
       "channel": "wasm-browser-release",
       "manifest_path": "packages/browser-core/package.json"
     },
     {
       "name": "@asupersync/browser",
-      "version": "0.4.6",
+      "version": "0.4.7",
       "channel": "wasm-browser-release",
       "manifest_path": "packages/browser/package.json"
     },
     {
       "name": "@asupersync/react",
-      "version": "0.4.6",
+      "version": "0.4.7",
       "channel": "wasm-browser-release",
       "manifest_path": "packages/react/package.json"
     },
     {
       "name": "@asupersync/next",
-      "version": "0.4.6",
+      "version": "0.4.7",
       "channel": "wasm-browser-release",
       "manifest_path": "packages/next/package.json"
     }
@@ -64,7 +64,7 @@
       "path": "packages/browser-core/package.json",
       "package": "@asupersync/browser-core",
       "kind": "manifest",
-      "sha256": "fb51fe3c5316b34b1897c5e3f72d0f1ac3c9ac2d2bfbb7acd97ef97a979bbd7d"
+      "sha256": "7dba25680d927cb8827a600b752f254f12bdba183f735a42de1b4f874fe093ab"
     },
     {
       "path": "packages/browser-core/index.js",
@@ -124,19 +124,19 @@
       "path": "packages/browser/package.json",
       "package": "@asupersync/browser",
       "kind": "manifest",
-      "sha256": "eeeccef12daa52ba783d7be394e8306c2ebd6b5d272336dc1e2021cc6dedc870"
+      "sha256": "97f315897ae7e011652c2fbc7830246e27a3c5d7baed830721e145b52de0464b"
     },
     {
       "path": "packages/react/package.json",
       "package": "@asupersync/react",
       "kind": "manifest",
-      "sha256": "433afd3a757537f5a3a0f825e8a556cf18161909c8991c7891a1065261d7d69b"
+      "sha256": "10549337132017fdbd74e10943d6cd0d5f07fe63061ca2238b72e0aa866ff5ed"
     },
     {
       "path": "packages/next/package.json",
       "package": "@asupersync/next",
       "kind": "manifest",
-      "sha256": "f2a2603e78b8602dc9dad536b03ebda874f50cf4048d2edd55db8fa99ea2c194"
+      "sha256": "4bc1e472f388996208f78d72e34b35cfba12c230c8cd817a99bfdba123b7e57d"
     }
   ]
 }
