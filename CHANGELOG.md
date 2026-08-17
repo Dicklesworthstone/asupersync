@@ -49,6 +49,8 @@ GitHub Release/tag baseline is `v0.4.5`.
 
 ## [Unreleased]
 
+## [v0.4.6] - 2026-08-16
+
 ### Runtime correctness
 
 - **Lab runs can capture and force an exact bounded dispatch projection.** The
@@ -57,11 +59,6 @@ GitHub Release/tag baseline is `v0.4.5`.
   refuses stale, reordered, partial, or resource-exhausting projections without
   falling back to RNG scheduling. This is the executable replay substrate; it
   does not yet provide schedule minimization or a persisted replay artifact.
-
-## [v0.4.6] - 2026-08-16
-
-### Runtime correctness
-
 - **Cancelled sleeps release timer registrations before the completed future is
   dropped.** A task that retains its completed `Sleep` can no longer retain the
   timer-wheel entry, stored waker, or fallback-thread state after explicit
