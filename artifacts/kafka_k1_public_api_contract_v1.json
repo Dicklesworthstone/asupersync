@@ -265,7 +265,7 @@
         "row_count": 23,
         "id_key": "finding_id",
         "id_set_sha256": "752d9b0be528ea09c4eb06100e6b1ab1992d92f52cd8a8f9400f0d805e5223b0",
-        "canonical_row_sha256": "cb04492d3a8e82d415833d06533ec311b72159c1a5e2b9051469e7b6e74ecae5",
+        "canonical_row_sha256": "b8786f5521bfdcfbba786844fea0e41242fcbe65d8ad886069470dfc5540c404",
         "disposition": "REVIEWED_EVOLUTION_INPUT",
         "gate_state": "BLOCKING_UNTIL_OWNER_RESOLUTION_AND_TERMINAL_EVIDENCE"
       }
