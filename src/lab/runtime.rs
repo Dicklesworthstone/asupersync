@@ -9239,7 +9239,7 @@ mod tests {
         for prefix_len in 0..canonical.len() {
             assert!(matches!(
                 ForcedSchedule::try_from_canonical_bytes(&canonical[..prefix_len], decode_limits),
-                Err(ForcedScheduleError::ArtifactTruncated { .. })
+                Err(ForcedScheduleArtifactError::Truncated { .. })
             ));
         }
         let mut trailing = canonical.clone();
@@ -9249,7 +9249,7 @@ mod tests {
                 &trailing,
                 ForcedScheduleDecodeLimits::new(trailing.len(), 32, decoded_dispatch_bytes)
             ),
-            Err(ForcedScheduleError::ArtifactTrailingBytes { .. })
+            Err(ForcedScheduleArtifactError::TrailingBytes { .. })
         ));
 
         for byte_index in 0..canonical.len() {
@@ -9266,7 +9266,7 @@ mod tests {
                 &canonical,
                 ForcedScheduleDecodeLimits::new(canonical.len() - 1, 32, decoded_dispatch_bytes)
             ),
-            Err(ForcedScheduleError::ArtifactByteLimitExceeded { .. })
+            Err(ForcedScheduleArtifactError::ByteLimitExceeded { .. })
         ));
         assert!(matches!(
             ForcedSchedule::try_from_canonical_bytes(
@@ -9277,14 +9277,14 @@ mod tests {
                     decoded_dispatch_bytes
                 )
             ),
-            Err(ForcedScheduleError::DispatchLimitExceeded { .. })
+            Err(ForcedScheduleArtifactError::DispatchLimitExceeded { .. })
         ));
         assert!(matches!(
             ForcedSchedule::try_from_canonical_bytes(
                 &canonical,
                 ForcedScheduleDecodeLimits::new(canonical.len(), 32, decoded_dispatch_bytes - 1)
             ),
-            Err(ForcedScheduleError::ArtifactDecodedAllocationLimitExceeded { .. })
+            Err(ForcedScheduleArtifactError::DecodedAllocationLimitExceeded { .. })
         ));
         let mut impossible_count = canonical[..FORCED_SCHEDULE_ARTIFACT_HEADER_LEN].to_vec();
         write_u64(
@@ -9297,7 +9297,7 @@ mod tests {
                 &impossible_count,
                 ForcedScheduleDecodeLimits::new(impossible_count.len(), usize::MAX, usize::MAX)
             ),
-            Err(ForcedScheduleError::ArtifactLengthOverflow { .. })
+            Err(ForcedScheduleArtifactError::LengthOverflow { .. })
         ));
 
         let dispatch0 = FORCED_SCHEDULE_ARTIFACT_HEADER_LEN;
@@ -9310,7 +9310,7 @@ mod tests {
         rewrite_checksum(&mut wrong_magic);
         assert_eq!(
             ForcedSchedule::try_from_canonical_bytes(&wrong_magic, decode_limits),
-            Err(ForcedScheduleError::ArtifactMagicMismatch)
+            Err(ForcedScheduleArtifactError::MagicMismatch)
         );
         let mut wrong_artifact_version = canonical.clone();
         write_u32(
@@ -9321,21 +9321,21 @@ mod tests {
         rewrite_checksum(&mut wrong_artifact_version);
         assert!(matches!(
             ForcedSchedule::try_from_canonical_bytes(&wrong_artifact_version, decode_limits),
-            Err(ForcedScheduleError::ArtifactVersionMismatch { .. })
+            Err(ForcedScheduleArtifactError::VersionMismatch { .. })
         ));
         let mut wrong_schema = canonical.clone();
         write_u32(&mut wrong_schema, 12, FORCED_SCHEDULE_SCHEMA_VERSION + 1);
         rewrite_checksum(&mut wrong_schema);
         assert!(matches!(
             ForcedSchedule::try_from_canonical_bytes(&wrong_schema, decode_limits),
-            Err(ForcedScheduleError::SchemaMismatch { .. })
+            Err(ForcedScheduleArtifactError::SchemaMismatch { .. })
         ));
         let mut unknown_lane = canonical.clone();
         unknown_lane[dispatch0 + 12] = 0xff;
         rewrite_checksum(&mut unknown_lane);
         assert!(matches!(
             ForcedSchedule::try_from_canonical_bytes(&unknown_lane, decode_limits),
-            Err(ForcedScheduleError::ArtifactLaneTag {
+            Err(ForcedScheduleArtifactError::LaneTag {
                 index: 0,
                 tag: 0xff
             })
@@ -9349,7 +9349,7 @@ mod tests {
         rewrite_checksum(&mut duplicate_step);
         assert!(matches!(
             ForcedSchedule::try_from_canonical_bytes(&duplicate_step, decode_limits),
-            Err(ForcedScheduleError::StepOrder { index: 1, .. })
+            Err(ForcedScheduleArtifactError::Schedule(ForcedScheduleError::StepOrder { index: 1, .. }))
         ));
         let mut backwards_time = canonical.clone();
         write_u64(&mut backwards_time, dispatch0 + 21, 1);
@@ -9357,7 +9357,7 @@ mod tests {
         rewrite_checksum(&mut backwards_time);
         assert!(matches!(
             ForcedSchedule::try_from_canonical_bytes(&backwards_time, decode_limits),
-            Err(ForcedScheduleError::TimeOrder { index: 1, .. })
+            Err(ForcedScheduleArtifactError::Schedule(ForcedScheduleError::TimeOrder { index: 1, .. }))
         ));
         for (offset, field) in [
             (terminal + 24, "terminal_quiescent"),
@@ -9368,7 +9368,7 @@ mod tests {
             rewrite_checksum(&mut invalid_bool);
             assert_eq!(
                 ForcedSchedule::try_from_canonical_bytes(&invalid_bool, decode_limits),
-                Err(ForcedScheduleError::ArtifactBooleanTag { field, tag: 2 })
+                Err(ForcedScheduleArtifactError::BooleanTag { field, tag: 2 })
             );
         }
         for (offset, value) in [(terminal + 24, 0), (terminal + 25, 1)] {
@@ -9377,7 +9377,7 @@ mod tests {
             rewrite_checksum(&mut partial);
             assert_eq!(
                 ForcedSchedule::try_from_canonical_bytes(&partial, decode_limits),
-                Err(ForcedScheduleError::PartialSource)
+                Err(ForcedScheduleArtifactError::Schedule(ForcedScheduleError::PartialSource))
             );
         }
         let mut impossible_terminal = canonical.clone();
@@ -9394,7 +9394,7 @@ mod tests {
         rewrite_checksum(&mut impossible_terminal);
         assert_eq!(
             ForcedSchedule::try_from_canonical_bytes(&impossible_terminal, decode_limits),
-            Err(ForcedScheduleError::PartialSource)
+            Err(ForcedScheduleArtifactError::Schedule(ForcedScheduleError::PartialSource))
         );
 
         let mut wrong_seed = canonical.clone();
