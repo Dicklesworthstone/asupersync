@@ -299,8 +299,8 @@ Env	net/atp/transport_rq/mod.rs	13046	std::env::var_os(	let trace_commit = std::
 Env	net/atp/transport_rq/mod.rs	470	std::env::var_os(	*ENABLED.get_or_init(|| std::env::var_os().is_some())
 Env	net/atp/transport_rq/mod.rs	477	std::env::var_os(	if std::env::var_os().is_some() {
 Env	net/atp/transport_rq/mod.rs	487	std::env::var_os(	if std::env::var_os().is_some() {
-Env	net/quic_native/connection.rs	1350	std::env::var_os(	if std::env::var_os().is_some() {
-Env	net/quic_native/connection.rs	315	std::env::var_os(	if std::env::var_os().is_some() {
+Env	net/quic_native/connection.rs	1372	std::env::var_os(	if std::env::var_os().is_some() {
+Env	net/quic_native/connection.rs	322	std::env::var_os(	if std::env::var_os().is_some() {
 Env	net/quic_native/endpoint.rs	458	std::env::var_os(	let kernel_snapshot = if std::env::var_os().is_some()
 Env	net/quic_native/endpoint.rs	459	std::env::var_os(	|| std::env::var_os().is_some()
 Env	net/quic_native/endpoint_api.rs	70	std::env::var_os(	if std::env::var_os().is_some() {
@@ -467,7 +467,7 @@ Output	net/atp/transport_rq/mod.rs	12154	eprintln!(	eprintln!(
 Output	net/atp/transport_rq/mod.rs	12170	eprintln!(	eprintln!(
 Output	net/atp/transport_rq/mod.rs	478	eprintln!(	eprintln!(, format!($($arg)*));
 Output	net/atp/transport_rq/mod.rs	488	eprintln!(	eprintln!(, format!($($arg)*));
-Output	net/quic_native/connection.rs	316	eprintln!(	eprintln!(, format!($($arg)*));
+Output	net/quic_native/connection.rs	323	eprintln!(	eprintln!(, format!($($arg)*));
 Output	net/quic_native/endpoint_api.rs	71	eprintln!(	eprintln!(, format!($($arg)*));
 Spawn	database/mysql.rs	1810	std::thread::Builder	std::thread::Builder::new()
 Spawn	observability/debt_runtime_integration.rs	107	thread::spawn	let handle = thread::spawn(move || {
@@ -856,8 +856,8 @@ Time	net/quic_native/connection_manager.rs	394	Instant::now()	last_activity: Ins
 Time	net/quic_native/endpoint.rs	381	Instant::now()	let batch_start = Instant::now();
 Time	net/quic_native/endpoint.rs	421	Instant::now()	receive_time: Instant::now(),
 Time	net/quic_native/endpoint.rs	541	Instant::now()	let batch_start = Instant::now();
-Time	net/quic_native/handshake_driver.rs	922	Instant::now()	let mut flight_sent_at = Instant::now();
-Time	net/quic_native/handshake_driver.rs	944	Instant::now()	flight_sent_at = Instant::now();
+Time	net/quic_native/handshake_driver.rs	930	Instant::now()	let mut flight_sent_at = Instant::now();
+Time	net/quic_native/handshake_driver.rs	952	Instant::now()	flight_sent_at = Instant::now();
 Time	net/quic_native/managed_endpoint.rs	285	std::time::SystemTime::now()	std::time::SystemTime::now()
 Time	net/quic_native/managed_endpoint.rs	444	Instant::now()	let now = Instant::now();
 Time	net/quic_native/managed_endpoint.rs	478	Instant::now()	let closed_connections = self.connection_router.close_all(cx, Instant::now(), 0)?;

@@ -128,8 +128,8 @@
     },
     {
       "path": "src/lab/runtime.rs",
-      "sha256": "ada0d5cbba4b3c22d5e64054629d471825ee5d7586ddec0fc43f1c7a4bb9654f",
-      "line_count": 10214,
+      "sha256": "9fd30eaa888fb9ad291de8cb78897a15fac939b28acfff0ed277cea60e8e2d84",
+      "line_count": 10859,
       "role": "deterministic scheduler cancellation writer and alternate reader model"
     },
     {
@@ -473,7 +473,7 @@
     {
       "writer_id": "HOTREAD-CANCEL-WRITER-LAB",
       "owner": "LabRuntime poll-quota exhaustion",
-      "anchor": {"path": "src/lab/runtime.rs", "line": 3381, "fragment": "guard.set_cancel_requested(true)"},
+      "anchor": {"path": "src/lab/runtime.rs", "line": 3854, "fragment": "guard.set_cancel_requested(true)"},
       "ordering": "CxInner write guard within generation-checked Lab task update"
     }
   ],

@@ -15,7 +15,7 @@
     },
     {
       "path": "tests/dependency_oracles/nkeys/mod.rs",
-      "sha256": "211ae4fc5e086baa72913a9eecfa85c80d60fafd1b04777815d5932aa569aacf",
+      "sha256": "d76a6d1a578ae5bc1f82f9aedcd8356054e23c614bfaa8788b0ed9fcbd875222",
       "line_count": 500,
       "role": "test-only independent codec oracle and pinned upstream provenance"
     },
