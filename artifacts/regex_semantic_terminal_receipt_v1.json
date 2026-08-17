@@ -31,7 +31,7 @@
     {
       "bead_id": "asupersync-5z2scg.8.3.2.1",
       "path": "artifacts/regex_unicode_table_contract_v1.json",
-      "sha256": "de6e23dca05837c870668921617a15e34c8605eb84de2d28b83bb011814bbb02",
+      "sha256": "ab3d478b6a8acddee9a3e79a0d889d9aa283e600d02852bbd2e5afc0e6389126",
       "decision": "KEEP_INCUMBENT_DEFER"
     },
     {
@@ -65,7 +65,7 @@
     }
   ],
   "source_revisions": {
-    "cargo_toml_sha256": "10cc88160555e6bdc8761284cb2172e9cae03e2e624791005f59e542ccce8a68",
+    "cargo_toml_sha256": "b6c6e19a04920c3999dd92bb009b1eb03dc90dd93cfbd4acda1242a9c2fa4f79",
     "cargo_lock_sha256": "63a7b56a74734433596b77b692d373fab2a6a6e66a2cd7ebcb261a4e24308cfc",
     "rust_toolchain_sha256": "7be955420e9a82164d4c4307e141035b29cd395ba6f621af32f3fddfb4013f63",
     "package": "asupersync",

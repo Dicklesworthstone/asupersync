@@ -38,25 +38,25 @@
     {
       "bead_id": "asupersync-5z2scg.8.3.2.4",
       "path": "artifacts/regex_semantic_terminal_receipt_v1.json",
-      "sha256": "c03f55834a0af59f169bb8641f27df4e36b19c38f805bfdf6682d9fb633f74f6",
+      "sha256": "3df344ff49dc3a08108f8346908b29646c35590343f87c406cb958492e59cbf4",
       "disposition": "KEEP_INCUMBENT_DEFER"
     },
     {
       "bead_id": "asupersync-5z2scg.8.3.3.1",
       "path": "artifacts/regex_ir_schema_contract_v1.json",
-      "sha256": "47370ff36217f01be39bfa74428fb011ea2c53b96c0d36499224cf0d8555ee39",
+      "sha256": "d9ab0e40c9246a3a3520cf620fe20c741d8f0ca0cf1a1de3c269e0623e8c7177",
       "disposition": "STAGED_BOUNDED_IR_SCHEMA"
     },
     {
       "bead_id": "asupersync-5z2scg.8.3.3.2",
       "path": "artifacts/regex_ir_lowering_contract_v1.json",
-      "sha256": "4a2323e939d262e335c9035b979e0ea33aa989dfca3ee2397d780918133d0432",
+      "sha256": "bebdab586ce46935c8e0d5a0ed2d90f4c643f8ecea61b8055eff64751f926eb1",
       "disposition": "STAGED_CHECKED_STRUCTURAL_LOWERING"
     },
     {
       "bead_id": "asupersync-5z2scg.8.3.3.3",
       "path": "artifacts/regex_priority_capture_lowering_contract_v1.json",
-      "sha256": "a4219201d7a2176c82d0764c6c7bfb6eff1e84f414b9be0b97faa1ef981a62ee",
+      "sha256": "bc04c7a591681aa9ddcfd46713c15463b78a22637a509ffd2f104596c1833970",
       "disposition": "STAGED_PRIORITY_CAPTURE_LOWERING"
     }
   ],
@@ -93,7 +93,7 @@
     }
   ],
   "source_revisions": {
-    "cargo_toml_sha256": "10cc88160555e6bdc8761284cb2172e9cae03e2e624791005f59e542ccce8a68",
+    "cargo_toml_sha256": "b6c6e19a04920c3999dd92bb009b1eb03dc90dd93cfbd4acda1242a9c2fa4f79",
     "cargo_lock_sha256": "63a7b56a74734433596b77b692d373fab2a6a6e66a2cd7ebcb261a4e24308cfc",
     "rust_toolchain_sha256": "7be955420e9a82164d4c4307e141035b29cd395ba6f621af32f3fddfb4013f63",
     "package": "asupersync",

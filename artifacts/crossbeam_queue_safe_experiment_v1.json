@@ -263,8 +263,8 @@
   "source_pins": [
     {
       "path": "Cargo.toml",
-      "sha256": "10cc88160555e6bdc8761284cb2172e9cae03e2e624791005f59e542ccce8a68",
-      "line_count": 1057
+      "sha256": "b6c6e19a04920c3999dd92bb009b1eb03dc90dd93cfbd4acda1242a9c2fa4f79",
+      "line_count": 1061
     },
     {
       "path": "Cargo.lock",

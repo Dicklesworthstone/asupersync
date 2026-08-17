@@ -21,7 +21,7 @@ const PROGRAM_ID: &str = "asupersync-ir2uf0";
 const BEAD_ID: &str = "asupersync-dep-p7-kafka-removal-sarszu.1.2";
 const CAPABILITY_ID: &str = "CAP-KAFKA";
 const BASELINE_REVISION: &str = "b4997e8fe4de098a5a30ff468418460b59ca414a";
-const ARTIFACT_SHA256: &str = "0aabd6a743771cc65c5b2473b30708091c337fafd767b1a61f9fe67c6072bcec";
+const ARTIFACT_SHA256: &str = "d65abb5964c0fa7a581fcaff409299aae0ff90bfa0844f71409f223d2576021b";
 const DOC_SHA256: &str = "7cf46fb6eaa7ded66b6d1d04a7c711f4ce687252bb42eaa05d77e3a5e4b79ff5";
 const SOURCE_PIN_MAP_SHA256: &str =
     "48a17ab0a9d1fc05be56444ba3a3ae405ae4ec0f2c9a19abfceaa38e8cc93346";

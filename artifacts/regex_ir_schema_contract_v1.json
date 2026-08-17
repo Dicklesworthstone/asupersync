@@ -23,7 +23,7 @@
   },
   "authority": {
     "semantic_terminal_path": "artifacts/regex_semantic_terminal_receipt_v1.json",
-    "semantic_terminal_sha256": "c03f55834a0af59f169bb8641f27df4e36b19c38f805bfdf6682d9fb633f74f6",
+    "semantic_terminal_sha256": "3df344ff49dc3a08108f8346908b29646c35590343f87c406cb958492e59cbf4",
     "semantic_terminal_disposition": "KEEP_INCUMBENT_DEFER",
     "retained_backend": "regex-syntax@0.8.11",
     "unicode_version": "16.0.0",

@@ -702,8 +702,8 @@
       {
         "path": "Cargo.toml",
         "baseline_sha256": "5eb3d7f25fb2584dcc7dd4dc3addb59573d08a7404b4ffca1356e53a93cfb2e0",
-        "current_sha256": "10cc88160555e6bdc8761284cb2172e9cae03e2e624791005f59e542ccce8a68",
-        "current_line_count": 1057,
+        "current_sha256": "b6c6e19a04920c3999dd92bb009b1eb03dc90dd93cfbd4acda1242a9c2fa4f79",
+        "current_line_count": 1061,
         "classification": "CAPABILITY_PROJECTION_UNCHANGED",
         "projection": "root futures-lite manifest requirement",
         "projection_sha256": "81edacba422d047cd609290f9b0a95a8cda255ef326afe8d34afd7dfa7b80def"
@@ -1598,8 +1598,8 @@
   "source_pins": [
     {
       "path": "Cargo.toml",
-      "sha256": "10cc88160555e6bdc8761284cb2172e9cae03e2e624791005f59e542ccce8a68",
-      "line_count": 1057
+      "sha256": "b6c6e19a04920c3999dd92bb009b1eb03dc90dd93cfbd4acda1242a9c2fa4f79",
+      "line_count": 1061
     },
     {
       "path": "Cargo.lock",

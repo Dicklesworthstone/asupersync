@@ -44,7 +44,7 @@ const TERMINAL_PATH: &str = "artifacts/regex_compiler_terminal_receipt_v1.json";
 const VM_SOURCE_PATH: &str = "src/observability/regex_vm.rs";
 const MOD_SOURCE_PATH: &str = "src/observability/mod.rs";
 const FROZEN_TERMINAL_SHA256: &str =
-    "403b8863bb7df1df1df9e46595a6fbc475c438b64752540a5823e30705681188";
+    "1e45fa0b183120b6541d8fa87ec55ccfcb3c0df2292e078a158790c168c49781";
 const FROZEN_VM_SOURCE_SHA256: &str =
     "8952e787fe20b6bd0b4896b90e00fe25ed93d44154279c4c4c4deab1565d0e30";
 const FROZEN_MOD_SOURCE_SHA256: &str =
