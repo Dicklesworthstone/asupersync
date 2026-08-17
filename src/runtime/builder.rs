@@ -3603,6 +3603,73 @@ impl Runtime {
             .io_reactor_capability_snapshot()
     }
 
+    /// Shut down the runtime, waiting at most `timeout` for teardown to finish.
+    ///
+    /// Ordinary `Runtime` drop performs a blocking teardown: it signals the
+    /// scheduler, then joins every worker thread with no bound. A future that
+    /// blocks inside `poll` (in violation of the cooperative contract) keeps
+    /// its worker from returning, so plain drop can wait forever ([#60]).
+    ///
+    /// This method is the bounded alternative. It signals scheduler shutdown
+    /// immediately, then runs the normal teardown on a background reaper
+    /// thread and waits up to `timeout` for it to complete.
+    ///
+    /// Returns `true` when teardown fully completed within the bound.
+    ///
+    /// Returns `false` when the bound elapsed first. In that case teardown
+    /// continues on the detached reaper thread, which owns the final strong
+    /// runtime reference: the scheduler, runtime state, timer/IO drivers, and
+    /// blocking pool all remain alive for as long as any blocked worker can
+    /// still touch them, and are released when those workers finally return
+    /// (possibly never, if a task never unblocks — those resources are then
+    /// held until process exit). Join handles for unfinished tasks observe
+    /// cancellation exactly as with ordinary runtime drop.
+    ///
+    /// Cloned `Runtime`s and strong [`RuntimeHandle`]s keep the runtime alive
+    /// as usual: if other strong references exist when this is called, the
+    /// reaper thread merely drops this reference and final teardown is
+    /// deferred to the last one.
+    ///
+    /// [#60]: https://github.com/Dicklesworthstone/asupersync/issues/60
+    #[must_use = "the return value reports whether teardown completed within the bound"]
+    pub fn shutdown_timeout(self, timeout: Duration) -> bool {
+        // Publish the worker-stop signal from the caller's thread first so
+        // cooperative workers begin exiting while the reaper thread starts.
+        // `ThreeLaneScheduler::shutdown` is an idempotent shared flag, so the
+        // second signal from `RuntimeInner::drop` on the reaper is harmless.
+        self.inner.scheduler.shutdown();
+
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+        let spawned = std::thread::Builder::new()
+            .name("asupersync-shutdown".into())
+            .spawn(move || {
+                drop(self);
+                let _ = done_tx.send(());
+            });
+        match spawned {
+            // `Disconnected` (reaper panicked before sending) reports `false`;
+            // a successful send within the bound reports `true`.
+            Ok(_reaper) => done_rx.recv_timeout(timeout).is_ok(),
+            Err(_) => {
+                // Thread creation failed (resource exhaustion). The closure —
+                // and with it `self` — was dropped inside `spawn`, so the
+                // normal blocking teardown already ran inline on this thread.
+                true
+            }
+        }
+    }
+
+    /// Shut down the runtime without waiting for teardown to finish.
+    ///
+    /// Equivalent to [`shutdown_timeout`](Self::shutdown_timeout) with a zero
+    /// bound: scheduler shutdown is signalled, teardown proceeds on a
+    /// detached background thread, and this call returns immediately. See
+    /// [`shutdown_timeout`](Self::shutdown_timeout) for the ownership rules
+    /// that keep a still-blocked worker's state alive.
+    pub fn shutdown_background(self) {
+        let _ = self.shutdown_timeout(Duration::ZERO);
+    }
+
     /// Returns true if the runtime is quiescent (no live tasks or I/O).
     #[must_use]
     pub fn is_quiescent(&self) -> bool {

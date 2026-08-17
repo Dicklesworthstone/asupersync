@@ -56,6 +56,16 @@ GitHub Release/tag baseline is `v0.4.7`.
 
 ### Runtime correctness
 
+- **Runtime teardown now has a bounded path.** `Runtime::shutdown_timeout`
+  signals scheduler shutdown, runs the normal blocking teardown on a detached
+  reaper thread, and returns within the caller's bound even when a
+  contract-violating future blocks inside `poll` and its worker never joins;
+  `Runtime::shutdown_background` is the non-waiting variant. On a timed-out
+  return the reaper retains the runtime state so any still-blocked worker
+  keeps operating on live memory. Ordinary `Runtime` drop is unchanged and
+  still joins without a bound
+  ([#60](https://github.com/Dicklesworthstone/asupersync/issues/60)).
+
 - **Runtime-handle tasks now have an additive typed join path.**
   `RuntimeHandle::spawn_checked` and `try_spawn_checked` return a
   `CheckedJoinHandle<T>` whose future resolves to `Result<T, JoinError>`, so
