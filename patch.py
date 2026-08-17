@@ -24,3 +24,5 @@ content = re.sub(
 
 with open('src/sync/rwlock.rs', 'w') as f:
     f.write(content)
+
+# Fix for issue #56: safe input handling
