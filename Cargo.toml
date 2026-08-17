@@ -59,6 +59,10 @@ include = [
     # re-included immediately below so the published crate still builds.
     "!**/*tests.rs",
     "!**/*_test.rs",
+    # Metamorphic suites are likewise cfg(test)-only and are never referenced
+    # by a published library build. Excluding them preserves a healthy margin
+    # below crates.io's 10 MiB archive limit as the runtime sources grow.
+    "!**/*_metamorphic.rs",
     "!**/snapshots/**",
     "src/atp/adapter/integration_tests.rs",
     "src/obligation/metamorphic_tests.rs",
