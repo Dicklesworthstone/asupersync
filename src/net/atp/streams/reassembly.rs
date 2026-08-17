@@ -8,6 +8,10 @@ use crate::bytes::Bytes;
 use crate::types::outcome::Outcome;
 use std::collections::BTreeMap;
 
+/// Maximum number of disjoint receive fragments buffered for one stream.
+/// Byte limits alone do not bound per-fragment tree metadata or overlap scans.
+const MAX_BUFFERED_REASSEMBLY_SEGMENTS: usize = 4096;
+
 /// A segment of stream data with offset
 #[derive(Debug, Clone)]
 pub struct DataSegment {
@@ -151,6 +155,25 @@ impl ReassemblyBuffer {
         if buffered_after_insert > self.max_buffered_data {
             return Outcome::err(StreamError::ConnectionError {
                 reason: "Reassembly buffer limit exceeded".to_string(),
+            });
+        }
+        let Some(segments_after_insert) = self.segments.len().checked_add(uncovered_segments.len())
+        else {
+            return Outcome::err(StreamError::ConnectionError {
+                reason: "Reassembly segment count overflow".to_string(),
+            });
+        };
+        // A segment that fills the current head-of-line gap is inserted and
+        // immediately removed again by `extract_deliverable_data`, together
+        // with every now-contiguous buffered successor. Reject only growth
+        // that remains buffered; otherwise reaching the cap would make the
+        // one fragment capable of reducing it impossible to accept.
+        let drains_from_head = uncovered_segments
+            .first()
+            .is_some_and(|segment| segment.offset == self.next_offset);
+        if !drains_from_head && segments_after_insert > MAX_BUFFERED_REASSEMBLY_SEGMENTS {
+            return Outcome::err(StreamError::ConnectionError {
+                reason: "Reassembly segment limit exceeded".to_string(),
             });
         }
 
@@ -440,6 +463,53 @@ mod tests {
 
         let result = buffer.insert_segment(large_segment);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn fragment_count_limit_rejects_before_mutating_reassembly_state() {
+        let mut buffer = ReassemblyBuffer::new(1 << 20);
+
+        for fragment in 0..MAX_BUFFERED_REASSEMBLY_SEGMENTS {
+            let offset = 1 + (fragment as u64 * 2);
+            let delivered = buffer
+                .insert_segment(DataSegment::new(offset, Bytes::from_static(b"x"), false))
+                .unwrap(); // ubs:ignore - test oracle
+            assert!(delivered.is_empty());
+        }
+        assert_eq!(buffer.buffered_segments(), MAX_BUFFERED_REASSEMBLY_SEGMENTS);
+        assert_eq!(
+            buffer.buffered_data_size(),
+            MAX_BUFFERED_REASSEMBLY_SEGMENTS as u64
+        );
+
+        let rejected = buffer.insert_segment(DataSegment::new(
+            1 + (MAX_BUFFERED_REASSEMBLY_SEGMENTS as u64 * 2),
+            Bytes::from_static(b"x"),
+            false,
+        ));
+        assert!(matches!(
+            rejected,
+            Outcome::Err(StreamError::ConnectionError { ref reason })
+                if reason == "Reassembly segment limit exceeded"
+        ));
+        assert_eq!(buffer.buffered_segments(), MAX_BUFFERED_REASSEMBLY_SEGMENTS);
+        assert_eq!(
+            buffer.buffered_data_size(),
+            MAX_BUFFERED_REASSEMBLY_SEGMENTS as u64
+        );
+
+        let delivered = buffer
+            .insert_segment(DataSegment::new(0, Bytes::from_static(b"x"), false))
+            .expect("head-of-line fragment must remain admissible at the metadata cap");
+        assert_eq!(
+            delivered,
+            vec![Bytes::from_static(b"x"), Bytes::from_static(b"x")]
+        );
+        assert_eq!(
+            buffer.buffered_segments(),
+            MAX_BUFFERED_REASSEMBLY_SEGMENTS - 1,
+            "filling the head gap must reduce retained metadata"
+        );
     }
 
     #[test]
