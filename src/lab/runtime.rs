@@ -36,6 +36,7 @@ use crate::types::{ObligationId, RegionId, TaskId};
 use crate::util::det_hash::{DetHashMap, DetHashSet};
 use crate::util::{ArenaIndex, DetEntropy, DetRng};
 use parking_lot::Mutex;
+use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
@@ -64,8 +65,51 @@ pub struct LabTraceCertificateSummary {
 /// Schema version for the exact lab dispatch projection.
 pub const FORCED_SCHEDULE_SCHEMA_VERSION: u32 = 1;
 
+/// Fixed magic prefix for a canonical [`ForcedSchedule`] artifact.
+pub const FORCED_SCHEDULE_ARTIFACT_MAGIC: [u8; 8] = *b"ASUPFSC\0";
+
+/// Canonical artifact codec version.
+pub const FORCED_SCHEDULE_ARTIFACT_VERSION: u32 = 1;
+
 /// Schema version for a reduced exact-dispatch candidate.
 pub const FORCED_SCHEDULE_CANDIDATE_SCHEMA_VERSION: u32 = 1;
+
+const FORCED_SCHEDULE_ARTIFACT_HEADER_LEN: usize = 40;
+const FORCED_SCHEDULE_ARTIFACT_DISPATCH_LEN: usize = 29;
+const FORCED_SCHEDULE_ARTIFACT_TERMINAL_LEN: usize = 26;
+const FORCED_SCHEDULE_ARTIFACT_CHECKSUM_LEN: usize = 32;
+const FORCED_SCHEDULE_ARTIFACT_COUNT_OFFSET: usize = 32;
+
+/// Caller-owned resource bounds for decoding one forced-schedule artifact.
+///
+/// The decoder checks all three limits before reserving the dispatch vector.
+/// `max_decoded_dispatch_bytes` bounds the in-memory `ForcedDispatch`
+/// storage independently of the more compact wire representation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ForcedScheduleDecodeLimits {
+    /// Maximum admitted encoded artifact length.
+    pub max_encoded_bytes: usize,
+    /// Maximum admitted dispatch count.
+    pub max_dispatches: usize,
+    /// Maximum admitted decoded dispatch-vector storage.
+    pub max_decoded_dispatch_bytes: usize,
+}
+
+impl ForcedScheduleDecodeLimits {
+    /// Creates explicit encoded-byte, dispatch-count, and allocation bounds.
+    #[must_use]
+    pub const fn new(
+        max_encoded_bytes: usize,
+        max_dispatches: usize,
+        max_decoded_dispatch_bytes: usize,
+    ) -> Self {
+        Self {
+            max_encoded_bytes,
+            max_dispatches,
+            max_decoded_dispatch_bytes,
+        }
+    }
+}
 
 /// One scheduler choice captured before the selected task was polled.
 ///
@@ -295,6 +339,199 @@ pub struct ForcedScheduleCandidateReport {
 }
 
 impl ForcedSchedule {
+    /// Encodes this complete lab receipt into its strict canonical artifact.
+    ///
+    /// The format is fixed-width and little-endian. A domain-separated SHA-256
+    /// checksum covers the header, every dispatch field, and the complete
+    /// terminal receipt. This is an integrity binding for immutable lab
+    /// evidence, not an authentication or production scheduler-control format.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ForcedScheduleError`] when the receipt is partial, malformed,
+    /// too large for the artifact format, or cannot allocate its exact output.
+    pub fn to_canonical_bytes(&self) -> Result<Vec<u8>, ForcedScheduleError> {
+        validate_complete_forced_schedule_shape(self)?;
+        let expected_len = forced_schedule_artifact_len(self.dispatches.len())?;
+        let mut bytes = Vec::new();
+        bytes.try_reserve_exact(expected_len).map_err(|_| {
+            ForcedScheduleError::ArtifactAllocationFailed {
+                requested: expected_len,
+            }
+        })?;
+
+        bytes.extend_from_slice(&FORCED_SCHEDULE_ARTIFACT_MAGIC);
+        bytes.extend_from_slice(&FORCED_SCHEDULE_ARTIFACT_VERSION.to_le_bytes());
+        bytes.extend_from_slice(&self.version.to_le_bytes());
+        bytes.extend_from_slice(&self.seed.to_le_bytes());
+        bytes.extend_from_slice(&self.config_hash.to_le_bytes());
+        let dispatch_count = u64::try_from(self.dispatches.len()).map_err(|_| {
+            ForcedScheduleError::ArtifactLengthOverflow {
+                dispatch_count: u64::MAX,
+            }
+        })?;
+        bytes.extend_from_slice(&dispatch_count.to_le_bytes());
+        for dispatch in &self.dispatches {
+            bytes.extend_from_slice(&dispatch.task.0.to_le_bytes());
+            bytes.extend_from_slice(&dispatch.worker.to_le_bytes());
+            bytes.push(forced_schedule_lane_tag(dispatch.lane));
+            bytes.extend_from_slice(&dispatch.at_step.to_le_bytes());
+            bytes.extend_from_slice(&dispatch.at_nanos.to_le_bytes());
+        }
+        bytes.extend_from_slice(&self.terminal_steps.to_le_bytes());
+        bytes.extend_from_slice(&self.terminal_nanos.to_le_bytes());
+        bytes.extend_from_slice(&self.terminal_schedule_hash.to_le_bytes());
+        bytes.push(u8::from(self.terminal_quiescent));
+        bytes.push(u8::from(self.truncated));
+        let checksum = forced_schedule_artifact_checksum(&bytes);
+        bytes.extend_from_slice(&checksum);
+        debug_assert_eq!(bytes.len(), expected_len);
+        Ok(bytes)
+    }
+
+    /// Decodes and validates one strict canonical forced-schedule artifact.
+    ///
+    /// Byte, count, decoded-storage, and arithmetic admission all happen before
+    /// the dispatch vector is allocated. The reconstructed private authority is
+    /// complete and canonical, but [`LabRuntime::run_forced_schedule`] still
+    /// revalidates the source seed/config and every task generation, worker,
+    /// lane, step, time, and terminal certificate before accepting replay.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ForcedScheduleError`] for an unsupported or noncanonical
+    /// artifact, an incomplete source receipt, checksum mismatch, exceeded
+    /// caller limit, checked-arithmetic failure, or allocation refusal.
+    pub fn try_from_canonical_bytes(
+        bytes: &[u8],
+        limits: ForcedScheduleDecodeLimits,
+    ) -> Result<Self, ForcedScheduleError> {
+        if bytes.len() > limits.max_encoded_bytes {
+            return Err(ForcedScheduleError::ArtifactByteLimitExceeded {
+                found: bytes.len(),
+                limit: limits.max_encoded_bytes,
+            });
+        }
+        if bytes.len() < FORCED_SCHEDULE_ARTIFACT_HEADER_LEN {
+            return Err(ForcedScheduleError::ArtifactTruncated {
+                expected: FORCED_SCHEDULE_ARTIFACT_HEADER_LEN,
+                found: bytes.len(),
+            });
+        }
+        if bytes[..FORCED_SCHEDULE_ARTIFACT_MAGIC.len()] != FORCED_SCHEDULE_ARTIFACT_MAGIC {
+            return Err(ForcedScheduleError::ArtifactMagicMismatch);
+        }
+        let artifact_version = forced_schedule_artifact_u32(bytes, 8)?;
+        if artifact_version != FORCED_SCHEDULE_ARTIFACT_VERSION {
+            return Err(ForcedScheduleError::ArtifactVersionMismatch {
+                expected: FORCED_SCHEDULE_ARTIFACT_VERSION,
+                found: artifact_version,
+            });
+        }
+        let version = forced_schedule_artifact_u32(bytes, 12)?;
+        if version != FORCED_SCHEDULE_SCHEMA_VERSION {
+            return Err(ForcedScheduleError::SchemaMismatch {
+                expected: FORCED_SCHEDULE_SCHEMA_VERSION,
+                found: version,
+            });
+        }
+        let seed = forced_schedule_artifact_u64(bytes, 16)?;
+        let config_hash = forced_schedule_artifact_u64(bytes, 24)?;
+        let dispatch_count_u64 =
+            forced_schedule_artifact_u64(bytes, FORCED_SCHEDULE_ARTIFACT_COUNT_OFFSET)?;
+        let dispatch_count = usize::try_from(dispatch_count_u64).map_err(|_| {
+            ForcedScheduleError::ArtifactLengthOverflow {
+                dispatch_count: dispatch_count_u64,
+            }
+        })?;
+        if dispatch_count > limits.max_dispatches {
+            return Err(ForcedScheduleError::DispatchLimitExceeded {
+                found: dispatch_count,
+                limit: limits.max_dispatches,
+            });
+        }
+        let decoded_dispatch_bytes = dispatch_count
+            .checked_mul(std::mem::size_of::<ForcedDispatch>())
+            .ok_or(ForcedScheduleError::ArtifactLengthOverflow {
+                dispatch_count: dispatch_count_u64,
+            })?;
+        if decoded_dispatch_bytes > limits.max_decoded_dispatch_bytes {
+            return Err(
+                ForcedScheduleError::ArtifactDecodedAllocationLimitExceeded {
+                    requested: decoded_dispatch_bytes,
+                    limit: limits.max_decoded_dispatch_bytes,
+                },
+            );
+        }
+
+        let expected_len = forced_schedule_artifact_len(dispatch_count)?;
+        if bytes.len() < expected_len {
+            return Err(ForcedScheduleError::ArtifactTruncated {
+                expected: expected_len,
+                found: bytes.len(),
+            });
+        }
+        if bytes.len() > expected_len {
+            return Err(ForcedScheduleError::ArtifactTrailingBytes {
+                expected: expected_len,
+                found: bytes.len(),
+            });
+        }
+        let checksum_offset = expected_len - FORCED_SCHEDULE_ARTIFACT_CHECKSUM_LEN;
+        let actual_checksum = forced_schedule_artifact_checksum(&bytes[..checksum_offset]);
+        if bytes[checksum_offset..] != actual_checksum {
+            return Err(ForcedScheduleError::ArtifactChecksumMismatch);
+        }
+
+        let mut dispatches = Vec::new();
+        dispatches.try_reserve_exact(dispatch_count).map_err(|_| {
+            ForcedScheduleError::ArtifactAllocationFailed {
+                requested: decoded_dispatch_bytes,
+            }
+        })?;
+        for index in 0..dispatch_count {
+            let offset =
+                FORCED_SCHEDULE_ARTIFACT_HEADER_LEN + index * FORCED_SCHEDULE_ARTIFACT_DISPATCH_LEN;
+            let task = CompactTaskId(forced_schedule_artifact_u64(bytes, offset)?);
+            let worker = forced_schedule_artifact_u32(bytes, offset + 8)?;
+            let lane_tag = bytes[offset + 12];
+            let lane = forced_schedule_lane_from_tag(index, lane_tag)?;
+            let at_step = forced_schedule_artifact_u64(bytes, offset + 13)?;
+            let at_nanos = forced_schedule_artifact_u64(bytes, offset + 21)?;
+            dispatches.push(ForcedDispatch {
+                task,
+                worker,
+                lane,
+                at_step,
+                at_nanos,
+            });
+        }
+        let terminal_offset = FORCED_SCHEDULE_ARTIFACT_HEADER_LEN
+            + dispatch_count * FORCED_SCHEDULE_ARTIFACT_DISPATCH_LEN;
+        let terminal_steps = forced_schedule_artifact_u64(bytes, terminal_offset)?;
+        let terminal_nanos = forced_schedule_artifact_u64(bytes, terminal_offset + 8)?;
+        let terminal_schedule_hash = forced_schedule_artifact_u64(bytes, terminal_offset + 16)?;
+        let terminal_quiescent =
+            forced_schedule_bool(bytes[terminal_offset + 24], "terminal_quiescent")?;
+        let truncated = forced_schedule_bool(bytes[terminal_offset + 25], "truncated")?;
+        let schedule = Self {
+            version,
+            seed,
+            config_hash,
+            dispatches,
+            terminal_steps,
+            terminal_nanos,
+            terminal_schedule_hash,
+            terminal_quiescent,
+            truncated,
+        };
+        validate_complete_forced_schedule_shape(&schedule)?;
+        if schedule.to_canonical_bytes()?.as_slice() != bytes {
+            return Err(ForcedScheduleError::ArtifactNonCanonical);
+        }
+        Ok(schedule)
+    }
+
     /// Projection schema version.
     #[must_use]
     pub const fn version(&self) -> u32 {
@@ -335,6 +572,18 @@ impl ForcedSchedule {
     #[must_use]
     pub const fn terminal_schedule_hash(&self) -> u64 {
         self.terminal_schedule_hash
+    }
+
+    /// Whether the source terminated in structured quiescence.
+    #[must_use]
+    pub const fn terminal_quiescent(&self) -> bool {
+        self.terminal_quiescent
+    }
+
+    /// Whether bounded source capture truncated dispatch evidence.
+    #[must_use]
+    pub const fn truncated(&self) -> bool {
+        self.truncated
     }
 
     /// Derives a deletion-only candidate from ordered source indices.
@@ -480,6 +729,83 @@ pub enum ForcedScheduleError {
         /// Configured source recording limit.
         max_dispatches: usize,
     },
+    /// The artifact exceeds the caller's encoded-byte admission limit.
+    #[error("forced schedule artifact has {found} bytes, limit is {limit}")]
+    ArtifactByteLimitExceeded {
+        /// Supplied encoded byte length.
+        found: usize,
+        /// Caller-owned encoded byte limit.
+        limit: usize,
+    },
+    /// The artifact magic prefix is not recognized.
+    #[error("forced schedule artifact magic mismatch")]
+    ArtifactMagicMismatch,
+    /// The artifact codec version is unsupported.
+    #[error("forced schedule artifact version mismatch: expected {expected}, found {found}")]
+    ArtifactVersionMismatch {
+        /// Supported artifact version.
+        expected: u32,
+        /// Supplied artifact version.
+        found: u32,
+    },
+    /// Artifact size arithmetic overflowed before allocation.
+    #[error("forced schedule artifact length overflow for {dispatch_count} dispatches")]
+    ArtifactLengthOverflow {
+        /// Untrusted dispatch count that overflowed admission arithmetic.
+        dispatch_count: u64,
+    },
+    /// The artifact ended before its declared canonical length.
+    #[error("forced schedule artifact is truncated: expected {expected} bytes, found {found}")]
+    ArtifactTruncated {
+        /// Minimum or exact required byte length.
+        expected: usize,
+        /// Supplied byte length.
+        found: usize,
+    },
+    /// Bytes remain after the canonical artifact boundary.
+    #[error("forced schedule artifact has trailing bytes: expected {expected}, found {found}")]
+    ArtifactTrailingBytes {
+        /// Exact canonical byte length.
+        expected: usize,
+        /// Supplied byte length.
+        found: usize,
+    },
+    /// The SHA-256 integrity binding does not match the artifact body.
+    #[error("forced schedule artifact checksum mismatch")]
+    ArtifactChecksumMismatch,
+    /// Decoded dispatch storage exceeds the caller's allocation admission.
+    #[error("forced schedule artifact needs {requested} decoded dispatch bytes, limit is {limit}")]
+    ArtifactDecodedAllocationLimitExceeded {
+        /// Required decoded dispatch-vector bytes.
+        requested: usize,
+        /// Caller-owned decoded allocation limit.
+        limit: usize,
+    },
+    /// Exact artifact or dispatch-vector allocation failed.
+    #[error("forced schedule artifact could not allocate {requested} bytes")]
+    ArtifactAllocationFailed {
+        /// Exact requested allocation size.
+        requested: usize,
+    },
+    /// A dispatch encoded an unsupported scheduler-lane tag.
+    #[error("forced schedule artifact lane tag {tag} is invalid at dispatch {index}")]
+    ArtifactLaneTag {
+        /// Dispatch containing the invalid tag.
+        index: usize,
+        /// Unsupported lane tag.
+        tag: u8,
+    },
+    /// A boolean field used a noncanonical tag.
+    #[error("forced schedule artifact boolean {field} has invalid tag {tag}")]
+    ArtifactBooleanTag {
+        /// Stable field name.
+        field: &'static str,
+        /// Unsupported boolean tag.
+        tag: u8,
+    },
+    /// Parsed fields did not reproduce the exact input bytes.
+    #[error("forced schedule artifact is not canonically encoded")]
+    ArtifactNonCanonical,
     /// A candidate limit was configured as zero.
     #[error("forced schedule candidate limit {limit_name} must be nonzero")]
     ZeroCandidateLimit {
@@ -822,6 +1148,114 @@ fn validate_dispatch_order(dispatches: &[ForcedDispatch]) -> Result<(), ForcedSc
         }
         previous_step = dispatch.at_step;
         previous_nanos = dispatch.at_nanos;
+    }
+    Ok(())
+}
+
+fn forced_schedule_artifact_len(dispatch_count: usize) -> Result<usize, ForcedScheduleError> {
+    let dispatch_count_u64 = u64::try_from(dispatch_count).unwrap_or(u64::MAX);
+    let dispatch_bytes = dispatch_count
+        .checked_mul(FORCED_SCHEDULE_ARTIFACT_DISPATCH_LEN)
+        .ok_or(ForcedScheduleError::ArtifactLengthOverflow {
+            dispatch_count: dispatch_count_u64,
+        })?;
+    FORCED_SCHEDULE_ARTIFACT_HEADER_LEN
+        .checked_add(dispatch_bytes)
+        .and_then(|len| len.checked_add(FORCED_SCHEDULE_ARTIFACT_TERMINAL_LEN))
+        .and_then(|len| len.checked_add(FORCED_SCHEDULE_ARTIFACT_CHECKSUM_LEN))
+        .ok_or(ForcedScheduleError::ArtifactLengthOverflow {
+            dispatch_count: dispatch_count_u64,
+        })
+}
+
+fn forced_schedule_artifact_checksum(bytes: &[u8]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"asupersync.lab.forced-schedule.artifact.v1\0");
+    hasher.update(bytes);
+    hasher.finalize().into()
+}
+
+fn forced_schedule_artifact_u32(bytes: &[u8], offset: usize) -> Result<u32, ForcedScheduleError> {
+    let end = offset
+        .checked_add(4)
+        .ok_or(ForcedScheduleError::ArtifactLengthOverflow {
+            dispatch_count: u64::MAX,
+        })?;
+    let Some(raw) = bytes.get(offset..end) else {
+        return Err(ForcedScheduleError::ArtifactTruncated {
+            expected: end,
+            found: bytes.len(),
+        });
+    };
+    let mut value = [0u8; 4];
+    value.copy_from_slice(raw);
+    Ok(u32::from_le_bytes(value))
+}
+
+fn forced_schedule_artifact_u64(bytes: &[u8], offset: usize) -> Result<u64, ForcedScheduleError> {
+    let end = offset
+        .checked_add(8)
+        .ok_or(ForcedScheduleError::ArtifactLengthOverflow {
+            dispatch_count: u64::MAX,
+        })?;
+    let Some(raw) = bytes.get(offset..end) else {
+        return Err(ForcedScheduleError::ArtifactTruncated {
+            expected: end,
+            found: bytes.len(),
+        });
+    };
+    let mut value = [0u8; 8];
+    value.copy_from_slice(raw);
+    Ok(u64::from_le_bytes(value))
+}
+
+const fn forced_schedule_lane_tag(lane: DispatchLane) -> u8 {
+    match lane {
+        DispatchLane::Cancel => 0,
+        DispatchLane::Timed => 1,
+        DispatchLane::Ready => 2,
+        DispatchLane::Stolen => 3,
+    }
+}
+
+fn forced_schedule_lane_from_tag(
+    index: usize,
+    tag: u8,
+) -> Result<DispatchLane, ForcedScheduleError> {
+    match tag {
+        0 => Ok(DispatchLane::Cancel),
+        1 => Ok(DispatchLane::Timed),
+        2 => Ok(DispatchLane::Ready),
+        3 => Ok(DispatchLane::Stolen),
+        _ => Err(ForcedScheduleError::ArtifactLaneTag { index, tag }),
+    }
+}
+
+fn forced_schedule_bool(tag: u8, field: &'static str) -> Result<bool, ForcedScheduleError> {
+    match tag {
+        0 => Ok(false),
+        1 => Ok(true),
+        _ => Err(ForcedScheduleError::ArtifactBooleanTag { field, tag }),
+    }
+}
+
+fn validate_complete_forced_schedule_shape(
+    schedule: &ForcedSchedule,
+) -> Result<(), ForcedScheduleError> {
+    if schedule.version != FORCED_SCHEDULE_SCHEMA_VERSION {
+        return Err(ForcedScheduleError::SchemaMismatch {
+            expected: FORCED_SCHEDULE_SCHEMA_VERSION,
+            found: schedule.version,
+        });
+    }
+    if schedule.truncated || !schedule.terminal_quiescent {
+        return Err(ForcedScheduleError::PartialSource);
+    }
+    validate_dispatch_order(&schedule.dispatches)?;
+    if schedule.dispatches.last().is_some_and(|dispatch| {
+        dispatch.at_step > schedule.terminal_steps || dispatch.at_nanos > schedule.terminal_nanos
+    }) {
+        return Err(ForcedScheduleError::PartialSource);
     }
     Ok(())
 }
