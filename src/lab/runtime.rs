@@ -4437,7 +4437,12 @@ impl LabScheduler {
             self.set_assignment(task, expected_worker);
             self.cancel_streak[expected_worker] = 0;
         } else if expected_lane == DispatchLane::Cancel {
-            self.cancel_streak[actual_worker] = self.cancel_streak[actual_worker].saturating_add(1);
+            let cancel_streak = &mut self.cancel_streak[actual_worker];
+            *cancel_streak = if *cancel_streak < self.cancel_streak_limit {
+                (*cancel_streak).saturating_add(1)
+            } else {
+                1
+            };
         } else {
             self.cancel_streak[actual_worker] = 0;
         }
@@ -5527,6 +5532,31 @@ mod tests {
         );
 
         crate::test_complete!("lab_scheduler_pop_for_worker_respects_timed_deadlines");
+    }
+
+    #[test]
+    fn forced_cancel_dispatch_preserves_normal_fairness_state() {
+        init_test("forced_cancel_dispatch_preserves_normal_fairness_state");
+        let task = TaskId::from_arena(ArenaIndex::new(3, 0));
+        let mut normal = LabScheduler::new(1, 0);
+        let mut forced = LabScheduler::new(1, 0);
+
+        normal.cancel_streak[0] = normal.cancel_streak_limit;
+        forced.cancel_streak[0] = forced.cancel_streak_limit;
+        normal.schedule_cancel(task, 10);
+        forced.schedule_cancel(task, 10);
+
+        assert_eq!(
+            normal.pop_for_worker(0, 0, Time::ZERO),
+            Some((task, DispatchLane::Cancel))
+        );
+        forced
+            .take_forced(task, 0, DispatchLane::Cancel, Time::ZERO, 0)
+            .expect("forced cancel dispatch must remain available");
+
+        assert_eq!(normal.cancel_streak[0], 1);
+        assert_eq!(forced.cancel_streak[0], normal.cancel_streak[0]);
+        crate::test_complete!("forced_cancel_dispatch_preserves_normal_fairness_state");
     }
 
     #[test]
