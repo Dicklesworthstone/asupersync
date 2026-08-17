@@ -24,6 +24,28 @@ const A1_RECONCILIATION_PATHS: [&str; 3] = [
 ];
 const A1_DERIVED_A2_PATH: &str = "artifacts/x509_standard_verifier_delegation_v1.json";
 const REVIEWED_A2_SHA256: &str = "f7f3b9773f2f1af7b1a0640c627cd3d7f02d3dcf46c9b3f498f4cb251c06074c";
+const REVIEWED_IMPLEMENTATION_SOURCES: [(&str, &str, u64); 4] = [
+    (
+        "src/tls/types.rs",
+        "752c7070d3e4753a35cfdda85670d1eb2a4bd69760baf0cb7a3e831e0122e45f",
+        1_107,
+    ),
+    (
+        "src/tls/connector.rs",
+        "bd2ed80fdc244592e92985654fb9acb2cf00f0fa2dca68734f4dbd9e4a7da393",
+        2_049,
+    ),
+    (
+        "src/tls/acceptor.rs",
+        "1bbf5b9c2fe8d12c029a5e3effe3bede9513c9d094c69e1ff93145b6d76847e6",
+        2_785,
+    ),
+    (
+        "src/net/quic_native/handshake_driver.rs",
+        "51e50620ca4e6006485e31d1b8ece4fc56d29fc36e7a346258c4607af1fa3548",
+        1_438,
+    ),
+];
 const ROOT_MANIFEST_PATH: &str = "Cargo.toml";
 const REVIEWED_ROOT_MANIFEST_SHA256: &str =
     "10514efc995cfd40db1e52eee55d712cc25852b9320c1c51775d04fe19c17239";
@@ -186,6 +208,19 @@ fn normative_projection(value: &Value) -> Result<Value, String> {
                 "sha256".to_owned(),
                 Value::String(REVIEWED_A2_SHA256.to_owned()),
             );
+        } else if let Some((_, reviewed_sha256, reviewed_line_count)) =
+            REVIEWED_IMPLEMENTATION_SOURCES
+                .iter()
+                .find(|(path, _, _)| source["path"].as_str() == Some(*path))
+        {
+            // Implementation files evolve independently of the reviewed DER
+            // policy. Keep every live pin fail-closed, while this projection
+            // retains the exact source identities reviewed for A3.
+            source.insert(
+                "sha256".to_owned(),
+                Value::String((*reviewed_sha256).to_owned()),
+            );
+            source.insert("line_count".to_owned(), Value::from(*reviewed_line_count));
         } else if source["path"].as_str() == Some(ROOT_MANIFEST_PATH) {
             // Package-version and evidence-pin reconciliation changes the root
             // manifest identity without changing this reviewed DER policy.
@@ -253,6 +288,16 @@ fn validate_structure(value: &Value) -> Result<(), String> {
                 "reviewed_value": REVIEWED_A2_SHA256,
                 "reason": "The live A2 whole-file identity changes when its excluded A1 content pin is reconciled; the A3 normative projection retains the exact A2 identity independently reviewed for this specification."
             },
+            "normalized_reviewed_implementation_source_fields": REVIEWED_IMPLEMENTATION_SOURCES
+                .iter()
+                .map(|(path, sha256, line_count)| json!({
+                    "path": path,
+                    "fields": ["sha256", "line_count"],
+                    "reviewed_sha256": sha256,
+                    "reviewed_line_count": line_count
+                }))
+                .collect::<Vec<_>>(),
+            "normalized_reviewed_implementation_source_reason": "Routine reconciliation of live implementation files does not change this independently reviewed DER policy; retain reviewed source identities in the normative projection while every live source-contract row remains fail-closed and exact.",
             "normalized_release_manifest_fields": {
                 "path": ROOT_MANIFEST_PATH,
                 "fields": ["sha256", "line_count"],

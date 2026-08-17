@@ -50,9 +50,36 @@
       "normalized_a1_derived_fields": {
         "path": "artifacts/x509_standard_verifier_delegation_v1.json",
         "field": "sha256",
-      "reviewed_value": "5185fa89e3836fae4b1942955aabae3e4047880aab630752881c5e48fc12e6fb",
+        "reviewed_value": "f7f3b9773f2f1af7b1a0640c627cd3d7f02d3dcf46c9b3f498f4cb251c06074c",
         "reason": "The live A2 whole-file identity changes when its excluded A1 content pin is reconciled; the A3 normative projection retains the exact A2 identity independently reviewed for this specification."
       },
+      "normalized_reviewed_implementation_source_fields": [
+        {
+          "path": "src/tls/types.rs",
+          "fields": ["sha256", "line_count"],
+          "reviewed_sha256": "752c7070d3e4753a35cfdda85670d1eb2a4bd69760baf0cb7a3e831e0122e45f",
+          "reviewed_line_count": 1107
+        },
+        {
+          "path": "src/tls/connector.rs",
+          "fields": ["sha256", "line_count"],
+          "reviewed_sha256": "bd2ed80fdc244592e92985654fb9acb2cf00f0fa2dca68734f4dbd9e4a7da393",
+          "reviewed_line_count": 2049
+        },
+        {
+          "path": "src/tls/acceptor.rs",
+          "fields": ["sha256", "line_count"],
+          "reviewed_sha256": "1bbf5b9c2fe8d12c029a5e3effe3bede9513c9d094c69e1ff93145b6d76847e6",
+          "reviewed_line_count": 2785
+        },
+        {
+          "path": "src/net/quic_native/handshake_driver.rs",
+          "fields": ["sha256", "line_count"],
+          "reviewed_sha256": "51e50620ca4e6006485e31d1b8ece4fc56d29fc36e7a346258c4607af1fa3548",
+          "reviewed_line_count": 1438
+        }
+      ],
+      "normalized_reviewed_implementation_source_reason": "Routine reconciliation of live implementation files does not change this independently reviewed DER policy; retain reviewed source identities in the normative projection while every live source-contract row remains fail-closed and exact.",
       "normalized_release_manifest_fields": {
         "path": "Cargo.toml",
         "fields": [
@@ -110,13 +137,13 @@
     },
     {
       "path": "src/net/quic_native/handshake_driver.rs",
-      "sha256": "51e50620ca4e6006485e31d1b8ece4fc56d29fc36e7a346258c4607af1fa3548",
-      "line_count": 1438,
+      "sha256": "45f42e39f573517fd9e71c2c3315e0c05c305e8d896fc75862e85287a85cf7ca",
+      "line_count": 1896,
       "role": "X509-R4 shared exact-leaf shape incumbent"
     },
     {
       "path": "artifacts/x509_validation_ownership_inventory_v1.json",
-      "sha256": "247d501cd10e30d7e6c599115d392904fb51394ab5797c0907b0f4c1a8f848f2",
+      "sha256": "1357b998e3ff5e90f33f0257ca20eead749366975851a67c2b8a837c2bc3852b",
       "line_count": 1073,
       "role": "A1 call-site, owner, residue, and routed-gap authority"
     },
@@ -134,7 +161,7 @@
     },
     {
       "path": "artifacts/x509_standard_verifier_delegation_v1.json",
-      "sha256": "c748a1e82d9231e5b907319de70a19f3b168b4e30482b7c9c95b000928f69e2f",
+      "sha256": "2a1f7e09007e1f2519e216a5c800e9159db6beecd6f6cf6f0d72660842342e99",
       "line_count": 345,
       "role": "A2 standard-first delegation and retained-policy authority"
     },

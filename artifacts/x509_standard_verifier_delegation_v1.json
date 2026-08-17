@@ -32,8 +32,8 @@
     },
     {
       "path": "src/net/quic_native/handshake_driver.rs",
-      "sha256": "51e50620ca4e6006485e31d1b8ece4fc56d29fc36e7a346258c4607af1fa3548",
-      "line_count": 1438,
+      "sha256": "45f42e39f573517fd9e71c2c3315e0c05c305e8d896fc75862e85287a85cf7ca",
+      "line_count": 1896,
       "role": "shared standard-first exact-leaf verifier and focused tests"
     },
     {
@@ -44,7 +44,7 @@
     },
     {
       "path": "artifacts/x509_validation_ownership_inventory_v1.json",
-      "sha256": "247d501cd10e30d7e6c599115d392904fb51394ab5797c0907b0f4c1a8f848f2",
+      "sha256": "1357b998e3ff5e90f33f0257ca20eead749366975851a67c2b8a837c2bc3852b",
       "line_count": 1073,
       "role": "A1 ownership, residue, and routed-gap inventory"
     },
