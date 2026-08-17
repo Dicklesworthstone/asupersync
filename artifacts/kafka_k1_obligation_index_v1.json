@@ -65,7 +65,7 @@
       "path": "artifacts/kafka_k0_baseline_disposition_v1.json",
       "byte_count": 29494,
       "record_count": 284,
-      "sha256": "9aefd06db08fa4c33704f5c55322f468d3adb232145e426d4e213e2caa18d67d"
+      "sha256": "50c6357bc7a6cf9b6bd1a04e8b5ecd5e51716994d953f4e1f14a662e50f3e108"
     },
     {
       "input_id": "K1-INPUT-K0-5-DOCUMENT",
@@ -73,7 +73,7 @@
       "path": "docs/kafka_k0_baseline_disposition.md",
       "byte_count": 21799,
       "record_count": 349,
-      "sha256": "0833300943ea7bfaf12c10250291095c9a048514f4c33454e52a5374692dbadd"
+      "sha256": "e08a5394556496261e11f9332ed61d41a03811f33cabaff35ab30cf87e0184d9"
     },
     {
       "input_id": "K1-INPUT-K0-5-CONTRACT",
@@ -81,7 +81,7 @@
       "path": "tests/kafka_k0_baseline_disposition_contract.rs",
       "byte_count": 106003,
       "record_count": 2599,
-      "sha256": "5e13f9d614708a06d0c47c0cef9714be5da4bbbf8d537cf3b58b663f0b79bf42"
+      "sha256": "07de2af0fade7f6c522a43f3c1811bc4a16c8206b618ab8228e020257bd3741b"
     },
     {
       "input_id": "K1-INPUT-ADR",
@@ -525,7 +525,7 @@
     "source_pin_rollup": {
       "row_count": 266,
       "stage_counts": {"K0.1": 13, "K0.2": 8, "K0.3": 225, "K0.4": 20},
-      "canonical_json_sha256": "bbc98ca9d4c4e95307c015d45e5deefa744dbce51c2f067af2486972447d9323",
+      "canonical_json_sha256": "0780be5ae0528f70c1918f29a02f7badfd84329a8a144d7cac44055e4deaa524",
       "unique_path_count": 247,
       "unique_path_set_sha256": "d5631183e1560d87aeb50ca953d836b4405110b30f81c98aab099c6a5f1eb4c3",
       "overlap_group_count": 15,
@@ -559,7 +559,7 @@
     },
     "route_ownership": {
       "route_row_count": 87,
-      "route_projection_sha256": "efbc7795ffa4c5144ffcedf6ac2659603e9a298800b6d7130df1081d47722b43",
+      "route_projection_sha256": "e8565a21c4e3cd0e3c520e5d71ab2c04711b8e8954959a96c777cdde5565979f",
       "route_edge_count": 126,
       "route_edge_projection_sha256": "78ac2d846c8c21a1ed741ddb6a17c13c73cc57da86ae97a28577d2a061670dbc",
       "owner_id_count": 49,

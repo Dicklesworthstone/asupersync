@@ -23,7 +23,7 @@ const K0_4_PATH: &str = "artifacts/kafka_broker_fixture_provenance_matrix_v1.jso
 const K1_2_PATH: &str = "artifacts/kafka_k1_protocol_security_support_policy_v1.json";
 const TRACKER_PATH: &str = ".beads/issues.jsonl";
 
-const ARTIFACT_SHA256: &str = "403bdedd0a655a8e02d6701d222e9ba1d90f614f07be8046b5bf63a0396c351f";
+const ARTIFACT_SHA256: &str = "b6b1bd897029f252c09b76397e0b1e0d80586d38f792eb82aeee59816ac20623";
 const DOC_SHA256: &str = "01f51a8331ed57529fcc6d744aa29e0fceb38d83b30a97c58382851a0e18e805";
 
 const ARTIFACT_ID: &str = "kafka-k1-resource-lifecycle-contract-v1";
@@ -49,7 +49,7 @@ const AUTHORITY_INPUT_COUNT: usize = 15;
 
 const RESOURCE_ID_SHA256: &str = "e21f2fbe16b7d974b60cda3958e35e7cd0736eaa62c7003a8b7f6a0dbb194fcd";
 const RESOURCE_CONTRACT_SHA256: &str =
-    "7a7ecaaf1815c011b63a549623a33ecea4272f287f507adf49dba7a2f8617e5d";
+    "79c551cc99f036bc9b0a2bb9ca31aa794b02fe51db7400136fcc57040abec83b";
 const SEMANTIC_RESOURCE_BINDING_SHA256: &str =
     "bc625fbcca3de75d72d2bc2919cecc7636a94d6b25943bb37743d6c92b63ead9";
 const RESOURCE_LIMIT_DIMENSION_SHA256: &str =
@@ -65,9 +65,9 @@ const AUTHORITY_REFERENCE_SHA256: &str =
 const AUTHORITY_CONTRACT_SHA256: &str =
     "6a51fa1221869f3125a3ec478dc5e729eac868efc200a4779fdcaff35599cbf7";
 const AUTHORITY_INPUT_CONTRACT_SHA256: &str =
-    "deca3b8b3ae21b4188d093c9e877e1d05683b53923b454d269ebe81744b22eb3";
+    "b2fa87d18b5e67fa5b00531c1ddf57ed4260d17c10fff8f5867d181aff221893";
 const AUTHORITY_VIEWS_CONTRACT_SHA256: &str =
-    "b7c9cb4e15efb45cdca0c64316e4869b9cd93302205a52e4cf12ad88a19cb6b7";
+    "3ab13136432c2ae21e0db3f592ac08e63a843fb20879a0d97287ad3e3a20a21e";
 const POLICY_CONTRACT_SHA256: &str =
     "ec236faf14c33462c00c5c365e188b1a7089a3215329dd856699633ca4c2b396";
 const SEMANTIC_COVERAGE_CONTRACT_SHA256: &str =
@@ -83,7 +83,7 @@ const PROJECTION_RULE_SHA256: &str =
 const NO_CLAIM_SHA256: &str = "bc5703ea9ef717f0796db249350ceafac85544acc31ef47f2da2b6ac33be9ce3";
 const SEMANTIC_ID_SHA256: &str = "a9967c47346ee6386e9e8836d73e819a784f829baa6d255eb24e55aae1950cf7";
 const SEMANTIC_ROW_SHA256: &str =
-    "d19103e0fb6dd8b291405b1925c15d14cfacdf970901c766c10e06fcdbd7beab";
+    "ada6796514f5502ddd095dc05904f312bff387bc3a7fe70caf1cae0384ce3396";
 const SEMANTIC_CLASSIFICATION_SHA256: &str =
     "6bfbbd0e034be578cc508b99b2f7256f9511650632249fa485c5ab5bf1519e35";
 const SHARED_OBLIGATION_SHA256: &str =
@@ -91,7 +91,7 @@ const SHARED_OBLIGATION_SHA256: &str =
 const ROUTED_FINDING_ID_SHA256: &str =
     "752d9b0be528ea09c4eb06100e6b1ab1992d92f52cd8a8f9400f0d805e5223b0";
 const ROUTED_FINDING_ROW_SHA256: &str =
-    "cb04492d3a8e82d415833d06533ec311b72159c1a5e2b9051469e7b6e74ecae5";
+    "b8786f5521bfdcfbba786844fea0e41242fcbe65d8ad886069470dfc5540c404";
 const FAULT_VECTOR_ID_SHA256: &str =
     "c3da429cee7ac2fca222b5a288b9f76f78d88e01e5b6e32b4278104baa07c121";
 const FAULT_VECTOR_ROW_SHA256: &str =

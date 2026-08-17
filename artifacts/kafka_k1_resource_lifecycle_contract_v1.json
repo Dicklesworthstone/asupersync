@@ -39,7 +39,7 @@
       "path": "artifacts/kafka_k1_obligation_index_v1.json",
       "byte_count": 42758,
       "record_count": 738,
-      "sha256": "dde08fad4382cd103bff69153cbd11e06f69110ac87335e96cdac5c4adaeb8cf"
+      "sha256": "2fdd5443349d21acf80af92d6edafdb15a9dc05e1cdc45537852dd4c3c82f06b"
     },
     {
       "input_id": "K1-4-INPUT-K1-1-DOCUMENT",
@@ -55,7 +55,7 @@
       "path": "tests/kafka_k1_client_contract.rs",
       "byte_count": 95396,
       "record_count": 2585,
-      "sha256": "74e6c0a93d388b0780d39dcafa752a088298b7c13f947dbff8039e8acf94c406"
+      "sha256": "272e0261d28b4c2da6b7e022a622472632807e2c3a50fab173815de1caff95e8"
     },
     {
       "input_id": "K1-4-INPUT-K1-2",
@@ -63,15 +63,15 @@
       "path": "artifacts/kafka_k1_protocol_security_support_policy_v1.json",
       "byte_count": 82178,
       "record_count": 1399,
-      "sha256": "bc10ff569a48a2ddad384fbecf19236f73f1bbdec6fe900c059feb0c15a3e7b3"
+      "sha256": "3baeaaca79f0cabd2d0af8be1ce96e6a82c5e487f7d9b572731cbaf2a7085efd"
     },
     {
       "input_id": "K1-4-INPUT-K1-3",
       "role": "PUBLIC_API_CONFIGURATION_AND_ERROR_CONTRACT",
       "path": "artifacts/kafka_k1_public_api_contract_v1.json",
-      "byte_count": 37858,
+      "byte_count": 37860,
       "record_count": 753,
-      "sha256": "21d824232e952f8d4992ac422d0590cbe4e19fd9f3b070a98d9b4280293e33cf"
+      "sha256": "53885f35dc7e9ce1ad2c64ecee6511471a72d1a1ee28171005536dddff70eb17"
     },
     {
       "input_id": "K1-4-INPUT-K0-5",
@@ -79,15 +79,15 @@
       "path": "artifacts/kafka_k0_baseline_disposition_v1.json",
       "byte_count": 29494,
       "record_count": 284,
-      "sha256": "9aefd06db08fa4c33704f5c55322f468d3adb232145e426d4e213e2caa18d67d"
+      "sha256": "50c6357bc7a6cf9b6bd1a04e8b5ecd5e51716994d953f4e1f14a662e50f3e108"
     },
     {
       "input_id": "K1-4-INPUT-K0-2",
       "role": "INCUMBENT_RESOURCE_AND_LIFECYCLE_SEMANTIC_AUTHORITY",
       "path": "artifacts/kafka_incumbent_semantics_matrix_v1.json",
-      "byte_count": 228933,
+      "byte_count": 229415,
       "record_count": 2560,
-      "sha256": "78e9d1d810e5fc8c26e0de97aef9e2d5313dae758525a4ca236b1a8a4e882c43"
+      "sha256": "7a2532f6cad8aea83ece3570c5cb650849d09486c6c00eabb60d7c581a732842"
     },
     {
       "input_id": "K1-4-INPUT-K0-4",
@@ -95,7 +95,7 @@
       "path": "artifacts/kafka_broker_fixture_provenance_matrix_v1.json",
       "byte_count": 119250,
       "record_count": 2187,
-      "sha256": "fec2b0994bd6da153400cd94fcb9d36ff6285aa45407b6111fc7d68c319bc95e"
+      "sha256": "23e68abbd453839b72bbeef54192c7648808136177025065952790d671be0fba"
     },
     {
       "input_id": "K1-4-INPUT-ADR",
@@ -125,17 +125,17 @@
       "input_id": "K1-4-INPUT-SPAWN-BLOCKING",
       "role": "CURRENT_BLOCKING_BRIDGE_SOURCE",
       "path": "src/runtime/spawn_blocking.rs",
-      "byte_count": 26993,
-      "record_count": 778,
-      "sha256": "7697599162f83ff00697137d598ffb612608a3b4adc0062f4aa3930b33cd1ee6"
+      "byte_count": 29229,
+      "record_count": 830,
+      "sha256": "35aba417b15fa6a57956e3db253a173a02522135d56e6fe511daa8be2f92f87d"
     },
     {
       "input_id": "K1-4-INPUT-BLOCKING-POOL",
       "role": "CURRENT_CX_BLOCKING_POOL_SOURCE",
       "path": "src/runtime/blocking_pool.rs",
-      "byte_count": 141186,
-      "record_count": 3816,
-      "sha256": "74cca2354df83980f1b68ebf19bd5f6a76b619e14b5abe90be3d9c7affbbbd02"
+      "byte_count": 142551,
+      "record_count": 3849,
+      "sha256": "27d125f2453ed5f4724ad74d7739ab087d83222ba017e4d1dd9b34f961a12734"
     },
     {
       "input_id": "K1-4-INPUT-MANIFEST",
@@ -168,14 +168,14 @@
       "row_count": 97,
       "id_key": "semantic_id",
       "id_set_sha256": "a9967c47346ee6386e9e8836d73e819a784f829baa6d255eb24e55aae1950cf7",
-      "canonical_row_sha256": "d19103e0fb6dd8b291405b1925c15d14cfacdf970901c766c10e06fcdbd7beab",
+      "canonical_row_sha256": "ada6796514f5502ddd095dc05904f312bff387bc3a7fe70caf1cae0384ce3396",
       "coverage_rule": "Every configuration, enum, operation, and callable-helper semantic ID appears exactly once in semantic_coverage; context-only classification does not discard its retry, timeout, cancellation, shutdown, or resource-bound authority."
     },
     "k0_2_routed_findings": {
       "row_count": 23,
       "id_key": "finding_id",
       "id_set_sha256": "752d9b0be528ea09c4eb06100e6b1ab1992d92f52cd8a8f9400f0d805e5223b0",
-      "canonical_row_sha256": "cb04492d3a8e82d415833d06533ec311b72159c1a5e2b9051469e7b6e74ecae5"
+      "canonical_row_sha256": "b8786f5521bfdcfbba786844fea0e41242fcbe65d8ad886069470dfc5540c404"
     },
     "k0_4_fault_vectors": {
       "row_count": 6,
@@ -872,9 +872,9 @@
       "required_minimum": 0,
       "required_maximum_or_hard_cap": null,
       "required_numeric_state": "BLOCKING_OWNER_MUST_FREEZE_PENDING_AND_RUNNING_CAPS",
-      "admission_outcome": "Configured pool worker concurrency is finite, but accepted pending work enters an uncapped SegQueue and can remain retained after worker-spawn failure.",
+      "admission_outcome": "Configured pool worker concurrency is finite and accepted pending work enters an uncapped SegQueue. A final worker-spawn failure detaches and cancels stranded tasks so bridge-owned closures can fall back inline instead of remaining retained forever.",
       "owner_scope": "Cx blocking pool and the originating Kafka operation receipt.",
-      "overflow_behavior": "No pending-queue backpressure; shutdown rejection becomes a bridge panic in current callers.",
+      "overflow_behavior": "No pending-queue backpressure; shutdown rejection closes the pool task and the bridge executes its recoverable closure inline.",
       "release_point": "Queued cancellation skip, completed closure/result handoff, explicit rejection, panic accounting, or pool shutdown drain.",
       "accounting_invariant": "accepted = pending + running + terminal; every task retains its originating operation owner until terminal handoff.",
       "implementation_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.11.1",
@@ -1845,7 +1845,7 @@
     "transition_cell_count": 133,
     "unique_source_authority_reference_count": 63,
     "resource_id_sha256": "e21f2fbe16b7d974b60cda3958e35e7cd0736eaa62c7003a8b7f6a0dbb194fcd",
-    "resource_contract_sha256": "7a7ecaaf1815c011b63a549623a33ecea4272f287f507adf49dba7a2f8617e5d",
+    "resource_contract_sha256": "79c551cc99f036bc9b0a2bb9ca31aa794b02fe51db7400136fcc57040abec83b",
     "semantic_resource_binding_sha256": "bc625fbcca3de75d72d2bc2919cecc7636a94d6b25943bb37743d6c92b63ead9",
     "resource_limit_dimension_sha256": "3aaf18e4916c55d659cb5e89bdc0f474d60d54fa1472957e549fd9138c06ee6e",
     "operation_id_sha256": "e608943f31a0b005a825e5a70a3ee926462ed24c1bb5ae155ada73acae2a77ec",
@@ -1854,8 +1854,8 @@
     "source_authority_reference_sha256": "634bb51f85fe7d54015ccc24a83b52590d23b77c11c9aa522dc89d9af88357e7",
     "no_claim_boundary_sha256": "bc5703ea9ef717f0796db249350ceafac85544acc31ef47f2da2b6ac33be9ce3",
     "authority_contract_sha256": "6a51fa1221869f3125a3ec478dc5e729eac868efc200a4779fdcaff35599cbf7",
-    "authority_input_contract_sha256": "deca3b8b3ae21b4188d093c9e877e1d05683b53923b454d269ebe81744b22eb3",
-    "authority_views_contract_sha256": "b7c9cb4e15efb45cdca0c64316e4869b9cd93302205a52e4cf12ad88a19cb6b7",
+    "authority_input_contract_sha256": "b2fa87d18b5e67fa5b00531c1ddf57ed4260d17c10fff8f5867d181aff221893",
+    "authority_views_contract_sha256": "3ab13136432c2ae21e0db3f592ac08e63a843fb20879a0d97287ad3e3a20a21e",
     "policy_contract_sha256": "ec236faf14c33462c00c5c365e188b1a7089a3215329dd856699633ca4c2b396",
     "semantic_coverage_contract_sha256": "b86d984aa4061fe4770c4aeb7f639750193540deb4226522e48e1dfd6a441b27",
     "cross_cutting_invariant_sha256": "88438c4ffdb88a2320e223c994da4974d201d7569326dccf121bc4f6cd819492",

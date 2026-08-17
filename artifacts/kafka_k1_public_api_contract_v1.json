@@ -61,7 +61,7 @@
       "path": "artifacts/kafka_k1_obligation_index_v1.json",
       "byte_count": 42758,
       "record_count": 738,
-      "sha256": "dde08fad4382cd103bff69153cbd11e06f69110ac87335e96cdac5c4adaeb8cf"
+      "sha256": "2fdd5443349d21acf80af92d6edafdb15a9dc05e1cdc45537852dd4c3c82f06b"
     },
     {
       "input_id": "K1-3-INPUT-K1-1-DOCUMENT",
@@ -77,7 +77,7 @@
       "path": "tests/kafka_k1_client_contract.rs",
       "byte_count": 95396,
       "record_count": 2585,
-      "sha256": "74e6c0a93d388b0780d39dcafa752a088298b7c13f947dbff8039e8acf94c406"
+      "sha256": "272e0261d28b4c2da6b7e022a622472632807e2c3a50fab173815de1caff95e8"
     },
     {
       "input_id": "K1-3-INPUT-K0-5",
@@ -85,7 +85,7 @@
       "path": "artifacts/kafka_k0_baseline_disposition_v1.json",
       "byte_count": 29494,
       "record_count": 284,
-      "sha256": "9aefd06db08fa4c33704f5c55322f468d3adb232145e426d4e213e2caa18d67d"
+      "sha256": "50c6357bc7a6cf9b6bd1a04e8b5ecd5e51716994d953f4e1f14a662e50f3e108"
     },
     {
       "input_id": "K1-3-INPUT-K0-1",
@@ -99,9 +99,9 @@
       "input_id": "K1-3-INPUT-K0-2",
       "role": "SEMANTIC_AUTHORITY",
       "path": "artifacts/kafka_incumbent_semantics_matrix_v1.json",
-      "byte_count": 228933,
+      "byte_count": 229415,
       "record_count": 2560,
-      "sha256": "78e9d1d810e5fc8c26e0de97aef9e2d5313dae758525a4ca236b1a8a4e882c43"
+      "sha256": "7a2532f6cad8aea83ece3570c5cb650849d09486c6c00eabb60d7c581a732842"
     },
     {
       "input_id": "K1-3-INPUT-K0-3",
@@ -109,7 +109,7 @@
       "path": "artifacts/kafka_downstream_user_journey_inventory_v1.json",
       "byte_count": 1171867,
       "record_count": 17987,
-    "sha256": "dd8277e09864965f74d97d70406d722fd149636a010decb12113f6f7cd67dca3"
+      "sha256": "339c51b5186682514e2d493328c8756a1a57296066ce777c7df0ca0993c3c29b"
     },
     {
       "input_id": "K1-3-INPUT-ADR",
@@ -215,7 +215,7 @@
         "row_count": 38,
         "id_key": "semantic_id",
         "id_set_sha256": "01a40fb40520c2ee2016e0b6c51ca9083fd6cb019bbb369d28e86fca73f88eed",
-        "canonical_row_sha256": "9dc98f6774185534363e31af230d91c0a13822231d232559ef08e8490c939080",
+        "canonical_row_sha256": "fd1d1de4362e35c5259ed2503d9abd9ffad148346ba4bebf289d2706b2f947e2",
         "disposition": "PRESERVE",
         "gate_state": "BLOCKING_PENDING_IMPLEMENTATION_AND_VERIFICATION"
       },
@@ -330,7 +330,7 @@
     },
     "semantic_id_set_sha256": "a9967c47346ee6386e9e8836d73e819a784f829baa6d255eb24e55aae1950cf7",
     "canonical_semantic_row_rule": "Recursively key-sort and compactly serialize every row from configuration_fields, enum_semantics, operations, and callable_helpers; bytewise sort records and append one LF per record.",
-    "canonical_semantic_row_sha256": "d19103e0fb6dd8b291405b1925c15d14cfacdf970901c766c10e06fcdbd7beab",
+    "canonical_semantic_row_sha256": "ada6796514f5502ddd095dc05904f312bff387bc3a7fe70caf1cae0384ce3396",
     "required_row_fields": [
       "accepted_values",
       "broker_mapping",

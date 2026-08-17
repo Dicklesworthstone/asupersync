@@ -79,7 +79,7 @@ The canonical machine projections are:
 
 | Projection | Count | SHA-256 |
 |---|---:|---|
-| Source-pin canonical JSON | 266 | `bbc98ca9d4c4e95307c015d45e5deefa744dbce51c2f067af2486972447d9323` |
+| Source-pin canonical JSON | 266 | `0780be5ae0528f70c1918f29a02f7badfd84329a8a144d7cac44055e4deaa524` |
 | Unique source-pin paths | 247 | `d5631183e1560d87aeb50ca953d836b4405110b30f81c98aab099c6a5f1eb4c3` |
 | Source-pin overlap paths | 15 | membership is bound by the 34-row projection below |
 | Source-pin rows on overlap paths | 34 | `903c0f547cb957fc894d06ad3488effe349f06f5538423db1c1ee01c9f450d82` |
@@ -213,7 +213,7 @@ receipt.
 
 The raw child route ledger contains 87 unique route rows, 126 owner edges, and
 49 unique raw owners. The route-row, exact owner-edge, and owner-ID digests are
-`efbc7795ffa4c5144ffcedf6ac2659603e9a298800b6d7130df1081d47722b43`,
+`e8565a21c4e3cd0e3c520e5d71ab2c04711b8e8954959a96c777cdde5565979f`,
 `78ac2d846c8c21a1ed741ddb6a17c13c73cc57da86ae97a28577d2a061670dbc`,
 and `8eb70d75bda5b08007d844cee45bca48383d875ddf795610c9e0f936d1f92e88`.
 The route-row digest wraps each child row as a recursively key-sorted compact

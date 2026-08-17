@@ -21,14 +21,14 @@ const PROGRAM_ID: &str = "asupersync-ir2uf0";
 const BEAD_ID: &str = "asupersync-dep-p7-kafka-removal-sarszu.1.2";
 const CAPABILITY_ID: &str = "CAP-KAFKA";
 const BASELINE_REVISION: &str = "b4997e8fe4de098a5a30ff468418460b59ca414a";
-const ARTIFACT_SHA256: &str = "78e9d1d810e5fc8c26e0de97aef9e2d5313dae758525a4ca236b1a8a4e882c43";
+const ARTIFACT_SHA256: &str = "7a2532f6cad8aea83ece3570c5cb650849d09486c6c00eabb60d7c581a732842";
 const DOC_SHA256: &str = "7cf46fb6eaa7ded66b6d1d04a7c711f4ce687252bb42eaa05d77e3a5e4b79ff5";
 const SOURCE_PIN_MAP_SHA256: &str =
-    "dfd4f0144a0745940368d73f78563b5d885576e3bae793d98fce72567d6e7b34";
+    "10610746cc0c6e368c6f935c30b6f215b63d49b176947c7f26a7259eace0a0f5";
 const ALL_ROW_SOURCE_ANCHOR_MAP_SHA256: &str =
-    "a895bcf372e6fcdd834fea2ca918e1bbc22623193098e0f4ebda684ef7735d33";
+    "c9622a5c98a99c533c7566db6292500a1a7e14a7df1fa12351a05d16aa7d3c71";
 const PUBLIC_ENTRY_ANCHOR_MAP_SHA256: &str =
-    "8deea5e3080636eed2b7282749ce52b9b22642829b7f74b101bf8769817428e6";
+    "18bb3f3310348ad48b57ec90c1103baaa7a7234a96a8c075c89f20fa203e336a";
 const ROW_GAP_OWNER_MAP_SHA256: &str =
     "5c4cb0c1edc74b5f8de090bd8f166de14e8f263d4b681d5fa23cdcb20a1ea760";
 const FINDING_OWNER_MAP_SHA256: &str =
@@ -1097,7 +1097,7 @@ fn validate_high_risk_semantics(matrix: &Value) -> Result<(), String> {
         ],
     )?;
     if text(commit, "source_anchor")
-        != "src/messaging/kafka.rs:351-374,463-482,716-745,1971-2020,2143-2196,2229-2237;src/runtime/spawn_blocking.rs:1-12,40-63,113-130,146-177,239-253,264-315;src/runtime/blocking_pool.rs:284-317,436-457,626-645,866-884,973-990,1293-1310"
+        != "src/messaging/kafka.rs:351-374,463-482,716-745,1971-2020,2143-2196,2229-2237;src/runtime/spawn_blocking.rs:1-12,40-63,114-133,136-201,224-237,251-348;src/runtime/blocking_pool.rs:284-330,436-457,626-645,737-755,877-905,984-1001,1290-1416"
         || !text(commit, "error_outcome").contains("empty staged commit succeeds locally")
         || !text(commit, "error_outcome").contains("nonempty staged commit panics")
         || !text(commit, "error_outcome").contains("Duplicate native handles")
@@ -1120,7 +1120,7 @@ fn validate_high_risk_semantics(matrix: &Value) -> Result<(), String> {
         ],
     )?;
     if text(abort, "source_anchor")
-        != "src/messaging/kafka.rs:351-374,463-482,1971-2020,2198-2237;src/runtime/spawn_blocking.rs:1-12,40-63,113-130,146-177,239-253,264-315;src/runtime/blocking_pool.rs:284-317,436-457,626-645,866-884,973-990,1293-1310"
+        != "src/messaging/kafka.rs:351-374,463-482,1971-2020,2198-2237;src/runtime/spawn_blocking.rs:1-12,40-63,114-133,136-201,224-237,251-348;src/runtime/blocking_pool.rs:284-330,436-457,626-645,737-755,877-905,984-1001,1290-1416"
         || !text(abort, "broker_mapping").contains("every no-feature branch")
         || !text(abort, "error_outcome").contains("succeeds locally")
         || !text(abort, "error_outcome").contains("Duplicate native handles")
@@ -1138,9 +1138,11 @@ fn validate_high_risk_semantics(matrix: &Value) -> Result<(), String> {
             || !text(row, "cancellation_rule").contains("no-pool")
             || !text(row, "cancellation_rule").contains("queued")
             || !text(row, "cancellation_rule").contains("execut")
-            || !text(row, "timeout_rule").contains("queued indefinitely")
-            || !text(row, "error_outcome")
-                .contains("blocking operation ended without producing a result")
+            || !text(row, "timeout_rule").contains("closure inline")
+            || !text(row, "error_outcome").contains("inline")
+            || !(text(row, "error_outcome").contains("missing-result")
+                || text(row, "error_outcome")
+                    .contains("blocking operation ended without producing a result"))
             || !text(row, "error_outcome").contains("panic")
         {
             return Err(format!("{id} blocking-bridge semantics drifted"));
@@ -1497,7 +1499,7 @@ fn validate_shared_semantics_and_findings(matrix: &Value) -> Result<(), String> 
             "KAFKA-K0-2-GAP-19",
             [
                 "uncapped pending SegQueue",
-                "shutdown enqueue rejection",
+                "Pool shutdown rejection",
                 "256",
             ],
         ),

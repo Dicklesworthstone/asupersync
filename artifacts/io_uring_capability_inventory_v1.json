@@ -133,8 +133,8 @@
     },
     {
       "path": "src/runtime/builder.rs",
-      "sha256": "c075230a34c50f12f2b4dfd174e84d2a48bfd6969692e72da958c5a0d1f8fe6c",
-      "line_count": 9125,
+      "sha256": "cf525c48695f4a7147634b2154acbed79760572073c9aadb9e98cedc9db75f3e",
+      "line_count": 9516,
       "role": "platform-reactor policy, dependency injection, terminal fallback receipt and public runtime inspectors"
     },
     {
