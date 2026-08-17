@@ -55,8 +55,12 @@ GitHub Release/tag baseline is `v0.4.5`.
   opt-in lab-only authority binds each task generation to its modeled worker,
   scheduler lane, deterministic step, and virtual time before polling, and
   refuses stale, reordered, partial, or resource-exhausting projections without
-  falling back to RNG scheduling. This is the executable replay substrate; it
-  does not yet provide schedule minimization or a persisted replay artifact.
+  falling back to RNG scheduling. A separate deletion-only candidate API can
+  retain an ordered source subsequence and execute those exact task/worker/lane
+  choices, reporting quiescence versus exhaustion without treating the source
+  terminal certificate as a candidate result. This is the executable replay
+  and delta-debugging substrate; it does not yet provide a failure classifier,
+  minimizer, workload codec, or persisted replay artifact.
 
 ## [v0.4.6] - 2026-08-16
 

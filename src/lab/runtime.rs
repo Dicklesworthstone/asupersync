@@ -64,6 +64,9 @@ pub struct LabTraceCertificateSummary {
 /// Schema version for the exact lab dispatch projection.
 pub const FORCED_SCHEDULE_SCHEMA_VERSION: u32 = 1;
 
+/// Schema version for a reduced exact-dispatch candidate.
+pub const FORCED_SCHEDULE_CANDIDATE_SCHEMA_VERSION: u32 = 1;
+
 /// One scheduler choice captured before the selected task was polled.
 ///
 /// Unlike [`ReplayEvent::TaskScheduled`], this lab-only projection retains the
@@ -130,6 +133,167 @@ pub struct ForcedSchedule {
     truncated: bool,
 }
 
+/// One retained source dispatch in a reduced schedule candidate.
+///
+/// The fields are private so a caller can delete source choices but cannot
+/// synthesize a new task identity, worker, lane, step, or timestamp. Candidate
+/// execution uses the task/worker/lane tuple as the scheduler authority; the
+/// source step and time remain provenance rather than terminal expectations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ForcedScheduleCandidateDispatch {
+    source_index: usize,
+    dispatch: ForcedDispatch,
+}
+
+impl ForcedScheduleCandidateDispatch {
+    /// Index of this dispatch in the complete captured source schedule.
+    #[must_use]
+    pub const fn source_index(&self) -> usize {
+        self.source_index
+    }
+
+    /// Exact task generation retained from the source schedule.
+    #[must_use]
+    pub const fn task(&self) -> CompactTaskId {
+        self.dispatch.task
+    }
+
+    /// Modeled worker retained from the source schedule.
+    #[must_use]
+    pub const fn worker(&self) -> u32 {
+        self.dispatch.worker
+    }
+
+    /// Authoritative scheduler lane retained from the source schedule.
+    #[must_use]
+    pub const fn lane(&self) -> DispatchLane {
+        self.dispatch.lane
+    }
+
+    /// Source step retained for provenance only.
+    #[must_use]
+    pub const fn source_step(&self) -> u64 {
+        self.dispatch.at_step
+    }
+
+    /// Source virtual time retained for provenance only.
+    #[must_use]
+    pub const fn source_nanos(&self) -> u64 {
+        self.dispatch.at_nanos
+    }
+}
+
+/// A bounded, deletion-only candidate derived from one complete schedule.
+///
+/// This is a lab delta-debugging authority, not a weaker form of exact replay.
+/// [`LabRuntime::run_forced_schedule`] continues to validate the complete
+/// source terminal receipt. A candidate instead executes only its retained
+/// scheduler choices and reports whether that exact subsequence quiesced or
+/// was exhausted with work remaining.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForcedScheduleCandidate {
+    version: u32,
+    source_version: u32,
+    seed: u64,
+    config_hash: u64,
+    source_dispatch_count: usize,
+    source_terminal_schedule_hash: u64,
+    dispatches: Vec<ForcedScheduleCandidateDispatch>,
+}
+
+impl ForcedScheduleCandidate {
+    /// Candidate schema version.
+    #[must_use]
+    pub const fn version(&self) -> u32 {
+        self.version
+    }
+
+    /// Source schedule schema version.
+    #[must_use]
+    pub const fn source_version(&self) -> u32 {
+        self.source_version
+    }
+
+    /// Source lab seed.
+    #[must_use]
+    pub const fn seed(&self) -> u64 {
+        self.seed
+    }
+
+    /// Stable source execution-configuration hash.
+    #[must_use]
+    pub const fn config_hash(&self) -> u64 {
+        self.config_hash
+    }
+
+    /// Number of dispatches in the complete source schedule.
+    #[must_use]
+    pub const fn source_dispatch_count(&self) -> usize {
+        self.source_dispatch_count
+    }
+
+    /// Complete source schedule certificate hash retained as provenance.
+    #[must_use]
+    pub const fn source_terminal_schedule_hash(&self) -> u64 {
+        self.source_terminal_schedule_hash
+    }
+
+    /// Ordered retained source choices.
+    #[must_use]
+    pub fn dispatches(&self) -> &[ForcedScheduleCandidateDispatch] {
+        &self.dispatches
+    }
+}
+
+/// Caller-owned admission and execution limits for a reduced candidate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ForcedScheduleCandidateLimits {
+    /// Maximum complete source dispatch count admitted for derivation/replay.
+    pub max_source_dispatches: usize,
+    /// Maximum retained candidate dispatch count.
+    pub max_candidate_dispatches: usize,
+    /// Maximum bounded execution actions (scheduler steps or time/event pumps).
+    pub max_work_units: u64,
+}
+
+impl ForcedScheduleCandidateLimits {
+    /// Creates explicit source, candidate, and execution limits.
+    #[must_use]
+    pub const fn new(
+        max_source_dispatches: usize,
+        max_candidate_dispatches: usize,
+        max_work_units: u64,
+    ) -> Self {
+        Self {
+            max_source_dispatches,
+            max_candidate_dispatches,
+            max_work_units,
+        }
+    }
+}
+
+/// Terminal classification for a reduced candidate execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForcedScheduleCandidateTermination {
+    /// Every retained choice executed and the runtime reached quiescence.
+    Quiescent,
+    /// Every retained choice executed, but runnable or live work remained.
+    Exhausted,
+}
+
+/// Observed receipt from executing a reduced schedule candidate.
+#[derive(Debug, Clone)]
+pub struct ForcedScheduleCandidateReport {
+    /// Why candidate execution stopped.
+    pub termination: ForcedScheduleCandidateTermination,
+    /// Exact source indices consumed, in execution order.
+    pub consumed_source_indices: Vec<usize>,
+    /// Bounded scheduler-step/time-pump work consumed by the runner.
+    pub work_units: u64,
+    /// Canonical runtime/oracle report at the candidate boundary.
+    pub lab: LabRunReport,
+}
+
 impl ForcedSchedule {
     /// Projection schema version.
     #[must_use]
@@ -171,6 +335,95 @@ impl ForcedSchedule {
     #[must_use]
     pub const fn terminal_schedule_hash(&self) -> u64 {
         self.terminal_schedule_hash
+    }
+
+    /// Derives a deletion-only candidate from ordered source indices.
+    ///
+    /// Every retained dispatch is copied from this complete source receipt.
+    /// Callers can therefore remove choices but cannot synthesize task IDs or
+    /// scheduler metadata. The source itself is bounded and shape-validated
+    /// before any candidate allocation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ForcedScheduleError`] when the source is partial or malformed,
+    /// a caller limit is zero/exhausted, indices are duplicated/reordered/out of
+    /// range, or bounded candidate allocation fails.
+    pub fn derive_candidate(
+        &self,
+        retained_source_indices: &[usize],
+        limits: ForcedScheduleCandidateLimits,
+    ) -> Result<ForcedScheduleCandidate, ForcedScheduleError> {
+        validate_candidate_limits(limits)?;
+        if self.version != FORCED_SCHEDULE_SCHEMA_VERSION {
+            return Err(ForcedScheduleError::SchemaMismatch {
+                expected: FORCED_SCHEDULE_SCHEMA_VERSION,
+                found: self.version,
+            });
+        }
+        if self.truncated || !self.terminal_quiescent {
+            return Err(ForcedScheduleError::PartialSource);
+        }
+        if self.dispatches.len() > limits.max_source_dispatches {
+            return Err(ForcedScheduleError::CandidateSourceLimitExceeded {
+                found: self.dispatches.len(),
+                limit: limits.max_source_dispatches,
+            });
+        }
+        if retained_source_indices.len() > limits.max_candidate_dispatches {
+            return Err(ForcedScheduleError::DispatchLimitExceeded {
+                found: retained_source_indices.len(),
+                limit: limits.max_candidate_dispatches,
+            });
+        }
+
+        validate_dispatch_order(&self.dispatches)?;
+        if self.dispatches.last().is_some_and(|dispatch| {
+            dispatch.at_step > self.terminal_steps || dispatch.at_nanos > self.terminal_nanos
+        }) {
+            return Err(ForcedScheduleError::PartialSource);
+        }
+
+        let mut dispatches = Vec::new();
+        dispatches
+            .try_reserve_exact(retained_source_indices.len())
+            .map_err(|_| ForcedScheduleError::CandidateAllocationFailed {
+                requested: retained_source_indices.len(),
+            })?;
+        let mut previous = None;
+        for (candidate_index, &source_index) in retained_source_indices.iter().enumerate() {
+            if let Some(previous) = previous
+                && source_index <= previous
+            {
+                return Err(ForcedScheduleError::CandidateIndexOrder {
+                    candidate_index,
+                    previous,
+                    next: source_index,
+                });
+            }
+            let Some(&dispatch) = self.dispatches.get(source_index) else {
+                return Err(ForcedScheduleError::CandidateIndexOutOfRange {
+                    candidate_index,
+                    source_index,
+                    source_len: self.dispatches.len(),
+                });
+            };
+            dispatches.push(ForcedScheduleCandidateDispatch {
+                source_index,
+                dispatch,
+            });
+            previous = Some(source_index);
+        }
+
+        Ok(ForcedScheduleCandidate {
+            version: FORCED_SCHEDULE_CANDIDATE_SCHEMA_VERSION,
+            source_version: self.version,
+            seed: self.seed,
+            config_hash: self.config_hash,
+            source_dispatch_count: self.dispatches.len(),
+            source_terminal_schedule_hash: self.terminal_schedule_hash,
+            dispatches,
+        })
     }
 }
 
@@ -226,6 +479,66 @@ pub enum ForcedScheduleError {
     RecordingLimitExceeded {
         /// Configured source recording limit.
         max_dispatches: usize,
+    },
+    /// A candidate limit was configured as zero.
+    #[error("forced schedule candidate limit {limit_name} must be nonzero")]
+    ZeroCandidateLimit {
+        /// Stable name of the invalid limit.
+        limit_name: &'static str,
+    },
+    /// The complete source schedule exceeds caller admission.
+    #[error("forced schedule candidate source has {found} dispatches, limit is {limit}")]
+    CandidateSourceLimitExceeded {
+        /// Complete source dispatch count.
+        found: usize,
+        /// Caller-owned source admission bound.
+        limit: usize,
+    },
+    /// Retained source indices are not strictly increasing.
+    #[error(
+        "forced schedule candidate index order is invalid at {candidate_index}: previous {previous}, next {next}"
+    )]
+    CandidateIndexOrder {
+        /// Candidate position containing the invalid source index.
+        candidate_index: usize,
+        /// Previous retained source index.
+        previous: usize,
+        /// Reordered or duplicate source index.
+        next: usize,
+    },
+    /// A retained index does not exist in the complete source schedule.
+    #[error(
+        "forced schedule candidate index {candidate_index} references source {source_index}, source length is {source_len}"
+    )]
+    CandidateIndexOutOfRange {
+        /// Candidate position containing the invalid source index.
+        candidate_index: usize,
+        /// Invalid source index.
+        source_index: usize,
+        /// Complete source schedule length.
+        source_len: usize,
+    },
+    /// Candidate allocation failed before execution.
+    #[error("forced schedule candidate could not allocate {requested} dispatches")]
+    CandidateAllocationFailed {
+        /// Requested retained dispatch capacity.
+        requested: usize,
+    },
+    /// The reduced candidate uses an unsupported schema.
+    #[error("forced schedule candidate schema mismatch: expected {expected}, found {found}")]
+    CandidateSchemaMismatch {
+        /// Supported candidate schema.
+        expected: u32,
+        /// Supplied candidate schema.
+        found: u32,
+    },
+    /// Caller-owned candidate execution work was exhausted.
+    #[error("forced schedule candidate work limit exhausted at {work_units} units (limit {limit})")]
+    CandidateWorkLimitExceeded {
+        /// Bounded execution work already consumed.
+        work_units: u64,
+        /// Caller-owned execution work bound.
+        limit: u64,
     },
     /// The projection schema is unsupported.
     #[error("forced schedule schema mismatch: expected {expected}, found {found}")]
@@ -432,6 +745,9 @@ enum LabDispatchMode<'a> {
     Forced {
         expected: Option<(usize, &'a ForcedDispatch)>,
     },
+    Candidate {
+        expected: Option<(usize, &'a ForcedDispatch)>,
+    },
 }
 
 fn compact_task_id(compact: CompactTaskId) -> TaskId {
@@ -452,6 +768,62 @@ fn forced_schedule_config_hash(config: &LabConfig) -> u64 {
     config.panic_on_cancellation_violation.hash(&mut hasher);
     config.oracle_selection.hash(&mut hasher);
     hasher.finish()
+}
+
+fn validate_candidate_limits(
+    limits: ForcedScheduleCandidateLimits,
+) -> Result<(), ForcedScheduleError> {
+    if limits.max_source_dispatches == 0 {
+        return Err(ForcedScheduleError::ZeroCandidateLimit {
+            limit_name: "max_source_dispatches",
+        });
+    }
+    if limits.max_candidate_dispatches == 0 {
+        return Err(ForcedScheduleError::ZeroCandidateLimit {
+            limit_name: "max_candidate_dispatches",
+        });
+    }
+    if limits.max_work_units == 0 {
+        return Err(ForcedScheduleError::ZeroCandidateLimit {
+            limit_name: "max_work_units",
+        });
+    }
+    Ok(())
+}
+
+fn take_candidate_work(work_units: &mut u64, limit: u64) -> Result<(), ForcedScheduleError> {
+    if *work_units >= limit {
+        return Err(ForcedScheduleError::CandidateWorkLimitExceeded {
+            work_units: *work_units,
+            limit,
+        });
+    }
+    *work_units += 1;
+    Ok(())
+}
+
+fn validate_dispatch_order(dispatches: &[ForcedDispatch]) -> Result<(), ForcedScheduleError> {
+    let mut previous_step = 0u64;
+    let mut previous_nanos = 0u64;
+    for (index, dispatch) in dispatches.iter().enumerate() {
+        if dispatch.at_step <= previous_step {
+            return Err(ForcedScheduleError::StepOrder {
+                index,
+                previous: previous_step,
+                next: dispatch.at_step,
+            });
+        }
+        if dispatch.at_nanos < previous_nanos {
+            return Err(ForcedScheduleError::TimeOrder {
+                index,
+                previous: previous_nanos,
+                next: dispatch.at_nanos,
+            });
+        }
+        previous_step = dispatch.at_step;
+        previous_nanos = dispatch.at_nanos;
+    }
+    Ok(())
 }
 
 /// Why a [`LabRuntime::run_with_auto_advance`] loop terminated.
@@ -1539,6 +1911,183 @@ impl LabRuntime {
             schedule_hash: actual_hash,
             quiescent: true,
         })
+    }
+
+    /// Executes a deletion-only schedule candidate on this fresh runtime.
+    ///
+    /// Each retained task/worker/lane tuple is removed from its authoritative
+    /// scheduler queue before polling. Scheduler RNG is still advanced as part
+    /// of deterministic lab state, but it is never consulted to select a task.
+    /// Once the retained choices are exhausted, the runner may pump only
+    /// deterministic system work; it never polls an unrecorded task.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ForcedScheduleError`] for invalid provenance, incompatible
+    /// runtime configuration, impossible retained choices, allocation failure,
+    /// or exhausted caller-owned work.
+    pub fn run_forced_schedule_candidate(
+        &mut self,
+        candidate: &ForcedScheduleCandidate,
+        limits: ForcedScheduleCandidateLimits,
+    ) -> Result<ForcedScheduleCandidateReport, ForcedScheduleError> {
+        self.validate_forced_schedule_candidate(candidate, limits)?;
+
+        let start_steps = self.steps;
+        let mut work_units = 0u64;
+        let mut consumed_source_indices = Vec::new();
+        consumed_source_indices
+            .try_reserve_exact(candidate.dispatches.len())
+            .map_err(|_| ForcedScheduleError::CandidateAllocationFailed {
+                requested: candidate.dispatches.len(),
+            })?;
+
+        for (candidate_index, retained) in candidate.dispatches.iter().enumerate() {
+            loop {
+                if !self.candidate_has_runnable_work()
+                    && let Some(deadline) = self.next_auto_advance_deadline()
+                {
+                    take_candidate_work(&mut work_units, limits.max_work_units)?;
+                    if deadline > self.now() {
+                        self.advance_time_to(deadline);
+                    }
+                    let _ = self.pump_due_system_events();
+                    continue;
+                }
+
+                take_candidate_work(&mut work_units, limits.max_work_units)?;
+                if self.step_with_candidate_dispatch(Some((candidate_index, &retained.dispatch)))? {
+                    consumed_source_indices.push(retained.source_index);
+                    break;
+                }
+            }
+        }
+
+        let termination = loop {
+            if self.is_quiescent() {
+                break ForcedScheduleCandidateTermination::Quiescent;
+            }
+            if self.candidate_has_runnable_work() {
+                break ForcedScheduleCandidateTermination::Exhausted;
+            }
+            if let Some(deadline) = self.next_auto_advance_deadline() {
+                take_candidate_work(&mut work_units, limits.max_work_units)?;
+                if deadline > self.now() {
+                    self.advance_time_to(deadline);
+                }
+                let _ = self.pump_due_system_events();
+                continue;
+            }
+            break ForcedScheduleCandidateTermination::Exhausted;
+        };
+
+        let steps_delta = self.steps.saturating_sub(start_steps);
+        let lab = self.report_with_steps_delta(steps_delta);
+        Ok(ForcedScheduleCandidateReport {
+            termination,
+            consumed_source_indices,
+            work_units,
+            lab,
+        })
+    }
+
+    fn candidate_has_runnable_work(&self) -> bool {
+        let now = self.now();
+        self.scheduler.lock().has_runnable_work(now)
+    }
+
+    fn validate_forced_schedule_candidate(
+        &self,
+        candidate: &ForcedScheduleCandidate,
+        limits: ForcedScheduleCandidateLimits,
+    ) -> Result<(), ForcedScheduleError> {
+        validate_candidate_limits(limits)?;
+        if candidate.version != FORCED_SCHEDULE_CANDIDATE_SCHEMA_VERSION {
+            return Err(ForcedScheduleError::CandidateSchemaMismatch {
+                expected: FORCED_SCHEDULE_CANDIDATE_SCHEMA_VERSION,
+                found: candidate.version,
+            });
+        }
+        if candidate.source_version != FORCED_SCHEDULE_SCHEMA_VERSION {
+            return Err(ForcedScheduleError::SchemaMismatch {
+                expected: FORCED_SCHEDULE_SCHEMA_VERSION,
+                found: candidate.source_version,
+            });
+        }
+        if candidate.seed != self.config.seed {
+            return Err(ForcedScheduleError::SeedMismatch {
+                expected: self.config.seed,
+                found: candidate.seed,
+            });
+        }
+        let config_hash = forced_schedule_config_hash(&self.config);
+        if candidate.config_hash != config_hash {
+            return Err(ForcedScheduleError::ConfigMismatch {
+                expected: config_hash,
+                found: candidate.config_hash,
+            });
+        }
+        if self.steps != 0 || self.certificate.decisions() != 0 {
+            return Err(ForcedScheduleError::RuntimeAlreadyStarted {
+                steps: self.steps,
+                decisions: self.certificate.decisions(),
+            });
+        }
+        if candidate.source_dispatch_count > limits.max_source_dispatches {
+            return Err(ForcedScheduleError::CandidateSourceLimitExceeded {
+                found: candidate.source_dispatch_count,
+                limit: limits.max_source_dispatches,
+            });
+        }
+        if candidate.dispatches.len() > limits.max_candidate_dispatches {
+            return Err(ForcedScheduleError::DispatchLimitExceeded {
+                found: candidate.dispatches.len(),
+                limit: limits.max_candidate_dispatches,
+            });
+        }
+        let minimum_work = u64::try_from(candidate.dispatches.len()).unwrap_or(u64::MAX);
+        if minimum_work > limits.max_work_units {
+            return Err(ForcedScheduleError::CandidateWorkLimitExceeded {
+                work_units: minimum_work,
+                limit: limits.max_work_units,
+            });
+        }
+
+        let worker_count = self.config.worker_count.max(1);
+        let mut previous_source_index = None;
+        let mut retained_dispatches = Vec::new();
+        retained_dispatches
+            .try_reserve_exact(candidate.dispatches.len())
+            .map_err(|_| ForcedScheduleError::CandidateAllocationFailed {
+                requested: candidate.dispatches.len(),
+            })?;
+        for (candidate_index, retained) in candidate.dispatches.iter().enumerate() {
+            if retained.source_index >= candidate.source_dispatch_count {
+                return Err(ForcedScheduleError::CandidateIndexOutOfRange {
+                    candidate_index,
+                    source_index: retained.source_index,
+                    source_len: candidate.source_dispatch_count,
+                });
+            }
+            if let Some(previous) = previous_source_index
+                && retained.source_index <= previous
+            {
+                return Err(ForcedScheduleError::CandidateIndexOrder {
+                    candidate_index,
+                    previous,
+                    next: retained.source_index,
+                });
+            }
+            if retained.dispatch.worker as usize >= worker_count {
+                return Err(ForcedScheduleError::WorkerUnavailable {
+                    worker: retained.dispatch.worker,
+                    worker_count,
+                });
+            }
+            retained_dispatches.push(retained.dispatch);
+            previous_source_index = Some(retained.source_index);
+        }
+        validate_dispatch_order(&retained_dispatches)
     }
 
     fn validate_forced_schedule(
@@ -2638,6 +3187,13 @@ impl LabRuntime {
         self.step_inner(LabDispatchMode::Forced { expected })
     }
 
+    fn step_with_candidate_dispatch(
+        &mut self,
+        expected: Option<(usize, &ForcedDispatch)>,
+    ) -> Result<bool, ForcedScheduleError> {
+        self.step_inner(LabDispatchMode::Candidate { expected })
+    }
+
     #[allow(clippy::too_many_lines)]
     fn step_inner(
         &mut self,
@@ -2738,6 +3294,24 @@ impl LabRuntime {
                             consumed: self.certificate.decisions() as usize,
                         });
                     }
+                    drop(sched);
+                    self.check_deadline_monitor();
+                    return Ok(false);
+                }
+                LabDispatchMode::Candidate {
+                    expected: Some((index, dispatch)),
+                } => {
+                    let task_id = compact_task_id(dispatch.task);
+                    sched.take_forced(
+                        task_id,
+                        dispatch.worker as usize,
+                        dispatch.lane,
+                        now,
+                        index,
+                    )?;
+                    (task_id, dispatch.lane, dispatch.worker as usize)
+                }
+                LabDispatchMode::Candidate { expected: None } => {
                     drop(sched);
                     self.check_deadline_monitor();
                     return Ok(false);
@@ -8039,6 +8613,302 @@ mod tests {
         assert_eq!(receipt.schedule_hash, schedule.terminal_schedule_hash());
         assert_eq!(*replay_observations.lock(), *source_observations.lock());
         crate::test_complete!("forced_schedule_replay_executes_recorded_choices_before_polling");
+    }
+
+    #[test]
+    fn forced_schedule_candidate_executes_only_retained_source_choices() {
+        init_test("forced_schedule_candidate_executes_only_retained_source_choices");
+        let config = LabConfig::new(0xCAAD_1DA7).worker_count(2).max_steps(128);
+        let source_observations = Arc::new(Mutex::new(Vec::new()));
+        let mut source = forced_schedule_fixture(config.clone(), Arc::clone(&source_observations));
+        source
+            .start_forced_schedule_recording(32)
+            .expect("start exact dispatch capture");
+        let source_report = source.run_until_quiescent_with_report();
+        assert!(source_report.quiescent);
+        let schedule = source
+            .finish_forced_schedule_recording()
+            .expect("complete exact dispatch projection");
+        let limits = ForcedScheduleCandidateLimits::new(32, 32, 128);
+        let all_indices = (0..schedule.dispatches().len()).collect::<Vec<_>>();
+        let full = schedule
+            .derive_candidate(&all_indices, limits)
+            .expect("derive full-retention candidate");
+        assert_eq!(full.version(), FORCED_SCHEDULE_CANDIDATE_SCHEMA_VERSION);
+        assert_eq!(full.source_version(), FORCED_SCHEDULE_SCHEMA_VERSION);
+        assert_eq!(full.seed(), schedule.seed());
+        assert_eq!(full.config_hash(), schedule.config_hash());
+        assert_eq!(
+            full.source_terminal_schedule_hash(),
+            schedule.terminal_schedule_hash()
+        );
+        assert_eq!(full.source_dispatch_count(), schedule.dispatches().len());
+        assert_eq!(
+            full.dispatches()
+                .iter()
+                .map(ForcedScheduleCandidateDispatch::source_index)
+                .collect::<Vec<_>>(),
+            all_indices
+        );
+
+        let full_observations = Arc::new(Mutex::new(Vec::new()));
+        let mut full_replay =
+            forced_schedule_fixture(config.clone(), Arc::clone(&full_observations));
+        let full_report = full_replay
+            .run_forced_schedule_candidate(&full, limits)
+            .expect("full candidate must execute without RNG fallback");
+        assert_eq!(
+            full_report.termination,
+            ForcedScheduleCandidateTermination::Quiescent
+        );
+        assert_eq!(full_report.consumed_source_indices, all_indices);
+        assert!(full_report.lab.quiescent);
+        assert_eq!(full_report.lab.steps_total, schedule.terminal_steps());
+        assert_eq!(full_report.lab.now_nanos, schedule.terminal_nanos());
+        assert_eq!(
+            full_report.lab.trace_certificate.schedule_hash,
+            schedule.terminal_schedule_hash()
+        );
+        assert_eq!(*full_observations.lock(), *source_observations.lock());
+
+        let retained = schedule
+            .derive_candidate(&[1], limits)
+            .expect("derive one-choice candidate");
+        assert_eq!(retained.dispatches()[0].source_index(), 1);
+        assert_eq!(
+            retained.dispatches()[0].task(),
+            schedule.dispatches()[1].task()
+        );
+        assert_eq!(
+            retained.dispatches()[0].worker(),
+            schedule.dispatches()[1].worker()
+        );
+        assert_eq!(
+            retained.dispatches()[0].lane(),
+            schedule.dispatches()[1].lane()
+        );
+        assert_eq!(
+            retained.dispatches()[0].source_step(),
+            schedule.dispatches()[1].at_step()
+        );
+        assert_eq!(
+            retained.dispatches()[0].source_nanos(),
+            schedule.dispatches()[1].at_nanos()
+        );
+        let retained_observations = Arc::new(Mutex::new(Vec::new()));
+        let mut retained_replay =
+            forced_schedule_fixture(config.clone(), Arc::clone(&retained_observations));
+        let retained_report = retained_replay
+            .run_forced_schedule_candidate(&retained, limits)
+            .expect("retained source choice must execute directly");
+        assert_eq!(
+            retained_report.termination,
+            ForcedScheduleCandidateTermination::Exhausted
+        );
+        assert_eq!(retained_report.consumed_source_indices, vec![1]);
+        assert_eq!(retained_observations.lock().len(), 1);
+        assert!(!retained_report.lab.quiescent);
+
+        let empty = schedule
+            .derive_candidate(&[], limits)
+            .expect("derive empty deletion candidate");
+        let empty_observations = Arc::new(Mutex::new(Vec::new()));
+        let mut empty_replay = forced_schedule_fixture(config, Arc::clone(&empty_observations));
+        let empty_report = empty_replay
+            .run_forced_schedule_candidate(&empty, limits)
+            .expect("empty candidate must report exhaustion without RNG polling");
+        assert_eq!(
+            empty_report.termination,
+            ForcedScheduleCandidateTermination::Exhausted
+        );
+        assert!(empty_report.consumed_source_indices.is_empty());
+        assert_eq!(empty_report.work_units, 0);
+        assert!(empty_observations.lock().is_empty());
+        crate::test_complete!("forced_schedule_candidate_executes_only_retained_source_choices");
+    }
+
+    #[test]
+    fn forced_schedule_candidate_admission_is_bounded_and_source_derived() {
+        init_test("forced_schedule_candidate_admission_is_bounded_and_source_derived");
+        let config = LabConfig::new(0xCAAD_B0AD).worker_count(2).max_steps(128);
+        let source_observations = Arc::new(Mutex::new(Vec::new()));
+        let mut source = forced_schedule_fixture(config.clone(), source_observations);
+        source
+            .start_forced_schedule_recording(32)
+            .expect("start exact dispatch capture");
+        assert!(source.run_until_quiescent_with_report().quiescent);
+        let schedule = source
+            .finish_forced_schedule_recording()
+            .expect("complete exact dispatch projection");
+        let source_len = schedule.dispatches().len();
+        let limits = ForcedScheduleCandidateLimits::new(32, 32, 128);
+
+        assert!(matches!(
+            schedule.derive_candidate(&[], ForcedScheduleCandidateLimits::new(0, 32, 128)),
+            Err(ForcedScheduleError::ZeroCandidateLimit {
+                limit_name: "max_source_dispatches"
+            })
+        ));
+        assert!(matches!(
+            schedule.derive_candidate(&[], ForcedScheduleCandidateLimits::new(32, 0, 128)),
+            Err(ForcedScheduleError::ZeroCandidateLimit {
+                limit_name: "max_candidate_dispatches"
+            })
+        ));
+        assert!(matches!(
+            schedule.derive_candidate(&[], ForcedScheduleCandidateLimits::new(32, 32, 0)),
+            Err(ForcedScheduleError::ZeroCandidateLimit {
+                limit_name: "max_work_units"
+            })
+        ));
+        assert!(matches!(
+            schedule.derive_candidate(
+                &[],
+                ForcedScheduleCandidateLimits::new(source_len - 1, 32, 128)
+            ),
+            Err(ForcedScheduleError::CandidateSourceLimitExceeded { .. })
+        ));
+        assert!(matches!(
+            schedule.derive_candidate(&[0, 1], ForcedScheduleCandidateLimits::new(32, 1, 128)),
+            Err(ForcedScheduleError::DispatchLimitExceeded { .. })
+        ));
+        assert!(matches!(
+            schedule.derive_candidate(&[0, 0], limits),
+            Err(ForcedScheduleError::CandidateIndexOrder { .. })
+        ));
+        assert!(matches!(
+            schedule.derive_candidate(&[1, 0], limits),
+            Err(ForcedScheduleError::CandidateIndexOrder { .. })
+        ));
+        assert!(matches!(
+            schedule.derive_candidate(&[source_len], limits),
+            Err(ForcedScheduleError::CandidateIndexOutOfRange { .. })
+        ));
+
+        let all_indices = (0..source_len).collect::<Vec<_>>();
+        let full = schedule
+            .derive_candidate(&all_indices, limits)
+            .expect("derive valid full candidate");
+        let work_limited_observations = Arc::new(Mutex::new(Vec::new()));
+        let mut work_limited =
+            forced_schedule_fixture(config.clone(), Arc::clone(&work_limited_observations));
+        assert!(matches!(
+            work_limited.run_forced_schedule_candidate(
+                &full,
+                ForcedScheduleCandidateLimits::new(32, 32, 1)
+            ),
+            Err(ForcedScheduleError::CandidateWorkLimitExceeded { .. })
+        ));
+        assert!(
+            work_limited_observations.lock().is_empty(),
+            "minimum work refusal polled a task"
+        );
+
+        let mut wrong_task = schedule
+            .derive_candidate(&[0], limits)
+            .expect("derive source-owned candidate");
+        wrong_task.dispatches[0].dispatch.task.0 ^= 1;
+        let wrong_task_observations = Arc::new(Mutex::new(Vec::new()));
+        let mut wrong_task_replay =
+            forced_schedule_fixture(config.clone(), Arc::clone(&wrong_task_observations));
+        assert!(matches!(
+            wrong_task_replay.run_forced_schedule_candidate(&wrong_task, limits),
+            Err(ForcedScheduleError::TaskUnavailable { index: 0, .. })
+        ));
+        assert!(wrong_task_observations.lock().is_empty());
+
+        let mut wrong_config = schedule
+            .derive_candidate(&[0], limits)
+            .expect("derive source-owned candidate");
+        wrong_config.config_hash ^= 1;
+        let wrong_config_observations = Arc::new(Mutex::new(Vec::new()));
+        let mut wrong_config_replay =
+            forced_schedule_fixture(config, Arc::clone(&wrong_config_observations));
+        assert!(matches!(
+            wrong_config_replay.run_forced_schedule_candidate(&wrong_config, limits),
+            Err(ForcedScheduleError::ConfigMismatch { .. })
+        ));
+        assert!(wrong_config_observations.lock().is_empty());
+
+        let mut wrong_candidate_version = schedule
+            .derive_candidate(&[0], limits)
+            .expect("derive source-owned candidate");
+        wrong_candidate_version.version += 1;
+        let observations = Arc::new(Mutex::new(Vec::new()));
+        let mut replay = forced_schedule_fixture(config.clone(), Arc::clone(&observations));
+        assert!(matches!(
+            replay.run_forced_schedule_candidate(&wrong_candidate_version, limits),
+            Err(ForcedScheduleError::CandidateSchemaMismatch { .. })
+        ));
+        assert!(observations.lock().is_empty());
+
+        let mut wrong_source_version = schedule
+            .derive_candidate(&[0], limits)
+            .expect("derive source-owned candidate");
+        wrong_source_version.source_version += 1;
+        let observations = Arc::new(Mutex::new(Vec::new()));
+        let mut replay = forced_schedule_fixture(config.clone(), Arc::clone(&observations));
+        assert!(matches!(
+            replay.run_forced_schedule_candidate(&wrong_source_version, limits),
+            Err(ForcedScheduleError::SchemaMismatch { .. })
+        ));
+        assert!(observations.lock().is_empty());
+
+        let mut wrong_seed = schedule
+            .derive_candidate(&[0], limits)
+            .expect("derive source-owned candidate");
+        wrong_seed.seed ^= 1;
+        let observations = Arc::new(Mutex::new(Vec::new()));
+        let mut replay = forced_schedule_fixture(config.clone(), Arc::clone(&observations));
+        assert!(matches!(
+            replay.run_forced_schedule_candidate(&wrong_seed, limits),
+            Err(ForcedScheduleError::SeedMismatch { .. })
+        ));
+        assert!(observations.lock().is_empty());
+
+        let mut wrong_order = schedule
+            .derive_candidate(&[0, 1], limits)
+            .expect("derive source-owned candidate");
+        wrong_order.dispatches.swap(0, 1);
+        let observations = Arc::new(Mutex::new(Vec::new()));
+        let mut replay = forced_schedule_fixture(config.clone(), Arc::clone(&observations));
+        assert!(matches!(
+            replay.run_forced_schedule_candidate(&wrong_order, limits),
+            Err(ForcedScheduleError::CandidateIndexOrder { .. })
+        ));
+        assert!(observations.lock().is_empty());
+
+        let mut wrong_worker = schedule
+            .derive_candidate(&[0], limits)
+            .expect("derive source-owned candidate");
+        wrong_worker.dispatches[0].dispatch.worker ^= 1;
+        let observations = Arc::new(Mutex::new(Vec::new()));
+        let mut replay = forced_schedule_fixture(config.clone(), Arc::clone(&observations));
+        assert!(matches!(
+            replay.run_forced_schedule_candidate(&wrong_worker, limits),
+            Err(ForcedScheduleError::WorkerMismatch { index: 0, .. })
+                | Err(ForcedScheduleError::LaneMismatch { index: 0, .. })
+        ));
+        assert!(observations.lock().is_empty());
+
+        let mut wrong_lane = schedule
+            .derive_candidate(&[0], limits)
+            .expect("derive source-owned candidate");
+        wrong_lane.dispatches[0].dispatch.lane = match wrong_lane.dispatches[0].dispatch.lane {
+            DispatchLane::Cancel => DispatchLane::Ready,
+            DispatchLane::Timed | DispatchLane::Ready | DispatchLane::Stolen => {
+                DispatchLane::Cancel
+            }
+        };
+        let observations = Arc::new(Mutex::new(Vec::new()));
+        let mut replay = forced_schedule_fixture(config, Arc::clone(&observations));
+        assert!(matches!(
+            replay.run_forced_schedule_candidate(&wrong_lane, limits),
+            Err(ForcedScheduleError::LaneMismatch { index: 0, .. })
+                | Err(ForcedScheduleError::WorkerMismatch { index: 0, .. })
+        ));
+        assert!(observations.lock().is_empty());
+        crate::test_complete!("forced_schedule_candidate_admission_is_bounded_and_source_derived");
     }
 
     #[test]
