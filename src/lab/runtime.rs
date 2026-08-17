@@ -1944,6 +1944,15 @@ impl LabRuntime {
 
         for (candidate_index, retained) in candidate.dispatches.iter().enumerate() {
             loop {
+                if self.has_pending_dispatch_commands() {
+                    take_candidate_work(&mut work_units, limits.max_work_units)?;
+                    let dispatched = self.step_with_candidate_dispatch(None)?;
+                    debug_assert!(
+                        !dispatched,
+                        "candidate command pump must not poll a retained task"
+                    );
+                    continue;
+                }
                 if !self.candidate_has_runnable_work()
                     && let Some(deadline) = self.next_auto_advance_deadline()
                 {
@@ -1970,6 +1979,15 @@ impl LabRuntime {
             if self.candidate_has_runnable_work() {
                 break ForcedScheduleCandidateTermination::Exhausted;
             }
+            if self.has_pending_dispatch_commands() {
+                take_candidate_work(&mut work_units, limits.max_work_units)?;
+                let dispatched = self.step_with_candidate_dispatch(None)?;
+                debug_assert!(
+                    !dispatched,
+                    "candidate system-work pump must not poll an unrecorded task"
+                );
+                continue;
+            }
             if let Some(deadline) = self.next_auto_advance_deadline() {
                 take_candidate_work(&mut work_units, limits.max_work_units)?;
                 if deadline > self.now() {
@@ -1994,6 +2012,10 @@ impl LabRuntime {
     fn candidate_has_runnable_work(&self) -> bool {
         let now = self.now();
         self.scheduler.lock().has_runnable_work(now)
+    }
+
+    fn has_pending_dispatch_commands(&self) -> bool {
+        !self.spawn_mailbox.is_empty() || self.state.has_deferred_cancel_dispatches()
     }
 
     fn validate_forced_schedule_candidate(
@@ -2368,6 +2390,10 @@ impl LabRuntime {
             }
 
             // Scheduler is empty — check if we should auto-advance
+            if self.has_pending_dispatch_commands() {
+                self.step();
+                continue;
+            }
             if let Some(deadline) = self.next_auto_advance_deadline() {
                 if deadline > self.virtual_time {
                     self.advance_time_to(deadline);
@@ -2501,10 +2527,7 @@ impl LabRuntime {
             self.drain_handle_cancel_requests();
             self.drain_deferred_cancel_dispatches();
             let is_empty = self.scheduler.lock().is_empty();
-            if is_empty
-                && self.spawn_mailbox.handle_cancels_are_empty()
-                && !self.state.has_deferred_cancel_dispatches()
-            {
+            if is_empty && !self.has_pending_dispatch_commands() {
                 break;
             }
 
@@ -5236,7 +5259,8 @@ mod tests {
     use crate::record::{ObligationAbortReason, ObligationKind};
     use crate::runtime::deadline_monitor::{AdaptiveDeadlineConfig, WarningReason};
     #[cfg(unix)]
-    use crate::runtime::reactor::{Event, Interest};
+    use crate::runtime::reactor::Interest;
+    use crate::runtime::reactor::{Event, Token};
     use crate::types::{Budget, CancelKind, CancelReason, CxInner, Outcome, TaskId};
     use crate::util::ArenaIndex;
     use parking_lot::Mutex;
@@ -8606,6 +8630,187 @@ mod tests {
             runtime.scheduler.lock().schedule(task, label);
         }
         runtime
+    }
+
+    fn pending_spawn_with_future_reactor_fixture(
+        config: LabConfig,
+        observations: Arc<Mutex<Vec<u64>>>,
+    ) -> LabRuntime {
+        let mut runtime = LabRuntime::new(config);
+        let token = Token::new(0xCAAD);
+        runtime
+            .lab_reactor()
+            .inject_event(token, Event::readable(token), Duration::from_secs(1));
+
+        let root = runtime.state.create_root_region(Budget::INFINITE);
+        let pending = runtime
+            .state
+            .region(root)
+            .expect("root region")
+            .pending_spawn_handle();
+        let parent: crate::cx::Cx = crate::cx::Cx::new_with_drivers(
+            root,
+            TaskId::from_arena(ArenaIndex::new(u32::MAX - 1, 0)),
+            Budget::INFINITE,
+            None,
+            runtime.state.io_driver_handle(),
+            None,
+            runtime.state.timer_driver_handle(),
+            None,
+        )
+        .with_spawn_gateway(runtime.state.spawn_gateway())
+        .with_pending_spawn_counter(Some(pending));
+        let _handle = parent
+            .spawn(|child| async move {
+                observations.lock().push(child.now().as_nanos());
+            })
+            .expect("managed spawn enqueues");
+        assert_eq!(runtime.spawn_mailbox.len(), 1);
+        runtime
+    }
+
+    fn pending_command_before_timer_fixture(
+        config: LabConfig,
+        observations: Arc<Mutex<Vec<u64>>>,
+    ) -> LabRuntime {
+        let mut runtime = LabRuntime::new(config);
+        let root = runtime.state.create_root_region(Budget::INFINITE);
+        let gateway = runtime.state.spawn_gateway().expect("lab spawn gateway");
+        let missing = TaskId::from_arena(ArenaIndex::new(u32::MAX - 2, 0));
+        let (task, _handle) = runtime
+            .state
+            .create_task(root, Budget::INFINITE, async move {
+                let now = crate::cx::Cx::current().map_or(Time::ZERO, |cx| cx.now());
+                observations.lock().push(now.as_nanos());
+                assert!(gateway.enqueue_handle_cancel(missing, CancelReason::shutdown()));
+                crate::time::sleep(now, Duration::from_secs(1)).await;
+                let now = crate::cx::Cx::current().map_or(Time::ZERO, |cx| cx.now());
+                observations.lock().push(now.as_nanos());
+            })
+            .expect("create command-before-timer task");
+        runtime.scheduler.lock().schedule(task, 0);
+        runtime
+    }
+
+    #[test]
+    fn pending_dispatch_auto_advance_before_future_deadline() {
+        init_test("pending_dispatch_auto_advance_before_future_deadline");
+        let observations = Arc::new(Mutex::new(Vec::new()));
+        let mut runtime = pending_spawn_with_future_reactor_fixture(
+            LabConfig::new(0xCAAD_A070).max_steps(32),
+            Arc::clone(&observations),
+        );
+
+        let report = runtime.run_with_auto_advance();
+
+        assert_eq!(
+            *observations.lock(),
+            vec![0],
+            "queued spawn work must run before an unrelated future reactor deadline"
+        );
+        assert_eq!(report.termination, AutoAdvanceTermination::Quiescent);
+        assert_eq!(runtime.now(), Time::from_secs(1));
+        crate::test_complete!("pending_dispatch_auto_advance_before_future_deadline");
+    }
+
+    #[test]
+    fn pending_dispatch_run_until_idle_admits_spawn() {
+        init_test("pending_dispatch_run_until_idle_admits_spawn");
+        let observations = Arc::new(Mutex::new(Vec::new()));
+        let mut runtime = pending_spawn_with_future_reactor_fixture(
+            LabConfig::new(0x1D1E_CAAD).max_steps(32),
+            Arc::clone(&observations),
+        );
+
+        assert_eq!(runtime.run_until_idle(), 1);
+        assert_eq!(
+            *observations.lock(),
+            vec![0],
+            "idle detection must admit and poll queued managed spawns"
+        );
+        assert!(runtime.spawn_mailbox.is_empty());
+        crate::test_complete!("pending_dispatch_run_until_idle_admits_spawn");
+    }
+
+    #[test]
+    fn pending_dispatch_forced_candidate_before_future_deadline() {
+        init_test("pending_dispatch_forced_candidate_before_future_deadline");
+        let config = LabConfig::new(0xCAAD_CAAD).max_steps(32);
+        let source_observations = Arc::new(Mutex::new(Vec::new()));
+        let mut source = pending_spawn_with_future_reactor_fixture(
+            config.clone(),
+            Arc::clone(&source_observations),
+        );
+        source
+            .start_forced_schedule_recording(4)
+            .expect("start exact dispatch capture");
+        source.step();
+        assert!(source.is_quiescent());
+        let schedule = source
+            .finish_forced_schedule_recording()
+            .expect("capture one pending-spawn dispatch");
+        assert_eq!(schedule.dispatches().len(), 1);
+        assert_eq!(schedule.dispatches()[0].at_nanos(), 0);
+        assert_eq!(*source_observations.lock(), vec![0]);
+
+        let limits = ForcedScheduleCandidateLimits::new(4, 4, 16);
+        let candidate = schedule
+            .derive_candidate(&[0], limits)
+            .expect("derive full-retention candidate");
+        let replay_observations = Arc::new(Mutex::new(Vec::new()));
+        let mut replay =
+            pending_spawn_with_future_reactor_fixture(config, Arc::clone(&replay_observations));
+        let report = replay
+            .run_forced_schedule_candidate(&candidate, limits)
+            .expect("candidate must drain spawn admission before time advancement");
+
+        assert_eq!(
+            report.termination,
+            ForcedScheduleCandidateTermination::Quiescent
+        );
+        assert_eq!(report.consumed_source_indices, vec![0]);
+        assert_eq!(*replay_observations.lock(), vec![0]);
+        assert_eq!(report.lab.now_nanos, 0);
+        crate::test_complete!("pending_dispatch_forced_candidate_before_future_deadline");
+    }
+
+    #[test]
+    fn pending_dispatch_forced_candidate_before_later_retained_dispatch() {
+        init_test("pending_dispatch_forced_candidate_before_later_retained_dispatch");
+        let config = LabConfig::new(0xCAAD_C0DE).max_steps(32);
+        let source_observations = Arc::new(Mutex::new(Vec::new()));
+        let mut source =
+            pending_command_before_timer_fixture(config.clone(), Arc::clone(&source_observations));
+        source
+            .start_forced_schedule_recording(4)
+            .expect("start exact dispatch capture");
+        let source_report = source.run_with_auto_advance();
+        assert_eq!(source_report.termination, AutoAdvanceTermination::Quiescent);
+        let schedule = source
+            .finish_forced_schedule_recording()
+            .expect("capture both task dispatches");
+        assert_eq!(schedule.dispatches().len(), 2);
+        assert_eq!(*source_observations.lock(), vec![0, 1_000_000_000]);
+
+        let limits = ForcedScheduleCandidateLimits::new(4, 4, 16);
+        let candidate = schedule
+            .derive_candidate(&[0, 1], limits)
+            .expect("derive full-retention candidate");
+        let replay_observations = Arc::new(Mutex::new(Vec::new()));
+        let mut replay =
+            pending_command_before_timer_fixture(config, Arc::clone(&replay_observations));
+        let report = replay
+            .run_forced_schedule_candidate(&candidate, limits)
+            .expect("candidate must pump the command before advancing to the retained wake");
+
+        assert_eq!(
+            report.termination,
+            ForcedScheduleCandidateTermination::Quiescent
+        );
+        assert_eq!(report.consumed_source_indices, vec![0, 1]);
+        assert_eq!(*replay_observations.lock(), vec![0, 1_000_000_000]);
+        assert_eq!(report.lab.now_nanos, 1_000_000_000);
+        crate::test_complete!("pending_dispatch_forced_candidate_before_later_retained_dispatch");
     }
 
     #[test]
