@@ -8853,7 +8853,7 @@ mod tests {
         wrong_config.config_hash ^= 1;
         let wrong_config_observations = Arc::new(Mutex::new(Vec::new()));
         let mut wrong_config_replay =
-            forced_schedule_fixture(config, Arc::clone(&wrong_config_observations));
+            forced_schedule_fixture(config.clone(), Arc::clone(&wrong_config_observations));
         assert!(matches!(
             wrong_config_replay.run_forced_schedule_candidate(&wrong_config, limits),
             Err(ForcedScheduleError::ConfigMismatch { .. })
