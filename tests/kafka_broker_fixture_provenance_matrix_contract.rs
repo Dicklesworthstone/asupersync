@@ -18,8 +18,8 @@ use std::path::PathBuf;
 const ARTIFACT_PATH: &str = "artifacts/kafka_broker_fixture_provenance_matrix_v1.json";
 const DOC_PATH: &str = "docs/kafka_broker_fixture_provenance_matrix.md";
 const K0_3_PATH: &str = "artifacts/kafka_downstream_user_journey_inventory_v1.json";
-const ARTIFACT_SHA256: &str = "2a38fb6a35564d62a12a8a8da89baf575b909d899af326baf86bc56a5df9d7e3";
-const DOC_SHA256: &str = "f69b78bbf206c04a5a0ab51f21c1419310a089e1bebd12540f3818c867ea8696";
+const ARTIFACT_SHA256: &str = "2712d51c1398859bc30fcc70338060a4b20c32c0bf0802c72e76d05cc5fc53ab";
+const DOC_SHA256: &str = "8877f7a06d66a6940a214b9f1896b65612bdeb4a223c21b222617de964168423";
 const ARTIFACT_ID: &str = "kafka-broker-fixture-provenance-matrix-v1";
 const PROGRAM_ID: &str = "asupersync-ir2uf0";
 const BEAD_ID: &str = "asupersync-dep-p7-kafka-removal-sarszu.1.4";
@@ -184,7 +184,7 @@ const DIRECT_FIXTURE_PINS: &[(&str, &str, u64, u64, &str)] = &[
     ),
     (
         "tests/kafka_incumbent_semantics_matrix_contract.rs",
-        "42aa307cf457b1265f082cda8b6e163322d7bebcf45d617360f9a2a87a88cbf0",
+        "8800316e4a4c1bca6b75705221004ebd797d84944f99179b326a56da774ffb17",
         69_501,
         1_696,
         "UTF8_LINES",
