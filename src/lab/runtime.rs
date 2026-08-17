@@ -348,14 +348,15 @@ impl ForcedSchedule {
     ///
     /// # Errors
     ///
-    /// Returns [`ForcedScheduleError`] when the receipt is partial, malformed,
-    /// too large for the artifact format, or cannot allocate its exact output.
-    pub fn to_canonical_bytes(&self) -> Result<Vec<u8>, ForcedScheduleError> {
+    /// Returns [`ForcedScheduleArtifactError`] when the receipt is partial,
+    /// malformed, too large for the artifact format, or cannot allocate its
+    /// exact output.
+    pub fn to_canonical_bytes(&self) -> Result<Vec<u8>, ForcedScheduleArtifactError> {
         validate_complete_forced_schedule_shape(self)?;
         let expected_len = forced_schedule_artifact_len(self.dispatches.len())?;
         let mut bytes = Vec::new();
         bytes.try_reserve_exact(expected_len).map_err(|_| {
-            ForcedScheduleError::ArtifactAllocationFailed {
+            ForcedScheduleArtifactError::AllocationFailed {
                 requested: expected_len,
             }
         })?;
@@ -366,7 +367,7 @@ impl ForcedSchedule {
         bytes.extend_from_slice(&self.seed.to_le_bytes());
         bytes.extend_from_slice(&self.config_hash.to_le_bytes());
         let dispatch_count = u64::try_from(self.dispatches.len()).map_err(|_| {
-            ForcedScheduleError::ArtifactLengthOverflow {
+            ForcedScheduleArtifactError::LengthOverflow {
                 dispatch_count: u64::MAX,
             }
         })?;
@@ -399,38 +400,39 @@ impl ForcedSchedule {
     ///
     /// # Errors
     ///
-    /// Returns [`ForcedScheduleError`] for an unsupported or noncanonical
-    /// artifact, an incomplete source receipt, checksum mismatch, exceeded
-    /// caller limit, checked-arithmetic failure, or allocation refusal.
+    /// Returns [`ForcedScheduleArtifactError`] for an unsupported or
+    /// noncanonical artifact, an incomplete source receipt, checksum mismatch,
+    /// exceeded caller limit, checked-arithmetic failure, or allocation
+    /// refusal.
     pub fn try_from_canonical_bytes(
         bytes: &[u8],
         limits: ForcedScheduleDecodeLimits,
-    ) -> Result<Self, ForcedScheduleError> {
+    ) -> Result<Self, ForcedScheduleArtifactError> {
         if bytes.len() > limits.max_encoded_bytes {
-            return Err(ForcedScheduleError::ArtifactByteLimitExceeded {
+            return Err(ForcedScheduleArtifactError::ByteLimitExceeded {
                 found: bytes.len(),
                 limit: limits.max_encoded_bytes,
             });
         }
         if bytes.len() < FORCED_SCHEDULE_ARTIFACT_HEADER_LEN {
-            return Err(ForcedScheduleError::ArtifactTruncated {
+            return Err(ForcedScheduleArtifactError::Truncated {
                 expected: FORCED_SCHEDULE_ARTIFACT_HEADER_LEN,
                 found: bytes.len(),
             });
         }
         if bytes[..FORCED_SCHEDULE_ARTIFACT_MAGIC.len()] != FORCED_SCHEDULE_ARTIFACT_MAGIC {
-            return Err(ForcedScheduleError::ArtifactMagicMismatch);
+            return Err(ForcedScheduleArtifactError::MagicMismatch);
         }
         let artifact_version = forced_schedule_artifact_u32(bytes, 8)?;
         if artifact_version != FORCED_SCHEDULE_ARTIFACT_VERSION {
-            return Err(ForcedScheduleError::ArtifactVersionMismatch {
+            return Err(ForcedScheduleArtifactError::VersionMismatch {
                 expected: FORCED_SCHEDULE_ARTIFACT_VERSION,
                 found: artifact_version,
             });
         }
         let version = forced_schedule_artifact_u32(bytes, 12)?;
         if version != FORCED_SCHEDULE_SCHEMA_VERSION {
-            return Err(ForcedScheduleError::SchemaMismatch {
+            return Err(ForcedScheduleArtifactError::SchemaMismatch {
                 expected: FORCED_SCHEDULE_SCHEMA_VERSION,
                 found: version,
             });
@@ -440,24 +442,24 @@ impl ForcedSchedule {
         let dispatch_count_u64 =
             forced_schedule_artifact_u64(bytes, FORCED_SCHEDULE_ARTIFACT_COUNT_OFFSET)?;
         let dispatch_count = usize::try_from(dispatch_count_u64).map_err(|_| {
-            ForcedScheduleError::ArtifactLengthOverflow {
+            ForcedScheduleArtifactError::LengthOverflow {
                 dispatch_count: dispatch_count_u64,
             }
         })?;
         if dispatch_count > limits.max_dispatches {
-            return Err(ForcedScheduleError::DispatchLimitExceeded {
+            return Err(ForcedScheduleArtifactError::DispatchLimitExceeded {
                 found: dispatch_count,
                 limit: limits.max_dispatches,
             });
         }
         let decoded_dispatch_bytes = dispatch_count
             .checked_mul(std::mem::size_of::<ForcedDispatch>())
-            .ok_or(ForcedScheduleError::ArtifactLengthOverflow {
+            .ok_or(ForcedScheduleArtifactError::LengthOverflow {
                 dispatch_count: dispatch_count_u64,
             })?;
         if decoded_dispatch_bytes > limits.max_decoded_dispatch_bytes {
             return Err(
-                ForcedScheduleError::ArtifactDecodedAllocationLimitExceeded {
+                ForcedScheduleArtifactError::DecodedAllocationLimitExceeded {
                     requested: decoded_dispatch_bytes,
                     limit: limits.max_decoded_dispatch_bytes,
                 },
@@ -466,13 +468,13 @@ impl ForcedSchedule {
 
         let expected_len = forced_schedule_artifact_len(dispatch_count)?;
         if bytes.len() < expected_len {
-            return Err(ForcedScheduleError::ArtifactTruncated {
+            return Err(ForcedScheduleArtifactError::Truncated {
                 expected: expected_len,
                 found: bytes.len(),
             });
         }
         if bytes.len() > expected_len {
-            return Err(ForcedScheduleError::ArtifactTrailingBytes {
+            return Err(ForcedScheduleArtifactError::TrailingBytes {
                 expected: expected_len,
                 found: bytes.len(),
             });
@@ -480,12 +482,12 @@ impl ForcedSchedule {
         let checksum_offset = expected_len - FORCED_SCHEDULE_ARTIFACT_CHECKSUM_LEN;
         let actual_checksum = forced_schedule_artifact_checksum(&bytes[..checksum_offset]);
         if bytes[checksum_offset..] != actual_checksum {
-            return Err(ForcedScheduleError::ArtifactChecksumMismatch);
+            return Err(ForcedScheduleArtifactError::ChecksumMismatch);
         }
 
         let mut dispatches = Vec::new();
         dispatches.try_reserve_exact(dispatch_count).map_err(|_| {
-            ForcedScheduleError::ArtifactAllocationFailed {
+            ForcedScheduleArtifactError::AllocationFailed {
                 requested: decoded_dispatch_bytes,
             }
         })?;
@@ -527,7 +529,7 @@ impl ForcedSchedule {
         };
         validate_complete_forced_schedule_shape(&schedule)?;
         if schedule.to_canonical_bytes()?.as_slice() != bytes {
-            return Err(ForcedScheduleError::ArtifactNonCanonical);
+            return Err(ForcedScheduleArtifactError::NonCanonical);
         }
         Ok(schedule)
     }
@@ -729,83 +731,6 @@ pub enum ForcedScheduleError {
         /// Configured source recording limit.
         max_dispatches: usize,
     },
-    /// The artifact exceeds the caller's encoded-byte admission limit.
-    #[error("forced schedule artifact has {found} bytes, limit is {limit}")]
-    ArtifactByteLimitExceeded {
-        /// Supplied encoded byte length.
-        found: usize,
-        /// Caller-owned encoded byte limit.
-        limit: usize,
-    },
-    /// The artifact magic prefix is not recognized.
-    #[error("forced schedule artifact magic mismatch")]
-    ArtifactMagicMismatch,
-    /// The artifact codec version is unsupported.
-    #[error("forced schedule artifact version mismatch: expected {expected}, found {found}")]
-    ArtifactVersionMismatch {
-        /// Supported artifact version.
-        expected: u32,
-        /// Supplied artifact version.
-        found: u32,
-    },
-    /// Artifact size arithmetic overflowed before allocation.
-    #[error("forced schedule artifact length overflow for {dispatch_count} dispatches")]
-    ArtifactLengthOverflow {
-        /// Untrusted dispatch count that overflowed admission arithmetic.
-        dispatch_count: u64,
-    },
-    /// The artifact ended before its declared canonical length.
-    #[error("forced schedule artifact is truncated: expected {expected} bytes, found {found}")]
-    ArtifactTruncated {
-        /// Minimum or exact required byte length.
-        expected: usize,
-        /// Supplied byte length.
-        found: usize,
-    },
-    /// Bytes remain after the canonical artifact boundary.
-    #[error("forced schedule artifact has trailing bytes: expected {expected}, found {found}")]
-    ArtifactTrailingBytes {
-        /// Exact canonical byte length.
-        expected: usize,
-        /// Supplied byte length.
-        found: usize,
-    },
-    /// The SHA-256 integrity binding does not match the artifact body.
-    #[error("forced schedule artifact checksum mismatch")]
-    ArtifactChecksumMismatch,
-    /// Decoded dispatch storage exceeds the caller's allocation admission.
-    #[error("forced schedule artifact needs {requested} decoded dispatch bytes, limit is {limit}")]
-    ArtifactDecodedAllocationLimitExceeded {
-        /// Required decoded dispatch-vector bytes.
-        requested: usize,
-        /// Caller-owned decoded allocation limit.
-        limit: usize,
-    },
-    /// Exact artifact or dispatch-vector allocation failed.
-    #[error("forced schedule artifact could not allocate {requested} bytes")]
-    ArtifactAllocationFailed {
-        /// Exact requested allocation size.
-        requested: usize,
-    },
-    /// A dispatch encoded an unsupported scheduler-lane tag.
-    #[error("forced schedule artifact lane tag {tag} is invalid at dispatch {index}")]
-    ArtifactLaneTag {
-        /// Dispatch containing the invalid tag.
-        index: usize,
-        /// Unsupported lane tag.
-        tag: u8,
-    },
-    /// A boolean field used a noncanonical tag.
-    #[error("forced schedule artifact boolean {field} has invalid tag {tag}")]
-    ArtifactBooleanTag {
-        /// Stable field name.
-        field: &'static str,
-        /// Unsupported boolean tag.
-        tag: u8,
-    },
-    /// Parsed fields did not reproduce the exact input bytes.
-    #[error("forced schedule artifact is not canonically encoded")]
-    ArtifactNonCanonical,
     /// A candidate limit was configured as zero.
     #[error("forced schedule candidate limit {limit_name} must be nonzero")]
     ZeroCandidateLimit {
@@ -1059,6 +984,112 @@ pub enum ForcedScheduleError {
     },
 }
 
+/// Fail-closed error for the canonical [`ForcedSchedule`] artifact codec.
+///
+/// This error is separate from [`ForcedScheduleError`] so adding the codec in
+/// a `0.4.x` release does not add variants to that existing exhaustively
+/// matchable public enum.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ForcedScheduleArtifactError {
+    /// The complete schedule is not valid replay authority.
+    #[error(transparent)]
+    Schedule(#[from] ForcedScheduleError),
+    /// The artifact exceeds the caller's encoded-byte admission limit.
+    #[error("forced schedule artifact has {found} bytes, limit is {limit}")]
+    ByteLimitExceeded {
+        /// Supplied encoded byte length.
+        found: usize,
+        /// Caller-owned encoded byte limit.
+        limit: usize,
+    },
+    /// The artifact magic prefix is not recognized.
+    #[error("forced schedule artifact magic mismatch")]
+    MagicMismatch,
+    /// The artifact codec version is unsupported.
+    #[error("forced schedule artifact version mismatch: expected {expected}, found {found}")]
+    VersionMismatch {
+        /// Supported artifact version.
+        expected: u32,
+        /// Supplied artifact version.
+        found: u32,
+    },
+    /// The encoded schedule schema is unsupported.
+    #[error("forced schedule schema mismatch: expected {expected}, found {found}")]
+    SchemaMismatch {
+        /// Supported schedule schema.
+        expected: u32,
+        /// Supplied schedule schema.
+        found: u32,
+    },
+    /// Artifact size arithmetic overflowed before allocation.
+    #[error("forced schedule artifact length overflow for {dispatch_count} dispatches")]
+    LengthOverflow {
+        /// Untrusted dispatch count that overflowed admission arithmetic.
+        dispatch_count: u64,
+    },
+    /// The artifact ended before its declared canonical length.
+    #[error("forced schedule artifact is truncated: expected {expected} bytes, found {found}")]
+    Truncated {
+        /// Minimum or exact required byte length.
+        expected: usize,
+        /// Supplied byte length.
+        found: usize,
+    },
+    /// Bytes remain after the canonical artifact boundary.
+    #[error("forced schedule artifact has trailing bytes: expected {expected}, found {found}")]
+    TrailingBytes {
+        /// Exact canonical byte length.
+        expected: usize,
+        /// Supplied byte length.
+        found: usize,
+    },
+    /// The SHA-256 integrity binding does not match the artifact body.
+    #[error("forced schedule artifact checksum mismatch")]
+    ChecksumMismatch,
+    /// The decoded dispatch count exceeds the caller's admission limit.
+    #[error("forced schedule artifact has {found} dispatches, limit is {limit}")]
+    DispatchLimitExceeded {
+        /// Supplied number of dispatches.
+        found: usize,
+        /// Caller-owned dispatch limit.
+        limit: usize,
+    },
+    /// Decoded dispatch storage exceeds the caller's allocation admission.
+    #[error("forced schedule artifact needs {requested} decoded dispatch bytes, limit is {limit}")]
+    DecodedAllocationLimitExceeded {
+        /// Required decoded dispatch-vector bytes.
+        requested: usize,
+        /// Caller-owned decoded allocation limit.
+        limit: usize,
+    },
+    /// Exact artifact or dispatch-vector allocation failed.
+    #[error("forced schedule artifact could not allocate {requested} bytes")]
+    AllocationFailed {
+        /// Exact requested allocation size.
+        requested: usize,
+    },
+    /// A dispatch encoded an unsupported scheduler-lane tag.
+    #[error("forced schedule artifact lane tag {tag} is invalid at dispatch {index}")]
+    LaneTag {
+        /// Dispatch containing the invalid tag.
+        index: usize,
+        /// Unsupported lane tag.
+        tag: u8,
+    },
+    /// A boolean field used a noncanonical tag.
+    #[error("forced schedule artifact boolean {field} has invalid tag {tag}")]
+    BooleanTag {
+        /// Stable field name.
+        field: &'static str,
+        /// Unsupported boolean tag.
+        tag: u8,
+    },
+    /// Parsed fields did not reproduce the exact input bytes.
+    #[error("forced schedule artifact is not canonically encoded")]
+    NonCanonical,
+}
+
 #[derive(Debug)]
 struct ForcedScheduleRecorder {
     max_dispatches: usize,
@@ -1152,18 +1183,20 @@ fn validate_dispatch_order(dispatches: &[ForcedDispatch]) -> Result<(), ForcedSc
     Ok(())
 }
 
-fn forced_schedule_artifact_len(dispatch_count: usize) -> Result<usize, ForcedScheduleError> {
+fn forced_schedule_artifact_len(
+    dispatch_count: usize,
+) -> Result<usize, ForcedScheduleArtifactError> {
     let dispatch_count_u64 = u64::try_from(dispatch_count).unwrap_or(u64::MAX);
     let dispatch_bytes = dispatch_count
         .checked_mul(FORCED_SCHEDULE_ARTIFACT_DISPATCH_LEN)
-        .ok_or(ForcedScheduleError::ArtifactLengthOverflow {
+        .ok_or(ForcedScheduleArtifactError::LengthOverflow {
             dispatch_count: dispatch_count_u64,
         })?;
     FORCED_SCHEDULE_ARTIFACT_HEADER_LEN
         .checked_add(dispatch_bytes)
         .and_then(|len| len.checked_add(FORCED_SCHEDULE_ARTIFACT_TERMINAL_LEN))
         .and_then(|len| len.checked_add(FORCED_SCHEDULE_ARTIFACT_CHECKSUM_LEN))
-        .ok_or(ForcedScheduleError::ArtifactLengthOverflow {
+        .ok_or(ForcedScheduleArtifactError::LengthOverflow {
             dispatch_count: dispatch_count_u64,
         })
 }
@@ -1175,14 +1208,17 @@ fn forced_schedule_artifact_checksum(bytes: &[u8]) -> [u8; 32] {
     hasher.finalize().into()
 }
 
-fn forced_schedule_artifact_u32(bytes: &[u8], offset: usize) -> Result<u32, ForcedScheduleError> {
+fn forced_schedule_artifact_u32(
+    bytes: &[u8],
+    offset: usize,
+) -> Result<u32, ForcedScheduleArtifactError> {
     let end = offset
         .checked_add(4)
-        .ok_or(ForcedScheduleError::ArtifactLengthOverflow {
+        .ok_or(ForcedScheduleArtifactError::LengthOverflow {
             dispatch_count: u64::MAX,
         })?;
     let Some(raw) = bytes.get(offset..end) else {
-        return Err(ForcedScheduleError::ArtifactTruncated {
+        return Err(ForcedScheduleArtifactError::Truncated {
             expected: end,
             found: bytes.len(),
         });
@@ -1192,14 +1228,17 @@ fn forced_schedule_artifact_u32(bytes: &[u8], offset: usize) -> Result<u32, Forc
     Ok(u32::from_le_bytes(value))
 }
 
-fn forced_schedule_artifact_u64(bytes: &[u8], offset: usize) -> Result<u64, ForcedScheduleError> {
+fn forced_schedule_artifact_u64(
+    bytes: &[u8],
+    offset: usize,
+) -> Result<u64, ForcedScheduleArtifactError> {
     let end = offset
         .checked_add(8)
-        .ok_or(ForcedScheduleError::ArtifactLengthOverflow {
+        .ok_or(ForcedScheduleArtifactError::LengthOverflow {
             dispatch_count: u64::MAX,
         })?;
     let Some(raw) = bytes.get(offset..end) else {
-        return Err(ForcedScheduleError::ArtifactTruncated {
+        return Err(ForcedScheduleArtifactError::Truncated {
             expected: end,
             found: bytes.len(),
         });
@@ -1221,21 +1260,21 @@ const fn forced_schedule_lane_tag(lane: DispatchLane) -> u8 {
 fn forced_schedule_lane_from_tag(
     index: usize,
     tag: u8,
-) -> Result<DispatchLane, ForcedScheduleError> {
+) -> Result<DispatchLane, ForcedScheduleArtifactError> {
     match tag {
         0 => Ok(DispatchLane::Cancel),
         1 => Ok(DispatchLane::Timed),
         2 => Ok(DispatchLane::Ready),
         3 => Ok(DispatchLane::Stolen),
-        _ => Err(ForcedScheduleError::ArtifactLaneTag { index, tag }),
+        _ => Err(ForcedScheduleArtifactError::LaneTag { index, tag }),
     }
 }
 
-fn forced_schedule_bool(tag: u8, field: &'static str) -> Result<bool, ForcedScheduleError> {
+fn forced_schedule_bool(tag: u8, field: &'static str) -> Result<bool, ForcedScheduleArtifactError> {
     match tag {
         0 => Ok(false),
         1 => Ok(true),
-        _ => Err(ForcedScheduleError::ArtifactBooleanTag { field, tag }),
+        _ => Err(ForcedScheduleArtifactError::BooleanTag { field, tag }),
     }
 }
 
@@ -9669,6 +9708,178 @@ mod tests {
         assert_eq!(receipt.schedule_hash, schedule.terminal_schedule_hash());
         assert_eq!(*replay_observations.lock(), *source_observations.lock());
         crate::test_complete!("forced_schedule_replay_executes_recorded_choices_before_polling");
+    }
+
+    fn recorded_forced_schedule_fixture() -> ForcedSchedule {
+        let config = LabConfig::new(0xA471_FAC7).worker_count(2).max_steps(128);
+        let observations = Arc::new(Mutex::new(Vec::new()));
+        let mut source = forced_schedule_fixture(config, observations);
+        source
+            .start_forced_schedule_recording(32)
+            .expect("start artifact fixture capture");
+        assert!(source.run_until_quiescent_with_report().quiescent);
+        source
+            .finish_forced_schedule_recording()
+            .expect("finish complete artifact fixture capture")
+    }
+
+    fn reseal_forced_schedule_artifact(bytes: &mut [u8]) {
+        let checksum_offset = bytes.len() - FORCED_SCHEDULE_ARTIFACT_CHECKSUM_LEN;
+        let checksum = forced_schedule_artifact_checksum(&bytes[..checksum_offset]);
+        bytes[checksum_offset..].copy_from_slice(&checksum);
+    }
+
+    #[test]
+    fn forced_schedule_artifact_roundtrip_is_exact_and_bounded() {
+        init_test("forced_schedule_artifact_roundtrip_is_exact_and_bounded");
+        let schedule = recorded_forced_schedule_fixture();
+        let bytes = schedule
+            .to_canonical_bytes()
+            .expect("encode complete forced schedule");
+        assert_eq!(
+            schedule.to_canonical_bytes().expect("repeat encoding"),
+            bytes,
+            "canonical encoding must be deterministic"
+        );
+
+        let decoded_bytes = schedule.dispatches().len() * std::mem::size_of::<ForcedDispatch>();
+        let limits = ForcedScheduleDecodeLimits::new(
+            bytes.len(),
+            schedule.dispatches().len(),
+            decoded_bytes,
+        );
+        assert_eq!(
+            ForcedSchedule::try_from_canonical_bytes(&bytes, limits)
+                .expect("decode canonical artifact"),
+            schedule
+        );
+
+        assert!(matches!(
+            ForcedSchedule::try_from_canonical_bytes(
+                &bytes,
+                ForcedScheduleDecodeLimits::new(
+                    bytes.len() - 1,
+                    schedule.dispatches().len(),
+                    decoded_bytes,
+                ),
+            ),
+            Err(ForcedScheduleArtifactError::ByteLimitExceeded { .. })
+        ));
+        assert!(matches!(
+            ForcedSchedule::try_from_canonical_bytes(
+                &bytes,
+                ForcedScheduleDecodeLimits::new(
+                    bytes.len(),
+                    schedule.dispatches().len() - 1,
+                    decoded_bytes,
+                ),
+            ),
+            Err(ForcedScheduleArtifactError::DispatchLimitExceeded { .. })
+        ));
+        assert!(matches!(
+            ForcedSchedule::try_from_canonical_bytes(
+                &bytes,
+                ForcedScheduleDecodeLimits::new(
+                    bytes.len(),
+                    schedule.dispatches().len(),
+                    decoded_bytes - 1,
+                ),
+            ),
+            Err(ForcedScheduleArtifactError::DecodedAllocationLimitExceeded { .. })
+        ));
+        crate::test_complete!("forced_schedule_artifact_roundtrip_is_exact_and_bounded");
+    }
+
+    #[test]
+    fn forced_schedule_artifact_rejects_hostile_encodings() {
+        init_test("forced_schedule_artifact_rejects_hostile_encodings");
+        let schedule = recorded_forced_schedule_fixture();
+        let bytes = schedule
+            .to_canonical_bytes()
+            .expect("encode complete forced schedule");
+        let limits = ForcedScheduleDecodeLimits::new(
+            bytes.len() + 1,
+            schedule.dispatches().len() + 1,
+            (schedule.dispatches().len() + 1) * std::mem::size_of::<ForcedDispatch>(),
+        );
+
+        assert!(matches!(
+            ForcedSchedule::try_from_canonical_bytes(&bytes[..12], limits),
+            Err(ForcedScheduleArtifactError::Truncated { .. })
+        ));
+
+        let mut malformed = bytes.clone();
+        malformed[0] ^= 0x80;
+        assert_eq!(
+            ForcedSchedule::try_from_canonical_bytes(&malformed, limits),
+            Err(ForcedScheduleArtifactError::MagicMismatch)
+        );
+
+        let mut malformed = bytes.clone();
+        malformed[8..12].copy_from_slice(&(FORCED_SCHEDULE_ARTIFACT_VERSION + 1).to_le_bytes());
+        assert!(matches!(
+            ForcedSchedule::try_from_canonical_bytes(&malformed, limits),
+            Err(ForcedScheduleArtifactError::VersionMismatch { .. })
+        ));
+
+        let mut malformed = bytes.clone();
+        malformed.push(0);
+        assert!(matches!(
+            ForcedSchedule::try_from_canonical_bytes(&malformed, limits),
+            Err(ForcedScheduleArtifactError::TrailingBytes { .. })
+        ));
+
+        let mut malformed = bytes.clone();
+        let last = malformed.len() - 1;
+        malformed[last] ^= 1;
+        assert_eq!(
+            ForcedSchedule::try_from_canonical_bytes(&malformed, limits),
+            Err(ForcedScheduleArtifactError::ChecksumMismatch)
+        );
+
+        let mut malformed = bytes.clone();
+        malformed[FORCED_SCHEDULE_ARTIFACT_HEADER_LEN + 12] = u8::MAX;
+        reseal_forced_schedule_artifact(&mut malformed);
+        assert!(matches!(
+            ForcedSchedule::try_from_canonical_bytes(&malformed, limits),
+            Err(ForcedScheduleArtifactError::LaneTag { index: 0, .. })
+        ));
+
+        let mut malformed = bytes;
+        let terminal_offset = FORCED_SCHEDULE_ARTIFACT_HEADER_LEN
+            + schedule.dispatches().len() * FORCED_SCHEDULE_ARTIFACT_DISPATCH_LEN;
+        malformed[terminal_offset + 24] = 2;
+        reseal_forced_schedule_artifact(&mut malformed);
+        assert!(matches!(
+            ForcedSchedule::try_from_canonical_bytes(&malformed, limits),
+            Err(ForcedScheduleArtifactError::BooleanTag {
+                field: "terminal_quiescent",
+                tag: 2,
+            })
+        ));
+        crate::test_complete!("forced_schedule_artifact_rejects_hostile_encodings");
+    }
+
+    #[test]
+    fn forced_schedule_artifact_refuses_partial_authority() {
+        init_test("forced_schedule_artifact_refuses_partial_authority");
+        let config = LabConfig::new(0xA471_0BAD).max_steps(128);
+        let observations = Arc::new(Mutex::new(Vec::new()));
+        let mut source = forced_schedule_fixture(config, observations);
+        source
+            .start_forced_schedule_recording(32)
+            .expect("start partial artifact fixture capture");
+        let partial = source
+            .finish_forced_schedule_recording()
+            .expect("finish represented partial capture");
+
+        assert_eq!(
+            partial.to_canonical_bytes(),
+            Err(ForcedScheduleArtifactError::Schedule(
+                ForcedScheduleError::PartialSource
+            ))
+        );
+        crate::test_complete!("forced_schedule_artifact_refuses_partial_authority");
     }
 
     #[test]
