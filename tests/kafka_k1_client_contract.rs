@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 const ARTIFACT_PATH: &str = "artifacts/kafka_k1_obligation_index_v1.json";
 const DOC_PATH: &str = "docs/kafka_k1_client_contract.md";
 const TRACKER_PATH: &str = ".beads/issues.jsonl";
-const ARTIFACT_SHA256: &str = "2fdd5443349d21acf80af92d6edafdb15a9dc05e1cdc45537852dd4c3c82f06b";
+const ARTIFACT_SHA256: &str = "95bc5a83cb7710e43475f4420c0bf552df2a859d1b40878ab3fb8767144216ee";
 const DOC_SHA256: &str = "3657c47298408fdd5f6906376265ac3c587085ba5b0df67988fac7266fd6e116";
 
 const ARTIFACT_ID: &str = "kafka-k1-obligation-index-v1";

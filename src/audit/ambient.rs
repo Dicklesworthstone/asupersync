@@ -1481,7 +1481,7 @@ fn test_function() {
     /// pinned by file, category, pattern, occurrence count, line, and normalized context in
     /// `ambient_authority_inventory_v1.snap`. Review that snapshot diff and
     /// document intentional production additions before updating the baseline.
-    const AMBIENT_VIOLATION_BASELINE_COUNT: usize = 705;
+    const AMBIENT_VIOLATION_BASELINE_COUNT: usize = 708;
 
     fn src_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("src")

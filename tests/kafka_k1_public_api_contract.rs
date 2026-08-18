@@ -22,7 +22,7 @@ const K0_2_PATH: &str = "artifacts/kafka_incumbent_semantics_matrix_v1.json";
 const K0_3_PATH: &str = "artifacts/kafka_downstream_user_journey_inventory_v1.json";
 const TRACKER_PATH: &str = ".beads/issues.jsonl";
 
-const ARTIFACT_SHA256: &str = "ab05e82ea51ef27fcf0b09d303c42f13c07063f0a1ee95a23ce29bb03d56c429";
+const ARTIFACT_SHA256: &str = "2b2e08c4d095dae003311b625f54845fbe69b1a741a3e5970f71cd754aa6a21c";
 const DOC_SHA256: &str = "ee938c6af5aa904c824b46697a996973c6248fdc6de56bf6db1d158ab54ba153";
 
 const ARTIFACT_ID: &str = "kafka-k1-public-api-contract-v1";
@@ -53,7 +53,7 @@ const RENAMED_ALIAS_SHA256: &str =
 
 const SEMANTIC_ID_SHA256: &str = "a9967c47346ee6386e9e8836d73e819a784f829baa6d255eb24e55aae1950cf7";
 const SEMANTIC_ROW_SHA256: &str =
-    "d19103e0fb6dd8b291405b1925c15d14cfacdf970901c766c10e06fcdbd7beab";
+    "ada6796514f5502ddd095dc05904f312bff387bc3a7fe70caf1cae0384ce3396";
 const SHARED_ID_SHA256: &str = "92ab055d5d14e4971daf298e54c9f5036ecf71c490d579270f4789b889fc86a5";
 const SHARED_OBJECT_SHA256: &str =
     "558e38b863ad5a8e423a7d2f3731ada112a7d0bea16cf60484fd5c383efdfcb0";

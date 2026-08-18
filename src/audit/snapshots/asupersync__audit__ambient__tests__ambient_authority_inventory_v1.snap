@@ -902,7 +902,7 @@ Time	observability/swarm_pressure_governor.rs	457	Instant::now()	reported_at: In
 Time	raptorq/decoder.rs	1536	Instant::now()	let now = Instant::now();
 Time	raptorq/decoder.rs	78	Instant::now()	last_access: Instant::now(),
 Time	runtime/builder.rs	3664	Instant::now()	let started = Instant::now();
-Time	runtime/builder.rs	4198	Instant::now()	let started = Instant::now();
+Time	runtime/builder.rs	4191	Instant::now()	*completed_at = Some(Instant::now());
 Time	runtime/deadline_monitor.rs	17	Instant::now()	Instant::now()
 Time	runtime/epoch_gc.rs	467	Instant::now()	enqueued_at: Instant::now(),
 Time	runtime/epoch_gc.rs	486	Instant::now()	let start_time = Instant::now();
