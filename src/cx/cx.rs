@@ -604,25 +604,22 @@ fn next_current_cx_frame_id() -> u64 {
 #[cfg_attr(feature = "test-internals", visibility::make(pub))]
 /// Guard returned by ambient current-context installation helpers.
 pub struct CurrentCxGuard {
-    /// Whether this guard pushed a frame (true) or was a no-op
-    /// (false, when caller passed `None`). Determines whether drop
-    /// pops.
-    pushed: bool,
+    /// Identity of the exact frame installed by this guard. `None` means the
+    /// caller installed no context.
     frame_id: Option<u64>,
     _not_send: std::marker::PhantomData<*mut ()>,
 }
 
 impl Drop for CurrentCxGuard {
     fn drop(&mut self) {
-        if !self.pushed {
+        let Some(frame_id) = self.frame_id.take() else {
             return;
-        }
-        let frame_id = self.frame_id.take();
+        };
         let _ = CURRENT_CX_STACK.try_with(|stack| {
             let mut stack = stack.borrow_mut();
-            if stack.last().is_some_and(|frame| Some(frame.id) == frame_id) {
+            if stack.last().is_some_and(|frame| frame.id == frame_id) {
                 stack.pop();
-            } else if let Some(index) = stack.iter().rposition(|frame| Some(frame.id) == frame_id) {
+            } else if let Some(index) = stack.iter().rposition(|frame| frame.id == frame_id) {
                 stack.remove(index);
             } else {
                 debug_assert!(false, "current Cx guard frame was already removed");
@@ -816,7 +813,6 @@ impl FullCx {
             None => None,
         });
         CurrentCxGuard {
-            pushed: frame_id.is_some(),
             frame_id,
             _not_send: std::marker::PhantomData,
         }
@@ -866,7 +862,6 @@ where
             id
         });
         CurrentCxGuard {
-            pushed: true,
             frame_id: Some(frame_id),
             _not_send: std::marker::PhantomData,
         }
@@ -930,7 +925,6 @@ impl FullCx {
             Some(id)
         });
         CurrentCxGuard {
-            pushed: frame_id.is_some(),
             frame_id,
             _not_send: std::marker::PhantomData,
         }
