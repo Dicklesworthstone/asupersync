@@ -10,12 +10,15 @@ Asupersync is a spec-first, cancel-correct, capability-secure async runtime for 
 - Commit links point to representative commits, not exhaustive lists.
 - Organized by landed capabilities within each version, not by diff order.
 
-Scope window: current work through 2026-08-17, reconstructed from git history,
+Scope window: current work through 2026-08-18, reconstructed from git history,
 beads, benchmark ledgers, and live repo artifacts; the latest published
-GitHub Release/tag baseline is `v0.4.7`.
+GitHub Release/tag baseline is `v0.4.8`.
 
 ## Version Timeline
 
+- **v0.4.8 Release**: patch release fixing cross-runtime local-task placement,
+  foreign-worker cancellation routing, and out-of-order ambient-context guard
+  teardown while preserving the v0.4.3 public compatibility floor.
 - **v0.4.7 Release**: patch release adding typed runtime-handle join outcomes
   and hardening authenticated QUIC/ATP reassembly while preserving the v0.4.3
   public compatibility floor.
@@ -51,6 +54,36 @@ GitHub Release/tag baseline is `v0.4.7`.
 ---
 
 ## [Unreleased]
+
+## [v0.4.8] - 2026-08-18
+
+### Runtime correctness
+
+- **Local tasks now remain owned by the runtime that accepted them.** A
+  `spawn_local` issued while another runtime's worker TLS was active could
+  previously publish the task into that foreign worker's owner-local lane.
+  Local admission now verifies runtime ownership and otherwise uses the
+  accepting runtime's mailbox, preserving the task's non-`Send` placement and
+  cleanup contract ([`53b6813`](https://github.com/Dicklesworthstone/asupersync/commit/53b681391)).
+- **Cancellation no longer targets a foreign worker's local queue.** The
+  cancellation fast path now checks scheduler ownership before using the
+  current worker-local lane, preventing worker-index collisions across runtime
+  instances from stranding cancellation delivery. Native regression coverage
+  parks the task before aborting it and verifies the exact acknowledged result
+  and cleanup state ([`c2c8965`](https://github.com/Dicklesworthstone/asupersync/commit/c2c896520)).
+- **Ambient `Cx` guards remove the exact frame they installed.** Dropping an
+  outer `CurrentCxGuard` before a nested guard could previously pop the nested
+  capability restriction. Guards now carry frame identity, use an innermost
+  fast path, and remove by identity when teardown is out of order, preserving
+  capability attenuation and thread-local stack integrity
+  ([`c34dcd6`](https://github.com/Dicklesworthstone/asupersync/commit/c34dcd638),
+  [`062ad0a`](https://github.com/Dicklesworthstone/asupersync/commit/062ad0ae3)).
+
+### Compatibility
+
+- The fixes are internal and additive: no public item was removed or renamed,
+  no public signature or visibility changed, and the v0.4.3 API/behavior
+  compatibility contract remains the release floor.
 
 ## [v0.4.7] - 2026-08-17
 
@@ -2032,7 +2065,8 @@ The initial tagged milestone establishing the core async runtime with structured
 
 ---
 
-[Unreleased]: https://github.com/Dicklesworthstone/asupersync/compare/v0.4.7...HEAD
+[Unreleased]: https://github.com/Dicklesworthstone/asupersync/compare/v0.4.8...HEAD
+[v0.4.8]: https://github.com/Dicklesworthstone/asupersync/compare/v0.4.7...v0.4.8
 [v0.4.7]: https://github.com/Dicklesworthstone/asupersync/compare/v0.4.6...v0.4.7
 [v0.4.6]: https://github.com/Dicklesworthstone/asupersync/compare/v0.4.5...v0.4.6
 [v0.4.5]: https://github.com/Dicklesworthstone/asupersync/compare/v0.4.4...v0.4.5

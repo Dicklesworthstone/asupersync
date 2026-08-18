@@ -37,9 +37,9 @@
       "input_id": "K1-2-INPUT-K1-1-ARTIFACT",
       "role": "K1_AUTHORITY_AND_NAMESPACE_PACKET",
       "path": "artifacts/kafka_k1_obligation_index_v1.json",
-      "byte_count": 42758,
+      "byte_count": 42754,
       "record_count": 738,
-      "sha256": "a50c7adc94704bc8ca695592fdad32c15befbb7fceddf4c70bd62de3cefbc53b"
+      "sha256": "389175edfb98e321e5fb86a3b4d4bf55a8deab526b737daebf0f2c735bf7cfb0"
     },
     {
       "input_id": "K1-2-INPUT-K1-1-DOCUMENT",
@@ -55,7 +55,7 @@
       "path": "tests/kafka_k1_client_contract.rs",
       "byte_count": 95396,
       "record_count": 2585,
-      "sha256": "77938ff18b3929296ac90b399450a83e7451d76040656c0167df395e87e5761a"
+      "sha256": "45795a2b56478bc628776a036739dcff45ebc2a3bc4c54e0a418d0c613e06077"
     },
     {
       "input_id": "K1-2-INPUT-K0-5",
@@ -63,7 +63,7 @@
       "path": "artifacts/kafka_k0_baseline_disposition_v1.json",
       "byte_count": 29494,
       "record_count": 284,
-      "sha256": "431df4e692a4b022001da55b62977be9bb941d734227ac882574e83ff9ce6797"
+      "sha256": "75208b2ba8b0a52b1ffcd61d898672b7422cb6f6e77dac04a12ba6f313747729"
     },
     {
       "input_id": "K1-2-INPUT-K0-4",
@@ -71,7 +71,7 @@
       "path": "artifacts/kafka_broker_fixture_provenance_matrix_v1.json",
       "byte_count": 119250,
       "record_count": 2187,
-      "sha256": "8ca3e3add0c5756530b375950cdd7e0cd650d474a9d5daee05aa228cc951bc62"
+      "sha256": "60de200215e934303906b470c8450dc1bf698510740ea4d0996ef9b1b4b0e10e"
     },
     {
       "input_id": "K1-2-INPUT-K0-2",
@@ -79,15 +79,15 @@
       "path": "artifacts/kafka_incumbent_semantics_matrix_v1.json",
       "byte_count": 229415,
       "record_count": 2560,
-      "sha256": "7a2532f6cad8aea83ece3570c5cb650849d09486c6c00eabb60d7c581a732842"
+      "sha256": "02011e3bcf20b682817ed7f2e1043a4b5d1359d46105039c57c6efbe90129e3c"
     },
     {
       "input_id": "K1-2-INPUT-K1-3",
       "role": "SIBLING_PUBLIC_API_AND_CONFIGURATION_CONTRACT",
       "path": "artifacts/kafka_k1_public_api_contract_v1.json",
-      "byte_count": 37860,
+      "byte_count": 37858,
       "record_count": 753,
-      "sha256": "fe64eeae57ac8bd550399cff6671ef4080e5fc1b9977ce9f5f51ba7969362a80"
+      "sha256": "1f332b11762c48396180324bd8bfdb3a208730c434d96b54fb6891b22e7289f2"
     },
     {
       "input_id": "K1-2-INPUT-ADR",
@@ -119,7 +119,7 @@
       "path": "Cargo.toml",
       "byte_count": 37889,
       "record_count": 1061,
-      "sha256": "b6c6e19a04920c3999dd92bb009b1eb03dc90dd93cfbd4acda1242a9c2fa4f79"
+      "sha256": "b46fde72cc143cdeec3b234a0253619bd9fba1a7b825ee0d43d7b7a7180a3f05"
     },
     {
       "input_id": "K1-2-INPUT-LOCKFILE",
@@ -127,7 +127,7 @@
       "path": "Cargo.lock",
       "byte_count": 114614,
       "record_count": 4666,
-      "sha256": "63a7b56a74734433596b77b692d373fab2a6a6e66a2cd7ebcb261a4e24308cfc"
+      "sha256": "ccd16d63e66a3da65e6d87e2650f20d6be63e9d7f8d76c7300e01758193e641f"
     },
     {
       "input_id": "K1-2-INPUT-REAL-BROKER",

@@ -24,7 +24,7 @@
       "package": "@asupersync/browser-core",
       "kind": "manifest",
       "digest": {
-          "sha256": "7dba25680d927cb8827a600b752f254f12bdba183f735a42de1b4f874fe093ab"
+          "sha256": "00c25b6392e9c0a12f23f6fa504819488bd5df477331f7b237fe10954c9a7b4e"
       }
     },
     {
@@ -104,7 +104,7 @@
       "package": "@asupersync/browser",
       "kind": "manifest",
       "digest": {
-          "sha256": "97f315897ae7e011652c2fbc7830246e27a3c5d7baed830721e145b52de0464b"
+          "sha256": "1b031aa24b11f24fc9e5d2a751aaa738dd98fd49961934acad563045283257fb"
       }
     },
     {
@@ -112,7 +112,7 @@
       "package": "@asupersync/react",
       "kind": "manifest",
       "digest": {
-          "sha256": "10549337132017fdbd74e10943d6cd0d5f07fe63061ca2238b72e0aa866ff5ed"
+          "sha256": "1b16e4058c648a969ebe969cd0ba663ba5f7ac5563e7fb3ebfbb85e8f60fce0c"
       }
     },
     {
@@ -120,7 +120,7 @@
       "package": "@asupersync/next",
       "kind": "manifest",
       "digest": {
-          "sha256": "4bc1e472f388996208f78d72e34b35cfba12c230c8cd817a99bfdba123b7e57d"
+          "sha256": "771d0291c3282954852fec9fee280261f5ddcf210abbd5cb507ce9c4c14d1452"
       }
     }
   ],

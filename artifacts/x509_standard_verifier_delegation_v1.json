@@ -20,13 +20,13 @@
   "source_contracts": [
     {
       "path": "Cargo.toml",
-      "sha256": "b6c6e19a04920c3999dd92bb009b1eb03dc90dd93cfbd4acda1242a9c2fa4f79",
+      "sha256": "b46fde72cc143cdeec3b234a0253619bd9fba1a7b825ee0d43d7b7a7180a3f05",
       "line_count": 1061,
       "role": "dependency and feature baseline"
     },
     {
       "path": "Cargo.lock",
-      "sha256": "63a7b56a74734433596b77b692d373fab2a6a6e66a2cd7ebcb261a4e24308cfc",
+      "sha256": "ccd16d63e66a3da65e6d87e2650f20d6be63e9d7f8d76c7300e01758193e641f",
       "line_count": 4666,
       "role": "resolved dependency baseline"
     },
@@ -44,7 +44,7 @@
     },
     {
       "path": "artifacts/x509_validation_ownership_inventory_v1.json",
-      "sha256": "718cc84d56f3c57b8866db353ddcc3ee3c07d2f1042503fa8796f09607eb80ed",
+      "sha256": "fb1965a118cc2eb0d0eef6a24e96205011c5ba053f6c0fa1bc0d3ffb022b3653",
       "line_count": 1073,
       "role": "A1 ownership, residue, and routed-gap inventory"
     },

@@ -29,7 +29,7 @@
       "path": "Cargo.toml",
       "byte_count": 37889,
       "record_count": 1061,
-      "sha256": "b6c6e19a04920c3999dd92bb009b1eb03dc90dd93cfbd4acda1242a9c2fa4f79"
+      "sha256": "b46fde72cc143cdeec3b234a0253619bd9fba1a7b825ee0d43d7b7a7180a3f05"
     },
     {
       "input_id": "KAFKA-K2-1-INPUT-CARGO-LOCK",
@@ -37,7 +37,7 @@
       "path": "Cargo.lock",
       "byte_count": 114614,
       "record_count": 4666,
-      "sha256": "63a7b56a74734433596b77b692d373fab2a6a6e66a2cd7ebcb261a4e24308cfc"
+      "sha256": "ccd16d63e66a3da65e6d87e2650f20d6be63e9d7f8d76c7300e01758193e641f"
     },
     {
       "input_id": "KAFKA-K2-1-INPUT-PRODUCER-SOURCE",
@@ -61,7 +61,7 @@
       "path": "artifacts/kafka_k1_protocol_security_support_policy_v1.json",
       "byte_count": 82178,
       "record_count": 1399,
-      "sha256": "0fe2ec9618885deacbfdd7a6c73fa2438d46bebd5582830befa16a63bff477e4"
+      "sha256": "38106322351846ba5423ebb0d233f82f76fbae576776afc18c892017f898e3d4"
     },
     {
       "input_id": "KAFKA-K2-1-INPUT-K1-5",
@@ -69,7 +69,7 @@
       "path": "artifacts/kafka_k1_aggregate_evidence_gate_v1.json",
       "byte_count": 111408,
       "record_count": 2122,
-      "sha256": "800010a4a31123e1d1841ff5e02d58e01927bf67b19d4ccf13bc250c9dbda185"
+      "sha256": "978c583c14005bd7dab71723543eb6b90f3d250c04fa0d950d0a1763286ff893"
     },
     {
       "input_id": "KAFKA-K2-1-INPUT-K0-4",
@@ -77,15 +77,15 @@
       "path": "artifacts/kafka_broker_fixture_provenance_matrix_v1.json",
       "byte_count": 119250,
       "record_count": 2187,
-      "sha256": "8ca3e3add0c5756530b375950cdd7e0cd650d474a9d5daee05aa228cc951bc62"
+      "sha256": "60de200215e934303906b470c8450dc1bf698510740ea4d0996ef9b1b4b0e10e"
     },
     {
       "input_id": "KAFKA-K2-1-INPUT-K1-3",
       "authority_class": "PUBLIC_SURFACE_POLICY",
       "path": "artifacts/kafka_k1_public_api_contract_v1.json",
-      "byte_count": 37860,
+      "byte_count": 37858,
       "record_count": 753,
-      "sha256": "fe64eeae57ac8bd550399cff6671ef4080e5fc1b9977ce9f5f51ba7969362a80"
+      "sha256": "1f332b11762c48396180324bd8bfdb3a208730c434d96b54fb6891b22e7289f2"
     }
   ],
   "external_authorities": [

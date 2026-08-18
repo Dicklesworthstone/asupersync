@@ -24,7 +24,7 @@
       "crate_version": "0.32.0",
       "crates_io_checksum_sha256": "56d658ba1faf63f7b9c492cfbe6e0ec365440a16132d3270c1065f7b33f1b638",
       "cargo_lock_path": "Cargo.lock",
-      "cargo_lock_sha256": "63a7b56a74734433596b77b692d373fab2a6a6e66a2cd7ebcb261a4e24308cfc",
+      "cargo_lock_sha256": "ccd16d63e66a3da65e6d87e2650f20d6be63e9d7f8d76c7300e01758193e641f",
       "wrapper_repository": "https://github.com/open-telemetry/opentelemetry-rust",
       "wrapper_repository_commit": "ec289cb3c6f8260951699c51df968560943c1451",
       "path_in_wrapper_repository": "opentelemetry-proto",
@@ -137,7 +137,7 @@
     "repository_source_baseline": [
       {
         "path": "Cargo.toml",
-        "sha256": "b6c6e19a04920c3999dd92bb009b1eb03dc90dd93cfbd4acda1242a9c2fa4f79",
+        "sha256": "b46fde72cc143cdeec3b234a0253619bd9fba1a7b825ee0d43d7b7a7180a3f05",
         "role": "feature and dependency quarantine authority"
       },
       {

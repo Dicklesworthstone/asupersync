@@ -53,13 +53,13 @@
   "source_pins": [
     {
       "path": "Cargo.toml",
-      "sha256": "b6c6e19a04920c3999dd92bb009b1eb03dc90dd93cfbd4acda1242a9c2fa4f79",
+      "sha256": "b46fde72cc143cdeec3b234a0253619bd9fba1a7b825ee0d43d7b7a7180a3f05",
       "line_count": 1061,
       "role": "optional regex dependency selector and metrics feature gate"
     },
     {
       "path": "Cargo.lock",
-      "sha256": "63a7b56a74734433596b77b692d373fab2a6a6e66a2cd7ebcb261a4e24308cfc",
+      "sha256": "ccd16d63e66a3da65e6d87e2650f20d6be63e9d7f8d76c7300e01758193e641f",
       "line_count": 4666,
       "role": "incumbent regex dependency resolution"
     },
@@ -77,7 +77,7 @@
     },
     {
       "path": "artifacts/regex_privacy_capability_inventory_v1.json",
-      "sha256": "a8c5f5f7d6d25c21e580963d41b4bb0c2730f68e295cc53a16fb250856f74aa6",
+      "sha256": "4dfd0fdec21af7604c2b01bdeb4f373741fed2314ee7495eb941b2314ce67103",
       "line_count": 1014,
       "role": "R1 capability and historical detector baseline"
     },
@@ -95,7 +95,7 @@
     },
     {
       "path": "artifacts/dependency_capability_baseline_v1.json",
-      "sha256": "09404498819adb29849d4d6c955e7aaac876b6fb40a1e8144606bdb090502c40",
+      "sha256": "39d73a682c61f3d776ae9a76f40aa4d342e8498f41f24a4753d4498c3b0c3c85",
       "line_count": 3210,
       "role": "executable-partial blocking baseline authority"
     }

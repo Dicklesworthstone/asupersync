@@ -147,19 +147,19 @@ fn terminal_validate(value: &Value) -> Result<(), String> {
     let expected_predecessors = [
         (
             "artifacts/regex_semantic_terminal_receipt_v1.json",
-            "3df344ff49dc3a08108f8346908b29646c35590343f87c406cb958492e59cbf4",
+            "2bc7b84bc1ffb5d128820b9f0d3f09c66bdfa61ffda0e98add1f8e34438105c9",
         ),
         (
             "artifacts/regex_ir_schema_contract_v1.json",
-            "d9ab0e40c9246a3a3520cf620fe20c741d8f0ca0cf1a1de3c269e0623e8c7177",
+            "9ea224eab886836d00c8390fd9aeaad79d0a499540ed102e7097e33cd79c44a3",
         ),
         (
             "artifacts/regex_ir_lowering_contract_v1.json",
-            "bebdab586ce46935c8e0d5a0ed2d90f4c643f8ecea61b8055eff64751f926eb1",
+            "408bc5ae9cb7928c453530b8e6aa56b63cd61117d67cb0b58059e299d3df2b33",
         ),
         (
             "artifacts/regex_priority_capture_lowering_contract_v1.json",
-            "bc04c7a591681aa9ddcfd46713c15463b78a22637a509ffd2f104596c1833970",
+            "fca423b1cdc5409333f4efa3c1acdb7511377cd8729864648f89cd825f393d24",
         ),
     ];
     if predecessors.len() != expected_predecessors.len() {
