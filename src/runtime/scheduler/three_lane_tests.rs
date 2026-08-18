@@ -5407,6 +5407,7 @@ fn test_local_queue_fast_path() {
     // Simulate running on worker thread
     {
         let _guard = ScopedLocalScheduler::new(worker_local.clone());
+        let _queue_guard = LocalQueue::set_current(scheduler.workers[0].fast_queue.clone());
         // Spawn task
         scheduler.spawn(TaskId::new_for_test(1, 1), 100);
     }
@@ -5427,6 +5428,7 @@ fn test_local_queue_fast_path() {
     // Now verify wake also uses local queue
     {
         let _guard = ScopedLocalScheduler::new(worker_local.clone());
+        let _queue_guard = LocalQueue::set_current(scheduler.workers[0].fast_queue.clone());
         scheduler.wake(TaskId::new_for_test(1, 2), 100);
     }
 
@@ -5493,6 +5495,79 @@ fn fast_queue_wake_prefers_local_queue_tls() {
     assert!(!fast_queue.is_empty(), "task should be in fast_queue");
     let priority_len = priority_sched.lock().len();
     assert_eq!(priority_len, 0, "PriorityScheduler should be empty");
+}
+
+#[test]
+fn fast_queue_rejects_foreign_runtime_tls() {
+    // Runtime-local TaskIds can collide. A scheduler must not use another
+    // runtime worker's TLS queue merely because the call happens on that
+    // worker thread.
+    let state_a = LocalQueue::test_state(10);
+    let scheduler_a = ThreeLaneScheduler::new(1, &state_a);
+    let state_b = LocalQueue::test_state(10);
+    let scheduler_b = ThreeLaneScheduler::new(1, &state_b);
+    let foreign_fast_queue = scheduler_b.workers[0].fast_queue.clone();
+    let foreign_priority = scheduler_b.workers[0].local.clone();
+    let task = TaskId::new_for_test(1, 0);
+
+    {
+        let _scheduler_guard = ScopedLocalScheduler::new(foreign_priority.clone());
+        let _queue_guard = LocalQueue::set_current(foreign_fast_queue.clone());
+        scheduler_a.spawn(task, 100);
+    }
+
+    assert!(
+        foreign_fast_queue.is_empty(),
+        "runtime-A task must not enter runtime B's fast queue"
+    );
+    assert_eq!(
+        foreign_priority.lock().len(),
+        0,
+        "runtime-A task must not enter runtime B's priority queue"
+    );
+    assert_eq!(
+        scheduler_a.global.pop_ready().map(|ready| ready.task),
+        Some(task),
+        "foreign TLS must fall back to runtime A's global injector"
+    );
+}
+
+#[test]
+fn local_ready_rejects_foreign_runtime_tls_for_pinned_task() {
+    let state_a = LocalQueue::test_state(10);
+    let scheduler_a = ThreeLaneScheduler::new(1, &state_a);
+    let state_b = LocalQueue::test_state(10);
+    let scheduler_b = ThreeLaneScheduler::new(1, &state_b);
+    let task = TaskId::new_for_test(1, 0);
+    {
+        let mut state = state_a
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let record = state.task_mut(task).expect("runtime-A task record");
+        record.mark_local();
+        record.pin_to_worker(0);
+    }
+
+    let owner_local_ready = Arc::clone(&scheduler_a.workers[0].local_ready);
+    let foreign_local_ready = Arc::clone(&scheduler_b.workers[0].local_ready);
+    let foreign_fast_queue = scheduler_b.workers[0].fast_queue.clone();
+
+    {
+        let _worker_guard = ScopedWorkerId::new(0);
+        let _ready_guard = ScopedLocalReady::new(Arc::clone(&foreign_local_ready));
+        let _queue_guard = LocalQueue::set_current(foreign_fast_queue);
+        scheduler_a.spawn(task, 100);
+    }
+
+    assert!(
+        foreign_local_ready.lock().is_empty(),
+        "runtime-A pinned task must not enter runtime B's local-ready queue"
+    );
+    assert_eq!(
+        owner_local_ready.lock().snapshot(),
+        vec![task],
+        "foreign TLS must route the pinned task to runtime A's owner worker"
+    );
 }
 
 #[test]
@@ -5819,7 +5894,7 @@ fn fast_queue_schedule_on_current_local_prefers_fast() {
         let _sched_guard = ScopedLocalScheduler::new(priority_sched.clone());
         let _queue_guard = LocalQueue::set_current(fast_queue.clone());
 
-        let ok = schedule_on_current_local(TaskId::new_for_test(1, 0), 100);
+        let ok = scheduler.schedule_on_current_local(TaskId::new_for_test(1, 0), 100);
         assert!(ok);
     }
 

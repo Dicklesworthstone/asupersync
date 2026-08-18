@@ -4521,6 +4521,9 @@ where
         if crate::runtime::scheduler::three_lane::current_worker_id().is_none() {
             return Err(crate::runtime::state::SpawnError::LocalSchedulerUnavailable);
         }
+        if !crate::runtime::spawn_mailbox::local_spawn_lane_is_owned_by(gateway) {
+            return Err(crate::runtime::state::SpawnError::LocalSchedulerUnavailable);
+        }
 
         let provisional = gateway.mailbox().allocate_task_id();
         let admitted_slot = Arc::new(AdmittedTaskSlot::new_with_cancel_gateway(Arc::clone(

@@ -129,11 +129,9 @@ impl WorkStealingScheduler {
 
     /// Spawns a task.
     ///
-    /// If called from a worker thread, it should push to the local queue.
-    /// Otherwise, it pushes to the global queue.
-    ///
-    /// For Phase 1 initial implementation, we always push to global queue
-    /// to avoid TLS complexity for now.
+    /// If called from one of this scheduler's worker threads, it pushes to the
+    /// matching local queue. Otherwise, including from another runtime's
+    /// worker, it pushes to the global queue.
     pub fn spawn(&self, task: TaskId) {
         self.inner.spawn(task, 0);
     }

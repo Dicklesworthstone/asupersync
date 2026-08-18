@@ -127,6 +127,13 @@
 //!     would all be caught by the structural pins below.
 
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
+
+use asupersync::Cx;
+use asupersync::runtime::{RuntimeBuilder, SpawnError};
+use asupersync::types::Budget;
 
 fn read(rel: &str) -> String {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(rel);
@@ -238,9 +245,10 @@ fn spawn_local_routes_through_owner_thread_lane() {
 
     assert!(
         body.contains("current_worker_id().is_none()")
+            && body.contains("local_spawn_lane_is_owned_by(gateway)")
             && body.contains("SpawnError::LocalSchedulerUnavailable"),
         "REGRESSION: Cx::spawn_local no longer fails closed \
-         off-worker. Local spawns must have an owner worker.",
+         outside its owner runtime's worker-local lane.",
     );
 }
 
@@ -320,6 +328,16 @@ fn spawn_local_schedules_via_worker_local_queue_non_stealable() {
          The 'must not be stealable' invariant is what \
          documents the routing-level enforcement of the \
          spawn_local distinction.",
+    );
+
+    let mailbox = read("src/runtime/spawn_mailbox.rs");
+    assert!(
+        source.contains("ScopedLocalSpawnLaneOwner::new")
+            && mailbox.contains("local_spawn_lane_is_owned_by")
+            && mailbox.contains("Arc::ptr_eq(mailbox, gateway.mailbox())"),
+        "REGRESSION: the worker-local spawn lane no longer carries a \
+         runtime-unique mailbox identity. Numeric worker ids or ambient \
+         runtime handles are insufficient under multiple or nested runtimes.",
     );
 }
 
@@ -476,6 +494,117 @@ fn non_send_future_compiles_only_under_spawn_local_signature() {
     //     let counter = Rc::new(0_u32);
     //     async move { let _ = Rc::clone(&counter); }
     // });
+}
+
+/// A local task must be owned by both the current worker and that worker's
+/// runtime. Worker and region identifiers are runtime-local, so checking only
+/// that *some* runtime worker is current can silently admit a runtime-A `Cx`
+/// into runtime B when their identifiers collide.
+#[test]
+fn spawn_local_rejects_a_context_owned_by_another_runtime() {
+    let runtime_a = RuntimeBuilder::current_thread()
+        .build()
+        .expect("build source runtime");
+    let foreign_cx = runtime_a.request_cx_with_budget(Budget::INFINITE);
+
+    let runtime_b = RuntimeBuilder::current_thread()
+        .build()
+        .expect("build executing runtime");
+    let foreign_future_polled = Arc::new(AtomicBool::new(false));
+    let polled = Arc::clone(&foreign_future_polled);
+
+    runtime_b.block_on(runtime_b.handle().spawn(async move {
+        let local_cx: Cx = Cx::current().expect("runtime-B worker installs its Cx");
+        let foreign_spawn = foreign_cx.spawn_local(move |_| async move {
+            polled.store(true, Ordering::Release);
+            91_u8
+        });
+
+        match foreign_spawn {
+            Err(SpawnError::LocalSchedulerUnavailable) => {}
+            Err(other) => panic!(
+                "foreign-runtime spawn_local must fail at the owner-worker boundary; got {other:?}"
+            ),
+            Ok(mut handle) => {
+                let joined = handle.join(&local_cx).await;
+                panic!(
+                    "foreign-runtime spawn_local was admitted into runtime B and joined as {joined:?}"
+                );
+            }
+        }
+
+        let mut local = local_cx
+            .spawn_local(|_| async { 17_u8 })
+            .expect("same-runtime spawn_local remains available");
+        assert_eq!(
+            local.join(&local_cx).await,
+            Ok(17),
+            "same-runtime owner-local task must still run"
+        );
+    }));
+
+    assert!(
+        !foreign_future_polled.load(Ordering::Acquire),
+        "a rejected foreign-runtime local future must never be polled"
+    );
+    assert!(
+        runtime_b.shutdown_timeout(Duration::from_secs(5)),
+        "executing runtime must shut down without leaked local tasks"
+    );
+    assert!(
+        runtime_a.shutdown_timeout(Duration::from_secs(5)),
+        "source runtime must shut down without a leaked pending-spawn credit"
+    );
+}
+
+/// Installing another runtime through nested `block_on` must not retarget the
+/// worker's thread-local spawn lane. The lane still belongs to the outer
+/// runtime even though `Runtime::current_handle()` and `Cx::current()`
+/// temporarily describe the inner runtime.
+#[test]
+fn spawn_local_rejects_nested_foreign_runtime_block_on_from_worker_lane() {
+    let runtime_a = RuntimeBuilder::current_thread()
+        .build()
+        .expect("build outer worker runtime");
+    let runtime_b = RuntimeBuilder::current_thread()
+        .build()
+        .expect("build nested runtime");
+    let nested_runtime = runtime_b.clone();
+    let foreign_future_polled = Arc::new(AtomicBool::new(false));
+    let polled = Arc::clone(&foreign_future_polled);
+
+    let rejected = runtime_a.block_on(runtime_a.handle().spawn(async move {
+        nested_runtime.block_on(async move {
+            let nested_cx: Cx = Cx::current().expect("nested block_on installs runtime-B Cx");
+            match nested_cx.spawn_local(move |_| async move {
+                polled.store(true, Ordering::Release);
+                73_u8
+            }) {
+                Err(SpawnError::LocalSchedulerUnavailable) => true,
+                Err(other) => panic!(
+                    "nested foreign-runtime spawn_local must fail at the lane-owner boundary; got {other:?}"
+                ),
+                Ok(handle) => {
+                    drop(handle);
+                    false
+                }
+            }
+        })
+    }));
+
+    let runtime_a_clean = runtime_a.shutdown_timeout(Duration::from_secs(5));
+    let runtime_b_clean = runtime_b.shutdown_timeout(Duration::from_secs(5));
+
+    assert!(
+        rejected,
+        "nested runtime-B block_on must not publish into runtime A's worker-local lane"
+    );
+    assert!(
+        !foreign_future_polled.load(Ordering::Acquire),
+        "a rejected nested foreign-runtime local future must never be polled"
+    );
+    assert!(runtime_a_clean, "outer runtime must shut down cleanly");
+    assert!(runtime_b_clean, "nested runtime must shut down cleanly");
 }
 
 #[test]

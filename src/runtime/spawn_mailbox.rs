@@ -862,6 +862,43 @@ thread_local! {
     /// the shared mailbox.
     static LOCAL_SPAWN_LANE: std::cell::RefCell<std::collections::VecDeque<LocalSpawnRequest>> =
         const { std::cell::RefCell::new(std::collections::VecDeque::new()) };
+    /// Runtime identity for the worker that owns [`LOCAL_SPAWN_LANE`].
+    ///
+    /// Ambient runtime handles can be replaced by nested `Runtime::block_on`,
+    /// so the lane itself must carry the authoritative owner identity.
+    static LOCAL_SPAWN_OWNER: std::cell::RefCell<Option<Arc<SpawnMailbox>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Scoped runtime owner for the current worker's local-spawn lane.
+pub(crate) struct ScopedLocalSpawnLaneOwner {
+    previous: Option<Arc<SpawnMailbox>>,
+}
+
+impl ScopedLocalSpawnLaneOwner {
+    pub(crate) fn new(mailbox: Arc<SpawnMailbox>) -> Self {
+        let previous = LOCAL_SPAWN_OWNER.with(|owner| owner.replace(Some(mailbox)));
+        Self { previous }
+    }
+}
+
+impl Drop for ScopedLocalSpawnLaneOwner {
+    fn drop(&mut self) {
+        let previous = self.previous.take();
+        let _ = LOCAL_SPAWN_OWNER.try_with(|owner| {
+            *owner.borrow_mut() = previous;
+        });
+    }
+}
+
+/// Returns true only when the current worker-local lane belongs to `gateway`.
+pub(crate) fn local_spawn_lane_is_owned_by(gateway: &SpawnGateway) -> bool {
+    LOCAL_SPAWN_OWNER.with(|owner| {
+        owner
+            .borrow()
+            .as_ref()
+            .is_some_and(|mailbox| Arc::ptr_eq(mailbox, gateway.mailbox()))
+    })
 }
 
 /// Parks a local spawn request on the current thread's lane.
@@ -4028,6 +4065,13 @@ mod tests {
         }
     }
 
+    fn local_spawn_owner_for_test(cx: &crate::cx::Cx) -> ScopedLocalSpawnLaneOwner {
+        let gateway = cx
+            .spawn_gateway_handle()
+            .expect("runtime-wired test Cx carries a spawn gateway");
+        ScopedLocalSpawnLaneOwner::new(Arc::clone(gateway.mailbox()))
+    }
+
     /// A runtime-wired Cx still fails closed when called off-worker: a
     /// `!Send` factory cannot be parked anywhere unless an owner worker is
     /// currently draining that thread-local lane.
@@ -4068,6 +4112,7 @@ mod tests {
             crate::runtime::scheduler::PriorityScheduler::new(),
         ));
         let _worker_guard = crate::runtime::scheduler::three_lane::ScopedWorkerId::new(0);
+        let _owner_guard = local_spawn_owner_for_test(&parent_cx);
         let _scheduler_guard = crate::runtime::scheduler::three_lane::ScopedLocalScheduler::new(
             Arc::clone(&local_scheduler),
         );
@@ -4162,6 +4207,7 @@ mod tests {
             ),
         ));
         let _worker_guard = crate::runtime::scheduler::three_lane::ScopedWorkerId::new(0);
+        let _owner_guard = local_spawn_owner_for_test(&parent_cx);
         let _ready_guard =
             crate::runtime::scheduler::three_lane::ScopedLocalReady::new(Arc::clone(&local_ready));
 
@@ -4223,6 +4269,7 @@ mod tests {
             crate::runtime::scheduler::PriorityScheduler::new(),
         ));
         let _worker_guard = crate::runtime::scheduler::three_lane::ScopedWorkerId::new(0);
+        let _owner_guard = local_spawn_owner_for_test(&parent_cx);
         let _scheduler_guard = crate::runtime::scheduler::three_lane::ScopedLocalScheduler::new(
             Arc::clone(&local_scheduler),
         );
@@ -4517,6 +4564,7 @@ mod tests {
             ),
         ));
         let _worker_guard = crate::runtime::scheduler::three_lane::ScopedWorkerId::new(0);
+        let _owner_guard = local_spawn_owner_for_test(&parent_cx);
         let _ready_guard =
             crate::runtime::scheduler::three_lane::ScopedLocalReady::new(Arc::clone(&local_ready));
         lab.state.region(root).expect("root").begin_close(None);

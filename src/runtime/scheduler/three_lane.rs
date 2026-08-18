@@ -1400,22 +1400,6 @@ fn wait_graph_signals_from_state(state: &RuntimeState) -> (usize, Vec<(usize, us
 }
 
 #[inline]
-pub(crate) fn schedule_on_current_local(task: TaskId, priority: u8) -> bool {
-    // Fast path: O(1) push to LocalQueue VecDeque
-    if LocalQueue::schedule_local(task) {
-        return true;
-    }
-    // Slow path: O(log n) push to PriorityScheduler BinaryHeap
-    CURRENT_LOCAL.with(|cell| {
-        if let Some(local) = cell.borrow().as_ref() {
-            local.lock().schedule(task, priority);
-            return true;
-        }
-        false
-    })
-}
-
-#[inline]
 fn move_local_ready_task_to_cancel_lane(
     local: &Mutex<PriorityScheduler>,
     local_ready: &LocalReadyQueue,
@@ -1640,6 +1624,30 @@ impl SchedulerConstructionHandles {
 }
 
 impl ThreeLaneScheduler {
+    #[inline]
+    fn current_worker_owns_tasks(&self) -> bool {
+        LocalQueue::current_is_backed_by(&self.state, self.task_table.as_ref())
+    }
+
+    #[inline]
+    fn schedule_on_current_local(&self, task: TaskId, priority: u8) -> bool {
+        if !self.current_worker_owns_tasks() {
+            return false;
+        }
+        // Fast path: O(1) push to LocalQueue VecDeque.
+        if LocalQueue::schedule_local(task) {
+            return true;
+        }
+        // Slow path: O(log n) push to PriorityScheduler BinaryHeap.
+        CURRENT_LOCAL.with(|cell| {
+            if let Some(local) = cell.borrow().as_ref() {
+                local.lock().schedule(task, priority);
+                return true;
+            }
+            false
+        })
+    }
+
     #[inline]
     fn initial_local_scheduler_capacity(worker_count: usize) -> usize {
         let workers = worker_count.max(1);
@@ -2795,9 +2803,11 @@ impl ThreeLaneScheduler {
 
     /// Spawns a task (shorthand for inject_ready).
     ///
-    /// Fast path: when called on a worker thread, pushes to the worker's
-    /// `LocalQueue` (O(1) VecDeque) instead of the global injector
-    /// or the PriorityScheduler heap.
+    /// Fast path: when called on one of this scheduler's worker threads,
+    /// pushes to that worker's `LocalQueue` (O(1) VecDeque) instead of the
+    /// global injector or the PriorityScheduler heap. A foreign runtime's
+    /// worker-local queue is never used; those calls fall back to global
+    /// injection.
     ///
     /// # Local Tasks
     ///
@@ -2811,9 +2821,10 @@ impl ThreeLaneScheduler {
 
     /// Wakes a task by injecting it into the ready lane.
     ///
-    /// Fast path: when called on a worker thread, pushes to the worker's
-    /// `LocalQueue` (O(1)) or `PriorityScheduler` instead of the global
-    /// injector. For cancel wakeups, use `inject_cancel` instead.
+    /// Fast path: when called on one of this scheduler's worker threads,
+    /// pushes to that worker's `LocalQueue` (O(1)) or `PriorityScheduler`
+    /// instead of the global injector. A foreign runtime's worker-local queue
+    /// is never used. For cancel wakeups, use `inject_cancel` instead.
     ///
     /// # Local Tasks
     ///
@@ -2863,7 +2874,7 @@ impl ThreeLaneScheduler {
 
             // 1. Try scheduling on current thread (fastest, no locks if TLS setup)
             // ONLY if this thread is the owner.
-            if is_pinned_here && schedule_local_task(task) {
+            if is_pinned_here && self.current_worker_owns_tasks() && schedule_local_task(task) {
                 self.record_scheduler_evidence_enqueue(task);
                 return;
             }
@@ -2890,7 +2901,7 @@ impl ThreeLaneScheduler {
         }
 
         // Fast path 1 & 2: Try local queue (O(1)) then local scheduler (O(log n)) via TLS.
-        if schedule_on_current_local(task, priority) {
+        if self.schedule_on_current_local(task, priority) {
             self.record_scheduler_evidence_enqueue(task);
             return;
         }
@@ -4756,6 +4767,12 @@ impl ThreeLaneWorker {
         let _local_ready_guard = ScopedLocalReady::new(Arc::clone(&self.local_ready));
         // Set thread-local worker id for routing pinned local tasks.
         let _worker_guard = ScopedWorkerId::new(self.id);
+        // Bind the process-thread-local spawn lane to this runtime instance.
+        // Numeric worker ids and ambient RuntimeHandles are not authoritative:
+        // both can describe another runtime during nested execution.
+        let _local_spawn_owner_guard = self.spawn_mailbox.as_ref().map(|mailbox| {
+            crate::runtime::spawn_mailbox::ScopedLocalSpawnLaneOwner::new(Arc::clone(mailbox))
+        });
 
         while !self.shutdown.load(Ordering::Relaxed) {
             if let Some(task) = self.next_task() {

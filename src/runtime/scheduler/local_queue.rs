@@ -163,6 +163,33 @@ impl LocalQueue {
         }
     }
 
+    /// Returns whether the current thread-local queue belongs to the supplied
+    /// runtime task store.
+    #[inline]
+    pub(crate) fn current_is_backed_by(
+        state: &Arc<ContendedMutex<RuntimeState>>,
+        task_table: Option<&Arc<ContendedMutex<TaskTable>>>,
+    ) -> bool {
+        CURRENT_QUEUE.with(|slot| {
+            slot.borrow().as_ref().is_some_and(|queue| {
+                task_table.map_or_else(
+                    || {
+                        matches!(
+                            &queue.tasks,
+                            TaskSource::RuntimeState(current) if Arc::ptr_eq(current, state)
+                        )
+                    },
+                    |expected| {
+                        matches!(
+                            &queue.tasks,
+                            TaskSource::TaskTable(current) if Arc::ptr_eq(current, expected)
+                        )
+                    },
+                )
+            })
+        })
+    }
+
     /// Creates a runtime state with preallocated task records for tests.
     #[cfg(any(test, feature = "test-internals"))]
     #[must_use]
