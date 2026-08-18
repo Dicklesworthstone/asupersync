@@ -1387,14 +1387,14 @@
       },
       {
         "path": "src/runtime/scheduler/mod.rs",
-        "sha256": "00b2b8133aba3e46b0bfe2f1d8b6eec19a38cd1e58785b9a9c243302a571d81b",
-        "line_count": 223,
+        "sha256": "a8aacf99794eb64f2ba10f4f4078cf7504cc94a37c59e1220fde3ba55a97b26e",
+        "line_count": 221,
         "role": "unconditional local-queue module and public LocalQueue re-export boundary"
       },
       {
         "path": "src/runtime/scheduler/local_queue.rs",
-        "sha256": "056a4f095c96e5c568c8a2050ff31a1f921240f1e16d13a50d96ae68f878de4b",
-        "line_count": 1816,
+        "sha256": "858f3c30b7ed741830c5602be79e9a333465ab25715f9385ca5c97ff4e38278a",
+        "line_count": 1843,
         "role": "scheduler presence HashSet consumer, operations, invariants, and source-local tests"
       },
       {
@@ -2087,8 +2087,8 @@
       },
       {
         "path": "src/cx/cx.rs",
-        "sha256": "28f07128761f9892a6e2fc6e62b2fc1e2c4c0706639406f5cf7e682d8969f5fa",
-        "line_count": 7770,
+        "sha256": "b4a679ade9d6a5e23b23636830225503bde581adfbef4eeb42ef8843493dd4be",
+        "line_count": 7804,
         "role": "one already-public struct, four constructors, and one receiver method guarded by the incumbent attribute"
       },
       {

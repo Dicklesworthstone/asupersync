@@ -86,20 +86,20 @@
       },
       {
         "path": "src/cx/cx.rs",
-        "sha256": "28f07128761f9892a6e2fc6e62b2fc1e2c4c0706639406f5cf7e682d8969f5fa",
-        "line_count": 7770,
+        "sha256": "b4a679ade9d6a5e23b23636830225503bde581adfbef4eeb42ef8843493dd4be",
+        "line_count": 7804,
         "classification": "CANCELLATION_PUBLICATION_HARDENING_WITH_JOIN_ANCHORS_PRESERVED"
       },
       {
         "path": "src/runtime/spawn_mailbox.rs",
-        "sha256": "35fda3aa30a5823295c97d1ca5579353625e1c871b275f76d61560b7485f32ee",
-        "line_count": 4963,
+        "sha256": "d7e36a0b2ceef7becbc1f8c298c3f61ffc77990bf5156d8b24e27aee1a9bfbad",
+        "line_count": 5011,
         "classification": "MAILBOX_MAINTENANCE_WITH_JOIN_DENIAL_ANCHOR_PRESERVED"
       },
       {
         "path": "src/runtime/scheduler/three_lane.rs",
-        "sha256": "637290a7eca79c8a464763b3788703f52fbd731d65f049615d21a5bcc7a08cb1",
-        "line_count": 8192,
+        "sha256": "95133c33fbfac1ce32625234aca1a4fb262b6594d562ba5beb95aec8965f9156",
+        "line_count": 8210,
         "classification": "CANCELLATION_WAKER_HARDENING_WITH_BATCH_FAIRNESS_ANCHORS_PRESERVED"
       }
     ],
@@ -146,8 +146,8 @@
     },
     {
       "path": "src/cx/cx.rs",
-      "sha256": "28f07128761f9892a6e2fc6e62b2fc1e2c4c0706639406f5cf7e682d8969f5fa",
-      "line_count": 7770,
+      "sha256": "b4a679ade9d6a5e23b23636830225503bde581adfbef4eeb42ef8843493dd4be",
+      "line_count": 7804,
       "role": "public structured spawn producer and take-once completion sender"
     },
     {
@@ -164,14 +164,14 @@
     },
     {
       "path": "src/runtime/spawn_mailbox.rs",
-      "sha256": "35fda3aa30a5823295c97d1ca5579353625e1c871b275f76d61560b7485f32ee",
-      "line_count": 4963,
+      "sha256": "d7e36a0b2ceef7becbc1f8c298c3f61ffc77990bf5156d8b24e27aee1a9bfbad",
+      "line_count": 5011,
       "role": "per-request producer publication, pending credit, FIFO queue, trace, and denial resolution"
     },
     {
       "path": "src/runtime/scheduler/three_lane.rs",
-      "sha256": "637290a7eca79c8a464763b3788703f52fbd731d65f049615d21a5bcc7a08cb1",
-      "line_count": 8192,
+      "sha256": "95133c33fbfac1ce32625234aca1a4fb262b6594d562ba5beb95aec8965f9156",
+      "line_count": 8210,
       "role": "global batch-one and owner-local batch-sixteen consumer policies"
     },
     {
@@ -250,7 +250,7 @@
         {"path": "src/channel/oneshot.rs", "line": 159, "fragment": "struct OneShotInner<T>"},
         {"path": "src/channel/oneshot.rs", "line": 391, "fragment": "pub struct Sender<T>"},
         {"path": "src/channel/oneshot.rs", "line": 1099, "fragment": "pub struct Receiver<T>"},
-        {"path": "src/cx/cx.rs", "line": 4664, "fragment": "let shared_tx = Arc::new(std::sync::Mutex::new(Some(result_tx)))"}
+        {"path": "src/cx/cx.rs", "line": 4696, "fragment": "let shared_tx = Arc::new(std::sync::Mutex::new(Some(result_tx)))"}
       ]
     }
   ],
@@ -307,7 +307,7 @@
       "must_preserve": "the observer resolves exactly once; no typed-cancellation claim is added to this family",
       "anchors": [
         {"path": "src/runtime/builder.rs", "line": 4641, "fragment": "if let Some(mailbox) = &self.spawn_mailbox"},
-        {"path": "src/runtime/spawn_mailbox.rs", "line": 1118, "fragment": "pub fn resolve_failed(self, error: SpawnError)"}
+        {"path": "src/runtime/spawn_mailbox.rs", "line": 1155, "fragment": "pub fn resolve_failed(self, error: SpawnError)"}
       ]
     },
     {
@@ -349,8 +349,8 @@
       "incumbent_contract": "Cx::spawn and Cx::spawn_in return SpawnError::RuntimeUnavailable and never panic",
       "must_preserve": "no handle is returned for a request that was never published",
       "anchors": [
-        {"path": "src/cx/cx.rs", "line": 4056, "fragment": "pub fn spawn<F, Fut>("},
-        {"path": "src/cx/cx.rs", "line": 4152, "fragment": "pub fn spawn_in<F, Fut, P>("}
+        {"path": "src/cx/cx.rs", "line": 4085, "fragment": "pub fn spawn<F, Fut>("},
+        {"path": "src/cx/cx.rs", "line": 4181, "fragment": "pub fn spawn_in<F, Fut, P>("}
       ]
     },
     {
@@ -383,7 +383,7 @@
       "must_preserve": "panic stays typed for this family",
       "anchors": [
         {"path": "src/runtime/task_handle.rs", "line": 14, "fragment": "pub enum JoinError"},
-        {"path": "src/cx/cx.rs", "line": 4632, "fragment": "fn spawn_via_gateway<F, Fut>("}
+        {"path": "src/cx/cx.rs", "line": 4664, "fragment": "fn spawn_via_gateway<F, Fut>("}
       ]
     },
     {
@@ -393,7 +393,7 @@
       "incumbent_contract": "the completion slot or closed-channel mapping yields JoinError::Cancelled with the strongest available reason",
       "must_preserve": "every accepted request terminates its handle and preserves cancellation attribution",
       "anchors": [
-        {"path": "src/cx/cx.rs", "line": 4718, "fragment": "let request = SpawnRequest::new_with_factory"},
+        {"path": "src/cx/cx.rs", "line": 4750, "fragment": "let request = SpawnRequest::new_with_factory"},
         {"path": "src/runtime/task_handle.rs", "line": 831, "fragment": "impl<T> std::future::Future for JoinFuture"}
       ]
     },
@@ -461,10 +461,10 @@
       "trace": "TaskSpawnEnqueued is recorded before each request becomes visible",
       "capacity": "global mailbox is unbounded; admission quotas fail later and explicitly",
       "anchors": [
-        {"path": "src/runtime/spawn_mailbox.rs", "line": 902, "fragment": "pub struct SpawnRequest"},
-        {"path": "src/runtime/spawn_mailbox.rs", "line": 1249, "fragment": "pub fn enqueue(&self, request: SpawnRequest, now: Time)"},
-        {"path": "src/runtime/spawn_mailbox.rs", "line": 1414, "fragment": "pub fn enqueue_and_notify(&self, request: SpawnRequest)"},
-        {"path": "src/cx/cx.rs", "line": 4740, "fragment": "gateway.enqueue_and_notify(request)?"}
+        {"path": "src/runtime/spawn_mailbox.rs", "line": 939, "fragment": "pub struct SpawnRequest"},
+        {"path": "src/runtime/spawn_mailbox.rs", "line": 1286, "fragment": "pub fn enqueue(&self, request: SpawnRequest, now: Time)"},
+        {"path": "src/runtime/spawn_mailbox.rs", "line": 1451, "fragment": "pub fn enqueue_and_notify(&self, request: SpawnRequest)"},
+        {"path": "src/cx/cx.rs", "line": 4772, "fragment": "gateway.enqueue_and_notify(request)?"}
       ]
     },
     "consumer_now": {
@@ -472,10 +472,10 @@
       "owner_local_lane": "dequeue at most sixteen requests from the thread-local lane per selection",
       "fairness_boundary": "producer notification amortization does not authorize changing either consumer bound",
       "anchors": [
-        {"path": "src/runtime/scheduler/three_lane.rs", "line": 5577, "fragment": "fn drain_spawn_admissions(&mut self)"},
-        {"path": "src/runtime/scheduler/three_lane.rs", "line": 5578, "fragment": "const SPAWN_ADMISSION_BATCH: usize = 1"},
-        {"path": "src/runtime/scheduler/three_lane.rs", "line": 5696, "fragment": "const LOCAL_SPAWN_ADMISSION_BATCH: usize = 16"},
-        {"path": "src/runtime/scheduler/three_lane.rs", "line": 5845, "fragment": "self.drain_spawn_admissions()"}
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 5595, "fragment": "fn drain_spawn_admissions(&mut self)"},
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 5596, "fragment": "const SPAWN_ADMISSION_BATCH: usize = 1"},
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 5714, "fragment": "const LOCAL_SPAWN_ADMISSION_BATCH: usize = 16"},
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 5863, "fragment": "self.drain_spawn_admissions()"}
       ]
     },
     "identity_and_accounting": {

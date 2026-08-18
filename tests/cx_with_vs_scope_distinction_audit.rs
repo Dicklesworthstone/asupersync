@@ -149,9 +149,10 @@ fn cx_set_current_restricted_returns_current_cx_guard_with_mask() {
 }
 
 #[test]
-fn current_cx_guard_drop_pops_from_thread_local_stack() {
-    // Pin (link 4): CurrentCxGuard::drop pops the frame.
-    // Without this, set_current frames leak monotonically.
+fn current_cx_guard_drop_removes_own_thread_local_frame() {
+    // Pin (link 4): CurrentCxGuard::drop removes the frame it owns.
+    // A guard that installed no context is a no-op, and an outer guard
+    // dropped early must not remove a nested restriction.
     let source = read("src/cx/cx.rs");
 
     let impl_marker = "impl Drop for CurrentCxGuard {";
@@ -162,18 +163,20 @@ fn current_cx_guard_drop_pops_from_thread_local_stack() {
     let body = &source[start..start + body_end];
 
     assert!(
-        body.contains("if !self.pushed {") && body.contains("return;"),
-        "REGRESSION: CurrentCxGuard::drop no longer guards on \
-         self.pushed before popping. A guard from \
-         set_current(None) would pop a frame that doesn't \
-         belong to it — stack underflow.",
+        body.contains("let Some(frame_id) = self.frame_id.take() else") && body.contains("return;"),
+        "REGRESSION: CurrentCxGuard::drop no longer treats a guard \
+         from set_current(None) as a no-op.",
     );
 
     assert!(
-        body.contains("CURRENT_CX_STACK.try_with(") && body.contains("stack.borrow_mut().pop();"),
-        "REGRESSION: CurrentCxGuard::drop no longer pops \
-         from CURRENT_CX_STACK. Frames leak — \
-         Cx::current() returns stale Cxs from prior scopes.",
+        body.contains("CURRENT_CX_STACK.try_with(")
+            && body.contains("stack.last().is_some_and(|frame| frame.id == frame_id)")
+            && body.contains("stack.pop();")
+            && body.contains("stack.iter().rposition(|frame| frame.id == frame_id)")
+            && body.contains("stack.remove(index);"),
+        "REGRESSION: CurrentCxGuard::drop no longer removes its own \
+         frame from CURRENT_CX_STACK. Frames can leak or nested \
+         restrictions can be removed by the wrong guard.",
     );
 }
 

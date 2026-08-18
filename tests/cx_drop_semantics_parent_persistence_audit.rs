@@ -321,10 +321,10 @@ fn current_cx_stack_is_thread_local_for_per_thread_isolation() {
 
 #[test]
 fn current_cx_guard_pops_frame_on_drop() {
-    // Pin (link 6): CurrentCxGuard's Drop impl pops the
-    // frame from CURRENT_CX_STACK. Without this, frames
-    // would leak — Cx::current() would return a stale Cx
-    // from a long-since-completed scope.
+    // Pin (link 6): CurrentCxGuard's Drop impl removes the exact
+    // frame installed by that guard. The fast path pops a guard
+    // that is still innermost; the fallback removes by frame ID so
+    // out-of-order guard drops cannot discard a nested restriction.
     let source = read("src/cx/cx.rs");
 
     let impl_marker = "impl Drop for CurrentCxGuard {";
@@ -335,11 +335,15 @@ fn current_cx_guard_pops_frame_on_drop() {
     let body = &source[start..start + body_end];
 
     assert!(
-        body.contains("stack.borrow_mut().pop();"),
-        "REGRESSION: CurrentCxGuard::drop no longer pops the \
-         frame. Frames leak monotonically — Cx::current() \
-         returns Cxs from prior scopes, breaking the \
-         ambient-context invariant.",
+        body.contains("let Some(frame_id) = self.frame_id.take() else")
+            && body.contains("stack.last().is_some_and(|frame| frame.id == frame_id)")
+            && body.contains("stack.pop();")
+            && body.contains("stack.iter().rposition(|frame| frame.id == frame_id)")
+            && body.contains("stack.remove(index);"),
+        "REGRESSION: CurrentCxGuard::drop no longer removes its exact \
+         frame. Frames can leak or an out-of-order guard drop can \
+         discard a nested restriction, breaking the ambient-context \
+         invariant.",
     );
 
     // Must use try_with so panic-unwind during teardown is

@@ -74,8 +74,8 @@
     },
     {
       "path": "src/cx/cx.rs",
-      "sha256": "28f07128761f9892a6e2fc6e62b2fc1e2c4c0706639406f5cf7e682d8969f5fa",
-      "line_count": 7770,
+      "sha256": "b4a679ade9d6a5e23b23636830225503bde581adfbef4eeb42ef8843493dd4be",
+      "line_count": 7804,
       "role": "checkpoint, cancellation queries, writers, and cancel-waker registrations"
     },
     {
@@ -86,8 +86,8 @@
     },
     {
       "path": "src/runtime/scheduler/three_lane.rs",
-      "sha256": "637290a7eca79c8a464763b3788703f52fbd731d65f049615d21a5bcc7a08cb1",
-      "line_count": 8192,
+      "sha256": "95133c33fbfac1ce32625234aca1a4fb262b6594d562ba5beb95aec8965f9156",
+      "line_count": 8210,
       "role": "production scheduler table selection, poll cycle, publication, ordinary wakers, and reason-bearing cancel wakers"
     },
     {
@@ -128,8 +128,8 @@
     },
     {
       "path": "src/lab/runtime.rs",
-      "sha256": "fe5bb43219081c086adda403a8cd41c33d1fe6f7d2519656021993c110eca69d",
-      "line_count": 11246,
+      "sha256": "e0d9c94245f61fa387ee0a1307b61ca3e62cc4688f5c49a50dc5277d2e86a2dc",
+      "line_count": 11254,
       "role": "deterministic scheduler cancellation writer and alternate reader model"
     },
     {
@@ -279,9 +279,9 @@
         {"path": "src/obligation/lyapunov.rs", "line": 293, "fragment": "TaskPhase::CancelRequested"},
         {"path": "src/obligation/lyapunov.rs", "line": 294, "fragment": "TaskPhase::Cancelling"},
         {"path": "src/obligation/lyapunov.rs", "line": 295, "fragment": "TaskPhase::Finalizing"},
-        {"path": "src/runtime/scheduler/three_lane.rs", "line": 4577, "fragment": "fn capture_adaptive_snapshot"},
-        {"path": "src/runtime/scheduler/three_lane.rs", "line": 4617, "fragment": "capture_adaptive_snapshot()"},
-        {"path": "src/runtime/scheduler/three_lane.rs", "line": 6325, "fragment": "StateSnapshot::from_runtime_state_with_tasks"},
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 4589, "fragment": "fn capture_adaptive_snapshot"},
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 4629, "fragment": "capture_adaptive_snapshot()"},
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 6343, "fragment": "StateSnapshot::from_runtime_state_with_tasks"},
         {"path": "src/runtime/config.rs", "line": 2233, "fragment": "enable_governor: false"},
         {"path": "src/runtime/config.rs", "line": 2234, "fragment": "governor_interval: 32"},
         {"path": "src/runtime/config.rs", "line": 2236, "fragment": "enable_adaptive_cancel_streak: true"},
@@ -306,8 +306,8 @@
         {"path": "src/record/task.rs", "line": 1001, "fragment": "pub fn cancel_witness"},
         {"path": "src/record/task.rs", "line": 1196, "fragment": "pub fn complete"},
         {"path": "src/record/task.rs", "line": 1401, "fragment": "pub fn cancel_reason"},
-        {"path": "src/runtime/scheduler/three_lane.rs", "line": 7553, "fragment": "record.state.is_terminal()"},
-        {"path": "src/runtime/scheduler/three_lane.rs", "line": 7886, "fragment": "fn complete_polled_record"},
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 7571, "fragment": "record.state.is_terminal()"},
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 7904, "fragment": "fn complete_polled_record"},
         {"path": "src/runtime/scheduler/worker.rs", "line": 391, "fragment": "record.state.is_terminal()"},
         {"path": "src/runtime/scheduler/worker.rs", "line": 607, "fragment": "record.state.is_terminal()"},
         {"path": "src/runtime/scheduler/worker.rs", "line": 770, "fragment": "record.state.is_terminal()"},
@@ -330,12 +330,12 @@
       "semantic_payload": "lock-backed 0.4.3 requested bit or cloned reason/cause chain",
       "disposition": "KEEP_PUBLISHED_FLAG_AND_LOCKED_RICH_READS",
       "anchors": [
-        {"path": "src/cx/cx.rs", "line": 2155, "fragment": "self.inner.read().cancel_requested"},
-        {"path": "src/cx/cx.rs", "line": 3449, "fragment": "inner.cancel_reason.clone()"},
-        {"path": "src/cx/cx.rs", "line": 3479, "fragment": "pub fn cancel_chain"},
-        {"path": "src/cx/cx.rs", "line": 3513, "fragment": "pub fn root_cancel_cause"},
-        {"path": "src/cx/cx.rs", "line": 3539, "fragment": "pub fn cancelled_by"},
-        {"path": "src/cx/cx.rs", "line": 3570, "fragment": "pub fn any_cause_is"}
+        {"path": "src/cx/cx.rs", "line": 2184, "fragment": "self.inner.read().cancel_requested"},
+        {"path": "src/cx/cx.rs", "line": 3478, "fragment": "inner.cancel_reason.clone()"},
+        {"path": "src/cx/cx.rs", "line": 3508, "fragment": "pub fn cancel_chain"},
+        {"path": "src/cx/cx.rs", "line": 3542, "fragment": "pub fn root_cancel_cause"},
+        {"path": "src/cx/cx.rs", "line": 3568, "fragment": "pub fn cancelled_by"},
+        {"path": "src/cx/cx.rs", "line": 3599, "fragment": "pub fn any_cause_is"}
       ]
     },
     {
@@ -350,9 +350,9 @@
       "semantic_payload": "one-bit cancellation publication only",
       "disposition": "KEEP_INCUMBENT_ALREADY_ATOMIC",
       "anchors": [
-        {"path": "src/cx/cx.rs", "line": 2220, "fragment": "let cancelled = guard.is_cancel_requested()"},
-        {"path": "src/runtime/scheduler/three_lane.rs", "line": 7959, "fragment": "self.cancellation.load(Ordering::Acquire)"},
-        {"path": "src/runtime/scheduler/three_lane.rs", "line": 8018, "fragment": "self.cancellation.load(Ordering::Acquire)"}
+        {"path": "src/cx/cx.rs", "line": 2249, "fragment": "let cancelled = guard.is_cancel_requested()"},
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 7977, "fragment": "self.cancellation.load(Ordering::Acquire)"},
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 8036, "fragment": "self.cancellation.load(Ordering::Acquire)"}
       ]
     },
     {
@@ -367,12 +367,12 @@
       "semantic_payload": "coherent cancellation flag, strongest cleanup priority, and local/global route",
       "disposition": "KEEP_REASON_BEARING_LOCKED_PATH",
       "anchors": [
-        {"path": "src/runtime/scheduler/three_lane.rs", "line": 8075, "fragment": "fn schedule(&self)"},
-        {"path": "src/runtime/scheduler/three_lane.rs", "line": 8080, "fragment": "let guard = inner.read()"},
-        {"path": "src/runtime/scheduler/three_lane.rs", "line": 8087, "fragment": "guard.cancel_requested"},
-        {"path": "src/runtime/scheduler/three_lane.rs", "line": 8134, "fragment": "fn schedule(&self)"},
-        {"path": "src/runtime/scheduler/three_lane.rs", "line": 8139, "fragment": "let guard = inner.read()"},
-        {"path": "src/runtime/scheduler/three_lane.rs", "line": 8146, "fragment": "guard.cancel_requested"}
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 8093, "fragment": "fn schedule(&self)"},
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 8098, "fragment": "let guard = inner.read()"},
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 8105, "fragment": "guard.cancel_requested"},
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 8152, "fragment": "fn schedule(&self)"},
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 8157, "fragment": "let guard = inner.read()"},
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 8164, "fragment": "guard.cancel_requested"}
       ]
     },
     {
@@ -433,10 +433,10 @@
       "writer_id": "HOTREAD-CANCEL-WRITER-CHECKPOINT",
       "owner": "Cx::checkpoint and Cx::checkpoint_with compatibility-handle materialization and budget exhaustion",
       "anchors": [
-        {"path": "src/cx/cx.rs", "line": 2272, "fragment": "inner.set_cancel_requested(true)"},
-        {"path": "src/cx/cx.rs", "line": 2281, "fragment": "inner.set_cancel_requested(true)"},
-        {"path": "src/cx/cx.rs", "line": 2402, "fragment": "inner.set_cancel_requested(true)"},
-        {"path": "src/cx/cx.rs", "line": 2411, "fragment": "inner.set_cancel_requested(true)"}
+        {"path": "src/cx/cx.rs", "line": 2301, "fragment": "inner.set_cancel_requested(true)"},
+        {"path": "src/cx/cx.rs", "line": 2310, "fragment": "inner.set_cancel_requested(true)"},
+        {"path": "src/cx/cx.rs", "line": 2431, "fragment": "inner.set_cancel_requested(true)"},
+        {"path": "src/cx/cx.rs", "line": 2440, "fragment": "inner.set_cancel_requested(true)"}
       ],
       "ordering": "CxInner write guard; budget-derived reason and pending waker state remain under the guard"
     },
@@ -444,11 +444,11 @@
       "writer_id": "HOTREAD-CANCEL-WRITER-CX-APIS",
       "owner": "Cx internal, explicit, low-allocation, and reason-setting cancellation APIs",
       "anchors": [
-        {"path": "src/cx/cx.rs", "line": 3117, "fragment": "inner.set_cancel_requested(value)"},
-        {"path": "src/cx/cx.rs", "line": 3151, "fragment": "inner.set_cancel_requested(value)"},
-        {"path": "src/cx/cx.rs", "line": 3346, "fragment": "inner.set_cancel_requested(true)"},
-        {"path": "src/cx/cx.rs", "line": 3403, "fragment": "inner.set_cancel_requested(true)"},
-        {"path": "src/cx/cx.rs", "line": 3603, "fragment": "inner.set_cancel_requested(true)"}
+        {"path": "src/cx/cx.rs", "line": 3146, "fragment": "inner.set_cancel_requested(value)"},
+        {"path": "src/cx/cx.rs", "line": 3180, "fragment": "inner.set_cancel_requested(value)"},
+        {"path": "src/cx/cx.rs", "line": 3375, "fragment": "inner.set_cancel_requested(true)"},
+        {"path": "src/cx/cx.rs", "line": 3432, "fragment": "inner.set_cancel_requested(true)"},
+        {"path": "src/cx/cx.rs", "line": 3632, "fragment": "inner.set_cancel_requested(true)"}
       ],
       "ordering": "CxInner write guard; rich reason and waker snapshots are coherent at unlock"
     },
@@ -504,12 +504,12 @@
       "expected_frequency": "spawn, ordinary wake, timer wake, and cancellation injection",
       "semantic_payload": "dedup result plus local/global route metadata",
       "anchors": [
-        {"path": "src/runtime/scheduler/three_lane.rs", "line": 2585, "fragment": "record.wake_state.clear()"},
-        {"path": "src/runtime/scheduler/three_lane.rs", "line": 2599, "fragment": "record.wake_state.notify()"},
-        {"path": "src/runtime/scheduler/three_lane.rs", "line": 2666, "fragment": "record.wake_state.notify()"},
-        {"path": "src/runtime/scheduler/three_lane.rs", "line": 2687, "fragment": "record.wake_state.notify()"},
-        {"path": "src/runtime/scheduler/three_lane.rs", "line": 2745, "fragment": "record.wake_state.notify()"},
-        {"path": "src/runtime/scheduler/three_lane.rs", "line": 2845, "fragment": "record.wake_state.notify()"}
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 2593, "fragment": "record.wake_state.clear()"},
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 2607, "fragment": "record.wake_state.notify()"},
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 2675, "fragment": "record.wake_state.notify()"},
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 2696, "fragment": "record.wake_state.notify()"},
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 2754, "fragment": "record.wake_state.notify()"},
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 2857, "fragment": "record.wake_state.notify()"}
       ]
     },
     {
@@ -522,7 +522,7 @@
       "semantic_payload": "strongest reason priority, wake snapshots, and first-lane publication",
       "anchors": [
         {"path": "src/record/task.rs", "line": 896, "fragment": "self.wake_state.notify()"},
-        {"path": "src/runtime/scheduler/three_lane.rs", "line": 5148, "fragment": "record.wake_state.notify()"}
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 5166, "fragment": "record.wake_state.notify()"}
       ]
     },
     {
@@ -534,8 +534,8 @@
       "expected_frequency": "task or async-finalizer admission",
       "semantic_payload": "initial Notified state before ready queue publication",
       "anchors": [
-        {"path": "src/runtime/scheduler/three_lane.rs", "line": 5759, "fragment": "record.wake_state.notify()"},
-        {"path": "src/runtime/scheduler/three_lane.rs", "line": 5764, "fragment": "record.wake_state.notify()"},
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 5777, "fragment": "record.wake_state.notify()"},
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 5782, "fragment": "record.wake_state.notify()"},
         {"path": "src/runtime/state.rs", "line": 7247, "fragment": "record.wake_state.notify()"}
       ]
     },
@@ -548,12 +548,12 @@
       "expected_frequency": "worker-local scheduling and dependent completion wakes",
       "semantic_payload": "dedup, priority, pinning, and route",
       "anchors": [
-        {"path": "src/runtime/scheduler/three_lane.rs", "line": 6916, "fragment": "record.wake_state.notify()"},
-        {"path": "src/runtime/scheduler/three_lane.rs", "line": 6957, "fragment": "record.wake_state.notify()"},
-        {"path": "src/runtime/scheduler/three_lane.rs", "line": 6998, "fragment": "record.wake_state.notify()"},
-        {"path": "src/runtime/scheduler/three_lane.rs", "line": 7045, "fragment": "record.wake_state.notify()"},
-        {"path": "src/runtime/scheduler/three_lane.rs", "line": 7054, "fragment": "record.wake_state.notify()"},
-        {"path": "src/runtime/scheduler/three_lane.rs", "line": 7084, "fragment": "metadata.wake_state.clear()"}
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 6934, "fragment": "record.wake_state.notify()"},
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 6975, "fragment": "record.wake_state.notify()"},
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 7016, "fragment": "record.wake_state.notify()"},
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 7063, "fragment": "record.wake_state.notify()"},
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 7072, "fragment": "record.wake_state.notify()"},
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 7102, "fragment": "metadata.wake_state.clear()"}
       ]
     },
     {
@@ -565,11 +565,11 @@
       "expected_frequency": "every production ThreeLane poll",
       "semantic_payload": "Polling to Idle or Notified handoff",
       "anchors": [
-        {"path": "src/runtime/scheduler/three_lane.rs", "line": 7169, "fragment": "record.wake_state.begin_poll()"},
-        {"path": "src/runtime/scheduler/three_lane.rs", "line": 7211, "fragment": "record.wake_state.begin_poll()"},
-        {"path": "src/runtime/scheduler/three_lane.rs", "line": 7387, "fragment": "wake_state.clear()"},
-        {"path": "src/runtime/scheduler/three_lane.rs", "line": 7452, "fragment": "wake_state.finish_poll()"},
-        {"path": "src/runtime/scheduler/three_lane.rs", "line": 7526, "fragment": "wake_state.clear()"}
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 7187, "fragment": "record.wake_state.begin_poll()"},
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 7229, "fragment": "record.wake_state.begin_poll()"},
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 7405, "fragment": "wake_state.clear()"},
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 7470, "fragment": "wake_state.finish_poll()"},
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 7544, "fragment": "wake_state.clear()"}
       ]
     },
     {
@@ -581,10 +581,10 @@
       "expected_frequency": "every external wake and cancellation wake",
       "semantic_payload": "dedup, cancel route, strongest cleanup priority, and queue destination",
       "anchors": [
-        {"path": "src/runtime/scheduler/three_lane.rs", "line": 7952, "fragment": "self.wake_state.notify()"},
-        {"path": "src/runtime/scheduler/three_lane.rs", "line": 8015, "fragment": "self.wake_state.notify()"},
-        {"path": "src/runtime/scheduler/three_lane.rs", "line": 8095, "fragment": "self.wake_state.notify()"},
-        {"path": "src/runtime/scheduler/three_lane.rs", "line": 8154, "fragment": "self.wake_state.notify()"}
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 7970, "fragment": "self.wake_state.notify()"},
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 8033, "fragment": "self.wake_state.notify()"},
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 8113, "fragment": "self.wake_state.notify()"},
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 8172, "fragment": "self.wake_state.notify()"}
       ]
     },
     {
@@ -598,7 +598,7 @@
       "anchors": [
         {"path": "src/types/task_context.rs", "line": 981, "fragment": "pub(crate) fn cancel_waker_snapshot"},
         {"path": "src/types/task_context.rs", "line": 1006, "fragment": "pub(crate) fn take_cancel_wakers"},
-        {"path": "src/cx/cx.rs", "line": 3172, "fragment": "fn refresh_cancel_waker"},
+        {"path": "src/cx/cx.rs", "line": 3201, "fragment": "fn refresh_cancel_waker"},
         {"path": "src/channel/oneshot.rs", "line": 865, "fragment": "fn refresh_cancel_waker"},
         {"path": "src/sync/barrier.rs", "line": 489, "fragment": "Clear the Cx registration first"},
         {"path": "src/sync/once_cell.rs", "line": 884, "fragment": "refresh_cancel_waker"}
@@ -641,10 +641,10 @@
       "owner": "ThreeLaneWorker ordered completion",
       "rule": "external task table removes and detaches the record before RuntimeState completion; post-lock retirement drops it rather than returning it to the table pool",
       "anchors": [
-        {"path": "src/runtime/scheduler/three_lane.rs", "line": 7628, "fragment": "tt.remove_task(task_id)"},
-        {"path": "src/runtime/scheduler/three_lane.rs", "line": 7646, "fragment": "task_completed_from_external_record"},
-        {"path": "src/runtime/scheduler/three_lane.rs", "line": 7787, "fragment": "fn retire_detached_task_record"},
-        {"path": "src/runtime/scheduler/three_lane.rs", "line": 7792, "fragment": "drop(record)"}
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 7646, "fragment": "tt.remove_task(task_id)"},
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 7664, "fragment": "task_completed_from_external_record"},
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 7805, "fragment": "fn retire_detached_task_record"},
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 7810, "fragment": "drop(record)"}
       ]
     }
   ],

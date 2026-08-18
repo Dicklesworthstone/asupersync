@@ -116,7 +116,7 @@
     {"path":"examples/demo_benchmark.rs","sha256":"8525af694bd4d75f2a224200991e3d63d70e611bff435c441b778b439397a2ef","line_count":679},
     {"path":"benches/golden_output.rs","sha256":"a6dd8fee91a182d24168a45edd47aff95270e59de2747bf885309826b0ff5ed9","line_count":1041},
     {"path":"artifacts/dependency_capability_registry_v1.json","sha256":"834c0bb0f30adf65ad27256fbae9f903fe9945e37a7d010f90d38971802c74ea","line_count":6929},
-    {"path":"artifacts/dependency_capability_baseline_v1.json","sha256":"fc0ad0f0ade40c2ac156913ee524c29fc7303428cfc0439b9034dd36a1168d78","line_count":3210},
+    {"path":"artifacts/dependency_capability_baseline_v1.json","sha256":"09404498819adb29849d4d6c955e7aaac876b6fb40a1e8144606bdb090502c40","line_count":3210},
     {"path":"artifacts/dependency_verification_matrix_v1.json","sha256":"3370620a1bec9e38e37a7ea681e18e22251ac0745f52507c12b6261754d2447e","line_count":88541},
     {"path":"artifacts/dependency_marginal_ledger_v1.json","sha256":"4e36ca29d7187e3237cfd9f422b2661009a608e93bb5761c7d511d412d66a047","line_count":188447},
     {"path":"artifacts/api_surface_map_v1.json","sha256":"7dfbb239422630e1ef9c875e7542c4cee440211233dc7b734611fa8481d54178","line_count":4824},

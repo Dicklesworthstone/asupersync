@@ -166,9 +166,9 @@ fn current_cx_storage_is_a_stack_not_a_single_slot() {
 }
 
 #[test]
-fn current_cx_guard_pops_via_try_with_for_teardown_safety() {
-    // Pin: drop uses try_with(...).pop() to avoid double-
-    // panic during TLS teardown.
+fn current_cx_guard_removes_own_frame_via_try_with_for_teardown_safety() {
+    // Pin: drop uses try_with and exact frame identity to avoid both
+    // double-panic during TLS teardown and out-of-order frame removal.
     let source = read("src/cx/cx.rs");
 
     let drop_marker = "impl Drop for CurrentCxGuard {";
@@ -184,9 +184,13 @@ fn current_cx_guard_pops_via_try_with_for_teardown_safety() {
     );
 
     assert!(
-        body.contains("stack.borrow_mut().pop();"),
-        "REGRESSION: CurrentCxGuard::drop no longer pops \
-         the stack frame.",
+        body.contains("let Some(frame_id) = self.frame_id.take() else")
+            && body.contains("stack.last().is_some_and(|frame| frame.id == frame_id)")
+            && body.contains("stack.pop();")
+            && body.contains("stack.iter().rposition(|frame| frame.id == frame_id)")
+            && body.contains("stack.remove(index);"),
+        "REGRESSION: CurrentCxGuard::drop no longer removes the exact \
+         stack frame installed by that guard.",
     );
 }
 
