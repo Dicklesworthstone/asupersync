@@ -567,6 +567,50 @@ fn behavioral_explicit_argument_works_without_ambient() {
 }
 
 #[test]
+fn out_of_order_guard_drop_preserves_inner_capability_restriction() {
+    use std::time::Duration;
+
+    use asupersync::Cx;
+    use asupersync::cx::cap;
+    use asupersync::runtime::RuntimeBuilder;
+    use asupersync::types::Budget;
+
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("build capability-stack runtime");
+    let full = runtime.request_cx_with_budget(Budget::INFINITE);
+    let outer = Cx::set_current(Some(full.clone()));
+    let inner = full.restrict::<cap::None>().set_current_restricted();
+
+    drop(outer);
+
+    let observed = Cx::current().expect("inner restricted context remains installed");
+    assert!(observed.io().is_none(), "IO authority must remain masked");
+    assert!(
+        observed.remote().is_none(),
+        "remote authority must remain masked"
+    );
+    assert!(
+        observed.timer_driver().is_none(),
+        "time authority must remain masked"
+    );
+    assert!(
+        observed.fetch_cap().is_none(),
+        "fetch authority must remain masked"
+    );
+
+    drop(inner);
+    assert!(
+        Cx::current().is_none(),
+        "dropping both guards must leave no ambient context"
+    );
+    assert!(
+        runtime.shutdown_timeout(Duration::from_secs(5)),
+        "runtime must shut down without leaked context-owned state"
+    );
+}
+
+#[test]
 fn cross_reference_to_related_audits() {
     let prior_audits = [
         "tests/cx_api_decision_tree_with_vs_scope_audit.rs",

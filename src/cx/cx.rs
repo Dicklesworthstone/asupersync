@@ -93,7 +93,7 @@ use crate::types::{
     CapabilityBudgetRequirements, CxInner, RegionId, SystemPressure, TaskId, Time,
 };
 use crate::util::{ArenaIndex, EntropySource, OsEntropy};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::future::Future;
 use std::marker::PhantomData;
 use std::pin::Pin;
@@ -569,6 +569,7 @@ type FullCx = Cx<cap::All>;
 /// even though the underlying inner state is shared.
 #[derive(Debug, Clone)]
 struct CurrentCxFrame {
+    id: u64,
     cx: FullCx,
     mask: cap::CapMask,
 }
@@ -580,6 +581,22 @@ thread_local! {
     /// invariant that an empty stack means "no current cx" — i.e.
     /// `current()` returns `None`.
     static CURRENT_CX_STACK: RefCell<Vec<CurrentCxFrame>> = const { RefCell::new(Vec::new()) };
+    /// Per-thread identity source for stack frames. Guard drops use this
+    /// identity so an outer guard dropped before an inner guard cannot remove
+    /// the inner capability restriction.
+    static NEXT_CURRENT_CX_FRAME_ID: Cell<u64> = const { Cell::new(1) };
+}
+
+#[inline]
+fn next_current_cx_frame_id() -> u64 {
+    NEXT_CURRENT_CX_FRAME_ID.with(|next| {
+        let id = next.get();
+        next.set(
+            id.checked_add(1)
+                .expect("current Cx frame identity space exhausted"),
+        );
+        id
+    })
 }
 
 /// Guard that pops the corresponding frame from the
@@ -591,6 +608,7 @@ pub struct CurrentCxGuard {
     /// (false, when caller passed `None`). Determines whether drop
     /// pops.
     pushed: bool,
+    frame_id: Option<u64>,
     _not_send: std::marker::PhantomData<*mut ()>,
 }
 
@@ -599,8 +617,16 @@ impl Drop for CurrentCxGuard {
         if !self.pushed {
             return;
         }
+        let frame_id = self.frame_id.take();
         let _ = CURRENT_CX_STACK.try_with(|stack| {
-            stack.borrow_mut().pop();
+            let mut stack = stack.borrow_mut();
+            if stack.last().is_some_and(|frame| Some(frame.id) == frame_id) {
+                stack.pop();
+            } else if let Some(index) = stack.iter().rposition(|frame| Some(frame.id) == frame_id) {
+                stack.remove(index);
+            } else {
+                debug_assert!(false, "current Cx guard frame was already removed");
+            }
         });
     }
 }
@@ -777,18 +803,21 @@ impl FullCx {
     #[inline]
     #[must_use]
     pub fn set_current(cx: Option<Self>) -> CurrentCxGuard {
-        let pushed = CURRENT_CX_STACK.with(|stack| match cx {
+        let frame_id = CURRENT_CX_STACK.with(|stack| match cx {
             Some(cx) => {
+                let id = next_current_cx_frame_id();
                 stack.borrow_mut().push(CurrentCxFrame {
+                    id,
                     cx,
                     mask: cap::CapMask::all(),
                 });
-                true
+                Some(id)
             }
-            None => false,
+            None => None,
         });
         CurrentCxGuard {
-            pushed,
+            pushed: frame_id.is_some(),
+            frame_id,
             _not_send: std::marker::PhantomData,
         }
     }
@@ -822,7 +851,7 @@ where
     pub fn set_current_restricted(self) -> CurrentCxGuard {
         let mask = <Caps as cap::CapSetRuntimeMask>::MASK;
         let cx = self.retype::<cap::All>();
-        CURRENT_CX_STACK.with(|stack| {
+        let frame_id = CURRENT_CX_STACK.with(|stack| {
             let mut s = stack.borrow_mut();
             assert!(
                 s.len() < crate::types::task_context::MAX_CONTEXT_STACK_DEPTH,
@@ -832,10 +861,13 @@ where
                  restriction nesting.",
                 crate::types::task_context::MAX_CONTEXT_STACK_DEPTH
             );
-            s.push(CurrentCxFrame { cx, mask });
+            let id = next_current_cx_frame_id();
+            s.push(CurrentCxFrame { id, cx, mask });
+            id
         });
         CurrentCxGuard {
             pushed: true,
+            frame_id: Some(frame_id),
             _not_send: std::marker::PhantomData,
         }
     }
@@ -869,7 +901,7 @@ impl FullCx {
     /// (br-asupersync-5ckssb)
     #[must_use]
     pub fn push_restriction(mask: cap::CapMask) -> CurrentCxGuard {
-        let pushed = CURRENT_CX_STACK.with(|stack| {
+        let frame_id = CURRENT_CX_STACK.with(|stack| {
             let mut s = stack.borrow_mut();
             // Check depth limit before attempting to push
             assert!(
@@ -887,16 +919,19 @@ impl FullCx {
                 // No installed cx: push a no-op marker that current()
                 // will see as None (no cx to clone). Skip push since
                 // there's nothing to restrict.
-                None => return false,
+                None => return None,
             };
+            let id = next_current_cx_frame_id();
             s.push(CurrentCxFrame {
+                id,
                 cx,
                 mask: intersected_mask,
             });
-            true
+            Some(id)
         });
         CurrentCxGuard {
-            pushed,
+            pushed: frame_id.is_some(),
+            frame_id,
             _not_send: std::marker::PhantomData,
         }
     }
@@ -5844,6 +5879,7 @@ mod tests {
             let mut s = stack.borrow_mut();
             for _ in 0..crate::types::task_context::MAX_CONTEXT_STACK_DEPTH {
                 s.push(CurrentCxFrame {
+                    id: next_current_cx_frame_id(),
                     cx: cx.clone().retype::<cap::All>(),
                     mask: cap::CapMask::all(),
                 });
@@ -5866,6 +5902,7 @@ mod tests {
             let mut s = stack.borrow_mut();
             for _ in 0..crate::types::task_context::MAX_CONTEXT_STACK_DEPTH {
                 s.push(CurrentCxFrame {
+                    id: next_current_cx_frame_id(),
                     cx: cx.clone().retype::<cap::All>(),
                     mask: cap::CapMask::all(),
                 });
