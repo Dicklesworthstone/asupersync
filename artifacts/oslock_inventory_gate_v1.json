@@ -70,8 +70,8 @@
     },
     {
       "path": "src/runtime/blocking_pool.rs",
-      "sha256": "74cca2354df83980f1b68ebf19bd5f6a76b619e14b5abe90be3d9c7affbbbd02",
-      "line_count": 3816
+      "sha256": "27d125f2453ed5f4724ad74d7739ab087d83222ba017e4d1dd9b34f961a12734",
+      "line_count": 3849
     },
     {
       "path": "src/service/discover.rs",
@@ -118,7 +118,7 @@
     ],
     "matching_file_count": 246,
     "matching_line_count": 558,
-    "sha256": "2f5ceea6f293140897889583e7b34819fe531b22083d4e8cc01905639938289f",
+    "sha256": "a87e2904096723b994ccebddb429757b76507b9e04941a8b2ee883dc4b04bbb0",
     "scope_counts": [
       {
         "scope": "benches",
@@ -261,7 +261,7 @@
       },
       {
         "form": "{Mutex, MutexGuard}",
-        "count": 4
+        "count": 3
       },
       {
         "form": "{Condvar, Mutex}",
@@ -281,6 +281,10 @@
       },
       {
         "form": "{Mutex as ParkingMutex, RwLock}",
+        "count": 1
+      },
+      {
+        "form": "{Condvar, Mutex, MutexGuard}",
         "count": 1
       },
       {

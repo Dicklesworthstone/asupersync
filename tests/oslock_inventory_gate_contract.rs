@@ -220,7 +220,7 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
     if census.get("matching_file_count").and_then(Value::as_u64) != Some(246)
         || census.get("matching_line_count").and_then(Value::as_u64) != Some(558)
         || census.get("sha256").and_then(Value::as_str)
-            != Some("2f5ceea6f293140897889583e7b34819fe531b22083d4e8cc01905639938289f")
+            != Some("a87e2904096723b994ccebddb429757b76507b9e04941a8b2ee883dc4b04bbb0")
     {
         return Err("source census receipt drifted".to_owned());
     }
