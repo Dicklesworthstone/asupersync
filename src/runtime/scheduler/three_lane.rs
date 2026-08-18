@@ -2631,7 +2631,7 @@ impl ThreeLaneScheduler {
                     return;
                 }
             }
-            if schedule_cancel_on_current_local(task, priority) {
+            if self.current_worker_owns_tasks() && schedule_cancel_on_current_local(task, priority) {
                 Self::contain_publication_effect(|| {
                     self.record_scheduler_evidence_enqueue(task);
                 });
