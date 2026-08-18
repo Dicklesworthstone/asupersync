@@ -5571,6 +5571,71 @@ fn local_ready_rejects_foreign_runtime_tls_for_pinned_task() {
 }
 
 #[test]
+fn cancel_lane_rejects_foreign_runtime_tls_for_unpinned_local_task() {
+    let state_a = LocalQueue::test_state(10);
+    let task = {
+        let mut state = state_a
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let region = state.create_root_region(Budget::INFINITE);
+        let (task, _) = state
+            .create_task(region, Budget::INFINITE, async { 1 })
+            .expect("create runtime-A task");
+        state
+            .task_mut(task)
+            .expect("runtime-A task record")
+            .mark_local();
+        task
+    };
+    let scheduler_a = ThreeLaneScheduler::new(1, &state_a);
+
+    let state_b = LocalQueue::test_state(10);
+    let scheduler_b = ThreeLaneScheduler::new(1, &state_b);
+    let foreign_fast_queue = scheduler_b.workers[0].fast_queue.clone();
+    let foreign_priority = Arc::clone(&scheduler_b.workers[0].local);
+    let foreign_local_ready = Arc::clone(&scheduler_b.workers[0].local_ready);
+
+    let route_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _worker_guard = ScopedWorkerId::new(0);
+        let _ready_guard = ScopedLocalReady::new(Arc::clone(&foreign_local_ready));
+        let _scheduler_guard = ScopedLocalScheduler::new(Arc::clone(&foreign_priority));
+        let _queue_guard = LocalQueue::set_current(foreign_fast_queue);
+        scheduler_a.inject_cancel(task, 100);
+    }));
+
+    if cfg!(debug_assertions) {
+        assert!(
+            route_result.is_err(),
+            "debug builds must diagnose an unpinned local cancel without its owner worker"
+        );
+    } else {
+        assert!(
+            route_result.is_ok(),
+            "release builds must fail closed without unwinding"
+        );
+    }
+    assert!(
+        !foreign_priority.lock().is_in_cancel_lane(task),
+        "runtime-A cancellation must not enter runtime B's cancel lane"
+    );
+    assert!(
+        foreign_local_ready.lock().is_empty(),
+        "runtime-A cancellation must not mutate runtime B's local-ready queue"
+    );
+    let state = state_a
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    assert!(
+        state
+            .task(task)
+            .expect("runtime-A task record")
+            .wake_state
+            .notify(),
+        "failed local cancel routing must clear runtime A's wake state for retry"
+    );
+}
+
+#[test]
 fn try_ready_work_drains_fast_queue_first() {
     // When both fast_queue and PriorityScheduler have ready tasks,
     // try_ready_work() should pop from fast_queue first.

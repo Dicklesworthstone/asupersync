@@ -9349,7 +9349,9 @@ mod tests {
         rewrite_checksum(&mut duplicate_step);
         assert!(matches!(
             ForcedSchedule::try_from_canonical_bytes(&duplicate_step, decode_limits),
-            Err(ForcedScheduleArtifactError::Schedule(ForcedScheduleError::StepOrder { index: 1, .. }))
+            Err(ForcedScheduleArtifactError::Schedule(
+                ForcedScheduleError::StepOrder { index: 1, .. }
+            ))
         ));
         let mut backwards_time = canonical.clone();
         write_u64(&mut backwards_time, dispatch0 + 21, 1);
@@ -9357,7 +9359,9 @@ mod tests {
         rewrite_checksum(&mut backwards_time);
         assert!(matches!(
             ForcedSchedule::try_from_canonical_bytes(&backwards_time, decode_limits),
-            Err(ForcedScheduleArtifactError::Schedule(ForcedScheduleError::TimeOrder { index: 1, .. }))
+            Err(ForcedScheduleArtifactError::Schedule(
+                ForcedScheduleError::TimeOrder { index: 1, .. }
+            ))
         ));
         for (offset, field) in [
             (terminal + 24, "terminal_quiescent"),
@@ -9377,7 +9381,9 @@ mod tests {
             rewrite_checksum(&mut partial);
             assert_eq!(
                 ForcedSchedule::try_from_canonical_bytes(&partial, decode_limits),
-                Err(ForcedScheduleArtifactError::Schedule(ForcedScheduleError::PartialSource))
+                Err(ForcedScheduleArtifactError::Schedule(
+                    ForcedScheduleError::PartialSource
+                ))
             );
         }
         let mut impossible_terminal = canonical.clone();
@@ -9394,7 +9400,9 @@ mod tests {
         rewrite_checksum(&mut impossible_terminal);
         assert_eq!(
             ForcedSchedule::try_from_canonical_bytes(&impossible_terminal, decode_limits),
-            Err(ForcedScheduleArtifactError::Schedule(ForcedScheduleError::PartialSource))
+            Err(ForcedScheduleArtifactError::Schedule(
+                ForcedScheduleError::PartialSource
+            ))
         );
 
         let mut wrong_seed = canonical.clone();
