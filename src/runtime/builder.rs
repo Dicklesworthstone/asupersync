@@ -5006,6 +5006,36 @@ impl RuntimeHandle {
     {
         self.try_spawn(future).map(CheckedJoinHandle::new)
     }
+
+    /// Create a request-scoped [`Cx`](crate::cx::Cx) backed by this runtime.
+    ///
+    /// This is the handle-scoped counterpart to
+    /// [`Runtime::request_cx_with_budget`]. It carries the same runtime-owned
+    /// drivers, tracing, logical clock, entropy source, and spawn gateway, so
+    /// holders of a cloned `RuntimeHandle` can begin an operation with explicit
+    /// authority without spawning a helper task merely to mint a context.
+    ///
+    /// # Panics
+    ///
+    /// Panics if this is a weak handle and the runtime has already been
+    /// dropped. Use [`RuntimeHandle::try_request_cx_with_budget`] when runtime
+    /// teardown can race with context creation.
+    #[must_use]
+    pub fn request_cx_with_budget(&self, budget: Budget) -> crate::cx::Cx {
+        self.try_request_cx_with_budget(budget)
+            .expect("runtime unavailable while creating request context")
+    }
+
+    /// Try to create a request-scoped [`Cx`](crate::cx::Cx) backed by this
+    /// runtime.
+    ///
+    /// Returns [`SpawnError::RuntimeUnavailable`] when a weak handle outlives
+    /// its runtime. Otherwise this is semantically identical to
+    /// [`Runtime::request_cx_with_budget`].
+    pub fn try_request_cx_with_budget(&self, budget: Budget) -> Result<crate::cx::Cx, SpawnError> {
+        let inner = self.try_inner()?;
+        Ok(build_request_cx_from_inner(&inner, budget))
+    }
 }
 
 /// Executor-side completion lease for a runtime-handle task.
@@ -8428,6 +8458,50 @@ worker_threads = 16
     }
 
     #[test]
+    fn runtime_handle_request_cx_preserves_budget_and_runtime_authority() {
+        init_test_logging();
+        let runtime = RuntimeBuilder::new()
+            .worker_threads(1)
+            .enable_time()
+            .build()
+            .expect("runtime build");
+        let budget = Budget::new().with_poll_quota(37).with_cost_quota(91);
+
+        let runtime_cx = runtime.request_cx_with_budget(budget);
+        let handle_cx = runtime.handle().request_cx_with_budget(budget);
+
+        assert_eq!(handle_cx.budget(), budget);
+        assert_eq!(handle_cx.region_id(), runtime_cx.region_id());
+        assert_eq!(
+            handle_cx.io_driver_handle().is_some(),
+            runtime_cx.io_driver_handle().is_some(),
+            "handle-minted contexts must preserve runtime IO authority"
+        );
+        assert_eq!(
+            handle_cx.timer_driver().is_some(),
+            runtime_cx.timer_driver().is_some(),
+            "handle-minted contexts must preserve runtime time authority"
+        );
+        assert!(
+            handle_cx.spawn_gateway_handle().is_some(),
+            "handle-minted contexts must carry the runtime spawn gateway"
+        );
+        assert!(
+            handle_cx.pending_spawn_counter_handle().is_some(),
+            "handle-minted contexts must carry root pending-spawn accounting"
+        );
+
+        let mut child = handle_cx
+            .spawn(|child_cx| async move {
+                child_cx.checkpoint().expect("child checkpoint");
+                42_u8
+            })
+            .expect("handle-minted Cx must spawn through the runtime gateway");
+        let joined = runtime.block_on(async { child.join(&handle_cx).await });
+        assert_eq!(joined.expect("spawned child joins"), 42);
+    }
+
+    #[test]
     fn current_handle_restored_after_block_on() {
         init_test_logging();
         // Before block_on: None.
@@ -8634,6 +8708,13 @@ worker_threads = 16
         assert!(
             matches!(result, Err(SpawnError::RuntimeUnavailable)),
             "stale weak handle should return RuntimeUnavailable instead of panicking"
+        );
+        assert!(
+            matches!(
+                weak_handle.try_request_cx_with_budget(Budget::INFINITE),
+                Err(SpawnError::RuntimeUnavailable)
+            ),
+            "stale weak handle should fail request-Cx creation without manufacturing authority"
         );
         assert!(
             weak_handle.spawn_blocking(|| {}).is_none(),
