@@ -4011,9 +4011,7 @@ mod tests {
             Box::pin(
                 conn.run_connection_op(&owner_cx, "stream_queue_owner", move |raw| {
                     let result = run_signalled_infinite_query(raw, started_tx);
-                    let interrupted = result
-                        .as_ref()
-                        .is_err_and(|error| sqlite_error_is_interrupt(error));
+                    let interrupted = result.as_ref().is_err_and(sqlite_error_is_interrupt);
                     let _ = finished_tx.send(interrupted);
                     result
                 }),

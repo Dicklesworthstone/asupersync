@@ -2581,7 +2581,7 @@ mod owned_otlp_trace_tests {
         OwnedOtlpTraces::try_new(OwnedOtlpTraceConfig::new()).expect("valid trace mapper")
     }
 
-    fn basic_span<'a>(span_id: [u8; 8], name: &'a str) -> OtlpTraceSpanInput<'a> {
+    fn basic_span(span_id: [u8; 8], name: &str) -> OtlpTraceSpanInput<'_> {
         OtlpTraceSpanInput::new(TRACE_ID, span_id, name, 100, 500)
     }
 
