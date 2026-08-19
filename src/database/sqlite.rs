@@ -6263,7 +6263,7 @@ mod tests {
     }
 
     #[test]
-    fn cached_statements_remain_usable_after_schema_change() {
+    fn sqlite_prepared_statement_cache_capacity_one_reuses_evicts_and_reprepares() {
         let cx = create_test_cx();
 
         block_on(async {
@@ -6300,6 +6300,18 @@ mod tests {
                 other => panic!("initial cached query failed: {other:?}"),
             }
 
+            // The identical second query must reuse the capacity-one entry and
+            // return a reset statement rather than stale row/step state.
+            match conn
+                .query(&cx, "SELECT value FROM t WHERE id = 1", &[])
+                .await
+            {
+                Outcome::Ok(rows) => assert_eq!(rows[0].get_str("value").unwrap(), "before"),
+                other => panic!("cached query reuse failed: {other:?}"),
+            }
+
+            // A distinct statement occupies the sole LRU slot, evicting the
+            // value query. Its later use must therefore prepare afresh.
             match conn.query(&cx, "SELECT id FROM t WHERE id = 1", &[]).await {
                 Outcome::Ok(rows) => assert_eq!(rows[0].get_i64("id").unwrap(), 1),
                 other => panic!("second cached query failed: {other:?}"),

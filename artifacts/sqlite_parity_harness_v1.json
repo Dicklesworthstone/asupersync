@@ -1,5 +1,5 @@
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "phase1_bead_id": "asupersync-ym2wtv.2.1",
   "phase2_bead_id": "asupersync-ym2wtv.2.2",
   "capability_id": "CAP-SQLITE",
@@ -673,6 +673,164 @@
         }
       }
     }
+  },
+  "phase3": {
+    "bead_id": "asupersync-ym2wtv.2.3",
+    "status": "PASS_WITH_EXPLICIT_UNEXECUTED_CROSS_ENGINE_CELLS",
+    "scope": "prepared_statement_bind_reset_cache_schema_invalid_use_busy_and_cleanup",
+    "coverage_matrix": [
+      {
+        "id": "SQLITE-PARITY-P3-POSITIONAL-BIND-001",
+        "boundary": "positional_binding_all_public_value_types",
+        "asupersync_status": "PASS",
+        "asupersync_tests": [
+          "conformance::sqlite_prepared_statements::tests::sqlite_parameter_binding_boundaries"
+        ],
+        "required_observations": [
+          "null_integer_real_text_and_blob_round_trip",
+          "quoted_and_multiline_text_is_bound_not_interpolated",
+          "connection_closes_on_drop"
+        ],
+        "frankensqlite_status": "NOT_YET_EXECUTED_IN_PINNED_P3_NEUTRAL_ADAPTER",
+        "frankensqlite_reason": "The retained neutral consumer executes only P2 lifecycle vectors; it has not yet added a prepared-statement value adapter for the pinned release."
+      },
+      {
+        "id": "SQLITE-PARITY-P3-NAMED-BIND-002",
+        "boundary": "named_placeholders_bound_by_sqlite_parameter_index",
+        "asupersync_status": "PASS",
+        "asupersync_tests": [
+          "conformance::sqlite_prepared_statements::tests::sqlite_named_placeholders_bind_in_parameter_index_order"
+        ],
+        "required_observations": [
+          "named_placeholders_are_accepted",
+          "public_positional_value_slice_binds_in_sqlite_parameter_index_order",
+          "no_named_value_map_api_is_claimed"
+        ],
+        "frankensqlite_status": "NOT_YET_EXECUTED_IN_PINNED_P3_NEUTRAL_ADAPTER",
+        "frankensqlite_reason": "Named-placeholder behavior has not been executed through the pinned neutral adapter, so no equivalence claim is made."
+      },
+      {
+        "id": "SQLITE-PARITY-P3-RESET-CACHE-HIT-003",
+        "boundary": "cached_statement_reuse_and_reset",
+        "asupersync_status": "PASS",
+        "asupersync_tests": [
+          "conformance::sqlite_prepared_statements::tests::sqlite_cached_statement_resets_between_bindings",
+          "database::sqlite::tests::sqlite_prepared_statement_reset_audit::audit_prepare_cached_statement_reuse"
+        ],
+        "required_observations": [
+          "identical_sql_reuses_prepare_cached_path",
+          "new_parameters_replace_old_bindings",
+          "row_step_state_does_not_leak_between_calls"
+        ],
+        "frankensqlite_status": "NOT_YET_EXECUTED_IN_PINNED_P3_NEUTRAL_ADAPTER",
+        "frankensqlite_reason": "The pinned neutral adapter has no P3 cache-hit receipt and does not expose cache telemetry through its current adapter surface."
+      },
+      {
+        "id": "SQLITE-PARITY-P3-CACHE-EVICTION-004",
+        "boundary": "capacity_one_cache_eviction_and_reprepare",
+        "asupersync_status": "PASS",
+        "asupersync_tests": [
+          "database::sqlite::tests::sqlite_prepared_statement_cache_capacity_one_reuses_evicts_and_reprepares"
+        ],
+        "required_observations": [
+          "identical_statement_reuse_succeeds",
+          "distinct_statement_applies_capacity_pressure",
+          "evicted_statement_reprepares_without_stale_state"
+        ],
+        "frankensqlite_status": "NO_COMMON_PUBLIC_CACHE_CAPACITY_CONTROL",
+        "frankensqlite_reason": "The pinned neutral AsyncConnection adapter does not publish a cache-capacity control equivalent to rusqlite set_prepared_statement_cache_capacity."
+      },
+      {
+        "id": "SQLITE-PARITY-P3-SCHEMA-CHANGE-005",
+        "boundary": "cached_statement_schema_invalidation",
+        "asupersync_status": "PASS",
+        "asupersync_tests": [
+          "conformance::sqlite_prepared_statements::tests::sqlite_cached_statement_survives_schema_change",
+          "database::sqlite::tests::sqlite_prepared_statement_cache_capacity_one_reuses_evicts_and_reprepares"
+        ],
+        "required_observations": [
+          "cached_query_succeeds_before_schema_change",
+          "schema_rebuild_does_not_return_stale_row_shape_or_value",
+          "connection_remains_reusable"
+        ],
+        "frankensqlite_status": "NOT_YET_EXECUTED_IN_PINNED_P3_NEUTRAL_ADAPTER",
+        "frankensqlite_reason": "Schema-change prepared-statement behavior has not been executed by the pinned P2-only neutral adapter."
+      },
+      {
+        "id": "SQLITE-PARITY-P3-INVALID-USE-006",
+        "boundary": "malformed_sql_and_parameter_arity_errors",
+        "asupersync_status": "PASS",
+        "asupersync_tests": [
+          "conformance::sqlite_prepared_statements::tests::sqlite_malformed_and_arity_errors_release_statement_state"
+        ],
+        "required_observations": [
+          "malformed_prepare_returns_typed_sqlite_error",
+          "too_few_and_too_many_parameters_return_typed_sqlite_errors",
+          "failed_statements_release_state_and_connection_recovers"
+        ],
+        "frankensqlite_status": "NOT_YET_EXECUTED_IN_PINNED_P3_NEUTRAL_ADAPTER",
+        "frankensqlite_reason": "The pinned neutral adapter does not yet normalize FrankenSQLite malformed-SQL or arity errors into P3 rows."
+      },
+      {
+        "id": "SQLITE-PARITY-P3-FINALIZE-CANCEL-007",
+        "boundary": "statement_finalize_drop_and_pre_cancel_cleanup",
+        "asupersync_status": "PASS",
+        "asupersync_tests": [
+          "conformance::sqlite_prepared_statements::tests::sqlite_dropped_row_stream_finalizes_statement",
+          "conformance::sqlite_prepared_statements::tests::sqlite_cancelled_execute_does_not_mutate_state"
+        ],
+        "required_observations": [
+          "dropping_partial_row_stream_releases_statement",
+          "pre_cancelled_execute_does_not_mutate_database",
+          "connection_is_reusable_after_drop_and_cancel"
+        ],
+        "frankensqlite_status": "NO_COMMON_PUBLIC_ROW_STREAM_BOUNDARY",
+        "frankensqlite_reason": "The pinned neutral AsyncConnection adapter does not expose the row-stream drop surface needed for a neutral finalize vector."
+      },
+      {
+        "id": "SQLITE-PARITY-P3-BUSY-008",
+        "boundary": "prepared_statement_busy_error_and_cleanup",
+        "asupersync_status": "PASS",
+        "asupersync_tests": [
+          "conformance::sqlite_prepared_statements::tests::sqlite_busy_error_mapping_is_preserved"
+        ],
+        "required_observations": [
+          "write_lock_is_held_by_separate_connection",
+          "blocked_statement_returns_typed_sqlite_busy_or_locked_error",
+          "holder_transaction_rolls_back"
+        ],
+        "frankensqlite_status": "NOT_YET_EXECUTED_IN_PINNED_P3_NEUTRAL_ADAPTER",
+        "frankensqlite_reason": "The pinned P2-only neutral adapter has no P3 two-connection busy-state vector."
+      }
+    ],
+    "verification": {
+      "focused_conformance": {
+        "rch_job": "j-29983010363277369",
+        "worker": "ovh-a",
+        "base": "034e5ba089e192077a93052c080b17d8dfb47dcb",
+        "overlay_fingerprint": "daaf8587faa5fc6515e219e278525dacb79fe6d37bf0a6cae98153454c67b6f4",
+        "status": "PASS",
+        "passed": 9,
+        "failed": 0,
+        "scope": "sqlite_prepared_statement conformance module"
+      },
+      "focused_cache_unit": {
+        "rch_job": "j-29983010363277371",
+        "worker": "ovh-a",
+        "base": "034e5ba089e192077a93052c080b17d8dfb47dcb",
+        "overlay_fingerprint": "71261e90db43b9089c2532af57078147adbc7aad43f49a3097db6d0928363e5c",
+        "status": "PASS",
+        "passed": 5,
+        "failed": 0,
+        "scope": "capacity-one cache reuse eviction reprepare test"
+      }
+    },
+    "no_claims": [
+      "Asupersync uses a positional SqliteValue slice even when SQL contains named placeholders; no named value-map API is claimed.",
+      "The cache-capacity row proves adapter behavior under the configured rusqlite cache; it does not make rusqlite internals normative for another engine.",
+      "Unexecuted or unsupported FrankenSQLite cells remain non-PASS and keep full P3 cross-engine parity open.",
+      "This phase does not authorize dependency cutover or public API removal."
+    ]
   },
   "phase5": {
     "bead_id": "asupersync-ym2wtv.2.5",

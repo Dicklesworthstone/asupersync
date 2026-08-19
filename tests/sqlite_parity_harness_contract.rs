@@ -13,6 +13,7 @@ const VECTORS: &str = include_str!("../artifacts/sqlite_conformance_vectors_v1.j
 const HARNESS: &str = include_str!("../artifacts/sqlite_parity_harness_v1.json");
 const DOC: &str = include_str!("../docs/sqlite_parity_harness.md");
 const SQLITE_SOURCE: &str = include_str!("../src/database/sqlite.rs");
+const PREPARED_CONFORMANCE_SOURCE: &str = include_str!("conformance/sqlite_prepared_statements.rs");
 
 fn parse_json(source: &str) -> Value {
     serde_json::from_str(source).expect("contract JSON must parse")
@@ -174,7 +175,7 @@ fn vector_schema_is_versioned_complete_and_deterministic() {
 #[test]
 fn harness_receipt_pins_sources_profile_target_host_and_budget_defer() {
     let harness = parse_json(HARNESS);
-    assert_eq!(harness["schema_version"], 3);
+    assert_eq!(harness["schema_version"], 4);
     assert_eq!(harness["placement"]["kind"], "neutral_standalone_consumer");
     assert_eq!(harness["placement"]["workspace_member"], false);
     assert_eq!(
@@ -227,6 +228,95 @@ fn harness_receipt_pins_sources_profile_target_host_and_budget_defer() {
             .as_array()
             .is_some_and(|rows| rows.len() >= 5)
     );
+}
+
+#[test]
+fn phase3_matrix_covers_prepared_statement_boundaries_without_inventing_parity() {
+    let harness = parse_json(HARNESS);
+    let phase3 = &harness["phase3"];
+    assert_eq!(phase3["bead_id"], "asupersync-ym2wtv.2.3");
+    assert_eq!(
+        phase3["status"],
+        "PASS_WITH_EXPLICIT_UNEXECUTED_CROSS_ENGINE_CELLS"
+    );
+
+    let matrix = phase3["coverage_matrix"]
+        .as_array()
+        .expect("phase3 coverage matrix");
+    assert_eq!(matrix.len(), 8);
+    let boundaries = matrix
+        .iter()
+        .map(|row| row["boundary"].as_str().expect("boundary"))
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        boundaries,
+        [
+            "positional_binding_all_public_value_types",
+            "named_placeholders_bound_by_sqlite_parameter_index",
+            "cached_statement_reuse_and_reset",
+            "capacity_one_cache_eviction_and_reprepare",
+            "cached_statement_schema_invalidation",
+            "malformed_sql_and_parameter_arity_errors",
+            "statement_finalize_drop_and_pre_cancel_cleanup",
+            "prepared_statement_busy_error_and_cleanup",
+        ]
+        .into_iter()
+        .collect()
+    );
+
+    for row in matrix {
+        assert_eq!(row["asupersync_status"], "PASS");
+        assert!(
+            row["asupersync_tests"]
+                .as_array()
+                .is_some_and(|tests| !tests.is_empty())
+        );
+        assert!(
+            row["required_observations"]
+                .as_array()
+                .is_some_and(|observations| !observations.is_empty())
+        );
+        assert_ne!(row["frankensqlite_status"], "PASS");
+        assert!(
+            row["frankensqlite_reason"]
+                .as_str()
+                .is_some_and(|reason| !reason.is_empty())
+        );
+    }
+
+    for test_name in [
+        "sqlite_parameter_binding_boundaries",
+        "sqlite_named_placeholders_bind_in_parameter_index_order",
+        "sqlite_cached_statement_resets_between_bindings",
+        "sqlite_malformed_and_arity_errors_release_statement_state",
+        "sqlite_cached_statement_survives_schema_change",
+        "sqlite_dropped_row_stream_finalizes_statement",
+        "sqlite_cancelled_execute_does_not_mutate_state",
+        "sqlite_busy_error_mapping_is_preserved",
+    ] {
+        assert!(
+            PREPARED_CONFORMANCE_SOURCE.contains(&format!("fn {test_name}()")),
+            "missing executable P3 conformance test {test_name}"
+        );
+    }
+    for test_name in [
+        "sqlite_prepared_statement_cache_capacity_one_reuses_evicts_and_reprepares",
+        "audit_prepare_cached_statement_reuse",
+    ] {
+        assert!(
+            SQLITE_SOURCE.contains(&format!("fn {test_name}()")),
+            "missing executable P3 source test {test_name}"
+        );
+    }
+
+    let conformance = &phase3["verification"]["focused_conformance"];
+    assert_eq!(conformance["status"], "PASS");
+    assert_eq!(conformance["passed"], 9);
+    assert_eq!(conformance["failed"], 0);
+    let cache_unit = &phase3["verification"]["focused_cache_unit"];
+    assert_eq!(cache_unit["status"], "PASS");
+    assert_eq!(cache_unit["passed"], 5);
+    assert_eq!(cache_unit["failed"], 0);
 }
 
 #[test]
@@ -386,6 +476,8 @@ fn operator_doc_preserves_reproduction_and_no_claim_boundaries() {
         "cargo run --locked",
         "terminal `DEFER`",
         "does not authorize dependency cutover",
+        "SQLite P3 prepared-statement matrix",
+        "Full P3 parity",
         "SQLite P5 cancellation matrix",
         "unsupported cells stay unsupported",
     ] {

@@ -277,6 +277,99 @@ fn parameter_binding_boundaries() -> SqlitePreparedStatementResult {
     })
 }
 
+fn named_placeholders_bind_in_parameter_index_order() -> SqlitePreparedStatementResult {
+    const SCENARIO: &str = "SQLITE_PREPARED_NAMED_BINDINGS";
+    block_on(async {
+        let cx = Cx::for_testing();
+        let conn = match open_memory(
+            SCENARIO,
+            "named_placeholder_bind",
+            "named_sql_placeholders_with_positional_value_slice",
+            &cx,
+        )
+        .await
+        {
+            Ok(conn) => conn,
+            Err(result) => return result,
+        };
+
+        match conn
+            .execute_batch(
+                &cx,
+                "CREATE TABLE named_bindings (id INTEGER PRIMARY KEY, value TEXT);",
+            )
+            .await
+        {
+            Outcome::Ok(()) => {}
+            other => {
+                return SqlitePreparedStatementResult::fail(
+                    SCENARIO,
+                    "named_placeholder_bind",
+                    "named_sql_placeholders_with_positional_value_slice",
+                    format!("schema setup failed: {other:?}"),
+                );
+            }
+        }
+
+        match conn
+            .execute(
+                &cx,
+                "INSERT INTO named_bindings (id, value) VALUES (:id, :value)",
+                &[
+                    SqliteValue::Integer(7),
+                    SqliteValue::Text("named-value".to_string()),
+                ],
+            )
+            .await
+        {
+            Outcome::Ok(1) => {}
+            other => {
+                return SqlitePreparedStatementResult::fail(
+                    SCENARIO,
+                    "named_placeholder_bind",
+                    "named_sql_placeholders_with_positional_value_slice",
+                    format!("named insert failed: {other:?}"),
+                );
+            }
+        }
+
+        let rows = match conn
+            .query(
+                &cx,
+                "SELECT value FROM named_bindings WHERE id = :id",
+                &[SqliteValue::Integer(7)],
+            )
+            .await
+        {
+            Outcome::Ok(rows) => rows,
+            other => {
+                return SqlitePreparedStatementResult::fail(
+                    SCENARIO,
+                    "named_placeholder_bind",
+                    "named_sql_placeholders_with_positional_value_slice",
+                    format!("named query failed: {other:?}"),
+                );
+            }
+        };
+
+        if first_row_text(&rows, "value").as_deref() == Ok("named-value") {
+            SqlitePreparedStatementResult::pass(
+                SCENARIO,
+                "named_placeholder_bind",
+                "named_sql_placeholders_with_positional_value_slice",
+                "named_placeholders_bound_by_sqlite_parameter_index_and_connection_closed_on_drop",
+            )
+        } else {
+            SqlitePreparedStatementResult::fail(
+                SCENARIO,
+                "named_placeholder_bind",
+                "named_sql_placeholders_with_positional_value_slice",
+                format!("unexpected named query rows: {rows:?}"),
+            )
+        }
+    })
+}
+
 fn cached_statement_resets_between_bindings() -> SqlitePreparedStatementResult {
     const SCENARIO: &str = "SQLITE_PREPARED_CACHE_RESET";
     block_on(async {
@@ -354,6 +447,105 @@ fn cached_statement_resets_between_bindings() -> SqlitePreparedStatementResult {
                 "cached_statement_reset",
                 "same_sql_different_params",
                 format!("unexpected observed values: {observed:?}"),
+            )
+        }
+    })
+}
+
+fn malformed_and_arity_errors_release_statement_state() -> SqlitePreparedStatementResult {
+    const SCENARIO: &str = "SQLITE_PREPARED_INVALID_USE_CLEANUP";
+    block_on(async {
+        let cx = Cx::for_testing();
+        let conn = match open_memory(
+            SCENARIO,
+            "prepare_bind_error_cleanup",
+            "malformed_sql_too_few_and_too_many_parameters",
+            &cx,
+        )
+        .await
+        {
+            Ok(conn) => conn,
+            Err(result) => return result,
+        };
+
+        match conn
+            .execute_batch(
+                &cx,
+                "CREATE TABLE invalid_use (id INTEGER PRIMARY KEY, value TEXT);",
+            )
+            .await
+        {
+            Outcome::Ok(()) => {}
+            other => {
+                return SqlitePreparedStatementResult::fail(
+                    SCENARIO,
+                    "prepare_bind_error_cleanup",
+                    "malformed_sql_too_few_and_too_many_parameters",
+                    format!("schema setup failed: {other:?}"),
+                );
+            }
+        }
+
+        let malformed_is_typed = matches!(
+            conn.query_unchecked(&cx, "SELEC value FROM invalid_use", &[])
+                .await,
+            Outcome::Err(SqliteError::Sqlite(_))
+        );
+        let too_few_is_typed = matches!(
+            conn.query(&cx, "SELECT value FROM invalid_use WHERE id = ?1", &[],)
+                .await,
+            Outcome::Err(SqliteError::Sqlite(_))
+        );
+        let too_many_is_typed = matches!(
+            conn.query(
+                &cx,
+                "SELECT value FROM invalid_use",
+                &[SqliteValue::Integer(1)],
+            )
+            .await,
+            Outcome::Err(SqliteError::Sqlite(_))
+        );
+
+        let recovery = match conn
+            .execute(
+                &cx,
+                "INSERT INTO invalid_use (id, value) VALUES (?1, ?2)",
+                &[
+                    SqliteValue::Integer(1),
+                    SqliteValue::Text("recovered".to_string()),
+                ],
+            )
+            .await
+        {
+            Outcome::Ok(1) => match conn
+                .query(
+                    &cx,
+                    "SELECT value FROM invalid_use WHERE id = ?1",
+                    &[SqliteValue::Integer(1)],
+                )
+                .await
+            {
+                Outcome::Ok(rows) => first_row_text(&rows, "value").as_deref() == Ok("recovered"),
+                _ => false,
+            },
+            _ => false,
+        };
+
+        if malformed_is_typed && too_few_is_typed && too_many_is_typed && recovery {
+            SqlitePreparedStatementResult::pass(
+                SCENARIO,
+                "prepare_bind_error_cleanup",
+                "malformed_sql_too_few_and_too_many_parameters",
+                "all_failed_statements_released_and_connection_reused",
+            )
+        } else {
+            SqlitePreparedStatementResult::fail(
+                SCENARIO,
+                "prepare_bind_error_cleanup",
+                "malformed_sql_too_few_and_too_many_parameters",
+                format!(
+                    "malformed_typed={malformed_is_typed} too_few_typed={too_few_is_typed} too_many_typed={too_many_is_typed} recovery={recovery}"
+                ),
             )
         }
     })
@@ -777,7 +969,9 @@ fn busy_error_mapping_is_preserved() -> SqlitePreparedStatementResult {
 pub fn run_sqlite_prepared_statement_conformance_tests() -> Vec<SqlitePreparedStatementResult> {
     vec![
         parameter_binding_boundaries(),
+        named_placeholders_bind_in_parameter_index_order(),
         cached_statement_resets_between_bindings(),
+        malformed_and_arity_errors_release_statement_state(),
         cached_statement_survives_schema_change(),
         dropped_row_stream_finalizes_statement(),
         cancelled_execute_does_not_mutate_state(),
@@ -802,8 +996,18 @@ mod tests {
     }
 
     #[test]
+    fn sqlite_named_placeholders_bind_in_parameter_index_order() {
+        assert_pass(named_placeholders_bind_in_parameter_index_order());
+    }
+
+    #[test]
     fn sqlite_cached_statement_resets_between_bindings() {
         assert_pass(cached_statement_resets_between_bindings());
+    }
+
+    #[test]
+    fn sqlite_malformed_and_arity_errors_release_statement_state() {
+        assert_pass(malformed_and_arity_errors_release_statement_state());
     }
 
     #[test]

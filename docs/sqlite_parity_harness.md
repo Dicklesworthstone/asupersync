@@ -79,6 +79,36 @@ shutdown, and a closed region state.
 The original schema-v1 smoke execution remains historical evidence in
 `artifacts/sqlite_parity_harness_v1.json`; it is not relabeled as P2 evidence.
 
+## SQLite P3 prepared-statement matrix
+
+`asupersync-ym2wtv.2.3` adds executable Asupersync coverage for the public
+prepared-statement behavior that the P2 lifecycle harness did not exercise.
+The eight-row matrix covers positional binding for every public
+`SqliteValue`, named SQL placeholders bound by SQLite parameter index through
+the existing positional value slice, statement reuse/reset, capacity-one
+cache pressure and eviction, schema invalidation, malformed SQL and parameter
+arity errors, row-stream drop and pre-cancellation cleanup, and busy-state
+error mapping.
+
+The named-binding row is deliberately precise: Asupersync does not publish a
+name-to-value map API. A statement may contain `:name` placeholders, but the
+public `&[SqliteValue]` is bound in SQLite parameter-index order. The tests do
+not imply that parameter names reorder caller values.
+
+The cache test uses an A/A/B/A sequence with capacity one. The repeated A
+proves reset/reuse, B applies eviction pressure to the sole slot, and the final
+A must prepare again after the schema is rebuilt. This proves the adapter's
+observable result and cleanup behavior; it does not make rusqlite's internal
+cache representation normative for FrankenSQLite.
+
+The pinned neutral consumer is still a P2 adapter. It does not yet execute
+prepared-statement vectors, publish a common cache-capacity control, or expose
+a row-stream drop boundary for FrankenSQLite. Those cells remain explicitly
+non-PASS in `phase3.coverage_matrix`; this tranche does not manufacture
+cross-engine equivalence from unavailable observations. Full P3 parity and any
+dependency cutover therefore remain open until the neutral adapter executes
+the supported cells and records owner-approved differences.
+
 ## SQLite P5 cancellation matrix
 
 `asupersync-ym2wtv.2.5` adds a bounded second proof layer without rewriting the
