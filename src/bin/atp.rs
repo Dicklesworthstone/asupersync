@@ -2193,9 +2193,28 @@ fn redact_captured_line(line: String, redaction: Option<&SecretString>) -> Strin
         return line;
     };
     let sensitive_line = SecretString::from_string(line);
-    sensitive_line
-        .as_str()
-        .replace(secret.as_str(), "[REDACTED]")
+    let line = sensitive_line.as_str();
+    let secret = secret.as_str().as_bytes();
+    if secret.is_empty() || secret.len() > line.len() {
+        return line.to_string();
+    }
+
+    // Hex is case-insensitive at the CLI boundary. Redact every ASCII-case
+    // spelling so a remote wrapper cannot disclose the same key merely by
+    // uppercasing it (including inside a `0x...` representation).
+    let mut redacted = String::with_capacity(line.len());
+    let mut copied_through = 0;
+    while let Some(relative_start) = line.as_bytes()[copied_through..]
+        .windows(secret.len())
+        .position(|candidate| candidate.eq_ignore_ascii_case(secret))
+    {
+        let start = copied_through + relative_start;
+        redacted.push_str(&line[copied_through..start]);
+        redacted.push_str("[REDACTED]");
+        copied_through = start + secret.len();
+    }
+    redacted.push_str(&line[copied_through..]);
+    redacted
 }
 
 /// Spawn a thread that drains one child pipe into a shared, redacted log.
@@ -7084,30 +7103,406 @@ fn rq_auth_key(rq_auth: Option<&RqAuthChoice>) -> Option<&AuthKey> {
     }
 }
 
-fn ssh_path_targets_inherited_stdin(path: &str) -> bool {
-    let path = path
-        .trim()
-        .trim_matches(|character| matches!(character, '\'' | '"'))
-        .replace('\\', "/");
+#[cfg(unix)]
+fn ssh_local_home_dir() -> Option<PathBuf> {
+    nix::unistd::User::from_uid(nix::unistd::getuid())
+        .ok()
+        .flatten()
+        .map(|user| user.dir)
+}
+
+#[cfg(unix)]
+fn ssh_named_user_home(name: &str) -> Option<PathBuf> {
+    nix::unistd::User::from_name(name)
+        .ok()
+        .flatten()
+        .map(|user| user.dir)
+}
+
+#[cfg(not(unix))]
+fn ssh_named_user_home(_name: &str) -> Option<PathBuf> {
+    None
+}
+
+#[cfg(unix)]
+fn ssh_local_user_name() -> Option<String> {
+    nix::unistd::User::from_uid(nix::unistd::getuid())
+        .ok()
+        .flatten()
+        .map(|user| user.name)
+}
+
+#[cfg(not(unix))]
+fn ssh_local_user_name() -> Option<String> {
+    env::var("USERNAME").ok()
+}
+
+#[cfg(unix)]
+fn ssh_hostname_from_command_stdout(mut stdout: Vec<u8>) -> Option<String> {
+    if stdout.pop() != Some(b'\n') {
+        return None;
+    }
+    let hostname = String::from_utf8(stdout).ok()?;
+    (!hostname.is_empty()).then_some(hostname)
+}
+
+#[cfg(unix)]
+fn ssh_hostname_command(executable: &str) -> ProcessCommand {
+    let mut command = ProcessCommand::new(executable);
+    command.env_remove(RQ_AUTH_ENV);
+    command
+}
+
+#[cfg(unix)]
+fn ssh_local_hostname() -> Option<String> {
+    for executable in ["/bin/hostname", "/usr/bin/hostname"] {
+        let Ok(output) = ssh_hostname_command(executable).output() else {
+            continue;
+        };
+        if output.status.success() {
+            if let Some(hostname) = ssh_hostname_from_command_stdout(output.stdout) {
+                return Some(hostname);
+            }
+        }
+    }
+    None
+}
+
+#[cfg(not(unix))]
+fn ssh_local_hostname() -> Option<String> {
+    env::var("COMPUTERNAME").ok()
+}
+
+fn ssh_proxy_jump_token(value: Option<&str>) -> Option<String> {
+    let value = value.map(str::trim).unwrap_or_default();
+    if value.is_empty() || value.eq_ignore_ascii_case("none") {
+        return Some(String::new());
+    }
+
+    // OpenSSH expands %j to the hostname of the final ProxyJump hop. User,
+    // port, URI syntax, and any preceding hops are deliberately excluded.
+    let hop = value.rsplit(',').next()?.trim();
+    let hop = hop.strip_prefix("ssh://").unwrap_or(hop);
+    let host_and_port = hop.rsplit_once('@').map_or(hop, |(_, value)| value);
+    if let Some(bracketed) = host_and_port.strip_prefix('[') {
+        let closing = bracketed.find(']')?;
+        let host = &bracketed[..closing];
+        let suffix = &bracketed[closing + 1..];
+        if host.is_empty()
+            || !(suffix.is_empty()
+                || suffix.strip_prefix(':').is_some_and(|port| {
+                    !port.is_empty() && port.chars().all(|c| c.is_ascii_digit())
+                }))
+        {
+            return None;
+        }
+        return Some(host.to_string());
+    }
+
+    if host_and_port.matches(':').count() == 1
+        && let Some((host, port)) = host_and_port.rsplit_once(':')
+        && !host.is_empty()
+        && !port.is_empty()
+        && port.chars().all(|c| c.is_ascii_digit())
+    {
+        return Some(host.to_string());
+    }
+    (!host_and_port.is_empty()).then(|| host_and_port.to_string())
+}
+
+fn ssh_short_local_hostname(hostname: &str) -> Option<String> {
+    hostname
+        .split('.')
+        .next()
+        .filter(|hostname| !hostname.is_empty())
+        .map(str::to_string)
+}
+
+#[cfg(not(unix))]
+fn ssh_local_home_dir() -> Option<PathBuf> {
+    env::var_os("USERPROFILE").map(PathBuf::from).or_else(|| {
+        match (env::var_os("HOMEDRIVE"), env::var_os("HOMEPATH")) {
+            (Some(drive), Some(path)) => Some(PathBuf::from(drive).join(path)),
+            _ => None,
+        }
+    })
+}
+
+#[derive(Clone, Copy)]
+enum SshPathExpansion {
+    Literal,
+    TildeOnly,
+    TildePercentDollar,
+    SecurityKeyProvider,
+}
+
+fn expand_ssh_tilde(path: &str, home: &Path) -> Option<String> {
+    let home = home.to_str()?;
+    if path == "~" {
+        return Some(home.to_string());
+    }
+    if let Some(home_relative) = path.strip_prefix("~/") {
+        return Some(format!("{home}/{home_relative}"));
+    }
+    let Some(named_home) = path.strip_prefix('~') else {
+        return Some(path.to_string());
+    };
+    let (name, relative) = named_home
+        .split_once('/')
+        .map_or((named_home, ""), |(name, relative)| (name, relative));
+    let named_home = (!name.is_empty())
+        .then_some(name)
+        .and_then(ssh_named_user_home)?;
+    let named_home = named_home.to_str()?;
+    if relative.is_empty() {
+        Some(named_home.to_string())
+    } else {
+        Some(format!("{named_home}/{relative}"))
+    }
+}
+
+fn expand_ssh_file_path<F, T>(
+    path: &str,
+    environment: &F,
+    home: &Path,
+    token_value: &T,
+    expansion: SshPathExpansion,
+) -> Option<String>
+where
+    F: Fn(&str) -> Option<String>,
+    T: Fn(char) -> Option<String>,
+{
+    if matches!(expansion, SshPathExpansion::SecurityKeyProvider) {
+        let Some(name) = path.strip_prefix('$') else {
+            return Some(path.to_string());
+        };
+        if name.is_empty()
+            || !name
+                .chars()
+                .all(|character| character == '_' || character.is_ascii_alphanumeric())
+        {
+            return None;
+        }
+        return environment(name);
+    }
+
+    let path = match expansion {
+        SshPathExpansion::TildeOnly | SshPathExpansion::TildePercentDollar => {
+            expand_ssh_tilde(path, home)?
+        }
+        SshPathExpansion::Literal => path.to_string(),
+        SshPathExpansion::SecurityKeyProvider => unreachable!("handled above"),
+    };
+    if matches!(
+        expansion,
+        SshPathExpansion::Literal | SshPathExpansion::TildeOnly
+    ) {
+        return Some(path);
+    }
+
+    // OpenSSH performs tilde expansion first, then scans the resulting text
+    // once for percent and ${...} substitutions. Expansion results are
+    // appended literally; they are never recursively rescanned for tokens.
+    let mut expanded = String::with_capacity(path.len());
+    let mut cursor = 0;
+    while cursor < path.len() {
+        if path[cursor..].starts_with("${") {
+            let name_start = cursor + 2;
+            let relative_end = path[name_start..].find('}')?;
+            let end = name_start + relative_end;
+            let name = &path[name_start..end];
+            if name.is_empty() {
+                return None;
+            }
+            expanded.push_str(&environment(name)?);
+            cursor = end + 1;
+            continue;
+        }
+
+        let character = path[cursor..].chars().next()?;
+        cursor += character.len_utf8();
+        if character == '%' {
+            let token = path[cursor..].chars().next()?;
+            cursor += token.len_utf8();
+            match token {
+                '%' => expanded.push('%'),
+                'd' => expanded.push_str(home.to_str()?),
+                token => expanded.push_str(&token_value(token)?),
+            }
+        } else {
+            expanded.push(character);
+        }
+    }
+    Some(expanded)
+}
+
+fn ssh_raw_path_token_value(token: char) -> Option<String> {
+    // These are the common file-path tokens documented by ssh_config(5).
+    // Raw options are followed by an exact `ssh -G` effective-config pass,
+    // which resolves them to the values OpenSSH will actually use.
+    matches!(
+        token,
+        'C' | 'h' | 'i' | 'j' | 'k' | 'L' | 'l' | 'n' | 'p' | 'r' | 'u'
+    )
+    .then(|| "__atp_ssh_token__".to_string())
+}
+
+fn ssh_path_targets_inherited_stdin_with_expansion<F, T>(
+    path: &str,
+    environment: &F,
+    home: &Path,
+    token_value: &T,
+    expansion: SshPathExpansion,
+) -> bool
+where
+    F: Fn(&str) -> Option<String>,
+    T: Fn(char) -> Option<String>,
+{
+    #[cfg(windows)]
+    let path = path.replace('\\', "/");
+    #[cfg(not(windows))]
+    let path = path.to_string();
     if path == "-" {
         return true;
     }
 
-    let home_relative = path.strip_prefix("~/").map(str::to_string);
-    let path = if let Some(home_relative) = home_relative {
-        match env::var("HOME") {
-            Ok(home) => format!("{home}/{home_relative}"),
-            Err(_) => path,
-        }
-    } else if path.starts_with('/') {
+    let Some(path) = expand_ssh_file_path(&path, environment, home, token_value, expansion) else {
+        return true;
+    };
+
+    let path = if path.starts_with('/') {
         path
     } else {
         match env::current_dir() {
-            Ok(cwd) => format!("{}/{path}", cwd.display()),
+            Ok(cwd) => {
+                let Some(cwd) = cwd.to_str() else {
+                    return true;
+                };
+                format!("{cwd}/{path}")
+            }
             Err(_) => path,
         }
     };
 
+    if ssh_path_lexically_targets_inherited_stdin(&path) {
+        return true;
+    }
+
+    // Resolve aliases one component at a time and keep the unresolved suffix.
+    // This catches both a final IdentityFile symlink and a parent-directory
+    // alias such as `fd-dir -> /proc/self/fd` followed by `/0`.
+    let mut candidate = PathBuf::from(&path);
+    for _ in 0..32 {
+        let components = candidate
+            .components()
+            .map(|component| component.as_os_str().to_owned())
+            .collect::<Vec<_>>();
+        let mut prefix = PathBuf::new();
+        let mut replacement = None;
+        for (index, component) in components.iter().enumerate() {
+            prefix.push(component);
+            let metadata = match std::fs::symlink_metadata(&prefix) {
+                Ok(metadata) => metadata,
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                    ) =>
+                {
+                    continue;
+                }
+                Err(_) => return true,
+            };
+            if !metadata.file_type().is_symlink() {
+                continue;
+            }
+            let Ok(target) = std::fs::read_link(&prefix) else {
+                return true;
+            };
+            let mut next = if target.is_absolute() {
+                target
+            } else {
+                prefix
+                    .parent()
+                    .unwrap_or_else(|| Path::new("/"))
+                    .join(target)
+            };
+            for remaining in &components[index + 1..] {
+                next.push(remaining);
+            }
+            replacement = Some(next);
+            break;
+        }
+
+        let Some(next) = replacement else {
+            return false;
+        };
+        candidate = next;
+        let Some(candidate_text) = candidate.to_str() else {
+            return true;
+        };
+        #[cfg(windows)]
+        let candidate_text = candidate_text.replace('\\', "/");
+        #[cfg(not(windows))]
+        let candidate_text = candidate_text.to_string();
+        if ssh_path_lexically_targets_inherited_stdin(&candidate_text) {
+            return true;
+        }
+    }
+
+    // A symlink chain beyond the platform's usual resolution limit cannot be
+    // proven safe and would fail in OpenSSH as well.
+    true
+}
+
+#[cfg(test)]
+fn ssh_path_targets_inherited_stdin_with_env_and_home<F>(
+    path: &str,
+    environment: &F,
+    home: &Path,
+) -> bool
+where
+    F: Fn(&str) -> Option<String>,
+{
+    ssh_path_targets_inherited_stdin_with_expansion(
+        path,
+        environment,
+        home,
+        &ssh_raw_path_token_value,
+        SshPathExpansion::TildePercentDollar,
+    )
+}
+
+fn ssh_path_targets_inherited_stdin_with_profile(path: &str, expansion: SshPathExpansion) -> bool {
+    let Some(home) = ssh_local_home_dir() else {
+        return true;
+    };
+    ssh_path_targets_inherited_stdin_with_expansion(
+        path,
+        &|name| env::var(name).ok(),
+        &home,
+        &ssh_raw_path_token_value,
+        expansion,
+    )
+}
+
+#[cfg(test)]
+fn ssh_path_targets_inherited_stdin_with_env<F>(path: &str, environment: &F) -> bool
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let Some(home) = ssh_local_home_dir() else {
+        return true;
+    };
+    ssh_path_targets_inherited_stdin_with_env_and_home(path, environment, &home)
+}
+
+#[cfg(test)]
+fn ssh_path_targets_inherited_stdin(path: &str) -> bool {
+    ssh_path_targets_inherited_stdin_with_env(path, &|name| env::var(name).ok())
+}
+
+fn ssh_path_lexically_targets_inherited_stdin(path: &str) -> bool {
     let absolute = path.starts_with('/');
     let mut components = Vec::new();
     for component in path.split('/') {
@@ -7140,6 +7535,77 @@ fn ssh_path_targets_inherited_stdin(path: &str) -> bool {
     )
 }
 
+fn ssh_sensitive_path_expansion(name: &str) -> SshPathExpansion {
+    match name {
+        "identityfile" | "certificatefile" | "userknownhostsfile" | "revokedhostkeys" => {
+            SshPathExpansion::TildePercentDollar
+        }
+        "globalknownhostsfile" => SshPathExpansion::TildeOnly,
+        "securitykeyprovider" => SshPathExpansion::SecurityKeyProvider,
+        "pkcs11provider" | "xauthlocation" => SshPathExpansion::Literal,
+        _ => SshPathExpansion::Literal,
+    }
+}
+
+fn ssh_sensitive_path_value_conflicts_with_secret_stdin_with_expansion<F, T>(
+    name: &str,
+    value: &str,
+    environment: &F,
+    home: &Path,
+    token_value: &T,
+) -> bool
+where
+    F: Fn(&str) -> Option<String>,
+    T: Fn(char) -> Option<String>,
+{
+    let value = value;
+    if name == "securitykeyprovider" && value.eq_ignore_ascii_case("internal") {
+        return false;
+    }
+    let expansion = ssh_sensitive_path_expansion(name);
+    ssh_path_targets_inherited_stdin_with_expansion(
+        value,
+        environment,
+        home,
+        token_value,
+        expansion,
+    ) || value.split_whitespace().any(|path| {
+        ssh_path_targets_inherited_stdin_with_expansion(
+            path,
+            environment,
+            home,
+            token_value,
+            expansion,
+        )
+    })
+}
+
+fn ssh_sensitive_path_value_conflicts_with_secret_stdin_with_env<F>(
+    name: &str,
+    value: &str,
+    environment: &F,
+) -> bool
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let Some(home) = ssh_local_home_dir() else {
+        return true;
+    };
+    ssh_sensitive_path_value_conflicts_with_secret_stdin_with_expansion(
+        name,
+        value,
+        environment,
+        &home,
+        &ssh_raw_path_token_value,
+    )
+}
+
+fn ssh_sensitive_path_value_conflicts_with_secret_stdin(name: &str, value: &str) -> bool {
+    ssh_sensitive_path_value_conflicts_with_secret_stdin_with_env(name, value, &|name| {
+        env::var(name).ok()
+    })
+}
+
 fn ssh_assignment_conflicts_with_secret_stdin(assignment: &str) -> bool {
     let (name, raw_value) = assignment
         .split_once('=')
@@ -7170,9 +7636,9 @@ fn ssh_assignment_conflicts_with_secret_stdin(assignment: &str) -> bool {
         | "revokedhostkeys"
         | "pkcs11provider"
         | "securitykeyprovider"
-        | "xauthlocation" => raw_value
-            .split_whitespace()
-            .any(ssh_path_targets_inherited_stdin),
+        | "xauthlocation" => {
+            ssh_sensitive_path_value_conflicts_with_secret_stdin(&name, raw_value.trim())
+        }
         _ => false,
     }
 }
@@ -7182,17 +7648,24 @@ fn validate_ssh_secret_stdin_options(ssh_options: &[String]) -> Result<(), Strin
     enum PendingValue {
         Generic,
         Assignment,
-        SensitiveFile,
+        SensitiveFile(SshPathExpansion),
     }
 
     let mut pending = None;
     for option in ssh_options {
         let trimmed = option.trim();
+        if trimmed != option {
+            return Err(format!(
+                "--ssh-option {option:?} has ambiguous leading or trailing whitespace"
+            ));
+        }
         if let Some(expected) = pending.take() {
             let conflicts = match expected {
                 PendingValue::Generic => false,
                 PendingValue::Assignment => ssh_assignment_conflicts_with_secret_stdin(trimmed),
-                PendingValue::SensitiveFile => ssh_path_targets_inherited_stdin(trimmed),
+                PendingValue::SensitiveFile(expansion) => {
+                    ssh_path_targets_inherited_stdin_with_profile(trimmed, expansion)
+                }
             };
             if conflicts {
                 return Err(format!(
@@ -7240,10 +7713,15 @@ fn validate_ssh_secret_stdin_options(ssh_options: &[String]) -> Result<(), Strin
             ));
         }
         if matches!(first, 'E' | 'i' | 'I') {
+            let expansion = match first {
+                'i' => SshPathExpansion::TildePercentDollar,
+                'E' | 'I' => SshPathExpansion::Literal,
+                _ => unreachable!("matched sensitive SSH file option"),
+            };
             let sensitive_file = &cluster[1..];
             if sensitive_file.is_empty() {
-                pending = Some(PendingValue::SensitiveFile);
-            } else if ssh_path_targets_inherited_stdin(sensitive_file) {
+                pending = Some(PendingValue::SensitiveFile(expansion));
+            } else if ssh_path_targets_inherited_stdin_with_profile(sensitive_file, expansion) {
                 return Err(format!(
                     "--ssh-option {trimmed:?} reads the protected SSH stdin channel as a local SSH input"
                 ));
@@ -7341,33 +7819,99 @@ fn preflight_ssh_secret_stdin(
             last_log_lines(&stderr, 8),
         ));
     }
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = String::from_utf8(output.stdout).map_err(|_| {
+        format!(
+            "effective SSH config for {ssh_host} is not valid UTF-8; refusing lossy path checks"
+        )
+    })?;
     validate_ssh_secret_stdin_effective_config(&stdout, ssh_host)
+}
+
+fn ssh_effective_config_entry(line: &str) -> Option<(&str, &str)> {
+    let split_at = line.find(char::is_whitespace)?;
+    let delimiter = line[split_at..].chars().next()?;
+    let value_start = split_at + delimiter.len_utf8();
+    Some((&line[..split_at], &line[value_start..]))
+}
+
+fn ssh_effective_config_value<'a>(effective_config: &'a str, wanted: &str) -> Option<&'a str> {
+    effective_config.lines().find_map(|line| {
+        let (name, value) = ssh_effective_config_entry(line)?;
+        name.eq_ignore_ascii_case(wanted).then_some(value)
+    })
 }
 
 fn validate_ssh_secret_stdin_effective_config(
     effective_config: &str,
     ssh_host: &str,
 ) -> Result<(), String> {
+    if effective_config.lines().any(|line| line.trim() != line) {
+        return Err(format!(
+            "effective SSH config for {ssh_host} contains ambiguous leading or trailing whitespace"
+        ));
+    }
+    let original_host = ssh_host.rsplit_once('@').map_or(ssh_host, |(_, host)| host);
+    let hostname =
+        ssh_effective_config_value(effective_config, "hostname").unwrap_or(original_host);
+    let port = ssh_effective_config_value(effective_config, "port").unwrap_or("22");
+    let remote_user = ssh_effective_config_value(effective_config, "user");
+    let proxy_jump =
+        ssh_proxy_jump_token(ssh_effective_config_value(effective_config, "proxyjump"));
+    let host_key_alias = ssh_effective_config_value(effective_config, "hostkeyalias")
+        .filter(|value| !value.eq_ignore_ascii_case("none"))
+        .unwrap_or(original_host);
+    #[cfg(unix)]
+    let local_user_id = Some(nix::unistd::getuid().as_raw().to_string());
+    #[cfg(not(unix))]
+    let local_user_id: Option<String> = None;
+    let local_user = ssh_local_user_name();
+    let local_hostname = ssh_local_hostname();
+    let connection_hash = local_hostname.as_ref().and_then(|local_hostname| {
+        remote_user
+            .zip(proxy_jump.as_deref())
+            .map(|(remote_user, proxy_jump)| {
+                use sha1::Digest as _;
+
+                let input = format!("{local_hostname}{hostname}{port}{remote_user}{proxy_jump}");
+                hex::encode(sha1::Sha1::digest(input.as_bytes()))
+            })
+    });
+    let short_local_hostname = local_hostname.as_deref().and_then(ssh_short_local_hostname);
+    let token_value = |token| match token {
+        'C' => connection_hash.clone(),
+        'h' => Some(hostname.to_string()),
+        'i' => local_user_id.clone(),
+        'j' => proxy_jump.clone(),
+        'k' => Some(host_key_alias.to_string()),
+        'L' => short_local_hostname.clone(),
+        'l' => local_hostname.clone(),
+        'n' => Some(original_host.to_string()),
+        'p' => Some(port.to_string()),
+        'r' => remote_user.map(str::to_string),
+        'u' => local_user.clone(),
+        _ => None,
+    };
+    let local_home = ssh_local_home_dir();
+    let environment = |name: &str| env::var(name).ok();
+
     for line in effective_config.lines() {
-        let line = line.trim();
-        let Some(split_at) = line.find(char::is_whitespace) else {
+        let Some((name, value)) = ssh_effective_config_entry(line) else {
             continue;
         };
-        let name = line[..split_at].to_ascii_lowercase();
-        let value = line[split_at..].trim().to_ascii_lowercase();
+        let name = name.to_ascii_lowercase();
+        let keyword_value = value.to_ascii_lowercase();
         let safe = match name.as_str() {
-            "batchmode" => value == "yes" || value == "true",
-            "controlmaster" | "controlpersist" => value == "no" || value == "false",
-            "controlpath" => value == "none",
-            "forwardx11" => value == "no" || value == "false",
-            "permitlocalcommand" => value == "no" || value == "false",
+            "batchmode" => keyword_value == "yes" || keyword_value == "true",
+            "controlmaster" | "controlpersist" => keyword_value == "no" || keyword_value == "false",
+            "controlpath" => keyword_value == "none",
+            "forwardx11" => keyword_value == "no" || keyword_value == "false",
+            "permitlocalcommand" => keyword_value == "no" || keyword_value == "false",
             "requesttty" | "stdinnull" | "forkafterauthentication" => {
-                value == "no" || value == "false"
+                keyword_value == "no" || keyword_value == "false"
             }
-            "sessiontype" => value == "default",
-            "localcommand" | "remotecommand" => value == "none",
-            "proxycommand" => value != "-",
+            "sessiontype" => keyword_value == "default",
+            "localcommand" | "remotecommand" => keyword_value == "none",
+            "proxycommand" => keyword_value != "-",
             "identityfile"
             | "certificatefile"
             | "userknownhostsfile"
@@ -7375,10 +7919,22 @@ fn validate_ssh_secret_stdin_effective_config(
             | "revokedhostkeys"
             | "pkcs11provider"
             | "securitykeyprovider"
-            | "xauthlocation" => !value.split_whitespace().any(|path| {
-                path.eq_ignore_ascii_case(SSH_STDIN_CONFIG_CANARY_PATH)
-                    || ssh_path_targets_inherited_stdin(path)
-            }),
+            | "xauthlocation" => {
+                let references_canary = value.eq_ignore_ascii_case(SSH_STDIN_CONFIG_CANARY_PATH)
+                    || value
+                        .split_whitespace()
+                        .any(|path| path.eq_ignore_ascii_case(SSH_STDIN_CONFIG_CANARY_PATH));
+                let path_is_safe = local_home.as_deref().is_some_and(|home| {
+                    !ssh_sensitive_path_value_conflicts_with_secret_stdin_with_expansion(
+                        &name,
+                        value,
+                        &environment,
+                        home,
+                        &token_value,
+                    )
+                });
+                !references_canary && path_is_safe
+            }
             _ => true,
         };
         if !safe {
@@ -9469,13 +10025,19 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
     fn captured_remote_output_redacts_exact_stdin_key() {
         let key = auth_key_from_hex(VALID_KEY_HEX).expect("valid key");
         let redaction = auth_key_hex_secret(&key);
-        let redacted = redact_captured_line(
-            format!("remote wrapper echoed {VALID_KEY_HEX}"),
-            Some(&redaction),
-        );
+        for representation in [
+            VALID_KEY_HEX.to_string(),
+            VALID_KEY_HEX.to_ascii_uppercase(),
+            format!("0x{}", VALID_KEY_HEX.to_ascii_uppercase()),
+        ] {
+            let redacted = redact_captured_line(
+                format!("remote wrapper echoed {representation}"),
+                Some(&redaction),
+            );
 
-        assert_eq!(redacted, "remote wrapper echoed [REDACTED]");
-        assert!(!redacted.contains(VALID_KEY_HEX));
+            assert!(redacted.contains("[REDACTED]"));
+            assert!(!redacted.to_ascii_lowercase().contains(VALID_KEY_HEX));
+        }
     }
 
     #[test]
@@ -9548,12 +10110,38 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
                 .expect("configure secret-bearing SSH command");
             let command_args = command
                 .get_args()
-                .map(|arg| arg.to_string_lossy())
-                .collect::<Vec<_>>()
-                .join(" ");
-            assert!(command_args.contains("--rq-auth-key-stdin"));
-            assert!(!command_args.contains(VALID_KEY_HEX));
-            assert!(!command_args.contains(RQ_AUTH_ENV));
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect::<Vec<_>>();
+            let command_line = command_args.join(" ");
+            match shell {
+                RemoteShell::Posix => assert!(command_line.contains("--rq-auth-key-stdin")),
+                RemoteShell::Powershell => {
+                    assert!(command_line.contains("-EncodedCommand"));
+                    assert!(
+                        !command_line.contains("--rq-auth-key-stdin"),
+                        "PowerShell remote argv must remain inside the encoded command"
+                    );
+                    let encoded = command_args
+                        .last()
+                        .expect("SSH command contains remote command")
+                        .split_whitespace()
+                        .last()
+                        .expect("PowerShell command contains encoded payload");
+                    let bytes = STANDARD.decode(encoded).expect("decode PowerShell payload");
+                    let units = bytes
+                        .chunks_exact(2)
+                        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                        .collect::<Vec<_>>();
+                    let script = String::from_utf16(&units).expect("decode PowerShell script");
+                    assert!(
+                        script.contains(&STANDARD.encode(b"--rq-auth-key-stdin")),
+                        "encoded remote argv must contain the protected-stdin marker"
+                    );
+                }
+                RemoteShell::Auto => unreachable!("test uses resolved remote shells"),
+            }
+            assert!(!command_line.contains(VALID_KEY_HEX));
+            assert!(!command_line.contains(RQ_AUTH_ENV));
             assert!(!format!("{command:?}").contains(VALID_KEY_HEX));
         }
     }
@@ -9644,6 +10232,7 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
             vec!["-F/tmp/ssh_config".to_string()],
             vec!["-i".to_string(), "/dev/stdin".to_string()],
             vec!["-i/dev/fd/0".to_string()],
+            vec!["-i~root/../../dev/stdin".to_string()],
             vec!["-E".to_string(), "/dev/stdin".to_string()],
             vec!["-E/dev/fd/0".to_string()],
             vec!["-oIdentityFile=/proc/self/fd/0".to_string()],
@@ -9654,6 +10243,7 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
             vec!["-I/proc/self/fd/0".to_string()],
             vec!["-oPKCS11Provider=/dev/fd/0".to_string()],
             vec!["-oSecurityKeyProvider=/proc/self/fd/0".to_string()],
+            vec!["-oSecurityKeyProvider=$ASUPERSYNC_TEST_MISSING_SECRET_PROVIDER".to_string()],
             vec!["-oXAuthLocation=/dev/stdin".to_string()],
             vec!["-p".to_string()],
         ] {
@@ -9685,6 +10275,47 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
     }
 
     #[test]
+    fn ssh_secret_stdin_raw_path_options_accept_the_common_file_tokens() {
+        for token in ['C', 'h', 'i', 'j', 'k', 'L', 'l', 'n', 'p', 'r', 'u'] {
+            let options = [format!("-oIdentityFile=~/.ssh/id_%{token}")];
+            validate_ssh_secret_stdin_options(&options)
+                .unwrap_or_else(|error| panic!("raw %{token} path token was rejected: {error}"));
+        }
+    }
+
+    #[test]
+    fn ssh_effective_tokens_match_openssh_hostname_semantics() {
+        assert_eq!(ssh_proxy_jump_token(None).as_deref(), Some(""));
+        assert_eq!(ssh_proxy_jump_token(Some("none")).as_deref(), Some(""));
+        assert_eq!(
+            ssh_proxy_jump_token(Some("user@jump.example:2222")).as_deref(),
+            Some("jump.example")
+        );
+        assert_eq!(
+            ssh_proxy_jump_token(Some("jump1,user@jump2:2200")).as_deref(),
+            Some("jump2")
+        );
+        assert_eq!(
+            ssh_proxy_jump_token(Some("jump1,[2001:db8::1]:2200")).as_deref(),
+            Some("2001:db8::1")
+        );
+        assert_eq!(ssh_proxy_jump_token(Some("[]:22")), None);
+        assert_eq!(
+            ssh_short_local_hostname("builder.example.net").as_deref(),
+            Some("builder")
+        );
+        assert_eq!(
+            ssh_short_local_hostname("single-label").as_deref(),
+            Some("single-label")
+        );
+        assert_eq!(
+            ssh_effective_config_value("identityfile  /tmp/leading", "identityfile"),
+            Some(" /tmp/leading"),
+            "only the single ssh -G keyword delimiter may be stripped"
+        );
+    }
+
+    #[test]
     fn ssh_secret_stdin_path_classifier_rejects_fd_zero_aliases() {
         for path in [
             "-",
@@ -9694,7 +10325,7 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
             "/proc/self/fd/0",
             "/proc/thread-self/fd/0",
             "/proc/curproc/fd/0",
-            "'/dev/stdin'",
+            "${ATP_IDENTITY_FILE}",
         ] {
             assert!(
                 ssh_path_targets_inherited_stdin(path),
@@ -9704,6 +10335,169 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
         assert!(!ssh_path_targets_inherited_stdin(
             "/home/operator/.ssh/id_ed25519"
         ));
+        let environment = |name: &str| match name {
+            "HOME" => Some("/home/operator".to_string()),
+            "ATP_IDENTITY_FILE" => Some("/dev/stdin".to_string()),
+            _ => None,
+        };
+        assert!(ssh_path_targets_inherited_stdin_with_env(
+            "${ATP_IDENTITY_FILE}",
+            &environment
+        ));
+        assert!(!ssh_path_targets_inherited_stdin_with_env(
+            "${HOME}/.ssh/id_ed25519",
+            &environment
+        ));
+        assert!(!ssh_path_targets_inherited_stdin_with_env(
+            "%d/.ssh/id_ed25519",
+            &environment
+        ));
+        assert!(!ssh_path_targets_inherited_stdin_with_env(
+            "/tmp/literal%%percent",
+            &environment
+        ));
+        assert!(!ssh_path_targets_inherited_stdin_with_env(
+            "~/.ssh/id_%h_%n",
+            &environment
+        ));
+        assert!(
+            ssh_sensitive_path_value_conflicts_with_secret_stdin_with_env(
+                "securitykeyprovider",
+                "$ATP_IDENTITY_FILE",
+                &environment
+            )
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ssh_secret_stdin_path_classifier_resolves_existing_symlink_aliases() {
+        use std::os::unix::ffi::OsStringExt as _;
+
+        let hostname_command = ssh_hostname_command("/bin/hostname");
+        assert!(
+            hostname_command.get_envs().any(|(name, value)| {
+                name == std::ffi::OsStr::new(RQ_AUTH_ENV) && value.is_none()
+            })
+        );
+        assert_eq!(
+            ssh_hostname_from_command_stdout(b" builder.example \n".to_vec()).as_deref(),
+            Some(" builder.example "),
+            "hostname parsing must remove only the command line terminator"
+        );
+        assert!(ssh_hostname_from_command_stdout(b"missing-newline".to_vec()).is_none());
+
+        let temp = tempfile::tempdir().expect("create temporary SSH path directory");
+        let alias = temp.path().join("Stdin Alias");
+        std::os::unix::fs::symlink("/dev/stdin", &alias)
+            .expect("create mixed-case stdin symlink alias");
+        let parent_alias = temp.path().join("Fd Directory");
+        std::os::unix::fs::symlink("/proc/self/fd", &parent_alias)
+            .expect("create fd-directory symlink alias");
+        let passwd_home = temp.path().join("passwd-home");
+        std::fs::create_dir_all(passwd_home.join(".ssh")).expect("create synthetic passwd home");
+        std::os::unix::fs::symlink("/dev/stdin", passwd_home.join(".ssh/id_atp"))
+            .expect("create passwd-home stdin alias");
+        let token_alias = temp.path().join("id_self");
+        std::os::unix::fs::symlink("/dev/stdin", &token_alias)
+            .expect("create token-expanded stdin alias");
+        let literal_percent_alias = temp.path().join("literal_%h");
+        std::os::unix::fs::symlink("/dev/stdin", &literal_percent_alias)
+            .expect("create literal-percent stdin alias");
+        let literal_backslash_alias = temp.path().join("literal\\backslash");
+        std::os::unix::fs::symlink("/dev/stdin", &literal_backslash_alias)
+            .expect("create literal-backslash stdin alias");
+        let trailing_space_alias = temp.path().join("trailing-space ");
+        std::os::unix::fs::symlink("/dev/stdin", &trailing_space_alias)
+            .expect("create trailing-space stdin alias");
+
+        assert!(ssh_path_targets_inherited_stdin(
+            alias.to_str().expect("temporary path is UTF-8")
+        ));
+        assert!(ssh_path_targets_inherited_stdin(
+            parent_alias
+                .join("0")
+                .to_str()
+                .expect("temporary fd path is UTF-8")
+        ));
+        assert!(ssh_assignment_conflicts_with_secret_stdin(&format!(
+            "IdentityFile={}",
+            alias.display()
+        )));
+        let effective_config = format!("identityfile {}\n", alias.display());
+        validate_ssh_secret_stdin_effective_config(&effective_config, "mixed.example")
+            .expect_err("mixed-case whitespace symlink must fail closed");
+
+        let misleading_environment = |name: &str| match name {
+            "HOME" => Some("/tmp/not-the-passwd-home".to_string()),
+            _ => None,
+        };
+        for path in ["~/.ssh/id_atp", "%d/.ssh/id_atp"] {
+            assert!(ssh_path_targets_inherited_stdin_with_env_and_home(
+                path,
+                &misleading_environment,
+                &passwd_home
+            ));
+        }
+
+        let token_config = format!(
+            "hostname self\nuser operator\nport 22\nidentityfile {}/id_%h\n",
+            temp.path().display()
+        );
+        validate_ssh_secret_stdin_effective_config(&token_config, "alias.example")
+            .expect_err("expanded host token symlink must fail closed");
+        validate_ssh_secret_stdin_effective_config(
+            "hostname self\nuser operator\nport 22\nidentityfile /proc/%h/fd/0\n",
+            "alias.example",
+        )
+        .expect_err("expanded host token fd path must fail closed");
+
+        let literal_percent_environment = |name: &str| {
+            (name == "ATP_LITERAL_PERCENT_PATH")
+                .then(|| literal_percent_alias.display().to_string())
+        };
+        assert!(
+            ssh_sensitive_path_value_conflicts_with_secret_stdin_with_env(
+                "identityfile",
+                "${ATP_LITERAL_PERCENT_PATH}",
+                &literal_percent_environment,
+            ),
+            "environment results must not be recursively percent-expanded"
+        );
+        assert!(
+            ssh_sensitive_path_value_conflicts_with_secret_stdin_with_env(
+                "securitykeyprovider",
+                "$ATP_LITERAL_PERCENT_PATH",
+                &literal_percent_environment,
+            ),
+            "SecurityKeyProvider environment results remain literal"
+        );
+
+        let literal_percent_path = literal_percent_alias
+            .to_str()
+            .expect("temporary literal-percent path is UTF-8");
+        let global_config = format!("globalknownhostsfile {literal_percent_path}\n");
+        validate_ssh_secret_stdin_effective_config(&global_config, "self")
+            .expect_err("GlobalKnownHostsFile percent text must remain literal");
+        validate_ssh_secret_stdin_options(&[format!("-I{literal_percent_path}")])
+            .expect_err("raw PKCS11 provider percent text must remain literal");
+        validate_ssh_secret_stdin_effective_config(
+            &format!("xauthlocation {literal_percent_path}\n"),
+            "self",
+        )
+        .expect_err("XAuthLocation percent text must remain literal");
+        for literal_alias in [&literal_backslash_alias, &trailing_space_alias] {
+            let literal_alias = literal_alias
+                .to_str()
+                .expect("temporary literal path is UTF-8");
+            validate_ssh_secret_stdin_options(&[format!("-I{literal_alias}")])
+                .expect_err("raw SSH paths must preserve or reject exact literal bytes");
+        }
+        let invalid_utf8_home = PathBuf::from(std::ffi::OsString::from_vec(vec![0xff]));
+        assert!(
+            expand_ssh_tilde("~/.ssh/id_ed25519", &invalid_utf8_home).is_none(),
+            "invalid-UTF-8 home paths must fail closed"
+        );
     }
 
     #[test]
@@ -9718,9 +10512,23 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
                             controlpersist no\nforwardx11 false\npermitlocalcommand false\n\
                             requesttty false\nstdinnull no\nforkafterauthentication no\n\
                             sessiontype default\nremotecommand none\n\
-                            identityfile ~/.ssh/id_ed25519\n";
+                            identityfile ~/.ssh/id_ed25519\n\
+                            securitykeyprovider internal\n";
         validate_ssh_secret_stdin_effective_config(safe_current, "current.example")
             .expect("current default config preserves secret stdin");
+        validate_ssh_secret_stdin_effective_config(
+            "identityfile /tmp/apparently-safe-key \n",
+            "ambiguous.example",
+        )
+        .expect_err("trailing effective-config whitespace must fail closed");
+        validate_ssh_secret_stdin_effective_config(
+            "identityfile ${HOME}/.ssh/id_ed25519\n\
+             certificatefile %d/.ssh/id_ed25519-cert.pub\n\
+             identityfile ~/.ssh/id_%h_%n_%u\n\
+             userknownhostsfile /tmp/literal%%percent\n",
+            "expanded-safe.example",
+        )
+        .expect("resolved home and escaped-percent paths preserve protected stdin");
 
         for dangerous in [
             "requesttty force\n",
@@ -9744,6 +10552,10 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
             "securitykeyprovider /proc/self/fd/0\n",
             "xauthlocation /dev/stdin\n",
             "identityfile /__atp_ssh_stdin_preflight_canary__\n",
+            "identityfile ${ATP_IDENTITY_FILE}\n",
+            "identityfile ~root/../../dev/stdin\n",
+            "certificatefile %z/.ssh/certificate.pub\n",
+            "securitykeyprovider $ASUPERSYNC_TEST_MISSING_SECRET_PROVIDER\n",
         ] {
             let error = validate_ssh_secret_stdin_effective_config(dangerous, "bad.example")
                 .expect_err("dangerous effective SSH config must fail closed");
