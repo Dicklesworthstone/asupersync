@@ -316,11 +316,18 @@ GitHub Release/tag baseline is `v0.4.8`.
 
 ### Release evidence
 
+- **The published v0.4.4 downstream compatibility canary is now
+  permanent.** An external fixture depends on the exact crates.io release,
+  reproduces FrankenGraphDB's stale outer-cancellation expectation as a
+  planted negative, and proves the migrated public behavior: acknowledged
+  cancellation completes cleanup and joins `Ok(())`, while a
+  cancellation-blind child retains outer `JoinError::Cancelled`. RCH job
+  `29982692904796167` passed on `ovh-a` with all three required sentinels.
 - **Compatibility and proof receipts were reconciled to the shipped bytes.**
   Cancellation, HTTP/1, dependency, protocol, and artifact-governance packets
   retain their scoped no-claim boundaries while pinning the final source and
-  contract graph. These receipts do not replace the terminal release gates or
-  the real downstream compatibility canary.
+  contract graph. These receipts and the scoped compatibility canary do not
+  replace terminal release gates or broad downstream application testing.
 
 ---
 

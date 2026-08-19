@@ -82,6 +82,32 @@ Cx-independent publisher. The lane's source census must fail if a producer
 reintroduces a raw result sender, bypasses completion classification, or adds a
 new `TaskHandle` constructor without an explicit policy and behavioral case.
 
+### Published v0.4.4 downstream cancellation compatibility
+
+The native current-tree lane above is paired with an external consumer that
+depends on the exact crates.io release `asupersync = "=0.4.4"` under a distinct
+dependency alias. Run it through the canonical remote-only command:
+
+```bash
+RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR="${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_downstream_consumer_v044_cancel_compat" CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo run --manifest-path tests/fixtures/downstream-consumer-proof/Cargo.toml --bin v044_cancel_compat_consumer
+```
+
+The executable first launches a planted copy of FrankenGraphDB's stale
+`Err(JoinError::Cancelled)` expectation and requires that copy to fail for the
+intended policy mismatch. It then proves the migrated public sequence: an
+ordinary child is genuinely parked on a mutex, observes cancellation, crosses
+an asynchronous cleanup boundary, unlinks its waiter, and joins as `Ok(())`.
+An adjacent cancellation-blind child must still join with outer
+`JoinError::Cancelled`, so the two policies cannot silently alias. A valid run
+emits `V044_CANCEL_COMPAT_NEGATIVE_RED`,
+`V044_CANCEL_COMPAT_POSITIVE_GREEN`, and `V044_CANCEL_COMPAT_CASES=3` before
+remote exit 0. Missing signals, local fallback, or zero/filtered/skipped output
+is a hard failure.
+
+This lane proves only the exact published v0.4.4 cancellation boundary. It is
+not current-HEAD runtime evidence, broad FrankenGraphDB coverage, performance
+evidence, or release-readiness by itself.
+
 ## Shared Validation Contract (asupersync-ay6qvw)
 
 This section is the canonical validation contract for the stub-resolution closeout

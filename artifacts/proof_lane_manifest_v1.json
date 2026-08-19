@@ -393,6 +393,23 @@
         ]
       },
       {
+        "lane_id": "downstream-consumer-v044-cancel-compat-run",
+        "lane_class": "run_exact",
+        "expected_graph_roots": [
+          "tests/fixtures/downstream-consumer-proof/Cargo.toml",
+          "tests/fixtures/downstream-consumer-proof/src/bin/v044_cancel_compat_consumer.rs"
+        ],
+        "expected_heavy_edges": [],
+        "max_expected_crates": 240,
+        "no_claim_boundaries": [
+          "all-FrankenGraphDB-behavior",
+          "broad-workspace-health",
+          "current-head-runtime-behavior",
+          "performance",
+          "release-readiness"
+        ]
+      },
+      {
         "lane_id": "downstream-consumer-default-run",
         "lane_class": "run_exact",
         "expected_graph_roots": [
@@ -520,6 +537,7 @@
     "rch-topology-preflight-canary",
     "unsafe-boundary-ledger-contract",
     "proof-lane-manifest-verifier",
+    "downstream-consumer-v044-cancel-compatibility",
     "downstream-consumer-default-public-api",
     "downstream-consumer-default-kafka-fail-closed",
     "downstream-consumer-metrics-public-api",
@@ -2180,6 +2198,42 @@
       }
     },
     {
+      "lane_id": "downstream-consumer-v044-cancel-compat-run",
+      "kind": "test_frontier",
+      "resource_envelope_class": "test-frontier-heavy",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_downstream_consumer_v044_cancel_compat CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo run --manifest-path tests/fixtures/downstream-consumer-proof/Cargo.toml --bin v044_cancel_compat_consumer",
+      "package": "asupersync-downstream-consumer-proof",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "downstream-consumer-v044-cancel-compatibility"
+      ],
+      "covers": "Runs an external consumer against the exact published =0.4.4 crate. It proves an ordinary Cx::spawn child is genuinely mutex-parked, acknowledges cancellation, finishes asynchronous cleanup, unlinks its waiter, and joins as Ok(()); an adjacent cancellation-blind child retains outer JoinError::Cancelled attribution; and the planted stale FrankenGraphDB expectation fails for the intended policy mismatch.",
+      "explicit_not_covered": "current-head runtime behavior, every FrankenGraphDB behavior, broad workspace health, performance, release-readiness.",
+      "expected_signal": "V044_CANCEL_COMPAT_NEGATIVE_RED and V044_CANCEL_COMPAT_POSITIVE_GREEN both appear before remote exit 0",
+      "source_paths": [
+        "tests/fixtures/downstream-consumer-proof/Cargo.toml",
+        "tests/fixtures/downstream-consumer-proof/src/bin/v044_cancel_compat_consumer.rs",
+        "scripts/run_proof_checks.sh"
+      ],
+      "common_unrelated_blockers": [
+        "crates.io or registry index unavailable",
+        "published =0.4.4 package unavailable",
+        "remote worker compile cache pressure"
+      ],
+      "escalation_notes": "Any remote failure, local fallback, missing negative/positive sentinel, or case-count drift is release-blocking for this compatibility claim. This lane is exact published-v0.4.4 evidence, not current-HEAD or broad FrankenGraphDB proof.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": false,
+        "allowed_claim_scopes": [],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
+    },
+    {
       "lane_id": "downstream-consumer-default-run",
       "kind": "test_frontier",
       "resource_envelope_class": "test-frontier-heavy",
@@ -3466,6 +3520,13 @@
       "description": "The proof-lane manifest has a canonical verifier command.",
       "lane_ids": [
         "proof-lane-manifest-contract"
+      ]
+    },
+    {
+      "guarantee_id": "downstream-consumer-v044-cancel-compatibility",
+      "description": "The exact published-v0.4.4 external cancellation canary distinguishes acknowledged-cleanup Ok(()) from cancellation-blind outer JoinError::Cancelled and requires the planted stale downstream policy to fail.",
+      "lane_ids": [
+        "downstream-consumer-v044-cancel-compat-run"
       ]
     },
     {

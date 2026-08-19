@@ -113,6 +113,11 @@ fn fixture_is_external_workspace_and_does_not_enable_test_internals() {
     assert!(fixture_manifest.contains("[workspace]"));
     assert!(fixture_manifest.contains("name = \"asupersync-downstream-consumer-proof\""));
     assert!(fixture_manifest.contains("asupersync = { path = \"../../..\" }"));
+    assert!(fixture_manifest.contains(
+        "asupersync_v044 = { package = \"asupersync\", version = \"=0.4.4\", default-features = false }"
+    ));
+    assert!(fixture_manifest.contains("name = \"v044_cancel_compat_consumer\""));
+    assert!(fixture_manifest.contains("path = \"src/bin/v044_cancel_compat_consumer.rs\""));
     assert!(fixture_manifest.contains("metrics-profile = [\"asupersync/metrics\"]"));
     assert!(
         fixture_manifest
@@ -124,6 +129,42 @@ fn fixture_is_external_workspace_and_does_not_enable_test_internals() {
     assert!(
         !fixture_manifest.contains("test-internals"),
         "the downstream fixture must not opt into internal test helpers"
+    );
+}
+
+#[test]
+fn published_v044_cancellation_profile_is_exact_external_and_policy_discriminating() {
+    let artifact = json(ARTIFACT_PATH);
+    let profile = array(&artifact, "positive_profiles")
+        .iter()
+        .find(|entry| {
+            entry["profile_id"].as_str() == Some("published-v0.4.4-cancellation-compatibility-run")
+        })
+        .expect("published v0.4.4 cancellation compatibility profile");
+    let source = read_repo_file(string(profile, "bin_path"));
+
+    assert_eq!(string(profile, "bin"), "v044_cancel_compat_consumer");
+    assert!(array(profile, "fixture_features").is_empty());
+    assert!(array(profile, "root_feature_flags").is_empty());
+    assert!(string(profile, "command").contains(
+        "cargo run --manifest-path tests/fixtures/downstream-consumer-proof/Cargo.toml --bin v044_cancel_compat_consumer"
+    ));
+    assert!(source.contains("use asupersync_v044::Cx;"));
+    assert!(source.contains("RuntimeBuilder::current_thread()"));
+    assert!(source.contains("runtime.block_on(async"));
+    assert!(source.contains("runtime.is_quiescent()"));
+    assert!(!source.contains("test_utils"));
+    assert!(source.contains("mutex.waiters()"));
+    assert!(source.contains("cancellation_acknowledged"));
+    assert!(source.contains("cleanup_completed"));
+    assert!(source.contains("Ok(())"));
+    assert!(source.contains("Err(JoinError::Cancelled(_))"));
+    assert!(source.contains("V044_CANCEL_COMPAT_OLD_POLICY_REJECTED"));
+    assert!(source.contains("V044_CANCEL_COMPAT_NEGATIVE_RED"));
+    assert!(source.contains("V044_CANCEL_COMPAT_POSITIVE_GREEN"));
+    assert!(
+        !source.contains("use asupersync::"),
+        "the exact-release canary must use only the =0.4.4 dependency alias"
     );
 }
 

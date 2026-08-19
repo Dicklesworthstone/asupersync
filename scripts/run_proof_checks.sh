@@ -219,6 +219,51 @@ run_native_parked_task_cancellation() {
     done
 }
 
+run_v044_downstream_cancel_compatibility() {
+    local output=""
+    local status=0
+
+    validate_remote_rch_binary || return $?
+
+    set +e
+    output=$(RCH_REQUIRE_REMOTE=1 "$RCH_BIN" exec -- env \
+        CARGO_TARGET_DIR="$RCH_CARGO_TARGET_DIR" \
+        CARGO_INCREMENTAL=0 \
+        CARGO_PROFILE_DEV_DEBUG=0 \
+        RUSTFLAGS='-D warnings -C debuginfo=0' \
+        cargo run --manifest-path \
+        tests/fixtures/downstream-consumer-proof/Cargo.toml \
+        --bin v044_cancel_compat_consumer 2>&1)
+    status=$?
+    set -e
+
+    printf '%s\n' "$output"
+    if [[ $status -ne 0 ]]; then
+        return "$status"
+    fi
+    if grep -Eq '^\[RCH\] local \(|falling back to local|^\[rch-ci-fallback\] executing locally:' <<<"$output"; then
+        printf '%s\n' \
+            "FATAL: published v0.4.4 cancellation canary used local fallback while RCH is required" >&2
+        return 86
+    fi
+    for required_signal in \
+        V044_CANCEL_COMPAT_NEGATIVE_RED \
+        V044_CANCEL_COMPAT_POSITIVE_GREEN \
+        V044_CANCEL_COMPAT_CASES=3
+    do
+        if ! grep -Fq "$required_signal" <<<"$output"; then
+            printf '%s\n' \
+                "FATAL: published v0.4.4 cancellation canary did not emit ${required_signal}" >&2
+            return 88
+        fi
+    done
+    if grep -Eq '(^|[^0-9])0 passed|filtered out|ignored|skipped' <<<"$output"; then
+        printf '%s\n' \
+            "FATAL: published v0.4.4 cancellation canary emitted a zero, filtered, ignored, or skipped result" >&2
+        return 87
+    fi
+}
+
 echo "=== Asupersync Proof Verification Suite (bd-2rhiq) ==="
 echo "Artifacts: $ARTIFACTS_DIR"
 echo ""
@@ -227,6 +272,9 @@ echo ""
 
 run_check "Native parked-task cancellation boundary" "integration-proofs" \
     run_native_parked_task_cancellation
+
+run_check "Published v0.4.4 downstream cancellation compatibility" "integration-proofs" \
+    run_v044_downstream_cancel_compatibility
 
 # ---- Category: Rust Proof Tests ----
 

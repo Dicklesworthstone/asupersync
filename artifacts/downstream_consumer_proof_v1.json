@@ -19,6 +19,17 @@
       "expected_signal": "default_consumer exits 0 after exercising only root public re-exports"
     },
     {
+      "profile_id": "published-v0.4.4-cancellation-compatibility-run",
+      "lane_id": "downstream-consumer-v044-cancel-compat-run",
+      "guarantee_id": "downstream-consumer-v044-cancel-compatibility",
+      "bin": "v044_cancel_compat_consumer",
+      "bin_path": "tests/fixtures/downstream-consumer-proof/src/bin/v044_cancel_compat_consumer.rs",
+      "fixture_features": [],
+      "root_feature_flags": [],
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_downstream_consumer_v044_cancel_compat CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo run --manifest-path tests/fixtures/downstream-consumer-proof/Cargo.toml --bin v044_cancel_compat_consumer",
+      "expected_signal": "V044_CANCEL_COMPAT_NEGATIVE_RED and V044_CANCEL_COMPAT_POSITIVE_GREEN both appear before remote exit 0"
+    },
+    {
       "profile_id": "default-kafka-fail-closed-test",
       "lane_id": "downstream-consumer-default-kafka-test",
       "guarantee_id": "downstream-consumer-default-kafka-fail-closed",
@@ -102,6 +113,8 @@
     "kafka-backend-behavior",
     "performance",
     "release-readiness",
-    "test-internals-public-api"
+    "test-internals-public-api",
+    "current-head-runtime-behavior",
+    "all-FrankenGraphDB-behavior"
   ]
 }

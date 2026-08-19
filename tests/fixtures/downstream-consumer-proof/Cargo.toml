@@ -14,6 +14,11 @@ kafka = ["asupersync/kafka"]
 
 [dependencies]
 asupersync = { path = "../../.." }
+asupersync_v044 = { package = "asupersync", version = "=0.4.4", default-features = false }
+
+[[bin]]
+name = "v044_cancel_compat_consumer"
+path = "src/bin/v044_cancel_compat_consumer.rs"
 
 [[test]]
 name = "kafka_default_feature_surface"

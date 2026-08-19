@@ -966,6 +966,7 @@ fn manifest_records_required_lanes_and_doc_sources() {
         "fuzz-manifest-smoke",
         "lib-tests",
         "native-parked-task-cancellation",
+        "downstream-consumer-v044-cancel-compat-run",
         "all-targets-check",
         "clippy-all-targets",
         "rustdoc-api",
@@ -1111,6 +1112,77 @@ fn proof_runner_executes_native_cancellation_lane_fail_closed() {
             "native parked-task cancellation must run before `{later_target}` so a later broad-lane failure cannot hide it"
         );
     }
+}
+
+#[test]
+fn proof_runner_executes_published_v044_cancel_canary_fail_closed() {
+    let manifest = manifest();
+    let lane = lane_by_id(
+        array(&manifest, "lanes"),
+        "downstream-consumer-v044-cancel-compat-run",
+    );
+    assert_eq!(
+        lane.get("command").and_then(Value::as_str),
+        Some(
+            "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_downstream_consumer_v044_cancel_compat CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo run --manifest-path tests/fixtures/downstream-consumer-proof/Cargo.toml --bin v044_cancel_compat_consumer"
+        ),
+        "the release canary must run the exact external =0.4.4 consumer profile",
+    );
+    assert_eq!(
+        lane.get("proof_reuse_policy")
+            .and_then(|policy| policy.get("cache_hits_allowed"))
+            .and_then(Value::as_bool),
+        Some(false),
+        "the published compatibility claim requires a fresh remote run",
+    );
+
+    let runner = read_repo_file(PROOF_RUNNER_PATH);
+    let wrapper_start = runner
+        .find("run_v044_downstream_cancel_compatibility() {")
+        .expect("proof runner must define the published v0.4.4 compatibility wrapper");
+    let wrapper_end = runner[wrapper_start..]
+        .find("\n}\n")
+        .map(|offset| wrapper_start + offset + 3)
+        .expect("published v0.4.4 wrapper must have a complete function body");
+    let wrapper = &runner[wrapper_start..wrapper_end];
+    for required in [
+        "validate_remote_rch_binary || return $?",
+        "RCH_REQUIRE_REMOTE=1 \"$RCH_BIN\" exec",
+        "tests/fixtures/downstream-consumer-proof/Cargo.toml",
+        "--bin v044_cancel_compat_consumer",
+        "V044_CANCEL_COMPAT_NEGATIVE_RED",
+        "V044_CANCEL_COMPAT_POSITIVE_GREEN",
+        "V044_CANCEL_COMPAT_CASES=3",
+        "used local fallback while RCH is required",
+        "zero, filtered, ignored, or skipped result",
+    ] {
+        assert!(
+            wrapper.contains(required),
+            "published compatibility wrapper must retain `{required}`",
+        );
+    }
+    assert!(
+        wrapper.contains(r"^\[rch-ci-fallback\] executing locally:"),
+        "published compatibility proof must reject the local CI compatibility wrapper",
+    );
+    assert!(
+        wrapper.contains("(^|[^0-9])0 passed|filtered out|ignored|skipped"),
+        "published compatibility proof must reject zero, filtered, ignored, and skipped results",
+    );
+
+    let native_lane = runner
+        .find("run_check \"Native parked-task cancellation boundary\"")
+        .expect("proof runner must retain the native cancellation lane");
+    let published_lane = runner
+        .find("run_check \"Published v0.4.4 downstream cancellation compatibility\"")
+        .expect("proof runner must invoke the published compatibility lane");
+    let broader_lane = runner
+        .find("run_check \"Certificate verification\"")
+        .expect("proof runner must retain broader proof suites");
+    assert!(
+        native_lane < published_lane && published_lane < broader_lane,
+        "the exact published compatibility canary must run immediately after its native counterpart and before broader fail-fast proof suites",
+    );
 }
 
 #[test]

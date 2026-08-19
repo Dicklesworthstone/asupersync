@@ -312,6 +312,23 @@
       {
         "expected_graph_roots": [
           "tests/fixtures/downstream-consumer-proof/Cargo.toml",
+          "tests/fixtures/downstream-consumer-proof/src/bin/v044_cancel_compat_consumer.rs"
+        ],
+        "expected_heavy_edges": [],
+        "lane_class": "run_exact",
+        "lane_id": "downstream-consumer-v044-cancel-compat-run",
+        "max_expected_crates": 240,
+        "no_claim_boundaries": [
+          "all-FrankenGraphDB-behavior",
+          "broad-workspace-health",
+          "current-head-runtime-behavior",
+          "performance",
+          "release-readiness"
+        ]
+      },
+      {
+        "expected_graph_roots": [
+          "tests/fixtures/downstream-consumer-proof/Cargo.toml",
           "tests/fixtures/downstream-consumer-proof/src/bin/default_consumer.rs"
         ],
         "expected_heavy_edges": [],
@@ -450,6 +467,7 @@
     "rch-topology-preflight-canary",
     "unsafe-boundary-ledger-contract",
     "proof-lane-manifest-verifier",
+    "downstream-consumer-v044-cancel-compatibility",
     "downstream-consumer-default-public-api",
     "downstream-consumer-default-kafka-fail-closed",
     "downstream-consumer-metrics-public-api",
@@ -1267,6 +1285,23 @@
       ]
     },
     {
+      "lane_id": "downstream-consumer-v044-cancel-compat-run",
+      "kind": "test_frontier",
+      "resource_envelope_class": "test-frontier-heavy",
+      "package": "asupersync-downstream-consumer-proof",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_downstream_consumer_v044_cancel_compat CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo run --manifest-path tests/fixtures/downstream-consumer-proof/Cargo.toml --bin v044_cancel_compat_consumer",
+      "guarantee_ids": [
+        "downstream-consumer-v044-cancel-compatibility"
+      ],
+      "feature_flags": [],
+      "expected_signal": "V044_CANCEL_COMPAT_NEGATIVE_RED and V044_CANCEL_COMPAT_POSITIVE_GREEN both appear before remote exit 0",
+      "source_paths": [
+        "tests/fixtures/downstream-consumer-proof/Cargo.toml",
+        "tests/fixtures/downstream-consumer-proof/src/bin/v044_cancel_compat_consumer.rs",
+        "scripts/run_proof_checks.sh"
+      ]
+    },
+    {
       "lane_id": "downstream-consumer-default-run",
       "kind": "test_frontier",
       "resource_envelope_class": "test-frontier-heavy",
@@ -2001,6 +2036,12 @@
       "guarantee_id": "proof-lane-manifest-verifier",
       "lane_ids": [
         "proof-lane-manifest-contract"
+      ]
+    },
+    {
+      "guarantee_id": "downstream-consumer-v044-cancel-compatibility",
+      "lane_ids": [
+        "downstream-consumer-v044-cancel-compat-run"
       ]
     },
     {
