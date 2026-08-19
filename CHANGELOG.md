@@ -19,8 +19,9 @@ GitHub Release/tag baseline is `v0.4.8`.
 - **v0.4.8 Release**: patch release fixing cross-runtime local-task placement,
   foreign-worker cancellation routing, and out-of-order ambient-context guard
   teardown while preserving the v0.4.3 public compatibility floor.
-- **v0.4.7 Release**: patch release adding typed runtime-handle join outcomes
-  and hardening authenticated QUIC/ATP reassembly while preserving the v0.4.3
+- **v0.4.7 Release**: patch release adding bounded runtime shutdown, typed
+  runtime-handle join outcomes, and strict canonical Lab schedule artifacts,
+  while hardening authenticated QUIC/ATP reassembly and preserving the v0.4.3
   public compatibility floor.
 - **v0.4.6 Release**: patch release tightening HTTP/1 framing parsing and
   completing `Sleep` timer/waker cleanup without changing the v0.4.3 public
@@ -62,9 +63,11 @@ GitHub Release/tag baseline is `v0.4.8`.
 - **Local tasks now remain owned by the runtime that accepted them.** A
   `spawn_local` issued while another runtime's worker TLS was active could
   previously publish the task into that foreign worker's owner-local lane.
-  Local admission now verifies runtime ownership and otherwise uses the
-  accepting runtime's mailbox, preserving the task's non-`Send` placement and
-  cleanup contract ([`53b6813`](https://github.com/Dicklesworthstone/asupersync/commit/53b681391)).
+  The local-spawn lane is now bound to runtime identity, and a foreign `Cx` is
+  rejected with `SpawnError::LocalSchedulerUnavailable` before task allocation,
+  reservation, or enqueue. Ordinary `Send` scheduler paths retain their
+  established owner-scheduler fallback; non-`Send` tasks are never rerouted
+  across runtimes ([`53b6813`](https://github.com/Dicklesworthstone/asupersync/commit/53b681391)).
 - **Cancellation no longer targets a foreign worker's local queue.** The
   cancellation fast path now checks scheduler ownership before using the
   current worker-local lane, preventing worker-index collisions across runtime
@@ -90,14 +93,16 @@ GitHub Release/tag baseline is `v0.4.8`.
 ### Runtime correctness
 
 - **Runtime teardown now has a bounded path.** `Runtime::shutdown_timeout`
-  signals scheduler shutdown, runs the normal blocking teardown on a detached
-  reaper thread, and returns within the caller's bound even when a
+  synchronously closes task and blocking-pool admission, signals scheduler
+  shutdown, runs the normal blocking teardown on a detached reaper thread, and
+  returns within the caller's bound even when a
   contract-violating future blocks inside `poll` and its worker never joins;
   `Runtime::shutdown_background` is the non-waiting variant. On a timed-out
   return the reaper retains the runtime state so any still-blocked worker
   keeps operating on live memory. Ordinary `Runtime` drop is unchanged and
   still joins without a bound
-  ([#60](https://github.com/Dicklesworthstone/asupersync/issues/60)).
+  ([#60](https://github.com/Dicklesworthstone/asupersync/issues/60),
+  [`6f23db9`](https://github.com/Dicklesworthstone/asupersync/commit/6f23db9bc)).
 
 - **Runtime-handle tasks now have an additive typed join path.**
   `RuntimeHandle::spawn_checked` and `try_spawn_checked` return a
@@ -106,6 +111,18 @@ GitHub Release/tag baseline is `v0.4.8`.
   unwinding the observer. The established `RuntimeHandle::spawn` and
   `JoinHandle<T>` signatures and panic-propagating behavior remain unchanged
   for v0.4.3 compatibility ([#59](https://github.com/Dicklesworthstone/asupersync/issues/59)).
+
+### Deterministic testing
+
+- **Exact Lab schedules now have a strict canonical artifact codec.**
+  `ForcedSchedule::to_canonical_bytes` and bounded decoding through
+  `ForcedScheduleDecodeLimits` preserve dispatch identities, reject malformed,
+  oversized, checksum-invalid, or semantically inconsistent artifacts, and do
+  not fall back to RNG scheduling. This is a Lab evidence-integrity format, not
+  a production scheduler-control protocol, workload codec, universal replay
+  format, completed minimizer, or persisted downstream reproducer
+  ([`de16042`](https://github.com/Dicklesworthstone/asupersync/commit/de160424f),
+  [`0f36f1b`](https://github.com/Dicklesworthstone/asupersync/commit/0f36f1b7b)).
 
 ### Security and protocols
 
@@ -125,6 +142,11 @@ GitHub Release/tag baseline is `v0.4.8`.
   stream fragments. Limit rejection occurs before flow-control, final-size, or
   buffered-byte state changes, and harmless duplicate fragments remain
   accepted at the cap.
+- **ATP validates final size before duplicate trimming.** A duplicate FIN can
+  establish the stream's final size, while contradictory final offsets fail
+  before mutating reassembly state. Duplicate suppression therefore cannot hide
+  a final-size violation
+  ([`acfc2a7`](https://github.com/Dicklesworthstone/asupersync/commit/acfc2a7d2)).
 
 ### Compatibility and release evidence
 
@@ -215,7 +237,11 @@ GitHub Release/tag baseline is `v0.4.8`.
 - **Owned NKey primitives now cover the bounded codec substrate.** The release
   adds CRC16, RFC 4648 Base32, seed-prefix packing, typed Ed25519/Curve key
   forms, lifecycle/redaction coverage, and constant-time key comparison while
-  keeping deterministic seed constructors explicitly test-only.
+  keeping deterministic seed constructors explicitly test-only. This does not
+  claim a full first-party production identity cutover: the compatibility
+  surface still exposes the incumbent `nkeys::KeyPair`, retained-artifact E2E
+  evidence remains incomplete, and no generic Asupersync-owned transcript
+  signer shipped in this release.
 - **HTTP/1 borrowed request heads avoid needless allocation.** Additive public
   borrowed-head APIs feed the server parse path without changing the existing
   owned request surfaces.
@@ -236,7 +262,7 @@ GitHub Release/tag baseline is `v0.4.8`.
 
 ---
 
-## [v0.4.4] - 2026-08-13
+## [v0.4.4] - 2026-08-14
 
 ### Runtime correctness
 
@@ -298,7 +324,7 @@ GitHub Release/tag baseline is `v0.4.8`.
 
 ---
 
-## [v0.4.3] - 2026-08-09
+## [v0.4.3] - 2026-08-11
 
 ### Runtime correctness
 
