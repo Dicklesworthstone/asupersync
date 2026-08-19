@@ -763,6 +763,429 @@ fn owned_traces_loopback_http_wire_smoke_decodes_request() {
 
 #[cfg(all(feature = "metrics", feature = "test-internals"))]
 #[test]
+fn owned_logs_map_full_body_union_context_and_stable_batches() {
+    use asupersync::observability::{
+        LogLevel, OtlpLogBody, OtlpLogKeyValueInput, OtlpLogRecordInput, OwnedOtlpLogConfig,
+        OwnedOtlpLogs,
+    };
+    use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
+    use opentelemetry_proto::tonic::common::v1::any_value::Value;
+    use prost::Message;
+
+    let structured = [
+        OtlpLogKeyValueInput::string("z-last", "tail"),
+        OtlpLogKeyValueInput::new("a-first", OtlpLogBody::Int(7)),
+    ];
+    let body = [
+        OtlpLogBody::String("message"),
+        OtlpLogBody::Bool(true),
+        OtlpLogBody::Int(-7),
+        OtlpLogBody::Double(2.5),
+        OtlpLogBody::Bytes(&[0, 0xff]),
+        OtlpLogBody::KeyValueList(&structured),
+    ];
+    let attributes = [
+        OtlpLogKeyValueInput::string("z-key", "z-value"),
+        OtlpLogKeyValueInput::new("a-key", OtlpLogBody::Bool(false)),
+    ];
+    let resource = [
+        OtlpLogKeyValueInput::string("service.name", "owned-logs"),
+        OtlpLogKeyValueInput::string("deployment.environment", "test"),
+    ];
+    let trace_id = [0x31; 16];
+    let span_id = [0x41; 8];
+    let records = [
+        OtlpLogRecordInput::new(LogLevel::Error, OtlpLogBody::Array(&body), 100)
+            .with_observed_time_unix_nano(120)
+            .with_attributes(&attributes)
+            .with_dropped_attributes_count(3)
+            .with_trace_context(&trace_id, &span_id, 1)
+            .with_event_name("request.failed"),
+        OtlpLogRecordInput::new(LogLevel::Info, OtlpLogBody::Absent, 200),
+        OtlpLogRecordInput::new(LogLevel::Debug, OtlpLogBody::String(""), 300),
+    ];
+    let mapper = OwnedOtlpLogs::try_new(
+        OwnedOtlpLogConfig::new()
+            .with_max_records_per_request(1)
+            .with_scope("asupersync.logs.test", "1"),
+    )
+    .expect("valid owned logs mapper");
+
+    let first = mapper
+        .collect(&records, &resource)
+        .expect("strict logs map");
+    let second = mapper
+        .collect(&records, &resource)
+        .expect("deterministic repeat map");
+    assert_eq!(first, second);
+    assert_eq!(first.record_count(), 3);
+    assert_eq!(first.producer_dropped_attributes(), 3);
+    assert_eq!(first.requests().len(), 3);
+
+    let request = ExportLogsServiceRequest::decode(first.requests()[0].as_slice())
+        .expect("generated OTLP logs decode");
+    assert_eq!(
+        request.encode_to_vec(),
+        first.requests()[0],
+        "the crate-owned encoder must match the reference prost re-encoding"
+    );
+    let resource_logs = &request.resource_logs[0];
+    assert_eq!(
+        resource_logs
+            .resource
+            .as_ref()
+            .expect("resource")
+            .attributes
+            .iter()
+            .map(|attribute| attribute.key.as_str())
+            .collect::<Vec<_>>(),
+        ["deployment.environment", "service.name"]
+    );
+    let scope_logs = &resource_logs.scope_logs[0];
+    let scope = scope_logs.scope.as_ref().expect("scope");
+    assert_eq!(scope.name, "asupersync.logs.test");
+    assert_eq!(scope.version, "1");
+    let record = &scope_logs.log_records[0];
+    assert_eq!(record.time_unix_nano, 100);
+    assert_eq!(record.observed_time_unix_nano, 120);
+    assert_eq!(record.severity_number, 17);
+    assert_eq!(record.severity_text, "ERROR");
+    assert_eq!(record.dropped_attributes_count, 3);
+    assert_eq!(record.trace_id, trace_id);
+    assert_eq!(record.span_id, span_id);
+    assert_eq!(record.flags, 1);
+    assert_eq!(record.event_name, "request.failed");
+    assert_eq!(
+        record
+            .attributes
+            .iter()
+            .map(|attribute| attribute.key.as_str())
+            .collect::<Vec<_>>(),
+        ["a-key", "z-key"]
+    );
+    let Value::ArrayValue(array) = record
+        .body
+        .as_ref()
+        .and_then(|body| body.value.as_ref())
+        .expect("array body")
+    else {
+        panic!("body must retain the OTLP array variant");
+    };
+    assert!(
+        matches!(array.values[0].value, Some(Value::StringValue(ref value)) if value == "message")
+    );
+    assert!(matches!(
+        array.values[1].value,
+        Some(Value::BoolValue(true))
+    ));
+    assert!(matches!(array.values[2].value, Some(Value::IntValue(-7))));
+    assert!(matches!(array.values[3].value, Some(Value::DoubleValue(value)) if value == 2.5));
+    assert!(
+        matches!(array.values[4].value, Some(Value::BytesValue(ref value)) if value == &[0, 0xff])
+    );
+    let Some(Value::KvlistValue(map)) = array.values[5].value.as_ref() else {
+        panic!("structured body must retain the OTLP key/value-list variant");
+    };
+    assert_eq!(
+        map.values
+            .iter()
+            .map(|attribute| attribute.key.as_str())
+            .collect::<Vec<_>>(),
+        ["a-first", "z-last"]
+    );
+
+    let request = ExportLogsServiceRequest::decode(first.requests()[1].as_slice())
+        .expect("decode absent-body batch");
+    assert_eq!(request.encode_to_vec(), first.requests()[1]);
+    assert!(
+        request.resource_logs[0].scope_logs[0].log_records[0]
+            .body
+            .is_none()
+    );
+
+    let request = ExportLogsServiceRequest::decode(first.requests()[2].as_slice())
+        .expect("decode empty-string-body batch");
+    assert_eq!(request.encode_to_vec(), first.requests()[2]);
+    assert!(matches!(
+        request.resource_logs[0].scope_logs[0].log_records[0]
+            .body
+            .as_ref()
+            .and_then(|body| body.value.as_ref()),
+        Some(Value::StringValue(value)) if value.is_empty()
+    ));
+}
+
+#[cfg(all(feature = "metrics", feature = "test-internals"))]
+#[test]
+fn owned_logs_preserve_all_five_asupersync_severity_levels() {
+    use asupersync::observability::{LogLevel, OtlpLogBody, OtlpLogRecordInput, OwnedOtlpLogs};
+    use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
+    use prost::Message;
+
+    let records = [
+        OtlpLogRecordInput::new(LogLevel::Trace, OtlpLogBody::String("trace"), 1),
+        OtlpLogRecordInput::new(LogLevel::Debug, OtlpLogBody::String("debug"), 2),
+        OtlpLogRecordInput::new(LogLevel::Info, OtlpLogBody::String("info"), 3),
+        OtlpLogRecordInput::new(LogLevel::Warn, OtlpLogBody::String("warn"), 4),
+        OtlpLogRecordInput::new(LogLevel::Error, OtlpLogBody::String("error"), 5),
+    ];
+    let collection = OwnedOtlpLogs::try_new(Default::default())
+        .expect("valid mapper")
+        .collect(&records, &[])
+        .expect("severity map");
+    let request = ExportLogsServiceRequest::decode(collection.requests()[0].as_slice())
+        .expect("generated decode");
+    let records = &request.resource_logs[0].scope_logs[0].log_records;
+    assert_eq!(
+        records
+            .iter()
+            .map(|record| (record.severity_number, record.severity_text.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            (1, "TRACE"),
+            (5, "DEBUG"),
+            (9, "INFO"),
+            (13, "WARN"),
+            (17, "ERROR"),
+        ]
+    );
+}
+
+#[cfg(all(feature = "metrics", feature = "test-internals"))]
+#[test]
+fn owned_logs_fail_closed_before_encoding_invalid_input() {
+    use asupersync::observability::{
+        LogLevel, OtlpLogBody, OtlpLogKeyValueInput, OtlpLogRecord, OtlpLogRecordInput,
+        OwnedOtlpLogConfig, OwnedOtlpLogError, OwnedOtlpLogs,
+    };
+
+    let mapper = OwnedOtlpLogs::try_new(OwnedOtlpLogConfig::new()).expect("valid mapper");
+    let duplicate_attributes = [
+        OtlpLogKeyValueInput::string("duplicate", "one"),
+        OtlpLogKeyValueInput::string("duplicate", "two"),
+    ];
+    let duplicate = OtlpLogRecordInput::new(LogLevel::Info, OtlpLogBody::String("body"), 1)
+        .with_attributes(&duplicate_attributes);
+    assert_eq!(
+        mapper.collect(&[duplicate], &[]),
+        Err(OwnedOtlpLogError::InvalidAttributes)
+    );
+
+    let invalid_number = OtlpLogRecordInput::new(LogLevel::Info, OtlpLogBody::Double(f64::NAN), 1);
+    assert_eq!(
+        mapper.collect(&[invalid_number], &[]),
+        Err(OwnedOtlpLogError::InvalidNumericValue)
+    );
+
+    let nested_value = [OtlpLogKeyValueInput::string("child", "value")];
+    let nested =
+        OtlpLogRecordInput::new(LogLevel::Info, OtlpLogBody::KeyValueList(&nested_value), 1);
+    let shallow = OwnedOtlpLogs::try_new(OwnedOtlpLogConfig::new().with_max_body_depth(1))
+        .expect("valid shallow mapper");
+    assert_eq!(
+        shallow.collect(&[nested], &[]),
+        Err(OwnedOtlpLogError::InvalidBody),
+        "structured bodies must not reset recursive depth validation"
+    );
+
+    let two_records = [
+        OtlpLogRecordInput::new(LogLevel::Info, OtlpLogBody::String("one"), 1),
+        OtlpLogRecordInput::new(LogLevel::Info, OtlpLogBody::String("two"), 2),
+    ];
+    let one_record = OwnedOtlpLogs::try_new(
+        OwnedOtlpLogConfig::new()
+            .with_max_records_per_collection(1)
+            .with_max_records_per_request(1),
+    )
+    .expect("valid one-record mapper");
+    assert_eq!(
+        one_record.collect(&two_records, &[]),
+        Err(OwnedOtlpLogError::LimitExceeded)
+    );
+
+    let two_values = [OtlpLogBody::Int(1), OtlpLogBody::Int(2)];
+    let wide_body = OtlpLogRecordInput::new(LogLevel::Info, OtlpLogBody::Array(&two_values), 1);
+    let one_item = OwnedOtlpLogs::try_new(OwnedOtlpLogConfig::new().with_max_body_items(1))
+        .expect("valid one-item mapper");
+    assert_eq!(
+        one_item.collect(&[wide_body], &[]),
+        Err(OwnedOtlpLogError::InvalidBody)
+    );
+
+    let leaf_values = [OtlpLogBody::Int(1); 128];
+    let branch = OtlpLogBody::Array(&leaf_values);
+    let oversized_tree = [branch; 33];
+    let oversized_tree =
+        OtlpLogRecordInput::new(LogLevel::Info, OtlpLogBody::Array(&oversized_tree), 1);
+    assert_eq!(
+        mapper.collect(&[oversized_tree], &[]),
+        Err(OwnedOtlpLogError::LimitExceeded),
+        "recursive validation must stop at the aggregate node envelope"
+    );
+
+    let two_attributes = [
+        OtlpLogKeyValueInput::string("one", "1"),
+        OtlpLogKeyValueInput::string("two", "2"),
+    ];
+    let attributed = OtlpLogRecordInput::new(LogLevel::Info, OtlpLogBody::String("body"), 1)
+        .with_attributes(&two_attributes);
+    let one_attribute =
+        OwnedOtlpLogs::try_new(OwnedOtlpLogConfig::new().with_max_attributes_per_entity(1))
+            .expect("valid one-attribute mapper");
+    assert_eq!(
+        one_attribute.collect(&[attributed], &[]),
+        Err(OwnedOtlpLogError::LimitExceeded)
+    );
+
+    let owned_byte_limit =
+        OwnedOtlpLogs::try_new(OwnedOtlpLogConfig::new().with_max_owned_bytes(1))
+            .expect("valid one-byte mapper");
+    let two_bytes = OtlpLogRecordInput::new(LogLevel::Info, OtlpLogBody::String("xx"), 1);
+    assert_eq!(
+        owned_byte_limit.collect(&[two_bytes], &[]),
+        Err(OwnedOtlpLogError::LimitExceeded)
+    );
+
+    let request_byte_limit =
+        OwnedOtlpLogs::try_new(OwnedOtlpLogConfig::new().with_max_request_bytes(1))
+            .expect("valid one-byte request mapper");
+    assert_eq!(
+        request_byte_limit.collect(&[two_bytes], &[]),
+        Err(OwnedOtlpLogError::WireEnvelopeExceeded)
+    );
+
+    let mut malformed_context = OtlpLogRecord::new(LogLevel::Info, "body", 1);
+    malformed_context.trace_id = vec![1; 16];
+    malformed_context.flags = 0x100;
+    let malformed_context = OtlpLogRecordInput::from_legacy_record(&malformed_context);
+    assert_eq!(
+        mapper.collect(&[malformed_context], &[]),
+        Err(OwnedOtlpLogError::InvalidIdentifier)
+    );
+
+    let mut flags_without_context = OtlpLogRecord::new(LogLevel::Info, "body", 1);
+    flags_without_context.flags = 1;
+    let flags_without_context = OtlpLogRecordInput::from_legacy_record(&flags_without_context);
+    assert_eq!(
+        mapper.collect(&[flags_without_context], &[]),
+        Err(OwnedOtlpLogError::InvalidIdentifier)
+    );
+
+    let zero_trace_id = [0; 16];
+    let nonzero_span_id = [1; 8];
+    let zero_trace_context = OtlpLogRecordInput::new(
+        LogLevel::Info,
+        OtlpLogBody::String("body"),
+        1,
+    )
+    .with_trace_context(&zero_trace_id, &nonzero_span_id, 1);
+    assert_eq!(
+        mapper.collect(&[zero_trace_context], &[]),
+        Err(OwnedOtlpLogError::InvalidIdentifier)
+    );
+}
+
+#[cfg(all(feature = "metrics", feature = "test-internals"))]
+fn lab_owned_logs_bytes(seed: u64) -> Vec<Vec<u8>> {
+    use asupersync::lab::{LabConfig, LabRuntime};
+    use asupersync::observability::{
+        LogLevel, OtlpLogBody, OtlpLogKeyValueInput, OtlpLogRecordInput, OwnedOtlpLogs,
+    };
+    use asupersync::types::Budget;
+    use parking_lot::Mutex;
+    use std::sync::Arc;
+
+    let mut runtime = LabRuntime::new(LabConfig::new(seed).max_steps(1_000));
+    let root_region = runtime.state.create_root_region(Budget::INFINITE);
+    let output = Arc::new(Mutex::new(None));
+    let task_output = Arc::clone(&output);
+    let (task_id, _handle) = runtime
+        .state
+        .create_task(root_region, Budget::INFINITE, async move {
+            let attributes = [OtlpLogKeyValueInput::new("attempt", OtlpLogBody::Int(2))];
+            let record = OtlpLogRecordInput::new(
+                LogLevel::Warn,
+                OtlpLogBody::String("retry scheduled"),
+                500,
+            )
+            .with_observed_time_unix_nano(550)
+            .with_attributes(&attributes);
+            *task_output.lock() = Some(
+                OwnedOtlpLogs::try_new(Default::default())
+                    .expect("valid mapper")
+                    .collect(&[record], &[])
+                    .expect("lab logs collection")
+                    .into_requests(),
+            );
+        })
+        .expect("create deterministic logs producer task");
+    runtime
+        .scheduler
+        .lock()
+        .schedule(task_id, Budget::INFINITE.priority);
+    runtime.run_until_quiescent();
+    assert!(runtime.oracles.check_all(runtime.now()).is_empty());
+    output.lock().take().expect("logs producer completed")
+}
+
+#[cfg(all(feature = "metrics", feature = "test-internals"))]
+#[test]
+fn owned_logs_lab_replay_is_byte_identical() {
+    assert_eq!(lab_owned_logs_bytes(0x0A51), lab_owned_logs_bytes(0x0A51));
+}
+
+#[cfg(all(feature = "metrics", feature = "test-internals"))]
+#[test]
+fn owned_logs_loopback_http_wire_smoke_decodes_request() {
+    use asupersync::cx::Cx;
+    use asupersync::observability::{
+        LogLevel, OtlpHttpConfigBuilder, OtlpHttpExporter, OtlpLogBody, OtlpLogRecordInput,
+        OwnedOtlpLogs,
+    };
+    use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
+    use prost::Message;
+
+    let (endpoint, body_rx, collector) = loopback_otlp_capture("/v1/logs", 1);
+    let exporter = OtlpHttpExporter::from_config(
+        OtlpHttpConfigBuilder::new(endpoint)
+            .with_resource_attribute("service.name", "logs-loopback")
+            .build()
+            .expect("valid logs endpoint"),
+    );
+    let logs = OwnedOtlpLogs::try_new(Default::default()).expect("valid logs mapper");
+    let record = OtlpLogRecordInput::new(
+        LogLevel::Warn,
+        OtlpLogBody::String("shutdown requested"),
+        900,
+    );
+    asupersync::test_utils::run_test(|| async {
+        let cx = Cx::current().expect("native test runtime installs Cx");
+        exporter
+            .send_owned_logs(&cx, &logs, &[record])
+            .await
+            .expect("loopback collector accepts owned logs");
+    });
+
+    collector.join().expect("collector thread");
+    let body = body_rx.recv().expect("logs collector body");
+    let request = ExportLogsServiceRequest::decode(body.as_slice()).expect("generated decode");
+    let resource_logs = &request.resource_logs[0];
+    assert!(
+        resource_logs
+            .resource
+            .as_ref()
+            .expect("resource")
+            .attributes
+            .iter()
+            .any(|attribute| attribute.key == "service.name")
+    );
+    let record = &resource_logs.scope_logs[0].log_records[0];
+    assert_eq!(record.time_unix_nano, 900);
+    assert_eq!(record.severity_text, "WARN");
+}
+
+#[cfg(all(feature = "metrics", feature = "test-internals"))]
+#[test]
 fn owned_metrics_loopback_http_wire_smoke_decodes_request() {
     use asupersync::cx::Cx;
     use asupersync::observability::{
@@ -892,12 +1315,13 @@ fn owned_metrics_loopback_http_wire_smoke_decodes_request() {
 #[ignore = "real-service E2E downloads the pinned official OpenTelemetry Collector distribution"]
 fn owned_metrics_external_otel_collector_accepts_and_exports_request() {
     use asupersync::cx::Cx;
+    use asupersync::observability::otel::PrivacyConfig;
     use asupersync::observability::{
-        MetricsProvider, OtlpHttpExporter, OtlpTraceEventInput, OtlpTraceSpanInput,
-        OtlpTraceStatus, OutcomeKind, OwnedOtlpMetrics, OwnedOtlpMetricsConfig,
-        OwnedOtlpStatusCode, OwnedOtlpTraces,
+        LogEntry, MetricsProvider, OtlpHttpExporter, OtlpLogRecord, OtlpLogRecordInput,
+        OtlpTraceEventInput, OtlpTraceSpanInput, OtlpTraceStatus, OutcomeKind, OwnedOtlpLogs,
+        OwnedOtlpMetrics, OwnedOtlpMetricsConfig, OwnedOtlpStatusCode, OwnedOtlpTraces,
     };
-    use asupersync::types::{RegionId, TaskId};
+    use asupersync::types::{RegionId, TaskId, Time};
     use sha2::{Digest, Sha256};
     use std::fs;
     use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -989,7 +1413,7 @@ fn owned_metrics_external_otel_collector_accepts_and_exports_request() {
     let output_path = work_dir.join(format!("signals-{run_id}.jsonl"));
     let config_path = work_dir.join(format!("collector-{run_id}.yaml"));
     let config = format!(
-        "receivers:\n  otlp:\n    protocols:\n      http:\n        endpoint: {collector_address}\nexporters:\n  file:\n    path: {}\n    flush_interval: 100ms\nservice:\n  telemetry:\n    logs:\n      level: warn\n  pipelines:\n    metrics:\n      receivers: [otlp]\n      exporters: [file]\n    traces:\n      receivers: [otlp]\n      exporters: [file]\n",
+        "receivers:\n  otlp:\n    protocols:\n      http:\n        endpoint: {collector_address}\nexporters:\n  file:\n    path: {}\n    flush_interval: 100ms\nservice:\n  telemetry:\n    logs:\n      level: warn\n  pipelines:\n    metrics:\n      receivers: [otlp]\n      exporters: [file]\n    traces:\n      receivers: [otlp]\n      exporters: [file]\n    logs:\n      receivers: [otlp]\n      exporters: [file]\n",
         output_path.display()
     );
     fs::write(&config_path, config).expect("write collector config");
@@ -1021,7 +1445,10 @@ fn owned_metrics_external_otel_collector_accepts_and_exports_request() {
     let traces_exporter =
         OtlpHttpExporter::try_new(format!("http://{collector_address}/v1/traces"))
             .expect("valid trace collector endpoint");
+    let logs_exporter = OtlpHttpExporter::try_new(format!("http://{collector_address}/v1/logs"))
+        .expect("valid logs collector endpoint");
     let traces = OwnedOtlpTraces::try_new(Default::default()).expect("valid trace mapper");
+    let logs = OwnedOtlpLogs::try_new(Default::default()).expect("valid logs mapper");
     let trace_id = [0x71; 16];
     let root_id = [0x72; 8];
     let child_id = [0x73; 8];
@@ -1034,6 +1461,16 @@ fn owned_metrics_external_otel_collector_accepts_and_exports_request() {
             OwnedOtlpStatusCode::Error,
             "parent cancelled",
         ));
+    let log_entry = LogEntry::error("request failed")
+        .with_timestamp(Time::from_nanos(600))
+        .with_target("collector-e2e")
+        .with_field("request.kind", "shutdown")
+        .with_field("auth.token", "must-not-reach-collector");
+    let privacy = PrivacyConfig::new().with_drop_attribute("auth.token");
+    let legacy_log = OtlpLogRecord::from_log_entry_with_privacy(&log_entry, 650, &privacy)
+        .with_trace_context(trace_id, child_id, 1)
+        .with_event_name("request.failed");
+    let owned_log = OtlpLogRecordInput::from_legacy_record(&legacy_log);
     asupersync::test_utils::run_test(|| async {
         let cx = Cx::current().expect("native test runtime installs Cx");
         metrics_exporter
@@ -1050,6 +1487,10 @@ fn owned_metrics_external_otel_collector_accepts_and_exports_request() {
             .send_owned_traces(&cx, &traces, &[child_span, root_span])
             .await
             .expect("official collector accepts owned traces");
+        logs_exporter
+            .send_owned_logs(&cx, &logs, &[owned_log])
+            .await
+            .expect("official collector accepts owned logs");
     });
 
     let deadline = Instant::now() + Duration::from_secs(15);
@@ -1057,6 +1498,7 @@ fn owned_metrics_external_otel_collector_accepts_and_exports_request() {
         if let Ok(text) = fs::read_to_string(&output_path)
             && text.matches("asupersync.tasks.spawned").count() >= 2
             && text.contains("task.cancelled")
+            && text.contains("request failed")
         {
             break text;
         }
@@ -1086,4 +1528,10 @@ fn owned_metrics_external_otel_collector_accepts_and_exports_request() {
     assert!(canonical_output.contains("task.cancelled"));
     assert!(canonical_output.contains("cancel-requested"));
     assert!(canonical_output.contains("parent cancelled"));
+    assert!(canonical_output.contains("request failed"));
+    assert!(canonical_output.contains("request.failed"));
+    assert!(canonical_output.contains("request.kind"));
+    assert!(canonical_output.contains("shutdown"));
+    assert!(!canonical_output.contains("auth.token"));
+    assert!(!canonical_output.contains("must-not-reach-collector"));
 }

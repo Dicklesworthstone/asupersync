@@ -2881,6 +2881,927 @@ mod owned_otlp_trace_tests {
     }
 }
 
+// =============================================================================
+// Owned OTLP Logs Mapping
+// =============================================================================
+
+/// Version of the native, owned OTLP logs mapping contract.
+pub const OWNED_OTLP_LOGS_VERSION: u32 = 1;
+
+/// Maximum log records admitted by one owned collection call.
+pub const OWNED_OTLP_MAX_LOG_RECORDS_PER_COLLECTION: usize = 4_096;
+
+/// Default maximum log records emitted in one OTLP request.
+pub const OWNED_OTLP_DEFAULT_LOG_RECORDS_PER_REQUEST: usize = 512;
+
+/// Maximum nesting depth admitted for an OTLP log body.
+pub const OWNED_OTLP_MAX_LOG_BODY_DEPTH: usize = 16;
+
+/// Maximum items admitted by one log-body array or key/value list.
+pub const OWNED_OTLP_MAX_LOG_BODY_ITEMS: usize = 128;
+
+/// Maximum aggregate AnyValue nodes admitted by one encoded request.
+pub const OWNED_OTLP_MAX_LOG_BODY_NODES_PER_REQUEST: usize = 4_096;
+
+/// Maximum owned input bytes admitted by one logs collection.
+pub const OWNED_OTLP_MAX_LOG_COLLECTION_BYTES: usize = 4 * 1024 * 1024;
+
+/// Maximum UTF-8 bytes admitted for a log severity text.
+pub const OWNED_OTLP_MAX_LOG_SEVERITY_TEXT_BYTES: usize = 1_024;
+
+/// Maximum UTF-8 bytes admitted for a log event name.
+pub const OWNED_OTLP_MAX_LOG_EVENT_NAME_BYTES: usize = 1_024;
+
+/// Maximum UTF-8 bytes admitted for a resource or scope schema URL.
+pub const OWNED_OTLP_MAX_LOG_SCHEMA_URL_BYTES: usize = 2_048;
+
+/// Maximum UTF-8 bytes admitted for a scope name or version.
+pub const OWNED_OTLP_MAX_LOG_SCOPE_FIELD_BYTES: usize = 1_024;
+
+/// Stable, value-redacted error from the owned OTLP logs mapper.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum OwnedOtlpLogError {
+    /// A configured finite limit is zero, internally inconsistent, or too large.
+    InvalidConfiguration,
+    /// A collection, request, or aggregate owned-byte limit was exceeded.
+    LimitExceeded,
+    /// An attribute set contains an empty, duplicate, or otherwise invalid key/value.
+    InvalidAttributes,
+    /// A body is too deep, too wide, unsupported in context, or otherwise malformed.
+    InvalidBody,
+    /// A floating-point body value is NaN or infinite.
+    InvalidNumericValue,
+    /// Trace/span identifiers are missing, mismatched, all-zero, or the wrong width.
+    InvalidIdentifier,
+    /// Severity text, event name, scope metadata, or schema metadata is oversized.
+    InvalidName,
+    /// The finite crate-owned protobuf model rejected the encoded request.
+    WireEnvelopeExceeded,
+}
+
+impl OwnedOtlpLogError {
+    /// Stable machine-readable error code that never contains caller data.
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::InvalidConfiguration => "otlp.logs.invalid_configuration",
+            Self::LimitExceeded => "otlp.logs.limit_exceeded",
+            Self::InvalidAttributes => "otlp.logs.invalid_attributes",
+            Self::InvalidBody => "otlp.logs.invalid_body",
+            Self::InvalidNumericValue => "otlp.logs.invalid_numeric_value",
+            Self::InvalidIdentifier => "otlp.logs.invalid_identifier",
+            Self::InvalidName => "otlp.logs.invalid_name",
+            Self::WireEnvelopeExceeded => "otlp.logs.wire_envelope_exceeded",
+        }
+    }
+}
+
+impl std::fmt::Display for OwnedOtlpLogError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.code())
+    }
+}
+
+impl std::error::Error for OwnedOtlpLogError {}
+
+/// Borrowed OTLP log body.
+///
+/// This additive body surface preserves the legacy [`OtlpLogRecord::body`]
+/// string field and its wire behavior while allowing strict callers to encode
+/// every inline OTLP `AnyValue` payload variant. `StringIndex` is deliberately absent:
+/// the owned mapper has no string-table authority and therefore fails closed
+/// instead of emitting an unresolved index.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
+pub enum OtlpLogBody<'a> {
+    /// Omit the body field entirely.
+    Absent,
+    /// UTF-8 string body. The empty string remains distinct from [`Self::Absent`].
+    String(&'a str),
+    /// Boolean body.
+    Bool(bool),
+    /// Signed integer body.
+    Int(i64),
+    /// Finite IEEE-754 body.
+    Double(f64),
+    /// Opaque byte body.
+    Bytes(&'a [u8]),
+    /// Ordered heterogeneous body array.
+    Array(&'a [OtlpLogBody<'a>]),
+    /// Bytewise-key-sorted structured body.
+    KeyValueList(&'a [OtlpLogKeyValueInput<'a>]),
+}
+
+/// Borrowed key/value input used by resource, record, and structured-body attributes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OtlpLogKeyValueInput<'a> {
+    key: &'a str,
+    value: OtlpLogBody<'a>,
+}
+
+impl<'a> OtlpLogKeyValueInput<'a> {
+    /// Create a typed OTLP key/value input.
+    #[must_use]
+    pub const fn new(key: &'a str, value: OtlpLogBody<'a>) -> Self {
+        Self { key, value }
+    }
+
+    /// Create a string-valued OTLP key/value input.
+    #[must_use]
+    pub const fn string(key: &'a str, value: &'a str) -> Self {
+        Self::new(key, OtlpLogBody::String(value))
+    }
+
+    /// Borrow the key.
+    #[must_use]
+    pub const fn key(&self) -> &'a str {
+        self.key
+    }
+
+    /// Return the typed value.
+    #[must_use]
+    pub const fn value(&self) -> OtlpLogBody<'a> {
+        self.value
+    }
+}
+
+/// Borrowed, additive OTLP log-record input.
+///
+/// Fields stay private so later additive metadata cannot make this an
+/// exhaustively constructible compatibility trap. The complete collection is
+/// preflighted before any caller string or byte payload is cloned.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OtlpLogRecordInput<'a> {
+    time_unix_nano: u64,
+    observed_time_unix_nano: u64,
+    severity_number: i32,
+    severity_text: &'a str,
+    body: OtlpLogBody<'a>,
+    attributes: &'a [OtlpLogKeyValueInput<'a>],
+    legacy_attributes: Option<&'a [(String, String)]>,
+    dropped_attributes_count: u32,
+    flags: u32,
+    trace_id: Option<&'a [u8]>,
+    span_id: Option<&'a [u8]>,
+    event_name: &'a str,
+}
+
+impl<'a> OtlpLogRecordInput<'a> {
+    /// Create a record with explicit event time and a typed body.
+    #[must_use]
+    pub const fn new(level: LogLevel, body: OtlpLogBody<'a>, time_unix_nano: u64) -> Self {
+        let (severity_number, severity_text) = log_level_to_otlp_severity(level);
+        Self {
+            time_unix_nano,
+            observed_time_unix_nano: time_unix_nano,
+            severity_number,
+            severity_text,
+            body,
+            attributes: &[],
+            legacy_attributes: None,
+            dropped_attributes_count: 0,
+            flags: 0,
+            trace_id: None,
+            span_id: None,
+            event_name: "",
+        }
+    }
+
+    /// Borrow a legacy record without changing its established representation.
+    ///
+    /// Passing the result to [`OwnedOtlpLogs::collect`] opts into the stricter
+    /// owned validation contract; the existing [`LogsSnapshot`] path remains
+    /// unchanged and continues to preserve its legacy normalization.
+    #[must_use]
+    pub fn from_legacy_record(record: &'a OtlpLogRecord) -> Self {
+        Self {
+            time_unix_nano: record.time_unix_nano,
+            observed_time_unix_nano: record.observed_time_unix_nano,
+            severity_number: record.severity_number,
+            severity_text: &record.severity_text,
+            body: OtlpLogBody::String(&record.body),
+            attributes: &[],
+            legacy_attributes: Some(&record.attributes),
+            dropped_attributes_count: record.dropped_attributes_count,
+            flags: record.flags,
+            trace_id: (!record.trace_id.is_empty()).then_some(record.trace_id.as_slice()),
+            span_id: (!record.span_id.is_empty()).then_some(record.span_id.as_slice()),
+            event_name: &record.event_name,
+        }
+    }
+
+    /// Set the observation timestamp. Zero is preserved as unknown.
+    #[must_use]
+    pub const fn with_observed_time_unix_nano(mut self, observed_time_unix_nano: u64) -> Self {
+        self.observed_time_unix_nano = observed_time_unix_nano;
+        self
+    }
+
+    /// Attach typed attributes. The mapper rejects empty or duplicate keys.
+    #[must_use]
+    pub const fn with_attributes(mut self, attributes: &'a [OtlpLogKeyValueInput<'a>]) -> Self {
+        self.attributes = attributes;
+        self.legacy_attributes = None;
+        self
+    }
+
+    /// Preserve the producer's pre-mapping dropped-attribute count.
+    #[must_use]
+    pub const fn with_dropped_attributes_count(mut self, count: u32) -> Self {
+        self.dropped_attributes_count = count;
+        self
+    }
+
+    /// Attach an exact-width nonzero W3C trace/span context and low-eight-bit flags.
+    #[must_use]
+    pub const fn with_trace_context(
+        mut self,
+        trace_id: &'a [u8; 16],
+        span_id: &'a [u8; 8],
+        flags: u8,
+    ) -> Self {
+        self.trace_id = Some(trace_id);
+        self.span_id = Some(span_id);
+        self.flags = flags as u32;
+        self
+    }
+
+    /// Set the event name. Empty means this is an ordinary log record.
+    #[must_use]
+    pub const fn with_event_name(mut self, event_name: &'a str) -> Self {
+        self.event_name = event_name;
+        self
+    }
+}
+
+/// Immutable finite limits and scope metadata for [`OwnedOtlpLogs`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnedOtlpLogConfig {
+    max_records_per_collection: usize,
+    max_records_per_request: usize,
+    max_attributes_per_entity: usize,
+    max_body_depth: usize,
+    max_body_items: usize,
+    max_owned_bytes: usize,
+    max_request_bytes: usize,
+    scope_name: String,
+    scope_version: String,
+    schema_url: String,
+}
+
+impl Default for OwnedOtlpLogConfig {
+    fn default() -> Self {
+        Self {
+            max_records_per_collection: OWNED_OTLP_MAX_LOG_RECORDS_PER_COLLECTION,
+            max_records_per_request: OWNED_OTLP_DEFAULT_LOG_RECORDS_PER_REQUEST,
+            max_attributes_per_entity: OWNED_OTLP_MAX_ATTRIBUTES,
+            max_body_depth: OWNED_OTLP_MAX_LOG_BODY_DEPTH,
+            max_body_items: OWNED_OTLP_MAX_LOG_BODY_ITEMS,
+            max_owned_bytes: OWNED_OTLP_MAX_LOG_COLLECTION_BYTES,
+            max_request_bytes: OWNED_OTLP_DEFAULT_REQUEST_BYTES,
+            scope_name: "asupersync".to_owned(),
+            scope_version: env!("CARGO_PKG_VERSION").to_owned(),
+            schema_url: OTLP_LOGS_SCHEMA_URL.to_owned(),
+        }
+    }
+}
+
+impl OwnedOtlpLogConfig {
+    /// Construct the default finite logs envelope.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the record limit for one collection call.
+    #[must_use]
+    pub const fn with_max_records_per_collection(mut self, limit: usize) -> Self {
+        self.max_records_per_collection = limit;
+        self
+    }
+
+    /// Set the record limit per encoded request.
+    #[must_use]
+    pub const fn with_max_records_per_request(mut self, limit: usize) -> Self {
+        self.max_records_per_request = limit;
+        self
+    }
+
+    /// Set the attribute limit for each resource or record.
+    #[must_use]
+    pub const fn with_max_attributes_per_entity(mut self, limit: usize) -> Self {
+        self.max_attributes_per_entity = limit;
+        self
+    }
+
+    /// Set the maximum nested body depth.
+    #[must_use]
+    pub const fn with_max_body_depth(mut self, limit: usize) -> Self {
+        self.max_body_depth = limit;
+        self
+    }
+
+    /// Set the maximum items per body array or key/value list.
+    #[must_use]
+    pub const fn with_max_body_items(mut self, limit: usize) -> Self {
+        self.max_body_items = limit;
+        self
+    }
+
+    /// Set the aggregate owned-input byte limit for one collection.
+    #[must_use]
+    pub const fn with_max_owned_bytes(mut self, limit: usize) -> Self {
+        self.max_owned_bytes = limit;
+        self
+    }
+
+    /// Set the encoded byte limit for every request.
+    #[must_use]
+    pub const fn with_max_request_bytes(mut self, limit: usize) -> Self {
+        self.max_request_bytes = limit;
+        self
+    }
+
+    /// Set explicit instrumentation scope metadata.
+    #[must_use]
+    pub fn with_scope(mut self, name: impl Into<String>, version: impl Into<String>) -> Self {
+        self.scope_name = name.into();
+        self.scope_version = version.into();
+        self
+    }
+
+    /// Set the explicit resource/scope schema URL.
+    #[must_use]
+    pub fn with_schema_url(mut self, schema_url: impl Into<String>) -> Self {
+        self.schema_url = schema_url.into();
+        self
+    }
+
+    /// Record limit for one collection call.
+    #[must_use]
+    pub const fn max_records_per_collection(&self) -> usize {
+        self.max_records_per_collection
+    }
+
+    /// Record limit per request.
+    #[must_use]
+    pub const fn max_records_per_request(&self) -> usize {
+        self.max_records_per_request
+    }
+
+    /// Attribute limit per resource or record.
+    #[must_use]
+    pub const fn max_attributes_per_entity(&self) -> usize {
+        self.max_attributes_per_entity
+    }
+
+    /// Maximum nested body depth.
+    #[must_use]
+    pub const fn max_body_depth(&self) -> usize {
+        self.max_body_depth
+    }
+
+    /// Maximum items per body array or key/value list.
+    #[must_use]
+    pub const fn max_body_items(&self) -> usize {
+        self.max_body_items
+    }
+
+    /// Aggregate owned-input byte limit per collection.
+    #[must_use]
+    pub const fn max_owned_bytes(&self) -> usize {
+        self.max_owned_bytes
+    }
+
+    /// Encoded byte limit per request.
+    #[must_use]
+    pub const fn max_request_bytes(&self) -> usize {
+        self.max_request_bytes
+    }
+
+    /// Instrumentation scope name.
+    #[must_use]
+    pub fn scope_name(&self) -> &str {
+        &self.scope_name
+    }
+
+    /// Instrumentation scope version.
+    #[must_use]
+    pub fn scope_version(&self) -> &str {
+        &self.scope_version
+    }
+
+    /// Resource/scope schema URL.
+    #[must_use]
+    pub fn schema_url(&self) -> &str {
+        &self.schema_url
+    }
+
+    fn validate(&self) -> Result<(), OwnedOtlpLogError> {
+        if self.max_records_per_collection == 0
+            || self.max_records_per_collection > OWNED_OTLP_MAX_LOG_RECORDS_PER_COLLECTION
+            || self.max_records_per_request == 0
+            || self.max_records_per_request > self.max_records_per_collection
+            || self.max_attributes_per_entity == 0
+            || self.max_attributes_per_entity > OWNED_OTLP_MAX_ATTRIBUTES
+            || self.max_body_depth == 0
+            || self.max_body_depth > OWNED_OTLP_MAX_LOG_BODY_DEPTH
+            || self.max_body_items == 0
+            || self.max_body_items > OWNED_OTLP_MAX_LOG_BODY_ITEMS
+            || self.max_owned_bytes == 0
+            || self.max_owned_bytes > OWNED_OTLP_MAX_LOG_COLLECTION_BYTES
+            || self.max_request_bytes == 0
+            || self.max_request_bytes > OWNED_OTLP_DEFAULT_REQUEST_BYTES
+        {
+            return Err(OwnedOtlpLogError::InvalidConfiguration);
+        }
+        if self.scope_name.is_empty()
+            || self.scope_name.len() > OWNED_OTLP_MAX_LOG_SCOPE_FIELD_BYTES
+            || self.scope_version.len() > OWNED_OTLP_MAX_LOG_SCOPE_FIELD_BYTES
+            || self.schema_url.len() > OWNED_OTLP_MAX_LOG_SCHEMA_URL_BYTES
+        {
+            return Err(OwnedOtlpLogError::InvalidName);
+        }
+        Ok(())
+    }
+}
+
+/// Result of one finite owned logs collection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnedOtlpLogCollection {
+    requests: Vec<Vec<u8>>,
+    record_count: usize,
+    producer_dropped_attributes: u64,
+}
+
+impl OwnedOtlpLogCollection {
+    /// Encoded OTLP requests in original record order.
+    #[must_use]
+    pub fn requests(&self) -> &[Vec<u8>] {
+        &self.requests
+    }
+
+    /// Consume the collection and return the encoded requests.
+    #[must_use]
+    pub fn into_requests(self) -> Vec<Vec<u8>> {
+        self.requests
+    }
+
+    /// Number of encoded records.
+    #[must_use]
+    pub const fn record_count(&self) -> usize {
+        self.record_count
+    }
+
+    /// Saturating sum of producer-reported dropped attributes.
+    #[must_use]
+    pub const fn producer_dropped_attributes(&self) -> u64 {
+        self.producer_dropped_attributes
+    }
+
+    /// True when the input contained no records and no request was produced.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.requests.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct OwnedLogValueStats {
+    bytes: usize,
+    nodes: usize,
+}
+
+impl OwnedLogValueStats {
+    const ZERO: Self = Self { bytes: 0, nodes: 0 };
+
+    fn checked_add(self, other: Self) -> Result<Self, OwnedOtlpLogError> {
+        let nodes = self
+            .nodes
+            .checked_add(other.nodes)
+            .ok_or(OwnedOtlpLogError::LimitExceeded)?;
+        if nodes > OWNED_OTLP_MAX_LOG_BODY_NODES_PER_REQUEST {
+            return Err(OwnedOtlpLogError::LimitExceeded);
+        }
+        Ok(Self {
+            bytes: self
+                .bytes
+                .checked_add(other.bytes)
+                .ok_or(OwnedOtlpLogError::LimitExceeded)?,
+            nodes,
+        })
+    }
+}
+
+/// Stateless mapper backed by the crate-owned finite OTLP protobuf model.
+///
+/// The mapper performs no I/O, starts no task, and reads no ambient clock or
+/// resource. It validates every record and every batch before cloning caller
+/// payloads or returning request bytes.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone)]
+pub struct OwnedOtlpLogs {
+    config: OwnedOtlpLogConfig,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl OwnedOtlpLogs {
+    /// Create a mapper after validating all finite limits and scope metadata.
+    pub fn try_new(config: OwnedOtlpLogConfig) -> Result<Self, OwnedOtlpLogError> {
+        config.validate()?;
+        Ok(Self { config })
+    }
+
+    /// Validated immutable mapper configuration.
+    #[must_use]
+    pub const fn config(&self) -> &OwnedOtlpLogConfig {
+        &self.config
+    }
+
+    /// Validate, deterministically normalize, batch, and encode borrowed records.
+    ///
+    /// Record and array order are preserved. Resource, record, and structured
+    /// body key/value lists are sorted bytewise by key. Empty input produces no
+    /// request. Batching never increments producer drop counts.
+    pub fn collect(
+        &self,
+        records: &[OtlpLogRecordInput<'_>],
+        resource_attributes: &[OtlpLogKeyValueInput<'_>],
+    ) -> Result<OwnedOtlpLogCollection, OwnedOtlpLogError> {
+        use crate::observability::otlp_proto::collector::logs::ExportLogsServiceRequest;
+        use crate::observability::otlp_proto::common_and_resource::{
+            InstrumentationScope, Resource,
+        };
+        use crate::observability::otlp_proto::logs::{ResourceLogs, ScopeLogs};
+
+        if records.is_empty() {
+            return Ok(OwnedOtlpLogCollection {
+                requests: Vec::new(),
+                record_count: 0,
+                producer_dropped_attributes: 0,
+            });
+        }
+        if records.len() > self.config.max_records_per_collection {
+            return Err(OwnedOtlpLogError::LimitExceeded);
+        }
+
+        let resource_stats = validate_owned_log_key_values(
+            resource_attributes,
+            &self.config,
+            self.config.max_attributes_per_entity,
+            1,
+        )?;
+        let request_count = records.len().div_ceil(self.config.max_records_per_request);
+        let repeated_metadata_bytes = resource_stats
+            .bytes
+            .checked_add(self.config.scope_name.len())
+            .and_then(|bytes| bytes.checked_add(self.config.scope_version.len()))
+            .and_then(|bytes| bytes.checked_add(self.config.schema_url.len().saturating_mul(2)))
+            .and_then(|bytes| bytes.checked_mul(request_count))
+            .ok_or(OwnedOtlpLogError::LimitExceeded)?;
+        let mut collection_bytes = repeated_metadata_bytes;
+        let mut producer_dropped_attributes = 0_u64;
+        let mut record_stats = Vec::with_capacity(records.len());
+
+        for record in records {
+            let stats = validate_owned_log_record(record, &self.config)?;
+            collection_bytes = collection_bytes
+                .checked_add(stats.bytes)
+                .ok_or(OwnedOtlpLogError::LimitExceeded)?;
+            producer_dropped_attributes = producer_dropped_attributes
+                .saturating_add(u64::from(record.dropped_attributes_count));
+            record_stats.push(stats);
+        }
+        if collection_bytes > self.config.max_owned_bytes {
+            return Err(OwnedOtlpLogError::LimitExceeded);
+        }
+
+        for chunk in record_stats.chunks(self.config.max_records_per_request) {
+            let nodes = chunk
+                .iter()
+                .try_fold(resource_stats.nodes, |total, stats| {
+                    total
+                        .checked_add(stats.nodes)
+                        .ok_or(OwnedOtlpLogError::LimitExceeded)
+                })?;
+            if nodes > OWNED_OTLP_MAX_LOG_BODY_NODES_PER_REQUEST {
+                return Err(OwnedOtlpLogError::LimitExceeded);
+            }
+        }
+
+        let resource = Resource {
+            attributes: owned_log_key_values(resource_attributes),
+            ..Resource::default()
+        };
+        let scope = InstrumentationScope {
+            name: self.config.scope_name.clone(),
+            version: self.config.scope_version.clone(),
+            ..InstrumentationScope::default()
+        };
+        let mut requests = Vec::with_capacity(request_count);
+
+        for chunk in records.chunks(self.config.max_records_per_request) {
+            let request = ExportLogsServiceRequest {
+                resource_logs: vec![ResourceLogs {
+                    resource: Some(resource.clone()),
+                    scope_logs: vec![ScopeLogs {
+                        scope: Some(scope.clone()),
+                        log_records: chunk.iter().map(owned_log_record).collect(),
+                        schema_url: self.config.schema_url.clone(),
+                        ..ScopeLogs::default()
+                    }],
+                    schema_url: self.config.schema_url.clone(),
+                    ..ResourceLogs::default()
+                }],
+                ..ExportLogsServiceRequest::default()
+            };
+            let bytes = request
+                .encode_to_bytes(ProtobufWireLimits::for_message_size(
+                    self.config.max_request_bytes,
+                ))
+                .map_err(|_| OwnedOtlpLogError::WireEnvelopeExceeded)?;
+            requests.push(bytes.to_vec());
+        }
+
+        Ok(OwnedOtlpLogCollection {
+            requests,
+            record_count: records.len(),
+            producer_dropped_attributes,
+        })
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn validate_owned_log_record(
+    record: &OtlpLogRecordInput<'_>,
+    config: &OwnedOtlpLogConfig,
+) -> Result<OwnedLogValueStats, OwnedOtlpLogError> {
+    if !(0..=24).contains(&record.severity_number) {
+        return Err(OwnedOtlpLogError::InvalidName);
+    }
+    if record.severity_text.len() > OWNED_OTLP_MAX_LOG_SEVERITY_TEXT_BYTES
+        || record.event_name.len() > OWNED_OTLP_MAX_LOG_EVENT_NAME_BYTES
+    {
+        return Err(OwnedOtlpLogError::InvalidName);
+    }
+    if record.flags > u32::from(u8::MAX) {
+        return Err(OwnedOtlpLogError::InvalidIdentifier);
+    }
+    match (record.trace_id, record.span_id) {
+        (None, None) if record.flags == 0 => {}
+        (Some(trace_id), Some(span_id))
+            if trace_id.len() == 16
+                && span_id.len() == 8
+                && trace_id.iter().any(|byte| *byte != 0)
+                && span_id.iter().any(|byte| *byte != 0) => {}
+        _ => return Err(OwnedOtlpLogError::InvalidIdentifier),
+    }
+
+    let mut stats = validate_owned_log_body(record.body, config, 1, true)?;
+    stats.bytes = stats
+        .bytes
+        .checked_add(record.severity_text.len())
+        .and_then(|bytes| bytes.checked_add(record.event_name.len()))
+        .and_then(|bytes| bytes.checked_add(record.trace_id.map_or(0, <[u8]>::len)))
+        .and_then(|bytes| bytes.checked_add(record.span_id.map_or(0, <[u8]>::len)))
+        .ok_or(OwnedOtlpLogError::LimitExceeded)?;
+
+    let attribute_stats = if let Some(attributes) = record.legacy_attributes {
+        validate_owned_legacy_log_attributes(attributes, config)?
+    } else {
+        validate_owned_log_key_values(
+            record.attributes,
+            config,
+            config.max_attributes_per_entity,
+            1,
+        )?
+    };
+    stats.checked_add(attribute_stats)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn validate_owned_log_key_values(
+    attributes: &[OtlpLogKeyValueInput<'_>],
+    config: &OwnedOtlpLogConfig,
+    limit: usize,
+    value_depth: usize,
+) -> Result<OwnedLogValueStats, OwnedOtlpLogError> {
+    if attributes.len() > limit {
+        return Err(OwnedOtlpLogError::LimitExceeded);
+    }
+    let mut keys = BTreeSet::new();
+    let mut stats = OwnedLogValueStats::ZERO;
+    for attribute in attributes {
+        if attribute.key.is_empty()
+            || attribute.key.len() > OWNED_OTLP_MAX_ATTRIBUTE_KEY_BYTES
+            || !keys.insert(attribute.key)
+        {
+            return Err(OwnedOtlpLogError::InvalidAttributes);
+        }
+        let value = validate_owned_log_body(attribute.value, config, value_depth, false)?;
+        stats = stats.checked_add(OwnedLogValueStats {
+            bytes: attribute
+                .key
+                .len()
+                .checked_add(value.bytes)
+                .ok_or(OwnedOtlpLogError::LimitExceeded)?,
+            nodes: value.nodes,
+        })?;
+    }
+    Ok(stats)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn validate_owned_legacy_log_attributes(
+    attributes: &[(String, String)],
+    config: &OwnedOtlpLogConfig,
+) -> Result<OwnedLogValueStats, OwnedOtlpLogError> {
+    if attributes.len() > config.max_attributes_per_entity {
+        return Err(OwnedOtlpLogError::LimitExceeded);
+    }
+    let mut keys = BTreeSet::new();
+    let mut bytes = 0_usize;
+    for (key, value) in attributes {
+        if key.is_empty()
+            || key.len() > OWNED_OTLP_MAX_ATTRIBUTE_KEY_BYTES
+            || value.len() > OWNED_OTLP_MAX_ATTRIBUTE_VALUE_BYTES
+            || !keys.insert(key.as_str())
+        {
+            return Err(OwnedOtlpLogError::InvalidAttributes);
+        }
+        bytes = bytes
+            .checked_add(key.len())
+            .and_then(|total| total.checked_add(value.len()))
+            .ok_or(OwnedOtlpLogError::LimitExceeded)?;
+    }
+    Ok(OwnedLogValueStats {
+        bytes,
+        nodes: attributes.len(),
+    })
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn validate_owned_log_body(
+    body: OtlpLogBody<'_>,
+    config: &OwnedOtlpLogConfig,
+    depth: usize,
+    allow_absent: bool,
+) -> Result<OwnedLogValueStats, OwnedOtlpLogError> {
+    if depth > config.max_body_depth {
+        return Err(OwnedOtlpLogError::InvalidBody);
+    }
+    match body {
+        OtlpLogBody::Absent if allow_absent => Ok(OwnedLogValueStats::ZERO),
+        OtlpLogBody::Absent => Err(OwnedOtlpLogError::InvalidBody),
+        OtlpLogBody::String(value) => {
+            if value.len() > OWNED_OTLP_MAX_ATTRIBUTE_VALUE_BYTES {
+                return Err(OwnedOtlpLogError::LimitExceeded);
+            }
+            Ok(OwnedLogValueStats {
+                bytes: value.len(),
+                nodes: 1,
+            })
+        }
+        OtlpLogBody::Bytes(value) => {
+            if value.len() > OWNED_OTLP_MAX_ATTRIBUTE_VALUE_BYTES {
+                return Err(OwnedOtlpLogError::LimitExceeded);
+            }
+            Ok(OwnedLogValueStats {
+                bytes: value.len(),
+                nodes: 1,
+            })
+        }
+        OtlpLogBody::Double(value) => {
+            if !value.is_finite() {
+                return Err(OwnedOtlpLogError::InvalidNumericValue);
+            }
+            Ok(OwnedLogValueStats { bytes: 0, nodes: 1 })
+        }
+        OtlpLogBody::Bool(_) | OtlpLogBody::Int(_) => Ok(OwnedLogValueStats { bytes: 0, nodes: 1 }),
+        OtlpLogBody::Array(values) => {
+            if values.len() > config.max_body_items {
+                return Err(OwnedOtlpLogError::InvalidBody);
+            }
+            values
+                .iter()
+                .try_fold(OwnedLogValueStats { bytes: 0, nodes: 1 }, |stats, value| {
+                    stats.checked_add(validate_owned_log_body(
+                        *value,
+                        config,
+                        depth.saturating_add(1),
+                        false,
+                    )?)
+                })
+        }
+        OtlpLogBody::KeyValueList(values) => {
+            if values.len() > config.max_body_items {
+                return Err(OwnedOtlpLogError::InvalidBody);
+            }
+            let values = validate_owned_log_key_values(
+                values,
+                config,
+                config.max_body_items,
+                depth.saturating_add(1),
+            )?;
+            OwnedLogValueStats { bytes: 0, nodes: 1 }.checked_add(values)
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn owned_log_record(
+    record: &OtlpLogRecordInput<'_>,
+) -> crate::observability::otlp_proto::logs::LogRecord {
+    crate::observability::otlp_proto::logs::LogRecord {
+        time_unix_nano: record.time_unix_nano,
+        observed_time_unix_nano: record.observed_time_unix_nano,
+        severity_number: record.severity_number,
+        severity_text: record.severity_text.to_owned(),
+        body: owned_log_body(record.body),
+        attributes: if let Some(attributes) = record.legacy_attributes {
+            owned_legacy_log_attributes(attributes)
+        } else {
+            owned_log_key_values(record.attributes)
+        },
+        dropped_attributes_count: record.dropped_attributes_count,
+        flags: record.flags,
+        trace_id: record.trace_id.map_or_else(Vec::new, <[u8]>::to_vec),
+        span_id: record.span_id.map_or_else(Vec::new, <[u8]>::to_vec),
+        event_name: record.event_name.to_owned(),
+        ..Default::default()
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn owned_log_key_values(
+    attributes: &[OtlpLogKeyValueInput<'_>],
+) -> Vec<crate::observability::otlp_proto::common_and_resource::KeyValue> {
+    let mut attributes = attributes
+        .iter()
+        .map(
+            |attribute| crate::observability::otlp_proto::common_and_resource::KeyValue {
+                key: attribute.key.to_owned(),
+                value: owned_log_body(attribute.value),
+                ..Default::default()
+            },
+        )
+        .collect::<Vec<_>>();
+    attributes.sort_by(|left, right| left.key.cmp(&right.key));
+    attributes
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn owned_legacy_log_attributes(
+    attributes: &[(String, String)],
+) -> Vec<crate::observability::otlp_proto::common_and_resource::KeyValue> {
+    let mut attributes = attributes
+        .iter()
+        .map(
+            |(key, value)| crate::observability::otlp_proto::common_and_resource::KeyValue {
+                key: key.clone(),
+                value: owned_log_body(OtlpLogBody::String(value)),
+                ..Default::default()
+            },
+        )
+        .collect::<Vec<_>>();
+    attributes.sort_by(|left, right| left.key.cmp(&right.key));
+    attributes
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn owned_log_body(
+    body: OtlpLogBody<'_>,
+) -> Option<crate::observability::otlp_proto::common_and_resource::AnyValue> {
+    use crate::observability::otlp_proto::common_and_resource::{
+        AnyValue, AnyValueValue, ArrayValue, KeyValueList,
+    };
+
+    let value = match body {
+        OtlpLogBody::Absent => return None,
+        OtlpLogBody::String(value) => AnyValueValue::String(value.to_owned()),
+        OtlpLogBody::Bool(value) => AnyValueValue::Bool(value),
+        OtlpLogBody::Int(value) => AnyValueValue::Int(value),
+        OtlpLogBody::Double(value) => AnyValueValue::Double(value),
+        OtlpLogBody::Bytes(value) => AnyValueValue::Bytes(value.to_vec()),
+        OtlpLogBody::Array(values) => AnyValueValue::Array(ArrayValue {
+            values: values
+                .iter()
+                .filter_map(|value| owned_log_body(*value))
+                .collect(),
+            ..ArrayValue::default()
+        }),
+        OtlpLogBody::KeyValueList(values) => AnyValueValue::KeyValueList(KeyValueList {
+            values: owned_log_key_values(values),
+            ..KeyValueList::default()
+        }),
+    };
+    Some(AnyValue {
+        value: Some(value),
+        ..AnyValue::default()
+    })
+}
+
 /// Error type for export operations.
 #[derive(Debug, Clone)]
 pub struct ExportError {
@@ -5167,6 +6088,34 @@ impl OtlpHttpExporter {
             .collect::<Vec<_>>();
         let collection = traces
             .collect(spans, &attributes)
+            .map_err(|error| ExportError::new(error.to_string()))?;
+        for request in collection.into_requests() {
+            self.send_otlp_protobuf(cx, request).await?;
+        }
+        Ok(())
+    }
+
+    /// Map and send a finite borrowed OTLP logs collection.
+    ///
+    /// The complete collection passes count, byte, identifier, body, and
+    /// protobuf-envelope validation before the first network write. Record and
+    /// array order are preserved, attribute maps are normalized by bytewise
+    /// key order, and all requests remain inside the caller's cancellation and
+    /// budget envelope. This method never starts an exporter task.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn send_owned_logs(
+        &self,
+        cx: &crate::cx::Cx,
+        logs: &OwnedOtlpLogs,
+        records: &[OtlpLogRecordInput<'_>],
+    ) -> Result<(), ExportError> {
+        let resource_attributes = self
+            .resource_attributes
+            .iter()
+            .map(|(key, value)| OtlpLogKeyValueInput::string(key, value))
+            .collect::<Vec<_>>();
+        let collection = logs
+            .collect(records, &resource_attributes)
             .map_err(|error| ExportError::new(error.to_string()))?;
         for request in collection.into_requests() {
             self.send_otlp_protobuf(cx, request).await?;
