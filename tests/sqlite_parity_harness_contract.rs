@@ -12,6 +12,7 @@ const CONSUMER_LOCK: &str = include_str!("fixtures/sqlite-parity-consumer/Cargo.
 const VECTORS: &str = include_str!("../artifacts/sqlite_conformance_vectors_v1.json");
 const HARNESS: &str = include_str!("../artifacts/sqlite_parity_harness_v1.json");
 const DOC: &str = include_str!("../docs/sqlite_parity_harness.md");
+const SQLITE_SOURCE: &str = include_str!("../src/database/sqlite.rs");
 
 fn parse_json(source: &str) -> Value {
     serde_json::from_str(source).expect("contract JSON must parse")
@@ -173,7 +174,7 @@ fn vector_schema_is_versioned_complete_and_deterministic() {
 #[test]
 fn harness_receipt_pins_sources_profile_target_host_and_budget_defer() {
     let harness = parse_json(HARNESS);
-    assert_eq!(harness["schema_version"], 2);
+    assert_eq!(harness["schema_version"], 3);
     assert_eq!(harness["placement"]["kind"], "neutral_standalone_consumer");
     assert_eq!(harness["placement"]["workspace_member"], false);
     assert_eq!(
@@ -226,6 +227,91 @@ fn harness_receipt_pins_sources_profile_target_host_and_budget_defer() {
             .as_array()
             .is_some_and(|rows| rows.len() >= 5)
     );
+}
+
+#[test]
+fn phase5_matrix_covers_every_race_boundary_without_inventing_cross_engine_support() {
+    let harness = parse_json(HARNESS);
+    let phase5 = &harness["phase5"];
+    assert_eq!(phase5["bead_id"], "asupersync-ym2wtv.2.5");
+    assert_eq!(
+        phase5["status"],
+        "PASS_WITH_EXPLICIT_UNSUPPORTED_CROSS_ENGINE_CELLS"
+    );
+
+    let matrix = phase5["coverage_matrix"]
+        .as_array()
+        .expect("phase5 coverage matrix");
+    assert_eq!(matrix.len(), 8);
+    let boundaries = matrix
+        .iter()
+        .map(|row| row["boundary"].as_str().expect("boundary"))
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        boundaries,
+        [
+            "queued_operation_cancellation",
+            "queued_row_stream_cancellation",
+            "result_channel_reserve_cancellation",
+            "running_statement_cancellation",
+            "committed_result_vs_late_cancellation",
+            "statement_and_row_stream_timeout",
+            "explicit_native_interrupt",
+            "connection_and_runtime_shutdown",
+        ]
+        .into_iter()
+        .collect()
+    );
+
+    for row in matrix {
+        assert_eq!(row["asupersync_status"], "PASS");
+        assert!(
+            row["asupersync_tests"]
+                .as_array()
+                .is_some_and(|tests| !tests.is_empty())
+        );
+        assert!(
+            row["required_observations"]
+                .as_array()
+                .is_some_and(|observations| !observations.is_empty())
+        );
+        assert!(
+            row["frankensqlite_status"]
+                .as_str()
+                .is_some_and(|status| !status.is_empty())
+        );
+        assert!(
+            row["frankensqlite_reason"]
+                .as_str()
+                .is_some_and(|reason| !reason.is_empty())
+        );
+    }
+
+    for test_name in [
+        "sqlite_p5_queued_cancel_does_not_interrupt_connection_owner",
+        "sqlite_p5_queued_stream_cancel_does_not_interrupt_connection_owner",
+        "sqlite_p5_reserve_race_cancellation_does_not_execute_operation",
+        "cancel_interrupts_in_flight_statement_and_drains",
+        "sqlite_p5_committed_result_wins_finishing_cancellation",
+        "statement_timeout_override_aborts_runaway_query",
+        "row_stream_statement_timeout_aborts_runaway_query",
+        "sqlite_p5_explicit_interrupt_stops_statement_and_preserves_connection",
+    ] {
+        assert!(
+            SQLITE_SOURCE.contains(&format!("fn {test_name}()")),
+            "missing executable P5 test {test_name}"
+        );
+    }
+    assert!(SQLITE_SOURCE.contains("pub fn interrupt(&self)"));
+
+    let focused = &phase5["verification"]["focused"];
+    assert_eq!(focused["status"], "PASS");
+    assert_eq!(focused["passed"], 5);
+    assert_eq!(focused["failed"], 0);
+    let module = &phase5["verification"]["serialized_sqlite_module"];
+    assert_eq!(module["status"], "PASS");
+    assert_eq!(module["passed"], 121);
+    assert_eq!(module["failed"], 0);
 }
 
 #[test]
@@ -300,6 +386,8 @@ fn operator_doc_preserves_reproduction_and_no_claim_boundaries() {
         "cargo run --locked",
         "terminal `DEFER`",
         "does not authorize dependency cutover",
+        "SQLite P5 cancellation matrix",
+        "unsupported cells stay unsupported",
     ] {
         assert!(
             DOC.contains(marker),

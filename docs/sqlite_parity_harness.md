@@ -79,6 +79,35 @@ shutdown, and a closed region state.
 The original schema-v1 smoke execution remains historical evidence in
 `artifacts/sqlite_parity_harness_v1.json`; it is not relabeled as P2 evidence.
 
+## SQLite P5 cancellation matrix
+
+`asupersync-ym2wtv.2.5` adds a bounded second proof layer without rewriting the
+historical neutral-consumer receipt. The current Asupersync adapter has
+deterministic in-repository tests for queued operation and queued row-stream
+cancellation, cancellation before result-channel admission, cancellation of a
+signalled running statement, the committed-result-versus-late-cancellation
+window, statement and row-stream timeouts, explicit native interruption, and
+post-operation connection reuse. The exact eight-row map and the terminal RCH
+receipts live in `phase5.coverage_matrix` and `phase5.verification` of the
+harness artifact.
+
+This split is deliberate. FrankenSQLite v0.1.18 accepts a cancellable `Cx` and
+publishes `AsyncConnection::close`, but it does not expose a public
+statement-timeout setting, explicit interrupt handle, row-stream API, queued
+worker phase witness, or hook between engine completion and async result
+publication. A timing-based loop would not prove those race boundaries.
+Accordingly, unsupported cells stay unsupported; the matrix does not convert
+missing public hooks into parity by sleeping, guessing that work started, or
+normalizing unlike outcomes.
+
+The retained P2 neutral execution still supplies the shared public-API proof
+for pre-cancelled open, a structurally parked admission waiter, explicit
+connection close, full permit recovery, and runtime shutdown with zero pending,
+busy, or active blocking work. Together, the layers prove the current
+Asupersync repair and identify the exact pinned-FrankenSQLite gaps. They do not
+claim full cross-engine interrupt/timeout parity or authorize dependency
+cutover.
+
 ## Reproduction
 
 From a clean Asupersync source commit, run:

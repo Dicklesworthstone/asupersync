@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "phase1_bead_id": "asupersync-ym2wtv.2.1",
   "phase2_bead_id": "asupersync-ym2wtv.2.2",
   "capability_id": "CAP-SQLITE",
@@ -673,6 +673,183 @@
         }
       }
     }
+  },
+  "phase5": {
+    "bead_id": "asupersync-ym2wtv.2.5",
+    "status": "PASS_WITH_EXPLICIT_UNSUPPORTED_CROSS_ENGINE_CELLS",
+    "scope": "queued_running_finishing_cancellation_timeout_explicit_interrupt_shutdown_and_reuse",
+    "asupersync_source_revision": "4049a7e67aea2dad38ce25ed8ca460eed5022e2d",
+    "coverage_matrix": [
+      {
+        "id": "SQLITE-PARITY-P5-QUEUED-OP-CANCEL-001",
+        "boundary": "queued_operation_cancellation",
+        "asupersync_status": "PASS",
+        "asupersync_tests": [
+          "database::sqlite::tests::sqlite_p5_queued_cancel_does_not_interrupt_connection_owner"
+        ],
+        "required_observations": [
+          "queued_work_never_executes",
+          "connection_owner_is_not_interrupted",
+          "cancelled_worker_is_drained",
+          "connection_remains_reusable"
+        ],
+        "frankensqlite_status": "UNSUPPORTED_DETERMINISTIC_PUBLIC_HOOK",
+        "frankensqlite_reason": "Pinned AsyncConnection has Cx cancellation but no public worker-phase hook that can prove an operation is queued behind the connection owner before cancellation."
+      },
+      {
+        "id": "SQLITE-PARITY-P5-QUEUED-STREAM-CANCEL-002",
+        "boundary": "queued_row_stream_cancellation",
+        "asupersync_status": "PASS",
+        "asupersync_tests": [
+          "database::sqlite::tests::sqlite_p5_queued_stream_cancel_does_not_interrupt_connection_owner"
+        ],
+        "required_observations": [
+          "queued_stream_never_starts",
+          "connection_owner_is_not_interrupted",
+          "stream_worker_is_drained",
+          "connection_remains_reusable"
+        ],
+        "frankensqlite_status": "UNSUPPORTED_DETERMINISTIC_PUBLIC_HOOK",
+        "frankensqlite_reason": "Pinned AsyncConnection does not expose a public row-stream API or a deterministic queued-worker phase witness."
+      },
+      {
+        "id": "SQLITE-PARITY-P5-RESERVE-CANCEL-003",
+        "boundary": "result_channel_reserve_cancellation",
+        "asupersync_status": "PASS",
+        "asupersync_tests": [
+          "database::sqlite::tests::sqlite_p5_reserve_race_cancellation_does_not_execute_operation"
+        ],
+        "required_observations": [
+          "cancellation_precedes_worker_spawn",
+          "operation_body_never_executes",
+          "no_unobservable_completion_is_created"
+        ],
+        "frankensqlite_status": "NOT_A_SHARED_PUBLIC_BOUNDARY",
+        "frankensqlite_reason": "Result-channel admission is an Asupersync adapter implementation boundary, not a common public engine operation."
+      },
+      {
+        "id": "SQLITE-PARITY-P5-RUNNING-CANCEL-004",
+        "boundary": "running_statement_cancellation",
+        "asupersync_status": "PASS",
+        "asupersync_tests": [
+          "database::sqlite::tests::cancel_interrupts_in_flight_statement_and_drains",
+          "database::sqlite::tests::row_stream_cancel_interrupts_and_drains"
+        ],
+        "required_observations": [
+          "statement_start_is_signalled",
+          "sqlite_interrupt_is_delivered",
+          "worker_is_drained",
+          "typed_cancellation_is_returned"
+        ],
+        "frankensqlite_status": "PUBLIC_CX_CANCEL_AVAILABLE_NO_NEUTRAL_PHASE_WITNESS",
+        "frankensqlite_reason": "Pinned AsyncConnection accepts a cancellable Cx, but its public API does not expose a structural statement-start witness for a timing-independent neutral vector."
+      },
+      {
+        "id": "SQLITE-PARITY-P5-FINISHING-CANCEL-005",
+        "boundary": "committed_result_vs_late_cancellation",
+        "asupersync_status": "PASS",
+        "asupersync_tests": [
+          "database::sqlite::tests::sqlite_p5_committed_result_wins_finishing_cancellation"
+        ],
+        "required_observations": [
+          "write_commits_before_cancellation",
+          "result_publication_is_delayed",
+          "committed_result_wins",
+          "no_double_completion",
+          "committed_row_is_visible_after_reopen"
+        ],
+        "frankensqlite_status": "UNSUPPORTED_DETERMINISTIC_PUBLIC_HOOK",
+        "frankensqlite_reason": "Pinned AsyncConnection does not expose a public hook between engine completion and async result publication."
+      },
+      {
+        "id": "SQLITE-PARITY-P5-TIMEOUT-006",
+        "boundary": "statement_and_row_stream_timeout",
+        "asupersync_status": "PASS",
+        "asupersync_tests": [
+          "database::sqlite::tests::statement_timeout_override_aborts_runaway_query",
+          "database::sqlite::tests::row_stream_statement_timeout_aborts_runaway_query"
+        ],
+        "required_observations": [
+          "runaway_statement_is_interrupted",
+          "statement_timeout_is_typed",
+          "worker_is_drained",
+          "connection_remains_reusable"
+        ],
+        "frankensqlite_status": "UNSUPPORTED_PUBLIC_API",
+        "frankensqlite_reason": "Pinned AsyncConnection publishes no statement-timeout configuration or typed timeout result."
+      },
+      {
+        "id": "SQLITE-PARITY-P5-EXPLICIT-INTERRUPT-007",
+        "boundary": "explicit_native_interrupt",
+        "asupersync_status": "PASS",
+        "asupersync_tests": [
+          "database::sqlite::tests::sqlite_p5_explicit_interrupt_stops_statement_and_preserves_connection"
+        ],
+        "required_observations": [
+          "statement_start_is_signalled",
+          "interrupt_is_not_misreported_as_cx_cancellation",
+          "statement_stops",
+          "connection_remains_reusable"
+        ],
+        "frankensqlite_status": "UNSUPPORTED_PUBLIC_API",
+        "frankensqlite_reason": "Pinned AsyncConnection publishes no explicit interrupt handle or interrupt method."
+      },
+      {
+        "id": "SQLITE-PARITY-P5-SHUTDOWN-008",
+        "boundary": "connection_and_runtime_shutdown",
+        "asupersync_status": "PASS",
+        "asupersync_tests": [
+          "sqlite_parity_harness::clean_phase2_execution_receipt_matches_all_declared_vectors",
+          "database::sqlite::tests::sqlite_p5_queued_cancel_does_not_interrupt_connection_owner"
+        ],
+        "required_observations": [
+          "connection_closed_or_not_opened",
+          "open_transactions_zero",
+          "blocking_pending_busy_active_zero",
+          "region_closed",
+          "post_cancel_connection_reuse"
+        ],
+        "frankensqlite_status": "PASS_NEUTRAL_PHASE2",
+        "frankensqlite_reason": "The retained neutral P2 receipt closes AsyncConnection and proves its compatibility runtime blocking pool is shut down with zero pending, busy, or active work."
+      }
+    ],
+    "regression_invariants": [
+      "queued_cancellation_never_interrupts_the_connection_owner",
+      "cancelled_workers_are_drained_before_return",
+      "one_operation_has_exactly_one_terminal_completion",
+      "a_finished_result_wins_late_cancellation",
+      "no_committed_result_is_lost",
+      "connection_reuse_is_proved_after_cancel_timeout_and_interrupt",
+      "runtime_shutdown_leaves_no_blocking_work"
+    ],
+    "verification": {
+      "focused": {
+        "rch_job": "j-29983010363277355",
+        "status": "PASS",
+        "passed": 5,
+        "failed": 0,
+        "scope": "five new deterministic P5 regression tests"
+      },
+      "serialized_sqlite_module": {
+        "rch_job": "j-29983010363277358",
+        "status": "PASS",
+        "passed": 121,
+        "failed": 0,
+        "scope": "database::sqlite::tests serialized to remove unrelated parallel Lab interference"
+      },
+      "neutral_cross_engine_shutdown": {
+        "status": "PASS_RETAINED_PHASE2_RECEIPT",
+        "vector_ids": [
+          "SQLITE-PARITY-P2-CANCELLED-OPEN-004",
+          "SQLITE-PARITY-P2-POOL-CANCEL-005"
+        ]
+      }
+    },
+    "no_claims": [
+      "Unsupported FrankenSQLite cells are recorded, not normalized to PASS.",
+      "The in-repository phase witnesses are deterministic Asupersync adapter evidence, not cross-engine equivalence evidence.",
+      "This phase does not authorize a dependency cutover or claim full SQLite parity."
+    ]
   },
   "phase1_validation_frontier": {
     "newer_revision": "31fc4a3b3a108dc49243157ea29fb1ddfcb06fdc",
