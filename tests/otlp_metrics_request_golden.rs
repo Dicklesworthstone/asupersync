@@ -686,10 +686,7 @@ fn lab_owned_trace_bytes(seed: u64) -> Vec<Vec<u8>> {
             *task_output.lock() = Some(
                 OwnedOtlpTraces::try_new(Default::default())
                     .expect("valid owned trace mapper")
-                    .collect(
-                        &[child, root],
-                        &[("service.name", "lab-trace-replay")],
-                    )
+                    .collect(&[child, root], &[("service.name", "lab-trace-replay")])
                     .expect("lab trace collection")
                     .into_requests(),
             );
@@ -708,10 +705,7 @@ fn lab_owned_trace_bytes(seed: u64) -> Vec<Vec<u8>> {
 #[cfg(all(feature = "metrics", feature = "test-internals"))]
 #[test]
 fn owned_traces_lab_replay_is_byte_identical() {
-    assert_eq!(
-        lab_owned_trace_bytes(0x0A41),
-        lab_owned_trace_bytes(0x0A41)
-    );
+    assert_eq!(lab_owned_trace_bytes(0x0A41), lab_owned_trace_bytes(0x0A41));
 }
 
 #[cfg(all(feature = "metrics", feature = "test-internals"))]
@@ -753,7 +747,10 @@ fn owned_traces_loopback_http_wire_smoke_decodes_request() {
     let request = ExportTraceServiceRequest::decode(body.as_slice()).expect("generated decode");
     let spans = &request.resource_spans[0].scope_spans[0].spans;
     assert_eq!(
-        spans.iter().map(|span| span.name.as_str()).collect::<Vec<_>>(),
+        spans
+            .iter()
+            .map(|span| span.name.as_str())
+            .collect::<Vec<_>>(),
         ["region.root", "task.cancelled"]
     );
     assert!(spans[0].parent_span_id.is_empty());
@@ -908,7 +905,7 @@ fn owned_metrics_external_otel_collector_accepts_and_exports_request() {
     use std::net::{SocketAddr, TcpListener, TcpStream};
     use std::path::Path;
     use std::process::{Child, Command, Stdio};
-    use std::time::{Duration, Instant};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     const COLLECTOR_VERSION: &str = "0.157.0";
     const COLLECTOR_URL: &str = "https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/v0.157.0/otelcol-contrib_0.157.0_linux_amd64.tar.gz";
@@ -986,8 +983,13 @@ fn owned_metrics_external_otel_collector_accepts_and_exports_request() {
     let port_probe = TcpListener::bind("127.0.0.1:0").expect("reserve collector port");
     let collector_address = port_probe.local_addr().expect("collector port");
     drop(port_probe);
-    let output_path = work_dir.join("signals.jsonl");
-    let config_path = work_dir.join("collector.yaml");
+    let run_nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock after Unix epoch")
+        .as_nanos();
+    let run_id = format!("{}-{run_nonce}", std::process::id());
+    let output_path = work_dir.join(format!("signals-{run_id}.jsonl"));
+    let config_path = work_dir.join(format!("collector-{run_id}.yaml"));
     let config = format!(
         "receivers:\n  otlp:\n    protocols:\n      http:\n        endpoint: {collector_address}\nexporters:\n  file:\n    path: {}\n    flush_interval: 100ms\nservice:\n  telemetry:\n    logs:\n      level: warn\n  pipelines:\n    metrics:\n      receivers: [otlp]\n      exporters: [file]\n    traces:\n      receivers: [otlp]\n      exporters: [file]\n",
         output_path.display()
@@ -1017,9 +1019,10 @@ fn owned_metrics_external_otel_collector_accepts_and_exports_request() {
     assert_eq!(metrics.rejected_updates(), 2);
     let metrics_exporter =
         OtlpHttpExporter::try_new(format!("http://{collector_address}/v1/metrics"))
-        .expect("valid collector endpoint");
-    let traces_exporter = OtlpHttpExporter::try_new(format!("http://{collector_address}/v1/traces"))
-        .expect("valid trace collector endpoint");
+            .expect("valid collector endpoint");
+    let traces_exporter =
+        OtlpHttpExporter::try_new(format!("http://{collector_address}/v1/traces"))
+            .expect("valid trace collector endpoint");
     let traces = OwnedOtlpTraces::try_new(Default::default()).expect("valid trace mapper");
     let trace_id = [0x71; 16];
     let root_id = [0x72; 8];

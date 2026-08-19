@@ -2164,7 +2164,19 @@ impl OwnedOtlpTraces {
         }
 
         validate_owned_trace_attributes(resource_attributes, &self.config)?;
-        let mut owned_bytes = trace_attribute_bytes(resource_attributes)?;
+        let request_count = sampled_count.div_ceil(self.config.max_spans_per_request);
+        let resource_bytes = trace_attribute_bytes(resource_attributes)?;
+        let scope_bytes = "asupersync"
+            .len()
+            .checked_add(env!("CARGO_PKG_VERSION").len())
+            .ok_or(OwnedOtlpTraceError::LimitExceeded)?;
+        let mut owned_bytes = resource_bytes
+            .checked_add(scope_bytes)
+            .and_then(|bytes| bytes.checked_mul(request_count))
+            .ok_or(OwnedOtlpTraceError::LimitExceeded)?;
+        if owned_bytes > self.config.max_owned_bytes {
+            return Err(OwnedOtlpTraceError::LimitExceeded);
+        }
         let sampled = spans
             .iter()
             .filter(|span| span.is_sampled())
@@ -2428,6 +2440,38 @@ fn owned_otlp_context_flags(trace_flags: u8, context_is_remote: Option<bool>) ->
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+fn owned_otlp_string_attribute_value(
+    attribute: &crate::observability::otlp_proto::common_and_resource::KeyValue,
+) -> Option<&str> {
+    use crate::observability::otlp_proto::common_and_resource::AnyValueValue;
+
+    match attribute.value.as_ref()?.value.as_ref()? {
+        AnyValueValue::String(value) => Some(value.as_str()),
+        _ => None,
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn compare_owned_otlp_attributes(
+    left: &[crate::observability::otlp_proto::common_and_resource::KeyValue],
+    right: &[crate::observability::otlp_proto::common_and_resource::KeyValue],
+) -> std::cmp::Ordering {
+    left.iter()
+        .map(|attribute| {
+            (
+                attribute.key.as_str(),
+                owned_otlp_string_attribute_value(attribute),
+            )
+        })
+        .cmp(right.iter().map(|attribute| {
+            (
+                attribute.key.as_str(),
+                owned_otlp_string_attribute_value(attribute),
+            )
+        }))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn owned_otlp_trace_span(
     span: &OtlpTraceSpanInput<'_>,
 ) -> Result<crate::observability::otlp_proto::trace::Span, OwnedOtlpTraceError> {
@@ -2448,7 +2492,17 @@ fn owned_otlp_trace_span(
         })
         .collect::<Result<Vec<_>, _>>()?;
     events.sort_by(|left, right| {
-        (left.time_unix_nano, left.name.as_str()).cmp(&(right.time_unix_nano, right.name.as_str()))
+        (
+            left.time_unix_nano,
+            left.name.as_str(),
+            left.dropped_attributes_count,
+        )
+            .cmp(&(
+                right.time_unix_nano,
+                right.name.as_str(),
+                right.dropped_attributes_count,
+            ))
+            .then_with(|| compare_owned_otlp_attributes(&left.attributes, &right.attributes))
     });
 
     let mut links = span
@@ -2468,11 +2522,21 @@ fn owned_otlp_trace_span(
         })
         .collect::<Result<Vec<_>, _>>()?;
     links.sort_by(|left, right| {
-        (&left.trace_id, &left.span_id, left.trace_state.as_str()).cmp(&(
-            &right.trace_id,
-            &right.span_id,
-            right.trace_state.as_str(),
-        ))
+        (
+            &left.trace_id,
+            &left.span_id,
+            left.trace_state.as_str(),
+            left.dropped_attributes_count,
+            left.flags,
+        )
+            .cmp(&(
+                &right.trace_id,
+                &right.span_id,
+                right.trace_state.as_str(),
+                right.dropped_attributes_count,
+                right.flags,
+            ))
+            .then_with(|| compare_owned_otlp_attributes(&left.attributes, &right.attributes))
     });
 
     Ok(Span {
@@ -2686,9 +2750,12 @@ mod owned_otlp_trace_tests {
             OwnedOtlpTraceError::WireEnvelopeExceeded
         );
 
-        let limited =
-            OwnedOtlpTraces::try_new(OwnedOtlpTraceConfig::new().with_max_spans_per_collection(1))
-                .expect("valid one-span collection limit");
+        let limited = OwnedOtlpTraces::try_new(
+            OwnedOtlpTraceConfig::new()
+                .with_max_spans_per_collection(1)
+                .with_max_spans_per_request(1),
+        )
+        .expect("valid one-span collection limit");
         assert_eq!(
             limited
                 .collect(
@@ -2696,6 +2763,22 @@ mod owned_otlp_trace_tests {
                     &[],
                 )
                 .expect_err("two sampled spans exceed the limit"),
+            OwnedOtlpTraceError::LimitExceeded
+        );
+
+        let repeated_resource = OwnedOtlpTraces::try_new(
+            OwnedOtlpTraceConfig::new()
+                .with_max_spans_per_request(1)
+                .with_max_owned_bytes(64),
+        )
+        .expect("valid small aggregate byte envelope");
+        assert_eq!(
+            repeated_resource
+                .collect(
+                    &[basic_span(ROOT_ID, "a"), basic_span(TASK_ID, "b")],
+                    &[("service.name", "trace-test")],
+                )
+                .expect_err("resource and scope bytes repeat in every request"),
             OwnedOtlpTraceError::LimitExceeded
         );
     }
