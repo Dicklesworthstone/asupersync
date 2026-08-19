@@ -9142,8 +9142,7 @@ mod tests {
         let canonical = schedule
             .to_canonical_bytes()
             .expect("encode complete source schedule");
-        let decoded_dispatch_bytes =
-            schedule.dispatches().len() * std::mem::size_of::<ForcedDispatch>();
+        let decoded_dispatch_bytes = std::mem::size_of_val(schedule.dispatches());
         let decode_limits =
             ForcedScheduleDecodeLimits::new(canonical.len(), 32, decoded_dispatch_bytes);
         assert_eq!(
@@ -9750,7 +9749,7 @@ mod tests {
             "canonical encoding must be deterministic"
         );
 
-        let decoded_bytes = schedule.dispatches().len() * std::mem::size_of::<ForcedDispatch>();
+        let decoded_bytes = std::mem::size_of_val(schedule.dispatches());
         let limits = ForcedScheduleDecodeLimits::new(
             bytes.len(),
             schedule.dispatches().len(),

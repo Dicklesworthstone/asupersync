@@ -1242,8 +1242,10 @@ fn build_owned_otlp_metrics(
     // in-memory registry type.
     for metric in metrics.values_mut() {
         match metric.data.as_mut() {
-            Some(MetricData::Gauge(Gauge { data_points, .. }))
-            | Some(MetricData::Sum(Sum { data_points, .. })) => {
+            Some(
+                MetricData::Gauge(Gauge { data_points, .. })
+                | MetricData::Sum(Sum { data_points, .. }),
+            ) => {
                 data_points.sort_by(|left, right| {
                     owned_attribute_projection(&left.attributes)
                         .cmp(&owned_attribute_projection(&right.attributes))

@@ -727,7 +727,7 @@ mod tests {
         let mut distributor = SymbolDistributor::new(config);
         let replicas = create_test_replicas(5);
         let encoded = create_test_encoded_state();
-        let security = SecurityContext::new(AuthKey::from_seed(0x8A11_0C));
+        let security = SecurityContext::new(AuthKey::from_seed(0x008A_110C));
         for replica in &replicas[..2] {
             security
                 .authorize_replica(&replica.id, None)
@@ -757,7 +757,7 @@ mod tests {
         let mut distributor = SymbolDistributor::new(config);
         let replicas = create_test_replicas(3);
         let encoded = create_test_encoded_state();
-        let security = SecurityContext::new(AuthKey::from_seed(0x8A11_0C));
+        let security = SecurityContext::new(AuthKey::from_seed(0x008A_110C));
 
         let cx = Cx::for_testing();
         let result = futures_lite::future::block_on(distributor.distribute(

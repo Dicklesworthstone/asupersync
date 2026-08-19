@@ -547,7 +547,7 @@ mod tests {
 
     #[test]
     fn asupersync_8mp6md_auth_key_equality_covers_all_bytes() {
-        let baseline = AuthKey::from_seed(0x8A11_0C);
+        let baseline = AuthKey::from_seed(0x008A_110C);
         let same = baseline.clone();
         let mut first_diff = baseline.clone();
         first_diff.bytes[0] ^= 1;

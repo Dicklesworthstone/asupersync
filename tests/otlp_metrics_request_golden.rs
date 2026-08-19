@@ -640,8 +640,7 @@ fn lab_owned_metrics_bytes(seed: u64) -> Vec<Vec<u8>> {
         .schedule(task_id, Budget::INFINITE.priority);
     runtime.run_until_quiescent();
     assert!(runtime.oracles.check_all(runtime.now()).is_empty());
-    let bytes = output.lock().take().expect("producer completed");
-    bytes
+    output.lock().take().expect("producer completed")
 }
 
 #[cfg(all(feature = "metrics", feature = "test-internals"))]
@@ -698,8 +697,7 @@ fn lab_owned_trace_bytes(seed: u64) -> Vec<Vec<u8>> {
         .schedule(task_id, Budget::INFINITE.priority);
     runtime.run_until_quiescent();
     assert!(runtime.oracles.check_all(runtime.now()).is_empty());
-    let bytes = output.lock().take().expect("trace producer completed");
-    bytes
+    output.lock().take().expect("trace producer completed")
 }
 
 #[cfg(all(feature = "metrics", feature = "test-internals"))]

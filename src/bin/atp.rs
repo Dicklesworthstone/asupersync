@@ -7558,7 +7558,6 @@ where
     F: Fn(&str) -> Option<String>,
     T: Fn(char) -> Option<String>,
 {
-    let value = value;
     if name == "securitykeyprovider" && value.eq_ignore_ascii_case("internal") {
         return false;
     }
