@@ -1,472 +1,222 @@
-# OpenTelemetry Structured Concurrency Integration Design
+# OpenTelemetry structured-concurrency traces
 
-## Overview
+This document describes the tracing surfaces that are implemented today. It is
+not a promise of automatic runtime instrumentation, a performance claim, or a
+tail-sampling design.
 
-This document specifies the design for native OpenTelemetry tracing integration in asupersync, providing unprecedented observability into structured concurrency execution without manual instrumentation.
+## Contents
 
-## Background
+- [Current surfaces](#current-surfaces)
+- [Owned finite trace mapper](#owned-finite-trace-mapper)
+- [Structured-concurrency lineage](#structured-concurrency-lineage)
+- [Sampling and limits](#sampling-and-limits)
+- [Export ownership](#export-ownership)
+- [Compatibility](#compatibility)
+- [Verification](#verification)
+- [Explicit non-claims](#explicit-non-claims)
 
-Asupersync's structured concurrency creates natural observability boundaries through:
-- **Region hierarchy**: Ownership tree of execution scopes
-- **Task lifecycle**: Spawn, execution, completion/cancellation  
-- **Cancellation protocol**: Request → drain → finalize lifecycle
-- **Obligation tracking**: Resource management with commit/abort semantics
+## Current surfaces
 
-Current state includes foundational observability infrastructure:
-- `SpanId` and `DiagnosticContext` types in the `Cx` context
-- OpenTelemetry metrics provider (`OtelMetrics`)
-- Structured logging via `LogCollector`
-- Task/region identity tracking
+The `metrics` feature exposes two separate trace-building routes:
 
-## Design Goals
+1. `SpanStorage` is a manually driven OpenTelemetry SDK bridge. Callers create,
+   update, materialize, and end its region/task/operation/cancellation spans.
+   Asupersync does not install it into `RuntimeBuilder`, and the runtime does not
+   automatically call it for every scheduler transition.
+2. `OwnedOtlpTraces` is a finite mapper backed by Asupersync's crate-owned OTLP
+   protobuf model. It accepts borrowed span records, validates the complete
+   sampled collection, produces deterministic OTLP request bytes, and can send
+   them through `OtlpHttpExporter` under a caller-owned `Cx`.
 
-1. **Zero Manual Instrumentation**: Automatic span creation for all structured concurrency operations
-2. **Hierarchical Tracing**: Perfect parent-child relationships matching structured concurrency ownership
-3. **Performance**: <2% runtime overhead via lazy span creation and efficient storage
-4. **Rich Context**: Spans contain structured concurrency semantic information
-5. **Integration**: Works with existing `Cx` context and observability infrastructure
+The older `OtlpSpan`, `SpanBatch`, and `TraceExporter` APIs remain available.
+The owned mapper is additive and does not change their signatures or behavior.
 
-## Span Hierarchy Design
+## Owned finite trace mapper
 
-### Span Types
-
-| Span Type | Lifecycle | Parent | Key Attributes |
-|-----------|-----------|---------|----------------|
-| **Region** | Region creation → quiescence | Parent region | `region_id`, `region_limits`, `child_count` |
-| **Task** | Task spawn → completion/cancel | Parent region | `task_id`, `task_name`, `spawn_location` |
-| **Operation** | IO/timer/channel start → complete | Current task | `operation_type`, `resource_id`, `timeout` |
-| **Cancel** | Cancel request → drain complete | Cancelling entity | `cancel_reason`, `affected_entities`, `drain_time` |
-
-### Span Hierarchy Example
-
-```
-Region(root) [trace_id=T1]
-├── Region(http_server) [parent=root]
-│   ├── Task(accept_connections) [parent=http_server]
-│   │   ├── Operation(tcp_accept) [parent=accept_connections]
-│   │   └── Operation(spawn_handler) [parent=accept_connections]
-│   ├── Task(handle_request_123) [parent=http_server]
-│   │   ├── Operation(read_request) [parent=handle_request_123]
-│   │   ├── Region(process_auth) [parent=http_server]
-│   │   │   ├── Task(validate_token) [parent=process_auth]
-│   │   │   └── Operation(db_query) [parent=validate_token]
-│   │   └── Operation(write_response) [parent=handle_request_123]
-│   └── Cancel(shutdown_requested) [parent=http_server]
-│       ├── Cancel(drain_connections) [parent=shutdown_requested]
-│       └── Cancel(close_regions) [parent=shutdown_requested]
-```
-
-## Implementation Strategy
-
-### 1. Span Context Storage
-
-Extend `ObservabilityState` in `Cx` to include OpenTelemetry span context:
+Create a validated mapper and borrowed span inputs:
 
 ```rust
-#[derive(Debug, Clone)]
-pub struct ObservabilityState {
-    // Existing fields...
-    collector: Option<LogCollector>,
-    context: DiagnosticContext,
-    trace: Option<TraceBufferHandle>,
-    
-    // New OpenTelemetry integration
-    otel_context: Option<OtelContext>,
-    span_stack: Vec<ActiveSpan>,
-    lazy_spans: HashMap<EntityId, PendingSpan>,
-}
+use asupersync::observability::{
+    OtlpTraceSpanInput, OtlpTraceStatus, OwnedOtlpStatusCode,
+    OwnedOtlpTraceConfig, OwnedOtlpTraces,
+};
 
-#[derive(Debug, Clone)]
-pub struct OtelContext {
-    trace_id: opentelemetry::TraceId,
-    parent_span_id: Option<opentelemetry::SpanId>,
-    trace_flags: opentelemetry::TraceFlags,
-    trace_state: opentelemetry::TraceState,
-}
+let traces = OwnedOtlpTraces::try_new(OwnedOtlpTraceConfig::new())?;
+let trace_id = [0x11; 16];
+let root_id = [0x21; 8];
+let child_id = [0x22; 8];
 
-#[derive(Debug)]
-pub struct ActiveSpan {
-    span: opentelemetry::trace::Span,
-    span_type: SpanType,
-    entity_id: EntityId,
-    start_time: Time,
-}
+let root = OtlpTraceSpanInput::new(
+    trace_id,
+    root_id,
+    "region.root",
+    1_000,
+    5_000,
+);
+let child = OtlpTraceSpanInput::new(
+    trace_id,
+    child_id,
+    "task.worker",
+    2_000,
+    4_000,
+)
+.with_parent_span_id(root_id)
+.with_status(OtlpTraceStatus::new(
+    OwnedOtlpStatusCode::Ok,
+    "completed",
+));
+
+let collection = traces.collect(
+    &[child, root],
+    &[("service.name", "example")],
+)?;
+assert_eq!(collection.sampled_spans(), 2);
 ```
 
-### 2. Lazy Span Creation
+All IDs and timestamps are explicit. The mapper does not read an ambient clock
+or generate random identifiers. Each `OtlpTraceSpanInput` may carry:
 
-Implement lazy span creation to minimize overhead:
+- a 16-byte nonzero trace ID and 8-byte nonzero span ID;
+- an optional 8-byte parent span ID;
+- span name, kind, start/end timestamps, W3C tracestate, and trace flags;
+- bounded string attributes and producer-supplied dropped-attribute count;
+- bounded timestamped events and dropped-event count;
+- bounded links, including link tracestate/flags/remote-context metadata;
+- an optional OTLP status and diagnostic message;
+- optional local/remote context metadata encoded in OTLP flags.
+
+The public input fields are private and configured through builders. This keeps
+the new API additive: future metadata can be added without making existing
+exhaustive struct literals fail to compile.
+
+## Structured-concurrency lineage
+
+For sampled spans in the same collection, a parent ID is a local lineage edge
+when `(trace_id, parent_span_id)` identifies another sampled span. The mapper:
+
+- rejects duplicate `(trace_id, span_id)` pairs;
+- rejects cycles and self-parenting;
+- requires every local parent timestamp interval to enclose its child;
+- emits local parents before descendants even when input is shuffled;
+- orders unrelated roots deterministically by trace ID, timestamps, and span ID;
+- accepts an absent parent as an external/distributed parent rather than
+  inventing a local span.
+
+Callers choose the semantic span names and attributes. A useful convention is:
+
+| Runtime event | Span name | Typical attributes |
+| --- | --- | --- |
+| Region lifecycle | `region.root` or `region.child` | entity/region IDs, outcome |
+| Task lifecycle | `task.worker` | task/region IDs, outcome |
+| Cancellable operation | `operation.read` | operation kind, resource class |
+| Cancellation/drain | `cancel.drain` | cancel kind, initiator, outcome |
+
+These names are conventions, not automatic runtime hooks.
+
+## Sampling and limits
+
+The sampled bit is the low bit of `trace_flags`. Unsampled inputs are counted
+and discarded before resource validation or owned request allocation. This is
+head sampling: the producer decides sampling before calling the mapper. There is
+no tail sampler in this path.
+
+`OwnedOtlpTraceConfig` validates an immutable finite envelope. Defaults are:
+
+| Limit | Default |
+| --- | ---: |
+| Sampled spans per collection | 4,096 |
+| Sampled spans per request | 256 |
+| Events per span | 128 |
+| Links per span | 128 |
+| Attributes per resource/span/event/link | 128 |
+| Span or event name | 1,024 bytes |
+| W3C tracestate | 512 bytes |
+| Owned caller string bytes per collection | 4 MiB |
+| Encoded request bytes | 4 MiB |
+
+Validation is performed before cloning caller strings. Empty/all-zero IDs,
+zero or reversed timestamps, empty/oversized names, duplicate/oversized
+attributes, malformed tracestate, invalid event timestamps, invalid links,
+lineage violations, and finite-envelope breaches return a value-redacted
+`OwnedOtlpTraceError`. Complete mapping of every request finishes before an
+exporter writes the first byte.
+
+Events are ordered by timestamp and name. Links and attributes are likewise
+canonicalized before encoding. With equivalent inputs, repeated Lab runs and
+different input ordering produce byte-identical request bodies.
+
+## Export ownership
+
+`OtlpHttpExporter::send_owned_traces` maps first and then sends each request
+sequentially:
 
 ```rust
-#[derive(Debug)]
-pub struct PendingSpan {
-    span_type: SpanType,
-    entity_id: EntityId,
-    attributes: HashMap<String, opentelemetry::Value>,
-    start_time: Time,
-    parent_context: Option<OtelContext>,
-}
-
-impl PendingSpan {
-    fn materialize(&self, tracer: &opentelemetry::trace::Tracer) -> opentelemetry::trace::Span {
-        let mut span_builder = tracer.span_builder(self.span_name());
-        span_builder = span_builder.with_start_time(self.start_time.into());
-        
-        if let Some(parent) = &self.parent_context {
-            span_builder = span_builder.with_parent_context(&parent.as_context());
-        }
-        
-        for (key, value) in &self.attributes {
-            span_builder = span_builder.with_attributes([opentelemetry::KeyValue::new(key.clone(), value.clone())]);
-        }
-        
-        span_builder.start(tracer)
-    }
-}
+let cx = /* caller-owned Cx */;
+exporter.send_owned_traces(&cx, &traces, &[root, child]).await?;
 ```
 
-### 3. Integration Points
+The method uses the same validated endpoint, TLS/auth, timeout, retry, and
+compression policy as owned metrics. It does not spawn a background exporter
+task. Cancellation and budget ownership therefore remain with the supplied
+`Cx`; an all-unsampled collection performs no network request.
 
-#### Region Creation Hook
+## Compatibility
 
-In `RegionTable::create_region()`:
+This work adds new APIs under the existing opt-in `metrics` feature. It does
+not remove, rename, or change the public signature of the v0.4.3 trace-export
+surfaces. Existing SDK-based instrumentation and legacy trace exporters keep
+working. Applications may adopt the owned mapper one producer at a time.
 
-```rust
-pub fn create_region(
-    &mut self,
-    parent: Option<RegionId>,
-    limits: RegionLimits,
-    cx: &Cx,
-) -> Result<RegionId, RegionCreateError> {
-    let region_id = self.allocate_region_id();
-    
-    // Existing region creation logic...
-    
-    // Create region span
-    if let Some(tracer) = cx.otel_tracer() {
-        cx.create_region_span(region_id, parent, &limits);
-    }
-    
-    Ok(region_id)
-}
+The crate-owned protobuf module is intentionally private. Public callers build
+borrowed inputs and receive request bytes through `OwnedOtlpTraceCollection`,
+so protobuf implementation details can evolve without exporting a second OTLP
+schema API.
+
+## Verification
+
+Focused mapper and native wire tests:
+
+```bash
+RCH_REQUIRE_REMOTE=1 rch exec -- env \
+  CARGO_TARGET_DIR="${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_otlp_trace_a4" \
+  CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 \
+  RUSTFLAGS='-D warnings -C debuginfo=0' \
+  cargo test -p asupersync --lib --features metrics,test-internals \
+  owned_otlp_trace_tests -- --nocapture
+
+RCH_REQUIRE_REMOTE=1 rch exec -- env \
+  CARGO_TARGET_DIR="${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_otlp_trace_golden" \
+  CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 \
+  RUSTFLAGS='-D warnings -C debuginfo=0' \
+  cargo test -p asupersync --test otlp_metrics_request_golden \
+  --features metrics,test-internals -- --nocapture
 ```
 
-#### Task Spawn Hook
+The ignored real-service test downloads a pinned Linux OpenTelemetry Collector
+archive, verifies its SHA-256 digest, sends both metrics and traces, and reads
+the collector's file-exporter output:
 
-In `TaskTable::spawn_task()`:
-
-```rust
-pub fn spawn<T>(
-    &mut self,
-    region: RegionId,
-    future: T,
-    cx: &Cx,
-) -> Result<TaskId, SpawnError> 
-where
-    T: Future + Send + 'static,
-{
-    let task_id = self.allocate_task_id();
-    
-    // Existing task spawn logic...
-    
-    // Create task span  
-    if let Some(tracer) = cx.otel_tracer() {
-        cx.create_task_span(task_id, region, std::any::type_name::<T>());
-    }
-    
-    Ok(task_id)
-}
+```bash
+RCH_REQUIRE_REMOTE=1 rch exec -- env \
+  CARGO_TARGET_DIR="${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_otlp_collector" \
+  CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 \
+  RUSTFLAGS='-D warnings -C debuginfo=0' \
+  cargo test -p asupersync --test otlp_metrics_request_golden \
+  --features metrics,test-internals \
+  owned_metrics_external_otel_collector_accepts_and_exports_request \
+  -- --ignored --exact --nocapture
 ```
 
-#### Operation Span Creation
+## Explicit non-claims
 
-New method in `Cx` for IO/timer/channel operations:
-
-```rust
-impl<Caps> Cx<Caps> {
-    pub fn enter_operation_span<T>(&self, operation_type: &str, resource_id: &str) -> OperationSpanGuard<T> {
-        if let Some(tracer) = self.otel_tracer() {
-            let span = self.create_operation_span(operation_type, resource_id);
-            OperationSpanGuard::new(span, self.observability.clone())
-        } else {
-            OperationSpanGuard::noop()
-        }
-    }
-}
-
-pub struct OperationSpanGuard<T> {
-    span: Option<opentelemetry::trace::Span>,
-    observability: Arc<parking_lot::RwLock<ObservabilityState>>,
-    _phantom: std::marker::PhantomData<T>,
-}
-
-impl<T> Drop for OperationSpanGuard<T> {
-    fn drop(&mut self) {
-        if let Some(span) = self.span.take() {
-            span.end();
-        }
-    }
-}
-```
-
-### 4. Context Propagation Strategy
-
-#### Automatic Parent-Child Relationships
-
-Context propagation leverages the existing structured concurrency guarantees:
-
-1. **Region spans**: Inherit from parent region context in `Cx`
-2. **Task spans**: Inherit from region context where task is spawned  
-3. **Operation spans**: Inherit from current task context
-4. **Cancel spans**: Inherit from entity being cancelled
-
-#### Cross-Async-Boundary Propagation
-
-```rust
-impl<Caps> Cx<Caps> {
-    pub fn fork_for_child_region(&self, child_region: RegionId) -> Self {
-        let mut child_cx = self.clone();
-        
-        // Update observability state to inherit span context
-        {
-            let mut obs = child_cx.observability.write();
-            obs.context = obs.context.fork()
-                .with_region_id(child_region)
-                .with_parent_span_id(obs.context.span_id());
-                
-            // Propagate OpenTelemetry context
-            if let Some(otel_ctx) = &obs.otel_context {
-                obs.otel_context = Some(otel_ctx.fork_for_child());
-            }
-        }
-        
-        child_cx
-    }
-}
-```
-
-### 5. Performance Optimization
-
-#### Sampling Strategy
-
-```rust
-#[derive(Debug, Clone)]
-pub struct OtelStructuredConcurrencyConfig {
-    /// Global trace sampling rate (0.0-1.0)
-    pub global_sample_rate: f64,
-    
-    /// Per-span-type sampling rates
-    pub span_type_rates: HashMap<SpanType, f64>,
-    
-    /// Always sample these span types regardless of global rate
-    pub always_sample: HashSet<SpanType>,
-    
-    /// Maximum concurrent active spans to prevent memory exhaustion
-    pub max_active_spans: usize,
-    
-    /// Lazy span materialization threshold (materialize after N operations)
-    pub lazy_threshold: usize,
-}
-
-impl Default for OtelStructuredConcurrencyConfig {
-    fn default() -> Self {
-        let mut always_sample = HashSet::new();
-        always_sample.insert(SpanType::Cancel); // Always trace cancellation
-        
-        Self {
-            global_sample_rate: 0.1, // 10% sampling by default
-            span_type_rates: HashMap::new(),
-            always_sample,
-            max_active_spans: 10_000,
-            lazy_threshold: 5,
-        }
-    }
-}
-```
-
-#### Efficient Span Storage
-
-```rust
-/// Lock-free span storage optimized for structured concurrency
-#[derive(Debug)]
-pub struct SpanStorage {
-    /// Ring buffer for active spans
-    active_spans: parking_lot::RwLock<HashMap<EntityId, ActiveSpan>>,
-    
-    /// Pending spans awaiting materialization
-    pending_spans: parking_lot::RwLock<HashMap<EntityId, PendingSpan>>,
-    
-    /// Span context cache for context propagation
-    context_cache: parking_lot::RwLock<HashMap<EntityId, OtelContext>>,
-    
-    /// Performance counters
-    stats: SpanStorageStats,
-}
-
-#[derive(Debug, Default)]
-pub struct SpanStorageStats {
-    pub spans_created: std::sync::atomic::AtomicU64,
-    pub spans_materialized: std::sync::atomic::AtomicU64,
-    pub context_cache_hits: std::sync::atomic::AtomicU64,
-    pub context_cache_misses: std::sync::atomic::AtomicU64,
-}
-```
-
-### 6. Span Attributes Schema
-
-#### Region Spans
-
-```yaml
-span.name: "region_lifecycle"
-attributes:
-  asupersync.entity.type: "region"
-  asupersync.entity.id: "R12345"
-  asupersync.region.parent_id: "R12340" # Optional
-  asupersync.region.limits.max_tasks: 1000
-  asupersync.region.limits.max_obligations: 500
-  asupersync.region.child_count: 3
-  asupersync.region.state: "active" | "draining" | "closed"
-```
-
-#### Task Spans
-
-```yaml
-span.name: "task_execution"  
-attributes:
-  asupersync.entity.type: "task"
-  asupersync.entity.id: "T67890"
-  asupersync.task.region_id: "R12345"
-  asupersync.task.name: "HttpRequestHandler"
-  asupersync.task.spawn_location: "src/server.rs:142"
-  asupersync.task.outcome: "completed" | "cancelled" | "panicked"
-  asupersync.task.cancel_reason: "parent_cancelled" # If cancelled
-```
-
-#### Operation Spans
-
-```yaml
-span.name: "io_operation"
-attributes:
-  asupersync.entity.type: "operation" 
-  asupersync.operation.type: "tcp_read" | "timer_sleep" | "channel_send"
-  asupersync.operation.resource_id: "TcpStream-192.168.1.100:8080"
-  asupersync.operation.timeout_ms: 5000
-  asupersync.operation.outcome: "completed" | "timeout" | "cancelled"
-  asupersync.operation.bytes_transferred: 1024 # For IO operations
-```
-
-#### Cancel Spans
-
-```yaml
-span.name: "cancellation_event"
-attributes:
-  asupersync.entity.type: "cancel"
-  asupersync.cancel.reason: "user_requested" | "timeout" | "parent_cancelled"
-  asupersync.cancel.initiator_id: "T67890"
-  asupersync.cancel.affected_regions: ["R12345", "R12346"]
-  asupersync.cancel.affected_tasks: ["T67891", "T67892"]
-  asupersync.cancel.drain_duration_ms: 150
-```
-
-### 7. Configuration and Integration
-
-#### Runtime Builder Integration
-
-```rust
-use asupersync::runtime::RuntimeBuilder;
-use asupersync::observability::otel::OtelStructuredConcurrencyConfig;
-
-let otel_config = OtelStructuredConcurrencyConfig::default()
-    .with_global_sample_rate(0.05) // 5% sampling
-    .with_span_type_sample_rate(SpanType::Cancel, 1.0); // Always sample cancellation
-
-let runtime = RuntimeBuilder::new()
-    .with_otel_structured_concurrency(otel_config)
-    .build()?;
-```
-
-#### Tracer Integration
-
-```rust
-use opentelemetry::global;
-use opentelemetry_sdk::trace::TracerProvider;
-
-// Set up OpenTelemetry tracer
-let tracer_provider = TracerProvider::builder()
-    .with_batch_exporter(/* your exporter */)
-    .build();
-global::set_tracer_provider(tracer_provider);
-
-// Runtime automatically uses global tracer
-let runtime = RuntimeBuilder::new()
-    .with_otel_structured_concurrency(otel_config)
-    .build()?;
-```
-
-## Success Metrics
-
-### Performance Requirements
-
-- **Overhead**: <2% runtime performance impact with 10% sampling
-- **Memory**: <1MB additional memory usage per 1000 active spans
-- **Latency**: <10μs per span creation operation
-
-### Observability Goals
-
-- **Complete Hierarchy**: 100% of structured concurrency operations traced
-- **Context Propagation**: Perfect parent-child relationships
-- **Rich Context**: All relevant structured concurrency semantics captured
-- **Backend Compatibility**: Works with Jaeger, Zipkin, and other OTel receivers
-
-### Test Coverage
-
-- **Unit Tests**: Span creation, context propagation, sampling logic
-- **Integration Tests**: Full trace collection with various backends
-- **Performance Tests**: Overhead measurement and regression detection
-- **Chaos Tests**: Trace integrity under cancellation and failure scenarios
-
-## Implementation Phases
-
-### Phase 1: Core Infrastructure (Week 1)
-- [ ] Extend `ObservabilityState` with OTel context storage
-- [ ] Implement lazy span creation mechanism
-- [ ] Basic region and task span creation hooks
-- [ ] Unit tests for span lifecycle
-
-### Phase 2: Context Propagation (Week 2)  
-- [ ] Implement context propagation through structured concurrency
-- [ ] Parent-child relationship establishment
-- [ ] Cross-async-boundary context threading
-- [ ] Integration tests for span hierarchy
-
-### Phase 3: Operation and Cancel Spans (Week 3)
-- [ ] Operation span creation for IO/timer/channel operations  
-- [ ] Cancellation event tracing
-- [ ] Span attribute schema implementation
-- [ ] End-to-end trace validation
-
-### Phase 4: Performance and Production (Week 4)
-- [ ] Sampling strategy implementation
-- [ ] Performance optimization and measurement
-- [ ] Configuration and runtime integration
-- [ ] Documentation and examples
-
-## Migration Strategy
-
-### Backward Compatibility
-
-The implementation maintains full backward compatibility:
-- Existing code continues to work without changes
-- OTel integration is opt-in via feature flags and configuration
-- No changes to public APIs or structured concurrency semantics
-- Graceful degradation when OTel is not configured
-
-### Incremental Adoption
-
-Teams can adopt incrementally:
-1. **Start with sampling**: Enable with low sample rates
-2. **Add backend integration**: Connect to existing observability infrastructure  
-3. **Increase coverage**: Gradually increase sampling rates
-4. **Custom dashboards**: Build structured concurrency specific visualizations
-
-This design provides production-grade distributed tracing for structured concurrency with minimal performance overhead and zero code changes required for adoption.
+- The runtime does not automatically emit a span for every region, task,
+  operation, cancellation, or obligation transition.
+- `RuntimeBuilder` does not install `SpanStorage` or `OwnedOtlpTraces`.
+- The owned mapper implements producer-selected head sampling, not tail
+  sampling.
+- No benchmark result or fixed overhead percentage is claimed here.
+- Collector acceptance proves the emitted OTLP/HTTP trace request is accepted
+  by the pinned fixture. It does not prove compatibility with every collector,
+  backend, deployment policy, TLS setup, or sampling pipeline.
+- Enabling `metrics` is not zero-cost. With the feature disabled, these owned
+  trace types and exporter methods are not compiled.
