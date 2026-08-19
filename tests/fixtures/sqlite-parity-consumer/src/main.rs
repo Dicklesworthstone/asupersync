@@ -10,7 +10,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use asupersync::database::{SqliteConnection, SqliteValue as AsupersyncValue};
+use asupersync::database::sqlite::validate_checked_sql_statement;
+use asupersync::database::{SqliteConnection, SqliteError, SqliteValue as AsupersyncValue};
 use asupersync::runtime::{BlockingPoolHandle, RuntimeBuilder, yield_now};
 use asupersync::sync::{AcquireError, OwnedSemaphorePermit, Semaphore};
 use asupersync::{Cx, Outcome};
@@ -132,7 +133,29 @@ struct HarnessEvidence<'a> {
     capability_id: &'a str,
     provenance: Provenance<'a>,
     engine_results: Vec<EngineResult>,
+    security_policy: SecurityPolicyEvidence,
     comparison: Comparison,
+}
+
+#[derive(Debug, Serialize)]
+struct SecurityPolicyEvidence {
+    policy_id: &'static str,
+    status: &'static str,
+    bounded_cases: usize,
+    asupersync: Vec<SecurityCaseResult>,
+    frankensqlite_adapter: Vec<SecurityCaseResult>,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+struct SecurityCaseResult {
+    id: &'static str,
+    decision: &'static str,
+}
+
+struct SecurityCase {
+    id: &'static str,
+    sql: String,
+    expected: &'static str,
 }
 
 #[derive(Debug, Serialize)]
@@ -197,6 +220,7 @@ fn run() -> Result<(), String> {
 
     let mismatches = compare_results(&suite, &asupersync, &frankensqlite);
     let comparable = mismatches.is_empty();
+    let security_policy = run_security_policy()?;
     let evidence = HarnessEvidence {
         evidence_schema_version: 1,
         vector_schema_version: suite.schema_version,
@@ -212,6 +236,7 @@ fn run() -> Result<(), String> {
             host: env!("SQLITE_PARITY_HOST"),
         },
         engine_results: vec![asupersync, frankensqlite],
+        security_policy,
         comparison: Comparison {
             comparable,
             compared_vectors: suite.vectors.len(),
@@ -227,6 +252,215 @@ fn run() -> Result<(), String> {
     } else {
         Err("engine evidence did not match the declared vector contract".to_owned())
     }
+}
+
+fn security_cases() -> Vec<SecurityCase> {
+    vec![
+        SecurityCase {
+            id: "SQLITE-PARITY-P7-ALLOW-SELECT-001",
+            sql: "SELECT 1 AS value".to_owned(),
+            expected: "allowed",
+        },
+        SecurityCase {
+            id: "SQLITE-PARITY-P7-ALLOW-QUOTED-CONTROL-WORDS-002",
+            sql: "SELECT 'ATTACH PRAGMA VACUUM load_extension(' AS inert_text".to_owned(),
+            expected: "allowed",
+        },
+        SecurityCase {
+            id: "SQLITE-PARITY-P7-ALLOW-UNICODE-DATA-003",
+            sql: "SELECT 'Δatabase-\u{2019}-\u{200b}' AS unicode_text".to_owned(),
+            expected: "allowed",
+        },
+        SecurityCase {
+            id: "SQLITE-PARITY-P7-DENY-MULTI-STATEMENT-004",
+            sql: "SELECT 1; ATTACH ':memory:' AS tenant".to_owned(),
+            expected: "rejected_unsafe_sql",
+        },
+        SecurityCase {
+            id: "SQLITE-PARITY-P7-DENY-COMMENT-PRAGMA-005",
+            sql: "/* looks harmless */ PRAGMA writable_schema=ON".to_owned(),
+            expected: "rejected_unsafe_sql",
+        },
+        SecurityCase {
+            id: "SQLITE-PARITY-P7-DENY-ATTACH-006",
+            sql: "ATTACH '/tmp/tenant.db' AS tenant".to_owned(),
+            expected: "rejected_unsafe_sql",
+        },
+        SecurityCase {
+            id: "SQLITE-PARITY-P7-DENY-DETACH-007",
+            sql: "DETACH DATABASE tenant".to_owned(),
+            expected: "rejected_unsafe_sql",
+        },
+        SecurityCase {
+            id: "SQLITE-PARITY-P7-DENY-VACUUM-INTO-008",
+            sql: "VACUUM INTO '/tmp/export.db'".to_owned(),
+            expected: "rejected_unsafe_sql",
+        },
+        SecurityCase {
+            id: "SQLITE-PARITY-P7-DENY-TRANSACTION-CONTROL-009",
+            sql: "BEGIN IMMEDIATE".to_owned(),
+            expected: "rejected_unsafe_sql",
+        },
+        SecurityCase {
+            id: "SQLITE-PARITY-P7-DENY-EXTENSION-LOADING-010",
+            sql: "SELECT load_extension('/tmp/evil.so')".to_owned(),
+            expected: "rejected_unsafe_sql",
+        },
+        SecurityCase {
+            id: "SQLITE-PARITY-P7-DENY-MALFORMED-011",
+            sql: "SELECT FROM".to_owned(),
+            expected: "rejected_unsafe_sql",
+        },
+        SecurityCase {
+            id: "SQLITE-PARITY-P7-DENY-OVERSIZED-012",
+            sql: format!("SELECT '{}'", "x".repeat(1024 * 1024)),
+            expected: "rejected_unsafe_sql",
+        },
+        SecurityCase {
+            id: "SQLITE-PARITY-P7-DENY-RECURSION-013",
+            sql: format!("SELECT {}1{}", "(".repeat(140), ")".repeat(140)),
+            expected: "rejected_unsafe_sql",
+        },
+    ]
+}
+
+fn run_security_policy() -> Result<SecurityPolicyEvidence, String> {
+    let cases = security_cases();
+    let mut ids = BTreeSet::new();
+    if cases.iter().any(|case| !ids.insert(case.id)) {
+        return Err("duplicate SQLite P7 security case id".to_owned());
+    }
+
+    let asupersync = run_asupersync_security_cases(&cases)?;
+    let frankensqlite_adapter = run_frankensqlite_security_cases(&cases)?;
+    for ((case, native), franken) in cases
+        .iter()
+        .zip(&asupersync)
+        .zip(&frankensqlite_adapter)
+    {
+        if native.decision != case.expected
+            || franken.decision != case.expected
+            || native != franken
+        {
+            return Err(format!(
+                "SQLite P7 policy mismatch for {}: expected {}, asupersync {}, FrankenSQLite adapter {}",
+                case.id, case.expected, native.decision, franken.decision
+            ));
+        }
+    }
+
+    Ok(SecurityPolicyEvidence {
+        policy_id: "sqlite-checked-sql-policy-v1",
+        status: "PASS",
+        bounded_cases: cases.len(),
+        asupersync,
+        frankensqlite_adapter,
+    })
+}
+
+fn run_asupersync_security_cases(
+    cases: &[SecurityCase],
+) -> Result<Vec<SecurityCaseResult>, String> {
+    let runtime = RuntimeBuilder::current_thread()
+        .blocking_threads(2, 2)
+        .build()
+        .map_err(|error| format!("build Asupersync P7 runtime: {error}"))?;
+    let blocking = runtime
+        .handle()
+        .blocking_handle()
+        .ok_or_else(|| "Asupersync P7 runtime has no blocking pool".to_owned())?;
+    let results = runtime.block_on(async {
+        let cx = Cx::current().ok_or_else(|| "Asupersync P7 runtime has no Cx".to_owned())?;
+        let connection = asupersync_open_memory(&cx).await?;
+        let mut results = Vec::with_capacity(cases.len());
+        for case in cases {
+            let decision = match connection.query_row(&cx, &case.sql, &[]).await {
+                Outcome::Ok(Some(_)) => "allowed",
+                Outcome::Err(SqliteError::UnsafeSql(_)) => "rejected_unsafe_sql",
+                Outcome::Ok(None) => {
+                    return Err(format!("Asupersync P7 case {} returned no row", case.id));
+                }
+                Outcome::Err(error) => {
+                    return Err(format!(
+                        "Asupersync P7 case {} escaped policy as engine error: {error}",
+                        case.id
+                    ));
+                }
+                Outcome::Cancelled(_) => {
+                    return Err(format!("Asupersync P7 case {} was cancelled", case.id));
+                }
+                Outcome::Panicked(_) => {
+                    return Err(format!("Asupersync P7 case {} panicked", case.id));
+                }
+            };
+            results.push(SecurityCaseResult {
+                id: case.id,
+                decision,
+            });
+        }
+        asupersync_close(&connection, &cx).await?;
+        Ok(results)
+    })?;
+    drop(runtime);
+    require_runtime_quiescence(&blocking, "asupersync-p7")?;
+    Ok(results)
+}
+
+fn run_frankensqlite_security_cases(
+    cases: &[SecurityCase],
+) -> Result<Vec<SecurityCaseResult>, String> {
+    let runtime = CompatRuntimeBuilder::current_thread()
+        .blocking_threads(2, 2)
+        .build()
+        .map_err(|error| format!("build FrankenSQLite P7 runtime: {error}"))?;
+    let blocking = runtime
+        .handle()
+        .blocking_handle()
+        .ok_or_else(|| "FrankenSQLite P7 runtime has no blocking pool".to_owned())?;
+    let results = runtime.block_on(async {
+        let native_cx = CompatCx::current()
+            .ok_or_else(|| "FrankenSQLite P7 compatibility runtime has no Cx".to_owned())?;
+        let local_cx = attached_franken_cx(&native_cx);
+        let mut connection = FrankenConnection::open(&local_cx, ":memory:")
+            .await
+            .map_err(|error| format!("FrankenSQLite P7 open: {error}"))?;
+        let mut results = Vec::with_capacity(cases.len());
+        for case in cases {
+            let decision = match validate_checked_sql_statement(&case.sql) {
+                Err(SqliteError::UnsafeSql(_)) => "rejected_unsafe_sql",
+                Err(error) => {
+                    return Err(format!(
+                        "FrankenSQLite adapter P7 case {} policy error: {error}",
+                        case.id
+                    ));
+                }
+                Ok(()) => match connection.query(&local_cx, &case.sql).await {
+                    Ok(rows) if !rows.is_empty() => "allowed",
+                    Ok(_) => {
+                        return Err(format!(
+                            "FrankenSQLite adapter P7 case {} returned no row",
+                            case.id
+                        ));
+                    }
+                    Err(error) => {
+                        return Err(format!(
+                            "FrankenSQLite adapter P7 case {} escaped policy as engine error: {error}",
+                            case.id
+                        ));
+                    }
+                },
+            };
+            results.push(SecurityCaseResult {
+                id: case.id,
+                decision,
+            });
+        }
+        franken_close(&mut connection, &local_cx).await?;
+        Ok(results)
+    })?;
+    drop(runtime);
+    require_compat_runtime_quiescence(&blocking, "frankensqlite-p7")?;
+    Ok(results)
 }
 
 fn validate_suite(suite: &VectorSuite) -> Result<(), String> {
@@ -703,11 +937,10 @@ fn unsupported_outcome() -> ScenarioOutcome {
     )
 }
 
-fn finalize_runtime_quiescence(
-    mut outcome: ScenarioOutcome,
+fn require_runtime_quiescence(
     blocking: &BlockingPoolHandle,
     engine: &str,
-) -> Result<ScenarioOutcome, String> {
+) -> Result<(), String> {
     let pending = blocking.pending_count();
     let busy = blocking.busy_threads();
     let active = blocking.active_threads();
@@ -717,6 +950,34 @@ fn finalize_runtime_quiescence(
             blocking.is_shutdown()
         ));
     }
+    Ok(())
+}
+
+fn require_compat_runtime_quiescence(
+    blocking: &CompatBlockingPoolHandle,
+    engine: &str,
+) -> Result<(), String> {
+    let pending = blocking.pending_count();
+    let busy = blocking.busy_threads();
+    let active = blocking.active_threads();
+    if !blocking.is_shutdown() || pending != 0 || busy != 0 || active != 0 {
+        return Err(format!(
+            "{engine} compatibility runtime did not quiesce: shutdown={} pending={pending} busy={busy} active={active}",
+            blocking.is_shutdown()
+        ));
+    }
+    Ok(())
+}
+
+fn finalize_runtime_quiescence(
+    mut outcome: ScenarioOutcome,
+    blocking: &BlockingPoolHandle,
+    engine: &str,
+) -> Result<ScenarioOutcome, String> {
+    let pending = blocking.pending_count();
+    let busy = blocking.busy_threads();
+    let active = blocking.active_threads();
+    require_runtime_quiescence(blocking, engine)?;
     outcome.resource_state.blocking_pending = pending as u64;
     outcome.resource_state.blocking_busy = busy as u64;
     outcome.resource_state.blocking_active = active as u64;
@@ -733,12 +994,7 @@ fn finalize_compat_runtime_quiescence(
     let pending = blocking.pending_count();
     let busy = blocking.busy_threads();
     let active = blocking.active_threads();
-    if !blocking.is_shutdown() || pending != 0 || busy != 0 || active != 0 {
-        return Err(format!(
-            "{engine} compatibility runtime did not quiesce: shutdown={} pending={pending} busy={busy} active={active}",
-            blocking.is_shutdown()
-        ));
-    }
+    require_compat_runtime_quiescence(blocking, engine)?;
     outcome.resource_state.blocking_pending = pending as u64;
     outcome.resource_state.blocking_busy = busy as u64;
     outcome.resource_state.blocking_active = active as u64;

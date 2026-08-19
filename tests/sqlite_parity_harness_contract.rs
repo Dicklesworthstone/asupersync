@@ -13,6 +13,7 @@ const VECTORS: &str = include_str!("../artifacts/sqlite_conformance_vectors_v1.j
 const HARNESS: &str = include_str!("../artifacts/sqlite_parity_harness_v1.json");
 const DOC: &str = include_str!("../docs/sqlite_parity_harness.md");
 const SQLITE_SOURCE: &str = include_str!("../src/database/sqlite.rs");
+const CONSUMER_SOURCE: &str = include_str!("fixtures/sqlite-parity-consumer/src/main.rs");
 const PREPARED_CONFORMANCE_SOURCE: &str = include_str!("conformance/sqlite_prepared_statements.rs");
 
 fn parse_json(source: &str) -> Value {
@@ -52,7 +53,7 @@ fn dependency_direction_is_cycle_safe_and_runtime_boundaries_are_explicit() {
         "the consumer must resolve the current engine and pinned compatibility runtime"
     );
     assert!(CONSUMER_LOCK.contains("\"asupersync 0.3.10\""));
-    assert!(CONSUMER_LOCK.contains("\"asupersync 0.4.4\""));
+    assert!(CONSUMER_LOCK.contains("\"asupersync 0.4.8\""));
     assert!(CONSUMER_LOCK.contains(
         "git+https://github.com/Dicklesworthstone/frankensqlite.git?rev=92f9e9833f859ebcbe27e9fef16d9cad4372bbd7#92f9e9833f859ebcbe27e9fef16d9cad4372bbd7"
     ));
@@ -405,6 +406,149 @@ fn phase5_matrix_covers_every_race_boundary_without_inventing_cross_engine_suppo
 }
 
 #[test]
+fn phase7_checked_sql_policy_is_machine_readable_reused_and_adversarial() {
+    let harness = parse_json(HARNESS);
+    let phase7 = &harness["phase7"];
+    assert_eq!(phase7["bead_id"], "asupersync-ym2wtv.2.7");
+    assert_eq!(phase7["status"], "PASS");
+    assert_eq!(
+        phase7["policy"]["policy_id"],
+        "sqlite-checked-sql-policy-v1"
+    );
+    assert_eq!(phase7["policy"]["maximum_sql_bytes"], 1024 * 1024);
+    assert_eq!(phase7["policy"]["maximum_parser_recursion"], 128);
+    assert_eq!(
+        phase7["policy"]["parameter_policy"],
+        "BOUND_VALUES_ARE_DATA_AND_ARE_NEVER_REPARSED_AS_SQL_SYNTAX"
+    );
+
+    let deny_rules = phase7["policy"]["deny_rules"]
+        .as_array()
+        .expect("phase7 deny rules");
+    assert_eq!(deny_rules.len(), 8);
+    assert!(deny_rules.iter().all(|rule| rule["decision"] == "DENY"));
+    let deny_classes = deny_rules
+        .iter()
+        .map(|rule| rule["class"].as_str().expect("deny class"))
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        deny_classes,
+        [
+            "parser_rejected",
+            "byte_or_recursion_limit",
+            "single_statement_count_not_one",
+            "pragma",
+            "transaction_or_connection_control",
+            "attach_or_detach",
+            "vacuum_or_vacuum_into",
+            "load_extension_call",
+        ]
+        .into_iter()
+        .collect()
+    );
+
+    let entries = phase7["public_entry_points"]
+        .as_array()
+        .expect("checked entry points");
+    assert_eq!(entries.len(), 7);
+    assert_eq!(
+        entries
+            .iter()
+            .map(|entry| entry["api"].as_str().expect("entry point"))
+            .collect::<BTreeSet<_>>(),
+        [
+            "SqliteConnection::execute",
+            "SqliteConnection::execute_batch",
+            "SqliteConnection::query",
+            "SqliteConnection::query_row",
+            "SqliteConnection::query_stream",
+            "SqliteTransaction::execute",
+            "SqliteTransaction::query",
+        ]
+        .into_iter()
+        .collect()
+    );
+    assert!(SQLITE_SOURCE.contains("pub fn validate_checked_sql_statement"));
+    assert!(SQLITE_SOURCE.contains("pub fn validate_checked_sql_batch"));
+    assert!(SQLITE_SOURCE.contains("SqlSurfaceViolation::ExtensionLoading"));
+    assert_eq!(
+        SQLITE_SOURCE
+            .matches("if let Err(err) = validate_checked_sql_statement(sql)")
+            .count(),
+        4,
+        "all four checked single-statement entry points must reuse the public validator"
+    );
+    assert_eq!(
+        SQLITE_SOURCE
+            .matches("if let Err(err) = validate_checked_sql_batch(sql)")
+            .count(),
+        1,
+        "the checked batch entry point must reuse the public batch validator"
+    );
+    assert_eq!(
+        SQLITE_SOURCE
+            .matches("self.conn.execute(cx, sql, params).await")
+            .count(),
+        1,
+        "transaction execute must delegate to the checked connection entry point"
+    );
+    assert_eq!(
+        SQLITE_SOURCE
+            .matches("self.conn.query(cx, sql, params).await")
+            .count(),
+        1,
+        "transaction query must delegate to the checked connection entry point"
+    );
+    assert!(
+        SQLITE_SOURCE
+            .contains("fn every_checked_public_entry_point_applies_the_same_fail_closed_policy")
+    );
+
+    let case_ids = phase7["neutral_adapter"]["case_ids"]
+        .as_array()
+        .expect("phase7 case ids");
+    assert_eq!(case_ids.len(), 13);
+    assert_eq!(
+        case_ids
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<BTreeSet<_>>()
+            .len(),
+        13
+    );
+    for case_id in case_ids.iter().filter_map(Value::as_str) {
+        assert!(
+            CONSUMER_SOURCE.contains(case_id),
+            "neutral consumer is missing {case_id}"
+        );
+    }
+    for marker in [
+        "validate_checked_sql_statement(&case.sql)",
+        "run_asupersync_security_cases",
+        "run_frankensqlite_security_cases",
+        "require_runtime_quiescence",
+        "require_compat_runtime_quiescence",
+    ] {
+        assert!(
+            CONSUMER_SOURCE.contains(marker),
+            "neutral consumer is missing {marker}"
+        );
+    }
+
+    assert_eq!(phase7["bounded_fuzz"]["deterministic_cases"], 4096);
+    assert!(SQLITE_SOURCE.contains("fn checked_sql_policy_bounded_adversarial_fuzz_is_panic_free"));
+    for lane in ["sqlite_module", "neutral_consumer", "repository_contract"] {
+        assert_eq!(phase7["verification"][lane]["status"], "PASS");
+        assert!(
+            phase7["verification"][lane]["rch_job"]
+                .as_str()
+                .is_some_and(|job| !job.is_empty()),
+            "phase7 verification lane {lane} lacks an RCH receipt"
+        );
+    }
+}
+
+#[test]
 fn clean_phase2_execution_receipt_matches_all_declared_vectors() {
     let harness = parse_json(HARNESS);
     assert_eq!(harness["phase1_execution"]["status"], "PASS");
@@ -480,6 +624,9 @@ fn operator_doc_preserves_reproduction_and_no_claim_boundaries() {
         "Full P3 parity",
         "SQLite P5 cancellation matrix",
         "unsupported cells stay unsupported",
+        "SQLite P7 checked-SQL security parity",
+        "validate_checked_sql_statement",
+        "4,096 bounded variants",
     ] {
         assert!(
             DOC.contains(marker),

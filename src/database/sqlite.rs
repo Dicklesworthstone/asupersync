@@ -485,6 +485,7 @@ enum SqlSurfaceViolation {
     TransactionControl,
     AttachDetach,
     Vacuum,
+    ExtensionLoading,
     ParserRejected,
     StatementCount,
     ResourceLimit,
@@ -500,6 +501,9 @@ impl SqlSurfaceViolation {
             Self::AttachDetach => "ATTACH and DETACH are disabled on the checked SQLite APIs",
             Self::Vacuum => {
                 "VACUUM requires the explicit *_unchecked SQLite APIs because VACUUM INTO can write an arbitrary filesystem path"
+            }
+            Self::ExtensionLoading => {
+                "SQLite extension loading is disabled on the checked SQLite APIs"
             }
             Self::ParserRejected => {
                 "checked SQLite SQL must be accepted by the bounded policy parser; audited engine-specific SQL requires an explicit *_unchecked API"
@@ -524,29 +528,38 @@ const MAX_CHECKED_SQL_RECURSION: usize = 128;
 
 #[cfg(test)]
 fn classify_sql_surface_violation(sql: &str) -> Option<SqlSurfaceViolation> {
-    // SECURITY FIX: Use sqlparser-rs instead of a hand-rolled keyword parser so
-    // policy decisions are made from structured syntax (asupersync-dn5hn8).
-    // SQLite itself remains the authoritative execution parser.
+    match parse_checked_sql(sql) {
+        Ok(statements) => check_parsed_statements(&statements),
+        Err(violation) => Some(violation),
+    }
+}
 
+fn contains_extension_loading_call(sql: &str) -> Result<bool, SqlSurfaceViolation> {
     use sqlparser::dialect::SQLiteDialect;
-    use sqlparser::parser::Parser;
+    use sqlparser::tokenizer::{Token, Tokenizer};
 
     let dialect = SQLiteDialect {};
-    if sql.len() > MAX_CHECKED_SQL_BYTES {
-        return Some(SqlSurfaceViolation::ResourceLimit);
-    }
+    let tokens = Tokenizer::new(&dialect, sql)
+        .tokenize()
+        .map_err(|_| SqlSurfaceViolation::ParserRejected)?;
+    let mut significant = tokens
+        .iter()
+        .filter(|token| !matches!(token, Token::Whitespace(_)))
+        .peekable();
 
-    match Parser::new(&dialect)
-        .with_recursion_limit(MAX_CHECKED_SQL_RECURSION)
-        .try_with_sql(sql)
-        .and_then(|mut parser| parser.parse_statements())
-    {
-        Ok(statements) => check_parsed_statements(&statements),
-        Err(_) => {
-            // If parsing fails, fall back to keyword detection for safety
-            check_sql_keywords_fallback(sql)
+    while let Some(token) = significant.next() {
+        let Token::Word(word) = token else {
+            continue;
+        };
+        if word.value.eq_ignore_ascii_case("load_extension")
+            && significant
+                .peek()
+                .is_some_and(|next| matches!(next, Token::LParen))
+        {
+            return Ok(true);
         }
     }
+    Ok(false)
 }
 
 fn unchecked_sql_contains_attach_detach(sql: &str) -> bool {
@@ -773,13 +786,17 @@ fn parse_checked_sql(sql: &str) -> Result<Vec<sqlparser::ast::Statement>, SqlSur
     }
 
     let dialect = SQLiteDialect {};
-    Parser::new(&dialect)
+    let statements = Parser::new(&dialect)
         .with_recursion_limit(MAX_CHECKED_SQL_RECURSION)
         .try_with_sql(sql)
         .and_then(|mut parser| parser.parse_statements())
         .map_err(|_| {
             check_sql_keywords_fallback(sql).unwrap_or(SqlSurfaceViolation::ParserRejected)
-        })
+        })?;
+    if contains_extension_loading_call(sql)? {
+        return Err(SqlSurfaceViolation::ExtensionLoading);
+    }
+    Ok(statements)
 }
 
 fn ensure_checked_sql_surface(
@@ -804,6 +821,27 @@ fn ensure_checked_sql_surface(
         ));
     }
     Ok(())
+}
+
+/// Validate one statement against the checked SQLite SQL policy without
+/// executing it.
+///
+/// This is the same bounded, fail-closed admission used by [`SqliteConnection::execute`],
+/// [`SqliteConnection::query`], [`SqliteConnection::query_row`], and
+/// [`SqliteConnection::query_stream`]. It is public so companion adapters can
+/// apply the identical policy before dispatching SQL to another SQLite engine.
+pub fn validate_checked_sql_statement(sql: &str) -> Result<(), SqliteError> {
+    ensure_checked_sql_surface(sql, CheckedSqlCardinality::ExactlyOne)
+}
+
+/// Validate zero or more statements against the checked SQLite batch policy
+/// without executing them.
+///
+/// Batch validation retains the same parser size, recursion, control-statement,
+/// attachment, vacuum, and extension-loading restrictions as the one-statement
+/// policy; only the statement-count restriction differs.
+pub fn validate_checked_sql_batch(sql: &str) -> Result<(), SqliteError> {
+    ensure_checked_sql_surface(sql, CheckedSqlCardinality::Batch)
 }
 
 fn ensure_unchecked_sql_surface(sql: &str) -> Result<(), SqliteError> {
@@ -2118,7 +2156,7 @@ impl SqliteConnection {
         sql: &str,
         params: &[SqliteValue],
     ) -> Outcome<u64, SqliteError> {
-        if let Err(err) = ensure_checked_sql_surface(sql, CheckedSqlCardinality::ExactlyOne) {
+        if let Err(err) = validate_checked_sql_statement(sql) {
             return Outcome::Err(err);
         }
         self.execute_unchecked(cx, sql, params).await
@@ -2211,7 +2249,7 @@ impl SqliteConnection {
     ///
     /// This operation checks for cancellation before starting.
     pub async fn execute_batch(&self, cx: &Cx, sql: &str) -> Outcome<(), SqliteError> {
-        if let Err(err) = ensure_checked_sql_surface(sql, CheckedSqlCardinality::Batch) {
+        if let Err(err) = validate_checked_sql_batch(sql) {
             return Outcome::Err(err);
         }
         self.execute_batch_unchecked(cx, sql).await
@@ -2261,7 +2299,7 @@ impl SqliteConnection {
         sql: &str,
         params: &[SqliteValue],
     ) -> Outcome<Vec<SqliteRow>, SqliteError> {
-        if let Err(err) = ensure_checked_sql_surface(sql, CheckedSqlCardinality::ExactlyOne) {
+        if let Err(err) = validate_checked_sql_statement(sql) {
             return Outcome::Err(err);
         }
         self.query_unchecked(cx, sql, params).await
@@ -2371,7 +2409,7 @@ impl SqliteConnection {
         sql: &str,
         params: &[SqliteValue],
     ) -> Outcome<SqliteRowStream<'connection>, SqliteError> {
-        if let Err(err) = ensure_checked_sql_surface(sql, CheckedSqlCardinality::ExactlyOne) {
+        if let Err(err) = validate_checked_sql_statement(sql) {
             return Outcome::Err(err);
         }
         self.query_stream_unchecked(cx, sql, params).await
@@ -2570,7 +2608,7 @@ impl SqliteConnection {
         sql: &str,
         params: &[SqliteValue],
     ) -> Outcome<Option<SqliteRow>, SqliteError> {
-        if let Err(err) = ensure_checked_sql_surface(sql, CheckedSqlCardinality::ExactlyOne) {
+        if let Err(err) = validate_checked_sql_statement(sql) {
             return Outcome::Err(err);
         }
         self.query_row_unchecked(cx, sql, params).await
@@ -3358,6 +3396,32 @@ mod tests {
     }
 
     #[test]
+    fn test_checked_sql_blocks_extension_loading_calls() {
+        for sql in [
+            "SELECT load_extension('/tmp/evil.so')",
+            "SELECT LOAD_EXTENSION ( '/tmp/evil.so', 'entrypoint' )",
+            "SELECT main.load_extension('/tmp/evil.so')",
+            "SELECT main.\"load_extension\"('/tmp/evil.so')",
+            "SELECT \"load_extension\"('/tmp/evil.so')",
+            "SELECT [load_extension]('/tmp/evil.so')",
+            "SELECT `load_extension`('/tmp/evil.so')",
+            "SELECT load_extension /* comment */ ('/tmp/evil.so')",
+        ] {
+            assert_eq!(
+                classify_sql_surface_violation(sql),
+                Some(SqlSurfaceViolation::ExtensionLoading),
+                "checked policy must reject {sql:?}"
+            );
+        }
+
+        assert_eq!(
+            classify_sql_surface_violation("SELECT 'load_extension(' AS inert_text"),
+            None,
+            "extension-like text inside a string literal is data"
+        );
+    }
+
+    #[test]
     fn test_sqlparser_comment_bypass_protection() {
         // Test that comment removal in fallback works correctly
         let sql = "/* comment */ PRAGMA journal_mode -- line comment";
@@ -3366,9 +3430,14 @@ mod tests {
             Some(SqlSurfaceViolation::Pragma)
         );
 
-        // Test nested comments in fallback
+        // SQLite does not support nested block comments. The checked policy
+        // rejects parser divergence instead of guessing that malformed SQL is
+        // safe.
         let sql = "/* outer /* inner */ comment */ SELECT 1";
-        assert_eq!(classify_sql_surface_violation(sql), None);
+        assert_eq!(
+            classify_sql_surface_violation(sql),
+            Some(SqlSurfaceViolation::ParserRejected)
+        );
     }
 
     /// TOCTOU Security Tests - Verify the TOCTOU vulnerability fix (asupersync-607uqy)
@@ -4785,6 +4854,125 @@ mod tests {
         }
         assert_eq!(check_sql_keywords_fallback("BEGINNING SELECT 1"), None);
         assert_eq!(check_sql_keywords_fallback("VACUUMED SELECT 1"), None);
+    }
+
+    #[test]
+    fn checked_sql_policy_bounded_adversarial_fuzz_is_panic_free() {
+        let mut state = 0x5eed_5eed_cafe_f00d_u64;
+        for case_index in 0..4096_u64 {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            let padding = " ".repeat((state as usize) & 15);
+            let marker = format!("{state:016x}");
+            let (sql, should_allow) = match case_index % 6 {
+                0 => (
+                    format!("/*{marker}*/{padding}PRAGMA foreign_keys=OFF"),
+                    false,
+                ),
+                1 => (
+                    format!("--{marker}\n{padding}ATTACH ':memory:' AS escaped"),
+                    false,
+                ),
+                2 => (
+                    format!("SELECT load_extension{padding}('/tmp/{marker}.so')"),
+                    false,
+                ),
+                3 => (format!("SELECT 'Δ-{marker}-\u{200b}'"), true),
+                4 => (format!("SELECT ({padding}{marker}"), false),
+                _ => (
+                    format!("SELECT 1; /*{marker}*/ VACUUM INTO '/tmp/{marker}.db'"),
+                    false,
+                ),
+            };
+
+            let result = std::panic::catch_unwind(|| validate_checked_sql_statement(&sql))
+                .unwrap_or_else(|_| {
+                    panic!("checked policy panicked for case {case_index}: {sql:?}")
+                });
+            assert_eq!(
+                result.is_ok(),
+                should_allow,
+                "unexpected policy result for case {case_index}: {sql:?}: {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_checked_public_entry_point_applies_the_same_fail_closed_policy() {
+        let cx = create_test_cx();
+
+        block_on(async {
+            let mut conn = match SqliteConnection::open_in_memory(&cx).await {
+                Outcome::Ok(conn) => conn,
+                other => panic!("open_in_memory failed: {other:?}"),
+            };
+
+            assert!(matches!(
+                conn.execute(&cx, "ATTACH ':memory:' AS blocked", &[]).await,
+                Outcome::Err(SqliteError::UnsafeSql(_))
+            ));
+            assert!(matches!(
+                conn.execute_batch(&cx, "SELECT 1; PRAGMA foreign_keys=OFF")
+                    .await,
+                Outcome::Err(SqliteError::UnsafeSql(_))
+            ));
+            assert!(matches!(
+                conn.query(&cx, "SELECT load_extension('/tmp/blocked.so')", &[])
+                    .await,
+                Outcome::Err(SqliteError::UnsafeSql(_))
+            ));
+            assert!(matches!(
+                conn.query_row(&cx, "VACUUM INTO '/tmp/blocked.db'", &[])
+                    .await,
+                Outcome::Err(SqliteError::UnsafeSql(_))
+            ));
+            assert!(matches!(
+                conn.query_stream(&cx, "BEGIN IMMEDIATE", &[]).await,
+                Outcome::Err(SqliteError::UnsafeSql(_))
+            ));
+
+            match conn.query_row(&cx, "SELECT 1 AS value", &[]).await {
+                Outcome::Ok(Some(row)) => {
+                    assert!(matches!(row.get("value"), Ok(SqliteValue::Integer(1))));
+                }
+                other => panic!("connection was not reusable after policy rejection: {other:?}"),
+            }
+
+            let control_text = "ATTACH PRAGMA VACUUM load_extension(";
+            match conn
+                .query_row(
+                    &cx,
+                    "SELECT ?1 AS value",
+                    &[SqliteValue::Text(control_text.to_owned())],
+                )
+                .await
+            {
+                Outcome::Ok(Some(row)) => match row.get("value") {
+                    Ok(SqliteValue::Text(value)) => assert_eq!(value, control_text),
+                    other => panic!("bound value had the wrong shape: {other:?}"),
+                },
+                other => panic!("bound control-like data was not preserved: {other:?}"),
+            }
+
+            let transaction = match conn.begin(&cx).await {
+                Outcome::Ok(transaction) => transaction,
+                _ => panic!("begin failed after checked-policy rejections"),
+            };
+            assert!(matches!(
+                transaction
+                    .execute(&cx, "PRAGMA writable_schema=ON", &[])
+                    .await,
+                Outcome::Err(SqliteError::UnsafeSql(_))
+            ));
+            assert!(matches!(
+                transaction
+                    .query(&cx, "SELECT load_extension('/tmp/blocked.so')", &[])
+                    .await,
+                Outcome::Err(SqliteError::UnsafeSql(_))
+            ));
+            assert!(matches!(transaction.rollback(&cx).await, Outcome::Ok(())));
+        });
     }
 
     // ---- SqliteError From<io::Error> ----

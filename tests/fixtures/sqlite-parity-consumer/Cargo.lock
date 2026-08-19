@@ -166,7 +166,7 @@ dependencies = [
 
 [[package]]
 name = "asupersync"
-version = "0.4.5"
+version = "0.4.8"
 dependencies = [
  "aes-gcm",
  "asupersync-macros",
@@ -175,9 +175,9 @@ dependencies = [
  "chacha20poly1305 0.11.0",
  "crc32fast",
  "crossbeam-queue",
- "franken-decision 0.4.4",
- "franken-evidence 0.4.4",
- "franken-kernel 0.4.4",
+ "franken-decision 0.4.8",
+ "franken-evidence 0.4.8",
+ "franken-kernel 0.4.8",
  "futures-lite",
  "getrandom 0.4.3",
  "hashbrown 0.17.1",
@@ -219,7 +219,7 @@ dependencies = [
 
 [[package]]
 name = "asupersync-macros"
-version = "0.4.5"
+version = "0.4.8"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -231,7 +231,7 @@ name = "asupersync-sqlite-parity-consumer"
 version = "0.0.0"
 dependencies = [
  "asupersync 0.3.10",
- "asupersync 0.4.4",
+ "asupersync 0.4.8",
  "fsqlite",
  "fsqlite-types",
  "serde",
@@ -783,10 +783,10 @@ dependencies = [
 
 [[package]]
 name = "franken-decision"
-version = "0.4.5"
+version = "0.4.8"
 dependencies = [
- "franken-evidence 0.4.4",
- "franken-kernel 0.4.4",
+ "franken-evidence 0.4.8",
+ "franken-kernel 0.4.8",
  "serde",
 ]
 
@@ -802,7 +802,7 @@ dependencies = [
 
 [[package]]
 name = "franken-evidence"
-version = "0.4.5"
+version = "0.4.8"
 dependencies = [
  "serde",
  "serde_json",
@@ -819,7 +819,7 @@ dependencies = [
 
 [[package]]
 name = "franken-kernel"
-version = "0.4.5"
+version = "0.4.8"
 dependencies = [
  "serde",
 ]

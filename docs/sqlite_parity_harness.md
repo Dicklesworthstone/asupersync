@@ -17,9 +17,10 @@ direct Asupersync dependency at this checkout, pins the public FrankenSQLite Git
 source to release `v0.1.18`
 (`92f9e9833f859ebcbe27e9fef16d9cad4372bbd7`). That release depends on
 Asupersync 0.3.x, whose public `Cx` and runtime types are not interchangeable
-with the current 0.4.4 types. The consumer therefore names the published
-0.3.10 package explicitly as `asupersync-compat`, runs each adapter inside its
-own matching runtime, and compares only the declared public lifecycle outcome.
+with the current 0.4.8 types. The consumer therefore names the published
+0.3.10 package explicitly as `asupersync-compat`, resolves the current path
+dependency as Asupersync 0.4.8, runs each adapter inside its own matching
+runtime, and compares only the declared public lifecycle outcome.
 P2 enables the pinned `fsqlite` `async-api` feature and directly names its
 matching `fsqlite-types` package so the two runtime boundaries remain visible
 rather than being hidden behind an ineffective Cargo patch.
@@ -61,7 +62,7 @@ The six scenarios are:
 - `SQLITE-PARITY-P2-POOL-CANCEL-005`: a consumer-owned admission semaphore is
   saturated, the second checkout is proven parked, the live connection closes,
   the waiter is aborted and drained as the engine's public cancellation form,
-  and the sole permit is restored exactly once. The 0.4.4 path requires the
+  and the sole permit is restored exactly once. The current 0.4.8 path requires the
   graceful inner `AcquireError::Cancelled`; the pinned 0.3.10 compatibility
   path may report the legacy outer task-cancelled join, which is normalized
   only after the waiter and permit cleanup checks pass.
@@ -137,6 +138,45 @@ busy, or active blocking work. Together, the layers prove the current
 Asupersync repair and identify the exact pinned-FrankenSQLite gaps. They do not
 claim full cross-engine interrupt/timeout parity or authorize dependency
 cutover.
+
+## SQLite P7 checked-SQL security parity
+
+`asupersync-ym2wtv.2.7` makes the checked-SQL boundary reusable and executable
+without weakening the established checked-by-default API. The additive
+`validate_checked_sql_statement` and `validate_checked_sql_batch` functions use
+the exact policy called by `execute`, `execute_batch`, `query`, `query_row`, and
+`query_stream`; transaction `execute` and `query` delegate to those same checked
+connection methods. A companion adapter can therefore reject unsafe input
+before it reaches another SQLite engine instead of maintaining a second keyword
+parser.
+
+The machine policy in `phase7.policy` denies parser failure, inputs above one
+MiB, syntax deeper than 128 parser recursion levels, multiple statements on a
+single-statement API, PRAGMA and transaction control, ATTACH/DETACH, VACUUM and
+VACUUM INTO, and `load_extension(...)` calls. The extension call check uses SQL
+tokens, so comments, whitespace, case, and quoted function identifiers cannot
+bypass it, while the same words inside string literals remain data. The explicit
+extension rule is defense in depth: the current rusqlite feature set does not
+enable dynamic extension loading, but checked admission must not depend on that
+ambient build fact. Bound parameter values remain data and are never reparsed as
+SQL syntax; the public-entry-point regression includes control-looking text in a
+bound value.
+
+The neutral consumer runs thirteen allow/deny cases through the real
+Asupersync checked query path and through the FrankenSQLite adapter after that
+adapter applies the shared validator. Its corpus covers multi-statement
+smuggling, comments, quoted control words, Unicode data, ATTACH, DETACH, PRAGMA,
+VACUUM INTO, transaction control, extension loading, malformed SQL, the byte
+limit, and the recursion limit. Both connections are then closed and both
+runtime blocking pools must report shutdown with zero pending, busy, or active
+work. The in-crate deterministic fuzz test adds 4,096 bounded variants and fails
+on any panic or allow/deny drift.
+
+This proves the declared adapter policy and corpus, not that unchecked APIs are
+safe for untrusted SQL. The `_unchecked` APIs intentionally retain trusted
+migration and connection-control compatibility; ATTACH/DETACH remain disabled
+even there. P7 does not authorize a dependency cutover or claim arbitrary SQL
+equivalence between the two engines.
 
 ## Reproduction
 

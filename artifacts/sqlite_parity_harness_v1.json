@@ -258,7 +258,7 @@
           "async-api"
         ]
       },
-      "lockfile_sha256": "7b57b6c40a2b93ca7acd4b435d14a69512a743bfd6612529602b1342f3a703fc",
+      "lockfile_sha256": "472618c2cd399af3d4c6dc307fd90590cf53bbd7ac0c53e584bd0398d49c3248",
       "cargo_profile": "dev",
       "target": "x86_64-unknown-linux-gnu",
       "host": "linux-x86_64-trj"
@@ -1007,6 +1007,178 @@
       "Unsupported FrankenSQLite cells are recorded, not normalized to PASS.",
       "The in-repository phase witnesses are deterministic Asupersync adapter evidence, not cross-engine equivalence evidence.",
       "This phase does not authorize a dependency cutover or claim full SQLite parity."
+    ]
+  },
+  "phase7": {
+    "bead_id": "asupersync-ym2wtv.2.7",
+    "status": "PASS",
+    "scope": "checked_sql_allow_deny_policy_public_entry_points_dual_engine_adapter_and_bounded_fuzz",
+    "threat_model": {
+      "attacker_controls": "SQL text passed to a checked SQLite API or companion adapter",
+      "protected_effects": [
+        "connection_and_transaction_control",
+        "database_attachment",
+        "filesystem_writes_through_vacuum_into",
+        "dynamic_extension_loading",
+        "parser_resource_exhaustion",
+        "multi_statement_smuggling_on_single_statement_apis"
+      ],
+      "trusted_boundary": "Callers choosing an explicit *_unchecked API own SQL provenance; ATTACH and DETACH remain disabled there.",
+      "failure_mode": "Return SqliteError::UnsafeSql before engine dispatch."
+    },
+    "policy": {
+      "policy_id": "sqlite-checked-sql-policy-v1",
+      "default_for_parseable_statements": "ALLOW_UNLESS_A_DENY_RULE_MATCHES",
+      "maximum_sql_bytes": 1048576,
+      "maximum_parser_recursion": 128,
+      "single_statement_cardinality": "EXACTLY_ONE",
+      "batch_cardinality": "ZERO_OR_MORE",
+      "parameter_policy": "BOUND_VALUES_ARE_DATA_AND_ARE_NEVER_REPARSED_AS_SQL_SYNTAX",
+      "deny_rules": [
+        {
+          "id": "SQLITE-P7-DENY-PARSER",
+          "class": "parser_rejected",
+          "decision": "DENY"
+        },
+        {
+          "id": "SQLITE-P7-DENY-RESOURCE",
+          "class": "byte_or_recursion_limit",
+          "decision": "DENY"
+        },
+        {
+          "id": "SQLITE-P7-DENY-CARDINALITY",
+          "class": "single_statement_count_not_one",
+          "decision": "DENY"
+        },
+        {
+          "id": "SQLITE-P7-DENY-PRAGMA",
+          "class": "pragma",
+          "decision": "DENY"
+        },
+        {
+          "id": "SQLITE-P7-DENY-TRANSACTION",
+          "class": "transaction_or_connection_control",
+          "decision": "DENY"
+        },
+        {
+          "id": "SQLITE-P7-DENY-ATTACH",
+          "class": "attach_or_detach",
+          "decision": "DENY"
+        },
+        {
+          "id": "SQLITE-P7-DENY-VACUUM",
+          "class": "vacuum_or_vacuum_into",
+          "decision": "DENY"
+        },
+        {
+          "id": "SQLITE-P7-DENY-EXTENSION",
+          "class": "load_extension_call",
+          "decision": "DENY"
+        }
+      ],
+      "allowed_examples": [
+        "single SELECT/INSERT/UPDATE/DELETE/DDL statement",
+        "checked batch containing parseable non-control statements",
+        "control keywords inside comments or quoted data",
+        "Unicode string data accepted by the bounded parser"
+      ]
+    },
+    "public_entry_points": [
+      {
+        "api": "SqliteConnection::execute",
+        "validator": "validate_checked_sql_statement"
+      },
+      {
+        "api": "SqliteConnection::execute_batch",
+        "validator": "validate_checked_sql_batch"
+      },
+      {
+        "api": "SqliteConnection::query",
+        "validator": "validate_checked_sql_statement"
+      },
+      {
+        "api": "SqliteConnection::query_row",
+        "validator": "validate_checked_sql_statement"
+      },
+      {
+        "api": "SqliteConnection::query_stream",
+        "validator": "validate_checked_sql_statement"
+      },
+      {
+        "api": "SqliteTransaction::execute",
+        "validator": "delegates_to_SqliteConnection::execute"
+      },
+      {
+        "api": "SqliteTransaction::query",
+        "validator": "delegates_to_SqliteConnection::query"
+      }
+    ],
+    "neutral_adapter": {
+      "source": "tests/fixtures/sqlite-parity-consumer/src/main.rs",
+      "policy_function": "validate_checked_sql_statement",
+      "asupersync_path": "real SqliteConnection::query_row checked entry point",
+      "frankensqlite_path": "shared policy admission followed by AsyncConnection::query only on ALLOW",
+      "bounded_case_count": 13,
+      "case_ids": [
+        "SQLITE-PARITY-P7-ALLOW-SELECT-001",
+        "SQLITE-PARITY-P7-ALLOW-QUOTED-CONTROL-WORDS-002",
+        "SQLITE-PARITY-P7-ALLOW-UNICODE-DATA-003",
+        "SQLITE-PARITY-P7-DENY-MULTI-STATEMENT-004",
+        "SQLITE-PARITY-P7-DENY-COMMENT-PRAGMA-005",
+        "SQLITE-PARITY-P7-DENY-ATTACH-006",
+        "SQLITE-PARITY-P7-DENY-DETACH-007",
+        "SQLITE-PARITY-P7-DENY-VACUUM-INTO-008",
+        "SQLITE-PARITY-P7-DENY-TRANSACTION-CONTROL-009",
+        "SQLITE-PARITY-P7-DENY-EXTENSION-LOADING-010",
+        "SQLITE-PARITY-P7-DENY-MALFORMED-011",
+        "SQLITE-PARITY-P7-DENY-OVERSIZED-012",
+        "SQLITE-PARITY-P7-DENY-RECURSION-013"
+      ],
+      "terminal_resource_requirements": [
+        "both_connections_closed",
+        "both_runtime_blocking_pools_shutdown",
+        "pending_zero",
+        "busy_zero",
+        "active_zero"
+      ]
+    },
+    "bounded_fuzz": {
+      "test": "database::sqlite::tests::checked_sql_policy_bounded_adversarial_fuzz_is_panic_free",
+      "deterministic_cases": 4096,
+      "maximum_case_bytes": 1048585,
+      "required_result": "NO_PANIC_AND_EXPECTED_ALLOW_DENY_DECISION"
+    },
+    "verification": {
+      "sqlite_module": {
+        "status": "PASS",
+        "rch_job": "j-29983848133558291",
+        "worker": "ovh-a",
+        "passed": 129,
+        "failed": 0,
+        "scope": "database::sqlite::tests with sqlite,test-internals"
+      },
+      "neutral_consumer": {
+        "status": "PASS",
+        "rch_job": "j-29983848133558278",
+        "worker": "ovh-a",
+        "bounded_cases": 13,
+        "failed": 0,
+        "scope": "real Asupersync and FrankenSQLite adapter checked-SQL decisions plus terminal blocking-pool quiescence"
+      },
+      "repository_contract": {
+        "status": "PASS",
+        "rch_job": "j-29983848133558293",
+        "worker": "ovh-a",
+        "passed": 8,
+        "failed": 0,
+        "scope": "sqlite_parity_harness_contract structural and receipt validation"
+      }
+    },
+    "no_claims": [
+      "The checked policy does not make *_unchecked APIs safe for untrusted SQL.",
+      "The neutral adapter proves declared admission parity, not arbitrary engine semantic equivalence.",
+      "Dynamic extension loading is blocked defensively; this packet does not claim it was enabled by the incumbent build.",
+      "This phase does not authorize dependency cutover or removal of rusqlite or sqlparser."
     ]
   },
   "phase1_validation_frontier": {
