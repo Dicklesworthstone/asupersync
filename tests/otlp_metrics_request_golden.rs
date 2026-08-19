@@ -536,6 +536,70 @@ fn test_metric_data_types_coverage() {
 }
 
 #[cfg(all(feature = "metrics", feature = "test-internals"))]
+fn loopback_otlp_capture(
+    path: &str,
+    request_count: usize,
+) -> (
+    String,
+    std::sync::mpsc::Receiver<Vec<u8>>,
+    std::thread::JoinHandle<()>,
+) {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback collector");
+    let endpoint = format!(
+        "http://{}{}",
+        listener.local_addr().expect("collector addr"),
+        path
+    );
+    let (body_tx, body_rx) = mpsc::sync_channel(request_count);
+    let collector = std::thread::spawn(move || {
+        for _ in 0..request_count {
+            let (mut stream, _) = listener.accept().expect("accept exporter connection");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("collector read timeout");
+            let mut request = Vec::new();
+            let mut buffer = [0u8; 4096];
+            let (header_end, content_length) = loop {
+                let read = stream.read(&mut buffer).expect("read exporter request");
+                assert_ne!(read, 0, "exporter closed before HTTP headers");
+                request.extend_from_slice(&buffer[..read]);
+                if let Some(end) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+                    let header_end = end + 4;
+                    let headers =
+                        std::str::from_utf8(&request[..header_end]).expect("ASCII headers");
+                    let content_length = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().expect("content length"))
+                        })
+                        .expect("content-length header");
+                    break (header_end, content_length);
+                }
+            };
+            while request.len() < header_end + content_length {
+                let read = stream.read(&mut buffer).expect("read exporter body");
+                assert_ne!(read, 0, "exporter closed before complete body");
+                request.extend_from_slice(&buffer[..read]);
+            }
+            body_tx
+                .send(request[header_end..header_end + content_length].to_vec())
+                .expect("publish collector body");
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .expect("write collector response");
+        }
+    });
+    (endpoint, body_rx, collector)
+}
+
+#[cfg(all(feature = "metrics", feature = "test-internals"))]
 fn lab_owned_metrics_bytes(seed: u64) -> Vec<Vec<u8>> {
     use asupersync::lab::{LabConfig, LabRuntime};
     use asupersync::observability::{
@@ -590,6 +654,119 @@ fn owned_metrics_lab_replay_is_byte_identical() {
 }
 
 #[cfg(all(feature = "metrics", feature = "test-internals"))]
+fn lab_owned_trace_bytes(seed: u64) -> Vec<Vec<u8>> {
+    use asupersync::lab::{LabConfig, LabRuntime};
+    use asupersync::observability::{
+        OtlpTraceEventInput, OtlpTraceSpanInput, OtlpTraceStatus, OwnedOtlpStatusCode,
+        OwnedOtlpTraces,
+    };
+    use asupersync::types::Budget;
+    use parking_lot::Mutex;
+    use std::sync::Arc;
+
+    let mut runtime = LabRuntime::new(LabConfig::new(seed).max_steps(1_000));
+    let root_region = runtime.state.create_root_region(Budget::INFINITE);
+    let output = Arc::new(Mutex::new(None));
+    let task_output = Arc::clone(&output);
+    let (task_id, _handle) = runtime
+        .state
+        .create_task(root_region, Budget::INFINITE, async move {
+            let trace_id = [0x31; 16];
+            let root_id = [0x41; 8];
+            let child_id = [0x42; 8];
+            let events = [OtlpTraceEventInput::new(200, "cancel-requested")];
+            let root = OtlpTraceSpanInput::new(trace_id, root_id, "region.root", 100, 500);
+            let child = OtlpTraceSpanInput::new(trace_id, child_id, "task.cancelled", 150, 400)
+                .with_parent_span_id(root_id)
+                .with_events(&events)
+                .with_status(OtlpTraceStatus::new(
+                    OwnedOtlpStatusCode::Error,
+                    "cancelled",
+                ));
+            *task_output.lock() = Some(
+                OwnedOtlpTraces::try_new(Default::default())
+                    .expect("valid owned trace mapper")
+                    .collect(
+                        &[child, root],
+                        &[("service.name", "lab-trace-replay")],
+                    )
+                    .expect("lab trace collection")
+                    .into_requests(),
+            );
+        })
+        .expect("create deterministic trace producer task");
+    runtime
+        .scheduler
+        .lock()
+        .schedule(task_id, Budget::INFINITE.priority);
+    runtime.run_until_quiescent();
+    assert!(runtime.oracles.check_all(runtime.now()).is_empty());
+    let bytes = output.lock().take().expect("trace producer completed");
+    bytes
+}
+
+#[cfg(all(feature = "metrics", feature = "test-internals"))]
+#[test]
+fn owned_traces_lab_replay_is_byte_identical() {
+    assert_eq!(
+        lab_owned_trace_bytes(0x0A41),
+        lab_owned_trace_bytes(0x0A41)
+    );
+}
+
+#[cfg(all(feature = "metrics", feature = "test-internals"))]
+#[test]
+fn owned_traces_loopback_http_wire_smoke_decodes_request() {
+    use asupersync::cx::Cx;
+    use asupersync::observability::{
+        OtlpHttpExporter, OtlpTraceEventInput, OtlpTraceSpanInput, OtlpTraceStatus,
+        OwnedOtlpStatusCode, OwnedOtlpTraces,
+    };
+    use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
+    use prost::Message;
+
+    let (endpoint, body_rx, collector) = loopback_otlp_capture("/v1/traces", 1);
+    let trace_id = [0x51; 16];
+    let root_id = [0x61; 8];
+    let child_id = [0x62; 8];
+    let events = [OtlpTraceEventInput::new(250, "cancel-requested")];
+    let root = OtlpTraceSpanInput::new(trace_id, root_id, "region.root", 100, 500);
+    let child = OtlpTraceSpanInput::new(trace_id, child_id, "task.cancelled", 200, 400)
+        .with_parent_span_id(root_id)
+        .with_events(&events)
+        .with_status(OtlpTraceStatus::new(
+            OwnedOtlpStatusCode::Error,
+            "parent cancelled",
+        ));
+    let traces = OwnedOtlpTraces::try_new(Default::default()).expect("valid trace mapper");
+    let exporter = OtlpHttpExporter::try_new(endpoint).expect("valid trace endpoint");
+    asupersync::test_utils::run_test(|| async {
+        let cx = Cx::current().expect("native test runtime installs Cx");
+        exporter
+            .send_owned_traces(&cx, &traces, &[child, root])
+            .await
+            .expect("loopback collector accepts owned traces");
+    });
+
+    collector.join().expect("collector thread");
+    let body = body_rx.recv().expect("trace collector body");
+    let request = ExportTraceServiceRequest::decode(body.as_slice()).expect("generated decode");
+    let spans = &request.resource_spans[0].scope_spans[0].spans;
+    assert_eq!(
+        spans.iter().map(|span| span.name.as_str()).collect::<Vec<_>>(),
+        ["region.root", "task.cancelled"]
+    );
+    assert!(spans[0].parent_span_id.is_empty());
+    assert_eq!(spans[1].parent_span_id, root_id);
+    assert_eq!(spans[1].events[0].name, "cancel-requested");
+    assert_eq!(spans[1].status.as_ref().expect("status").code, 2);
+    assert_eq!(
+        spans[1].status.as_ref().expect("status").message,
+        "parent cancelled"
+    );
+}
+
+#[cfg(all(feature = "metrics", feature = "test-internals"))]
 #[test]
 fn owned_metrics_loopback_http_wire_smoke_decodes_request() {
     use asupersync::cx::Cx;
@@ -599,57 +776,9 @@ fn owned_metrics_loopback_http_wire_smoke_decodes_request() {
     use asupersync::types::{RegionId, TaskId};
     use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
     use prost::Message;
-    use std::io::{Read, Write};
-    use std::net::TcpListener;
-    use std::sync::mpsc;
     use std::time::Duration;
 
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback collector");
-    let endpoint = format!(
-        "http://{}/v1/metrics",
-        listener.local_addr().expect("collector addr")
-    );
-    let (body_tx, body_rx) = mpsc::sync_channel(2);
-    let collector = std::thread::spawn(move || {
-        for _ in 0..2 {
-            let (mut stream, _) = listener.accept().expect("accept exporter connection");
-            stream
-                .set_read_timeout(Some(Duration::from_secs(5)))
-                .expect("collector read timeout");
-            let mut request = Vec::new();
-            let mut buffer = [0u8; 4096];
-            let (header_end, content_length) = loop {
-                let read = stream.read(&mut buffer).expect("read exporter request");
-                assert_ne!(read, 0, "exporter closed before HTTP headers");
-                request.extend_from_slice(&buffer[..read]);
-                if let Some(end) = request.windows(4).position(|window| window == b"\r\n\r\n") {
-                    let header_end = end + 4;
-                    let headers =
-                        std::str::from_utf8(&request[..header_end]).expect("ASCII headers");
-                    let content_length = headers
-                        .lines()
-                        .find_map(|line| {
-                            let (name, value) = line.split_once(':')?;
-                            name.eq_ignore_ascii_case("content-length")
-                                .then(|| value.trim().parse::<usize>().expect("content length"))
-                        })
-                        .expect("content-length header");
-                    break (header_end, content_length);
-                }
-            };
-            while request.len() < header_end + content_length {
-                let read = stream.read(&mut buffer).expect("read exporter body");
-                assert_ne!(read, 0, "exporter closed before complete body");
-                request.extend_from_slice(&buffer[..read]);
-            }
-            body_tx
-                .send(request[header_end..header_end + content_length].to_vec())
-                .expect("publish collector body");
-            stream
-                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
-                .expect("write collector response");
-        }
-    });
+    let (endpoint, body_rx, collector) = loopback_otlp_capture("/v1/metrics", 2);
 
     let metrics = OwnedOtlpMetrics::try_new(
         OwnedOtlpMetricsConfig::new(1_000).with_max_cardinality_per_metric(1),
@@ -769,7 +898,9 @@ fn owned_metrics_loopback_http_wire_smoke_decodes_request() {
 fn owned_metrics_external_otel_collector_accepts_and_exports_request() {
     use asupersync::cx::Cx;
     use asupersync::observability::{
-        MetricsProvider, OtlpHttpExporter, OutcomeKind, OwnedOtlpMetrics, OwnedOtlpMetricsConfig,
+        MetricsProvider, OtlpHttpExporter, OtlpTraceEventInput, OtlpTraceSpanInput,
+        OtlpTraceStatus, OutcomeKind, OwnedOtlpMetrics, OwnedOtlpMetricsConfig,
+        OwnedOtlpStatusCode, OwnedOtlpTraces,
     };
     use asupersync::types::{RegionId, TaskId};
     use sha2::{Digest, Sha256};
@@ -855,10 +986,10 @@ fn owned_metrics_external_otel_collector_accepts_and_exports_request() {
     let port_probe = TcpListener::bind("127.0.0.1:0").expect("reserve collector port");
     let collector_address = port_probe.local_addr().expect("collector port");
     drop(port_probe);
-    let output_path = work_dir.join("metrics.jsonl");
+    let output_path = work_dir.join("signals.jsonl");
     let config_path = work_dir.join("collector.yaml");
     let config = format!(
-        "receivers:\n  otlp:\n    protocols:\n      http:\n        endpoint: {collector_address}\nexporters:\n  file:\n    path: {}\n    flush_interval: 100ms\nservice:\n  telemetry:\n    logs:\n      level: warn\n  pipelines:\n    metrics:\n      receivers: [otlp]\n      exporters: [file]\n",
+        "receivers:\n  otlp:\n    protocols:\n      http:\n        endpoint: {collector_address}\nexporters:\n  file:\n    path: {}\n    flush_interval: 100ms\nservice:\n  telemetry:\n    logs:\n      level: warn\n  pipelines:\n    metrics:\n      receivers: [otlp]\n      exporters: [file]\n    traces:\n      receivers: [otlp]\n      exporters: [file]\n",
         output_path.display()
     );
     fs::write(&config_path, config).expect("write collector config");
@@ -884,32 +1015,53 @@ fn owned_metrics_external_otel_collector_accepts_and_exports_request() {
     metrics.task_spawned(region, task);
     metrics.task_completed(task, OutcomeKind::Err, Duration::from_millis(15));
     assert_eq!(metrics.rejected_updates(), 2);
-    let exporter = OtlpHttpExporter::try_new(format!("http://{collector_address}/v1/metrics"))
+    let metrics_exporter =
+        OtlpHttpExporter::try_new(format!("http://{collector_address}/v1/metrics"))
         .expect("valid collector endpoint");
+    let traces_exporter = OtlpHttpExporter::try_new(format!("http://{collector_address}/v1/traces"))
+        .expect("valid trace collector endpoint");
+    let traces = OwnedOtlpTraces::try_new(Default::default()).expect("valid trace mapper");
+    let trace_id = [0x71; 16];
+    let root_id = [0x72; 8];
+    let child_id = [0x73; 8];
+    let events = [OtlpTraceEventInput::new(250, "cancel-requested")];
+    let root_span = OtlpTraceSpanInput::new(trace_id, root_id, "region.root", 100, 500);
+    let child_span = OtlpTraceSpanInput::new(trace_id, child_id, "task.cancelled", 200, 400)
+        .with_parent_span_id(root_id)
+        .with_events(&events)
+        .with_status(OtlpTraceStatus::new(
+            OwnedOtlpStatusCode::Error,
+            "parent cancelled",
+        ));
     asupersync::test_utils::run_test(|| async {
         let cx = Cx::current().expect("native test runtime installs Cx");
-        exporter
+        metrics_exporter
             .send_owned_metrics(&cx, &metrics, 2_000)
             .await
             .expect("official collector accepts owned metrics");
         metrics.reset(3_000).expect("rotate accumulation epoch");
         metrics.task_spawned(region, task);
-        exporter
+        metrics_exporter
             .send_owned_metrics(&cx, &metrics, 4_000)
             .await
             .expect("official collector accepts reset metrics");
+        traces_exporter
+            .send_owned_traces(&cx, &traces, &[child_span, root_span])
+            .await
+            .expect("official collector accepts owned traces");
     });
 
     let deadline = Instant::now() + Duration::from_secs(15);
     let exported = loop {
         if let Ok(text) = fs::read_to_string(&output_path)
             && text.matches("asupersync.tasks.spawned").count() >= 2
+            && text.contains("task.cancelled")
         {
             break text;
         }
         assert!(
             Instant::now() < deadline,
-            "official collector did not export the accepted metric within 15 seconds"
+            "official collector did not export the accepted signals within 15 seconds"
         );
         std::thread::sleep(Duration::from_millis(50));
     };
@@ -929,4 +1081,8 @@ fn owned_metrics_external_otel_collector_accepts_and_exports_request() {
     assert!(canonical_output.contains("ok"));
     assert!(canonical_output.contains("service.name"));
     assert!(canonical_output.contains("asupersync"));
+    assert!(canonical_output.contains("region.root"));
+    assert!(canonical_output.contains("task.cancelled"));
+    assert!(canonical_output.contains("cancel-requested"));
+    assert!(canonical_output.contains("parent cancelled"));
 }
