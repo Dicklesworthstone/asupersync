@@ -10046,7 +10046,7 @@ fn trace_config_summary(cx: &Cx, operation: &str, config: &QuicConfig, peer_id: 
 /// coroutine (Hello, manifest, RaptorQ symbol spray over QUIC DATAGRAMs, and the
 /// fountain feedback loop) until the receiver returns a committed Proof.
 ///
-/// Requires [`QuicConfig::client_tls`] to be set; without it (or without the
+/// Requires `QuicConfig::client_tls` to be set; without it (or without the
 /// `tls` feature) it fails closed — there is no insecure transport path.
 ///
 /// [`transport_tcp::send_path`]: crate::net::atp::transport_tcp::send_path

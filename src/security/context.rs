@@ -31,7 +31,7 @@ const REPLICA_AUTHORIZATION_DOMAIN: &[u8] = b"asupersync::security::replica_auth
 /// rejected by panicking — silent ignore is worse, since a caller
 /// believing they downgraded would assume looser semantics that
 /// don't apply. Tests that need to construct a context in a specific
-/// mode should use [`SecurityContext::for_testing_with_mode`] which
+/// mode should use `SecurityContext::for_testing_with_mode`, which
 /// sets the mode at CONSTRUCTION time (no transition needed).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthMode {
@@ -208,7 +208,7 @@ impl SecurityContext {
     /// authentication for every subsequent symbol verification.
     ///
     /// Tests that need to verify Permissive / Disabled behavior must
-    /// construct via [`Self::for_testing_with_mode`] instead.
+    /// construct via `Self::for_testing_with_mode` instead.
     ///
     /// # Panics
     ///

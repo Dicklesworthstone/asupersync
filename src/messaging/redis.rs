@@ -1591,7 +1591,7 @@ pub struct RedisProtocolLimits {
     pub max_array_len: usize,
     /// Maximum declared bulk string length.
     ///
-    /// When decoding from a [`RedisConnection`], the effective buffered-reply
+    /// When decoding from a `RedisConnection`, the effective buffered-reply
     /// limit is the smaller of this value and [`Self::max_frame_size`] (minus
     /// RESP framing bytes). Standalone [`RespValue::try_decode_with_limits`]
     /// calls apply this declared-length limit but do not buffer network input.

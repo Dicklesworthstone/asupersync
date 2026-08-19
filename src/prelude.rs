@@ -41,7 +41,7 @@
 //!
 //! Deterministic lab essentials (only under `cfg(test)` or the `test-internals`
 //! feature — these are testing tools, not production surface):
-//! - [`LabRuntime`] / [`LabConfig`].
+//! - [`crate::LabRuntime`] / [`crate::LabConfig`].
 //!
 //! # Deliberate exclusions (and why)
 //!
