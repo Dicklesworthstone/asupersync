@@ -10,7 +10,7 @@ Asupersync is a spec-first, cancel-correct, capability-secure async runtime for 
 - Commit links point to representative commits, not exhaustive lists.
 - Organized by landed capabilities within each version, not by diff order.
 
-Scope window: current work through 2026-08-18, reconstructed from git history,
+Scope window: current work through 2026-08-19, reconstructed from git history,
 beads, benchmark ledgers, and live repo artifacts; the latest published
 GitHub Release/tag baseline is `v0.4.8`.
 
@@ -55,6 +55,39 @@ GitHub Release/tag baseline is `v0.4.8`.
 ---
 
 ## [Unreleased]
+
+### Runtime API
+
+- **Cloned runtime handles can now mint production request contexts.**
+  `RuntimeHandle::request_cx_with_budget` and the fallible
+  `try_request_cx_with_budget` are additive counterparts to the established
+  `Runtime` method. The resulting `Cx` retains the request budget, root region,
+  I/O and timer drivers, spawn gateway, and pending-spawn accounting. A weak
+  handle whose runtime has already gone away fails closed with
+  `SpawnError::RuntimeUnavailable` instead of manufacturing authority
+  ([`04a4914`](https://github.com/Dicklesworthstone/asupersync/commit/04a4914afff4b131bba82760e17d1fbd4dcc53c3)).
+
+### Compatibility evidence
+
+- **The published v0.4.4 cancellation boundary now has a permanent external
+  consumer canary.** A standalone fixture depends on exactly `asupersync
+  = "=0.4.4"`, reproduces FrankenGraphDB's stale outer-`Cancelled`
+  expectation, and then verifies the shipped acknowledged-cancellation result
+  and cleanup behavior. The RCH-only release lane rejects local fallback,
+  skipped execution, and zero passed cases. This is exact-release compatibility
+  evidence for v0.4.4, not current-HEAD native-runtime proof and not proof that
+  the real FrankenGraphDB consumer has completed its migration
+  ([`6ab560f`](https://github.com/Dicklesworthstone/asupersync/commit/6ab560f2d77a94638cb1ad566cab0ca30388f343)).
+
+### ATP security
+
+- **RQ SSH bootstrap keys no longer travel in process arguments.** Generated
+  authentication keys are delivered through bounded protected standard input;
+  bootstrap subprocesses lose the key-bearing environment, captured output is
+  redacted, and configurations that would divert the protected input fail
+  closed. OpenSSH token expansion and local-hostname preflight now preserve the
+  intended byte semantics without re-exposing the secret
+  ([`515d96e`](https://github.com/Dicklesworthstone/asupersync/commit/515d96e7fd7444b33f14e7684c4ba4d988fb58e0)).
 
 ## [v0.4.8] - 2026-08-18
 
