@@ -1299,6 +1299,7 @@ pub struct SqliteRowStream<'connection> {
     receiver: mpsc::Receiver<SqliteRowStreamMessage>,
     handle: crate::runtime::blocking_pool::BlockingTaskHandle,
     counters: Arc<SqliteRowStreamCounters>,
+    phase: Arc<Mutex<SqliteConnectionOpPhase>>,
     finished: bool,
     /// br-asupersync-1cjrtx: interrupt handle shared with the owning
     /// connection so abandoning or cancelling the stream aborts an
@@ -1319,6 +1320,25 @@ impl fmt::Debug for SqliteRowStream<'_> {
 }
 
 impl SqliteRowStream<'_> {
+    fn request_cancel(&self) -> SqliteConnectionOpPhase {
+        let mut phase = self.phase.lock();
+        let observed = *phase;
+        match observed {
+            SqliteConnectionOpPhase::Queued => {
+                *phase = SqliteConnectionOpPhase::CancelRequested;
+            }
+            SqliteConnectionOpPhase::Running => {
+                *phase = SqliteConnectionOpPhase::CancelRequested;
+                // Keep the phase lock held until sqlite3_interrupt returns so
+                // the worker cannot publish Completed and release the
+                // connection to a neighbouring operation during the handoff.
+                self.interrupt.interrupt();
+            }
+            SqliteConnectionOpPhase::CancelRequested | SqliteConnectionOpPhase::Completed => {}
+        }
+        observed
+    }
+
     /// Returns the next row, or `None` once the SQLite statement is exhausted.
     pub async fn next(&mut self, cx: &Cx) -> Outcome<Option<SqliteRow>, SqliteError> {
         if self.finished {
@@ -1372,10 +1392,21 @@ impl SqliteRowStream<'_> {
             return;
         }
         self.finished = true;
+        let cancel_phase = self.request_cancel();
         self.handle.cancel();
         if !self.handle.is_done() {
-            self.interrupt.interrupt();
-            cx.trace("client.wire_cancel proto=sqlite outcome=interrupt_sent op=row_stream");
+            match cancel_phase {
+                SqliteConnectionOpPhase::Running => cx.trace(
+                    "client.wire_cancel proto=sqlite outcome=interrupt_sent op=row_stream",
+                ),
+                SqliteConnectionOpPhase::Queued => cx.trace(
+                    "client.wire_cancel proto=sqlite outcome=skipped op=row_stream reason=queued",
+                ),
+                SqliteConnectionOpPhase::Completed => cx.trace(
+                    "client.wire_cancel proto=sqlite outcome=skipped op=row_stream reason=completed",
+                ),
+                SqliteConnectionOpPhase::CancelRequested => {}
+            }
             let drained = crate::combinator::commit_section(cx, MASKED_DRAIN_POLLS, async {
                 loop {
                     match self.receiver.recv(cx).await {
@@ -1416,17 +1447,8 @@ impl SqliteRowStream<'_> {
         if !self.finished {
             self.finished = true;
             self.receiver.close();
+            self.request_cancel();
             self.handle.cancel();
-            // br-asupersync-1cjrtx: abort an in-flight long VM step instead
-            // of letting an abandoned stream's statement run to its next
-            // row boundary. The is_done guard narrows the inherent
-            // sqlite3_interrupt race (a statement finishing concurrently);
-            // the worst case is a retryable interrupt of a neighbouring
-            // statement, which sqlite documents as expected interrupt
-            // semantics.
-            if !self.handle.is_done() {
-                self.interrupt.interrupt();
-            }
         }
     }
 }
@@ -1441,6 +1463,25 @@ impl Drop for SqliteRowStream<'_> {
 struct SqliteConnectionInner {
     /// The actual SQLite connection. None if closed.
     conn: Option<rusqlite::Connection>,
+}
+
+/// Lifecycle of one blocking-pool operation against a SQLite connection.
+///
+/// SQLite's interrupt handle is connection-global. Tracking whether this
+/// particular operation is merely queued, actively owns the connection, or
+/// has already finished prevents cancellation of one waiter from interrupting
+/// an unrelated statement that currently owns the connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SqliteConnectionOpPhase {
+    Queued,
+    Running,
+    CancelRequested,
+    Completed,
+}
+
+enum SqliteConnectionOpCompletion<R> {
+    Finished(Result<R, SqliteError>),
+    Cancelled,
 }
 
 impl SqliteConnectionInner {
@@ -1506,6 +1547,17 @@ impl fmt::Debug for SqliteConnection {
 }
 
 impl SqliteConnection {
+    /// Interrupts the SQLite statement currently executing on this connection.
+    ///
+    /// This is an immediate, thread-safe request backed by
+    /// `sqlite3_interrupt`. If no statement is running, it has no effect. An
+    /// interrupted operation reports its ordinary SQLite interruption error;
+    /// use [`Cx`] cancellation when the caller needs a structured
+    /// [`Outcome::Cancelled`] result and the corresponding drain guarantee.
+    pub fn interrupt(&self) {
+        self.interrupt.interrupt();
+    }
+
     /// Sets the per-connection statement-timeout override
     /// (br-asupersync-server-stack-hardening-eeexl1.1.2).
     ///
@@ -1566,55 +1618,118 @@ impl SqliteConnection {
         }
 
         let inner = Arc::clone(&self.inner);
+        let phase = Arc::new(Mutex::new(SqliteConnectionOpPhase::Queued));
+        let worker_phase = Arc::clone(&phase);
         let (tx, mut rx) = crate::channel::oneshot::channel();
-        let permit = tx.reserve(cx);
+        let permit = match tx.reserve(cx) {
+            Ok(permit) => permit,
+            Err(crate::channel::oneshot::SendError::Cancelled(())) => {
+                return Outcome::Cancelled(sqlite_cancelled_reason(cx));
+            }
+            Err(crate::channel::oneshot::SendError::Disconnected(())) => {
+                return Outcome::Err(SqliteError::Sqlite(format!(
+                    "failed to reserve result channel for {op_name}"
+                )));
+            }
+        };
 
         let handle = self.pool.spawn(move || {
-            let result = (|| {
+            let completion = (|| {
                 let guard = inner.lock();
-                let conn = guard.get()?;
-                // br-asupersync-server-stack-hardening-eeexl1.1.2: arm the
-                // budget-derived statement timeout for the duration of this
-                // operation. Wall-clock by necessity — the deadline fires on
-                // a blocking-pool thread that has no virtual-time access.
-                // Arming must succeed before the op runs: silently running
-                // without the requested bound would void the contract.
-                if let Some(limit) = timeout {
-                    let deadline = std::time::Instant::now() + limit;
-                    conn.progress_handler(
-                        TIMEOUT_PROGRESS_OPS,
-                        Some(move || std::time::Instant::now() >= deadline),
-                    )
-                    .map_err(|e| {
-                        SqliteError::Sqlite(format!("failed to arm statement timeout: {e}"))
-                    })?;
+                {
+                    let mut phase = worker_phase.lock();
+                    match *phase {
+                        SqliteConnectionOpPhase::Queued => {
+                            *phase = SqliteConnectionOpPhase::Running;
+                        }
+                        SqliteConnectionOpPhase::CancelRequested => {
+                            *phase = SqliteConnectionOpPhase::Completed;
+                            drop(phase);
+                            drop(guard);
+                            return SqliteConnectionOpCompletion::Cancelled;
+                        }
+                        SqliteConnectionOpPhase::Running | SqliteConnectionOpPhase::Completed => {
+                            unreachable!("a SQLite connection operation starts exactly once")
+                        }
+                    }
                 }
-                let result = f(conn);
-                if timeout.is_some() {
-                    // Best-effort disarm; failure here implies a broken db
-                    // handle, which every subsequent operation will surface.
-                    let _ = conn.progress_handler(0, None::<fn() -> bool>);
-                }
-                let result = match (timeout, result) {
-                    (Some(limit), Err(err)) if sqlite_error_is_interrupt(&err) => {
+
+                let result = (|| {
+                    let conn = guard.get()?;
+                    // br-asupersync-server-stack-hardening-eeexl1.1.2: arm the
+                    // budget-derived statement timeout for the duration of this
+                    // operation. Wall-clock by necessity — the deadline fires on
+                    // a blocking-pool thread that has no virtual-time access.
+                    // Arming must succeed before the op runs: silently running
+                    // without the requested bound would void the contract.
+                    if let Some(limit) = timeout {
+                        let deadline = std::time::Instant::now() + limit;
+                        conn.progress_handler(
+                            TIMEOUT_PROGRESS_OPS,
+                            Some(move || std::time::Instant::now() >= deadline),
+                        )
+                        .map_err(|e| {
+                            SqliteError::Sqlite(format!("failed to arm statement timeout: {e}"))
+                        })?;
+                    }
+                    let result = f(conn);
+                    if timeout.is_some() {
+                        // Best-effort disarm; failure here implies a broken db
+                        // handle, which every subsequent operation will surface.
+                        let _ = conn.progress_handler(0, None::<fn() -> bool>);
+                    }
+                    result
+                })();
+                let cancellation_requested = {
+                    let mut phase = worker_phase.lock();
+                    let cancellation_requested = *phase == SqliteConnectionOpPhase::CancelRequested;
+                    *phase = SqliteConnectionOpPhase::Completed;
+                    cancellation_requested
+                };
+                let result = match (cancellation_requested, timeout, result) {
+                    (true, _, Err(err)) if sqlite_error_is_interrupt(&err) => {
+                        drop(guard);
+                        return SqliteConnectionOpCompletion::Cancelled;
+                    }
+                    (_, Some(limit), Err(err)) if sqlite_error_is_interrupt(&err) => {
                         Err(SqliteError::StatementTimeout { limit })
                     }
-                    (_, result) => result,
+                    (_, _, result) => result,
                 };
                 drop(guard);
-                result
+                SqliteConnectionOpCompletion::Finished(result)
             })();
-            // oneshot::Sender::reserve now returns Result<SendPermit, SendError>;
-            // see open path above for rationale.
-            if let Ok(p) = permit {
-                let _ = p.send(result);
-            }
+            let _ = permit.send(completion);
         });
 
         match rx.recv(cx).await {
-            Ok(Ok(result)) => Outcome::Ok(result),
-            Ok(Err(e)) => Outcome::Err(e),
+            Ok(SqliteConnectionOpCompletion::Finished(Ok(result))) => Outcome::Ok(result),
+            Ok(SqliteConnectionOpCompletion::Finished(Err(e))) => Outcome::Err(e),
+            Ok(SqliteConnectionOpCompletion::Cancelled) => Outcome::Cancelled(
+                cx.cancel_reason()
+                    .unwrap_or_else(|| CancelReason::user("cancelled")),
+            ),
             Err(crate::channel::oneshot::RecvError::Cancelled) => {
+                let cancel_phase = {
+                    let mut phase = phase.lock();
+                    let observed = *phase;
+                    match observed {
+                        SqliteConnectionOpPhase::Queued => {
+                            *phase = SqliteConnectionOpPhase::CancelRequested;
+                        }
+                        SqliteConnectionOpPhase::Running => {
+                            *phase = SqliteConnectionOpPhase::CancelRequested;
+                            // Hold the phase lock across sqlite3_interrupt so
+                            // the worker cannot publish Completed and release
+                            // the connection to a neighbouring operation in the
+                            // middle of this cancellation handoff.
+                            self.interrupt.interrupt();
+                        }
+                        SqliteConnectionOpPhase::CancelRequested
+                        | SqliteConnectionOpPhase::Completed => {}
+                    }
+                    observed
+                };
                 handle.cancel();
                 // br-asupersync-server-stack-hardening-eeexl1.1.2: wire-level
                 // cancel in the drain phase. `sqlite3_interrupt` aborts the
@@ -1623,14 +1738,33 @@ impl SqliteConnection {
                 // operation resolves Cancelled, so the connection mutex is
                 // free and no statement keeps running unobserved. The
                 // masked-poll budget keeps the drain step bounded.
-                self.interrupt.interrupt();
-                cx.trace(&format!(
-                    "client.wire_cancel proto=sqlite outcome=interrupt_sent op={op_name}"
-                ));
+                match cancel_phase {
+                    SqliteConnectionOpPhase::Running => cx.trace(&format!(
+                        "client.wire_cancel proto=sqlite outcome=interrupt_sent op={op_name}"
+                    )),
+                    SqliteConnectionOpPhase::Queued => cx.trace(&format!(
+                        "client.wire_cancel proto=sqlite outcome=skipped op={op_name} reason=queued"
+                    )),
+                    SqliteConnectionOpPhase::Completed => cx.trace(&format!(
+                        "client.wire_cancel proto=sqlite outcome=skipped op={op_name} reason=completed"
+                    )),
+                    SqliteConnectionOpPhase::CancelRequested => {}
+                }
                 let drained =
                     crate::combinator::commit_section(cx, MASKED_DRAIN_POLLS, rx.recv(cx)).await;
                 match drained {
-                    Ok(_) => cx.trace("client.wire_cancel proto=sqlite drain=job_completed"),
+                    Ok(SqliteConnectionOpCompletion::Finished(result)) => {
+                        cx.trace(
+                            "client.wire_cancel proto=sqlite drain=job_completed completion=won",
+                        );
+                        return match result {
+                            Ok(result) => Outcome::Ok(result),
+                            Err(err) => Outcome::Err(err),
+                        };
+                    }
+                    Ok(SqliteConnectionOpCompletion::Cancelled) => {
+                        cx.trace("client.wire_cancel proto=sqlite drain=job_cancelled");
+                    }
                     Err(crate::channel::oneshot::RecvError::Closed) => {
                         cx.trace("client.wire_cancel proto=sqlite drain=job_not_started");
                     }
@@ -2184,6 +2318,8 @@ impl SqliteConnection {
         let counters = Arc::new(SqliteRowStreamCounters::default());
         let worker_counters = Arc::clone(&counters);
         let (sender, receiver) = mpsc::channel(SQLITE_ROW_STREAM_CHANNEL_CAPACITY);
+        let phase = Arc::new(Mutex::new(SqliteConnectionOpPhase::Queued));
+        let worker_phase = Arc::clone(&phase);
 
         let handle = self.pool.spawn(move || {
             /// SQLite VM instructions between deadline checks — see
@@ -2192,68 +2328,92 @@ impl SqliteConnection {
 
             let result = (|| {
                 let guard = inner.lock();
-                let conn = guard.get()?;
-                if let Some(limit) = timeout {
-                    let deadline = std::time::Instant::now() + limit;
-                    conn.progress_handler(
-                        TIMEOUT_PROGRESS_OPS,
-                        Some(move || std::time::Instant::now() >= deadline),
-                    )
-                    .map_err(|e| {
-                        SqliteError::Sqlite(format!("failed to arm statement timeout: {e}"))
-                    })?;
-                }
-
-                // Inner closure so the disarm below runs on EVERY exit path
-                // of the statement work — a `?` escaping with the handler
-                // still armed would impose a stale deadline on the next
-                // operation that borrows this connection.
-                let body_result = (|| {
-                    let params_refs: Vec<&dyn rusqlite::ToSql> =
-                        params.iter().map(|v| v as &dyn rusqlite::ToSql).collect();
-
-                    let mut stmt = conn
-                        .prepare_cached(&sql)
-                        .map_err(|e| SqliteError::Sqlite(e.to_string()))?;
-
-                    let column_names: Vec<String> = stmt
-                        .column_names()
-                        .iter()
-                        .map(std::string::ToString::to_string)
-                        .collect();
-                    let columns: BTreeMap<String, usize> = column_names
-                        .iter()
-                        .enumerate()
-                        .map(|(i, name)| (name.clone(), i))
-                        .collect();
-                    let columns = Arc::new(columns);
-                    let column_count = stmt.column_count();
-
-                    let mut rows = stmt
-                        .query(params_refs.as_slice())
-                        .map_err(|e| SqliteError::Sqlite(e.to_string()))?;
-
-                    while let Some(row) = rows
-                        .next()
-                        .map_err(|e| SqliteError::Sqlite(e.to_string()))?
-                    {
-                        worker_counters.rows_stepped.fetch_add(1, Ordering::AcqRel);
-                        let row = sqlite_row_from_rusqlite_row(
-                            row,
-                            column_count,
-                            &column_names,
-                            &columns,
-                        )?;
-                        if !send_sqlite_stream_message(&sender, &worker_counters, Ok(row)) {
-                            break;
+                {
+                    let mut phase = worker_phase.lock();
+                    match *phase {
+                        SqliteConnectionOpPhase::Queued => {
+                            *phase = SqliteConnectionOpPhase::Running;
+                        }
+                        SqliteConnectionOpPhase::CancelRequested => {
+                            *phase = SqliteConnectionOpPhase::Completed;
+                            drop(phase);
+                            drop(guard);
+                            return Ok(());
+                        }
+                        SqliteConnectionOpPhase::Running | SqliteConnectionOpPhase::Completed => {
+                            unreachable!("a SQLite row-stream worker starts exactly once")
                         }
                     }
-                    Ok(())
-                })();
+                }
+                let body_result = (|| {
+                    let conn = guard.get()?;
+                    if let Some(limit) = timeout {
+                        let deadline = std::time::Instant::now() + limit;
+                        conn.progress_handler(
+                            TIMEOUT_PROGRESS_OPS,
+                            Some(move || std::time::Instant::now() >= deadline),
+                        )
+                        .map_err(|e| {
+                            SqliteError::Sqlite(format!("failed to arm statement timeout: {e}"))
+                        })?;
+                    }
 
-                if timeout.is_some() {
-                    // Best-effort disarm — see `run_connection_op`.
-                    let _ = conn.progress_handler(0, None::<fn() -> bool>);
+                    // Inner closure so the disarm below runs on EVERY exit path
+                    // of the statement work — a `?` escaping with the handler
+                    // still armed would impose a stale deadline on the next
+                    // operation that borrows this connection.
+                    let query_result = (|| {
+                        let params_refs: Vec<&dyn rusqlite::ToSql> =
+                            params.iter().map(|v| v as &dyn rusqlite::ToSql).collect();
+
+                        let mut stmt = conn
+                            .prepare_cached(&sql)
+                            .map_err(|e| SqliteError::Sqlite(e.to_string()))?;
+
+                        let column_names: Vec<String> = stmt
+                            .column_names()
+                            .iter()
+                            .map(std::string::ToString::to_string)
+                            .collect();
+                        let columns: BTreeMap<String, usize> = column_names
+                            .iter()
+                            .enumerate()
+                            .map(|(i, name)| (name.clone(), i))
+                            .collect();
+                        let columns = Arc::new(columns);
+                        let column_count = stmt.column_count();
+
+                        let mut rows = stmt
+                            .query(params_refs.as_slice())
+                            .map_err(|e| SqliteError::Sqlite(e.to_string()))?;
+
+                        while let Some(row) = rows
+                            .next()
+                            .map_err(|e| SqliteError::Sqlite(e.to_string()))?
+                        {
+                            worker_counters.rows_stepped.fetch_add(1, Ordering::AcqRel);
+                            let row = sqlite_row_from_rusqlite_row(
+                                row,
+                                column_count,
+                                &column_names,
+                                &columns,
+                            )?;
+                            if !send_sqlite_stream_message(&sender, &worker_counters, Ok(row)) {
+                                break;
+                            }
+                        }
+                        Ok(())
+                    })();
+
+                    if timeout.is_some() {
+                        // Best-effort disarm — see `run_connection_op`.
+                        let _ = conn.progress_handler(0, None::<fn() -> bool>);
+                    }
+                    query_result
+                })();
+                {
+                    let mut phase = worker_phase.lock();
+                    *phase = SqliteConnectionOpPhase::Completed;
                 }
                 drop(guard);
                 body_result
@@ -2279,6 +2439,7 @@ impl SqliteConnection {
             receiver,
             handle,
             counters,
+            phase,
             finished: false,
             interrupt: Arc::clone(&self.interrupt),
             _connection_lease: PhantomData,
@@ -3446,6 +3607,30 @@ mod tests {
     const INFINITE_QUERY: &str =
         "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c) SELECT count(*) FROM c";
 
+    fn run_signalled_infinite_query(
+        conn: &rusqlite::Connection,
+        started: std::sync::mpsc::SyncSender<()>,
+    ) -> Result<(), SqliteError> {
+        const RUNNING_PROGRESS_CALLBACKS: usize = 10_000;
+        let mut progress_callbacks = 0usize;
+        conn.progress_handler(
+            1,
+            Some(move || {
+                progress_callbacks = progress_callbacks.saturating_add(1);
+                if progress_callbacks == RUNNING_PROGRESS_CALLBACKS {
+                    let _ = started.try_send(());
+                }
+                false
+            }),
+        )
+        .map_err(|error| SqliteError::Sqlite(error.to_string()))?;
+        let result = conn
+            .query_row(INFINITE_QUERY, [], |_| Ok(()))
+            .map_err(|error| SqliteError::Sqlite(error.to_string()));
+        let _ = conn.progress_handler(0, None::<fn() -> bool>);
+        result
+    }
+
     fn traced_cx_with_budget(budget: Budget) -> (Cx, crate::trace::TraceBufferHandle) {
         let cx = Cx::new(
             RegionId::from_arena(ArenaIndex::new(0, 1)),
@@ -3610,6 +3795,332 @@ mod tests {
             match conn.query_unchecked(&fresh_cx, "SELECT 1", &[]).await {
                 Outcome::Ok(rows) => assert_eq!(rows.len(), 1),
                 other => panic!("connection unusable after drain: {other:?}"),
+            }
+        });
+    }
+
+    /// P5: cancelling work that is queued behind the connection mutex must not
+    /// fire the connection-global interrupt at the statement that currently
+    /// owns the connection.
+    #[test]
+    fn sqlite_p5_queued_cancel_does_not_interrupt_connection_owner() {
+        init_test_logging();
+        let owner_cx = create_test_cx();
+        let (queued_cx, queued_trace) = traced_cx_with_budget(Budget::INFINITE);
+        let conn = block_on(async {
+            match SqliteConnection::open_in_memory(&owner_cx).await {
+                Outcome::Ok(conn) => conn,
+                other => panic!("open_in_memory failed: {other:?}"),
+            }
+        });
+
+        let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
+        let mut owner = Box::pin(
+            conn.run_connection_op(&owner_cx, "queue_owner", move |raw| {
+                run_signalled_infinite_query(raw, started_tx)
+            }),
+        );
+        assert!(
+            block_on(futures_lite::future::poll_once(owner.as_mut())).is_none(),
+            "owner must remain in its runaway statement"
+        );
+        started_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("owner statement must start");
+
+        let executions = Arc::new(AtomicUsize::new(0));
+        let queued_executions = Arc::clone(&executions);
+        let mut queued = Box::pin(conn.run_connection_op(&queued_cx, "queued", move |_| {
+            queued_executions.fetch_add(1, Ordering::AcqRel);
+            Ok(())
+        }));
+        assert!(
+            block_on(futures_lite::future::poll_once(queued.as_mut())).is_none(),
+            "second operation must queue behind the owner"
+        );
+
+        queued_cx.cancel_fast(crate::types::CancelKind::User);
+        assert!(
+            block_on(futures_lite::future::poll_once(queued.as_mut())).is_none(),
+            "queued cancellation must drain until the worker acknowledges"
+        );
+        assert!(
+            block_on(futures_lite::future::poll_once(owner.as_mut())).is_none(),
+            "cancelling the queued operation must not interrupt the owner"
+        );
+
+        conn.interrupt();
+        match block_on(owner) {
+            Outcome::Err(err) if sqlite_error_is_interrupt(&err) => {}
+            other => panic!("explicit interrupt must stop the owner: {other:?}"),
+        }
+        match block_on(queued) {
+            Outcome::Cancelled(reason) => {
+                assert_eq!(reason.kind, crate::types::CancelKind::User);
+            }
+            other => panic!("queued operation must resolve as cancelled: {other:?}"),
+        }
+        assert_eq!(
+            executions.load(Ordering::Acquire),
+            0,
+            "cancelled queued work must never execute"
+        );
+        let messages =
+            user_trace_messages(&queued_trace, "client.wire_cancel proto=sqlite outcome=");
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("outcome=skipped")
+                    && message.contains("reason=queued")),
+            "queued cancellation must record why no interrupt was sent: {messages:?}"
+        );
+    }
+
+    /// P5: the row-stream worker has the same queued/running distinction as a
+    /// one-shot operation. Cancelling it before it owns the connection must not
+    /// interrupt an abandoned-but-still-running predecessor.
+    #[test]
+    fn sqlite_p5_queued_stream_cancel_does_not_interrupt_connection_owner() {
+        init_test_logging();
+        let owner_cx = create_test_cx();
+        let (stream_cx, stream_trace) = traced_cx_with_budget(Budget::INFINITE);
+        let mut conn = block_on(async {
+            match SqliteConnection::open_in_memory(&owner_cx).await {
+                Outcome::Ok(conn) => conn,
+                other => panic!("open_in_memory failed: {other:?}"),
+            }
+        });
+
+        let owner_interrupt = Arc::clone(&conn.interrupt);
+        let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
+        let (finished_tx, finished_rx) = std::sync::mpsc::sync_channel(1);
+        let mut owner =
+            Box::pin(
+                conn.run_connection_op(&owner_cx, "stream_queue_owner", move |raw| {
+                    let result = run_signalled_infinite_query(raw, started_tx);
+                    let interrupted = result
+                        .as_ref()
+                        .is_err_and(|error| sqlite_error_is_interrupt(error));
+                    let _ = finished_tx.send(interrupted);
+                    result
+                }),
+            );
+        assert!(
+            block_on(futures_lite::future::poll_once(owner.as_mut())).is_none(),
+            "owner must remain in its runaway statement"
+        );
+        started_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("owner statement must be executing before the stream queues");
+        drop(owner);
+
+        let mut stream = block_on(async {
+            match conn
+                .query_stream_unchecked(&stream_cx, "SELECT 1", &[])
+                .await
+            {
+                Outcome::Ok(stream) => stream,
+                other => panic!("query_stream failed to start: {other:?}"),
+            }
+        });
+        stream_cx.cancel_fast(crate::types::CancelKind::User);
+        let mut next = Box::pin(stream.next(&stream_cx));
+        let first_poll = block_on(futures_lite::future::poll_once(next.as_mut()));
+        assert!(
+            matches!(
+                finished_rx.try_recv(),
+                Err(std::sync::mpsc::TryRecvError::Empty)
+            ),
+            "queued stream cancellation must not interrupt the connection owner"
+        );
+
+        owner_interrupt.interrupt();
+        assert!(
+            finished_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("explicit interrupt must finish the owner"),
+            "owner must finish because of the explicit interrupt"
+        );
+        let outcome = match first_poll {
+            Some(outcome) => {
+                drop(next);
+                outcome
+            }
+            None => block_on(next),
+        };
+        match outcome {
+            Outcome::Cancelled(reason) => {
+                assert_eq!(reason.kind, crate::types::CancelKind::User);
+            }
+            other => panic!("queued row stream must resolve as cancelled: {other:?}"),
+        }
+        drop(stream);
+
+        let messages = user_trace_messages(
+            &stream_trace,
+            "client.wire_cancel proto=sqlite outcome=skipped op=row_stream",
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("reason=queued")),
+            "queued stream cancellation must explain why it skipped interrupt: {messages:?}"
+        );
+        let fresh_cx = create_test_cx();
+        block_on(async {
+            match conn.query_unchecked(&fresh_cx, "SELECT 1", &[]).await {
+                Outcome::Ok(rows) => assert_eq!(rows.len(), 1),
+                other => panic!("connection unusable after queued stream cancellation: {other:?}"),
+            }
+        });
+    }
+
+    /// P5: cancellation observed by the result-channel reserve is still a
+    /// before-start boundary; no blocking job or database side effect may run.
+    #[test]
+    fn sqlite_p5_reserve_race_cancellation_does_not_execute_operation() {
+        let setup_cx = create_test_cx();
+        let cancelled_cx = create_test_cx();
+        let conn = block_on(async {
+            match SqliteConnection::open_in_memory(&setup_cx).await {
+                Outcome::Ok(conn) => conn,
+                other => panic!("open_in_memory failed: {other:?}"),
+            }
+        });
+        cancelled_cx.cancel_fast(crate::types::CancelKind::User);
+
+        let executions = Arc::new(AtomicUsize::new(0));
+        let worker_executions = Arc::clone(&executions);
+        match block_on(
+            conn.run_connection_op(&cancelled_cx, "reserve_race", move |_| {
+                worker_executions.fetch_add(1, Ordering::AcqRel);
+                Ok(())
+            }),
+        ) {
+            Outcome::Cancelled(reason) => {
+                assert_eq!(reason.kind, crate::types::CancelKind::User);
+            }
+            other => panic!("pre-start reserve race must cancel: {other:?}"),
+        }
+        assert_eq!(executions.load(Ordering::Acquire), 0);
+    }
+
+    /// P5: once SQLite has committed the operation, that terminal result wins
+    /// over cancellation even if publication back to the async caller is still
+    /// in flight.
+    #[test]
+    fn sqlite_p5_committed_result_wins_finishing_cancellation() {
+        init_test_logging();
+        let (cx, trace) = traced_cx_with_budget(Budget::INFINITE);
+        let conn = block_on(async {
+            match SqliteConnection::open_in_memory(&cx).await {
+                Outcome::Ok(conn) => conn,
+                other => panic!("open_in_memory failed: {other:?}"),
+            }
+        });
+        block_on(async {
+            match conn
+                .execute_batch(&cx, "CREATE TABLE finishing (value INTEGER NOT NULL);")
+                .await
+            {
+                Outcome::Ok(()) => {}
+                other => panic!("schema setup failed: {other:?}"),
+            }
+        });
+
+        let (committed_tx, committed_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+        let mut operation = Box::pin(conn.run_connection_op(&cx, "finishing", move |raw| {
+            let affected = raw
+                .execute("INSERT INTO finishing(value) VALUES (7)", [])
+                .map_err(|error| SqliteError::Sqlite(error.to_string()))?;
+            committed_tx
+                .send(())
+                .expect("commit observer must remain live");
+            release_rx
+                .recv()
+                .expect("test must release result publication");
+            Ok(affected)
+        }));
+        assert!(
+            block_on(futures_lite::future::poll_once(operation.as_mut())).is_none(),
+            "operation must park before publishing its committed result"
+        );
+        committed_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("SQLite write must commit before cancellation");
+
+        cx.cancel_fast(crate::types::CancelKind::User);
+        assert!(
+            block_on(futures_lite::future::poll_once(operation.as_mut())).is_none(),
+            "cancel drain must wait for the committed result publication"
+        );
+        release_tx
+            .send(())
+            .expect("blocking operation must still be waiting");
+        match block_on(operation) {
+            Outcome::Ok(1) => {}
+            other => panic!("committed completion must win cancellation: {other:?}"),
+        }
+
+        let fresh_cx = create_test_cx();
+        block_on(async {
+            match conn
+                .query_unchecked(&fresh_cx, "SELECT COUNT(*) AS count FROM finishing", &[])
+                .await
+            {
+                Outcome::Ok(rows) => assert_eq!(
+                    rows[0]
+                        .get_i64("count")
+                        .expect("count column must remain readable"),
+                    1
+                ),
+                other => panic!("connection unusable after finishing race: {other:?}"),
+            }
+        });
+        let messages = user_trace_messages(&trace, "client.wire_cancel proto=sqlite ");
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("completion=won")),
+            "finishing race must record terminal-completion precedence: {messages:?}"
+        );
+    }
+
+    /// P5: embedders may request SQLite's native interrupt directly without
+    /// converting that request into structured Cx cancellation.
+    #[test]
+    fn sqlite_p5_explicit_interrupt_stops_statement_and_preserves_connection() {
+        let cx = create_test_cx();
+        let conn = block_on(async {
+            match SqliteConnection::open_in_memory(&cx).await {
+                Outcome::Ok(conn) => conn,
+                other => panic!("open_in_memory failed: {other:?}"),
+            }
+        });
+        let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
+        let mut operation = Box::pin(conn.run_connection_op(
+            &cx,
+            "explicit_interrupt",
+            move |raw| run_signalled_infinite_query(raw, started_tx),
+        ));
+        assert!(
+            block_on(futures_lite::future::poll_once(operation.as_mut())).is_none(),
+            "runaway statement must be in flight"
+        );
+        started_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("statement must start before explicit interrupt");
+
+        conn.interrupt();
+        match block_on(operation) {
+            Outcome::Err(err) if sqlite_error_is_interrupt(&err) => {}
+            other => panic!("explicit interrupt must surface SQLite interruption: {other:?}"),
+        }
+        block_on(async {
+            match conn.query_unchecked(&cx, "SELECT 1", &[]).await {
+                Outcome::Ok(rows) => assert_eq!(rows.len(), 1),
+                other => panic!("connection unusable after explicit interrupt: {other:?}"),
             }
         });
     }
