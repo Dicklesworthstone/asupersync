@@ -1441,6 +1441,26 @@ impl OtlpLogsHttpExporter {
         }
     }
 
+    /// Create a logs exporter only if the default configuration is valid.
+    pub fn try_new(endpoint: impl Into<String>) -> Result<Self, OtlpConfigError> {
+        Ok(Self {
+            http: OtlpHttpExporter::try_new(endpoint)?,
+        })
+    }
+
+    /// Create a logs exporter from an immutable validated configuration.
+    #[must_use]
+    pub fn from_config(config: OtlpHttpConfig) -> Self {
+        Self {
+            http: OtlpHttpExporter::from_config(config),
+        }
+    }
+
+    /// Return a validated snapshot of the exporter's configuration.
+    pub fn config(&self) -> Result<OtlpHttpConfig, OtlpConfigError> {
+        self.http.config()
+    }
+
     /// Set request timeout.
     #[must_use]
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
@@ -1466,6 +1486,34 @@ impl OtlpLogsHttpExporter {
     #[must_use]
     pub fn with_compression(mut self, compression: bool) -> Self {
         self.http = self.http.with_compression(compression);
+        self
+    }
+
+    /// Select the endpoint transport-security policy.
+    #[must_use]
+    pub fn with_tls_policy(mut self, policy: OtlpTlsPolicy) -> Self {
+        self.http = self.http.with_tls_policy(policy);
+        self
+    }
+
+    /// Add an Authorization bearer token.
+    #[must_use]
+    pub fn with_bearer_token(mut self, token: impl Into<String>) -> Self {
+        self.http = self.http.with_bearer_token(token);
+        self
+    }
+
+    /// Add an API-key header.
+    #[must_use]
+    pub fn with_api_key(mut self, header_name: impl Into<String>, key: impl Into<String>) -> Self {
+        self.http = self.http.with_api_key(header_name, key);
+        self
+    }
+
+    /// Add a custom authentication header.
+    #[must_use]
+    pub fn with_auth_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.http = self.http.with_auth_header(name, value);
         self
     }
 
@@ -1938,13 +1986,657 @@ impl MetricsExporter for InMemoryExporter {
     }
 }
 
+/// Version of the validated OTLP HTTP configuration contract.
+pub const OTLP_HTTP_CONFIG_VERSION: u32 = 1;
+
+/// Maximum accepted OTLP endpoint length in bytes.
+pub const OTLP_HTTP_MAX_ENDPOINT_BYTES: usize = 4096;
+
+/// Maximum number of explicit authentication headers on one exporter.
+pub const OTLP_HTTP_MAX_AUTH_HEADERS: usize = 32;
+
+/// Maximum accepted authentication-header name length in bytes.
+pub const OTLP_HTTP_MAX_AUTH_HEADER_NAME_BYTES: usize = 256;
+
+/// Maximum accepted authentication-header value length in bytes.
+pub const OTLP_HTTP_MAX_AUTH_HEADER_VALUE_BYTES: usize = 8192;
+
+/// Maximum number of resolved resource attributes on one exporter.
+pub const OTLP_HTTP_MAX_RESOURCE_ATTRIBUTES: usize = 128;
+
+/// Maximum accepted resource-attribute key length in bytes.
+pub const OTLP_HTTP_MAX_RESOURCE_KEY_BYTES: usize = 256;
+
+/// Maximum accepted resource-attribute value length in bytes.
+pub const OTLP_HTTP_MAX_RESOURCE_VALUE_BYTES: usize = 4096;
+
+/// Maximum number of bounded retry attempts for one export.
+pub const OTLP_HTTP_MAX_RETRIES: u32 = 16;
+
+/// Transport security policy for an OTLP HTTP endpoint.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum OtlpTlsPolicy {
+    /// Permit either `http://` or `https://`; HTTPS still requires the `tls`
+    /// feature at build time.
+    #[default]
+    AllowPlaintext,
+    /// Require an `https://` endpoint.
+    RequireTls,
+}
+
+/// Stable, secret-free OTLP configuration error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum OtlpConfigError {
+    /// The endpoint is not a bounded absolute HTTP(S) URL.
+    InvalidEndpoint,
+    /// The selected policy requires HTTPS, but the endpoint uses HTTP.
+    TlsRequired,
+    /// The endpoint uses HTTPS, but this build lacks the `tls` feature.
+    TlsFeatureUnavailable,
+    /// The endpoint uses HTTPS, but this build has no certificate-root provider.
+    TlsRootsUnavailable,
+    /// Authentication headers were configured for a plaintext HTTP endpoint.
+    InsecureAuthTransport,
+    /// Compression was selected, but this build lacks the `compression` feature.
+    CompressionFeatureUnavailable,
+    /// The request timeout is zero.
+    ZeroTimeout,
+    /// A retry delay is zero or the initial delay exceeds the maximum delay.
+    InvalidRetryDelay,
+    /// The retry count exceeds the bounded exporter limit.
+    TooManyRetries,
+    /// An authentication-header name is empty or is not an RFC 9110 token.
+    InvalidHeaderName,
+    /// An authentication-header value is empty or contains a forbidden control byte.
+    InvalidHeaderValue,
+    /// An authentication header attempts to replace a transport-owned header.
+    ReservedHeaderName,
+    /// Authentication-header names are duplicated case-insensitively.
+    DuplicateHeaderName,
+    /// The authentication-header count exceeds the bounded exporter limit.
+    TooManyAuthHeaders,
+    /// A resource-attribute key or value violates the bounded schema.
+    InvalidResourceAttribute,
+    /// The resolved resource-attribute count exceeds the bounded schema.
+    TooManyResourceAttributes,
+}
+
+impl OtlpConfigError {
+    /// Stable machine-readable error code.
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::InvalidEndpoint => "otlp.config.invalid_endpoint",
+            Self::TlsRequired => "otlp.config.tls_required",
+            Self::TlsFeatureUnavailable => "otlp.config.tls_feature_unavailable",
+            Self::TlsRootsUnavailable => "otlp.config.tls_roots_unavailable",
+            Self::InsecureAuthTransport => "otlp.config.insecure_auth_transport",
+            Self::CompressionFeatureUnavailable => "otlp.config.compression_feature_unavailable",
+            Self::ZeroTimeout => "otlp.config.zero_timeout",
+            Self::InvalidRetryDelay => "otlp.config.invalid_retry_delay",
+            Self::TooManyRetries => "otlp.config.too_many_retries",
+            Self::InvalidHeaderName => "otlp.config.invalid_header_name",
+            Self::InvalidHeaderValue => "otlp.config.invalid_header_value",
+            Self::ReservedHeaderName => "otlp.config.reserved_header_name",
+            Self::DuplicateHeaderName => "otlp.config.duplicate_header_name",
+            Self::TooManyAuthHeaders => "otlp.config.too_many_auth_headers",
+            Self::InvalidResourceAttribute => "otlp.config.invalid_resource_attribute",
+            Self::TooManyResourceAttributes => "otlp.config.too_many_resource_attributes",
+        }
+    }
+
+    /// Whether retrying the same immutable configuration can succeed.
+    ///
+    /// Configuration failures are deterministic. A caller must change the
+    /// input or feature set before retrying; transient export failures use
+    /// [`OtlpError`] instead.
+    #[must_use]
+    pub const fn is_retryable(self) -> bool {
+        false
+    }
+}
+
+impl std::fmt::Display for OtlpConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let detail = match self {
+            Self::InvalidEndpoint => "endpoint must be a bounded absolute HTTP(S) URL",
+            Self::TlsRequired => "transport policy requires an HTTPS endpoint",
+            Self::TlsFeatureUnavailable => "HTTPS requires the asupersync tls feature",
+            Self::TlsRootsUnavailable => "HTTPS requires tls-native-roots or tls-webpki-roots",
+            Self::InsecureAuthTransport => "authentication headers require an HTTPS endpoint",
+            Self::CompressionFeatureUnavailable => {
+                "gzip requires the asupersync compression feature"
+            }
+            Self::ZeroTimeout => "request timeout must be nonzero",
+            Self::InvalidRetryDelay => {
+                "retry delays must be nonzero and initial must not exceed maximum"
+            }
+            Self::TooManyRetries => "retry count exceeds the bounded exporter limit",
+            Self::InvalidHeaderName => "authentication-header name is invalid",
+            Self::InvalidHeaderValue => "authentication-header value is invalid",
+            Self::ReservedHeaderName => "authentication header is owned by the transport",
+            Self::DuplicateHeaderName => "authentication-header name is duplicated",
+            Self::TooManyAuthHeaders => "authentication-header count exceeds the bounded limit",
+            Self::InvalidResourceAttribute => "resource attribute violates the bounded schema",
+            Self::TooManyResourceAttributes => "resource-attribute count exceeds the bounded limit",
+        };
+        write!(f, "{}: {detail}", self.code())
+    }
+}
+
+impl std::error::Error for OtlpConfigError {}
+
+impl From<OtlpConfigError> for ExportError {
+    fn from(error: OtlpConfigError) -> Self {
+        Self::new(error.to_string())
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct SecretHeaderValue(String);
+
+impl SecretHeaderValue {
+    fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for SecretHeaderValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("[REDACTED]")
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct OtlpAuthHeader {
+    name: String,
+    value: SecretHeaderValue,
+}
+
+impl std::fmt::Debug for OtlpAuthHeader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OtlpAuthHeader")
+            .field("name", &self.name)
+            .field("value", &self.value)
+            .finish()
+    }
+}
+
+/// Immutable, validated OTLP HTTP configuration.
+///
+/// Construct this value with [`OtlpHttpConfigBuilder::build`]. It performs no
+/// ambient environment reads: process environment and config-file precedence
+/// belong at the application boundary, before this value enters exporter
+/// state. Authentication values are deliberately unavailable through accessors
+/// and are redacted from `Debug` output.
+///
+/// Resource attributes are retained for the owned signal adapters implemented
+/// by later OTLP phases. [`OtlpHttpExporter::send_otlp_protobuf`] transmits an
+/// already-encoded request and therefore does not rewrite that byte payload.
+#[derive(Clone, PartialEq, Eq)]
+pub struct OtlpHttpConfig {
+    endpoint: String,
+    timeout: Duration,
+    max_retries: u32,
+    initial_retry_delay: Duration,
+    max_retry_delay: Duration,
+    compression: bool,
+    tls_policy: OtlpTlsPolicy,
+    auth_headers: Vec<OtlpAuthHeader>,
+    resource_attributes: Vec<(String, String)>,
+}
+
+impl OtlpHttpConfig {
+    /// Configuration contract version.
+    #[must_use]
+    pub const fn version(&self) -> u32 {
+        OTLP_HTTP_CONFIG_VERSION
+    }
+
+    /// Validated collector endpoint.
+    #[must_use]
+    pub fn endpoint(&self) -> &str {
+        &self.endpoint
+    }
+
+    /// Request timeout.
+    #[must_use]
+    pub const fn timeout(&self) -> Duration {
+        self.timeout
+    }
+
+    /// Maximum retry count.
+    #[must_use]
+    pub const fn max_retries(&self) -> u32 {
+        self.max_retries
+    }
+
+    /// Initial retry delay.
+    #[must_use]
+    pub const fn initial_retry_delay(&self) -> Duration {
+        self.initial_retry_delay
+    }
+
+    /// Maximum retry delay.
+    #[must_use]
+    pub const fn max_retry_delay(&self) -> Duration {
+        self.max_retry_delay
+    }
+
+    /// Whether gzip request compression is enabled.
+    #[must_use]
+    pub const fn compression(&self) -> bool {
+        self.compression
+    }
+
+    /// Configured TLS policy.
+    #[must_use]
+    pub const fn tls_policy(&self) -> OtlpTlsPolicy {
+        self.tls_policy
+    }
+
+    /// Authentication-header names, in deterministic transmission order.
+    ///
+    /// Values are intentionally not exposed.
+    #[must_use]
+    pub fn auth_header_names(&self) -> impl ExactSizeIterator<Item = &str> {
+        self.auth_headers.iter().map(|header| header.name.as_str())
+    }
+
+    /// Resolved resource attributes in deterministic key order.
+    ///
+    /// These values were supplied explicitly at the application boundary; no
+    /// environment read occurs while constructing or using this immutable
+    /// configuration. They are adapter input, not a promise that the raw-byte
+    /// [`OtlpHttpExporter::send_otlp_protobuf`] method rewrites its payload.
+    #[must_use]
+    pub fn resource_attributes(&self) -> impl ExactSizeIterator<Item = (&str, &str)> {
+        self.resource_attributes
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+    }
+
+    fn validate(&self) -> Result<(), OtlpConfigError> {
+        validate_otlp_http_config(self)
+    }
+}
+
+impl std::fmt::Debug for OtlpHttpConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OtlpHttpConfig")
+            .field("version", &OTLP_HTTP_CONFIG_VERSION)
+            .field("endpoint", &redacted_otlp_endpoint(&self.endpoint))
+            .field("timeout", &self.timeout)
+            .field("max_retries", &self.max_retries)
+            .field("initial_retry_delay", &self.initial_retry_delay)
+            .field("max_retry_delay", &self.max_retry_delay)
+            .field("compression", &self.compression)
+            .field("tls_policy", &self.tls_policy)
+            .field(
+                "auth_header_names",
+                &self.auth_header_names().collect::<Vec<_>>(),
+            )
+            .field(
+                "auth_header_values",
+                &self
+                    .auth_headers
+                    .iter()
+                    .map(|_| "[REDACTED]")
+                    .collect::<Vec<_>>(),
+            )
+            .field(
+                "resource_attribute_keys",
+                &self
+                    .resource_attributes
+                    .iter()
+                    .map(|(key, _)| key.as_str())
+                    .collect::<Vec<_>>(),
+            )
+            .finish()
+    }
+}
+
+fn redacted_otlp_endpoint(endpoint: &str) -> String {
+    let Some((scheme, rest)) = endpoint.split_once("://") else {
+        return "[REDACTED]".to_owned();
+    };
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..authority_end];
+    let authority = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
+    format!("{scheme}://{authority}[/REDACTED]")
+}
+
+fn default_otlp_resource_attributes() -> BTreeMap<String, String> {
+    BTreeMap::from([
+        ("service.name".to_owned(), "unknown_service".to_owned()),
+        ("telemetry.sdk.name".to_owned(), "asupersync".to_owned()),
+        (
+            "telemetry.sdk.version".to_owned(),
+            env!("CARGO_PKG_VERSION").to_owned(),
+        ),
+    ])
+}
+
+/// Builder for a validated [`OtlpHttpConfig`].
+#[derive(Clone)]
+pub struct OtlpHttpConfigBuilder {
+    config: OtlpHttpConfig,
+    boundary_resource_attributes: BTreeMap<String, String>,
+    programmatic_resource_attributes: BTreeMap<String, String>,
+}
+
+impl OtlpHttpConfigBuilder {
+    /// Start an explicit configuration with backward-compatible defaults.
+    #[must_use]
+    pub fn new(endpoint: impl Into<String>) -> Self {
+        Self {
+            config: OtlpHttpConfig {
+                endpoint: endpoint.into(),
+                timeout: Duration::from_secs(10),
+                max_retries: 3,
+                initial_retry_delay: Duration::from_millis(100),
+                max_retry_delay: Duration::from_secs(30),
+                compression: false,
+                tls_policy: OtlpTlsPolicy::AllowPlaintext,
+                auth_headers: Vec::new(),
+                resource_attributes: Vec::new(),
+            },
+            boundary_resource_attributes: BTreeMap::new(),
+            programmatic_resource_attributes: BTreeMap::new(),
+        }
+    }
+
+    /// Set request timeout.
+    #[must_use]
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.config.timeout = timeout;
+        self
+    }
+
+    /// Set bounded retry configuration.
+    #[must_use]
+    pub fn with_retry_config(
+        mut self,
+        max_retries: u32,
+        initial_delay: Duration,
+        max_delay: Duration,
+    ) -> Self {
+        self.config.max_retries = max_retries;
+        self.config.initial_retry_delay = initial_delay;
+        self.config.max_retry_delay = max_delay;
+        self
+    }
+
+    /// Enable gzip compression for request bodies.
+    #[must_use]
+    pub fn with_compression(mut self, compression: bool) -> Self {
+        self.config.compression = compression;
+        self
+    }
+
+    /// Select the endpoint transport-security policy.
+    #[must_use]
+    pub fn with_tls_policy(mut self, policy: OtlpTlsPolicy) -> Self {
+        self.config.tls_policy = policy;
+        self
+    }
+
+    /// Add an Authorization bearer token.
+    #[must_use]
+    pub fn with_bearer_token(mut self, token: impl Into<String>) -> Self {
+        let token = token.into();
+        let value = if token.is_empty() || token.bytes().any(|byte| byte.is_ascii_whitespace()) {
+            String::new()
+        } else {
+            format!("Bearer {token}")
+        };
+        self.config.auth_headers.push(OtlpAuthHeader {
+            name: "Authorization".to_owned(),
+            value: SecretHeaderValue(value),
+        });
+        self
+    }
+
+    /// Add an API-key header.
+    #[must_use]
+    pub fn with_api_key(mut self, name: impl Into<String>, key: impl Into<String>) -> Self {
+        self.config.auth_headers.push(OtlpAuthHeader {
+            name: name.into(),
+            value: SecretHeaderValue(key.into()),
+        });
+        self
+    }
+
+    /// Add a custom authentication header.
+    #[must_use]
+    pub fn with_auth_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.config.auth_headers.push(OtlpAuthHeader {
+            name: name.into(),
+            value: SecretHeaderValue(value.into()),
+        });
+        self
+    }
+
+    /// Add resource attributes already resolved at the application boundary.
+    ///
+    /// This lower-priority layer is intended for values parsed from deployment
+    /// configuration or `OTEL_RESOURCE_ATTRIBUTES` by the application. It does
+    /// not read the process environment. Explicit programmatic attributes added
+    /// with [`Self::with_resource_attribute`] win regardless of call order.
+    #[must_use]
+    pub fn with_boundary_resource_attributes<I, K, V>(mut self, attributes: I) -> Self
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: Into<String>,
+        V: Into<String>,
+    {
+        self.boundary_resource_attributes.extend(
+            attributes
+                .into_iter()
+                .map(|(key, value)| (key.into(), value.into())),
+        );
+        self
+    }
+
+    /// Add or replace one highest-priority programmatic resource attribute.
+    #[must_use]
+    pub fn with_resource_attribute(
+        mut self,
+        key: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Self {
+        self.programmatic_resource_attributes
+            .insert(key.into(), value.into());
+        self
+    }
+
+    /// Validate and freeze the configuration.
+    pub fn build(mut self) -> Result<OtlpHttpConfig, OtlpConfigError> {
+        let mut resolved = default_otlp_resource_attributes();
+        resolved.extend(self.boundary_resource_attributes);
+        resolved.extend(self.programmatic_resource_attributes);
+        self.config.resource_attributes = resolved.into_iter().collect();
+        self.config.validate()?;
+        Ok(self.config)
+    }
+}
+
+impl std::fmt::Debug for OtlpHttpConfigBuilder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("OtlpHttpConfigBuilder")
+            .field(&self.config)
+            .field(&self.boundary_resource_attributes.keys().collect::<Vec<_>>())
+            .field(
+                &self
+                    .programmatic_resource_attributes
+                    .keys()
+                    .collect::<Vec<_>>(),
+            )
+            .finish()
+    }
+}
+
+fn valid_otlp_header_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= OTLP_HTTP_MAX_AUTH_HEADER_NAME_BYTES
+        && name.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(
+                    byte,
+                    b'!' | b'#'
+                        | b'$'
+                        | b'%'
+                        | b'&'
+                        | b'\''
+                        | b'*'
+                        | b'+'
+                        | b'-'
+                        | b'.'
+                        | b'^'
+                        | b'_'
+                        | b'`'
+                        | b'|'
+                        | b'~'
+                )
+        })
+}
+
+fn valid_otlp_header_value(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= OTLP_HTTP_MAX_AUTH_HEADER_VALUE_BYTES
+        && !value.bytes().any(|byte| {
+            byte == 0
+                || byte == b'\r'
+                || byte == b'\n'
+                || byte == 0x7f
+                || (byte < 0x20 && byte != b'\t')
+        })
+}
+
+fn transport_owns_header(name: &str) -> bool {
+    [
+        "connection",
+        "content-encoding",
+        "content-length",
+        "content-type",
+        "expect",
+        "host",
+        "http2-settings",
+        "keep-alive",
+        "proxy-authorization",
+        "proxy-connection",
+        "te",
+        "trailer",
+        "transfer-encoding",
+        "upgrade",
+    ]
+    .iter()
+    .any(|reserved| name.eq_ignore_ascii_case(reserved))
+}
+
+fn valid_otlp_resource_attribute(key: &str, value: &str) -> bool {
+    !key.is_empty()
+        && key.len() <= OTLP_HTTP_MAX_RESOURCE_KEY_BYTES
+        && value.len() <= OTLP_HTTP_MAX_RESOURCE_VALUE_BYTES
+        && !key.bytes().any(|byte| byte.is_ascii_control())
+        && !value.bytes().any(|byte| byte.is_ascii_control())
+}
+
+fn validate_otlp_http_config_common(config: &OtlpHttpConfig) -> Result<(), OtlpConfigError> {
+    use crate::http::h1::http_client::{ParsedUrl, Scheme};
+
+    if config.endpoint.is_empty()
+        || config.endpoint.len() > OTLP_HTTP_MAX_ENDPOINT_BYTES
+        || config
+            .endpoint
+            .bytes()
+            .any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace())
+        || config.endpoint.contains('#')
+    {
+        return Err(OtlpConfigError::InvalidEndpoint);
+    }
+    let parsed =
+        ParsedUrl::parse(&config.endpoint).map_err(|_| OtlpConfigError::InvalidEndpoint)?;
+    if config.tls_policy == OtlpTlsPolicy::RequireTls && parsed.scheme != Scheme::Https {
+        return Err(OtlpConfigError::TlsRequired);
+    }
+    if parsed.scheme == Scheme::Https && !cfg!(feature = "tls") {
+        return Err(OtlpConfigError::TlsFeatureUnavailable);
+    }
+    if parsed.scheme == Scheme::Https
+        && cfg!(feature = "tls")
+        && !cfg!(any(
+            feature = "tls-native-roots",
+            feature = "tls-webpki-roots"
+        ))
+    {
+        return Err(OtlpConfigError::TlsRootsUnavailable);
+    }
+    if config.compression && !cfg!(feature = "compression") {
+        return Err(OtlpConfigError::CompressionFeatureUnavailable);
+    }
+    if config.timeout.is_zero() {
+        return Err(OtlpConfigError::ZeroTimeout);
+    }
+    if config.auth_headers.len() > OTLP_HTTP_MAX_AUTH_HEADERS {
+        return Err(OtlpConfigError::TooManyAuthHeaders);
+    }
+
+    let mut names = HashSet::with_capacity(config.auth_headers.len());
+    for header in &config.auth_headers {
+        if !valid_otlp_header_name(&header.name) {
+            return Err(OtlpConfigError::InvalidHeaderName);
+        }
+        if transport_owns_header(&header.name) {
+            return Err(OtlpConfigError::ReservedHeaderName);
+        }
+        if !valid_otlp_header_value(header.value.expose()) {
+            return Err(OtlpConfigError::InvalidHeaderValue);
+        }
+        if !names.insert(header.name.to_ascii_lowercase()) {
+            return Err(OtlpConfigError::DuplicateHeaderName);
+        }
+    }
+    if !config.auth_headers.is_empty() && parsed.scheme != Scheme::Https {
+        return Err(OtlpConfigError::InsecureAuthTransport);
+    }
+    if config.resource_attributes.len() > OTLP_HTTP_MAX_RESOURCE_ATTRIBUTES {
+        return Err(OtlpConfigError::TooManyResourceAttributes);
+    }
+    if config
+        .resource_attributes
+        .iter()
+        .any(|(key, value)| !valid_otlp_resource_attribute(key, value))
+    {
+        return Err(OtlpConfigError::InvalidResourceAttribute);
+    }
+    Ok(())
+}
+
+fn validate_otlp_http_config(config: &OtlpHttpConfig) -> Result<(), OtlpConfigError> {
+    validate_otlp_http_config_common(config)?;
+    if config.max_retries > OTLP_HTTP_MAX_RETRIES {
+        return Err(OtlpConfigError::TooManyRetries);
+    }
+    if config.initial_retry_delay.is_zero()
+        || config.max_retry_delay.is_zero()
+        || config.initial_retry_delay > config.max_retry_delay
+    {
+        return Err(OtlpConfigError::InvalidRetryDelay);
+    }
+    Ok(())
+}
+
 /// OTLP HTTP exporter with RFC-compliant retry logic.
 ///
 /// Implements OTLP spec requirements for retryable HTTP responses:
 /// - 502, 503, 504: Retry with exponential backoff
 /// - 429: Retry with Retry-After header or exponential backoff
 /// - Other 5xx: Drop batch (non-retryable per spec)
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct OtlpHttpExporter {
     endpoint: String,
     timeout: Duration,
@@ -1952,7 +2644,39 @@ pub struct OtlpHttpExporter {
     initial_retry_delay: Duration,
     max_retry_delay: Duration,
     compression: bool,
-    auth_headers: Vec<(String, String)>,
+    tls_policy: OtlpTlsPolicy,
+    auth_headers: Vec<OtlpAuthHeader>,
+    resource_attributes: Vec<(String, String)>,
+    legacy_retry_compatibility: bool,
+}
+
+impl std::fmt::Debug for OtlpHttpExporter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.config() {
+            Ok(config) => f.debug_tuple("OtlpHttpExporter").field(&config).finish(),
+            Err(error) => f
+                .debug_struct("OtlpHttpExporter")
+                .field("configuration_error", &error.code())
+                .field("endpoint", &redacted_otlp_endpoint(&self.endpoint))
+                .field(
+                    "auth_header_names",
+                    &self
+                        .auth_headers
+                        .iter()
+                        .map(|header| header.name.as_str())
+                        .collect::<Vec<_>>(),
+                )
+                .field(
+                    "auth_header_values",
+                    &self
+                        .auth_headers
+                        .iter()
+                        .map(|_| "[REDACTED]")
+                        .collect::<Vec<_>>(),
+                )
+                .finish(),
+        }
+    }
 }
 
 impl OtlpHttpExporter {
@@ -1966,7 +2690,71 @@ impl OtlpHttpExporter {
             initial_retry_delay: Duration::from_millis(100),
             max_retry_delay: Duration::from_secs(30),
             compression: false, // Default to false for backward compatibility
+            tls_policy: OtlpTlsPolicy::AllowPlaintext,
             auth_headers: Vec::new(),
+            resource_attributes: default_otlp_resource_attributes().into_iter().collect(),
+            legacy_retry_compatibility: true,
+        }
+    }
+
+    /// Create an exporter only if the default configuration is valid in this
+    /// build's TLS and compression feature matrix.
+    pub fn try_new(endpoint: impl Into<String>) -> Result<Self, OtlpConfigError> {
+        let config = OtlpHttpConfigBuilder::new(endpoint).build()?;
+        Ok(Self::from_config(config))
+    }
+
+    /// Create an exporter from an immutable validated configuration.
+    #[must_use]
+    pub fn from_config(config: OtlpHttpConfig) -> Self {
+        Self {
+            endpoint: config.endpoint,
+            timeout: config.timeout,
+            max_retries: config.max_retries,
+            initial_retry_delay: config.initial_retry_delay,
+            max_retry_delay: config.max_retry_delay,
+            compression: config.compression,
+            tls_policy: config.tls_policy,
+            auth_headers: config.auth_headers,
+            resource_attributes: config.resource_attributes,
+            legacy_retry_compatibility: false,
+        }
+    }
+
+    fn snapshot_config(&self) -> OtlpHttpConfig {
+        OtlpHttpConfig {
+            endpoint: self.endpoint.clone(),
+            timeout: self.timeout,
+            max_retries: self.max_retries,
+            initial_retry_delay: self.initial_retry_delay,
+            max_retry_delay: self.max_retry_delay,
+            compression: self.compression,
+            tls_policy: self.tls_policy,
+            auth_headers: self.auth_headers.clone(),
+            resource_attributes: self.resource_attributes.clone(),
+        }
+    }
+
+    /// Return a strictly validated snapshot of the exporter's immutable
+    /// configuration.
+    pub fn config(&self) -> Result<OtlpHttpConfig, OtlpConfigError> {
+        let config = self.snapshot_config();
+        config.validate()?;
+        Ok(config)
+    }
+
+    fn validate_for_export(&self) -> Result<(), OtlpConfigError> {
+        let config = self.snapshot_config();
+        if self.legacy_retry_compatibility {
+            // The pre-existing fluent API accepted arbitrary retry counts and
+            // zero delays (including the useful `(0, 0, 0)` disabled-retry
+            // form). Preserve that shipped behavior while still applying all
+            // endpoint, TLS, credential, timeout, header, and resource safety
+            // checks. The new immutable builder enforces the bounded retry
+            // contract through full validation.
+            validate_otlp_http_config_common(&config)
+        } else {
+            config.validate()
         }
     }
 
@@ -1998,27 +2786,46 @@ impl OtlpHttpExporter {
         self
     }
 
+    /// Select the endpoint transport-security policy.
+    #[must_use]
+    pub fn with_tls_policy(mut self, policy: OtlpTlsPolicy) -> Self {
+        self.tls_policy = policy;
+        self
+    }
+
     /// Add Authorization header with Bearer token.
     #[must_use]
     pub fn with_bearer_token(mut self, token: impl Into<String>) -> Self {
-        self.auth_headers.push((
-            "Authorization".to_owned(),
-            format!("Bearer {}", token.into()),
-        ));
+        let token = token.into();
+        let value = if token.is_empty() || token.bytes().any(|byte| byte.is_ascii_whitespace()) {
+            String::new()
+        } else {
+            format!("Bearer {token}")
+        };
+        self.auth_headers.push(OtlpAuthHeader {
+            name: "Authorization".to_owned(),
+            value: SecretHeaderValue(value),
+        });
         self
     }
 
     /// Add API key header.
     #[must_use]
     pub fn with_api_key(mut self, header_name: impl Into<String>, key: impl Into<String>) -> Self {
-        self.auth_headers.push((header_name.into(), key.into()));
+        self.auth_headers.push(OtlpAuthHeader {
+            name: header_name.into(),
+            value: SecretHeaderValue(key.into()),
+        });
         self
     }
 
     /// Add custom authentication header.
     #[must_use]
     pub fn with_auth_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
-        self.auth_headers.push((name.into(), value.into()));
+        self.auth_headers.push(OtlpAuthHeader {
+            name: name.into(),
+            value: SecretHeaderValue(value.into()),
+        });
         self
     }
 
@@ -2029,6 +2836,11 @@ impl OtlpHttpExporter {
         request_body: Vec<u8>,
     ) -> Result<(), ExportError> {
         use std::cmp;
+
+        // Existing infallible builders remain source-compatible, but every
+        // export fails closed before compression, DNS, or network activity if
+        // their accumulated configuration is invalid.
+        self.validate_for_export().map_err(ExportError::from)?;
 
         let mut retry_count = 0;
         let mut current_delay = self.initial_retry_delay;
@@ -2057,15 +2869,16 @@ impl OtlpHttpExporter {
                             retry_count,
                             status_code,
                         ));
-                        let delay_with_jitter = current_delay + jitter;
-                        cmp::min(delay_with_jitter, self.max_retry_delay)
+                        bounded_otlp_retry_delay(current_delay, jitter, self.max_retry_delay)
                     };
 
                     retry_count += 1;
-                    current_delay = cmp::min(current_delay * 2, self.max_retry_delay);
+                    current_delay = next_otlp_retry_delay(current_delay, self.max_retry_delay);
 
-                    // Sleep before retry
-                    crate::time::sleep(cx.now(), delay).await;
+                    // The backoff remains inside the caller's cancellation and
+                    // budget envelope; cancellation must not wait for a long
+                    // collector-supplied Retry-After delay to elapse.
+                    wait_otlp_retry_backoff(cx, delay).await?;
                 }
                 Err(OtlpError::CompressionFallback { status_code }) => {
                     // 415 Unsupported Media Type - retry without compression
@@ -2120,7 +2933,14 @@ impl OtlpHttpExporter {
 
         #[cfg(feature = "metrics")]
         {
-            let client = HttpClient::new();
+            // OTLP owns retry and endpoint security. Automatic redirects could
+            // otherwise downgrade RequireTls or forward a custom credential to
+            // another origin, so this transport never follows them.
+            let client = HttpClient::builder()
+                .no_redirects()
+                .no_cookie_store()
+                .no_retries()
+                .build();
 
             // Apply compression if enabled
             let (compressed_body, content_encoding) = if use_compression {
@@ -2158,22 +2978,176 @@ impl OtlpHttpExporter {
             }
 
             // Add authentication headers
-            headers.extend(self.auth_headers.clone());
+            headers.extend(
+                self.auth_headers
+                    .iter()
+                    .map(|header| (header.name.clone(), header.value.expose().to_owned())),
+            );
 
-            // Send request with timeout
-            let response = crate::time::timeout(cx.now(), self.timeout, async {
+            // Send under the caller's explicit timer capability. Using the
+            // ambient timeout helper here would put a non-ambient `Cx` and its
+            // timeout on different clocks in deterministic runtimes.
+            let response = drive_otlp_request_with_timeout(cx, self.timeout, async {
                 client
                     .request(cx, Method::Post, &self.endpoint, headers, compressed_body)
                     .await
             })
-            .await
-            .map_err(|_| OtlpError::non_retryable("OTLP request timeout"))?
+            .await?
             .map_err(|e| OtlpError::non_retryable(format!("OTLP request failed: {}", e)))?;
 
             // Handle response per OTLP spec
             classify_otlp_http_response(response.status, &response.headers)
         }
     }
+}
+
+fn bounded_otlp_retry_delay(current: Duration, jitter: Duration, maximum: Duration) -> Duration {
+    current.saturating_add(jitter).min(maximum)
+}
+
+fn next_otlp_retry_delay(current: Duration, maximum: Duration) -> Duration {
+    current.saturating_mul(2).min(maximum)
+}
+
+async fn drive_otlp_request_with_timeout<F>(
+    cx: &crate::cx::Cx,
+    timeout: Duration,
+    future: F,
+) -> Result<F::Output, OtlpError>
+where
+    F: std::future::Future,
+{
+    use std::future::{Future, poll_fn};
+    use std::pin::pin;
+    use std::task::Poll;
+
+    let timer_driver = cx.timer_driver();
+    let now = timer_driver
+        .as_ref()
+        .map_or_else(crate::time::wall_now, |driver| driver.now());
+    let timeout_nanos = u64::try_from(timeout.as_nanos()).unwrap_or(u64::MAX);
+    let request_deadline = now.saturating_add_nanos(timeout_nanos);
+    let deadline = cx
+        .budget()
+        .deadline
+        .map_or(request_deadline, |budget_deadline| {
+            request_deadline.min(budget_deadline)
+        });
+    let effective_timeout = Duration::from_nanos(deadline.duration_since(now));
+    let mut sleeper = if let Some(timer_driver) = timer_driver {
+        crate::time::Sleep::with_timer_driver(deadline, timer_driver)
+    } else {
+        crate::time::sleep(now, effective_timeout)
+    };
+    let mut future = pin!(future);
+    let mut cancel_waker = OtlpCancelWakerGuard::new(cx);
+
+    let result = poll_fn(|task_cx| {
+        cancel_waker.refresh(task_cx.waker());
+        if cx.checkpoint().is_err() {
+            return Poll::Ready(Err(OtlpError::non_retryable(
+                "OTLP request failed: request cancelled",
+            )));
+        }
+
+        // Preserve completed work at the exact timeout boundary, matching the
+        // crate-wide timeout contract.
+        if let Poll::Ready(output) = future.as_mut().poll(task_cx) {
+            return Poll::Ready(Ok(output));
+        }
+        match std::pin::Pin::new(&mut sleeper).poll(task_cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(()) => {
+                if cx.checkpoint().is_err() {
+                    Poll::Ready(Err(OtlpError::non_retryable(
+                        "OTLP request failed: request cancelled",
+                    )))
+                } else {
+                    Poll::Ready(Err(OtlpError::non_retryable("OTLP request timeout")))
+                }
+            }
+        }
+    })
+    .await;
+    cancel_waker.clear();
+    result
+}
+
+struct OtlpCancelWakerGuard<'a> {
+    cx: &'a crate::cx::Cx,
+    token: Option<crate::cx::CancelWakerToken>,
+}
+
+impl<'a> OtlpCancelWakerGuard<'a> {
+    fn new(cx: &'a crate::cx::Cx) -> Self {
+        Self { cx, token: None }
+    }
+
+    fn refresh(&mut self, waker: &std::task::Waker) {
+        self.token = Some(self.cx.refresh_cancel_waker(self.token, waker));
+    }
+
+    fn clear(&mut self) {
+        if let Some(token) = self.token.take() {
+            self.cx.clear_cancel_waker(token);
+        }
+    }
+}
+
+impl Drop for OtlpCancelWakerGuard<'_> {
+    fn drop(&mut self) {
+        self.clear();
+    }
+}
+
+async fn wait_otlp_retry_backoff(cx: &crate::cx::Cx, delay: Duration) -> Result<(), ExportError> {
+    use std::future::{Future, poll_fn};
+    use std::pin::Pin;
+    use std::task::Poll;
+
+    cx.checkpoint().map_err(|_| {
+        ExportError::new("OTLP retry backoff interrupted by Cx budget or cancellation")
+    })?;
+
+    let timer_driver = cx.timer_driver();
+    let now = timer_driver
+        .as_ref()
+        .map_or_else(crate::time::wall_now, |driver| driver.now());
+    let delay = cx.budget().deadline.map_or(delay, |deadline| {
+        delay.min(Duration::from_nanos(deadline.duration_since(now)))
+    });
+    if delay.is_zero() {
+        return cx.checkpoint().map_err(|_| {
+            ExportError::new("OTLP retry backoff interrupted by Cx budget or cancellation")
+        });
+    }
+
+    let mut sleeper = if let Some(timer_driver) = timer_driver {
+        let delay_nanos = u64::try_from(delay.as_nanos()).unwrap_or(u64::MAX);
+        crate::time::Sleep::with_timer_driver(now.saturating_add_nanos(delay_nanos), timer_driver)
+    } else {
+        crate::time::sleep(now, delay)
+    };
+    let mut cancel_waker = OtlpCancelWakerGuard::new(cx);
+    let result = poll_fn(|task_cx| {
+        // Register before checking cancellation so a request racing this poll
+        // either wakes the task or is observed by the following checkpoint.
+        cancel_waker.refresh(task_cx.waker());
+        if cx.checkpoint().is_err() {
+            return Poll::Ready(Err(ExportError::new(
+                "OTLP retry backoff interrupted by Cx budget or cancellation",
+            )));
+        }
+        match Pin::new(&mut sleeper).poll(task_cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(()) => Poll::Ready(cx.checkpoint().map_err(|_| {
+                ExportError::new("OTLP retry backoff interrupted by Cx budget or cancellation")
+            })),
+        }
+    })
+    .await;
+    cancel_waker.clear();
+    result
 }
 
 fn parse_otlp_retry_after(headers: &[(String, String)]) -> Option<Duration> {
@@ -2349,6 +3323,508 @@ mod otlp_retry_tests {
         assert_eq!(exporter.max_retries, 5);
         assert_eq!(exporter.initial_retry_delay, Duration::from_millis(200));
         assert_eq!(exporter.max_retry_delay, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn validated_otlp_config_freezes_explicit_precedence() {
+        let config = OtlpHttpConfigBuilder::new("http://collector:4318/v1/metrics")
+            .with_timeout(Duration::from_secs(15))
+            .with_retry_config(5, Duration::from_millis(200), Duration::from_secs(60))
+            .with_tls_policy(OtlpTlsPolicy::AllowPlaintext)
+            .with_resource_attribute("service.name", "programmatic-service")
+            .with_boundary_resource_attributes([
+                ("service.name", "boundary-service"),
+                ("deployment.environment", "production"),
+            ])
+            .build()
+            .expect("explicit OTLP configuration should validate");
+
+        assert_eq!(config.version(), OTLP_HTTP_CONFIG_VERSION);
+        assert_eq!(config.endpoint(), "http://collector:4318/v1/metrics");
+        assert_eq!(config.timeout(), Duration::from_secs(15));
+        assert_eq!(config.max_retries(), 5);
+        assert_eq!(config.initial_retry_delay(), Duration::from_millis(200));
+        assert_eq!(config.max_retry_delay(), Duration::from_secs(60));
+        assert!(!config.compression());
+        assert_eq!(config.tls_policy(), OtlpTlsPolicy::AllowPlaintext);
+        assert_eq!(
+            config.auth_header_names().collect::<Vec<_>>(),
+            Vec::<&str>::new()
+        );
+        assert_eq!(
+            config.resource_attributes().collect::<Vec<_>>(),
+            vec![
+                ("deployment.environment", "production"),
+                ("service.name", "programmatic-service"),
+                ("telemetry.sdk.name", "asupersync"),
+                ("telemetry.sdk.version", env!("CARGO_PKG_VERSION")),
+            ]
+        );
+
+        let exporter = OtlpHttpExporter::from_config(config.clone());
+        assert_eq!(
+            exporter.config().expect("frozen config").endpoint(),
+            config.endpoint()
+        );
+        let logs = OtlpLogsHttpExporter::from_config(config);
+        assert_eq!(
+            logs.config().expect("shared logs config").timeout(),
+            Duration::from_secs(15)
+        );
+    }
+
+    #[test]
+    fn otlp_config_errors_are_stable_and_fail_closed() {
+        let invalid_endpoints = [
+            "",
+            "collector:4318/v1/metrics",
+            "ftp://collector/v1/metrics",
+            "http://user@collector/v1/metrics",
+            "http://collector/has space",
+            "http://collector/v1/metrics#fragment",
+        ];
+        for endpoint in invalid_endpoints {
+            assert_eq!(
+                OtlpHttpConfigBuilder::new(endpoint).build(),
+                Err(OtlpConfigError::InvalidEndpoint),
+                "endpoint {endpoint:?} must fail closed"
+            );
+        }
+
+        assert_eq!(
+            OtlpHttpConfigBuilder::new("http://collector/v1/metrics")
+                .with_tls_policy(OtlpTlsPolicy::RequireTls)
+                .build(),
+            Err(OtlpConfigError::TlsRequired)
+        );
+        assert_eq!(
+            OtlpHttpConfigBuilder::new("http://collector/v1/metrics")
+                .with_timeout(Duration::ZERO)
+                .build(),
+            Err(OtlpConfigError::ZeroTimeout)
+        );
+        assert_eq!(
+            OtlpHttpConfigBuilder::new("http://collector/v1/metrics")
+                .with_retry_config(
+                    OTLP_HTTP_MAX_RETRIES + 1,
+                    Duration::from_millis(1),
+                    Duration::from_millis(1),
+                )
+                .build(),
+            Err(OtlpConfigError::TooManyRetries)
+        );
+        assert_eq!(
+            OtlpHttpConfigBuilder::new("http://collector/v1/metrics")
+                .with_retry_config(1, Duration::from_secs(2), Duration::from_secs(1),)
+                .build(),
+            Err(OtlpConfigError::InvalidRetryDelay)
+        );
+
+        let error = OtlpConfigError::InvalidEndpoint;
+        assert_eq!(error.code(), "otlp.config.invalid_endpoint");
+        assert!(!error.is_retryable());
+        assert_eq!(
+            error.to_string(),
+            "otlp.config.invalid_endpoint: endpoint must be a bounded absolute HTTP(S) URL"
+        );
+
+        assert_eq!(
+            OtlpHttpConfigBuilder::new("http://collector/v1/metrics")
+                .with_resource_attribute("bad\nkey", "value")
+                .build(),
+            Err(OtlpConfigError::InvalidResourceAttribute)
+        );
+        assert_eq!(
+            OtlpHttpConfigBuilder::new("http://collector/v1/metrics")
+                .with_boundary_resource_attributes(
+                    (0..OTLP_HTTP_MAX_RESOURCE_ATTRIBUTES)
+                        .map(|index| (format!("resource.{index}"), "value")),
+                )
+                .build(),
+            Err(OtlpConfigError::TooManyResourceAttributes)
+        );
+    }
+
+    #[test]
+    fn otlp_auth_secrets_never_enter_debug_or_errors() {
+        let builder = OtlpHttpConfigBuilder::new(
+            "http://collector:4318/tenant/path-secret/v1/metrics?tenant=query-secret",
+        )
+        .with_bearer_token("bearer-secret")
+        .with_api_key("X-API-Key", "api-key-secret");
+        let exporter = OtlpHttpExporter::new(
+            "http://collector:4318/tenant/path-secret/v1/metrics?tenant=query-secret",
+        )
+        .with_bearer_token("bearer-secret")
+        .with_api_key("X-API-Key", "api-key-secret");
+
+        for debug in [format!("{builder:?}"), format!("{exporter:?}")] {
+            assert!(!debug.contains("path-secret"));
+            assert!(!debug.contains("query-secret"));
+            assert!(!debug.contains("bearer-secret"));
+            assert!(!debug.contains("api-key-secret"));
+            assert!(debug.contains("[REDACTED]"));
+        }
+
+        let invalid_builder = OtlpHttpConfigBuilder::new(
+            "https://endpoint-user:userinfo-secret@collector/v1/metrics",
+        );
+        let invalid_debug = format!("{invalid_builder:?}");
+        assert!(!invalid_debug.contains("endpoint-user"));
+        assert!(!invalid_debug.contains("userinfo-secret"));
+        assert!(invalid_debug.contains("https://collector[/REDACTED]"));
+
+        assert_eq!(
+            OtlpHttpConfigBuilder::new("http://collector/v1/metrics")
+                .with_bearer_token("must-use-tls")
+                .build(),
+            Err(OtlpConfigError::InsecureAuthTransport)
+        );
+
+        assert_eq!(
+            OtlpHttpConfigBuilder::new("http://collector/v1/metrics")
+                .with_auth_header("Bad Header", "secret")
+                .build(),
+            Err(OtlpConfigError::InvalidHeaderName)
+        );
+        assert_eq!(
+            OtlpHttpConfigBuilder::new("http://collector/v1/metrics")
+                .with_auth_header("X-API-Key", "secret\r\ninjected: value")
+                .build(),
+            Err(OtlpConfigError::InvalidHeaderValue)
+        );
+        assert_eq!(
+            OtlpHttpConfigBuilder::new("http://collector/v1/metrics")
+                .with_auth_header("Content-Type", "secret")
+                .build(),
+            Err(OtlpConfigError::ReservedHeaderName)
+        );
+        assert_eq!(
+            OtlpHttpConfigBuilder::new("http://collector/v1/metrics")
+                .with_auth_header("Transfer-Encoding", "chunked")
+                .build(),
+            Err(OtlpConfigError::ReservedHeaderName)
+        );
+        assert_eq!(
+            OtlpHttpConfigBuilder::new("http://collector/v1/metrics")
+                .with_bearer_token("")
+                .build(),
+            Err(OtlpConfigError::InvalidHeaderValue)
+        );
+        assert_eq!(
+            OtlpHttpConfigBuilder::new("http://collector/v1/metrics")
+                .with_auth_header(
+                    "X-API-Key",
+                    "x".repeat(OTLP_HTTP_MAX_AUTH_HEADER_VALUE_BYTES + 1),
+                )
+                .build(),
+            Err(OtlpConfigError::InvalidHeaderValue)
+        );
+        assert_eq!(
+            OtlpHttpConfigBuilder::new("http://collector/v1/metrics")
+                .with_auth_header("X-API-Key", "first")
+                .with_auth_header("x-api-key", "second")
+                .build(),
+            Err(OtlpConfigError::DuplicateHeaderName)
+        );
+    }
+
+    #[test]
+    fn otlp_config_feature_matrix_is_explicit() {
+        let https = OtlpHttpConfigBuilder::new("https://collector/v1/metrics").build();
+        let https_auth = OtlpHttpConfigBuilder::new("https://collector/v1/metrics")
+            .with_bearer_token("feature-matrix-token")
+            .with_api_key("X-API-Key", "feature-matrix-key")
+            .build();
+        if cfg!(all(
+            feature = "tls",
+            any(feature = "tls-native-roots", feature = "tls-webpki-roots")
+        )) {
+            assert!(https.is_ok());
+            assert_eq!(
+                https_auth
+                    .expect("HTTPS credentials should validate with roots")
+                    .auth_header_names()
+                    .collect::<Vec<_>>(),
+                vec!["Authorization", "X-API-Key"]
+            );
+        } else if cfg!(feature = "tls") {
+            assert_eq!(https, Err(OtlpConfigError::TlsRootsUnavailable));
+            assert_eq!(https_auth, Err(OtlpConfigError::TlsRootsUnavailable));
+        } else {
+            assert_eq!(https, Err(OtlpConfigError::TlsFeatureUnavailable));
+            assert_eq!(https_auth, Err(OtlpConfigError::TlsFeatureUnavailable));
+        }
+
+        let compression = OtlpHttpConfigBuilder::new("http://collector/v1/metrics")
+            .with_compression(true)
+            .build();
+        if cfg!(feature = "compression") {
+            assert!(compression.is_ok());
+        } else {
+            assert_eq!(
+                compression,
+                Err(OtlpConfigError::CompressionFeatureUnavailable)
+            );
+        }
+    }
+
+    #[test]
+    fn otlp_retry_backoff_observes_cx_cancellation() {
+        use std::future::Future;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::task::{Context, Poll, Wake, Waker};
+
+        #[derive(Default)]
+        struct WakeCounter(AtomicUsize);
+
+        impl Wake for WakeCounter {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+
+            fn wake_by_ref(self: &Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let cx = crate::cx::Cx::for_testing();
+        let mut wait = Box::pin(wait_otlp_retry_backoff(&cx, Duration::from_secs(60)));
+        let wake_counter = Arc::new(WakeCounter::default());
+        let waker = Waker::from(Arc::clone(&wake_counter));
+        let mut task_cx = Context::from_waker(&waker);
+
+        assert!(matches!(wait.as_mut().poll(&mut task_cx), Poll::Pending));
+        assert_eq!(wake_counter.0.load(Ordering::SeqCst), 0);
+        cx.set_cancel_reason(crate::types::CancelReason::user("stop OTLP retry"));
+        assert!(wake_counter.0.load(Ordering::SeqCst) > 0);
+
+        match wait.as_mut().poll(&mut task_cx) {
+            Poll::Ready(Err(error)) => assert_eq!(
+                error.to_string(),
+                "export error: OTLP retry backoff interrupted by Cx budget or cancellation"
+            ),
+            other => panic!("expected cancelled OTLP retry backoff, got {other:?}"),
+        }
+
+        let dropped_cx = crate::cx::Cx::for_testing();
+        let dropped_wake_counter = Arc::new(WakeCounter::default());
+        let dropped_waker = Waker::from(Arc::clone(&dropped_wake_counter));
+        let mut dropped_task_cx = Context::from_waker(&dropped_waker);
+        {
+            let mut dropped_wait = Box::pin(wait_otlp_retry_backoff(
+                &dropped_cx,
+                Duration::from_secs(60),
+            ));
+            assert!(matches!(
+                dropped_wait.as_mut().poll(&mut dropped_task_cx),
+                Poll::Pending
+            ));
+        }
+        dropped_cx.set_cancel_reason(crate::types::CancelReason::user("after drop"));
+        assert_eq!(dropped_wake_counter.0.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn otlp_retry_backoff_uses_the_explicit_cx_timer_driver() {
+        use std::future::Future;
+        use std::sync::Arc;
+        use std::task::{Context, Poll, Waker};
+
+        let clock = Arc::new(crate::time::VirtualClock::new());
+        let timer = crate::time::TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
+        let cx = crate::cx::Cx::new_with_drivers(
+            crate::types::RegionId::new_for_test(91, 0),
+            crate::types::TaskId::new_for_test(92, 0),
+            crate::types::Budget::INFINITE,
+            None,
+            None,
+            None,
+            Some(timer.clone()),
+            None,
+        );
+        let mut wait = Box::pin(wait_otlp_retry_backoff(&cx, Duration::from_secs(1)));
+        let mut task_cx = Context::from_waker(Waker::noop());
+
+        assert!(matches!(wait.as_mut().poll(&mut task_cx), Poll::Pending));
+        assert_eq!(timer.pending_count(), 1);
+        clock.advance(999_999_999);
+        assert_eq!(timer.process_timers(), 0);
+        assert!(matches!(wait.as_mut().poll(&mut task_cx), Poll::Pending));
+        clock.advance(1);
+        assert_eq!(timer.process_timers(), 1);
+        assert!(matches!(
+            wait.as_mut().poll(&mut task_cx),
+            Poll::Ready(Ok(()))
+        ));
+    }
+
+    #[test]
+    fn otlp_request_timeout_uses_the_explicit_cx_timer_driver() {
+        use std::future::{Future, pending};
+        use std::sync::Arc;
+        use std::task::{Context, Poll, Waker};
+
+        let clock = Arc::new(crate::time::VirtualClock::new());
+        let timer = crate::time::TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
+        let cx = crate::cx::Cx::new_with_drivers(
+            crate::types::RegionId::new_for_test(95, 0),
+            crate::types::TaskId::new_for_test(96, 0),
+            crate::types::Budget::INFINITE,
+            None,
+            None,
+            None,
+            Some(timer.clone()),
+            None,
+        );
+        let mut request = Box::pin(drive_otlp_request_with_timeout(
+            &cx,
+            Duration::from_secs(1),
+            pending::<Result<(), crate::http::h1::http_client::ClientError>>(),
+        ));
+        let mut task_cx = Context::from_waker(Waker::noop());
+
+        assert!(matches!(request.as_mut().poll(&mut task_cx), Poll::Pending));
+        assert_eq!(timer.pending_count(), 1);
+        clock.advance(999_999_999);
+        assert_eq!(timer.process_timers(), 0);
+        assert!(matches!(request.as_mut().poll(&mut task_cx), Poll::Pending));
+        clock.advance(1);
+        assert_eq!(timer.process_timers(), 1);
+        match request.as_mut().poll(&mut task_cx) {
+            Poll::Ready(Err(error)) => {
+                assert_eq!(error.to_string(), "OTLP error: OTLP request timeout")
+            }
+            other => panic!("expected OTLP request timeout, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn otlp_retry_backoff_refuses_work_at_the_budget_deadline() {
+        use std::future::Future;
+        use std::sync::Arc;
+        use std::task::{Context, Poll, Waker};
+
+        let clock = Arc::new(crate::time::VirtualClock::new());
+        let timer = crate::time::TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
+        let budget = crate::types::Budget::new().with_deadline(crate::types::Time::from_secs(1));
+        let cx = crate::cx::Cx::new_with_drivers(
+            crate::types::RegionId::new_for_test(93, 0),
+            crate::types::TaskId::new_for_test(94, 0),
+            budget,
+            None,
+            None,
+            None,
+            Some(timer.clone()),
+            None,
+        );
+        let mut wait = Box::pin(wait_otlp_retry_backoff(&cx, Duration::from_secs(60)));
+        let mut task_cx = Context::from_waker(Waker::noop());
+
+        assert!(matches!(wait.as_mut().poll(&mut task_cx), Poll::Pending));
+        clock.advance(1_000_000_000);
+        assert_eq!(timer.process_timers(), 1);
+        match wait.as_mut().poll(&mut task_cx) {
+            Poll::Ready(Err(error)) => assert_eq!(
+                error.to_string(),
+                "export error: OTLP retry backoff interrupted by Cx budget or cancellation"
+            ),
+            other => panic!("expected exhausted OTLP retry backoff, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn otlp_request_timeout_honors_an_earlier_cx_budget_deadline() {
+        use std::future::{Future, pending};
+        use std::sync::Arc;
+        use std::task::{Context, Poll, Waker};
+
+        let clock = Arc::new(crate::time::VirtualClock::new());
+        let timer = crate::time::TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
+        let budget = crate::types::Budget::new().with_deadline(crate::types::Time::from_secs(1));
+        let cx = crate::cx::Cx::new_with_drivers(
+            crate::types::RegionId::new_for_test(97, 0),
+            crate::types::TaskId::new_for_test(98, 0),
+            budget,
+            None,
+            None,
+            None,
+            Some(timer.clone()),
+            None,
+        );
+        let mut request = Box::pin(drive_otlp_request_with_timeout(
+            &cx,
+            Duration::from_secs(60),
+            pending::<Result<(), crate::http::h1::http_client::ClientError>>(),
+        ));
+        let mut task_cx = Context::from_waker(Waker::noop());
+
+        assert!(matches!(request.as_mut().poll(&mut task_cx), Poll::Pending));
+        assert_eq!(timer.pending_count(), 1);
+        clock.advance(1_000_000_000);
+        assert_eq!(timer.process_timers(), 1);
+        match request.as_mut().poll(&mut task_cx) {
+            Poll::Ready(Err(error)) => {
+                assert_eq!(
+                    error.to_string(),
+                    "OTLP error: OTLP request failed: request cancelled"
+                )
+            }
+            other => panic!("expected exhausted OTLP request budget, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn otlp_retry_delay_arithmetic_saturates() {
+        assert_eq!(
+            bounded_otlp_retry_delay(Duration::MAX, Duration::from_millis(100), Duration::MAX,),
+            Duration::MAX
+        );
+        assert_eq!(
+            next_otlp_retry_delay(Duration::MAX, Duration::MAX),
+            Duration::MAX
+        );
+    }
+
+    #[test]
+    fn legacy_retry_configuration_remains_export_compatible() {
+        let many_retries = OtlpHttpExporter::new("http://collector/v1/metrics").with_retry_config(
+            OTLP_HTTP_MAX_RETRIES + 1,
+            Duration::from_millis(1),
+            Duration::from_millis(1),
+        );
+        assert_eq!(many_retries.config(), Err(OtlpConfigError::TooManyRetries));
+        assert_eq!(many_retries.validate_for_export(), Ok(()));
+
+        let disabled_retries = OtlpHttpExporter::new("http://collector/v1/metrics")
+            .with_retry_config(0, Duration::ZERO, Duration::ZERO);
+        assert_eq!(
+            disabled_retries.config(),
+            Err(OtlpConfigError::InvalidRetryDelay)
+        );
+        assert_eq!(disabled_retries.validate_for_export(), Ok(()));
+
+        let plaintext_credentials =
+            OtlpHttpExporter::new("http://collector/v1/metrics").with_bearer_token("secret");
+        assert_eq!(
+            plaintext_credentials.validate_for_export(),
+            Err(OtlpConfigError::InsecureAuthTransport)
+        );
+    }
+
+    #[test]
+    fn legacy_builder_validates_before_any_async_transport_work() {
+        let exporter =
+            OtlpHttpExporter::new("ftp://collector/v1/metrics").with_bearer_token("must-not-leak");
+        assert_eq!(exporter.config(), Err(OtlpConfigError::InvalidEndpoint));
+
+        let cx = crate::cx::Cx::for_testing();
+        let error = futures_lite::future::block_on(exporter.send_otlp_protobuf(&cx, Vec::new()))
+            .expect_err("invalid config must fail before transport");
+        let message = error.to_string();
+        assert!(message.contains("otlp.config.invalid_endpoint"));
+        assert!(!message.contains("must-not-leak"));
     }
 
     /// Test that verifies RFC-compliant retry behavior for different HTTP status codes.

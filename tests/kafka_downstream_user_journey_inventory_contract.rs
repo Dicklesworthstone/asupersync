@@ -20,7 +20,7 @@ const DOC_PATH: &str = "docs/kafka_downstream_user_journey_inventory.md";
 const K0_1_PATH: &str = "artifacts/kafka_capability_inventory_v1.json";
 const K0_2_PATH: &str = "artifacts/kafka_incumbent_semantics_matrix_v1.json";
 const ADR_REGISTRY_PATH: &str = "artifacts/dependency_api_adr_registry_v1.json";
-const ARTIFACT_SHA256: &str = "40c090147db3d6caf11eabdd8aadc0ac2dde727a07e35b84ce3c8dd077134832";
+const ARTIFACT_SHA256: &str = "9091968aac6ca9f5fc768ca0513122cac52a255f913eb3653c3412f015e20adc";
 const DOC_SHA256: &str = "3c2f0b4fa956bc45fc5b9738f5f2349024dafb577509195e998fa72ec0d9dbb1";
 const ARTIFACT_ID: &str = "kafka-downstream-user-journey-inventory-v1";
 const PROGRAM_ID: &str = "asupersync-ir2uf0";
@@ -50,8 +50,8 @@ const EXTERNAL_SEARCH_COUNT: usize = 7;
 const OWNED_UNKNOWN_COUNT: usize = 8;
 const ROUTED_GAP_COUNT: usize = 23;
 const TEST_DECLARATION_GROUP_COUNT: usize = 35;
-const TEST_DECLARATION_COUNT: usize = 940;
-const EXACT_TEST_DECLARATION_COUNT: usize = 892;
+const TEST_DECLARATION_COUNT: usize = 941;
+const EXACT_TEST_DECLARATION_COUNT: usize = 893;
 const TOKIO_TEST_DECLARATION_COUNT: usize = 48;
 const TOKIO_TEST_DECLARATION_TUPLE_SHA256: &str =
     "c21dd6b0021dc189e82e6a3cf95dd37f1cddb100cf9688595fbe7a969b09b80d";
@@ -64,7 +64,7 @@ const COMPILATION_PROFILE_SEMANTIC_TUPLE_SHA256: &str =
 const CALL_SITE_GROUP_COUNT: usize = 48;
 const CALL_SITE_COUNT: usize = 1_363;
 const CALL_SITE_ID_SET_SHA256: &str =
-    "8eebdef6b89dab9aa58f7c59299a6431de095a99196825488785b325ed3a51c7";
+    "c2db10d33c5898d006cef34e4d1a7c5403aef3803b3fd2512366b216cdb710de";
 const CALL_SITE_PATH_SET_SHA256: &str =
     "612152c18e6daff98c7d0c3c7d907df8aa7100a8bab45e88a701d08588718d9c";
 const DOWNSTREAM_HELPER_TUPLE_SHA256: &str =
@@ -81,15 +81,15 @@ const DOCUMENTATION_OCCURRENCE_GROUP_COUNT: usize = 173;
 const DOCUMENTATION_PATH_SHA256: &str =
     "092daf94a5e428430bc2e6fab7a13a30649aca53e30680c300f9eb76cbbfec67";
 const DOCUMENTATION_OCCURRENCE_TUPLE_SHA256: &str =
-    "db891636f3587ce976ca7b20715e31576dbc7a3c5b1ceca45b9933bdd0b43189";
+    "eb295c544a1dbaf765447847e5c1d3737e571c9ef57cc3d5a54cb4f31c2356a7";
 const DOCUMENTATION_LINE_TUPLE_SHA256: &str =
-    "7cd3db345857f34fd26b6554a167a7729edbd023a692b590054c82a0ee01efa0";
+    "be17ef0a0fbe0ea00d9b243fa27aeecaa822670042d2651c36fe835c5a6b5b15";
 const DOCUMENTATION_OCCURRENCE_ID_SHA256: &str =
-    "c99daa6074d3095d7559debf1145ea4f3aaab4b708d64da83a8e7e5d2fe137e5";
+    "75282923657e9e1e0cf42010a6acbb1f1f22e97fd5059475da0353850a0e0b8c";
 const DOCUMENTATION_CANONICAL_ID_SHA256: &str =
     "eb639a6c63291a29da23d7f002dcb0b26a38f34c42ed857f6949db3a92b5328e";
 const DOCUMENTATION_REMAINDER_ID_SHA256: &str =
-    "f01287813ca98978e1fbe93bd9c714a3b81a3e7e6efe1f64769cbedfb254263b";
+    "24cba80747d716c3c17616b1caac2bdca9f74264e296d8618647293f31119711";
 const DOCUMENTATION_GROUP_ID_SHA256: &str =
     "5e36b023be812fd3887b84af75d46e7b220c0138317b2a4face21917bdf180dd";
 const DOCUMENTATION_SOURCE_PIN_TUPLE_SHA256: &str =
@@ -428,7 +428,7 @@ fn validate_authority_and_policy(inventory: &Value) -> Result<(), String> {
     for required in [
         "1,363-node declared candidate grammar",
         "266 are explicit lexical exclusions",
-        "892 exact #[test] and 48 exact #[tokio::test]",
+        "893 exact #[test] and 48 exact #[tokio::test]",
         "EXACT_BASELINE_ABSENCE digest token",
         "UNKNOWN usage",
         "no compiler, formatter, test, runtime, broker, external-search, or network execution",
@@ -2203,7 +2203,7 @@ fn validate_handoff_and_receipt(inventory: &Value) -> Result<(), String> {
         "22 K0.2 semantic IDs have no resolved invocation in the declared call-site grammar and require K14 synthesis before migration".to_owned(),
         "8 stale call-site candidate nodes remain unresolved against the current K0.1 surface".to_owned(),
         "162 baseline occurrence paths are explicitly owned and conservatively POLICY_OR_CONTEXT_RETAINED pending K14 recheck".to_owned(),
-        "924 of 940 literal test declarations use owned group-inherited classifications rather than individual atomic migration analysis".to_owned(),
+        "925 of 941 literal test declarations use owned group-inherited classifications rather than individual atomic migration analysis".to_owned(),
         "9,143 literal documentation occurrences have stable identity and ownership but remain semantically UNKNOWN and migration-blocking".to_owned(),
         "all seven external downstream search domains are NOT_RUN and UNKNOWN".to_owned(),
         "all fifteen real-broker-capable atomic cases are NOT_RUN and retain no immutable broker receipt".to_owned(),
@@ -2215,7 +2215,7 @@ fn validate_handoff_and_receipt(inventory: &Value) -> Result<(), String> {
             .get("local_static_scope_definition")
             .and_then(Value::as_str)
             != Some(
-                "the exact 245-path five-tier occurrence partition, 940 named declarations across exact test and tokio::test attributes, 16 atomic overrides, 1,363-node candidate call-site grammar, and 9,180-occurrence documentation-claim identity and ownership partition are complete; 266 call-site candidates are explicit exclusions and 9,143 documentation occurrences remain semantically UNKNOWN",
+                "the exact 245-path five-tier occurrence partition, 941 named declarations across exact test and tokio::test attributes, 16 atomic overrides, 1,363-node candidate call-site grammar, and 9,180-occurrence documentation-claim identity and ownership partition are complete; 266 call-site candidates are explicit exclusions and 9,143 documentation occurrences remain semantically UNKNOWN",
             )
         || receipt
             .get("test_declaration_classification_rule")

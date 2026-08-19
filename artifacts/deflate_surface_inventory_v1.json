@@ -685,8 +685,8 @@
     },
     {
       "path": "src/observability/otel.rs",
-      "sha256": "1fafcd630490e8f5707f01b934291961ff78921bf07d39f54efbb67165b74a5f",
-      "line_count": 9420
+      "sha256": "f359398c5c33ef86ec9be6a0852ade52c40081e1797e1f868529d9234e4e51b5",
+      "line_count": 10896
     },
     {
       "path": "src/observability/metrics.rs",

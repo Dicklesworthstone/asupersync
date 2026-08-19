@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 
 const ARTIFACT_PATH: &str = "artifacts/kafka_k2_reachable_schema_broker_matrix_v1.json";
 const DOC_PATH: &str = "docs/kafka_k2_reachable_schema_broker_matrix.md";
-const ARTIFACT_SHA256: &str = "4d09e623ea35cfb3c3e473e9f5c6713d7038139f33a5ebd6422a96e1a5ffe8b5";
+const ARTIFACT_SHA256: &str = "2820a63aebb439de5cae1fd4a1f01c1c7b4a5392f3c03cb03b0d189fbd4425c2";
 const DOC_SHA256: &str = "949f40c1c68009357dc38ea108509d8a51b63e43e7fc7a39feaa2c52cb42785f";
 
 const DOC_BEGIN: &str = "<!-- BEGIN KAFKA K2.1 REACHABLE SCHEMA BROKER MATRIX -->";
