@@ -484,6 +484,10 @@ enum SqlSurfaceViolation {
     Pragma,
     TransactionControl,
     AttachDetach,
+    Vacuum,
+    ParserRejected,
+    StatementCount,
+    ResourceLimit,
 }
 
 impl SqlSurfaceViolation {
@@ -494,27 +498,81 @@ impl SqlSurfaceViolation {
                 "transaction or connection control statements require the explicit *_unchecked SQLite APIs"
             }
             Self::AttachDetach => "ATTACH and DETACH are disabled on the checked SQLite APIs",
+            Self::Vacuum => {
+                "VACUUM requires the explicit *_unchecked SQLite APIs because VACUUM INTO can write an arbitrary filesystem path"
+            }
+            Self::ParserRejected => {
+                "checked SQLite SQL must be accepted by the bounded policy parser; audited engine-specific SQL requires an explicit *_unchecked API"
+            }
+            Self::StatementCount => "this checked SQLite API requires exactly one SQL statement",
+            Self::ResourceLimit => "SQLite SQL exceeds the checked-surface parser resource limits",
         }
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CheckedSqlCardinality {
+    ExactlyOne,
+    Batch,
+}
+
+const MAX_CHECKED_SQL_BYTES: usize = 1024 * 1024;
+const MAX_CHECKED_SQL_RECURSION: usize = 128;
+
 // SECURITY FIX: Removed TriggerScanState enum - no longer needed
 // after replacing vulnerable custom SQL parser (asupersync-dn5hn8)
 
+#[cfg(test)]
 fn classify_sql_surface_violation(sql: &str) -> Option<SqlSurfaceViolation> {
-    // SECURITY FIX: Use sqlparser-rs to eliminate parser divergence vulnerabilities
-    // This ensures we use the same SQL parsing logic as execution (asupersync-dn5hn8)
+    // SECURITY FIX: Use sqlparser-rs instead of a hand-rolled keyword parser so
+    // policy decisions are made from structured syntax (asupersync-dn5hn8).
+    // SQLite itself remains the authoritative execution parser.
 
     use sqlparser::dialect::SQLiteDialect;
     use sqlparser::parser::Parser;
 
     let dialect = SQLiteDialect {};
-    match Parser::parse_sql(&dialect, sql) {
+    if sql.len() > MAX_CHECKED_SQL_BYTES {
+        return Some(SqlSurfaceViolation::ResourceLimit);
+    }
+
+    match Parser::new(&dialect)
+        .with_recursion_limit(MAX_CHECKED_SQL_RECURSION)
+        .try_with_sql(sql)
+        .and_then(|mut parser| parser.parse_statements())
+    {
         Ok(statements) => check_parsed_statements(&statements),
         Err(_) => {
             // If parsing fails, fall back to keyword detection for safety
             check_sql_keywords_fallback(sql)
         }
+    }
+}
+
+fn unchecked_sql_contains_attach_detach(sql: &str) -> bool {
+    use sqlparser::ast::Statement;
+    use sqlparser::dialect::SQLiteDialect;
+    use sqlparser::parser::Parser;
+
+    let dialect = SQLiteDialect {};
+    match Parser::new(&dialect)
+        .with_recursion_limit(MAX_CHECKED_SQL_RECURSION)
+        .try_with_sql(sql)
+        .and_then(|mut parser| parser.parse_statements())
+    {
+        Ok(statements) => statements.iter().any(|statement| {
+            matches!(
+                statement,
+                Statement::AttachDatabase { .. }
+                    | Statement::AttachDuckDBDatabase { .. }
+                    | Statement::DetachDuckDBDatabase { .. }
+            )
+        }),
+        Err(_) => remove_sql_comments(sql).split(';').any(|statement| {
+            let statement = statement.trim().to_ascii_uppercase();
+            starts_with_sql_keyword(&statement, "ATTACH")
+                || starts_with_sql_keyword(&statement, "DETACH")
+        }),
     }
 }
 
@@ -544,11 +602,18 @@ fn check_parsed_statements(
             | Statement::DetachDuckDBDatabase { .. } => {
                 return Some(SqlSurfaceViolation::AttachDetach);
             }
+            // Plain VACUUM is connection control, while SQLite's `VACUUM
+            // INTO` form can create or replace a filesystem path. Keep both
+            // behind the explicit unchecked surface.
+            Statement::Vacuum(_) => {
+                return Some(SqlSurfaceViolation::Vacuum);
+            }
             // Transaction control statements are blocked on checked surface
             Statement::StartTransaction { .. }
             | Statement::Commit { .. }
             | Statement::Rollback { .. }
-            | Statement::Savepoint { .. } => {
+            | Statement::Savepoint { .. }
+            | Statement::ReleaseSavepoint { .. } => {
                 return Some(SqlSurfaceViolation::TransactionControl);
             }
             // CREATE TRIGGER can contain BEGIN/END but should be allowed
@@ -602,21 +667,30 @@ fn check_sql_keywords_fallback(sql: &str) -> Option<SqlSurfaceViolation> {
         }
 
         // Check for PRAGMA
-        if stmt.starts_with("PRAGMA ") || stmt == "PRAGMA" {
+        if starts_with_sql_keyword(stmt, "PRAGMA") {
             return Some(SqlSurfaceViolation::Pragma);
         }
 
         // Check for ATTACH/DETACH
-        if stmt.starts_with("ATTACH ") || stmt.starts_with("DETACH ") {
+        if starts_with_sql_keyword(stmt, "ATTACH") || starts_with_sql_keyword(stmt, "DETACH") {
             return Some(SqlSurfaceViolation::AttachDetach);
+        }
+
+        // `sqlparser` does not model every SQLite-specific VACUUM form (most
+        // importantly VACUUM INTO), so the fail-closed fallback must retain
+        // this boundary even when the primary parser rejects the statement.
+        if starts_with_sql_keyword(stmt, "VACUUM") {
+            return Some(SqlSurfaceViolation::Vacuum);
         }
 
         // Check for transaction control (excluding CREATE TRIGGER)
         if !stmt.contains(" TRIGGER ") {
-            if stmt.starts_with("BEGIN")
-                || stmt.starts_with("COMMIT")
-                || stmt.starts_with("ROLLBACK")
-                || stmt.starts_with("SAVEPOINT ")
+            if starts_with_sql_keyword(stmt, "BEGIN")
+                || starts_with_sql_keyword(stmt, "COMMIT")
+                || starts_with_sql_keyword(stmt, "ROLLBACK")
+                || starts_with_sql_keyword(stmt, "SAVEPOINT")
+                || starts_with_sql_keyword(stmt, "RELEASE")
+                || starts_with_sql_keyword(stmt, "END")
             {
                 return Some(SqlSurfaceViolation::TransactionControl);
             }
@@ -624,6 +698,15 @@ fn check_sql_keywords_fallback(sql: &str) -> Option<SqlSurfaceViolation> {
     }
 
     None
+}
+
+fn starts_with_sql_keyword(statement: &str, keyword: &str) -> bool {
+    statement.strip_prefix(keyword).is_some_and(|suffix| {
+        suffix
+            .chars()
+            .next()
+            .is_none_or(|ch| !(ch.is_ascii_alphanumeric() || matches!(ch, '_' | '$')))
+    })
 }
 
 /// Remove SQL comments (fallback implementation)
@@ -681,8 +764,41 @@ fn remove_sql_comments(sql: &str) -> String {
 // SECURITY FIX: Removed old custom parsing functions that were vulnerable
 // to parser divergence attacks. Replaced with sqlparser-rs integration.
 
-fn ensure_checked_sql_surface(sql: &str) -> Result<(), SqliteError> {
-    if let Some(violation) = classify_sql_surface_violation(sql) {
+fn parse_checked_sql(sql: &str) -> Result<Vec<sqlparser::ast::Statement>, SqlSurfaceViolation> {
+    use sqlparser::dialect::SQLiteDialect;
+    use sqlparser::parser::Parser;
+
+    if sql.len() > MAX_CHECKED_SQL_BYTES {
+        return Err(SqlSurfaceViolation::ResourceLimit);
+    }
+
+    let dialect = SQLiteDialect {};
+    Parser::new(&dialect)
+        .with_recursion_limit(MAX_CHECKED_SQL_RECURSION)
+        .try_with_sql(sql)
+        .and_then(|mut parser| parser.parse_statements())
+        .map_err(|_| {
+            check_sql_keywords_fallback(sql).unwrap_or(SqlSurfaceViolation::ParserRejected)
+        })
+}
+
+fn ensure_checked_sql_surface(
+    sql: &str,
+    cardinality: CheckedSqlCardinality,
+) -> Result<(), SqliteError> {
+    let statements = parse_checked_sql(sql).map_err(|violation| {
+        SqliteError::UnsafeSql(violation.checked_surface_message().to_string())
+    })?;
+
+    if cardinality == CheckedSqlCardinality::ExactlyOne && statements.len() != 1 {
+        return Err(SqliteError::UnsafeSql(
+            SqlSurfaceViolation::StatementCount
+                .checked_surface_message()
+                .to_string(),
+        ));
+    }
+
+    if let Some(violation) = check_parsed_statements(&statements) {
         return Err(SqliteError::UnsafeSql(
             violation.checked_surface_message().to_string(),
         ));
@@ -691,10 +807,7 @@ fn ensure_checked_sql_surface(sql: &str) -> Result<(), SqliteError> {
 }
 
 fn ensure_unchecked_sql_surface(sql: &str) -> Result<(), SqliteError> {
-    if matches!(
-        classify_sql_surface_violation(sql),
-        Some(SqlSurfaceViolation::AttachDetach)
-    ) {
+    if unchecked_sql_contains_attach_detach(sql) {
         return Err(SqliteError::UnsafeSql(
             "ATTACH and DETACH are disabled on SQLite connections; open a separate validated connection instead"
                 .to_string(),
@@ -2005,7 +2118,7 @@ impl SqliteConnection {
         sql: &str,
         params: &[SqliteValue],
     ) -> Outcome<u64, SqliteError> {
-        if let Err(err) = ensure_checked_sql_surface(sql) {
+        if let Err(err) = ensure_checked_sql_surface(sql, CheckedSqlCardinality::ExactlyOne) {
             return Outcome::Err(err);
         }
         self.execute_unchecked(cx, sql, params).await
@@ -2098,7 +2211,7 @@ impl SqliteConnection {
     ///
     /// This operation checks for cancellation before starting.
     pub async fn execute_batch(&self, cx: &Cx, sql: &str) -> Outcome<(), SqliteError> {
-        if let Err(err) = ensure_checked_sql_surface(sql) {
+        if let Err(err) = ensure_checked_sql_surface(sql, CheckedSqlCardinality::Batch) {
             return Outcome::Err(err);
         }
         self.execute_batch_unchecked(cx, sql).await
@@ -2148,7 +2261,7 @@ impl SqliteConnection {
         sql: &str,
         params: &[SqliteValue],
     ) -> Outcome<Vec<SqliteRow>, SqliteError> {
-        if let Err(err) = ensure_checked_sql_surface(sql) {
+        if let Err(err) = ensure_checked_sql_surface(sql, CheckedSqlCardinality::ExactlyOne) {
             return Outcome::Err(err);
         }
         self.query_unchecked(cx, sql, params).await
@@ -2258,7 +2371,7 @@ impl SqliteConnection {
         sql: &str,
         params: &[SqliteValue],
     ) -> Outcome<SqliteRowStream<'connection>, SqliteError> {
-        if let Err(err) = ensure_checked_sql_surface(sql) {
+        if let Err(err) = ensure_checked_sql_surface(sql, CheckedSqlCardinality::ExactlyOne) {
             return Outcome::Err(err);
         }
         self.query_stream_unchecked(cx, sql, params).await
@@ -2457,7 +2570,7 @@ impl SqliteConnection {
         sql: &str,
         params: &[SqliteValue],
     ) -> Outcome<Option<SqliteRow>, SqliteError> {
-        if let Err(err) = ensure_checked_sql_surface(sql) {
+        if let Err(err) = ensure_checked_sql_surface(sql, CheckedSqlCardinality::ExactlyOne) {
             return Outcome::Err(err);
         }
         self.query_row_unchecked(cx, sql, params).await
@@ -4458,7 +4571,7 @@ mod tests {
             "/* comment */ SAVEPOINT sp1",
             "ATTACH 'tenant.db' AS tenant",
         ] {
-            let err = ensure_checked_sql_surface(sql).unwrap_err();
+            let err = ensure_checked_sql_surface(sql, CheckedSqlCardinality::Batch).unwrap_err();
             assert!(
                 matches!(err, SqliteError::UnsafeSql(_)),
                 "expected unsafe SQL rejection for {sql:?}, got {err:?}"
@@ -4472,7 +4585,7 @@ mod tests {
             "PRAGMA read_uncommitted = 1",
             "  /* comment */ PRAGMA foreign_keys = OFF",
         ] {
-            let err = ensure_checked_sql_surface(sql).unwrap_err();
+            let err = ensure_checked_sql_surface(sql, CheckedSqlCardinality::Batch).unwrap_err();
             assert!(
                 matches!(err, SqliteError::UnsafeSql(_)),
                 "expected unsafe SQL rejection for {sql:?}, got {err:?}"
@@ -4497,6 +4610,23 @@ mod tests {
             ensure_unchecked_sql_surface(sql)
                 .unwrap_or_else(|err| panic!("unchecked surface should allow {sql:?}: {err:?}"));
         }
+    }
+
+    #[test]
+    fn unchecked_sql_surface_preserves_large_trusted_migration_compatibility() {
+        let oversized = format!("SELECT '{}';", "x".repeat(MAX_CHECKED_SQL_BYTES));
+        ensure_unchecked_sql_surface(&oversized)
+            .expect("the explicit unchecked surface must not inherit checked parser size limits");
+
+        let oversized_attach = format!(
+            "SELECT '{}'; VACUUM; ATTACH ':memory:' AS bypass",
+            "x".repeat(MAX_CHECKED_SQL_BYTES)
+        );
+        let err = ensure_unchecked_sql_surface(&oversized_attach).unwrap_err();
+        assert!(
+            matches!(err, SqliteError::UnsafeSql(_)),
+            "oversized unchecked batches must not bypass the permanent ATTACH ban: {err:?}"
+        );
     }
 
     #[test]
@@ -4537,7 +4667,7 @@ mod tests {
             "INSERT INTO users(name) VALUES ('alice')",
             "WITH cte AS (SELECT 1) SELECT * FROM cte",
         ] {
-            ensure_checked_sql_surface(sql)
+            ensure_checked_sql_surface(sql, CheckedSqlCardinality::ExactlyOne)
                 .unwrap_or_else(|err| panic!("checked surface should allow {sql:?}: {err:?}"));
         }
     }
@@ -4553,17 +4683,110 @@ mod tests {
             END;
         ";
 
-        ensure_checked_sql_surface(sql)
+        ensure_checked_sql_surface(sql, CheckedSqlCardinality::Batch)
             .unwrap_or_else(|err| panic!("checked surface should allow trigger DDL: {err:?}"));
     }
 
     #[test]
     fn checked_sql_surface_rejects_top_level_end_transaction_control() {
-        let err = ensure_checked_sql_surface("END").unwrap_err();
+        let err = ensure_checked_sql_surface("END", CheckedSqlCardinality::ExactlyOne).unwrap_err();
         assert!(
             matches!(err, SqliteError::UnsafeSql(_)),
             "expected unsafe SQL rejection for END, got {err:?}"
         );
+    }
+
+    #[test]
+    fn checked_sql_surface_rejects_vacuum_and_vacuum_into() {
+        for sql in [
+            "VACUUM",
+            "VACUUM main",
+            "VACUUM INTO '/tmp/asupersync-copy.sqlite'",
+            "/* audited? */ VACUUM\tINTO '/tmp/asupersync-copy.sqlite'",
+        ] {
+            let err =
+                ensure_checked_sql_surface(sql, CheckedSqlCardinality::ExactlyOne).unwrap_err();
+            assert!(
+                matches!(err, SqliteError::UnsafeSql(ref msg) if msg.starts_with("VACUUM requires")),
+                "expected VACUUM rejection for {sql:?}, got {err:?}"
+            );
+        }
+
+        ensure_unchecked_sql_surface("VACUUM")
+            .expect("the explicit unchecked surface retains ordinary VACUUM compatibility");
+    }
+
+    #[test]
+    fn checked_sql_surface_enforces_statement_count_and_parser_limits() {
+        let err =
+            ensure_checked_sql_surface("SELECT 1; SELECT 2", CheckedSqlCardinality::ExactlyOne)
+                .unwrap_err();
+        assert!(
+            matches!(err, SqliteError::UnsafeSql(ref msg) if msg.contains("exactly one")),
+            "single-statement APIs must reject multiple statements: {err:?}"
+        );
+        ensure_checked_sql_surface("SELECT 1; SELECT 2", CheckedSqlCardinality::Batch)
+            .expect("checked batch APIs retain multiple-statement support");
+
+        let malformed =
+            ensure_checked_sql_surface("SELECT FROM", CheckedSqlCardinality::ExactlyOne)
+                .unwrap_err();
+        assert!(
+            matches!(malformed, SqliteError::UnsafeSql(ref msg) if msg.contains("bounded policy parser")),
+            "parser divergence must fail closed: {malformed:?}"
+        );
+
+        let oversized = format!("SELECT '{}';", "x".repeat(MAX_CHECKED_SQL_BYTES));
+        let err =
+            ensure_checked_sql_surface(&oversized, CheckedSqlCardinality::ExactlyOne).unwrap_err();
+        assert!(
+            matches!(err, SqliteError::UnsafeSql(ref msg) if msg.contains("resource limits")),
+            "oversized checked SQL must fail before parsing: {err:?}"
+        );
+
+        let nested = format!(
+            "SELECT {}1{}",
+            "(".repeat(MAX_CHECKED_SQL_RECURSION + 8),
+            ")".repeat(MAX_CHECKED_SQL_RECURSION + 8)
+        );
+        let err =
+            ensure_checked_sql_surface(&nested, CheckedSqlCardinality::ExactlyOne).unwrap_err();
+        assert!(
+            matches!(err, SqliteError::UnsafeSql(ref msg) if msg.contains("bounded policy parser")),
+            "excessive parser recursion must fail closed: {err:?}"
+        );
+    }
+
+    #[test]
+    fn checked_sql_surface_does_not_treat_comments_or_literals_as_control_sql() {
+        for sql in [
+            "SELECT 'VACUUM INTO /tmp/copy.sqlite'",
+            "SELECT 'ATTACH tenant.sqlite'",
+            "-- PRAGMA foreign_keys=OFF\nSELECT 1",
+            "/* ROLLBACK; ATTACH x */ SELECT 'Δatabase'",
+        ] {
+            ensure_checked_sql_surface(sql, CheckedSqlCardinality::ExactlyOne).unwrap_or_else(
+                |err| panic!("quoted/commented control words are data for {sql:?}: {err:?}"),
+            );
+        }
+    }
+
+    #[test]
+    fn fallback_keyword_boundaries_cover_sqlite_whitespace_and_punctuation() {
+        for sql in [
+            "PRAGMA(main.table_info)",
+            "ATTACH\t'db.sqlite' AS tenant",
+            "DETACH\ntenant",
+            "VACUUM\tINTO 'copy.sqlite'",
+            "RELEASE\tSAVEPOINT sp",
+        ] {
+            assert!(
+                check_sql_keywords_fallback(sql).is_some(),
+                "fallback must classify control statement {sql:?}"
+            );
+        }
+        assert_eq!(check_sql_keywords_fallback("BEGINNING SELECT 1"), None);
+        assert_eq!(check_sql_keywords_fallback("VACUUMED SELECT 1"), None);
     }
 
     // ---- SqliteError From<io::Error> ----
