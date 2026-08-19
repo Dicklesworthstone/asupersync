@@ -2075,7 +2075,7 @@ impl MySqlConnection {
     /// in-flight query's cancellation — re-using the cancelled Cx will
     /// cause the kill connection's connect to also be cancelled. The
     /// canonical pattern is to spawn a short-lived reaper region or to
-    /// use [`crate::cx::Cx::for_request_with_budget`] with a small
+    /// use [`crate::runtime::RuntimeHandle::request_cx_with_budget`] with a small
     /// budget to bound how long the kill operation can take.
     ///
     /// # Errors
