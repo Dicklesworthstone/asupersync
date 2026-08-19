@@ -59,7 +59,7 @@ use opentelemetry::KeyValue;
 use opentelemetry::metrics::{Counter, Histogram, Meter, ObservableGauge};
 use parking_lot::{Mutex, RwLock};
 use regex::Regex;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::Write;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -1506,6 +1506,1293 @@ impl MetricsProvider for OwnedOtlpMetrics {
     fn record_panic(&self, _location: &'static str) {
         // The fixed 23-instrument provider has no panic descriptor. Keep the
         // callback an explicit no-op until an additive versioned metric exists.
+    }
+}
+
+// =============================================================================
+// Owned OTLP Trace Mapping
+// =============================================================================
+
+/// Version of the native, owned OTLP trace mapping contract.
+pub const OWNED_OTLP_TRACES_VERSION: u32 = 1;
+
+/// Maximum sampled spans admitted by one collection call.
+pub const OWNED_OTLP_MAX_SPANS_PER_COLLECTION: usize = 4_096;
+
+/// Default maximum sampled spans encoded in one OTLP request.
+pub const OWNED_OTLP_DEFAULT_SPANS_PER_REQUEST: usize = 256;
+
+/// Maximum events admitted on one sampled span.
+pub const OWNED_OTLP_MAX_EVENTS_PER_SPAN: usize = 128;
+
+/// Maximum links admitted on one sampled span.
+pub const OWNED_OTLP_MAX_LINKS_PER_SPAN: usize = 128;
+
+/// Maximum UTF-8 bytes admitted for one sampled span name.
+pub const OWNED_OTLP_MAX_SPAN_NAME_BYTES: usize = 1_024;
+
+/// Maximum UTF-8 bytes admitted for one event name.
+pub const OWNED_OTLP_MAX_EVENT_NAME_BYTES: usize = 1_024;
+
+/// Maximum UTF-8 bytes admitted for one W3C tracestate value.
+pub const OWNED_OTLP_MAX_TRACE_STATE_BYTES: usize = 512;
+
+/// Maximum owned string bytes admitted across one trace collection.
+pub const OWNED_OTLP_MAX_TRACE_COLLECTION_BYTES: usize = 4 * 1024 * 1024;
+
+const OWNED_OTLP_TRACE_SAMPLED_FLAG: u8 = 0x01;
+const OWNED_OTLP_CONTEXT_HAS_REMOTE_MASK: u32 = 0x100;
+const OWNED_OTLP_CONTEXT_IS_REMOTE_MASK: u32 = 0x200;
+
+/// Stable, value-redacted error from the owned OTLP trace mapper.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum OwnedOtlpTraceError {
+    /// A configured finite limit is zero or outside the supported envelope.
+    InvalidConfiguration,
+    /// A trace, span, parent, or link identifier is invalid.
+    InvalidIdentifier,
+    /// A timestamp is zero, reversed, or outside its owning span.
+    InvalidTimestamp,
+    /// A span or event name is empty or outside its byte limit.
+    InvalidName,
+    /// A W3C tracestate value is outside the finite or grammar envelope.
+    InvalidTraceState,
+    /// An attribute set contains an empty, duplicate, or oversized key/value.
+    InvalidAttributes,
+    /// Local parentage is cyclic, cross-trace, or not structurally enclosing.
+    InvalidLineage,
+    /// A span, event, link, attribute, or collection count exceeded its limit.
+    LimitExceeded,
+    /// The crate-owned protobuf model exceeded its finite wire envelope.
+    WireEnvelopeExceeded,
+}
+
+impl OwnedOtlpTraceError {
+    /// Stable machine-readable error code.
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::InvalidConfiguration => "otlp.traces.invalid_configuration",
+            Self::InvalidIdentifier => "otlp.traces.invalid_identifier",
+            Self::InvalidTimestamp => "otlp.traces.invalid_timestamp",
+            Self::InvalidName => "otlp.traces.invalid_name",
+            Self::InvalidTraceState => "otlp.traces.invalid_trace_state",
+            Self::InvalidAttributes => "otlp.traces.invalid_attributes",
+            Self::InvalidLineage => "otlp.traces.invalid_lineage",
+            Self::LimitExceeded => "otlp.traces.limit_exceeded",
+            Self::WireEnvelopeExceeded => "otlp.traces.wire_envelope_exceeded",
+        }
+    }
+}
+
+impl std::fmt::Display for OwnedOtlpTraceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.code())
+    }
+}
+
+impl std::error::Error for OwnedOtlpTraceError {}
+
+/// OTLP span kind used by [`OtlpTraceSpanInput`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum OwnedOtlpSpanKind {
+    /// Kind was not specified.
+    Unspecified,
+    /// Internal runtime operation.
+    #[default]
+    Internal,
+    /// Server-side request handling.
+    Server,
+    /// Client-side request handling.
+    Client,
+    /// Message or stream producer.
+    Producer,
+    /// Message or stream consumer.
+    Consumer,
+}
+
+impl OwnedOtlpSpanKind {
+    const fn as_raw(self) -> i32 {
+        match self {
+            Self::Unspecified => 0,
+            Self::Internal => 1,
+            Self::Server => 2,
+            Self::Client => 3,
+            Self::Producer => 4,
+            Self::Consumer => 5,
+        }
+    }
+}
+
+/// OTLP status code used by [`OtlpTraceStatus`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum OwnedOtlpStatusCode {
+    /// No status conclusion was recorded.
+    #[default]
+    Unset,
+    /// Operation completed successfully.
+    Ok,
+    /// Operation failed.
+    Error,
+}
+
+impl OwnedOtlpStatusCode {
+    const fn as_raw(self) -> i32 {
+        match self {
+            Self::Unset => 0,
+            Self::Ok => 1,
+            Self::Error => 2,
+        }
+    }
+}
+
+/// Borrowed OTLP status input. Validation and ownership happen in one mapper
+/// call, after the complete collection has passed its finite preflight.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OtlpTraceStatus<'a> {
+    code: OwnedOtlpStatusCode,
+    message: &'a str,
+}
+
+impl<'a> OtlpTraceStatus<'a> {
+    /// Create a status with an explicit code and optional diagnostic message.
+    #[must_use]
+    pub const fn new(code: OwnedOtlpStatusCode, message: &'a str) -> Self {
+        Self { code, message }
+    }
+
+    /// Status code.
+    #[must_use]
+    pub const fn code(&self) -> OwnedOtlpStatusCode {
+        self.code
+    }
+
+    /// Redaction remains the caller's responsibility; the mapper enforces only
+    /// the finite byte envelope.
+    #[must_use]
+    pub const fn message(&self) -> &'a str {
+        self.message
+    }
+}
+
+/// Borrowed event input for one OTLP span.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OtlpTraceEventInput<'a> {
+    time_unix_nano: u64,
+    name: &'a str,
+    attributes: &'a [(&'a str, &'a str)],
+    dropped_attributes_count: u32,
+}
+
+impl<'a> OtlpTraceEventInput<'a> {
+    /// Create an event at an explicit timestamp. No ambient clock is read.
+    #[must_use]
+    pub const fn new(time_unix_nano: u64, name: &'a str) -> Self {
+        Self {
+            time_unix_nano,
+            name,
+            attributes: &[],
+            dropped_attributes_count: 0,
+        }
+    }
+
+    /// Attach borrowed string attributes.
+    #[must_use]
+    pub const fn with_attributes(mut self, attributes: &'a [(&'a str, &'a str)]) -> Self {
+        self.attributes = attributes;
+        self
+    }
+
+    /// Preserve the producer's count of attributes dropped before mapping.
+    #[must_use]
+    pub const fn with_dropped_attributes_count(mut self, count: u32) -> Self {
+        self.dropped_attributes_count = count;
+        self
+    }
+}
+
+/// Borrowed link input for one OTLP span.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OtlpTraceLinkInput<'a> {
+    trace_id: [u8; 16],
+    span_id: [u8; 8],
+    trace_state: &'a str,
+    attributes: &'a [(&'a str, &'a str)],
+    dropped_attributes_count: u32,
+    trace_flags: u8,
+    context_is_remote: Option<bool>,
+}
+
+impl<'a> OtlpTraceLinkInput<'a> {
+    /// Create a link with exact-width W3C identifiers.
+    #[must_use]
+    pub const fn new(trace_id: [u8; 16], span_id: [u8; 8]) -> Self {
+        Self {
+            trace_id,
+            span_id,
+            trace_state: "",
+            attributes: &[],
+            dropped_attributes_count: 0,
+            trace_flags: 0,
+            context_is_remote: None,
+        }
+    }
+
+    /// Preserve the W3C tracestate value without parsing vendor data.
+    #[must_use]
+    pub const fn with_trace_state(mut self, trace_state: &'a str) -> Self {
+        self.trace_state = trace_state;
+        self
+    }
+
+    /// Attach borrowed string attributes.
+    #[must_use]
+    pub const fn with_attributes(mut self, attributes: &'a [(&'a str, &'a str)]) -> Self {
+        self.attributes = attributes;
+        self
+    }
+
+    /// Preserve the producer's count of attributes dropped before mapping.
+    #[must_use]
+    pub const fn with_dropped_attributes_count(mut self, count: u32) -> Self {
+        self.dropped_attributes_count = count;
+        self
+    }
+
+    /// Set the low eight W3C trace-flag bits.
+    #[must_use]
+    pub const fn with_trace_flags(mut self, trace_flags: u8) -> Self {
+        self.trace_flags = trace_flags;
+        self
+    }
+
+    /// Record whether the linked context is remote.
+    #[must_use]
+    pub const fn with_remote_context(mut self, is_remote: bool) -> Self {
+        self.context_is_remote = Some(is_remote);
+        self
+    }
+}
+
+/// Borrowed, additive OTLP span input.
+///
+/// All fields remain private so future additive metadata does not make this an
+/// exhaustively constructible compatibility trap. Builders borrow caller data;
+/// [`OwnedOtlpTraces::collect`] validates the complete finite collection before
+/// cloning any caller-owned string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OtlpTraceSpanInput<'a> {
+    trace_id: [u8; 16],
+    span_id: [u8; 8],
+    parent_span_id: Option<[u8; 8]>,
+    trace_state: &'a str,
+    name: &'a str,
+    kind: OwnedOtlpSpanKind,
+    start_time_unix_nano: u64,
+    end_time_unix_nano: u64,
+    attributes: &'a [(&'a str, &'a str)],
+    dropped_attributes_count: u32,
+    events: &'a [OtlpTraceEventInput<'a>],
+    dropped_events_count: u32,
+    links: &'a [OtlpTraceLinkInput<'a>],
+    dropped_links_count: u32,
+    status: Option<OtlpTraceStatus<'a>>,
+    trace_flags: u8,
+    context_is_remote: Option<bool>,
+}
+
+impl<'a> OtlpTraceSpanInput<'a> {
+    /// Create a sampled internal span with explicit IDs and timestamps.
+    #[must_use]
+    pub const fn new(
+        trace_id: [u8; 16],
+        span_id: [u8; 8],
+        name: &'a str,
+        start_time_unix_nano: u64,
+        end_time_unix_nano: u64,
+    ) -> Self {
+        Self {
+            trace_id,
+            span_id,
+            parent_span_id: None,
+            trace_state: "",
+            name,
+            kind: OwnedOtlpSpanKind::Internal,
+            start_time_unix_nano,
+            end_time_unix_nano,
+            attributes: &[],
+            dropped_attributes_count: 0,
+            events: &[],
+            dropped_events_count: 0,
+            links: &[],
+            dropped_links_count: 0,
+            status: None,
+            trace_flags: OWNED_OTLP_TRACE_SAMPLED_FLAG,
+            context_is_remote: None,
+        }
+    }
+
+    /// Set the local or external parent span ID.
+    #[must_use]
+    pub const fn with_parent_span_id(mut self, parent_span_id: [u8; 8]) -> Self {
+        self.parent_span_id = Some(parent_span_id);
+        self
+    }
+
+    /// Preserve the W3C tracestate value without parsing vendor data.
+    #[must_use]
+    pub const fn with_trace_state(mut self, trace_state: &'a str) -> Self {
+        self.trace_state = trace_state;
+        self
+    }
+
+    /// Set the OTLP span kind.
+    #[must_use]
+    pub const fn with_kind(mut self, kind: OwnedOtlpSpanKind) -> Self {
+        self.kind = kind;
+        self
+    }
+
+    /// Attach borrowed string attributes.
+    #[must_use]
+    pub const fn with_attributes(mut self, attributes: &'a [(&'a str, &'a str)]) -> Self {
+        self.attributes = attributes;
+        self
+    }
+
+    /// Preserve the producer's count of attributes dropped before mapping.
+    #[must_use]
+    pub const fn with_dropped_attributes_count(mut self, count: u32) -> Self {
+        self.dropped_attributes_count = count;
+        self
+    }
+
+    /// Attach borrowed span events.
+    #[must_use]
+    pub const fn with_events(mut self, events: &'a [OtlpTraceEventInput<'a>]) -> Self {
+        self.events = events;
+        self
+    }
+
+    /// Preserve the producer's count of events dropped before mapping.
+    #[must_use]
+    pub const fn with_dropped_events_count(mut self, count: u32) -> Self {
+        self.dropped_events_count = count;
+        self
+    }
+
+    /// Attach borrowed span links.
+    #[must_use]
+    pub const fn with_links(mut self, links: &'a [OtlpTraceLinkInput<'a>]) -> Self {
+        self.links = links;
+        self
+    }
+
+    /// Preserve the producer's count of links dropped before mapping.
+    #[must_use]
+    pub const fn with_dropped_links_count(mut self, count: u32) -> Self {
+        self.dropped_links_count = count;
+        self
+    }
+
+    /// Set an explicit OTLP status.
+    #[must_use]
+    pub const fn with_status(mut self, status: OtlpTraceStatus<'a>) -> Self {
+        self.status = Some(status);
+        self
+    }
+
+    /// Set the low eight W3C trace-flag bits. A span without the sampled bit is
+    /// counted and omitted before resource validation or owned allocation.
+    #[must_use]
+    pub const fn with_trace_flags(mut self, trace_flags: u8) -> Self {
+        self.trace_flags = trace_flags;
+        self
+    }
+
+    /// Record whether this span's context originated remotely.
+    #[must_use]
+    pub const fn with_remote_context(mut self, is_remote: bool) -> Self {
+        self.context_is_remote = Some(is_remote);
+        self
+    }
+
+    const fn is_sampled(&self) -> bool {
+        self.trace_flags & OWNED_OTLP_TRACE_SAMPLED_FLAG != 0
+    }
+}
+
+/// Immutable finite limits for [`OwnedOtlpTraces`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnedOtlpTraceConfig {
+    max_spans_per_collection: usize,
+    max_spans_per_request: usize,
+    max_events_per_span: usize,
+    max_links_per_span: usize,
+    max_attributes_per_entity: usize,
+    max_owned_bytes: usize,
+    max_request_bytes: usize,
+}
+
+impl Default for OwnedOtlpTraceConfig {
+    fn default() -> Self {
+        Self {
+            max_spans_per_collection: OWNED_OTLP_MAX_SPANS_PER_COLLECTION,
+            max_spans_per_request: OWNED_OTLP_DEFAULT_SPANS_PER_REQUEST,
+            max_events_per_span: OWNED_OTLP_MAX_EVENTS_PER_SPAN,
+            max_links_per_span: OWNED_OTLP_MAX_LINKS_PER_SPAN,
+            max_attributes_per_entity: OWNED_OTLP_MAX_ATTRIBUTES,
+            max_owned_bytes: OWNED_OTLP_MAX_TRACE_COLLECTION_BYTES,
+            max_request_bytes: OWNED_OTLP_DEFAULT_REQUEST_BYTES,
+        }
+    }
+}
+
+impl OwnedOtlpTraceConfig {
+    /// Construct the default finite trace envelope.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the sampled-span limit for one collection call.
+    #[must_use]
+    pub const fn with_max_spans_per_collection(mut self, limit: usize) -> Self {
+        self.max_spans_per_collection = limit;
+        self
+    }
+
+    /// Set the sampled-span limit per encoded request.
+    #[must_use]
+    pub const fn with_max_spans_per_request(mut self, limit: usize) -> Self {
+        self.max_spans_per_request = limit;
+        self
+    }
+
+    /// Set the event limit per sampled span.
+    #[must_use]
+    pub const fn with_max_events_per_span(mut self, limit: usize) -> Self {
+        self.max_events_per_span = limit;
+        self
+    }
+
+    /// Set the link limit per sampled span.
+    #[must_use]
+    pub const fn with_max_links_per_span(mut self, limit: usize) -> Self {
+        self.max_links_per_span = limit;
+        self
+    }
+
+    /// Set the string-attribute limit for every resource, span, event, or link.
+    #[must_use]
+    pub const fn with_max_attributes_per_entity(mut self, limit: usize) -> Self {
+        self.max_attributes_per_entity = limit;
+        self
+    }
+
+    /// Set the aggregate owned-string byte limit for one collection.
+    #[must_use]
+    pub const fn with_max_owned_bytes(mut self, limit: usize) -> Self {
+        self.max_owned_bytes = limit;
+        self
+    }
+
+    /// Set the encoded byte envelope for every request.
+    #[must_use]
+    pub const fn with_max_request_bytes(mut self, limit: usize) -> Self {
+        self.max_request_bytes = limit;
+        self
+    }
+
+    /// Sampled-span limit for one collection.
+    #[must_use]
+    pub const fn max_spans_per_collection(&self) -> usize {
+        self.max_spans_per_collection
+    }
+
+    /// Sampled-span limit per request.
+    #[must_use]
+    pub const fn max_spans_per_request(&self) -> usize {
+        self.max_spans_per_request
+    }
+
+    /// Event limit per sampled span.
+    #[must_use]
+    pub const fn max_events_per_span(&self) -> usize {
+        self.max_events_per_span
+    }
+
+    /// Link limit per sampled span.
+    #[must_use]
+    pub const fn max_links_per_span(&self) -> usize {
+        self.max_links_per_span
+    }
+
+    /// Attribute limit per owning resource, span, event, or link.
+    #[must_use]
+    pub const fn max_attributes_per_entity(&self) -> usize {
+        self.max_attributes_per_entity
+    }
+
+    /// Aggregate owned-string byte limit per collection.
+    #[must_use]
+    pub const fn max_owned_bytes(&self) -> usize {
+        self.max_owned_bytes
+    }
+
+    /// Encoded request byte limit.
+    #[must_use]
+    pub const fn max_request_bytes(&self) -> usize {
+        self.max_request_bytes
+    }
+
+    fn validate(&self) -> Result<(), OwnedOtlpTraceError> {
+        if self.max_spans_per_collection == 0
+            || self.max_spans_per_collection > OWNED_OTLP_MAX_SPANS_PER_COLLECTION
+            || self.max_spans_per_request == 0
+            || self.max_spans_per_request > self.max_spans_per_collection
+            || self.max_events_per_span == 0
+            || self.max_events_per_span > OWNED_OTLP_MAX_EVENTS_PER_SPAN
+            || self.max_links_per_span == 0
+            || self.max_links_per_span > OWNED_OTLP_MAX_LINKS_PER_SPAN
+            || self.max_attributes_per_entity == 0
+            || self.max_attributes_per_entity > OWNED_OTLP_MAX_ATTRIBUTES
+            || self.max_owned_bytes == 0
+            || self.max_owned_bytes > OWNED_OTLP_MAX_TRACE_COLLECTION_BYTES
+            || self.max_request_bytes == 0
+            || self.max_request_bytes > OWNED_OTLP_DEFAULT_REQUEST_BYTES
+        {
+            return Err(OwnedOtlpTraceError::InvalidConfiguration);
+        }
+        Ok(())
+    }
+}
+
+/// Result of one finite owned trace collection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnedOtlpTraceCollection {
+    requests: Vec<Vec<u8>>,
+    sampled_spans: usize,
+    unsampled_spans: usize,
+}
+
+impl OwnedOtlpTraceCollection {
+    /// Encoded OTLP requests in deterministic parent-before-child order.
+    #[must_use]
+    pub fn requests(&self) -> &[Vec<u8>] {
+        &self.requests
+    }
+
+    /// Consume the collection and return the encoded requests.
+    #[must_use]
+    pub fn into_requests(self) -> Vec<Vec<u8>> {
+        self.requests
+    }
+
+    /// Number of sampled spans encoded across all requests.
+    #[must_use]
+    pub const fn sampled_spans(&self) -> usize {
+        self.sampled_spans
+    }
+
+    /// Number of unsampled spans omitted before owned allocation.
+    #[must_use]
+    pub const fn unsampled_spans(&self) -> usize {
+        self.unsampled_spans
+    }
+
+    /// True when head sampling produced no network request.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.requests.is_empty()
+    }
+}
+
+/// Stateless mapper backed by the crate-owned finite OTLP protobuf model.
+///
+/// The mapper is additive to the existing SDK bridge and legacy
+/// [`crate::observability::OtlpSpan`] queue. It never reads an ambient clock,
+/// starts a task, or performs network I/O.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone)]
+pub struct OwnedOtlpTraces {
+    config: OwnedOtlpTraceConfig,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl OwnedOtlpTraces {
+    /// Create a mapper after validating every finite limit.
+    pub fn try_new(config: OwnedOtlpTraceConfig) -> Result<Self, OwnedOtlpTraceError> {
+        config.validate()?;
+        Ok(Self { config })
+    }
+
+    /// Validated immutable mapper configuration.
+    #[must_use]
+    pub const fn config(&self) -> &OwnedOtlpTraceConfig {
+        &self.config
+    }
+
+    /// Validate, deterministically order, and encode borrowed span inputs.
+    ///
+    /// Head sampling is applied first. If no span is sampled, the method does
+    /// not validate resource attributes and allocates no request. For sampled
+    /// input, the complete collection passes count, byte, identifier,
+    /// timestamp, attribute, and lineage preflight before any caller string is
+    /// cloned. Local parents are encoded before descendants regardless of input
+    /// order; unrelated roots use trace ID, start time, end time, and span ID as
+    /// deterministic tie-breakers.
+    pub fn collect(
+        &self,
+        spans: &[OtlpTraceSpanInput<'_>],
+        resource_attributes: &[(&str, &str)],
+    ) -> Result<OwnedOtlpTraceCollection, OwnedOtlpTraceError> {
+        let sampled_count = spans.iter().filter(|span| span.is_sampled()).count();
+        let unsampled_spans = spans.len().saturating_sub(sampled_count);
+        if sampled_count == 0 {
+            return Ok(OwnedOtlpTraceCollection {
+                requests: Vec::new(),
+                sampled_spans: 0,
+                unsampled_spans,
+            });
+        }
+        if sampled_count > self.config.max_spans_per_collection {
+            return Err(OwnedOtlpTraceError::LimitExceeded);
+        }
+
+        validate_owned_trace_attributes(resource_attributes, &self.config)?;
+        let mut owned_bytes = trace_attribute_bytes(resource_attributes)?;
+        let sampled = spans
+            .iter()
+            .filter(|span| span.is_sampled())
+            .collect::<Vec<_>>();
+        for span in &sampled {
+            owned_bytes = owned_bytes
+                .checked_add(validate_owned_trace_span(span, &self.config)?)
+                .ok_or(OwnedOtlpTraceError::LimitExceeded)?;
+            if owned_bytes > self.config.max_owned_bytes {
+                return Err(OwnedOtlpTraceError::LimitExceeded);
+            }
+        }
+
+        let ordered = deterministic_trace_order(&sampled)?;
+        let resource = crate::observability::otlp_proto::common_and_resource::Resource {
+            attributes: owned_otlp_attributes(resource_attributes)
+                .map_err(|_| OwnedOtlpTraceError::InvalidAttributes)?,
+            ..Default::default()
+        };
+        let scope = crate::observability::otlp_proto::common_and_resource::InstrumentationScope {
+            name: "asupersync".to_owned(),
+            version: env!("CARGO_PKG_VERSION").to_owned(),
+            ..Default::default()
+        };
+        let mapped = ordered
+            .into_iter()
+            .map(owned_otlp_trace_span)
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut requests = Vec::new();
+        for chunk in mapped.chunks(self.config.max_spans_per_request) {
+            use crate::observability::otlp_proto::collector::trace::ExportTraceServiceRequest;
+            use crate::observability::otlp_proto::trace::{ResourceSpans, ScopeSpans};
+
+            let request = ExportTraceServiceRequest {
+                resource_spans: vec![ResourceSpans {
+                    resource: Some(resource.clone()),
+                    scope_spans: vec![ScopeSpans {
+                        scope: Some(scope.clone()),
+                        spans: chunk.to_vec(),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            };
+            let bytes = request
+                .encode_to_bytes(ProtobufWireLimits::for_message_size(
+                    self.config.max_request_bytes,
+                ))
+                .map_err(|error| match error {
+                    crate::grpc::protobuf::ProtobufWireError::SchemaInvariant {
+                        invariant: "trace state must use the W3C tracestate format",
+                        ..
+                    } => OwnedOtlpTraceError::InvalidTraceState,
+                    _ => OwnedOtlpTraceError::WireEnvelopeExceeded,
+                })?;
+            requests.push(bytes.to_vec());
+        }
+
+        Ok(OwnedOtlpTraceCollection {
+            requests,
+            sampled_spans: sampled_count,
+            unsampled_spans,
+        })
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn validate_owned_trace_attributes(
+    attributes: &[(&str, &str)],
+    config: &OwnedOtlpTraceConfig,
+) -> Result<(), OwnedOtlpTraceError> {
+    if attributes.len() > config.max_attributes_per_entity {
+        return Err(OwnedOtlpTraceError::LimitExceeded);
+    }
+    validate_owned_otlp_attributes(attributes.len(), attributes.iter().copied())
+        .map_err(|_| OwnedOtlpTraceError::InvalidAttributes)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn trace_attribute_bytes(attributes: &[(&str, &str)]) -> Result<usize, OwnedOtlpTraceError> {
+    attributes.iter().try_fold(0usize, |total, (key, value)| {
+        total
+            .checked_add(key.len())
+            .and_then(|total| total.checked_add(value.len()))
+            .ok_or(OwnedOtlpTraceError::LimitExceeded)
+    })
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn nonzero_id<const N: usize>(id: &[u8; N]) -> bool {
+    id.iter().any(|byte| *byte != 0)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn validate_owned_trace_span(
+    span: &OtlpTraceSpanInput<'_>,
+    config: &OwnedOtlpTraceConfig,
+) -> Result<usize, OwnedOtlpTraceError> {
+    if !nonzero_id(&span.trace_id)
+        || !nonzero_id(&span.span_id)
+        || span
+            .parent_span_id
+            .as_ref()
+            .is_some_and(|id| !nonzero_id(id))
+    {
+        return Err(OwnedOtlpTraceError::InvalidIdentifier);
+    }
+    if span.start_time_unix_nano == 0
+        || span.end_time_unix_nano == 0
+        || span.end_time_unix_nano < span.start_time_unix_nano
+    {
+        return Err(OwnedOtlpTraceError::InvalidTimestamp);
+    }
+    if span.name.is_empty() || span.name.len() > OWNED_OTLP_MAX_SPAN_NAME_BYTES {
+        return Err(OwnedOtlpTraceError::InvalidName);
+    }
+    if span.trace_state.len() > OWNED_OTLP_MAX_TRACE_STATE_BYTES {
+        return Err(OwnedOtlpTraceError::InvalidTraceState);
+    }
+    if span.events.len() > config.max_events_per_span
+        || span.links.len() > config.max_links_per_span
+    {
+        return Err(OwnedOtlpTraceError::LimitExceeded);
+    }
+    validate_owned_trace_attributes(span.attributes, config)?;
+    let mut owned_bytes = span
+        .name
+        .len()
+        .checked_add(span.trace_state.len())
+        .and_then(|total| {
+            span.status.map_or(Some(total), |status| {
+                total.checked_add(status.message.len())
+            })
+        })
+        .ok_or(OwnedOtlpTraceError::LimitExceeded)?;
+    if span
+        .status
+        .is_some_and(|status| status.message.len() > OWNED_OTLP_MAX_ATTRIBUTE_VALUE_BYTES)
+    {
+        return Err(OwnedOtlpTraceError::LimitExceeded);
+    }
+    owned_bytes = owned_bytes
+        .checked_add(trace_attribute_bytes(span.attributes)?)
+        .ok_or(OwnedOtlpTraceError::LimitExceeded)?;
+
+    for event in span.events {
+        if event.time_unix_nano < span.start_time_unix_nano
+            || event.time_unix_nano > span.end_time_unix_nano
+        {
+            return Err(OwnedOtlpTraceError::InvalidTimestamp);
+        }
+        if event.name.is_empty() || event.name.len() > OWNED_OTLP_MAX_EVENT_NAME_BYTES {
+            return Err(OwnedOtlpTraceError::InvalidName);
+        }
+        validate_owned_trace_attributes(event.attributes, config)?;
+        let event_attribute_bytes = trace_attribute_bytes(event.attributes)?;
+        owned_bytes = owned_bytes
+            .checked_add(event.name.len())
+            .and_then(|total| total.checked_add(event_attribute_bytes))
+            .ok_or(OwnedOtlpTraceError::LimitExceeded)?;
+    }
+    for link in span.links {
+        if !nonzero_id(&link.trace_id) || !nonzero_id(&link.span_id) {
+            return Err(OwnedOtlpTraceError::InvalidIdentifier);
+        }
+        if link.trace_state.len() > OWNED_OTLP_MAX_TRACE_STATE_BYTES {
+            return Err(OwnedOtlpTraceError::InvalidTraceState);
+        }
+        validate_owned_trace_attributes(link.attributes, config)?;
+        let link_attribute_bytes = trace_attribute_bytes(link.attributes)?;
+        owned_bytes = owned_bytes
+            .checked_add(link.trace_state.len())
+            .and_then(|total| total.checked_add(link_attribute_bytes))
+            .ok_or(OwnedOtlpTraceError::LimitExceeded)?;
+    }
+    Ok(owned_bytes)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn deterministic_trace_order<'a>(
+    spans: &[&'a OtlpTraceSpanInput<'a>],
+) -> Result<Vec<&'a OtlpTraceSpanInput<'a>>, OwnedOtlpTraceError> {
+    let mut index = BTreeMap::new();
+    for (position, span) in spans.iter().enumerate() {
+        if index
+            .insert((span.trace_id, span.span_id), position)
+            .is_some()
+        {
+            return Err(OwnedOtlpTraceError::InvalidIdentifier);
+        }
+    }
+
+    let mut children = vec![Vec::new(); spans.len()];
+    let mut indegree = vec![0usize; spans.len()];
+    for (child_position, child) in spans.iter().enumerate() {
+        let Some(parent_span_id) = child.parent_span_id else {
+            continue;
+        };
+        let Some(&parent_position) = index.get(&(child.trace_id, parent_span_id)) else {
+            continue;
+        };
+        if parent_position == child_position {
+            return Err(OwnedOtlpTraceError::InvalidLineage);
+        }
+        let parent = spans[parent_position];
+        if parent.start_time_unix_nano > child.start_time_unix_nano
+            || parent.end_time_unix_nano < child.end_time_unix_nano
+        {
+            return Err(OwnedOtlpTraceError::InvalidLineage);
+        }
+        children[parent_position].push(child_position);
+        indegree[child_position] = indegree[child_position].saturating_add(1);
+    }
+
+    type OrderKey = ([u8; 16], u64, u64, [u8; 8], usize);
+    let key = |position: usize| -> OrderKey {
+        let span = spans[position];
+        (
+            span.trace_id,
+            span.start_time_unix_nano,
+            span.end_time_unix_nano,
+            span.span_id,
+            position,
+        )
+    };
+    let mut ready = BTreeSet::new();
+    for (position, degree) in indegree.iter().enumerate() {
+        if *degree == 0 {
+            ready.insert(key(position));
+        }
+    }
+
+    let mut ordered = Vec::with_capacity(spans.len());
+    while let Some(next) = ready.pop_first() {
+        let position = next.4;
+        ordered.push(spans[position]);
+        for &child in &children[position] {
+            indegree[child] = indegree[child].saturating_sub(1);
+            if indegree[child] == 0 {
+                ready.insert(key(child));
+            }
+        }
+    }
+    if ordered.len() != spans.len() {
+        return Err(OwnedOtlpTraceError::InvalidLineage);
+    }
+    Ok(ordered)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn owned_otlp_context_flags(trace_flags: u8, context_is_remote: Option<bool>) -> u32 {
+    let mut flags = u32::from(trace_flags);
+    if let Some(is_remote) = context_is_remote {
+        flags |= OWNED_OTLP_CONTEXT_HAS_REMOTE_MASK;
+        if is_remote {
+            flags |= OWNED_OTLP_CONTEXT_IS_REMOTE_MASK;
+        }
+    }
+    flags
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn owned_otlp_trace_span(
+    span: &OtlpTraceSpanInput<'_>,
+) -> Result<crate::observability::otlp_proto::trace::Span, OwnedOtlpTraceError> {
+    use crate::observability::otlp_proto::trace::{Span, SpanEvent, SpanLink, Status};
+
+    let mut events = span
+        .events
+        .iter()
+        .map(|event| {
+            Ok(SpanEvent {
+                time_unix_nano: event.time_unix_nano,
+                name: event.name.to_owned(),
+                attributes: owned_otlp_attributes(event.attributes)
+                    .map_err(|_| OwnedOtlpTraceError::InvalidAttributes)?,
+                dropped_attributes_count: event.dropped_attributes_count,
+                ..Default::default()
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    events.sort_by(|left, right| {
+        (left.time_unix_nano, left.name.as_str()).cmp(&(right.time_unix_nano, right.name.as_str()))
+    });
+
+    let mut links = span
+        .links
+        .iter()
+        .map(|link| {
+            Ok(SpanLink {
+                trace_id: link.trace_id.to_vec(),
+                span_id: link.span_id.to_vec(),
+                trace_state: link.trace_state.to_owned(),
+                attributes: owned_otlp_attributes(link.attributes)
+                    .map_err(|_| OwnedOtlpTraceError::InvalidAttributes)?,
+                dropped_attributes_count: link.dropped_attributes_count,
+                flags: owned_otlp_context_flags(link.trace_flags, link.context_is_remote),
+                ..Default::default()
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    links.sort_by(|left, right| {
+        (&left.trace_id, &left.span_id, left.trace_state.as_str()).cmp(&(
+            &right.trace_id,
+            &right.span_id,
+            right.trace_state.as_str(),
+        ))
+    });
+
+    Ok(Span {
+        trace_id: span.trace_id.to_vec(),
+        span_id: span.span_id.to_vec(),
+        parent_span_id: span.parent_span_id.map_or_else(Vec::new, |id| id.to_vec()),
+        trace_state: span.trace_state.to_owned(),
+        name: span.name.to_owned(),
+        kind: span.kind.as_raw(),
+        start_time_unix_nano: span.start_time_unix_nano,
+        end_time_unix_nano: span.end_time_unix_nano,
+        attributes: owned_otlp_attributes(span.attributes)
+            .map_err(|_| OwnedOtlpTraceError::InvalidAttributes)?,
+        dropped_attributes_count: span.dropped_attributes_count,
+        events,
+        dropped_events_count: span.dropped_events_count,
+        links,
+        dropped_links_count: span.dropped_links_count,
+        status: span.status.map(|status| Status {
+            message: status.message.to_owned(),
+            code: status.code.as_raw(),
+            ..Default::default()
+        }),
+        flags: owned_otlp_context_flags(span.trace_flags, span.context_is_remote),
+        ..Default::default()
+    })
+}
+
+#[cfg(all(test, feature = "metrics", not(target_arch = "wasm32")))]
+mod owned_otlp_trace_tests {
+    use super::*;
+    use crate::observability::otlp_proto::collector::trace::ExportTraceServiceRequest;
+
+    const TRACE_ID: [u8; 16] = [0x11; 16];
+    const ROOT_ID: [u8; 8] = [0x21; 8];
+    const TASK_ID: [u8; 8] = [0x22; 8];
+    const CANCEL_ID: [u8; 8] = [0x23; 8];
+
+    fn mapper() -> OwnedOtlpTraces {
+        OwnedOtlpTraces::try_new(OwnedOtlpTraceConfig::new()).expect("valid trace mapper")
+    }
+
+    fn basic_span<'a>(span_id: [u8; 8], name: &'a str) -> OtlpTraceSpanInput<'a> {
+        OtlpTraceSpanInput::new(TRACE_ID, span_id, name, 100, 500)
+    }
+
+    fn decode_request(bytes: &[u8]) -> ExportTraceServiceRequest {
+        ExportTraceServiceRequest::decode_from_bytes(
+            bytes,
+            ProtobufWireLimits::for_message_size(OWNED_OTLP_DEFAULT_REQUEST_BYTES),
+        )
+        .expect("owned request must round-trip through the crate-owned decoder")
+    }
+
+    fn request_spans(
+        request: &ExportTraceServiceRequest,
+    ) -> &[crate::observability::otlp_proto::trace::Span] {
+        &request.resource_spans[0].scope_spans[0].spans
+    }
+
+    #[test]
+    fn finite_trace_mapping_is_deterministic_and_preserves_lineage() {
+        let root_attributes = [("z", "last"), ("a", "first")];
+        let task_attributes = [("asupersync.entity.type", "task")];
+        let event_attributes = [("outcome", "cancelled")];
+        let events = [
+            OtlpTraceEventInput::new(320, "drained")
+                .with_attributes(&event_attributes)
+                .with_dropped_attributes_count(2),
+            OtlpTraceEventInput::new(220, "cancel-requested"),
+        ];
+        let link_attributes = [("link.kind", "follows-from")];
+        let links = [OtlpTraceLinkInput::new([0x42; 16], [0x52; 8])
+            .with_trace_state("vendor=value")
+            .with_attributes(&link_attributes)
+            .with_dropped_attributes_count(3)
+            .with_trace_flags(1)
+            .with_remote_context(true)];
+        let root = basic_span(ROOT_ID, "region.root")
+            .with_attributes(&root_attributes)
+            .with_kind(OwnedOtlpSpanKind::Internal);
+        let task = OtlpTraceSpanInput::new(TRACE_ID, TASK_ID, "task.worker", 150, 450)
+            .with_parent_span_id(ROOT_ID)
+            .with_attributes(&task_attributes)
+            .with_kind(OwnedOtlpSpanKind::Consumer)
+            .with_status(OtlpTraceStatus::new(OwnedOtlpStatusCode::Ok, "completed"));
+        let cancel = OtlpTraceSpanInput::new(TRACE_ID, CANCEL_ID, "cancel.drain", 200, 400)
+            .with_parent_span_id(ROOT_ID)
+            .with_events(&events)
+            .with_dropped_events_count(4)
+            .with_links(&links)
+            .with_dropped_links_count(5)
+            .with_status(OtlpTraceStatus::new(
+                OwnedOtlpStatusCode::Error,
+                "child cancelled",
+            ))
+            .with_remote_context(true);
+
+        let first = mapper()
+            .collect(
+                &[cancel, task, root],
+                &[("service.name", "trace-test"), ("deployment", "lab")],
+            )
+            .expect("map shuffled structured trace");
+        let second = mapper()
+            .collect(
+                &[root, cancel, task],
+                &[("deployment", "lab"), ("service.name", "trace-test")],
+            )
+            .expect("map alternate input order");
+        assert_eq!(first.requests(), second.requests());
+        assert_eq!(first.sampled_spans(), 3);
+        assert_eq!(first.unsampled_spans(), 0);
+
+        let request = decode_request(&first.requests()[0]);
+        let resource_spans = &request.resource_spans[0];
+        let resource = resource_spans.resource.as_ref().expect("resource");
+        assert_eq!(resource.attributes[0].key, "deployment");
+        assert_eq!(resource.attributes[1].key, "service.name");
+        let scope = resource_spans.scope_spans[0]
+            .scope
+            .as_ref()
+            .expect("instrumentation scope");
+        assert_eq!(scope.name, "asupersync");
+        assert_eq!(scope.version, env!("CARGO_PKG_VERSION"));
+
+        let spans = request_spans(&request);
+        assert_eq!(
+            spans
+                .iter()
+                .map(|span| span.name.as_str())
+                .collect::<Vec<_>>(),
+            ["region.root", "task.worker", "cancel.drain"]
+        );
+        assert!(spans[0].parent_span_id.is_empty());
+        assert_eq!(spans[1].parent_span_id, ROOT_ID);
+        assert_eq!(spans[2].parent_span_id, ROOT_ID);
+        assert_eq!(spans[0].attributes[0].key, "a");
+        assert_eq!(spans[0].attributes[1].key, "z");
+        assert_eq!(spans[1].kind, OwnedOtlpSpanKind::Consumer.as_raw());
+        assert_eq!(spans[1].status.as_ref().expect("task status").code, 1);
+        assert_eq!(spans[2].status.as_ref().expect("cancel status").code, 2);
+        assert_eq!(spans[2].events[0].name, "cancel-requested");
+        assert_eq!(spans[2].events[1].name, "drained");
+        assert_eq!(spans[2].events[1].dropped_attributes_count, 2);
+        assert_eq!(spans[2].dropped_events_count, 4);
+        assert_eq!(spans[2].links[0].trace_state, "vendor=value");
+        assert_eq!(spans[2].links[0].dropped_attributes_count, 3);
+        assert_eq!(spans[2].links[0].flags, 0x301);
+        assert_eq!(spans[2].dropped_links_count, 5);
+        assert_eq!(spans[2].flags, 0x301);
+    }
+
+    #[test]
+    fn head_sampling_precedes_resource_validation_and_allocation() {
+        let unsampled = basic_span(ROOT_ID, "ignored").with_trace_flags(0);
+        let oversized = "x".repeat(OWNED_OTLP_MAX_ATTRIBUTE_VALUE_BYTES + 1);
+        let result = mapper()
+            .collect(&[unsampled], &[("", oversized.as_str())])
+            .expect("all-unsampled collection must not inspect resource data");
+        assert!(result.is_empty());
+        assert_eq!(result.sampled_spans(), 0);
+        assert_eq!(result.unsampled_spans(), 1);
+    }
+
+    #[test]
+    fn trace_mapping_splits_requests_and_accepts_external_parents() {
+        let external_parent = [0x77; 8];
+        let root = basic_span(ROOT_ID, "root");
+        let external_child = OtlpTraceSpanInput::new(TRACE_ID, TASK_ID, "remote-child", 200, 300)
+            .with_parent_span_id(external_parent);
+        let traces =
+            OwnedOtlpTraces::try_new(OwnedOtlpTraceConfig::new().with_max_spans_per_request(1))
+                .expect("valid one-span request envelope");
+        let result = traces
+            .collect(&[external_child, root], &[])
+            .expect("external parent is not a local lineage edge");
+        assert_eq!(result.requests().len(), 2);
+        assert_eq!(
+            request_spans(&decode_request(&result.requests()[0])).len(),
+            1
+        );
+        assert_eq!(
+            request_spans(&decode_request(&result.requests()[1])).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn trace_mapping_refuses_invalid_limits_and_wire_envelopes() {
+        assert_eq!(
+            OwnedOtlpTraces::try_new(OwnedOtlpTraceConfig::new().with_max_spans_per_collection(0))
+                .expect_err("zero collection limit must fail"),
+            OwnedOtlpTraceError::InvalidConfiguration
+        );
+        assert_eq!(
+            OwnedOtlpTraces::try_new(
+                OwnedOtlpTraceConfig::new()
+                    .with_max_spans_per_collection(1)
+                    .with_max_spans_per_request(2)
+            )
+            .expect_err("request limit cannot exceed collection limit"),
+            OwnedOtlpTraceError::InvalidConfiguration
+        );
+
+        let tiny = OwnedOtlpTraces::try_new(OwnedOtlpTraceConfig::new().with_max_request_bytes(1))
+            .expect("positive tiny wire limit is a valid policy");
+        assert_eq!(
+            tiny.collect(&[basic_span(ROOT_ID, "root")], &[])
+                .expect_err("encoded request must exceed one byte"),
+            OwnedOtlpTraceError::WireEnvelopeExceeded
+        );
+
+        let limited =
+            OwnedOtlpTraces::try_new(OwnedOtlpTraceConfig::new().with_max_spans_per_collection(1))
+                .expect("valid one-span collection limit");
+        assert_eq!(
+            limited
+                .collect(
+                    &[basic_span(ROOT_ID, "root"), basic_span(TASK_ID, "task")],
+                    &[],
+                )
+                .expect_err("two sampled spans exceed the limit"),
+            OwnedOtlpTraceError::LimitExceeded
+        );
+    }
+
+    #[test]
+    fn trace_mapping_refuses_invalid_ids_timestamps_names_and_attributes() {
+        let mut zero_trace = basic_span(ROOT_ID, "root");
+        zero_trace.trace_id = [0; 16];
+        assert_eq!(
+            mapper().collect(&[zero_trace], &[]).unwrap_err(),
+            OwnedOtlpTraceError::InvalidIdentifier
+        );
+        let reversed = OtlpTraceSpanInput::new(TRACE_ID, ROOT_ID, "root", 500, 100);
+        assert_eq!(
+            mapper().collect(&[reversed], &[]).unwrap_err(),
+            OwnedOtlpTraceError::InvalidTimestamp
+        );
+        assert_eq!(
+            mapper()
+                .collect(&[basic_span(ROOT_ID, "")], &[])
+                .unwrap_err(),
+            OwnedOtlpTraceError::InvalidName
+        );
+        let duplicate_attributes = [("duplicate", "one"), ("duplicate", "two")];
+        let duplicate = basic_span(ROOT_ID, "root").with_attributes(&duplicate_attributes);
+        assert_eq!(
+            mapper().collect(&[duplicate], &[]).unwrap_err(),
+            OwnedOtlpTraceError::InvalidAttributes
+        );
+        assert_eq!(
+            mapper()
+                .collect(
+                    &[basic_span(ROOT_ID, "root")],
+                    &[("service.name", "one"), ("service.name", "two")],
+                )
+                .unwrap_err(),
+            OwnedOtlpTraceError::InvalidAttributes
+        );
+    }
+
+    #[test]
+    fn trace_mapping_refuses_invalid_events_links_status_and_trace_state() {
+        let bad_event = [OtlpTraceEventInput::new(99, "before-span")];
+        let event_span = basic_span(ROOT_ID, "root").with_events(&bad_event);
+        assert_eq!(
+            mapper().collect(&[event_span], &[]).unwrap_err(),
+            OwnedOtlpTraceError::InvalidTimestamp
+        );
+
+        let bad_link = [OtlpTraceLinkInput::new([0; 16], [1; 8])];
+        let link_span = basic_span(ROOT_ID, "root").with_links(&bad_link);
+        assert_eq!(
+            mapper().collect(&[link_span], &[]).unwrap_err(),
+            OwnedOtlpTraceError::InvalidIdentifier
+        );
+
+        let oversized_status = "x".repeat(OWNED_OTLP_MAX_ATTRIBUTE_VALUE_BYTES + 1);
+        let status_span = basic_span(ROOT_ID, "root").with_status(OtlpTraceStatus::new(
+            OwnedOtlpStatusCode::Error,
+            oversized_status.as_str(),
+        ));
+        assert_eq!(
+            mapper().collect(&[status_span], &[]).unwrap_err(),
+            OwnedOtlpTraceError::LimitExceeded
+        );
+
+        let malformed = basic_span(ROOT_ID, "root").with_trace_state("Vendor=value");
+        assert_eq!(
+            mapper().collect(&[malformed], &[]).unwrap_err(),
+            OwnedOtlpTraceError::InvalidTraceState
+        );
+    }
+
+    #[test]
+    fn trace_mapping_refuses_duplicate_cyclic_and_non_enclosing_lineage() {
+        let duplicate = basic_span(ROOT_ID, "duplicate");
+        assert_eq!(
+            mapper().collect(&[duplicate, duplicate], &[]).unwrap_err(),
+            OwnedOtlpTraceError::InvalidIdentifier
+        );
+
+        let left = OtlpTraceSpanInput::new(TRACE_ID, ROOT_ID, "left", 100, 500)
+            .with_parent_span_id(TASK_ID);
+        let right = OtlpTraceSpanInput::new(TRACE_ID, TASK_ID, "right", 100, 500)
+            .with_parent_span_id(ROOT_ID);
+        assert_eq!(
+            mapper().collect(&[left, right], &[]).unwrap_err(),
+            OwnedOtlpTraceError::InvalidLineage
+        );
+
+        let parent = OtlpTraceSpanInput::new(TRACE_ID, ROOT_ID, "parent", 200, 300);
+        let child = OtlpTraceSpanInput::new(TRACE_ID, TASK_ID, "child", 100, 400)
+            .with_parent_span_id(ROOT_ID);
+        assert_eq!(
+            mapper().collect(&[parent, child], &[]).unwrap_err(),
+            OwnedOtlpTraceError::InvalidLineage
+        );
     }
 }
 
@@ -3770,6 +5057,33 @@ impl OtlpHttpExporter {
             .collect(point_time_unix_nano, &attributes)
             .map_err(|error| ExportError::new(error.to_string()))?;
         for request in requests {
+            self.send_otlp_protobuf(cx, request).await?;
+        }
+        Ok(())
+    }
+
+    /// Map and send a finite borrowed OTLP trace collection.
+    ///
+    /// Every sampled span is validated and encoded before the first network
+    /// write. Requests are sent sequentially inside the caller's cancellation
+    /// and budget envelope; this method never starts an exporter task. An
+    /// all-unsampled collection performs no network request.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn send_owned_traces(
+        &self,
+        cx: &crate::cx::Cx,
+        traces: &OwnedOtlpTraces,
+        spans: &[OtlpTraceSpanInput<'_>],
+    ) -> Result<(), ExportError> {
+        let attributes = self
+            .resource_attributes
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+            .collect::<Vec<_>>();
+        let collection = traces
+            .collect(spans, &attributes)
+            .map_err(|error| ExportError::new(error.to_string()))?;
+        for request in collection.into_requests() {
             self.send_otlp_protobuf(cx, request).await?;
         }
         Ok(())

@@ -278,11 +278,17 @@ pub use otel::{
 #[cfg(all(feature = "metrics", not(target_arch = "wasm32")))]
 pub use otel::{
     OWNED_OTLP_DEFAULT_METRICS_PER_REQUEST, OWNED_OTLP_DEFAULT_REQUEST_BYTES,
-    OWNED_OTLP_MAX_ATTRIBUTE_BYTES, OWNED_OTLP_MAX_ATTRIBUTE_KEY_BYTES,
-    OWNED_OTLP_MAX_ATTRIBUTE_VALUE_BYTES, OWNED_OTLP_MAX_ATTRIBUTES,
-    OWNED_OTLP_MAX_POINTS_PER_METRIC, OWNED_OTLP_METRICS_VERSION, OtlpHttpConfig,
-    OtlpHttpConfigBuilder, OtlpHttpExporter, OtlpTlsPolicy, OwnedOtlpMetrics,
-    OwnedOtlpMetricsConfig, OwnedOtlpMetricsError,
+    OWNED_OTLP_DEFAULT_SPANS_PER_REQUEST, OWNED_OTLP_MAX_ATTRIBUTE_BYTES,
+    OWNED_OTLP_MAX_ATTRIBUTE_KEY_BYTES, OWNED_OTLP_MAX_ATTRIBUTE_VALUE_BYTES,
+    OWNED_OTLP_MAX_ATTRIBUTES, OWNED_OTLP_MAX_EVENT_NAME_BYTES, OWNED_OTLP_MAX_EVENTS_PER_SPAN,
+    OWNED_OTLP_MAX_LINKS_PER_SPAN, OWNED_OTLP_MAX_POINTS_PER_METRIC,
+    OWNED_OTLP_MAX_SPAN_NAME_BYTES, OWNED_OTLP_MAX_SPANS_PER_COLLECTION,
+    OWNED_OTLP_MAX_TRACE_COLLECTION_BYTES, OWNED_OTLP_MAX_TRACE_STATE_BYTES,
+    OWNED_OTLP_METRICS_VERSION, OWNED_OTLP_TRACES_VERSION, OtlpHttpConfig, OtlpHttpConfigBuilder,
+    OtlpHttpExporter, OtlpTlsPolicy, OtlpTraceEventInput, OtlpTraceLinkInput, OtlpTraceSpanInput,
+    OtlpTraceStatus, OwnedOtlpMetrics, OwnedOtlpMetricsConfig, OwnedOtlpMetricsError,
+    OwnedOtlpSpanKind, OwnedOtlpStatusCode, OwnedOtlpTraceCollection, OwnedOtlpTraceConfig,
+    OwnedOtlpTraceError, OwnedOtlpTraces,
 };
 pub use otel_structured_concurrency::{
     EntityId, OtelStructuredConcurrencyConfig, SpanStorage, SpanType,
