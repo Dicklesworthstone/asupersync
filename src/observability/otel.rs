@@ -49,6 +49,8 @@
 //! // RuntimeBuilder::new().metrics(metrics).build();
 //! ```
 
+#[cfg(not(target_arch = "wasm32"))]
+use crate::grpc::protobuf::{ProtoMessage, ProtobufWireLimits};
 use crate::observability::entry::LogEntry;
 use crate::observability::level::LogLevel;
 use crate::observability::metrics::{MetricsProvider, OutcomeKind};
@@ -670,6 +672,840 @@ impl MetricsSnapshot {
         sum: f64,
     ) {
         self.histograms.push((name.into(), labels, count, sum));
+    }
+}
+
+// =============================================================================
+// Owned OTLP Metrics Mapping
+// =============================================================================
+
+/// Version of the native, owned OTLP metrics mapping contract.
+pub const OWNED_OTLP_METRICS_VERSION: u32 = 1;
+
+/// Maximum points admitted for one owned metric stream.
+pub const OWNED_OTLP_MAX_POINTS_PER_METRIC: usize = 1_000;
+
+/// Default maximum metrics emitted in one OTLP request.
+pub const OWNED_OTLP_DEFAULT_METRICS_PER_REQUEST: usize = 256;
+
+/// Default maximum encoded size of one OTLP metrics request.
+pub const OWNED_OTLP_DEFAULT_REQUEST_BYTES: usize = 4 * 1024 * 1024;
+
+/// Maximum attributes admitted on an owned OTLP resource or data point.
+pub const OWNED_OTLP_MAX_ATTRIBUTES: usize = 128;
+
+/// Maximum UTF-8 bytes admitted for one owned OTLP attribute key.
+pub const OWNED_OTLP_MAX_ATTRIBUTE_KEY_BYTES: usize = 1_024;
+
+/// Maximum UTF-8 bytes admitted for one owned OTLP attribute value.
+pub const OWNED_OTLP_MAX_ATTRIBUTE_VALUE_BYTES: usize = 4_096;
+
+/// Maximum aggregate key-plus-value bytes admitted for one attribute owner.
+pub const OWNED_OTLP_MAX_ATTRIBUTE_BYTES: usize = OWNED_OTLP_MAX_ATTRIBUTES
+    * (OWNED_OTLP_MAX_ATTRIBUTE_KEY_BYTES + OWNED_OTLP_MAX_ATTRIBUTE_VALUE_BYTES);
+
+/// Stable, value-redacted error from the owned OTLP metrics mapper.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum OwnedOtlpMetricsError {
+    /// A configured finite limit or epoch is invalid.
+    InvalidConfiguration,
+    /// A collection or reset timestamp is zero or outside monotonic order.
+    InvalidTimestamp,
+    /// An attribute set contains an empty or duplicate key.
+    InvalidAttributes,
+    /// A numeric value is non-finite or cannot be represented exactly.
+    InvalidNumericValue,
+    /// Histogram bounds, counts, or totals are inconsistent.
+    InvalidHistogram,
+    /// The owned protobuf model exceeded its finite wire envelope.
+    WireEnvelopeExceeded,
+}
+
+impl OwnedOtlpMetricsError {
+    /// Stable machine-readable error code.
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::InvalidConfiguration => "otlp.metrics.invalid_configuration",
+            Self::InvalidTimestamp => "otlp.metrics.invalid_timestamp",
+            Self::InvalidAttributes => "otlp.metrics.invalid_attributes",
+            Self::InvalidNumericValue => "otlp.metrics.invalid_numeric_value",
+            Self::InvalidHistogram => "otlp.metrics.invalid_histogram",
+            Self::WireEnvelopeExceeded => "otlp.metrics.wire_envelope_exceeded",
+        }
+    }
+}
+
+impl std::fmt::Display for OwnedOtlpMetricsError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.code())
+    }
+}
+
+impl std::error::Error for OwnedOtlpMetricsError {}
+
+/// Immutable finite limits for [`OwnedOtlpMetrics`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnedOtlpMetricsConfig {
+    epoch_start_unix_nano: u64,
+    max_cardinality_per_metric: usize,
+    max_metrics_per_request: usize,
+    max_request_bytes: usize,
+}
+
+impl OwnedOtlpMetricsConfig {
+    /// Construct the default finite envelope around an explicit accumulation
+    /// epoch. The timestamp is supplied by the caller; this API never reads an
+    /// ambient wall clock.
+    #[must_use]
+    pub const fn new(epoch_start_unix_nano: u64) -> Self {
+        Self {
+            epoch_start_unix_nano,
+            max_cardinality_per_metric: OWNED_OTLP_MAX_POINTS_PER_METRIC,
+            max_metrics_per_request: OWNED_OTLP_DEFAULT_METRICS_PER_REQUEST,
+            max_request_bytes: OWNED_OTLP_DEFAULT_REQUEST_BYTES,
+        }
+    }
+
+    /// Set the finite number of attribute-distinct points admitted per metric.
+    #[must_use]
+    pub const fn with_max_cardinality_per_metric(mut self, limit: usize) -> Self {
+        self.max_cardinality_per_metric = limit;
+        self
+    }
+
+    /// Set the finite metric count emitted per request. Larger collections are
+    /// split deterministically at metric boundaries.
+    #[must_use]
+    pub const fn with_max_metrics_per_request(mut self, limit: usize) -> Self {
+        self.max_metrics_per_request = limit;
+        self
+    }
+
+    /// Set the finite encoded byte envelope for every request.
+    #[must_use]
+    pub const fn with_max_request_bytes(mut self, limit: usize) -> Self {
+        self.max_request_bytes = limit;
+        self
+    }
+
+    /// Explicit accumulation-epoch start timestamp.
+    #[must_use]
+    pub const fn epoch_start_unix_nano(&self) -> u64 {
+        self.epoch_start_unix_nano
+    }
+
+    /// Point cardinality limit per metric.
+    #[must_use]
+    pub const fn max_cardinality_per_metric(&self) -> usize {
+        self.max_cardinality_per_metric
+    }
+
+    /// Metric count limit per encoded request.
+    #[must_use]
+    pub const fn max_metrics_per_request(&self) -> usize {
+        self.max_metrics_per_request
+    }
+
+    /// Encoded request byte limit.
+    #[must_use]
+    pub const fn max_request_bytes(&self) -> usize {
+        self.max_request_bytes
+    }
+
+    fn validate(&self) -> Result<(), OwnedOtlpMetricsError> {
+        if self.epoch_start_unix_nano == 0
+            || self.max_cardinality_per_metric == 0
+            || self.max_cardinality_per_metric > OWNED_OTLP_MAX_POINTS_PER_METRIC
+            || self.max_metrics_per_request == 0
+            || self.max_metrics_per_request > 4_096
+            || self.max_request_bytes == 0
+            || self.max_request_bytes > OWNED_OTLP_DEFAULT_REQUEST_BYTES
+        {
+            return Err(OwnedOtlpMetricsError::InvalidConfiguration);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct OwnedMetricStream {
+    name: &'static str,
+    attributes: Vec<(String, String)>,
+}
+
+impl OwnedMetricStream {
+    fn new(name: &'static str, mut attributes: Vec<(String, String)>) -> Self {
+        attributes.sort();
+        Self { name, attributes }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct OwnedHistogramState {
+    bounds: &'static [f64],
+    bucket_counts: Vec<u64>,
+    count: u64,
+    sum: f64,
+}
+
+impl OwnedHistogramState {
+    fn new(bounds: &'static [f64]) -> Self {
+        Self {
+            bounds,
+            bucket_counts: vec![0; bounds.len() + 1],
+            count: 0,
+            sum: 0.0,
+        }
+    }
+
+    fn record(&mut self, value: f64) -> Result<(), OwnedOtlpMetricsError> {
+        if !value.is_finite() {
+            return Err(OwnedOtlpMetricsError::InvalidNumericValue);
+        }
+        let bucket = self.bounds.partition_point(|bound| value > *bound);
+        let next_bucket = self.bucket_counts[bucket]
+            .checked_add(1)
+            .ok_or(OwnedOtlpMetricsError::InvalidHistogram)?;
+        let next_count = self
+            .count
+            .checked_add(1)
+            .ok_or(OwnedOtlpMetricsError::InvalidHistogram)?;
+        let next_sum = self.sum + value;
+        if !next_sum.is_finite() {
+            return Err(OwnedOtlpMetricsError::InvalidNumericValue);
+        }
+        self.bucket_counts[bucket] = next_bucket;
+        self.count = next_count;
+        self.sum = next_sum;
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+struct OwnedOtlpMetricsState {
+    epoch_start_unix_nano: u64,
+    last_collection_unix_nano: u64,
+    counters: BTreeMap<OwnedMetricStream, u64>,
+    gauges: BTreeMap<OwnedMetricStream, i64>,
+    histograms: BTreeMap<OwnedMetricStream, OwnedHistogramState>,
+    rejected_updates: u64,
+    terminal_error: Option<OwnedOtlpMetricsError>,
+}
+
+/// Native cumulative metrics provider backed by the crate-owned finite OTLP
+/// protobuf model.
+///
+/// This provider is additive: the established [`OtelMetrics`] bridge remains
+/// unchanged for embedders that own an OpenTelemetry SDK. Collection requires
+/// an explicit timestamp, emits deterministic metric/attribute order, and
+/// returns no request bytes when validation fails.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug)]
+pub struct OwnedOtlpMetrics {
+    config: OwnedOtlpMetricsConfig,
+    state: Mutex<OwnedOtlpMetricsState>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl OwnedOtlpMetrics {
+    /// Create a provider after validating every finite limit.
+    pub fn try_new(config: OwnedOtlpMetricsConfig) -> Result<Self, OwnedOtlpMetricsError> {
+        config.validate()?;
+        Ok(Self {
+            state: Mutex::new(OwnedOtlpMetricsState {
+                epoch_start_unix_nano: config.epoch_start_unix_nano,
+                last_collection_unix_nano: 0,
+                counters: BTreeMap::new(),
+                gauges: BTreeMap::new(),
+                histograms: BTreeMap::new(),
+                rejected_updates: 0,
+                terminal_error: None,
+            }),
+            config,
+        })
+    }
+
+    /// Validated immutable provider configuration.
+    #[must_use]
+    pub const fn config(&self) -> &OwnedOtlpMetricsConfig {
+        &self.config
+    }
+
+    /// Number of callback updates rejected by cardinality or numeric bounds.
+    #[must_use]
+    pub fn rejected_updates(&self) -> u64 {
+        self.state.lock().rejected_updates
+    }
+
+    /// Atomically start a new cumulative epoch. Gauges retain their current
+    /// last values; cumulative counters and histograms restart from zero.
+    pub fn reset(&self, new_epoch_unix_nano: u64) -> Result<(), OwnedOtlpMetricsError> {
+        let mut state = self.state.lock();
+        if new_epoch_unix_nano == 0
+            || new_epoch_unix_nano <= state.epoch_start_unix_nano
+            || new_epoch_unix_nano <= state.last_collection_unix_nano
+        {
+            return Err(OwnedOtlpMetricsError::InvalidTimestamp);
+        }
+        state.epoch_start_unix_nano = new_epoch_unix_nano;
+        state.last_collection_unix_nano = 0;
+        state.counters.clear();
+        state.histograms.clear();
+        state.terminal_error = None;
+        Ok(())
+    }
+
+    /// Encode a deterministic collection into one or more finite OTLP
+    /// requests. Splitting occurs only at metric boundaries.
+    pub fn collect(
+        &self,
+        point_time_unix_nano: u64,
+        resource_attributes: &[(&str, &str)],
+    ) -> Result<Vec<Vec<u8>>, OwnedOtlpMetricsError> {
+        use crate::observability::otlp_proto::collector::metrics::ExportMetricsServiceRequest;
+        use crate::observability::otlp_proto::common_and_resource::{
+            InstrumentationScope, Resource,
+        };
+        use crate::observability::otlp_proto::metrics::{ResourceMetrics, ScopeMetrics};
+
+        let mut state = self.state.lock();
+        if let Some(error) = state.terminal_error {
+            return Err(error);
+        }
+        if point_time_unix_nano == 0
+            || point_time_unix_nano < state.epoch_start_unix_nano
+            || point_time_unix_nano < state.last_collection_unix_nano
+        {
+            return Err(OwnedOtlpMetricsError::InvalidTimestamp);
+        }
+
+        let resource_attributes = owned_otlp_attributes(resource_attributes)?;
+        let resource = Resource {
+            attributes: resource_attributes,
+            ..Resource::default()
+        };
+        let scope = InstrumentationScope {
+            name: "asupersync".to_owned(),
+            version: env!("CARGO_PKG_VERSION").to_owned(),
+            ..InstrumentationScope::default()
+        };
+        let metrics = build_owned_otlp_metrics(&state, point_time_unix_nano)?;
+        let mut encoded = Vec::new();
+
+        for chunk in metrics.chunks(self.config.max_metrics_per_request) {
+            let request = ExportMetricsServiceRequest {
+                resource_metrics: vec![ResourceMetrics {
+                    resource: Some(resource.clone()),
+                    scope_metrics: vec![ScopeMetrics {
+                        scope: Some(scope.clone()),
+                        metrics: chunk.to_vec(),
+                        ..ScopeMetrics::default()
+                    }],
+                    ..ResourceMetrics::default()
+                }],
+                ..ExportMetricsServiceRequest::default()
+            };
+            let bytes = request
+                .encode_to_bytes(ProtobufWireLimits::for_message_size(
+                    self.config.max_request_bytes,
+                ))
+                .map_err(|_| OwnedOtlpMetricsError::WireEnvelopeExceeded)?;
+            encoded.push(bytes.to_vec());
+        }
+
+        // Empty collections deliberately produce no HTTP request.
+        state.last_collection_unix_nano = point_time_unix_nano;
+        Ok(encoded)
+    }
+
+    fn cardinality_available<T>(
+        &self,
+        map: &BTreeMap<OwnedMetricStream, T>,
+        stream: &OwnedMetricStream,
+    ) -> bool {
+        map.contains_key(stream)
+            || map
+                .keys()
+                .filter(|candidate| candidate.name == stream.name)
+                .count()
+                < self.config.max_cardinality_per_metric
+    }
+
+    fn increment_counter(&self, name: &'static str, attributes: Vec<(String, String)>) {
+        let stream = OwnedMetricStream::new(name, attributes);
+        let mut state = self.state.lock();
+        if !self.cardinality_available(&state.counters, &stream) {
+            state.rejected_updates = state.rejected_updates.saturating_add(1);
+            return;
+        }
+        let value = state.counters.entry(stream).or_insert(0);
+        match value.checked_add(1) {
+            Some(next) => *value = next,
+            None => {
+                state.rejected_updates = state.rejected_updates.saturating_add(1);
+                state.terminal_error = Some(OwnedOtlpMetricsError::InvalidNumericValue);
+            }
+        }
+    }
+
+    fn adjust_gauge(&self, name: &'static str, delta: i64) {
+        let stream = OwnedMetricStream::new(name, Vec::new());
+        let mut state = self.state.lock();
+        let value = state.gauges.entry(stream).or_insert(0);
+        match value.checked_add(delta).filter(|next| *next >= 0) {
+            Some(next) => *value = next,
+            None => {
+                state.rejected_updates = state.rejected_updates.saturating_add(1);
+                state.terminal_error = Some(OwnedOtlpMetricsError::InvalidNumericValue);
+            }
+        }
+    }
+
+    fn record_histogram(&self, name: &'static str, attributes: Vec<(String, String)>, value: f64) {
+        let stream = OwnedMetricStream::new(name, attributes);
+        let mut state = self.state.lock();
+        if !self.cardinality_available(&state.histograms, &stream) {
+            state.rejected_updates = state.rejected_updates.saturating_add(1);
+            return;
+        }
+        let histogram = state
+            .histograms
+            .entry(stream)
+            .or_insert_with(|| OwnedHistogramState::new(owned_histogram_bounds(name)));
+        if let Err(error) = histogram.record(value) {
+            state.rejected_updates = state.rejected_updates.saturating_add(1);
+            state.terminal_error = Some(error);
+        }
+    }
+
+    fn reject_update(&self) {
+        let mut state = self.state.lock();
+        state.rejected_updates = state.rejected_updates.saturating_add(1);
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn validate_owned_otlp_attributes<'a>(
+    count: usize,
+    attributes: impl Iterator<Item = (&'a str, &'a str)>,
+) -> Result<(), OwnedOtlpMetricsError> {
+    if count > OWNED_OTLP_MAX_ATTRIBUTES {
+        return Err(OwnedOtlpMetricsError::InvalidAttributes);
+    }
+    let mut owned_bytes = 0usize;
+    for (key, value) in attributes {
+        if key.is_empty()
+            || key.len() > OWNED_OTLP_MAX_ATTRIBUTE_KEY_BYTES
+            || value.len() > OWNED_OTLP_MAX_ATTRIBUTE_VALUE_BYTES
+        {
+            return Err(OwnedOtlpMetricsError::InvalidAttributes);
+        }
+        owned_bytes = owned_bytes
+            .checked_add(key.len())
+            .and_then(|total| total.checked_add(value.len()))
+            .ok_or(OwnedOtlpMetricsError::InvalidAttributes)?;
+        if owned_bytes > OWNED_OTLP_MAX_ATTRIBUTE_BYTES {
+            return Err(OwnedOtlpMetricsError::InvalidAttributes);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn owned_otlp_attributes(
+    attributes: &[(&str, &str)],
+) -> Result<
+    Vec<crate::observability::otlp_proto::common_and_resource::KeyValue>,
+    OwnedOtlpMetricsError,
+> {
+    use crate::observability::otlp_proto::common_and_resource::{
+        AnyValue, AnyValueValue, KeyValue,
+    };
+
+    // Validate caller-owned references before allocating any owned key/value.
+    validate_owned_otlp_attributes(attributes.len(), attributes.iter().copied())?;
+    let mut attributes = attributes.to_vec();
+    attributes.sort_unstable();
+    if attributes.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+        return Err(OwnedOtlpMetricsError::InvalidAttributes);
+    }
+    Ok(attributes
+        .into_iter()
+        .map(|(key, value)| KeyValue {
+            key: key.to_owned(),
+            value: Some(AnyValue {
+                value: Some(AnyValueValue::String(value.to_owned())),
+                ..AnyValue::default()
+            }),
+            ..KeyValue::default()
+        })
+        .collect())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn owned_otlp_stream_attributes(
+    attributes: &[(String, String)],
+) -> Result<
+    Vec<crate::observability::otlp_proto::common_and_resource::KeyValue>,
+    OwnedOtlpMetricsError,
+> {
+    validate_owned_otlp_attributes(
+        attributes.len(),
+        attributes
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str())),
+    )?;
+    let borrowed = attributes
+        .iter()
+        .map(|(key, value)| (key.as_str(), value.as_str()))
+        .collect::<Vec<_>>();
+    owned_otlp_attributes(&borrowed)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn build_owned_otlp_metrics(
+    state: &OwnedOtlpMetricsState,
+    point_time_unix_nano: u64,
+) -> Result<Vec<crate::observability::otlp_proto::metrics::Metric>, OwnedOtlpMetricsError> {
+    use crate::observability::otlp_proto::metrics::{
+        Gauge, Histogram, HistogramDataPoint, Metric, MetricData, NumberDataPoint,
+        NumberDataPointValue, Sum,
+    };
+
+    let mut metrics = BTreeMap::<&'static str, Metric>::new();
+    for (stream, value) in &state.counters {
+        let value =
+            i64::try_from(*value).map_err(|_| OwnedOtlpMetricsError::InvalidNumericValue)?;
+        let point = NumberDataPoint {
+            start_time_unix_nano: state.epoch_start_unix_nano,
+            time_unix_nano: point_time_unix_nano,
+            value: Some(NumberDataPointValue::Int(value)),
+            attributes: owned_otlp_stream_attributes(&stream.attributes)?,
+            ..NumberDataPoint::default()
+        };
+        let metric = metrics
+            .entry(stream.name)
+            .or_insert_with(|| owned_metric_shell(stream.name, OwnedMetricType::Counter));
+        let Some(MetricData::Sum(sum)) = metric.data.as_mut() else {
+            return Err(OwnedOtlpMetricsError::InvalidConfiguration);
+        };
+        sum.data_points.push(point);
+    }
+    for (stream, value) in &state.gauges {
+        let point = NumberDataPoint {
+            time_unix_nano: point_time_unix_nano,
+            value: Some(NumberDataPointValue::Int(*value)),
+            attributes: owned_otlp_stream_attributes(&stream.attributes)?,
+            ..NumberDataPoint::default()
+        };
+        let metric = metrics
+            .entry(stream.name)
+            .or_insert_with(|| owned_metric_shell(stream.name, OwnedMetricType::Gauge));
+        let Some(MetricData::Gauge(gauge)) = metric.data.as_mut() else {
+            return Err(OwnedOtlpMetricsError::InvalidConfiguration);
+        };
+        gauge.data_points.push(point);
+    }
+    for (stream, histogram) in &state.histograms {
+        if !histogram.sum.is_finite()
+            || histogram
+                .bounds
+                .windows(2)
+                .any(|pair| pair[0].partial_cmp(&pair[1]) != Some(std::cmp::Ordering::Less))
+            || histogram.bucket_counts.len() != histogram.bounds.len() + 1
+            || histogram.bucket_counts.iter().sum::<u64>() != histogram.count
+        {
+            return Err(OwnedOtlpMetricsError::InvalidHistogram);
+        }
+        let point = HistogramDataPoint {
+            start_time_unix_nano: state.epoch_start_unix_nano,
+            time_unix_nano: point_time_unix_nano,
+            count: histogram.count,
+            sum: Some(histogram.sum),
+            bucket_counts: histogram.bucket_counts.clone(),
+            explicit_bounds: histogram.bounds.to_vec(),
+            attributes: owned_otlp_stream_attributes(&stream.attributes)?,
+            ..HistogramDataPoint::default()
+        };
+        let metric = metrics
+            .entry(stream.name)
+            .or_insert_with(|| owned_metric_shell(stream.name, OwnedMetricType::Histogram));
+        let Some(MetricData::Histogram(points)) = metric.data.as_mut() else {
+            return Err(OwnedOtlpMetricsError::InvalidConfiguration);
+        };
+        points.data_points.push(point);
+    }
+
+    // Ensure deterministic point order even if a future producer changes its
+    // in-memory registry type.
+    for metric in metrics.values_mut() {
+        match metric.data.as_mut() {
+            Some(MetricData::Gauge(Gauge { data_points, .. }))
+            | Some(MetricData::Sum(Sum { data_points, .. })) => {
+                data_points.sort_by(|left, right| {
+                    owned_attribute_projection(&left.attributes)
+                        .cmp(&owned_attribute_projection(&right.attributes))
+                });
+            }
+            Some(MetricData::Histogram(Histogram { data_points, .. })) => {
+                data_points.sort_by(|left, right| {
+                    owned_attribute_projection(&left.attributes)
+                        .cmp(&owned_attribute_projection(&right.attributes))
+                });
+            }
+            _ => {}
+        }
+    }
+    Ok(metrics.into_values().collect())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn owned_attribute_projection(
+    attributes: &[crate::observability::otlp_proto::common_and_resource::KeyValue],
+) -> Vec<(&str, &str)> {
+    use crate::observability::otlp_proto::common_and_resource::AnyValueValue;
+    attributes
+        .iter()
+        .map(|attribute| {
+            let value = attribute
+                .value
+                .as_ref()
+                .and_then(|value| value.value.as_ref())
+                .and_then(|value| match value {
+                    AnyValueValue::String(value) => Some(value.as_str()),
+                    _ => None,
+                })
+                .unwrap_or("");
+            (attribute.key.as_str(), value)
+        })
+        .collect()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Copy)]
+enum OwnedMetricType {
+    Counter,
+    Gauge,
+    Histogram,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn owned_metric_shell(
+    name: &'static str,
+    metric_type: OwnedMetricType,
+) -> crate::observability::otlp_proto::metrics::Metric {
+    use crate::observability::otlp_proto::metrics::{
+        AggregationTemporality, Gauge, Histogram, Metric, MetricData, Sum,
+    };
+    let (description, unit) = owned_metric_description_and_unit(name);
+    let data = match metric_type {
+        OwnedMetricType::Counter => MetricData::Sum(Sum {
+            aggregation_temporality: AggregationTemporality::Cumulative.as_raw(),
+            is_monotonic: true,
+            ..Sum::default()
+        }),
+        OwnedMetricType::Gauge => MetricData::Gauge(Gauge::default()),
+        OwnedMetricType::Histogram => MetricData::Histogram(Histogram {
+            aggregation_temporality: AggregationTemporality::Cumulative.as_raw(),
+            ..Histogram::default()
+        }),
+    };
+    Metric {
+        name: name.to_owned(),
+        description: description.to_owned(),
+        unit: unit.to_owned(),
+        data: Some(data),
+        ..Metric::default()
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn owned_metric_description_and_unit(name: &str) -> (&'static str, &'static str) {
+    match name {
+        "asupersync.tasks.active" => ("Currently running tasks", "1"),
+        "asupersync.regions.active" => ("Currently active regions", "1"),
+        "asupersync.obligations.active" => ("Currently active obligations", "1"),
+        "asupersync.tasks.spawned" => ("Total tasks spawned", "1"),
+        "asupersync.tasks.completed" => ("Total tasks completed", "1"),
+        "asupersync.regions.created" => ("Total regions created", "1"),
+        "asupersync.regions.closed" => ("Total regions closed", "1"),
+        "asupersync.cancellations" => ("Cancellation requests", "1"),
+        "asupersync.deadlines.set" => ("Deadlines configured", "1"),
+        "asupersync.deadlines.exceeded" => ("Deadline exceeded events", "1"),
+        "asupersync.deadline.warnings_total" => ("Deadline warning events", "1"),
+        "asupersync.deadline.violations_total" => ("Deadline violation events", "1"),
+        "asupersync.task.stuck_detected_total" => ("Tasks detected as stuck (no progress)", "1"),
+        "asupersync.obligations.created" => ("Obligations created", "1"),
+        "asupersync.obligations.discharged" => ("Obligations discharged", "1"),
+        "asupersync.obligations.leaked" => ("Obligations leaked", "1"),
+        "asupersync.tasks.duration" => ("Task execution duration in seconds", "s"),
+        "asupersync.regions.lifetime" => ("Region lifetime in seconds", "s"),
+        "asupersync.cancellation.drain_duration" => ("Cancellation drain duration in seconds", "s"),
+        "asupersync.deadline.remaining_seconds" => ("Time remaining at completion in seconds", "s"),
+        "asupersync.checkpoint.interval_seconds" => ("Time between checkpoints in seconds", "s"),
+        "asupersync.scheduler.poll_time" => ("Scheduler poll duration in seconds", "s"),
+        "asupersync.scheduler.tasks_polled" => ("Tasks polled per scheduler tick", "1"),
+        _ => ("", ""),
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn owned_histogram_bounds(name: &str) -> &'static [f64] {
+    const TIME: &[f64] = &[
+        0.000_001, 0.000_01, 0.000_1, 0.001, 0.01, 0.1, 1.0, 10.0, 60.0,
+    ];
+    const REMAINING: &[f64] = &[0.0, 0.001, 0.01, 0.1, 1.0, 5.0, 30.0, 60.0, 300.0];
+    const TASKS: &[f64] = &[
+        1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0, 1024.0,
+    ];
+    match name {
+        "asupersync.deadline.remaining_seconds" => REMAINING,
+        "asupersync.scheduler.tasks_polled" => TASKS,
+        _ => TIME,
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl MetricsProvider for OwnedOtlpMetrics {
+    fn task_spawned(&self, _region_id: RegionId, _task_id: TaskId) {
+        self.adjust_gauge("asupersync.tasks.active", 1);
+        self.increment_counter("asupersync.tasks.spawned", Vec::new());
+    }
+
+    fn task_completed(&self, _task_id: TaskId, outcome: OutcomeKind, duration: Duration) {
+        let attributes = vec![("outcome".to_owned(), outcome_label(outcome).to_owned())];
+        self.adjust_gauge("asupersync.tasks.active", -1);
+        self.increment_counter("asupersync.tasks.completed", attributes.clone());
+        self.record_histogram(
+            "asupersync.tasks.duration",
+            attributes,
+            duration.as_secs_f64(),
+        );
+    }
+
+    fn region_created(&self, _region_id: RegionId, _parent: Option<RegionId>) {
+        self.adjust_gauge("asupersync.regions.active", 1);
+        self.increment_counter("asupersync.regions.created", Vec::new());
+    }
+
+    fn region_closed(&self, _region_id: RegionId, lifetime: Duration) {
+        self.adjust_gauge("asupersync.regions.active", -1);
+        self.increment_counter("asupersync.regions.closed", Vec::new());
+        self.record_histogram(
+            "asupersync.regions.lifetime",
+            Vec::new(),
+            lifetime.as_secs_f64(),
+        );
+    }
+
+    fn cancellation_requested(&self, _region_id: RegionId, kind: CancelKind) {
+        self.increment_counter(
+            "asupersync.cancellations",
+            vec![("kind".to_owned(), cancel_kind_label(kind).to_owned())],
+        );
+    }
+
+    fn drain_completed(&self, _region_id: RegionId, duration: Duration) {
+        self.record_histogram(
+            "asupersync.cancellation.drain_duration",
+            Vec::new(),
+            duration.as_secs_f64(),
+        );
+    }
+
+    fn deadline_set(&self, _region_id: RegionId, _deadline: Duration) {
+        self.increment_counter("asupersync.deadlines.set", Vec::new());
+    }
+
+    fn deadline_exceeded(&self, _region_id: RegionId) {
+        self.increment_counter("asupersync.deadlines.exceeded", Vec::new());
+    }
+
+    fn deadline_warning(&self, task_type: &str, reason: &'static str, _remaining: Duration) {
+        if reason.len() > OWNED_OTLP_MAX_ATTRIBUTE_VALUE_BYTES {
+            self.reject_update();
+            return;
+        }
+        self.increment_counter(
+            "asupersync.deadline.warnings_total",
+            vec![
+                ("reason".to_owned(), reason.to_owned()),
+                ("task_type".to_owned(), sanitize_task_type_label(task_type)),
+            ],
+        );
+    }
+
+    fn deadline_violation(&self, task_type: &str, _over_by: Duration) {
+        self.increment_counter(
+            "asupersync.deadline.violations_total",
+            vec![("task_type".to_owned(), sanitize_task_type_label(task_type))],
+        );
+    }
+
+    fn deadline_remaining(&self, task_type: &str, remaining: Duration) {
+        self.record_histogram(
+            "asupersync.deadline.remaining_seconds",
+            vec![("task_type".to_owned(), sanitize_task_type_label(task_type))],
+            remaining.as_secs_f64(),
+        );
+    }
+
+    fn checkpoint_interval(&self, task_type: &str, interval: Duration) {
+        self.record_histogram(
+            "asupersync.checkpoint.interval_seconds",
+            vec![("task_type".to_owned(), sanitize_task_type_label(task_type))],
+            interval.as_secs_f64(),
+        );
+    }
+
+    fn task_stuck_detected(&self, task_type: &str) {
+        self.increment_counter(
+            "asupersync.task.stuck_detected_total",
+            vec![("task_type".to_owned(), sanitize_task_type_label(task_type))],
+        );
+    }
+
+    fn obligation_created(&self, _region_id: RegionId) {
+        self.adjust_gauge("asupersync.obligations.active", 1);
+        self.increment_counter("asupersync.obligations.created", Vec::new());
+    }
+
+    fn obligation_discharged(&self, _region_id: RegionId) {
+        self.adjust_gauge("asupersync.obligations.active", -1);
+        self.increment_counter("asupersync.obligations.discharged", Vec::new());
+    }
+
+    fn obligation_leaked(&self, _region_id: RegionId) {
+        self.adjust_gauge("asupersync.obligations.active", -1);
+        self.increment_counter("asupersync.obligations.leaked", Vec::new());
+    }
+
+    fn scheduler_tick(&self, tasks_polled: usize, duration: Duration) {
+        self.record_histogram(
+            "asupersync.scheduler.poll_time",
+            Vec::new(),
+            duration.as_secs_f64(),
+        );
+        const EXACT_F64_INTEGER_LIMIT: u64 = 1u64 << 53;
+        if u64::try_from(tasks_polled).map_or(true, |value| value > EXACT_F64_INTEGER_LIMIT) {
+            let mut state = self.state.lock();
+            state.rejected_updates = state.rejected_updates.saturating_add(1);
+            state.terminal_error = Some(OwnedOtlpMetricsError::InvalidNumericValue);
+        } else {
+            #[allow(clippy::cast_precision_loss)]
+            self.record_histogram(
+                "asupersync.scheduler.tasks_polled",
+                Vec::new(),
+                tasks_polled as f64,
+            );
+        }
+    }
+
+    fn record_panic(&self, _location: &'static str) {
+        // The fixed 23-instrument provider has no panic descriptor. Keep the
+        // callback an explicit no-op until an additive versioned metric exists.
     }
 }
 
@@ -2910,6 +3746,33 @@ impl OtlpHttpExporter {
                 }
             }
         }
+    }
+
+    /// Collect and send a native owned OTLP metrics provider.
+    ///
+    /// Mapping and protobuf validation complete for every deterministic batch
+    /// before the first network write. The caller supplies the collection time
+    /// explicitly, and the export remains inside `cx` cancellation and budget
+    /// ownership. A mapping refusal emits no request bytes.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn send_owned_metrics(
+        &self,
+        cx: &crate::cx::Cx,
+        metrics: &OwnedOtlpMetrics,
+        point_time_unix_nano: u64,
+    ) -> Result<(), ExportError> {
+        let attributes = self
+            .resource_attributes
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+            .collect::<Vec<_>>();
+        let requests = metrics
+            .collect(point_time_unix_nano, &attributes)
+            .map_err(|error| ExportError::new(error.to_string()))?;
+        for request in requests {
+            self.send_otlp_protobuf(cx, request).await?;
+        }
+        Ok(())
     }
 
     async fn send_request_once(&self, cx: &crate::cx::Cx, body: &[u8]) -> Result<(), OtlpError> {
@@ -9565,8 +10428,15 @@ pub mod otlp_request_builder {
 mod otlp_wire_format_tests {
     use super::span_semantics::{SpanConformanceConfig, TestSpan};
     use super::{
-        MetricLabels, MetricsSnapshot, OtlpLogRecord, PrivacyConfig, otlp_request_builder,
+        MetricLabels, MetricsSnapshot, OWNED_OTLP_DEFAULT_REQUEST_BYTES,
+        OWNED_OTLP_MAX_ATTRIBUTE_KEY_BYTES, OWNED_OTLP_MAX_ATTRIBUTE_VALUE_BYTES,
+        OWNED_OTLP_MAX_ATTRIBUTES, OWNED_OTLP_MAX_POINTS_PER_METRIC, OtlpLogRecord,
+        OwnedHistogramState, OwnedMetricStream, OwnedOtlpMetrics, OwnedOtlpMetricsConfig,
+        OwnedOtlpMetricsError, PrivacyConfig, otlp_request_builder, owned_histogram_bounds,
+        owned_metric_description_and_unit,
     };
+    use crate::observability::{MetricsProvider, OutcomeKind};
+    use crate::types::{CancelKind, RegionId, TaskId};
     use opentelemetry::trace::{SpanKind as ApiSpanKind, Status as ApiStatus};
     use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
     use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
@@ -10892,5 +11762,414 @@ mod otlp_wire_format_tests {
         assert!(!attributes.contains_key("auth.token"));
         assert!(!attributes.contains_key("request.path"));
         assert_eq!(filtered_record.dropped_attributes_count, 3);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn populated_owned_metrics() -> OwnedOtlpMetrics {
+        let metrics = OwnedOtlpMetrics::try_new(OwnedOtlpMetricsConfig::new(1_000))
+            .expect("valid owned metrics config");
+        let region = RegionId::testing_default();
+        let task = TaskId::testing_default();
+        metrics.task_spawned(region, task);
+        metrics.task_completed(task, OutcomeKind::Ok, Duration::from_millis(25));
+        metrics.region_created(region, None);
+        metrics.region_closed(region, Duration::from_secs(2));
+        metrics.cancellation_requested(region, CancelKind::Timeout);
+        metrics.drain_completed(region, Duration::from_millis(3));
+        metrics.deadline_set(region, Duration::from_secs(5));
+        metrics.deadline_exceeded(region);
+        metrics.deadline_warning("http.request", "no_progress", Duration::from_secs(1));
+        metrics.deadline_violation("http.request", Duration::from_millis(1));
+        metrics.deadline_remaining("http.request", Duration::from_secs(4));
+        metrics.checkpoint_interval("http.request", Duration::from_millis(10));
+        metrics.task_stuck_detected("http.request");
+        metrics.obligation_created(region);
+        metrics.obligation_created(region);
+        metrics.obligation_discharged(region);
+        metrics.obligation_leaked(region);
+        metrics.scheduler_tick(8, Duration::from_micros(50));
+        metrics
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn owned_otlp_metrics_maps_all_fixed_instruments_deterministically() {
+        use crate::grpc::protobuf::{ProtoMessage, ProtobufWireLimits};
+        use crate::observability::otlp_proto::collector::metrics::ExportMetricsServiceRequest;
+        use crate::observability::otlp_proto::metrics::MetricData;
+
+        let metrics = populated_owned_metrics();
+        let attributes = [("service.name", "owned-test"), ("empty.value", "")];
+        let first = metrics
+            .collect(2_000, &attributes)
+            .expect("first collection");
+        let repeat = metrics
+            .collect(
+                2_000,
+                &[("empty.value", ""), ("service.name", "owned-test")],
+            )
+            .expect("repeat collection");
+        assert_eq!(
+            first, repeat,
+            "equal state and time must encode identically"
+        );
+        assert_eq!(first.len(), 1);
+
+        let request = ExportMetricsServiceRequest::decode_from_bytes(
+            &first[0],
+            ProtobufWireLimits::for_message_size(OWNED_OTLP_DEFAULT_REQUEST_BYTES),
+        )
+        .expect("owned request decodes");
+        let names = request.resource_metrics[0].scope_metrics[0]
+            .metrics
+            .iter()
+            .map(|metric| metric.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names.len(), 23);
+        assert!(names.windows(2).all(|pair| pair[0] < pair[1]));
+        let resource_attributes = &request.resource_metrics[0]
+            .resource
+            .as_ref()
+            .expect("resource")
+            .attributes;
+        assert_eq!(resource_attributes[0].key, "empty.value");
+        assert_eq!(resource_attributes[1].key, "service.name");
+        for expected in [
+            "asupersync.tasks.active",
+            "asupersync.regions.active",
+            "asupersync.obligations.active",
+            "asupersync.tasks.spawned",
+            "asupersync.tasks.completed",
+            "asupersync.regions.created",
+            "asupersync.regions.closed",
+            "asupersync.cancellations",
+            "asupersync.deadlines.set",
+            "asupersync.deadlines.exceeded",
+            "asupersync.deadline.warnings_total",
+            "asupersync.deadline.violations_total",
+            "asupersync.task.stuck_detected_total",
+            "asupersync.obligations.created",
+            "asupersync.obligations.discharged",
+            "asupersync.obligations.leaked",
+            "asupersync.tasks.duration",
+            "asupersync.regions.lifetime",
+            "asupersync.cancellation.drain_duration",
+            "asupersync.deadline.remaining_seconds",
+            "asupersync.checkpoint.interval_seconds",
+            "asupersync.scheduler.poll_time",
+            "asupersync.scheduler.tasks_polled",
+        ] {
+            assert!(names.contains(&expected), "missing {expected}");
+        }
+        for metric in &request.resource_metrics[0].scope_metrics[0].metrics {
+            let (_, expected_unit) = owned_metric_description_and_unit(&metric.name);
+            assert_eq!(
+                metric.unit, expected_unit,
+                "unit mismatch for {}",
+                metric.name
+            );
+            if let Some(MetricData::Histogram(histogram)) = &metric.data {
+                let point = &histogram.data_points[0];
+                assert_eq!(
+                    point.explicit_bounds,
+                    owned_histogram_bounds(&metric.name),
+                    "bound mismatch for {}",
+                    metric.name
+                );
+                assert_eq!(point.bucket_counts.len(), point.explicit_bounds.len() + 1);
+                assert_eq!(point.bucket_counts.iter().sum::<u64>(), point.count);
+            }
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn owned_otlp_metrics_epoch_reset_and_timestamp_contract() {
+        use crate::grpc::protobuf::{ProtoMessage, ProtobufWireLimits};
+        use crate::observability::otlp_proto::collector::metrics::ExportMetricsServiceRequest;
+        use crate::observability::otlp_proto::metrics::{MetricData, NumberDataPointValue};
+
+        let metrics = populated_owned_metrics();
+        let first = metrics.collect(2_000, &[]).expect("first epoch");
+        metrics.task_spawned(RegionId::testing_default(), TaskId::testing_default());
+        let advanced = metrics.collect(2_500, &[]).expect("same epoch advances");
+        let advanced_request = ExportMetricsServiceRequest::decode_from_bytes(
+            &advanced[0],
+            ProtobufWireLimits::for_message_size(OWNED_OTLP_DEFAULT_REQUEST_BYTES),
+        )
+        .expect("decode advanced request");
+        let advanced_spawned = advanced_request.resource_metrics[0].scope_metrics[0]
+            .metrics
+            .iter()
+            .find(|metric| metric.name == "asupersync.tasks.spawned")
+            .expect("advanced spawned metric");
+        let Some(MetricData::Sum(advanced_sum)) = &advanced_spawned.data else {
+            panic!("spawned must be cumulative sum");
+        };
+        assert_eq!(advanced_sum.data_points[0].start_time_unix_nano, 1_000);
+        assert_eq!(advanced_sum.data_points[0].time_unix_nano, 2_500);
+        assert_eq!(
+            advanced_sum.data_points[0].value,
+            Some(NumberDataPointValue::Int(2))
+        );
+        assert_eq!(
+            metrics.collect(2_499, &[]),
+            Err(OwnedOtlpMetricsError::InvalidTimestamp)
+        );
+        assert_eq!(
+            metrics.reset(2_500),
+            Err(OwnedOtlpMetricsError::InvalidTimestamp)
+        );
+        metrics.reset(3_000).expect("rotate epoch");
+        metrics.task_spawned(RegionId::testing_default(), TaskId::testing_default());
+        let second = metrics.collect(3_000, &[]).expect("second epoch");
+        assert_ne!(first, second);
+
+        let request = ExportMetricsServiceRequest::decode_from_bytes(
+            &second[0],
+            ProtobufWireLimits::for_message_size(OWNED_OTLP_DEFAULT_REQUEST_BYTES),
+        )
+        .expect("decode reset request");
+        let spawned = request.resource_metrics[0].scope_metrics[0]
+            .metrics
+            .iter()
+            .find(|metric| metric.name == "asupersync.tasks.spawned")
+            .expect("spawned metric");
+        let Some(MetricData::Sum(sum)) = &spawned.data else {
+            panic!("spawned must be cumulative sum");
+        };
+        assert_eq!(sum.data_points[0].start_time_unix_nano, 3_000);
+        assert_eq!(sum.data_points[0].time_unix_nano, 3_000);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn owned_otlp_metrics_enforces_cardinality_attributes_and_wire_limits() {
+        let metrics = OwnedOtlpMetrics::try_new(
+            OwnedOtlpMetricsConfig::new(1_000).with_max_cardinality_per_metric(1),
+        )
+        .expect("finite config");
+        metrics.deadline_violation("alpha", Duration::ZERO);
+        metrics.deadline_violation("beta", Duration::ZERO);
+        assert_eq!(metrics.rejected_updates(), 1);
+        assert_eq!(
+            metrics.collect(2_000, &[("duplicate", "a"), ("duplicate", "b")]),
+            Err(OwnedOtlpMetricsError::InvalidAttributes)
+        );
+        assert_eq!(
+            metrics.collect(2_000, &[("", "value")]),
+            Err(OwnedOtlpMetricsError::InvalidAttributes)
+        );
+        let exact_key = format!("k{}", "x".repeat(OWNED_OTLP_MAX_ATTRIBUTE_KEY_BYTES - 1));
+        let exact_value = "v".repeat(OWNED_OTLP_MAX_ATTRIBUTE_VALUE_BYTES);
+        metrics
+            .collect(2_000, &[(exact_key.as_str(), exact_value.as_str())])
+            .expect("exact attribute byte limits must pass");
+        let long_key = "k".repeat(OWNED_OTLP_MAX_ATTRIBUTE_KEY_BYTES + 1);
+        let long_value = "v".repeat(OWNED_OTLP_MAX_ATTRIBUTE_VALUE_BYTES + 1);
+        assert_eq!(
+            metrics.collect(2_000, &[(long_key.as_str(), "value")]),
+            Err(OwnedOtlpMetricsError::InvalidAttributes)
+        );
+        assert_eq!(
+            metrics.collect(2_000, &[("key", long_value.as_str())]),
+            Err(OwnedOtlpMetricsError::InvalidAttributes)
+        );
+        let many_attributes = (0..=OWNED_OTLP_MAX_ATTRIBUTES)
+            .map(|index| (format!("key-{index}"), "value".to_owned()))
+            .collect::<Vec<_>>();
+        let many_attributes = many_attributes
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            metrics.collect(2_000, &many_attributes),
+            Err(OwnedOtlpMetricsError::InvalidAttributes)
+        );
+        let exact_attribute_count = (0..OWNED_OTLP_MAX_ATTRIBUTES)
+            .map(|index| (format!("key-{index}"), "value".to_owned()))
+            .collect::<Vec<_>>();
+        let exact_attribute_count = exact_attribute_count
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+            .collect::<Vec<_>>();
+        metrics
+            .collect(2_000, &exact_attribute_count)
+            .expect("exact attribute count must pass");
+
+        for config in [
+            OwnedOtlpMetricsConfig::new(0),
+            OwnedOtlpMetricsConfig::new(1_000).with_max_cardinality_per_metric(0),
+            OwnedOtlpMetricsConfig::new(1_000)
+                .with_max_cardinality_per_metric(OWNED_OTLP_MAX_POINTS_PER_METRIC + 1),
+            OwnedOtlpMetricsConfig::new(1_000).with_max_metrics_per_request(0),
+            OwnedOtlpMetricsConfig::new(1_000).with_max_metrics_per_request(4_097),
+            OwnedOtlpMetricsConfig::new(1_000).with_max_request_bytes(0),
+            OwnedOtlpMetricsConfig::new(1_000)
+                .with_max_request_bytes(OWNED_OTLP_DEFAULT_REQUEST_BYTES + 1),
+        ] {
+            assert_eq!(
+                OwnedOtlpMetrics::try_new(config).expect_err("invalid config must refuse"),
+                OwnedOtlpMetricsError::InvalidConfiguration
+            );
+        }
+
+        let callback_limits = OwnedOtlpMetrics::try_new(OwnedOtlpMetricsConfig::new(1_000))
+            .expect("valid callback-limit config");
+        let oversized_reason = Box::leak(
+            "r".repeat(OWNED_OTLP_MAX_ATTRIBUTE_VALUE_BYTES + 1)
+                .into_boxed_str(),
+        );
+        callback_limits.deadline_warning("worker", oversized_reason, Duration::ZERO);
+        assert_eq!(callback_limits.rejected_updates(), 1);
+        assert!(
+            callback_limits
+                .collect(2_000, &[])
+                .expect("counted drop still collects")
+                .is_empty(),
+            "oversized callback label must not create a metric stream"
+        );
+        let tiny =
+            OwnedOtlpMetrics::try_new(OwnedOtlpMetricsConfig::new(1_000).with_max_request_bytes(1))
+                .expect("positive finite byte cap");
+        tiny.task_spawned(RegionId::testing_default(), TaskId::testing_default());
+        assert_eq!(
+            tiny.collect(2_000, &[]),
+            Err(OwnedOtlpMetricsError::WireEnvelopeExceeded)
+        );
+
+        let split = populated_owned_metrics();
+        let split = OwnedOtlpMetrics {
+            config: OwnedOtlpMetricsConfig::new(1_000).with_max_metrics_per_request(1),
+            state: split.state,
+        };
+        assert_eq!(
+            split.collect(2_000, &[]).expect("split collection").len(),
+            23
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn owned_otlp_metrics_numeric_boundaries_are_typed_refusals() {
+        use crate::grpc::protobuf::{ProtoMessage, ProtobufWireLimits};
+        use crate::observability::otlp_proto::collector::metrics::ExportMetricsServiceRequest;
+        use crate::observability::otlp_proto::metrics::{MetricData, NumberDataPointValue};
+
+        let metrics = OwnedOtlpMetrics::try_new(OwnedOtlpMetricsConfig::new(1_000))
+            .expect("valid owned metrics config");
+        let stream = OwnedMetricStream::new("asupersync.tasks.spawned", Vec::new());
+        metrics
+            .state
+            .lock()
+            .counters
+            .insert(stream.clone(), i64::MAX as u64);
+        let encoded = metrics.collect(2_000, &[]).expect("i64 max maps exactly");
+        let request = ExportMetricsServiceRequest::decode_from_bytes(
+            &encoded[0],
+            ProtobufWireLimits::for_message_size(OWNED_OTLP_DEFAULT_REQUEST_BYTES),
+        )
+        .expect("decode boundary request");
+        let metric = &request.resource_metrics[0].scope_metrics[0].metrics[0];
+        let Some(MetricData::Sum(sum)) = &metric.data else {
+            panic!("counter maps to sum");
+        };
+        assert_eq!(
+            sum.data_points[0].value,
+            Some(NumberDataPointValue::Int(i64::MAX))
+        );
+
+        metrics
+            .state
+            .lock()
+            .counters
+            .insert(stream, i64::MAX as u64 + 1);
+        assert_eq!(
+            metrics.collect(2_000, &[]),
+            Err(OwnedOtlpMetricsError::InvalidNumericValue)
+        );
+
+        for invalid in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let nonfinite = OwnedOtlpMetrics::try_new(OwnedOtlpMetricsConfig::new(1_000))
+                .expect("valid owned metrics config");
+            nonfinite.record_histogram("asupersync.tasks.duration", Vec::new(), invalid);
+            assert_eq!(
+                nonfinite.collect(2_000, &[]),
+                Err(OwnedOtlpMetricsError::InvalidNumericValue)
+            );
+        }
+
+        let count_overflow = OwnedOtlpMetrics::try_new(OwnedOtlpMetricsConfig::new(1_000))
+            .expect("valid count-overflow config");
+        count_overflow.state.lock().histograms.insert(
+            OwnedMetricStream::new("asupersync.tasks.duration", Vec::new()),
+            OwnedHistogramState {
+                bounds: owned_histogram_bounds("asupersync.tasks.duration"),
+                bucket_counts: vec![u64::MAX, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                count: u64::MAX,
+                sum: 1.0,
+            },
+        );
+        count_overflow.record_histogram("asupersync.tasks.duration", Vec::new(), 0.0);
+        assert_eq!(
+            count_overflow.collect(2_000, &[]),
+            Err(OwnedOtlpMetricsError::InvalidHistogram)
+        );
+
+        let sum_overflow = OwnedOtlpMetrics::try_new(OwnedOtlpMetricsConfig::new(1_000))
+            .expect("valid sum-overflow config");
+        sum_overflow.state.lock().histograms.insert(
+            OwnedMetricStream::new("asupersync.tasks.duration", Vec::new()),
+            OwnedHistogramState {
+                bounds: owned_histogram_bounds("asupersync.tasks.duration"),
+                bucket_counts: vec![1, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                count: 1,
+                sum: f64::MAX,
+            },
+        );
+        sum_overflow.record_histogram("asupersync.tasks.duration", Vec::new(), f64::MAX);
+        assert_eq!(
+            sum_overflow.collect(2_000, &[]),
+            Err(OwnedOtlpMetricsError::InvalidNumericValue)
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn owned_otlp_metrics_reset_clears_histograms_and_panic_is_explicit_noop() {
+        use crate::grpc::protobuf::{ProtoMessage, ProtobufWireLimits};
+        use crate::observability::otlp_proto::collector::metrics::ExportMetricsServiceRequest;
+
+        let metrics = OwnedOtlpMetrics::try_new(OwnedOtlpMetricsConfig::new(1_000))
+            .expect("valid owned metrics config");
+        metrics.task_spawned(RegionId::testing_default(), TaskId::testing_default());
+        metrics.task_completed(
+            TaskId::testing_default(),
+            OutcomeKind::Ok,
+            Duration::from_millis(1),
+        );
+        let before = metrics.collect(2_000, &[]).expect("pre-reset collection");
+        metrics.record_panic("owned-otlp-test");
+        assert_eq!(
+            before,
+            metrics.collect(2_000, &[]).expect("panic no-op collection"),
+            "record_panic must remain an explicit no-op without a descriptor"
+        );
+
+        metrics.reset(3_000).expect("reset epoch");
+        metrics.task_spawned(RegionId::testing_default(), TaskId::testing_default());
+        let after = metrics.collect(4_000, &[]).expect("post-reset collection");
+        let request = ExportMetricsServiceRequest::decode_from_bytes(
+            &after[0],
+            ProtobufWireLimits::for_message_size(OWNED_OTLP_DEFAULT_REQUEST_BYTES),
+        )
+        .expect("decode post-reset request");
+        assert!(
+            request.resource_metrics[0].scope_metrics[0]
+                .metrics
+                .iter()
+                .all(|metric| metric.name != "asupersync.tasks.duration"),
+            "reset must clear cumulative histogram streams"
+        );
     }
 }

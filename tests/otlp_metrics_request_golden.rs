@@ -534,3 +534,399 @@ fn test_metric_data_types_coverage() {
         "Should cover all supported metric types"
     );
 }
+
+#[cfg(all(feature = "metrics", feature = "test-internals"))]
+fn lab_owned_metrics_bytes(seed: u64) -> Vec<Vec<u8>> {
+    use asupersync::lab::{LabConfig, LabRuntime};
+    use asupersync::observability::{
+        MetricsProvider, OutcomeKind, OwnedOtlpMetrics, OwnedOtlpMetricsConfig,
+    };
+    use asupersync::types::{Budget, RegionId, TaskId};
+    use parking_lot::Mutex;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    let mut runtime = LabRuntime::new(LabConfig::new(seed).max_steps(1_000));
+    let root = runtime.state.create_root_region(Budget::INFINITE);
+    let metrics = Arc::new(
+        OwnedOtlpMetrics::try_new(OwnedOtlpMetricsConfig::new(1_000))
+            .expect("valid owned metrics config"),
+    );
+    let output = Arc::new(Mutex::new(None));
+    let task_metrics = Arc::clone(&metrics);
+    let task_output = Arc::clone(&output);
+    let (task_id, _handle) = runtime
+        .state
+        .create_task(root, Budget::INFINITE, async move {
+            let region = RegionId::new_for_test(7, 0);
+            let task = TaskId::new_for_test(9, 0);
+            task_metrics.task_spawned(region, task);
+            task_metrics.task_completed(task, OutcomeKind::Ok, Duration::from_millis(20));
+            task_metrics.scheduler_tick(4, Duration::from_micros(25));
+            *task_output.lock() = Some(
+                task_metrics
+                    .collect(2_000, &[("service.name", "lab-replay")])
+                    .expect("lab collection"),
+            );
+        })
+        .expect("create deterministic producer task");
+    runtime
+        .scheduler
+        .lock()
+        .schedule(task_id, Budget::INFINITE.priority);
+    runtime.run_until_quiescent();
+    assert!(runtime.oracles.check_all(runtime.now()).is_empty());
+    let bytes = output.lock().take().expect("producer completed");
+    bytes
+}
+
+#[cfg(all(feature = "metrics", feature = "test-internals"))]
+#[test]
+fn owned_metrics_lab_replay_is_byte_identical() {
+    assert_eq!(
+        lab_owned_metrics_bytes(0x0A31),
+        lab_owned_metrics_bytes(0x0A31)
+    );
+}
+
+#[cfg(all(feature = "metrics", feature = "test-internals"))]
+#[test]
+fn owned_metrics_loopback_http_wire_smoke_decodes_request() {
+    use asupersync::cx::Cx;
+    use asupersync::observability::{
+        MetricsProvider, OtlpHttpExporter, OutcomeKind, OwnedOtlpMetrics, OwnedOtlpMetricsConfig,
+    };
+    use asupersync::types::{RegionId, TaskId};
+    use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
+    use prost::Message;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback collector");
+    let endpoint = format!(
+        "http://{}/v1/metrics",
+        listener.local_addr().expect("collector addr")
+    );
+    let (body_tx, body_rx) = mpsc::sync_channel(2);
+    let collector = std::thread::spawn(move || {
+        for _ in 0..2 {
+            let (mut stream, _) = listener.accept().expect("accept exporter connection");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("collector read timeout");
+            let mut request = Vec::new();
+            let mut buffer = [0u8; 4096];
+            let (header_end, content_length) = loop {
+                let read = stream.read(&mut buffer).expect("read exporter request");
+                assert_ne!(read, 0, "exporter closed before HTTP headers");
+                request.extend_from_slice(&buffer[..read]);
+                if let Some(end) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+                    let header_end = end + 4;
+                    let headers =
+                        std::str::from_utf8(&request[..header_end]).expect("ASCII headers");
+                    let content_length = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().expect("content length"))
+                        })
+                        .expect("content-length header");
+                    break (header_end, content_length);
+                }
+            };
+            while request.len() < header_end + content_length {
+                let read = stream.read(&mut buffer).expect("read exporter body");
+                assert_ne!(read, 0, "exporter closed before complete body");
+                request.extend_from_slice(&buffer[..read]);
+            }
+            body_tx
+                .send(request[header_end..header_end + content_length].to_vec())
+                .expect("publish collector body");
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .expect("write collector response");
+        }
+    });
+
+    let metrics = OwnedOtlpMetrics::try_new(
+        OwnedOtlpMetricsConfig::new(1_000).with_max_cardinality_per_metric(1),
+    )
+    .expect("valid owned metrics config");
+    let region = RegionId::new_for_test(1, 0);
+    let task = TaskId::new_for_test(2, 0);
+    metrics.task_spawned(region, task);
+    metrics.task_completed(task, OutcomeKind::Ok, Duration::from_millis(12));
+    metrics.task_spawned(region, task);
+    metrics.task_completed(task, OutcomeKind::Err, Duration::from_millis(15));
+    assert_eq!(metrics.rejected_updates(), 2);
+    let exporter = OtlpHttpExporter::try_new(endpoint).expect("valid loopback exporter");
+    asupersync::test_utils::run_test(|| async {
+        let cx = Cx::current().expect("native test runtime installs Cx");
+        exporter
+            .send_owned_metrics(&cx, &metrics, 2_000)
+            .await
+            .expect("collector accepts owned metrics");
+        metrics.reset(3_000).expect("rotate accumulation epoch");
+        metrics.task_spawned(region, task);
+        exporter
+            .send_owned_metrics(&cx, &metrics, 4_000)
+            .await
+            .expect("collector accepts reset epoch");
+    });
+
+    collector.join().expect("collector thread");
+    let first_body = body_rx.recv().expect("first collector body");
+    let second_body = body_rx.recv().expect("second collector body");
+    let first =
+        ExportMetricsServiceRequest::decode(first_body.as_slice()).expect("generated decode");
+    let resource = &first.resource_metrics[0];
+    let scope = &resource.scope_metrics[0];
+    let spawned = scope
+        .metrics
+        .iter()
+        .find(|metric| metric.name == "asupersync.tasks.spawned")
+        .expect("spawned metric reached collector");
+    let sum = spawned.data.as_ref().and_then(|data| match data {
+        opentelemetry_proto::tonic::metrics::v1::metric::Data::Sum(sum) => Some(sum),
+        _ => None,
+    });
+    let sum = sum.expect("spawned maps to Sum");
+    assert!(sum.is_monotonic);
+    assert_eq!(sum.aggregation_temporality, 2);
+    assert_eq!(sum.data_points[0].start_time_unix_nano, 1_000);
+    assert_eq!(sum.data_points[0].time_unix_nano, 2_000);
+    assert_eq!(
+        sum.data_points[0].value,
+        Some(opentelemetry_proto::tonic::metrics::v1::number_data_point::Value::AsInt(2))
+    );
+
+    let active = scope
+        .metrics
+        .iter()
+        .find(|metric| metric.name == "asupersync.tasks.active")
+        .expect("active gauge reached collector");
+    assert!(matches!(
+        active.data,
+        Some(opentelemetry_proto::tonic::metrics::v1::metric::Data::Gauge(_))
+    ));
+    let duration = scope
+        .metrics
+        .iter()
+        .find(|metric| metric.name == "asupersync.tasks.duration")
+        .expect("duration histogram reached collector");
+    let histogram = duration.data.as_ref().and_then(|data| match data {
+        opentelemetry_proto::tonic::metrics::v1::metric::Data::Histogram(histogram) => {
+            Some(histogram)
+        }
+        _ => None,
+    });
+    let histogram = histogram.expect("duration maps to Histogram");
+    assert_eq!(histogram.data_points.len(), 1);
+    assert_eq!(histogram.data_points[0].attributes[0].key, "outcome");
+    assert_eq!(
+        histogram.data_points[0].attributes[0]
+            .value
+            .as_ref()
+            .and_then(|value| value.value.as_ref()),
+        Some(
+            &opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue("ok".to_owned())
+        ),
+        "the second outcome stream must be omitted at the cardinality boundary"
+    );
+    assert_eq!(histogram.data_points[0].count, 1);
+
+    let second =
+        ExportMetricsServiceRequest::decode(second_body.as_slice()).expect("decode reset request");
+    let reset_spawned = second.resource_metrics[0].scope_metrics[0]
+        .metrics
+        .iter()
+        .find(|metric| metric.name == "asupersync.tasks.spawned")
+        .expect("reset spawned metric reached collector");
+    let reset_sum = reset_spawned.data.as_ref().and_then(|data| match data {
+        opentelemetry_proto::tonic::metrics::v1::metric::Data::Sum(sum) => Some(sum),
+        _ => None,
+    });
+    let reset_sum = reset_sum.expect("reset spawned maps to Sum");
+    assert_eq!(reset_sum.data_points[0].start_time_unix_nano, 3_000);
+    assert_eq!(reset_sum.data_points[0].time_unix_nano, 4_000);
+    assert_eq!(
+        reset_sum.data_points[0].value,
+        Some(opentelemetry_proto::tonic::metrics::v1::number_data_point::Value::AsInt(1))
+    );
+}
+
+#[cfg(all(
+    feature = "metrics",
+    feature = "test-internals",
+    target_os = "linux",
+    target_arch = "x86_64"
+))]
+#[test]
+#[ignore = "real-service E2E downloads the pinned official OpenTelemetry Collector distribution"]
+fn owned_metrics_external_otel_collector_accepts_and_exports_request() {
+    use asupersync::cx::Cx;
+    use asupersync::observability::{
+        MetricsProvider, OtlpHttpExporter, OutcomeKind, OwnedOtlpMetrics, OwnedOtlpMetricsConfig,
+    };
+    use asupersync::types::{RegionId, TaskId};
+    use sha2::{Digest, Sha256};
+    use std::fs;
+    use std::net::{SocketAddr, TcpListener, TcpStream};
+    use std::path::Path;
+    use std::process::{Child, Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    const COLLECTOR_VERSION: &str = "0.157.0";
+    const COLLECTOR_URL: &str = "https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/v0.157.0/otelcol-contrib_0.157.0_linux_amd64.tar.gz";
+    const COLLECTOR_SHA256: &str =
+        "d33177515a244a2393f03ffd66ab3e68a8fc11a56bc145ec4d0ca2644ee95504";
+
+    struct CollectorGuard(Child);
+
+    impl Drop for CollectorGuard {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    fn sha256_hex(path: &Path) -> String {
+        let bytes = fs::read(path).expect("read pinned collector archive");
+        let digest = Sha256::digest(bytes);
+        let mut hex = String::with_capacity(64);
+        for byte in digest {
+            use std::fmt::Write as _;
+            write!(&mut hex, "{byte:02x}").expect("write digest");
+        }
+        hex
+    }
+
+    fn wait_for_collector(address: SocketAddr, collector: &mut Child) {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            if TcpStream::connect_timeout(&address, Duration::from_millis(100)).is_ok() {
+                return;
+            }
+            if let Some(status) = collector.try_wait().expect("poll collector process") {
+                panic!("OpenTelemetry Collector exited before readiness: {status}");
+            }
+            assert!(
+                Instant::now() < deadline,
+                "OpenTelemetry Collector did not become ready within 15 seconds"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    let fixture_root = std::env::var_os("CARGO_TARGET_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    let work_dir = fixture_root.join(format!("external-fixtures/otelcol-{COLLECTOR_VERSION}"));
+    fs::create_dir_all(&work_dir).expect("create collector work directory");
+    let archive = work_dir.join("otelcol-contrib.tar.gz");
+    let collector_binary = work_dir.join("otelcol-contrib");
+    if !archive.is_file() || sha256_hex(&archive) != COLLECTOR_SHA256 {
+        let status = Command::new("curl")
+            .args(["--fail", "--location", "--silent", "--show-error"])
+            .arg("--output")
+            .arg(&archive)
+            .arg(COLLECTOR_URL)
+            .status()
+            .expect("launch curl for pinned collector archive");
+        assert!(status.success(), "collector download failed: {status}");
+    }
+    assert_eq!(
+        sha256_hex(&archive),
+        COLLECTOR_SHA256,
+        "pinned collector archive digest drifted"
+    );
+    let status = Command::new("tar")
+        .args(["-xzf"])
+        .arg(&archive)
+        .arg("-C")
+        .arg(&work_dir)
+        .status()
+        .expect("extract pinned collector archive");
+    assert!(status.success(), "collector extraction failed: {status}");
+
+    let port_probe = TcpListener::bind("127.0.0.1:0").expect("reserve collector port");
+    let collector_address = port_probe.local_addr().expect("collector port");
+    drop(port_probe);
+    let output_path = work_dir.join("metrics.jsonl");
+    let config_path = work_dir.join("collector.yaml");
+    let config = format!(
+        "receivers:\n  otlp:\n    protocols:\n      http:\n        endpoint: {collector_address}\nexporters:\n  file:\n    path: {}\n    flush_interval: 100ms\nservice:\n  telemetry:\n    logs:\n      level: warn\n  pipelines:\n    metrics:\n      receivers: [otlp]\n      exporters: [file]\n",
+        output_path.display()
+    );
+    fs::write(&config_path, config).expect("write collector config");
+    let child = Command::new(&collector_binary)
+        .arg("--config")
+        .arg(&config_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn pinned OpenTelemetry Collector");
+    let mut collector = CollectorGuard(child);
+    wait_for_collector(collector_address, &mut collector.0);
+
+    let metrics = OwnedOtlpMetrics::try_new(
+        OwnedOtlpMetricsConfig::new(1_000).with_max_cardinality_per_metric(1),
+    )
+    .expect("valid owned metrics config");
+    let region = RegionId::new_for_test(1, 0);
+    let task = TaskId::new_for_test(2, 0);
+    metrics.task_spawned(region, task);
+    metrics.task_completed(task, OutcomeKind::Ok, Duration::from_millis(12));
+    metrics.task_spawned(region, task);
+    metrics.task_completed(task, OutcomeKind::Err, Duration::from_millis(15));
+    assert_eq!(metrics.rejected_updates(), 2);
+    let exporter = OtlpHttpExporter::try_new(format!("http://{collector_address}/v1/metrics"))
+        .expect("valid collector endpoint");
+    asupersync::test_utils::run_test(|| async {
+        let cx = Cx::current().expect("native test runtime installs Cx");
+        exporter
+            .send_owned_metrics(&cx, &metrics, 2_000)
+            .await
+            .expect("official collector accepts owned metrics");
+        metrics.reset(3_000).expect("rotate accumulation epoch");
+        metrics.task_spawned(region, task);
+        exporter
+            .send_owned_metrics(&cx, &metrics, 4_000)
+            .await
+            .expect("official collector accepts reset metrics");
+    });
+
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let exported = loop {
+        if let Ok(text) = fs::read_to_string(&output_path)
+            && text.matches("asupersync.tasks.spawned").count() >= 2
+        {
+            break text;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "official collector did not export the accepted metric within 15 seconds"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let records = exported
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str::<Value>(line).expect("collector output must be JSON"))
+        .collect::<Vec<_>>();
+    assert!(
+        !records.is_empty(),
+        "collector must emit at least one record"
+    );
+    let canonical_output = serde_json::to_string(&records).expect("serialize collector output");
+    assert!(canonical_output.contains("asupersync.tasks.spawned"));
+    assert!(canonical_output.contains("asupersync.tasks.active"));
+    assert!(canonical_output.contains("asupersync.tasks.duration"));
+    assert!(canonical_output.contains("ok"));
+    assert!(canonical_output.contains("service.name"));
+    assert!(canonical_output.contains("asupersync"));
+}

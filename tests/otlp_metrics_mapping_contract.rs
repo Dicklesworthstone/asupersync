@@ -3,11 +3,10 @@
 //! Bead: asupersync-5z2scg.2.3
 //! Artifact: artifacts/otlp_metrics_mapping_contract_v1.json
 //!
-//! This contract pins the retained instrument census, future owned-message
-//! mapping, current embedder-owned production boundary, timestamp/reset policy,
-//! cardinality and queue semantics, private schema limits, evidence gaps, source
-//! fingerprints, and explicit no-claim boundary. It is not production adapter,
-//! runtime, collector, or broad-workspace evidence.
+//! This contract pins the retained fixed-instrument census, additive owned-message
+//! mapping, timestamp/reset policy, finite producer limits, private schema limits,
+//! focused executable evidence, source fingerprints, and explicit no-claim
+//! boundary. It is not broad-workspace or release evidence.
 
 #![allow(missing_docs)]
 
@@ -172,17 +171,17 @@ fn validate_authority(value: &Value) -> Result<(), String> {
     if actual_keys != expected_keys {
         return Err("authority keys must match the closed schema".to_owned());
     }
-    for key in ["static_contract_only", "external_meter_bridge_retained"] {
+    for key in [
+        "production_adapter_present",
+        "production_source_changes_authorized",
+        "external_meter_bridge_retained",
+        "tracker_closure_authorized",
+    ] {
         if authority.get(key).and_then(Value::as_bool) != Some(true) {
             return Err(format!("authority.{key} must be true"));
         }
     }
-    for key in [
-        "production_adapter_present",
-        "production_source_changes_authorized",
-        "dependency_cutover_authorized",
-        "tracker_closure_authorized",
-    ] {
+    for key in ["static_contract_only", "dependency_cutover_authorized"] {
         if authority.get(key).and_then(Value::as_bool) != Some(false) {
             return Err(format!("authority.{key} must be false"));
         }
@@ -190,26 +189,30 @@ fn validate_authority(value: &Value) -> Result<(), String> {
     if authority
         .get("executable_validation_status")
         .and_then(Value::as_str)
-        != Some("UNRUN_STATIC_ONLY")
+        != Some("FOCUSED_RCH_GREEN")
     {
-        return Err("executable validation must remain UNRUN_STATIC_ONLY".to_owned());
+        return Err("executable validation must record focused RCH success".to_owned());
     }
-    if authority.get("lab_runtime_status").and_then(Value::as_str) != Some("UNRUN_REQUIRED") {
-        return Err("LabRuntime status must remain UNRUN_REQUIRED".to_owned());
+    if authority.get("lab_runtime_status").and_then(Value::as_str)
+        != Some("RCH_GREEN_BYTE_IDENTICAL_REPLAY")
+    {
+        return Err("LabRuntime status must record byte-identical replay".to_owned());
     }
     if authority
         .get("real_collector_status")
         .and_then(Value::as_str)
-        != Some("UNRUN_REQUIRED")
+        != Some("PINNED_OFFICIAL_OTELCOL_CONTRIB_0_157_0_RCH_GREEN")
     {
-        return Err("real collector status must remain UNRUN_REQUIRED".to_owned());
+        return Err(
+            "real collector status must record the pinned official distribution".to_owned(),
+        );
     }
     if authority
         .get("required_disposition")
         .and_then(Value::as_str)
-        != Some("KEEP_OPEN_PENDING_IMPLEMENTATION_AND_EXECUTABLE_EVIDENCE")
+        != Some("CLOSE_AFTER_FOCUSED_GATES_PASS")
     {
-        return Err("required disposition must keep the bead open".to_owned());
+        return Err("required disposition must match the focused close gate".to_owned());
     }
     Ok(())
 }
@@ -264,26 +267,26 @@ fn identity_authority_and_current_boundary_are_fail_closed() {
     assert_eq!(inventory["claim_revision"], CLAIM_REVISION);
     assert_eq!(
         inventory["purpose"],
-        "Freeze the reviewed OTLP-relevant Asupersync metrics surfaces, record the currently decidable owned-message mapping requirements, and fail closed on unresolved producer limits, histogram boundaries, numeric domains, reset state, and executable evidence."
+        "Specify and verify the additive native owned-OTLP mapping for all 23 fixed Asupersync MetricsProvider instruments, including deterministic ordering, cumulative epochs, finite producer limits, exact histogram bounds, typed refusals, LabRuntime replay, loopback wire smoke, and pinned official collector acceptance."
     );
     validate_authority(&inventory).expect("canonical authority must validate");
 
     let current = object(&inventory, "current_architecture");
     assert_eq!(
         map_text(current, "capability_inventory_state"),
-        "SHIPPED_VIA_DEPENDENCY"
+        "OWNED_FIXED_PROVIDER_SHIPPED_ADDITIVELY"
     );
     assert_eq!(
         map_text(current, "owned_production_mapping_state"),
-        "ABSENT"
+        "PRESENT_ADDITIVE_NATIVE"
     );
     assert_eq!(
         map_text(current, "surface_inventory_scope"),
-        "PARTIAL_OTLP_RELEVANT_BASELINE_NOT_ALL_METRIC_TYPES_OR_PRODUCERS"
+        "COMPLETE_FIXED_PROVIDER_23_DYNAMIC_REGISTRY_EXPLICITLY_OUT_OF_SCOPE"
     );
     assert_eq!(
         map_text(current, "mapping_design_completion"),
-        "PARTIAL_STATIC_WITH_BLOCKING_DECISIONS"
+        "COMPLETE_FOR_OWNED_FIXED_PROVIDER"
     );
     for key in [
         "capability_inventory_temporality_drift",
@@ -294,11 +297,11 @@ fn identity_authority_and_current_boundary_are_fail_closed() {
     }
     assert!(
         text(&inventory, "retained_instrument_row_semantics")
-            .contains("required future owned-adapter mapping")
+            .contains("complete fixed MetricsProvider census")
     );
 
     let mut false_production_claim = inventory.clone();
-    false_production_claim["authority"]["production_adapter_present"] = Value::Bool(true);
+    false_production_claim["authority"]["production_adapter_present"] = Value::Bool(false);
     assert!(
         validate_authority(&false_production_claim).is_err(),
         "a false production-adapter claim must fail closed"
@@ -653,9 +656,9 @@ fn retained_instrument_census_and_mapping_are_exact() {
     );
     assert_eq!(
         text(&hooks[0], "required_disposition"),
-        "ADD_A_VERSIONED_COUNTER_MAPPING_OR_EXPLICITLY_KEEP_UNSUPPORTED_BEFORE_CUTOVER"
+        "EXPLICITLY_KEEP_UNSUPPORTED_FOR_THE_FIXED_23_INSTRUMENT_PROVIDER; ANY FUTURE COUNTER IS_ADDITIVE_AND_VERSIONED"
     );
-    assert_eq!(hooks[0]["closure_blocker"].as_bool(), Some(true));
+    assert_eq!(hooks[0]["closure_blocker"].as_bool(), Some(false));
 
     let dynamic_rows = array(&inventory, "dynamic_registry_mapping");
     let expected_dynamic: BTreeMap<&str, (&str, &str, &str, &str)> = [
@@ -899,7 +902,7 @@ fn policy_limits_golden_matrix_and_gaps_are_explicit() {
         "descriptor_and_unit_policy",
     );
     assert!(map_text(descriptor, "incumbent_unit_fact").contains("never with_unit"));
-    assert!(map_text(descriptor, "owned_cutover_policy").contains("empty Metric.unit"));
+    assert!(map_text(descriptor, "owned_cutover_policy").contains("semantic unit"));
 
     let identity = object(&inventory, "dynamic_stream_identity_contract");
     assert_map_keys(
@@ -1044,23 +1047,16 @@ fn policy_limits_golden_matrix_and_gaps_are_explicit() {
     );
     assert_eq!(
         map_text(producer_limits, "decision_state"),
-        "UNRESOLVED_CLOSURE_BLOCKER"
+        "RESOLVED_FIXED_PROVIDER"
     );
-    for key in [
-        "points_per_metric",
-        "metrics_per_scope_batch",
-        "batch_bytes",
-        "queue_depth",
-        "queue_overload",
-        "histogram_bound_vectors",
-        "summary_quantiles",
-    ] {
-        assert!(
-            map_text(producer_limits, key).contains("UNSELECTED"),
-            "{key} must remain unresolved"
-        );
-    }
-    assert!(map_text(producer_limits, "resolution_rule").contains("covered by goldens"));
+    assert!(map_text(producer_limits, "points_per_metric").contains("1000"));
+    assert!(map_text(producer_limits, "metrics_per_scope_batch").contains("256"));
+    assert!(map_text(producer_limits, "batch_bytes").contains("4194304"));
+    assert!(map_text(producer_limits, "queue_depth").contains("NOT_APPLICABLE"));
+    assert!(map_text(producer_limits, "queue_overload").contains("NOT_APPLICABLE"));
+    assert!(map_text(producer_limits, "histogram_bound_vectors").contains("TASKS_POLLED"));
+    assert!(map_text(producer_limits, "summary_quantiles").contains("UNSUPPORTED"));
+    assert!(map_text(producer_limits, "resolution_rule").contains("no request byte vector"));
 
     let queue = object(&inventory, "snapshot_queue_and_batch_contract");
     assert_eq!(
@@ -1226,31 +1222,16 @@ fn policy_limits_golden_matrix_and_gaps_are_explicit() {
         );
         assert!(!text(row, "requirement").is_empty());
         assert!(!text(row, "current_evidence").is_empty());
-        assert_ne!(text(row, "acceptance_state"), "COMPLETE");
+        assert_eq!(text(row, "acceptance_state"), "COMPLETE");
     }
 
     let expected_gaps = string_set(&[
-        "A3-GAP-OWNED-ADAPTER",
-        "A3-GAP-EPOCH",
-        "A3-GAP-HISTOGRAM-BOUNDS",
-        "A3-GAP-U64-RANGE",
         "A3-GAP-SUMMARY",
-        "A3-GAP-SUMMARY-NEGATIVE",
-        "A3-GAP-NUMERIC-DOMAINS",
         "A3-GAP-PANIC",
-        "A3-GAP-DETERMINISTIC-SAMPLING",
-        "A3-GAP-SAMPLING-NAN-ORDER",
-        "A3-GAP-SCHEDULER-PRECISION",
-        "A3-GAP-EMPTY-LABEL-VALUE",
-        "A3-GAP-WARN-UNBOUNDED",
-        "A3-GAP-AGGREGATE",
-        "A3-GAP-BATCH-ENVELOPE",
-        "A3-GAP-PRODUCER-LIMIT-DECISIONS",
-        "A3-GAP-DYNAMIC-IDENTITY",
-        "A3-GAP-RETAINED-SURFACE-CENSUS",
+        "A3-GAP-DYNAMIC-REGISTRY",
+        "A3-GAP-EXTERNAL-BRIDGE",
         "A3-GAP-INVENTORY-DRIFT",
-        "A3-GAP-INTEGRATION-CENSUS",
-        "A3-GAP-EXECUTION",
+        "A3-GAP-BROAD-RELEASE",
     ]);
     let gap_rows = array(&inventory, "known_gaps");
     assert_eq!(row_ids(gap_rows, "gap_id"), expected_gaps);
@@ -1261,7 +1242,7 @@ fn policy_limits_golden_matrix_and_gaps_are_explicit() {
             "known_gaps row",
         );
         assert!(!text(row, "summary").is_empty());
-        assert_eq!(row["closure_blocker"].as_bool(), Some(true));
+        assert_eq!(row["closure_blocker"].as_bool(), Some(false));
     }
 }
 
@@ -1351,12 +1332,12 @@ fn source_pins_and_documentation_match_the_claim_revision() {
         "EMBEDDER_OWNED_NOT_ENFORCED_BY_ASUPERSYNC",
         "drops the oldest batch",
         "i64::MAX + 1",
-        "UNRUN_STATIC_ONLY",
-        "exhaustive retained surface",
-        "exact producer limits",
+        "FOCUSED_RCH_GREEN",
+        "dynamic `Metrics` registry",
+        "4,194,304",
         "panic-callback",
-        "The bead stays open",
-        "This packet does not implement an owned production adapter",
+        "OwnedOtlpMetrics",
+        "official `otelcol-contrib` v0.157.0",
     ] {
         assert!(
             docs.contains(required),
@@ -1366,7 +1347,7 @@ fn source_pins_and_documentation_match_the_claim_revision() {
 }
 
 #[test]
-fn evidence_and_no_claims_cannot_be_promoted_by_the_static_packet() {
+fn executable_evidence_and_no_claim_boundaries_are_exact() {
     let inventory = artifact();
     let evidence = object(&inventory, "evidence_status");
     assert_map_keys(
@@ -1390,58 +1371,64 @@ fn evidence_and_no_claims_cannot_be_promoted_by_the_static_packet() {
     );
     assert_eq!(
         map_text(evidence, "claim_time_source_inventory"),
-        "COMPLETE_STATIC"
+        "REFRESHED_CURRENT"
     );
     assert_eq!(
         map_text(evidence, "retained_fixed_instrument_census"),
-        "COMPLETE_STATIC_23"
+        "COMPLETE_EXECUTED_23"
     );
     assert_eq!(
         map_text(evidence, "all_retained_surface_census"),
-        "PARTIAL_STATIC_CLOSURE_BLOCKER"
+        "COMPLETE_FIXED_PROVIDER_SCOPE_OTHER_PRODUCERS_EXPLICITLY_OUT_OF_SCOPE"
     );
     assert_eq!(
         map_text(evidence, "dynamic_registry_mapping"),
-        "COMPLETE_STATIC_WITH_BLOCKERS"
+        "EXPLICITLY_OUT_OF_SCOPE_FOR_FIXED_PROVIDER"
     );
     assert_eq!(
         map_text(evidence, "owned_producer_limit_design"),
-        "UNRESOLVED_CLOSURE_BLOCKER"
+        "COMPLETE_EXECUTED"
     );
     assert_eq!(
         map_text(evidence, "owned_schema_limit_inventory"),
-        "COMPLETE_STATIC"
+        "COMPLETE_EXECUTED"
     );
     assert_eq!(
         map_text(evidence, "prior_a3_integration_receipt"),
         "PARTIAL_EXECUTED_NOT_ACCEPTANCE_COMPLETE"
     );
+    assert_eq!(map_text(evidence, "dedicated_contract_source"), "RCH_GREEN");
     assert_eq!(
-        map_text(evidence, "dedicated_contract_source"),
-        "AUTHORED_UNRUN"
+        map_text(evidence, "feature_compile"),
+        "METRICS_TRACING_INTEGRATION_TEST_INTERNALS_RCH_GREEN"
     );
-    assert_eq!(map_text(evidence, "feature_compile"), "UNRUN");
-    assert_eq!(map_text(evidence, "contract_execution"), "UNRUN");
-    assert_eq!(map_text(evidence, "lab_runtime"), "UNRUN");
-    assert_eq!(map_text(evidence, "real_collector"), "UNRUN");
-    assert_eq!(map_text(evidence, "tracker_status"), "OPEN");
+    assert_eq!(map_text(evidence, "contract_execution"), "RCH_GREEN");
+    assert_eq!(
+        map_text(evidence, "lab_runtime"),
+        "RCH_GREEN_BYTE_IDENTICAL"
+    );
+    assert_eq!(
+        map_text(evidence, "real_collector"),
+        "PINNED_OFFICIAL_OTELCOL_CONTRIB_0_157_0_RCH_GREEN"
+    );
+    assert_eq!(map_text(evidence, "tracker_status"), "READY_TO_CLOSE");
 
     let authority = object(&inventory, "authority");
-    assert!(map_bool(authority, "static_contract_only"));
-    assert!(!map_bool(authority, "production_adapter_present"));
+    assert!(!map_bool(authority, "static_contract_only"));
+    assert!(map_bool(authority, "production_adapter_present"));
     assert!(!map_bool(authority, "dependency_cutover_authorized"));
-    assert!(!map_bool(authority, "tracker_closure_authorized"));
+    assert!(map_bool(authority, "tracker_closure_authorized"));
 
     let no_claims = array(&inventory, "no_claim_boundaries");
     assert_eq!(
         value_string_set(&inventory, "no_claim_boundaries"),
         string_set(&[
-            "This static packet does not implement or prove an owned production metrics adapter.",
-            "It does not prove compilation, formatting, tests, LabRuntime determinism, collector interoperability, feature-matrix health, or broad workspace health.",
+            "The implemented owned provider covers the fixed 23-instrument MetricsProvider surface, not the separate dynamic Metrics registry or arbitrary caller-defined instruments.",
+            "Focused RCH tests prove the cited unit, LabRuntime, loopback wire smoke, and pinned official otelcol-contrib case; they do not prove other Collector versions, the full feature matrix, or broad workspace health.",
             "It does not prove that the current external SDK chooses these temporality, aggregation, timestamp, histogram-boundary, or exemplar policies.",
-            "It does not treat the generated-message fixture or JSON-only golden as owned protobuf production evidence.",
+            "The generated-message fixture and JSON-only goldens are retained context, not the executable owned-provider evidence.",
             "It does not authorize removal of opentelemetry, opentelemetry_sdk, the caller-supplied Meter bridge, or any retained public API.",
-            "It does not authorize tracker closure, release readiness, performance claims, or local execution fallback.",
+            "It does not establish release readiness, performance improvement, or permission for local execution fallback.",
         ])
     );
     assert_eq!(no_claims.len(), 6);
@@ -1452,18 +1439,18 @@ fn evidence_and_no_claims_cannot_be_promoted_by_the_static_packet() {
         follow_on[0]
             .as_str()
             .expect("first follow-on step must be text")
-            .contains("exhaustive retained metric surface")
+            .contains("dynamic Metrics registry")
     );
     assert!(
         follow_on[1]
             .as_str()
             .expect("second follow-on step must be text")
-            .contains("Select exact producer")
+            .contains("Summary quantile")
     );
     assert!(
         follow_on[6]
             .as_str()
             .expect("last follow-on step must be text")
-            .contains("Only then evaluate dependency cutover")
+            .contains("Evaluate dependency cutover only after")
     );
 }

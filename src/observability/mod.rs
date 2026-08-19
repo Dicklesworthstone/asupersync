@@ -72,8 +72,9 @@ pub mod otel_structured_concurrency;
 #[cfg(test)]
 pub mod otlp_attribute_size_cap_audit_test;
 // br-asupersync-5z2scg.1.3: private, native-only owned OTLP message staging.
-// Signal adapters, transport wiring, public re-exports, and dependency cutover
-// remain outside this module's authority.
+// Signal adapters may construct these finite models inside the crate, but the
+// model types remain private; external SDK adapters and dependency cutover are
+// separate compatibility decisions.
 #[cfg(all(feature = "metrics", not(target_arch = "wasm32")))]
 #[allow(dead_code)]
 // The owned schema deliberately spells its internal contract as crate-visible.
@@ -273,6 +274,15 @@ pub use otel::{
     NullLogsExporter, OTLP_LOGS_MAX_ATTRIBUTE_VALUE_BYTES, OTLP_LOGS_MAX_ATTRIBUTES,
     OTLP_LOGS_SCHEMA_URL, OTLP_LOGS_SCOPE_NAME, OtelMetrics, OtlpLogRecord, OtlpLogsHttpExporter,
     SamplingConfig, StdoutExporter, log_level_to_otlp_severity,
+};
+#[cfg(all(feature = "metrics", not(target_arch = "wasm32")))]
+pub use otel::{
+    OWNED_OTLP_DEFAULT_METRICS_PER_REQUEST, OWNED_OTLP_DEFAULT_REQUEST_BYTES,
+    OWNED_OTLP_MAX_ATTRIBUTE_BYTES, OWNED_OTLP_MAX_ATTRIBUTE_KEY_BYTES,
+    OWNED_OTLP_MAX_ATTRIBUTE_VALUE_BYTES, OWNED_OTLP_MAX_ATTRIBUTES,
+    OWNED_OTLP_MAX_POINTS_PER_METRIC, OWNED_OTLP_METRICS_VERSION, OtlpHttpConfig,
+    OtlpHttpConfigBuilder, OtlpHttpExporter, OtlpTlsPolicy, OwnedOtlpMetrics,
+    OwnedOtlpMetricsConfig, OwnedOtlpMetricsError,
 };
 pub use otel_structured_concurrency::{
     EntityId, OtelStructuredConcurrencyConfig, SpanStorage, SpanType,

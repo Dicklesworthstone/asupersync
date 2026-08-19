@@ -2365,6 +2365,14 @@ pub(crate) mod metrics {
                     invariant: "number data point must contain a recognized value",
                 });
             }
+            if budget.enforces_invariants()
+                && matches!(self.value, Some(NumberDataPointValue::Double(value)) if !value.is_finite())
+            {
+                return Err(ProtobufWireError::SchemaInvariant {
+                    offset: 0,
+                    invariant: "number data point double must be finite",
+                });
+            }
             validate_point_time(self.time_unix_nano, budget)?;
             validate_models(
                 &self.exemplars,
@@ -2513,6 +2521,22 @@ pub(crate) mod metrics {
                 .saturating_add(self.explicit_bounds.len());
             budget.work(numeric_work)?;
             if budget.enforces_invariants() {
+                if self.sum.is_some_and(|value| !value.is_finite())
+                    || self.explicit_bounds.iter().any(|value| !value.is_finite())
+                    || self.min.is_some_and(|value| !value.is_finite())
+                    || self.max.is_some_and(|value| !value.is_finite())
+                {
+                    return Err(ProtobufWireError::SchemaInvariant {
+                        offset: 0,
+                        invariant: "histogram numeric fields must be finite",
+                    });
+                }
+                if self.min.zip(self.max).is_some_and(|(min, max)| min > max) {
+                    return Err(ProtobufWireError::SchemaInvariant {
+                        offset: 0,
+                        invariant: "histogram min must not exceed max",
+                    });
+                }
                 let shape_matches = if self.bucket_counts.is_empty() {
                     self.explicit_bounds.is_empty()
                 } else {
@@ -2764,6 +2788,22 @@ pub(crate) mod metrics {
                 negative.validate_otlp(budget, 0)?;
             }
             if budget.enforces_invariants() {
+                if self.sum.is_some_and(|value| !value.is_finite())
+                    || self.min.is_some_and(|value| !value.is_finite())
+                    || self.max.is_some_and(|value| !value.is_finite())
+                    || !self.zero_threshold.is_finite()
+                {
+                    return Err(ProtobufWireError::SchemaInvariant {
+                        offset: 0,
+                        invariant: "exponential histogram numeric fields must be finite",
+                    });
+                }
+                if self.min.zip(self.max).is_some_and(|(min, max)| min > max) {
+                    return Err(ProtobufWireError::SchemaInvariant {
+                        offset: 0,
+                        invariant: "exponential histogram min must not exceed max",
+                    });
+                }
                 let bucket_total = self
                     .positive
                     .iter()
@@ -2848,10 +2888,10 @@ pub(crate) mod metrics {
                     invariant: "summary quantile must be finite and between zero and one",
                 });
             }
-            if budget.enforces_invariants() && self.value < 0.0 {
+            if budget.enforces_invariants() && (!self.value.is_finite() || self.value < 0.0) {
                 return Err(ProtobufWireError::SchemaInvariant {
                     offset: 0,
-                    invariant: "summary quantile value must not be negative",
+                    invariant: "summary quantile value must be finite and nonnegative",
                 });
             }
             validate_unknown(&self.unknown_fields, budget)
@@ -2939,6 +2979,12 @@ pub(crate) mod metrics {
             _any_value_depth: usize,
         ) -> Result<(), ProtobufWireError> {
             validate_point_time(self.time_unix_nano, budget)?;
+            if budget.enforces_invariants() && !self.sum.is_finite() {
+                return Err(ProtobufWireError::SchemaInvariant {
+                    offset: 0,
+                    invariant: "summary sum must be finite",
+                });
+            }
             budget.repeated(
                 self.quantile_values.len(),
                 MAX_SUMMARY_QUANTILES,
@@ -8552,5 +8598,69 @@ mod tests {
                 .expect("generic logs collector codec decode"),
             logs_model
         );
+    }
+
+    #[test]
+    fn owned_otlp_metrics_numeric_invariants_refuse_nonfinite_and_reversed_ranges() {
+        let nonfinite_number = NumberDataPoint {
+            time_unix_nano: 1,
+            value: Some(NumberDataPointValue::Double(f64::NAN)),
+            ..NumberDataPoint::default()
+        };
+        assert!(matches!(
+            nonfinite_number.encode_to_bytes(limits()),
+            Err(ProtobufWireError::SchemaInvariant {
+                invariant: "number data point double must be finite",
+                ..
+            })
+        ));
+
+        let invalid_histogram = HistogramDataPoint {
+            time_unix_nano: 1,
+            count: 1,
+            sum: Some(f64::INFINITY),
+            bucket_counts: vec![1, 0],
+            explicit_bounds: vec![1.0],
+            min: Some(2.0),
+            max: Some(1.0),
+            ..HistogramDataPoint::default()
+        };
+        assert!(matches!(
+            invalid_histogram.encode_to_bytes(limits()),
+            Err(ProtobufWireError::SchemaInvariant {
+                invariant: "histogram numeric fields must be finite",
+                ..
+            })
+        ));
+        let reversed_histogram = HistogramDataPoint {
+            sum: Some(1.0),
+            ..invalid_histogram.clone()
+        };
+        assert!(matches!(
+            reversed_histogram.encode_to_bytes(limits()),
+            Err(ProtobufWireError::SchemaInvariant {
+                invariant: "histogram min must not exceed max",
+                ..
+            })
+        ));
+
+        let invalid_summary = SummaryDataPoint {
+            time_unix_nano: 1,
+            count: 1,
+            sum: f64::NAN,
+            quantile_values: vec![SummaryValueAtQuantile {
+                quantile: 0.5,
+                value: f64::INFINITY,
+                ..SummaryValueAtQuantile::default()
+            }],
+            ..SummaryDataPoint::default()
+        };
+        assert!(matches!(
+            invalid_summary.encode_to_bytes(limits()),
+            Err(ProtobufWireError::SchemaInvariant {
+                invariant: "summary sum must be finite",
+                ..
+            })
+        ));
     }
 }

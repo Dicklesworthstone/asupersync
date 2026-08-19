@@ -8,9 +8,10 @@ Canonical artifact: `artifacts/otlp_metrics_mapping_contract_v1.json`
 
 Claim revision: `f3ccd58d8d9b740ad07b4f2197d56d70ad049125`
 
-Status: static A3 contract authored; production adapter implementation,
-executable contract validation, deterministic LabRuntime replay, and real
-collector evidence remain pending (`UNRUN_STATIC_ONLY`). The bead stays open.
+Status: additive fixed-provider implementation complete. Focused execution is
+`FOCUSED_RCH_GREEN`, including byte-identical deterministic LabRuntime replay
+and a digest-pinned official `otelcol-contrib` v0.157.0 acceptance case. A fast
+loopback receiver remains only a wire/decode smoke test.
 
 ## Outcome
 
@@ -22,15 +23,17 @@ conflated:
    temporality, timestamps, histogram boundaries, exemplars, and export.
 2. `Metrics` is the dependency-free dynamic registry. It retains counters,
    gauges, explicit-bound histograms, and bounded-sample summaries.
-3. `otlp_proto` contains finite crate-private owned OTLP metric and collector
-   messages. No production adapter currently connects either producer surface
-   to those messages.
+3. `OwnedOtlpMetrics` implements all 23 fixed `MetricsProvider` instruments on
+   top of the finite crate-owned `otlp_proto` messages. It owns cumulative
+   epochs, exact histogram bounds, deterministic order, and finite request
+   envelopes. `OtlpHttpExporter::send_owned_metrics` exports under a caller
+   `Cx` without changing the established `OtelMetrics` bridge.
 
-That list is not the complete repository-wide metrics census. The A3 artifact
-freezes this reviewed subset, records each required future owned-adapter mapping,
-and keeps unresolved producer limits and descriptor decisions as closure blockers.
-Fields named `owned_*` are requirements, not descriptions of
-the current external `MeterProvider` output or a complete adapter design.
+The fixed provider intentionally does not ingest the dynamic `Metrics` registry
+or arbitrary direct instruments. Those surfaces remain documented no-claims,
+not hidden inputs to the closed 23-instrument mapping. Fields named `owned_*`
+describe the additive native provider; they do not describe the current
+external `MeterProvider` output.
 
 This distinction corrects three overstatements in the earlier frozen inventory:
 
@@ -40,7 +43,8 @@ This distinction corrects three overstatements in the earlier frozen inventory:
   and
 - the cited A3 integration receipt is partial evidence, not proof of owned
   mapping, reset behavior, boundary cardinality, deterministic replay, or a
-  real collector.
+  real collector. The executable tranche below supplies that missing case for
+  the additive owned provider only.
 
 ## Fixed `OtelMetrics` instrument census
 
@@ -76,21 +80,20 @@ states that values are seconds.
 | `asupersync.scheduler.tasks_polled` | `f64` histogram | none | shared `asupersync.scheduler` | cumulative explicit histogram |
 
 The exact descriptions, semantic units, callbacks, and mapping variants live in
-the JSON artifact. Descriptions remain byte-for-byte incumbent values. An owned
-parity cutover must emit an empty `Metric.unit`; introducing `s`, `1`, or
-another nonempty unit is a deliberate descriptor version requiring separate
-golden and collector evidence.
+the JSON artifact. Descriptions remain byte-for-byte incumbent values. The
+additive owned provider emits `1` for counts and `s` for durations. The existing
+external bridge still emits its established empty application-level units, so
+this is not a cutover or a breaking descriptor change.
 
-The explicit integration-test census currently names only the 20 synchronous
-counters and histograms. The three observable gauges exist in the constructor
-but are not named in that expected list.
+The owned-provider unit census executes callbacks for all 23 instruments,
+including the three observable gauges, and checks the sorted emitted names.
 
-`MetricsProvider::record_panic` is another retained callback but not one of the
-23 instruments: `OtelMetrics` inherits the trait's no-op default. A3 cannot close
-until a versioned counter mapping lands or the unsupported behavior is retained
-explicitly.
+`MetricsProvider::record_panic` is another retained panic-callback but not one of
+the 23 instruments. Its no-op behavior is retained explicitly. A future panic
+counter must be additive and versioned; the unsupported callback is not silently
+misrepresented as an exported metric.
 
-## Additional retained surfaces still requiring census
+## Additional retained surfaces outside the fixed provider
 
 The fixed 23-row table is complete only for `OtelMetrics`. It is not “every
 metric in Asupersync.” At least three additional families remain:
@@ -106,9 +109,9 @@ metric in Asupersync.” At least three additional families remain:
 - Direct `Counter`, `Gauge`, and `Histogram` users include the release-proof
   aggregator, ATP QUIC per-connection metrics, and network-truth metrics.
 
-Those examples are deliberately not presented as exhaustive. Completing that
-producer/name census and mapping its reset, dynamic-name, descriptor, and range
-semantics is an A3 closure blocker.
+Those examples are deliberately not presented as exhaustive. They are not
+accepted inputs to `OwnedOtlpMetrics`; a future dynamic adapter must define its
+own descriptor identity, reset, summary, and range semantics.
 
 ## Dynamic registry mapping
 
@@ -116,8 +119,8 @@ The default-feature `Metrics` registry is also retained:
 
 | Registry kind | Available fidelity | Required owned mapping | Current gap |
 |---|---|---|---|
-| Counter | exact `u64` value | cumulative monotonic `Sum` | owned integer is `i64`; epoch state is absent |
-| Gauge | exact `i64` value | `Gauge` integer | adapter absent |
+| Counter | exact `u64` value | cumulative monotonic `Sum` | not wired to the fixed provider |
+| Gauge | exact `i64` value | `Gauge` integer | not wired to the fixed provider |
 | Histogram | sorted bounds, per-bucket counts including `+Inf`, count, sum | cumulative explicit `Histogram` | public `MetricsSnapshot` drops bounds and bucket counts |
 | Summary | exact count and sum; last 4,096 finite observations for quantiles | `Summary` | no snapshot row or canonical quantile set |
 
@@ -127,45 +130,40 @@ A fresh name beyond the cap is routed to
 Because the sentinel is insertable in addition to the configured ordinary-name
 budget, a capped map may contain the cap plus the sentinel.
 
-## Required owned message shape
+## Owned message shape
 
-The future production route is:
+The native fixed-provider route is:
 
 ```text
 ExportMetricsServiceRequest
   -> ResourceMetrics
     -> ScopeMetrics
       -> Metric
-        -> Gauge | Sum | Histogram | Summary
+        -> Gauge | Sum | Histogram
           -> bounded data points
 ```
 
 Counters use `Sum`, `Cumulative`, `is_monotonic = true`, and an integer point.
 Gauges use an integer point with no start timestamp. Histograms use cumulative
 explicit buckets whose count vector has exactly one more item than the strictly
-increasing bound vector and whose checked bucket sum equals `count`. The exact
-bound vectors for the seven fixed histograms remain unselected. Summaries remain
-blocked until the producer owns a canonical quantile set. Asupersync has no
-explicit owned exemplar producer; the current embedder SDK may still attach
-exemplars under its own provider policy. A future owned policy path leaves
-exemplars, exponential histograms, and metric metadata empty until explicit
-producers and policies land.
+increasing bound vector and whose checked bucket sum equals `count`. The five
+duration histograms use `[0.000001, 0.00001, 0.0001, 0.001, 0.01, 0.1, 1, 10,
+60]`; deadline remaining uses `[0, 0.001, 0.01, 0.1, 1, 5, 30, 60, 300]`; and
+tasks polled uses `[1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]`. The fixed
+provider emits no Summary, exemplar, exponential histogram, or metric metadata
+until an explicit producer and versioned contract exist.
 
-Descriptor identity is name, kind, description, and unit. Stream identity adds
-the canonical post-filter attribute vector. One `Metric` groups the distinct
-attribute-stream points for one descriptor. Empty names, duplicate exact
-streams, same-name descriptor conflicts, and duplicate point identities are
-refused before model construction. Coalescing is forbidden until an explicit
-associative aggregation contract and goldens exist. Metrics are ordered by
-descriptor identity and points by their canonical attribute vectors. No model
-or wire bytes are returned when producer mapping fails.
+The provider has a closed descriptor set. One `Metric` groups distinct canonical
+attribute-stream points for one fixed descriptor. Metrics are ordered by name
+and points by their sorted attribute vectors. Duplicate or empty attribute keys
+are refused before model construction. No model or wire bytes are returned when
+producer mapping or encoding fails.
 
 ## Temporality, timestamps, and reset
 
-Current production policy is `EMBEDDER_OWNED_NOT_ENFORCED_BY_ASUPERSYNC`.
-The required owned policy is cumulative-only for sums and histograms. Delta is
-forbidden until previous-value state, reset detection, and dedicated goldens
-exist.
+The retained external bridge remains
+`EMBEDDER_OWNED_NOT_ENFORCED_BY_ASUPERSYNC`. The additive owned provider is
+cumulative-only for sums and histograms. Delta is unsupported.
 
 Within one stream and attribute set:
 
@@ -176,20 +174,17 @@ Within one stream and attribute set:
   the cumulative value or every histogram field together; and
 - reset is never represented as a negative delta.
 
-The generated-message fixture does not prove that policy. It derives a fresh
-start timestamp from every `batch_sequence`, presenting every changed sequence
-as a new accumulation epoch. The existing monotonicity audit also misses two
-numeric boundaries: `Counter::add` can wrap its `AtomicU64`, and the fixture's
-`cast_signed()` produces a negative point above `i64::MAX`.
+The generated-message fixture does not prove that policy. The executable owned
+provider instead receives epoch and point timestamps explicitly, rejects
+backwards time, and rotates the epoch only through `reset`.
 
-The owned adapter therefore refuses a counter or observable gauge above
-`i64::MAX` before model construction. Wrapping and lossy floating-point
-conversion are forbidden. It also refuses nonfinite observations, bounds, sums,
-min/max, quantiles, and quantile values. Dynamic `Summary` accepts negative
-finite observations while the owned Summary quantile model rejects negative
-values, so that mapping remains blocked. Time and epoch authority must be
-explicit inputs; synthetic batch arithmetic and an ambient wall clock are not
-production authority.
+The owned provider maps `i64::MAX` exactly and refuses `i64::MAX + 1` before
+model construction. Wrapping and lossy floating-point
+conversion are forbidden. Scheduler task counts above the exactly representable
+`f64` integer range are likewise refused. The owned schema rejects nonfinite
+observations, bounds, sums, min/max, quantiles, and quantile values. Time and
+epoch authority are explicit inputs; the provider never reads an ambient wall
+clock.
 
 ## Attributes, cardinality, and sampling
 
@@ -198,10 +193,14 @@ model. Sorting uses UTF-8 key bytes followed by encoded value bytes. Duplicate
 or empty keys are refused; empty string values are preserved unless the caller's
 privacy policy explicitly removes the field.
 
-Current fixed domains include `outcome`, `kind`, `task_type`, and `reason`.
+The owned provider preserves empty values, refuses duplicate or empty keys, and
+checks the 128-attribute, 1,024-byte key, 4,096-byte value, and aggregate owned-
+byte limits before cloning caller-owned resource strings. It sorts resource and
+point attributes before model construction. Current fixed domains include
+`outcome`, `kind`, `task_type`, and `reason`.
 `task_type` is restricted to 64 bytes and the documented safe character set;
-invalid values become `<invalid>`. `reason` is a static string but still needs
-the owned value-byte admission check.
+invalid values become `<invalid>`. An oversized static `reason` is counted and
+omitted before cloning, because the callback cannot return a mapping error.
 
 `OtelMetrics` defaults are 1,000 label combinations per tracker-visible metric,
 4,096 tracker-visible names, `Drop`, no dropped keys, and no sampling. Only the
@@ -212,7 +211,8 @@ while `max_metrics = 0` disables the name limit. At zero cardinality, `Drop`
 omits, `Aggregate` retries and is normally still refused, while `Warn` records
 beyond the zero cap.
 
-Overflow behavior is exact, including its shortcomings:
+Those strategies describe the retained external bridge. Its overflow behavior
+is exact, including its shortcomings:
 
 - `Drop` counts one overflow and omits the point.
 - `Aggregate` changes every retained value to `other` and retries. Because the
@@ -220,6 +220,10 @@ Overflow behavior is exact, including its shortcomings:
   refused. It succeeds only if that exact series was admitted earlier.
 - `Warn` logs and records beyond both caps. This is explicitly unbounded and
   cannot be inherited by a bounded owned adapter.
+
+`OwnedOtlpMetrics` has none of those bypass modes. It accepts a finite point cap
+from 1 through 1,000, omits a fresh stream at N+1, and increments
+`rejected_updates`. Zero or out-of-range configuration is rejected.
 
 Sampling uses one atomic 100-slot sequence shared across selected metrics. The
 threshold is `floor(sample_rate * 100)`, giving one-percent downward
@@ -229,9 +233,8 @@ owned mode must reject it at configuration time. Histogram sampling occurs
 before sanitization and cardinality admission, so a sampled-out point consumes
 no tracker slot. A completion counter can still advance while its duration
 histogram is sampled out, and both scheduler histograms share one decision.
-There is no reweighting. Concurrent callback order can change which observations
-are retained, so deterministic replay remains an executable acceptance
-requirement.
+There is no reweighting. `OwnedOtlpMetrics` does not sample; the focused
+LabRuntime test proves byte-identical output for the same deterministic schedule.
 
 ## Snapshot queue and finite limits
 
@@ -243,8 +246,7 @@ depth one: the first enqueue reports shedding but increments no drop counter
 because there was no prior item. A dequeued batch that fails export is neither
 requeued nor counted as shed.
 
-The private owned model has useful semantic limits and default wire-envelope
-values, but they are not producer or production proof:
+The private owned model has semantic limits and default wire-envelope values:
 
 | Limit | Value |
 |---|---:|
@@ -269,53 +271,45 @@ values, but they are not producer or production proof:
 caps. The semantic owned-payload and collection caps remain hard. The codec
 rejects limit violations without returning a partial fresh model.
 
-Exact producer points-per-metric, metrics-per-batch, batch-byte, queue-depth,
-overload, fixed-histogram-bound, and summary-quantile choices are still
-unselected. They must be finite and at most the applicable owned semantic and
-caller wire envelopes. A3 cannot close and an adapter cannot land until those
-values and split/refusal behavior are versioned and covered by goldens.
+`OwnedOtlpMetricsConfig` defaults to 1,000 points per metric, 256 metrics per
+request, and 4,194,304 encoded bytes per request. The accepted ranges are
+1..=1,000, 1..=4,096, and 1..=4,194,304 respectively. Collections split
+deterministically at metric boundaries. The provider has no implicit queue, so
+queue depth and queue overload are not applicable. Mapping and encoding of all
+batches complete before `send_owned_metrics` performs the first network write.
+Any mapping or encoding refusal returns no request byte vector.
 
-## Evidence required before closure
+## Executable evidence
 
-The artifact's golden matrix is the authoritative checklist. At minimum it
-requires:
+The focused A3 lanes exercise:
 
-- an exact 23-instrument descriptor and mapping census;
-- an exhaustive retained surface, producer, public-name, descriptor, reset,
-  and numeric-domain census beyond the reviewed three-family baseline;
-- same-epoch cumulative continuity and explicit reset rotation;
-- exact `i64::MAX` mapping plus refusal at `i64::MAX + 1`;
-- empty, boundary, maximum, reset, and malformed histogram cases;
-- gauge and cumulative timestamp rules;
-- byte-identical attribute ordering with duplicate and empty-key refusals;
-- empty-name and duplicate/conflicting dynamic stream identity refusals;
-- N and N+1 cardinality cases for every overflow and zero policy;
-- distinct zero-cardinality outcomes for `Drop`, `Aggregate`, and `Warn`;
-- negative Summary incompatibility plus finite-number and overflow boundaries;
-- sampling quantization, NaN refusal, selector, admission-order, and shared-sequence cases;
-- exact producer limits, overload/split behavior, all seven fixed histogram
-  bound vectors, and canonical Summary quantiles at zero, limit, and
-  limit-plus-one boundaries;
-- a versioned panic-callback counter mapping or an explicit retained unsupported
-  disposition;
-- refusal of unbounded `Warn` in owned mode;
-- deterministic LabRuntime replay with identical bytes and sampling decisions;
-  and
-- a no-mock collector case for counters, gauges, histograms, reset, attributes,
-  and cardinality boundaries.
+- the exact sorted 23-instrument census and the three OTLP metric variants;
+- cumulative epochs, explicit reset, nondecreasing timestamps, exact integer
+  conversion, histogram shape, finite numeric validation, and typed refusals;
+- canonical attributes, empty-value preservation, finite N/N+1 cardinality,
+  deterministic metric splitting, and byte-envelope rejection;
+- byte-identical deterministic LabRuntime replay; and
+- `send_owned_metrics` against a loopback HTTP wire receiver, followed by
+  generated-schema decoding and semantic assertions; and
+- an ignored real-service E2E that downloads the SHA-256-pinned official
+  `otelcol-contrib` v0.157.0 Linux distribution, sends two cumulative/reset
+  requests, and independently parses its file-exporter JSON output.
 
-This tranche authored only the static artifact, documentation, and its Rust
-contract source. None of those executable cases ran.
+The owned unit matrix runs through RCH with
+`metrics,tracing-integration,test-internals`; the integration and real-service
+targets use `metrics,test-internals`. The artifact records
+`FOCUSED_RCH_GREEN`. These are executable evidence for this fixed provider, not
+a substitute for a later broad release gate.
 
 ## No-claim boundary
 
-This packet does not implement an owned production adapter, alter production
-behavior, or prove compilation, formatting, tests, deterministic replay,
-collector interoperability, feature-matrix health, or broad workspace health.
-It does not claim that an arbitrary embedder `MeterProvider` selects the future
-owned policies. It does not treat the generated-message helper or JSON-only
-golden as production protobuf evidence. It does not authorize dependency
-removal, API removal, cutover, release readiness, local execution fallback, or
-tracker closure.
+The implemented provider covers the fixed 23-instrument `MetricsProvider`
+surface, not the dynamic `Metrics` registry or arbitrary direct instruments.
+Focused RCH evidence proves only the cited unit, LabRuntime, loopback wire smoke,
+and pinned official `otelcol-contrib` v0.157.0 case. It does not claim that an
+arbitrary embedder `MeterProvider` selects the owned policies, prove other
+Collector versions, or prove the full feature matrix, broad workspace health,
+performance, or release readiness. It does not authorize dependency removal,
+API removal, cutover, or local execution fallback.
 
 <!-- END OTLP METRICS MAPPING CONTRACT -->
