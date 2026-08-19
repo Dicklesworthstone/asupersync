@@ -1560,7 +1560,7 @@ pub enum OwnedOtlpTraceError {
     InvalidTraceState,
     /// An attribute set contains an empty, duplicate, or oversized key/value.
     InvalidAttributes,
-    /// Local parentage is cyclic, cross-trace, or not structurally enclosing.
+    /// Local parentage is cyclic or not structurally enclosing.
     InvalidLineage,
     /// A span, event, link, attribute, or collection count exceeded its limit.
     LimitExceeded,

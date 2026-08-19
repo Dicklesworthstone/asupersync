@@ -134,12 +134,11 @@ no tail sampler in this path.
 | Owned caller string bytes per collection | 4 MiB |
 | Encoded request bytes | 4 MiB |
 
-Validation is performed before cloning caller strings. Empty/all-zero IDs,
-zero or reversed timestamps, empty/oversized names, duplicate/oversized
-attributes, malformed tracestate, invalid event timestamps, invalid links,
-lineage violations, and finite-envelope breaches return a value-redacted
-`OwnedOtlpTraceError`. Complete mapping of every request finishes before an
-exporter writes the first byte.
+Finite count, byte, identifier, timestamp, attribute, and lineage validation is
+performed before cloning caller strings. Malformed W3C tracestate is rejected
+during owned protobuf encoding, before the mapper returns or the exporter
+writes a byte. All failures use a value-redacted `OwnedOtlpTraceError`, and
+complete mapping of every request finishes before network output begins.
 
 Events are ordered by timestamp and name. Links and attributes are likewise
 canonicalized before encoding. With equivalent inputs, repeated Lab runs and
