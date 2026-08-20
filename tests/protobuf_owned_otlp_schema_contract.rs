@@ -26,7 +26,7 @@ use std::path::PathBuf;
 
 const ARTIFACT_PATH: &str = "artifacts/protobuf_owned_otlp_schema_v1.json";
 const DOC_PATH: &str = "docs/protobuf_owned_otlp_schema.md";
-const ARTIFACT_SHA256: &str = "59cc079f083c87703915267a29d6a7d0face239c50ca1bba91e20f8f9331756b";
+const ARTIFACT_SHA256: &str = "37a600ed0e6e02dcfc3fd4bed6617b33e25c57ee6e003087cf4a863d4ec5b132";
 const DOC_SHA256: &str = "17360f46fff6ba94487780ce5e5b692c5af80c3be19442cd5d89c0317fb2337f";
 const SCHEMA_SIGNATURE_SHA256: &str =
     "2b9311b5c766da1b2fb88262aeb89e125c41f8ea4d8406e534a2e9b42839256b";
@@ -582,7 +582,7 @@ fn validate_identity_and_authority(value: &Value) -> ValidationResult {
         ("cargo_lock_path", "Cargo.lock"),
         (
             "cargo_lock_sha256",
-            "ccd16d63e66a3da65e6d87e2650f20d6be63e9d7f8d76c7300e01758193e641f",
+            "dc66ff7b4e6d1e75fac66fad2f90f528019a4da55e6012714160e158cc63d236",
         ),
         (
             "wrapper_repository",

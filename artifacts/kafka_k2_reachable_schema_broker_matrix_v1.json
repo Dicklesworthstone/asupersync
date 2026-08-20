@@ -29,7 +29,7 @@
       "path": "Cargo.toml",
       "byte_count": 37889,
       "record_count": 1061,
-      "sha256": "b46fde72cc143cdeec3b234a0253619bd9fba1a7b825ee0d43d7b7a7180a3f05"
+      "sha256": "914cb85f3b3ef24c06e41f332cb21c2361163c99c186d4a8234b237323792b2b"
     },
     {
       "input_id": "KAFKA-K2-1-INPUT-CARGO-LOCK",
@@ -37,7 +37,7 @@
       "path": "Cargo.lock",
       "byte_count": 114614,
       "record_count": 4666,
-      "sha256": "ccd16d63e66a3da65e6d87e2650f20d6be63e9d7f8d76c7300e01758193e641f"
+      "sha256": "dc66ff7b4e6d1e75fac66fad2f90f528019a4da55e6012714160e158cc63d236"
     },
     {
       "input_id": "KAFKA-K2-1-INPUT-PRODUCER-SOURCE",
@@ -61,7 +61,7 @@
       "path": "artifacts/kafka_k1_protocol_security_support_policy_v1.json",
     "byte_count": 82166,
       "record_count": 1399,
-    "sha256": "d8c202c1130f827dda2ed04c4c1a94c1a70ca7bb1e2fe461e26d15666b4bbf14"
+    "sha256": "10461420078717f2ca1c69ea10fdb64c932a20471005838f29f41a784688efaf"
     },
     {
       "input_id": "KAFKA-K2-1-INPUT-K1-5",
@@ -69,7 +69,7 @@
       "path": "artifacts/kafka_k1_aggregate_evidence_gate_v1.json",
       "byte_count": 111408,
       "record_count": 2122,
-    "sha256": "e1913c3d9eed330d3c3b6936985cd9d2eebeceffe7dbd876ffa272bd349b1a26"
+    "sha256": "be95c37a15b4b5a2b325e4757b2f9c7d9fd44313c1e08495bd3d65287f9af8be"
     },
     {
       "input_id": "KAFKA-K2-1-INPUT-K0-4",
@@ -77,7 +77,7 @@
       "path": "artifacts/kafka_broker_fixture_provenance_matrix_v1.json",
       "byte_count": 119250,
       "record_count": 2187,
-    "sha256": "9bb2cac95655fc129e3b5841758c751e5fe6e58d259bf55a404f80a328e5756f"
+    "sha256": "5097ed4857ecadf3426ffaab4b2d4e8763ba29613587956e3735b2e15f6cc270"
     },
     {
       "input_id": "KAFKA-K2-1-INPUT-K1-3",
@@ -85,7 +85,7 @@
       "path": "artifacts/kafka_k1_public_api_contract_v1.json",
     "byte_count": 37848,
       "record_count": 753,
-    "sha256": "bb6adc4e518341d2920d1c4a88a56707f890723ff347419f1c008238961da135"
+    "sha256": "fe4ba7b0e357a7fccb077bc7a9a8dba7a9d792a06f296f817164d96bbc6cd252"
     }
   ],
   "external_authorities": [

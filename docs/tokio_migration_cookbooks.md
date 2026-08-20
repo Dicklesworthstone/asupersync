@@ -410,8 +410,8 @@ tokio = { version = "1", features = ["full"] }
 
 // After: asupersync with compat bridge
 [dependencies]
-asupersync = "0.4.8"
-asupersync-tokio-compat = { version = "0.4.8", features = ["full"] }
+asupersync = "0.4.9"
+asupersync-tokio-compat = { version = "0.4.9", features = ["full"] }
 ```
 
 This dependency change alone does not let a Tokio-runtime-dependent library run

@@ -11,11 +11,15 @@ Asupersync is a spec-first, cancel-correct, capability-secure async runtime for 
 - Organized by landed capabilities within each version, not by diff order.
 
 Scope window: current work through 2026-08-20, reconstructed from git history,
-beads, benchmark ledgers, and live repo artifacts; the latest published
-GitHub Release/tag baseline is `v0.4.8`.
+beads, benchmark ledgers, and live repo artifacts; the latest release baseline
+is `v0.4.9`.
 
 ## Version Timeline
 
+- **v0.4.9 Release**: additive runtime-context and owned-OTLP APIs, SQLite
+  cancellation/security/row-metadata correctness, ATP bootstrap-secret
+  hardening, and a terminal dual-engine SQLite parity packet, while preserving
+  the v0.4.3 public compatibility floor.
 - **v0.4.8 Release**: patch release fixing cross-runtime local-task placement,
   foreign-worker cancellation routing, and out-of-order ambient-context guard
   teardown while preserving the v0.4.3 public compatibility floor.
@@ -55,6 +59,10 @@ GitHub Release/tag baseline is `v0.4.8`.
 ---
 
 ## [Unreleased]
+
+_No unreleased changes._
+
+## [v0.4.9] - 2026-08-20
 
 ### Runtime API and correctness
 
@@ -186,6 +194,15 @@ GitHub Release/tag baseline is `v0.4.8`.
   ([`f1eb79a`](https://github.com/Dicklesworthstone/asupersync/commit/f1eb79aa3),
   [`bad4b46`](https://github.com/Dicklesworthstone/asupersync/commit/bad4b4666),
   [`7ab8bde`](https://github.com/Dicklesworthstone/asupersync/commit/7ab8bde35)).
+- **The SQLite parity campaign now ends in one real dual-engine aggregate.** A
+  neutral downstream consumer executes 47 common public-surface cases across
+  P2-P8, records eight explicitly native-only cancellation cases, reports zero
+  unexplained divergences, and proves terminal runtime-local cleanup on Linux.
+  Unsupported target cells and every intentional difference remain explicit;
+  the decision is to keep `rusqlite` and `sqlparser`, not authorize a
+  FrankenSQLite cutover
+  ([`b22544e`](https://github.com/Dicklesworthstone/asupersync/commit/b22544ef8),
+  [`a439270`](https://github.com/Dicklesworthstone/asupersync/commit/a4392700f)).
 
 ### Compatibility evidence
 
@@ -2278,7 +2295,8 @@ The initial tagged milestone establishing the core async runtime with structured
 
 ---
 
-[Unreleased]: https://github.com/Dicklesworthstone/asupersync/compare/v0.4.8...HEAD
+[Unreleased]: https://github.com/Dicklesworthstone/asupersync/compare/v0.4.9...HEAD
+[v0.4.9]: https://github.com/Dicklesworthstone/asupersync/compare/v0.4.8...v0.4.9
 [v0.4.8]: https://github.com/Dicklesworthstone/asupersync/compare/v0.4.7...v0.4.8
 [v0.4.7]: https://github.com/Dicklesworthstone/asupersync/compare/v0.4.6...v0.4.7
 [v0.4.6]: https://github.com/Dicklesworthstone/asupersync/compare/v0.4.5...v0.4.6

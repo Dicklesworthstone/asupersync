@@ -104,12 +104,12 @@
   "source_contracts": [
     {
       "path": "Cargo.toml",
-      "sha256": "b46fde72cc143cdeec3b234a0253619bd9fba1a7b825ee0d43d7b7a7180a3f05",
+      "sha256": "914cb85f3b3ef24c06e41f332cb21c2361163c99c186d4a8234b237323792b2b",
       "role": "retained root normal feature edge and development oracle edge"
     },
     {
       "path": "Cargo.lock",
-      "sha256": "ccd16d63e66a3da65e6d87e2650f20d6be63e9d7f8d76c7300e01758193e641f",
+      "sha256": "dc66ff7b4e6d1e75fac66fad2f90f528019a4da55e6012714160e158cc63d236",
       "role": "locked lz4_flex 0.14.0 package and checksum"
     },
     {
@@ -134,7 +134,7 @@
     },
     {
       "path": "artifacts/lz4_surface_artifact_inventory_v1.json",
-      "sha256": "bf192bbd03cfe8d40e5bb279f4f22570de2d480f99cbea4bc8faa351e628bdd8",
+      "sha256": "965d4e8a2ead1a247e74986ff94ae065cbddc7dcbd82a42ff029e0b8d07594ff",
       "role": "A1 machine inventory and routed gap authority"
     },
     {

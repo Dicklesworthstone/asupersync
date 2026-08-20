@@ -1,6 +1,6 @@
 {
   "name": "@asupersync/browser-core",
-  "version": "0.4.8",
+  "version": "0.4.9",
   "description": "Low-level Browser Edition runtime bindings for Asupersync.",
   "homepage": "https://github.com/Dicklesworthstone/asupersync#readme",
   "bugs": {

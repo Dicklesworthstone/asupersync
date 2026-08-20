@@ -55,7 +55,7 @@ fn dependency_direction_is_cycle_safe_and_runtime_boundaries_are_explicit() {
         "the consumer must resolve the current engine and pinned compatibility runtime"
     );
     assert!(CONSUMER_LOCK.contains("\"asupersync 0.3.10\""));
-    assert!(CONSUMER_LOCK.contains("\"asupersync 0.4.8\""));
+    assert!(CONSUMER_LOCK.contains("\"asupersync 0.4.9\""));
     assert!(CONSUMER_LOCK.contains(
         "git+https://github.com/Dicklesworthstone/frankensqlite.git?rev=92f9e9833f859ebcbe27e9fef16d9cad4372bbd7#92f9e9833f859ebcbe27e9fef16d9cad4372bbd7"
     ));

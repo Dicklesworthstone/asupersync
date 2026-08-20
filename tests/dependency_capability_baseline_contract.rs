@@ -1714,28 +1714,28 @@ fn tempfile_claim_time_profile_checkpoint_is_source_pinned_and_fail_closed() {
         (
             "Cargo.lock",
             (
-                "ccd16d63e66a3da65e6d87e2650f20d6be63e9d7f8d76c7300e01758193e641f",
+                "dc66ff7b4e6d1e75fac66fad2f90f528019a4da55e6012714160e158cc63d236",
                 4666_u64,
             ),
         ),
         (
             "Cargo.toml",
             (
-                "b46fde72cc143cdeec3b234a0253619bd9fba1a7b825ee0d43d7b7a7180a3f05",
+                "914cb85f3b3ef24c06e41f332cb21c2361163c99c186d4a8234b237323792b2b",
                 1061_u64,
             ),
         ),
         (
             "artifacts/dependency_capability_baseline_v1.json",
             (
-                "7c136c23360e33113253313155ed7fec5c4e37d3865c13c331342ddca9e47ea5",
+                "168e9a0b5f836c1d30b56c1fb6478092d8759b0d1fe144edbdb526cca5a488ad",
                 3210_u64,
             ),
         ),
         (
             "artifacts/dependency_capability_registry_v1.json",
             (
-                "834c0bb0f30adf65ad27256fbae9f903fe9945e37a7d010f90d38971802c74ea",
+                "9fa15cca1a7b202ff7a9accc78bb7a052a8f4f830b37ae450959b539633d01fd",
                 6929_u64,
             ),
         ),

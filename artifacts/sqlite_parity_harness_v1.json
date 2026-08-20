@@ -11,7 +11,7 @@
     "independent_lockfile": "tests/fixtures/sqlite-parity-consumer/Cargo.lock",
     "dependency_direction": "consumer_to_asupersync_and_frankensqlite_only",
     "asupersync_root_has_frankensqlite_edge": false,
-    "runtime_boundary": "The current adapter runs on local asupersync 0.4.8; pinned FrankenSQLite v0.1.18 runs on its published asupersync 0.3.10 dependency. The neutral consumer keeps both Cx/runtime identities explicit and normalizes only public lifecycle outcomes."
+    "runtime_boundary": "The current adapter runs on local asupersync 0.4.9; pinned FrankenSQLite v0.1.18 runs on its published asupersync 0.3.10 dependency. The neutral consumer keeps both Cx/runtime identities explicit and normalizes only public lifecycle outcomes."
   },
   "phase1_pins": {
     "asupersync": {
@@ -259,7 +259,7 @@
           "async-api"
         ]
       },
-      "lockfile_sha256": "472618c2cd399af3d4c6dc307fd90590cf53bbd7ac0c53e584bd0398d49c3248",
+      "lockfile_sha256": "b6eeaee417a1898c9a4ed5d5847746859382ead9ea19dbc5e3d210eba17d797b",
       "cargo_profile": "dev",
       "target": "x86_64-unknown-linux-gnu",
       "host": "linux-x86_64-trj"
@@ -1817,7 +1817,7 @@
       },
       {
         "path": "tests/fixtures/sqlite-parity-consumer/Cargo.lock",
-        "sha256": "472618c2cd399af3d4c6dc307fd90590cf53bbd7ac0c53e584bd0398d49c3248",
+        "sha256": "b6eeaee417a1898c9a4ed5d5847746859382ead9ea19dbc5e3d210eba17d797b",
         "line_count": 2650
       },
       {

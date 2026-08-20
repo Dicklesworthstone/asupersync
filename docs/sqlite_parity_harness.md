@@ -17,9 +17,9 @@ direct Asupersync dependency at this checkout, pins the public FrankenSQLite Git
 source to release `v0.1.18`
 (`92f9e9833f859ebcbe27e9fef16d9cad4372bbd7`). That release depends on
 Asupersync 0.3.x, whose public `Cx` and runtime types are not interchangeable
-with the current 0.4.8 types. The consumer therefore names the published
+with the current 0.4.9 types. The consumer therefore names the published
 0.3.10 package explicitly as `asupersync-compat`, resolves the current path
-dependency as Asupersync 0.4.8, runs each adapter inside its own matching
+dependency as Asupersync 0.4.9, runs each adapter inside its own matching
 runtime, and compares only the declared public lifecycle outcome.
 P2 enables the pinned `fsqlite` `async-api` feature and directly names its
 matching `fsqlite-types` package so the two runtime boundaries remain visible

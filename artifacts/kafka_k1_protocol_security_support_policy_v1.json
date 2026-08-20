@@ -39,7 +39,7 @@
       "path": "artifacts/kafka_k1_obligation_index_v1.json",
       "byte_count": 42754,
       "record_count": 738,
-    "sha256": "167d483a4b532512f294e415f9cbbe3700940f5d27dc44edf0460b4afdae9f31"
+    "sha256": "285a005c18ac25b039931f15e22145d97615c998dade306abe4a07a08018f5c5"
     },
     {
       "input_id": "K1-2-INPUT-K1-1-DOCUMENT",
@@ -55,7 +55,7 @@
       "path": "tests/kafka_k1_client_contract.rs",
       "byte_count": 95396,
       "record_count": 2585,
-    "sha256": "7222a1f0e9a46bb47d032021ee92b84528af0d41d2d4103619565274e005250a"
+    "sha256": "233025a1fcb5f30641aff09ce7836f6a8784c468cce61ebb502664703c22d44b"
     },
     {
       "input_id": "K1-2-INPUT-K0-5",
@@ -63,7 +63,7 @@
       "path": "artifacts/kafka_k0_baseline_disposition_v1.json",
       "byte_count": 29494,
       "record_count": 284,
-    "sha256": "6b4f59dece48166040ffd62e33cdc9c48f9064c0da46b68b759b16c303b8ffc6"
+    "sha256": "d2e17838295856c713204bb8da999a35bba69bac387b746c3d4331f0cb1d18a8"
     },
     {
       "input_id": "K1-2-INPUT-K0-4",
@@ -71,7 +71,7 @@
       "path": "artifacts/kafka_broker_fixture_provenance_matrix_v1.json",
       "byte_count": 119250,
       "record_count": 2187,
-    "sha256": "9bb2cac95655fc129e3b5841758c751e5fe6e58d259bf55a404f80a328e5756f"
+    "sha256": "5097ed4857ecadf3426ffaab4b2d4e8763ba29613587956e3735b2e15f6cc270"
     },
     {
       "input_id": "K1-2-INPUT-K0-2",
@@ -87,7 +87,7 @@
       "path": "artifacts/kafka_k1_public_api_contract_v1.json",
     "byte_count": 37848,
       "record_count": 753,
-    "sha256": "bb6adc4e518341d2920d1c4a88a56707f890723ff347419f1c008238961da135"
+    "sha256": "fe4ba7b0e357a7fccb077bc7a9a8dba7a9d792a06f296f817164d96bbc6cd252"
     },
     {
       "input_id": "K1-2-INPUT-ADR",
@@ -119,7 +119,7 @@
       "path": "Cargo.toml",
       "byte_count": 37889,
       "record_count": 1061,
-      "sha256": "b46fde72cc143cdeec3b234a0253619bd9fba1a7b825ee0d43d7b7a7180a3f05"
+      "sha256": "914cb85f3b3ef24c06e41f332cb21c2361163c99c186d4a8234b237323792b2b"
     },
     {
       "input_id": "K1-2-INPUT-LOCKFILE",
@@ -127,7 +127,7 @@
       "path": "Cargo.lock",
       "byte_count": 114614,
       "record_count": 4666,
-      "sha256": "ccd16d63e66a3da65e6d87e2650f20d6be63e9d7f8d76c7300e01758193e641f"
+      "sha256": "dc66ff7b4e6d1e75fac66fad2f90f528019a4da55e6012714160e158cc63d236"
     },
     {
       "input_id": "K1-2-INPUT-REAL-BROKER",

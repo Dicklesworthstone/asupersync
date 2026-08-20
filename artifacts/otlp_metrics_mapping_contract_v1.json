@@ -904,13 +904,13 @@
     },
     {
       "path": "artifacts/otlp_capability_inventory_v1.json",
-      "sha256": "5a2917f6159bbc5fd3f1e3ed9604e834b6903b68a8780a1e5e5abb444d8477d1",
+      "sha256": "3067f54264e32f7312cbeeb1bc108b632e07da8ae6a01efbb7bdb71b94921179",
       "line_count": 985,
       "anchors": ["SHIPPED_VIA_DEPENDENCY", "OTLP-GAP-01", "asupersync-5z2scg.2.3"]
     },
     {
       "path": "artifacts/protobuf_owned_otlp_schema_v1.json",
-      "sha256": "59cc079f083c87703915267a29d6a7d0face239c50ca1bba91e20f8f9331756b",
+      "sha256": "37a600ed0e6e02dcfc3fd4bed6617b33e25c57ee6e003087cf4a863d4ec5b132",
       "line_count": 1126,
       "anchors": ["NEW_A3_SCHEMA_POLICY_NOT_INCUMBENT_PARITY", "data_points_per_metric", "signal_construction_separation"]
     },

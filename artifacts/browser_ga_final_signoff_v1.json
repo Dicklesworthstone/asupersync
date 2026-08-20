@@ -25,7 +25,7 @@
     "decision_id": "browser-ga-js-ts-scoped-2026-06-12",
     "reviewed_as_of": "2026-06-12",
     "release_channel": "stable",
-    "candidate_package_version": "0.4.8",
+    "candidate_package_version": "0.4.9",
     "final_verdict": "pass_scoped_js_ts_ga",
     "js_ts_package_ga_allowed": true,
     "rust_browser_api_stable_allowed": false,
@@ -128,9 +128,9 @@
   "package_versions": [
     {
       "package_name": "@asupersync/browser-core",
-      "version": "0.4.8",
+      "version": "0.4.9",
       "manifest": "packages/browser-core/package.json",
-      "manifest_sha256": "00c25b6392e9c0a12f23f6fa504819488bd5df477331f7b237fe10954c9a7b4e",
+      "manifest_sha256": "0c6ee067050655dcc6565e2c99aaf0f945bd04c1cec0e0332fc891125dd54fbb",
       "artifact_hashes": [
         {
           "path": "packages/browser-core/index.js",
@@ -172,9 +172,9 @@
     },
     {
       "package_name": "@asupersync/browser",
-      "version": "0.4.8",
+      "version": "0.4.9",
       "manifest": "packages/browser/package.json",
-      "manifest_sha256": "1b031aa24b11f24fc9e5d2a751aaa738dd98fd49961934acad563045283257fb",
+      "manifest_sha256": "441f13164faa91cb210fc1f272f8f14119d061591b4145a1f4d4529f261eb2fa",
       "artifact_hashes": [
         {
           "path": "packages/browser/src/index.ts",
@@ -192,9 +192,9 @@
     },
     {
       "package_name": "@asupersync/react",
-      "version": "0.4.8",
+      "version": "0.4.9",
       "manifest": "packages/react/package.json",
-      "manifest_sha256": "1b16e4058c648a969ebe969cd0ba663ba5f7ac5563e7fb3ebfbb85e8f60fce0c",
+      "manifest_sha256": "f7cf567b7d9ac3ec8eb6b905c3390f52f49d31bf284f1432dd9e2fa0cf0cd7b7",
       "artifact_hashes": [
         {
           "path": "packages/react/src/index.ts",
@@ -208,9 +208,9 @@
     },
     {
       "package_name": "@asupersync/next",
-      "version": "0.4.8",
+      "version": "0.4.9",
       "manifest": "packages/next/package.json",
-      "manifest_sha256": "771d0291c3282954852fec9fee280261f5ddcf210abbd5cb507ce9c4c14d1452",
+      "manifest_sha256": "3360fece8ff1aac7ec6fab5426c4e431a52d0cc12118c6c330af27641790f84c",
       "artifact_hashes": [
         {
           "path": "packages/next/src/index.ts",
