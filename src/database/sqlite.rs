@@ -4516,8 +4516,7 @@ mod tests {
             SqliteValue::Integer(1),
             SqliteValue::Text("Alice".to_string()),
         ];
-        let ordered_columns: Arc<[String]> =
-            vec!["id".to_string(), "name".to_string()].into();
+        let ordered_columns: Arc<[String]> = vec!["id".to_string(), "name".to_string()].into();
         let row = SqliteRow::new(columns, ordered_columns, values);
 
         assert_eq!(row.len(), 2);
@@ -5192,6 +5191,10 @@ mod tests {
         assert_eq!(
             row.column_names().collect::<Vec<_>>(),
             vec!["Beta", "alpha", "dup"]
+        );
+        assert_eq!(
+            format!("{row:?}"),
+            "SqliteRow { columns: {\"Beta\": 1, \"alpha\": 3, \"dup\": 2}, values: [Integer(10), Integer(20), Integer(30), Integer(40)] }"
         );
     }
 
