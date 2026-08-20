@@ -1642,16 +1642,15 @@ async fn run_gen_server_loop<S: GenServer>(
             Ok(envelope) => {
                 dispatch_envelope(&mut server, &cx, envelope).await;
 
-                // Yield periodically to maintain fairness with other tasks
+                // Yield periodically to maintain fairness with other tasks.
+                // Merely checking the budget is not a scheduling point: a
+                // continuously ready mailbox can otherwise monopolize its
+                // worker indefinitely.
                 messages_processed += 1;
                 if messages_processed >= YIELD_INTERVAL {
                     messages_processed = 0;
-                    // Use budget consumption check as yield mechanism - if budget is consumed,
-                    // this will cause the scheduler to potentially switch to other tasks
-                    if cx.budget().poll_quota == 0 {
-                        cx.trace("gen_server::yield_on_budget_exhaustion");
-                        // Let the next checkpoint handle budget exhaustion
-                    }
+                    cx.trace("gen_server::yield_after_ready_batch");
+                    crate::runtime::yield_now().await;
                 }
             }
             Err(crate::channel::mpsc::RecvError::Disconnected) => {
@@ -1716,13 +1715,12 @@ async fn run_gen_server_loop<S: GenServer>(
         }
         drained += 1;
 
-        // br-asupersync-foa8ir: Yield during drain to prevent starvation
+        // br-asupersync-foa8ir: Yield during drain to prevent starvation.
         drain_yield_counter += 1;
         if drain_yield_counter >= YIELD_INTERVAL {
             drain_yield_counter = 0;
-            if cx.budget().poll_quota == 0 {
-                cx.trace("gen_server::yield_during_drain");
-            }
+            cx.trace("gen_server::yield_during_drain");
+            crate::runtime::yield_now().await;
         }
     }
     if drained > 0 {
@@ -2397,6 +2395,81 @@ mod tests {
             }
             Box::pin(async {})
         }
+    }
+
+    struct FairnessProbeServer {
+        handled: Arc<AtomicUsize>,
+    }
+
+    impl GenServer for FairnessProbeServer {
+        type Call = ();
+        type Reply = ();
+        type Cast = ();
+        type Info = SystemMsg;
+
+        fn handle_call(
+            &mut self,
+            _cx: &Cx,
+            (): (),
+            reply: Reply<()>,
+        ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+            let _ = reply.send(());
+            Box::pin(async {})
+        }
+
+        fn handle_cast(
+            &mut self,
+            _cx: &Cx,
+            (): (),
+        ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+            self.handled.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async {})
+        }
+    }
+
+    /// A fully ready mailbox must still yield the worker after a bounded batch.
+    ///
+    /// The single-poll assertion distinguishes a real scheduling point from the
+    /// previous trace-only counter: the no-op implementation consumed all
+    /// sixteen casts before returning `Pending` on the empty mailbox.
+    #[test]
+    fn gen_server_ready_mailbox_yields_after_bounded_batch() {
+        init_test("gen_server_ready_mailbox_yields_after_bounded_batch");
+
+        let handled = Arc::new(AtomicUsize::new(0));
+        let server = FairnessProbeServer {
+            handled: Arc::clone(&handled),
+        };
+        let (sender, mailbox) = mpsc::channel(16);
+        for _ in 0..16 {
+            sender
+                .try_send(Envelope::Cast { msg: () })
+                .expect("queue ready GenServer cast");
+        }
+
+        let state = Arc::new(GenServerStateCell::new(ActorState::Created));
+        let mut cell = GenServerCell {
+            mailbox,
+            state: Arc::clone(&state),
+            _keep_alive: sender.clone(),
+        };
+        let cx = Cx::for_testing();
+        let mut server_loop = Box::pin(run_gen_server_loop(server, cx, &mut cell));
+        let waker = Waker::noop().clone();
+        let mut task_cx = Context::from_waker(&waker);
+
+        assert!(matches!(
+            server_loop.as_mut().poll(&mut task_cx),
+            Poll::Pending
+        ));
+        assert_eq!(
+            handled.load(Ordering::SeqCst),
+            8,
+            "one poll must stop at the fairness batch boundary"
+        );
+        assert_eq!(state.load(), ActorState::Running);
+
+        crate::test_complete!("gen_server_ready_mailbox_yields_after_bounded_batch");
     }
 
     #[derive(Clone)]

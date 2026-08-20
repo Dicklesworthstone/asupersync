@@ -854,16 +854,15 @@ async fn run_actor_loop<A: Actor>(mut actor: A, cx: Cx, cell: &mut ActorCell<A::
             Ok(msg) => {
                 actor.handle(&cx, msg).await;
 
-                // Yield periodically to maintain fairness with other tasks
+                // Yield periodically to maintain fairness with other tasks.
+                // Merely checking the budget is not a scheduling point: a
+                // continuously ready mailbox can otherwise monopolize its
+                // worker indefinitely.
                 messages_processed += 1;
                 if messages_processed >= YIELD_INTERVAL {
                     messages_processed = 0;
-                    // Use budget consumption check as yield mechanism - if budget is consumed,
-                    // this will cause the scheduler to potentially switch to other tasks
-                    if cx.budget().poll_quota == 0 {
-                        cx.trace("actor::yield_on_budget_exhaustion");
-                        // Let the next checkpoint handle budget exhaustion
-                    }
+                    cx.trace("actor::yield_after_ready_batch");
+                    crate::runtime::yield_now().await;
                 }
             }
             Err(crate::channel::mpsc::RecvError::Disconnected) => {
@@ -903,13 +902,12 @@ async fn run_actor_loop<A: Actor>(mut actor: A, cx: Cx, cell: &mut ActorCell<A::
             actor.handle(&cx, msg).await;
             drained += 1;
 
-            // br-asupersync-foa8ir: Yield during drain to prevent starvation
+            // br-asupersync-foa8ir: Yield during drain to prevent starvation.
             drain_yield_counter += 1;
             if drain_yield_counter >= YIELD_INTERVAL {
                 drain_yield_counter = 0;
-                if cx.budget().poll_quota == 0 {
-                    cx.trace("actor::yield_during_drain");
-                }
+                cx.trace("actor::yield_during_drain");
+                crate::runtime::yield_now().await;
             }
         }
         if drained > 0 {
@@ -1515,6 +1513,62 @@ mod tests {
             self.stopped = true;
             Box::pin(async {})
         }
+    }
+
+    struct FairnessProbeActor {
+        handled: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl Actor for FairnessProbeActor {
+        type Message = ();
+
+        fn handle(&mut self, _cx: &Cx, (): ()) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+            self.handled.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async {})
+        }
+    }
+
+    /// A fully ready mailbox must still yield the worker after a bounded batch.
+    ///
+    /// Polling once is the important oracle: without the real `yield_now`
+    /// scheduling point, the loop consumes all sixteen messages before it
+    /// finally returns `Pending` on the empty mailbox. With the fairness yield,
+    /// exactly the first batch of eight is handled.
+    #[test]
+    fn actor_ready_mailbox_yields_after_bounded_batch() {
+        init_test("actor_ready_mailbox_yields_after_bounded_batch");
+
+        let handled = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let actor = FairnessProbeActor {
+            handled: Arc::clone(&handled),
+        };
+        let (sender, mailbox) = mpsc::channel(16);
+        for _ in 0..16 {
+            sender.try_send(()).expect("queue ready actor message");
+        }
+
+        let state = Arc::new(ActorStateCell::new(ActorState::Created));
+        let mut cell = ActorCell {
+            mailbox,
+            state: Arc::clone(&state),
+        };
+        let cx = Cx::for_testing();
+        let mut actor_loop = Box::pin(run_actor_loop(actor, cx, &mut cell));
+        let waker = Waker::noop().clone();
+        let mut task_cx = Context::from_waker(&waker);
+
+        assert!(matches!(
+            actor_loop.as_mut().poll(&mut task_cx),
+            Poll::Pending
+        ));
+        assert_eq!(
+            handled.load(Ordering::SeqCst),
+            8,
+            "one poll must stop at the fairness batch boundary"
+        );
+        assert_eq!(state.load(), ActorState::Running);
+
+        crate::test_complete!("actor_ready_mailbox_yields_after_bounded_batch");
     }
 
     fn assert_actor<A: Actor>() {}
