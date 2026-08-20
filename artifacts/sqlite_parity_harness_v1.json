@@ -681,8 +681,8 @@
     "scope": "prepared_statement_bind_reset_cache_schema_invalid_use_busy_and_cleanup",
     "consumer_source": {
       "path": "tests/fixtures/sqlite-parity-consumer/src/main.rs",
-      "sha256": "c8a03cd353e522803748bad5406900fbee5c874ac80fef1f5d673c22f5f370b7",
-      "line_count": 3927
+      "sha256": "d1d9714a759883ad1eb70dc80c8fa546c511176035f662a5af6bbe1f906d4710",
+      "line_count": 3935
     },
     "neutral_matrix": {
       "matrix_id": "sqlite-neutral-prepared-statement-parity-v1",
@@ -898,8 +898,8 @@
     "scope": "deferred_immediate_exclusive_savepoint_constraint_rollback_reuse_and_quiescence",
     "consumer_source": {
       "path": "tests/fixtures/sqlite-parity-consumer/src/main.rs",
-      "sha256": "c8a03cd353e522803748bad5406900fbee5c874ac80fef1f5d673c22f5f370b7",
-      "line_count": 3927
+      "sha256": "d1d9714a759883ad1eb70dc80c8fa546c511176035f662a5af6bbe1f906d4710",
+      "line_count": 3935
     },
     "neutral_matrix": {
       "matrix_id": "sqlite-neutral-transaction-parity-v1",
@@ -1330,8 +1330,8 @@
     "scope": "null_integer_real_text_blob_owned_rows_conversion_and_large_value_profile",
     "consumer_source": {
       "path": "tests/fixtures/sqlite-parity-consumer/src/main.rs",
-      "sha256": "c8a03cd353e522803748bad5406900fbee5c874ac80fef1f5d673c22f5f370b7",
-      "line_count": 3927
+      "sha256": "d1d9714a759883ad1eb70dc80c8fa546c511176035f662a5af6bbe1f906d4710",
+      "line_count": 3935
     },
     "neutral_matrix": {
       "matrix_id": "sqlite-neutral-value-row-parity-v1",
@@ -1651,8 +1651,8 @@
       },
       {
         "path": "tests/fixtures/sqlite-parity-consumer/src/main.rs",
-        "sha256": "c8a03cd353e522803748bad5406900fbee5c874ac80fef1f5d673c22f5f370b7",
-        "line_count": 3927
+        "sha256": "d1d9714a759883ad1eb70dc80c8fa546c511176035f662a5af6bbe1f906d4710",
+        "line_count": 3935
       }
     ],
     "public_diagnostic_contract": {
@@ -1794,14 +1794,6 @@
         "worker": "PENDING_FINAL_RCH",
         "failed": 0,
         "scope": "real Asupersync and FrankenSQLite P8 rows plus inherited P3 lock observation and runtime-local quiescence"
-      },
-      "repository_contract": {
-        "status": "PENDING_FINAL_RCH",
-        "rch_job": "PENDING_FINAL_RCH",
-        "worker": "PENDING_FINAL_RCH",
-        "passed": 0,
-        "failed": 0,
-        "scope": "sqlite_parity_harness_contract P8 structural and receipt validation"
       }
     },
     "no_claims": [

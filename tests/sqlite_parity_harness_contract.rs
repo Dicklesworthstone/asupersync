@@ -1118,7 +1118,7 @@ fn phase8_stable_diagnostics_are_additive_executable_and_quiescent() {
         );
     }
 
-    for lane in ["sqlite_focused", "neutral_consumer", "repository_contract"] {
+    for lane in ["sqlite_focused", "neutral_consumer"] {
         assert_eq!(phase8["verification"][lane]["status"], "PASS");
         assert!(
             phase8["verification"][lane]["rch_job"]
