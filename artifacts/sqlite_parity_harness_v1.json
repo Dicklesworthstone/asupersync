@@ -1646,8 +1646,8 @@
     "source_contracts": [
       {
         "path": "src/database/sqlite.rs",
-        "sha256": "7a22f7cb5a707bc9a3f62e6f8254c214a3fed588bc00fd55d36c936b1bc5cd68",
-        "line_count": 10522
+        "sha256": "3686beab168e685ae1fa83bc2bad71243c30c34a9a7413da372e02c6a319b55d",
+        "line_count": 10539
       },
       {
         "path": "tests/fixtures/sqlite-parity-consumer/src/main.rs",
@@ -1781,17 +1781,17 @@
     },
     "verification": {
       "sqlite_focused": {
-        "status": "PENDING_FINAL_RCH",
-        "rch_job": "PENDING_FINAL_RCH",
-        "worker": "PENDING_FINAL_RCH",
-        "passed": 0,
+        "status": "PASS",
+        "rch_job": "j-29984462414544947",
+        "worker": "hz2",
+        "passed": 3,
         "failed": 0,
         "scope": "three sqlite_p8_ native tests with sqlite,test-internals"
       },
       "neutral_consumer": {
-        "status": "PENDING_FINAL_RCH",
-        "rch_job": "PENDING_FINAL_RCH",
-        "worker": "PENDING_FINAL_RCH",
+        "status": "PASS",
+        "rch_job": "j-29984462414544946",
+        "worker": "ovh-a",
         "failed": 0,
         "scope": "real Asupersync and FrankenSQLite P8 rows plus inherited P3 lock observation and runtime-local quiescence"
       }

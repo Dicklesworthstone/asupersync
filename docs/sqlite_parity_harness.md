@@ -308,9 +308,10 @@ cancellation as outer `Outcome::Cancelled`, whereas FrankenSQLite exposes its
 typed interrupt error; and the inherited P3 lock row may end for
 FrankenSQLite as a five-second killed-and-reaped watchdog refusal rather than
 cooperative connection reuse. Ordinary connections are explicitly closed and
-both runtime-local blocking pools must be quiescent. These checks do not claim
-process-global task/resource quiescence, arbitrary engine equivalence, or
-permission to remove rusqlite/sqlparser or perform a dependency cutover.
+both runtime-local blocking pools must be quiescent. This evidence
+does not claim process-global task/resource quiescence, arbitrary engine
+equivalence, or permission to remove rusqlite/sqlparser or perform a dependency
+cutover.
 
 ## Reproduction
 

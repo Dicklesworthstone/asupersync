@@ -1545,8 +1545,20 @@ impl SqliteErrorDiagnostic {
     }
 
     fn from_rusqlite(operation: SqliteOperation, error: &rusqlite::Error) -> Self {
-        let code = error.sqlite_error_code();
-        let extended_code = error.sqlite_extended_error_code();
+        // rusqlite exposes parser failures as `SqlInputError`, which retains
+        // SQLite's structured code but is intentionally not returned by the
+        // `sqlite_error_*` accessors (those only match `SqliteFailure`). Keep
+        // that structured source instead of degrading malformed SQL to an
+        // unclassified, code-less input error.
+        let (code, extended_code) = match error {
+            rusqlite::Error::SqlInputError { error, .. } => {
+                (Some(error.code), Some(error.extended_code))
+            }
+            _ => (
+                error.sqlite_error_code(),
+                error.sqlite_extended_error_code(),
+            ),
+        };
         let (category, primary_code, retry, connection_error) = match code {
             Some(rusqlite::ffi::ErrorCode::DatabaseBusy) => (
                 SqliteErrorCategory::Busy,
@@ -1687,7 +1699,12 @@ impl SqliteErrorDiagnostic {
                 false,
             ),
             Some(rusqlite::ffi::ErrorCode::Unknown) => (
-                if matches!(operation, SqliteOperation::Prepare | SqliteOperation::Bind) {
+                if matches!(
+                    operation,
+                    SqliteOperation::Prepare
+                        | SqliteOperation::Bind
+                        | SqliteOperation::TransactionBegin
+                ) {
                     SqliteErrorCategory::InvalidInput
                 } else {
                     SqliteErrorCategory::Unknown
