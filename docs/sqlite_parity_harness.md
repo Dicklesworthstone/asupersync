@@ -82,33 +82,44 @@ The original schema-v1 smoke execution remains historical evidence in
 
 ## SQLite P3 prepared-statement matrix
 
-`asupersync-ym2wtv.2.3` adds executable Asupersync coverage for the public
-prepared-statement behavior that the P2 lifecycle harness did not exercise.
-The eight-row matrix covers positional binding for every public
-`SqliteValue`, named SQL placeholders bound by SQLite parameter index through
-the existing positional value slice, statement reuse/reset, capacity-one
-cache pressure and eviction, schema invalidation, malformed SQL and parameter
-arity errors, row-stream drop and pre-cancellation cleanup, and busy-state
-error mapping.
+`asupersync-ym2wtv.2.3` extends the neutral consumer with seven executable
+prepared-statement cases on both pinned engines. The common observations cover
+positional binding for every public `SqliteValue`, named SQL placeholders
+bound by SQLite parameter index through the existing positional value slice,
+repeated execution/reset, schema invalidation, malformed SQL and too-few bind
+errors, pre-cancellation without mutation, connection reuse, and
+two-connection write contention. Both ordinary runtimes close with zero
+pending, busy, or active blocking work.
 
 The named-binding row is deliberately precise: Asupersync does not publish a
 name-to-value map API. A statement may contain `:name` placeholders, but the
 public `&[SqliteValue]` is bound in SQLite parameter-index order. The tests do
 not imply that parameter names reorder caller values.
 
-The cache test uses an A/A/B/A sequence with capacity one. The repeated A
-proves reset/reuse, B applies eviction pressure to the sole slot, and the final
-A must prepare again after the schema is rebuilt. This proves the adapter's
-observable result and cleanup behavior; it does not make rusqlite's internal
-cache representation normative for FrankenSQLite.
+The neutral repeated-execution case uses an A/B/missing/A sequence and proves
+the same result and released statement state on both engines. Asupersync's
+separate capacity-one A/A/B/A test additionally proves cache hit, eviction,
+and reprepare behavior. FrankenSQLite's pinned async API exposes no public
+prepared-statement object, cache-capacity control, or cache telemetry, so the
+neutral evidence does not infer equivalent cache internals from equal query
+results.
 
-The pinned neutral consumer is still a P2 adapter. It does not yet execute
-prepared-statement vectors, publish a common cache-capacity control, or expose
-a row-stream drop boundary for FrankenSQLite. Those cells remain explicitly
-non-PASS in `phase3.coverage_matrix`; this tranche does not manufacture
-cross-engine equivalence from unavailable observations. Full P3 parity and any
-dependency cutover therefore remain open until the neutral adapter executes
-the supported cells and records owner-approved differences.
+Two observed differences stay explicit. Asupersync rejects a surplus bind
+parameter with a typed SQL error; pinned FrankenSQLite accepts the same call
+and ignores the surplus value. Under a real two-connection write lock,
+Asupersync returns a typed busy-or-locked error and remains reusable, while the
+pinned FrankenSQLite call does not return despite `PRAGMA busy_timeout = 0`.
+The neutral harness executes that call in an isolated child process, applies a
+five-second watchdog, then kills and reaps the child. This bounds the proof
+lane but does not claim cooperative cleanup of the child connection.
+
+The executable common cancellation case proves pre-cancelled no-mutation and
+same-connection reuse. Asupersync's native row-stream test separately proves
+partial-stream drop finalization; FrankenSQLite materializes `Vec<Row>` and has
+no corresponding public async row-stream boundary. These unsupported cache and
+row-stream cells, and the two intentional differences above, are not relabeled
+as parity. The P3 tranche is complete for the pinned public surfaces, but it
+does not authorize dependency cutover or public API removal.
 
 ## SQLite P4 transaction and savepoint matrix
 
@@ -143,8 +154,10 @@ zero-timeout reference `BEGIN IMMEDIATE` succeeds immediately afterward, the
 cancelled row is absent, and the database remains writable. The pinned
 FrankenSQLite async adapter has no equivalent closure-based cancellation hook,
 so that native cancellation evidence is not relabeled as cross-engine parity.
-The deterministic constraint case likewise does not replace the separate P3
-two-connection busy/locked test.
+The deterministic constraint case likewise does not replace P3's separate
+two-connection evidence: Asupersync returns a typed busy/locked result and
+recovers, while the pinned FrankenSQLite call is bounded by the external
+five-second kill-and-reap watchdog and remains an explicit difference.
 
 This is a bounded common transaction matrix, not a claim that every drop,
 panic, timeout, pool, or concurrency schedule is equivalent. It does not

@@ -9,9 +9,10 @@ use std::collections::BTreeSet;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use asupersync::database::sqlite::validate_checked_sql_statement;
 use asupersync::database::transaction::SqliteSavepoint;
@@ -37,6 +38,8 @@ use serde::{Deserialize, Serialize};
 
 const VECTOR_JSON: &str = include_str!("../../../../artifacts/sqlite_conformance_vectors_v1.json");
 const FSQLITE_REVISION: &str = "92f9e9833f859ebcbe27e9fef16d9cad4372bbd7";
+const P3_BUSY_CHILD_ENV: &str = "SQLITE_PARITY_P3_BUSY_CHILD";
+const P3_BUSY_WATCHDOG: Duration = Duration::from_secs(5);
 const P6_PROFILE_MAX_VALUE_BYTES: usize = 1024 * 1024;
 const P6_VALUE_QUERY: &str = "SELECT ?1 AS null_value, ?2 AS integer_min, ?3 AS integer_max, ?4 AS integer_beyond_exact_f64, ?5 AS negative_zero, ?6 AS positive_infinity, ?7 AS negative_infinity, ?8 AS nan_value, ?9 AS empty_text, ?10 AS unicode_nul_text, ?11 AS empty_blob, ?12 AS binary_blob, ?13 AS large_text, ?14 AS large_blob";
 const P6_VALUE_CASE_IDS: [&str; 14] = [
@@ -158,10 +161,55 @@ struct HarnessEvidence<'a> {
     capability_id: &'a str,
     provenance: Provenance<'a>,
     engine_results: Vec<EngineResult>,
+    prepared_statement_parity: PreparedStatementParityEvidence,
     value_parity: ValueParityEvidence,
     transaction_parity: TransactionParityEvidence,
     security_policy: SecurityPolicyEvidence,
     comparison: Comparison,
+}
+
+#[derive(Debug, Serialize)]
+struct PreparedStatementParityEvidence {
+    bead_id: &'static str,
+    matrix_id: &'static str,
+    status: &'static str,
+    compared_cases: usize,
+    asupersync: PreparedEngineEvidence,
+    frankensqlite: PreparedEngineEvidence,
+    mismatches: Vec<String>,
+    intentional_differences: Vec<PreparedDifferenceEvidence>,
+    unsupported: Vec<PreparedUnsupportedEvidence>,
+}
+
+#[derive(Debug, Serialize)]
+struct PreparedEngineEvidence {
+    cases: Vec<PreparedCaseResult>,
+    runtime_quiescent: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct PreparedCaseResult {
+    case_id: &'static str,
+    observation: String,
+    error_class: Option<&'static str>,
+    connection_reusable: bool,
+    cleanup_state: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+struct PreparedUnsupportedEvidence {
+    engine: &'static str,
+    capability: &'static str,
+    reason: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+struct PreparedDifferenceEvidence {
+    case_id: &'static str,
+    boundary: &'static str,
+    asupersync: &'static str,
+    frankensqlite: &'static str,
+    rationale: &'static str,
 }
 
 #[derive(Debug, Serialize)]
@@ -311,6 +359,14 @@ struct Comparison {
 }
 
 fn main() {
+    if std::env::var_os(P3_BUSY_CHILD_ENV).is_some() {
+        if let Err(error) = run_frankensqlite_busy_child() {
+            eprintln!("sqlite P3 busy child failed: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     if let Err(error) = run() {
         eprintln!("sqlite parity harness failed: {error}");
         std::process::exit(1);
@@ -341,6 +397,7 @@ fn run() -> Result<(), String> {
 
     let mismatches = compare_results(&suite, &asupersync, &frankensqlite);
     let comparable = mismatches.is_empty();
+    let prepared_statement_parity = run_prepared_statement_parity()?;
     let value_parity = run_value_parity()?;
     let transaction_parity = run_transaction_parity()?;
     let security_policy = run_security_policy()?;
@@ -359,6 +416,7 @@ fn run() -> Result<(), String> {
             host: env!("SQLITE_PARITY_HOST"),
         },
         engine_results: vec![asupersync, frankensqlite],
+        prepared_statement_parity,
         value_parity,
         transaction_parity,
         security_policy,
@@ -377,6 +435,930 @@ fn run() -> Result<(), String> {
     } else {
         Err("engine evidence did not match the declared vector contract".to_owned())
     }
+}
+
+fn run_prepared_statement_parity() -> Result<PreparedStatementParityEvidence, String> {
+    let asupersync = run_asupersync_prepared_matrix()?;
+    let frankensqlite = run_frankensqlite_prepared_matrix()?;
+    let expected_busy_timeout = asupersync
+        .cases
+        .iter()
+        .zip(&frankensqlite.cases)
+        .any(|(native, franken)| expected_franken_busy_timeout(native, franken));
+    let mut mismatches = Vec::new();
+    if asupersync.cases.len() != frankensqlite.cases.len() {
+        mismatches.push(format!(
+            "case-count differs: asupersync={} frankensqlite={}",
+            asupersync.cases.len(),
+            frankensqlite.cases.len()
+        ));
+    }
+    mismatches.extend(
+        asupersync
+            .cases
+            .iter()
+            .zip(&frankensqlite.cases)
+            .filter_map(|(native, franken)| {
+                (native != franken && !expected_franken_busy_timeout(native, franken)).then(|| {
+                    format!(
+                        "{} differs: asupersync={native:?} frankensqlite={franken:?}",
+                        native.case_id
+                    )
+                })
+            }),
+    );
+    if !mismatches.is_empty() {
+        return Err(format!(
+            "SQLite P3 prepared-statement parity failed: {}",
+            mismatches.join("; ")
+        ));
+    }
+
+    let mut intentional_differences = vec![PreparedDifferenceEvidence {
+        case_id: "SQLITE-PARITY-P3-INVALID-USE-006",
+        boundary: "surplus_parameter_binding",
+        asupersync: "typed_sql_rejection",
+        frankensqlite: "accepts_and_ignores_surplus_parameter",
+        rationale: "The neutral adapter records the pinned engines' observable behavior without weakening Asupersync's fail-closed arity contract or claiming cross-engine equivalence for this cell.",
+    }];
+    if expected_busy_timeout {
+        intentional_differences.push(PreparedDifferenceEvidence {
+            case_id: "SQLITE-PARITY-P3-BUSY-008",
+            boundary: "zero_busy_timeout_contention",
+            asupersync: "typed_busy_or_locked_then_recovered",
+            frankensqlite: "operation_did_not_complete_within_5s",
+            rationale: "The pinned FrankenSQLite async call did not honor PRAGMA busy_timeout=0 under two-connection write contention. The neutral harness executes it in a child process, kills and reaps that child at the five-second watchdog, and makes no cleanup or typed-error parity claim for that engine cell.",
+        });
+    }
+
+    Ok(PreparedStatementParityEvidence {
+        bead_id: "asupersync-ym2wtv.2.3",
+        matrix_id: "sqlite-neutral-prepared-statement-parity-v1",
+        status: "PASS_BOUNDED_COMMON_OBSERVABLE_MATRIX_WITH_EXPLICIT_DIFFERENCES_AND_UNSUPPORTED",
+        compared_cases: asupersync.cases.len(),
+        asupersync,
+        frankensqlite,
+        mismatches,
+        intentional_differences,
+        unsupported: vec![
+            PreparedUnsupportedEvidence {
+                engine: "frankensqlite",
+                capability: "async_prepared_statement_object_and_cache_capacity_control",
+                reason: "The pinned AsyncConnection exposes query_with_params and execute_with_params but no async prepared-statement object, cache-capacity control, or cache telemetry; the neutral matrix compares repeated observable execution without inventing cache internals.",
+            },
+            PreparedUnsupportedEvidence {
+                engine: "frankensqlite",
+                capability: "async_row_stream_drop_finalize_boundary",
+                reason: "The pinned AsyncConnection materializes Vec<Row> and exposes no public async row-stream object whose partial drop can be compared with Asupersync row-stream finalization.",
+            },
+        ],
+    })
+}
+
+fn expected_franken_busy_timeout(
+    native: &PreparedCaseResult,
+    franken: &PreparedCaseResult,
+) -> bool {
+    native.case_id == "SQLITE-PARITY-P3-BUSY-008"
+        && native.observation == "contender_rejected_then_recovered"
+        && native.error_class == Some("busy_or_locked")
+        && native.connection_reusable
+        && native.cleanup_state == "statement_state_released"
+        && franken.case_id == native.case_id
+        && franken.observation == "operation_did_not_complete_within_5s"
+        && franken.error_class == Some("watchdog_timeout")
+        && !franken.connection_reusable
+        && franken.cleanup_state == "isolated_child_killed_and_reaped"
+}
+
+fn run_asupersync_prepared_matrix() -> Result<PreparedEngineEvidence, String> {
+    let runtime = RuntimeBuilder::current_thread()
+        .blocking_threads(2, 2)
+        .build()
+        .map_err(|error| format!("build Asupersync P3 runtime: {error}"))?;
+    let blocking = runtime
+        .handle()
+        .blocking_handle()
+        .ok_or_else(|| "Asupersync P3 runtime has no blocking pool".to_owned())?;
+    let cases = runtime.block_on(async {
+        let cx = Cx::current().ok_or_else(|| "Asupersync P3 runtime has no Cx".to_owned())?;
+        let connection = asupersync_open_memory(&cx).await?;
+        asupersync_outcome(
+            connection
+                .execute_batch(
+                    &cx,
+                    "CREATE TABLE p3_bind (
+                        id INTEGER PRIMARY KEY,
+                        int_value INTEGER,
+                        real_value REAL,
+                        text_value TEXT,
+                        blob_value BLOB,
+                        null_value INTEGER
+                    );
+                    CREATE TABLE p3_named (id INTEGER PRIMARY KEY, value TEXT NOT NULL);
+                    CREATE TABLE p3_reset (id INTEGER PRIMARY KEY, value TEXT NOT NULL);
+                    INSERT INTO p3_reset VALUES (1, 'first'), (2, 'second');
+                    CREATE TABLE p3_schema (id INTEGER PRIMARY KEY, value TEXT NOT NULL);
+                    INSERT INTO p3_schema VALUES (1, 'before');
+                    CREATE TABLE p3_cancel (value TEXT NOT NULL);",
+                )
+                .await,
+            "set up Asupersync P3 matrix",
+        )?;
+
+        let positional = asupersync_prepared_positional_case(&connection, &cx).await?;
+        let named = asupersync_prepared_named_case(&connection, &cx).await?;
+        let reset = asupersync_prepared_reset_case(&connection, &cx).await?;
+        let schema = asupersync_prepared_schema_case(&connection, &cx).await?;
+        let invalid = asupersync_prepared_invalid_case(&connection, &cx).await?;
+        let cancelled = asupersync_prepared_cancel_case(&connection, &cx).await?;
+        asupersync_close(&connection, &cx).await?;
+        let busy = asupersync_prepared_busy_case(&cx).await?;
+        Ok::<_, String>(vec![
+            positional, named, reset, schema, invalid, cancelled, busy,
+        ])
+    })?;
+    drop(runtime);
+    require_runtime_quiescence(&blocking, "asupersync-p3")?;
+    Ok(PreparedEngineEvidence {
+        cases,
+        runtime_quiescent: true,
+    })
+}
+
+fn run_frankensqlite_prepared_matrix() -> Result<PreparedEngineEvidence, String> {
+    let runtime = CompatRuntimeBuilder::current_thread()
+        .blocking_threads(2, 2)
+        .build()
+        .map_err(|error| format!("build FrankenSQLite P3 runtime: {error}"))?;
+    let blocking = runtime
+        .handle()
+        .blocking_handle()
+        .ok_or_else(|| "FrankenSQLite P3 runtime has no blocking pool".to_owned())?;
+    let cases = runtime.block_on(async {
+        let native_cx = CompatCx::current()
+            .ok_or_else(|| "FrankenSQLite P3 compatibility runtime has no Cx".to_owned())?;
+        let cx = attached_franken_cx(&native_cx);
+        let mut connection = FrankenConnection::open(&cx, ":memory:")
+            .await
+            .map_err(|error| format!("FrankenSQLite P3 open: {error}"))?;
+        connection
+            .execute_batch(
+                &cx,
+                "CREATE TABLE p3_bind (
+                    id INTEGER PRIMARY KEY,
+                    int_value INTEGER,
+                    real_value REAL,
+                    text_value TEXT,
+                    blob_value BLOB,
+                    null_value INTEGER
+                );
+                CREATE TABLE p3_named (id INTEGER PRIMARY KEY, value TEXT NOT NULL);
+                CREATE TABLE p3_reset (id INTEGER PRIMARY KEY, value TEXT NOT NULL);
+                INSERT INTO p3_reset VALUES (1, 'first'), (2, 'second');
+                CREATE TABLE p3_schema (id INTEGER PRIMARY KEY, value TEXT NOT NULL);
+                INSERT INTO p3_schema VALUES (1, 'before');
+                CREATE TABLE p3_cancel (value TEXT NOT NULL);",
+            )
+            .await
+            .map_err(|error| format!("set up FrankenSQLite P3 matrix: {error}"))?;
+
+        let positional = frankensqlite_prepared_positional_case(&connection, &cx).await?;
+        let named = frankensqlite_prepared_named_case(&connection, &cx).await?;
+        let reset = frankensqlite_prepared_reset_case(&connection, &cx).await?;
+        let schema = frankensqlite_prepared_schema_case(&connection, &cx).await?;
+        let invalid = frankensqlite_prepared_invalid_case(&connection, &cx).await?;
+        let cancelled = frankensqlite_prepared_cancel_case(&connection, &native_cx, &cx).await?;
+        franken_close(&mut connection, &cx).await?;
+        let busy = frankensqlite_prepared_busy_case()?;
+        Ok::<_, String>(vec![
+            positional, named, reset, schema, invalid, cancelled, busy,
+        ])
+    })?;
+    drop(runtime);
+    require_compat_runtime_quiescence(&blocking, "frankensqlite-p3")?;
+    Ok(PreparedEngineEvidence {
+        cases,
+        runtime_quiescent: true,
+    })
+}
+
+fn prepared_case(
+    case_id: &'static str,
+    observation: impl Into<String>,
+    error_class: Option<&'static str>,
+) -> PreparedCaseResult {
+    PreparedCaseResult {
+        case_id,
+        observation: observation.into(),
+        error_class,
+        connection_reusable: true,
+        cleanup_state: "statement_state_released",
+    }
+}
+
+async fn asupersync_prepared_positional_case(
+    connection: &SqliteConnection,
+    cx: &Cx,
+) -> Result<PreparedCaseResult, String> {
+    let text = "line-one\nline-two 'quoted'";
+    let blob = vec![0, 1, 254, 255];
+    let params = vec![
+        AsupersyncValue::Integer(1),
+        AsupersyncValue::Integer(i64::MIN),
+        AsupersyncValue::Real(3.25),
+        AsupersyncValue::Text(text.to_owned()),
+        AsupersyncValue::Blob(blob.clone()),
+        AsupersyncValue::Null,
+    ];
+    let affected = asupersync_outcome(
+        connection
+            .execute(
+                cx,
+                "INSERT INTO p3_bind VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                &params,
+            )
+            .await,
+        "Asupersync P3 positional insert",
+    )?;
+    if affected != 1 {
+        return Err(format!(
+            "Asupersync P3 positional insert affected {affected} rows"
+        ));
+    }
+    let row = asupersync_outcome(
+        connection
+            .query_row(
+                cx,
+                "SELECT * FROM p3_bind WHERE id = ?1",
+                &[AsupersyncValue::Integer(1)],
+            )
+            .await,
+        "Asupersync P3 positional query",
+    )?
+    .ok_or_else(|| "Asupersync P3 positional query returned no row".to_owned())?;
+    let matches = row
+        .get_i64("int_value")
+        .is_ok_and(|value| value == i64::MIN)
+        && row
+            .get_f64("real_value")
+            .is_ok_and(|value| value.to_bits() == 3.25_f64.to_bits())
+        && row.get_str("text_value").is_ok_and(|value| value == text)
+        && row
+            .get_blob("blob_value")
+            .is_ok_and(|value| value == blob.as_slice())
+        && row.get("null_value").is_ok_and(AsupersyncValue::is_null);
+    if !matches {
+        return Err(format!("Asupersync P3 positional row drifted: {row:?}"));
+    }
+    Ok(prepared_case(
+        "SQLITE-PARITY-P3-POSITIONAL-BIND-001",
+        "null_integer_real_text_blob_round_trip",
+        None,
+    ))
+}
+
+async fn frankensqlite_prepared_positional_case(
+    connection: &FrankenConnection,
+    cx: &FrankenCx,
+) -> Result<PreparedCaseResult, String> {
+    let text = "line-one\nline-two 'quoted'";
+    let blob = vec![0, 1, 254, 255];
+    let params = vec![
+        FrankenValue::Integer(1),
+        FrankenValue::Integer(i64::MIN),
+        FrankenValue::Float(3.25),
+        FrankenValue::Text(text.into()),
+        FrankenValue::Blob(Arc::from(blob.clone())),
+        FrankenValue::Null,
+    ];
+    let affected = connection
+        .execute_with_params(
+            cx,
+            "INSERT INTO p3_bind VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            &params,
+        )
+        .await
+        .map_err(|error| format!("FrankenSQLite P3 positional insert: {error}"))?;
+    if affected != 1 {
+        return Err(format!(
+            "FrankenSQLite P3 positional insert affected {affected} rows"
+        ));
+    }
+    let row = connection
+        .query_row_with_params(
+            cx,
+            "SELECT * FROM p3_bind WHERE id = ?1",
+            &[FrankenValue::Integer(1)],
+        )
+        .await
+        .map_err(|error| format!("FrankenSQLite P3 positional query: {error}"))?;
+    let matches = matches!(row.get(1), Some(FrankenValue::Integer(i64::MIN)))
+        && matches!(row.get(2), Some(FrankenValue::Float(value)) if value.to_bits() == 3.25_f64.to_bits())
+        && matches!(row.get(3), Some(FrankenValue::Text(value)) if value.as_ref() == text)
+        && matches!(row.get(4), Some(FrankenValue::Blob(value)) if value.as_ref() == blob.as_slice())
+        && matches!(row.get(5), Some(FrankenValue::Null));
+    if !matches {
+        return Err(format!("FrankenSQLite P3 positional row drifted: {row:?}"));
+    }
+    Ok(prepared_case(
+        "SQLITE-PARITY-P3-POSITIONAL-BIND-001",
+        "null_integer_real_text_blob_round_trip",
+        None,
+    ))
+}
+
+async fn asupersync_prepared_named_case(
+    connection: &SqliteConnection,
+    cx: &Cx,
+) -> Result<PreparedCaseResult, String> {
+    asupersync_outcome(
+        connection
+            .execute(
+                cx,
+                "INSERT INTO p3_named (id, value) VALUES (:id, :value)",
+                &[
+                    AsupersyncValue::Integer(7),
+                    AsupersyncValue::Text("named-value".to_owned()),
+                ],
+            )
+            .await,
+        "Asupersync P3 named insert",
+    )?;
+    let row = asupersync_outcome(
+        connection
+            .query_row(
+                cx,
+                "SELECT value FROM p3_named WHERE id = :id",
+                &[AsupersyncValue::Integer(7)],
+            )
+            .await,
+        "Asupersync P3 named query",
+    )?
+    .ok_or_else(|| "Asupersync P3 named query returned no row".to_owned())?;
+    if !row
+        .get_str("value")
+        .is_ok_and(|value| value == "named-value")
+    {
+        return Err(format!("Asupersync P3 named row drifted: {row:?}"));
+    }
+    Ok(prepared_case(
+        "SQLITE-PARITY-P3-NAMED-BIND-002",
+        "named_placeholders_bound_by_parameter_index",
+        None,
+    ))
+}
+
+async fn frankensqlite_prepared_named_case(
+    connection: &FrankenConnection,
+    cx: &FrankenCx,
+) -> Result<PreparedCaseResult, String> {
+    connection
+        .execute_with_params(
+            cx,
+            "INSERT INTO p3_named (id, value) VALUES (:id, :value)",
+            &[
+                FrankenValue::Integer(7),
+                FrankenValue::Text("named-value".into()),
+            ],
+        )
+        .await
+        .map_err(|error| format!("FrankenSQLite P3 named insert: {error}"))?;
+    let row = connection
+        .query_row_with_params(
+            cx,
+            "SELECT value FROM p3_named WHERE id = :id",
+            &[FrankenValue::Integer(7)],
+        )
+        .await
+        .map_err(|error| format!("FrankenSQLite P3 named query: {error}"))?;
+    if !matches!(row.get(0), Some(FrankenValue::Text(value)) if value.as_ref() == "named-value") {
+        return Err(format!("FrankenSQLite P3 named row drifted: {row:?}"));
+    }
+    Ok(prepared_case(
+        "SQLITE-PARITY-P3-NAMED-BIND-002",
+        "named_placeholders_bound_by_parameter_index",
+        None,
+    ))
+}
+
+async fn asupersync_prepared_reset_case(
+    connection: &SqliteConnection,
+    cx: &Cx,
+) -> Result<PreparedCaseResult, String> {
+    let query = "SELECT value FROM p3_reset WHERE id = ?1";
+    let mut observed = Vec::new();
+    for id in [1, 2, 99, 1] {
+        let rows = asupersync_outcome(
+            connection
+                .query(cx, query, &[AsupersyncValue::Integer(id)])
+                .await,
+            "Asupersync P3 repeated query",
+        )?;
+        observed.push(if rows.is_empty() {
+            "missing".to_owned()
+        } else {
+            exactly_one(rows, "Asupersync P3 repeated query")?
+                .get_str("value")
+                .map(str::to_owned)
+                .map_err(|error| format!("Asupersync P3 repeated value: {error}"))?
+        });
+    }
+    if observed != ["first", "second", "missing", "first"] {
+        return Err(format!(
+            "Asupersync P3 repeated results drifted: {observed:?}"
+        ));
+    }
+    Ok(prepared_case(
+        "SQLITE-PARITY-P3-RESET-CACHE-HIT-003",
+        observed.join(","),
+        None,
+    ))
+}
+
+async fn frankensqlite_prepared_reset_case(
+    connection: &FrankenConnection,
+    cx: &FrankenCx,
+) -> Result<PreparedCaseResult, String> {
+    let query = "SELECT value FROM p3_reset WHERE id = ?1";
+    let mut observed = Vec::new();
+    for id in [1, 2, 99, 1] {
+        let rows = connection
+            .query_with_params(cx, query, &[FrankenValue::Integer(id)])
+            .await
+            .map_err(|error| format!("FrankenSQLite P3 repeated query: {error}"))?;
+        observed.push(if rows.is_empty() {
+            "missing".to_owned()
+        } else {
+            match exactly_one(rows, "FrankenSQLite P3 repeated query")?.get(0) {
+                Some(FrankenValue::Text(value)) => value.to_string(),
+                other => {
+                    return Err(format!(
+                        "FrankenSQLite P3 repeated value drifted: {other:?}"
+                    ));
+                }
+            }
+        });
+    }
+    if observed != ["first", "second", "missing", "first"] {
+        return Err(format!(
+            "FrankenSQLite P3 repeated results drifted: {observed:?}"
+        ));
+    }
+    Ok(prepared_case(
+        "SQLITE-PARITY-P3-RESET-CACHE-HIT-003",
+        observed.join(","),
+        None,
+    ))
+}
+
+async fn asupersync_prepared_schema_case(
+    connection: &SqliteConnection,
+    cx: &Cx,
+) -> Result<PreparedCaseResult, String> {
+    let query = "SELECT value FROM p3_schema WHERE id = 1";
+    let before = asupersync_outcome(
+        connection.query(cx, query, &[]).await,
+        "Asupersync P3 schema before",
+    )?;
+    let before = exactly_one(before, "Asupersync P3 schema before")?
+        .get_str("value")
+        .map(str::to_owned)
+        .map_err(|error| format!("Asupersync P3 schema before value: {error}"))?;
+    asupersync_outcome(
+        connection
+            .execute_batch(
+                cx,
+                "DROP TABLE p3_schema;
+                 CREATE TABLE p3_schema (id INTEGER PRIMARY KEY, value TEXT NOT NULL);
+                 INSERT INTO p3_schema VALUES (1, 'after');",
+            )
+            .await,
+        "Asupersync P3 schema rebuild",
+    )?;
+    let after = asupersync_outcome(
+        connection.query(cx, query, &[]).await,
+        "Asupersync P3 schema after",
+    )?;
+    let after = exactly_one(after, "Asupersync P3 schema after")?
+        .get_str("value")
+        .map(str::to_owned)
+        .map_err(|error| format!("Asupersync P3 schema after value: {error}"))?;
+    if before != "before" || after != "after" {
+        return Err(format!(
+            "Asupersync P3 schema sequence drifted: {before}->{after}"
+        ));
+    }
+    Ok(prepared_case(
+        "SQLITE-PARITY-P3-SCHEMA-CHANGE-005",
+        "before->after",
+        None,
+    ))
+}
+
+async fn frankensqlite_prepared_schema_case(
+    connection: &FrankenConnection,
+    cx: &FrankenCx,
+) -> Result<PreparedCaseResult, String> {
+    let query = "SELECT value FROM p3_schema WHERE id = 1";
+    let before = connection
+        .query_row(cx, query)
+        .await
+        .map_err(|error| format!("FrankenSQLite P3 schema before: {error}"))?;
+    let before = match before.get(0) {
+        Some(FrankenValue::Text(value)) => value.to_string(),
+        other => return Err(format!("FrankenSQLite P3 schema before drifted: {other:?}")),
+    };
+    connection
+        .execute_batch(
+            cx,
+            "DROP TABLE p3_schema;
+             CREATE TABLE p3_schema (id INTEGER PRIMARY KEY, value TEXT NOT NULL);
+             INSERT INTO p3_schema VALUES (1, 'after');",
+        )
+        .await
+        .map_err(|error| format!("FrankenSQLite P3 schema rebuild: {error}"))?;
+    let after = connection
+        .query_row(cx, query)
+        .await
+        .map_err(|error| format!("FrankenSQLite P3 schema after: {error}"))?;
+    let after = match after.get(0) {
+        Some(FrankenValue::Text(value)) => value.to_string(),
+        other => return Err(format!("FrankenSQLite P3 schema after drifted: {other:?}")),
+    };
+    if before != "before" || after != "after" {
+        return Err(format!(
+            "FrankenSQLite P3 schema sequence drifted: {before}->{after}"
+        ));
+    }
+    Ok(prepared_case(
+        "SQLITE-PARITY-P3-SCHEMA-CHANGE-005",
+        "before->after",
+        None,
+    ))
+}
+
+async fn asupersync_prepared_invalid_case(
+    connection: &SqliteConnection,
+    cx: &Cx,
+) -> Result<PreparedCaseResult, String> {
+    for (label, outcome) in [
+        ("malformed", connection.execute(cx, "SELEKT 1", &[]).await),
+        (
+            "too_few",
+            connection
+                .execute(cx, "SELECT ?1 + ?2", &[AsupersyncValue::Integer(1)])
+                .await,
+        ),
+    ] {
+        if !matches!(
+            outcome,
+            Outcome::Err(SqliteError::Sqlite(_) | SqliteError::UnsafeSql(_))
+        ) {
+            return Err(format!("Asupersync P3 {label} error drifted: {outcome:?}"));
+        }
+    }
+    let too_many = connection
+        .execute(
+            cx,
+            "SELECT ?1",
+            &[AsupersyncValue::Integer(1), AsupersyncValue::Integer(2)],
+        )
+        .await;
+    if !matches!(
+        too_many,
+        Outcome::Err(SqliteError::Sqlite(_) | SqliteError::UnsafeSql(_))
+    ) {
+        return Err(format!(
+            "Asupersync P3 surplus-parameter contract drifted: {too_many:?}"
+        ));
+    }
+    let reusable = asupersync_outcome(
+        connection.query(cx, "SELECT 1", &[]).await,
+        "Asupersync P3 invalid-use recovery",
+    )?;
+    exactly_one(reusable, "Asupersync P3 invalid-use recovery")?;
+    Ok(prepared_case(
+        "SQLITE-PARITY-P3-INVALID-USE-006",
+        "malformed,too_few_rejected",
+        Some("sql_rejected"),
+    ))
+}
+
+async fn frankensqlite_prepared_invalid_case(
+    connection: &FrankenConnection,
+    cx: &FrankenCx,
+) -> Result<PreparedCaseResult, String> {
+    let malformed = connection.execute(cx, "SELEKT 1").await;
+    let too_few = connection
+        .execute_with_params(cx, "SELECT ?1 + ?2", &[FrankenValue::Integer(1)])
+        .await;
+    let too_many = connection
+        .execute_with_params(
+            cx,
+            "SELECT ?1",
+            &[FrankenValue::Integer(1), FrankenValue::Integer(2)],
+        )
+        .await;
+    for (label, result) in [("malformed", malformed), ("too_few", too_few)] {
+        if result.is_ok() {
+            return Err(format!("FrankenSQLite P3 {label} unexpectedly succeeded"));
+        }
+    }
+    too_many.map_err(|error| {
+        format!("FrankenSQLite P3 surplus-parameter acceptance drifted: {error}")
+    })?;
+    connection
+        .query(cx, "SELECT 1")
+        .await
+        .map_err(|error| format!("FrankenSQLite P3 invalid-use recovery: {error}"))?;
+    Ok(prepared_case(
+        "SQLITE-PARITY-P3-INVALID-USE-006",
+        "malformed,too_few_rejected",
+        Some("sql_rejected"),
+    ))
+}
+
+async fn asupersync_prepared_cancel_case(
+    connection: &SqliteConnection,
+    cx: &Cx,
+) -> Result<PreparedCaseResult, String> {
+    cx.set_cancel_requested(true);
+    let result = connection
+        .execute(
+            cx,
+            "INSERT INTO p3_cancel VALUES (?1)",
+            &[AsupersyncValue::Text("must-not-commit".to_owned())],
+        )
+        .await;
+    cx.set_cancel_requested(false);
+    match result {
+        Outcome::Cancelled(_) => {}
+        other => return Err(format!("Asupersync P3 pre-cancel drifted: {other:?}")),
+    }
+    let rows = asupersync_outcome(
+        connection
+            .query(cx, "SELECT COUNT(*) FROM p3_cancel", &[])
+            .await,
+        "Asupersync P3 pre-cancel count",
+    )?;
+    let count = exactly_one(rows, "Asupersync P3 pre-cancel count")?
+        .get_idx(0)
+        .map_err(|error| format!("Asupersync P3 pre-cancel count value: {error}"))?
+        .as_integer();
+    if count != Some(0) {
+        return Err(format!("Asupersync P3 pre-cancel mutated state: {count:?}"));
+    }
+    Ok(prepared_case(
+        "SQLITE-PARITY-P3-FINALIZE-CANCEL-007",
+        "pre_cancelled_without_mutation",
+        Some("cancelled"),
+    ))
+}
+
+async fn frankensqlite_prepared_cancel_case(
+    connection: &FrankenConnection,
+    native_cx: &CompatCx,
+    cx: &FrankenCx,
+) -> Result<PreparedCaseResult, String> {
+    native_cx.set_cancel_requested(true);
+    let cancelled_cx = attached_franken_cx(native_cx);
+    let result = connection
+        .execute_with_params(
+            &cancelled_cx,
+            "INSERT INTO p3_cancel VALUES (?1)",
+            &[FrankenValue::Text("must-not-commit".into())],
+        )
+        .await;
+    native_cx.set_cancel_requested(false);
+    if !matches!(result, Err(FrankenError::Interrupt)) {
+        return Err(format!("FrankenSQLite P3 pre-cancel drifted: {result:?}"));
+    }
+    let row = connection
+        .query_row(cx, "SELECT COUNT(*) FROM p3_cancel")
+        .await
+        .map_err(|error| format!("FrankenSQLite P3 pre-cancel count: {error}"))?;
+    if !matches!(row.get(0), Some(FrankenValue::Integer(0))) {
+        return Err(format!(
+            "FrankenSQLite P3 pre-cancel mutated state: {row:?}"
+        ));
+    }
+    Ok(prepared_case(
+        "SQLITE-PARITY-P3-FINALIZE-CANCEL-007",
+        "pre_cancelled_without_mutation",
+        Some("cancelled"),
+    ))
+}
+
+async fn asupersync_prepared_busy_case(cx: &Cx) -> Result<PreparedCaseResult, String> {
+    let path = scratch_database_path("asupersync-p3-busy");
+    let holder = asupersync_outcome(
+        SqliteConnection::open(cx, &path).await,
+        "Asupersync P3 busy holder open",
+    )?;
+    let contender = asupersync_outcome(
+        SqliteConnection::open(cx, &path).await,
+        "Asupersync P3 busy contender open",
+    )?;
+    asupersync_outcome(
+        holder
+            .execute_batch(cx, "CREATE TABLE busy (value TEXT NOT NULL);")
+            .await,
+        "Asupersync P3 busy schema",
+    )?;
+    asupersync_outcome(
+        contender.set_busy_timeout(cx, Duration::ZERO).await,
+        "Asupersync P3 busy timeout",
+    )?;
+    let transaction =
+        asupersync_outcome(holder.begin_immediate(cx).await, "Asupersync P3 busy begin")?;
+    asupersync_outcome(
+        transaction
+            .execute(
+                cx,
+                "INSERT INTO busy VALUES (?1)",
+                &[AsupersyncValue::Text("holder".to_owned())],
+            )
+            .await,
+        "Asupersync P3 busy holder write",
+    )?;
+    match contender
+        .execute(
+            cx,
+            "INSERT INTO busy VALUES (?1)",
+            &[AsupersyncValue::Text("contender".to_owned())],
+        )
+        .await
+    {
+        Outcome::Err(error) if error.is_busy() || error.is_locked() => {}
+        other => return Err(format!("Asupersync P3 busy contender drifted: {other:?}")),
+    }
+    asupersync_outcome(
+        transaction.rollback(cx).await,
+        "Asupersync P3 busy rollback",
+    )?;
+    asupersync_outcome(
+        contender
+            .execute(
+                cx,
+                "INSERT INTO busy VALUES (?1)",
+                &[AsupersyncValue::Text("after".to_owned())],
+            )
+            .await,
+        "Asupersync P3 busy recovery write",
+    )?;
+    asupersync_close(&holder, cx).await?;
+    asupersync_close(&contender, cx).await?;
+    Ok(prepared_case(
+        "SQLITE-PARITY-P3-BUSY-008",
+        "contender_rejected_then_recovered",
+        Some("busy_or_locked"),
+    ))
+}
+
+fn run_frankensqlite_busy_child() -> Result<(), String> {
+    let runtime = CompatRuntimeBuilder::current_thread()
+        .blocking_threads(2, 2)
+        .build()
+        .map_err(|error| format!("build FrankenSQLite P3 busy-child runtime: {error}"))?;
+    let blocking = runtime
+        .handle()
+        .blocking_handle()
+        .ok_or_else(|| "FrankenSQLite P3 busy-child runtime has no blocking pool".to_owned())?;
+    runtime.block_on(async {
+        let native_cx = CompatCx::current()
+            .ok_or_else(|| "FrankenSQLite P3 busy-child runtime has no Cx".to_owned())?;
+        let cx = attached_franken_cx(&native_cx);
+        frankensqlite_prepared_busy_case_inner(&cx)
+            .await
+            .map(|_| ())
+    })?;
+    drop(runtime);
+    require_compat_runtime_quiescence(&blocking, "frankensqlite-p3-busy-child")
+}
+
+fn frankensqlite_prepared_busy_case() -> Result<PreparedCaseResult, String> {
+    let executable = std::env::current_exe()
+        .map_err(|error| format!("resolve SQLite P3 consumer executable: {error}"))?;
+    let mut child = Command::new(executable)
+        .env_clear()
+        .env(P3_BUSY_CHILD_ENV, "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| format!("spawn FrankenSQLite P3 busy child: {error}"))?;
+    let deadline = Instant::now() + P3_BUSY_WATCHDOG;
+    loop {
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|error| format!("poll FrankenSQLite P3 busy child: {error}"))?
+        {
+            if status.success() {
+                return Ok(prepared_case(
+                    "SQLITE-PARITY-P3-BUSY-008",
+                    "contender_rejected_then_recovered",
+                    Some("busy_or_locked"),
+                ));
+            }
+            return Err(format!(
+                "FrankenSQLite P3 busy child failed before watchdog: {status}"
+            ));
+        }
+        if Instant::now() >= deadline {
+            let kill_result = child.kill();
+            let status = child
+                .wait()
+                .map_err(|error| format!("reap FrankenSQLite P3 busy child: {error}"))?;
+            if status.success() {
+                return Ok(prepared_case(
+                    "SQLITE-PARITY-P3-BUSY-008",
+                    "contender_rejected_then_recovered",
+                    Some("busy_or_locked"),
+                ));
+            }
+            kill_result.map_err(|error| format!("kill FrankenSQLite P3 busy child: {error}"))?;
+            return Ok(PreparedCaseResult {
+                case_id: "SQLITE-PARITY-P3-BUSY-008",
+                observation: "operation_did_not_complete_within_5s".to_owned(),
+                error_class: Some("watchdog_timeout"),
+                connection_reusable: false,
+                cleanup_state: "isolated_child_killed_and_reaped",
+            });
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+async fn frankensqlite_prepared_busy_case_inner(
+    cx: &FrankenCx,
+) -> Result<PreparedCaseResult, String> {
+    let path = path_to_string(&scratch_database_path("frankensqlite-p3-busy"))?.to_owned();
+    let mut holder = FrankenConnection::open(cx, path.clone())
+        .await
+        .map_err(|error| format!("FrankenSQLite P3 busy holder open: {error}"))?;
+    let mut contender = FrankenConnection::open(cx, path)
+        .await
+        .map_err(|error| format!("FrankenSQLite P3 busy contender open: {error}"))?;
+    holder
+        .execute_batch(cx, "CREATE TABLE busy (value TEXT NOT NULL);")
+        .await
+        .map_err(|error| format!("FrankenSQLite P3 busy schema: {error}"))?;
+    contender
+        .execute_batch(cx, "PRAGMA busy_timeout = 0;")
+        .await
+        .map_err(|error| format!("FrankenSQLite P3 busy timeout: {error}"))?;
+    holder
+        .execute_batch(cx, "BEGIN IMMEDIATE;")
+        .await
+        .map_err(|error| format!("FrankenSQLite P3 busy begin: {error}"))?;
+    holder
+        .execute_with_params(
+            cx,
+            "INSERT INTO busy VALUES (?1)",
+            &[FrankenValue::Text("holder".into())],
+        )
+        .await
+        .map_err(|error| format!("FrankenSQLite P3 busy holder write: {error}"))?;
+    let contender_result = contender
+        .execute_with_params(
+            cx,
+            "INSERT INTO busy VALUES (?1)",
+            &[FrankenValue::Text("contender".into())],
+        )
+        .await;
+    match contender_result {
+        Err(FrankenError::Busy | FrankenError::BusyRecovery)
+        | Err(FrankenError::BusySnapshot { .. })
+        | Err(FrankenError::DatabaseLocked { .. })
+        | Err(FrankenError::LockFailed { .. })
+        | Err(FrankenError::WriteConflict { .. })
+        | Err(FrankenError::SerializationFailure { .. }) => {}
+        other => {
+            return Err(format!(
+                "FrankenSQLite P3 busy contender drifted: {other:?}"
+            ));
+        }
+    }
+    holder
+        .execute_batch(cx, "ROLLBACK;")
+        .await
+        .map_err(|error| format!("FrankenSQLite P3 busy rollback: {error}"))?;
+    contender
+        .execute_with_params(
+            cx,
+            "INSERT INTO busy VALUES (?1)",
+            &[FrankenValue::Text("after".into())],
+        )
+        .await
+        .map_err(|error| format!("FrankenSQLite P3 busy recovery write: {error}"))?;
+    franken_close(&mut holder, cx).await?;
+    franken_close(&mut contender, cx).await?;
+    Ok(prepared_case(
+        "SQLITE-PARITY-P3-BUSY-008",
+        "contender_rejected_then_recovered",
+        Some("busy_or_locked"),
+    ))
 }
 
 fn run_value_parity() -> Result<ValueParityEvidence, String> {

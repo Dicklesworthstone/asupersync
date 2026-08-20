@@ -677,8 +677,34 @@
   },
   "phase3": {
     "bead_id": "asupersync-ym2wtv.2.3",
-    "status": "PASS_WITH_EXPLICIT_UNEXECUTED_CROSS_ENGINE_CELLS",
+    "status": "PASS_BOUNDED_COMMON_OBSERVABLE_MATRIX_WITH_EXPLICIT_DIFFERENCES_AND_UNSUPPORTED",
     "scope": "prepared_statement_bind_reset_cache_schema_invalid_use_busy_and_cleanup",
+    "consumer_source": {
+      "path": "tests/fixtures/sqlite-parity-consumer/src/main.rs",
+      "sha256": "58f61313cdbac5dfa9cdf40ed1d5bf0a8cc3c6f3de941e5316defdd140739b2c",
+      "line_count": 3310
+    },
+    "neutral_matrix": {
+      "matrix_id": "sqlite-neutral-prepared-statement-parity-v1",
+      "compared_cases": 7,
+      "case_ids": [
+        "SQLITE-PARITY-P3-POSITIONAL-BIND-001",
+        "SQLITE-PARITY-P3-NAMED-BIND-002",
+        "SQLITE-PARITY-P3-RESET-CACHE-HIT-003",
+        "SQLITE-PARITY-P3-SCHEMA-CHANGE-005",
+        "SQLITE-PARITY-P3-INVALID-USE-006",
+        "SQLITE-PARITY-P3-FINALIZE-CANCEL-007",
+        "SQLITE-PARITY-P3-BUSY-008"
+      ],
+      "normalization": {
+        "bindings": "Compare successful positional and named-placeholder execution through each engine's public positional value slice.",
+        "reuse": "Compare A/B/missing/A results without claiming equivalent private statement caches or cache telemetry.",
+        "invalid_use": "Compare malformed SQL and too-few binding rejection; preserve the observed surplus-binding difference as an explicit non-equivalent row.",
+        "cancellation": "Compare pre-cancelled no-mutation and same-connection reuse; retain Asupersync row-stream finalization as native-only evidence.",
+        "busy": "Execute lock contention directly for Asupersync and in a kill-and-reap child process for FrankenSQLite so a non-returning call is a bounded observation rather than a hung proof lane.",
+        "quiescence": "Close ordinary connections and require both parent runtimes to terminate with zero pending, busy, or active blocking work. A timed-out busy child is killed and reaped; no child-connection cleanup claim is made."
+      }
+    },
     "coverage_matrix": [
       {
         "id": "SQLITE-PARITY-P3-POSITIONAL-BIND-001",
@@ -692,8 +718,8 @@
           "quoted_and_multiline_text_is_bound_not_interpolated",
           "connection_closes_on_drop"
         ],
-        "frankensqlite_status": "NOT_YET_EXECUTED_IN_PINNED_P3_NEUTRAL_ADAPTER",
-        "frankensqlite_reason": "The retained neutral consumer executes only P2 lifecycle vectors; it has not yet added a prepared-statement value adapter for the pinned release."
+        "frankensqlite_status": "PASS",
+        "frankensqlite_evidence": "SQLITE-PARITY-P3-POSITIONAL-BIND-001"
       },
       {
         "id": "SQLITE-PARITY-P3-NAMED-BIND-002",
@@ -707,8 +733,8 @@
           "public_positional_value_slice_binds_in_sqlite_parameter_index_order",
           "no_named_value_map_api_is_claimed"
         ],
-        "frankensqlite_status": "NOT_YET_EXECUTED_IN_PINNED_P3_NEUTRAL_ADAPTER",
-        "frankensqlite_reason": "Named-placeholder behavior has not been executed through the pinned neutral adapter, so no equivalence claim is made."
+        "frankensqlite_status": "PASS",
+        "frankensqlite_evidence": "SQLITE-PARITY-P3-NAMED-BIND-002"
       },
       {
         "id": "SQLITE-PARITY-P3-RESET-CACHE-HIT-003",
@@ -723,8 +749,9 @@
           "new_parameters_replace_old_bindings",
           "row_step_state_does_not_leak_between_calls"
         ],
-        "frankensqlite_status": "NOT_YET_EXECUTED_IN_PINNED_P3_NEUTRAL_ADAPTER",
-        "frankensqlite_reason": "The pinned neutral adapter has no P3 cache-hit receipt and does not expose cache telemetry through its current adapter surface."
+        "frankensqlite_status": "PASS_OBSERVABLE_EXECUTION_ONLY",
+        "frankensqlite_evidence": "SQLITE-PARITY-P3-RESET-CACHE-HIT-003",
+        "frankensqlite_reason": "The A/B/missing/A sequence is equal, but the pinned async surface exposes no cache telemetry, so only repeated observable execution is compared."
       },
       {
         "id": "SQLITE-PARITY-P3-CACHE-EVICTION-004",
@@ -754,8 +781,8 @@
           "schema_rebuild_does_not_return_stale_row_shape_or_value",
           "connection_remains_reusable"
         ],
-        "frankensqlite_status": "NOT_YET_EXECUTED_IN_PINNED_P3_NEUTRAL_ADAPTER",
-        "frankensqlite_reason": "Schema-change prepared-statement behavior has not been executed by the pinned P2-only neutral adapter."
+        "frankensqlite_status": "PASS",
+        "frankensqlite_evidence": "SQLITE-PARITY-P3-SCHEMA-CHANGE-005"
       },
       {
         "id": "SQLITE-PARITY-P3-INVALID-USE-006",
@@ -766,11 +793,17 @@
         ],
         "required_observations": [
           "malformed_prepare_returns_typed_sqlite_error",
-          "too_few_and_too_many_parameters_return_typed_sqlite_errors",
+          "too_few_parameters_return_typed_sqlite_error",
+          "asupersync_rejects_surplus_parameters_while_pinned_frankensqlite_accepts_and_ignores_them",
           "failed_statements_release_state_and_connection_recovers"
         ],
-        "frankensqlite_status": "NOT_YET_EXECUTED_IN_PINNED_P3_NEUTRAL_ADAPTER",
-        "frankensqlite_reason": "The pinned neutral adapter does not yet normalize FrankenSQLite malformed-SQL or arity errors into P3 rows."
+        "frankensqlite_status": "PASS_WITH_EXPLICIT_SURPLUS_PARAMETER_DIFFERENCE",
+        "frankensqlite_evidence": "SQLITE-PARITY-P3-INVALID-USE-006",
+        "intentional_difference": {
+          "boundary": "surplus_parameter_binding",
+          "asupersync": "typed_sql_rejection",
+          "frankensqlite": "accepts_and_ignores_surplus_parameter"
+        }
       },
       {
         "id": "SQLITE-PARITY-P3-FINALIZE-CANCEL-007",
@@ -785,8 +818,9 @@
           "pre_cancelled_execute_does_not_mutate_database",
           "connection_is_reusable_after_drop_and_cancel"
         ],
-        "frankensqlite_status": "NO_COMMON_PUBLIC_ROW_STREAM_BOUNDARY",
-        "frankensqlite_reason": "The pinned neutral AsyncConnection adapter does not expose the row-stream drop surface needed for a neutral finalize vector."
+        "frankensqlite_status": "PASS_PRE_CANCEL_ONLY_NO_ROW_STREAM_BOUNDARY",
+        "frankensqlite_evidence": "SQLITE-PARITY-P3-FINALIZE-CANCEL-007",
+        "frankensqlite_reason": "Pre-cancelled no-mutation and reuse are executable and equal. The pinned AsyncConnection materializes Vec<Row> and exposes no public partial row-stream drop boundary."
       },
       {
         "id": "SQLITE-PARITY-P3-BUSY-008",
@@ -800,8 +834,8 @@
           "blocked_statement_returns_typed_sqlite_busy_or_locked_error",
           "holder_transaction_rolls_back"
         ],
-        "frankensqlite_status": "NOT_YET_EXECUTED_IN_PINNED_P3_NEUTRAL_ADAPTER",
-        "frankensqlite_reason": "The pinned P2-only neutral adapter has no P3 two-connection busy-state vector."
+        "frankensqlite_status": "BOUNDED_WATCHDOG_TIMEOUT",
+        "frankensqlite_reason": "With PRAGMA busy_timeout=0, the pinned async write did not return within five seconds. The neutral consumer killed and reaped the isolated child and makes no typed-error, reuse, or child-connection cleanup claim."
       }
     ],
     "verification": {
@@ -824,12 +858,37 @@
         "passed": 5,
         "failed": 0,
         "scope": "capacity-one cache reuse eviction reprepare test"
+      },
+      "neutral_cross_engine_execution": {
+        "status": "PASS",
+        "rch_job": "j-29984462414544930",
+        "worker": "hz1",
+        "base": "dcfb01cfa8d3916552002d6837b9acedc7ced116",
+        "overlay_fingerprint": "a7da9decd26af4e4eb7bdced14b9e84899719cde6e2dbca340ad37437e2bd82f",
+        "overlay_paths": [
+          "tests/fixtures/sqlite-parity-consumer/src/main.rs"
+        ],
+        "remote_exit_code": 0,
+        "remote_command_elapsed_ms": 591644,
+        "command": "RCH_REQUIRE_REMOTE=1 RCH_WORKER=hz1 rch exec --base dcfb01cfa8d3916552002d6837b9acedc7ced116 --clean-overlay --overlay-path tests/fixtures/sqlite-parity-consumer/src/main.rs -- env ASUPERSYNC_SOURCE_REVISION=dcfb01cfa8d3916552002d6837b9acedc7ced116 SQLITE_PARITY_TARGET=x86_64-unknown-linux-gnu SQLITE_PARITY_HOST=linux-x86_64-rch-worker CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo run -j 2 --locked --manifest-path tests/fixtures/sqlite-parity-consumer/Cargo.toml",
+        "evidence_summary": {
+          "matrix_id": "sqlite-neutral-prepared-statement-parity-v1",
+          "compared_cases": 7,
+          "mismatches": [],
+          "intentional_difference_count": 2,
+          "unsupported_count": 2,
+          "asupersync_runtime_quiescent": true,
+          "frankensqlite_parent_runtime_quiescent": true,
+          "frankensqlite_busy_child_cleanup": "killed_and_reaped_after_5s_watchdog"
+        }
       }
     },
     "no_claims": [
       "Asupersync uses a positional SqliteValue slice even when SQL contains named placeholders; no named value-map API is claimed.",
       "The cache-capacity row proves adapter behavior under the configured rusqlite cache; it does not make rusqlite internals normative for another engine.",
-      "Unexecuted or unsupported FrankenSQLite cells remain non-PASS and keep full P3 cross-engine parity open.",
+      "FrankenSQLite async cache capacity and telemetry, and partial row-stream finalization, remain unsupported rather than being inferred from successful query results.",
+      "The surplus-parameter and bounded busy-timeout rows are intentional observed differences, not parity claims or reasons to weaken Asupersync's fail-closed behavior.",
+      "Killing and reaping the isolated busy child bounds the proof process; it does not prove that the child connection cleaned up cooperatively.",
       "This phase does not authorize dependency cutover or public API removal."
     ]
   },
@@ -839,8 +898,8 @@
     "scope": "deferred_immediate_exclusive_savepoint_constraint_rollback_reuse_and_quiescence",
     "consumer_source": {
       "path": "tests/fixtures/sqlite-parity-consumer/src/main.rs",
-      "sha256": "9c98e783066afde3fc2df3b55d3cfd86de4365f796f22d44523c87617008ea64",
-      "line_count": 2328
+      "sha256": "58f61313cdbac5dfa9cdf40ed1d5bf0a8cc3c6f3de941e5316defdd140739b2c",
+      "line_count": 3310
     },
     "neutral_matrix": {
       "matrix_id": "sqlite-neutral-transaction-parity-v1",
@@ -945,7 +1004,7 @@
           "busy_timeout_produces_lock_error_under_write_contention",
           "both neutral runtimes terminate with zero pending busy and active blocking work"
         ],
-        "no_claim": "The deterministic two-connection busy test is Asupersync authority; the neutral common matrix uses constraint conflict because the pinned FrankenSQLite write-lock attempt can wait without a public bounded busy-timeout witness."
+        "no_claim": "The deterministic two-connection busy test is Asupersync typed-error authority. The P3 neutral matrix bounds the pinned FrankenSQLite non-returning write-lock attempt with an external five-second kill-and-reap watchdog; that is not a public busy-timeout or cooperative-cleanup claim."
       }
     ],
     "execution": {
@@ -1082,7 +1141,7 @@
       ]
     },
     "no_claims": [
-      "The neutral matrix uses a deterministic constraint conflict; the separate P3 busy test remains the authority for two-connection lock contention.",
+      "The neutral transaction matrix uses a deterministic constraint conflict. P3 separately proves Asupersync typed busy cleanup and records the pinned FrankenSQLite write-lock call's bounded watchdog timeout without relabeling it as parity.",
       "The pinned FrankenSQLite adapter does not expose an equivalent closure-based cancellation hook, so native cancellation evidence is not relabeled as cross-engine parity.",
       "This bounded matrix does not claim every drop, panic, timeout, pool, or concurrency schedule is equivalent.",
       "This phase does not authorize dependency cutover or public API removal."
@@ -1271,8 +1330,8 @@
     "scope": "null_integer_real_text_blob_owned_rows_conversion_and_large_value_profile",
     "consumer_source": {
       "path": "tests/fixtures/sqlite-parity-consumer/src/main.rs",
-      "sha256": "9c98e783066afde3fc2df3b55d3cfd86de4365f796f22d44523c87617008ea64",
-      "line_count": 2328
+      "sha256": "58f61313cdbac5dfa9cdf40ed1d5bf0a8cc3c6f3de941e5316defdd140739b2c",
+      "line_count": 3310
     },
     "neutral_matrix": {
       "matrix_id": "sqlite-neutral-value-row-parity-v1",

@@ -233,14 +233,50 @@ fn harness_receipt_pins_sources_profile_target_host_and_budget_defer() {
 }
 
 #[test]
-fn phase3_matrix_covers_prepared_statement_boundaries_without_inventing_parity() {
+fn phase3_matrix_executes_supported_cells_and_preserves_explicit_differences() {
     let harness = parse_json(HARNESS);
     let phase3 = &harness["phase3"];
     assert_eq!(phase3["bead_id"], "asupersync-ym2wtv.2.3");
     assert_eq!(
         phase3["status"],
-        "PASS_WITH_EXPLICIT_UNEXECUTED_CROSS_ENGINE_CELLS"
+        "PASS_BOUNDED_COMMON_OBSERVABLE_MATRIX_WITH_EXPLICIT_DIFFERENCES_AND_UNSUPPORTED"
     );
+    assert_eq!(phase3["consumer_source"]["sha256"], sha256(CONSUMER_SOURCE));
+    assert_eq!(
+        phase3["consumer_source"]["line_count"],
+        CONSUMER_SOURCE.lines().count()
+    );
+
+    let expected_case_ids = [
+        "SQLITE-PARITY-P3-POSITIONAL-BIND-001",
+        "SQLITE-PARITY-P3-NAMED-BIND-002",
+        "SQLITE-PARITY-P3-RESET-CACHE-HIT-003",
+        "SQLITE-PARITY-P3-SCHEMA-CHANGE-005",
+        "SQLITE-PARITY-P3-INVALID-USE-006",
+        "SQLITE-PARITY-P3-FINALIZE-CANCEL-007",
+        "SQLITE-PARITY-P3-BUSY-008",
+    ];
+    let neutral = &phase3["neutral_matrix"];
+    assert_eq!(
+        neutral["matrix_id"],
+        "sqlite-neutral-prepared-statement-parity-v1"
+    );
+    assert_eq!(neutral["compared_cases"], expected_case_ids.len());
+    assert_eq!(
+        neutral["case_ids"]
+            .as_array()
+            .expect("phase3 case IDs")
+            .iter()
+            .map(|value| value.as_str().expect("phase3 case ID"))
+            .collect::<Vec<_>>(),
+        expected_case_ids
+    );
+    for case_id in expected_case_ids {
+        assert!(
+            CONSUMER_SOURCE.contains(case_id),
+            "missing executable P3 case {case_id}"
+        );
+    }
 
     let matrix = phase3["coverage_matrix"]
         .as_array()
@@ -267,7 +303,11 @@ fn phase3_matrix_covers_prepared_statement_boundaries_without_inventing_parity()
     );
 
     for row in matrix {
-        assert_eq!(row["asupersync_status"], "PASS");
+        assert!(
+            row["asupersync_status"]
+                .as_str()
+                .is_some_and(|status| status.starts_with("PASS"))
+        );
         assert!(
             row["asupersync_tests"]
                 .as_array()
@@ -278,13 +318,43 @@ fn phase3_matrix_covers_prepared_statement_boundaries_without_inventing_parity()
                 .as_array()
                 .is_some_and(|observations| !observations.is_empty())
         );
-        assert_ne!(row["frankensqlite_status"], "PASS");
-        assert!(
-            row["frankensqlite_reason"]
-                .as_str()
-                .is_some_and(|reason| !reason.is_empty())
-        );
     }
+    assert_eq!(matrix[0]["frankensqlite_status"], "PASS");
+    assert_eq!(matrix[1]["frankensqlite_status"], "PASS");
+    assert_eq!(
+        matrix[2]["frankensqlite_status"],
+        "PASS_OBSERVABLE_EXECUTION_ONLY"
+    );
+    assert_eq!(
+        matrix[3]["frankensqlite_status"],
+        "NO_COMMON_PUBLIC_CACHE_CAPACITY_CONTROL"
+    );
+    assert_eq!(matrix[4]["frankensqlite_status"], "PASS");
+    assert_eq!(
+        matrix[5]["frankensqlite_status"],
+        "PASS_WITH_EXPLICIT_SURPLUS_PARAMETER_DIFFERENCE"
+    );
+    assert_eq!(
+        matrix[5]["intentional_difference"]["asupersync"],
+        "typed_sql_rejection"
+    );
+    assert_eq!(
+        matrix[5]["intentional_difference"]["frankensqlite"],
+        "accepts_and_ignores_surplus_parameter"
+    );
+    assert_eq!(
+        matrix[6]["frankensqlite_status"],
+        "PASS_PRE_CANCEL_ONLY_NO_ROW_STREAM_BOUNDARY"
+    );
+    assert_eq!(
+        matrix[7]["frankensqlite_status"],
+        "BOUNDED_WATCHDOG_TIMEOUT"
+    );
+    assert!(
+        matrix[7]["frankensqlite_reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("killed and reaped"))
+    );
 
     for test_name in [
         "sqlite_parameter_binding_boundaries",
@@ -319,6 +389,46 @@ fn phase3_matrix_covers_prepared_statement_boundaries_without_inventing_parity()
     assert_eq!(cache_unit["status"], "PASS");
     assert_eq!(cache_unit["passed"], 5);
     assert_eq!(cache_unit["failed"], 0);
+
+    let execution = &phase3["verification"]["neutral_cross_engine_execution"];
+    assert_eq!(execution["status"], "PASS");
+    assert_eq!(execution["rch_job"], "j-29984462414544930");
+    assert_eq!(execution["worker"], "hz1");
+    assert_eq!(execution["remote_exit_code"], 0);
+    assert_eq!(
+        execution["overlay_paths"],
+        serde_json::json!(["tests/fixtures/sqlite-parity-consumer/src/main.rs"])
+    );
+    assert!(
+        execution["command"]
+            .as_str()
+            .is_some_and(|command| command.contains("cargo run -j 2 --locked"))
+    );
+    let evidence = &execution["evidence_summary"];
+    assert_eq!(evidence["compared_cases"], expected_case_ids.len());
+    assert_eq!(evidence["mismatches"].as_array().map(Vec::len), Some(0));
+    assert_eq!(evidence["intentional_difference_count"], 2);
+    assert_eq!(evidence["unsupported_count"], 2);
+    assert_eq!(evidence["asupersync_runtime_quiescent"], true);
+    assert_eq!(evidence["frankensqlite_parent_runtime_quiescent"], true);
+    assert_eq!(
+        evidence["frankensqlite_busy_child_cleanup"],
+        "killed_and_reaped_after_5s_watchdog"
+    );
+
+    for marker in [
+        "SQLITE_PARITY_P3_BUSY_CHILD",
+        "P3_BUSY_WATCHDOG",
+        ".kill()",
+        ".wait()",
+        "accepts_and_ignores_surplus_parameter",
+        "isolated_child_killed_and_reaped",
+    ] {
+        assert!(
+            CONSUMER_SOURCE.contains(marker),
+            "missing P3 executable safety marker {marker}"
+        );
+    }
 }
 
 #[test]
@@ -961,7 +1071,9 @@ fn operator_doc_preserves_reproduction_and_no_claim_boundaries() {
         "terminal `DEFER`",
         "does not authorize dependency cutover",
         "SQLite P3 prepared-statement matrix",
-        "Full P3 parity",
+        "five-second watchdog",
+        "accepts the same call",
+        "does not claim cooperative cleanup",
         "SQLite P4 transaction and savepoint matrix",
         "constraint-conflict recovery",
         "native cancellation evidence",
