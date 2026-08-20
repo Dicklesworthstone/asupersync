@@ -1,27 +1,33 @@
 //! Scope API for spawning work within a region.
 //!
-//! A `Scope` provides the API for spawning tasks, creating child regions,
-//! and registering finalizers.
+//! A `Scope` is the legacy state-threaded surface for registering movable
+//! tasks, creating child regions, and registering finalizers. Runtime-wired
+//! application code normally spawns through [`Cx`] instead.
 //!
-//! # Execution Tiers and Soundness Rules
+//! # Choosing a Spawn Surface
 //!
-//! Asupersync defines two execution tiers with different constraints:
+//! Asupersync exposes three related paths with deliberately different bounds:
 //!
-//! ## Fiber Tier (Phase 0)
+//! | Path | Factory and future | Placement | Typical use |
+//! |------|--------------------|-----------|-------------|
+//! | [`Cx::spawn`] / [`Cx::spawn_in`] | `Send + 'static` | movable, stealable task | runtime-wired parallel work |
+//! | [`Cx::spawn_local`] / [`Cx::spawn_local_in`] | `'static`, but not necessarily `Send` | pinned to the calling owner worker | `Rc`, `RefCell`, and other `!Send` state |
+//! | [`Scope::spawn_registered`] | `Send + 'static` | legacy state-threaded movable task | synchronous boot and test paths |
 //!
-//! - Single-thread, borrow-friendly execution
-//! - Can capture borrowed references (`&T`) since no migration
-//! - Implemented via [`Cx::spawn_local`] (currently requires Send bounds; relaxed in Phase 1+)
+//! Local spawning is thread-local, not borrow-scoped. Its factory and future
+//! do **not** require `Send`, but they still require `'static`; stack borrows
+//! cannot escape into a spawned task. The call must run on the context's owner
+//! runtime worker. Off-worker calls, including calls under the lab runtime and
+//! blocking-pool threads, fail with
+//! [`SpawnError::LocalSchedulerUnavailable`](crate::runtime::SpawnError::LocalSchedulerUnavailable).
+//! A local task is stored on that worker and scheduled through a non-stealable
+//! queue, while its output remains `Send + 'static` because the join handle may
+//! be awaited from another thread.
 //!
-//! ## Task Tier (Phase 1+)
+//! # Soundness Rules for Movable Tasks
 //!
-//! - Multi-threaded, `Send` tasks that may migrate across workers
-//! - **Must capture only `Send + 'static` data** by construction
-//! - Can reference region-owned data via [`RRef<T>`](crate::types::rref::RRef)
-//!
-//! # Soundness Rules for Send Tasks
-//!
-//! The state-threaded boot path enforces the following bounds:
+//! [`Scope::spawn_registered`], [`Cx::spawn`], and [`Cx::spawn_in`] enforce the
+//! following bounds:
 //!
 //! | Component | Bound | Rationale |
 //! |-----------|-------|-----------|
@@ -68,7 +74,8 @@
 //!
 //! ```compile_fail
 //! use std::rc::Rc;
-//! use asupersync::cx::Scope;
+//! use asupersync::cx::{Cx, Scope};
+//! use asupersync::runtime::RuntimeState;
 //!
 //! fn try_capture_rc(scope: &Scope, state: &mut RuntimeState, cx: &Cx) {
 //!     let rc = Rc::new(42); // Rc is !Send
@@ -79,7 +86,8 @@
 //! ```
 //!
 //! ```compile_fail
-//! use asupersync::cx::Scope;
+//! use asupersync::cx::{Cx, Scope};
+//! use asupersync::runtime::RuntimeState;
 //!
 //! fn try_capture_borrow(scope: &Scope, state: &mut RuntimeState, cx: &Cx) {
 //!     let local = 42;
@@ -92,9 +100,12 @@
 //!
 //! # Lab Runtime Compatibility
 //!
-//! The Send bounds do not affect lab runtime determinism. The lab runtime
-//! simulates multi-worker scheduling deterministically (same seed = same
-//! execution), regardless of whether tasks are actually migrated.
+//! The state-threaded movable-task path remains deterministic under the lab
+//! runtime. [`Cx::spawn_local`] is different: it requires a native owner-worker
+//! lane and therefore fails closed with `LocalSchedulerUnavailable` under the
+//! lab runtime. Do not replace a movable spawn with `spawn_local` merely to make
+//! a test accept a `!Send` future; choose a native owner-worker test when local
+//! placement is part of the behavior under test.
 
 use crate::combinator::{Either, Select};
 use crate::cx::{Cx, cap};

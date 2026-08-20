@@ -141,6 +141,37 @@ fn read(rel: &str) -> String {
 }
 
 #[test]
+fn scope_module_docs_match_the_worker_local_spawn_contract() {
+    let source = read("src/cx/scope.rs");
+    let docs = source
+        .split_once("\nuse crate::")
+        .map_or(source.as_str(), |(docs, _)| docs);
+
+    for stale_claim in [
+        "currently requires Send bounds",
+        "Can capture borrowed references (`&T`) since no migration",
+    ] {
+        assert!(
+            !docs.contains(stale_claim),
+            "REGRESSION: Scope module docs restored stale spawn_local claim: {stale_claim}"
+        );
+    }
+
+    for required_contract in [
+        "do **not** require `Send`",
+        "they still require `'static`",
+        "context's owner",
+        "LocalSchedulerUnavailable",
+        "non-stealable",
+    ] {
+        assert!(
+            docs.contains(required_contract),
+            "REGRESSION: Scope module docs omit worker-local contract: {required_contract}"
+        );
+    }
+}
+
+#[test]
 fn spawn_local_accepts_both_send_and_non_send_via_no_send_bound() {
     // Pin (link 1+2): spawn_local has NO Send bound on F or
     // Fut. This is what makes it the !Send escape hatch
