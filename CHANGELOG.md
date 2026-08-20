@@ -56,37 +56,39 @@ GitHub Release/tag baseline is `v0.4.8`.
 
 ## [Unreleased]
 
-### Runtime API
+### Runtime API and correctness
 
 - **Cloned runtime handles can now mint production request contexts.**
-  `RuntimeHandle::request_cx_with_budget` and the fallible
-  `try_request_cx_with_budget` are additive counterparts to the established
-  `Runtime` method. The resulting `Cx` retains the request budget, root region,
-  I/O and timer drivers, spawn gateway, and pending-spawn accounting. A weak
-  handle whose runtime has already gone away fails closed with
+  `RuntimeHandle::request_cx_with_budget` and the fallible counterpart are
+  additive to the established `Runtime` method. The resulting `Cx` retains the
+  request budget, root region, I/O/timer drivers, spawn gateway, and pending-spawn
+  accounting. A weak handle whose runtime has gone away fails closed with
   `SpawnError::RuntimeUnavailable` instead of manufacturing authority
   ([`04a4914`](https://github.com/Dicklesworthstone/asupersync/commit/04a4914afff4b131bba82760e17d1fbd4dcc53c3)).
 - **Embedders can attach their own blocking pool to a request context.**
-  `Cx::with_blocking_pool_handle` is now public, allowing an embedding
-  application that already owns a `BlockingPoolHandle` to route
-  `spawn_blocking` through that pool. Without an attached pool, an explicit or
-  current `Cx` runs the blocking closure inline on its polling thread; only the
-  free `runtime::spawn_blocking` helper with no ambient `Cx` uses the bounded
-  dedicated-thread fallback. This is an authority-preserving additive API: it
-  does not create a pool or install global state; passing `None` detaches the
-  pool
+  Public `Cx::with_blocking_pool_handle` lets an embedder route `spawn_blocking`
+  through its existing `BlockingPoolHandle`. Without one, an explicit/current
+  `Cx` runs the closure inline; only free `runtime::spawn_blocking` with no
+  ambient `Cx` uses the bounded dedicated-thread fallback. This additive API
+  creates no pool or global state; `None` detaches the pool
   ([`a4b16b4`](https://github.com/Dicklesworthstone/asupersync/commit/a4b16b4e090066cc8b61d2d97ba849a29c114ef1)).
+- **Actor and GenServer hot mailboxes now yield after each bounded batch.** Fully ready normal and shutdown-drain loops call `yield_now` after eight messages;
+  single-poll regressions stop at eight. This internal repair changes no public
+  signature and does not prove whole-runtime fairness or a throughput gain
+  ([`05e6d06`](https://github.com/Dicklesworthstone/asupersync/commit/05e6d06c7c96255461081a10dd75d41e499a0f70)).
+- **Extreme exponential restart backoff now saturates instead of panicking.** Its fallible duration conversion clamps or falls back to the configured maximum,
+  including `Duration::MAX` at `u32::MAX`; the public strategy shape is unchanged
+  ([`1127d64`](https://github.com/Dicklesworthstone/asupersync/commit/1127d64d300a2a52524b7bb4870c7a521f7d55aa)).
 
 ### OpenTelemetry export
 
 - **OTLP/HTTP configuration is validated before export work begins.** The
-  additive immutable `OtlpHttpConfig` builder validates bounded absolute
-  HTTP(S) endpoints, TLS/root-provider availability, secret and reserved
-  headers, timeouts, retry limits and backoff, compression support, and
-  resource attributes. Core configuration performs no ambient environment
-  reads; authorization values remain inaccessible and redacted, redirects,
-  cookies, and client-internal retries are disabled, and the exporter's own
-  retries remain bounded by the caller's `Cx`, deadline, and budget
+  additive immutable `OtlpHttpConfig` builder validates bounded absolute HTTP(S)
+  endpoints, TLS/root-provider availability, headers, timeouts, retry/backoff,
+  compression, and resource attributes. Core configuration performs no ambient
+  environment reads; secrets remain inaccessible/redacted; redirects, cookies,
+  and client-internal retries are disabled; exporter retries remain bounded by
+  the caller's `Cx`, deadline, and budget
   ([`d0303fd`](https://github.com/Dicklesworthstone/asupersync/commit/d0303fdebac717ee8fb3f09f32ce3dd88e5ae059)).
 - **Metrics can be exported through a finite, owned OTLP pipeline.**
   `OwnedOtlpMetrics` maps all 23 fixed `MetricsProvider` instruments into
@@ -153,10 +155,13 @@ GitHub Release/tag baseline is `v0.4.8`.
   binding order, malformed and incorrect arity cleanup, reset and reuse,
   capacity-one eviction and re-prepare, schema invalidation, dropped or
   pre-cancelled row streams, busy-state cleanup, and terminal pool quiescence
-  ([`b19079a`](https://github.com/Dicklesworthstone/asupersync/commit/b19079adf8d0fbb7b6ee34db353f52408d86e903)).
-  This is strengthened Asupersync boundary coverage, not a claim of full
-  prepared-statement parity with FrankenSQLite; the corresponding
-  neutral-consumer parity work remains open.
+  ([`b19079a`](https://github.com/Dicklesworthstone/asupersync/commit/b19079adf8d0fbb7b6ee34db353f52408d86e903),
+  [`eacfba3`](https://github.com/Dicklesworthstone/asupersync/commit/eacfba37a226551b07f1acc6d792f5750af6fead)).
+  The neutral consumer now executes seven public-surface cases on both pinned engines, bounded to binding, repeated execution, schema refresh,
+  malformed/too-few binds, and pre-cancelled no-mutation/reuse. Surplus binds
+  and busy-lock behavior are explicit differences; private cache telemetry and
+  partial row-stream finalization remain unsupported, and the pinned P3 matrix
+  closure authorizes neither dependency cutover nor API removal.
 - **Transaction helpers now await helper-owned rollback before returning a
   cancelled or failed body outcome.** `with_sqlite_transaction` and its
   immediate variant poll rollback to a terminal outcome inside a bounded
@@ -215,23 +220,18 @@ GitHub Release/tag baseline is `v0.4.8`.
 ### Maintenance
 
 - **Compatibility guidance now matches the behavior that actually ships.**
-  MySQL's legacy compatibility fields are documented and tested not to enable
-  the insecure `mysql_native_password` plugin, which remains rejected;
-  `spawn_local` documentation now requires a native-runtime owner-worker local
-  lane and distinguishes it from ordinary `Send` spawning; and the Tokio
-  compatibility crate now states precisely that it installs an Asupersync
-  `Cx`, not a Tokio runtime or `Handle`. Tokio-dependent libraries that require
-  `Handle::current()` must remain behind an independently owned Tokio runtime
-  island; the provided Hyper, Tower, and I/O surfaces are explicit
-  trait/component bridges. These are documentation and regression-contract
-  corrections, not new removals or behavior breaks
+  MySQL legacy fields do not enable rejected `mysql_native_password`;
+  `spawn_local` requires a native owner-worker local lane, unlike `Send`
+  spawning; and the compatibility crate installs an Asupersync `Cx`, not a
+  Tokio runtime or `Handle`. Libraries requiring `Handle::current()` need an
+  independently owned Tokio island; Hyper, Tower, and I/O remain explicit
+  component bridges. These are contract corrections, not removals or breaks
   ([`860fa00`](https://github.com/Dicklesworthstone/asupersync/commit/860fa00e5),
   [`506fce0`](https://github.com/Dicklesworthstone/asupersync/commit/506fce04d),
   [`4fb2ba0`](https://github.com/Dicklesworthstone/asupersync/commit/4fb2ba0f9)).
 - **Strict all-feature lint and documentation frontiers were repaired.** The
-  post-v0.4.8 tree removes the remaining all-feature Clippy and rustdoc-link
-  blockers, including the MySQL context link, without intentional runtime
-  behavior changes
+  remaining Clippy and rustdoc-link blockers, including the MySQL context link,
+  are gone without intentional runtime behavior changes
   ([`b809ce7`](https://github.com/Dicklesworthstone/asupersync/commit/b809ce7e237d5701ed06e58b16556111efd25c5a),
   [`1aec733`](https://github.com/Dicklesworthstone/asupersync/commit/1aec733e31a7f7cccaa2f204f1555ba426385edd),
   [`0a646d4`](https://github.com/Dicklesworthstone/asupersync/commit/0a646d4f5b03b12026adb86050084c2b89a73438)).
