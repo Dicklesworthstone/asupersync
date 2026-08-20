@@ -426,6 +426,17 @@ fn main() {
     }
 }
 
+#[cfg(test)]
+#[test]
+fn sqlite_parity_aggregate() {
+    if std::env::var_os(P3_BUSY_CHILD_ENV).is_some() {
+        run_frankensqlite_busy_child().expect("SQLite P3 busy child");
+        return;
+    }
+
+    run().expect("SQLite parity aggregate");
+}
+
 fn run() -> Result<(), String> {
     let suite: VectorSuite =
         serde_json::from_str(VECTOR_JSON).map_err(|error| format!("parse vectors: {error}"))?;

@@ -64,6 +64,8 @@ Cargo-backed scenarios require:
   RCH_REQUIRE_REMOTE=1 bash scripts/run_dependency_sovereignty_e2e.sh \
     --scenario aggregate-signoff-contract
   RCH_REQUIRE_REMOTE=1 bash scripts/run_dependency_sovereignty_e2e.sh \
+    --scenario sqlite-parity-aggregate
+  RCH_REQUIRE_REMOTE=1 bash scripts/run_dependency_sovereignty_e2e.sh \
     --scenario api-adr-registry-contract
   RCH_REQUIRE_REMOTE=1 bash scripts/run_dependency_sovereignty_e2e.sh \
     --scenario api-adr-phase3-signoff
@@ -98,6 +100,7 @@ scenario_ids() {
         real-service-fixture-contract \
         feature-platform-consumer-contract \
         aggregate-signoff-contract \
+        sqlite-parity-aggregate \
         api-adr-registry-contract \
         api-adr-phase3-signoff \
         atp_version_artifacts \
@@ -114,7 +117,7 @@ scenario_ids() {
 
 scenario_is_known() {
     case "$1" in
-        catalog | runner-contract | registry-contract | baseline-contract | cutover-policy-contract | verification-matrix-contract | failure-injection-contract | real-service-fixture-contract | feature-platform-consumer-contract | aggregate-signoff-contract | api-adr-registry-contract | api-adr-phase3-signoff | atp_version_artifacts | dep-sovereignty-asupersync_d24mms_11_d22341de8339 | dep-sovereignty-asupersync_d24mms_4_b6e90e93b1e8 | dep-sovereignty-asupersync_5z2scg_3_5_66765b43947e | dep-sovereignty-asupersync_5z2scg_3_7_94b694387988 | lz4_trace_replay | lz4_cross_version_artifact | lz4_malformed_limits | dep-sovereignty-asupersync_0h6myr_4_5_04aaef97c5dd | dep-sovereignty-asupersync_dep_p4_nkeys_poc60v_1_3_5e81559b363d)
+        catalog | runner-contract | registry-contract | baseline-contract | cutover-policy-contract | verification-matrix-contract | failure-injection-contract | real-service-fixture-contract | feature-platform-consumer-contract | aggregate-signoff-contract | sqlite-parity-aggregate | api-adr-registry-contract | api-adr-phase3-signoff | atp_version_artifacts | dep-sovereignty-asupersync_d24mms_11_d22341de8339 | dep-sovereignty-asupersync_d24mms_4_b6e90e93b1e8 | dep-sovereignty-asupersync_5z2scg_3_5_66765b43947e | dep-sovereignty-asupersync_5z2scg_3_7_94b694387988 | lz4_trace_replay | lz4_cross_version_artifact | lz4_malformed_limits | dep-sovereignty-asupersync_0h6myr_4_5_04aaef97c5dd | dep-sovereignty-asupersync_dep_p4_nkeys_poc60v_1_3_5e81559b363d)
             return 0
             ;;
         *)
@@ -125,7 +128,7 @@ scenario_is_known() {
 
 scenario_is_cargo() {
     case "$1" in
-        registry-contract | baseline-contract | cutover-policy-contract | verification-matrix-contract | failure-injection-contract | real-service-fixture-contract | feature-platform-consumer-contract | aggregate-signoff-contract | api-adr-registry-contract | api-adr-phase3-signoff | atp_version_artifacts | dep-sovereignty-asupersync_d24mms_11_d22341de8339 | dep-sovereignty-asupersync_d24mms_4_b6e90e93b1e8 | dep-sovereignty-asupersync_5z2scg_3_5_66765b43947e | dep-sovereignty-asupersync_5z2scg_3_7_94b694387988 | lz4_trace_replay | lz4_cross_version_artifact | lz4_malformed_limits | dep-sovereignty-asupersync_0h6myr_4_5_04aaef97c5dd | dep-sovereignty-asupersync_dep_p4_nkeys_poc60v_1_3_5e81559b363d)
+        registry-contract | baseline-contract | cutover-policy-contract | verification-matrix-contract | failure-injection-contract | real-service-fixture-contract | feature-platform-consumer-contract | aggregate-signoff-contract | sqlite-parity-aggregate | api-adr-registry-contract | api-adr-phase3-signoff | atp_version_artifacts | dep-sovereignty-asupersync_d24mms_11_d22341de8339 | dep-sovereignty-asupersync_d24mms_4_b6e90e93b1e8 | dep-sovereignty-asupersync_5z2scg_3_5_66765b43947e | dep-sovereignty-asupersync_5z2scg_3_7_94b694387988 | lz4_trace_replay | lz4_cross_version_artifact | lz4_malformed_limits | dep-sovereignty-asupersync_0h6myr_4_5_04aaef97c5dd | dep-sovereignty-asupersync_dep_p4_nkeys_poc60v_1_3_5e81559b363d)
             return 0
             ;;
         *)
@@ -137,7 +140,7 @@ scenario_is_cargo() {
 scenario_surface() {
     case "$1" in
         catalog) printf 'audit' ;;
-        atp_version_artifacts | dep-sovereignty-asupersync_d24mms_11_d22341de8339 | dep-sovereignty-asupersync_d24mms_4_b6e90e93b1e8 | dep-sovereignty-asupersync_5z2scg_3_5_66765b43947e | dep-sovereignty-asupersync_5z2scg_3_7_94b694387988 | lz4_trace_replay | lz4_cross_version_artifact | lz4_malformed_limits | dep-sovereignty-asupersync_0h6myr_4_5_04aaef97c5dd | dep-sovereignty-asupersync_dep_p4_nkeys_poc60v_1_3_5e81559b363d) printf 'e2e' ;;
+        sqlite-parity-aggregate | atp_version_artifacts | dep-sovereignty-asupersync_d24mms_11_d22341de8339 | dep-sovereignty-asupersync_d24mms_4_b6e90e93b1e8 | dep-sovereignty-asupersync_5z2scg_3_5_66765b43947e | dep-sovereignty-asupersync_5z2scg_3_7_94b694387988 | lz4_trace_replay | lz4_cross_version_artifact | lz4_malformed_limits | dep-sovereignty-asupersync_0h6myr_4_5_04aaef97c5dd | dep-sovereignty-asupersync_dep_p4_nkeys_poc60v_1_3_5e81559b363d) printf 'e2e' ;;
         runner-contract | failure-injection-contract | real-service-fixture-contract | feature-platform-consumer-contract | aggregate-signoff-contract | api-adr-registry-contract | api-adr-phase3-signoff) printf 'contract' ;;
         *) printf 'integration' ;;
     esac
@@ -155,6 +158,7 @@ scenario_fixture() {
         real-service-fixture-contract) printf 'artifacts/dependency_real_service_fixture_matrix_v1.json' ;;
         feature-platform-consumer-contract) printf 'artifacts/dependency_feature_platform_consumer_matrix_v1.json' ;;
         aggregate-signoff-contract) printf 'artifacts/dependency_verification_final_signoff_v1.json' ;;
+        sqlite-parity-aggregate) printf 'tests/fixtures/sqlite-parity-consumer/Cargo.toml' ;;
         api-adr-registry-contract) printf 'artifacts/dependency_api_adr_registry_v1.json' ;;
         api-adr-phase3-signoff) printf 'artifacts/dependency_api_adr_phase3_signoff_v1.json' ;;
         atp_version_artifacts | dep-sovereignty-asupersync_d24mms_11_d22341de8339) printf 'tests/atp_cdc_deduplication.rs' ;;
@@ -173,6 +177,7 @@ scenario_profile() {
         catalog | runner-contract) printf 'contract-only' ;;
         feature-platform-consumer-contract) printf 'sparse-feature-platform-consumer' ;;
         aggregate-signoff-contract) printf 'aggregate-signoff' ;;
+        sqlite-parity-aggregate) printf 'sqlite-dual-engine-current' ;;
         atp_version_artifacts | dep-sovereignty-asupersync_d24mms_11_d22341de8339) printf 'atp-artifact-default' ;;
         dep-sovereignty-asupersync_d24mms_4_b6e90e93b1e8) printf 'current-cli-owned-formatter-keep' ;;
         dep-sovereignty-asupersync_5z2scg_3_5_66765b43947e) printf 'typed-format-terminal-keep' ;;
@@ -188,6 +193,9 @@ scenario_capabilities() {
     case "$1" in
         catalog | runner-contract | verification-matrix-contract | failure-injection-contract | real-service-fixture-contract | aggregate-signoff-contract)
             printf '["CAP-REAL-SERVICE-E2E","CAP-VERIFICATION-PROFILES"]'
+            ;;
+        sqlite-parity-aggregate)
+            printf '["CAP-SQLITE","CAP-DOWNSTREAM-CONSUMERS","CAP-REAL-SERVICE-E2E"]'
             ;;
         feature-platform-consumer-contract)
             printf '["CAP-DOWNSTREAM-CONSUMERS","CAP-PUBLIC-API-TOPOLOGY","CAP-REAL-SERVICE-E2E","CAP-VERIFICATION-PROFILES"]'
@@ -233,6 +241,9 @@ scenario_features() {
         atp_version_artifacts | dep-sovereignty-asupersync_d24mms_11_d22341de8339)
             printf '["default"]'
             ;;
+        sqlite-parity-aggregate)
+            printf '["sqlite"]'
+            ;;
         dep-sovereignty-asupersync_d24mms_4_b6e90e93b1e8)
             printf '["cli"]'
             ;;
@@ -260,6 +271,7 @@ scenario_evidence_owner() {
         real-service-fixture-contract) printf 'asupersync-dep-p1-foundations-upksjk.6.3' ;;
         feature-platform-consumer-contract) printf 'asupersync-dep-p1-foundations-upksjk.6.5' ;;
         aggregate-signoff-contract) printf 'asupersync-dep-p1-foundations-upksjk.6.6' ;;
+        sqlite-parity-aggregate) printf 'asupersync-ym2wtv.2.9' ;;
         api-adr-registry-contract) printf 'asupersync-dep-p3-api-adrs-h3jspm.3' ;;
         api-adr-phase3-signoff) printf 'asupersync-dep-p3-api-adrs-h3jspm.13' ;;
         atp_version_artifacts | dep-sovereignty-asupersync_d24mms_11_d22341de8339) printf 'asupersync-d24mms.11' ;;
@@ -279,6 +291,7 @@ scenario_step_id() {
         real-service-fixture-contract) printf 'ver-a3-real-service-fixture-contract' ;;
         feature-platform-consumer-contract) printf 'ver-a5-feature-platform-consumer-contract' ;;
         aggregate-signoff-contract) printf 'ver-a6-aggregate-signoff-contract' ;;
+        sqlite-parity-aggregate) printf 'sqlite-p9-aggregate-dual-engine' ;;
         api-adr-registry-contract) printf 'adr-003-api-adr-registry-contract' ;;
         api-adr-phase3-signoff) printf 'adr-013-api-adr-phase3-signoff' ;;
         atp_version_artifacts | dep-sovereignty-asupersync_d24mms_11_d22341de8339) printf 'd24mms-11-artifact-version-reassembly' ;;
@@ -326,6 +339,9 @@ scenario_command_display() {
             ;;
         aggregate-signoff-contract)
             printf '%s' "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --no-overlay -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=<isolated> cargo test -p asupersync --test dependency_verification_final_signoff_contract -- --nocapture"
+            ;;
+        sqlite-parity-aggregate)
+            printf '%s' "env -u CARGO_TARGET_DIR RCH_REQUIRE_REMOTE=1 RCH_BUILD_TIMEOUT_SEC=<scenario-timeout> RCH_TEST_TIMEOUT_SEC=<scenario-timeout> rch exec --base HEAD --clean-overlay --overlay-path tests/fixtures/sqlite-parity-consumer/src/main.rs -- env ASUPERSYNC_SOURCE_REVISION=<source-commit> SQLITE_PARITY_TARGET=x86_64-unknown-linux-gnu SQLITE_PARITY_HOST=linux-x86_64-rch-worker CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -j 3 --locked --manifest-path tests/fixtures/sqlite-parity-consumer/Cargo.toml --bin asupersync-sqlite-parity-consumer -- --nocapture --test-threads=1"
             ;;
         api-adr-registry-contract)
             printf '%s' "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --no-overlay -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=<isolated> cargo test -p asupersync --test dependency_api_adr_registry_contract -- --nocapture"
@@ -785,7 +801,7 @@ execute_scenario() {
             run_classifier_contract
             ;;
         registry-contract)
-            env RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --no-overlay -- \
+            env -u CARGO_TARGET_DIR RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --no-overlay -- \
                 env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 \
                 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR="$target_dir" \
                 cargo test -p asupersync --test dependency_capability_registry_contract -- --nocapture
@@ -831,6 +847,19 @@ execute_scenario() {
                 env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 \
                 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR="$target_dir" \
                 cargo test -p asupersync --test dependency_verification_final_signoff_contract -- --nocapture
+            ;;
+        sqlite-parity-aggregate)
+            env -u CARGO_TARGET_DIR RCH_REQUIRE_REMOTE=1 \
+                RCH_BUILD_TIMEOUT_SEC="$STEP_TIMEOUT" RCH_TEST_TIMEOUT_SEC="$STEP_TIMEOUT" \
+                rch exec --base HEAD --clean-overlay \
+                --overlay-path tests/fixtures/sqlite-parity-consumer/src/main.rs -- \
+                env ASUPERSYNC_SOURCE_REVISION="$SOURCE_REVISION" \
+                SQLITE_PARITY_TARGET=x86_64-unknown-linux-gnu \
+                SQLITE_PARITY_HOST=linux-x86_64-rch-worker \
+                CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 \
+                RUSTFLAGS='-D warnings -C debuginfo=0' \
+                cargo test -j 3 --locked --manifest-path tests/fixtures/sqlite-parity-consumer/Cargo.toml \
+                    --bin asupersync-sqlite-parity-consumer -- --nocapture --test-threads=1
             ;;
         api-adr-registry-contract)
             env RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --no-overlay -- \
@@ -933,7 +962,7 @@ execute_scenario() {
     esac
 }
 
-export MATRIX FAILURE_MATRIX REAL_SERVICE_FIXTURE_MATRIX FEATURE_PLATFORM_CONSUMER_MATRIX FINAL_SIGNOFF_MATRIX PROJECT_ROOT CANARY
+export MATRIX FAILURE_MATRIX REAL_SERVICE_FIXTURE_MATRIX FEATURE_PLATFORM_CONSUMER_MATRIX FINAL_SIGNOFF_MATRIX PROJECT_ROOT CANARY SOURCE_REVISION STEP_TIMEOUT
 export -f classify_result execute_scenario redact_stream run_classifier_contract
 
 TOTAL=0
@@ -1023,15 +1052,22 @@ for scenario_id in "${SELECTED_SCENARIOS[@]}"; do
         elif [[ "$exit_code" -ge 128 ]]; then
             signal=$((exit_code - 128))
         fi
-        if grep -Eq "$LOCAL_FALLBACK_PATTERN" "$stdout_log" "$stderr_log" 2>/dev/null; then
+        if [[ "$exit_code" -eq 103 ]] && grep -Eq '\[RCH-I003\]|remote required; refusing local fallback' "$stdout_log" "$stderr_log" 2>/dev/null; then
+            blocked_rch=1
+            execution_backend="blocked"
+        elif grep -Eq "$LOCAL_FALLBACK_PATTERN" "$stdout_log" "$stderr_log" 2>/dev/null; then
             local_fallback=1
         fi
-        rch_worker="$(
-            {
-                grep -hEo 'Selected worker: [A-Za-z0-9._-]+' "$stdout_log" "$stderr_log" || true
-                grep -hEo '\[RCH\] remote [A-Za-z0-9._-]+' "$stdout_log" "$stderr_log" || true
-            } | awk '{print $NF}' | tail -n 1
-        )"
+        if [[ "$blocked_rch" -eq 1 ]]; then
+            rch_worker="unassigned"
+        else
+            rch_worker="$(
+                {
+                    grep -hEo 'Selected worker: [A-Za-z0-9._-]+' "$stdout_log" "$stderr_log" || true
+                    grep -hEo '\[RCH\] remote [A-Za-z0-9._-]+' "$stdout_log" "$stderr_log" || true
+                } | awk '{print $NF}' | tail -n 1
+            )"
+        fi
         if [[ -z "$rch_worker" ]]; then
             if scenario_is_cargo "$scenario_id"; then
                 rch_worker="unknown"

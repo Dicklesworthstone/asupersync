@@ -1,5 +1,5 @@
 {
-  "schema_version": 5,
+  "schema_version": 6,
   "phase1_bead_id": "asupersync-ym2wtv.2.1",
   "phase2_bead_id": "asupersync-ym2wtv.2.2",
   "phase4_bead_id": "asupersync-ym2wtv.2.4",
@@ -1805,6 +1805,239 @@
       "This phase does not authorize dependency cutover or removal of rusqlite or sqlparser."
     ]
   },
+  "phase9": {
+    "bead_id": "asupersync-ym2wtv.2.9",
+    "status": "PASS_AGGREGATE_REAL_DUAL_ENGINE_MATRIX_KEEP_INCUMBENT",
+    "scope": "single_process_real_dual_engine_execution_aggregate_matrix_and_scoped_signoff",
+    "source_contracts": [
+      {
+        "path": "tests/fixtures/sqlite-parity-consumer/Cargo.toml",
+        "sha256": "7953e64e52f24df58e76525d667a02c88bc5cc2507500f94c5033d8dbf3ec233",
+        "line_count": 18
+      },
+      {
+        "path": "tests/fixtures/sqlite-parity-consumer/Cargo.lock",
+        "sha256": "472618c2cd399af3d4c6dc307fd90590cf53bbd7ac0c53e584bd0398d49c3248",
+        "line_count": 2650
+      },
+      {
+        "path": "tests/fixtures/sqlite-parity-consumer/src/main.rs",
+        "sha256": "d1d9714a759883ad1eb70dc80c8fa546c511176035f662a5af6bbe1f906d4710",
+        "line_count": 3935
+      },
+      {
+        "path": "scripts/run_dependency_sovereignty_e2e.sh",
+        "sha256": "1ebd9655151931da206536688e1b0b4506a6b612264ba814ff2f514846408fdb",
+        "line_count": 1348
+      }
+    ],
+    "aggregate_matrix": {
+      "matrix_id": "sqlite-neutral-aggregate-parity-v1",
+      "execution_model": "one neutral consumer process runs the real Asupersync and pinned FrankenSQLite adapters and emits one structured evidence document",
+      "family_rows": [
+        {
+          "phase": "P2",
+          "bead_id": "asupersync-ym2wtv.2.2",
+          "family": "open_configuration_admission_and_close",
+          "directly_compared_cases": 6,
+          "native_only_cases": 0,
+          "unexplained_divergences": 0,
+          "status": "PASS"
+        },
+        {
+          "phase": "P3",
+          "bead_id": "asupersync-ym2wtv.2.3",
+          "family": "prepared_statements_bind_reset_schema_change_busy_and_cancel",
+          "directly_compared_cases": 7,
+          "native_only_cases": 0,
+          "unexplained_divergences": 0,
+          "status": "PASS_WITH_EXPLICIT_DIFFERENCES"
+        },
+        {
+          "phase": "P4",
+          "bead_id": "asupersync-ym2wtv.2.4",
+          "family": "transactions_savepoints_rollback_and_reuse",
+          "directly_compared_cases": 5,
+          "native_only_cases": 0,
+          "unexplained_divergences": 0,
+          "status": "PASS"
+        },
+        {
+          "phase": "P5",
+          "bead_id": "asupersync-ym2wtv.2.5",
+          "family": "interrupt_timeout_and_cancellation_races",
+          "directly_compared_cases": 0,
+          "native_only_cases": 8,
+          "unexplained_divergences": 0,
+          "status": "PASS_NATIVE_WITH_EXPLICIT_FRANKENSQLITE_UNSUPPORTED_CELLS"
+        },
+        {
+          "phase": "P6",
+          "bead_id": "asupersync-ym2wtv.2.6",
+          "family": "value_row_and_conversion_semantics",
+          "directly_compared_cases": 14,
+          "native_only_cases": 0,
+          "unexplained_divergences": 0,
+          "status": "PASS_WITH_EXPLICIT_UNSUPPORTED_METADATA"
+        },
+        {
+          "phase": "P7",
+          "bead_id": "asupersync-ym2wtv.2.7",
+          "family": "checked_sql_admission_and_adversarial_inputs",
+          "directly_compared_cases": 13,
+          "native_only_cases": 0,
+          "unexplained_divergences": 0,
+          "status": "PASS"
+        },
+        {
+          "phase": "P8",
+          "bead_id": "asupersync-ym2wtv.2.8",
+          "family": "stable_errors_and_terminal_quiescence",
+          "directly_compared_cases": 2,
+          "native_only_cases": 0,
+          "unexplained_divergences": 0,
+          "status": "PASS_WITH_EXPLICIT_DIFFERENCES"
+        }
+      ],
+      "directly_compared_cases": 47,
+      "native_p5_cases": 8,
+      "unexplained_divergences": 0,
+      "classified_difference_policy": "Differences and unavailable public hooks remain explicit matrix cells; they are never normalized into false parity.",
+      "terminal_resource_policy": "Every executed family closes or quarantines its connections and requires the matching runtime-local blocking pool to reach zero pending, busy, and active work."
+    },
+    "target_matrix": [
+      {
+        "target": "x86_64-unknown-linux-gnu",
+        "host_class": "linux-x86_64-rch-worker",
+        "status": "PASS",
+        "authority": "terminal remote-only P9 aggregate run"
+      },
+      {
+        "target": "aarch64-apple-darwin",
+        "host_class": "macos-arm64",
+        "status": "BLOCKED_NOT_EXECUTED",
+        "authority": "no terminal P9 host receipt"
+      },
+      {
+        "target": "x86_64-pc-windows-msvc",
+        "host_class": "windows-x86_64",
+        "status": "BLOCKED_NOT_EXECUTED",
+        "authority": "no terminal P9 host receipt"
+      },
+      {
+        "target": "wasm32-unknown-unknown",
+        "host_class": "browser-wasm",
+        "status": "UNSUPPORTED_NATIVE_SQLITE_ENGINES",
+        "authority": "both selected adapters require native SQLite execution"
+      }
+    ],
+    "execution": {
+      "scenario_id": "sqlite-parity-aggregate",
+      "step_id": "sqlite-p9-aggregate-dual-engine",
+      "remote_required": true,
+      "local_fallback": false,
+      "clean_overlay": {
+        "base": "63877809b7fd4fff4e7ae65ae187bd3caf7f2ba2",
+        "no_overlay": false,
+        "overlay_paths": [
+          "tests/fixtures/sqlite-parity-consumer/src/main.rs"
+        ],
+        "overlay_sha256": "8afbc5c2d1d11ba7bd3cef0a7c6e938a7d2b49467c1c7956af6a681ca3d16942",
+        "overlay_fingerprint": "23b0858ce11990e01b0882eadcaffa3d0c11e97a2a513b0578e64b58a9d389a7"
+      },
+      "diagnostic_attempts": [
+        {
+          "run_id": "sqlite-p9-63877809b-20260820",
+          "status": "BLOCKED_RCH_PRE_ADMISSION",
+          "remote_cargo_started": false,
+          "diagnostic": "RCH-I003 insufficient slots on the forced three-slot worker for a default four-job request"
+        },
+        {
+          "run_id": "sqlite-p9-63877809b-20260820b",
+          "rch_job": "j-29984462414544950",
+          "worker": "vmi1264463",
+          "remote_command_exit_code": 0,
+          "wrapper_exit_code": 102,
+          "status": "REMOTE_COMMAND_PASSED_PACKET_INCOMPLETE",
+          "diagnostic": "RCH-E309 timed out while retrieving the custom Cargo target, so this attempt is not the terminal packet authority"
+        },
+        {
+          "run_id": "sqlite-p9-63877809b-20260820c",
+          "rch_job": "j-29984462414544951",
+          "worker": "vmi1264463",
+          "remote_command_exit_code": 130,
+          "status": "CANCELLED_BY_STUCK_DETECTOR",
+          "diagnostic": "The daemon stuck detector cancelled the quiet compile; it emitted no terminal consumer result and is not test evidence"
+        },
+        {
+          "run_id": "sqlite-p9-63877809b-20260820c",
+          "rch_job": "j-29984462414544952",
+          "worker": "vmi1264463",
+          "remote_command_exit_code": 0,
+          "wrapper_exit_code": 102,
+          "status": "REMOTE_COMMAND_PASSED_PACKET_INCOMPLETE",
+          "diagnostic": "RCH-E309 timed out while retrieving the inherited Cargo target, so this attempt is not the terminal packet authority"
+        },
+        {
+          "run_id": "sqlite-p9-63877809b-20260820d",
+          "rch_job": "j-29984462414544953",
+          "worker": "vmi1264463",
+          "remote_command_exit_code": 1,
+          "wrapper_exit_code": 1,
+          "status": "TRANSPORT_TIMEOUT_DIAGNOSTIC",
+          "diagnostic": "The 1200-second SSH execution envelope expired during a cold compile; a concurrent runner edit made the local diagnostic packet non-authoritative, and no local Cargo fallback was executed"
+        },
+        {
+          "run_id": "sqlite-p9-63877809b-20260820e",
+          "rch_job": "j-29984462414544954",
+          "worker": "vmi1264463",
+          "remote_command_exit_code": 0,
+          "wrapper_exit_code": 102,
+          "status": "REMOTE_COMMAND_PASSED_PACKET_INCOMPLETE",
+          "diagnostic": "RCH-E309 again timed out while retrieving build artifacts after the consumer passed; this motivated the streamed cargo-test lane"
+        }
+      ],
+      "terminal_run": {
+        "run_id": "sqlite-p9-63877809b-20260820f",
+        "rch_job": "j-29984462414544955",
+        "worker": "vmi1264463",
+        "pipeline": "7706a9c69dd2f282",
+        "remote_command_exit_code": 0,
+        "wrapper_exit_code": 0,
+        "observed_outcome": "PASSED",
+        "remote_command_duration_ms": 900458,
+        "rch_total_duration_ms": 939528,
+        "test_totals": {
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        "summary_path": "target/e2e-results/dependency-sovereignty/sqlite-p9-63877809b-20260820f/summary.json",
+        "summary_sha256": "5a4542ce24501d3159e1d5cfe00543e5fb32629adddf543b820ff840d2c0c3ea",
+        "scenarios_sha256": "7daa9f28f357e2162205ce9ae7fb6b1a8a202f9b7b2f00543aa983fb73987c60",
+        "artifact_manifest_sha256": "210f4832d154dd57681f20fb5a60a1d022e20298ede82363750c4c29b212d411",
+        "repro_manifest_sha256": "e8dcbd354362b8cc7adb65daab3731b3e408adb5c2b2d96835dc966422a113fc",
+        "cleanup_result": "passed",
+        "redaction_policy": "metadata-and-secret-patterns-v1"
+      }
+    },
+    "decision": {
+      "sqlite_dependency": "KEEP_CURRENT_RUSQLITE_AND_SQLPARSER",
+      "combined_graph_budget": "DEFER",
+      "cutover_authorized": false,
+      "owner_gate_invoked": false,
+      "reason": "The executed common matrix is green, but P5 and platform cells remain explicitly incomplete and the combined graph budget remains DEFER."
+    },
+    "no_claims": [
+      "This packet does not authorize a FrankenSQLite dependency cutover or removal of rusqlite or sqlparser.",
+      "The aggregate totals count only declared common rows; P5 native-only cases are reported separately and do not imply cross-engine parity.",
+      "Linux execution does not prove macOS, Windows, or browser-Wasm support.",
+      "Runtime-local zero counts do not prove process-global task or resource quiescence.",
+      "The matrix does not claim arbitrary SQL equivalence, performance parity, FrankenSQLite maturity, or release readiness outside this scoped SQLite campaign."
+    ]
+  },
   "phase1_validation_frontier": {
     "newer_revision": "31fc4a3b3a108dc49243157ea29fb1ddfcb06fdc",
     "status": "BLOCKED_UPSTREAM_COMPILE",
@@ -1839,7 +2072,7 @@
   },
   "no_claims": [
     "No dependency cutover or rusqlite/sqlparser removal is authorized.",
-    "The six P2 vectors do not establish the transaction, statement, value, interrupt, concurrency or aggregate parity families owned by later children.",
+    "The six P2 vectors alone do not establish the later families; Phase 9 aggregates only the explicitly executed and classified P2-P8 cells.",
     "Runtime-local closed and zero-count receipts do not prove process-global task or resource quiescence.",
     "The graph-budget DEFER remains terminal for this prerequisite and is not converted to PASS by a P2 run.",
     "No claim is made about FrankenSQLite performance, maturity, or release readiness."

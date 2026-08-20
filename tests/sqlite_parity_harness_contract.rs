@@ -16,6 +16,7 @@ const SQLITE_SOURCE: &str = include_str!("../src/database/sqlite.rs");
 const CONSUMER_SOURCE: &str = include_str!("fixtures/sqlite-parity-consumer/src/main.rs");
 const PREPARED_CONFORMANCE_SOURCE: &str = include_str!("conformance/sqlite_prepared_statements.rs");
 const REAL_DISK_CANCEL_ROLLBACK_SOURCE: &str = include_str!("sqlite_real_disk_cancel_rollback.rs");
+const E2E_RUNNER: &str = include_str!("../scripts/run_dependency_sovereignty_e2e.sh");
 
 fn parse_json(source: &str) -> Value {
     serde_json::from_str(source).expect("contract JSON must parse")
@@ -177,7 +178,7 @@ fn vector_schema_is_versioned_complete_and_deterministic() {
 #[test]
 fn harness_receipt_pins_sources_profile_target_host_and_budget_defer() {
     let harness = parse_json(HARNESS);
-    assert_eq!(harness["schema_version"], 5);
+    assert_eq!(harness["schema_version"], 6);
     assert_eq!(harness["placement"]["kind"], "neutral_standalone_consumer");
     assert_eq!(harness["placement"]["workspace_member"], false);
     assert_eq!(
@@ -1192,6 +1193,179 @@ fn clean_phase2_execution_receipt_matches_all_declared_vectors() {
 }
 
 #[test]
+fn phase9_aggregates_real_rows_preserves_gaps_and_keeps_the_incumbent() {
+    let harness = parse_json(HARNESS);
+    let phase9 = &harness["phase9"];
+    assert_eq!(phase9["bead_id"], "asupersync-ym2wtv.2.9");
+    assert_eq!(
+        phase9["status"],
+        "PASS_AGGREGATE_REAL_DUAL_ENGINE_MATRIX_KEEP_INCUMBENT"
+    );
+
+    let source_contracts = phase9["source_contracts"]
+        .as_array()
+        .expect("phase9 source contracts");
+    for (path, source) in [
+        (
+            "tests/fixtures/sqlite-parity-consumer/Cargo.toml",
+            CONSUMER_MANIFEST,
+        ),
+        (
+            "tests/fixtures/sqlite-parity-consumer/Cargo.lock",
+            CONSUMER_LOCK,
+        ),
+        (
+            "tests/fixtures/sqlite-parity-consumer/src/main.rs",
+            CONSUMER_SOURCE,
+        ),
+        ("scripts/run_dependency_sovereignty_e2e.sh", E2E_RUNNER),
+    ] {
+        let row = source_contracts
+            .iter()
+            .find(|row| row["path"] == path)
+            .unwrap_or_else(|| panic!("missing phase9 source contract {path}"));
+        assert_eq!(row["sha256"], sha256(source));
+        assert_eq!(
+            row["line_count"].as_u64(),
+            Some(source.lines().count() as u64)
+        );
+    }
+
+    let matrix = &phase9["aggregate_matrix"];
+    let families = matrix["family_rows"]
+        .as_array()
+        .expect("phase9 family rows");
+    assert_eq!(families.len(), 7);
+    assert_eq!(
+        families
+            .iter()
+            .map(|row| row["phase"].as_str().expect("phase name"))
+            .collect::<BTreeSet<_>>(),
+        ["P2", "P3", "P4", "P5", "P6", "P7", "P8"]
+            .into_iter()
+            .collect()
+    );
+    assert_eq!(
+        families
+            .iter()
+            .map(|row| row["directly_compared_cases"].as_u64().unwrap_or(0))
+            .sum::<u64>(),
+        47
+    );
+    assert_eq!(matrix["directly_compared_cases"], 47);
+    assert_eq!(matrix["native_p5_cases"], 8);
+    assert_eq!(matrix["unexplained_divergences"], 0);
+    assert!(
+        families
+            .iter()
+            .all(|row| row["unexplained_divergences"] == 0)
+    );
+    let p5 = families
+        .iter()
+        .find(|row| row["phase"] == "P5")
+        .expect("P5 aggregate row");
+    assert_eq!(p5["directly_compared_cases"], 0);
+    assert_eq!(p5["native_only_cases"], 8);
+    assert!(
+        p5["status"]
+            .as_str()
+            .is_some_and(|status| status.contains("UNSUPPORTED"))
+    );
+
+    let targets = phase9["target_matrix"]
+        .as_array()
+        .expect("phase9 target matrix");
+    assert_eq!(targets.len(), 4);
+    assert!(
+        targets
+            .iter()
+            .any(|row| { row["target"] == "x86_64-unknown-linux-gnu" && row["status"] == "PASS" })
+    );
+    assert_eq!(
+        targets
+            .iter()
+            .filter(|row| row["status"] == "BLOCKED_NOT_EXECUTED")
+            .count(),
+        2
+    );
+    assert!(
+        targets
+            .iter()
+            .any(|row| row["status"] == "UNSUPPORTED_NATIVE_SQLITE_ENGINES")
+    );
+
+    let execution = &phase9["execution"];
+    assert_eq!(execution["scenario_id"], "sqlite-parity-aggregate");
+    assert_eq!(execution["remote_required"], true);
+    assert_eq!(execution["local_fallback"], false);
+    assert_eq!(execution["clean_overlay"]["no_overlay"], false);
+    assert_eq!(
+        execution["clean_overlay"]["overlay_paths"],
+        serde_json::json!(["tests/fixtures/sqlite-parity-consumer/src/main.rs"])
+    );
+    let terminal = &execution["terminal_run"];
+    assert_eq!(terminal["remote_command_exit_code"], 0);
+    assert_eq!(terminal["wrapper_exit_code"], 0);
+    assert_eq!(terminal["observed_outcome"], "PASSED");
+    assert_eq!(terminal["cleanup_result"], "passed");
+    for field in [
+        "summary_sha256",
+        "scenarios_sha256",
+        "artifact_manifest_sha256",
+        "repro_manifest_sha256",
+    ] {
+        let digest = terminal[field].as_str().expect("terminal digest");
+        assert_eq!(digest.len(), 64, "invalid phase9 {field}");
+        assert!(digest.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    }
+    let diagnostics = execution["diagnostic_attempts"]
+        .as_array()
+        .expect("phase9 diagnostic attempts");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|row| row["status"] == "BLOCKED_RCH_PRE_ADMISSION"
+                && row["remote_cargo_started"] == false)
+    );
+    assert!(diagnostics.iter().any(|row| {
+        row["status"] == "REMOTE_COMMAND_PASSED_PACKET_INCOMPLETE"
+            && row["remote_command_exit_code"] == 0
+            && row["wrapper_exit_code"] == 102
+    }));
+
+    assert_eq!(
+        phase9["decision"]["sqlite_dependency"],
+        "KEEP_CURRENT_RUSQLITE_AND_SQLPARSER"
+    );
+    assert_eq!(phase9["decision"]["combined_graph_budget"], "DEFER");
+    assert_eq!(phase9["decision"]["cutover_authorized"], false);
+    assert_eq!(phase9["decision"]["owner_gate_invoked"], false);
+    assert!(
+        phase9["no_claims"]
+            .as_array()
+            .is_some_and(|rows| rows.len() >= 5)
+    );
+
+    for marker in [
+        "sqlite-parity-aggregate",
+        "sqlite-p9-aggregate-dual-engine",
+        "RCH-I003",
+        "remote required; refusing local fallback",
+        "blocked_rch=1",
+        "env -u CARGO_TARGET_DIR",
+        "RCH_BUILD_TIMEOUT_SEC=\"$STEP_TIMEOUT\"",
+        "--overlay-path tests/fixtures/sqlite-parity-consumer/src/main.rs",
+        "cargo test -j 3 --locked",
+        "--bin asupersync-sqlite-parity-consumer",
+    ] {
+        assert!(
+            E2E_RUNNER.contains(marker),
+            "missing runner marker {marker}"
+        );
+    }
+}
+
+#[test]
 fn operator_doc_preserves_reproduction_and_no_claim_boundaries() {
     for marker in [
         "neutral consumer",
@@ -1221,6 +1395,11 @@ fn operator_doc_preserves_reproduction_and_no_claim_boundaries() {
         "separately named `*_diagnosed` methods",
         "five-second killed-and-reaped watchdog refusal",
         "does not claim process-global task/resource quiescence",
+        "SQLite P9 aggregate signoff",
+        "47 directly compared cases",
+        "BLOCKED_NOT_EXECUTED",
+        "KEEP_CURRENT_RUSQLITE_AND_SQLPARSER",
+        "--scenario sqlite-parity-aggregate",
     ] {
         assert!(
             DOC.contains(marker),

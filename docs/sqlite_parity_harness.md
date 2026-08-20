@@ -313,6 +313,53 @@ does not claim process-global task/resource quiescence, arbitrary engine
 equivalence, or permission to remove rusqlite/sqlparser or perform a dependency
 cutover.
 
+## SQLite P9 aggregate signoff
+
+P9 runs the real neutral consumer once and treats its single structured output
+as the aggregate matrix, rather than manufacturing a second set of synthetic
+rows. The terminal remote-only run covers all executable P2-P8 families in one
+process: 47 directly compared cases (6 P2, 7 P3, 5 P4, 14 P6, 13 P7, and 2 P8)
+plus the 8 native P5 cancellation/interrupt cases. Every directly compared row
+is explained and the aggregate carries zero unexplained divergences.
+
+Unsupported cells stay unsupported. P5 does not claim cross-engine parity when
+the pinned FrankenSQLite public API has no deterministic queue, statement-start,
+or result-publication witness. P3 and P8 preserve the bounded killed-and-reaped
+busy observation and the two runtimes' different cancellation result lattices.
+The target matrix records Linux x86-64 as executed, macOS and Windows as
+`BLOCKED_NOT_EXECUTED`, and browser Wasm as unsupported for these native SQLite
+engines. A green Linux cell is not portable-host evidence.
+
+The replayable entry point is:
+
+```bash
+RCH_REQUIRE_REMOTE=1 bash scripts/run_dependency_sovereignty_e2e.sh \
+  --scenario sqlite-parity-aggregate \
+  --run-id <run-id> \
+  --timeout 1800
+```
+
+The runner emits `summary.json`, `events.ndjson`, `scenarios.ndjson`,
+`validation_stages.ndjson`, `artifact_manifest.ndjson`, `environment.json`,
+`repro_manifest.json`, and the redacted RCH log. Exit 103 with `RCH-I003` is
+classified as a pre-admission `BLOCKED_RCH` receipt, not as local fallback or
+test evidence. An RCH-E309 retrieval failure after remote exit 0 remains an
+incomplete packet; only a wrapper exit 0 with `observed_outcome=PASSED` is the
+P9 terminal authority. The scenario uses an exact-base clean overlay containing
+only the neutral consumer fixture and executes that fixture through `cargo
+test`. RCH classifies this as a stream-only test lane, so the result comes back
+over stdout without requesting the remote target directory. The scenario also
+unsets an inherited host `CARGO_TARGET_DIR`, and passes the same timeout to
+RCH's build and test envelopes, so the outer runner and remote command share one
+explicit bound.
+
+The outcome is deliberately `KEEP_CURRENT_RUSQLITE_AND_SQLPARSER`, with the
+combined graph budget still terminal `DEFER`. The aggregate signoff does not
+authorize dependency cutover, does not convert the P5 unsupported cells into
+parity, and does not claim process-global task/resource quiescence, arbitrary
+SQL equivalence, performance parity, FrankenSQLite maturity, or release
+readiness outside this scoped campaign.
+
 ## Reproduction
 
 From a clean Asupersync source commit, run:
