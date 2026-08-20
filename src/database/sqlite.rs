@@ -1223,18 +1223,40 @@ impl fmt::Display for SqliteValue {
 }
 
 /// A row from a SQLite query result.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SqliteRow {
-    /// Column names to indices mapping.
+    /// Legacy exact-name mapping. Duplicate names intentionally resolve to the
+    /// last matching column for compatibility with the v0.4.3 API.
     columns: Arc<BTreeMap<String, usize>>,
+    /// Column names in SQLite result-set order, including duplicates.
+    ordered_columns: Arc<[String]>,
     /// Row values.
     values: Vec<SqliteValue>,
 }
 
+impl fmt::Debug for SqliteRow {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Keep the v0.4.3 derived-Debug shape stable; ordered metadata is an
+        // additive implementation detail, not a new diagnostic contract.
+        f.debug_struct("SqliteRow")
+            .field("columns", &self.columns)
+            .field("values", &self.values)
+            .finish()
+    }
+}
+
 impl SqliteRow {
     /// Creates a new row from column names and values.
-    fn new(columns: Arc<BTreeMap<String, usize>>, values: Vec<SqliteValue>) -> Self {
-        Self { columns, values }
+    fn new(
+        columns: Arc<BTreeMap<String, usize>>,
+        ordered_columns: Arc<[String]>,
+        values: Vec<SqliteValue>,
+    ) -> Self {
+        Self {
+            columns,
+            ordered_columns,
+            values,
+        }
     }
 
     /// Gets a value by column name.
@@ -1307,9 +1329,38 @@ impl SqliteRow {
         self.values.is_empty()
     }
 
-    /// Returns an iterator over column names.
+    /// Returns an iterator over unique column names in sorted order.
+    ///
+    /// This preserves the v0.4.3 behavior. Use
+    /// [`SqliteRow::column_names_in_order`] when result-set order and duplicate
+    /// names matter.
     pub fn column_names(&self) -> impl Iterator<Item = &str> {
         self.columns.keys().map(String::as_str)
+    }
+
+    /// Returns an iterator over column names in result-set order.
+    ///
+    /// Unlike [`SqliteRow::column_names`], this retains duplicate names.
+    pub fn column_names_in_order(&self) -> impl ExactSizeIterator<Item = &str> {
+        self.ordered_columns.iter().map(String::as_str)
+    }
+
+    /// Returns the name of the column at `index` in result-set order.
+    #[must_use]
+    pub fn column_name(&self, index: usize) -> Option<&str> {
+        self.ordered_columns.get(index).map(String::as_str)
+    }
+
+    /// Returns the first column index matching `name` using SQLite's
+    /// ASCII-case-insensitive name comparison.
+    ///
+    /// This is the duplicate-preserving counterpart to the legacy
+    /// exact-name, last-match behavior of [`SqliteRow::get`].
+    #[must_use]
+    pub fn column_index(&self, name: &str) -> Option<usize> {
+        self.ordered_columns
+            .iter()
+            .position(|column| column.eq_ignore_ascii_case(name))
     }
 }
 
@@ -1424,10 +1475,10 @@ fn send_sqlite_stream_message(
 
 fn sqlite_row_from_rusqlite_row(
     row: &rusqlite::Row<'_>,
-    column_count: usize,
-    column_names: &[String],
+    column_names: &Arc<[String]>,
     columns: &Arc<BTreeMap<String, usize>>,
 ) -> Result<SqliteRow, SqliteError> {
+    let column_count = column_names.len();
     let mut values = Vec::with_capacity(column_count);
     for i in 0..column_count {
         let value = row
@@ -1436,7 +1487,30 @@ fn sqlite_row_from_rusqlite_row(
         let column = column_name_or_index(column_names, i);
         values.push(convert_value(value, &column)?);
     }
-    Ok(SqliteRow::new(Arc::clone(columns), values))
+    Ok(SqliteRow::new(
+        Arc::clone(columns),
+        Arc::clone(column_names),
+        values,
+    ))
+}
+
+fn sqlite_row_metadata(row: &rusqlite::Row<'_>) -> (Arc<[String]>, Arc<BTreeMap<String, usize>>) {
+    // SQLite can automatically reprepare a statement during its first step
+    // after a schema change. Read metadata from the already-stepped row so the
+    // names describe the values we are about to expose.
+    let column_names: Arc<[String]> = row
+        .as_ref()
+        .column_names()
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>()
+        .into();
+    let columns = column_names
+        .iter()
+        .enumerate()
+        .map(|(index, name)| (name.clone(), index))
+        .collect();
+    (column_names, Arc::new(columns))
 }
 
 /// Streaming SQLite query result with bounded row buffering.
@@ -2344,34 +2418,19 @@ impl SqliteConnection {
                 .prepare_cached(&sql)
                 .map_err(|e| SqliteError::Sqlite(e.to_string()))?;
 
-            let column_names: Vec<String> = stmt
-                .column_names()
-                .iter()
-                .map(std::string::ToString::to_string)
-                .collect();
-            let columns: BTreeMap<String, usize> = column_names
-                .iter()
-                .enumerate()
-                .map(|(i, name)| (name.clone(), i))
-                .collect();
-            let columns = Arc::new(columns);
-
-            let column_count = stmt.column_count();
             let mut rows = stmt
                 .query(params_refs.as_slice())
                 .map_err(|e| SqliteError::Sqlite(e.to_string()))?;
 
             let mut result = Vec::new();
+            let mut metadata = None;
             while let Some(row) = rows
                 .next()
                 .map_err(|e| SqliteError::Sqlite(e.to_string()))?
             {
-                result.push(sqlite_row_from_rusqlite_row(
-                    row,
-                    column_count,
-                    &column_names,
-                    &columns,
-                )?);
+                let (column_names, columns) =
+                    metadata.get_or_insert_with(|| sqlite_row_metadata(row));
+                result.push(sqlite_row_from_rusqlite_row(row, column_names, columns)?);
             }
             drop(rows);
             drop(stmt);
@@ -2521,34 +2580,19 @@ impl SqliteConnection {
                             .prepare_cached(&sql)
                             .map_err(|e| SqliteError::Sqlite(e.to_string()))?;
 
-                        let column_names: Vec<String> = stmt
-                            .column_names()
-                            .iter()
-                            .map(std::string::ToString::to_string)
-                            .collect();
-                        let columns: BTreeMap<String, usize> = column_names
-                            .iter()
-                            .enumerate()
-                            .map(|(i, name)| (name.clone(), i))
-                            .collect();
-                        let columns = Arc::new(columns);
-                        let column_count = stmt.column_count();
-
                         let mut rows = stmt
                             .query(params_refs.as_slice())
                             .map_err(|e| SqliteError::Sqlite(e.to_string()))?;
 
+                        let mut metadata = None;
                         while let Some(row) = rows
                             .next()
                             .map_err(|e| SqliteError::Sqlite(e.to_string()))?
                         {
                             worker_counters.rows_stepped.fetch_add(1, Ordering::AcqRel);
-                            let row = sqlite_row_from_rusqlite_row(
-                                row,
-                                column_count,
-                                &column_names,
-                                &columns,
-                            )?;
+                            let (column_names, columns) =
+                                metadata.get_or_insert_with(|| sqlite_row_metadata(row));
+                            let row = sqlite_row_from_rusqlite_row(row, column_names, columns)?;
                             if !send_sqlite_stream_message(&sender, &worker_counters, Ok(row)) {
                                 break;
                             }
@@ -2653,13 +2697,6 @@ impl SqliteConnection {
                 .prepare_cached(&sql)
                 .map_err(|e| SqliteError::Sqlite(e.to_string()))?;
 
-            let column_count = stmt.column_count();
-            let column_names: Vec<String> = stmt
-                .column_names()
-                .iter()
-                .map(std::string::ToString::to_string)
-                .collect();
-
             let mut rows = stmt
                 .query(params_refs.as_slice())
                 .map_err(|e| SqliteError::Sqlite(e.to_string()))?;
@@ -2669,22 +2706,8 @@ impl SqliteConnection {
                 .map_err(|e| SqliteError::Sqlite(e.to_string()))?;
 
             let result = if let Some(row) = row_opt {
-                let columns: BTreeMap<String, usize> = column_names
-                    .iter()
-                    .enumerate()
-                    .map(|(i, name)| (name.clone(), i))
-                    .collect();
-                let columns = Arc::new(columns);
-
-                let mut values = Vec::with_capacity(column_count);
-                for i in 0..column_count {
-                    let value = row
-                        .get_ref(i)
-                        .map_err(|e| SqliteError::Sqlite(e.to_string()))?;
-                    let column = column_name_or_index(&column_names, i);
-                    values.push(convert_value(value, &column)?);
-                }
-                Some(SqliteRow::new(columns, values))
+                let (column_names, columns) = sqlite_row_metadata(row);
+                Some(sqlite_row_from_rusqlite_row(row, &column_names, &columns)?)
             } else {
                 None
             };
@@ -4493,7 +4516,9 @@ mod tests {
             SqliteValue::Integer(1),
             SqliteValue::Text("Alice".to_string()),
         ];
-        let row = SqliteRow::new(columns, values);
+        let ordered_columns: Arc<[String]> =
+            vec!["id".to_string(), "name".to_string()].into();
+        let row = SqliteRow::new(columns, ordered_columns, values);
 
         assert_eq!(row.len(), 2);
         assert!(!row.is_empty());
@@ -5052,7 +5077,12 @@ mod tests {
         for (i, name) in names.iter().enumerate() {
             columns.insert(name.to_string(), i);
         }
-        SqliteRow::new(Arc::new(columns), values)
+        let ordered_columns = names
+            .iter()
+            .map(|name| (*name).to_string())
+            .collect::<Vec<_>>()
+            .into();
+        SqliteRow::new(Arc::new(columns), ordered_columns, values)
     }
 
     #[test]
@@ -5126,6 +5156,80 @@ mod tests {
         let names: Vec<&str> = row.column_names().collect();
         // BTreeMap yields sorted order
         assert_eq!(names, vec!["alpha", "beta", "gamma"]);
+    }
+
+    #[test]
+    fn sqlite_row_debug_preserves_v043_shape() {
+        let row = make_test_sqlite_row(&["id"], vec![SqliteValue::Integer(7)]);
+        assert_eq!(
+            format!("{row:?}"),
+            "SqliteRow { columns: {\"id\": 0}, values: [Integer(7)] }"
+        );
+    }
+
+    fn assert_duplicate_sqlite_row_metadata(row: &SqliteRow) {
+        let ordered: Vec<&str> = row.column_names_in_order().collect();
+        assert_eq!(ordered, vec!["dup", "Beta", "dup", "alpha"]);
+        assert_eq!(row.column_name(0), Some("dup"));
+        assert_eq!(row.column_name(3), Some("alpha"));
+        assert_eq!(row.column_name(4), None);
+
+        assert_eq!(row.column_index("dup"), Some(0));
+        assert_eq!(row.column_index("DUP"), Some(0));
+        assert_eq!(row.column_index("beta"), Some(1));
+        assert_eq!(row.column_index("missing"), None);
+
+        assert_eq!(row.get_idx(0).unwrap(), &SqliteValue::Integer(10));
+        assert_eq!(row.get_idx(2).unwrap(), &SqliteValue::Integer(30));
+
+        // Compatibility guard: the v0.4.3 surface remains exact-case,
+        // last-duplicate-wins, sorted, and unique.
+        assert_eq!(row.get_i64("dup").unwrap(), 30);
+        assert!(matches!(
+            row.get("DUP"),
+            Err(SqliteError::ColumnNotFound(name)) if name == "DUP"
+        ));
+        assert_eq!(
+            row.column_names().collect::<Vec<_>>(),
+            vec!["Beta", "alpha", "dup"]
+        );
+    }
+
+    #[test]
+    fn sqlite_row_ordered_metadata_preserves_duplicates_across_query_surfaces() {
+        const DUPLICATE_COLUMNS: &str = "SELECT 10 AS dup, 20 AS Beta, 30 AS dup, 40 AS alpha";
+        let cx = create_test_cx();
+
+        block_on(async {
+            let mut conn = match SqliteConnection::open_in_memory(&cx).await {
+                Outcome::Ok(conn) => conn,
+                other => panic!("open_in_memory failed: {other:?}"),
+            };
+
+            let rows = match conn.query(&cx, DUPLICATE_COLUMNS, &[]).await {
+                Outcome::Ok(rows) => rows,
+                other => panic!("query failed: {other:?}"),
+            };
+            assert_eq!(rows.len(), 1);
+            assert_duplicate_sqlite_row_metadata(&rows[0]);
+
+            let row = match conn.query_row(&cx, DUPLICATE_COLUMNS, &[]).await {
+                Outcome::Ok(Some(row)) => row,
+                other => panic!("query_row failed: {other:?}"),
+            };
+            assert_duplicate_sqlite_row_metadata(&row);
+
+            let mut stream = match conn.query_stream(&cx, DUPLICATE_COLUMNS, &[]).await {
+                Outcome::Ok(stream) => stream,
+                other => panic!("query_stream failed to start: {other:?}"),
+            };
+            let row = match stream.next(&cx).await {
+                Outcome::Ok(Some(row)) => row,
+                other => panic!("query_stream first row failed: {other:?}"),
+            };
+            assert_duplicate_sqlite_row_metadata(&row);
+            assert!(matches!(stream.next(&cx).await, Outcome::Ok(None)));
+        });
     }
 
     #[test]
