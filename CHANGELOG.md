@@ -158,6 +158,21 @@ _No unreleased changes._
   workloads, while `ATTACH`/`DETACH` remain denied even there
   ([`41a1ae8`](https://github.com/Dicklesworthstone/asupersync/commit/41a1ae844ec01d5910b1c36cdd0db4dc63e54b92),
   [`355266b`](https://github.com/Dicklesworthstone/asupersync/commit/355266bb61b95211f668a095cd1f8a4b10252f8f)).
+- **Callers can opt into structured, redaction-safe SQLite diagnostics without
+  changing established error signatures.** The additive, non-exhaustive
+  `SqliteOperation`, `SqliteErrorCategory`, `SqliteRetryDisposition`,
+  `SqliteErrorDiagnostic`, and `SqliteOperationError` types expose stable
+  operation, category, retry, and SQLite primary/extended-code data through
+  separately named `*_diagnosed` connection and transaction methods. Existing
+  methods continue returning the v0.4.3-compatible `SqliteError`; structured
+  cancellation remains an outer `Outcome::Cancelled`; and ordinary `Debug`,
+  `Display`, and error-chain traversal omit SQL, values, paths, and raw engine
+  prose. Callers must explicitly request `legacy_error()` or `engine_source()`
+  when they need those compatibility or diagnostic details. Parser-specific
+  `SqlInputError` codes and malformed transaction-begin classifications are
+  preserved instead of degrading into generic internal errors
+  ([`8757273`](https://github.com/Dicklesworthstone/asupersync/commit/875727331),
+  [`6387780`](https://github.com/Dicklesworthstone/asupersync/commit/63877809b)).
 - **Prepared-statement cleanup and cache boundaries have stronger public
   conformance coverage.** Regression cases now cover positional and named
   binding order, malformed and incorrect arity cleanup, reset and reuse,
@@ -221,8 +236,8 @@ _No unreleased changes._
   changed. Existing unchecked SQLite APIs, OTLP SDK and legacy-log surfaces,
   and ordinary runtime-context construction remain functional. The new APIs
   provide opt-in request-context creation, embedder-owned blocking-pool
-  attachment, checked-SQL validation, explicit SQLite interruption, and finite
-  owned OTLP export.
+  attachment, checked-SQL validation, structured SQLite diagnostics, explicit
+  SQLite interruption, and finite owned OTLP export.
 
 ### ATP security
 
@@ -1450,7 +1465,7 @@ This window landed (non-exhaustive, mined from commit history):
   protocol, TLS message parsing, Redis RESP, PostgreSQL wire
   protocol, Kafka wire protocol, RaptorQ codec frame splitter /
   symbol set / matrix ops / decoder state machine, websocket
-  frames, channel state machine, and more.
+  frames, and channel state-machine inputs.
 - Conformance matrix expansion (manifest schema, doctor scenario
   coverage packs, stress/soak report format).
 - Runtime and scheduler hardening (FIFO, reactor, epoch tracking,

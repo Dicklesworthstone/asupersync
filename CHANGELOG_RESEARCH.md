@@ -143,3 +143,92 @@ Changelog corrections made from this pass:
 - added ATP duplicate-FIN/final-size validation
 - made the shipped-versus-incomplete NKey boundary explicit
 - normalized the v0.4.3 and v0.4.4 headings to their annotated tag dates
+
+## 2026-08-20 v0.4.9 Canonical-Skill Reconciliation
+
+Scope: refresh the canonical `asupersync-mega-skill` against the complete
+`v0.4.8..v0.4.9` release delta, correcting the release record before using it
+as one of the skill's evidence sources.
+
+Sources used:
+
+- full `AGENTS.md`, `README.md`, `CHANGELOG.md`, `TESTING_FOR_AGENTS.md`, the
+  canonical skill, and the affected source, test, proof-artifact, and package
+  manifests
+- annotated tags, release-to-release git history, GitHub release/issue state,
+  crates.io package state, and npm package lookups
+- direct Beads JSONL comparison plus focused live issue inspection; tracker
+  rows were treated as intent and evidence, not as authoritative shipped-state
+  labels when they contradicted tagged source and release artifacts
+- focused CASS searches over request-context creation, native cancellation,
+  SQLite, compatibility, and prior skill work; the local checkpoint remained
+  stale after 2026-08-02, and the one bounded rebuild attempt failed cleanly
+  with an `index-busy` snapshot conflict, so CASS supplied hypotheses and
+  historical rationale rather than current-state proof
+- three read-only subagent passes over architecture/API deltas, git/release
+  history, and Beads history
+
+Release-window accounting:
+
+- `v0.4.8..v0.4.9` contains 50 commits across 181 files
+  (+21,059/-4,130).
+- `main`, `origin/main`, `origin/master`, and the `v0.4.9` tag all resolved to
+  `9eb0600e6` during this pass. GitHub publishes `v0.4.9`, and all nine Rust
+  workspace crates are live and unyanked at `0.4.9` on crates.io.
+- The browser package manifests are also versioned `0.4.9`, but the four
+  `@asupersync/*` packages still returned npm 404 and remain workspace-local.
+- The canonical skill's effective source cutoff was `eacfba37a`: it captured
+  the first 40 commits after `v0.4.8` but preceded the final ten commits and
+  therefore described shipped v0.4.9 work as unreleased current-main behavior.
+
+Material v0.4.9 conclusions:
+
+- Additive request-context and blocking-pool attachment APIs, bounded actor
+  yielding, saturating restart backoff, finite owned OTLP metrics/traces/logs,
+  SQLite cancellation ownership, checked SQL, transaction rollback completion,
+  row metadata/strict REAL accessors, and protected-stdin ATP key transport are
+  published v0.4.9 behavior rather than post-v0.4.8 previews.
+- The largest skill and changelog omission was the additive structured SQLite
+  diagnostic family: `SqliteOperation`, `SqliteErrorCategory`,
+  `SqliteRetryDisposition`, `SqliteErrorDiagnostic`, `SqliteOperationError`,
+  and separately named connection/transaction `*_diagnosed` methods. Existing
+  `SqliteError` signatures remain intact; cancellation remains an outer
+  `Outcome`; ordinary formatting and error chaining redact raw SQL, values,
+  paths, and engine prose; explicit accessors expose legacy or engine details.
+- The terminal SQLite P9 aggregate compares 47 common public-surface cases,
+  records eight native-only cancellation cases, reports zero unexplained
+  divergences, and keeps `rusqlite` plus `sqlparser`. It does not authorize a
+  FrankenSQLite cutover or establish arbitrary-SQL, performance, cross-platform,
+  browser-Wasm, or process-global-quiescence claims.
+- OTLP A2-A5 are shipped, but the open frontier is A6-A11: transport responses,
+  queue/retry/shutdown, shared privacy/cardinality, failure/fuzz coverage,
+  aggregate dependency/cutover signoff, and maintained external SDK/provider
+  coverage remain incomplete.
+- `asupersync-909482` and `asupersync-2qas9c` remain unshipped P0 boundaries.
+  In contrast, the protected-input ATP change and the exact-v0.4.4 downstream
+  cancellation fixture shipped in v0.4.9.
+- The public API artifact remains a lexical inventory (19 entry points, 120
+  modules, 315 root exports), not proof that every listed module is a default
+  production surface or that any item is behaviorally correct.
+
+Evidence hierarchy and compatibility conclusions:
+
+- Current tagged source and public signatures outrank stale tracker status;
+  focused acceptance artifacts and terminal execution receipts establish only
+  their declared guarantees; Beads and CASS provide rationale and discovery.
+- A manifest row defines a proof command and no-claim boundary, a status
+  snapshot records freshness/blockers, and only a terminal execution receipt
+  proves that the command ran. Structural contract tests are not broad runtime
+  or release proof.
+- v0.4.9 preserves the hard v0.4.3 compatibility floor. Its public changes are
+  additive, and the diagnosed SQLite family deliberately uses separately named
+  APIs rather than changing established error types or method signatures.
+
+Changelog corrections made from this pass:
+
+- added the previously omitted structured SQLite diagnostic API family and its
+  parser/transaction classification repair to the v0.4.9 SQLite section
+- added structured SQLite diagnostics to the v0.4.9 additive-compatibility
+  summary
+- replaced the historical low-signal fuzz-target phrase "and more" with the
+  concrete channel state-machine boundary
