@@ -1,6 +1,10 @@
 //! Regression test for a `BlockingPool` spawn/shutdown TOCTOU race.
 
 use asupersync::runtime::{BlockingPool, BlockingTaskHandle};
+#[cfg(feature = "test-internals")]
+use asupersync::{Cx, runtime::spawn_blocking};
+#[cfg(feature = "test-internals")]
+use futures_lite::future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -110,4 +114,27 @@ fn pool_spawn_shutdown_race_completes_or_cancels() -> Result<(), String> {
 #[test]
 fn handle_spawn_shutdown_race_completes_or_cancels() -> Result<(), String> {
     run_spawn_shutdown_race(SpawnApi::Handle)
+}
+
+#[cfg(feature = "test-internals")]
+#[test]
+fn embedder_context_routes_spawn_blocking_to_caller_owned_pool() {
+    let pool = BlockingPool::new(1, 1);
+    let cx = Cx::for_testing().with_blocking_pool_handle(Some(pool.handle()));
+
+    let thread_name = {
+        let _guard = Cx::set_current(Some(cx));
+        future::block_on(spawn_blocking(|| {
+            std::thread::current()
+                .name()
+                .unwrap_or("unnamed")
+                .to_owned()
+        }))
+    };
+
+    assert!(
+        thread_name.contains("-blocking-"),
+        "spawn_blocking bypassed the caller-owned pool: {thread_name}"
+    );
+    assert!(pool.shutdown_and_wait(DRAIN_TIMEOUT));
 }

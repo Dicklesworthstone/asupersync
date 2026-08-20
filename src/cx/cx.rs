@@ -1110,9 +1110,21 @@ impl<Caps> Cx<Caps> {
         self.handles.blocking_pool.clone()
     }
 
-    /// Attaches a blocking pool handle to this context.
+    /// Attaches a caller-owned blocking pool handle to this context.
+    ///
+    /// This is the embedder-facing counterpart to [`Cx::set_current`]. An
+    /// embedder that drives Asupersync futures without a full [`Runtime`] can
+    /// install the returned context so [`spawn_blocking`] dispatches through
+    /// the supplied pool instead of using the thread-per-call fallback.
+    ///
+    /// The method does not mint blocking authority: the caller must already
+    /// possess a [`BlockingPoolHandle`]. Passing `None` explicitly detaches a
+    /// previously attached pool.
+    ///
+    /// [`Runtime`]: crate::runtime::Runtime
+    /// [`spawn_blocking`]: crate::runtime::spawn_blocking()
     #[must_use]
-    pub(crate) fn with_blocking_pool_handle(mut self, handle: Option<BlockingPoolHandle>) -> Self {
+    pub fn with_blocking_pool_handle(mut self, handle: Option<BlockingPoolHandle>) -> Self {
         Arc::make_mut(&mut self.handles).blocking_pool = handle;
         self
     }
