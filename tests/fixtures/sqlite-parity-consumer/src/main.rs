@@ -2626,7 +2626,6 @@ fn run_asupersync_error_matrix() -> Result<ErrorEngineEvidence, String> {
         {
             Outcome::Err(error) => asupersync_error_case(
                 "SQLITE-PARITY-P8-PREPARE-001",
-                "prepare",
                 &error,
                 &["SELEKT", "p8_sensitive_payload"],
             ),
@@ -2645,7 +2644,6 @@ fn run_asupersync_error_matrix() -> Result<ErrorEngineEvidence, String> {
         {
             Outcome::Err(error) => asupersync_error_case(
                 "SQLITE-PARITY-P8-CONSTRAINT-002",
-                "step",
                 &error,
                 &["p8_sensitive_error_table", "value"],
             ),
@@ -2710,7 +2708,6 @@ fn run_asupersync_error_matrix() -> Result<ErrorEngineEvidence, String> {
         {
             Outcome::Err(error) => asupersync_error_case(
                 "SQLITE-PARITY-P8-CLOSED-004",
-                "step",
                 &error,
                 &[],
             ),
@@ -2778,6 +2775,7 @@ fn run_frankensqlite_error_matrix() -> Result<ErrorEngineEvidence, String> {
             "prepare",
             &prepare_error,
             "not_cancelled",
+            &["SELEKT", "p8_sensitive_payload"],
         );
         let constraint_error = connection
             .execute_with_params(
@@ -2795,6 +2793,7 @@ fn run_frankensqlite_error_matrix() -> Result<ErrorEngineEvidence, String> {
             "step",
             &constraint_error,
             "not_cancelled",
+            &["p8_sensitive_error_table", "value"],
         );
 
         native_cx.set_cancel_requested(true);
@@ -2822,6 +2821,7 @@ fn run_frankensqlite_error_matrix() -> Result<ErrorEngineEvidence, String> {
             "step",
             &cancel_error,
             "engine_interrupt_error",
+            &[],
         );
         let cancelled_count = connection
             .query_row(
@@ -2852,6 +2852,7 @@ fn run_frankensqlite_error_matrix() -> Result<ErrorEngineEvidence, String> {
             "step",
             &closed_error,
             "not_cancelled",
+            &[],
         );
         Ok::<_, String>(vec![prepare, constraint, cancel, closed])
     })?;
@@ -2873,7 +2874,6 @@ fn run_frankensqlite_error_matrix() -> Result<ErrorEngineEvidence, String> {
 
 fn asupersync_error_case(
     case_id: &'static str,
-    operation: &'static str,
     error: &SqliteOperationError,
     sensitive_markers: &[&str],
 ) -> ErrorCaseResult {
@@ -2881,7 +2881,7 @@ fn asupersync_error_case(
     let rendered = format!("{error:?} {error}");
     ErrorCaseResult {
         case_id,
-        operation,
+        operation: asupersync_operation(diagnostic.operation()),
         category: asupersync_error_category(diagnostic.category()),
         primary_code: diagnostic.primary_code(),
         extended_code: diagnostic.extended_code(),
@@ -2891,6 +2891,26 @@ fn asupersync_error_case(
         stable_evidence_redacted: sensitive_markers
             .iter()
             .all(|marker| !rendered.contains(marker)),
+    }
+}
+
+fn asupersync_operation(operation: asupersync::database::sqlite::SqliteOperation) -> &'static str {
+    match operation {
+        asupersync::database::sqlite::SqliteOperation::Open => "open",
+        asupersync::database::sqlite::SqliteOperation::Prepare => "prepare",
+        asupersync::database::sqlite::SqliteOperation::Bind => "bind",
+        asupersync::database::sqlite::SqliteOperation::Step => "step",
+        asupersync::database::sqlite::SqliteOperation::ExecuteBatch => "execute_batch",
+        asupersync::database::sqlite::SqliteOperation::TransactionBegin => "transaction_begin",
+        asupersync::database::sqlite::SqliteOperation::TransactionCommit => "transaction_commit",
+        asupersync::database::sqlite::SqliteOperation::TransactionRollback => {
+            "transaction_rollback"
+        }
+        asupersync::database::sqlite::SqliteOperation::Configure => "configure",
+        asupersync::database::sqlite::SqliteOperation::Close => "close",
+        asupersync::database::sqlite::SqliteOperation::BlockingPool => "blocking_pool",
+        asupersync::database::sqlite::SqliteOperation::Validation => "validation",
+        _ => "unknown_future_operation",
     }
 }
 
@@ -2930,8 +2950,10 @@ fn frankensqlite_error_case(
     operation: &'static str,
     error: &FrankenError,
     cancellation_delivery: &'static str,
+    sensitive_markers: &[&str],
 ) -> ErrorCaseResult {
     let primary_code = error.error_code() as i32;
+    let rendered = format!("{error:?} {error}");
     ErrorCaseResult {
         case_id,
         operation,
@@ -2941,7 +2963,9 @@ fn frankensqlite_error_case(
         retry: sqlite_primary_retry(primary_code),
         cancellation_delivery,
         source_preserved: true,
-        stable_evidence_redacted: true,
+        stable_evidence_redacted: sensitive_markers
+            .iter()
+            .all(|marker| !rendered.contains(marker)),
     }
 }
 
