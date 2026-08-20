@@ -46,9 +46,7 @@
 
 use asupersync::channel::oneshot;
 use asupersync::cx::Cx;
-use asupersync::database::sqlite::{
-    SqliteConnection, SqliteError, SqliteTransaction, SqliteValue,
-};
+use asupersync::database::sqlite::{SqliteConnection, SqliteError, SqliteTransaction, SqliteValue};
 use asupersync::database::transaction::{
     with_sqlite_transaction, with_sqlite_transaction_immediate,
 };

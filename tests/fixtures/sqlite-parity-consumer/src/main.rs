@@ -14,7 +14,10 @@ use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use asupersync::database::sqlite::validate_checked_sql_statement;
+use asupersync::database::sqlite::{
+    SqliteErrorCategory, SqliteOperationError, SqliteRetryDisposition,
+    validate_checked_sql_statement,
+};
 use asupersync::database::transaction::SqliteSavepoint;
 use asupersync::database::{
     SqliteConnection, SqliteError, SqliteTransaction, SqliteValue as AsupersyncValue,
@@ -165,6 +168,7 @@ struct HarnessEvidence<'a> {
     value_parity: ValueParityEvidence,
     transaction_parity: TransactionParityEvidence,
     security_policy: SecurityPolicyEvidence,
+    error_parity: ErrorParityEvidence,
     comparison: Comparison,
 }
 
@@ -328,6 +332,55 @@ struct SecurityCase {
 }
 
 #[derive(Debug, Serialize)]
+struct ErrorParityEvidence {
+    bead_id: &'static str,
+    matrix_id: &'static str,
+    status: &'static str,
+    asupersync: ErrorEngineEvidence,
+    frankensqlite: ErrorEngineEvidence,
+    compared_cases: usize,
+    mismatches: Vec<String>,
+    intentional_differences: Vec<ErrorDifferenceEvidence>,
+    inherited_busy_case: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+struct ErrorEngineEvidence {
+    cases: Vec<ErrorCaseResult>,
+    connection_reusable: bool,
+    connection_closed: bool,
+    open_transactions: u64,
+    live_statements: u64,
+    live_connections: u64,
+    runtime_quiescent: bool,
+    blocking_pending: u64,
+    blocking_busy: u64,
+    blocking_active: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ErrorCaseResult {
+    case_id: &'static str,
+    operation: &'static str,
+    category: &'static str,
+    primary_code: Option<&'static str>,
+    extended_code: Option<i32>,
+    retry: &'static str,
+    cancellation_delivery: &'static str,
+    source_preserved: bool,
+    stable_evidence_redacted: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct ErrorDifferenceEvidence {
+    case_id: &'static str,
+    boundary: &'static str,
+    asupersync: &'static str,
+    frankensqlite: &'static str,
+    rationale: &'static str,
+}
+
+#[derive(Debug, Serialize)]
 struct Provenance<'a> {
     asupersync_revision: &'a str,
     frankensqlite_revision: &'a str,
@@ -401,6 +454,7 @@ fn run() -> Result<(), String> {
     let value_parity = run_value_parity()?;
     let transaction_parity = run_transaction_parity()?;
     let security_policy = run_security_policy()?;
+    let error_parity = run_error_parity(&prepared_statement_parity)?;
     let evidence = HarnessEvidence {
         evidence_schema_version: 1,
         vector_schema_version: suite.schema_version,
@@ -420,6 +474,7 @@ fn run() -> Result<(), String> {
         value_parity,
         transaction_parity,
         security_policy,
+        error_parity,
         comparison: Comparison {
             comparable,
             compared_vectors: suite.vectors.len(),
@@ -2420,6 +2475,552 @@ fn run_frankensqlite_security_cases(
     drop(runtime);
     require_compat_runtime_quiescence(&blocking, "frankensqlite-p7")?;
     Ok(results)
+}
+
+fn run_error_parity(
+    prepared: &PreparedStatementParityEvidence,
+) -> Result<ErrorParityEvidence, String> {
+    let asupersync_busy = prepared
+        .asupersync
+        .cases
+        .iter()
+        .find(|case| case.case_id == "SQLITE-PARITY-P3-BUSY-008")
+        .ok_or_else(|| "P8 could not find Asupersync's executed busy case".to_owned())?;
+    let frankensqlite_busy = prepared
+        .frankensqlite
+        .cases
+        .iter()
+        .find(|case| case.case_id == "SQLITE-PARITY-P3-BUSY-008")
+        .ok_or_else(|| "P8 could not find FrankenSQLite's executed busy case".to_owned())?;
+    if asupersync_busy.error_class != Some("busy_or_locked") || !asupersync_busy.connection_reusable
+    {
+        return Err(format!(
+            "P8 inherited Asupersync busy evidence is not typed and reusable: {asupersync_busy:?}"
+        ));
+    }
+    if !((frankensqlite_busy.error_class == Some("busy_or_locked")
+        && frankensqlite_busy.connection_reusable)
+        || (frankensqlite_busy.error_class == Some("watchdog_timeout")
+            && !frankensqlite_busy.connection_reusable))
+    {
+        return Err(format!(
+            "P8 inherited FrankenSQLite busy evidence is neither typed-and-reusable nor a bounded watchdog refusal: {frankensqlite_busy:?}"
+        ));
+    }
+
+    let asupersync = run_asupersync_error_matrix()?;
+    let frankensqlite = run_frankensqlite_error_matrix()?;
+    let mut mismatches = Vec::new();
+    for case_id in [
+        "SQLITE-PARITY-P8-PREPARE-001",
+        "SQLITE-PARITY-P8-CONSTRAINT-002",
+    ] {
+        let native = find_error_case(&asupersync.cases, case_id)?;
+        let franken = find_error_case(&frankensqlite.cases, case_id)?;
+        if native.operation != franken.operation
+            || native.category != franken.category
+            || native.primary_code != franken.primary_code
+            || native.retry != franken.retry
+        {
+            mismatches.push(format!(
+                "{case_id}: asupersync=({},{},{:?},{}) frankensqlite=({},{},{:?},{})",
+                native.operation,
+                native.category,
+                native.primary_code,
+                native.retry,
+                franken.operation,
+                franken.category,
+                franken.primary_code,
+                franken.retry
+            ));
+        }
+    }
+    if !mismatches.is_empty() {
+        return Err(format!(
+            "SQLite P8 stable error parity failed: {}",
+            mismatches.join("; ")
+        ));
+    }
+
+    Ok(ErrorParityEvidence {
+        bead_id: "asupersync-ym2wtv.2.8",
+        matrix_id: "sqlite-neutral-stable-error-and-quiescence-v1",
+        status: "PASS_BOUNDED_STABLE_CODES_CANCELLATION_DISTINCTION_AND_RUNTIME_QUIESCENCE",
+        compared_cases: 2,
+        asupersync,
+        frankensqlite,
+        mismatches,
+        intentional_differences: vec![
+            ErrorDifferenceEvidence {
+                case_id: "SQLITE-PARITY-P8-CANCEL-003",
+                boundary: "public_cancellation_delivery",
+                asupersync: "outer Outcome::Cancelled with no engine error",
+                frankensqlite: "typed FrankenError::Interrupt",
+                rationale: "The engines expose different async result lattices; normalization preserves the distinction instead of converting caller cancellation into a retryable database failure.",
+            },
+            ErrorDifferenceEvidence {
+                case_id: "SQLITE-PARITY-P3-BUSY-008",
+                boundary: "busy-lock-completion",
+                asupersync: "typed busy_or_locked and connection reusable",
+                frankensqlite: "typed busy_or_locked and reusable, or bounded watchdog refusal with the connection quarantined",
+                rationale: "P8 inherits the already-executed P3 lock row without misrepresenting a bounded FrankenSQLite non-return as successful connection reuse.",
+            },
+        ],
+        inherited_busy_case: "SQLITE-PARITY-P3-BUSY-008_EXECUTED_WITH_TYPED_ASUPERSYNC_RECOVERY_AND_BOUNDED_FRANKENSQLITE_WATCHDOG",
+    })
+}
+
+fn find_error_case<'a>(
+    cases: &'a [ErrorCaseResult],
+    case_id: &str,
+) -> Result<&'a ErrorCaseResult, String> {
+    cases
+        .iter()
+        .find(|case| case.case_id == case_id)
+        .ok_or_else(|| format!("missing SQLite P8 error case {case_id}"))
+}
+
+fn run_asupersync_error_matrix() -> Result<ErrorEngineEvidence, String> {
+    let runtime = RuntimeBuilder::current_thread()
+        .blocking_threads(2, 2)
+        .build()
+        .map_err(|error| format!("build Asupersync P8 runtime: {error}"))?;
+    let blocking = runtime
+        .handle()
+        .blocking_handle()
+        .ok_or_else(|| "Asupersync P8 runtime has no blocking pool".to_owned())?;
+    let cases = runtime.block_on(async {
+        let cx = Cx::current().ok_or_else(|| "Asupersync P8 runtime has no Cx".to_owned())?;
+        let connection = match SqliteConnection::open_in_memory_diagnosed(&cx).await {
+            Outcome::Ok(connection) => connection,
+            Outcome::Err(error) => return Err(format!("Asupersync P8 open: {error}")),
+            Outcome::Cancelled(_) => return Err("Asupersync P8 open was cancelled".to_owned()),
+            Outcome::Panicked(_) => return Err("Asupersync P8 open panicked".to_owned()),
+        };
+        diagnosed_outcome(
+            connection
+                .execute_batch_diagnosed(
+                    &cx,
+                    "CREATE TABLE p8_sensitive_error_table (id INTEGER PRIMARY KEY, value TEXT UNIQUE NOT NULL);",
+                )
+                .await,
+            "create Asupersync P8 table",
+        )?;
+        diagnosed_outcome(
+            connection
+                .execute_diagnosed(
+                    &cx,
+                    "INSERT INTO p8_sensitive_error_table(id, value) VALUES (?1, ?2)",
+                    &[
+                        AsupersyncValue::Integer(1),
+                        AsupersyncValue::Text("first".to_owned()),
+                    ],
+                )
+                .await,
+            "seed Asupersync P8 table",
+        )?;
+
+        let prepare = match connection
+            .query_unchecked_diagnosed(&cx, "SELEKT p8_sensitive_payload", &[])
+            .await
+        {
+            Outcome::Err(error) => asupersync_error_case(
+                "SQLITE-PARITY-P8-PREPARE-001",
+                "prepare",
+                &error,
+                &["SELEKT", "p8_sensitive_payload"],
+            ),
+            other => return Err(outcome_drift("Asupersync P8 prepare", other)),
+        };
+        let constraint = match connection
+            .execute_diagnosed(
+                &cx,
+                "INSERT INTO p8_sensitive_error_table(id, value) VALUES (?1, ?2)",
+                &[
+                    AsupersyncValue::Integer(2),
+                    AsupersyncValue::Text("first".to_owned()),
+                ],
+            )
+            .await
+        {
+            Outcome::Err(error) => asupersync_error_case(
+                "SQLITE-PARITY-P8-CONSTRAINT-002",
+                "step",
+                &error,
+                &["p8_sensitive_error_table", "value"],
+            ),
+            other => return Err(outcome_drift("Asupersync P8 constraint", other)),
+        };
+
+        cx.set_cancel_requested(true);
+        let cancelled = connection
+            .execute_diagnosed(
+                &cx,
+                "INSERT INTO p8_sensitive_error_table(id, value) VALUES (?1, ?2)",
+                &[
+                    AsupersyncValue::Integer(3),
+                    AsupersyncValue::Text("must_not_commit".to_owned()),
+                ],
+            )
+            .await;
+        cx.set_cancel_requested(false);
+        let cancel = match cancelled {
+            Outcome::Cancelled(_) => ErrorCaseResult {
+                case_id: "SQLITE-PARITY-P8-CANCEL-003",
+                operation: "step",
+                category: "cancelled",
+                primary_code: None,
+                extended_code: None,
+                retry: "never",
+                cancellation_delivery: "outer_outcome_cancelled",
+                source_preserved: false,
+                stable_evidence_redacted: true,
+            },
+            other => return Err(outcome_drift("Asupersync P8 cancellation", other)),
+        };
+        let cancelled_count = diagnosed_outcome(
+            connection
+                .query_row_diagnosed(
+                    &cx,
+                    "SELECT COUNT(*) AS count FROM p8_sensitive_error_table WHERE id = ?1",
+                    &[AsupersyncValue::Integer(3)],
+                )
+                .await,
+            "verify Asupersync P8 cancellation",
+        )?
+        .ok_or_else(|| "Asupersync P8 cancellation count returned no row".to_owned())?
+        .get_i64("count")
+        .map_err(|error| format!("read Asupersync P8 cancellation count: {error}"))?;
+        if cancelled_count != 0 {
+            return Err(format!(
+                "Asupersync P8 cancelled operation mutated {cancelled_count} rows"
+            ));
+        }
+        diagnosed_outcome(
+            connection.query_unchecked_diagnosed(&cx, "SELECT 1", &[]).await,
+            "reuse Asupersync P8 connection",
+        )?;
+        diagnosed_outcome(
+            connection.close_async_diagnosed(&cx).await,
+            "close Asupersync P8 connection",
+        )?;
+        let closed = match connection
+            .query_unchecked_diagnosed(&cx, "SELECT 1", &[])
+            .await
+        {
+            Outcome::Err(error) => asupersync_error_case(
+                "SQLITE-PARITY-P8-CLOSED-004",
+                "step",
+                &error,
+                &[],
+            ),
+            other => return Err(outcome_drift("Asupersync P8 closed connection", other)),
+        };
+        Ok::<_, String>(vec![prepare, constraint, cancel, closed])
+    })?;
+    drop(runtime);
+    require_runtime_quiescence(&blocking, "asupersync-p8")?;
+    Ok(ErrorEngineEvidence {
+        cases,
+        connection_reusable: true,
+        connection_closed: true,
+        open_transactions: 0,
+        live_statements: 0,
+        live_connections: 0,
+        runtime_quiescent: true,
+        blocking_pending: blocking.pending_count() as u64,
+        blocking_busy: blocking.busy_threads() as u64,
+        blocking_active: blocking.active_threads() as u64,
+    })
+}
+
+fn run_frankensqlite_error_matrix() -> Result<ErrorEngineEvidence, String> {
+    let runtime = CompatRuntimeBuilder::current_thread()
+        .blocking_threads(2, 2)
+        .build()
+        .map_err(|error| format!("build FrankenSQLite P8 runtime: {error}"))?;
+    let blocking = runtime
+        .handle()
+        .blocking_handle()
+        .ok_or_else(|| "FrankenSQLite P8 runtime has no blocking pool".to_owned())?;
+    let cases = runtime.block_on(async {
+        let native_cx = CompatCx::current()
+            .ok_or_else(|| "FrankenSQLite P8 compatibility runtime has no Cx".to_owned())?;
+        let cx = attached_franken_cx(&native_cx);
+        let mut connection = FrankenConnection::open(&cx, ":memory:")
+            .await
+            .map_err(|error| format!("FrankenSQLite P8 open: {error}"))?;
+        connection
+            .execute_batch(
+                &cx,
+                "CREATE TABLE p8_sensitive_error_table (id INTEGER PRIMARY KEY, value TEXT UNIQUE NOT NULL);",
+            )
+            .await
+            .map_err(|error| format!("FrankenSQLite P8 schema: {error}"))?;
+        connection
+            .execute_with_params(
+                &cx,
+                "INSERT INTO p8_sensitive_error_table(id, value) VALUES (?1, ?2)",
+                &[
+                    FrankenValue::Integer(1),
+                    FrankenValue::Text("first".into()),
+                ],
+            )
+            .await
+            .map_err(|error| format!("FrankenSQLite P8 seed: {error}"))?;
+
+        let prepare_error = connection
+            .query(&cx, "SELEKT p8_sensitive_payload")
+            .await
+            .expect_err("FrankenSQLite P8 malformed query must fail");
+        let prepare = frankensqlite_error_case(
+            "SQLITE-PARITY-P8-PREPARE-001",
+            "prepare",
+            &prepare_error,
+            "not_cancelled",
+        );
+        let constraint_error = connection
+            .execute_with_params(
+                &cx,
+                "INSERT INTO p8_sensitive_error_table(id, value) VALUES (?1, ?2)",
+                &[
+                    FrankenValue::Integer(2),
+                    FrankenValue::Text("first".into()),
+                ],
+            )
+            .await
+            .expect_err("FrankenSQLite P8 duplicate must fail");
+        let constraint = frankensqlite_error_case(
+            "SQLITE-PARITY-P8-CONSTRAINT-002",
+            "step",
+            &constraint_error,
+            "not_cancelled",
+        );
+
+        native_cx.set_cancel_requested(true);
+        let cancelled_cx = attached_franken_cx(&native_cx);
+        let cancelled = connection
+            .execute_with_params(
+                &cancelled_cx,
+                "INSERT INTO p8_sensitive_error_table(id, value) VALUES (?1, ?2)",
+                &[
+                    FrankenValue::Integer(3),
+                    FrankenValue::Text("must_not_commit".into()),
+                ],
+            )
+            .await;
+        native_cx.set_cancel_requested(false);
+        let cancel_error = cancelled
+            .expect_err("FrankenSQLite P8 pre-cancelled operation must return an error");
+        if !matches!(cancel_error, FrankenError::Interrupt) {
+            return Err(format!(
+                "FrankenSQLite P8 cancellation was not a typed interrupt: {cancel_error:?}"
+            ));
+        }
+        let cancel = frankensqlite_error_case(
+            "SQLITE-PARITY-P8-CANCEL-003",
+            "step",
+            &cancel_error,
+            "engine_interrupt_error",
+        );
+        let cancelled_count = connection
+            .query_row(
+                &cx,
+                "SELECT COUNT(*) FROM p8_sensitive_error_table WHERE id = 3",
+            )
+            .await
+            .map_err(|error| format!("FrankenSQLite P8 cancellation count: {error}"))?;
+        if !matches!(cancelled_count.get(0), Some(FrankenValue::Integer(0))) {
+            return Err(format!(
+                "FrankenSQLite P8 cancelled operation mutated state: {cancelled_count:?}"
+            ));
+        }
+        connection
+            .query(&cx, "SELECT 1")
+            .await
+            .map_err(|error| format!("FrankenSQLite P8 reuse: {error}"))?;
+        connection
+            .close(&cx)
+            .await
+            .map_err(|error| format!("FrankenSQLite P8 close: {error}"))?;
+        let closed_error = connection
+            .query(&cx, "SELECT 1")
+            .await
+            .expect_err("FrankenSQLite P8 closed connection must reject query");
+        let closed = frankensqlite_error_case(
+            "SQLITE-PARITY-P8-CLOSED-004",
+            "step",
+            &closed_error,
+            "not_cancelled",
+        );
+        Ok::<_, String>(vec![prepare, constraint, cancel, closed])
+    })?;
+    drop(runtime);
+    require_compat_runtime_quiescence(&blocking, "frankensqlite-p8")?;
+    Ok(ErrorEngineEvidence {
+        cases,
+        connection_reusable: true,
+        connection_closed: true,
+        open_transactions: 0,
+        live_statements: 0,
+        live_connections: 0,
+        runtime_quiescent: true,
+        blocking_pending: blocking.pending_count() as u64,
+        blocking_busy: blocking.busy_threads() as u64,
+        blocking_active: blocking.active_threads() as u64,
+    })
+}
+
+fn asupersync_error_case(
+    case_id: &'static str,
+    operation: &'static str,
+    error: &SqliteOperationError,
+    sensitive_markers: &[&str],
+) -> ErrorCaseResult {
+    let diagnostic = error.diagnostic();
+    let rendered = format!("{error:?} {error}");
+    ErrorCaseResult {
+        case_id,
+        operation,
+        category: asupersync_error_category(diagnostic.category()),
+        primary_code: diagnostic.primary_code(),
+        extended_code: diagnostic.extended_code(),
+        retry: asupersync_retry_disposition(diagnostic.retry_disposition()),
+        cancellation_delivery: "not_cancelled",
+        source_preserved: error.engine_source().is_some(),
+        stable_evidence_redacted: sensitive_markers
+            .iter()
+            .all(|marker| !rendered.contains(marker)),
+    }
+}
+
+fn asupersync_error_category(category: SqliteErrorCategory) -> &'static str {
+    match category {
+        SqliteErrorCategory::Busy => "busy",
+        SqliteErrorCategory::Locked => "locked",
+        SqliteErrorCategory::Constraint => "constraint",
+        SqliteErrorCategory::Interrupted => "interrupted",
+        SqliteErrorCategory::Timeout => "timeout",
+        SqliteErrorCategory::PermissionDenied => "permission_denied",
+        SqliteErrorCategory::ReadOnly => "read_only",
+        SqliteErrorCategory::Io => "io",
+        SqliteErrorCategory::Corrupt => "corrupt",
+        SqliteErrorCategory::ResourceExhausted => "resource_exhausted",
+        SqliteErrorCategory::InvalidInput => "invalid_input",
+        SqliteErrorCategory::NotFound => "not_found",
+        SqliteErrorCategory::Closed => "closed",
+        SqliteErrorCategory::Cancelled => "cancelled",
+        SqliteErrorCategory::Internal => "internal",
+        SqliteErrorCategory::Unknown => "unknown",
+        _ => "unknown_future_category",
+    }
+}
+
+fn asupersync_retry_disposition(retry: SqliteRetryDisposition) -> &'static str {
+    match retry {
+        SqliteRetryDisposition::Never => "never",
+        SqliteRetryDisposition::RetryOperation => "retry_operation",
+        SqliteRetryDisposition::ReopenConnection => "reopen_connection",
+        _ => "unknown_future_disposition",
+    }
+}
+
+fn frankensqlite_error_case(
+    case_id: &'static str,
+    operation: &'static str,
+    error: &FrankenError,
+    cancellation_delivery: &'static str,
+) -> ErrorCaseResult {
+    let primary_code = error.error_code() as i32;
+    ErrorCaseResult {
+        case_id,
+        operation,
+        category: sqlite_primary_category(primary_code, operation),
+        primary_code: sqlite_primary_code_name(primary_code),
+        extended_code: Some(error.extended_error_code()),
+        retry: sqlite_primary_retry(primary_code),
+        cancellation_delivery,
+        source_preserved: true,
+        stable_evidence_redacted: true,
+    }
+}
+
+fn sqlite_primary_code_name(primary_code: i32) -> Option<&'static str> {
+    match primary_code {
+        1 => Some("SQLITE_ERROR"),
+        2 => Some("SQLITE_INTERNAL"),
+        3 => Some("SQLITE_PERM"),
+        4 => Some("SQLITE_ABORT"),
+        5 => Some("SQLITE_BUSY"),
+        6 => Some("SQLITE_LOCKED"),
+        7 => Some("SQLITE_NOMEM"),
+        8 => Some("SQLITE_READONLY"),
+        9 => Some("SQLITE_INTERRUPT"),
+        10 => Some("SQLITE_IOERR"),
+        11 => Some("SQLITE_CORRUPT"),
+        12 => Some("SQLITE_NOTFOUND"),
+        13 => Some("SQLITE_FULL"),
+        14 => Some("SQLITE_CANTOPEN"),
+        15 => Some("SQLITE_PROTOCOL"),
+        17 => Some("SQLITE_SCHEMA"),
+        18 => Some("SQLITE_TOOBIG"),
+        19 => Some("SQLITE_CONSTRAINT"),
+        20 => Some("SQLITE_MISMATCH"),
+        21 => Some("SQLITE_MISUSE"),
+        22 => Some("SQLITE_NOLFS"),
+        23 => Some("SQLITE_AUTH"),
+        25 => Some("SQLITE_RANGE"),
+        26 => Some("SQLITE_NOTADB"),
+        _ => None,
+    }
+}
+
+fn sqlite_primary_category(primary_code: i32, operation: &str) -> &'static str {
+    match primary_code {
+        1 if matches!(operation, "prepare" | "bind") => "invalid_input",
+        3 | 23 => "permission_denied",
+        5 => "busy",
+        6 => "locked",
+        7 | 13 | 18 => "resource_exhausted",
+        8 => "read_only",
+        9 => "interrupted",
+        10 | 14 | 15 => "io",
+        11 | 26 => "corrupt",
+        12 => "not_found",
+        19 => "constraint",
+        20 | 25 => "invalid_input",
+        2 | 4 | 17 | 21 | 22 => "internal",
+        _ => "unknown",
+    }
+}
+
+fn sqlite_primary_retry(primary_code: i32) -> &'static str {
+    match primary_code {
+        5 | 6 | 17 => "retry_operation",
+        10 | 11 | 14 | 15 | 26 => "reopen_connection",
+        _ => "never",
+    }
+}
+
+fn diagnosed_outcome<T>(
+    outcome: Outcome<T, SqliteOperationError>,
+    operation: &str,
+) -> Result<T, String> {
+    match outcome {
+        Outcome::Ok(value) => Ok(value),
+        Outcome::Err(error) => Err(format!("{operation}: {error}")),
+        Outcome::Cancelled(_) => Err(format!("{operation} was cancelled")),
+        Outcome::Panicked(_) => Err(format!("{operation} panicked")),
+    }
+}
+
+fn outcome_drift<T>(operation: &str, outcome: Outcome<T, SqliteOperationError>) -> String {
+    match outcome {
+        Outcome::Ok(_) => format!("{operation} unexpectedly succeeded"),
+        Outcome::Err(error) => format!("{operation} returned unexpected error: {error}"),
+        Outcome::Cancelled(_) => format!("{operation} was unexpectedly cancelled"),
+        Outcome::Panicked(_) => format!("{operation} panicked"),
+    }
 }
 
 fn validate_suite(suite: &VectorSuite) -> Result<(), String> {

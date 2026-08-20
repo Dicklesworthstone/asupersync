@@ -119,13 +119,26 @@ fn configure_connection_defaults(
     conn: &rusqlite::Connection,
     enable_wal: bool,
 ) -> Result<(), SqliteError> {
+    configure_connection_defaults_with(conn, enable_wal, |_, error| {
+        SqliteError::Sqlite(error.to_string())
+    })
+}
+
+fn configure_connection_defaults_with<E, F>(
+    conn: &rusqlite::Connection,
+    enable_wal: bool,
+    mut map_error: F,
+) -> Result<(), E>
+where
+    F: FnMut(SqliteOperation, rusqlite::Error) -> E,
+{
     conn.busy_timeout(DEFAULT_BUSY_TIMEOUT)
-        .map_err(|e| SqliteError::Sqlite(e.to_string()))?;
+        .map_err(|error| map_error(SqliteOperation::Configure, error))?;
     conn.pragma_update(None, "foreign_keys", "ON")
-        .map_err(|e| SqliteError::Sqlite(e.to_string()))?;
+        .map_err(|error| map_error(SqliteOperation::Configure, error))?;
     if enable_wal {
         conn.pragma_update(None, "journal_mode", "WAL")
-            .map_err(|e| SqliteError::Sqlite(e.to_string()))?;
+            .map_err(|error| map_error(SqliteOperation::Configure, error))?;
     }
     conn.set_prepared_statement_cache_capacity(DEFAULT_STATEMENT_CACHE_CAPACITY);
     Ok(())
@@ -222,6 +235,48 @@ impl BeginAttempt {
         }
         result
     }
+
+    fn finish_worker_diagnosed(
+        &self,
+        conn: &rusqlite::Connection,
+        operation: SqliteOperation,
+        result: Result<u64, SqliteOperationError>,
+    ) -> Result<u64, SqliteOperationError> {
+        if result.is_ok() {
+            let mut lifecycle = self.lifecycle.lock();
+            lifecycle.opened = true;
+            let Some(generation) =
+                advance_transaction_generation(self.transaction_generation.as_ref())
+            else {
+                drop(lifecycle);
+                rollback_abandoned_begin_mutex_guarded(
+                    conn,
+                    self.transaction_state.as_ref(),
+                    self.transaction_generation.as_ref(),
+                )
+                .map_err(|error| SqliteOperationError::from_legacy(operation, error))?;
+                return Err(SqliteOperationError::from_legacy(
+                    operation,
+                    SqliteError::Sqlite(
+                        "managed SQLite transaction generation exhausted".to_string(),
+                    ),
+                ));
+            };
+            lifecycle.generation = Some(generation);
+            if lifecycle.abandoned {
+                drop(lifecycle);
+                rollback_abandoned_begin_mutex_guarded(
+                    conn,
+                    self.transaction_state.as_ref(),
+                    self.transaction_generation.as_ref(),
+                )
+                .map_err(|error| SqliteOperationError::from_legacy(operation, error))?;
+            } else {
+                *self.transaction_state.lock() = TransactionState::InTransaction;
+            }
+        }
+        result
+    }
 }
 
 enum TransactionWorkerEffect {
@@ -245,6 +300,32 @@ impl TransactionWorkerEffect {
                 attempt.finish_worker(conn, result)
             }
             Self::Finish(mut effect) => effect.execute_worker(conn, sql),
+        }
+    }
+
+    fn execute_worker_diagnosed(
+        self,
+        conn: &rusqlite::Connection,
+        sql: &str,
+        operation: SqliteOperation,
+    ) -> Result<u64, SqliteOperationError> {
+        match self {
+            Self::Begin(attempt) => {
+                if attempt.transaction_generation.load(Ordering::Acquire) >= u64::MAX - 1 {
+                    return Err(SqliteOperationError::from_legacy(
+                        operation,
+                        SqliteError::Sqlite(
+                            "managed SQLite transaction generation exhausted".to_string(),
+                        ),
+                    ));
+                }
+                let result = conn
+                    .execute(sql, [])
+                    .map(|rows| rows as u64)
+                    .map_err(|error| SqliteOperationError::from_rusqlite(operation, error));
+                attempt.finish_worker_diagnosed(conn, operation, result)
+            }
+            Self::Finish(mut effect) => effect.execute_worker_diagnosed(conn, sql, operation),
         }
     }
 }
@@ -304,6 +385,56 @@ impl TransactionFinishEffect {
             .execute(sql, [])
             .map(|rows| rows as u64)
             .map_err(|error| SqliteError::Sqlite(error.to_string()));
+        if result.is_ok() {
+            let _ = advance_transaction_generation(self.transaction_generation.as_ref());
+            *self.transaction_state.lock() = TransactionState::Autocommit;
+            if let Some(token) = self.obligation.take() {
+                match self.kind {
+                    TransactionFinishKind::Commit => {
+                        let _ = token.commit();
+                    }
+                    TransactionFinishKind::Rollback => {
+                        let _ = token.abort();
+                    }
+                }
+            }
+        } else if let Some(token) = self.obligation.take() {
+            let _ = token.abort();
+        }
+        result
+    }
+
+    fn execute_worker_diagnosed(
+        &mut self,
+        conn: &rusqlite::Connection,
+        sql: &str,
+        operation: SqliteOperation,
+    ) -> Result<u64, SqliteOperationError> {
+        if self.transaction_generation.load(Ordering::Acquire) != self.expected_generation {
+            if let Some(token) = self.obligation.take() {
+                let _ = token.abort();
+            }
+            return Err(SqliteOperationError::from_legacy(
+                operation,
+                SqliteError::TransactionFinished,
+            ));
+        }
+        if conn.is_autocommit() {
+            let _ = advance_transaction_generation(self.transaction_generation.as_ref());
+            *self.transaction_state.lock() = TransactionState::Autocommit;
+            if let Some(token) = self.obligation.take() {
+                let _ = token.abort();
+            }
+            return Err(SqliteOperationError::from_legacy(
+                operation,
+                SqliteError::TransactionFinished,
+            ));
+        }
+
+        let result = conn
+            .execute(sql, [])
+            .map(|rows| rows as u64)
+            .map_err(|error| SqliteOperationError::from_rusqlite(operation, error));
         if result.is_ok() {
             let _ = advance_transaction_generation(self.transaction_generation.as_ref());
             *self.transaction_state.lock() = TransactionState::Autocommit;
@@ -1149,6 +1280,564 @@ impl From<std::io::Error> for SqliteError {
     }
 }
 
+/// Stage of a SQLite operation that produced a structured diagnostic.
+///
+/// This is an additive companion to the v0.4.3-compatible [`SqliteError`]
+/// surface. It deliberately describes the operation boundary rather than
+/// exposing rusqlite implementation types.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SqliteOperation {
+    /// Opening a database connection.
+    Open,
+    /// Preparing SQL for execution.
+    Prepare,
+    /// Binding caller-supplied parameters.
+    Bind,
+    /// Stepping a prepared statement.
+    Step,
+    /// Executing a batch of statements.
+    ExecuteBatch,
+    /// Beginning a transaction.
+    TransactionBegin,
+    /// Committing a transaction.
+    TransactionCommit,
+    /// Rolling back a transaction.
+    TransactionRollback,
+    /// Configuring a connection.
+    Configure,
+    /// Closing or draining a connection.
+    Close,
+    /// Communicating with the blocking-pool worker.
+    BlockingPool,
+    /// Rejecting input before it reaches SQLite.
+    Validation,
+}
+
+impl SqliteOperation {
+    #[must_use]
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::Prepare => "prepare",
+            Self::Bind => "bind",
+            Self::Step => "step",
+            Self::ExecuteBatch => "execute_batch",
+            Self::TransactionBegin => "transaction_begin",
+            Self::TransactionCommit => "transaction_commit",
+            Self::TransactionRollback => "transaction_rollback",
+            Self::Configure => "configure",
+            Self::Close => "close",
+            Self::BlockingPool => "blocking_pool",
+            Self::Validation => "validation",
+        }
+    }
+}
+
+/// Stable, engine-neutral classification for a SQLite failure.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SqliteErrorCategory {
+    /// The database is busy and the operation may be retried.
+    Busy,
+    /// A table or schema object is locked and the operation may be retried.
+    Locked,
+    /// A database constraint rejected the operation.
+    Constraint,
+    /// SQLite reported `SQLITE_INTERRUPT`.
+    Interrupted,
+    /// A caller budget or configured statement timeout expired.
+    Timeout,
+    /// SQLite or the validated path policy denied access.
+    PermissionDenied,
+    /// The database is read-only for the attempted operation.
+    ReadOnly,
+    /// An operating-system or database I/O operation failed.
+    Io,
+    /// SQLite reported corrupt or non-database bytes.
+    Corrupt,
+    /// Memory, disk, or a configured size limit was exhausted.
+    ResourceExhausted,
+    /// SQL, parameters, a path, or a row conversion was invalid.
+    InvalidInput,
+    /// A requested database object was not found.
+    NotFound,
+    /// The connection is closed or no longer usable.
+    Closed,
+    /// The structured operation was cancelled.
+    Cancelled,
+    /// An internal invariant, lock, or API contract failed.
+    Internal,
+    /// The legacy error did not retain enough structured information.
+    Unknown,
+}
+
+impl SqliteErrorCategory {
+    #[must_use]
+    const fn operator_code(self) -> &'static str {
+        match self {
+            Self::Busy => "sqlite.busy",
+            Self::Locked => "sqlite.locked",
+            Self::Constraint => "sqlite.constraint",
+            Self::Interrupted => "sqlite.interrupted",
+            Self::Timeout => "sqlite.timeout",
+            Self::PermissionDenied => "sqlite.permission_denied",
+            Self::ReadOnly => "sqlite.read_only",
+            Self::Io => "sqlite.io",
+            Self::Corrupt => "sqlite.corrupt",
+            Self::ResourceExhausted => "sqlite.resource_exhausted",
+            Self::InvalidInput => "sqlite.invalid_input",
+            Self::NotFound => "sqlite.not_found",
+            Self::Closed => "sqlite.closed",
+            Self::Cancelled => "sqlite.cancelled",
+            Self::Internal => "sqlite.internal",
+            Self::Unknown => "sqlite.unknown",
+        }
+    }
+}
+
+/// Whether retrying a failed SQLite operation is appropriate.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SqliteRetryDisposition {
+    /// Retrying would repeat a terminal or caller-directed outcome.
+    Never,
+    /// The same operation may be retried subject to caller policy.
+    RetryOperation,
+    /// Reopen the connection before retrying.
+    ReopenConnection,
+}
+
+/// Structured SQLite diagnostic captured before the legacy string conversion.
+///
+/// The diagnostic intentionally excludes SQL text, bound values, paths, and
+/// engine messages so `Debug` output is safe for ordinary telemetry. The
+/// original v0.4.3-compatible error remains available through
+/// [`SqliteOperationError::legacy_error`] when a caller explicitly needs it.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SqliteErrorDiagnostic {
+    operation: SqliteOperation,
+    category: SqliteErrorCategory,
+    primary_code: Option<&'static str>,
+    extended_code: Option<i32>,
+    retry: SqliteRetryDisposition,
+    connection_error: bool,
+}
+
+impl SqliteErrorDiagnostic {
+    /// Operation stage that failed.
+    #[must_use]
+    pub const fn operation(&self) -> SqliteOperation {
+        self.operation
+    }
+
+    /// Stable engine-neutral category.
+    #[must_use]
+    pub const fn category(&self) -> SqliteErrorCategory {
+        self.category
+    }
+
+    /// Stable operator-facing token that does not contain user data.
+    #[must_use]
+    pub const fn operator_code(&self) -> &'static str {
+        self.category.operator_code()
+    }
+
+    /// Primary SQLite code name, such as `SQLITE_BUSY`, when SQLite supplied
+    /// one directly.
+    #[must_use]
+    pub const fn primary_code(&self) -> Option<&'static str> {
+        self.primary_code
+    }
+
+    /// Raw extended SQLite result code, when SQLite supplied one directly.
+    #[must_use]
+    pub const fn extended_code(&self) -> Option<i32> {
+        self.extended_code
+    }
+
+    /// Retry policy implied by the structured failure.
+    #[must_use]
+    pub const fn retry_disposition(&self) -> SqliteRetryDisposition {
+        self.retry
+    }
+
+    /// Whether retrying the same operation is permitted by the diagnostic.
+    #[must_use]
+    pub const fn is_retryable(&self) -> bool {
+        matches!(self.retry, SqliteRetryDisposition::RetryOperation)
+    }
+
+    /// Whether recovery should replace or reopen the connection.
+    #[must_use]
+    pub const fn is_connection_error(&self) -> bool {
+        self.connection_error
+    }
+
+    fn from_legacy(operation: SqliteOperation, error: &SqliteError) -> Self {
+        let (category, retry, connection_error) = match error {
+            SqliteError::Cancelled(_) => (
+                SqliteErrorCategory::Cancelled,
+                SqliteRetryDisposition::Never,
+                false,
+            ),
+            SqliteError::ConnectionClosed => (
+                SqliteErrorCategory::Closed,
+                SqliteRetryDisposition::ReopenConnection,
+                true,
+            ),
+            SqliteError::ColumnNotFound(_) => (
+                SqliteErrorCategory::NotFound,
+                SqliteRetryDisposition::Never,
+                false,
+            ),
+            SqliteError::TypeMismatch { .. }
+            | SqliteError::UnsafeSql(_)
+            | SqliteError::InvalidTextEncoding { .. }
+            | SqliteError::TransactionFinished => (
+                SqliteErrorCategory::InvalidInput,
+                SqliteRetryDisposition::Never,
+                false,
+            ),
+            SqliteError::UnsafePath(_) => (
+                SqliteErrorCategory::PermissionDenied,
+                SqliteRetryDisposition::Never,
+                false,
+            ),
+            SqliteError::Io(_) => (
+                SqliteErrorCategory::Io,
+                SqliteRetryDisposition::ReopenConnection,
+                true,
+            ),
+            SqliteError::LockPoisoned => (
+                SqliteErrorCategory::Internal,
+                SqliteRetryDisposition::ReopenConnection,
+                true,
+            ),
+            SqliteError::StatementTimeout { .. } => (
+                SqliteErrorCategory::Timeout,
+                SqliteRetryDisposition::Never,
+                false,
+            ),
+            SqliteError::WalCheckpointFailed(_) => (
+                SqliteErrorCategory::Io,
+                SqliteRetryDisposition::RetryOperation,
+                false,
+            ),
+            // The legacy public variant intentionally retains its v0.4.3
+            // payload. It cannot be classified without parsing prose, which
+            // this additive surface refuses to do.
+            SqliteError::Sqlite(_) => (
+                SqliteErrorCategory::Unknown,
+                SqliteRetryDisposition::Never,
+                false,
+            ),
+        };
+        Self {
+            operation,
+            category,
+            primary_code: None,
+            extended_code: None,
+            retry,
+            connection_error,
+        }
+    }
+
+    fn from_rusqlite(operation: SqliteOperation, error: &rusqlite::Error) -> Self {
+        let code = error.sqlite_error_code();
+        let extended_code = error.sqlite_extended_error_code();
+        let (category, primary_code, retry, connection_error) = match code {
+            Some(rusqlite::ffi::ErrorCode::DatabaseBusy) => (
+                SqliteErrorCategory::Busy,
+                Some("SQLITE_BUSY"),
+                SqliteRetryDisposition::RetryOperation,
+                false,
+            ),
+            Some(rusqlite::ffi::ErrorCode::DatabaseLocked) => (
+                SqliteErrorCategory::Locked,
+                Some("SQLITE_LOCKED"),
+                SqliteRetryDisposition::RetryOperation,
+                false,
+            ),
+            Some(rusqlite::ffi::ErrorCode::ConstraintViolation) => (
+                SqliteErrorCategory::Constraint,
+                Some("SQLITE_CONSTRAINT"),
+                SqliteRetryDisposition::Never,
+                false,
+            ),
+            Some(rusqlite::ffi::ErrorCode::OperationInterrupted) => (
+                SqliteErrorCategory::Interrupted,
+                Some("SQLITE_INTERRUPT"),
+                SqliteRetryDisposition::Never,
+                false,
+            ),
+            Some(rusqlite::ffi::ErrorCode::PermissionDenied) => (
+                SqliteErrorCategory::PermissionDenied,
+                Some("SQLITE_PERM"),
+                SqliteRetryDisposition::Never,
+                false,
+            ),
+            Some(rusqlite::ffi::ErrorCode::AuthorizationForStatementDenied) => (
+                SqliteErrorCategory::PermissionDenied,
+                Some("SQLITE_AUTH"),
+                SqliteRetryDisposition::Never,
+                false,
+            ),
+            Some(rusqlite::ffi::ErrorCode::ReadOnly) => (
+                SqliteErrorCategory::ReadOnly,
+                Some("SQLITE_READONLY"),
+                SqliteRetryDisposition::Never,
+                false,
+            ),
+            Some(rusqlite::ffi::ErrorCode::SystemIoFailure) => (
+                SqliteErrorCategory::Io,
+                Some("SQLITE_IOERR"),
+                SqliteRetryDisposition::ReopenConnection,
+                true,
+            ),
+            Some(rusqlite::ffi::ErrorCode::DatabaseCorrupt) => (
+                SqliteErrorCategory::Corrupt,
+                Some("SQLITE_CORRUPT"),
+                SqliteRetryDisposition::ReopenConnection,
+                true,
+            ),
+            Some(rusqlite::ffi::ErrorCode::NotADatabase) => (
+                SqliteErrorCategory::Corrupt,
+                Some("SQLITE_NOTADB"),
+                SqliteRetryDisposition::ReopenConnection,
+                true,
+            ),
+            Some(rusqlite::ffi::ErrorCode::OutOfMemory) => (
+                SqliteErrorCategory::ResourceExhausted,
+                Some("SQLITE_NOMEM"),
+                SqliteRetryDisposition::Never,
+                false,
+            ),
+            Some(rusqlite::ffi::ErrorCode::DiskFull) => (
+                SqliteErrorCategory::ResourceExhausted,
+                Some("SQLITE_FULL"),
+                SqliteRetryDisposition::Never,
+                false,
+            ),
+            Some(rusqlite::ffi::ErrorCode::TooBig) => (
+                SqliteErrorCategory::ResourceExhausted,
+                Some("SQLITE_TOOBIG"),
+                SqliteRetryDisposition::Never,
+                false,
+            ),
+            Some(rusqlite::ffi::ErrorCode::CannotOpen) => (
+                SqliteErrorCategory::Io,
+                Some("SQLITE_CANTOPEN"),
+                SqliteRetryDisposition::ReopenConnection,
+                true,
+            ),
+            Some(rusqlite::ffi::ErrorCode::NotFound) => (
+                SqliteErrorCategory::NotFound,
+                Some("SQLITE_NOTFOUND"),
+                SqliteRetryDisposition::Never,
+                false,
+            ),
+            Some(rusqlite::ffi::ErrorCode::SchemaChanged) => (
+                SqliteErrorCategory::Internal,
+                Some("SQLITE_SCHEMA"),
+                SqliteRetryDisposition::RetryOperation,
+                false,
+            ),
+            Some(rusqlite::ffi::ErrorCode::TypeMismatch) => (
+                SqliteErrorCategory::InvalidInput,
+                Some("SQLITE_MISMATCH"),
+                SqliteRetryDisposition::Never,
+                false,
+            ),
+            Some(rusqlite::ffi::ErrorCode::ParameterOutOfRange) => (
+                SqliteErrorCategory::InvalidInput,
+                Some("SQLITE_RANGE"),
+                SqliteRetryDisposition::Never,
+                false,
+            ),
+            Some(rusqlite::ffi::ErrorCode::ApiMisuse) => (
+                SqliteErrorCategory::Internal,
+                Some("SQLITE_MISUSE"),
+                SqliteRetryDisposition::Never,
+                false,
+            ),
+            Some(rusqlite::ffi::ErrorCode::OperationAborted) => (
+                SqliteErrorCategory::Internal,
+                Some("SQLITE_ABORT"),
+                SqliteRetryDisposition::Never,
+                false,
+            ),
+            Some(rusqlite::ffi::ErrorCode::FileLockingProtocolFailed) => (
+                SqliteErrorCategory::Io,
+                Some("SQLITE_PROTOCOL"),
+                SqliteRetryDisposition::ReopenConnection,
+                true,
+            ),
+            Some(rusqlite::ffi::ErrorCode::InternalMalfunction) => (
+                SqliteErrorCategory::Internal,
+                Some("SQLITE_INTERNAL"),
+                SqliteRetryDisposition::ReopenConnection,
+                true,
+            ),
+            Some(rusqlite::ffi::ErrorCode::NoLargeFileSupport) => (
+                SqliteErrorCategory::Internal,
+                Some("SQLITE_NOLFS"),
+                SqliteRetryDisposition::Never,
+                false,
+            ),
+            Some(rusqlite::ffi::ErrorCode::Unknown) => (
+                if matches!(operation, SqliteOperation::Prepare | SqliteOperation::Bind) {
+                    SqliteErrorCategory::InvalidInput
+                } else {
+                    SqliteErrorCategory::Unknown
+                },
+                Some("SQLITE_ERROR"),
+                SqliteRetryDisposition::Never,
+                false,
+            ),
+            None => {
+                let operation = match error {
+                    rusqlite::Error::InvalidParameterCount(_, _)
+                    | rusqlite::Error::InvalidParameterName(_)
+                    | rusqlite::Error::NulError(_)
+                    | rusqlite::Error::ToSqlConversionFailure(_) => SqliteOperation::Bind,
+                    _ => operation,
+                };
+                return Self {
+                    operation,
+                    category: SqliteErrorCategory::InvalidInput,
+                    primary_code: None,
+                    extended_code: None,
+                    retry: SqliteRetryDisposition::Never,
+                    connection_error: false,
+                };
+            }
+            Some(_) => (
+                SqliteErrorCategory::Unknown,
+                None,
+                SqliteRetryDisposition::Never,
+                false,
+            ),
+        };
+        Self {
+            operation,
+            category,
+            primary_code,
+            extended_code,
+            retry,
+            connection_error,
+        }
+    }
+}
+
+/// Additive structured error for the `*_diagnosed` SQLite APIs.
+///
+/// Existing methods continue to return [`SqliteError`] exactly as they did in
+/// v0.4.3. This wrapper keeps that legacy value available while exposing the
+/// structured diagnostic captured before rusqlite renders an engine failure
+/// into prose. For engine-originated failures, [`Self::engine_source`] retains
+/// the original error behind an explicit accessor; ordinary `Debug`,
+/// `Display`, and automatic error-chain traversal deliberately omit that
+/// potentially sensitive source.
+pub struct SqliteOperationError {
+    diagnostic: SqliteErrorDiagnostic,
+    legacy: SqliteError,
+    engine_source: Option<rusqlite::Error>,
+}
+
+impl SqliteOperationError {
+    fn from_rusqlite(operation: SqliteOperation, error: rusqlite::Error) -> Self {
+        let diagnostic = SqliteErrorDiagnostic::from_rusqlite(operation, &error);
+        let rendered = error.to_string();
+        Self {
+            diagnostic,
+            legacy: SqliteError::Sqlite(rendered),
+            engine_source: Some(error),
+        }
+    }
+
+    fn from_legacy(operation: SqliteOperation, legacy: SqliteError) -> Self {
+        let diagnostic = SqliteErrorDiagnostic::from_legacy(operation, &legacy);
+        Self {
+            diagnostic,
+            legacy,
+            engine_source: None,
+        }
+    }
+
+    /// Structured, redaction-safe diagnostic.
+    #[must_use]
+    pub const fn diagnostic(&self) -> &SqliteErrorDiagnostic {
+        &self.diagnostic
+    }
+
+    /// Original v0.4.3-compatible error value.
+    #[must_use]
+    pub const fn legacy_error(&self) -> &SqliteError {
+        &self.legacy
+    }
+
+    /// Original engine error, when SQLite produced the failure directly.
+    ///
+    /// Access is explicit because the engine message can contain SQL fragments
+    /// or schema names. Automatic error-chain reporters do not receive it.
+    #[must_use]
+    pub fn engine_source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.engine_source
+            .as_ref()
+            .map(|error| error as &(dyn std::error::Error + 'static))
+    }
+
+    /// Consume the wrapper and recover the original error value.
+    #[must_use]
+    pub fn into_legacy(self) -> SqliteError {
+        self.legacy
+    }
+}
+
+impl fmt::Debug for SqliteOperationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SqliteOperationError")
+            .field("diagnostic", &self.diagnostic)
+            .field("legacy", &"<redacted; call legacy_error() explicitly>")
+            .finish()
+    }
+}
+
+impl fmt::Display for SqliteOperationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "[{}] SQLite {} failed",
+            self.diagnostic.operator_code(),
+            self.diagnostic.operation().as_str()
+        )?;
+        if let Some(primary) = self.diagnostic.primary_code() {
+            write!(f, " ({primary}")?;
+            if let Some(extended) = self.diagnostic.extended_code() {
+                write!(f, ", extended={extended}")?;
+            }
+            write!(f, ")")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for SqliteOperationError {}
+
+fn diagnose_legacy_outcome<T>(
+    operation: SqliteOperation,
+    outcome: Outcome<T, SqliteError>,
+) -> Outcome<T, SqliteOperationError> {
+    match outcome {
+        Outcome::Ok(value) => Outcome::Ok(value),
+        Outcome::Err(error) => Outcome::Err(SqliteOperationError::from_legacy(operation, error)),
+        Outcome::Cancelled(reason) => Outcome::Cancelled(reason),
+        Outcome::Panicked(payload) => Outcome::Panicked(payload),
+    }
+}
+
 /// A value from a SQLite row.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SqliteValue {
@@ -1733,9 +2422,43 @@ enum SqliteConnectionOpPhase {
     Completed,
 }
 
-enum SqliteConnectionOpCompletion<R> {
-    Finished(Result<R, SqliteError>),
+enum SqliteConnectionOpCompletion<R, E> {
+    Finished(Result<R, E>),
     Cancelled,
+}
+
+trait SqliteConnectionOpError: Send + 'static {
+    fn from_legacy(operation: SqliteOperation, error: SqliteError) -> Self;
+    fn is_interrupt(&self) -> bool;
+    fn statement_timeout(operation: SqliteOperation, limit: Duration) -> Self;
+}
+
+impl SqliteConnectionOpError for SqliteError {
+    fn from_legacy(_operation: SqliteOperation, error: SqliteError) -> Self {
+        error
+    }
+
+    fn is_interrupt(&self) -> bool {
+        sqlite_error_is_interrupt(self)
+    }
+
+    fn statement_timeout(_operation: SqliteOperation, limit: Duration) -> Self {
+        Self::StatementTimeout { limit }
+    }
+}
+
+impl SqliteConnectionOpError for SqliteOperationError {
+    fn from_legacy(operation: SqliteOperation, error: SqliteError) -> Self {
+        SqliteOperationError::from_legacy(operation, error)
+    }
+
+    fn is_interrupt(&self) -> bool {
+        self.diagnostic.category() == SqliteErrorCategory::Interrupted
+    }
+
+    fn statement_timeout(operation: SqliteOperation, limit: Duration) -> Self {
+        SqliteOperationError::from_legacy(operation, SqliteError::StatementTimeout { limit })
+    }
 }
 
 impl SqliteConnectionInner {
@@ -1847,6 +2570,37 @@ impl SqliteConnection {
         R: Send + 'static,
         F: FnOnce(&rusqlite::Connection) -> Result<R, SqliteError> + Send + 'static,
     {
+        self.run_connection_op_inner(cx, op_name, SqliteOperation::BlockingPool, f)
+            .await
+    }
+
+    async fn run_connection_op_diagnosed<R, F>(
+        &self,
+        cx: &Cx,
+        op_name: &'static str,
+        operation: SqliteOperation,
+        f: F,
+    ) -> Outcome<R, SqliteOperationError>
+    where
+        R: Send + 'static,
+        F: FnOnce(&rusqlite::Connection) -> Result<R, SqliteOperationError> + Send + 'static,
+    {
+        self.run_connection_op_inner(cx, op_name, operation, f)
+            .await
+    }
+
+    async fn run_connection_op_inner<R, E, F>(
+        &self,
+        cx: &Cx,
+        op_name: &'static str,
+        operation: SqliteOperation,
+        f: F,
+    ) -> Outcome<R, E>
+    where
+        R: Send + 'static,
+        E: SqliteConnectionOpError,
+        F: FnOnce(&rusqlite::Connection) -> Result<R, E> + Send + 'static,
+    {
         /// SQLite VM instructions between deadline checks in the timeout
         /// progress handler — small enough for prompt aborts, large enough
         /// to keep the per-op overhead negligible.
@@ -1881,9 +2635,10 @@ impl SqliteConnection {
                 return Outcome::Cancelled(sqlite_cancelled_reason(cx));
             }
             Err(crate::channel::oneshot::SendError::Disconnected(())) => {
-                return Outcome::Err(SqliteError::Sqlite(format!(
-                    "failed to reserve result channel for {op_name}"
-                )));
+                return Outcome::Err(E::from_legacy(
+                    operation,
+                    SqliteError::Sqlite(format!("failed to reserve result channel for {op_name}")),
+                ));
             }
         };
 
@@ -1909,7 +2664,9 @@ impl SqliteConnection {
                 }
 
                 let result = (|| {
-                    let conn = guard.get()?;
+                    let conn = guard
+                        .get()
+                        .map_err(|error| E::from_legacy(operation, error))?;
                     // br-asupersync-server-stack-hardening-eeexl1.1.2: arm the
                     // budget-derived statement timeout for the duration of this
                     // operation. Wall-clock by necessity — the deadline fires on
@@ -1923,7 +2680,12 @@ impl SqliteConnection {
                             Some(move || std::time::Instant::now() >= deadline),
                         )
                         .map_err(|e| {
-                            SqliteError::Sqlite(format!("failed to arm statement timeout: {e}"))
+                            E::from_legacy(
+                                operation,
+                                SqliteError::Sqlite(format!(
+                                    "failed to arm statement timeout: {e}"
+                                )),
+                            )
                         })?;
                     }
                     let result = f(conn);
@@ -1941,12 +2703,12 @@ impl SqliteConnection {
                     cancellation_requested
                 };
                 let result = match (cancellation_requested, timeout, result) {
-                    (true, _, Err(err)) if sqlite_error_is_interrupt(&err) => {
+                    (true, _, Err(err)) if err.is_interrupt() => {
                         drop(guard);
                         return SqliteConnectionOpCompletion::Cancelled;
                     }
-                    (_, Some(limit), Err(err)) if sqlite_error_is_interrupt(&err) => {
-                        Err(SqliteError::StatementTimeout { limit })
+                    (_, Some(limit), Err(err)) if err.is_interrupt() => {
+                        Err(E::statement_timeout(operation, limit))
                     }
                     (_, _, result) => result,
                 };
@@ -2032,8 +2794,9 @@ impl SqliteConnection {
                         .unwrap_or_else(|| CancelReason::user("cancelled")),
                 )
             }
-            Err(crate::channel::oneshot::RecvError::Closed) => Outcome::Err(SqliteError::Sqlite(
-                format!("failed to receive result for {op_name}"),
+            Err(crate::channel::oneshot::RecvError::Closed) => Outcome::Err(E::from_legacy(
+                operation,
+                SqliteError::Sqlite(format!("failed to receive result for {op_name}")),
             )),
             Err(crate::channel::oneshot::RecvError::PolledAfterCompletion) => {
                 unreachable!("{op_name} awaits a fresh oneshot recv future")
@@ -2108,48 +2871,23 @@ impl SqliteConnection {
         });
     }
 
-    /// Opens a SQLite database at the given path.
-    ///
-    /// # Cancellation
-    ///
-    /// This operation checks for cancellation before starting.
-    /// If cancelled during execution, the connection may or may not be opened.
-    pub async fn open(cx: &Cx, path: impl AsRef<Path>) -> Outcome<Self, SqliteError> {
-        // Check for cancellation
+    async fn open_with<E, F>(cx: &Cx, operation: SqliteOperation, open: F) -> Outcome<Self, E>
+    where
+        E: SqliteConnectionOpError,
+        F: FnOnce() -> Result<rusqlite::Connection, E> + Send + 'static,
+    {
         if cx.checkpoint().is_err() {
-            return Outcome::Cancelled(
-                cx.cancel_reason()
-                    .unwrap_or_else(|| CancelReason::user("cancelled")),
-            );
+            return Outcome::Cancelled(sqlite_cancelled_reason(cx));
         }
 
-        let path = path.as_ref().to_path_buf();
         let pool = get_sqlite_pool();
         let pool_clone = pool.clone();
-
         let (tx, mut rx) = crate::channel::oneshot::channel();
         let permit = tx.reserve(cx);
-
         let handle = pool.spawn(move || {
-            let result = (|| {
-                // SECURITY: lexical tilde/parent-traversal rejection must see the
-                // raw input before canonicalization erases those components
-                // (br-asupersync-uvqpga: open() previously skipped these checks).
-                validate_sqlite_open_path_lexical(&path)?;
-                // SECURITY FIX: Resolve path once and use same resolved path for both validation and opening
-                // Eliminates TOCTOU vulnerability where symlinks could change between check and use
-                let resolved_path = resolve_sqlite_open_path(&path)?;
-                validate_resolved_sqlite_path(&resolved_path)?;
-                let conn = rusqlite::Connection::open(&resolved_path)
-                    .map_err(|e| SqliteError::Sqlite(e.to_string()))?;
-                configure_connection_defaults(&conn, true)?;
-                Ok(conn)
-            })();
-            // oneshot::Sender::reserve now returns Result<SendPermit, SendError>;
-            // if reservation failed (Cx cancelled before reserve), drop the
-            // result silently — the receiver path will surface the cancel.
-            if let Ok(p) = permit {
-                let _ = p.send(result);
+            let result = open();
+            if let Ok(permit) = permit {
+                let _ = permit.send(result);
             }
         });
 
@@ -2165,21 +2903,75 @@ impl SqliteConnection {
                     statement_timeout_override: None,
                 })
             }
-            Ok(Err(e)) => Outcome::Err(e),
+            Ok(Err(error)) => Outcome::Err(error),
             Err(crate::channel::oneshot::RecvError::Cancelled) => {
                 handle.cancel();
-                Outcome::Cancelled(
-                    cx.cancel_reason()
-                        .unwrap_or_else(|| CancelReason::user("cancelled")),
-                )
+                Outcome::Cancelled(sqlite_cancelled_reason(cx))
             }
-            Err(crate::channel::oneshot::RecvError::Closed) => {
-                Outcome::Err(SqliteError::Sqlite("failed to receive result".to_string()))
-            }
+            Err(crate::channel::oneshot::RecvError::Closed) => Outcome::Err(E::from_legacy(
+                operation,
+                SqliteError::Sqlite("failed to receive result".to_string()),
+            )),
             Err(crate::channel::oneshot::RecvError::PolledAfterCompletion) => {
                 unreachable!("SQLite blocking-pool open awaits a fresh oneshot recv future")
             }
         }
+    }
+
+    /// Opens a SQLite database at the given path.
+    ///
+    /// # Cancellation
+    ///
+    /// This operation checks for cancellation before starting.
+    /// If cancelled during execution, the connection may or may not be opened.
+    pub async fn open(cx: &Cx, path: impl AsRef<Path>) -> Outcome<Self, SqliteError> {
+        let path = path.as_ref().to_path_buf();
+        Self::open_with(cx, SqliteOperation::Open, move || {
+            // SECURITY: lexical tilde/parent-traversal rejection must see the
+            // raw input before canonicalization erases those components
+            // (br-asupersync-uvqpga: open() previously skipped these checks).
+            validate_sqlite_open_path_lexical(&path)?;
+            // Resolve once and use the same path for validation and opening.
+            let resolved_path = resolve_sqlite_open_path(&path)?;
+            validate_resolved_sqlite_path(&resolved_path)?;
+            let conn = rusqlite::Connection::open(&resolved_path)
+                .map_err(|error| SqliteError::Sqlite(error.to_string()))?;
+            configure_connection_defaults(&conn, true)?;
+            Ok(conn)
+        })
+        .await
+    }
+
+    /// Opens a SQLite database and preserves structured engine diagnostics.
+    ///
+    /// This additive API has the same success and cancellation semantics as
+    /// [`Self::open`]. It never parses SQLite's rendered error text: engine
+    /// codes are captured before conversion, while validation failures retain
+    /// their established [`SqliteError`] as the error source.
+    pub async fn open_diagnosed(
+        cx: &Cx,
+        path: impl AsRef<Path>,
+    ) -> Outcome<Self, SqliteOperationError> {
+        let path = path.as_ref().to_path_buf();
+        Self::open_with(cx, SqliteOperation::Open, move || {
+            validate_sqlite_open_path_lexical(&path).map_err(|error| {
+                SqliteOperationError::from_legacy(SqliteOperation::Validation, error)
+            })?;
+            let resolved_path = resolve_sqlite_open_path(&path).map_err(|error| {
+                SqliteOperationError::from_legacy(SqliteOperation::Validation, error)
+            })?;
+            validate_resolved_sqlite_path(&resolved_path).map_err(|error| {
+                SqliteOperationError::from_legacy(SqliteOperation::Validation, error)
+            })?;
+            let conn = rusqlite::Connection::open(&resolved_path).map_err(|error| {
+                SqliteOperationError::from_rusqlite(SqliteOperation::Open, error)
+            })?;
+            configure_connection_defaults_with(&conn, true, |operation, error| {
+                SqliteOperationError::from_rusqlite(operation, error)
+            })?;
+            Ok(conn)
+        })
+        .await
     }
 
     /// Opens an in-memory SQLite database.
@@ -2188,61 +2980,27 @@ impl SqliteConnection {
     ///
     /// This operation checks for cancellation before starting.
     pub async fn open_in_memory(cx: &Cx) -> Outcome<Self, SqliteError> {
-        // Check for cancellation
-        if cx.checkpoint().is_err() {
-            return Outcome::Cancelled(
-                cx.cancel_reason()
-                    .unwrap_or_else(|| CancelReason::user("cancelled")),
-            );
-        }
+        Self::open_with(cx, SqliteOperation::Open, move || {
+            let conn = rusqlite::Connection::open_in_memory()
+                .map_err(|error| SqliteError::Sqlite(error.to_string()))?;
+            configure_connection_defaults(&conn, false)?;
+            Ok(conn)
+        })
+        .await
+    }
 
-        let pool = get_sqlite_pool();
-        let pool_clone = pool.clone();
-
-        let (tx, mut rx) = crate::channel::oneshot::channel();
-        let permit = tx.reserve(cx);
-
-        let handle = pool.spawn(move || {
-            let result = (|| {
-                let conn = rusqlite::Connection::open_in_memory()
-                    .map_err(|e| SqliteError::Sqlite(e.to_string()))?;
-                configure_connection_defaults(&conn, false)?;
-                Ok(conn)
-            })();
-            // oneshot::Sender::reserve now returns Result<SendPermit, SendError>;
-            // see the on-disk open path above for the full rationale.
-            if let Ok(p) = permit {
-                let _ = p.send(result);
-            }
-        });
-
-        match rx.recv(cx).await {
-            Ok(Ok(conn)) => {
-                let interrupt = Arc::new(conn.get_interrupt_handle());
-                Outcome::Ok(Self {
-                    inner: Arc::new(Mutex::new(SqliteConnectionInner::new(conn))),
-                    pool: pool_clone,
-                    transaction_state: Arc::new(Mutex::new(TransactionState::Autocommit)),
-                    transaction_generation: Arc::new(AtomicU64::new(0)),
-                    interrupt,
-                    statement_timeout_override: None,
-                })
-            }
-            Ok(Err(e)) => Outcome::Err(e),
-            Err(crate::channel::oneshot::RecvError::Cancelled) => {
-                handle.cancel();
-                Outcome::Cancelled(
-                    cx.cancel_reason()
-                        .unwrap_or_else(|| CancelReason::user("cancelled")),
-                )
-            }
-            Err(crate::channel::oneshot::RecvError::Closed) => {
-                Outcome::Err(SqliteError::Sqlite("failed to receive result".to_string()))
-            }
-            Err(crate::channel::oneshot::RecvError::PolledAfterCompletion) => {
-                unreachable!("SQLite in-memory open awaits a fresh oneshot recv future")
-            }
-        }
+    /// Opens an in-memory SQLite database with structured diagnostics.
+    pub async fn open_in_memory_diagnosed(cx: &Cx) -> Outcome<Self, SqliteOperationError> {
+        Self::open_with(cx, SqliteOperation::Open, move || {
+            let conn = rusqlite::Connection::open_in_memory().map_err(|error| {
+                SqliteOperationError::from_rusqlite(SqliteOperation::Open, error)
+            })?;
+            configure_connection_defaults_with(&conn, false, |operation, error| {
+                SqliteOperationError::from_rusqlite(operation, error)
+            })?;
+            Ok(conn)
+        })
+        .await
     }
 
     /// Executes a SQL statement that returns no rows.
@@ -2292,6 +3050,80 @@ impl SqliteConnection {
         .await
     }
 
+    /// Executes a checked statement and preserves structured engine
+    /// diagnostics without changing the legacy [`Self::execute`] contract.
+    pub async fn execute_diagnosed(
+        &self,
+        cx: &Cx,
+        sql: &str,
+        params: &[SqliteValue],
+    ) -> Outcome<u64, SqliteOperationError> {
+        if let Err(error) = validate_checked_sql_statement(sql) {
+            return Outcome::Err(SqliteOperationError::from_legacy(
+                SqliteOperation::Validation,
+                error,
+            ));
+        }
+        self.execute_unchecked_diagnosed(cx, sql, params).await
+    }
+
+    /// Executes trusted SQL and captures prepare, bind, and step failures as
+    /// structured diagnostics.
+    ///
+    /// This has the same security boundary as [`Self::execute_unchecked`].
+    pub async fn execute_unchecked_diagnosed(
+        &self,
+        cx: &Cx,
+        sql: &str,
+        params: &[SqliteValue],
+    ) -> Outcome<u64, SqliteOperationError> {
+        if let Err(error) = ensure_unchecked_sql_surface(sql) {
+            return Outcome::Err(SqliteOperationError::from_legacy(
+                SqliteOperation::Validation,
+                error,
+            ));
+        }
+        if cx.checkpoint().is_err() {
+            return Outcome::Cancelled(sqlite_cancelled_reason(cx));
+        }
+        match diagnose_legacy_outcome(
+            SqliteOperation::TransactionRollback,
+            self.drain_orphaned_transaction(cx).await,
+        ) {
+            Outcome::Ok(()) => {}
+            Outcome::Err(error) => return Outcome::Err(error),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+        }
+        if cx.checkpoint().is_err() {
+            return Outcome::Cancelled(sqlite_cancelled_reason(cx));
+        }
+
+        let sql = sql.to_string();
+        let params = params.to_vec();
+        self.run_connection_op_diagnosed(
+            cx,
+            "sqlite diagnosed execute",
+            SqliteOperation::Step,
+            move |conn| {
+                let mut statement = conn.prepare_cached(&sql).map_err(|error| {
+                    SqliteOperationError::from_rusqlite(SqliteOperation::Prepare, error)
+                })?;
+                let params_refs: Vec<&dyn rusqlite::ToSql> = params
+                    .iter()
+                    .map(|value| value as &dyn rusqlite::ToSql)
+                    .collect();
+                statement
+                    .execute(params_refs.as_slice())
+                    .map(|rows| rows as u64)
+                    .map_err(|error| {
+                        SqliteOperationError::from_rusqlite(SqliteOperation::Step, error)
+                    })
+            },
+        )
+        .await
+    }
+
     async fn execute_transaction_control(
         &self,
         cx: &Cx,
@@ -2301,6 +3133,44 @@ impl SqliteConnection {
         self.execute_unchecked_with(cx, sql, &[], move |conn, sql, _params| {
             effect.execute_worker(conn, sql)
         })
+        .await
+    }
+
+    async fn execute_transaction_control_diagnosed(
+        &self,
+        cx: &Cx,
+        sql: &'static str,
+        operation: SqliteOperation,
+        effect: TransactionWorkerEffect,
+    ) -> Outcome<u64, SqliteOperationError> {
+        if let Err(error) = ensure_unchecked_sql_surface(sql) {
+            return Outcome::Err(SqliteOperationError::from_legacy(
+                SqliteOperation::Validation,
+                error,
+            ));
+        }
+        if cx.checkpoint().is_err() {
+            return Outcome::Cancelled(sqlite_cancelled_reason(cx));
+        }
+        match diagnose_legacy_outcome(
+            SqliteOperation::TransactionRollback,
+            self.drain_orphaned_transaction(cx).await,
+        ) {
+            Outcome::Ok(()) => {}
+            Outcome::Err(error) => return Outcome::Err(error),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+        }
+        if cx.checkpoint().is_err() {
+            return Outcome::Cancelled(sqlite_cancelled_reason(cx));
+        }
+
+        self.run_connection_op_diagnosed(
+            cx,
+            "sqlite diagnosed transaction control",
+            operation,
+            move |conn| effect.execute_worker_diagnosed(conn, sql, operation),
+        )
         .await
     }
 
@@ -2391,6 +3261,66 @@ impl SqliteConnection {
         .await
     }
 
+    /// Executes a checked SQL batch with structured engine diagnostics.
+    pub async fn execute_batch_diagnosed(
+        &self,
+        cx: &Cx,
+        sql: &str,
+    ) -> Outcome<(), SqliteOperationError> {
+        if let Err(error) = validate_checked_sql_batch(sql) {
+            return Outcome::Err(SqliteOperationError::from_legacy(
+                SqliteOperation::Validation,
+                error,
+            ));
+        }
+        self.execute_batch_unchecked_diagnosed(cx, sql).await
+    }
+
+    /// Executes a trusted SQL batch with structured engine diagnostics.
+    ///
+    /// This has the same security boundary as
+    /// [`Self::execute_batch_unchecked`].
+    pub async fn execute_batch_unchecked_diagnosed(
+        &self,
+        cx: &Cx,
+        sql: &str,
+    ) -> Outcome<(), SqliteOperationError> {
+        if let Err(error) = ensure_unchecked_sql_surface(sql) {
+            return Outcome::Err(SqliteOperationError::from_legacy(
+                SqliteOperation::Validation,
+                error,
+            ));
+        }
+        if cx.checkpoint().is_err() {
+            return Outcome::Cancelled(sqlite_cancelled_reason(cx));
+        }
+        match diagnose_legacy_outcome(
+            SqliteOperation::TransactionRollback,
+            self.drain_orphaned_transaction(cx).await,
+        ) {
+            Outcome::Ok(()) => {}
+            Outcome::Err(error) => return Outcome::Err(error),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+        }
+        if cx.checkpoint().is_err() {
+            return Outcome::Cancelled(sqlite_cancelled_reason(cx));
+        }
+
+        let sql = sql.to_string();
+        self.run_connection_op_diagnosed(
+            cx,
+            "sqlite diagnosed execute_batch",
+            SqliteOperation::ExecuteBatch,
+            move |conn| {
+                conn.execute_batch(&sql).map_err(|error| {
+                    SqliteOperationError::from_rusqlite(SqliteOperation::ExecuteBatch, error)
+                })
+            },
+        )
+        .await
+    }
+
     /// Executes a query and returns all rows.
     ///
     /// # Cancellation
@@ -2465,6 +3395,92 @@ impl SqliteConnection {
             drop(stmt);
             Ok(result)
         })
+        .await
+    }
+
+    /// Executes a checked query with structured prepare, bind, and step
+    /// diagnostics.
+    pub async fn query_diagnosed(
+        &self,
+        cx: &Cx,
+        sql: &str,
+        params: &[SqliteValue],
+    ) -> Outcome<Vec<SqliteRow>, SqliteOperationError> {
+        if let Err(error) = validate_checked_sql_statement(sql) {
+            return Outcome::Err(SqliteOperationError::from_legacy(
+                SqliteOperation::Validation,
+                error,
+            ));
+        }
+        self.query_unchecked_diagnosed(cx, sql, params).await
+    }
+
+    /// Executes a trusted query with structured prepare, bind, and step
+    /// diagnostics.
+    ///
+    /// This has the same security boundary as [`Self::query_unchecked`].
+    pub async fn query_unchecked_diagnosed(
+        &self,
+        cx: &Cx,
+        sql: &str,
+        params: &[SqliteValue],
+    ) -> Outcome<Vec<SqliteRow>, SqliteOperationError> {
+        if let Err(error) = ensure_unchecked_sql_surface(sql) {
+            return Outcome::Err(SqliteOperationError::from_legacy(
+                SqliteOperation::Validation,
+                error,
+            ));
+        }
+        if cx.checkpoint().is_err() {
+            return Outcome::Cancelled(sqlite_cancelled_reason(cx));
+        }
+        match diagnose_legacy_outcome(
+            SqliteOperation::TransactionRollback,
+            self.drain_orphaned_transaction(cx).await,
+        ) {
+            Outcome::Ok(()) => {}
+            Outcome::Err(error) => return Outcome::Err(error),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+        }
+        if cx.checkpoint().is_err() {
+            return Outcome::Cancelled(sqlite_cancelled_reason(cx));
+        }
+
+        let sql = sql.to_string();
+        let params = params.to_vec();
+        self.run_connection_op_diagnosed(
+            cx,
+            "sqlite diagnosed query",
+            SqliteOperation::Step,
+            move |conn| {
+                let params_refs: Vec<&dyn rusqlite::ToSql> = params
+                    .iter()
+                    .map(|value| value as &dyn rusqlite::ToSql)
+                    .collect();
+                let mut statement = conn.prepare_cached(&sql).map_err(|error| {
+                    SqliteOperationError::from_rusqlite(SqliteOperation::Prepare, error)
+                })?;
+                let mut rows = statement.query(params_refs.as_slice()).map_err(|error| {
+                    SqliteOperationError::from_rusqlite(SqliteOperation::Bind, error)
+                })?;
+
+                let mut result = Vec::new();
+                let mut metadata = None;
+                while let Some(row) = rows.next().map_err(|error| {
+                    SqliteOperationError::from_rusqlite(SqliteOperation::Step, error)
+                })? {
+                    let (column_names, columns) =
+                        metadata.get_or_insert_with(|| sqlite_row_metadata(row));
+                    let converted = sqlite_row_from_rusqlite_row(row, column_names, columns)
+                        .map_err(|error| {
+                            SqliteOperationError::from_legacy(SqliteOperation::Step, error)
+                        })?;
+                    result.push(converted);
+                }
+                Ok(result)
+            },
+        )
         .await
     }
 
@@ -2748,6 +3764,92 @@ impl SqliteConnection {
         .await
     }
 
+    /// Executes a checked query for its first row with structured diagnostics.
+    pub async fn query_row_diagnosed(
+        &self,
+        cx: &Cx,
+        sql: &str,
+        params: &[SqliteValue],
+    ) -> Outcome<Option<SqliteRow>, SqliteOperationError> {
+        if let Err(error) = validate_checked_sql_statement(sql) {
+            return Outcome::Err(SqliteOperationError::from_legacy(
+                SqliteOperation::Validation,
+                error,
+            ));
+        }
+        self.query_row_unchecked_diagnosed(cx, sql, params).await
+    }
+
+    /// Executes a trusted query for its first row with structured diagnostics.
+    ///
+    /// This has the same security boundary as [`Self::query_row_unchecked`].
+    pub async fn query_row_unchecked_diagnosed(
+        &self,
+        cx: &Cx,
+        sql: &str,
+        params: &[SqliteValue],
+    ) -> Outcome<Option<SqliteRow>, SqliteOperationError> {
+        if let Err(error) = ensure_unchecked_sql_surface(sql) {
+            return Outcome::Err(SqliteOperationError::from_legacy(
+                SqliteOperation::Validation,
+                error,
+            ));
+        }
+        if cx.checkpoint().is_err() {
+            return Outcome::Cancelled(sqlite_cancelled_reason(cx));
+        }
+        match diagnose_legacy_outcome(
+            SqliteOperation::TransactionRollback,
+            self.drain_orphaned_transaction(cx).await,
+        ) {
+            Outcome::Ok(()) => {}
+            Outcome::Err(error) => return Outcome::Err(error),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+        }
+        if cx.checkpoint().is_err() {
+            return Outcome::Cancelled(sqlite_cancelled_reason(cx));
+        }
+
+        let sql = sql.to_string();
+        let params = params.to_vec();
+        self.run_connection_op_diagnosed(
+            cx,
+            "sqlite diagnosed query_row",
+            SqliteOperation::Step,
+            move |conn| {
+                let params_refs: Vec<&dyn rusqlite::ToSql> = params
+                    .iter()
+                    .map(|value| value as &dyn rusqlite::ToSql)
+                    .collect();
+                let mut statement = conn.prepare_cached(&sql).map_err(|error| {
+                    SqliteOperationError::from_rusqlite(SqliteOperation::Prepare, error)
+                })?;
+                let mut rows = statement.query(params_refs.as_slice()).map_err(|error| {
+                    SqliteOperationError::from_rusqlite(SqliteOperation::Bind, error)
+                })?;
+                let row = rows.next().map_err(|error| {
+                    SqliteOperationError::from_rusqlite(SqliteOperation::Step, error)
+                })?;
+                let result = match row {
+                    Some(row) => {
+                        let (column_names, columns) = sqlite_row_metadata(row);
+                        Some(
+                            sqlite_row_from_rusqlite_row(row, &column_names, &columns).map_err(
+                                |error| {
+                                    SqliteOperationError::from_legacy(SqliteOperation::Step, error)
+                                },
+                            )?,
+                        )
+                    }
+                    None => None,
+                };
+                Ok(result)
+            },
+        )
+        .await
+    }
+
     async fn begin_with_sql<'conn>(
         &'conn self,
         cx: &Cx,
@@ -2798,6 +3900,67 @@ impl SqliteConnection {
         }
     }
 
+    async fn begin_with_sql_diagnosed<'conn>(
+        &'conn self,
+        cx: &Cx,
+        sql: &'static str,
+        trace_operation: &'static str,
+    ) -> Outcome<SqliteTransaction<'conn>, SqliteOperationError> {
+        trace_database_transaction(cx, "sqlite", trace_operation, "start");
+        let mut drop_guard = BeginDropGuard::new(
+            Arc::clone(&self.transaction_state),
+            Arc::clone(&self.transaction_generation),
+        );
+        let effect = TransactionWorkerEffect::Begin(drop_guard.attempt());
+
+        match self
+            .execute_transaction_control_diagnosed(
+                cx,
+                sql,
+                SqliteOperation::TransactionBegin,
+                effect,
+            )
+            .await
+        {
+            Outcome::Ok(_) => {
+                let Some(generation) = drop_guard.opened_generation() else {
+                    drop_guard.abandon();
+                    trace_database_transaction(cx, "sqlite", trace_operation, "err");
+                    return Outcome::Err(SqliteOperationError::from_legacy(
+                        SqliteOperation::TransactionBegin,
+                        SqliteError::Sqlite(
+                            "managed BEGIN completed without a transaction generation".to_string(),
+                        ),
+                    ));
+                };
+                let transaction = SqliteTransaction {
+                    conn: self,
+                    finished: false,
+                    obligation: reserve_transaction_obligation(cx),
+                    generation,
+                };
+                drop_guard.disarm();
+                trace_database_transaction(cx, "sqlite", trace_operation, "ok");
+                Outcome::Ok(transaction)
+            }
+            Outcome::Err(error) => {
+                drop_guard.disarm();
+                trace_database_transaction(cx, "sqlite", trace_operation, "err");
+                Outcome::Err(error)
+            }
+            Outcome::Cancelled(reason) => {
+                drop_guard.abandon();
+                trace_database_transaction(cx, "sqlite", trace_operation, "cancelled");
+                Outcome::Cancelled(reason)
+            }
+            Outcome::Panicked(payload) => {
+                drop_guard.abandon();
+                trace_database_transaction(cx, "sqlite", trace_operation, "panicked");
+                Outcome::Panicked(payload)
+            }
+        }
+    }
+
     /// Begins a new transaction.
     ///
     /// # Cancellation
@@ -2805,6 +3968,15 @@ impl SqliteConnection {
     /// This operation checks for cancellation before starting.
     pub async fn begin(&self, cx: &Cx) -> Outcome<SqliteTransaction<'_>, SqliteError> {
         self.begin_with_sql(cx, "BEGIN", "begin").await
+    }
+
+    /// Begins a deferred transaction with structured diagnostics.
+    pub async fn begin_diagnosed(
+        &self,
+        cx: &Cx,
+    ) -> Outcome<SqliteTransaction<'_>, SqliteOperationError> {
+        self.begin_with_sql_diagnosed(cx, "BEGIN", "begin_diagnosed")
+            .await
     }
 
     /// Begins an immediate transaction (acquires write lock immediately).
@@ -2817,6 +3989,15 @@ impl SqliteConnection {
             .await
     }
 
+    /// Begins an immediate transaction with structured diagnostics.
+    pub async fn begin_immediate_diagnosed(
+        &self,
+        cx: &Cx,
+    ) -> Outcome<SqliteTransaction<'_>, SqliteOperationError> {
+        self.begin_with_sql_diagnosed(cx, "BEGIN IMMEDIATE", "begin_immediate_diagnosed")
+            .await
+    }
+
     /// Begins an exclusive transaction (acquires exclusive lock immediately).
     ///
     /// # Cancellation
@@ -2824,6 +4005,15 @@ impl SqliteConnection {
     /// This operation checks for cancellation before starting.
     pub async fn begin_exclusive(&self, cx: &Cx) -> Outcome<SqliteTransaction<'_>, SqliteError> {
         self.begin_with_sql(cx, "BEGIN EXCLUSIVE", "begin_exclusive")
+            .await
+    }
+
+    /// Begins an exclusive transaction with structured diagnostics.
+    pub async fn begin_exclusive_diagnosed(
+        &self,
+        cx: &Cx,
+    ) -> Outcome<SqliteTransaction<'_>, SqliteOperationError> {
+        self.begin_with_sql_diagnosed(cx, "BEGIN EXCLUSIVE", "begin_exclusive_diagnosed")
             .await
     }
 
@@ -2846,6 +4036,37 @@ impl SqliteConnection {
                 .map_err(|e| SqliteError::Sqlite(e.to_string()))?;
             Ok(())
         })
+        .await
+    }
+
+    /// Updates SQLite's busy timeout with structured diagnostics.
+    pub async fn set_busy_timeout_diagnosed(
+        &self,
+        cx: &Cx,
+        timeout: Duration,
+    ) -> Outcome<(), SqliteOperationError> {
+        if cx.checkpoint().is_err() {
+            return Outcome::Cancelled(sqlite_cancelled_reason(cx));
+        }
+        match diagnose_legacy_outcome(
+            SqliteOperation::TransactionRollback,
+            self.drain_orphaned_transaction(cx).await,
+        ) {
+            Outcome::Ok(()) => {}
+            Outcome::Err(error) => return Outcome::Err(error),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+        }
+        self.run_connection_op_diagnosed(
+            cx,
+            "sqlite diagnosed set_busy_timeout",
+            SqliteOperation::Configure,
+            move |conn| {
+                conn.busy_timeout(timeout).map_err(|error| {
+                    SqliteOperationError::from_rusqlite(SqliteOperation::Configure, error)
+                })
+            },
+        )
         .await
     }
 
@@ -2884,6 +4105,13 @@ impl SqliteConnection {
         Ok(())
     }
 
+    /// Closes the connection and classifies cleanup failures without changing
+    /// [`Self::close`].
+    pub fn close_diagnosed(&self) -> Result<(), SqliteOperationError> {
+        self.close()
+            .map_err(|error| SqliteOperationError::from_legacy(SqliteOperation::Close, error))
+    }
+
     /// Closes the connection asynchronously with proper WAL checkpoint.
     ///
     /// This method ensures WAL frames are safely checkpointed before closing
@@ -2920,6 +4148,12 @@ impl SqliteConnection {
             Ok(()) => Outcome::Ok(()),
             Err(e) => Outcome::Err(e),
         }
+    }
+
+    /// Closes the connection asynchronously with structured cleanup
+    /// diagnostics.
+    pub async fn close_async_diagnosed(&self, cx: &Cx) -> Outcome<(), SqliteOperationError> {
+        diagnose_legacy_outcome(SqliteOperation::Close, self.close_async(cx).await)
     }
 
     /// Returns true if the connection is open.
@@ -3213,6 +4447,54 @@ impl SqliteTransaction<'_> {
         }
     }
 
+    /// Commits the transaction with structured engine diagnostics.
+    pub async fn commit_diagnosed(mut self, cx: &Cx) -> Outcome<(), SqliteOperationError> {
+        if self.finished {
+            trace_database_transaction(cx, "sqlite", "commit_diagnosed", "already_finished");
+            return Outcome::Err(SqliteOperationError::from_legacy(
+                SqliteOperation::TransactionCommit,
+                SqliteError::TransactionFinished,
+            ));
+        }
+        trace_database_transaction(cx, "sqlite", "commit_diagnosed", "start");
+        let finish_effect = TransactionFinishEffect::new(
+            Arc::clone(&self.conn.transaction_state),
+            Arc::clone(&self.conn.transaction_generation),
+            self.generation,
+            TransactionFinishKind::Commit,
+            self.obligation.take(),
+        );
+        let effect = TransactionWorkerEffect::Finish(finish_effect);
+        match self
+            .conn
+            .execute_transaction_control_diagnosed(
+                cx,
+                "COMMIT",
+                SqliteOperation::TransactionCommit,
+                effect,
+            )
+            .await
+        {
+            Outcome::Ok(_) => {
+                self.finished = true;
+                trace_database_transaction(cx, "sqlite", "commit_diagnosed", "ok");
+                Outcome::Ok(())
+            }
+            Outcome::Err(error) => {
+                trace_database_transaction(cx, "sqlite", "commit_diagnosed", "err");
+                Outcome::Err(error)
+            }
+            Outcome::Cancelled(reason) => {
+                trace_database_transaction(cx, "sqlite", "commit_diagnosed", "cancelled");
+                Outcome::Cancelled(reason)
+            }
+            Outcome::Panicked(payload) => {
+                trace_database_transaction(cx, "sqlite", "commit_diagnosed", "panicked");
+                Outcome::Panicked(payload)
+            }
+        }
+    }
+
     /// Rolls back the transaction.
     ///
     /// # Cancellation
@@ -3257,6 +4539,54 @@ impl SqliteTransaction<'_> {
         }
     }
 
+    /// Rolls back the transaction with structured engine diagnostics.
+    pub async fn rollback_diagnosed(mut self, cx: &Cx) -> Outcome<(), SqliteOperationError> {
+        if self.finished {
+            trace_database_transaction(cx, "sqlite", "rollback_diagnosed", "already_finished");
+            return Outcome::Err(SqliteOperationError::from_legacy(
+                SqliteOperation::TransactionRollback,
+                SqliteError::TransactionFinished,
+            ));
+        }
+        trace_database_transaction(cx, "sqlite", "rollback_diagnosed", "start");
+        let finish_effect = TransactionFinishEffect::new(
+            Arc::clone(&self.conn.transaction_state),
+            Arc::clone(&self.conn.transaction_generation),
+            self.generation,
+            TransactionFinishKind::Rollback,
+            self.obligation.take(),
+        );
+        let effect = TransactionWorkerEffect::Finish(finish_effect);
+        match self
+            .conn
+            .execute_transaction_control_diagnosed(
+                cx,
+                "ROLLBACK",
+                SqliteOperation::TransactionRollback,
+                effect,
+            )
+            .await
+        {
+            Outcome::Ok(_) => {
+                self.finished = true;
+                trace_database_transaction(cx, "sqlite", "rollback_diagnosed", "ok");
+                Outcome::Ok(())
+            }
+            Outcome::Err(error) => {
+                trace_database_transaction(cx, "sqlite", "rollback_diagnosed", "err");
+                Outcome::Err(error)
+            }
+            Outcome::Cancelled(reason) => {
+                trace_database_transaction(cx, "sqlite", "rollback_diagnosed", "cancelled");
+                Outcome::Cancelled(reason)
+            }
+            Outcome::Panicked(payload) => {
+                trace_database_transaction(cx, "sqlite", "rollback_diagnosed", "panicked");
+                Outcome::Panicked(payload)
+            }
+        }
+    }
+
     /// Executes a SQL statement within this transaction.
     pub async fn execute(
         &self,
@@ -3268,6 +4598,23 @@ impl SqliteTransaction<'_> {
             return Outcome::Err(SqliteError::TransactionFinished);
         }
         self.conn.execute(cx, sql, params).await
+    }
+
+    /// Executes a statement inside this transaction with structured
+    /// diagnostics.
+    pub async fn execute_diagnosed(
+        &self,
+        cx: &Cx,
+        sql: &str,
+        params: &[SqliteValue],
+    ) -> Outcome<u64, SqliteOperationError> {
+        if self.finished {
+            return Outcome::Err(SqliteOperationError::from_legacy(
+                SqliteOperation::Step,
+                SqliteError::TransactionFinished,
+            ));
+        }
+        self.conn.execute_diagnosed(cx, sql, params).await
     }
 
     /// Executes trusted transaction-control SQL within this transaction.
@@ -3294,6 +4641,22 @@ impl SqliteTransaction<'_> {
             return Outcome::Err(SqliteError::TransactionFinished);
         }
         self.conn.query(cx, sql, params).await
+    }
+
+    /// Executes a query inside this transaction with structured diagnostics.
+    pub async fn query_diagnosed(
+        &self,
+        cx: &Cx,
+        sql: &str,
+        params: &[SqliteValue],
+    ) -> Outcome<Vec<SqliteRow>, SqliteOperationError> {
+        if self.finished {
+            return Outcome::Err(SqliteOperationError::from_legacy(
+                SqliteOperation::Step,
+                SqliteError::TransactionFinished,
+            ));
+        }
+        self.conn.query_diagnosed(cx, sql, params).await
     }
 }
 
@@ -3861,6 +5224,30 @@ mod tests {
         let result = conn
             .query_row(INFINITE_QUERY, [], |_| Ok(()))
             .map_err(|error| SqliteError::Sqlite(error.to_string()));
+        let _ = conn.progress_handler(0, None::<fn() -> bool>);
+        result
+    }
+
+    fn run_signalled_infinite_query_diagnosed(
+        conn: &rusqlite::Connection,
+        started: std::sync::mpsc::SyncSender<()>,
+    ) -> Result<(), SqliteOperationError> {
+        const RUNNING_PROGRESS_CALLBACKS: usize = 10_000;
+        let mut progress_callbacks = 0usize;
+        conn.progress_handler(
+            1,
+            Some(move || {
+                progress_callbacks = progress_callbacks.saturating_add(1);
+                if progress_callbacks == RUNNING_PROGRESS_CALLBACKS {
+                    let _ = started.try_send(());
+                }
+                false
+            }),
+        )
+        .map_err(|error| SqliteOperationError::from_rusqlite(SqliteOperation::Step, error))?;
+        let result = conn
+            .query_row(INFINITE_QUERY, [], |_| Ok(()))
+            .map_err(|error| SqliteOperationError::from_rusqlite(SqliteOperation::Step, error));
         let _ = conn.progress_handler(0, None::<fn() -> bool>);
         result
     }
@@ -6860,6 +8247,463 @@ mod tests {
                 other => panic!("rollback failed: {other:?}"),
             }
         });
+    }
+
+    #[test]
+    fn sqlite_p8_engine_codes_map_without_rendered_message_parsing() {
+        let cases = [
+            (
+                rusqlite::ffi::SQLITE_BUSY,
+                SqliteErrorCategory::Busy,
+                "SQLITE_BUSY",
+                SqliteRetryDisposition::RetryOperation,
+                false,
+            ),
+            (
+                rusqlite::ffi::SQLITE_LOCKED,
+                SqliteErrorCategory::Locked,
+                "SQLITE_LOCKED",
+                SqliteRetryDisposition::RetryOperation,
+                false,
+            ),
+            (
+                rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE,
+                SqliteErrorCategory::Constraint,
+                "SQLITE_CONSTRAINT",
+                SqliteRetryDisposition::Never,
+                false,
+            ),
+            (
+                rusqlite::ffi::SQLITE_INTERRUPT,
+                SqliteErrorCategory::Interrupted,
+                "SQLITE_INTERRUPT",
+                SqliteRetryDisposition::Never,
+                false,
+            ),
+            (
+                rusqlite::ffi::SQLITE_IOERR_READ,
+                SqliteErrorCategory::Io,
+                "SQLITE_IOERR",
+                SqliteRetryDisposition::ReopenConnection,
+                true,
+            ),
+            (
+                rusqlite::ffi::SQLITE_NOTADB,
+                SqliteErrorCategory::Corrupt,
+                "SQLITE_NOTADB",
+                SqliteRetryDisposition::ReopenConnection,
+                true,
+            ),
+            (
+                rusqlite::ffi::SQLITE_AUTH,
+                SqliteErrorCategory::PermissionDenied,
+                "SQLITE_AUTH",
+                SqliteRetryDisposition::Never,
+                false,
+            ),
+        ];
+
+        for (extended, category, primary, retry, connection_error) in cases {
+            let error = SqliteOperationError::from_rusqlite(
+                SqliteOperation::Step,
+                rusqlite::Error::SqliteFailure(
+                    rusqlite::ffi::Error::new(extended),
+                    Some("sensitive SQL and path payload".to_owned()),
+                ),
+            );
+            let diagnostic = error.diagnostic();
+            assert_eq!(diagnostic.operation(), SqliteOperation::Step);
+            assert_eq!(diagnostic.category(), category);
+            assert_eq!(diagnostic.primary_code(), Some(primary));
+            assert_eq!(diagnostic.extended_code(), Some(extended));
+            assert_eq!(diagnostic.retry_disposition(), retry);
+            assert_eq!(diagnostic.is_connection_error(), connection_error);
+            assert_eq!(
+                diagnostic.is_retryable(),
+                retry == SqliteRetryDisposition::RetryOperation
+            );
+
+            let rendered = format!("{error:?} {error}");
+            assert!(!rendered.contains("sensitive SQL and path payload"));
+            assert!(error.engine_source().is_some());
+            assert!(std::error::Error::source(&error).is_none());
+            assert!(
+                matches!(error.legacy_error(), SqliteError::Sqlite(message) if message.contains("sensitive SQL and path payload")),
+                "the legacy source remains available only through the explicit accessor"
+            );
+        }
+
+        let path_error = SqliteOperationError::from_legacy(
+            SqliteOperation::Validation,
+            SqliteError::UnsafePath("sensitive path".to_owned()),
+        );
+        assert_eq!(
+            path_error.diagnostic().category(),
+            SqliteErrorCategory::PermissionDenied
+        );
+        assert_eq!(
+            path_error.diagnostic().operator_code(),
+            "sqlite.permission_denied"
+        );
+
+        let missing_column = SqliteOperationError::from_legacy(
+            SqliteOperation::Step,
+            SqliteError::ColumnNotFound("secret_column".to_owned()),
+        );
+        assert_eq!(
+            missing_column.diagnostic().category(),
+            SqliteErrorCategory::NotFound
+        );
+        assert!(!format!("{missing_column:?}").contains("secret_column"));
+    }
+
+    #[test]
+    fn sqlite_p8_public_diagnosed_apis_preserve_legacy_and_reuse() {
+        let cx = create_test_cx();
+        let directory = tempdir().unwrap();
+        let directory_path = directory.path().to_path_buf();
+        block_on(async {
+            let open_error = match SqliteConnection::open_diagnosed(&cx, &directory_path).await {
+                Outcome::Err(error) => error,
+                Outcome::Ok(connection) => {
+                    drop(connection);
+                    panic!("diagnosed directory open unexpectedly succeeded")
+                }
+                Outcome::Cancelled(reason) => {
+                    panic!("diagnosed directory open was cancelled: {reason:?}")
+                }
+                Outcome::Panicked(_) => panic!("diagnosed directory open panicked"),
+            };
+            assert_eq!(open_error.diagnostic().operation(), SqliteOperation::Open);
+            assert_eq!(open_error.diagnostic().category(), SqliteErrorCategory::Io);
+            assert_eq!(
+                open_error.diagnostic().primary_code(),
+                Some("SQLITE_CANTOPEN")
+            );
+
+            let conn = match SqliteConnection::open_in_memory_diagnosed(&cx).await {
+                Outcome::Ok(conn) => conn,
+                other => panic!("diagnosed open failed: {other:?}"),
+            };
+            match conn
+                .execute_batch_diagnosed(
+                    &cx,
+                    "CREATE TABLE p8 (id INTEGER PRIMARY KEY, value TEXT UNIQUE NOT NULL);",
+                )
+                .await
+            {
+                Outcome::Ok(()) => {}
+                other => panic!("diagnosed schema setup failed: {other:?}"),
+            }
+            match conn
+                .execute_diagnosed(
+                    &cx,
+                    "INSERT INTO p8(id, value) VALUES (?1, ?2)",
+                    &[
+                        SqliteValue::Integer(1),
+                        SqliteValue::Text("first".to_owned()),
+                    ],
+                )
+                .await
+            {
+                Outcome::Ok(1) => {}
+                other => panic!("diagnosed insert failed: {other:?}"),
+            }
+
+            let prepare = match conn
+                .query_unchecked_diagnosed(&cx, "SELEKT p8_sensitive_payload", &[])
+                .await
+            {
+                Outcome::Err(error) => error,
+                other => panic!("expected diagnosed prepare failure, got {other:?}"),
+            };
+            assert_eq!(prepare.diagnostic().operation(), SqliteOperation::Prepare);
+            assert_eq!(
+                prepare.diagnostic().category(),
+                SqliteErrorCategory::InvalidInput
+            );
+            assert_eq!(prepare.diagnostic().primary_code(), Some("SQLITE_ERROR"));
+            assert!(!format!("{prepare:?} {prepare}").contains("p8_sensitive_payload"));
+
+            let duplicate = match conn
+                .execute_diagnosed(
+                    &cx,
+                    "INSERT INTO p8(id, value) VALUES (?1, ?2)",
+                    &[
+                        SqliteValue::Integer(2),
+                        SqliteValue::Text("first".to_owned()),
+                    ],
+                )
+                .await
+            {
+                Outcome::Err(error) => error,
+                other => panic!("expected diagnosed constraint failure, got {other:?}"),
+            };
+            assert_eq!(duplicate.diagnostic().operation(), SqliteOperation::Step);
+            assert_eq!(
+                duplicate.diagnostic().category(),
+                SqliteErrorCategory::Constraint
+            );
+            assert_eq!(
+                duplicate.diagnostic().primary_code(),
+                Some("SQLITE_CONSTRAINT")
+            );
+            assert!(!duplicate.diagnostic().is_retryable());
+            assert!(matches!(duplicate.legacy_error(), SqliteError::Sqlite(_)));
+
+            let bind = match conn
+                .execute_diagnosed(
+                    &cx,
+                    "INSERT INTO p8(id, value) VALUES (?1, ?2)",
+                    &[SqliteValue::Integer(3)],
+                )
+                .await
+            {
+                Outcome::Err(error) => error,
+                other => panic!("expected diagnosed bind failure, got {other:?}"),
+            };
+            assert_eq!(bind.diagnostic().operation(), SqliteOperation::Bind);
+            assert_eq!(
+                bind.diagnostic().category(),
+                SqliteErrorCategory::InvalidInput
+            );
+            assert_eq!(bind.diagnostic().primary_code(), None);
+
+            let rejected = match conn.query_diagnosed(&cx, "PRAGMA journal_mode", &[]).await {
+                Outcome::Err(error) => error,
+                other => panic!("checked policy must reject PRAGMA, got {other:?}"),
+            };
+            assert_eq!(
+                rejected.diagnostic().operation(),
+                SqliteOperation::Validation
+            );
+            assert_eq!(
+                rejected.diagnostic().category(),
+                SqliteErrorCategory::InvalidInput
+            );
+
+            let transaction = match conn.begin_diagnosed(&cx).await {
+                Outcome::Ok(transaction) => transaction,
+                Outcome::Err(error) => panic!("diagnosed begin failed: {error}"),
+                Outcome::Cancelled(reason) => {
+                    panic!("diagnosed begin was cancelled: {reason:?}")
+                }
+                Outcome::Panicked(_) => panic!("diagnosed begin panicked"),
+            };
+            let nested = match conn.begin_diagnosed(&cx).await {
+                Outcome::Err(error) => error,
+                Outcome::Ok(_) => panic!("nested diagnosed transaction unexpectedly began"),
+                Outcome::Cancelled(reason) => {
+                    panic!("nested diagnosed begin was cancelled: {reason:?}")
+                }
+                Outcome::Panicked(_) => panic!("nested diagnosed begin panicked"),
+            };
+            assert_eq!(
+                nested.diagnostic().operation(),
+                SqliteOperation::TransactionBegin
+            );
+            assert_eq!(
+                nested.diagnostic().category(),
+                SqliteErrorCategory::InvalidInput
+            );
+            match transaction
+                .execute_diagnosed(
+                    &cx,
+                    "INSERT INTO p8(id, value) VALUES (?1, ?2)",
+                    &[
+                        SqliteValue::Integer(4),
+                        SqliteValue::Text("rolled_back".to_owned()),
+                    ],
+                )
+                .await
+            {
+                Outcome::Ok(1) => {}
+                other => panic!("diagnosed transaction insert failed: {other:?}"),
+            }
+            match transaction.rollback_diagnosed(&cx).await {
+                Outcome::Ok(()) => {}
+                other => panic!("diagnosed rollback failed: {other:?}"),
+            }
+
+            match conn
+                .query_row_diagnosed(
+                    &cx,
+                    "SELECT COUNT(*) AS count FROM p8 WHERE value = ?1",
+                    &[SqliteValue::Text("rolled_back".to_owned())],
+                )
+                .await
+            {
+                Outcome::Ok(Some(row)) => assert_eq!(row.get_i64("count").unwrap(), 0),
+                other => panic!("connection was not reusable after errors: {other:?}"),
+            }
+            match conn.close_async_diagnosed(&cx).await {
+                Outcome::Ok(()) => {}
+                other => panic!("diagnosed close failed: {other:?}"),
+            }
+            assert!(!conn.is_open());
+            let closed = match conn.query_unchecked_diagnosed(&cx, "SELECT 1", &[]).await {
+                Outcome::Err(error) => error,
+                other => panic!("closed diagnosed connection accepted query: {other:?}"),
+            };
+            assert_eq!(closed.diagnostic().category(), SqliteErrorCategory::Closed);
+            assert_eq!(
+                closed.diagnostic().retry_disposition(),
+                SqliteRetryDisposition::ReopenConnection
+            );
+        });
+    }
+
+    #[test]
+    fn sqlite_p8_busy_cancel_interrupt_and_pool_shutdown_are_distinct() {
+        let cx = create_test_cx();
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("p8_contention.sqlite3");
+
+        block_on(async {
+            let conn1 = match SqliteConnection::open_diagnosed(&cx, &db_path).await {
+                Outcome::Ok(conn) => conn,
+                other => panic!("diagnosed open conn1 failed: {other:?}"),
+            };
+            let conn2 = match SqliteConnection::open_diagnosed(&cx, &db_path).await {
+                Outcome::Ok(conn) => conn,
+                other => panic!("diagnosed open conn2 failed: {other:?}"),
+            };
+            match conn1
+                .execute_batch_diagnosed(
+                    &cx,
+                    "CREATE TABLE p8_busy (id INTEGER PRIMARY KEY, value TEXT);",
+                )
+                .await
+            {
+                Outcome::Ok(()) => {}
+                other => panic!("busy schema setup failed: {other:?}"),
+            }
+            match conn2
+                .set_busy_timeout_diagnosed(&cx, Duration::from_millis(25))
+                .await
+            {
+                Outcome::Ok(()) => {}
+                other => panic!("diagnosed busy timeout failed: {other:?}"),
+            }
+            let transaction = match conn1.begin_immediate_diagnosed(&cx).await {
+                Outcome::Ok(transaction) => transaction,
+                Outcome::Err(error) => panic!("diagnosed immediate begin failed: {error}"),
+                Outcome::Cancelled(reason) => {
+                    panic!("diagnosed immediate begin was cancelled: {reason:?}")
+                }
+                Outcome::Panicked(_) => panic!("diagnosed immediate begin panicked"),
+            };
+            let busy = match conn2
+                .execute_diagnosed(
+                    &cx,
+                    "INSERT INTO p8_busy(value) VALUES (?1)",
+                    &[SqliteValue::Text("blocked".to_owned())],
+                )
+                .await
+            {
+                Outcome::Err(error) => error,
+                other => panic!("expected diagnosed busy failure, got {other:?}"),
+            };
+            assert!(matches!(
+                busy.diagnostic().category(),
+                SqliteErrorCategory::Busy | SqliteErrorCategory::Locked
+            ));
+            assert!(busy.diagnostic().is_retryable());
+            assert!(!busy.diagnostic().is_connection_error());
+            match transaction.rollback_diagnosed(&cx).await {
+                Outcome::Ok(()) => {}
+                other => panic!("diagnosed contention rollback failed: {other:?}"),
+            }
+            match conn2
+                .execute_diagnosed(
+                    &cx,
+                    "INSERT INTO p8_busy(value) VALUES (?1)",
+                    &[SqliteValue::Text("recovered".to_owned())],
+                )
+                .await
+            {
+                Outcome::Ok(1) => {}
+                other => panic!("contender was not reusable: {other:?}"),
+            }
+        });
+
+        let pool = BlockingPool::new(1, 1);
+        let raw = rusqlite::Connection::open_in_memory().expect("open dedicated P8 connection");
+        configure_connection_defaults(&raw, false).expect("configure dedicated P8 connection");
+        let interrupt = Arc::new(raw.get_interrupt_handle());
+        let conn = SqliteConnection {
+            inner: Arc::new(Mutex::new(SqliteConnectionInner::new(raw))),
+            pool: pool.handle(),
+            transaction_state: Arc::new(Mutex::new(TransactionState::Autocommit)),
+            transaction_generation: Arc::new(AtomicU64::new(0)),
+            interrupt,
+            statement_timeout_override: None,
+        };
+
+        let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
+        let mut interrupted = Box::pin(conn.run_connection_op_diagnosed(
+            &cx,
+            "sqlite P8 explicit interrupt",
+            SqliteOperation::Step,
+            move |raw| run_signalled_infinite_query_diagnosed(raw, started_tx),
+        ));
+        assert!(
+            block_on(futures_lite::future::poll_once(interrupted.as_mut())).is_none(),
+            "infinite operation must park before explicit interrupt"
+        );
+        started_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("diagnosed statement must start");
+        conn.interrupt();
+        match block_on(interrupted) {
+            Outcome::Err(error) => {
+                assert_eq!(
+                    error.diagnostic().category(),
+                    SqliteErrorCategory::Interrupted
+                );
+                assert_eq!(error.diagnostic().primary_code(), Some("SQLITE_INTERRUPT"));
+            }
+            other => panic!("explicit interrupt must remain an error: {other:?}"),
+        }
+
+        let cancelled_cx = create_test_cx();
+        let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
+        let mut cancelled = Box::pin(conn.run_connection_op_diagnosed(
+            &cancelled_cx,
+            "sqlite P8 cancellation",
+            SqliteOperation::Step,
+            move |raw| run_signalled_infinite_query_diagnosed(raw, started_tx),
+        ));
+        assert!(
+            block_on(futures_lite::future::poll_once(cancelled.as_mut())).is_none(),
+            "infinite operation must park before Cx cancellation"
+        );
+        started_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("cancellable diagnosed statement must start");
+        cancelled_cx.cancel_fast(crate::types::CancelKind::User);
+        match block_on(cancelled) {
+            Outcome::Cancelled(reason) => {
+                assert_eq!(reason.kind, crate::types::CancelKind::User);
+            }
+            other => panic!("Cx cancellation must not become an error category: {other:?}"),
+        }
+
+        let fresh_cx = create_test_cx();
+        match block_on(conn.query_unchecked_diagnosed(&fresh_cx, "SELECT 1", &[])) {
+            Outcome::Ok(rows) => assert_eq!(rows.len(), 1),
+            other => panic!("connection unusable after interrupt/cancel: {other:?}"),
+        }
+        conn.close_diagnosed()
+            .expect("close dedicated P8 connection");
+        drop(conn);
+        assert!(
+            pool.shutdown_and_wait(Duration::from_secs(5)),
+            "dedicated P8 blocking pool must shut down"
+        );
+        assert_eq!(pool.pending_count(), 0);
+        assert_eq!(pool.busy_threads(), 0);
+        assert_eq!(pool.active_threads(), 0);
     }
 
     #[test]

@@ -681,8 +681,8 @@
     "scope": "prepared_statement_bind_reset_cache_schema_invalid_use_busy_and_cleanup",
     "consumer_source": {
       "path": "tests/fixtures/sqlite-parity-consumer/src/main.rs",
-      "sha256": "58f61313cdbac5dfa9cdf40ed1d5bf0a8cc3c6f3de941e5316defdd140739b2c",
-      "line_count": 3310
+      "sha256": "9beb2f4da89924a138f051b96ecf43912ae59786235f907c91247ccb9712c780",
+      "line_count": 3911
     },
     "neutral_matrix": {
       "matrix_id": "sqlite-neutral-prepared-statement-parity-v1",
@@ -898,8 +898,8 @@
     "scope": "deferred_immediate_exclusive_savepoint_constraint_rollback_reuse_and_quiescence",
     "consumer_source": {
       "path": "tests/fixtures/sqlite-parity-consumer/src/main.rs",
-      "sha256": "58f61313cdbac5dfa9cdf40ed1d5bf0a8cc3c6f3de941e5316defdd140739b2c",
-      "line_count": 3310
+      "sha256": "9beb2f4da89924a138f051b96ecf43912ae59786235f907c91247ccb9712c780",
+      "line_count": 3911
     },
     "neutral_matrix": {
       "matrix_id": "sqlite-neutral-transaction-parity-v1",
@@ -1330,8 +1330,8 @@
     "scope": "null_integer_real_text_blob_owned_rows_conversion_and_large_value_profile",
     "consumer_source": {
       "path": "tests/fixtures/sqlite-parity-consumer/src/main.rs",
-      "sha256": "58f61313cdbac5dfa9cdf40ed1d5bf0a8cc3c6f3de941e5316defdd140739b2c",
-      "line_count": 3310
+      "sha256": "9beb2f4da89924a138f051b96ecf43912ae59786235f907c91247ccb9712c780",
+      "line_count": 3911
     },
     "neutral_matrix": {
       "matrix_id": "sqlite-neutral-value-row-parity-v1",
@@ -1629,6 +1629,187 @@
       "The checked policy does not make *_unchecked APIs safe for untrusted SQL.",
       "The neutral adapter proves declared admission parity, not arbitrary engine semantic equivalence.",
       "Dynamic extension loading is blocked defensively; this packet does not claim it was enabled by the incumbent build.",
+      "This phase does not authorize dependency cutover or removal of rusqlite or sqlparser."
+    ]
+  },
+  "phase8": {
+    "bead_id": "asupersync-ym2wtv.2.8",
+    "status": "PASS_BOUNDED_STABLE_CODES_CANCELLATION_DISTINCTION_AND_RUNTIME_QUIESCENCE",
+    "scope": "additive_structured_sqlite_diagnostics_real_cross_engine_error_rows_and_terminal_runtime_cleanup",
+    "compatibility": {
+      "baseline": "v0.4.3",
+      "legacy_error_surface": "UNCHANGED",
+      "strategy": "KEEP_EXISTING_METHODS_AND_ADD_SEPARATELY_NAMED_DIAGNOSED_METHODS",
+      "public_enums_and_structs": "NEW_TYPES_ARE_NON_EXHAUSTIVE_OR_HAVE_PRIVATE_FIELDS",
+      "behavioral_boundary": "Existing SqliteError methods preserve their established result shape; structured codes are opt-in."
+    },
+    "source_contracts": [
+      {
+        "path": "src/database/sqlite.rs",
+        "sha256": "7a22f7cb5a707bc9a3f62e6f8254c214a3fed588bc00fd55d36c936b1bc5cd68",
+        "line_count": 10522
+      },
+      {
+        "path": "tests/fixtures/sqlite-parity-consumer/src/main.rs",
+        "sha256": "9beb2f4da89924a138f051b96ecf43912ae59786235f907c91247ccb9712c780",
+        "line_count": 3911
+      }
+    ],
+    "public_diagnostic_contract": {
+      "types": [
+        "SqliteOperation",
+        "SqliteErrorCategory",
+        "SqliteRetryDisposition",
+        "SqliteErrorDiagnostic",
+        "SqliteOperationError"
+      ],
+      "diagnosed_connection_operations": [
+        "open_diagnosed",
+        "open_in_memory_diagnosed",
+        "execute_diagnosed",
+        "execute_unchecked_diagnosed",
+        "execute_batch_diagnosed",
+        "execute_batch_unchecked_diagnosed",
+        "query_diagnosed",
+        "query_unchecked_diagnosed",
+        "query_row_diagnosed",
+        "query_row_unchecked_diagnosed",
+        "begin_diagnosed",
+        "begin_immediate_diagnosed",
+        "begin_exclusive_diagnosed",
+        "set_busy_timeout_diagnosed",
+        "close_diagnosed",
+        "close_async_diagnosed"
+      ],
+      "diagnosed_transaction_operations": [
+        "commit_diagnosed",
+        "rollback_diagnosed",
+        "execute_diagnosed",
+        "query_diagnosed"
+      ],
+      "classification_source": "rusqlite ErrorCode and extended result code captured before legacy string rendering",
+      "rendering_policy": "Debug and Display omit SQL text, bound values, paths, and engine messages",
+      "source_policy": "The raw rusqlite error remains available only through the explicit engine_source accessor; automatic error-chain traversal, Debug, and Display are redacted. legacy_error is a separate explicit compatibility accessor."
+    },
+    "required_error_rows": [
+      {
+        "id": "SQLITE-PARITY-P8-OPEN-000",
+        "operation": "open",
+        "category": "io",
+        "primary_code": "SQLITE_CANTOPEN"
+      },
+      {
+        "id": "SQLITE-PARITY-P8-PREPARE-001",
+        "operation": "prepare",
+        "category": "invalid_input",
+        "primary_code": "SQLITE_ERROR"
+      },
+      {
+        "id": "SQLITE-PARITY-P8-CONSTRAINT-002",
+        "operation": "step",
+        "category": "constraint",
+        "primary_code": "SQLITE_CONSTRAINT"
+      },
+      {
+        "id": "SQLITE-PARITY-P8-CANCEL-003",
+        "operation": "step",
+        "category": "cancelled",
+        "primary_code": null
+      },
+      {
+        "id": "SQLITE-PARITY-P8-CLOSED-004",
+        "operation": "step",
+        "category": "closed",
+        "primary_code": null
+      },
+      {
+        "id": "SQLITE-PARITY-P8-BIND-005",
+        "operation": "bind",
+        "category": "invalid_input",
+        "primary_code": null
+      },
+      {
+        "id": "SQLITE-PARITY-P8-TRANSACTION-006",
+        "operation": "transaction_begin",
+        "category": "invalid_input",
+        "primary_code": "SQLITE_ERROR"
+      },
+      {
+        "id": "SQLITE-PARITY-P8-BUSY-007",
+        "operation": "step",
+        "category": "busy_or_locked",
+        "retry": "retry_operation"
+      },
+      {
+        "id": "SQLITE-PARITY-P8-INTERRUPT-008",
+        "operation": "step",
+        "category": "interrupted",
+        "primary_code": "SQLITE_INTERRUPT"
+      },
+      {
+        "id": "SQLITE-PARITY-P8-POOL-SHUTDOWN-009",
+        "operation": "blocking_pool",
+        "category": "terminal_cleanup",
+        "primary_code": null
+      }
+    ],
+    "neutral_matrix": {
+      "matrix_id": "sqlite-neutral-stable-error-and-quiescence-v1",
+      "consumer_source": "tests/fixtures/sqlite-parity-consumer/src/main.rs",
+      "per_engine_cases": 4,
+      "directly_compared_cases": 2,
+      "compared_case_ids": [
+        "SQLITE-PARITY-P8-PREPARE-001",
+        "SQLITE-PARITY-P8-CONSTRAINT-002"
+      ],
+      "mismatches": 0,
+      "intentional_differences": [
+        "Asupersync reports caller cancellation as Outcome::Cancelled; FrankenSQLite reports its typed Interrupt error.",
+        "The inherited P3 Asupersync busy row is typed and reusable; the FrankenSQLite row may instead terminate as a bounded killed-and-reaped watchdog refusal."
+      ],
+      "terminal_requirements": [
+        "connection_reused_after_nonfatal_error",
+        "connection_explicitly_closed",
+        "open_transactions_zero",
+        "live_statements_zero",
+        "live_connections_zero",
+        "blocking_pending_zero",
+        "blocking_busy_zero",
+        "blocking_active_zero",
+        "runtime_local_quiescence"
+      ]
+    },
+    "verification": {
+      "sqlite_focused": {
+        "status": "PENDING_FINAL_RCH",
+        "rch_job": "PENDING_FINAL_RCH",
+        "worker": "PENDING_FINAL_RCH",
+        "passed": 0,
+        "failed": 0,
+        "scope": "three sqlite_p8_ native tests with sqlite,test-internals"
+      },
+      "neutral_consumer": {
+        "status": "PENDING_FINAL_RCH",
+        "rch_job": "PENDING_FINAL_RCH",
+        "worker": "PENDING_FINAL_RCH",
+        "failed": 0,
+        "scope": "real Asupersync and FrankenSQLite P8 rows plus inherited P3 lock observation and runtime-local quiescence"
+      },
+      "repository_contract": {
+        "status": "PENDING_FINAL_RCH",
+        "rch_job": "PENDING_FINAL_RCH",
+        "worker": "PENDING_FINAL_RCH",
+        "passed": 0,
+        "failed": 0,
+        "scope": "sqlite_parity_harness_contract P8 structural and receipt validation"
+      }
+    },
+    "no_claims": [
+      "This phase does not change or remove the v0.4.3 SqliteError surface or existing method signatures.",
+      "Stable categories do not promise that every future SQLite extended result code has a dedicated category.",
+      "Preserving the raw source permits explicit engine_source inspection; ordinary SqliteOperationError Debug, Display, and automatic error-chain traversal remain redacted.",
+      "Runtime-local zero counts do not prove process-global task or resource quiescence.",
+      "The neutral matrix compares declared public rows, not arbitrary SQLite engine equivalence.",
       "This phase does not authorize dependency cutover or removal of rusqlite or sqlparser."
     ]
   },

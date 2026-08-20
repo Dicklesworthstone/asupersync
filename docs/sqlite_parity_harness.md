@@ -271,6 +271,47 @@ migration and connection-control compatibility; ATTACH/DETACH remain disabled
 even there. P7 does not authorize a dependency cutover or claim arbitrary SQL
 equivalence between the two engines.
 
+## SQLite P8 stable diagnostics and quiescence
+
+`asupersync-ym2wtv.2.8` adds a structured error surface without changing the
+v0.4.3-compatible `SqliteError` enum or any established method signature. The
+existing methods retain their behavior. Callers that need stable diagnostics
+opt into separately named `*_diagnosed` methods and receive
+`SqliteOperationError`, whose non-exhaustive operation, category, and retry
+types expose SQLite primary and extended result codes captured before
+rusqlite renders an error into prose.
+
+The classified path covers open, prepare, bind, step, batch, transaction
+begin/commit/rollback, configuration, close, blocking-pool, and validation
+boundaries. `Debug` and `Display` for `SqliteOperationError` omit SQL text,
+bound values, paths, and engine messages. The original rusqlite error remains
+available only through the explicit `engine_source` accessor, and the legacy
+value is exposed only through its separate compatibility accessor. Automatic
+error-chain traversal is redacted as well. Consequently callers can inspect
+useful source information deliberately without putting raw engine messages
+into ordinary structured evidence.
+
+The native focused tests execute real malformed SQL, constraint, binding,
+checked-policy, nested-transaction, busy-lock, explicit interrupt, caller
+cancellation, closed-connection, reuse, and blocking-pool shutdown paths.
+They distinguish a retryable `SQLITE_BUSY`/`SQLITE_LOCKED` result from
+`SQLITE_INTERRUPT` and from outer `Outcome::Cancelled`; cancellation is not
+collapsed into a retryable database error. The dedicated pool must terminate
+with zero pending, busy, and active workers.
+
+The neutral consumer executes four real P8 rows per engine and compares the
+prepare and constraint operation/category/symbolic-primary-code/retry tuples.
+Backend-specific extended numeric codes remain evidence but are not mistaken
+for a portable cross-engine contract. The harness also preserves two
+differences instead of normalizing them away: Asupersync returns caller
+cancellation as outer `Outcome::Cancelled`, whereas FrankenSQLite exposes its
+typed interrupt error; and the inherited P3 lock row may end for
+FrankenSQLite as a five-second killed-and-reaped watchdog refusal rather than
+cooperative connection reuse. Ordinary connections are explicitly closed and
+both runtime-local blocking pools must be quiescent. These checks do not claim
+process-global task/resource quiescence, arbitrary engine equivalence, or
+permission to remove rusqlite/sqlparser or perform a dependency cutover.
+
 ## Reproduction
 
 From a clean Asupersync source commit, run:

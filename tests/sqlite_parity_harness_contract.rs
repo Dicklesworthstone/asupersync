@@ -999,6 +999,138 @@ fn phase7_checked_sql_policy_is_machine_readable_reused_and_adversarial() {
 }
 
 #[test]
+fn phase8_stable_diagnostics_are_additive_executable_and_quiescent() {
+    let harness = parse_json(HARNESS);
+    let phase8 = &harness["phase8"];
+    assert_eq!(phase8["bead_id"], "asupersync-ym2wtv.2.8");
+    assert_eq!(
+        phase8["status"],
+        "PASS_BOUNDED_STABLE_CODES_CANCELLATION_DISTINCTION_AND_RUNTIME_QUIESCENCE"
+    );
+    assert_eq!(phase8["compatibility"]["baseline"], "v0.4.3");
+    assert_eq!(phase8["compatibility"]["legacy_error_surface"], "UNCHANGED");
+    assert_eq!(
+        phase8["compatibility"]["strategy"],
+        "KEEP_EXISTING_METHODS_AND_ADD_SEPARATELY_NAMED_DIAGNOSED_METHODS"
+    );
+
+    let source_contracts = phase8["source_contracts"]
+        .as_array()
+        .expect("phase8 source contracts");
+    assert_eq!(source_contracts.len(), 2);
+    for (path, source) in [
+        ("src/database/sqlite.rs", SQLITE_SOURCE),
+        (
+            "tests/fixtures/sqlite-parity-consumer/src/main.rs",
+            CONSUMER_SOURCE,
+        ),
+    ] {
+        let contract = source_contracts
+            .iter()
+            .find(|entry| entry["path"] == path)
+            .unwrap_or_else(|| panic!("missing phase8 source contract {path}"));
+        assert_eq!(contract["sha256"], sha256(source));
+        assert_eq!(contract["line_count"], source.lines().count());
+    }
+
+    for marker in [
+        "pub enum SqliteOperation",
+        "pub enum SqliteErrorCategory",
+        "pub enum SqliteRetryDisposition",
+        "pub struct SqliteErrorDiagnostic",
+        "pub struct SqliteOperationError",
+        "pub fn engine_source(&self)",
+        "fn from_rusqlite(operation: SqliteOperation",
+        "pub async fn open_diagnosed",
+        "pub async fn execute_diagnosed",
+        "pub async fn execute_batch_diagnosed",
+        "pub async fn query_diagnosed",
+        "pub async fn query_row_diagnosed",
+        "pub async fn begin_diagnosed",
+        "pub async fn commit_diagnosed",
+        "pub async fn rollback_diagnosed",
+        "pub async fn close_async_diagnosed",
+        "sqlite_p8_engine_codes_map_without_rendered_message_parsing",
+        "sqlite_p8_public_diagnosed_apis_preserve_legacy_and_reuse",
+        "sqlite_p8_busy_cancel_interrupt_and_pool_shutdown_are_distinct",
+    ] {
+        assert!(
+            SQLITE_SOURCE.contains(marker),
+            "missing executable SQLite P8 source marker {marker}"
+        );
+    }
+    let error_rows = phase8["required_error_rows"]
+        .as_array()
+        .expect("phase8 required error rows");
+    assert_eq!(error_rows.len(), 10);
+    assert_eq!(
+        error_rows
+            .iter()
+            .filter_map(|row| row["id"].as_str())
+            .collect::<BTreeSet<_>>()
+            .len(),
+        10
+    );
+    for row in error_rows {
+        let id = row["id"].as_str().expect("phase8 row ID");
+        assert!(
+            id.starts_with("SQLITE-PARITY-P8-"),
+            "phase8 error row {id} is outside the P8 namespace"
+        );
+        assert!(row["operation"].as_str().is_some());
+        assert!(row["category"].as_str().is_some());
+    }
+
+    let matrix = &phase8["neutral_matrix"];
+    assert_eq!(
+        matrix["matrix_id"],
+        "sqlite-neutral-stable-error-and-quiescence-v1"
+    );
+    assert_eq!(matrix["per_engine_cases"], 4);
+    assert_eq!(matrix["directly_compared_cases"], 2);
+    assert_eq!(matrix["mismatches"], 0);
+    assert_eq!(
+        matrix["intentional_differences"].as_array().map(Vec::len),
+        Some(2)
+    );
+    for marker in [
+        "fn run_error_parity(",
+        "fn run_asupersync_error_matrix(",
+        "fn run_frankensqlite_error_matrix(",
+        "error.engine_source().is_some()",
+        "outer Outcome::Cancelled with no engine error",
+        "bounded watchdog refusal",
+        "require_runtime_quiescence(&blocking, \"asupersync-p8\")",
+        "require_compat_runtime_quiescence(&blocking, \"frankensqlite-p8\")",
+    ] {
+        assert!(
+            CONSUMER_SOURCE.contains(marker),
+            "neutral consumer is missing P8 marker {marker}"
+        );
+    }
+    for requirement in matrix["terminal_requirements"]
+        .as_array()
+        .expect("phase8 terminal requirements")
+    {
+        assert!(
+            requirement.as_str().is_some_and(|value| !value.is_empty()),
+            "phase8 terminal requirement must be named"
+        );
+    }
+
+    for lane in ["sqlite_focused", "neutral_consumer", "repository_contract"] {
+        assert_eq!(phase8["verification"][lane]["status"], "PASS");
+        assert!(
+            phase8["verification"][lane]["rch_job"]
+                .as_str()
+                .is_some_and(|job| job.starts_with("j-")),
+            "phase8 verification lane {lane} lacks a terminal RCH receipt"
+        );
+        assert_eq!(phase8["verification"][lane]["failed"], 0);
+    }
+}
+
+#[test]
 fn clean_phase2_execution_receipt_matches_all_declared_vectors() {
     let harness = parse_json(HARNESS);
     assert_eq!(harness["phase1_execution"]["status"], "PASS");
@@ -1085,6 +1217,10 @@ fn operator_doc_preserves_reproduction_and_no_claim_boundaries() {
         "SQLite P7 checked-SQL security parity",
         "validate_checked_sql_statement",
         "4,096 bounded variants",
+        "SQLite P8 stable diagnostics and quiescence",
+        "separately named `*_diagnosed` methods",
+        "five-second killed-and-reaped watchdog refusal",
+        "does not claim process-global task/resource quiescence",
     ] {
         assert!(
             DOC.contains(marker),

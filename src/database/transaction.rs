@@ -474,12 +474,9 @@ mod sqlite {
     /// ordinary error/cancellation tracing, while the caller preserves the
     /// body's original outcome.
     async fn rollback_before_propagating(tx: SqliteTransaction<'_>, cx: &Cx) {
-        let _ = crate::combinator::commit_section(
-            cx,
-            HELPER_ROLLBACK_MASKED_POLLS,
-            tx.rollback(cx),
-        )
-        .await;
+        let _ =
+            crate::combinator::commit_section(cx, HELPER_ROLLBACK_MASKED_POLLS, tx.rollback(cx))
+                .await;
     }
 
     /// Run a closure inside a SQLite transaction.
