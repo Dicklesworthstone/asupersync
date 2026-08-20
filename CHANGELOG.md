@@ -157,6 +157,30 @@ GitHub Release/tag baseline is `v0.4.8`.
   This is strengthened Asupersync boundary coverage, not a claim of full
   prepared-statement parity with FrankenSQLite; the corresponding
   neutral-consumer parity work remains open.
+- **Transaction helpers now await helper-owned rollback before returning a
+  cancelled or failed body outcome.** `with_sqlite_transaction` and its
+  immediate variant poll rollback to a terminal outcome inside a bounded
+  cancellation-masked cleanup section, then preserve the callback's original
+  `Err`, `Cancelled`, `Panicked`, or rollback-required result. The existing
+  generation-guarded `Drop` rollback remains a last-resort fallback rather
+  than the normal completion path. A real-disk regression immediately acquires
+  a competing zero-time `BEGIN IMMEDIATE` after helper return, proving that the
+  database write lock is already released instead of merely becoming reusable
+  eventually
+  ([`0fd29c8`](https://github.com/Dicklesworthstone/asupersync/commit/0fd29c849)).
+- **SQLite rows expose ordered, duplicate-preserving metadata without changing
+  legacy lookup behavior.** Additive `column_name`,
+  `column_names_in_order`, and `column_index` APIs retain result-set order and
+  duplicate names; `column_index` follows SQLite's first
+  ASCII-case-insensitive match. Established `get(name)` exact-case,
+  last-duplicate behavior and sorted-unique `column_names()` remain intact for
+  v0.4.3 compatibility. Additive `SqliteValue::as_real_strict` and
+  `SqliteRow::get_f64_strict` reject integer widening when an exact SQLite
+  `REAL` is required, while the established widening accessors remain
+  unchanged
+  ([`f1eb79a`](https://github.com/Dicklesworthstone/asupersync/commit/f1eb79aa3),
+  [`bad4b46`](https://github.com/Dicklesworthstone/asupersync/commit/bad4b4666),
+  [`7ab8bde`](https://github.com/Dicklesworthstone/asupersync/commit/7ab8bde35)).
 
 ### Compatibility evidence
 
@@ -190,6 +214,20 @@ GitHub Release/tag baseline is `v0.4.8`.
 
 ### Maintenance
 
+- **Compatibility guidance now matches the behavior that actually ships.**
+  MySQL's legacy compatibility fields are documented and tested not to enable
+  the insecure `mysql_native_password` plugin, which remains rejected;
+  `spawn_local` documentation now requires a native-runtime owner-worker local
+  lane and distinguishes it from ordinary `Send` spawning; and the Tokio
+  compatibility crate now states precisely that it installs an Asupersync
+  `Cx`, not a Tokio runtime or `Handle`. Tokio-dependent libraries that require
+  `Handle::current()` must remain behind an independently owned Tokio runtime
+  island; the provided Hyper, Tower, and I/O surfaces are explicit
+  trait/component bridges. These are documentation and regression-contract
+  corrections, not new removals or behavior breaks
+  ([`860fa00`](https://github.com/Dicklesworthstone/asupersync/commit/860fa00e5),
+  [`506fce0`](https://github.com/Dicklesworthstone/asupersync/commit/506fce04d),
+  [`4fb2ba0`](https://github.com/Dicklesworthstone/asupersync/commit/4fb2ba0f9)).
 - **Strict all-feature lint and documentation frontiers were repaired.** The
   post-v0.4.8 tree removes the remaining all-feature Clippy and rustdoc-link
   blockers, including the MySQL context link, without intentional runtime

@@ -20,7 +20,7 @@ const DOC_PATH: &str = "docs/kafka_downstream_user_journey_inventory.md";
 const K0_1_PATH: &str = "artifacts/kafka_capability_inventory_v1.json";
 const K0_2_PATH: &str = "artifacts/kafka_incumbent_semantics_matrix_v1.json";
 const ADR_REGISTRY_PATH: &str = "artifacts/dependency_api_adr_registry_v1.json";
-const ARTIFACT_SHA256: &str = "3a855002d66ab7d384f04eb79d0b23eeb6f242cc95d45c0db46108486aa20abd";
+const ARTIFACT_SHA256: &str = "8d90efb0a430356a8b3b548dbfc9881d82fbd63e72fd2e46c4ad4e5f1a7e94bc";
 const DOC_SHA256: &str = "3c2f0b4fa956bc45fc5b9738f5f2349024dafb577509195e998fa72ec0d9dbb1";
 const ARTIFACT_ID: &str = "kafka-downstream-user-journey-inventory-v1";
 const PROGRAM_ID: &str = "asupersync-ir2uf0";
@@ -64,7 +64,7 @@ const COMPILATION_PROFILE_SEMANTIC_TUPLE_SHA256: &str =
 const CALL_SITE_GROUP_COUNT: usize = 48;
 const CALL_SITE_COUNT: usize = 1_363;
 const CALL_SITE_ID_SET_SHA256: &str =
-    "c2db10d33c5898d006cef34e4d1a7c5403aef3803b3fd2512366b216cdb710de";
+    "c76b5bd3b1d5e97ad1b619052a8a87c95f6841a65d615dcd716e456276facfd4";
 const CALL_SITE_PATH_SET_SHA256: &str =
     "612152c18e6daff98c7d0c3c7d907df8aa7100a8bab45e88a701d08588718d9c";
 const DOWNSTREAM_HELPER_TUPLE_SHA256: &str =
@@ -81,15 +81,15 @@ const DOCUMENTATION_OCCURRENCE_GROUP_COUNT: usize = 173;
 const DOCUMENTATION_PATH_SHA256: &str =
     "092daf94a5e428430bc2e6fab7a13a30649aca53e30680c300f9eb76cbbfec67";
 const DOCUMENTATION_OCCURRENCE_TUPLE_SHA256: &str =
-    "3d23ee6450973d0c634bc7345cbaaf0594e59ccb542efb82fa71c5fc653b25b0";
+    "9738b4620ca53f4a95e94b2a6af0d9df6a32999d68244986a7b9ede28cea0a4c";
 const DOCUMENTATION_LINE_TUPLE_SHA256: &str =
-    "6da90b18d1605cd0eac6030630ab3908e645a92b7b1c59de849f41b9b880986f";
+    "c8cfaa14d425a54161f268e50e46ddb3788c0dddca853f9af5baeac61fa1012e";
 const DOCUMENTATION_OCCURRENCE_ID_SHA256: &str =
-    "be4583afd2b652f7e78c69f3607aee2c486e056c29ef2d61caf6ed444d2f638f";
+    "03f49e89a604474e7f9701c5c6814b6af41bb214672c1a0300d1aee0f7a27434";
 const DOCUMENTATION_CANONICAL_ID_SHA256: &str =
     "eb639a6c63291a29da23d7f002dcb0b26a38f34c42ed857f6949db3a92b5328e";
 const DOCUMENTATION_REMAINDER_ID_SHA256: &str =
-    "869df8a5425d496992b18af6f66dc9d1066ab7b24901e4da37a58fa82fd4eeb7";
+    "b90625b79139af630775ecbeb1d6d0b56162e2172dfd16643e50f80da5cd9b47";
 const DOCUMENTATION_GROUP_ID_SHA256: &str =
     "5e36b023be812fd3887b84af75d46e7b220c0138317b2a4face21917bdf180dd";
 const DOCUMENTATION_SOURCE_PIN_TUPLE_SHA256: &str =

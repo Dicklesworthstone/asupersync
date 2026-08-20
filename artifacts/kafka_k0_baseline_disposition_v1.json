@@ -79,9 +79,9 @@
       "authority_revision_state": "PRESENT_MATCHES_BASELINE",
       "inventory_state": "K0_3_LOCAL_STATIC_AND_CALL_SITE_CENSUS_FROZEN_EXTERNAL_UNKNOWN",
       "files": [
-        {"role":"ARTIFACT","path":"artifacts/kafka_downstream_user_journey_inventory_v1.json","byte_count":1171972,"record_count":17987,"sha256":"3a855002d66ab7d384f04eb79d0b23eeb6f242cc95d45c0db46108486aa20abd"},
+        {"role":"ARTIFACT","path":"artifacts/kafka_downstream_user_journey_inventory_v1.json","byte_count":1171976,"record_count":17987,"sha256":"8d90efb0a430356a8b3b548dbfc9881d82fbd63e72fd2e46c4ad4e5f1a7e94bc"},
         {"role":"DOCUMENT","path":"docs/kafka_downstream_user_journey_inventory.md","byte_count":40662,"record_count":612,"sha256":"3c2f0b4fa956bc45fc5b9738f5f2349024dafb577509195e998fa72ec0d9dbb1"},
-        {"role":"CONTRACT","path":"tests/kafka_downstream_user_journey_inventory_contract.rs","byte_count":216695,"record_count":5381,"sha256":"fbe96a428b61ec8f07cffe0c2cd4932f057d56fe557c062b2f596cb366ebeab4"}
+        {"role":"CONTRACT","path":"tests/kafka_downstream_user_journey_inventory_contract.rs","byte_count":216695,"record_count":5381,"sha256":"8188c21a18b292b39ac271cc0a3c57f333138d38e6932bbb5cd5c8b43827b817"}
       ]
     },
     {
@@ -94,9 +94,9 @@
       "authority_revision_state": "ABSENT_BY_CHILD_SCHEMA",
       "inventory_state": "K0_4_STATIC_FIXTURE_AND_PROVENANCE_MATRIX_FROZEN_RUNTIME_UNKNOWN",
       "files": [
-        {"role":"ARTIFACT","path":"artifacts/kafka_broker_fixture_provenance_matrix_v1.json","byte_count":119250,"record_count":2187,"sha256":"f44f4003fbcb2ea2f07ee11bffdc056e4d756211b289f3f0cef53661c4180e4b"},
+        {"role":"ARTIFACT","path":"artifacts/kafka_broker_fixture_provenance_matrix_v1.json","byte_count":119250,"record_count":2187,"sha256":"59d1ea5ef9257bc4459183db783e6357ab1bab0db033b7bf804512c62536e735"},
         {"role":"DOCUMENT","path":"docs/kafka_broker_fixture_provenance_matrix.md","byte_count":25259,"record_count":346,"sha256":"bac8c12a14bb8e0eb10fdbf6f3d0bf813fee1d95a37cf120c03290ebcf466d93"},
-        {"role":"CONTRACT","path":"tests/kafka_broker_fixture_provenance_matrix_contract.rs","byte_count":129665,"record_count":3462,"sha256":"2a31fd5a607dcba7028e5ffdfc27127e6826a9918e1fa2c7c5c7e6e40f6f3962"}
+        {"role":"CONTRACT","path":"tests/kafka_broker_fixture_provenance_matrix_contract.rs","byte_count":129665,"record_count":3462,"sha256":"0e3d0ef42c318a2d9a8a36e05cce8a6a5d4fbba4f20fe0307a1b1526079fc314"}
       ]
     }
   ],
@@ -116,7 +116,7 @@
     "source_pin_rollup": {
       "row_count": 266,
       "stage_counts": {"K0.1":13,"K0.2":8,"K0.3":225,"K0.4":20},
-      "canonical_json_sha256": "e1656c406e1dd10ba3445839f29f8aa6cdcfa94148bbf96ee134eb19f98945b2",
+      "canonical_json_sha256": "30478ead102507d22ec99d40366d8b096c1634f63eb539a964dba76bb7ffe2ec",
       "unique_path_count": 247,
       "unique_path_set_sha256": "d5631183e1560d87aeb50ca953d836b4405110b30f81c98aab099c6a5f1eb4c3",
       "overlap_group_count": 15,
@@ -155,7 +155,7 @@
   "collision_groups": {
     "authority_id_joins": {"group_count":2,"row_count":127,"combined_id_set_sha256":"a2336ba563186e1bc4a0a935ced3731e2292e8a6d54b0858311662113b267a94","mapping_rule":"For each authority reference, serialize left_child<TAB>left_collection<TAB>id<TAB>K0.3<TAB>right_collection<TAB>id; bytewise sort the records and append one LF per row.","mapping_sha256":"0a88e36135222e48bfeab5095be3896ef946cc9fa05f38cbd19d2cb656107cf9"},
     "typed_reference_joins": {"compilation_profile_reference_count":17,"cross_child_fixture_pin_reference_count":48,"direct_fixture_pin_reference_count":19,"fixture_profile_reference_count":67,"definition_collision_count":0},
-    "lexical_name_collisions": {"group_count":34,"site_count":232,"group_id_set_sha256":"e6a23cd6c436c1dd6b775481d2683eb53ca860a928572306f2ea910af3c8231b","site_id_set_sha256":"9ba367465432ba645991877f1453920edf82809c446e18a8f79bc976455132a7","mapping_rule":"For every atomic site classified EXCLUDED_NAME_COLLISION, recursively key-sort and compactly serialize an object with the parent group_id, parent path, and the complete site object; bytewise sort the records and append one LF per row.","mapping_sha256":"f8ac782c482875dd8359f47a0334445140e865e703a70d071e98c757b54dde03","classification":"NON_KAFKA_LEXICAL_EXCLUSIONS"},
+    "lexical_name_collisions": {"group_count":34,"site_count":232,"group_id_set_sha256":"e6a23cd6c436c1dd6b775481d2683eb53ca860a928572306f2ea910af3c8231b","site_id_set_sha256":"c99658f840ea27e35cc873cca6940ff50f90a25f8a3a71416e10762a627487f7","mapping_rule":"For every atomic site classified EXCLUDED_NAME_COLLISION, recursively key-sort and compactly serialize an object with the parent group_id, parent path, and the complete site object; bytewise sort the records and append one LF per row.","mapping_sha256":"1c7b0c050e014cf04234ee5b0af6d5a74ff2d293986a3543bbad386548a64e0f","classification":"NON_KAFKA_LEXICAL_EXCLUSIONS"},
     "shared_authority_references": ["program_id","capability_id","DEP-ADR-009","child artifact paths and IDs"],
     "unexpected_definition_collisions": []
   },

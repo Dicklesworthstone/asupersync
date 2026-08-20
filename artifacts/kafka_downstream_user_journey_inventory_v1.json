@@ -637,8 +637,8 @@
     {
       "pin_id": "KAFKA-K0-3-PIN-MIGRATION-COOKBOOK",
       "path": "docs/tokio_migration_cookbooks.md",
-      "record_count": 633,
-      "sha256": "a3df9575e7c6c8cce8618348bd945ea2d642fcaf5bbf6a0d017ddd53892f170a",
+      "record_count": 591,
+      "sha256": "5a234f6c2e81b16960be9f8dcc3e8b432c2faa7be25d91fe61493f8a33323e1e",
       "role": "prose-only Kafka mapping, rebalance, and rollback guidance"
     },
     {
@@ -812,8 +812,8 @@
     {
       "pin_id": "KAFKA-K0-3-PIN-CALLSITE-MYSQL",
       "path": "src/database/mysql.rs",
-      "record_count": 11149,
-      "sha256": "bb70585b886e7cb5ba5b46a6d35f5b0ee1178beb98f539df33975502dae7e6dc",
+      "record_count": 11204,
+      "sha256": "167b0d07ec8a45bddd5ccb059de32d91ed33132385f7ca5cbac9f831975ff64d",
       "role": "exact source pin for an excluded database IsolationLevel name collision"
     },
     {
@@ -848,7 +848,7 @@
       "pin_id": "KAFKA-K0-3-PIN-CALLSITE-REDIS",
       "path": "src/messaging/redis.rs",
       "record_count": 12998,
-      "sha256": "e15df52f98062fc15594626a1418ac4082ca6517817599cf54310f6e2a1199fb",
+      "sha256": "7a558e145c6189f64739a54c0ffb428db159185ece2c45e2a690c86a5e094a95",
       "role": "exact source pin for an excluded Redis Transaction name collision"
     },
     {
@@ -882,8 +882,8 @@
     {
       "pin_id": "KAFKA-K0-3-PIN-CALLSITE-OTEL",
       "path": "src/observability/otel.rs",
-      "record_count": 10896,
-      "sha256": "f359398c5c33ef86ec9be6a0852ade52c40081e1797e1f868529d9234e4e51b5",
+      "record_count": 14523,
+      "sha256": "590cb3e34654e71708ca8b623007aaaa4b35b20d602c1455c16890ef7352a72c",
       "role": "exact source pin for an excluded telemetry Compression name collision"
     },
     {
@@ -949,7 +949,7 @@
     {"pin_id":"KAFKA-K0-3-PIN-DOC-SURFACE-005","path":".claude/skills/asupersync-mega-skill/references/DB-MESSAGING-FS-PROCESS.md","record_count":75,"sha256":"9c625d542818655b5c7c56ff76017aa2611377e87e867d07bae201eac1609dd6","role":"exact baseline content pin for a documentation-claim candidate surface"},
     {"pin_id":"KAFKA-K0-3-PIN-DOC-SURFACE-006","path":".claude/skills/asupersync-mega-skill/references/TOKIO-MAPPING.md","record_count":90,"sha256":"6515172cf8cefabe38c62318ef22ab2f037eda4fdad3c78a4f916b7ff63b6114","role":"exact baseline content pin for a documentation-claim candidate surface"},
     {"pin_id":"KAFKA-K0-3-PIN-DOC-SURFACE-008","path":".github/wasm_optimization_policy.json","record_count":129,"sha256":"17d523da009cf70359e2a53d8049ce5f48431abb5ae81b196d743d813bc954d5","role":"exact baseline content pin for a documentation-claim candidate surface"},
-    {"pin_id":"KAFKA-K0-3-PIN-DOC-SURFACE-011","path":"CHANGELOG.md","record_count":2269,"sha256":"ae78d080c3b7587d7ef0ad449cbd650c0702062ee47ce20adb0ea33619c2a0e4","role":"exact baseline content pin for a documentation-claim candidate surface"},
+    {"pin_id":"KAFKA-K0-3-PIN-DOC-SURFACE-011","path":"CHANGELOG.md","record_count":2307,"sha256":"38c42c16ce6e5efb8b571ade68e306517924df3b8f46b0a633fd07a77c4e59ac","role":"exact baseline content pin for a documentation-claim candidate surface"},
     {"pin_id":"KAFKA-K0-3-PIN-DOC-SURFACE-012","path":"COMPREHENSIVE_DEPENDENCY_REPLACEMENT_PLAN.md","record_count":332,"sha256":"401b39c99f4909a7e805e0992327d2408fe54aed65610783830031b66083b7b0","role":"exact baseline content pin for a documentation-claim candidate surface"},
     {"pin_id":"KAFKA-K0-3-PIN-DOC-SURFACE-014","path":"TESTING.md","record_count":1391,"sha256":"37b703248aaf8f64adb0abc41c8a72639af4381582ed276e2c44aca71ec66369","role":"exact baseline content pin for a documentation-claim candidate surface"},
     {"pin_id":"KAFKA-K0-3-PIN-DOC-SURFACE-015","path":"UPGRADE_LOG.md","record_count":342,"sha256":"829caa113d8d20037f9eaf19f053df468be9cbb841a11e2ccf99d5c493ec595e","role":"exact baseline content pin for a documentation-claim candidate surface"},
@@ -998,7 +998,7 @@
     {"pin_id":"KAFKA-K0-3-PIN-DOC-SURFACE-076","path":"docs/dependency_verification_matrix.md","record_count":405,"sha256":"c90e0d2f786c2031a97845b217b720b3894ec1105395797900406cb1a0dc6a9d","role":"exact baseline content pin for a documentation-claim candidate surface"},
     {"pin_id":"KAFKA-K0-3-PIN-DOC-SURFACE-077","path":"docs/design/stable_rust_decision_record.md","record_count":258,"sha256":"8f4a9a81da3abcefead81fc81cae3ccc8336ce4a985e8bde160da90421e7baa6","role":"exact baseline content pin for a documentation-claim candidate surface"},
     {"pin_id":"KAFKA-K0-3-PIN-DOC-SURFACE-078","path":"docs/hex_capability_inventory.md","record_count":383,"sha256":"ae436b502b3d63459f1c9801e43f9571950d3340bf43be795e5e0377cfda2bb9","role":"exact baseline content pin for a documentation-claim candidate surface"},
-    {"pin_id":"KAFKA-K0-3-PIN-DOC-SURFACE-080","path":"docs/integration.md","record_count":2136,"sha256":"ec1b4485f5c3c31d526e4bab8d998f87cb56e4c4fcd46d479ac908cf224e8413","role":"exact baseline content pin for a documentation-claim candidate surface"},
+    {"pin_id":"KAFKA-K0-3-PIN-DOC-SURFACE-080","path":"docs/integration.md","record_count":2141,"sha256":"028ad9c97e97c71ca9930493b76c5bf7b1dfc36f8b36cb3f1e49a970c4a74173","role":"exact baseline content pin for a documentation-claim candidate surface"},
     {"pin_id":"KAFKA-K0-3-PIN-DOC-SURFACE-083","path":"docs/lz4_owned_codec_corpus.md","record_count":80,"sha256":"a618ebde74249746e66064415bb1f982ca7a984693a7635a4ce2e3a8243f1301","role":"exact baseline content pin for a documentation-claim candidate surface"},
     {"pin_id":"KAFKA-K0-3-PIN-DOC-SURFACE-084","path":"docs/oslock_inventory_gate.md","record_count":216,"sha256":"fc942147cb9def8c7c0edcf0e15c027534743c8f0414a6805aea20827ae98370","role":"exact baseline content pin for a documentation-claim candidate surface"},
     {"pin_id":"KAFKA-K0-3-PIN-DOC-SURFACE-085","path":"docs/parser_fuzz_protocol_inventory.md","record_count":40,"sha256":"fd47f1fab5587e8367f974b9538917a747b7127383ea5f00fcb25693204a44e9","role":"exact baseline content pin for a documentation-claim candidate surface"},
@@ -5309,14 +5309,14 @@
     "occurrence_id_rule": "KAFKA-K0-3-DOC-OCC-{three-digit candidate-surface ordinal}-L{six-digit 1-based line}-M{three-digit 1-based non-overlapping match ordinal within line}",
     "literal_occurrence_count": 9180,
     "matching_line_count": 7778,
-    "occurrence_locator_tuple_sha256": "3d23ee6450973d0c634bc7345cbaaf0594e59ccb542efb82fa71c5fc653b25b0",
-    "matching_line_locator_tuple_sha256": "6da90b18d1605cd0eac6030630ab3908e645a92b7b1c59de849f41b9b880986f",
-    "occurrence_id_list_sha256": "be4583afd2b652f7e78c69f3607aee2c486e056c29ef2d61caf6ed444d2f638f",
+    "occurrence_locator_tuple_sha256": "9738b4620ca53f4a95e94b2a6af0d9df6a32999d68244986a7b9ede28cea0a4c",
+    "matching_line_locator_tuple_sha256": "c8cfaa14d425a54161f268e50e46ddb3788c0dddca853f9af5baeac61fa1012e",
+    "occurrence_id_list_sha256": "03f49e89a604474e7f9701c5c6814b6af41bb214672c1a0300d1aee0f7a27434",
     "canonical_documentation_claim_count": 31,
     "canonical_projection_occurrence_count": 37,
     "canonical_projection_occurrence_id_list_sha256": "eb639a6c63291a29da23d7f002dcb0b26a38f34c42ed857f6949db3a92b5328e",
     "owned_unresolved_occurrence_count": 9143,
-      "owned_unresolved_occurrence_id_list_sha256": "869df8a5425d496992b18af6f66dc9d1066ab7b24901e4da37a58fa82fd4eeb7",
+      "owned_unresolved_occurrence_id_list_sha256": "b90625b79139af630775ecbeb1d6d0b56162e2172dfd16643e50f80da5cd9b47",
     "occurrence_group_count": 173,
     "occurrence_group_id_list_sha256": "5e36b023be812fd3887b84af75d46e7b220c0138317b2a4face21917bdf180dd",
     "source_pin_count_for_actual_candidate_surfaces": 149,
@@ -5423,7 +5423,7 @@
       "derived_group_count": 142,
       "derived_group_id_list_sha256": "a52b98d4cb5460c4731c64e085e4852990fd408196c67b9c67d46cc9c5acb7d1",
       "occurrence_count": 9143,
-      "occurrence_id_list_sha256": "869df8a5425d496992b18af6f66dc9d1066ab7b24901e4da37a58fa82fd4eeb7",
+      "occurrence_id_list_sha256": "b90625b79139af630775ecbeb1d6d0b56162e2172dfd16643e50f80da5cd9b47",
       "classification": "OWNED_UNRESOLVED_CLAIM",
       "semantic_state": "UNKNOWN",
       "evidence_class": "NON_BROKER_STATIC_IDENTITY_ONLY",
@@ -5436,7 +5436,7 @@
       "canonical_and_remainder_groups_are_pairwise_disjoint": true,
       "canonical_and_remainder_union_equals_all_literal_occurrences": true,
       "expected_union_occurrence_count": 9180,
-      "expected_union_occurrence_id_list_sha256": "be4583afd2b652f7e78c69f3607aee2c486e056c29ef2d61caf6ed444d2f638f",
+      "expected_union_occurrence_id_list_sha256": "03f49e89a604474e7f9701c5c6814b6af41bb214672c1a0300d1aee0f7a27434",
       "expected_group_count": 173,
       "expected_group_id_list_sha256": "5e36b023be812fd3887b84af75d46e7b220c0138317b2a4face21917bdf180dd",
       "canonical_claim_reverse_join_is_bijective": true
@@ -7440,7 +7440,7 @@
         "UNRESOLVED_STALE_SURFACE": 8
       }
     },
-    "call_site_id_set_sha256": "c2db10d33c5898d006cef34e4d1a7c5403aef3803b3fd2512366b216cdb710de",
+    "call_site_id_set_sha256": "c76b5bd3b1d5e97ad1b619052a8a87c95f6841a65d615dcd716e456276facfd4",
     "call_site_path_set_sha256": "612152c18e6daff98c7d0c3c7d907df8aa7100a8bab45e88a701d08588718d9c",
     "digest_algorithm": "SHA-256 of UTF-8 lexicographically sorted values joined by LF with one trailing LF"
   },
@@ -8742,9 +8742,9 @@
       "resolution_reason": "EXCLUDED_NAME_COLLISION",
       "atomic_sites": [
         {
-          "site_id": "KAFKA-K0-3-CS-008-AC-B158357-E158391",
+          "site_id": "KAFKA-K0-3-CS-008-AC-B158282-E158316",
           "site_kind": "ASSOCIATED_CALL",
-          "source_locator": "bytes 158357..158391; line 4095:15-4095:49",
+          "source_locator": "bytes 158282..158316; line 4094:15-4094:49",
           "source_literal": "IsolationLevel::from_server_string()",
           "k0_1_symbol_id": null,
           "k0_2_semantic_ids": [],
@@ -9482,9 +9482,9 @@
       "resolution_reason": "EXCLUDED_NAME_COLLISION",
       "atomic_sites": [
         {
-          "site_id": "KAFKA-K0-3-CS-014-AC-B135780-E135798",
+          "site_id": "KAFKA-K0-3-CS-014-AC-B135778-E135796",
           "site_kind": "ASSOCIATED_CALL",
-          "source_locator": "bytes 135780..135798; line 3482:9-3482:27",
+          "source_locator": "bytes 135778..135796; line 3482:9-3482:27",
           "source_literal": "Transaction::begin()",
           "k0_1_symbol_id": null,
           "k0_2_semantic_ids": [],
@@ -9622,9 +9622,9 @@
       "resolution_reason": "EXCLUDED_NAME_COLLISION",
       "atomic_sites": [
         {
-          "site_id": "KAFKA-K0-3-CS-019-AC-B97968-E97988",
+          "site_id": "KAFKA-K0-3-CS-019-AC-B214457-E214477",
           "site_kind": "ASSOCIATED_CALL",
-          "source_locator": "bytes 97968..97988; line 2952:66-2952:86",
+          "source_locator": "bytes 214457..214477; line 6163:66-6163:86",
           "source_literal": "Compression::default()",
           "k0_1_symbol_id": null,
           "k0_2_semantic_ids": [],
@@ -17933,7 +17933,7 @@
     "k0_2_ids_without_resolved_call_sites_count": 22,
     "legacy_local_row_only_unknown_k0_1_usage_count": 13,
     "legacy_local_row_only_unknown_k0_2_usage_count": 52,
-    "call_site_id_set_sha256": "c2db10d33c5898d006cef34e4d1a7c5403aef3803b3fd2512366b216cdb710de",
+    "call_site_id_set_sha256": "c76b5bd3b1d5e97ad1b619052a8a87c95f6841a65d615dcd716e456276facfd4",
     "call_site_path_set_sha256": "612152c18e6daff98c7d0c3c7d907df8aa7100a8bab45e88a701d08588718d9c",
     "policy_or_context_retained_path_count": 162,
     "external_searches_not_run_count": 7,
