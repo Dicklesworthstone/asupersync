@@ -21,12 +21,13 @@
 //!    `Cx` after ~150 ms via `cx.cancel_with(CancelKind::User, …)`.
 //! 3. Assert the outcome is `Outcome::Cancelled` with `CancelKind::User`
 //!    attribution — the cancel signal flowed through the transaction
-//!    helper and `with_sqlite_transaction` (src/database/transaction.rs:442)
-//!    took the Cancelled arm which calls `tx.rollback`.
-//! 4. Open a direct *reference* `rusqlite::Connection` to the same file
-//!    and verify the INSERTed row is NOT visible (rollback hit disk before
-//!    any other reader could observe it).
-//! 5. Run `PRAGMA integrity_check` on the reference connection and assert
+//!    helper and its Cancelled arm completed `tx.rollback`.
+//! 4. Open a direct *reference* `rusqlite::Connection` to the same file and
+//!    acquire `BEGIN IMMEDIATE` with a zero busy timeout before any wrapper
+//!    query or close. This proves the helper released SQLite's physical write
+//!    transaction before returning, rather than merely scheduling cleanup.
+//! 5. Verify the INSERTed row is NOT visible, then run `PRAGMA integrity_check`
+//!    on the reference connection and assert
 //!    the result is `"ok"` — no torn pages, no orphaned WAL frames.
 //! 6. Close the cancelled Asupersync connection, re-check through the
 //!    reference connection that deferred rollback cleanup left zero rows,
@@ -45,18 +46,70 @@
 
 use asupersync::channel::oneshot;
 use asupersync::cx::Cx;
-use asupersync::database::sqlite::{SqliteConnection, SqliteValue};
-use asupersync::database::transaction::with_sqlite_transaction;
+use asupersync::database::sqlite::{
+    SqliteConnection, SqliteError, SqliteTransaction, SqliteValue,
+};
+use asupersync::database::transaction::{
+    with_sqlite_transaction, with_sqlite_transaction_immediate,
+};
+use asupersync::observability::{LogCollector, LogLevel};
 use asupersync::test_utils::run_test_with_cx;
 use asupersync::types::{CancelKind, Outcome};
 
+use std::future::Future;
+use std::pin::Pin;
 use std::thread;
 use std::time::{Duration, Instant};
 use tempfile::tempdir;
 
-/// Cancel-during-transaction-body durability roundtrip (asupersync-qlwsxf).
-#[test]
-fn sqlite_real_disk_cancel_during_tx_body_rolls_back_and_leaves_file_consistent() {
+type CancelledTransactionBody<'a> =
+    Pin<Box<dyn Future<Output = Outcome<(), SqliteError>> + Send + 'a>>;
+
+fn cancelled_transaction_body<'a>(
+    tx: &'a SqliteTransaction<'_>,
+    tx_cx: &'a Cx,
+) -> CancelledTransactionBody<'a> {
+    Box::pin(async move {
+        // INSERT a row that MUST not be visible on rollback.
+        match tx
+            .execute(
+                tx_cx,
+                "INSERT INTO qlwsxf_rows (id, payload) VALUES (?1, ?2)",
+                &[
+                    SqliteValue::Integer(1),
+                    SqliteValue::Text("must-not-persist".into()),
+                ],
+            )
+            .await
+        {
+            Outcome::Ok(_) => {}
+            other => return other.map(|_| ()),
+        }
+
+        // Park on a cancel-aware receive with its sender retained. Unlike a
+        // raw timer, the receive owns a cancellation-Waker registration and
+        // must resume promptly when the sidecar cancels this Cx.
+        let (pending_tx, mut pending_rx) = oneshot::channel::<()>();
+        let wait_result = pending_rx.recv(tx_cx).await;
+        assert!(
+            matches!(wait_result, Err(oneshot::RecvError::Cancelled)),
+            "pending receive must wake through Cx cancellation: {wait_result:?}"
+        );
+        drop(pending_tx);
+
+        if tx_cx.checkpoint().is_err() {
+            return Outcome::Cancelled(
+                tx_cx
+                    .cancel_reason()
+                    .unwrap_or_else(|| asupersync::types::CancelReason::user("cancelled")),
+            );
+        }
+
+        Outcome::Ok(())
+    })
+}
+
+fn run_real_disk_cancel_rollback_case(immediate: bool) {
     // Tempdir auto-cleans on drop. The path is unique per test run so
     // parallel test execution doesn't see each other's files.
     let dir = tempdir().expect("tempdir");
@@ -64,6 +117,9 @@ fn sqlite_real_disk_cancel_during_tx_body_rolls_back_and_leaves_file_consistent(
     let db_path_str = db_path.to_string_lossy().to_string();
 
     run_test_with_cx(|cx| async move {
+        let logs = LogCollector::new(256).with_min_level(LogLevel::Trace);
+        cx.set_log_collector(logs.clone());
+
         // ── setup: create the table, set WAL mode, baseline empty count ──
         let conn = match SqliteConnection::open(&cx, &db_path_str).await {
             Outcome::Ok(c) => c,
@@ -126,50 +182,11 @@ fn sqlite_real_disk_cancel_during_tx_body_rolls_back_and_leaves_file_consistent(
             .expect("spawn canceller");
 
         let started = Instant::now();
-        let outcome =
-            with_sqlite_transaction(&conn, &cx, |tx, tx_cx| {
-                Box::pin(async move {
-                    // INSERT a row that MUST not be visible on rollback.
-                    match tx
-                        .execute(
-                            tx_cx,
-                            "INSERT INTO qlwsxf_rows (id, payload) VALUES (?1, ?2)",
-                            &[
-                                SqliteValue::Integer(1),
-                                SqliteValue::Text("must-not-persist".into()),
-                            ],
-                        )
-                        .await
-                    {
-                        Outcome::Ok(_) => {}
-                        other => return other.map(|_| ()),
-                    }
-
-                    // Park on a cancel-aware receive with its sender retained.
-                    // Unlike a raw timer, the receive owns a cancellation-Waker
-                    // registration and must resume promptly when the sidecar
-                    // cancels this Cx.
-                    let (pending_tx, mut pending_rx) = oneshot::channel::<()>();
-                    let wait_result = pending_rx.recv(tx_cx).await;
-                    assert!(
-                        matches!(wait_result, Err(oneshot::RecvError::Cancelled)),
-                        "pending receive must wake through Cx cancellation: {wait_result:?}"
-                    );
-                    drop(pending_tx);
-
-                    // Re-check the cancel after the sleep so the body
-                    // surfaces Outcome::Cancelled rather than Ok if the
-                    // checkpoint hadn't fired before this point.
-                    if tx_cx.checkpoint().is_err() {
-                        return Outcome::Cancelled(tx_cx.cancel_reason().unwrap_or_else(|| {
-                            asupersync::types::CancelReason::user("cancelled")
-                        }));
-                    }
-
-                    Outcome::Ok(())
-                })
-            })
-            .await;
+        let outcome = if immediate {
+            with_sqlite_transaction_immediate(&conn, &cx, cancelled_transaction_body).await
+        } else {
+            with_sqlite_transaction(&conn, &cx, cancelled_transaction_body).await
+        };
         let elapsed = started.elapsed();
         canceller.join().expect("canceller thread");
 
@@ -192,6 +209,17 @@ fn sqlite_real_disk_cancel_during_tx_body_rolls_back_and_leaves_file_consistent(
             Outcome::Panicked(p) => panic!("transaction body panicked: {p:?}"),
         }
 
+        let rollback_completed = logs.peek().iter().any(|entry| {
+            entry.message() == "database.transaction.lifecycle"
+                && entry.get_field("backend") == Some("sqlite")
+                && entry.get_field("operation") == Some("rollback")
+                && entry.get_field("outcome") == Some("ok")
+        });
+        assert!(
+            rollback_completed,
+            "with_sqlite_transaction must await a successful physical rollback before returning the body's cancellation"
+        );
+
         // Hard ceiling at 3 s catches a cancellation-Waker regression.
         assert!(
             elapsed < Duration::from_secs(3),
@@ -204,6 +232,15 @@ fn sqlite_real_disk_cancel_during_tx_body_rolls_back_and_leaves_file_consistent(
         let cx_recover = Cx::for_testing();
         let reference =
             rusqlite::Connection::open(&db_path_str).expect("open direct reference connection");
+        reference
+            .busy_timeout(Duration::ZERO)
+            .expect("set zero busy timeout on reference connection");
+        reference
+            .execute_batch("BEGIN IMMEDIATE")
+            .expect("helper return must release the write transaction immediately");
+        reference
+            .execute_batch("ROLLBACK")
+            .expect("release reference write-lock probe");
         let after: i64 = reference
             .query_row("SELECT count(*) FROM qlwsxf_rows", [], |row| row.get(0))
             .expect("reference post-cancel count");
@@ -225,7 +262,7 @@ fn sqlite_real_disk_cancel_during_tx_body_rolls_back_and_leaves_file_consistent(
             integrity, "ok",
             "PRAGMA integrity_check must be 'ok' after a cancel-rollback; got {integrity:?}. \
              A non-ok result indicates torn writes or orphaned WAL frames — review the rollback \
-             path in src/database/transaction.rs:442 and src/database/sqlite.rs:1801."
+             path in with_sqlite_transaction and SqliteTransaction::rollback."
         );
 
         // End the cancelled connection's lifecycle before handing write
@@ -279,4 +316,16 @@ fn sqlite_real_disk_cancel_during_tx_body_rolls_back_and_leaves_file_consistent(
             "asupersync must read a committed row written by the reference connection"
         );
     });
+}
+
+/// Deferred transaction cancel/rollback durability roundtrip (asupersync-qlwsxf).
+#[test]
+fn sqlite_real_disk_cancel_during_tx_body_rolls_back_and_leaves_file_consistent() {
+    run_real_disk_cancel_rollback_case(false);
+}
+
+/// Immediate transaction cancel/rollback durability roundtrip (asupersync-ym2wtv.2.4).
+#[test]
+fn sqlite_real_disk_cancel_during_immediate_tx_rolls_back_before_return() {
+    run_real_disk_cancel_rollback_case(true);
 }

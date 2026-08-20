@@ -458,8 +458,28 @@ mod sqlite {
 
     type SqliteTxFuture<'a, T> = Pin<Box<dyn Future<Output = Outcome<T, SqliteError>> + Send + 'a>>;
 
+    const HELPER_ROLLBACK_MASKED_POLLS: u32 = 1024;
+
     fn rollback_required_error() -> SqliteError {
         SqliteError::Sqlite("transaction must roll back before commit".to_string())
+    }
+
+    /// Finish helper-owned rollback before propagating the body outcome.
+    ///
+    /// The body may have cancelled `cx`, so polling `rollback` normally would
+    /// reject the operation at its first checkpoint and leave physical cleanup
+    /// to `SqliteTransaction::drop`. A transaction helper must not return while
+    /// that best-effort cleanup can still own SQLite's write transaction. Mask
+    /// cancellation only for a bounded number of polls; `rollback` retains its
+    /// ordinary error/cancellation tracing, while the caller preserves the
+    /// body's original outcome.
+    async fn rollback_before_propagating(tx: SqliteTransaction<'_>, cx: &Cx) {
+        let _ = crate::combinator::commit_section(
+            cx,
+            HELPER_ROLLBACK_MASKED_POLLS,
+            tx.rollback(cx),
+        )
+        .await;
     }
 
     /// Run a closure inside a SQLite transaction.
@@ -485,6 +505,7 @@ mod sqlite {
         match result {
             Outcome::Ok(value) => {
                 if tx.requires_rollback_before_commit() {
+                    rollback_before_propagating(tx, cx).await;
                     return Outcome::Err(rollback_required_error());
                 }
                 match tx.commit(cx).await {
@@ -495,15 +516,15 @@ mod sqlite {
                 }
             }
             Outcome::Err(e) => {
-                let _ = tx.rollback(cx).await;
+                rollback_before_propagating(tx, cx).await;
                 Outcome::Err(e)
             }
             Outcome::Cancelled(r) => {
-                let _ = tx.rollback(cx).await;
+                rollback_before_propagating(tx, cx).await;
                 Outcome::Cancelled(r)
             }
             Outcome::Panicked(p) => {
-                let _ = tx.rollback(cx).await;
+                rollback_before_propagating(tx, cx).await;
                 Outcome::Panicked(p)
             }
         }
@@ -533,6 +554,7 @@ mod sqlite {
         match result {
             Outcome::Ok(value) => {
                 if tx.requires_rollback_before_commit() {
+                    rollback_before_propagating(tx, cx).await;
                     return Outcome::Err(rollback_required_error());
                 }
                 match tx.commit(cx).await {
@@ -543,15 +565,15 @@ mod sqlite {
                 }
             }
             Outcome::Err(e) => {
-                let _ = tx.rollback(cx).await;
+                rollback_before_propagating(tx, cx).await;
                 Outcome::Err(e)
             }
             Outcome::Cancelled(r) => {
-                let _ = tx.rollback(cx).await;
+                rollback_before_propagating(tx, cx).await;
                 Outcome::Cancelled(r)
             }
             Outcome::Panicked(p) => {
-                let _ = tx.rollback(cx).await;
+                rollback_before_propagating(tx, cx).await;
                 Outcome::Panicked(p)
             }
         }
@@ -1551,6 +1573,8 @@ mod tests {
         let mut runtime = LabRuntimeTarget::create_runtime(TestConfig::default());
         LabRuntimeTarget::block_on(&mut runtime, async move {
             let cx = Cx::current().expect("lab runtime should install a current Cx");
+            let logs = LogCollector::new(128).with_min_level(LogLevel::Trace);
+            cx.set_log_collector(logs.clone());
             let conn = match SqliteConnection::open_in_memory(&cx).await {
                 Outcome::Ok(conn) => conn,
                 other => panic!("open_in_memory failed: {other:?}"),
@@ -1612,6 +1636,17 @@ mod tests {
                 }
                 other => panic!("expected rollback-required error, got {other:?}"),
             }
+
+            let rollback_completed = logs.peek().iter().any(|entry| {
+                entry.message() == "database.transaction.lifecycle"
+                    && entry.get_field("backend") == Some("sqlite")
+                    && entry.get_field("operation") == Some("rollback")
+                    && matches!(entry.get_field("outcome"), Some("ok" | "err"))
+            });
+            assert!(
+                rollback_completed,
+                "rollback-required helper exit must synchronously drive rollback to a terminal result before any follow-up operation"
+            );
 
             let rows = match conn
                 .query(
