@@ -2118,7 +2118,10 @@ impl BackoffStrategy {
                     max.as_secs_f64()
                 };
 
-                let delay = Duration::from_secs_f64(safe_secs.min(max.as_secs_f64()));
+                let capped_secs = safe_secs.min(max.as_secs_f64());
+                let delay = Duration::try_from_secs_f64(capped_secs)
+                    .unwrap_or(*max)
+                    .min(*max);
                 Some(delay)
             }
         }
@@ -4531,6 +4534,22 @@ mod tests {
         assert_eq!(d10.as_secs(), 10);
 
         crate::test_complete!("exponential_backoff");
+    }
+
+    #[test]
+    fn exponential_backoff_saturates_at_duration_max() {
+        init_test("exponential_backoff_saturates_at_duration_max");
+
+        let backoff = BackoffStrategy::Exponential {
+            initial: Duration::MAX,
+            max: Duration::MAX,
+            multiplier: 2.0,
+        };
+
+        assert_eq!(backoff.delay_for_attempt(0), Some(Duration::MAX));
+        assert_eq!(backoff.delay_for_attempt(u32::MAX), Some(Duration::MAX));
+
+        crate::test_complete!("exponential_backoff_saturates_at_duration_max");
     }
 
     #[test]
