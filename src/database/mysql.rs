@@ -1313,24 +1313,23 @@ pub struct MySqlConnectOptions {
     pub connect_timeout: Option<std::time::Duration>,
     /// Require SSL.
     pub ssl_mode: SslMode,
-    /// br-asupersync-m6c35i: opt-in escape hatch for legacy
-    /// `mysql_native_password` authentication. Default `false` — the
-    /// client REJECTS any auth-switch request from the server that
-    /// asks for `mysql_native_password` (which uses SHA1 over a
-    /// server-supplied nonce — offline-crackable from a captured
-    /// exchange, vulnerable to MitM downgrade from
-    /// `caching_sha2_password`). Operators that explicitly need the
-    /// legacy plugin (e.g., MySQL 5.6 or MariaDB 10.0) must set this
-    /// flag, accept the documented risk, and ideally pair with
-    /// `ssl_mode: Required` to neutralise the offline-crack surface.
+    /// Compatibility policy input retained for callers that configured legacy
+    /// `mysql_native_password` authentication before v0.4.3.
+    ///
+    /// Setting this field does **not** enable the plugin. The production client
+    /// permanently rejects `mysql_native_password` during both the initial
+    /// handshake and an authentication switch because its SHA-1 exchange is
+    /// vulnerable to offline password cracking. The field remains public so
+    /// existing struct literals keep compiling; migrate the server account to
+    /// `caching_sha2_password` instead of relying on this value.
     pub insecure_legacy_mysql_native_password: bool,
-    /// br-asupersync-63lpvq: explicit second opt-in for server-driven
-    /// authentication plugin downgrades during `AuthSwitchRequest`.
-    /// Default `false` — even clients that allow the legacy
-    /// `mysql_native_password` plugin on the initial handshake will
-    /// still reject a mid-auth downgrade from a stronger plugin such
-    /// as `caching_sha2_password` unless the operator confirms that
-    /// downgrade risk separately.
+    /// Compatibility policy input for server-driven authentication-plugin
+    /// downgrades during `AuthSwitchRequest`.
+    ///
+    /// The value is still consulted by the downgrade policy check, but it does
+    /// not override the permanent production rejection of
+    /// `mysql_native_password`. In particular, setting both insecure opt-ins
+    /// cannot make a SHA-1 authentication response reachable.
     pub insecure_allow_auth_switch_downgrade: bool,
     /// br-asupersync-charset-negotiation: requested character set for
     /// the connection. If specified, the client validates that the server
@@ -10343,13 +10342,41 @@ mod tests {
     }
 
     #[test]
-    fn test_auth_switch_allows_explicit_downgrade_opt_in() {
+    fn test_auth_switch_policy_gate_allows_explicit_opt_in() {
         let mut opts = MySqlConnectOptions::parse("mysql://user:pass@localhost/db").unwrap();
         opts.insecure_legacy_mysql_native_password = true;
         opts.insecure_allow_auth_switch_downgrade = true;
 
+        // This helper validates only the downgrade-policy layer. The actual
+        // transport path still rejects mysql_native_password below.
         validate_auth_plugin_switch("caching_sha2_password", "mysql_native_password", &opts)
             .unwrap();
+    }
+
+    #[test]
+    fn test_initial_mysql_native_password_stays_rejected_with_compatibility_opt_ins() {
+        let mut conn = make_test_connection();
+        let mut options = MySqlConnectOptions::parse("mysql://user:pass@localhost/db").unwrap();
+        options.insecure_legacy_mysql_native_password = true;
+        options.insecure_allow_auth_switch_downgrade = true;
+        let handshake = Handshake {
+            server_version: "8.0.0-test".to_string(),
+            connection_id: 1,
+            auth_plugin_data: b"01234567890123456789".to_vec(),
+            capabilities: capability::CLIENT_PROTOCOL_41
+                | capability::CLIENT_SECURE_CONNECTION
+                | capability::CLIENT_PLUGIN_AUTH,
+            charset: 45,
+            status_flags: 0,
+            auth_plugin_name: "mysql_native_password".to_string(),
+        };
+
+        let err = run(conn.send_handshake_response(&options, &handshake)).unwrap_err();
+        assert!(
+            matches!(err, MySqlError::UnsupportedAuthPlugin(ref message) if message.contains("permanently disabled")),
+            "compatibility opt-ins must not enable initial SHA-1 authentication: {err:?}"
+        );
+        assert_eq!(conn.inner.sequence, 0, "rejection must precede wire output");
     }
 
     #[test]
@@ -10398,6 +10425,34 @@ mod tests {
             matches!(err, MySqlError::UnsupportedAuthPlugin(ref plugin) if plugin == "sha256_password"),
             "unexpected plugin error: {err:?}"
         );
+    }
+
+    #[test]
+    fn test_switched_mysql_native_password_stays_rejected_with_compatibility_opt_ins() {
+        let mut conn = make_test_connection();
+        let mut options = MySqlConnectOptions::parse("mysql://user:pass@localhost/db").unwrap();
+        options.insecure_legacy_mysql_native_password = true;
+        options.insecure_allow_auth_switch_downgrade = true;
+        let handshake = Handshake {
+            server_version: "8.0.0-test".to_string(),
+            connection_id: 1,
+            auth_plugin_data: b"01234567890123456789".to_vec(),
+            capabilities: capability::CLIENT_PROTOCOL_41
+                | capability::CLIENT_SECURE_CONNECTION
+                | capability::CLIENT_PLUGIN_AUTH,
+            charset: 45,
+            status_flags: 0,
+            auth_plugin_name: "caching_sha2_password".to_string(),
+        };
+        let mut auth_switch = b"mysql_native_password\0".to_vec();
+        auth_switch.extend_from_slice(b"01234567890123456789\0");
+
+        let err = run(conn.handle_auth_switch(&auth_switch, &options, &handshake)).unwrap_err();
+        assert!(
+            matches!(err, MySqlError::UnsupportedAuthPlugin(ref message) if message.contains("permanently blocked")),
+            "compatibility opt-ins must not enable switched SHA-1 authentication: {err:?}"
+        );
+        assert_eq!(conn.inner.sequence, 0, "rejection must precede wire output");
     }
 
     #[test]
