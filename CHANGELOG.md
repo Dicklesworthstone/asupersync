@@ -10,7 +10,7 @@ Asupersync is a spec-first, cancel-correct, capability-secure async runtime for 
 - Commit links point to representative commits, not exhaustive lists.
 - Organized by landed capabilities within each version, not by diff order.
 
-Scope window: current work through 2026-08-19, reconstructed from git history,
+Scope window: current work through 2026-08-20, reconstructed from git history,
 beads, benchmark ledgers, and live repo artifacts; the latest published
 GitHub Release/tag baseline is `v0.4.8`.
 
@@ -66,6 +66,97 @@ GitHub Release/tag baseline is `v0.4.8`.
   handle whose runtime has already gone away fails closed with
   `SpawnError::RuntimeUnavailable` instead of manufacturing authority
   ([`04a4914`](https://github.com/Dicklesworthstone/asupersync/commit/04a4914afff4b131bba82760e17d1fbd4dcc53c3)).
+- **Embedders can attach their own blocking pool to a request context.**
+  `Cx::with_blocking_pool_handle` is now public, allowing an embedding
+  application that already owns a `BlockingPoolHandle` to route
+  `spawn_blocking` through that pool. Without an attached pool, an explicit or
+  current `Cx` runs the blocking closure inline on its polling thread; only the
+  free `runtime::spawn_blocking` helper with no ambient `Cx` uses the bounded
+  dedicated-thread fallback. This is an authority-preserving additive API: it
+  does not create a pool or install global state; passing `None` detaches the
+  pool
+  ([`a4b16b4`](https://github.com/Dicklesworthstone/asupersync/commit/a4b16b4e090066cc8b61d2d97ba849a29c114ef1)).
+
+### OpenTelemetry export
+
+- **OTLP/HTTP configuration is validated before export work begins.** The
+  additive immutable `OtlpHttpConfig` builder validates bounded absolute
+  HTTP(S) endpoints, TLS/root-provider availability, secret and reserved
+  headers, timeouts, retry limits and backoff, compression support, and
+  resource attributes. Core configuration performs no ambient environment
+  reads; authorization values remain inaccessible and redacted, redirects,
+  cookies, and client-internal retries are disabled, and the exporter's own
+  retries remain bounded by the caller's `Cx`, deadline, and budget
+  ([`d0303fd`](https://github.com/Dicklesworthstone/asupersync/commit/d0303fdebac717ee8fb3f09f32ce3dd88e5ae059)).
+- **Metrics can be exported through a finite, owned OTLP pipeline.**
+  `OwnedOtlpMetrics` maps all 23 fixed `MetricsProvider` instruments into
+  deterministic cumulative OTLP requests with exact units and histogram
+  boundaries, explicit timestamps and reset semantics, bytewise attribute
+  ordering, checked numeric conversion, bounded cardinality and request sizes,
+  and request splitting only at metric boundaries. The existing SDK-backed
+  `OtelMetrics` bridge remains available and unchanged
+  ([`4da1a40`](https://github.com/Dicklesworthstone/asupersync/commit/4da1a40028c533a063ef8e0b113064443c2a2b70)).
+- **Traces can be mapped and exported without handing ownership to an external
+  SDK.** `OwnedOtlpTraces` performs bounded preflight validation before cloning
+  or encoding, applies head sampling before request construction, emits no
+  request when every span is unsampled, canonicalizes parent-before-child,
+  sibling, event, and link ordering, and sends requests sequentially under the
+  caller's `Cx` without orphan tasks. The established SDK bridge and legacy
+  queue remain intact. The implemented lineage guarantee is deliberately local
+  to parentage within an individual trace; links do not claim arbitrary
+  cross-trace structured-concurrency lineage
+  ([`b21c025`](https://github.com/Dicklesworthstone/asupersync/commit/b21c025cfcdc7ee0b52f9da71cf8f99db7a0198b),
+  [`4610fdc`](https://github.com/Dicklesworthstone/asupersync/commit/4610fdcde56221dcc6953c73b0184ab756f0fd89)).
+- **Logs now have a finite owned OTLP mapping surface.** `OwnedOtlpLogs` and its
+  additive input and configuration types encode five severities, event and
+  observed timestamps, trace/span context, flags, event names, typed OTLP
+  bodies, attributes, resource/scope metadata, schema URLs, dropped counts,
+  and bounded batching. Recursive values have explicit node, depth, item,
+  byte, and wire-envelope limits; ordering is deterministic and privacy
+  filtering runs through the established `LogEntry` adapter. Legacy
+  `OtlpLogRecord`, `LogsSnapshot`, and exporter APIs remain unchanged. This
+  tranche establishes deterministic mapping and collector interoperability,
+  not the later partial-success, retry, shutdown, or complete transport-failure
+  matrix
+  ([`df93ab1`](https://github.com/Dicklesworthstone/asupersync/commit/df93ab1211a906dc0e8072b15a6e99b8562e0839)).
+
+### SQLite correctness and security
+
+- **Cancelling queued SQLite work no longer interrupts another operation that
+  owns the connection.** Each operation now moves through explicit queued,
+  running, cancellation-requested, and completed phases. Cancellation before
+  worker admission performs no database side effect; cancellation targets
+  native SQLite interruption only after that operation becomes the connection
+  owner; cancelled workers are drained; and an already committed result wins a
+  late cancellation race. Row streams follow the same ownership rules, and the
+  connection remains reusable afterward. The additive
+  `SqliteConnection::interrupt` remains an explicit native interrupt that
+  produces the ordinary SQLite interruption error; structured `Cx`
+  cancellation is the route to `Outcome::Cancelled` plus worker draining
+  ([`4049a7e`](https://github.com/Dicklesworthstone/asupersync/commit/4049a7e67aeab1e1b736751f9ade84ed2c71a893),
+  [`05641de`](https://github.com/Dicklesworthstone/asupersync/commit/05641de7c7b616126c5335b285e41d97e8aa0765)).
+- **Checked SQLite entry points now enforce one bounded, fail-closed SQL
+  admission policy.** Public `validate_checked_sql_statement` and
+  `validate_checked_sql_batch` helpers share the exact parser and policy used
+  by checked connection and transaction operations. Checked single-statement
+  operations reject multiple statements, parser-limit violations, `PRAGMA`,
+  transaction and connection control, `ATTACH`/`DETACH`, `VACUUM` including
+  `VACUUM INTO`, and `load_extension`; batch execution permits multiple
+  statements but applies the same denied-class policy. Token-aware
+  classification preserves comments, quoted data, and identifier boundaries.
+  Established unchecked APIs remain available for explicitly trusted migration
+  workloads, while `ATTACH`/`DETACH` remain denied even there
+  ([`41a1ae8`](https://github.com/Dicklesworthstone/asupersync/commit/41a1ae844ec01d5910b1c36cdd0db4dc63e54b92),
+  [`355266b`](https://github.com/Dicklesworthstone/asupersync/commit/355266bb61b95211f668a095cd1f8a4b10252f8f)).
+- **Prepared-statement cleanup and cache boundaries have stronger public
+  conformance coverage.** Regression cases now cover positional and named
+  binding order, malformed and incorrect arity cleanup, reset and reuse,
+  capacity-one eviction and re-prepare, schema invalidation, dropped or
+  pre-cancelled row streams, busy-state cleanup, and terminal pool quiescence
+  ([`b19079a`](https://github.com/Dicklesworthstone/asupersync/commit/b19079adf8d0fbb7b6ee34db353f52408d86e903)).
+  This is strengthened Asupersync boundary coverage, not a claim of full
+  prepared-statement parity with FrankenSQLite; the corresponding
+  neutral-consumer parity work remains open.
 
 ### Compatibility evidence
 
@@ -78,6 +169,14 @@ GitHub Release/tag baseline is `v0.4.8`.
   evidence for v0.4.4, not current-HEAD native-runtime proof and not proof that
   the real FrankenGraphDB consumer has completed its migration
   ([`6ab560f`](https://github.com/Dicklesworthstone/asupersync/commit/6ab560f2d77a94638cb1ad566cab0ca30388f343)).
+- **The v0.4.3 public compatibility floor remains intact.** All public-surface
+  changes in this release are additive: no established public item is removed
+  or renamed, no visibility is reduced, and no established signature is
+  changed. Existing unchecked SQLite APIs, OTLP SDK and legacy-log surfaces,
+  and ordinary runtime-context construction remain functional. The new APIs
+  provide opt-in request-context creation, embedder-owned blocking-pool
+  attachment, checked-SQL validation, explicit SQLite interruption, and finite
+  owned OTLP export.
 
 ### ATP security
 
@@ -88,6 +187,16 @@ GitHub Release/tag baseline is `v0.4.8`.
   closed. OpenSSH token expansion and local-hostname preflight now preserve the
   intended byte semantics without re-exposing the secret
   ([`515d96e`](https://github.com/Dicklesworthstone/asupersync/commit/515d96e7fd7444b33f14e7684c4ba4d988fb58e0)).
+
+### Maintenance
+
+- **Strict all-feature lint and documentation frontiers were repaired.** The
+  post-v0.4.8 tree removes the remaining all-feature Clippy and rustdoc-link
+  blockers, including the MySQL context link, without intentional runtime
+  behavior changes
+  ([`b809ce7`](https://github.com/Dicklesworthstone/asupersync/commit/b809ce7e237d5701ed06e58b16556111efd25c5a),
+  [`1aec733`](https://github.com/Dicklesworthstone/asupersync/commit/1aec733e31a7f7cccaa2f204f1555ba426385edd),
+  [`0a646d4`](https://github.com/Dicklesworthstone/asupersync/commit/0a646d4f5b03b12026adb86050084c2b89a73438)).
 
 ## [v0.4.8] - 2026-08-18
 
