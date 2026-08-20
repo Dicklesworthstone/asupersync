@@ -681,8 +681,8 @@
     "scope": "prepared_statement_bind_reset_cache_schema_invalid_use_busy_and_cleanup",
     "consumer_source": {
       "path": "tests/fixtures/sqlite-parity-consumer/src/main.rs",
-      "sha256": "d1d9714a759883ad1eb70dc80c8fa546c511176035f662a5af6bbe1f906d4710",
-      "line_count": 3935
+      "sha256": "8afbc5c2d1d11ba7bd3cef0a7c6e938a7d2b49467c1c7956af6a681ca3d16942",
+      "line_count": 3946
     },
     "neutral_matrix": {
       "matrix_id": "sqlite-neutral-prepared-statement-parity-v1",
@@ -898,8 +898,8 @@
     "scope": "deferred_immediate_exclusive_savepoint_constraint_rollback_reuse_and_quiescence",
     "consumer_source": {
       "path": "tests/fixtures/sqlite-parity-consumer/src/main.rs",
-      "sha256": "d1d9714a759883ad1eb70dc80c8fa546c511176035f662a5af6bbe1f906d4710",
-      "line_count": 3935
+      "sha256": "8afbc5c2d1d11ba7bd3cef0a7c6e938a7d2b49467c1c7956af6a681ca3d16942",
+      "line_count": 3946
     },
     "neutral_matrix": {
       "matrix_id": "sqlite-neutral-transaction-parity-v1",
@@ -1330,8 +1330,8 @@
     "scope": "null_integer_real_text_blob_owned_rows_conversion_and_large_value_profile",
     "consumer_source": {
       "path": "tests/fixtures/sqlite-parity-consumer/src/main.rs",
-      "sha256": "d1d9714a759883ad1eb70dc80c8fa546c511176035f662a5af6bbe1f906d4710",
-      "line_count": 3935
+      "sha256": "8afbc5c2d1d11ba7bd3cef0a7c6e938a7d2b49467c1c7956af6a681ca3d16942",
+      "line_count": 3946
     },
     "neutral_matrix": {
       "matrix_id": "sqlite-neutral-value-row-parity-v1",
@@ -1651,8 +1651,8 @@
       },
       {
         "path": "tests/fixtures/sqlite-parity-consumer/src/main.rs",
-        "sha256": "d1d9714a759883ad1eb70dc80c8fa546c511176035f662a5af6bbe1f906d4710",
-        "line_count": 3935
+        "sha256": "8afbc5c2d1d11ba7bd3cef0a7c6e938a7d2b49467c1c7956af6a681ca3d16942",
+        "line_count": 3946
       }
     ],
     "public_diagnostic_contract": {
@@ -1822,13 +1822,13 @@
       },
       {
         "path": "tests/fixtures/sqlite-parity-consumer/src/main.rs",
-        "sha256": "d1d9714a759883ad1eb70dc80c8fa546c511176035f662a5af6bbe1f906d4710",
-        "line_count": 3935
+        "sha256": "8afbc5c2d1d11ba7bd3cef0a7c6e938a7d2b49467c1c7956af6a681ca3d16942",
+        "line_count": 3946
       },
       {
         "path": "scripts/run_dependency_sovereignty_e2e.sh",
-        "sha256": "1ebd9655151931da206536688e1b0b4506a6b612264ba814ff2f514846408fdb",
-        "line_count": 1348
+        "sha256": "c2c112d25a005800549df4ed4e5d32b6e8a2c05c4e9045557b074e5740d170d9",
+        "line_count": 1350
       }
     ],
     "aggregate_matrix": {
