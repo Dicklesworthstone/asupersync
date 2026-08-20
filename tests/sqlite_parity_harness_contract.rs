@@ -15,6 +15,7 @@ const DOC: &str = include_str!("../docs/sqlite_parity_harness.md");
 const SQLITE_SOURCE: &str = include_str!("../src/database/sqlite.rs");
 const CONSUMER_SOURCE: &str = include_str!("fixtures/sqlite-parity-consumer/src/main.rs");
 const PREPARED_CONFORMANCE_SOURCE: &str = include_str!("conformance/sqlite_prepared_statements.rs");
+const REAL_DISK_CANCEL_ROLLBACK_SOURCE: &str = include_str!("sqlite_real_disk_cancel_rollback.rs");
 
 fn parse_json(source: &str) -> Value {
     serde_json::from_str(source).expect("contract JSON must parse")
@@ -176,7 +177,7 @@ fn vector_schema_is_versioned_complete_and_deterministic() {
 #[test]
 fn harness_receipt_pins_sources_profile_target_host_and_budget_defer() {
     let harness = parse_json(HARNESS);
-    assert_eq!(harness["schema_version"], 4);
+    assert_eq!(harness["schema_version"], 5);
     assert_eq!(harness["placement"]["kind"], "neutral_standalone_consumer");
     assert_eq!(harness["placement"]["workspace_member"], false);
     assert_eq!(
@@ -318,6 +319,198 @@ fn phase3_matrix_covers_prepared_statement_boundaries_without_inventing_parity()
     assert_eq!(cache_unit["status"], "PASS");
     assert_eq!(cache_unit["passed"], 5);
     assert_eq!(cache_unit["failed"], 0);
+}
+
+#[test]
+fn phase4_transaction_matrix_executes_both_engines_and_preserves_native_cancel_proof() {
+    let harness = parse_json(HARNESS);
+    let phase4 = &harness["phase4"];
+    assert_eq!(phase4["bead_id"], "asupersync-ym2wtv.2.4");
+    assert_eq!(
+        phase4["status"],
+        "PASS_BOUNDED_COMMON_MATRIX_WITH_NATIVE_CANCELLATION"
+    );
+    assert_eq!(phase4["consumer_source"]["sha256"], sha256(CONSUMER_SOURCE));
+    assert_eq!(
+        phase4["consumer_source"]["line_count"],
+        CONSUMER_SOURCE.lines().count()
+    );
+
+    let expected_case_ids = [
+        "SQLITE-PARITY-P4-DEFERRED-COMMIT-001",
+        "SQLITE-PARITY-P4-IMMEDIATE-ROLLBACK-002",
+        "SQLITE-PARITY-P4-EXCLUSIVE-COMMIT-003",
+        "SQLITE-PARITY-P4-SAVEPOINT-PARTIAL-ROLLBACK-004",
+        "SQLITE-PARITY-P4-CONSTRAINT-CONFLICT-RECOVERY-005",
+    ];
+    assert_eq!(
+        phase4["neutral_matrix"]["matrix_id"],
+        "sqlite-neutral-transaction-parity-v1"
+    );
+    assert_eq!(phase4["neutral_matrix"]["compared_cases"], 5);
+    assert_eq!(
+        phase4["neutral_matrix"]["case_ids"]
+            .as_array()
+            .expect("phase4 case IDs")
+            .iter()
+            .map(|value| value.as_str().expect("phase4 case ID"))
+            .collect::<Vec<_>>(),
+        expected_case_ids
+    );
+
+    let coverage = phase4["coverage_matrix"]
+        .as_array()
+        .expect("phase4 coverage matrix");
+    assert_eq!(coverage.len(), 8);
+    let boundaries = coverage
+        .iter()
+        .map(|row| row["boundary"].as_str().expect("phase4 boundary"))
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        boundaries,
+        [
+            "deferred_immediate_and_exclusive_begin_modes",
+            "savepoint_partial_rollback_and_outer_commit",
+            "constraint_error_preservation_rollback_and_reuse",
+            "unfinished_transaction_guard_drop",
+            "transaction_body_cancellation_and_physical_rollback_before_return",
+            "explicit_commit_rollback_terminal_state_and_same_connection_reuse",
+            "connection_state_safe_for_reuse_or_fail_closed_eviction",
+            "deterministic_contention_and_runtime_quiescence",
+        ]
+        .into_iter()
+        .collect()
+    );
+    assert!(coverage.iter().all(|row| {
+        row["asupersync_status"]
+            .as_str()
+            .is_some_and(|status| status.starts_with("PASS"))
+    }));
+    assert!(coverage.iter().all(|row| {
+        row["frankensqlite_status"]
+            .as_str()
+            .is_some_and(|status| status.starts_with("PASS") || status.starts_with("UNSUPPORTED"))
+    }));
+    for test_name in [
+        "transaction_drop_rolls_back_uncommitted_work",
+        "dropped_transaction_rolls_back_before_followup_connection_operation",
+        "dropped_transaction_with_obligation_aborts_and_poisons",
+        "busy_timeout_produces_lock_error_under_write_contention",
+    ] {
+        assert!(
+            SQLITE_SOURCE.contains(&format!("fn {test_name}()")),
+            "missing native P4 transaction test {test_name}"
+        );
+    }
+    assert_eq!(
+        coverage[3]["frankensqlite_status"],
+        "UNSUPPORTED_RAII_TRANSACTION_GUARD"
+    );
+    assert_eq!(
+        coverage[4]["frankensqlite_status"],
+        "UNSUPPORTED_CLOSURE_CANCELLATION_HOOK"
+    );
+    assert!(
+        coverage[5]["no_claim"]
+            .as_str()
+            .is_some_and(|text| text.contains("failure injection"))
+    );
+    assert!(
+        coverage[6]["no_claim"]
+            .as_str()
+            .is_some_and(|text| text.contains("pool"))
+    );
+
+    let execution = &phase4["execution"];
+    assert_eq!(execution["status"], "PASS");
+    assert_eq!(execution["rch_job"], "j-29984462414544915");
+    assert_eq!(execution["worker"], "ovh-a");
+    assert_eq!(execution["remote_exit_code"], 0);
+    assert_eq!(
+        execution["overlay_paths"],
+        serde_json::json!(["tests/fixtures/sqlite-parity-consumer/src/main.rs"])
+    );
+    assert!(
+        execution["command"]
+            .as_str()
+            .is_some_and(|command| command.contains("cargo run --locked"))
+    );
+
+    let evidence = &execution["evidence"];
+    assert_eq!(evidence["status"], "PASS");
+    assert_eq!(evidence["compared_cases"], 5);
+    assert_eq!(evidence["mismatches"].as_array().map(Vec::len), Some(0));
+    let asupersync = evidence["asupersync"]
+        .as_array()
+        .expect("asupersync P4 evidence");
+    let frankensqlite = evidence["frankensqlite"]
+        .as_array()
+        .expect("FrankenSQLite P4 evidence");
+    assert_eq!(asupersync.len(), expected_case_ids.len());
+    assert_eq!(asupersync, frankensqlite);
+    for (row, expected_id) in asupersync.iter().zip(expected_case_ids) {
+        assert_eq!(row["case_id"], expected_id);
+        assert_eq!(row["connection_reusable"], true);
+        assert_eq!(row["open_transactions"], 0);
+    }
+    assert_eq!(asupersync[0]["terminal_state"], "committed");
+    assert_eq!(
+        asupersync[0]["visible_labels"],
+        serde_json::json!(["deferred"])
+    );
+    assert_eq!(asupersync[1]["terminal_state"], "rolled_back");
+    assert_eq!(asupersync[1]["visible_labels"], serde_json::json!([]));
+    assert_eq!(asupersync[2]["terminal_state"], "committed");
+    assert_eq!(
+        asupersync[2]["visible_labels"],
+        serde_json::json!(["exclusive"])
+    );
+    assert_eq!(
+        asupersync[3]["terminal_state"],
+        "committed_after_savepoint_rollback"
+    );
+    assert_eq!(
+        asupersync[3]["visible_labels"],
+        serde_json::json!(["base", "after"])
+    );
+    assert_eq!(
+        asupersync[4]["terminal_state"],
+        "constraint_rejected_then_recovered"
+    );
+    assert_eq!(asupersync[4]["visible_labels"], serde_json::json!([]));
+    assert_eq!(asupersync[4]["conflict_class"], "constraint_violation");
+
+    for marker in [
+        "fn run_asupersync_transaction_cases(",
+        "fn run_frankensqlite_transaction_cases(",
+        "SqliteSavepoint::new",
+        "is_constraint_violation()",
+        "is_franken_constraint_conflict",
+        "require_runtime_quiescence(&blocking, \"asupersync transaction matrix\")",
+        "require_compat_runtime_quiescence(&blocking, \"FrankenSQLite transaction matrix\")",
+    ] {
+        assert!(
+            CONSUMER_SOURCE.contains(marker),
+            "missing executable P4 consumer marker {marker}"
+        );
+    }
+    for test_name in [
+        "sqlite_real_disk_cancel_during_tx_body_rolls_back_and_leaves_file_consistent",
+        "sqlite_real_disk_cancel_during_immediate_tx_rolls_back_before_return",
+    ] {
+        assert!(
+            REAL_DISK_CANCEL_ROLLBACK_SOURCE.contains(&format!("fn {test_name}()")),
+            "missing native P4 cancellation test {test_name}"
+        );
+    }
+    assert!(REAL_DISK_CANCEL_ROLLBACK_SOURCE.contains("busy_timeout(Duration::ZERO)"));
+    assert!(
+        phase4["no_claims"]
+            .as_array()
+            .is_some_and(|rows| rows.iter().any(|row| row
+                .as_str()
+                .is_some_and(|text| text.contains("does not authorize dependency cutover"))))
+    );
 }
 
 #[test]
@@ -622,6 +815,9 @@ fn operator_doc_preserves_reproduction_and_no_claim_boundaries() {
         "does not authorize dependency cutover",
         "SQLite P3 prepared-statement matrix",
         "Full P3 parity",
+        "SQLite P4 transaction and savepoint matrix",
+        "constraint-conflict recovery",
+        "native cancellation evidence",
         "SQLite P5 cancellation matrix",
         "unsupported cells stay unsupported",
         "SQLite P7 checked-SQL security parity",

@@ -110,6 +110,54 @@ cross-engine equivalence from unavailable observations. Full P3 parity and any
 dependency cutover therefore remain open until the neutral adapter executes
 the supported cells and records owner-approved differences.
 
+## SQLite P4 transaction and savepoint matrix
+
+`asupersync-ym2wtv.2.4` extends the neutral consumer with five executable
+transaction cases on both pinned engines. The cases cover deferred commit,
+immediate rollback, exclusive commit, savepoint partial rollback, and
+constraint-conflict recovery. Each adapter runs through its own matching
+runtime and public transaction surface. The comparison retains the exact
+terminal state, ordered visible labels, connection-reuse result, and zero-open-
+transaction count; only each engine's primary-key/unique error is normalized to
+`constraint_violation`.
+
+The savepoint case commits `base`, creates a savepoint, writes `discarded`, rolls
+back and releases that savepoint, writes `after`, and commits the outer
+transaction. Both engines must expose exactly `base, after`. The conflict case
+writes two rows with the same primary key inside one transaction, observes a
+constraint error, rolls the transaction back, then proves that the same
+connection can begin and roll back another transaction. Every case closes its
+connection, shuts down its runtime, and requires zero pending, busy, or active
+blocking work.
+
+RCH job `j-29984462414544915` ran the locked standalone consumer at exact base
+`1127d64d300a2a52524b7bb4870c7a521f7d55aa` plus only the consumer-source
+overlay. It returned exit 0 with five matching Asupersync/FrankenSQLite rows and
+no mismatches. The machine-readable receipt is `phase4.execution.evidence` in
+the harness artifact.
+
+Cancellation has a deliberately separate authority. The native cancellation
+evidence in `tests/sqlite_real_disk_cancel_rollback.rs` proves both deferred and
+immediate helper cancellation wait for physical rollback before returning: a
+zero-timeout reference `BEGIN IMMEDIATE` succeeds immediately afterward, the
+cancelled row is absent, and the database remains writable. The pinned
+FrankenSQLite async adapter has no equivalent closure-based cancellation hook,
+so that native cancellation evidence is not relabeled as cross-engine parity.
+The deterministic constraint case likewise does not replace the separate P3
+two-connection busy/locked test.
+
+This is a bounded common transaction matrix, not a claim that every drop,
+panic, timeout, pool, or concurrency schedule is equivalent. It does not
+authorize dependency cutover or public API removal.
+
+The machine-readable `phase4.coverage_matrix` makes the remaining boundaries
+explicit. Asupersync's RAII transaction-drop and native cancellation paths are
+backed by named source and real-disk tests. The pinned FrankenSQLite adapter
+does not expose an equivalent RAII transaction guard or closure-based
+cancellation hook, so those cells are `UNSUPPORTED`, not green. Both common
+adapters prove same-connection reuse and runtime quiescence; neither claims a
+shared pool-eviction policy or injected commit/rollback I/O-failure parity.
+
 ## SQLite P5 cancellation matrix
 
 `asupersync-ym2wtv.2.5` adds a bounded second proof layer without rewriting the
@@ -195,10 +243,11 @@ RCH_REQUIRE_REMOTE=1 rch exec -- env \
 ```
 
 The source revision, FrankenSQLite revision, feature sets, Cargo profile,
-target, host class, vector schema version, normalized lifecycle outcomes, and
-comparison are all included in stdout. The admitted receipt is copied into
-`artifacts/sqlite_parity_harness_v1.json`; the contract test verifies its shape
-against the vector rather than accepting a free-form success note.
+target, host class, vector schema version, normalized lifecycle outcomes, P4
+transaction evidence, and comparison are all included in stdout. The admitted
+receipt is copied into `artifacts/sqlite_parity_harness_v1.json`; the contract
+test verifies its shape against the vector and consumer source rather than
+accepting a free-form success note.
 
 ## Interpretation boundary
 

@@ -11,7 +11,10 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use asupersync::database::sqlite::validate_checked_sql_statement;
-use asupersync::database::{SqliteConnection, SqliteError, SqliteValue as AsupersyncValue};
+use asupersync::database::transaction::SqliteSavepoint;
+use asupersync::database::{
+    SqliteConnection, SqliteError, SqliteTransaction, SqliteValue as AsupersyncValue,
+};
 use asupersync::runtime::{BlockingPoolHandle, RuntimeBuilder, yield_now};
 use asupersync::sync::{AcquireError, OwnedSemaphorePermit, Semaphore};
 use asupersync::{Cx, Outcome};
@@ -133,8 +136,45 @@ struct HarnessEvidence<'a> {
     capability_id: &'a str,
     provenance: Provenance<'a>,
     engine_results: Vec<EngineResult>,
+    transaction_parity: TransactionParityEvidence,
     security_policy: SecurityPolicyEvidence,
     comparison: Comparison,
+}
+
+#[derive(Debug, Serialize)]
+struct TransactionParityEvidence {
+    bead_id: &'static str,
+    matrix_id: &'static str,
+    status: &'static str,
+    compared_cases: usize,
+    asupersync: Vec<TransactionCaseResult>,
+    frankensqlite: Vec<TransactionCaseResult>,
+    mismatches: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct TransactionCaseResult {
+    case_id: &'static str,
+    terminal_state: &'static str,
+    visible_labels: Vec<String>,
+    conflict_class: Option<&'static str>,
+    connection_reusable: bool,
+    open_transactions: u64,
+}
+
+#[derive(Clone, Copy)]
+struct TransactionCase {
+    id: &'static str,
+    kind: TransactionCaseKind,
+}
+
+#[derive(Clone, Copy)]
+enum TransactionCaseKind {
+    DeferredCommit,
+    ImmediateRollback,
+    ExclusiveCommit,
+    SavepointPartialRollback,
+    ConflictRecovery,
 }
 
 #[derive(Debug, Serialize)]
@@ -220,6 +260,7 @@ fn run() -> Result<(), String> {
 
     let mismatches = compare_results(&suite, &asupersync, &frankensqlite);
     let comparable = mismatches.is_empty();
+    let transaction_parity = run_transaction_parity()?;
     let security_policy = run_security_policy()?;
     let evidence = HarnessEvidence {
         evidence_schema_version: 1,
@@ -236,6 +277,7 @@ fn run() -> Result<(), String> {
             host: env!("SQLITE_PARITY_HOST"),
         },
         engine_results: vec![asupersync, frankensqlite],
+        transaction_parity,
         security_policy,
         comparison: Comparison {
             comparable,
@@ -252,6 +294,517 @@ fn run() -> Result<(), String> {
     } else {
         Err("engine evidence did not match the declared vector contract".to_owned())
     }
+}
+
+fn transaction_cases() -> [TransactionCase; 5] {
+    [
+        TransactionCase {
+            id: "SQLITE-PARITY-P4-DEFERRED-COMMIT-001",
+            kind: TransactionCaseKind::DeferredCommit,
+        },
+        TransactionCase {
+            id: "SQLITE-PARITY-P4-IMMEDIATE-ROLLBACK-002",
+            kind: TransactionCaseKind::ImmediateRollback,
+        },
+        TransactionCase {
+            id: "SQLITE-PARITY-P4-EXCLUSIVE-COMMIT-003",
+            kind: TransactionCaseKind::ExclusiveCommit,
+        },
+        TransactionCase {
+            id: "SQLITE-PARITY-P4-SAVEPOINT-PARTIAL-ROLLBACK-004",
+            kind: TransactionCaseKind::SavepointPartialRollback,
+        },
+        TransactionCase {
+            id: "SQLITE-PARITY-P4-CONSTRAINT-CONFLICT-RECOVERY-005",
+            kind: TransactionCaseKind::ConflictRecovery,
+        },
+    ]
+}
+
+fn run_transaction_parity() -> Result<TransactionParityEvidence, String> {
+    let cases = transaction_cases();
+    let asupersync = run_asupersync_transaction_cases(&cases)?;
+    let frankensqlite = run_frankensqlite_transaction_cases(&cases)?;
+    let mismatches = asupersync
+        .iter()
+        .zip(&frankensqlite)
+        .filter_map(|(native, franken)| {
+            (native != franken)
+                .then(|| format!("{}: normalized transaction outcomes differ", native.case_id))
+        })
+        .collect::<Vec<_>>();
+    if !mismatches.is_empty() {
+        return Err(format!(
+            "SQLite P4 transaction parity failed: {}",
+            mismatches.join(", ")
+        ));
+    }
+    Ok(TransactionParityEvidence {
+        bead_id: "asupersync-ym2wtv.2.4",
+        matrix_id: "sqlite-neutral-transaction-parity-v1",
+        status: "PASS",
+        compared_cases: cases.len(),
+        asupersync,
+        frankensqlite,
+        mismatches,
+    })
+}
+
+fn run_asupersync_transaction_cases(
+    cases: &[TransactionCase],
+) -> Result<Vec<TransactionCaseResult>, String> {
+    let runtime = RuntimeBuilder::current_thread()
+        .blocking_threads(2, 2)
+        .build()
+        .map_err(|error| format!("build asupersync transaction runtime: {error}"))?;
+    let blocking = runtime
+        .handle()
+        .blocking_handle()
+        .ok_or_else(|| "asupersync transaction runtime has no blocking pool".to_owned())?;
+    let results = runtime.block_on(async {
+        let cx = Cx::current()
+            .ok_or_else(|| "asupersync transaction runtime did not install Cx".to_owned())?;
+        let mut results = Vec::with_capacity(cases.len());
+        for case in cases {
+            results.push(run_asupersync_transaction_case(*case, &cx).await?);
+        }
+        Ok::<_, String>(results)
+    })?;
+    drop(runtime);
+    require_runtime_quiescence(&blocking, "asupersync transaction matrix")?;
+    Ok(results)
+}
+
+async fn run_asupersync_transaction_case(
+    case: TransactionCase,
+    cx: &Cx,
+) -> Result<TransactionCaseResult, String> {
+    if matches!(case.kind, TransactionCaseKind::ConflictRecovery) {
+        return run_asupersync_conflict_case(case.id, cx).await;
+    }
+
+    let connection = asupersync_open_memory(cx).await?;
+    asupersync_outcome(
+        connection
+            .execute_batch(
+                cx,
+                "CREATE TABLE p4_tx (id INTEGER PRIMARY KEY, label TEXT NOT NULL);",
+            )
+            .await,
+        "create transaction parity table",
+    )?;
+
+    let terminal_state = match case.kind {
+        TransactionCaseKind::DeferredCommit => {
+            let transaction = asupersync_outcome(connection.begin(cx).await, "begin deferred")?;
+            asupersync_insert_label(&transaction, cx, 1, "deferred").await?;
+            asupersync_outcome(transaction.commit(cx).await, "commit deferred")?;
+            "committed"
+        }
+        TransactionCaseKind::ImmediateRollback => {
+            let transaction =
+                asupersync_outcome(connection.begin_immediate(cx).await, "begin immediate")?;
+            asupersync_insert_label(&transaction, cx, 1, "immediate").await?;
+            asupersync_outcome(transaction.rollback(cx).await, "rollback immediate")?;
+            "rolled_back"
+        }
+        TransactionCaseKind::ExclusiveCommit => {
+            let transaction =
+                asupersync_outcome(connection.begin_exclusive(cx).await, "begin exclusive")?;
+            asupersync_insert_label(&transaction, cx, 1, "exclusive").await?;
+            asupersync_outcome(transaction.commit(cx).await, "commit exclusive")?;
+            "committed"
+        }
+        TransactionCaseKind::SavepointPartialRollback => {
+            let transaction = asupersync_outcome(connection.begin(cx).await, "begin savepoint")?;
+            asupersync_insert_label(&transaction, cx, 1, "base").await?;
+            let savepoint = asupersync_outcome(
+                SqliteSavepoint::new(&transaction, cx, "p4_partial").await,
+                "create savepoint",
+            )?;
+            asupersync_insert_label(&transaction, cx, 2, "discarded").await?;
+            asupersync_outcome(savepoint.rollback(cx).await, "rollback savepoint")?;
+            asupersync_insert_label(&transaction, cx, 3, "after").await?;
+            asupersync_outcome(transaction.commit(cx).await, "commit savepoint transaction")?;
+            "committed_after_savepoint_rollback"
+        }
+        TransactionCaseKind::ConflictRecovery => unreachable!("handled above"),
+    };
+
+    let visible_labels = collect_asupersync_labels(&connection, cx).await?;
+    prove_asupersync_connection_reusable(&connection, cx).await?;
+    asupersync_close(&connection, cx).await?;
+    Ok(TransactionCaseResult {
+        case_id: case.id,
+        terminal_state,
+        visible_labels,
+        conflict_class: None,
+        connection_reusable: true,
+        open_transactions: 0,
+    })
+}
+
+async fn asupersync_insert_label(
+    transaction: &SqliteTransaction<'_>,
+    cx: &Cx,
+    id: i64,
+    label: &str,
+) -> Result<(), String> {
+    let affected = asupersync_outcome(
+        transaction
+            .execute(
+                cx,
+                "INSERT INTO p4_tx (id, label) VALUES (?1, ?2)",
+                &[
+                    AsupersyncValue::Integer(id),
+                    AsupersyncValue::Text(label.to_owned()),
+                ],
+            )
+            .await,
+        "insert transaction parity row",
+    )?;
+    if affected != 1 {
+        return Err(format!(
+            "asupersync transaction insert affected {affected} rows"
+        ));
+    }
+    Ok(())
+}
+
+async fn collect_asupersync_labels(
+    connection: &SqliteConnection,
+    cx: &Cx,
+) -> Result<Vec<String>, String> {
+    let rows = asupersync_outcome(
+        connection
+            .query(cx, "SELECT label FROM p4_tx ORDER BY id", &[])
+            .await,
+        "query transaction parity labels",
+    )?;
+    rows.iter()
+        .map(|row| match row.get_idx(0) {
+            Ok(AsupersyncValue::Text(label)) => Ok(label.clone()),
+            other => Err(format!(
+                "asupersync transaction label was not text: {other:?}"
+            )),
+        })
+        .collect()
+}
+
+async fn prove_asupersync_connection_reusable(
+    connection: &SqliteConnection,
+    cx: &Cx,
+) -> Result<(), String> {
+    let transaction = asupersync_outcome(connection.begin(cx).await, "begin reuse probe")?;
+    asupersync_outcome(transaction.rollback(cx).await, "rollback reuse probe")
+}
+
+async fn run_asupersync_conflict_case(
+    case_id: &'static str,
+    cx: &Cx,
+) -> Result<TransactionCaseResult, String> {
+    let connection = asupersync_open_memory(cx).await?;
+    asupersync_outcome(
+        connection
+            .execute_batch(
+                cx,
+                "CREATE TABLE p4_tx (id INTEGER PRIMARY KEY, label TEXT NOT NULL);",
+            )
+            .await,
+        "create constraint-conflict table",
+    )?;
+
+    let transaction = asupersync_outcome(connection.begin(cx).await, "begin conflict case")?;
+    asupersync_insert_label(&transaction, cx, 1, "first").await?;
+    match transaction
+        .execute(
+            cx,
+            "INSERT INTO p4_tx (id, label) VALUES (?1, ?2)",
+            &[
+                AsupersyncValue::Integer(1),
+                AsupersyncValue::Text("duplicate".to_owned()),
+            ],
+        )
+        .await
+    {
+        Outcome::Err(error) if error.is_constraint_violation() => {}
+        Outcome::Err(error) => {
+            return Err(format!(
+                "asupersync duplicate key returned non-constraint error: {error}"
+            ));
+        }
+        Outcome::Ok(_) => {
+            return Err("asupersync duplicate key unexpectedly succeeded".to_owned());
+        }
+        Outcome::Cancelled(_) => {
+            return Err("asupersync duplicate key was cancelled".to_owned());
+        }
+        Outcome::Panicked(_) => return Err("asupersync duplicate key panicked".to_owned()),
+    }
+    asupersync_outcome(transaction.rollback(cx).await, "rollback conflict case")?;
+    let visible_labels = collect_asupersync_labels(&connection, cx).await?;
+    prove_asupersync_connection_reusable(&connection, cx).await?;
+    asupersync_close(&connection, cx).await?;
+    Ok(TransactionCaseResult {
+        case_id,
+        terminal_state: "constraint_rejected_then_recovered",
+        visible_labels,
+        conflict_class: Some("constraint_violation"),
+        connection_reusable: true,
+        open_transactions: 0,
+    })
+}
+
+fn run_frankensqlite_transaction_cases(
+    cases: &[TransactionCase],
+) -> Result<Vec<TransactionCaseResult>, String> {
+    let runtime = CompatRuntimeBuilder::current_thread()
+        .blocking_threads(2, 2)
+        .build()
+        .map_err(|error| format!("build FrankenSQLite transaction runtime: {error}"))?;
+    let blocking = runtime
+        .handle()
+        .blocking_handle()
+        .ok_or_else(|| "FrankenSQLite transaction runtime has no blocking pool".to_owned())?;
+    let results = runtime.block_on(async {
+        let native_cx = CompatCx::current().ok_or_else(|| {
+            "FrankenSQLite transaction runtime did not install native Cx".to_owned()
+        })?;
+        let cx = attached_franken_cx(&native_cx);
+        let mut results = Vec::with_capacity(cases.len());
+        for case in cases {
+            results.push(run_frankensqlite_transaction_case(*case, &cx).await?);
+        }
+        Ok::<_, String>(results)
+    })?;
+    drop(runtime);
+    require_compat_runtime_quiescence(&blocking, "FrankenSQLite transaction matrix")?;
+    Ok(results)
+}
+
+async fn run_frankensqlite_transaction_case(
+    case: TransactionCase,
+    cx: &FrankenCx,
+) -> Result<TransactionCaseResult, String> {
+    if matches!(case.kind, TransactionCaseKind::ConflictRecovery) {
+        return run_frankensqlite_conflict_case(case.id, cx).await;
+    }
+
+    let mut connection = FrankenConnection::open(cx, ":memory:")
+        .await
+        .map_err(|error| format!("FrankenSQLite transaction open: {error}"))?;
+    connection
+        .execute_batch(
+            cx,
+            "CREATE TABLE p4_tx (id INTEGER PRIMARY KEY, label TEXT NOT NULL);",
+        )
+        .await
+        .map_err(|error| format!("FrankenSQLite create transaction parity table: {error}"))?;
+
+    let terminal_state = match case.kind {
+        TransactionCaseKind::DeferredCommit => {
+            connection
+                .begin_transaction(cx)
+                .await
+                .map_err(|error| format!("FrankenSQLite begin deferred: {error}"))?;
+            franken_insert_label(&connection, cx, 1, "deferred").await?;
+            connection
+                .commit_transaction(cx)
+                .await
+                .map_err(|error| format!("FrankenSQLite commit deferred: {error}"))?;
+            "committed"
+        }
+        TransactionCaseKind::ImmediateRollback => {
+            connection
+                .execute(cx, "BEGIN IMMEDIATE")
+                .await
+                .map_err(|error| format!("FrankenSQLite begin immediate: {error}"))?;
+            franken_insert_label(&connection, cx, 1, "immediate").await?;
+            connection
+                .execute(cx, "ROLLBACK")
+                .await
+                .map_err(|error| format!("FrankenSQLite rollback immediate: {error}"))?;
+            "rolled_back"
+        }
+        TransactionCaseKind::ExclusiveCommit => {
+            connection
+                .execute(cx, "BEGIN EXCLUSIVE")
+                .await
+                .map_err(|error| format!("FrankenSQLite begin exclusive: {error}"))?;
+            franken_insert_label(&connection, cx, 1, "exclusive").await?;
+            connection
+                .execute(cx, "COMMIT")
+                .await
+                .map_err(|error| format!("FrankenSQLite commit exclusive: {error}"))?;
+            "committed"
+        }
+        TransactionCaseKind::SavepointPartialRollback => {
+            connection
+                .begin_transaction(cx)
+                .await
+                .map_err(|error| format!("FrankenSQLite begin savepoint: {error}"))?;
+            franken_insert_label(&connection, cx, 1, "base").await?;
+            connection
+                .execute(cx, "SAVEPOINT p4_partial")
+                .await
+                .map_err(|error| format!("FrankenSQLite create savepoint: {error}"))?;
+            franken_insert_label(&connection, cx, 2, "discarded").await?;
+            connection
+                .execute_batch(
+                    cx,
+                    "ROLLBACK TO SAVEPOINT p4_partial; RELEASE SAVEPOINT p4_partial;",
+                )
+                .await
+                .map_err(|error| format!("FrankenSQLite rollback savepoint: {error}"))?;
+            franken_insert_label(&connection, cx, 3, "after").await?;
+            connection
+                .commit_transaction(cx)
+                .await
+                .map_err(|error| format!("FrankenSQLite commit savepoint transaction: {error}"))?;
+            "committed_after_savepoint_rollback"
+        }
+        TransactionCaseKind::ConflictRecovery => unreachable!("handled above"),
+    };
+
+    if connection.in_transaction() {
+        return Err(format!(
+            "FrankenSQLite {} retained an open transaction",
+            case.id
+        ));
+    }
+    let visible_labels = collect_franken_labels(&connection, cx).await?;
+    prove_franken_connection_reusable(&connection, cx).await?;
+    franken_close(&mut connection, cx).await?;
+    Ok(TransactionCaseResult {
+        case_id: case.id,
+        terminal_state,
+        visible_labels,
+        conflict_class: None,
+        connection_reusable: true,
+        open_transactions: 0,
+    })
+}
+
+async fn franken_insert_label(
+    connection: &FrankenConnection,
+    cx: &FrankenCx,
+    id: i64,
+    label: &str,
+) -> Result<(), String> {
+    let affected = connection
+        .execute_with_params(
+            cx,
+            "INSERT INTO p4_tx (id, label) VALUES (?1, ?2)",
+            &[FrankenValue::Integer(id), FrankenValue::Text(label.into())],
+        )
+        .await
+        .map_err(|error| format!("FrankenSQLite insert transaction parity row: {error}"))?;
+    if affected != 1 {
+        return Err(format!(
+            "FrankenSQLite transaction insert affected {affected} rows"
+        ));
+    }
+    Ok(())
+}
+
+async fn collect_franken_labels(
+    connection: &FrankenConnection,
+    cx: &FrankenCx,
+) -> Result<Vec<String>, String> {
+    let rows = connection
+        .query(cx, "SELECT label FROM p4_tx ORDER BY id")
+        .await
+        .map_err(|error| format!("FrankenSQLite query transaction parity labels: {error}"))?;
+    rows.iter()
+        .map(|row| match row.get(0) {
+            Some(FrankenValue::Text(label)) => Ok(label.to_string()),
+            other => Err(format!(
+                "FrankenSQLite transaction label was not text: {other:?}"
+            )),
+        })
+        .collect()
+}
+
+async fn prove_franken_connection_reusable(
+    connection: &FrankenConnection,
+    cx: &FrankenCx,
+) -> Result<(), String> {
+    connection
+        .begin_transaction(cx)
+        .await
+        .map_err(|error| format!("FrankenSQLite begin reuse probe: {error}"))?;
+    connection
+        .rollback_transaction(cx)
+        .await
+        .map_err(|error| format!("FrankenSQLite rollback reuse probe: {error}"))?;
+    if connection.in_transaction() {
+        return Err("FrankenSQLite reuse probe retained an open transaction".to_owned());
+    }
+    Ok(())
+}
+
+async fn run_frankensqlite_conflict_case(
+    case_id: &'static str,
+    cx: &FrankenCx,
+) -> Result<TransactionCaseResult, String> {
+    let mut connection = FrankenConnection::open(cx, ":memory:")
+        .await
+        .map_err(|error| format!("FrankenSQLite conflict-case open: {error}"))?;
+    connection
+        .execute_batch(
+            cx,
+            "CREATE TABLE p4_tx (id INTEGER PRIMARY KEY, label TEXT NOT NULL);",
+        )
+        .await
+        .map_err(|error| format!("FrankenSQLite create constraint-conflict table: {error}"))?;
+    connection
+        .begin_transaction(cx)
+        .await
+        .map_err(|error| format!("FrankenSQLite begin conflict case: {error}"))?;
+    franken_insert_label(&connection, cx, 1, "first").await?;
+    match connection
+        .execute_with_params(
+            cx,
+            "INSERT INTO p4_tx (id, label) VALUES (?1, ?2)",
+            &[
+                FrankenValue::Integer(1),
+                FrankenValue::Text("duplicate".into()),
+            ],
+        )
+        .await
+    {
+        Err(error) if is_franken_constraint_conflict(&error) => {}
+        Err(error) => {
+            return Err(format!(
+                "FrankenSQLite duplicate key returned non-constraint error: {error}"
+            ));
+        }
+        Ok(_) => {
+            return Err("FrankenSQLite duplicate key unexpectedly succeeded".to_owned());
+        }
+    }
+    connection
+        .rollback_transaction(cx)
+        .await
+        .map_err(|error| format!("FrankenSQLite rollback conflict case: {error}"))?;
+    let visible_labels = collect_franken_labels(&connection, cx).await?;
+    prove_franken_connection_reusable(&connection, cx).await?;
+    franken_close(&mut connection, cx).await?;
+    Ok(TransactionCaseResult {
+        case_id,
+        terminal_state: "constraint_rejected_then_recovered",
+        visible_labels,
+        conflict_class: Some("constraint_violation"),
+        connection_reusable: true,
+        open_transactions: 0,
+    })
+}
+
+fn is_franken_constraint_conflict(error: &FrankenError) -> bool {
+    matches!(
+        error,
+        FrankenError::UniqueViolation { .. } | FrankenError::PrimaryKeyViolation
+    )
 }
 
 fn security_cases() -> Vec<SecurityCase> {
@@ -333,11 +886,7 @@ fn run_security_policy() -> Result<SecurityPolicyEvidence, String> {
 
     let asupersync = run_asupersync_security_cases(&cases)?;
     let frankensqlite_adapter = run_frankensqlite_security_cases(&cases)?;
-    for ((case, native), franken) in cases
-        .iter()
-        .zip(&asupersync)
-        .zip(&frankensqlite_adapter)
-    {
+    for ((case, native), franken) in cases.iter().zip(&asupersync).zip(&frankensqlite_adapter) {
         if native.decision != case.expected
             || franken.decision != case.expected
             || native != franken
@@ -937,10 +1486,7 @@ fn unsupported_outcome() -> ScenarioOutcome {
     )
 }
 
-fn require_runtime_quiescence(
-    blocking: &BlockingPoolHandle,
-    engine: &str,
-) -> Result<(), String> {
+fn require_runtime_quiescence(blocking: &BlockingPoolHandle, engine: &str) -> Result<(), String> {
     let pending = blocking.pending_count();
     let busy = blocking.busy_threads();
     let active = blocking.active_threads();
@@ -1331,12 +1877,12 @@ fn scratch_database_path(engine: &str) -> PathBuf {
     let root = std::env::var_os("SQLITE_PARITY_SCRATCH_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(std::env::temp_dir);
-    let nonce = SystemTime::now()
+    let run_stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
     root.join(format!(
-        "asupersync-sqlite-p2-{engine}-{}-{nonce}.db",
+        "asupersync-sqlite-p2-{engine}-{}-{run_stamp}.db",
         std::process::id()
     ))
 }
