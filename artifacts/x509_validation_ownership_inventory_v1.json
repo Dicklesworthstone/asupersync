@@ -104,17 +104,17 @@
     },
     {
       "path": "src/bin/atp.rs",
-      "sha256": "57404e8d8d57a8ac3c5c6b3e949c78cc49c670b2bc3bcf3f1bb4287743b6e5ba",
-      "line_count": 11912
+      "sha256": "fa68f1bfb4f6e59fd3d4a0c781a5e5b7b2cce13ad2d39ee2ec084f068a837c9f",
+      "line_count": 12723
     },
     {
       "path": "artifacts/dependency_capability_registry_v1.json",
-      "sha256": "834c0bb0f30adf65ad27256fbae9f903fe9945e37a7d010f90d38971802c74ea",
+      "sha256": "9fa15cca1a7b202ff7a9accc78bb7a052a8f4f830b37ae450959b539633d01fd",
       "line_count": 6929
     },
     {
       "path": "artifacts/dependency_capability_baseline_v1.json",
-      "sha256": "39d73a682c61f3d776ae9a76f40aa4d342e8498f41f24a4753d4498c3b0c3c85",
+      "sha256": "7c136c23360e33113253313155ed7fec5c4e37d3865c13c331342ddca9e47ea5",
       "line_count": 3210
     },
     {

@@ -54,8 +54,8 @@
     },
     {
       "path": "src/runtime/builder.rs",
-      "sha256": "cf525c48695f4a7147634b2154acbed79760572073c9aadb9e98cedc9db75f3e",
-      "line_count": 9516
+      "sha256": "43e4f8b0d8a68c4978c447d2b0f52bc11ca198482f7a61c59d4495c9842b62b4",
+      "line_count": 9597
     },
     {
       "path": "src/runtime/env_config_metamorphic_tests.rs",
@@ -1472,8 +1472,8 @@
           "classification": "A2_RUNTIME_JSON_ENTRY_POINTS_AND_SHARED_APPLICATION",
           "previous_sha256": "370a2d5659a86290c8418b7b9f7e379a76e2b68e1b43e7e56c229d9acc6e8146",
           "previous_line_count": 9058,
-          "current_sha256": "cf525c48695f4a7147634b2154acbed79760572073c9aadb9e98cedc9db75f3e",
-          "current_line_count": 9516,
+          "current_sha256": "43e4f8b0d8a68c4978c447d2b0f52bc11ca198482f7a61c59d4495c9842b62b4",
+          "current_line_count": 9597,
           "accepted_toml_input_changed": false
         },
         {

@@ -74,8 +74,8 @@
     },
     {
       "path": "src/cx/cx.rs",
-      "sha256": "b4a679ade9d6a5e23b23636830225503bde581adfbef4eeb42ef8843493dd4be",
-      "line_count": 7804,
+      "sha256": "2e9b20ad5c3aefba1619e93831640ab2d6eead53922e31a87c305dc0f431f95b",
+      "line_count": 7816,
       "role": "checkpoint, cancellation queries, writers, and cancel-waker registrations"
     },
     {
@@ -116,20 +116,20 @@
     },
     {
       "path": "src/actor.rs",
-      "sha256": "107f77d83150bf3132d016a77b12dd03ebf891435b00be0da01ee69f0baf737c",
-      "line_count": 3645,
+      "sha256": "971d48e8f9bef744ce04595eef544a0ebf6f5309f6932e24a6cb632621977fa3",
+      "line_count": 3699,
       "role": "actor and actor-join abort writers"
     },
     {
       "path": "src/gen_server.rs",
-      "sha256": "c072f2eac339cf116f3c4fbfc5829c00080dd939ed0ceb6049b4597519b0cbb5",
-      "line_count": 7491,
+      "sha256": "64dd5140f602b473e2b9ea84f70a8fd15ed0f11eac9f3f460c43fb08abc00ffe",
+      "line_count": 7564,
       "role": "server and server-join abort writers"
     },
     {
       "path": "src/lab/runtime.rs",
-      "sha256": "e0d9c94245f61fa387ee0a1307b61ca3e62cc4688f5c49a50dc5277d2e86a2dc",
-      "line_count": 11254,
+      "sha256": "ff01e00c11f5afedb04376c77b8724f686d00cf3988690c51229fa36628c85a8",
+      "line_count": 11253,
       "role": "deterministic scheduler cancellation writer and alternate reader model"
     },
     {
@@ -330,12 +330,12 @@
       "semantic_payload": "lock-backed 0.4.3 requested bit or cloned reason/cause chain",
       "disposition": "KEEP_PUBLISHED_FLAG_AND_LOCKED_RICH_READS",
       "anchors": [
-        {"path": "src/cx/cx.rs", "line": 2184, "fragment": "self.inner.read().cancel_requested"},
-        {"path": "src/cx/cx.rs", "line": 3478, "fragment": "inner.cancel_reason.clone()"},
-        {"path": "src/cx/cx.rs", "line": 3508, "fragment": "pub fn cancel_chain"},
-        {"path": "src/cx/cx.rs", "line": 3542, "fragment": "pub fn root_cancel_cause"},
-        {"path": "src/cx/cx.rs", "line": 3568, "fragment": "pub fn cancelled_by"},
-        {"path": "src/cx/cx.rs", "line": 3599, "fragment": "pub fn any_cause_is"}
+        {"path": "src/cx/cx.rs", "line": 2196, "fragment": "self.inner.read().cancel_requested"},
+        {"path": "src/cx/cx.rs", "line": 3490, "fragment": "inner.cancel_reason.clone()"},
+        {"path": "src/cx/cx.rs", "line": 3520, "fragment": "pub fn cancel_chain"},
+        {"path": "src/cx/cx.rs", "line": 3554, "fragment": "pub fn root_cancel_cause"},
+        {"path": "src/cx/cx.rs", "line": 3580, "fragment": "pub fn cancelled_by"},
+        {"path": "src/cx/cx.rs", "line": 3611, "fragment": "pub fn any_cause_is"}
       ]
     },
     {
@@ -350,7 +350,7 @@
       "semantic_payload": "one-bit cancellation publication only",
       "disposition": "KEEP_INCUMBENT_ALREADY_ATOMIC",
       "anchors": [
-        {"path": "src/cx/cx.rs", "line": 2249, "fragment": "let cancelled = guard.is_cancel_requested()"},
+        {"path": "src/cx/cx.rs", "line": 2261, "fragment": "let cancelled = guard.is_cancel_requested()"},
         {"path": "src/runtime/scheduler/three_lane.rs", "line": 7977, "fragment": "self.cancellation.load(Ordering::Acquire)"},
         {"path": "src/runtime/scheduler/three_lane.rs", "line": 8036, "fragment": "self.cancellation.load(Ordering::Acquire)"}
       ]
@@ -433,10 +433,10 @@
       "writer_id": "HOTREAD-CANCEL-WRITER-CHECKPOINT",
       "owner": "Cx::checkpoint and Cx::checkpoint_with compatibility-handle materialization and budget exhaustion",
       "anchors": [
-        {"path": "src/cx/cx.rs", "line": 2301, "fragment": "inner.set_cancel_requested(true)"},
-        {"path": "src/cx/cx.rs", "line": 2310, "fragment": "inner.set_cancel_requested(true)"},
-        {"path": "src/cx/cx.rs", "line": 2431, "fragment": "inner.set_cancel_requested(true)"},
-        {"path": "src/cx/cx.rs", "line": 2440, "fragment": "inner.set_cancel_requested(true)"}
+        {"path": "src/cx/cx.rs", "line": 2313, "fragment": "inner.set_cancel_requested(true)"},
+        {"path": "src/cx/cx.rs", "line": 2322, "fragment": "inner.set_cancel_requested(true)"},
+        {"path": "src/cx/cx.rs", "line": 2443, "fragment": "inner.set_cancel_requested(true)"},
+        {"path": "src/cx/cx.rs", "line": 2452, "fragment": "inner.set_cancel_requested(true)"}
       ],
       "ordering": "CxInner write guard; budget-derived reason and pending waker state remain under the guard"
     },
@@ -444,11 +444,11 @@
       "writer_id": "HOTREAD-CANCEL-WRITER-CX-APIS",
       "owner": "Cx internal, explicit, low-allocation, and reason-setting cancellation APIs",
       "anchors": [
-        {"path": "src/cx/cx.rs", "line": 3146, "fragment": "inner.set_cancel_requested(value)"},
-        {"path": "src/cx/cx.rs", "line": 3180, "fragment": "inner.set_cancel_requested(value)"},
-        {"path": "src/cx/cx.rs", "line": 3375, "fragment": "inner.set_cancel_requested(true)"},
-        {"path": "src/cx/cx.rs", "line": 3432, "fragment": "inner.set_cancel_requested(true)"},
-        {"path": "src/cx/cx.rs", "line": 3632, "fragment": "inner.set_cancel_requested(true)"}
+        {"path": "src/cx/cx.rs", "line": 3158, "fragment": "inner.set_cancel_requested(value)"},
+        {"path": "src/cx/cx.rs", "line": 3192, "fragment": "inner.set_cancel_requested(value)"},
+        {"path": "src/cx/cx.rs", "line": 3387, "fragment": "inner.set_cancel_requested(true)"},
+        {"path": "src/cx/cx.rs", "line": 3444, "fragment": "inner.set_cancel_requested(true)"},
+        {"path": "src/cx/cx.rs", "line": 3644, "fragment": "inner.set_cancel_requested(true)"}
       ],
       "ordering": "CxInner write guard; rich reason and waker snapshots are coherent at unlock"
     },
@@ -598,7 +598,7 @@
       "anchors": [
         {"path": "src/types/task_context.rs", "line": 981, "fragment": "pub(crate) fn cancel_waker_snapshot"},
         {"path": "src/types/task_context.rs", "line": 1006, "fragment": "pub(crate) fn take_cancel_wakers"},
-        {"path": "src/cx/cx.rs", "line": 3201, "fragment": "fn refresh_cancel_waker"},
+        {"path": "src/cx/cx.rs", "line": 3213, "fragment": "fn refresh_cancel_waker"},
         {"path": "src/channel/oneshot.rs", "line": 865, "fragment": "fn refresh_cancel_waker"},
         {"path": "src/sync/barrier.rs", "line": 489, "fragment": "Clear the Cx registration first"},
         {"path": "src/sync/once_cell.rs", "line": 884, "fragment": "refresh_cancel_waker"}

@@ -18,8 +18,8 @@ use std::path::PathBuf;
 const ARTIFACT_PATH: &str = "artifacts/kafka_k0_baseline_disposition_v1.json";
 const DOC_PATH: &str = "docs/kafka_k0_baseline_disposition.md";
 const TRACKER_PATH: &str = ".beads/issues.jsonl";
-const ARTIFACT_SHA256: &str = "480cae4203019f9b608bb7dd59c87d2f0627b7681ef52bf4f7f949c7685d0cab";
-const DOC_SHA256: &str = "c0f36b5178f74241db844584eafed75a1f30e38c9f1c952010a93685ff45d22b";
+const ARTIFACT_SHA256: &str = "6b4f59dece48166040ffd62e33cdc9c48f9064c0da46b68b759b16c303b8ffc6";
+const DOC_SHA256: &str = "28778cd74bf0258eb6510fd00c23104ca92198aefbe5310cdcafc5907459bac6";
 const ARTIFACT_ID: &str = "kafka-k0-baseline-disposition-v1";
 const PROGRAM_ID: &str = "asupersync-ir2uf0";
 const BEAD_ID: &str = "asupersync-dep-p7-kafka-removal-sarszu.1.5";
@@ -83,7 +83,7 @@ const ROUTE_OWNER_ID_SHA256: &str =
 const REDUCED_UNKNOWN_SELECTOR_SHA256: &str =
     "5c7fb727bc79d4f8be1c979fadda8bcfd261da0953e972a32a89bef27a28b18c";
 const SOURCE_PIN_FULL_ROW_SHA256: &str =
-    "d6f77b728e5dacfc0f8609b1799a3c5aa75147e292b57ff1dd0e8bdcffc43280";
+    "d013c3326eb8785bfb92d8b1a7ad2a92ccc3bcec6a70adc4177bb4cc52a42a01";
 const SOURCE_PIN_PATH_SHA256: &str =
     "d5631183e1560d87aeb50ca953d836b4405110b30f81c98aab099c6a5f1eb4c3";
 const SOURCE_PIN_OVERLAP_SHA256: &str =
@@ -211,7 +211,7 @@ const CHILD_FILE_PINS: &[ChildFilePin] = &[
         packet_id: "K0.3",
         role: "artifact_file",
         path: "artifacts/kafka_downstream_user_journey_inventory_v1.json",
-        sha256: "d88730c41b963159a8a5e0d5534b8db6da66af0f6af056d6a54465813d55fe9a",
+        sha256: "05c27e500ff3a09b4665f3ded50c2ff6018d116494dd4be4dad836401bded1bd",
         byte_count: 1_171_976,
         record_count: 17_987,
     },
@@ -227,7 +227,7 @@ const CHILD_FILE_PINS: &[ChildFilePin] = &[
         packet_id: "K0.3",
         role: "contract_file",
         path: "tests/kafka_downstream_user_journey_inventory_contract.rs",
-        sha256: "e4ffa9267732fde34a9a19ca3ff61c9940d06ab31dc7aac1d4d5f517f6b8553e",
+        sha256: "0c55bdd4cfae9c3ba13bc19b2b5d8489436e540ffcda421944f7c19e4eb40366",
         byte_count: 216_695,
         record_count: 5_381,
     },
@@ -235,7 +235,7 @@ const CHILD_FILE_PINS: &[ChildFilePin] = &[
         packet_id: "K0.4",
         role: "artifact_file",
         path: "artifacts/kafka_broker_fixture_provenance_matrix_v1.json",
-        sha256: "b24c68092d607582ccc8f8ac62195dcf1d39bed7e07ff2fce2e722af4bd30cae",
+        sha256: "9bb2cac95655fc129e3b5841758c751e5fe6e58d259bf55a404f80a328e5756f",
         byte_count: 119_250,
         record_count: 2_187,
     },
@@ -251,7 +251,7 @@ const CHILD_FILE_PINS: &[ChildFilePin] = &[
         packet_id: "K0.4",
         role: "contract_file",
         path: "tests/kafka_broker_fixture_provenance_matrix_contract.rs",
-        sha256: "1542282d0deb9dfdcc9d870d4b6fac66647933cc6d16ad8dc0386803020eaf44",
+        sha256: "723184e5ce868c3f4415770e2717072f9dc028b86e795e2ca2df1641689d6ea6",
         byte_count: 129_665,
         record_count: 3_462,
     },

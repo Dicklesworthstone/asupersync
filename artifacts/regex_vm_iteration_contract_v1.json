@@ -8,7 +8,7 @@
   "generated_at_utc": "2026-07-26T06:02:00Z",
   "authority": {
     "compiler_terminal_path": "artifacts/regex_compiler_terminal_receipt_v1.json",
-    "compiler_terminal_sha256": "a2a95ff216d72e8e03f489f508201300b074dc5aac2f967e17b19ec9964de095",
+    "compiler_terminal_sha256": "3a67d943175079ab0378080de5b8ee06fd5e979b0c9555dc30a45cbb62da2f5b",
     "compiler_disposition": "KEEP_INCUMBENT_DEFER",
     "priority_capture_predecessor_path": "artifacts/regex_vm_captures_contract_v1.json",
     "production_cutover_eligible": false
@@ -42,8 +42,8 @@
     },
     {
       "path": "src/observability/mod.rs",
-      "sha256": "75927f5785fff839df41d3b46c9acb76cd07cda854b6b978d1ac79d1d5a9921b",
-      "bytes": 43945,
+      "sha256": "2c1fe00b759c05d6d92437f94178690861d84040c2dc7558284afca3ade19e6b",
+      "bytes": 45623,
       "revision": "asupersync-5z2scg.8.3.4.1"
     }
   ],

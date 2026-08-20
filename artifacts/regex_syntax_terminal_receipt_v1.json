@@ -21,11 +21,11 @@
     },
     {
       "path": "artifacts/regex_syntax_grammar_contract_v1.json",
-      "sha256": "6196026a2780dad533295b4679de04cccd1223660b89f45d2b2f19d079aa3151"
+      "sha256": "e15615c0d5e4df04c8938e7089c3cad817b1081c9b8e96dacd5111696fb0c966"
     },
     {
       "path": "artifacts/regex_privacy_capability_inventory_v1.json",
-      "sha256": "4dfd0fdec21af7604c2b01bdeb4f373741fed2314ee7495eb941b2314ce67103"
+      "sha256": "dfc6b686658865b03839bb6c187fe48f189808ef1c33e227c7ad5afab8939e16"
     }
   ],
   "oracle": {

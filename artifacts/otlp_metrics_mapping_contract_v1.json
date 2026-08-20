@@ -796,8 +796,8 @@
     },
     {
       "path": "src/observability/otel.rs",
-      "sha256": "9bfb4c2bd008b02be15f50bbf9688601d166e78f38a5ebfe9296cae17f50d78a",
-      "line_count": 12175,
+      "sha256": "590cb3e34654e71708ca8b623007aaaa4b35b20d602c1455c16890ef7352a72c",
+      "line_count": 14523,
       "anchors": ["pub enum CardinalityOverflow", "pub struct MetricsSnapshot", "pub struct OtelMetrics", "pub struct OwnedOtlpMetrics", "pub async fn send_owned_metrics", "pub fn metrics_request_from_snapshot"]
     },
     {
@@ -808,8 +808,8 @@
     },
     {
       "path": "src/observability/mod.rs",
-      "sha256": "dd3f0780f4462f7f5f3ddfa14cc9d62154f2bc21dfd2315217b739149c9d1435",
-      "line_count": 1182,
+      "sha256": "2c1fe00b759c05d6d92437f94178690861d84040c2dc7558284afca3ade19e6b",
+      "line_count": 1194,
       "anchors": ["private, native-only owned OTLP message staging", "Signal adapters may construct these finite models", "pub(crate) mod otlp_proto", "OwnedOtlpMetrics"]
     },
     {
@@ -868,8 +868,8 @@
     },
     {
       "path": "tests/otlp_metrics_request_golden.rs",
-      "sha256": "e1d6c98fb9ed26c6358f3bbd4352735fad32309707c902dbb9bc24ba36545783",
-      "line_count": 932,
+      "sha256": "749a31cd2412ffc1a59593da0dec102f97164a4848157dfc6dc5be63809f3749",
+      "line_count": 1537,
       "anchors": ["struct OtlpMetricsRequest", "fn create_baseline_otlp_request", "fn test_golden_snapshot_determinism", "fn owned_metrics_lab_replay_is_byte_identical", "fn owned_metrics_loopback_http_wire_smoke_decodes_request", "fn owned_metrics_external_otel_collector_accepts_and_exports_request"]
     },
     {
@@ -892,7 +892,7 @@
     },
     {
       "path": "tests/protobuf_owned_otlp_schema_contract.rs",
-      "sha256": "bb0e97cf68ba614beb911e44a01fac55171335f64057a19bfd6db02ff471a69f",
+      "sha256": "30db4e4851b6f342396e8e1b5ce6c5f1d591bf9225bf8bd6eadd40c8d82c6ff3",
       "line_count": 2193,
       "anchors": ["The JSON-shaped fixture is not protobuf wire evidence", "Generated request builders are test/fuzz gated"]
     },
@@ -904,13 +904,13 @@
     },
     {
       "path": "artifacts/otlp_capability_inventory_v1.json",
-      "sha256": "f379544af6a353cc19ef81fa87d95a9d049ca905fc6fa67c3e7faed932687bce",
+      "sha256": "5a2917f6159bbc5fd3f1e3ed9604e834b6903b68a8780a1e5e5abb444d8477d1",
       "line_count": 985,
       "anchors": ["SHIPPED_VIA_DEPENDENCY", "OTLP-GAP-01", "asupersync-5z2scg.2.3"]
     },
     {
       "path": "artifacts/protobuf_owned_otlp_schema_v1.json",
-      "sha256": "592b8eaee51e5f0bfa3b0fe8d1830fd6204214b8ac1947e3aeb2dd6f90d91ab9",
+      "sha256": "59cc079f083c87703915267a29d6a7d0face239c50ca1bba91e20f8f9331756b",
       "line_count": 1126,
       "anchors": ["NEW_A3_SCHEMA_POLICY_NOT_INCUMBENT_PARITY", "data_points_per_metric", "signal_construction_separation"]
     },

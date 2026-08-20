@@ -152,17 +152,17 @@
       },
       {
         "path": "src/observability/mod.rs",
-        "sha256": "75927f5785fff839df41d3b46c9acb76cd07cda854b6b978d1ac79d1d5a9921b",
+        "sha256": "2c1fe00b759c05d6d92437f94178690861d84040c2dc7558284afca3ade19e6b",
         "role": "private native metrics module gate"
       },
       {
         "path": "src/observability/otlp_proto.rs",
-        "sha256": "cc04fb98d1cc5d14f0e26c3941d336250ec958d9e51fa651eec2f644357776b2",
+        "sha256": "1d9b19295230754329a93ce474c16366b01842ec1bf64796d5f5b42e16fe17c5",
         "role": "complete bounded common, resource, metrics, trace, logs, and collector implementation"
       },
       {
         "path": "src/observability/otel.rs",
-        "sha256": "1fafcd630490e8f5707f01b934291961ff78921bf07d39f54efbb67165b74a5f",
+        "sha256": "590cb3e34654e71708ca8b623007aaaa4b35b20d602c1455c16890ef7352a72c",
         "role": "current metrics, logs, reference builder, and producer-limit baseline"
       },
       {

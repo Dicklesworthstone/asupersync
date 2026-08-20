@@ -134,7 +134,7 @@
     },
     {
       "path": "artifacts/lz4_surface_artifact_inventory_v1.json",
-      "sha256": "45fb60695d862d0e4257d9dea97f2ae83d1948839381c1cb08fb95f42dd1eac9",
+      "sha256": "bf192bbd03cfe8d40e5bb279f4f22570de2d480f99cbea4bc8faa351e628bdd8",
       "role": "A1 machine inventory and routed gap authority"
     },
     {
@@ -184,7 +184,7 @@
     },
     {
       "path": "scripts/run_dependency_sovereignty_e2e.sh",
-      "sha256": "f2deaf18dd793e3df114c300ffaa15445ccbf0040f9cc3c5b56e89fd19665ccc",
+      "sha256": "c2c112d25a005800549df4ed4e5d32b6e8a2c05c4e9045557b074e5740d170d9",
       "role": "canonical sparse plus aggregate terminal runner"
     },
     {

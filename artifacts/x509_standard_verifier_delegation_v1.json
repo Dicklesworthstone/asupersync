@@ -38,13 +38,13 @@
     },
     {
       "path": "src/bin/atp.rs",
-      "sha256": "57404e8d8d57a8ac3c5c6b3e949c78cc49c670b2bc3bcf3f1bb4287743b6e5ba",
-      "line_count": 11912,
+      "sha256": "fa68f1bfb4f6e59fd3d4a0c781a5e5b7b2cce13ad2d39ee2ec084f068a837c9f",
+      "line_count": 12723,
       "role": "ATP delegation caller and preserved CLI error mapping"
     },
     {
       "path": "artifacts/x509_validation_ownership_inventory_v1.json",
-      "sha256": "fb1965a118cc2eb0d0eef6a24e96205011c5ba053f6c0fa1bc0d3ffb022b3653",
+      "sha256": "aba83a414fb29872174db63c16f50426686ca9d5e29512bf7b412bceb766f164",
       "line_count": 1073,
       "role": "A1 ownership, residue, and routed-gap inventory"
     },

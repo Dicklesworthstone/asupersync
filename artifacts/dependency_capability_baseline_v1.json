@@ -1429,7 +1429,7 @@
       },
       {
         "path": "artifacts/dependency_capability_registry_v1.json",
-        "sha256": "834c0bb0f30adf65ad27256fbae9f903fe9945e37a7d010f90d38971802c74ea",
+        "sha256": "9fa15cca1a7b202ff7a9accc78bb7a052a8f4f830b37ae450959b539633d01fd",
         "line_count": 6929,
         "role": "CAP-HASH-MAPS capability, platform, security, lifecycle, and ownership authority"
       },
@@ -1441,8 +1441,8 @@
       },
       {
         "path": "scripts/run_dependency_sovereignty_e2e.sh",
-        "sha256": "f2deaf18dd793e3df114c300ffaa15445ccbf0040f9cc3c5b56e89fd19665ccc",
-        "line_count": 1314,
+        "sha256": "c2c112d25a005800549df4ed4e5d32b6e8a2c05c4e9045557b074e5740d170d9",
+        "line_count": 1350,
         "role": "retained dependency-sovereignty scenario catalog lacking reactor_registration_churn"
       },
       {
@@ -1801,7 +1801,7 @@
       },
       {
         "path": "artifacts/dependency_capability_registry_v1.json",
-        "sha256": "834c0bb0f30adf65ad27256fbae9f903fe9945e37a7d010f90d38971802c74ea",
+        "sha256": "9fa15cca1a7b202ff7a9accc78bb7a052a8f4f830b37ae450959b539633d01fd",
         "line_count": 6929,
         "role": "CAP-HOST-BENCH-METADATA and CAP-HOST-INTROSPECTION authority"
       },
@@ -1813,8 +1813,8 @@
       },
       {
         "path": "scripts/run_dependency_sovereignty_e2e.sh",
-        "sha256": "f2deaf18dd793e3df114c300ffaa15445ccbf0040f9cc3c5b56e89fd19665ccc",
-        "line_count": 1314,
+        "sha256": "c2c112d25a005800549df4ed4e5d32b6e8a2c05c4e9045557b074e5740d170d9",
+        "line_count": 1350,
         "role": "scenario catalog and retained evidence schema"
       }
     ],
@@ -2087,14 +2087,14 @@
       },
       {
         "path": "src/cx/cx.rs",
-        "sha256": "b4a679ade9d6a5e23b23636830225503bde581adfbef4eeb42ef8843493dd4be",
-        "line_count": 7804,
+        "sha256": "2e9b20ad5c3aefba1619e93831640ab2d6eead53922e31a87c305dc0f431f95b",
+        "line_count": 7816,
         "role": "one already-public struct, four constructors, and one receiver method guarded by the incumbent attribute"
       },
       {
         "path": "src/cx/scope.rs",
-        "sha256": "2455754abf6c51c4fa6a475a4ba5427cb844fc8fda1e5b6d3b3d9f52dc14b11d",
-        "line_count": 3589,
+        "sha256": "74e17f014ba1403f6311e11bb7ca95a5c8bddb9a49c5c6060121e097858ce2c5",
+        "line_count": 3600,
         "role": "three pub(crate) functions in a generic inherent impl guarded by the incumbent attribute"
       },
       {
@@ -2105,7 +2105,7 @@
       },
       {
         "path": "artifacts/dependency_capability_registry_v1.json",
-        "sha256": "834c0bb0f30adf65ad27256fbae9f903fe9945e37a7d010f90d38971802c74ea",
+        "sha256": "9fa15cca1a7b202ff7a9accc78bb7a052a8f4f830b37ae450959b539633d01fd",
         "line_count": 6929,
         "role": "CAP-VISIBILITY-MACRO ownership, semantics, feature, and planned-fixture authority"
       },
@@ -2515,7 +2515,7 @@
       },
       {
         "path": "artifacts/dependency_capability_registry_v1.json",
-        "sha256": "834c0bb0f30adf65ad27256fbae9f903fe9945e37a7d010f90d38971802c74ea",
+        "sha256": "9fa15cca1a7b202ff7a9accc78bb7a052a8f4f830b37ae450959b539633d01fd",
         "line_count": 6929,
         "role": "CAP-TOKEN-SLAB source ownership, scenario, safety, and lifecycle authority"
       },
@@ -2533,8 +2533,8 @@
       },
       {
         "path": "scripts/run_dependency_sovereignty_e2e.sh",
-        "sha256": "f2deaf18dd793e3df114c300ffaa15445ccbf0040f9cc3c5b56e89fd19665ccc",
-        "line_count": 1314,
+        "sha256": "c2c112d25a005800549df4ed4e5d32b6e8a2c05c4e9045557b074e5740d170d9",
+        "line_count": 1350,
         "role": "dependency-sovereignty runner with neither declared token-slab scenario"
       },
       {

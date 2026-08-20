@@ -49,8 +49,8 @@
     },
     {
       "path": "src/observability/mod.rs",
-      "sha256": "75927f5785fff839df41d3b46c9acb76cd07cda854b6b978d1ac79d1d5a9921b",
-      "line_count": 1172
+      "sha256": "2c1fe00b759c05d6d92437f94178690861d84040c2dc7558284afca3ade19e6b",
+      "line_count": 1194
     },
     {
       "path": "src/net/atp/chunk/artifact.rs",

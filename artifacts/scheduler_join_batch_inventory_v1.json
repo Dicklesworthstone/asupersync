@@ -86,8 +86,8 @@
       },
       {
         "path": "src/cx/cx.rs",
-        "sha256": "b4a679ade9d6a5e23b23636830225503bde581adfbef4eeb42ef8843493dd4be",
-        "line_count": 7804,
+        "sha256": "2e9b20ad5c3aefba1619e93831640ab2d6eead53922e31a87c305dc0f431f95b",
+        "line_count": 7816,
         "classification": "CANCELLATION_PUBLICATION_HARDENING_WITH_JOIN_ANCHORS_PRESERVED"
       },
       {
@@ -128,8 +128,8 @@
     },
     {
       "path": "src/runtime/builder.rs",
-      "sha256": "cf525c48695f4a7147634b2154acbed79760572073c9aadb9e98cedc9db75f3e",
-      "line_count": 9516,
+      "sha256": "43e4f8b0d8a68c4978c447d2b0f52bc11ca198482f7a61c59d4495c9842b62b4",
+      "line_count": 9597,
       "role": "public request-scoped Cx entry plus legacy RuntimeHandle spawn, JoinHandle state, completion, admission, and shutdown"
     },
     {
@@ -146,14 +146,14 @@
     },
     {
       "path": "src/cx/cx.rs",
-      "sha256": "b4a679ade9d6a5e23b23636830225503bde581adfbef4eeb42ef8843493dd4be",
-      "line_count": 7804,
+      "sha256": "2e9b20ad5c3aefba1619e93831640ab2d6eead53922e31a87c305dc0f431f95b",
+      "line_count": 7816,
       "role": "public structured spawn producer and take-once completion sender"
     },
     {
       "path": "src/cx/scope.rs",
-      "sha256": "2455754abf6c51c4fa6a475a4ba5427cb844fc8fda1e5b6d3b3d9f52dc14b11d",
-      "line_count": 3589,
+      "sha256": "74e17f014ba1403f6311e11bb7ca95a5c8bddb9a49c5c6060121e097858ce2c5",
+      "line_count": 3600,
       "role": "state-threaded structured spawn and input-order join_all"
     },
     {
@@ -250,7 +250,7 @@
         {"path": "src/channel/oneshot.rs", "line": 159, "fragment": "struct OneShotInner<T>"},
         {"path": "src/channel/oneshot.rs", "line": 391, "fragment": "pub struct Sender<T>"},
         {"path": "src/channel/oneshot.rs", "line": 1099, "fragment": "pub struct Receiver<T>"},
-        {"path": "src/cx/cx.rs", "line": 4696, "fragment": "let shared_tx = Arc::new(std::sync::Mutex::new(Some(result_tx)))"}
+        {"path": "src/cx/cx.rs", "line": 4708, "fragment": "let shared_tx = Arc::new(std::sync::Mutex::new(Some(result_tx)))"}
       ]
     }
   ],
@@ -349,8 +349,8 @@
       "incumbent_contract": "Cx::spawn and Cx::spawn_in return SpawnError::RuntimeUnavailable and never panic",
       "must_preserve": "no handle is returned for a request that was never published",
       "anchors": [
-        {"path": "src/cx/cx.rs", "line": 4085, "fragment": "pub fn spawn<F, Fut>("},
-        {"path": "src/cx/cx.rs", "line": 4181, "fragment": "pub fn spawn_in<F, Fut, P>("}
+        {"path": "src/cx/cx.rs", "line": 4097, "fragment": "pub fn spawn<F, Fut>("},
+        {"path": "src/cx/cx.rs", "line": 4193, "fragment": "pub fn spawn_in<F, Fut, P>("}
       ]
     },
     {
@@ -360,7 +360,7 @@
       "incumbent_contract": "the completion sender commits Ok(value); join, try_join, or poll_join consumes one terminal result",
       "must_preserve": "the value is delivered once with no ambient cancellation check on the join receive",
       "anchors": [
-        {"path": "src/cx/scope.rs", "line": 477, "fragment": "publish_terminal_result(tx, Ok(result))"},
+        {"path": "src/cx/scope.rs", "line": 488, "fragment": "publish_terminal_result(tx, Ok(result))"},
         {"path": "src/runtime/task_handle.rs", "line": 640, "fragment": "pub fn try_join(&mut self)"}
       ]
     },
@@ -383,7 +383,7 @@
       "must_preserve": "panic stays typed for this family",
       "anchors": [
         {"path": "src/runtime/task_handle.rs", "line": 14, "fragment": "pub enum JoinError"},
-        {"path": "src/cx/cx.rs", "line": 4664, "fragment": "fn spawn_via_gateway<F, Fut>("}
+        {"path": "src/cx/cx.rs", "line": 4676, "fragment": "fn spawn_via_gateway<F, Fut>("}
       ]
     },
     {
@@ -393,7 +393,7 @@
       "incumbent_contract": "the completion slot or closed-channel mapping yields JoinError::Cancelled with the strongest available reason",
       "must_preserve": "every accepted request terminates its handle and preserves cancellation attribution",
       "anchors": [
-        {"path": "src/cx/cx.rs", "line": 4750, "fragment": "let request = SpawnRequest::new_with_factory"},
+        {"path": "src/cx/cx.rs", "line": 4762, "fragment": "let request = SpawnRequest::new_with_factory"},
         {"path": "src/runtime/task_handle.rs", "line": 831, "fragment": "impl<T> std::future::Future for JoinFuture"}
       ]
     },
@@ -446,7 +446,7 @@
       "incumbent_contract": "Scope::join_all and JoinSet::join_all return input or spawn order; JoinSet::join_next returns completion order with earliest-spawned ready tie-break",
       "must_preserve": "a batch producer cannot change collection ordering",
       "anchors": [
-        {"path": "src/cx/scope.rs", "line": 1280, "fragment": "pub async fn join_all<T>("},
+        {"path": "src/cx/scope.rs", "line": 1291, "fragment": "pub async fn join_all<T>("},
         {"path": "src/combinator/join_set.rs", "line": 209, "fragment": "pub async fn join_all"},
         {"path": "src/combinator/join_set.rs", "line": 227, "fragment": "pub async fn join_next"}
       ]
@@ -464,7 +464,7 @@
         {"path": "src/runtime/spawn_mailbox.rs", "line": 939, "fragment": "pub struct SpawnRequest"},
         {"path": "src/runtime/spawn_mailbox.rs", "line": 1286, "fragment": "pub fn enqueue(&self, request: SpawnRequest, now: Time)"},
         {"path": "src/runtime/spawn_mailbox.rs", "line": 1451, "fragment": "pub fn enqueue_and_notify(&self, request: SpawnRequest)"},
-        {"path": "src/cx/cx.rs", "line": 4772, "fragment": "gateway.enqueue_and_notify(request)?"}
+        {"path": "src/cx/cx.rs", "line": 4784, "fragment": "gateway.enqueue_and_notify(request)?"}
       ]
     },
     "consumer_now": {

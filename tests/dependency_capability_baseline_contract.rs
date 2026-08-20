@@ -1728,7 +1728,7 @@ fn tempfile_claim_time_profile_checkpoint_is_source_pinned_and_fail_closed() {
         (
             "artifacts/dependency_capability_baseline_v1.json",
             (
-                "39d73a682c61f3d776ae9a76f40aa4d342e8498f41f24a4753d4498c3b0c3c85",
+                "7c136c23360e33113253313155ed7fec5c4e37d3865c13c331342ddca9e47ea5",
                 3210_u64,
             ),
         ),
@@ -1784,7 +1784,7 @@ fn tempfile_claim_time_profile_checkpoint_is_source_pinned_and_fail_closed() {
         (
             "src/net/atp/transport_quic/mod.rs",
             (
-                "6e4295c5f192016d0b087c1cd8909f599c038735b58f1fe4f908fecb17db1e5c",
+                "306a5043ba0bf7614ceb7b40d29836730285f24ed4a01e402c9576bd0e55e770",
                 17_212_u64,
             ),
         ),
