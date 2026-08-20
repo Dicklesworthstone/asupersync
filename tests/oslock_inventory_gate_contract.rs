@@ -217,10 +217,10 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
     validate_no_unknown(inventory, "$")?;
 
     let census = object(inventory, "source_census");
-    if census.get("matching_file_count").and_then(Value::as_u64) != Some(246)
-        || census.get("matching_line_count").and_then(Value::as_u64) != Some(558)
+    if census.get("matching_file_count").and_then(Value::as_u64) != Some(247)
+        || census.get("matching_line_count").and_then(Value::as_u64) != Some(561)
         || census.get("sha256").and_then(Value::as_str)
-            != Some("a87e2904096723b994ccebddb429757b76507b9e04941a8b2ee883dc4b04bbb0")
+            != Some("738384a996ed1d1a5064b134890aea1aaf9d1d278ebd6aa263f91ebc60120b20")
     {
         return Err("source census receipt drifted".to_owned());
     }
@@ -229,7 +229,7 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
     if imports
         .get("direct_use_statement_count")
         .and_then(Value::as_u64)
-        != Some(180)
+        != Some(183)
     {
         return Err("direct use-statement count drifted".to_owned());
     }

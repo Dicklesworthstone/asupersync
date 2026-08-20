@@ -1929,7 +1929,7 @@ fn tempfile_claim_time_profile_checkpoint_is_source_pinned_and_fail_closed() {
         .iter()
         .map(|path| count_occurrences(&read_repo_file(path), "tempfile::"))
         .sum::<u64>();
-    assert_eq!(source_token_count, 277);
+    assert_eq!(source_token_count, 278);
     assert_eq!(rust_paths_under_with_token("tests", "tempfile::").len(), 94);
     assert_eq!(
         rust_paths_under_with_token("benches", "tempfile::").len(),

@@ -263,9 +263,9 @@ Entropy	net/atp/crypto/mod.rs	419	getrandom::	getrandom::fill(&mut iv).map_err(|
 Entropy	net/atp/datagram/probes.rs	367	getrandom::	match getrandom::fill(&mut challenge) {
 Entropy	net/atp/handshake/transport_params.rs	232	getrandom::	getrandom::fill(&mut stateless_reset_token)
 Entropy	net/atp/transport_quic/native_link.rs	8151	getrandom::	getrandom::fill(&mut nonce)
-Entropy	observability/otel.rs	474	std::collections::hash_map::RandomState	hasher_seed: std::collections::hash_map::RandomState,
-Entropy	observability/otel.rs	482	std::collections::hash_map::RandomState	hasher_seed: std::collections::hash_map::RandomState::new(),
-Entropy	observability/otel.rs	578	std::collections::hash_map::RandomState	use std::collections::hash_map::RandomState;
+Entropy	observability/otel.rs	476	std::collections::hash_map::RandomState	hasher_seed: std::collections::hash_map::RandomState,
+Entropy	observability/otel.rs	484	std::collections::hash_map::RandomState	hasher_seed: std::collections::hash_map::RandomState::new(),
+Entropy	observability/otel.rs	580	std::collections::hash_map::RandomState	use std::collections::hash_map::RandomState;
 Entropy	observability/w3c_trace_context.rs	148	getrandom::	getrandom::fill(&mut bytes).expect();
 Entropy	observability/w3c_trace_context.rs	470	getrandom::	getrandom::fill(&mut bytes).expect();
 Entropy	util/det_hash.rs	79	std::collections::hash_map::RandomState	use std::collections::hash_map::RandomState;
@@ -305,8 +305,8 @@ Env	net/quic_native/connection.rs	322	std::env::var_os(	if std::env::var_os().is
 Env	net/quic_native/endpoint.rs	458	std::env::var_os(	let kernel_snapshot = if std::env::var_os().is_some()
 Env	net/quic_native/endpoint.rs	459	std::env::var_os(	|| std::env::var_os().is_some()
 Env	net/quic_native/endpoint_api.rs	70	std::env::var_os(	if std::env::var_os().is_some() {
-Env	observability/otel.rs	2811	std::env::var(	if let Ok(env_attrs_str) = std::env::var() {
-Env	observability/otel.rs	2909	std::env::var(	std::env::var(key)
+Env	observability/otel.rs	7498	std::env::var(	if let Ok(env_attrs_str) = std::env::var() {
+Env	observability/otel.rs	7596	std::env::var(	std::env::var(key)
 Env	raptorq/gf256.rs	1230	std::env::var(	let requested_mode_raw = std::env::var().ok();
 Env	raptorq/gf256.rs	1244	std::env::var(	let requested_profile_raw = std::env::var().ok();
 Env	raptorq/gf256.rs	1362	std::env::var(	std::env::var(key).map_or(NumericEnvOverride::Unset, |raw| {
@@ -332,8 +332,8 @@ Io	atp/mailbox/relay.rs	284	TcpStream::	let mut stream = TcpStream::connect_time
 Io	atp/mailbox/storage.rs	410	std::fs::write(	if let Err(error) = std::fs::write(&full_path, &prepared.bytes) {
 Io	atp/mailbox/storage.rs	435	std::fs::read(	std::fs::read(&chunk_path).map_err(|e| MailboxError::NetworkError {
 Io	atp/writer.rs	401	File::open(	let mut file = match File::open(path).await {
-Io	database/mysql.rs	1992	TcpStream::	match TcpStream::connect_timeout(addr, timeout).await {
-Io	database/mysql.rs	1997	TcpStream::	match TcpStream::connect(addr).await {
+Io	database/mysql.rs	1991	TcpStream::	match TcpStream::connect_timeout(addr, timeout).await {
+Io	database/mysql.rs	1996	TcpStream::	match TcpStream::connect(addr).await {
 Io	database/postgres.rs	3548	TcpStream::	let mut stream = crate::net::TcpStream::connect_timeout(addr, target.connect_timeout)
 Io	database/postgres.rs	3762	TcpStream::	TcpStream::connect_timeout(addr, timeout).await
 Io	database/postgres.rs	3764	TcpStream::	TcpStream::connect(addr).await
@@ -470,7 +470,7 @@ Output	net/atp/transport_rq/mod.rs	478	eprintln!(	eprintln!(, format!($($arg)*))
 Output	net/atp/transport_rq/mod.rs	488	eprintln!(	eprintln!(, format!($($arg)*));
 Output	net/quic_native/connection.rs	323	eprintln!(	eprintln!(, format!($($arg)*));
 Output	net/quic_native/endpoint_api.rs	71	eprintln!(	eprintln!(, format!($($arg)*));
-Spawn	database/mysql.rs	1810	std::thread::Builder	std::thread::Builder::new()
+Spawn	database/mysql.rs	1809	std::thread::Builder	std::thread::Builder::new()
 Spawn	observability/debt_runtime_integration.rs	107	thread::spawn	let handle = thread::spawn(move || {
 Spawn	runtime/builder.rs	365	std::thread::Builder	let mut builder = std::thread::Builder::new().name(name);
 Spawn	runtime/builder.rs	3652	std::thread::Builder	std::thread::Builder::new()
@@ -864,7 +864,7 @@ Time	net/quic_native/managed_endpoint.rs	285	std::time::SystemTime::now()	std::t
 Time	net/quic_native/managed_endpoint.rs	444	Instant::now()	let now = Instant::now();
 Time	net/quic_native/managed_endpoint.rs	478	Instant::now()	let closed_connections = self.connection_router.close_all(cx, Instant::now(), 0)?;
 Time	net/stun.rs	196	SystemTime::now()	let now = SystemTime::now()
-Time	observability/mod.rs	431	std::time::SystemTime::now()	std::time::SystemTime::now()
+Time	observability/mod.rs	453	std::time::SystemTime::now()	std::time::SystemTime::now()
 Time	observability/network_diagnostics.rs	192	std::time::SystemTime::now()	timestamp: std::time::SystemTime::now(),
 Time	observability/otel_structured_concurrency.rs	228	SystemTime::now()	created_at: SystemTime::now(),
 Time	observability/otel_structured_concurrency.rs	530	SystemTime::now()	let now = SystemTime::now();

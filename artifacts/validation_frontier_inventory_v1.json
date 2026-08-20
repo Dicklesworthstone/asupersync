@@ -784,6 +784,21 @@
       "current_rch_behavior": "mapped_not_rerun_in_vf1"
     },
     {
+      "lane_id": "downstream-consumer-v044-cancel-compat-run",
+      "source": "proof_lane_manifest_v1",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_downstream_consumer_v044_cancel_compat CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo run --manifest-path tests/fixtures/downstream-consumer-proof/Cargo.toml --bin v044_cancel_compat_consumer",
+      "intended_guarantee": "Published v0.4.4 parked-task cancellation and cleanup compatibility execution.",
+      "package_or_surface": "asupersync-downstream-consumer-proof",
+      "target_kind": "test_frontier",
+      "features": [],
+      "cfg_test_enabled": "no",
+      "dev_dependency_edges": "none_expected",
+      "conformance_expected": "not_expected",
+      "normal_edge_tokio_expectation": "not_applicable",
+      "resource_envelope_class": "test-frontier-heavy",
+      "current_rch_behavior": "mapped_not_rerun_in_vf1"
+    },
+    {
       "lane_id": "downstream-consumer-default-run",
       "source": "proof_lane_manifest_v1",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_downstream_consumer_default CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo run --manifest-path tests/fixtures/downstream-consumer-proof/Cargo.toml --bin default_consumer",

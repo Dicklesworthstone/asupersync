@@ -215,8 +215,8 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
         }
         public_item_count += items.len();
     }
-    if public_item_count != 88 {
-        return Err("module public inventory must contain 88 unique per-module items".to_owned());
+    if public_item_count != 149 {
+        return Err("module public inventory must contain 149 unique per-module items".to_owned());
     }
 
     let expected_signals: BTreeSet<String> = ["external_meter_bridge", "logs", "metrics", "traces"]

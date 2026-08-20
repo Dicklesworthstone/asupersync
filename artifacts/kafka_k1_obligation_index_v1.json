@@ -65,7 +65,7 @@
       "path": "artifacts/kafka_k0_baseline_disposition_v1.json",
       "byte_count": 29494,
       "record_count": 284,
-    "sha256": "d2e17838295856c713204bb8da999a35bba69bac387b746c3d4331f0cb1d18a8"
+    "sha256": "f4f2012b475793d57f5ef2f5ed40f08f985dff9a7c709cf1c67416a3eb9f9f09"
     },
     {
       "input_id": "K1-INPUT-K0-5-DOCUMENT",
@@ -73,7 +73,7 @@
       "path": "docs/kafka_k0_baseline_disposition.md",
       "byte_count": 21799,
       "record_count": 349,
-    "sha256": "b4e4430f0d9cc11fb162763a2b61ebf34fc0a4e8cebd9162b3c25a63af215929"
+    "sha256": "a0323113a57e4b42860fcf8be9ba09b54538d673c856daff96e793b1291fc244"
     },
     {
       "input_id": "K1-INPUT-K0-5-CONTRACT",
@@ -81,7 +81,7 @@
       "path": "tests/kafka_k0_baseline_disposition_contract.rs",
       "byte_count": 106003,
       "record_count": 2599,
-      "sha256": "6778193e5f5eb2bddcddf462fdc931b798fca980f9315cd3d949155eea3fb90d"
+      "sha256": "a40a303676ae47fe54d512971341d386106687da054fc4f6a16ad611eb50e9dd"
     },
     {
       "input_id": "K1-INPUT-ADR",
@@ -525,13 +525,13 @@
     "source_pin_rollup": {
       "row_count": 266,
       "stage_counts": {"K0.1": 13, "K0.2": 8, "K0.3": 225, "K0.4": 20},
-      "canonical_json_sha256": "948ebf961621b46631bf680520bf27322275ae50b2de2c7e3022d12bbc373467",
+      "canonical_json_sha256": "890b19c9bba9570de2ad374d38deab35a1fb00359c61925a90d25404111f9c5d",
       "unique_path_count": 247,
       "unique_path_set_sha256": "d5631183e1560d87aeb50ca953d836b4405110b30f81c98aab099c6a5f1eb4c3",
       "overlap_group_count": 15,
       "overlap_pin_row_count": 34,
       "overlap_pin_tuple_rule": "For each source-pin row whose path occurs in more than one child packet, serialize path<TAB>child<TAB>pin_id<TAB>sha256; bytewise sort the records and append one LF per row.",
-      "overlap_pin_projection_sha256": "7f7b5550d42ae12074050da27787b0cd9409150ccfe444ca208c69466911cb0c",
+      "overlap_pin_projection_sha256": "d2eb5cb6c4f52668f3f3202215709714ebe89c6d7ae8a847544da65e7b83687c",
       "conflicting_overlap_groups": []
     },
     "unknown_blockers": {

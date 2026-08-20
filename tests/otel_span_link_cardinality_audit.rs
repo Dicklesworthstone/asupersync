@@ -8,16 +8,12 @@
 //!
 //! Audit findings:
 //!
-//!   (a) **There is no public API to attach OTLP-style `Link`s to
-//!       a `TestSpan`.** The asupersync `TestSpan` (otel.rs:2647-
-//!       2673) exposes context, name, kind, start_time, end_time,
-//!       attributes, attribute_values, events, status,
-//!       parent_context, and baggage. There is NO `links` field
-//!       and NO `add_link` / `with_link` method. The struct
-//!       cannot represent an OTLP SpanLink at all.
+//!   (a) **The legacy `TestSpan` encoder remains link-free.** That
+//!       compatibility surface has no `links` field or link mutator, so its
+//!       `proto_span` conversion still emits the protobuf defaults.
 //!
 //!   (b) **The production OTLP encoder unconditionally emits
-//!       empty links.** `proto_span` (otel.rs:5390-5415) builds
+//!       empty links.** The legacy `proto_span` mapper builds
 //!       a `ProtoSpan` from a `TestSpan` and uses
 //!       `..Default::default()` for the trailing fields, which
 //!       sets:
@@ -26,17 +22,21 @@
 //!         - `flags: 0`
 //!         - `trace_state: ""`
 //!
-//!   (c) **The conformance reference path also emits empty
-//!       links.** `build_our_otlp_export`
-//!       (otel.rs:6065-6122) and `build_reference_otlp_export`
-//!       (otel.rs:6167-6222) both produce `links: vec![]` /
+//!   (c) **The legacy conformance reference path also emits empty
+//!       links.** `build_our_otlp_export` and
+//!       `build_reference_otlp_export` both produce `links: vec![]` /
 //!       `SpanLinks::default()`, byte-identical to the upstream
 //!       opentelemetry-proto reference transformer.
 //!
-//! Verdict: **SOUND**. The cardinality cap question is moot
-//! today — the upper bound on emitted links is exactly 0, so no
-//! cap is needed and `dropped_links_count` of 0 is correct (no
-//! links were dropped because none ever existed).
+//!   (d) **The additive owned OTLP trace path supports bounded links.**
+//!       `OtlpTraceSpanInput::with_links` feeds `OwnedOtlpTraces`, whose
+//!       immutable configuration defaults to and may not exceed
+//!       `OWNED_OTLP_MAX_LINKS_PER_SPAN == 128`. Preflight rejects a sampled
+//!       span above that bound before owned allocation or wire emission, while
+//!       the caller-provided `dropped_links_count` is preserved.
+//!
+//! Verdict: **SOUND**. The legacy path emits zero links, and the owned path has
+//! an explicit finite 128-link ceiling with preflight enforcement.
 //!
 //! Per OTLP/Proto spec (proto/opentelemetry/proto/trace/v1/
 //! trace.proto), the `links` field on a Span is `repeated Link`
@@ -46,10 +46,8 @@
 //! exist for this span", as opposed to "links existed but were
 //! dropped".
 //!
-//! The OTel SDK SpanLimits default is 128 links per span; if the
-//! asupersync runtime ever adds a public link API, that surface
-//! MUST enforce the cap and bump `dropped_links_count` for each
-//! over-cap link. The structural pin below catches a regression
+//! The OTel SDK SpanLimits default is 128 links per span. The structural pins
+//! below catch a regression
 //! that:
 //!   - adds an unbounded link push API on TestSpan,
 //!   - replaces `..Default::default()` in `proto_span` with an
@@ -103,7 +101,7 @@ fn test_span_struct_has_no_links_field() {
          to emit the populated links + count, (4) an update to \
          this audit test to verify the cap is enforced. Update \
          all four together — DO NOT silently expose an unbounded \
-         link API. (operator audit, otel.rs:2647-2673)\n\nstruct body:\n{body}",
+         link API. (operator audit, legacy TestSpan)\n\nstruct body:\n{body}",
     );
 }
 
@@ -114,6 +112,14 @@ fn test_span_struct_has_no_link_setter_methods() {
     // there should be no `add_link`, `with_link`, `push_link`,
     // `set_links` methods on TestSpan.
     let source = read_otel_source();
+    let impl_marker = "impl TestSpan {";
+    let impl_start = source
+        .find(impl_marker)
+        .expect("TestSpan impl must exist in otel.rs");
+    let impl_end = source[impl_start..]
+        .find("\n    }\n\n")
+        .expect("TestSpan impl must have a closing brace");
+    let test_span_impl = &source[impl_start..impl_start + impl_end];
 
     let forbidden_method_names = [
         "fn add_link",
@@ -125,7 +131,7 @@ fn test_span_struct_has_no_link_setter_methods() {
 
     for name in &forbidden_method_names {
         assert!(
-            !source.contains(name),
+            !test_span_impl.contains(name),
             "REGRESSION: otel.rs now exposes `{name}` — a public \
              link-add method. Confirm: (1) the implementation \
              enforces the OTel SDK 128-link cap, (2) over-cap \
@@ -202,7 +208,7 @@ fn test_otlp_request_builder_default_init_for_links() {
     //
     // A regression where one path emits links and the other
     // doesn't would break the byte-identical conformance test
-    // (otel.rs:5958 `otlp_export_conformance_byte_identical`).
+    // (`otlp_export_conformance_byte_identical`).
     let source = read_otel_source();
 
     // The conformance test pins both paths. Verify the `links:
@@ -250,33 +256,16 @@ fn test_dropped_links_count_explicitly_set_to_zero() {
 }
 
 #[test]
-fn no_link_cardinality_cap_constants_yet() {
-    // Pin: the 128-link OTel SDK SpanLimits default is NOT
-    // currently a constant in the asupersync codebase because
-    // there is nothing to bound. When a public link API is
-    // added, an explicit constant (e.g.
-    // `pub const MAX_SPAN_LINKS: usize = 128;`) should be added
-    // alongside the per-span enforcement. Until then, the
-    // absence of the constant is itself the pin: no link
-    // surface exists.
-    //
-    // We sanity-check by grepping for any obvious cap symbol.
-    // If any of these appear, the audit must be updated.
+fn owned_link_surface_has_a_finite_enforced_cap() {
     let source = read_otel_source();
-    let cap_markers = [
-        "MAX_SPAN_LINKS",
-        "MAX_LINKS_PER_SPAN",
-        "max_span_links",
-        "max_links_per_span",
-        "DEFAULT_SPAN_LINKS",
-    ];
-    for marker in &cap_markers {
-        assert!(
-            !source.contains(marker),
-            "REGRESSION: otel.rs now defines `{marker}`. A link \
-             cap implies a link API; update this audit test to \
-             behaviorally verify the cap is enforced and that \
-             dropped_links_count tracks over-cap drops.",
-        );
-    }
+    assert!(
+        source.contains("pub const OWNED_OTLP_MAX_LINKS_PER_SPAN: usize = 128;")
+            && source.contains("pub const fn with_links(")
+            && source.contains("pub const fn with_dropped_links_count(")
+            && source.contains("span.links.len() > config.max_links_per_span")
+            && source.contains("self.max_links_per_span > OWNED_OTLP_MAX_LINKS_PER_SPAN"),
+        "REGRESSION: the owned OTLP link surface must retain its public 128-link \
+         ceiling, explicit dropped-count input, configuration upper bound, and \
+         per-span preflight enforcement before wire emission.",
+    );
 }

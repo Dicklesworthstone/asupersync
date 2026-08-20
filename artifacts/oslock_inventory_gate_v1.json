@@ -14,7 +14,7 @@
     "registry_cutover_state": "KEEP_INCUMBENT",
     "gate_decision": "DEFER",
     "gate_state": "TERMINAL",
-    "decision_basis": "The incumbent is spread across 246 Rust files and 558 exact source lines, owns production Condvar and visible guard semantics, and saves four package versions in 48 of 52 canonical graph cells. A safe std-backed replacement remains plausible, but the required 1/8/32/64-core Linux and Apple throughput, p50/p95/p99/p999, fairness, starvation, cancellation-adjacent, allocation, RSS, compile-time, binary-size, and stable-lane comparison receipts do not exist. Missing parity evidence cannot authorize implementation or cutover.",
+    "decision_basis": "The incumbent is spread across 247 Rust files and 561 exact source lines, owns production Condvar and visible guard semantics, and saves four package versions in 48 of 52 canonical graph cells. A safe std-backed replacement remains plausible, but the required 1/8/32/64-core Linux and Apple throughput, p50/p95/p99/p999, fairness, starvation, cancellation-adjacent, allocation, RSS, compile-time, binary-size, and stable-lane comparison receipts do not exist. Missing parity evidence cannot authorize implementation or cutover.",
     "dependency_exit_allowed": false,
     "implementation_children_authorized": false,
     "owner_review_required_to_change": true
@@ -116,9 +116,9 @@
     "excluded_paths": [
       "tests/oslock_inventory_gate_contract.rs"
     ],
-    "matching_file_count": 246,
-    "matching_line_count": 558,
-    "sha256": "a87e2904096723b994ccebddb429757b76507b9e04941a8b2ee883dc4b04bbb0",
+    "matching_file_count": 247,
+    "matching_line_count": 561,
+    "sha256": "738384a996ed1d1a5064b134890aea1aaf9d1d278ebd6aa263f91ebc60120b20",
     "scope_counts": [
       {
         "scope": "benches",
@@ -142,8 +142,8 @@
       },
       {
         "scope": "tests",
-        "file_count": 51,
-        "occurrence_count": 92
+        "file_count": 52,
+        "occurrence_count": 95
       }
     ],
     "workload_counts": [
@@ -179,8 +179,8 @@
       },
       {
         "workload": "integration_tests",
-        "file_count": 51,
-        "occurrence_count": 92
+        "file_count": 52,
+        "occurrence_count": 95
       },
       {
         "workload": "messaging",
@@ -245,11 +245,11 @@
     ]
   },
   "import_inventory": {
-    "direct_use_statement_count": 180,
+    "direct_use_statement_count": 183,
     "forms": [
       {
         "form": "Mutex",
-        "count": 129
+        "count": 132
       },
       {
         "form": "RwLock",
@@ -477,7 +477,7 @@
     {
       "semantic_id": "OSLOCK-SEM-LOCK-ORDER",
       "state": "PARTIAL",
-      "finding": "Some local orders are documented, including watch send_lock before value, but there is no complete 246-file order graph.",
+      "finding": "Some local orders are documented, including watch send_lock before value, but there is no complete 247-file order graph.",
       "route": "complete lock-order audit"
     },
     {
@@ -665,7 +665,7 @@
     {
       "gap_id": "OSLOCK-A1-GAP-04",
       "state": "ROUTED",
-      "finding": "There is no complete lock-order and recursive-acquisition audit across the 246-file surface.",
+      "finding": "There is no complete lock-order and recursive-acquisition audit across the 247-file surface.",
       "owner": "incumbent lock-order audit",
       "replacement_required": false
     },
@@ -744,7 +744,7 @@
   },
   "no_claim_boundaries": [
     "This inventory does not prove release readiness, broad workspace health, or performance equivalence.",
-    "The focused sync test receipt covers incumbent sync unit tests only; it does not cover all 246 files, all targets, all features, or a candidate replacement.",
+    "The focused sync test receipt covers incumbent sync unit tests only; it does not cover all 247 files, all targets, all features, or a candidate replacement.",
     "The source census proves exact dependency-token coverage at one revision; it does not prove that every lock is correctly ordered or cancellation-safe.",
     "The marginal ledger proves package-graph deltas only and does not prove native-code presence, runtime benefit, or acceptable engineering cost.",
     "DEFER is terminal success for this gate. This artifact does not authorize implementing a wrapper, migrating call sites, removing parking_lot, editing Cargo manifests, or unblocking implementation children.",

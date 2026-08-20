@@ -71,7 +71,7 @@
     },
     {
       "path": "artifacts/unsafe_boundary_ledger_v1.json",
-      "sha256": "b2eefcd5d2b46015a6a83c4cf8ac43c5934fcda5befc97cb5053e030d38d108c",
+      "sha256": "fc42eaabb33e6014bb8b886d98f0f2087973823531e81ac49d552b3296bc5aae",
       "line_count": 6441
     },
     {
@@ -141,8 +141,8 @@
     },
     {
       "path": "scripts/run_dependency_sovereignty_e2e.sh",
-      "sha256": "f2deaf18dd793e3df114c300ffaa15445ccbf0040f9cc3c5b56e89fd19665ccc",
-      "line_count": 1314
+      "sha256": "c2c112d25a005800549df4ed4e5d32b6e8a2c05c4e9045557b074e5740d170d9",
+      "line_count": 1350
     }
   ],
   "dependency_resolution": {

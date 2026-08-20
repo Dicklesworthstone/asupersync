@@ -40,6 +40,7 @@
     "arq-quic-bounded-memory-loopback",
     "arq-quic-wire-conformance",
     "arq-quic-fleet-benchmark",
+    "downstream-consumer-v044-cancel-compat-run",
     "downstream-consumer-default-run",
     "downstream-consumer-default-kafka-test",
     "downstream-consumer-metrics-run",

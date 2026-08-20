@@ -61,20 +61,20 @@ The result is:
 | `benches` | 1 | 1 |
 | `examples` | 1 | 4 |
 | `fuzz` | 13 | 31 |
-| `src` | 175 | 426 |
-| `tests` | 50 | 90 |
-| **Total** | **240** | **552** |
+| `src` | 180 | 430 |
+| `tests` | 52 | 95 |
+| **Total** | **247** | **561** |
 
 The SHA-256 receipt is
-`aaeb074cb4c2cac65a46c01d04b78f4585c81da2ce8aad0be1970bfdac6ad224`.
+`738384a996ed1d1a5064b134890aea1aaf9d1d278ebd6aa263f91ebc60120b20`.
 The focused contract recomputes the receipt and the nineteen workload buckets
 from the clean overlay, so a new, removed, or changed occurrence fails closed.
 
 ## Primitive and API surface
 
-There are 178 direct import statements. The dominant forms are 127 standalone
+There are 183 direct import statements. The dominant forms are 132 standalone
 `Mutex` imports, 30 standalone `RwLock` imports, seven combined
-`{Mutex, RwLock}` imports, four `{Mutex, MutexGuard}` imports, three
+`{Mutex, RwLock}` imports, three `{Mutex, MutexGuard}` imports, three
 `{Condvar, Mutex}` imports, and aliases named `ParkingMutex` and `PoolMutex`.
 
 The inventory covers:

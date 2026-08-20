@@ -38,7 +38,7 @@ const PATH_TOKEN: &str = concat!("hex", "::");
 const SOURCE_PIN_PATHS_SHA256: &str =
     "8ff7aa63a3c44e801fc536f894aff787d209a9032de2ac69d163bcca1f6cb156";
 const CLAIMS_PROJECTION_SHA256: &str =
-    "14c2c7f6cd9b084f8b857bed97400453d5216bac22e5a1237c29ee9daf4d3e46";
+    "f5ffe7318ca737e630e5a65bc3e44c1d665f33da545f4585df47801b3ee5f8b2";
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -531,14 +531,14 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
     let census = object(inventory, "occurrence_census");
     for (key, expected) in [
         ("files", 104),
-        ("lexical_tokens", 253),
-        ("code_or_type_references", 250),
+        ("lexical_tokens", 254),
+        ("code_or_type_references", 251),
         ("comment_tokens", 3),
         ("cfg_any_disabled_reference_count", 4),
         ("cfg_test_references_embedded_in_production_files", 25),
         ("test_or_test_internals_module_references", 2),
         ("test_or_conformance_group_references", 124),
-        ("active_production_references", 95),
+        ("active_production_references", 96),
         ("unknown_occurrences", 0),
     ] {
         if census.get(key).and_then(Value::as_u64) != Some(expected) {
@@ -553,7 +553,7 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
             ("FromHexError".to_owned(), 4),
             ("decode".to_owned(), 36),
             ("decode_to_slice".to_owned(), 11),
-            ("encode".to_owned(), 201),
+            ("encode".to_owned(), 202),
             ("tests".to_owned(), 1),
         ])
         || symbol_map(census_value, "code_or_type_symbols")
@@ -561,7 +561,7 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
                 ("FromHexError".to_owned(), 4),
                 ("decode".to_owned(), 34),
                 ("decode_to_slice".to_owned(), 11),
-                ("encode".to_owned(), 201),
+                ("encode".to_owned(), 202),
             ])
     {
         return Err("occurrence symbol summaries drifted".to_owned());
@@ -574,7 +574,7 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
         "occurrence roots",
     )?;
     let expected_root_counts = BTreeMap::from([
-        ("src", (51, 182)),
+        ("src", (51, 183)),
         ("tests", (52, 69)),
         ("conformance", (1, 2)),
         ("examples", (0, 0)),
@@ -1105,14 +1105,14 @@ fn complete_direct_path_census_matches_source() {
         }
     }
     assert_eq!(actual.len(), 104);
-    assert_eq!(lexical_symbols.values().sum::<u64>(), 253);
+    assert_eq!(lexical_symbols.values().sum::<u64>(), 254);
     assert_eq!(
         lexical_symbols,
         BTreeMap::from([
             ("FromHexError".to_owned(), 4),
             ("decode".to_owned(), 36),
             ("decode_to_slice".to_owned(), 11),
-            ("encode".to_owned(), 201),
+            ("encode".to_owned(), 202),
             ("tests".to_owned(), 1),
         ])
     );
@@ -1127,7 +1127,7 @@ fn complete_direct_path_census_matches_source() {
                 totals
             },
         );
-    assert_eq!(code_symbols.values().sum::<u64>(), 250);
+    assert_eq!(code_symbols.values().sum::<u64>(), 251);
     assert_eq!(code_symbols.get("decode"), Some(&34));
 }
 
@@ -1179,7 +1179,7 @@ fn reservation_groups_are_disjoint_complete_and_digest_pinned() {
         );
     }
     assert_eq!(counts.values().map(|row| row.0).sum::<u64>(), 104);
-    assert_eq!(counts.values().map(|row| row.1).sum::<u64>(), 253);
+    assert_eq!(counts.values().map(|row| row.1).sum::<u64>(), 254);
 }
 
 #[test]
@@ -1292,7 +1292,7 @@ fn comments_and_disabled_rows_remain_separate_from_active_behavior() {
         "cfg(any(test, feature = test-internals))"
     );
     assert_eq!(symbol_total(&symbol_map(logging, "symbols")), 2);
-    assert_eq!(250 - test_conformance_total - 25 - 2 - 4, 95);
+    assert_eq!(251 - test_conformance_total - 25 - 2 - 4, 96);
 }
 
 #[test]

@@ -10,25 +10,21 @@
 //!   (a) **Per-request timeout is configurable** via
 //!       `OtlpHttpExporter::with_timeout(timeout: Duration)`.
 //!       Default is 10 seconds in `OtlpHttpExporter::new`.
-//!       The timeout bound is applied PER request_once attempt,
-//!       not per overall batch — so a batch that retries N
-//!       times has a worst-case wall-clock of
-//!       `(timeout + retry_delay) × max_retries`.
+//!       The timeout bound is applied per request attempt. Retryable HTTP
+//!       responses can still consume the configured retry delays, but a request
+//!       that reaches this timeout exits immediately because expiry is
+//!       classified as non-retryable.
 //!
-//!   (b) **`crate::time::timeout` wraps the HTTP request**
-//!       inside `send_request_with_compression`. The wrapped expression returns a
-//!       `TimeoutFuture<F>` (src/time/timeout_future.rs:47-61)
-//!       which holds the inner future as a `#[pin]`-projected
-//!       field. When `TimeoutFuture` resolves to `Err(Elapsed)`,
-//!       the `.await` consumes the wrapper; dropping the
-//!       wrapper drops the inner future, which cancels the
-//!       in-flight HTTP request and releases the cloned
-//!       `body.to_vec()` captured by the async block.
+//!   (b) **`drive_otlp_request_with_timeout` owns and pins the HTTP request**
+//!       inside `send_request_with_compression`. The helper uses the caller's
+//!       `Cx` timer driver, polls the request before its deadline sleeper, and
+//!       keeps both futures on its own stack. When it returns on timeout or
+//!       cancellation, dropping that stack frame drops the pinned HTTP request
+//!       and releases the cloned `body.to_vec()` captured by the async block.
 //!
 //!   (c) **Timeout maps to `OtlpError::non_retryable`**
 //!       Timeout errors map to:
-//!       `.map_err(|_| OtlpError::non_retryable("OTLP request
-//!         timeout"))?`
+//!       `Err(OtlpError::non_retryable("OTLP request timeout"))`
 //!       This is NOT a retryable error class. The retry loop's
 //!       `Err(e)` (non-retryable) arm in `send_otlp_protobuf`
 //!       returns IMMEDIATELY — no further retry attempts on
@@ -44,27 +40,22 @@
 //!       So the failed-on-timeout batch has nowhere to go
 //!       except out-of-scope.
 //!
-//!   (e) **`TimeoutFuture::poll` semantics** (timeout_future.rs:
-//!       252-283): on timeout, `*this.timed_out = true` AND
-//!       `*this.completed = true` are set, then `Err(Elapsed)`
-//!       is returned. A second poll on the same TimeoutFuture
-//!       returns `Err(Elapsed)` again (fail-closed). The inner
-//!       future is NOT polled after timeout — preventing a
-//!       situation where a slow inner future continues to
-//!       allocate while a parent caller has already moved on.
+//!   (e) **The helper is cancellation-aware and boundary-correct**: it refreshes
+//!       a cancellation waker, checks `cx.checkpoint()` on every poll, polls the
+//!       request before the sleeper so completed work wins at the exact deadline,
+//!       and clears the registered waker before returning.
 //!
 //! Verdict: **SOUND**. The in-flight batch is dropped on
 //! timeout via three converging mechanisms:
-//!   1. `TimeoutFuture` cancellation: drop semantics propagate
-//!      to the inner HTTP request future.
+//!   1. Stack-owned future cancellation: returning from the `Cx`-driven helper
+//!      drops the pinned inner HTTP request future.
 //!   2. Non-retryable error class: timeout does not loop back
 //!      into the retry path that would re-allocate.
 //!   3. No queue / no buffer / no background dispatcher: the
 //!      timed-out batch has no pending state to live in.
 //!
 //! A regression that:
-//!   - replaced `crate::time::timeout(...)` with a sleep + race
-//!     pattern that didn't drop the inner future,
+//!   - detached the request from the stack-owned `Cx`-driven timeout helper,
 //!   - changed the timeout error mapping from
 //!     `OtlpError::non_retryable` to `OtlpError::Retryable`
 //!     (would loop and re-allocate the body),
@@ -80,11 +71,6 @@ use std::path::PathBuf;
 fn read_otel_source() -> String {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/observability/otel.rs");
     std::fs::read_to_string(&path).expect("read otel.rs")
-}
-
-fn read_timeout_future_source() -> String {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/time/timeout_future.rs");
-    std::fs::read_to_string(&path).expect("read timeout_future.rs")
 }
 
 #[test]
@@ -114,12 +100,11 @@ fn otlp_exporter_has_timeout_field_with_duration_type() {
 }
 
 #[test]
-fn send_request_with_compression_wraps_request_in_time_timeout() {
-    // Pin (b) AUDIT-CRITICAL: the HTTP request is wrapped in
-    // `crate::time::timeout(...)`. A regression that removed
-    // the wrapper would let the request hang indefinitely if
-    // the server never responded — the in-flight body would
-    // be held forever in the inner future's state.
+fn send_request_with_compression_uses_cx_driven_timeout() {
+    // Pin (b) AUDIT-CRITICAL: the HTTP request is owned by the
+    // caller-capability-aware timeout helper. A regression that removed this
+    // wrapper would let the request hang indefinitely and would also put
+    // deterministic runtimes on the wrong clock.
     let source = read_otel_source();
 
     let fn_marker = "async fn send_request_with_compression(";
@@ -132,14 +117,11 @@ fn send_request_with_compression_wraps_request_in_time_timeout() {
     let body = &source[start..start + body_end];
 
     assert!(
-        body.contains("crate::time::timeout("),
-        "REGRESSION: send_request_with_compression no longer wraps the HTTP \
-         request in `crate::time::timeout(...)`. Without the \
-         wrapper, a slow / unresponsive OTLP collector could \
-         hold the in-flight batch in the request future's \
-         state forever. The `crate::time::timeout` provides \
-         the drop-on-expiry semantics that release the \
-         memory.\n\nfn body:\n{body}",
+        body.contains("drive_otlp_request_with_timeout(cx, self.timeout, async {"),
+        "REGRESSION: send_request_with_compression no longer routes the HTTP \
+         request through `drive_otlp_request_with_timeout(cx, self.timeout, ...)`. \
+         The helper is the cancellation, timer-capability, and drop-on-expiry \
+         boundary for the in-flight request body.\n\nfn body:\n{body}",
     );
 
     // The wrapper must use `self.timeout` (the configured
@@ -153,31 +135,30 @@ fn send_request_with_compression_wraps_request_in_time_timeout() {
 }
 
 #[test]
-fn timeout_error_maps_to_non_retryable() {
-    // Pin (c) AUDIT-CRITICAL: the timeout's `Err(Elapsed)` is
-    // mapped to `OtlpError::non_retryable`. If a regression
+fn timeout_helper_returns_non_retryable_timeout() {
+    // Pin (c) AUDIT-CRITICAL: deadline expiry is returned as
+    // `OtlpError::non_retryable`. If a regression
     // changed this to Retryable, the retry loop would re-enter
     // and re-allocate body.to_vec() on every retry — turning
     // a timeout from a single-batch drop into an N-times
     // memory amplifier.
     let source = read_otel_source();
 
-    let fn_marker = "async fn send_request_with_compression(";
+    let fn_marker = "async fn drive_otlp_request_with_timeout<F>(";
     let start = source
         .find(fn_marker)
-        .expect("send_request_with_compression fn");
+        .expect("drive_otlp_request_with_timeout fn");
     let body_end = source[start..]
-        .find("\n    }\n")
-        .expect("send_request_with_compression close");
+        .find("\n}\n")
+        .expect("drive_otlp_request_with_timeout close");
     let body = &source[start..start + body_end];
 
     // The timeout map_err must produce non_retryable, NOT
     // retryable. Look for the canonical pattern.
     assert!(
-        body.contains(".map_err(|_| OtlpError::non_retryable(\"OTLP request timeout\"))"),
-        "REGRESSION: timeout error mapping is no longer \
-         `.map_err(|_| OtlpError::non_retryable(\"OTLP request \
-         timeout\"))`. If the timeout now maps to a Retryable \
+        body.contains("Poll::Ready(Err(OtlpError::non_retryable(\"OTLP request timeout\")))"),
+        "REGRESSION: the Cx-driven timeout helper no longer returns the canonical \
+         non-retryable OTLP timeout. If the timeout now maps to a Retryable \
          error, the retry loop would re-enter for each timeout \
          — turning each timeout into max_retries × \
          (timeout + retry_delay) of held-batch memory.\n\n\
@@ -186,8 +167,7 @@ fn timeout_error_maps_to_non_retryable() {
 
     // Forbid the retryable-on-timeout regression explicitly.
     assert!(
-        !body.contains(".map_err(|_| OtlpError::retryable")
-            && !body.contains(".map_err(|_| OtlpError::Retryable"),
+        !body.contains("OtlpError::retryable") && !body.contains("OtlpError::Retryable"),
         "REGRESSION: timeout now maps to a retryable error \
          class. Retrying on timeout means re-allocating \
          body.to_vec() on every retry attempt; combined with \
@@ -198,75 +178,44 @@ fn timeout_error_maps_to_non_retryable() {
 }
 
 #[test]
-fn timeout_future_holds_inner_future_as_pinned_field() {
-    // Pin (b)+(e): TimeoutFuture's inner future is a
-    // `#[pin]`-projected field, so dropping the wrapper drops
-    // the inner. A regression that boxed the inner into an
-    // `Arc<Mutex<F>>` or shared it with anything else would
-    // break the cancel-on-drop invariant — the inner future
-    // would outlive the timeout and continue holding the body.
-    let source = read_timeout_future_source();
-
-    let struct_marker = "pub struct TimeoutFuture<F> {";
-    let start = source.find(struct_marker).expect("TimeoutFuture struct");
-    let end_rel = source[start..].find("\n}\n").expect("struct close");
-    let body = &source[start..start + end_rel];
+fn otlp_timeout_helper_pins_the_request_on_its_stack() {
+    let source = read_otel_source();
+    let start = source
+        .find("async fn drive_otlp_request_with_timeout<F>(")
+        .expect("drive_otlp_request_with_timeout fn");
+    let end = source[start..]
+        .find("\n}\n")
+        .expect("drive_otlp_request_with_timeout close");
+    let body = &source[start..start + end];
 
     assert!(
-        body.contains("#[pin]\n    future: F,"),
-        "REGRESSION: TimeoutFuture's `future: F` field is no \
-         longer marked `#[pin]`. Without the pin projection, \
-         the inner future cannot be polled in place AND \
-         dropping the wrapper may not drop the inner — \
-         re-opening the hold-forever failure mode.\n\n\
-         struct body:\n{body}",
+        body.contains("let mut future = pin!(future);")
+            && body.contains("let mut sleeper =")
+            && body.contains("future.as_mut().poll(task_cx)"),
+        "REGRESSION: the OTLP timeout helper must own and pin both the request \
+         future and deadline sleeper so returning drops the in-flight request.\n\n\
+         helper body:\n{body}",
     );
-
-    // Forbid Arc / Box wrapping that would defeat drop
-    // propagation.
-    let suspect_field_wraps = ["future: Arc<", "future: Rc<", "future: Box<dyn Future"];
-    for pat in &suspect_field_wraps {
-        assert!(
-            !body.contains(pat),
-            "REGRESSION: TimeoutFuture's future field is now \
-             `{pat}`. This is suspicious — Arc/Rc-wrapped \
-             futures aren't dropped when the wrapper is \
-             dropped if anyone else holds a clone, breaking \
-             the cancel-on-timeout semantics. Verify the new \
-             design and update this audit test.",
-        );
-    }
 }
 
 #[test]
-fn timeout_future_returns_elapsed_and_marks_completed() {
-    // Pin (e): on timeout, TimeoutFuture marks itself completed
-    // AND timed_out, then returns Err(Elapsed). A regression
-    // that forgot to set `completed` would let a re-poll
-    // re-enter the inner future, defeating the drop-on-timeout
-    // intent.
-    let source = read_timeout_future_source();
-
-    let fn_marker = "fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {";
-    let start = source.find(fn_marker).expect("TimeoutFuture::poll");
-    let body_end = source[start..].find("\n    }\n").expect("poll body close");
-    let body = &source[start..start + body_end];
+fn otlp_timeout_helper_checks_cancellation_and_clears_its_waker() {
+    let source = read_otel_source();
+    let start = source
+        .find("async fn drive_otlp_request_with_timeout<F>(")
+        .expect("drive_otlp_request_with_timeout fn");
+    let end = source[start..]
+        .find("\n}\n")
+        .expect("drive_otlp_request_with_timeout close");
+    let body = &source[start..start + end];
 
     assert!(
-        body.contains("*this.completed = true;") && body.contains("*this.timed_out = true;"),
-        "REGRESSION: the timeout-elapsed path no longer sets \
-         BOTH completed=true AND timed_out=true. Without \
-         these, a re-poll would re-enter the inner future, \
-         which has already been logically cancelled — \
-         could lead to unpinned reference issues or \
-         re-allocation of dropped state.\n\nfn body:\n{body}",
-    );
-
-    assert!(
-        body.contains("Err(Elapsed::new("),
-        "REGRESSION: timeout no longer returns Err(Elapsed). \
-         Callers depend on this Err to drop the wrapper and \
-         release the inner future.",
+        body.contains("cancel_waker.refresh(task_cx.waker());")
+            && body.matches("cx.checkpoint().is_err()").count() >= 2
+            && body.contains("cancel_waker.clear();"),
+        "REGRESSION: OTLP timeout/cancellation must register a wake path, check \
+         cancellation before work and at the deadline boundary, and unlink the \
+         waker before returning.\n\nhelper body:\n{body}",
     );
 }
 
@@ -335,21 +284,22 @@ fn retry_loop_returns_immediately_on_non_retryable_timeout() {
 }
 
 #[test]
-fn timeout_future_doc_promises_cancel_safety_on_drop() {
-    // Pin (b): the TimeoutFuture doc explicitly promises
-    // "dropping it is safe" — the contract callers rely on.
-    // A regression that removed this guarantee suggests a
-    // semantic change worth re-auditing.
-    let source = read_timeout_future_source();
+fn otlp_timeout_helper_uses_the_cx_timer_driver() {
+    let source = read_otel_source();
+    let start = source
+        .find("async fn drive_otlp_request_with_timeout<F>(")
+        .expect("drive_otlp_request_with_timeout fn");
+    let end = source[start..]
+        .find("\n}\n")
+        .expect("drive_otlp_request_with_timeout close");
+    let body = &source[start..start + end];
 
     assert!(
-        source.contains("dropping it is safe"),
-        "REGRESSION: TimeoutFuture's cancel-safety doc \
-         (\"dropping it is safe\") is gone. If the drop \
-         semantics changed, the OTLP exporter's reliance on \
-         drop-on-timeout to release the in-flight batch may \
-         no longer hold. Audit the new semantics and update \
-         this test.",
+        body.contains("let timer_driver = cx.timer_driver();")
+            && body.contains("crate::time::Sleep::with_timer_driver(deadline, timer_driver)"),
+        "REGRESSION: the OTLP request timeout must use the caller's timer \
+         capability when present; an ambient clock would diverge under \
+         deterministic runtimes.\n\nhelper body:\n{body}",
     );
 }
 

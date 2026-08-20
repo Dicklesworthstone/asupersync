@@ -1,8 +1,8 @@
 # Asupersync Proof Lane Dashboard - [TIMESTAMP]
 
 ## Summary
-Total lanes: 61 | Green: 14 | Yellow: 35 | Red: 0 | Unknown: 12
-Total guarantees: 61 | Green: 14 | Red: 0
+Total lanes: 62 | Green: 14 | Yellow: 36 | Red: 0 | Unknown: 12
+Total guarantees: 62 | Green: 14 | Red: 0
 
 ## Production Graph Proofs
 ✅ default-production-tokio-tree (dependency_graph)
@@ -61,6 +61,8 @@ Total guarantees: 61 | Green: 14 | Red: 0
    Runs the external byte-level conformance suite for the ATP-over-QUIC RaptorQ sym...
 🟡 arq-quic-fleet-benchmark (test_frontier)
    Canonical G2 fleet benchmark command for RaptorQ-over-QUIC versus tuned rsync ov...
+🟡 downstream-consumer-v044-cancel-compat-run (test_frontier)
+   Runs an external consumer against the exact published =0.4.4 crate. It proves an...
 🟡 downstream-consumer-default-run (test_frontier)
    Runs the downstream fixture as an external crate against default asupersync feat...
 🟡 downstream-consumer-default-kafka-test (test_frontier)

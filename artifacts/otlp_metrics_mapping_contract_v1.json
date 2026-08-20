@@ -892,7 +892,7 @@
     },
     {
       "path": "tests/protobuf_owned_otlp_schema_contract.rs",
-      "sha256": "30db4e4851b6f342396e8e1b5ce6c5f1d591bf9225bf8bd6eadd40c8d82c6ff3",
+      "sha256": "839ea47e26ae4e9c9e85c60453ec5dbb778548ba4822bb0e365c8f5b932331d6",
       "line_count": 2193,
       "anchors": ["The JSON-shaped fixture is not protobuf wire evidence", "Generated request builders are test/fuzz gated"]
     },
@@ -904,8 +904,8 @@
     },
     {
       "path": "artifacts/otlp_capability_inventory_v1.json",
-      "sha256": "3067f54264e32f7312cbeeb1bc108b632e07da8ae6a01efbb7bdb71b94921179",
-      "line_count": 985,
+      "sha256": "1703c7c62da34a9f18135ec4d24d3858f7a62b2956bbc83e1693dac681ba3c2c",
+      "line_count": 1046,
       "anchors": ["SHIPPED_VIA_DEPENDENCY", "OTLP-GAP-01", "asupersync-5z2scg.2.3"]
     },
     {

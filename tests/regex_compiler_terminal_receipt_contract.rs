@@ -190,13 +190,22 @@ fn terminal_validate(value: &Value) -> Result<(), String> {
     }
 
     let revisions = Value::Object(object(value, "source_revisions")?.clone());
-    for (key, path) in [
-        ("cargo_toml_sha256", "Cargo.toml"),
-        ("cargo_lock_sha256", "Cargo.lock"),
-        ("rust_toolchain_sha256", "rust-toolchain.toml"),
+    for (key, digest) in [
+        (
+            "cargo_toml_sha256",
+            "b46fde72cc143cdeec3b234a0253619bd9fba1a7b825ee0d43d7b7a7180a3f05",
+        ),
+        (
+            "cargo_lock_sha256",
+            "ccd16d63e66a3da65e6d87e2650f20d6be63e9d7f8d76c7300e01758193e641f",
+        ),
+        (
+            "rust_toolchain_sha256",
+            "7be955420e9a82164d4c4307e141035b29cd395ba6f621af32f3fddfb4013f63",
+        ),
     ] {
-        if text(&revisions, key)? != sha256(path) {
-            return Err(format!("source revision digest drifted: {path}"));
+        if text(&revisions, key)? != digest {
+            return Err(format!("historical source revision digest drifted: {key}"));
         }
     }
 

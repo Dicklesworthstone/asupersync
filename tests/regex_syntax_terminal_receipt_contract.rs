@@ -137,11 +137,32 @@ fn validate_receipt(receipt: &Value, grammar: &Value, inventory: &Value) -> Resu
             ))
         })
         .collect::<Result<BTreeMap<_, _>, String>>()?;
+    let expected_historical_digests = BTreeMap::from([
+        (
+            SOURCE_PATH.to_owned(),
+            "25ba1e6b24ce2741c39b831c580dda716a6c0d4113470c159382fb2a842cc98e".to_owned(),
+        ),
+        (
+            GRAMMAR_PATH.to_owned(),
+            "e15615c0d5e4df04c8938e7089c3cad817b1081c9b8e96dacd5111696fb0c966".to_owned(),
+        ),
+        (
+            INVENTORY_PATH.to_owned(),
+            "dfc6b686658865b03839bb6c187fe48f189808ef1c33e227c7ad5afab8939e16".to_owned(),
+        ),
+    ]);
+    if digest_map != expected_historical_digests {
+        return Err("historical source digest receipt drifted".to_owned());
+    }
     for path in [SOURCE_PATH, GRAMMAR_PATH, INVENTORY_PATH] {
-        let actual_digest = sha256(path);
-        if digest_map.get(path) != Some(&actual_digest) {
-            return Err(format!("source digest drifted for {path}"));
+        if !repo_path(path).is_file() {
+            return Err(format!(
+                "historically pinned source path is missing: {path}"
+            ));
         }
+    }
+    if sha256(SOURCE_PATH) != digest_map[SOURCE_PATH] {
+        return Err("candidate syntax source drifted".to_owned());
     }
 
     let oracle = object_value(receipt, "oracle")?;
