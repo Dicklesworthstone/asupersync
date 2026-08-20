@@ -599,6 +599,153 @@ fn phase5_matrix_covers_every_race_boundary_without_inventing_cross_engine_suppo
 }
 
 #[test]
+fn phase6_value_row_matrix_executes_common_values_and_records_metadata_limit() {
+    let harness = parse_json(HARNESS);
+    let phase6 = &harness["phase6"];
+    assert_eq!(phase6["bead_id"], "asupersync-ym2wtv.2.6");
+    assert_eq!(
+        phase6["status"],
+        "PASS_BOUNDED_COMMON_VALUES_WITH_EXPLICIT_ROW_METADATA_UNSUPPORTED"
+    );
+    assert_eq!(phase6["consumer_source"]["sha256"], sha256(CONSUMER_SOURCE));
+    assert_eq!(
+        phase6["consumer_source"]["line_count"],
+        CONSUMER_SOURCE.lines().count()
+    );
+
+    let expected_case_ids = [
+        "SQLITE-PARITY-P6-NULL-001",
+        "SQLITE-PARITY-P6-I64-MIN-002",
+        "SQLITE-PARITY-P6-I64-MAX-003",
+        "SQLITE-PARITY-P6-I64-BEYOND-EXACT-F64-004",
+        "SQLITE-PARITY-P6-NEGATIVE-ZERO-005",
+        "SQLITE-PARITY-P6-POSITIVE-INFINITY-006",
+        "SQLITE-PARITY-P6-NEGATIVE-INFINITY-007",
+        "SQLITE-PARITY-P6-NAN-TO-NULL-008",
+        "SQLITE-PARITY-P6-EMPTY-TEXT-009",
+        "SQLITE-PARITY-P6-UNICODE-NUL-TEXT-010",
+        "SQLITE-PARITY-P6-EMPTY-BLOB-011",
+        "SQLITE-PARITY-P6-BINARY-BLOB-012",
+        "SQLITE-PARITY-P6-LARGE-TEXT-013",
+        "SQLITE-PARITY-P6-LARGE-BLOB-014",
+    ];
+    let matrix = &phase6["neutral_matrix"];
+    assert_eq!(matrix["matrix_id"], "sqlite-neutral-value-row-parity-v1");
+    assert_eq!(matrix["profile_max_value_bytes"], 1024 * 1024);
+    assert_eq!(matrix["compared_values"], expected_case_ids.len());
+    assert_eq!(
+        matrix["case_ids"]
+            .as_array()
+            .expect("phase6 case IDs")
+            .iter()
+            .map(|value| value.as_str().expect("phase6 case ID"))
+            .collect::<Vec<_>>(),
+        expected_case_ids
+    );
+    for case_id in expected_case_ids {
+        assert!(
+            CONSUMER_SOURCE.contains(case_id),
+            "missing executable P6 case {case_id}"
+        );
+    }
+
+    let coverage = phase6["coverage_matrix"]
+        .as_array()
+        .expect("phase6 coverage matrix");
+    assert_eq!(coverage.len(), 6);
+    assert!(
+        coverage
+            .iter()
+            .all(|row| row["asupersync_status"] == "PASS")
+    );
+    assert_eq!(
+        coverage[4]["boundary"],
+        "ordered_duplicate_preserving_column_metadata_and_name_lookup"
+    );
+    assert_eq!(
+        coverage[4]["frankensqlite_status"],
+        "UNSUPPORTED_NO_PUBLIC_ASYNC_ROW_METADATA"
+    );
+    assert!(
+        coverage[4]["frankensqlite_reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("does not infer aliases"))
+    );
+
+    let execution = &phase6["execution"];
+    assert_eq!(execution["status"], "PASS");
+    assert_eq!(execution["rch_job"], "j-29984462414544922");
+    assert_eq!(execution["worker"], "vmi1153651");
+    assert_eq!(execution["remote_exit_code"], 0);
+    assert_eq!(
+        execution["overlay_paths"],
+        serde_json::json!(["tests/fixtures/sqlite-parity-consumer/src/main.rs"])
+    );
+    let evidence = &execution["evidence_summary"];
+    assert_eq!(evidence["compared_values"], expected_case_ids.len());
+    assert_eq!(evidence["mismatches"].as_array().map(Vec::len), Some(0));
+    assert_eq!(evidence["asupersync_owned_after_close"], true);
+    assert_eq!(evidence["frankensqlite_owned_after_close"], true);
+    assert_eq!(evidence["asupersync_runtime_quiescent"], true);
+    assert_eq!(evidence["frankensqlite_runtime_quiescent"], true);
+    assert_eq!(evidence["asupersync_type_mismatch_class"], "type_mismatch");
+    assert_eq!(
+        evidence["frankensqlite_type_mismatch_class"],
+        "type_mismatch"
+    );
+    assert_eq!(
+        evidence["asupersync_out_of_bounds_class"],
+        "index_out_of_bounds"
+    );
+    assert_eq!(
+        evidence["frankensqlite_out_of_bounds_class"],
+        "index_out_of_bounds"
+    );
+    assert_eq!(evidence["large_text"]["byte_len"], 1024 * 1024);
+    assert_eq!(evidence["large_text"]["fnv1a64"], "73833fad05222325");
+    assert_eq!(evidence["large_blob"]["byte_len"], 1024 * 1024);
+    assert_eq!(evidence["large_blob"]["fnv1a64"], "1f5e0df9bc822325");
+    assert_eq!(
+        evidence["asupersync_row_metadata"]["ordered_names"],
+        serde_json::json!(["dup", "Other", "dup", "Tail"])
+    );
+    assert_eq!(
+        evidence["asupersync_row_metadata"]["legacy_sorted_unique_names"],
+        serde_json::json!(["Other", "Tail", "dup"])
+    );
+    assert_eq!(
+        evidence["asupersync_row_metadata"]["first_ascii_case_insensitive_dup_index"],
+        0
+    );
+    assert_eq!(
+        evidence["asupersync_row_metadata"]["legacy_exact_dup_value"],
+        3
+    );
+    assert_eq!(
+        evidence["asupersync_row_metadata"]["missing_name_class"],
+        "column_not_found"
+    );
+    assert_eq!(
+        evidence["frankensqlite_row_metadata_status"],
+        "UNSUPPORTED_NO_PUBLIC_ASYNC_ROW_METADATA"
+    );
+
+    for marker in [
+        "fn run_asupersync_value_matrix(",
+        "fn run_frankensqlite_value_matrix(",
+        "f64::NAN",
+        "column_names_in_order()",
+        "require_runtime_quiescence(&blocking, \"asupersync-p6\")",
+        "require_compat_runtime_quiescence(&blocking, \"frankensqlite-p6\")",
+    ] {
+        assert!(
+            CONSUMER_SOURCE.contains(marker),
+            "missing executable P6 consumer marker {marker}"
+        );
+    }
+}
+
+#[test]
 fn phase7_checked_sql_policy_is_machine_readable_reused_and_adversarial() {
     let harness = parse_json(HARNESS);
     let phase7 = &harness["phase7"];
@@ -820,6 +967,9 @@ fn operator_doc_preserves_reproduction_and_no_claim_boundaries() {
         "native cancellation evidence",
         "SQLite P5 cancellation matrix",
         "unsupported cells stay unsupported",
+        "SQLite P6 value and row matrix",
+        "1 MiB",
+        "UNSUPPORTED_NO_PUBLIC_ASYNC_ROW_METADATA",
         "SQLite P7 checked-SQL security parity",
         "validate_checked_sql_statement",
         "4,096 bounded variants",

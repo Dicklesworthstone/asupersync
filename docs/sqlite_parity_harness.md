@@ -61,11 +61,11 @@ The six scenarios are:
   FrankenSQLite context.
 - `SQLITE-PARITY-P2-POOL-CANCEL-005`: a consumer-owned admission semaphore is
   saturated, the second checkout is proven parked, the live connection closes,
-  the waiter is aborted and drained as the engine's public cancellation form,
-  and the sole permit is restored exactly once. The current 0.4.8 path requires the
-  graceful inner `AcquireError::Cancelled`; the pinned 0.3.10 compatibility
-  path may report the legacy outer task-cancelled join, which is normalized
-  only after the waiter and permit cleanup checks pass.
+  an isolated cancellation-only `Cx` drains the waiter through the engine's
+  public `AcquireError::Cancelled` result, and the sole permit is restored
+  exactly once. The harness polls the acquire future directly to `Pending`
+  before closing the connection, so the parked-state witness does not depend
+  on executor scheduling or a bounded yield loop.
 - `SQLITE-PARITY-P2-URI-UNSUPPORTED-006`: the harness records that neither P2
   adapter exposes a common SQLite URI-filename contract. It does not pretend a
   `Path` or `String` filename API carries URI flag semantics.
@@ -186,6 +186,38 @@ busy, or active blocking work. Together, the layers prove the current
 Asupersync repair and identify the exact pinned-FrankenSQLite gaps. They do not
 claim full cross-engine interrupt/timeout parity or authorize dependency
 cutover.
+
+## SQLite P6 value and row matrix
+
+`asupersync-ym2wtv.2.6` extends the same neutral consumer with fourteen exact
+value cases executed by both pinned engines. The common matrix covers NULL;
+signed 64-bit extrema; the integer `2^53 + 1`, which is beyond binary64's exact
+integer range; negative zero; positive and negative infinity; SQLite's shared
+NaN-to-NULL behavior;
+empty text and blobs; Unicode text containing an embedded NUL; binary bytes;
+and a bounded 1 MiB text/blob profile. Integers and IEEE-754 bits are compared
+exactly. Text and blob bytes are compared directly; their lengths and FNV-1a
+fingerprints are compact diagnostics, not the equality authority.
+
+Both adapters retain the owned result row until after explicit connection
+close, then validate it and shut down their matching runtimes with no pending,
+busy, or active blocking work. Wrong-type and out-of-bounds indexed reads are
+also classified on both engines. RCH job `j-29984462414544922` ran the locked
+consumer at exact base `285174b6814f22782c5aeb92b5b7d310a3ad3b56` plus only
+the consumer-source overlay on worker `vmi1153651`; it returned exit 0 with all
+fourteen normalized values equal and no mismatches.
+
+Row metadata remains an intentional, visible difference. Asupersync proves
+ordered duplicate-preserving names, its legacy sorted/unique name view,
+first-match ASCII-case-insensitive indexing, and its legacy last-wins exact-name
+lookup. The pinned FrankenSQLite async `Row` exposes owned values by index but
+no public column-name metadata or name lookup, so that cell is
+`UNSUPPORTED_NO_PUBLIC_ASYNC_ROW_METADATA`. The harness does not infer aliases
+from SQL text or call the missing observation green.
+
+The 1 MiB cases are a campaign profile, not a claimed hard maximum. This phase
+does not authorize dependency cutover, public API removal, or complete SQLite
+engine parity.
 
 ## SQLite P7 checked-SQL security parity
 

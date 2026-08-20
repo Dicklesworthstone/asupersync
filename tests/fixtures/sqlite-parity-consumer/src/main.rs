@@ -6,8 +6,11 @@
 //! workspace so FrankenSQLite never enters asupersync's dependency graph.
 
 use std::collections::BTreeSet;
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll, Waker};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use asupersync::database::sqlite::validate_checked_sql_statement;
@@ -15,24 +18,43 @@ use asupersync::database::transaction::SqliteSavepoint;
 use asupersync::database::{
     SqliteConnection, SqliteError, SqliteTransaction, SqliteValue as AsupersyncValue,
 };
-use asupersync::runtime::{BlockingPoolHandle, RuntimeBuilder, yield_now};
+use asupersync::runtime::{BlockingPoolHandle, RuntimeBuilder};
 use asupersync::sync::{AcquireError, OwnedSemaphorePermit, Semaphore};
 use asupersync::{Cx, Outcome};
 use asupersync_compat::Cx as CompatCx;
 use asupersync_compat::runtime::{
     BlockingPoolHandle as CompatBlockingPoolHandle, RuntimeBuilder as CompatRuntimeBuilder,
-    yield_now as compat_yield_now,
 };
 use asupersync_compat::sync::{
     AcquireError as CompatAcquireError, OwnedSemaphorePermit as CompatOwnedSemaphorePermit,
     Semaphore as CompatSemaphore,
 };
-use fsqlite::{AsyncConnection as FrankenConnection, FrankenError, SqliteValue as FrankenValue};
+use fsqlite::{
+    AsyncConnection as FrankenConnection, FrankenError, SqliteValue as FrankenValue, compat::RowExt,
+};
 use fsqlite_types::cx::Cx as FrankenCx;
 use serde::{Deserialize, Serialize};
 
 const VECTOR_JSON: &str = include_str!("../../../../artifacts/sqlite_conformance_vectors_v1.json");
 const FSQLITE_REVISION: &str = "92f9e9833f859ebcbe27e9fef16d9cad4372bbd7";
+const P6_PROFILE_MAX_VALUE_BYTES: usize = 1024 * 1024;
+const P6_VALUE_QUERY: &str = "SELECT ?1 AS null_value, ?2 AS integer_min, ?3 AS integer_max, ?4 AS integer_beyond_exact_f64, ?5 AS negative_zero, ?6 AS positive_infinity, ?7 AS negative_infinity, ?8 AS nan_value, ?9 AS empty_text, ?10 AS unicode_nul_text, ?11 AS empty_blob, ?12 AS binary_blob, ?13 AS large_text, ?14 AS large_blob";
+const P6_VALUE_CASE_IDS: [&str; 14] = [
+    "SQLITE-PARITY-P6-NULL-001",
+    "SQLITE-PARITY-P6-I64-MIN-002",
+    "SQLITE-PARITY-P6-I64-MAX-003",
+    "SQLITE-PARITY-P6-I64-BEYOND-EXACT-F64-004",
+    "SQLITE-PARITY-P6-NEGATIVE-ZERO-005",
+    "SQLITE-PARITY-P6-POSITIVE-INFINITY-006",
+    "SQLITE-PARITY-P6-NEGATIVE-INFINITY-007",
+    "SQLITE-PARITY-P6-NAN-TO-NULL-008",
+    "SQLITE-PARITY-P6-EMPTY-TEXT-009",
+    "SQLITE-PARITY-P6-UNICODE-NUL-TEXT-010",
+    "SQLITE-PARITY-P6-EMPTY-BLOB-011",
+    "SQLITE-PARITY-P6-BINARY-BLOB-012",
+    "SQLITE-PARITY-P6-LARGE-TEXT-013",
+    "SQLITE-PARITY-P6-LARGE-BLOB-014",
+];
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -136,9 +158,68 @@ struct HarnessEvidence<'a> {
     capability_id: &'a str,
     provenance: Provenance<'a>,
     engine_results: Vec<EngineResult>,
+    value_parity: ValueParityEvidence,
     transaction_parity: TransactionParityEvidence,
     security_policy: SecurityPolicyEvidence,
     comparison: Comparison,
+}
+
+#[derive(Debug, Serialize)]
+struct ValueParityEvidence {
+    bead_id: &'static str,
+    matrix_id: &'static str,
+    status: &'static str,
+    profile_max_value_bytes: usize,
+    compared_values: usize,
+    asupersync: ValueEngineEvidence,
+    frankensqlite: ValueEngineEvidence,
+    mismatches: Vec<String>,
+    unsupported: Vec<ValueUnsupportedEvidence>,
+}
+
+#[derive(Debug, Serialize)]
+struct ValueEngineEvidence {
+    values: Vec<ValueCaseResult>,
+    owned_after_close: bool,
+    type_mismatch_class: &'static str,
+    out_of_bounds_class: &'static str,
+    row_metadata: RowMetadataEvidence,
+    runtime_quiescent: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ValueCaseResult {
+    case_id: &'static str,
+    storage_class: &'static str,
+    exact_scalar: Option<String>,
+    byte_len: Option<usize>,
+    fnv1a64: String,
+}
+
+#[derive(Debug, Serialize)]
+struct RowMetadataEvidence {
+    status: &'static str,
+    ordered_names: Vec<String>,
+    legacy_sorted_unique_names: Vec<String>,
+    first_ascii_case_insensitive_dup_index: Option<usize>,
+    legacy_exact_dup_value: Option<i64>,
+    missing_name_class: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+struct ValueUnsupportedEvidence {
+    engine: &'static str,
+    capability: &'static str,
+    reason: &'static str,
+}
+
+#[derive(Debug)]
+enum ExpectedValue {
+    Null,
+    Integer(i64),
+    Real(f64),
+    Text(String),
+    Blob(Vec<u8>),
 }
 
 #[derive(Debug, Serialize)]
@@ -260,6 +341,7 @@ fn run() -> Result<(), String> {
 
     let mismatches = compare_results(&suite, &asupersync, &frankensqlite);
     let comparable = mismatches.is_empty();
+    let value_parity = run_value_parity()?;
     let transaction_parity = run_transaction_parity()?;
     let security_policy = run_security_policy()?;
     let evidence = HarnessEvidence {
@@ -277,6 +359,7 @@ fn run() -> Result<(), String> {
             host: env!("SQLITE_PARITY_HOST"),
         },
         engine_results: vec![asupersync, frankensqlite],
+        value_parity,
         transaction_parity,
         security_policy,
         comparison: Comparison {
@@ -294,6 +377,351 @@ fn run() -> Result<(), String> {
     } else {
         Err("engine evidence did not match the declared vector contract".to_owned())
     }
+}
+
+fn run_value_parity() -> Result<ValueParityEvidence, String> {
+    let asupersync = run_asupersync_value_matrix()?;
+    let frankensqlite = run_frankensqlite_value_matrix()?;
+    let mismatches = if asupersync.values == frankensqlite.values {
+        Vec::new()
+    } else {
+        vec!["normalized common value rows differ".to_owned()]
+    };
+    if !mismatches.is_empty() {
+        return Err(format!(
+            "SQLite P6 value parity failed: {}",
+            mismatches.join(", ")
+        ));
+    }
+
+    Ok(ValueParityEvidence {
+        bead_id: "asupersync-ym2wtv.2.6",
+        matrix_id: "sqlite-neutral-value-row-parity-v1",
+        status: "PASS_BOUNDED_COMMON_VALUES_WITH_EXPLICIT_ROW_METADATA_UNSUPPORTED",
+        profile_max_value_bytes: P6_PROFILE_MAX_VALUE_BYTES,
+        compared_values: P6_VALUE_CASE_IDS.len(),
+        asupersync,
+        frankensqlite,
+        mismatches,
+        unsupported: vec![ValueUnsupportedEvidence {
+            engine: "frankensqlite",
+            capability: "async_row_column_names_and_name_lookup",
+            reason: "The pinned AsyncConnection Row exposes owned values by index but no public result-column metadata or name lookup; the neutral adapter does not infer aliases from SQL text.",
+        }],
+    })
+}
+
+fn run_asupersync_value_matrix() -> Result<ValueEngineEvidence, String> {
+    let runtime = RuntimeBuilder::current_thread()
+        .blocking_threads(2, 2)
+        .build()
+        .map_err(|error| format!("build Asupersync P6 runtime: {error}"))?;
+    let blocking = runtime
+        .handle()
+        .blocking_handle()
+        .ok_or_else(|| "Asupersync P6 runtime has no blocking pool".to_owned())?;
+    let evidence = runtime.block_on(async {
+        let cx = Cx::current().ok_or_else(|| "Asupersync P6 runtime has no Cx".to_owned())?;
+        let connection = asupersync_open_memory(&cx).await?;
+        let params = asupersync_p6_params();
+        let rows = asupersync_outcome(
+            connection.query(&cx, P6_VALUE_QUERY, &params).await,
+            "query Asupersync P6 values",
+        )?;
+        let row = exactly_one(rows, "Asupersync P6 value row")?;
+        let metadata_rows = asupersync_outcome(
+            connection
+                .query(&cx, "SELECT 1 AS dup, 2 AS Other, 3 AS dup, 4 AS Tail", &[])
+                .await,
+            "query Asupersync P6 row metadata",
+        )?;
+        let metadata_row = exactly_one(metadata_rows, "Asupersync P6 metadata row")?;
+        asupersync_close(&connection, &cx).await?;
+
+        let expected = p6_expected_values();
+        verify_asupersync_values(&row, &expected)?;
+        let type_mismatch_class = match row.get_i64("large_text") {
+            Err(SqliteError::TypeMismatch { .. }) => "type_mismatch",
+            other => return Err(format!("Asupersync P6 type mismatch drifted: {other:?}")),
+        };
+        let out_of_bounds_class = match row.get_idx(expected.len()) {
+            Err(SqliteError::ColumnNotFound(_)) => "index_out_of_bounds",
+            other => return Err(format!("Asupersync P6 out-of-bounds drifted: {other:?}")),
+        };
+        let ordered_names = metadata_row
+            .column_names_in_order()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let legacy_sorted_unique_names = metadata_row
+            .column_names()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let legacy_exact_dup_value = match metadata_row.get_i64("dup") {
+            Ok(value) => Some(value),
+            Err(error) => return Err(format!("Asupersync P6 duplicate lookup failed: {error}")),
+        };
+        let missing_name_class = match metadata_row.get("missing") {
+            Err(SqliteError::ColumnNotFound(_)) => "column_not_found",
+            other => return Err(format!("Asupersync P6 missing-name drifted: {other:?}")),
+        };
+        Ok::<_, String>(ValueEngineEvidence {
+            values: value_case_results(&expected),
+            owned_after_close: true,
+            type_mismatch_class,
+            out_of_bounds_class,
+            row_metadata: RowMetadataEvidence {
+                status: "PASS",
+                ordered_names,
+                legacy_sorted_unique_names,
+                first_ascii_case_insensitive_dup_index: metadata_row.column_index("DUP"),
+                legacy_exact_dup_value,
+                missing_name_class,
+            },
+            runtime_quiescent: true,
+        })
+    })?;
+    drop(runtime);
+    require_runtime_quiescence(&blocking, "asupersync-p6")?;
+    Ok(evidence)
+}
+
+fn run_frankensqlite_value_matrix() -> Result<ValueEngineEvidence, String> {
+    let runtime = CompatRuntimeBuilder::current_thread()
+        .blocking_threads(2, 2)
+        .build()
+        .map_err(|error| format!("build FrankenSQLite P6 runtime: {error}"))?;
+    let blocking = runtime
+        .handle()
+        .blocking_handle()
+        .ok_or_else(|| "FrankenSQLite P6 runtime has no blocking pool".to_owned())?;
+    let evidence = runtime.block_on(async {
+        let native_cx = CompatCx::current()
+            .ok_or_else(|| "FrankenSQLite P6 compatibility runtime has no Cx".to_owned())?;
+        let cx = attached_franken_cx(&native_cx);
+        let mut connection = FrankenConnection::open(&cx, ":memory:")
+            .await
+            .map_err(|error| format!("FrankenSQLite P6 open: {error}"))?;
+        let rows = connection
+            .query_with_params(&cx, P6_VALUE_QUERY, &frankensqlite_p6_params())
+            .await
+            .map_err(|error| format!("FrankenSQLite P6 value query: {error}"))?;
+        let row = exactly_one(rows, "FrankenSQLite P6 value row")?;
+        franken_close(&mut connection, &cx).await?;
+
+        let expected = p6_expected_values();
+        verify_frankensqlite_values(&row, &expected)?;
+        let type_mismatch_class = match row.get_typed::<i64>(12) {
+            Err(FrankenError::TypeMismatch { .. }) => "type_mismatch",
+            other => return Err(format!("FrankenSQLite P6 type mismatch drifted: {other:?}")),
+        };
+        let out_of_bounds_class = match row.get_typed::<i64>(expected.len()) {
+            Err(FrankenError::NoSuchColumn { .. }) => "index_out_of_bounds",
+            other => return Err(format!("FrankenSQLite P6 out-of-bounds drifted: {other:?}")),
+        };
+        Ok::<_, String>(ValueEngineEvidence {
+            values: value_case_results(&expected),
+            owned_after_close: true,
+            type_mismatch_class,
+            out_of_bounds_class,
+            row_metadata: RowMetadataEvidence {
+                status: "UNSUPPORTED_NO_PUBLIC_ASYNC_ROW_METADATA",
+                ordered_names: Vec::new(),
+                legacy_sorted_unique_names: Vec::new(),
+                first_ascii_case_insensitive_dup_index: None,
+                legacy_exact_dup_value: None,
+                missing_name_class: "unsupported",
+            },
+            runtime_quiescent: true,
+        })
+    })?;
+    drop(runtime);
+    require_compat_runtime_quiescence(&blocking, "frankensqlite-p6")?;
+    Ok(evidence)
+}
+
+fn p6_expected_values() -> Vec<ExpectedValue> {
+    vec![
+        ExpectedValue::Null,
+        ExpectedValue::Integer(i64::MIN),
+        ExpectedValue::Integer(i64::MAX),
+        ExpectedValue::Integer(9_007_199_254_740_993),
+        ExpectedValue::Real(-0.0),
+        ExpectedValue::Real(f64::INFINITY),
+        ExpectedValue::Real(f64::NEG_INFINITY),
+        ExpectedValue::Null,
+        ExpectedValue::Text(String::new()),
+        ExpectedValue::Text("Delta-Δ\0emoji-🙂".to_owned()),
+        ExpectedValue::Blob(Vec::new()),
+        ExpectedValue::Blob(vec![0, 255, 1, 254, 2, 253, 128, 127]),
+        ExpectedValue::Text("L".repeat(P6_PROFILE_MAX_VALUE_BYTES)),
+        ExpectedValue::Blob(
+            (0..P6_PROFILE_MAX_VALUE_BYTES)
+                .map(|index| ((index * 131 + 17) & 0xff) as u8)
+                .collect(),
+        ),
+    ]
+}
+
+fn asupersync_p6_params() -> Vec<AsupersyncValue> {
+    let expected = p6_expected_values();
+    expected
+        .into_iter()
+        .enumerate()
+        .map(|(index, value)| match (index, value) {
+            (7, ExpectedValue::Null) => AsupersyncValue::Real(f64::NAN),
+            (_, ExpectedValue::Null) => AsupersyncValue::Null,
+            (_, ExpectedValue::Integer(value)) => AsupersyncValue::Integer(value),
+            (_, ExpectedValue::Real(value)) => AsupersyncValue::Real(value),
+            (_, ExpectedValue::Text(value)) => AsupersyncValue::Text(value),
+            (_, ExpectedValue::Blob(value)) => AsupersyncValue::Blob(value),
+        })
+        .collect()
+}
+
+fn frankensqlite_p6_params() -> Vec<FrankenValue> {
+    let expected = p6_expected_values();
+    expected
+        .into_iter()
+        .enumerate()
+        .map(|(index, value)| match (index, value) {
+            (7, ExpectedValue::Null) => FrankenValue::Float(f64::NAN),
+            (_, ExpectedValue::Null) => FrankenValue::Null,
+            (_, ExpectedValue::Integer(value)) => FrankenValue::Integer(value),
+            (_, ExpectedValue::Real(value)) => FrankenValue::Float(value),
+            (_, ExpectedValue::Text(value)) => FrankenValue::Text(value.into()),
+            (_, ExpectedValue::Blob(value)) => FrankenValue::Blob(Arc::from(value)),
+        })
+        .collect()
+}
+
+fn verify_asupersync_values(
+    row: &asupersync::database::SqliteRow,
+    expected: &[ExpectedValue],
+) -> Result<(), String> {
+    if row.len() != expected.len() {
+        return Err(format!(
+            "Asupersync P6 returned {} columns, expected {}",
+            row.len(),
+            expected.len()
+        ));
+    }
+    for (index, expected) in expected.iter().enumerate() {
+        let actual = row
+            .get_idx(index)
+            .map_err(|error| format!("Asupersync P6 column {index}: {error}"))?;
+        if !asupersync_value_matches(actual, expected) {
+            return Err(format!(
+                "Asupersync P6 {} mismatch: actual {actual:?}, expected {expected:?}",
+                P6_VALUE_CASE_IDS[index]
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn verify_frankensqlite_values(
+    row: &fsqlite::Row,
+    expected: &[ExpectedValue],
+) -> Result<(), String> {
+    if row.values().len() != expected.len() {
+        return Err(format!(
+            "FrankenSQLite P6 returned {} columns, expected {}",
+            row.values().len(),
+            expected.len()
+        ));
+    }
+    for (index, expected) in expected.iter().enumerate() {
+        let actual = row
+            .get(index)
+            .ok_or_else(|| format!("FrankenSQLite P6 column {index} is missing"))?;
+        if !frankensqlite_value_matches(actual, expected) {
+            return Err(format!(
+                "FrankenSQLite P6 {} mismatch: actual {actual:?}, expected {expected:?}",
+                P6_VALUE_CASE_IDS[index]
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn asupersync_value_matches(actual: &AsupersyncValue, expected: &ExpectedValue) -> bool {
+    match (actual, expected) {
+        (AsupersyncValue::Null, ExpectedValue::Null) => true,
+        (AsupersyncValue::Integer(actual), ExpectedValue::Integer(expected)) => actual == expected,
+        (AsupersyncValue::Real(actual), ExpectedValue::Real(expected)) => {
+            actual.to_bits() == expected.to_bits()
+        }
+        (AsupersyncValue::Text(actual), ExpectedValue::Text(expected)) => actual == expected,
+        (AsupersyncValue::Blob(actual), ExpectedValue::Blob(expected)) => actual == expected,
+        _ => false,
+    }
+}
+
+fn frankensqlite_value_matches(actual: &FrankenValue, expected: &ExpectedValue) -> bool {
+    match (actual, expected) {
+        (FrankenValue::Null, ExpectedValue::Null) => true,
+        (FrankenValue::Integer(actual), ExpectedValue::Integer(expected)) => actual == expected,
+        (FrankenValue::Float(actual), ExpectedValue::Real(expected)) => {
+            actual.to_bits() == expected.to_bits()
+        }
+        (FrankenValue::Text(actual), ExpectedValue::Text(expected)) => actual.as_str() == expected,
+        (FrankenValue::Blob(actual), ExpectedValue::Blob(expected)) => actual.as_ref() == expected,
+        _ => false,
+    }
+}
+
+fn value_case_results(expected: &[ExpectedValue]) -> Vec<ValueCaseResult> {
+    expected
+        .iter()
+        .zip(P6_VALUE_CASE_IDS)
+        .map(|(value, case_id)| {
+            let (storage_class, exact_scalar, byte_len, fingerprint) = match value {
+                ExpectedValue::Null => ("null", Some("null".to_owned()), None, fnv1a64(b"null")),
+                ExpectedValue::Integer(value) => (
+                    "integer",
+                    Some(value.to_string()),
+                    None,
+                    fnv1a64(&value.to_le_bytes()),
+                ),
+                ExpectedValue::Real(value) => (
+                    "real",
+                    Some(format!("0x{:016x}", value.to_bits())),
+                    None,
+                    fnv1a64(&value.to_bits().to_le_bytes()),
+                ),
+                ExpectedValue::Text(value) => (
+                    "text",
+                    (value.len() <= 64).then(|| value.clone()),
+                    Some(value.len()),
+                    fnv1a64(value.as_bytes()),
+                ),
+                ExpectedValue::Blob(value) => ("blob", None, Some(value.len()), fnv1a64(value)),
+            };
+            ValueCaseResult {
+                case_id,
+                storage_class,
+                exact_scalar,
+                byte_len,
+                fnv1a64: format!("{fingerprint:016x}"),
+            }
+        })
+        .collect()
+}
+
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
+}
+
+fn exactly_one<T>(mut values: Vec<T>, context: &str) -> Result<T, String> {
+    if values.len() != 1 {
+        return Err(format!(
+            "{context} returned {} rows, expected 1",
+            values.len()
+        ));
+    }
+    Ok(values.remove(0))
 }
 
 fn transaction_cases() -> [TransactionCase; 5] {
@@ -1234,9 +1662,30 @@ async fn run_asupersync_scenario(vector: &Vector, cx: &Cx) -> Result<ScenarioOut
                 .await
                 .map_err(|error| format!("asupersync acquire holder: {error}"))?;
             let connection = asupersync_open_memory(cx).await?;
-            let mut waiter = spawn_parked_checkout(cx, Arc::clone(&semaphore)).await?;
+            if semaphore.try_acquire(1).is_ok() {
+                return Err("consumer admission pool was not saturated".to_owned());
+            }
+            let waiter_cx = Cx::detached_cancel_context();
+            let mut waiter = std::pin::pin!(semaphore.acquire(&waiter_cx, 1));
+            if !poll_once(waiter.as_mut()).is_pending()
+                || semaphore.telemetry_snapshot(0x53514c32).waiter_count != 1
+            {
+                return Err("checkout did not register on the saturated admission queue".to_owned());
+            }
             asupersync_close(&connection, cx).await?;
-            abort_and_drain_checkout(cx, &semaphore, &mut waiter).await?;
+            if semaphore.telemetry_snapshot(0x53514c32).waiter_count != 1 {
+                return Err("checkout was not in flight when connection close completed".to_owned());
+            }
+            waiter_cx.set_cancel_requested(true);
+            match poll_once(waiter.as_mut()) {
+                Poll::Ready(Err(AcquireError::Cancelled)) => {}
+                other => {
+                    return Err(format!(
+                        "parked checkout did not drain as graceful cancellation: {other:?}"
+                    ));
+                }
+            }
+            drop(waiter);
             drop(holder);
             let telemetry = semaphore.telemetry_snapshot(0x53514c32);
             verify_admission_recovered(&telemetry, *capacity)?;
@@ -1382,10 +1831,36 @@ async fn run_frankensqlite_scenario(
             let mut connection = FrankenConnection::open(&local_cx, ":memory:")
                 .await
                 .map_err(|error| format!("FrankenSQLite pool scenario open: {error}"))?;
-            let mut waiter =
-                spawn_parked_compat_checkout(native_cx, Arc::clone(&semaphore)).await?;
+            if semaphore.try_acquire(1).is_ok() {
+                return Err("consumer compatibility admission pool was not saturated".to_owned());
+            }
+            let waiter_cx = CompatCx::detached_cancel_context();
+            let mut waiter = std::pin::pin!(semaphore.acquire(&waiter_cx, 1));
+            if !poll_once(waiter.as_mut()).is_pending()
+                || semaphore.telemetry_snapshot(0x53514c32).waiter_count != 1
+            {
+                return Err(
+                    "compatibility checkout did not register on the saturated admission queue"
+                        .to_owned(),
+                );
+            }
             franken_close(&mut connection, &local_cx).await?;
-            abort_and_drain_compat_checkout(native_cx, &semaphore, &mut waiter).await?;
+            if semaphore.telemetry_snapshot(0x53514c32).waiter_count != 1 {
+                return Err(
+                    "compatibility checkout was not in flight when connection close completed"
+                        .to_owned(),
+                );
+            }
+            waiter_cx.set_cancel_requested(true);
+            match poll_once(waiter.as_mut()) {
+                Poll::Ready(Err(CompatAcquireError::Cancelled)) => {}
+                other => {
+                    return Err(format!(
+                        "parked compatibility checkout did not drain as graceful cancellation: {other:?}"
+                    ));
+                }
+            }
+            drop(waiter);
             drop(holder);
             let telemetry = semaphore.telemetry_snapshot(0x53514c32);
             verify_compat_admission_recovered(&telemetry, *capacity)?;
@@ -1744,99 +2219,12 @@ async fn franken_close(connection: &mut FrankenConnection, cx: &FrankenCx) -> Re
     Ok(())
 }
 
-async fn spawn_parked_checkout(
-    cx: &Cx,
-    semaphore: Arc<Semaphore>,
-) -> Result<asupersync::runtime::TaskHandle<Result<(), AcquireError>>, String> {
-    if semaphore.try_acquire(1).is_ok() {
-        return Err("consumer admission pool was not saturated".to_owned());
-    }
-    let waiter_semaphore = Arc::clone(&semaphore);
-    let mut waiter = cx
-        .spawn(move |waiter_cx| async move {
-            OwnedSemaphorePermit::acquire(waiter_semaphore, &waiter_cx, 1)
-                .await
-                .map(drop)
-        })
-        .map_err(|error| format!("spawn checkout waiter: {error}"))?;
-    for _ in 0..256 {
-        if semaphore.telemetry_snapshot(0x53514c32).waiter_count == 1 {
-            return Ok(waiter);
-        }
-        yield_now().await;
-    }
-    waiter.abort();
-    let _ = waiter.join(cx).await;
-    Err("checkout waiter never reached the saturated admission queue".to_owned())
-}
-
-async fn abort_and_drain_checkout(
-    cx: &Cx,
-    semaphore: &Semaphore,
-    waiter: &mut asupersync::runtime::TaskHandle<Result<(), AcquireError>>,
-) -> Result<(), String> {
-    if semaphore.telemetry_snapshot(0x53514c32).waiter_count != 1 {
-        return Err("checkout was not in flight when connection close completed".to_owned());
-    }
-    waiter.abort();
-    match waiter.join(cx).await {
-        Ok(Err(AcquireError::Cancelled)) => {}
-        other => {
-            return Err(format!(
-                "parked checkout did not drain as graceful cancellation: {other:?}"
-            ));
-        }
-    }
-    Ok(())
-}
-
-async fn spawn_parked_compat_checkout(
-    cx: &CompatCx,
-    semaphore: Arc<CompatSemaphore>,
-) -> Result<asupersync_compat::runtime::TaskHandle<Result<(), CompatAcquireError>>, String> {
-    if semaphore.try_acquire(1).is_ok() {
-        return Err("consumer compatibility admission pool was not saturated".to_owned());
-    }
-    let waiter_semaphore = Arc::clone(&semaphore);
-    let mut waiter = cx
-        .spawn(move |waiter_cx| async move {
-            CompatOwnedSemaphorePermit::acquire(waiter_semaphore, &waiter_cx, 1)
-                .await
-                .map(drop)
-        })
-        .map_err(|error| format!("spawn compatibility checkout waiter: {error}"))?;
-    for _ in 0..256 {
-        if semaphore.telemetry_snapshot(0x53514c32).waiter_count == 1 {
-            return Ok(waiter);
-        }
-        compat_yield_now().await;
-    }
-    waiter.abort();
-    let _ = waiter.join(cx).await;
-    Err("compatibility checkout waiter never reached the saturated admission queue".to_owned())
-}
-
-async fn abort_and_drain_compat_checkout(
-    cx: &CompatCx,
-    semaphore: &CompatSemaphore,
-    waiter: &mut asupersync_compat::runtime::TaskHandle<Result<(), CompatAcquireError>>,
-) -> Result<(), String> {
-    if semaphore.telemetry_snapshot(0x53514c32).waiter_count != 1 {
-        return Err(
-            "compatibility checkout was not in flight when connection close completed".to_owned(),
-        );
-    }
-    waiter.abort();
-    match waiter.join(cx).await {
-        Ok(Err(CompatAcquireError::Cancelled))
-        | Err(asupersync_compat::runtime::JoinError::Cancelled(_)) => {}
-        other => {
-            return Err(format!(
-                "parked compatibility checkout did not drain as a recognized cancellation: {other:?}"
-            ));
-        }
-    }
-    Ok(())
+fn poll_once<F>(future: Pin<&mut F>) -> Poll<F::Output>
+where
+    F: Future,
+{
+    let mut context = Context::from_waker(Waker::noop());
+    future.poll(&mut context)
 }
 
 fn verify_admission_recovered(

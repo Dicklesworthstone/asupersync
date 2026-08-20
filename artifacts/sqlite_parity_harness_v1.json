@@ -839,8 +839,8 @@
     "scope": "deferred_immediate_exclusive_savepoint_constraint_rollback_reuse_and_quiescence",
     "consumer_source": {
       "path": "tests/fixtures/sqlite-parity-consumer/src/main.rs",
-      "sha256": "6e72fffae189ae5a65fdaf9765d21dcb4a1c95596c64afeeaabe66b6397ddd06",
-      "line_count": 1940
+      "sha256": "9c98e783066afde3fc2df3b55d3cfd86de4365f796f22d44523c87617008ea64",
+      "line_count": 2328
     },
     "neutral_matrix": {
       "matrix_id": "sqlite-neutral-transaction-parity-v1",
@@ -1263,6 +1263,142 @@
       "Unsupported FrankenSQLite cells are recorded, not normalized to PASS.",
       "The in-repository phase witnesses are deterministic Asupersync adapter evidence, not cross-engine equivalence evidence.",
       "This phase does not authorize a dependency cutover or claim full SQLite parity."
+    ]
+  },
+  "phase6": {
+    "bead_id": "asupersync-ym2wtv.2.6",
+    "status": "PASS_BOUNDED_COMMON_VALUES_WITH_EXPLICIT_ROW_METADATA_UNSUPPORTED",
+    "scope": "null_integer_real_text_blob_owned_rows_conversion_and_large_value_profile",
+    "consumer_source": {
+      "path": "tests/fixtures/sqlite-parity-consumer/src/main.rs",
+      "sha256": "9c98e783066afde3fc2df3b55d3cfd86de4365f796f22d44523c87617008ea64",
+      "line_count": 2328
+    },
+    "neutral_matrix": {
+      "matrix_id": "sqlite-neutral-value-row-parity-v1",
+      "profile_max_value_bytes": 1048576,
+      "compared_values": 14,
+      "case_ids": [
+        "SQLITE-PARITY-P6-NULL-001",
+        "SQLITE-PARITY-P6-I64-MIN-002",
+        "SQLITE-PARITY-P6-I64-MAX-003",
+        "SQLITE-PARITY-P6-I64-BEYOND-EXACT-F64-004",
+        "SQLITE-PARITY-P6-NEGATIVE-ZERO-005",
+        "SQLITE-PARITY-P6-POSITIVE-INFINITY-006",
+        "SQLITE-PARITY-P6-NEGATIVE-INFINITY-007",
+        "SQLITE-PARITY-P6-NAN-TO-NULL-008",
+        "SQLITE-PARITY-P6-EMPTY-TEXT-009",
+        "SQLITE-PARITY-P6-UNICODE-NUL-TEXT-010",
+        "SQLITE-PARITY-P6-EMPTY-BLOB-011",
+        "SQLITE-PARITY-P6-BINARY-BLOB-012",
+        "SQLITE-PARITY-P6-LARGE-TEXT-013",
+        "SQLITE-PARITY-P6-LARGE-BLOB-014"
+      ],
+      "normalization": {
+        "null": "Compare the SQLite NULL storage class exactly; the NaN input case records SQLite's shared NaN-to-NULL behavior separately.",
+        "integer": "Compare signed 64-bit integer values exactly, including both extrema and 2^53+1 without a floating-point conversion.",
+        "real": "Compare IEEE-754 bits exactly, preserving negative zero and both infinities.",
+        "text_and_blob": "Compare bytes directly in the executable consumer; byte length and FNV-1a are diagnostic receipt fields, not equality authority.",
+        "ownership": "Retain each owned row until after explicit connection close, then verify its values.",
+        "conversion_errors": "Normalize wrong-type and out-of-bounds indexed access without flattening successful values.",
+        "quiescence": "Drop each runtime and require its blocking pool to be shut down with zero pending, busy, or active work."
+      }
+    },
+    "coverage_matrix": [
+      {
+        "id": "SQLITE-PARITY-P6-VALUES-001",
+        "boundary": "null_integer_and_real_edge_values",
+        "asupersync_status": "PASS",
+        "frankensqlite_status": "PASS"
+      },
+      {
+        "id": "SQLITE-PARITY-P6-BYTES-002",
+        "boundary": "empty_unicode_embedded_nul_and_binary_values",
+        "asupersync_status": "PASS",
+        "frankensqlite_status": "PASS"
+      },
+      {
+        "id": "SQLITE-PARITY-P6-LARGE-003",
+        "boundary": "one_mib_text_and_blob_profile",
+        "asupersync_status": "PASS",
+        "frankensqlite_status": "PASS"
+      },
+      {
+        "id": "SQLITE-PARITY-P6-CONVERSION-004",
+        "boundary": "wrong_type_and_out_of_bounds_index_access",
+        "asupersync_status": "PASS",
+        "frankensqlite_status": "PASS"
+      },
+      {
+        "id": "SQLITE-PARITY-P6-METADATA-005",
+        "boundary": "ordered_duplicate_preserving_column_metadata_and_name_lookup",
+        "asupersync_status": "PASS",
+        "frankensqlite_status": "UNSUPPORTED_NO_PUBLIC_ASYNC_ROW_METADATA",
+        "frankensqlite_reason": "The pinned AsyncConnection Row exposes owned values by index but no public result-column metadata or name lookup; the neutral adapter does not infer aliases from SQL text."
+      },
+      {
+        "id": "SQLITE-PARITY-P6-OWNERSHIP-006",
+        "boundary": "owned_rows_survive_explicit_close_and_runtime_quiesces",
+        "asupersync_status": "PASS",
+        "frankensqlite_status": "PASS"
+      }
+    ],
+    "execution": {
+      "status": "PASS",
+      "rch_job": "j-29984462414544922",
+      "worker": "vmi1153651",
+      "base": "285174b6814f22782c5aeb92b5b7d310a3ad3b56",
+      "overlay_fingerprint": "0bb17093b413363c0173bd544313a4aa7c34e609056c0acfcb1d4628b7f6af96",
+      "overlay_paths": [
+        "tests/fixtures/sqlite-parity-consumer/src/main.rs"
+      ],
+      "remote_exit_code": 0,
+      "remote_command_elapsed_ms": 837396,
+      "command": "ASUPERSYNC_SOURCE_REVISION=285174b6814f22782c5aeb92b5b7d310a3ad3b56 SQLITE_PARITY_TARGET=x86_64-unknown-linux-gnu SQLITE_PARITY_HOST=linux-x86_64-rch-worker CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo run -j 8 --locked --manifest-path tests/fixtures/sqlite-parity-consumer/Cargo.toml",
+      "evidence_summary": {
+        "matrix_id": "sqlite-neutral-value-row-parity-v1",
+        "compared_values": 14,
+        "mismatches": [],
+        "asupersync_owned_after_close": true,
+        "frankensqlite_owned_after_close": true,
+        "asupersync_runtime_quiescent": true,
+        "frankensqlite_runtime_quiescent": true,
+        "asupersync_type_mismatch_class": "type_mismatch",
+        "frankensqlite_type_mismatch_class": "type_mismatch",
+        "asupersync_out_of_bounds_class": "index_out_of_bounds",
+        "frankensqlite_out_of_bounds_class": "index_out_of_bounds",
+        "asupersync_row_metadata": {
+          "ordered_names": [
+            "dup",
+            "Other",
+            "dup",
+            "Tail"
+          ],
+          "legacy_sorted_unique_names": [
+            "Other",
+            "Tail",
+            "dup"
+          ],
+          "first_ascii_case_insensitive_dup_index": 0,
+          "legacy_exact_dup_value": 3,
+          "missing_name_class": "column_not_found"
+        },
+        "frankensqlite_row_metadata_status": "UNSUPPORTED_NO_PUBLIC_ASYNC_ROW_METADATA",
+        "large_text": {
+          "byte_len": 1048576,
+          "fnv1a64": "73833fad05222325"
+        },
+        "large_blob": {
+          "byte_len": 1048576,
+          "fnv1a64": "1f5e0df9bc822325"
+        }
+      }
+    },
+    "no_claims": [
+      "One MiB is the bounded campaign profile, not a claimed SQLite or adapter hard maximum.",
+      "FNV-1a fingerprints are compact diagnostics; direct executable equality over exact values and bytes is the comparison authority.",
+      "The pinned FrankenSQLite async Row publishes no column-name metadata or name lookup, so those cells remain explicitly unsupported rather than inferred from SQL text.",
+      "This phase does not authorize dependency cutover, public API removal, or a claim of complete SQLite engine parity."
     ]
   },
   "phase7": {
