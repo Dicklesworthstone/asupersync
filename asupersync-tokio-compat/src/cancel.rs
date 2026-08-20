@@ -1,7 +1,9 @@
-//! Cancellation bridge between Asupersync and Tokio-originated futures.
+//! Cancellation-signal bridge for compatibility futures.
 //!
-//! Provides [`CancelAware`], a wrapper that monitors `Cx` cancellation state
-//! and drops the inner future when cancellation is requested.
+//! Provides [`CancelAware`], a wrapper driven by an explicit [`CancelSignal`].
+//! The wrapper does not inspect an Asupersync `Cx` itself. An outer adapter,
+//! such as [`crate::runtime::with_tokio_context`], must observe its `Cx` and
+//! call [`CancelAware::request_cancel`] when cancellation becomes visible.
 
 use std::future::Future;
 use std::pin::Pin;

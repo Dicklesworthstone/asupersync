@@ -1,11 +1,13 @@
 //! hyper v1 runtime bridge for Asupersync.
 //!
-//! Implements `hyper::rt::{Executor, Timer, Sleep, Read, Write}` using
-//! Asupersync's executor, timer wheel, and I/O subsystems.
+//! Implements `hyper::rt::{Executor, Timer, Sleep}` using an explicit spawn
+//! callback and Asupersync's public sleep future. The sibling [`crate::io`]
+//! module supplies the hyper `Read`/`Write` implementations.
 //!
-//! This is the **keystone adapter** — once hyper can run on Asupersync,
-//! the entire HTTP/web/gRPC stack (reqwest, axum routing, tonic codec)
-//! becomes accessible.
+//! These adapters satisfy selected hyper runtime traits. They do not install a
+//! Tokio runtime, and therefore do not by themselves make higher-level crates
+//! such as reqwest, axum, or tonic usable when those crates require
+//! `tokio::runtime::Handle::current()` or other Tokio runtime services.
 //!
 //! # Usage
 //!
@@ -29,11 +31,11 @@ use std::time::{Duration, Instant};
 type BoxedTask = Pin<Box<dyn Future<Output = ()> + Send>>;
 type SpawnFn = dyn Fn(BoxedTask) + Send + Sync;
 
-/// Executor that spawns futures on the Asupersync runtime.
+/// Executor that forwards futures to a caller-supplied spawn callback.
 ///
-/// Tasks spawned through this executor are region-owned: they will be
-/// cancelled when the originating region closes, preserving structured
-/// concurrency.
+/// The callback must publish each future into the appropriate Asupersync
+/// region. Region ownership is a caller obligation, not something this type
+/// can infer from hyper's context-free `Executor::execute` method.
 ///
 /// # Design
 ///
@@ -44,8 +46,9 @@ type SpawnFn = dyn Fn(BoxedTask) + Send + Sync;
 ///
 /// # Invariants Preserved
 ///
-/// - **INV-2 (Structured concurrency)**: Spawned tasks are region-owned
-/// - **INV-4 (No obligation leaks)**: Task handles are tracked
+/// - **INV-2 (Structured concurrency)**: The explicit callback is the only
+///   allowed publication boundary and must provide region ownership
+/// - **INV-4 (No obligation leaks)**: The callback must track task handles
 #[derive(Clone)]
 pub struct AsupersyncExecutor {
     spawn_fn: Arc<SpawnFn>,

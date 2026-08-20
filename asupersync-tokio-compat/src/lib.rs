@@ -1,15 +1,20 @@
 //! # asupersync-tokio-compat
 //!
-//! Compatibility bridge for running Tokio-locked crates within the Asupersync
-//! async runtime.
+//! Compatibility bridges for selected Tokio, hyper, and Tower traits at an
+//! Asupersync boundary.
 //!
 //! This crate provides adapter primitives that implement Tokio/hyper runtime
-//! traits using Asupersync's executor, timer, and I/O subsystems. It allows
-//! crates like reqwest, axum, tonic, and sqlx to execute within an Asupersync
-//! runtime while preserving Asupersync's core invariants:
+//! traits using explicit callbacks, Asupersync timers, and I/O adapters. It
+//! does not provide or emulate a Tokio runtime. In particular,
+//! `tokio::runtime::Handle::current()` remains unavailable unless the caller
+//! independently owns and enters a Tokio runtime. Dependencies such as
+//! reqwest, axum, tonic, or sqlx that require that runtime context must stay
+//! behind that separately managed boundary.
 //!
-//! - **No ambient authority**: All adapter entry points require explicit `Cx`
-//! - **Structured concurrency**: Adapter-spawned tasks are region-owned
+//! - **No ambient authority**: Effectful Cx adapters require explicit `Cx`;
+//!   pure trait wrappers do not mint authority
+//! - **Structured concurrency**: Executor callbacks must publish spawned work
+//!   into the caller's owning region
 //! - **Cancellation protocol**: Cancellation propagates through adapters
 //! - **No obligation leaks**: Resources are tracked and released on region close
 //!
@@ -22,8 +27,8 @@
 //! │     asupersync-tokio-compat      │  ← This crate
 //! │  (executor, timer, I/O bridges)  │
 //! ├─────────────────────────────────┤
-//! │     Tokio-locked crates          │
-//! │  (reqwest, axum, tonic, sqlx)    │
+//! │   Selected Tokio/hyper/Tower      │
+//! │      trait-level consumers        │
 //! └─────────────────────────────────┘
 //! ```
 //!
@@ -38,11 +43,11 @@
 //! # Hard Boundary Rules
 //!
 //! 1. The main `asupersync` crate does NOT depend on this crate (one-way dep).
-//! 2. Tokio is never the primary executor for Asupersync tasks. The compat
-//!    layer may use private current-thread Tokio runtimes on blocking threads
-//!    when a Tokio-only future must actually be driven.
+//! 2. The compat layer does not construct or enter a Tokio runtime. A
+//!    Tokio-runtime-dependent component remains an explicitly owned boundary.
 //! 3. `Cx` must cross every adapter boundary explicitly.
-//! 4. All spawned tasks are region-owned and cancellation-aware.
+//! 4. Every supplied spawn callback must make tasks region-owned and
+//!    cancellation-aware; the compat crate cannot infer that ownership.
 
 #![deny(unsafe_code)]
 #![warn(clippy::pedantic, clippy::nursery)]

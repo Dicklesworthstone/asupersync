@@ -103,7 +103,7 @@ Compat crate feature gates and the entrypoints they expose:
 
 | Feature | Use when | Entry points |
 |---|---|---|
-| `hyper-bridge` | `hyper`, `hyper-util`, `reqwest`, `tonic`, or any client/server path that wants hyper runtime traits | `hyper_bridge::AsupersyncExecutor`, `hyper_bridge::AsupersyncTimer` |
+| `hyper-bridge` | Audited lower-level code needs hyper executor/timer/body traits; this is not a reqwest or tonic runtime | `hyper_bridge::AsupersyncExecutor`, `hyper_bridge::AsupersyncTimer`, `body_bridge` |
 | `tokio-io` | A crate needs Tokio `AsyncRead` / `AsyncWrite` or hyper runtime I/O traits | `io::TokioIo<T>`, `io::AsupersyncIo<T>` |
 | `tower-bridge` | You need to run tower middleware inside Asupersync or expose an Asupersync service to tower | `tower_bridge::FromTower<S>`, `tower_bridge::IntoTower<S>` |
 | `full` | You need all three bridge families together | all of the above |
@@ -118,8 +118,11 @@ Rules of thumb:
 - Treat adapters as edge infrastructure. Do not add Tokio dependencies to the
   core `asupersync` crate or to examples that are meant to show the native
   runtime surface.
+- The compat crate does not construct or enter a Tokio runtime. A dependency
+  that calls `tokio::runtime::Handle::current()` or requires Tokio's reactor,
+  timers, or task scheduler must stay in an independently owned Tokio island.
 
-### hyper, reqwest, tonic, and hyper-based clients
+### Hyper runtime-trait components
 
 When a client or server stack expects hyper runtime traits, wire three pieces:
 an executor, a timer, and a compatible I/O wrapper.
@@ -141,9 +144,9 @@ let builder = hyper::server::conn::http1::Builder::new().timer(timer);
 let _ = (executor, io, builder);
 ```
 
-Use this pattern for libraries that sit on hyper's runtime traits, including
-`reqwest`-style client transport, tonic's hyper transport path, and direct
-hyper connection builders.
+This is component wiring, not a complete client or server. It can support
+audited lower-level hyper code whose needs are limited to these traits. It does
+not make reqwest or tonic run without their required Tokio runtime context.
 
 ### tower and axum-style middleware stacks
 
@@ -161,28 +164,30 @@ let bridge = FromTower::new(tower_service);
 let response = bridge.call(&cx, request).await?;
 ```
 
-This is the right bridge for `tower`, `tower-http`, and middleware-heavy
-stacks. If you are migrating an `axum` application, prefer moving handlers and
-request state to Asupersync's native web surface over time, and keep the tower
-bridge only for the layers you cannot retire immediately.
+This is the right bridge for a Tower service whose future is independently
+runnable on the Asupersync executor. Audit middleware individually: the bridge
+does not supply a Tokio runtime to `tower-http`, axum, or any other layer that
+needs one. When migrating axum, keep the still-Tokio-dependent portion in an
+owned Tokio island or move handlers and request state to Asupersync's native web
+surface.
 
-### Tokio runtime-context and I/O shims
+### Asupersync Cx polling-context and I/O shims
 
-Some libraries do not need a full hyper bridge; they only need Tokio task
-context or Tokio I/O traits. For those cases, use the narrower runtime and I/O
-adapters.
+Some compatibility futures need Asupersync's current `Cx` while they are polled,
+and some libraries need only Tokio I/O traits. Those are separate needs.
 
 ```ignore
 use asupersync_tokio_compat::runtime::with_tokio_context;
 
 let result = with_tokio_context(&cx, || async {
-    tokio_locked_client.call().await
+    runtime_independent_compat_future.await
 }).await;
 ```
 
 `with_tokio_context` and `AsupersyncRuntime::new(&cx).enter(...)` keep `Cx`
-installed while the wrapped code runs, and the I/O adapters let you translate
-streams in either direction:
+installed while the wrapped code runs. They do not install a Tokio runtime and
+do not make `tokio::runtime::Handle::current()` available. The I/O adapters let
+you translate compatible stream traits in either direction:
 
 - `TokioIo<T>`: Asupersync stream -> Tokio/hyper traits
 - `AsupersyncIo<T>`: Tokio stream -> Asupersync traits
@@ -194,8 +199,8 @@ I/O trait compatibility, do not also bring in the hyper or tower bridges.
 
 1. Replace top-level `tokio::spawn`, timers, and channels with native
    Asupersync equivalents in your application code.
-2. Keep third-party Tokio-locked crates behind the compat boundary, not spread
-   through the core of the application.
+2. Keep third-party Tokio-runtime-dependent crates and their independently
+   owned Tokio runtime behind one explicit island boundary.
 3. Migrate HTTP/web/gRPC surfaces to native Asupersync modules when practical,
    leaving only truly external crates on the compat path.
 4. Re-run the no-Tokio production graph checks on the core crate once the

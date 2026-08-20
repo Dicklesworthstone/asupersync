@@ -1,10 +1,12 @@
-//! Tokio runtime context bridge.
+//! Asupersync context bridge for compatibility futures.
 //!
-//! Provides [`AsupersyncRuntime`], the keystone primitive that implements
-//! Tokio's runtime handle interface using Asupersync's executor.
+//! Provides [`AsupersyncRuntime`], which keeps an explicit Asupersync [`Cx`]
+//! installed while a closure or future is polled.
 //!
-//! This does NOT start a Tokio runtime. It intercepts Tokio runtime
-//! operations and routes them to Asupersync equivalents.
+//! This module does **not** start or enter a Tokio runtime and does not make
+//! `tokio::runtime::Handle::current()` available. A dependency that requires
+//! Tokio runtime context must remain behind an independently owned Tokio
+//! runtime boundary.
 
 use std::future::{Future, poll_fn};
 use std::task::Poll;
@@ -15,10 +17,11 @@ use asupersync::types::RegionId;
 use crate::CancellationMode;
 use crate::cancel::{CancelAware, CancelResult};
 
-/// A Tokio-compatible runtime handle backed by Asupersync's executor.
+/// A scoped carrier for an Asupersync [`Cx`].
 ///
-/// This does NOT start a Tokio runtime. It intercepts Tokio runtime
-/// operations and routes them to Asupersync equivalents.
+/// This type is not a Tokio runtime handle. It installs only Asupersync's
+/// current-`Cx` binding; it neither implements Tokio's runtime handle
+/// interface nor makes `tokio::runtime::Handle::current()` succeed.
 #[derive(Debug, Clone)]
 pub struct AsupersyncRuntime {
     cx: Cx,
@@ -47,7 +50,9 @@ impl AsupersyncRuntime {
         self.region_id
     }
 
-    /// Run a synchronous closure with this runtime's `Cx` installed as current.
+    /// Run a synchronous closure with this bridge's `Cx` installed as current.
+    ///
+    /// This changes only [`Cx::current`]. It does not enter a Tokio runtime.
     pub fn enter<F, R>(&self, f: F) -> R
     where
         F: FnOnce() -> R,
@@ -62,6 +67,11 @@ impl AsupersyncRuntime {
 /// Returns `None` once cancellation is observed before the future completes,
 /// even if the wrapped future reports `Ready` on the first poll after that
 /// cancellation becomes visible to the adapter.
+///
+/// This function does not install Tokio runtime context. The wrapped future
+/// must be independently runnable on the caller's executor; futures that call
+/// `tokio::runtime::Handle::current()` still require a separately owned and
+/// entered Tokio runtime.
 pub async fn with_tokio_context<F, Fut, T>(cx: &Cx, f: F) -> Option<T>
 where
     F: FnOnce() -> Fut,

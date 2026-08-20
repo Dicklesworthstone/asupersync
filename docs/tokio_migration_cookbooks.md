@@ -385,18 +385,21 @@ let row = pool.query("SELECT 1").fetch_one().await?;
 
 ### 8.1 Domain Overview
 
-Bridge tokio-locked ecosystem crates (hyper, reqwest, axum, tonic) via the
-asupersync-tokio-compat adapter layer for incremental migration.
+Bridge selected Tokio, hyper, and Tower traits with
+`asupersync-tokio-compat`. The compat crate does not construct or enter a Tokio
+runtime. Components that require Tokio's reactor, task scheduler, timer driver,
+or `tokio::runtime::Handle::current()` must remain behind an explicitly owned
+Tokio island until they are replaced.
 
 ### 8.2 Key Recipes
 
 | Recipe | From | To | Notes |
 |--------|------|-----|-------|
-| R7-01 | tokio::runtime | compat::TokioRuntime | Runtime bridge |
-| R7-02 | tokio::spawn | compat::spawn_tokio | Task bridging |
-| R7-03 | tokio::time::sleep | compat::sleep | Timer bridge |
-| R7-04 | tokio::io traits | compat::io | I/O trait bridge |
-| R7-05 | hyper::body | compat::body | HTTP body bridge |
+| R7-01 | poll-time Asupersync context | `runtime::with_tokio_context` | Installs only `Cx`; not a Tokio runtime |
+| R7-02 | hyper task publication | `hyper_bridge::AsupersyncExecutor::with_spawn_fn` | Caller supplies the region-owned callback |
+| R7-03 | hyper timer traits | `hyper_bridge::AsupersyncTimer` | Implements hyper timer traits, not Tokio time |
+| R7-04 | Tokio/hyper I/O traits | `io::{TokioIo, AsupersyncIo}` | Pure trait wrappers |
+| R7-05 | HTTP body traits | `body_bridge` | Body conversion only; no client/server runtime |
 
 ### 8.3 Before/After
 
@@ -407,9 +410,13 @@ tokio = { version = "1", features = ["full"] }
 
 // After: asupersync with compat bridge
 [dependencies]
-asupersync = "0.4.0"
-asupersync-tokio-compat = { version = "0.4.0", features = ["full"] }
+asupersync = "0.4.8"
+asupersync-tokio-compat = { version = "0.4.8", features = ["full"] }
 ```
+
+This dependency change alone does not let a Tokio-runtime-dependent library run
+on Asupersync. Keep the dependency's Tokio runtime together with it unless a
+source-level audit proves that only the shipped trait bridges are required.
 
 ### 8.4 Adapter Examples for Common Tokio-Dependent Crates
 
@@ -420,32 +427,19 @@ Tower service traits.
 
 | Crate family | Preferred path | Adapter path | Required compat features |
 |--------------|----------------|--------------|--------------------------|
-| `reqwest` / hyper clients | `asupersync::http` client/pool surfaces | keep client, wrap call future with `with_tokio_context`; use hyper bridge for custom hyper clients | `hyper-bridge`, `tokio-io` |
-| `axum` / Tower middleware | native `asupersync::web` and `asupersync::service` | wrap Tower stack with `tower_bridge::FromTower` while handlers are being ported | `tower-bridge` |
-| `tonic` clients/servers | native `asupersync::grpc` | wrap unary/stream futures at the boundary; preserve gRPC status/deadline metadata | `hyper-bridge`, `tokio-io`, optionally `tower-bridge` |
-| `sqlx` / Tokio database pools | native `asupersync::database::{postgres,mysql,sqlite}` | keep the pool behind a region-owned adapter and wrap query futures with `with_tokio_context` | `full` if driver also needs hyper/Tower I/O |
+| `reqwest` / hyper clients | `asupersync::http` client/pool surfaces | keep reqwest and its Tokio runtime in an owned island; lower-level custom hyper code may use explicit hyper/I/O components after source audit | depends on audited traits |
+| `axum` / Tower middleware | native `asupersync::web` and `asupersync::service` | `FromTower` can preserve a compatible Tower service trait, but does not provide axum's Tokio runtime | `tower-bridge` |
+| `tonic` clients/servers | native `asupersync::grpc` | keep tonic transport and its Tokio runtime together unless a bounded lower-level trait-only integration is proven | depends on audited traits |
+| `sqlx` / Tokio database pools | native `asupersync::database::{postgres,mysql,sqlite}` | keep the pool and its Tokio runtime in one owned island; `with_tokio_context` alone is insufficient | none supplied for sqlx runtime |
 
 #### R7-06: Retain a Tokio-locked HTTP client temporarily
 
-```rust
-use asupersync::Cx;
-use asupersync_tokio_compat::runtime::with_tokio_context;
-
-async fn call_tokio_locked_client(
-    cx: &Cx,
-    client: reqwest::Client,
-    request: reqwest::Request,
-) -> Result<reqwest::Response, ClientError> {
-    with_tokio_context(cx, || async move { client.execute(request).await })
-        .await
-        .ok_or(ClientError::Cancelled)?
-        .map_err(ClientError::Http)
-}
-```
-
-Boundary rule: the adapter receives `&Cx` at the public edge. Do not hide this
-inside a global client singleton; region close must still cancel or drain the
-in-flight request.
+Keep reqwest and an independently owned Tokio runtime behind one application
+boundary. Send bounded requests into that island, propagate the caller's
+deadline/cancellation explicitly, and make island shutdown part of the owning
+region's close protocol. Do not wrap `client.execute(...)` in
+`with_tokio_context`: that helper installs only Asupersync's `Cx`, so
+`tokio::runtime::Handle::current()` remains unavailable.
 
 #### R7-07: Wrap a Tower middleware stack during router migration
 
@@ -472,60 +466,24 @@ where
 Boundary rule: the `FromTower` bridge polls readiness under an Asupersync
 `Mutex`, installs `Cx` while polling Tower futures, and maps cancellation to
 `BridgeError::Cancelled`. Keep this wrapper at the service edge, not scattered
-through handlers.
+through handlers. Audit every middleware layer separately: `FromTower` does not
+create the Tokio runtime that Tokio-bound middleware may require.
 
 #### R7-08: Keep a tonic client while porting service internals
 
-```rust
-use asupersync::Cx;
-use asupersync_tokio_compat::runtime::with_tokio_context;
+Keep the tonic channel and its Tokio runtime in the same explicit island. Copy
+`grpc-timeout`, auth, and trace metadata into the island request; map completion,
+status, timeout, and caller cancellation back into distinct Asupersync outcomes.
+The hyper and I/O adapters are components for audited lower-level wiring, not a
+drop-in tonic transport and not a replacement for Tokio runtime context.
 
-async fn call_tonic_unary<Req, Resp, F, Fut>(
-    cx: &Cx,
-    request: tonic::Request<Req>,
-    call: F,
-) -> Result<tonic::Response<Resp>, GrpcBoundaryError>
-where
-    F: FnOnce(tonic::Request<Req>) -> Fut,
-    Fut: core::future::Future<Output = Result<tonic::Response<Resp>, tonic::Status>>,
-{
-    with_tokio_context(cx, || call(request))
-        .await
-        .ok_or(GrpcBoundaryError::Cancelled)?
-        .map_err(GrpcBoundaryError::Status)
-}
-```
+#### R7-09: Keep an sqlx pool behind an owned runtime boundary
 
-Boundary rule: copy `grpc-timeout`, auth, and trace metadata before crossing the
-adapter. Cancellation must map to the Asupersync cancellation protocol, not to a
-generic transport error.
-
-#### R7-09: Keep an sqlx pool behind a region-owned boundary
-
-```rust
-use asupersync::Cx;
-use asupersync_tokio_compat::runtime::with_tokio_context;
-
-async fn fetch_user(
-    cx: &Cx,
-    pool: sqlx::PgPool,
-    user_id: i64,
-) -> Result<UserRow, DbBoundaryError> {
-    with_tokio_context(cx, || async move {
-        sqlx::query_as::<_, UserRow>("select id, email from users where id = $1")
-            .bind(user_id)
-            .fetch_one(&pool)
-            .await
-    })
-    .await
-    .ok_or(DbBoundaryError::Cancelled)?
-    .map_err(DbBoundaryError::Sqlx)
-}
-```
-
-Boundary rule: pool acquisition and transaction lifetimes are obligations. A
-cancelled query must release the checked-out connection or abort the transaction
-before the owning region closes.
+The sqlx pool, its driver tasks, and its Tokio runtime stay together. The
+Asupersync side owns a bounded request channel and shutdown handshake. Pool
+acquisition and transaction lifetimes remain obligations: a cancelled request
+must release the checked-out connection or roll back the transaction before the
+island acknowledges cancellation. There is no shipped `sqlx_runtime` feature.
 
 ### 8.5 Adapter Exit Criteria
 
@@ -541,7 +499,7 @@ T7 when all of the following are true:
 
 ### 8.6 Anti-Patterns
 
-- AP-T7-01: Running both runtimes with separate thread pools (use bridge)
+- AP-T7-01: Hiding a second runtime instead of making its lifecycle boundary explicit
 - AP-T7-02: Mixing tokio::spawn and asupersync::spawn without coordination
 - AP-T7-03: Not propagating cancellation across runtime boundary
 
@@ -549,7 +507,7 @@ T7 when all of the following are true:
 
 | Failure | Symptom | Mitigation |
 |---------|---------|------------|
-| FM-T7-01 | Deadlock between runtimes | Single bridge executor; never block on cross-runtime call |
+| FM-T7-01 | Deadlock between runtimes | Never synchronously block across the island boundary; use bounded request/response handoff |
 | FM-T7-02 | Timer drift in bridge layer | Use unified time source; test with deterministic clock |
 | FM-T7-03 | Cancel not reaching tokio future | Wrap with CancelAware; verify propagation in tests |
 
@@ -564,7 +522,7 @@ T7 when all of the following are true:
 
 | Checkpoint | Rollback Criterion | Action |
 |-----------|-------------------|--------|
-| After R7-01 runtime bridge | Latency overhead > 1ms per call | Profile bridge path |
+| After R7-01 Cx polling bridge | Latency overhead > 1ms per call | Profile bridge path |
 | After R7-04 I/O bridge | Throughput < 80% of direct tokio | Optimize or revert |
 | After R7-05 body bridge | Data corruption in body round-trip | Revert immediately |
 

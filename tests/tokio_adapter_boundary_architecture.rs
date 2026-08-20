@@ -8,9 +8,13 @@
 use std::path::Path;
 
 fn load_doc() -> String {
-    let path =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/tokio_adapter_boundary_architecture.md");
-    std::fs::read_to_string(path).expect("adapter boundary architecture document must exist")
+    load_repo_file("docs/tokio_adapter_boundary_architecture.md")
+}
+
+fn load_repo_file(relative: &str) -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(relative);
+    std::fs::read_to_string(path)
+        .unwrap_or_else(|error| panic!("repository contract input {relative} must exist: {error}"))
 }
 
 #[test]
@@ -32,7 +36,7 @@ fn architecture_doc_references_correct_bead_and_metadata() {
         "Maintained by",
         "WhiteDesert",
         "Version",
-        "1.4.0",
+        "1.5.0",
     ] {
         assert!(doc.contains(token), "missing metadata token: {token}");
     }
@@ -78,11 +82,11 @@ fn architecture_doc_has_success_failure_cancellation_outcome_matrix() {
         "Failure Contract",
         "Cancellation Contract",
         "Deterministic Assertion",
-        "Runtime bridge (`with_tokio_context`)",
-        "Hyper bridge (`hyper_bridge`)",
-        "SQLx runtime adapter (`sqlx_runtime`)",
-        "Tonic transport bridge (`tonic_transport`)",
-        "Outcome::Cancelled",
+        "Cx polling bridge (`with_tokio_context`)",
+        "Tower bridge (`FromTower`)",
+        "Hyper executor callback",
+        "I/O trait wrappers",
+        "BridgeError::Cancelled",
     ] {
         assert!(
             doc.contains(token),
@@ -103,6 +107,68 @@ fn architecture_doc_declares_forbidden_patterns_explicitly() {
         assert!(
             doc.contains(token),
             "missing forbidden-pattern token: {token}"
+        );
+    }
+}
+
+#[test]
+fn docs_do_not_promise_a_tokio_runtime_handle() {
+    let inputs = [
+        (
+            "compat crate root",
+            load_repo_file("asupersync-tokio-compat/src/lib.rs"),
+        ),
+        (
+            "runtime source",
+            load_repo_file("asupersync-tokio-compat/src/runtime.rs"),
+        ),
+        (
+            "cancellation source",
+            load_repo_file("asupersync-tokio-compat/src/cancel.rs"),
+        ),
+        (
+            "hyper bridge source",
+            load_repo_file("asupersync-tokio-compat/src/hyper_bridge.rs"),
+        ),
+        ("architecture", load_doc()),
+        (
+            "migration cookbooks",
+            load_repo_file("docs/tokio_migration_cookbooks.md"),
+        ),
+        ("integration guide", load_repo_file("docs/integration.md")),
+    ];
+
+    for (label, input) in &inputs {
+        for forbidden in [
+            "implements Tokio's runtime handle interface using",
+            "Tokio-compatible runtime handle backed by Asupersync",
+            "valid tokio::runtime::Handle::current()",
+            "with_tokio_context(cx, || reqwest",
+            "axum_serve::serve(cx",
+            "tonic_transport::connect(cx",
+            "create_pool(cx, url",
+        ] {
+            assert!(
+                !input.contains(forbidden),
+                "{label} must not promise unsupported Tokio runtime behavior: {forbidden}"
+            );
+        }
+    }
+
+    let combined = inputs
+        .iter()
+        .map(|(_, input)| input.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    for required in [
+        "does not install a Tokio runtime",
+        "tokio::runtime::Handle::current()",
+        "independently owned Tokio runtime",
+        "with_tokio_context",
+    ] {
+        assert!(
+            combined.contains(required),
+            "corrected boundary must retain marker: {required}"
         );
     }
 }
@@ -162,8 +228,8 @@ fn architecture_doc_links_contract_and_source_evidence() {
         "docs/tokio_nonfunctional_closure_criteria.md",
         "docs/tokio_evidence_checklist.md",
         "asupersync-tokio-compat/src/runtime.rs",
-        "asupersync-tokio-compat/src/executor.rs",
-        "asupersync-tokio-compat/src/timer.rs",
+        "asupersync-tokio-compat/src/hyper_bridge.rs",
+        "asupersync-tokio-compat/src/blocking.rs",
         "asupersync-tokio-compat/src/io.rs",
         "asupersync-tokio-compat/src/cancel.rs",
         "tests/tokio_adapter_boundary_architecture.rs",
@@ -308,10 +374,11 @@ fn t74_executor_uses_callback_not_ambient_authority() {
         "executor must expose with_spawn_fn constructor"
     );
 
-    // INV-2: Structured concurrency — documents region ownership.
+    // INV-2: Structured concurrency — documents that ownership belongs to the
+    // caller-supplied publication callback rather than being inferred.
     assert!(
-        bridge.contains("region-owned"),
-        "executor must document region ownership of spawned tasks"
+        bridge.contains("Region ownership is a caller obligation"),
+        "executor must document the caller's region-ownership obligation"
     );
 
     // No unimplemented! in production code paths.
