@@ -1181,12 +1181,26 @@ impl SqliteValue {
     }
 
     /// Tries to get the value as a real (floating point).
+    ///
+    /// For compatibility with v0.4.3, integer values are widened with Rust's
+    /// `i64 as f64` conversion. That conversion can lose precision outside the
+    /// exactly representable binary64 integer range. Use
+    /// [`SqliteValue::as_real_strict`] when integer coercion is not acceptable.
     #[must_use]
     pub fn as_real(&self) -> Option<f64> {
         match self {
             Self::Real(v) => Some(*v),
             #[allow(clippy::cast_precision_loss)]
             Self::Integer(v) => Some(*v as f64),
+            _ => None,
+        }
+    }
+
+    /// Tries to get only a SQLite REAL value without coercing INTEGER values.
+    #[must_use]
+    pub fn as_real_strict(&self) -> Option<f64> {
+        match self {
+            Self::Real(v) => Some(*v),
             _ => None,
         }
     }
@@ -1288,6 +1302,10 @@ impl SqliteRow {
     }
 
     /// Gets a real value by column name.
+    ///
+    /// For compatibility with v0.4.3, this accepts INTEGER values via the
+    /// potentially lossy widening performed by [`SqliteValue::as_real`]. Use
+    /// [`SqliteRow::get_f64_strict`] to require the SQLite REAL storage class.
     pub fn get_f64(&self, column: &str) -> Result<f64, SqliteError> {
         let val = self.get(column)?;
         val.as_real().ok_or_else(|| SqliteError::TypeMismatch {
@@ -1295,6 +1313,17 @@ impl SqliteRow {
             expected: "real",
             actual: format!("{val:?}"),
         })
+    }
+
+    /// Gets a SQLite REAL value by column name without coercing INTEGER values.
+    pub fn get_f64_strict(&self, column: &str) -> Result<f64, SqliteError> {
+        let val = self.get(column)?;
+        val.as_real_strict()
+            .ok_or_else(|| SqliteError::TypeMismatch {
+                column: column.to_string(),
+                expected: "real",
+                actual: format!("{val:?}"),
+            })
     }
 
     /// Gets a text value by column name.
@@ -4492,6 +4521,8 @@ mod tests {
 
         assert_eq!(SqliteValue::Real(3.5).as_real(), Some(3.5));
         assert_eq!(SqliteValue::Integer(42).as_real(), Some(42.0));
+        assert_eq!(SqliteValue::Real(3.5).as_real_strict(), Some(3.5));
+        assert_eq!(SqliteValue::Integer(42).as_real_strict(), None);
 
         assert_eq!(
             SqliteValue::Text("hello".to_string()).as_text(),
@@ -5110,6 +5141,16 @@ mod tests {
     fn sqlite_row_get_f64_widens_from_integer() {
         let row = make_test_sqlite_row(&["val"], vec![SqliteValue::Integer(7)]);
         assert!((row.get_f64("val").unwrap() - 7.0).abs() < f64::EPSILON);
+        assert!(matches!(
+            row.get_f64_strict("val"),
+            Err(SqliteError::TypeMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn sqlite_row_get_f64_strict_accepts_real() {
+        let row = make_test_sqlite_row(&["val"], vec![SqliteValue::Real(3.5)]);
+        assert_eq!(row.get_f64_strict("val").unwrap(), 3.5);
     }
 
     #[test]
@@ -5233,6 +5274,108 @@ mod tests {
             assert_duplicate_sqlite_row_metadata(&row);
             assert!(matches!(stream.next(&cx).await, Outcome::Ok(None)));
         });
+    }
+
+    fn assert_sqlite_value_boundary_row(row: &SqliteRow) {
+        const ABOVE_EXACT_BINARY64_INTEGER: i64 = (1_i64 << 53) + 1;
+
+        assert_eq!(row.get_i64("int_min").unwrap(), i64::MIN);
+        assert_eq!(row.get_i64("int_max").unwrap(), i64::MAX);
+        assert_eq!(
+            row.get_i64("above_exact").unwrap(),
+            ABOVE_EXACT_BINARY64_INTEGER
+        );
+
+        // Compatibility guard: the legacy accessor widens INTEGER values,
+        // while the additive strict accessor refuses the lossy coercion.
+        assert_eq!(row.get_f64("above_exact").unwrap(), 9_007_199_254_740_992.0);
+        assert!(matches!(
+            row.get_f64_strict("above_exact"),
+            Err(SqliteError::TypeMismatch { .. })
+        ));
+
+        assert_eq!(
+            row.get_f64_strict("negative_zero").unwrap().to_bits(),
+            (-0.0_f64).to_bits()
+        );
+        assert_eq!(
+            row.get_f64_strict("positive_infinity").unwrap(),
+            f64::INFINITY
+        );
+        assert_eq!(
+            row.get_f64_strict("negative_infinity").unwrap(),
+            f64::NEG_INFINITY
+        );
+        assert_eq!(row.get("nan_value").unwrap(), &SqliteValue::Null);
+
+        assert_eq!(row.get_str("empty_text").unwrap(), "");
+        assert_eq!(row.get_str("nul_text").unwrap(), "a\0b");
+        assert_eq!(row.get_str("unicode_text").unwrap(), "e\u{301}雪");
+        assert_eq!(row.get_blob("empty_blob").unwrap(), b"");
+        assert_eq!(row.get_blob("binary_blob").unwrap(), &[0x00, 0x80, 0xff]);
+    }
+
+    #[test]
+    fn sqlite_value_boundaries_round_trip_across_query_surfaces() {
+        const VALUE_QUERY: &str = "SELECT ?1 AS int_min, ?2 AS int_max, \
+            ?3 AS above_exact, ?4 AS negative_zero, ?5 AS positive_infinity, \
+            ?6 AS negative_infinity, ?7 AS nan_value, ?8 AS empty_text, \
+            ?9 AS nul_text, ?10 AS unicode_text, ?11 AS empty_blob, \
+            ?12 AS binary_blob";
+
+        let cx = create_test_cx();
+        let (query_row, one_row, streamed_row) = block_on(async {
+            let mut conn = match SqliteConnection::open_in_memory(&cx).await {
+                Outcome::Ok(conn) => conn,
+                other => panic!("open_in_memory failed: {other:?}"),
+            };
+            let params = vec![
+                SqliteValue::Integer(i64::MIN),
+                SqliteValue::Integer(i64::MAX),
+                SqliteValue::Integer((1_i64 << 53) + 1),
+                SqliteValue::Real(-0.0),
+                SqliteValue::Real(f64::INFINITY),
+                SqliteValue::Real(f64::NEG_INFINITY),
+                SqliteValue::Real(f64::NAN),
+                SqliteValue::Text(String::new()),
+                SqliteValue::Text("a\0b".to_string()),
+                SqliteValue::Text("e\u{301}雪".to_string()),
+                SqliteValue::Blob(Vec::new()),
+                SqliteValue::Blob(vec![0x00, 0x80, 0xff]),
+            ];
+
+            let mut rows = match conn.query(&cx, VALUE_QUERY, &params).await {
+                Outcome::Ok(rows) => rows,
+                other => panic!("query failed: {other:?}"),
+            };
+            assert_eq!(rows.len(), 1);
+            let query_row = rows.remove(0);
+
+            let one_row = match conn.query_row(&cx, VALUE_QUERY, &params).await {
+                Outcome::Ok(Some(row)) => row,
+                other => panic!("query_row failed: {other:?}"),
+            };
+
+            let mut stream = match conn.query_stream(&cx, VALUE_QUERY, &params).await {
+                Outcome::Ok(stream) => stream,
+                other => panic!("query_stream failed to start: {other:?}"),
+            };
+            let streamed_row = match stream.next(&cx).await {
+                Outcome::Ok(Some(row)) => row,
+                other => panic!("query_stream first row failed: {other:?}"),
+            };
+            assert!(matches!(stream.next(&cx).await, Outcome::Ok(None)));
+            drop(stream);
+            conn.close().unwrap();
+
+            (query_row, one_row, streamed_row)
+        });
+
+        // Rows own their values and metadata beyond statement and connection
+        // lifetimes on every public query surface.
+        for row in [&query_row, &one_row, &streamed_row] {
+            assert_sqlite_value_boundary_row(row);
+        }
     }
 
     #[test]
@@ -5793,23 +5936,49 @@ mod tests {
     }
 
     #[test]
-    fn query_rejects_invalid_utf8_text() {
+    fn sqlite_value_invalid_utf8_is_typed_and_recovers_across_query_surfaces() {
         let cx = create_test_cx();
 
         block_on(async {
-            let conn = match SqliteConnection::open_in_memory(&cx).await {
+            let mut conn = match SqliteConnection::open_in_memory(&cx).await {
                 Outcome::Ok(conn) => conn,
                 other => panic!("open_in_memory failed: {other:?}"),
             };
 
-            match conn
-                .query_unchecked(&cx, "SELECT CAST(X'80' AS TEXT) AS bad_text", &[])
-                .await
-            {
+            const INVALID_TEXT_QUERY: &str = "SELECT CAST(X'80' AS TEXT) AS bad_text";
+
+            match conn.query_unchecked(&cx, INVALID_TEXT_QUERY, &[]).await {
                 Outcome::Err(SqliteError::InvalidTextEncoding { column, .. }) => {
-                    assert_eq!(column, "bad_text");
+                    assert_eq!(column, "bad_text")
                 }
                 other => panic!("expected invalid UTF-8 rejection, got: {other:?}"),
+            }
+
+            match conn.query_row_unchecked(&cx, INVALID_TEXT_QUERY, &[]).await {
+                Outcome::Err(SqliteError::InvalidTextEncoding { column, .. }) => {
+                    assert_eq!(column, "bad_text")
+                }
+                other => panic!("expected query_row invalid UTF-8 rejection, got: {other:?}"),
+            }
+
+            let mut stream = match conn
+                .query_stream_unchecked(&cx, INVALID_TEXT_QUERY, &[])
+                .await
+            {
+                Outcome::Ok(stream) => stream,
+                other => panic!("query_stream failed to start: {other:?}"),
+            };
+            match stream.next(&cx).await {
+                Outcome::Err(SqliteError::InvalidTextEncoding { column, .. }) => {
+                    assert_eq!(column, "bad_text")
+                }
+                other => panic!("expected streamed invalid UTF-8 rejection, got: {other:?}"),
+            }
+            drop(stream);
+
+            match conn.query_unchecked(&cx, "SELECT 1 AS healthy", &[]).await {
+                Outcome::Ok(rows) => assert_eq!(rows[0].get_i64("healthy").unwrap(), 1),
+                other => panic!("connection did not recover after UTF-8 errors: {other:?}"),
             }
         });
     }
