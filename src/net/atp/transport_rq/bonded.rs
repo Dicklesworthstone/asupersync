@@ -299,6 +299,65 @@ struct BondedIngest {
     accepted: bool,
 }
 
+#[allow(clippy::too_many_arguments)]
+fn admit_bonded_datagram<'a, F>(
+    buf: &'a [u8],
+    n: usize,
+    tag: u64,
+    symbol_auth: Option<&SecurityContext>,
+    donor_count: u32,
+    blocks: &BTreeMap<(u32, u8), BondedBlockState>,
+    symbol_set: &mut BondedReceiverSymbolSet,
+    retention: BondedReceiverRetentionPolicy,
+    symbol_size: u16,
+    mut resolve_entry: F,
+) -> (BondedIngest, Option<(usize, ParsedDatagram, &'a [u8])>)
+where
+    F: FnMut(u32) -> Option<(usize, ObjectId)>,
+{
+    let auth_required = symbol_auth.is_some();
+    let Some((parsed, payload)) = parse_symbol_datagram_payload(buf, n, tag, auth_required) else {
+        return (BondedIngest::default(), None);
+    };
+    let observed = BondedIngest {
+        observed: true,
+        accepted: false,
+    };
+    let Some((decoder_pos, object_id)) = resolve_entry(parsed.entry) else {
+        return (observed, None);
+    };
+    if payload.len() != usize::from(symbol_size) {
+        return (observed, None);
+    }
+    // C2 auth gate: verify the bonded symbol tag BEFORE the key can enter the
+    // shared set — a forged symbol must not consume dedup or retention state.
+    if let Some(context) = symbol_auth {
+        let symbol = Symbol::new(
+            SymbolId::new(object_id, parsed.sbn, parsed.esi),
+            payload.to_vec(),
+            parsed.kind,
+        );
+        match verify_bonded_symbol_tag(context, &symbol, parsed.auth_tag) {
+            BondedSymbolAuthVerdict::Accepted(_) => {}
+            BondedSymbolAuthVerdict::Rejected(_) => return (observed, None),
+        }
+    }
+    let donor_index =
+        bonded_attribute_donor(parsed.entry, parsed.sbn, parsed.esi, donor_count, blocks);
+    let key = BondedSymbolKey::new(object_id, parsed.sbn, parsed.esi);
+    match symbol_set.record_key_with_retention(donor_index, key, parsed.kind, retention) {
+        BondedSymbolDisposition::Accepted(_) => (
+            BondedIngest {
+                observed: true,
+                accepted: true,
+            },
+            Some((decoder_pos, parsed, payload)),
+        ),
+        BondedSymbolDisposition::Duplicate(_)
+        | BondedSymbolDisposition::RejectedByRetention { .. } => (observed, None),
+    }
+}
+
 /// Feed one bonded donor datagram: parse, verify the per-symbol auth tag,
 /// dedupe across donors, then feed the shared per-entry decode pipeline with
 /// the same spawn/width gating as the single-source intake (C6).
@@ -316,42 +375,24 @@ async fn feed_bonded_datagram_to_decoders(
     decoders: &mut [EntryDecoder],
     symbol_size: u16,
 ) -> Result<BondedIngest, RqError> {
-    let auth_required = symbol_auth.is_some();
-    let Some((parsed, payload)) = parse_symbol_datagram_payload(buf, n, tag, auth_required) else {
-        return Ok(BondedIngest::default());
+    let (ingest, admitted) = admit_bonded_datagram(
+        buf,
+        n,
+        tag,
+        symbol_auth,
+        donor_count,
+        blocks,
+        symbol_set,
+        retention,
+        symbol_size,
+        |entry| {
+            let pos = decoder_position_for_entry(decoders, entry)?;
+            Some((pos, decoders[pos].object_id))
+        },
+    );
+    let Some((pos, parsed, payload)) = admitted else {
+        return Ok(ingest);
     };
-    let observed = BondedIngest {
-        observed: true,
-        accepted: false,
-    };
-    let Some(pos) = decoder_position_for_entry(decoders, parsed.entry) else {
-        return Ok(observed);
-    };
-    if payload.len() != usize::from(symbol_size) {
-        return Ok(observed);
-    }
-    let object_id = decoders[pos].object_id;
-    // C2 auth gate: verify the bonded symbol tag BEFORE the key can enter the
-    // shared set — a forged symbol must not consume dedup or retention state.
-    if let Some(context) = symbol_auth {
-        let symbol = Symbol::new(
-            SymbolId::new(object_id, parsed.sbn, parsed.esi),
-            payload.to_vec(),
-            parsed.kind,
-        );
-        match verify_bonded_symbol_tag(context, &symbol, parsed.auth_tag) {
-            BondedSymbolAuthVerdict::Accepted(_) => {}
-            BondedSymbolAuthVerdict::Rejected(_) => return Ok(observed),
-        }
-    }
-    let donor_index =
-        bonded_attribute_donor(parsed.entry, parsed.sbn, parsed.esi, donor_count, blocks);
-    let key = BondedSymbolKey::new(object_id, parsed.sbn, parsed.esi);
-    match symbol_set.record_key_with_retention(donor_index, key, parsed.kind, retention) {
-        BondedSymbolDisposition::Accepted(_) => {}
-        BondedSymbolDisposition::Duplicate(_)
-        | BondedSymbolDisposition::RejectedByRetention { .. } => return Ok(observed),
-    }
     let source_streaming_source = decoders[pos].source_streaming && parsed.kind.is_source();
     let (allow_spawn_decode, decode_width_budget) = if source_streaming_source {
         (false, 0)
@@ -1871,7 +1912,11 @@ async fn bonded_donor_execute_need_more(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lab::{LabRuntime, assert_deterministic_for_seeds};
+    use crate::net::{LabAtpUdpNetwork, LabUdpLinkPolicy, LabUdpLinkStats};
     use crate::runtime::RuntimeBuilder;
+    use crate::types::Budget;
+    use std::num::NonZeroU64;
     use std::sync::mpsc;
     use std::thread;
 
@@ -1912,6 +1957,368 @@ mod tests {
             ..RqConfig::default()
         }
         .with_symbol_auth(SecurityContext::for_testing(214))
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct LabBondedDatagramObservation {
+        decoded: Vec<u8>,
+        donor_accepted: [u64; 2],
+        donor_links: [LabUdpLinkStats; 2],
+        first_receive_parked: bool,
+        virtual_time_nanos: u64,
+    }
+
+    fn lab_bonded_descriptor(payload: &[u8], config: &RqConfig) -> BondTransferDescriptor {
+        let size = u64::try_from(payload.len()).expect("lab payload length fits u64");
+        let content_sha256: [u8; 32] = Sha256::digest(payload).into();
+        let digest = EntryDigest {
+            rel_path: "payload.bin".to_string(),
+            size,
+            content_id: crate::atp::object::ObjectId::content(ContentId::from_bytes(payload)),
+            content_sha256,
+        };
+        BondTransferDescriptor {
+            transfer_id: "lab-bonded-n2-loss-v1".to_string(),
+            root_name: "payload.bin".to_string(),
+            is_directory: false,
+            total_bytes: size,
+            merkle_root_hex: flat_merkle_root_from_digests(std::slice::from_ref(&digest)),
+            metadata: None,
+            entries: vec![crate::net::atp::bonding::BondEntry {
+                index: 0,
+                rel_path: digest.rel_path,
+                size,
+                sha256_hex: hex_encode(&content_sha256),
+            }],
+            symbol_size: config.symbol_size,
+            max_block_size: u64::try_from(config.max_block_size).expect("lab block size fits u64"),
+            auth_key_id: None,
+        }
+    }
+
+    async fn send_lab_bonded_schedule(
+        cx: Cx,
+        descriptor: BondTransferDescriptor,
+        assignment: DonorAssignment,
+        payload: Vec<u8>,
+        config: RqConfig,
+        mut socket: crate::net::LabAtpUdpNetworkSocket,
+        receiver: SocketAddr,
+    ) -> Result<u64, String> {
+        let schedule = schedule_bonded_donor_spray(&descriptor, &assignment, 32)
+            .map_err(|error| error.to_string())?;
+        let tag = transfer_tag(&descriptor.transfer_id);
+        let mut sent = 0u64;
+        for block in &schedule.blocks {
+            let start = usize::try_from(block.geometry.block_start)
+                .map_err(|_| "lab block start does not fit usize".to_string())?;
+            let len = usize::try_from(block.geometry.block_bytes)
+                .map_err(|_| "lab block length does not fit usize".to_string())?;
+            let end = start
+                .checked_add(len)
+                .ok_or_else(|| "lab block range overflow".to_string())?;
+            let block_bytes = payload
+                .get(start..end)
+                .ok_or_else(|| "lab block range escapes payload".to_string())?;
+            for emission in block.iter_symbol_emissions(schedule.donor_index) {
+                let symbol = encode_bonded_donor_emission(emission, block_bytes, &config)
+                    .map_err(|error| error.to_string())?;
+                let datagram =
+                    encode_bonded_donor_datagram(tag, block.geometry.entry_index, &symbol, None);
+                socket
+                    .send_to(&cx, &datagram, receiver)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                sent = sent.saturating_add(1);
+                crate::runtime::yield_now().await;
+            }
+        }
+        Ok(sent)
+    }
+
+    async fn run_lab_bonded_datagram_scenario(
+        cx: Cx,
+    ) -> Result<LabBondedDatagramObservation, String> {
+        let payload = bonded_e2e_payload(3_073);
+        let config = RqConfig {
+            symbol_size: 256,
+            max_block_size: 4_096,
+            ..RqConfig::default()
+        }
+        .allow_unauthenticated_for_trusted_transport();
+        let descriptor = lab_bonded_descriptor(&payload, &config);
+        descriptor.validate().map_err(|error| error.to_string())?;
+        let geometry = descriptor
+            .entry_block_geometry(0, 0)
+            .ok_or_else(|| "lab descriptor has no source block".to_string())?;
+
+        let network = LabAtpUdpNetwork::with_queue_capacity(256);
+        let receiver_addr: SocketAddr = "127.0.0.1:41000"
+            .parse()
+            .map_err(|error| format!("receiver address: {error}"))?;
+        let donor_addrs = [
+            "127.0.0.1:41001"
+                .parse()
+                .map_err(|error| format!("donor A address: {error}"))?,
+            "127.0.0.1:41002"
+                .parse()
+                .map_err(|error| format!("donor B address: {error}"))?,
+        ];
+        let receiver_socket = network
+            .bind(receiver_addr)
+            .map_err(|error| error.to_string())?;
+        let donor_a_socket = network
+            .bind(donor_addrs[0])
+            .map_err(|error| error.to_string())?;
+        let donor_b_socket = network
+            .bind(donor_addrs[1])
+            .map_err(|error| error.to_string())?;
+        network
+            .set_source_policy(
+                donor_addrs[0],
+                LabUdpLinkPolicy {
+                    drop_every: NonZeroU64::new(5),
+                    latency: Duration::ZERO,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        network
+            .set_source_policy(
+                donor_addrs[1],
+                LabUdpLinkPolicy {
+                    drop_every: NonZeroU64::new(7),
+                    latency: Duration::ZERO,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        let assignment_a = DonorAssignment::new_static(0, 2, vec![receiver_addr], None);
+        let assignment_b = DonorAssignment::new_static(1, 2, vec![receiver_addr], None);
+        let mut donor_a = cx
+            .spawn({
+                let descriptor = descriptor.clone();
+                let payload = payload.clone();
+                let config = config.clone();
+                move |donor_cx| {
+                    send_lab_bonded_schedule(
+                        donor_cx,
+                        descriptor,
+                        assignment_a,
+                        payload,
+                        config,
+                        donor_a_socket,
+                        receiver_addr,
+                    )
+                }
+            })
+            .map_err(|error| error.to_string())?;
+        let mut donor_b = cx
+            .spawn({
+                let descriptor = descriptor.clone();
+                let payload = payload.clone();
+                let config = config.clone();
+                move |donor_cx| {
+                    send_lab_bonded_schedule(
+                        donor_cx,
+                        descriptor,
+                        assignment_b,
+                        payload,
+                        config,
+                        donor_b_socket,
+                        receiver_addr,
+                    )
+                }
+            })
+            .map_err(|error| error.to_string())?;
+
+        let mut udp = RqReceiverUdpFanout::from_lab_sockets(vec![receiver_socket])
+            .map_err(|error| error.to_string())?;
+        let packet_size = usize::from(config.symbol_size) + AUTH_DGRAM_HEADER + 64;
+        let mut first_receive_parked = false;
+        let (_, mut first_batch) = std::future::poll_fn(|task_cx| {
+            let poll = udp.poll_recv_batch_any(task_cx, RQ_INBOUND_PUMP_BATCH, packet_size);
+            if poll.is_pending() {
+                first_receive_parked = true;
+                assert_eq!(network.has_receive_waiter(receiver_addr), Some(true));
+            }
+            poll
+        })
+        .await
+        .map_err(|error| error.to_string())?;
+        let mut packets = Vec::new();
+        packets.append(&mut first_batch.packets);
+        udp.recycle_recv_batch(&mut first_batch, RQ_INBOUND_PUMP_BATCH);
+
+        let sent_a = donor_a
+            .join(&cx)
+            .await
+            .map_err(|error| error.to_string())??;
+        let sent_b = donor_b
+            .join(&cx)
+            .await
+            .map_err(|error| error.to_string())??;
+        if sent_a == 0 || sent_b == 0 {
+            return Err("both lab donors must emit symbols".to_string());
+        }
+        while network.queued_datagrams(receiver_addr).unwrap_or(0) > 0 {
+            let (_, mut batch) = std::future::poll_fn(|task_cx| {
+                udp.poll_recv_batch_any(task_cx, RQ_INBOUND_PUMP_BATCH, packet_size)
+            })
+            .await
+            .map_err(|error| error.to_string())?;
+            packets.append(&mut batch.packets);
+            udp.recycle_recv_batch(&mut batch, RQ_INBOUND_PUMP_BATCH);
+        }
+
+        let mut decoding_config = DecodingConfig::without_auth();
+        decoding_config.symbol_size = config.symbol_size;
+        decoding_config.max_block_size = config.max_block_size;
+        decoding_config.repair_overhead = 1.0;
+        decoding_config.min_overhead = 2;
+        let mut decoder = DecodingPipeline::new(decoding_config);
+        decoder
+            .set_object_params(ObjectParams::new(
+                geometry.object_id,
+                u64::try_from(payload.len()).expect("lab payload length fits u64"),
+                config.symbol_size,
+                geometry.source_block_count,
+                geometry.source_symbols,
+            ))
+            .map_err(|error| error.to_string())?;
+        let blocks = BTreeMap::new();
+        let mut symbol_set = BondedReceiverSymbolSet::new();
+        let retention = BondedReceiverRetentionPolicy::bounded(128, 128);
+        let tag = transfer_tag(&descriptor.transfer_id);
+        for packet in packets {
+            let (_ingest, admitted) = admit_bonded_datagram(
+                &packet.payload,
+                packet.payload.len(),
+                tag,
+                None,
+                2,
+                &blocks,
+                &mut symbol_set,
+                retention,
+                config.symbol_size,
+                |entry| (entry == 0).then_some((0, geometry.object_id)),
+            );
+            let Some((_decoder_pos, parsed, symbol_payload)) = admitted else {
+                continue;
+            };
+            if decoder.is_complete() {
+                continue;
+            }
+            let symbol = Symbol::new(
+                SymbolId::new(geometry.object_id, parsed.sbn, parsed.esi),
+                symbol_payload.to_vec(),
+                parsed.kind,
+            );
+            decoder
+                .feed(AuthenticatedSymbol::new_unauthenticated(symbol))
+                .map_err(|error| error.to_string())?;
+        }
+        let decoded = decoder.into_data().map_err(|error| error.to_string())?;
+        let decoded_sha256: [u8; 32] = Sha256::digest(&decoded).into();
+        let decoded_digest = EntryDigest {
+            rel_path: descriptor.entries[0].rel_path.clone(),
+            size: u64::try_from(decoded.len()).expect("decoded lab payload length fits u64"),
+            content_id: crate::atp::object::ObjectId::content(ContentId::from_bytes(&decoded)),
+            content_sha256: decoded_sha256,
+        };
+        if hex_encode(&decoded_sha256) != descriptor.entries[0].sha256_hex
+            || flat_merkle_root_from_digests(std::slice::from_ref(&decoded_digest))
+                != descriptor.merkle_root_hex
+        {
+            return Err("lab bonded decode failed descriptor integrity verification".to_string());
+        }
+        let donor_accepted = [
+            symbol_set
+                .donor_stats(0)
+                .map_or(0, |stats| stats.symbols_accepted),
+            symbol_set
+                .donor_stats(1)
+                .map_or(0, |stats| stats.symbols_accepted),
+        ];
+        let donor_links = [
+            network
+                .source_stats(donor_addrs[0])
+                .ok_or_else(|| "missing donor A link stats".to_string())?,
+            network
+                .source_stats(donor_addrs[1])
+                .ok_or_else(|| "missing donor B link stats".to_string())?,
+        ];
+        if network.queued_datagrams(receiver_addr) != Some(0)
+            || network.has_receive_waiter(receiver_addr) != Some(false)
+        {
+            return Err("lab UDP receiver did not drain cleanly".to_string());
+        }
+
+        Ok(LabBondedDatagramObservation {
+            decoded,
+            donor_accepted,
+            donor_links,
+            first_receive_parked,
+            virtual_time_nanos: cx.now_for_observability().as_nanos(),
+        })
+    }
+
+    fn install_lab_bonded_datagram_scenario(runtime: &mut LabRuntime) {
+        let expected = bonded_e2e_payload(3_073);
+        let root = runtime.state.create_root_region(Budget::INFINITE);
+        let (task_id, mut handle, spawn_effects) = runtime
+            .state
+            .create_task_with_deferred_spawn_effects(root, Budget::INFINITE, async move {
+                let cx = Cx::current().expect("lab bonded task has current Cx");
+                run_lab_bonded_datagram_scenario(cx).await
+            })
+            .expect("create lab bonded root task");
+        runtime
+            .scheduler
+            .lock()
+            .schedule(task_id, Budget::INFINITE.priority);
+        spawn_effects.dispatch();
+        runtime.advance_time(1_000_000);
+        let report = runtime.run_until_quiescent_with_report();
+        assert!(
+            report.quiescent,
+            "lab bonded scenario did not quiesce: {report:?}"
+        );
+        let observation = handle
+            .try_join()
+            .expect("join lab bonded root task")
+            .expect("lab bonded root task completed")
+            .expect("lab bonded datagram scenario succeeds");
+        assert_eq!(
+            observation.decoded, expected,
+            "lab decode must be byte-identical"
+        );
+        assert!(observation.first_receive_parked);
+        assert!(observation.virtual_time_nanos > 0);
+        for (donor, accepted) in observation.donor_accepted.into_iter().enumerate() {
+            assert!(
+                accepted > 0,
+                "donor {donor} contributed no accepted symbols"
+            );
+        }
+        for (donor, stats) in observation.donor_links.into_iter().enumerate() {
+            assert!(stats.sent > 0, "donor {donor} sent no datagrams");
+            assert!(stats.dropped > 0, "donor {donor} experienced no loss");
+            assert!(stats.delivered > 0, "donor {donor} delivered no datagrams");
+            assert_eq!(stats.sent, stats.dropped + stats.delivered);
+        }
+    }
+
+    /// br-asupersync-kp2kg7: two residue-disjoint donors traverse the actual
+    /// bonded schedule, symbol encoder, wire framing, shared admission/dedup,
+    /// and RaptorQ decoder over a waker-backed virtual UDP plane. Both links
+    /// lose packets, the first receive genuinely parks, virtual time advances,
+    /// and same-seed LabRuntime traces replay identically.
+    #[test]
+    fn bonded_n2_loss_is_byte_identical_and_replayable_under_lab_runtime() {
+        assert_deterministic_for_seeds(
+            [0xB04D_0002, 0xB04D_0003],
+            install_lab_bonded_datagram_scenario,
+        );
     }
 
     /// Build the shared bonded descriptor exactly like a real coordinator:

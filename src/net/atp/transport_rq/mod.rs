@@ -80,6 +80,8 @@ use crate::decoding::{
 };
 use crate::encoding::{EncodedSymbol, EncodingPipeline, MAX_SOURCE_BLOCKS, max_object_size};
 use crate::io::{AsyncReadExt, AsyncWriteExt, ReadBuf};
+#[cfg(test)]
+use crate::net::LabAtpUdpNetworkSocket;
 use crate::net::atp::bonding::{
     BondTransferDescriptor, BondedDonorSymbolEmission, DonorAssignment, schedule_bonded_donor_spray,
 };
@@ -1313,8 +1315,14 @@ fn send_progress_crossed_yield_boundary(before: u64, after: u64) -> bool {
     after > before && before / 64 != after / 64
 }
 
+enum RqReceiverUdpSocket {
+    Native(UdpSocket),
+    #[cfg(test)]
+    Lab(LabAtpUdpNetworkSocket),
+}
+
 struct RqReceiverUdpFanout {
-    sockets: Vec<UdpSocket>,
+    sockets: Vec<RqReceiverUdpSocket>,
     next_poll: usize,
     recv_payload_pool: Vec<Vec<u8>>,
 }
@@ -1333,11 +1341,26 @@ impl RqReceiverUdpFanout {
                 recv_buffer_bytes: Some(recv_buffer_bytes),
                 send_buffer_bytes: None,
             });
-            sockets.push(socket);
+            sockets.push(RqReceiverUdpSocket::Native(socket));
         }
 
         Ok(Self {
             sockets,
+            next_poll: 0,
+            recv_payload_pool: Vec::with_capacity(RQ_INBOUND_PUMP_BATCH),
+        })
+    }
+
+    #[cfg(test)]
+    fn from_lab_sockets(sockets: Vec<LabAtpUdpNetworkSocket>) -> std::io::Result<Self> {
+        if sockets.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "RQ lab receiver UDP fanout needs at least one socket",
+            ));
+        }
+        Ok(Self {
+            sockets: sockets.into_iter().map(RqReceiverUdpSocket::Lab).collect(),
             next_poll: 0,
             recv_payload_pool: Vec::with_capacity(RQ_INBOUND_PUMP_BATCH),
         })
@@ -1350,7 +1373,11 @@ impl RqReceiverUdpFanout {
     fn local_ports(&self) -> std::io::Result<Vec<u16>> {
         self.sockets
             .iter()
-            .map(|socket| socket.local_addr().map(|addr| addr.port()))
+            .map(|socket| match socket {
+                RqReceiverUdpSocket::Native(socket) => socket.local_addr().map(|addr| addr.port()),
+                #[cfg(test)]
+                RqReceiverUdpSocket::Lab(socket) => Ok(socket.local_addr().port()),
+            })
             .collect()
     }
 
@@ -1371,7 +1398,14 @@ impl RqReceiverUdpFanout {
         let socket_count = self.sockets.len();
         for offset in 0..socket_count {
             let socket_index = (self.next_poll + offset) % socket_count;
-            match self.sockets[socket_index].poll_recv(task_cx, rbuf) {
+            let received = match &mut self.sockets[socket_index] {
+                RqReceiverUdpSocket::Native(socket) => socket.poll_recv(task_cx, rbuf),
+                #[cfg(test)]
+                RqReceiverUdpSocket::Lab(socket) => socket
+                    .poll_recv_from(task_cx, rbuf)
+                    .map(|result| result.map(|(n, _source)| n)),
+            };
+            match received {
                 Poll::Ready(Ok(n)) => {
                     self.next_poll = (socket_index + 1) % socket_count;
                     return Poll::Ready(Ok((socket_index, n)));
@@ -1404,14 +1438,21 @@ impl RqReceiverUdpFanout {
         for offset in 0..socket_count {
             let socket_index = (self.next_poll + offset) % socket_count;
             let poll_result = {
-                let socket = &mut self.sockets[socket_index];
-                let recv_payload_pool = &mut self.recv_payload_pool;
-                let mut recv = std::pin::pin!(socket.recv_batch_from_reusing(
-                    max_packets,
-                    packet_size,
-                    recv_payload_pool
-                ));
-                Future::poll(recv.as_mut(), task_cx)
+                match &mut self.sockets[socket_index] {
+                    RqReceiverUdpSocket::Native(socket) => {
+                        let recv_payload_pool = &mut self.recv_payload_pool;
+                        let mut recv = std::pin::pin!(socket.recv_batch_from_reusing(
+                            max_packets,
+                            packet_size,
+                            recv_payload_pool
+                        ));
+                        Future::poll(recv.as_mut(), task_cx)
+                    }
+                    #[cfg(test)]
+                    RqReceiverUdpSocket::Lab(socket) => {
+                        socket.poll_recv_batch(task_cx, max_packets, packet_size)
+                    }
+                }
             };
             match poll_result {
                 Poll::Ready(Ok(batch)) => {
@@ -1438,9 +1479,20 @@ impl RqReceiverUdpFanout {
                 "RQ receiver UDP fanout socket index out of range",
             )
         })?;
-        socket
-            .recv_batch_from_reusing(max_packets, packet_size, &mut self.recv_payload_pool)
-            .await
+        match socket {
+            RqReceiverUdpSocket::Native(socket) => {
+                socket
+                    .recv_batch_from_reusing(max_packets, packet_size, &mut self.recv_payload_pool)
+                    .await
+            }
+            #[cfg(test)]
+            RqReceiverUdpSocket::Lab(socket) => {
+                std::future::poll_fn(|task_cx| {
+                    socket.poll_recv_batch(task_cx, max_packets, packet_size)
+                })
+                .await
+            }
+        }
     }
 
     fn recycle_recv_batch(&mut self, batch: &mut crate::net::UdpRecvBatch, max_spare: usize) {
@@ -9414,6 +9466,21 @@ fn encode_bonded_donor_emission(
     Ok(symbol)
 }
 
+fn encode_bonded_donor_datagram(
+    tag: u64,
+    entry: u32,
+    symbol: &Symbol,
+    symbol_auth: Option<&SecurityContext>,
+) -> Vec<u8> {
+    let auth = symbol_auth.map(|context| context.sign_symbol(symbol));
+    encode_symbol_datagram(
+        tag,
+        entry,
+        symbol,
+        auth.as_ref().map(AuthenticatedSymbol::tag),
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn queue_bonded_donor_datagram(
     cx: &Cx,
@@ -9439,9 +9506,7 @@ async fn queue_bonded_donor_datagram(
     }
 
     pacer.before_send(cx).await?;
-    let auth = symbol_auth.map(|ctx| ctx.sign_symbol(sym));
-    let dgram =
-        encode_symbol_datagram(tag, entry, sym, auth.as_ref().map(AuthenticatedSymbol::tag));
+    let dgram = encode_bonded_donor_datagram(tag, entry, sym, symbol_auth);
     let fanout = send_batch.fanout();
     let socket_index = *rr % fanout;
     *rr = rr.wrapping_add(1);
