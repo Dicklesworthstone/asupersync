@@ -1913,12 +1913,12 @@
     "executable_source_pins": [
       {"path":"tests/regex_built_in_detector_corpus_contract.rs","sha256":"2268e012b3c587add36f78e436758946530ecf4d3ddcaaba5e2add4a00f86bb1","line_count":1231},
       {"path":"tests/regex_unicode_table_contract.rs","sha256":"4281b1db3127bdda90bdf580a4f0a518a1e5f078f669c0db1e619865bf19e215","line_count":929},
-      {"path":"tests/regex_syntax_terminal_receipt_contract.rs","sha256":"b82b7b7d1f38bd5d33cbddd9841375336d546cd0d1fb476397905cf5a3436e48","line_count":520},
-      {"path":"tests/regex_semantic_terminal_receipt_contract.rs","sha256":"6bc89410fdffac6603db8562add8426acf3eea4376abe2ccecc410dc3738fbee","line_count":818},
-      {"path":"tests/regex_compiler_terminal_receipt_contract.rs","sha256":"23aa6d53db1d662eaf6c45ef87ce4153154f7abfa853eb28218f9756ed72972e","line_count":1357},
-      {"path":"tests/regex_vm_core_contract.rs","sha256":"b225e926a5a319ce82609e6a19cd98cb58b4dbfbfb5634d6d31319195bc94066","line_count":737},
-      {"path":"tests/regex_vm_captures_contract.rs","sha256":"e641ab926a3221eb9ed2af542e2a4ab9c1f7408f647015e2f50d1bc684bad621","line_count":612},
-      {"path":"tests/regex_vm_iteration_contract.rs","sha256":"e15080cdf67caab871674dac663667a4e45ca6c241fd8cab31b351880424daa3","line_count":782},
+      {"path":"tests/regex_syntax_terminal_receipt_contract.rs","sha256":"ca73b7a75189db4bfab9fbf61169798284392729339400719b96bb99aa54e196","line_count":509},
+      {"path":"tests/regex_semantic_terminal_receipt_contract.rs","sha256":"e01a9528f6ba3a168037e15c6513750ff562d6649a4d6e917c357c802636e5a7","line_count":811},
+      {"path":"tests/regex_compiler_terminal_receipt_contract.rs","sha256":"d2b578eb9ac339c4520d74622b8eb6870bd82d24446d5e69eddeb43544177a2b","line_count":1370},
+      {"path":"tests/regex_vm_core_contract.rs","sha256":"eb4029b5da272f22414ff108cbeb8f60c89196c592b1d404dfeaf6b4e588d251","line_count":765},
+      {"path":"tests/regex_vm_captures_contract.rs","sha256":"3b048347a0e56502934dba9170c932890bd7e6a07bbc6708ef4e88d866b786fe","line_count":631},
+      {"path":"tests/regex_vm_iteration_contract.rs","sha256":"278bf257ab2caa176915e04cdc1b67a9893eb49148d4ae17a6372b6aed4e846a","line_count":801},
       {"path":"tests/regex_vm_terminal_receipt_contract.rs","sha256":"1297af65839227b939d15a4740488f67387d02b644e97aa9b8ba6f058e4a00f9","line_count":1109}
     ],
     "official_upstream_file_pins": [

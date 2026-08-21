@@ -293,7 +293,22 @@ fn identity_sources_authority_and_decision_are_fail_closed() {
     assert_eq!(sha256(TERMINAL_PATH), TERMINAL_SHA256);
     assert!(fs::metadata(PREDECESSOR_PATH).is_ok());
 
-    for source in array(&value, "sources") {
+    let sources = array(&value, "sources");
+    assert_eq!(
+        sources
+            .iter()
+            .map(|source| text(source, "path"))
+            .collect::<Vec<_>>(),
+        [
+            "src/observability/regex_ir.rs",
+            "src/observability/regex_lowering.rs",
+            "src/observability/regex_vm.rs",
+            "src/observability/mod.rs",
+        ]
+    );
+    // The source rows are an immutable R3.4.3 receipt. R3.7.1 separately
+    // pins and executes the live successor sources.
+    for source in sources {
         let path = text(source, "path");
         if path == VM_SOURCE_PATH {
             assert_eq!(text(source, "sha256"), FROZEN_R3_4_3_VM_SHA256);
@@ -301,11 +316,15 @@ fn identity_sources_authority_and_decision_are_fail_closed() {
             assert_eq!(text(source, "pin_scope"), "historical_r3_4_3_source");
             continue;
         }
-        assert_eq!(sha256(path), text(source, "sha256"), "source drift: {path}");
-        let bytes = fs::metadata(path)
-            .unwrap_or_else(|error| panic!("metadata {path}: {error}"))
-            .len();
-        assert_eq!(bytes, number(source, "bytes"), "source size drift: {path}");
+        let digest = text(source, "sha256");
+        assert_eq!(digest.len(), 64, "historical source digest length: {path}");
+        assert!(digest.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert!(number(source, "bytes") > 0);
+        assert!(!text(source, "revision").is_empty());
+        assert!(
+            fs::metadata(path).is_ok(),
+            "historical source path is missing: {path}"
+        );
     }
 
     let handoff = Value::Object(object(&value, "successor_handoff").clone());

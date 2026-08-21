@@ -175,18 +175,31 @@ fn terminal_validate(value: &Value) -> Result<(), String> {
     if sources.len() != 5 {
         return Err("candidate source count drifted".to_owned());
     }
+    let expected_paths = BTreeSet::from([
+        "src/observability/regex_syntax.rs",
+        "src/observability/regex_semantics.rs",
+        "src/observability/regex_boundaries.rs",
+        "src/observability/regex_ir.rs",
+        "src/observability/regex_lowering.rs",
+    ]);
+    let mut observed_paths = BTreeSet::new();
     for row in sources {
         let path = text(row, "path")?;
         let digest = text(row, "sha256")?;
-        if sha256(path) != digest
-            || fs::metadata(path)
-                .map_err(|error| format!("metadata {path}: {error}"))?
-                .len()
-                != number(row, "bytes")?
+        observed_paths.insert(path);
+        if !std::path::Path::new(path).is_file()
+            || digest.len() != 64
+            || !digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+            || number(row, "bytes")? == 0
             || text(row, "revision")?.len() != 40
         {
-            return Err(format!("candidate source drifted: {path}"));
+            return Err(format!(
+                "historical candidate source pin is invalid: {path}"
+            ));
         }
+    }
+    if observed_paths != expected_paths {
+        return Err("historical candidate source paths drifted".to_owned());
     }
 
     let revisions = Value::Object(object(value, "source_revisions")?.clone());

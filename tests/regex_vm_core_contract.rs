@@ -251,7 +251,25 @@ fn identity_authority_source_pins_and_decision_are_fail_closed() {
     assert!(boolean(&terminal, "vm_experimentation_authorized"));
     assert!(!boolean(&terminal, "production_cutover_eligible"));
 
-    for source in array(&value, "sources") {
+    let sources = array(&value, "sources");
+    assert_eq!(
+        sources
+            .iter()
+            .map(|source| text(source, "path"))
+            .collect::<Vec<_>>(),
+        [
+            "src/observability/regex_syntax.rs",
+            "src/observability/regex_semantics.rs",
+            "src/observability/regex_boundaries.rs",
+            "src/observability/regex_ir.rs",
+            "src/observability/regex_lowering.rs",
+            "src/observability/regex_vm.rs",
+            "src/observability/mod.rs",
+        ]
+    );
+    // The source rows are an immutable R3.4.1 receipt. R3.7.1 separately
+    // pins and executes the live successor sources.
+    for source in sources {
         let path = text(source, "path");
         if path == VM_SOURCE_PATH {
             assert_eq!(text(source, "sha256"), FROZEN_VM_SOURCE_SHA256);
@@ -259,13 +277,23 @@ fn identity_authority_source_pins_and_decision_are_fail_closed() {
             assert_eq!(text(source, "pin_scope"), "historical_r3_4_1_source");
             continue;
         }
-        assert_eq!(sha256(path), text(source, "sha256"), "source drift: {path}");
-        let bytes = fs::metadata(path)
-            .unwrap_or_else(|error| panic!("metadata {path}: {error}"))
-            .len();
-        assert_eq!(bytes, number(source, "bytes"), "source size drift: {path}");
+        let digest = text(source, "sha256");
+        assert_eq!(digest.len(), 64, "historical source digest length: {path}");
+        assert!(digest.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert!(number(source, "bytes") > 0);
+        assert!(!text(source, "revision").is_empty());
+        assert!(
+            fs::metadata(path).is_ok(),
+            "historical source path is missing: {path}"
+        );
     }
-    assert_eq!(sha256(MOD_SOURCE_PATH), FROZEN_MOD_SOURCE_SHA256);
+    assert_eq!(
+        sources
+            .iter()
+            .find(|source| text(source, "path") == MOD_SOURCE_PATH)
+            .map(|source| text(source, "sha256")),
+        Some(FROZEN_MOD_SOURCE_SHA256)
+    );
 
     let handoff = Value::Object(object(&value, "successor_handoff").clone());
     assert_eq!(
