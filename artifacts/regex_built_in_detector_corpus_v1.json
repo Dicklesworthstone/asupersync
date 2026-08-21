@@ -77,8 +77,8 @@
     },
     {
       "path": "artifacts/regex_privacy_capability_inventory_v1.json",
-      "sha256": "29ecaeb39e376e5d096847782a21a88e79c69ab8b8dba98a66ecaec2ba190915",
-      "line_count": 1014,
+      "sha256": "2f0264e45f9362d4b299c235f82b415d553b8f6fd40a05aef25f84c948f75a5e",
+      "line_count": 1015,
       "role": "R1 capability and historical detector baseline"
     },
     {
