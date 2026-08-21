@@ -160,10 +160,11 @@ _No unreleased changes._
   [`355266b`](https://github.com/Dicklesworthstone/asupersync/commit/355266bb61b95211f668a095cd1f8a4b10252f8f)).
 - **Callers can opt into structured, redaction-safe SQLite diagnostics without
   changing established error signatures.** The additive, non-exhaustive
-  `SqliteOperation`, `SqliteErrorCategory`, `SqliteRetryDisposition`,
-  `SqliteErrorDiagnostic`, and `SqliteOperationError` types expose stable
-  operation, category, retry, and SQLite primary/extended-code data through
-  separately named `*_diagnosed` connection and transaction methods. Existing
+  `SqliteOperation`, `SqliteErrorCategory`, `SqliteRetryDisposition`, and
+  `SqliteErrorDiagnostic` types plus the private-field `SqliteOperationError`
+  wrapper expose stable operation, category, retry, and SQLite
+  primary/extended-code data through separately named `*_diagnosed` connection
+  and transaction methods. Existing
   methods continue returning the v0.4.3-compatible `SqliteError`; structured
   cancellation remains an outer `Outcome::Cancelled`; and ordinary `Debug`,
   `Display`, and error-chain traversal omit SQL, values, paths, and raw engine
