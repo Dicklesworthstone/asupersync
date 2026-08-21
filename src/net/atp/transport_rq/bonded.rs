@@ -1913,6 +1913,7 @@ async fn bonded_donor_execute_need_more(
 mod tests {
     use super::*;
     use crate::lab::{LabRuntime, assert_deterministic_for_seeds};
+    use crate::net::atp::bonding::BondedBlockCompletionPath;
     use crate::net::{LabAtpUdpNetwork, LabUdpLinkPolicy, LabUdpLinkStats};
     use crate::runtime::RuntimeBuilder;
     use crate::types::Budget;
@@ -1959,16 +1960,47 @@ mod tests {
         .with_symbol_auth(SecurityContext::for_testing(214))
     }
 
+    #[derive(Debug, Clone, Copy)]
+    struct LabBondedScenario {
+        donor_count: u32,
+        stopped_donor: Option<(u32, u64)>,
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct LabDonorSendObservation {
+        emitted: u64,
+        planned: u64,
+        stopped_early: bool,
+    }
+
     #[derive(Debug, PartialEq, Eq)]
     struct LabBondedDatagramObservation {
         decoded: Vec<u8>,
-        donor_accepted: [u64; 2],
-        donor_links: [LabUdpLinkStats; 2],
+        donor_ingress: Vec<BondedDonorIngressStats>,
+        donor_links: Vec<LabUdpLinkStats>,
+        donor_sends: Vec<LabDonorSendObservation>,
+        source_symbols_required: u64,
+        source_symbols_accepted: u64,
+        repair_symbols_accepted: u64,
+        completion_path: BondedBlockCompletionPath,
+        missing_source_esis: Vec<u32>,
+        deficit_symbols: u32,
+        decoder_pipeline_released: bool,
+        bytes_written_before_late_source: u64,
+        bytes_written_after_late_source: u64,
+        final_bytes_written: u64,
+        late_source_observed: bool,
+        late_source_accepted: bool,
+        staging_unchanged_after_late_source: bool,
         first_receive_parked: bool,
         virtual_time_nanos: u64,
     }
 
-    fn lab_bonded_descriptor(payload: &[u8], config: &RqConfig) -> BondTransferDescriptor {
+    fn lab_bonded_descriptor(
+        payload: &[u8],
+        config: &RqConfig,
+        donor_count: u32,
+    ) -> BondTransferDescriptor {
         let size = u64::try_from(payload.len()).expect("lab payload length fits u64");
         let content_sha256: [u8; 32] = Sha256::digest(payload).into();
         let digest = EntryDigest {
@@ -1978,7 +2010,7 @@ mod tests {
             content_sha256,
         };
         BondTransferDescriptor {
-            transfer_id: "lab-bonded-n2-loss-v1".to_string(),
+            transfer_id: format!("lab-bonded-n{donor_count}-loss-v1"),
             root_name: "payload.bin".to_string(),
             is_directory: false,
             total_bytes: size,
@@ -2004,9 +2036,12 @@ mod tests {
         config: RqConfig,
         mut socket: crate::net::LabAtpUdpNetworkSocket,
         receiver: SocketAddr,
-    ) -> Result<u64, String> {
+        stop_after: Option<u64>,
+    ) -> Result<LabDonorSendObservation, String> {
         let schedule = schedule_bonded_donor_spray(&descriptor, &assignment, 32)
             .map_err(|error| error.to_string())?;
+        let planned = u64::try_from(schedule.total_symbol_count())
+            .map_err(|_| "lab donor schedule length does not fit u64".to_string())?;
         let tag = transfer_tag(&descriptor.transfer_id);
         let mut sent = 0u64;
         for block in &schedule.blocks {
@@ -2021,6 +2056,13 @@ mod tests {
                 .get(start..end)
                 .ok_or_else(|| "lab block range escapes payload".to_string())?;
             for emission in block.iter_symbol_emissions(schedule.donor_index) {
+                if stop_after.is_some_and(|limit| sent >= limit) {
+                    return Ok(LabDonorSendObservation {
+                        emitted: sent,
+                        planned,
+                        stopped_early: true,
+                    });
+                }
                 let symbol = encode_bonded_donor_emission(emission, block_bytes, &config)
                     .map_err(|error| error.to_string())?;
                 let datagram =
@@ -2033,103 +2075,100 @@ mod tests {
                 crate::runtime::yield_now().await;
             }
         }
-        Ok(sent)
+        Ok(LabDonorSendObservation {
+            emitted: sent,
+            planned,
+            stopped_early: false,
+        })
     }
 
     async fn run_lab_bonded_datagram_scenario(
         cx: Cx,
+        scenario: LabBondedScenario,
     ) -> Result<LabBondedDatagramObservation, String> {
-        let payload = bonded_e2e_payload(3_073);
+        if !(1..=3).contains(&scenario.donor_count) {
+            return Err(format!(
+                "lab bonded scenario supports one to three donors, got {}",
+                scenario.donor_count
+            ));
+        }
+        let payload = bonded_e2e_payload(7_169);
         let config = RqConfig {
             symbol_size: 256,
             max_block_size: 4_096,
+            source_retransmit_rounds: 1,
             ..RqConfig::default()
         }
         .allow_unauthenticated_for_trusted_transport();
-        let descriptor = lab_bonded_descriptor(&payload, &config);
+        let descriptor = lab_bonded_descriptor(&payload, &config, scenario.donor_count);
         descriptor.validate().map_err(|error| error.to_string())?;
         let geometry = descriptor
             .entry_block_geometry(0, 0)
             .ok_or_else(|| "lab descriptor has no source block".to_string())?;
 
         let network = LabAtpUdpNetwork::with_queue_capacity(256);
-        let receiver_addr: SocketAddr = "127.0.0.1:41000"
-            .parse()
-            .map_err(|error| format!("receiver address: {error}"))?;
-        let donor_addrs = [
-            "127.0.0.1:41001"
-                .parse()
-                .map_err(|error| format!("donor A address: {error}"))?,
-            "127.0.0.1:41002"
-                .parse()
-                .map_err(|error| format!("donor B address: {error}"))?,
-        ];
+        let receiver_addr = SocketAddr::from(([127, 0, 0, 1], 41_000));
         let receiver_socket = network
             .bind(receiver_addr)
             .map_err(|error| error.to_string())?;
-        let donor_a_socket = network
-            .bind(donor_addrs[0])
-            .map_err(|error| error.to_string())?;
-        let donor_b_socket = network
-            .bind(donor_addrs[1])
-            .map_err(|error| error.to_string())?;
-        network
-            .set_source_policy(
-                donor_addrs[0],
-                LabUdpLinkPolicy {
-                    drop_every: NonZeroU64::new(5),
-                    latency: Duration::ZERO,
-                },
-            )
-            .map_err(|error| error.to_string())?;
-        network
-            .set_source_policy(
-                donor_addrs[1],
-                LabUdpLinkPolicy {
-                    drop_every: NonZeroU64::new(7),
-                    latency: Duration::ZERO,
-                },
-            )
-            .map_err(|error| error.to_string())?;
+        let drop_periods = [5_u64, 7, 3];
+        let mut donor_addrs = Vec::with_capacity(
+            usize::try_from(scenario.donor_count).expect("lab donor count fits usize"),
+        );
+        let mut donor_handles = Vec::with_capacity(donor_addrs.capacity());
+        for donor_index in 0..scenario.donor_count {
+            let donor_port = 41_001_u16
+                .checked_add(u16::try_from(donor_index).expect("lab donor index fits u16"))
+                .expect("lab donor port does not overflow");
+            let donor_addr = SocketAddr::from(([127, 0, 0, 1], donor_port));
+            let donor_socket = network
+                .bind(donor_addr)
+                .map_err(|error| error.to_string())?;
+            let drop_every = drop_periods
+                .get(usize::try_from(donor_index).expect("lab donor index fits usize"))
+                .copied()
+                .and_then(NonZeroU64::new);
+            network
+                .set_source_policy(
+                    donor_addr,
+                    LabUdpLinkPolicy {
+                        drop_every,
+                        latency: Duration::ZERO,
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+            donor_addrs.push(donor_addr);
 
-        let assignment_a = DonorAssignment::new_static(0, 2, vec![receiver_addr], None);
-        let assignment_b = DonorAssignment::new_static(1, 2, vec![receiver_addr], None);
-        let mut donor_a = cx
-            .spawn({
-                let descriptor = descriptor.clone();
-                let payload = payload.clone();
-                let config = config.clone();
-                move |donor_cx| {
-                    send_lab_bonded_schedule(
-                        donor_cx,
-                        descriptor,
-                        assignment_a,
-                        payload,
-                        config,
-                        donor_a_socket,
-                        receiver_addr,
-                    )
-                }
-            })
-            .map_err(|error| error.to_string())?;
-        let mut donor_b = cx
-            .spawn({
-                let descriptor = descriptor.clone();
-                let payload = payload.clone();
-                let config = config.clone();
-                move |donor_cx| {
-                    send_lab_bonded_schedule(
-                        donor_cx,
-                        descriptor,
-                        assignment_b,
-                        payload,
-                        config,
-                        donor_b_socket,
-                        receiver_addr,
-                    )
-                }
-            })
-            .map_err(|error| error.to_string())?;
+            let assignment = DonorAssignment::new_static(
+                donor_index,
+                scenario.donor_count,
+                vec![receiver_addr],
+                None,
+            );
+            let stop_after = scenario
+                .stopped_donor
+                .and_then(|(stopped, limit)| (stopped == donor_index).then_some(limit));
+            let handle = cx
+                .spawn({
+                    let descriptor = descriptor.clone();
+                    let payload = payload.clone();
+                    let config = config.clone();
+                    move |donor_cx| {
+                        send_lab_bonded_schedule(
+                            donor_cx,
+                            descriptor,
+                            assignment,
+                            payload,
+                            config,
+                            donor_socket,
+                            receiver_addr,
+                            stop_after,
+                        )
+                    }
+                })
+                .map_err(|error| error.to_string())?;
+            donor_handles.push(handle);
+        }
 
         let mut udp = RqReceiverUdpFanout::from_lab_sockets(vec![receiver_socket])
             .map_err(|error| error.to_string())?;
@@ -2149,16 +2188,13 @@ mod tests {
         packets.append(&mut first_batch.packets);
         udp.recycle_recv_batch(&mut first_batch, RQ_INBOUND_PUMP_BATCH);
 
-        let sent_a = donor_a
-            .join(&cx)
-            .await
-            .map_err(|error| error.to_string())??;
-        let sent_b = donor_b
-            .join(&cx)
-            .await
-            .map_err(|error| error.to_string())??;
-        if sent_a == 0 || sent_b == 0 {
-            return Err("both lab donors must emit symbols".to_string());
+        let mut donor_sends = Vec::with_capacity(donor_handles.len());
+        for mut donor in donor_handles {
+            let sent = donor.join(&cx).await.map_err(|error| error.to_string())??;
+            if sent.emitted == 0 {
+                return Err("every lab donor must emit at least one symbol".to_string());
+            }
+            donor_sends.push(sent);
         }
         while network.queued_datagrams(receiver_addr).unwrap_or(0) > 0 {
             let (_, mut batch) = std::future::poll_fn(|task_cx| {
@@ -2170,54 +2206,270 @@ mod tests {
             udp.recycle_recv_batch(&mut batch, RQ_INBOUND_PUMP_BATCH);
         }
 
-        let mut decoding_config = DecodingConfig::without_auth();
-        decoding_config.symbol_size = config.symbol_size;
-        decoding_config.max_block_size = config.max_block_size;
-        decoding_config.repair_overhead = 1.0;
-        decoding_config.min_overhead = 2;
-        let mut decoder = DecodingPipeline::new(decoding_config);
-        decoder
-            .set_object_params(ObjectParams::new(
-                geometry.object_id,
-                u64::try_from(payload.len()).expect("lab payload length fits u64"),
-                config.symbol_size,
-                geometry.source_block_count,
-                geometry.source_symbols,
-            ))
+        let manifest = manifest_from_bonded_descriptor(&descriptor);
+        let source_streaming = config.repair_overhead <= 1.0
+            && config.source_retransmit_rounds > 0;
+        if !source_streaming {
+            return Err("lab bonded matrix must exercise source-streaming decode".to_string());
+        }
+        let staging_dir = bonded_e2e_tmp(&format!(
+            "lab_n{}_source_streaming",
+            scenario.donor_count
+        ));
+        let mut decoders = vec![new_bonded_entry_decoder(
+            &manifest.entries[0],
+            &manifest,
+            &staging_dir,
+            None,
+            config.symbol_size,
+            config.max_block_size,
+            descriptor.max_block_size,
+            &config,
+            None,
+            source_streaming,
+        )];
+        let blocks = bonded_block_states(&descriptor, &decoders, 32)
             .map_err(|error| error.to_string())?;
-        let blocks = BTreeMap::new();
         let mut symbol_set = BondedReceiverSymbolSet::new();
         let retention = BondedReceiverRetentionPolicy::bounded(128, 128);
         let tag = transfer_tag(&descriptor.transfer_id);
+        let mut source_packets = Vec::new();
+        let mut block_zero_repair_packets = Vec::new();
+        let mut later_repair_packets = Vec::new();
+        let mut late_source_packet = None;
         for packet in packets {
-            let (_ingest, admitted) = admit_bonded_datagram(
+            let (parsed, _) = parse_symbol_datagram_payload(
+                &packet.payload,
+                packet.payload.len(),
+                tag,
+                false,
+            )
+            .ok_or_else(|| "lab network delivered an invalid bonded datagram".to_string())?;
+            if parsed.kind.is_source() && parsed.sbn == 0 && parsed.esi == 10 {
+                if late_source_packet.replace(packet).is_some() {
+                    return Err("lab schedule emitted duplicate source ESI 10".to_string());
+                }
+            } else if parsed.kind.is_source() {
+                source_packets.push(packet);
+            } else if parsed.sbn == 0 {
+                block_zero_repair_packets.push(packet);
+            } else {
+                later_repair_packets.push(packet);
+            }
+        }
+        let late_source_packet = late_source_packet
+            .ok_or_else(|| "lab loss schedule must deliver held source ESI 10".to_string())?;
+
+        // Exercise the production bonded receiver seam, not a standalone
+        // DecodingPipeline: source symbols persist through EntryDecoder, repair
+        // symbols seed that same pipeline, and decoded bytes flow through the
+        // E-9 accounting path in persist_decoded_block.
+        for packet in source_packets {
+            let ingest = feed_bonded_datagram_to_decoders(
+                &cx,
                 &packet.payload,
                 packet.payload.len(),
                 tag,
                 None,
-                2,
+                scenario.donor_count,
                 &blocks,
                 &mut symbol_set,
                 retention,
+                &mut decoders,
                 config.symbol_size,
-                |entry| (entry == 0).then_some((0, geometry.object_id)),
-            );
-            let Some((_decoder_pos, parsed, symbol_payload)) = admitted else {
-                continue;
-            };
-            if decoder.is_complete() {
-                continue;
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+            if !ingest.observed || !ingest.accepted {
+                return Err("production bonded intake rejected a source symbol".to_string());
             }
-            let symbol = Symbol::new(
-                SymbolId::new(geometry.object_id, parsed.sbn, parsed.esi),
-                symbol_payload.to_vec(),
-                parsed.kind,
-            );
-            decoder
-                .feed(AuthenticatedSymbol::new_unauthenticated(symbol))
-                .map_err(|error| error.to_string())?;
         }
-        let decoded = decoder.into_data().map_err(|error| error.to_string())?;
+        let _ = flush_and_seed_source_streaming_round_boundary(
+            &cx,
+            &mut decoders,
+            config.symbol_size,
+            None,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        for packet in block_zero_repair_packets {
+            let ingest = feed_bonded_datagram_to_decoders(
+                &cx,
+                &packet.payload,
+                packet.payload.len(),
+                tag,
+                None,
+                scenario.donor_count,
+                &blocks,
+                &mut symbol_set,
+                retention,
+                &mut decoders,
+                config.symbol_size,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+            if !ingest.observed {
+                return Err("production bonded intake did not observe a repair symbol".to_string());
+            }
+            if decoders[0].bytes_written == geometry.block_bytes {
+                break;
+            }
+        }
+        let _ = flush_and_seed_source_streaming_round_boundary(
+            &cx,
+            &mut decoders,
+            config.symbol_size,
+            None,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        let decode_width_budget =
+            rq_decode_width_budget_for_cx(&cx, &decoders, config.symbol_size);
+        let _ = join_all_pending_decodes(&cx, &mut decoders, decode_width_budget)
+            .await
+            .map_err(|error| error.to_string())?;
+        flush_cached_entry_staging_files(&mut decoders)
+            .await
+            .map_err(|error| error.to_string())?;
+        if decoders[0].bytes_written != geometry.block_bytes {
+            return Err(
+                "production bonded EntryDecoder did not persist FEC-completed block zero"
+                    .to_string(),
+            );
+        }
+        if decoders[0].complete {
+            return Err("block zero completed the entry before the late-source E-9 probe".to_string());
+        }
+
+        let progress = symbol_set.block_progress_metrics(
+            geometry.object_id,
+            geometry.source_block_number,
+            u32::from(geometry.source_symbols),
+        );
+        let block_source_symbols_accepted = u64::from(progress.source_symbols).saturating_sub(
+            u64::try_from(progress.missing_source_esis.len()).unwrap_or(u64::MAX),
+        );
+        let aggregate = symbol_set.aggregate_stats();
+        let donor_ingress = (0..scenario.donor_count)
+            .map(|donor_index| {
+                symbol_set
+                    .donor_stats(donor_index)
+                    .ok_or_else(|| format!("missing donor {donor_index} ingress stats"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let bytes_written_before_late_source = decoders[0].bytes_written;
+        let staging_path = decoders[0].staging_path.clone();
+        let staging_before_late_source = std::fs::read(&staging_path)
+            .map_err(|error| format!("read staging bytes before late source: {error}"))?;
+
+        // Deliver every missing block-zero systematic symbol only after FEC
+        // completed that block while block one keeps the entry open. ESI 10 is
+        // the real datagram held above; symbols lost on the lab links are
+        // rebuilt through the production encoder/wire format, exactly as a
+        // source-first feedback retransmit would be. Before E-9, the final one
+        // drove received_count to K and counted block zero a second time.
+        let block_start = usize::try_from(geometry.block_start)
+            .map_err(|_| "lab block start does not fit usize".to_string())?;
+        let block_len = usize::try_from(geometry.block_bytes)
+            .map_err(|_| "lab block length does not fit usize".to_string())?;
+        let block_end = block_start
+            .checked_add(block_len)
+            .ok_or_else(|| "lab block range overflow".to_string())?;
+        let block_bytes = payload
+            .get(block_start..block_end)
+            .ok_or_else(|| "lab block range escapes payload".to_string())?;
+        let mut late_sources_observed = true;
+        let mut late_source_accepted = false;
+        for &esi in &progress.missing_source_esis {
+            let datagram = if esi == 10 {
+                late_source_packet.payload.clone()
+            } else {
+                let emission = crate::net::atp::bonding::BondedDonorSymbolEmission {
+                    donor_index: esi % scenario.donor_count,
+                    geometry,
+                    esi,
+                    kind: BondedDonorSymbolKind::Source,
+                    stagger_delay_slots: 0,
+                };
+                let symbol = encode_bonded_donor_emission(emission, block_bytes, &config)
+                    .map_err(|error| error.to_string())?;
+                encode_symbol_datagram(tag, geometry.entry_index, &symbol, None)
+            };
+            let ingest = feed_bonded_datagram_to_decoders(
+                &cx,
+                &datagram,
+                datagram.len(),
+                tag,
+                None,
+                scenario.donor_count,
+                &blocks,
+                &mut symbol_set,
+                retention,
+                &mut decoders,
+                config.symbol_size,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+            late_sources_observed &= ingest.observed;
+            late_source_accepted |= ingest.accepted;
+        }
+        flush_cached_entry_staging_files(&mut decoders)
+            .await
+            .map_err(|error| error.to_string())?;
+        let bytes_written_after_late_source = decoders[0].bytes_written;
+        let staged_after_late_source = std::fs::read(&staging_path)
+            .map_err(|error| format!("read staging bytes after late source: {error}"))?;
+        let staging_unchanged_after_late_source =
+            staged_after_late_source == staging_before_late_source;
+
+        for packet in later_repair_packets {
+            let ingest = feed_bonded_datagram_to_decoders(
+                &cx,
+                &packet.payload,
+                packet.payload.len(),
+                tag,
+                None,
+                scenario.donor_count,
+                &blocks,
+                &mut symbol_set,
+                retention,
+                &mut decoders,
+                config.symbol_size,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+            if !ingest.observed {
+                return Err(
+                    "production bonded intake did not observe a later-block repair".to_string(),
+                );
+            }
+            if decoders[0].complete {
+                break;
+            }
+        }
+        let _ = flush_and_seed_source_streaming_round_boundary(
+            &cx,
+            &mut decoders,
+            config.symbol_size,
+            None,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        let decode_width_budget =
+            rq_decode_width_budget_for_cx(&cx, &decoders, config.symbol_size);
+        let _ = join_all_pending_decodes(&cx, &mut decoders, decode_width_budget)
+            .await
+            .map_err(|error| error.to_string())?;
+        flush_cached_entry_staging_files(&mut decoders)
+            .await
+            .map_err(|error| error.to_string())?;
+        if !decoders[0].complete {
+            return Err("production bonded EntryDecoder did not complete the entry".to_string());
+        }
+        let final_bytes_written = decoders[0].bytes_written;
+        let decoded = std::fs::read(&staging_path)
+            .map_err(|error| format!("read production bonded staging bytes: {error}"))?;
+
         let decoded_sha256: [u8; 32] = Sha256::digest(&decoded).into();
         let decoded_digest = EntryDigest {
             rel_path: descriptor.entries[0].rel_path.clone(),
@@ -2231,22 +2483,15 @@ mod tests {
         {
             return Err("lab bonded decode failed descriptor integrity verification".to_string());
         }
-        let donor_accepted = [
-            symbol_set
-                .donor_stats(0)
-                .map_or(0, |stats| stats.symbols_accepted),
-            symbol_set
-                .donor_stats(1)
-                .map_or(0, |stats| stats.symbols_accepted),
-        ];
-        let donor_links = [
-            network
-                .source_stats(donor_addrs[0])
-                .ok_or_else(|| "missing donor A link stats".to_string())?,
-            network
-                .source_stats(donor_addrs[1])
-                .ok_or_else(|| "missing donor B link stats".to_string())?,
-        ];
+        let donor_links = donor_addrs
+            .iter()
+            .enumerate()
+            .map(|(donor_index, donor_addr)| {
+                network
+                    .source_stats(*donor_addr)
+                    .ok_or_else(|| format!("missing donor {donor_index} link stats"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         if network.queued_datagrams(receiver_addr) != Some(0)
             || network.has_receive_waiter(receiver_addr) != Some(false)
         {
@@ -2255,21 +2500,35 @@ mod tests {
 
         Ok(LabBondedDatagramObservation {
             decoded,
-            donor_accepted,
+            donor_ingress,
             donor_links,
+            donor_sends,
+            source_symbols_required: u64::from(geometry.source_symbols),
+            source_symbols_accepted: block_source_symbols_accepted,
+            repair_symbols_accepted: aggregate.repair_symbols_accepted,
+            completion_path: progress.completion_path,
+            missing_source_esis: progress.missing_source_esis,
+            deficit_symbols: progress.deficit_symbols,
+            decoder_pipeline_released: decoders[0].pipeline.is_none(),
+            bytes_written_before_late_source,
+            bytes_written_after_late_source,
+            final_bytes_written,
+            late_source_observed: late_sources_observed,
+            late_source_accepted,
+            staging_unchanged_after_late_source,
             first_receive_parked,
             virtual_time_nanos: cx.now_for_observability().as_nanos(),
         })
     }
 
-    fn install_lab_bonded_datagram_scenario(runtime: &mut LabRuntime) {
-        let expected = bonded_e2e_payload(3_073);
+    fn install_lab_bonded_datagram_scenario(runtime: &mut LabRuntime, scenario: LabBondedScenario) {
+        let expected = bonded_e2e_payload(7_169);
         let root = runtime.state.create_root_region(Budget::INFINITE);
         let (task_id, mut handle, spawn_effects) = runtime
             .state
             .create_task_with_deferred_spawn_effects(root, Budget::INFINITE, async move {
                 let cx = Cx::current().expect("lab bonded task has current Cx");
-                run_lab_bonded_datagram_scenario(cx).await
+                run_lab_bonded_datagram_scenario(cx, scenario).await
             })
             .expect("create lab bonded root task");
         runtime
@@ -2294,18 +2553,117 @@ mod tests {
         );
         assert!(observation.first_receive_parked);
         assert!(observation.virtual_time_nanos > 0);
-        for (donor, accepted) in observation.donor_accepted.into_iter().enumerate() {
+        assert!(observation.source_symbols_accepted > 0);
+        assert!(
+            observation.source_symbols_accepted < observation.source_symbols_required,
+            "at least one source symbol must be lost so FEC is required: {observation:?}"
+        );
+        assert!(
+            observation.repair_symbols_accepted > 0,
+            "repair/FEC symbols must contribute to completion: {observation:?}"
+        );
+        assert_eq!(
+            observation.completion_path,
+            BondedBlockCompletionPath::RepairDecode,
+            "accepted coverage must complete through repair decode"
+        );
+        assert_eq!(observation.deficit_symbols, 0);
+        let expected_source_holes = match scenario.donor_count {
+            1 => vec![4, 9, 10, 14],
+            2 => vec![8, 10, 13],
+            3 => vec![8, 10, 11, 12, 14],
+            _ => unreachable!("scenario donor count validated by runner"),
+        };
+        assert_eq!(observation.missing_source_esis, expected_source_holes);
+        assert!(observation.decoder_pipeline_released);
+        assert_eq!(observation.bytes_written_before_late_source, 4_096);
+        assert_eq!(observation.bytes_written_after_late_source, 4_096);
+        let expected_len = u64::try_from(expected.len()).expect("lab payload length fits u64");
+        assert_eq!(observation.final_bytes_written, expected_len);
+        assert!(observation.late_source_observed);
+        assert!(
+            !observation.late_source_accepted,
+            "completed source block must refuse every late source retransmit"
+        );
+        assert!(
+            observation.staging_unchanged_after_late_source,
+            "late source must not change staged bytes after FEC completion"
+        );
+        let donor_count =
+            usize::try_from(scenario.donor_count).expect("lab donor count fits usize");
+        assert_eq!(observation.donor_ingress.len(), donor_count);
+        assert_eq!(observation.donor_links.len(), donor_count);
+        assert_eq!(observation.donor_sends.len(), donor_count);
+        for (donor, ((ingress, link), send)) in observation
+            .donor_ingress
+            .into_iter()
+            .zip(observation.donor_links)
+            .zip(observation.donor_sends)
+            .enumerate()
+        {
             assert!(
-                accepted > 0,
+                ingress.symbols_accepted > 0,
                 "donor {donor} contributed no accepted symbols"
             );
+            assert_eq!(
+                ingress.duplicate_symbols, 0,
+                "residue-disjoint donor {donor} produced duplicate ESIs"
+            );
+            assert_eq!(ingress.symbols_rejected_by_retention, 0);
+            assert!(link.sent > 0, "donor {donor} sent no datagrams");
+            assert!(link.dropped > 0, "donor {donor} experienced no loss");
+            assert!(link.delivered > 0, "donor {donor} delivered no datagrams");
+            assert_eq!(link.sent, link.dropped + link.delivered);
+            assert_eq!(send.emitted, link.sent);
+            let expected_stop = scenario.stopped_donor.and_then(|(stopped, limit)| {
+                (usize::try_from(stopped).ok() == Some(donor)).then_some(limit)
+            });
+            if let Some(limit) = expected_stop {
+                assert!(send.stopped_early, "donor {donor} must die mid-spray");
+                assert_eq!(send.emitted, limit);
+                assert!(send.emitted < send.planned);
+            } else {
+                assert!(!send.stopped_early, "donor {donor} stopped unexpectedly");
+                assert_eq!(send.emitted, send.planned);
+            }
         }
-        for (donor, stats) in observation.donor_links.into_iter().enumerate() {
-            assert!(stats.sent > 0, "donor {donor} sent no datagrams");
-            assert!(stats.dropped > 0, "donor {donor} experienced no loss");
-            assert!(stats.delivered > 0, "donor {donor} delivered no datagrams");
-            assert_eq!(stats.sent, stats.dropped + stats.delivered);
-        }
+    }
+
+    fn install_lab_bonded_n1_loss(runtime: &mut LabRuntime) {
+        install_lab_bonded_datagram_scenario(
+            runtime,
+            LabBondedScenario {
+                donor_count: 1,
+                stopped_donor: None,
+            },
+        );
+    }
+
+    fn install_lab_bonded_n2_loss(runtime: &mut LabRuntime) {
+        install_lab_bonded_datagram_scenario(
+            runtime,
+            LabBondedScenario {
+                donor_count: 2,
+                stopped_donor: None,
+            },
+        );
+    }
+
+    fn install_lab_bonded_n3_loss_and_donor_death(runtime: &mut LabRuntime) {
+        install_lab_bonded_datagram_scenario(
+            runtime,
+            LabBondedScenario {
+                donor_count: 3,
+                stopped_donor: Some((2, 3)),
+            },
+        );
+    }
+
+    /// H1: the degenerate one-donor partition remains byte-identical while
+    /// deterministic loss forces completion to use repair symbols.
+    #[test]
+    fn bonded_lab_n1_loss_is_byte_identical_and_replayable() {
+        assert_deterministic_for_seeds([0xB04D_0101, 0xB04D_0102], install_lab_bonded_n1_loss);
     }
 
     /// br-asupersync-kp2kg7: two residue-disjoint donors traverse the actual
@@ -2315,9 +2673,18 @@ mod tests {
     /// and same-seed LabRuntime traces replay identically.
     #[test]
     fn bonded_n2_loss_is_byte_identical_and_replayable_under_lab_runtime() {
+        assert_deterministic_for_seeds([0xB04D_0002, 0xB04D_0003], install_lab_bonded_n2_loss);
+    }
+
+    /// H1: three residue partitions survive independent link loss after donor
+    /// two dies mid-spray; every donor contributes novel symbols, source loss
+    /// makes FEC necessary, a held late source symbol cannot double-count the
+    /// completed block, and the fixed-seed schedules replay identically.
+    #[test]
+    fn bonded_lab_n3_loss_and_donor_death_is_byte_identical_and_replayable() {
         assert_deterministic_for_seeds(
-            [0xB04D_0002, 0xB04D_0003],
-            install_lab_bonded_datagram_scenario,
+            [0xB04D_0301, 0xB04D_0302],
+            install_lab_bonded_n3_loss_and_donor_death,
         );
     }
 
