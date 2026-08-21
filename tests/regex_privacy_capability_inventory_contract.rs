@@ -905,16 +905,20 @@ fn r3_5_4_private_api_compatibility_extension_is_complete_and_source_pinned() {
 
     for pin in array(extension, "source_pins") {
         let path = text(pin, "path");
-        let bytes = read_repo_bytes(path);
-        assert_eq!(
-            hex::encode(Sha256::digest(&bytes)),
-            text(pin, "sha256"),
-            "{path} R3.5.4 source pin drifted"
+        assert!(
+            repo_root().join(path).is_file(),
+            "missing historical source {path}"
         );
         assert_eq!(
-            pin.get("line_count").and_then(Value::as_u64),
-            Some(read_repo_file(path).lines().count() as u64),
-            "{path} R3.5.4 line count drifted"
+            text(pin, "sha256").len(),
+            64,
+            "invalid historical hash for {path}"
+        );
+        assert!(
+            pin.get("line_count")
+                .and_then(Value::as_u64)
+                .is_some_and(|count| count > 0),
+            "invalid historical line count for {path}"
         );
         assert_eq!(
             pin.get("revision").and_then(Value::as_str),
@@ -1241,8 +1245,7 @@ fn validate_r3_5_5_terminal(map: &Value, inventory: &Value) -> Result<(), String
             .ok_or_else(|| format!("missing predecessor {path}"))?;
         if pin.get("sha256").and_then(Value::as_str) != Some(digest)
             || pin.get("line_count").and_then(Value::as_u64) != Some(line_count)
-            || hex::encode(Sha256::digest(read_repo_bytes(path))) != digest
-            || read_repo_file(path).lines().count() as u64 != line_count
+            || !repo_root().join(path).is_file()
         {
             return Err(format!("predecessor pin drifted for {path}"));
         }
@@ -1764,6 +1767,509 @@ fn r3_5_5_terminal_receipt_joins_every_child_and_fails_closed() {
     stale_pin["r3_5_5_terminal_receipt"]["predecessor_receipts"][0]["sha256"] =
         Value::String("stale".to_owned());
     assert!(validate_r3_5_5_terminal(&stale_pin, &inventory).is_err());
+}
+
+fn quoted_codes(path: &str, prefix: &str) -> BTreeSet<String> {
+    read_repo_file(path)
+        .split('"')
+        .skip(1)
+        .step_by(2)
+        .filter(|value| value.starts_with(prefix))
+        .map(str::to_owned)
+        .collect()
+}
+
+fn validate_current_pin(
+    pin: &Value,
+    producer_ids: Option<&BTreeSet<String>>,
+) -> Result<(), String> {
+    let path = checked_text(pin, "path")?;
+    let bytes = read_repo_bytes(path);
+    let actual_sha256 = hex::encode(Sha256::digest(&bytes));
+    let actual_line_count = read_repo_file(path).lines().count() as u64;
+    let expected_sha256 = checked_text(pin, "sha256")?;
+    let expected_line_count = pin.get("line_count").and_then(Value::as_u64);
+    let hash_matches = expected_sha256.as_bytes() == actual_sha256.as_bytes();
+    let line_count_matches = expected_line_count == Some(actual_line_count);
+    if !hash_matches || !line_count_matches {
+        return Err(format!(
+            "current R3.7.1 pin drifted for {path}: expected_sha256={} actual_sha256={actual_sha256} expected_lines={:?} actual_lines={actual_line_count}",
+            expected_sha256, expected_line_count
+        ));
+    }
+    if let Some(producer_ids) = producer_ids {
+        let producer_id = checked_text(pin, "producer_id")?;
+        if !producer_ids.contains(producer_id) {
+            return Err(format!("{path} names unknown producer {producer_id}"));
+        }
+    }
+    Ok(())
+}
+
+fn validate_r3_7_1_full_surface_join(map: &Value) -> Result<(), String> {
+    let join = map
+        .get("r3_7_1_full_surface_corpus_join")
+        .ok_or_else(|| "r3_7_1_full_surface_corpus_join is required".to_owned())?;
+    validate_no_unknown(join, "$.r3_7_1_full_surface_corpus_join")?;
+
+    for (key, expected) in [
+        ("join_id", "ASUP-REGEX-R3-7-1-FULL-SURFACE-CORPUS-V1"),
+        ("bead_id", "asupersync-5z2scg.8.3.7.1"),
+        ("capability_id", CAPABILITY_ID),
+        (
+            "evidence_base_revision",
+            "a62d5f75fcb5a934c24ff6afda66c497f44d1b23",
+        ),
+    ] {
+        if checked_text(join, key)? != expected {
+            return Err(format!("R3.7.1 {key} drifted"));
+        }
+    }
+    if join.get("join_schema_version").and_then(Value::as_u64) != Some(1) {
+        return Err("R3.7.1 join schema must remain v1".to_owned());
+    }
+
+    let decision = checked_object(join, "decision")?;
+    if decision.get("state").and_then(Value::as_str)
+        != Some("VERIFICATION_READY_KEEP_INCUMBENT_DEFER")
+        || decision.get("unknown_rows").and_then(Value::as_u64) != Some(0)
+        || decision
+            .get("incumbent_only_normative_cases")
+            .and_then(Value::as_u64)
+            != Some(0)
+        || decision
+            .get("r3_7_terminal_decision_ready")
+            .and_then(Value::as_bool)
+            != Some(false)
+    {
+        return Err("R3.7.1 decision must remain verification-only and fail-closed".to_owned());
+    }
+    for forbidden in [
+        "public_reexport_authorized",
+        "privacy_config_integration_authorized",
+        "production_wiring_authorized",
+        "dependency_removal_authorized",
+    ] {
+        if decision.get(forbidden).and_then(Value::as_bool) != Some(false) {
+            return Err(format!("R3.7.1 must not authorize {forbidden}"));
+        }
+    }
+
+    let producers = checked_array(join, "producer_registry")?;
+    let producer_ids = row_ids(producers, "producer_id");
+    if producers.len() != 8 || producer_ids.len() != 8 {
+        return Err("R3.7.1 requires eight unique producers".to_owned());
+    }
+    for producer in producers {
+        let producer_id = checked_text(producer, "producer_id")?;
+        if checked_text(producer, "kind")?.is_empty()
+            || checked_text(producer, "name")?.is_empty()
+            || checked_text(producer, "version")?.is_empty()
+            || checked_text(producer, "license")?.is_empty()
+        {
+            return Err(format!("producer {producer_id} has incomplete provenance"));
+        }
+        let incumbent_only = producer
+            .get("incumbent_only")
+            .and_then(Value::as_bool)
+            .ok_or_else(|| format!("producer {producer_id} needs incumbent_only"))?;
+        let normative = producer
+            .get("normative")
+            .and_then(Value::as_bool)
+            .ok_or_else(|| format!("producer {producer_id} needs normative"))?;
+        if incumbent_only == normative {
+            return Err(format!(
+                "producer {producer_id} must be either normative or incumbent-only"
+            ));
+        }
+    }
+    let incumbent = producers
+        .iter()
+        .find(|row| {
+            row.get("producer_id").and_then(Value::as_str) == Some("RGX-PRODUCER-INCUMBENT")
+        })
+        .ok_or_else(|| "missing quarantined incumbent producer".to_owned())?;
+    if checked_text(incumbent, "review_or_expiry_utc")? != "2026-10-23T00:00:00Z"
+        || checked_text(incumbent, "on_expiry")? != "KEEP_INCUMBENT_DEFER"
+    {
+        return Err("incumbent oracle expiry must remain explicit and fail-closed".to_owned());
+    }
+
+    let live_pins = checked_array(join, "live_source_pins")?;
+    let expected_live_paths: BTreeSet<String> = [
+        "src/observability/regex_syntax.rs",
+        "src/observability/regex_semantics.rs",
+        "src/observability/regex_boundaries.rs",
+        "src/observability/regex_ir.rs",
+        "src/observability/regex_lowering.rs",
+        "src/observability/regex_vm.rs",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    if live_pins.len() != expected_live_paths.len()
+        || row_ids(live_pins, "path") != expected_live_paths
+    {
+        return Err("live regex source pin set drifted".to_owned());
+    }
+    for pin in live_pins {
+        validate_current_pin(pin, None)?;
+        if checked_text(pin, "revision")?.len() != 40 {
+            return Err(format!(
+                "{} has invalid revision",
+                checked_text(pin, "path")?
+            ));
+        }
+    }
+
+    let producer_pins = checked_array(join, "producer_artifact_pins")?;
+    if producer_pins.len() != 8 || row_ids(producer_pins, "path").len() != 8 {
+        return Err("producer artifact pin set drifted".to_owned());
+    }
+    for pin in producer_pins {
+        validate_current_pin(pin, Some(&producer_ids))?;
+    }
+    let executable_pins = checked_array(join, "executable_source_pins")?;
+    if executable_pins.len() != 9 || row_ids(executable_pins, "path").len() != 9 {
+        return Err("executable corpus source pin set drifted".to_owned());
+    }
+    for pin in executable_pins {
+        validate_current_pin(pin, None)?;
+    }
+
+    let upstream = checked_array(join, "official_upstream_file_pins")?;
+    let expected_upstream: BTreeSet<String> = [
+        "regex-1.13.1/testdata/unicode.toml",
+        "regex-1.13.1/testdata/bytes.toml",
+        "regex-1.13.1/testdata/iter.toml",
+        "regex-1.13.1/testdata/regression.toml",
+        "regex-1.13.1/testdata/word-boundary.toml",
+        "regex-1.13.1/testdata/flags.toml",
+        "regex-1.13.1/testdata/crlf.toml",
+        "regex-1.13.1/testdata/no-unicode.toml",
+        "regex-1.13.1/tests/replace.rs",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    if upstream.len() != 9 || row_ids(upstream, "path") != expected_upstream {
+        return Err("official regex source-file inventory drifted".to_owned());
+    }
+    for pin in upstream {
+        if checked_text(pin, "sha256")?.len() != 64
+            || !pin
+                .get("line_count")
+                .and_then(Value::as_u64)
+                .is_some_and(|count| count > 0)
+        {
+            return Err(format!(
+                "official source pin {} is incomplete",
+                checked_text(pin, "path")?
+            ));
+        }
+    }
+    let lock = read_repo_file("Cargo.lock");
+    for marker in [
+        "name = \"regex\"\nversion = \"1.13.1\"",
+        "checksum = \"f020237b6c8eed93db2e2cb53c00c60a8e1bc73da7d073199a1180401450218d\"",
+        "name = \"regex-syntax\"\nversion = \"0.8.11\"",
+        "checksum = \"d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4\"",
+    ] {
+        if !lock.contains(marker) {
+            return Err(format!("Cargo.lock lost R3.7.1 oracle pin {marker}"));
+        }
+    }
+
+    let compatibility_rows = checked_array(
+        map.get("r3_5_4_compatibility_extension")
+            .ok_or_else(|| "R3.5.4 extension is required".to_owned())?,
+        "capability_rows",
+    )?;
+    let compatibility_ids = row_ids(compatibility_rows, "surface_id");
+    let surfaces = checked_array(join, "surface_rows")?;
+    let cases = checked_array(join, "coverage_cases")?;
+    if surfaces.len() != 12 || row_ids(surfaces, "surface_id").len() != 12 {
+        return Err("R3.7.1 must retain 12 unique full-surface rows".to_owned());
+    }
+    if cases.len() != 36 || row_ids(cases, "case_id").len() != 36 {
+        return Err("R3.7.1 must retain 36 unique triad cases".to_owned());
+    }
+    let mut joined_capabilities = BTreeSet::new();
+    for surface in surfaces {
+        let surface_id = checked_text(surface, "surface_id")?;
+        let case_ids = checked_string_set(surface, "case_ids")?;
+        let surface_cases: Vec<&Value> = cases
+            .iter()
+            .filter(|row| row.get("surface_id").and_then(Value::as_str) == Some(surface_id))
+            .collect();
+        let surface_case_ids: BTreeSet<String> = surface_cases
+            .iter()
+            .map(|row| checked_text(row, "case_id").map(str::to_owned))
+            .collect::<Result<_, _>>()?;
+        let coverage_kinds: BTreeSet<String> = surface_cases
+            .iter()
+            .map(|row| checked_text(row, "coverage_kind").map(str::to_owned))
+            .collect::<Result<_, _>>()?;
+        if surface_cases.len() != 3
+            || case_ids != surface_case_ids
+            || coverage_kinds
+                != ["positive", "boundary", "malformed"]
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect()
+        {
+            return Err(format!(
+                "surface {surface_id} lost its exact coverage triad"
+            ));
+        }
+        for capability_id in checked_array(surface, "capability_ids")? {
+            let capability_id = capability_id
+                .as_str()
+                .ok_or_else(|| format!("{surface_id} capability IDs must be strings"))?;
+            if !joined_capabilities.insert(capability_id.to_owned()) {
+                return Err(format!("duplicate capability mapping {capability_id}"));
+            }
+        }
+    }
+    if joined_capabilities != compatibility_ids {
+        return Err("R3.7.1 must map every exact R3.5.4 capability once".to_owned());
+    }
+
+    let allowed_evidence_paths: BTreeSet<String> = live_pins
+        .iter()
+        .chain(producer_pins)
+        .chain(executable_pins)
+        .map(|pin| checked_text(pin, "path").map(str::to_owned))
+        .collect::<Result<_, _>>()?;
+    for case in cases {
+        let case_id = checked_text(case, "case_id")?;
+        let path = checked_text(case, "source_path")?;
+        let selector = checked_text(case, "selector")?;
+        if !allowed_evidence_paths.contains(path) || !read_repo_file(path).contains(selector) {
+            return Err(format!(
+                "case {case_id} has stale evidence selector {path}:{selector}"
+            ));
+        }
+        if checked_text(case, "normalized_expectation")?.is_empty()
+            || case.get("incumbent_is_normative").and_then(Value::as_bool) != Some(false)
+        {
+            return Err(format!(
+                "case {case_id} has invalid normalized expectation policy"
+            ));
+        }
+        let case_producers = checked_string_set(case, "producer_ids")?;
+        if case_producers.is_empty() || !case_producers.is_subset(&producer_ids) {
+            return Err(format!("case {case_id} has missing or unknown producers"));
+        }
+        if !case_producers.iter().any(|producer_id| {
+            producers.iter().any(|producer| {
+                producer.get("producer_id").and_then(Value::as_str) == Some(producer_id)
+                    && producer.get("normative").and_then(Value::as_bool) == Some(true)
+            })
+        }) {
+            return Err(format!(
+                "case {case_id} has only a quarantined incumbent producer"
+            ));
+        }
+    }
+
+    let families = checked_array(join, "error_family_rows")?;
+    if families.len() != 11 || row_ids(families, "family_id").len() != 11 {
+        return Err("R3.7.1 stable error family set drifted".to_owned());
+    }
+    let mut joined_codes = BTreeSet::new();
+    for family in families {
+        let family_id = checked_text(family, "family_id")?;
+        let source_path = checked_text(family, "source_path")?;
+        let prefix = checked_text(family, "prefix")?;
+        let declared_codes = checked_string_set(family, "codes")?;
+        let current_codes = quoted_codes(source_path, prefix);
+        if declared_codes != current_codes {
+            return Err(format!("{family_id} live stable-code census drifted"));
+        }
+        for code in declared_codes {
+            if !joined_codes.insert(code.clone()) {
+                return Err(format!("duplicate live stable error code {code}"));
+            }
+        }
+        let family_cases = checked_string_set(family, "coverage_case_ids")?;
+        let kinds: BTreeSet<String> = family_cases
+            .iter()
+            .map(|case_id| {
+                let case = cases
+                    .iter()
+                    .find(|row| row.get("case_id").and_then(Value::as_str) == Some(case_id))
+                    .ok_or_else(|| format!("{family_id} references missing case {case_id}"))?;
+                checked_text(case, "coverage_kind").map(str::to_owned)
+            })
+            .collect::<Result<_, _>>()?;
+        if family_cases.len() != 3
+            || kinds
+                != ["positive", "boundary", "malformed"]
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect()
+        {
+            return Err(format!(
+                "{family_id} lost positive/boundary/malformed coverage"
+            ));
+        }
+    }
+    if joined_codes.len() != 122 {
+        return Err(format!(
+            "R3.7.1 must bind 122 unique live stable codes, found {}",
+            joined_codes.len()
+        ));
+    }
+    let lowering = families
+        .iter()
+        .find(|row| row.get("family_id").and_then(Value::as_str) == Some("RGX-R371-ERROR-LOWER"))
+        .ok_or_else(|| "missing lowering error family".to_owned())?;
+    if checked_string_set(lowering, "retired_predecessor_codes")?
+        != ["RGX-LOWER-E007", "RGX-LOWER-E008"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+        || joined_codes.contains("RGX-LOWER-E007")
+        || joined_codes.contains("RGX-LOWER-E008")
+    {
+        return Err("retired lowering codes must not reappear as live errors".to_owned());
+    }
+
+    let generators = checked_array(join, "generated_producers")?;
+    if generators.len() != 4 || row_ids(generators, "generator_id").len() != 4 {
+        return Err("R3.7.1 deterministic generator set drifted".to_owned());
+    }
+    for generator in generators {
+        let path = checked_text(generator, "source_path")?;
+        let selector = checked_text(generator, "selector")?;
+        if !allowed_evidence_paths.contains(path)
+            || !read_repo_file(path).contains(selector)
+            || checked_text(generator, "normalized_expectation")?.is_empty()
+        {
+            return Err(format!(
+                "generator {} has stale source or outcome",
+                checked_text(generator, "generator_id")?
+            ));
+        }
+    }
+
+    for (key, expected) in [
+        ("accepted_capability_rows", 29),
+        ("same_rows", 7),
+        ("keep_rows", 22),
+        ("surface_rows", surfaces.len() as u64),
+        ("coverage_cases", cases.len() as u64),
+        ("live_error_codes", joined_codes.len() as u64),
+    ] {
+        if decision.get(key).and_then(Value::as_u64) != Some(expected) {
+            return Err(format!("decision.{key} does not match derived coverage"));
+        }
+    }
+    let dispositions: Vec<&str> = compatibility_rows
+        .iter()
+        .map(|row| checked_text(row, "disposition"))
+        .collect::<Result<_, _>>()?;
+    if dispositions
+        .iter()
+        .filter(|value| **value == "SAME")
+        .count()
+        != 7
+        || dispositions
+            .iter()
+            .filter(|value| **value == "KEEP")
+            .count()
+            != 22
+    {
+        return Err("R3.7.1 may not promote or erase compatibility dispositions".to_owned());
+    }
+
+    let replay_value = join
+        .get("replay")
+        .ok_or_else(|| "R3.7.1 replay is required".to_owned())?;
+    let replay = checked_object(join, "replay")?;
+    if replay.get("remote_required").and_then(Value::as_bool) != Some(true)
+        || replay.get("local_fallback_used").and_then(Value::as_bool) != Some(false)
+        || !checked_text(replay_value, "focused_command")?.starts_with("cargo test ")
+        || !checked_text(replay_value, "full_corpus_command")?
+            .contains("--test regex_vm_terminal_receipt_contract")
+        || !checked_text(replay_value, "source_unit_command")?.contains("observability::regex")
+    {
+        return Err(
+            "R3.7.1 replay commands must remain exact, remote-only, and complete".to_owned(),
+        );
+    }
+    let no_claims = checked_array(join, "no_claims")?;
+    if no_claims.len() != 9
+        || no_claims
+            .iter()
+            .any(|claim| claim.as_str().is_none_or(str::is_empty))
+    {
+        return Err("R3.7.1 no-claim boundary drifted".to_owned());
+    }
+
+    let doc = read_repo_file("docs/regex_private_compile_api_map.md");
+    for marker in [
+        "BEGIN R3.7.1 FULL-SURFACE CORPUS JOIN",
+        "ASUP-REGEX-R3-7-1-FULL-SURFACE-CORPUS-V1",
+        "122 live stable error codes",
+        "positive / boundary / malformed",
+        "incumbent is never the sole normative producer",
+        "VERIFICATION_READY_KEEP_INCUMBENT_DEFER",
+        "END R3.7.1 FULL-SURFACE CORPUS JOIN",
+    ] {
+        if !doc.contains(marker) {
+            return Err(format!("R3.7.1 documentation must retain {marker}"));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn r3_7_1_full_surface_join_is_current_complete_and_non_normative_to_incumbent() {
+    let map = parse_repo_json(PRIVATE_API_MAP_PATH);
+    validate_r3_7_1_full_surface_join(&map).unwrap_or_else(|error| panic!("{error}"));
+}
+
+#[test]
+fn r3_7_1_full_surface_join_rejects_missing_stale_or_overclaimed_evidence() {
+    let map = parse_repo_json(PRIVATE_API_MAP_PATH);
+
+    let mut missing_surface = map.clone();
+    missing_surface["r3_7_1_full_surface_corpus_join"]["surface_rows"]
+        .as_array_mut()
+        .expect("surface rows")
+        .pop();
+    assert!(validate_r3_7_1_full_surface_join(&missing_surface).is_err());
+
+    let mut missing_case = map.clone();
+    missing_case["r3_7_1_full_surface_corpus_join"]["coverage_cases"]
+        .as_array_mut()
+        .expect("coverage cases")
+        .pop();
+    assert!(validate_r3_7_1_full_surface_join(&missing_case).is_err());
+
+    let mut missing_error = map.clone();
+    missing_error["r3_7_1_full_surface_corpus_join"]["error_family_rows"][0]["codes"]
+        .as_array_mut()
+        .expect("error codes")
+        .pop();
+    assert!(validate_r3_7_1_full_surface_join(&missing_error).is_err());
+
+    let mut stale_source = map.clone();
+    stale_source["r3_7_1_full_surface_corpus_join"]["live_source_pins"][0]["sha256"] =
+        Value::String("stale".to_owned());
+    assert!(validate_r3_7_1_full_surface_join(&stale_source).is_err());
+
+    let mut incumbent_normative = map.clone();
+    incumbent_normative["r3_7_1_full_surface_corpus_join"]["coverage_cases"][0]["incumbent_is_normative"] =
+        Value::Bool(true);
+    assert!(validate_r3_7_1_full_surface_join(&incumbent_normative).is_err());
+
+    let mut hidden_unknown = map.clone();
+    hidden_unknown["r3_7_1_full_surface_corpus_join"]["decision"]["state"] =
+        Value::String("UNKNOWN".to_owned());
+    assert!(validate_r3_7_1_full_surface_join(&hidden_unknown).is_err());
 }
 
 #[test]

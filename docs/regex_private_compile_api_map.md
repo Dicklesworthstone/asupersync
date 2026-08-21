@@ -274,6 +274,59 @@ health claim, release-readiness claim, or local Cargo fallback.
 
 <!-- END R3.5.5 PRIVATE API TERMINAL RECEIPT -->
 
+## R3.7.1 full-surface corpus join
+
+<!-- BEGIN R3.7.1 FULL-SURFACE CORPUS JOIN -->
+
+`ASUP-REGEX-R3-7-1-FULL-SURFACE-CORPUS-V1` is the executable join over the
+already-shipped syntax, Unicode/byte, compiler/IR, VM, replacement,
+configuration, privacy, cache, concurrency, and cancellation corpora. Its
+state is `VERIFICATION_READY_KEEP_INCUMBENT_DEFER`: it makes the evidence
+replayable and fail-closed, but it does not turn coverage into cutover
+authority.
+
+The join binds all 29 R3.5.4 capability rows exactly once, preserving the
+existing 7 `SAME` / 22 `KEEP` partition. Twelve surface rows each require one
+positive / boundary / malformed triad, for 36 deterministic coverage cases.
+Every case names its producer, source path, executable selector, and normalized
+expectation. The incumbent is never the sole normative producer: normative
+inputs come from published syntax and UCD data, upstream testdata, independent
+hand-authored vectors, bounded executable models, deterministic generators,
+or the frozen public inventory. `regex` 1.13.1 remains only a quarantined
+differential oracle and expires fail-closed to `KEEP_INCUMBENT_DEFER` on
+2026-10-23 unless deliberately reviewed.
+
+The live diagnostic census contains 122 live stable error codes across lexer,
+parser, semantic, fold/boundary, IR, lowering, configuration, replacement,
+cache, and VM execution families. The contract derives those literals from the
+current source and requires each family to retain a positive / boundary /
+malformed evidence triad. Historical lowering identifiers `RGX-LOWER-E007`
+and `RGX-LOWER-E008` are predecessor-only; the live enum intentionally uses
+`E009` through `E011` for the remaining rows.
+
+Freshness is explicit. R3.5.4 source pins and R3.5.5 predecessor pins remain
+historical snapshots at their named revisions. This join is their live
+successor: it verifies current hashes and line counts for all six owned regex
+modules, eight producer artifacts, and nine executable corpus sources. It also
+records the exact Cargo package checksums and upstream file hashes for the
+bounded `regex` 1.13.1 official-source selection, plus UCD 16.0.0 provenance
+and license boundaries. A changed live source, artifact, selector, package
+resolution, producer, capability, coverage edge, or error code fails the
+focused contract instead of silently inheriting stale evidence.
+
+Replay remains remote-only. The machine join records the exact focused,
+full-corpus, and source-unit Cargo commands. Terminal clean-overlay job
+receipts for the finalized bytes belong in the Bead closure and commit handoff,
+avoiding a self-referential edit-and-rerun loop. No local Cargo fallback is
+authorized.
+
+This join does not authorize a public re-export, `PrivacyConfig` integration,
+production wiring, byte-regex parity, compatibility shim, dependency removal,
+performance claim, R3.7.2 fuzz-campaign completion, R3.7.3 security/cross-target
+completion, broad workspace-health claim, or release-readiness claim.
+
+<!-- END R3.7.1 FULL-SURFACE CORPUS JOIN -->
+
 ## Static validation boundary
 
 Validation includes JSON parsing, source and predecessor hash/line-count
