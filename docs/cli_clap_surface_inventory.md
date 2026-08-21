@@ -216,8 +216,9 @@ The static source establishes these boundaries:
   falls back to defaults with a warning. `PROGRAMDATA` affects Windows default
   paths, while diagnostics consults `HOSTNAME` and then `COMPUTERNAME`; none is
   a clap-populated value.
-- `offline_tuner` initializes `env_logger` from its default environment after
-  parsing, choosing a default filter from `--verbose`.
+- `offline_tuner` no longer initializes a logging ecosystem. `--verbose`
+  remains an owned stdout behavior, valid `RUST_LOG` cells preserve the
+  incumbent empty stderr, and invalid filter text is no longer parsed or echoed.
 - Only `asupersync` consumes the ten-code shared semantic exit registry.
   Standalone `atp` reduces command errors to `std::process::ExitCode::FAILURE`,
   `atpd` returns `Result`, and `offline_tuner` uses exit 1 on reported errors.
@@ -248,70 +249,70 @@ environment cells, the three width cells, admitted feature combinations, and
 the platform cells listed in the artifact. A missing or unsupported cell stays
 explicitly missing; it is not green and is not silently skipped.
 
-## Offline Tuner `env_logger` static audit
+## Offline Tuner `env_logger` cutover
 
-The dependent Phase-2 leaf `asupersync-d24mms.3` now has a bounded static
-receipt, `CLI-OFFLINE-TUNER-ENV-LOGGER-AUDIT-V1`, inside the same artifact.
-Its state is `STATIC_SOURCE_PINNED_NOT_EXECUTED`; the required black-box state
-is `NO_BLACK_BOX_BASELINE_CAPTURED`. The receipt advances source and evidence
-planning without treating source inspection as observable logging behavior.
+The dependent Phase-2 leaf `asupersync-d24mms.3` now has an executed
+`CLI-OFFLINE-TUNER-ENV-LOGGER-AUDIT-V1` receipt inside the same artifact. Its
+state is `EXECUTED_CLEAN_OVERLAY_PARITY_PROVED`; the root `cli` feature and root
+`asupersync` lock row no longer include `env_logger`. The locked 0.11 package
+remains because `conformance/Cargo.toml` has an independent dependency.
+The scoped disposition is `ROOT_EDGE_REMOVED_SAME_OR_BETTER`.
 
-A 2026-08-05 static correction reconciles the wrapper-script source pin with
-the companion contract's Rust `str::lines()` semantics.
-`scripts/run_offline_tuning.sh` has no final LF, so its final nonempty record is
-line 248 even though newline-byte counting reports 247. Its SHA-256 and bytes
-are unchanged. This measurement correction does not change `KEEP_INCUMBENT`,
-provide black-box evidence, or complete the bead.
+A 2026-08-05 static correction reconciled the wrapper-script source pin with
+the companion contract's Rust `str::lines()` semantics. It remains historical:
+that correction did not change the decision; the later executable campaign did.
 
-The pinned binary parses first, initializes `env_logger` from
-`Env::default()`, selects only the fallback filter from `--verbose`, creates
-the output directory, and then dispatches exactly one of `optimize`,
-`candidates`, `emit-profile`, `validate`, or `scheduler-recommend`. Static
-counts record two logger builder sites, two environment lookups, 39 stdout
-print sites, two stderr print sites, two explicit exit-1 sites, five file-write
-sites, two file-read sites, and two wall-clock artifact fields. The binary and
-its directly invoked tuner module contain zero direct `log` or `tracing` call
-tokens. That zero is deliberately not promoted to a behavior claim: a built
-command may reach dependency logging that source-local scanning cannot see.
+The baseline and post-cutover matrix each exercised all 30 nominal cells: five
+commands multiplied by default versus `--verbose` and by `RUST_LOG` unset,
+`off`, or `trace`. `optimize` ran its real benchmark path. Five post-cutover
+negative cells preserved argument, input, JSON parse, output-filesystem, and
+invalid-enum diagnostics with exits 1 or 2 and no panic. No safe
+user-reachable panic path was identified, so that disposition is explicit.
 
-The nominal future baseline has 30 cells: five commands multiplied by default
-versus `--verbose` and by `RUST_LOG` unset, `off`, or `trace`. It must also
-cover successful execution, argument or validation failures, input/output
-failures, the invoked optimization benchmark path, and either a safe panic
-capture or an owner-approved receipt that no safe user-reachable panic cell
-exists. Every case must retain exact stdout and stderr bytes, exit code,
-environment allowlist, feature/host/source identity, generated artifact paths
-and hashes, structured harness NDJSON, a redaction result, and a deterministic
-replay command. Missing, skipped, unsupported, unredacted, or non-replayable
-cells are not parity evidence.
+Every valid incumbent and post-cutover filter cell emitted empty stderr; the
+explicit verbose markers remained on stdout. The one behavioral improvement is
+privacy: an invalid canary-bearing `RUST_LOG` directive was echoed by the
+incumbent filter parser, while post-cutover stderr is empty. Retained receipts
+store the differential with the canary redacted.
 
-All seven cutover rows are therefore `MISSING`: all-command baseline, filter
-parity, stream/exit parity, artifact/replay parity, redaction parity, focused
-replacement unit evidence, and serialized dependency-ledger cutover. The
-result is `KEEP_INCUMBENT` with `dependency_exit_allowed=false`. No manifest,
-lockfile, dependency, logger, source behavior, or tracker state changed, and
-this partial receipt does not claim completion of `asupersync-d24mms.3`.
+The canonical replay is:
+
+```bash
+RCH_REQUIRE_REMOTE=1 E2E_TIMEOUT=900 bash scripts/run_all_e2e.sh \
+  --suite dependency-sovereignty \
+  --scenario offline-tuner-logging-parity
+```
+
+Run `d24mms3-post-cutover-900s` passed on RCH worker `vmi1227854`, job
+`j-29985909466202255`: two binary unit tests, three integration tests, all 36
+process cases, remote exit 0, and retained summary/scenario/redaction/replay
+metadata. An earlier 300-second outer envelope timed out during a fresh remote
+compile before behavioral execution; it is retained as envelope evidence and
+is not counted as a product failure.
+
+All seven scoped cutover rows are now `SAME` or `BETTER`, including the
+serialized manifest, lock, marginal-ledger, and budget exit. No replacement
+subscriber was added because executable evidence found no valid-filter records
+to preserve. Generated artifact paths, bytes, and raw hashes were retained, but
+real benchmark timing, `SystemTime`, candidate selection, and temporary paths
+are intentionally not claimed byte-deterministic across runs.
 
 ## Static contract
 
-`tests/cli_clap_surface_inventory_contract.rs` is authored to verify source
+`tests/cli_clap_surface_inventory_contract.rs` verifies source
 fingerprints, line counts, declaration and attribute counts, indexed command
 variants, the 527-row complete static field-normalization cohort,
-feature/environment/config/exit boundary markers, documentation markers, and
-the empty fail-closed golden state.
-
-In this safety lane the contract was not executed. Validation was limited to
-JSON parsing, hashes, textual counts, and Git whitespace checks. Consequently,
-the contract's presence is not a passing test receipt.
+feature/environment/config/exit boundary markers, documentation markers, the
+still-empty broad byte-golden state, and the executed offline-tuner cutover
+subreceipt. Its focused Cargo test is remote-required.
 
 ## No-claim boundary
 
-This inventory contains zero captured byte goldens. No binary or parser was
-executed. No compiler, test, formatter, benchmark, or remote proof lane was
-run. The artifact does not prove rendered help or error stability, stdout and
-stderr routing, process exit behavior, non-UTF-8 handling, platform parity,
-compilation, runtime correctness, performance, release readiness, or broad
-workspace health.
+This inventory still contains zero complete byte goldens for the four-binary
+clap surface. The offline-tuner subreceipt executed one Linux clean-overlay
+matrix and proves only its scoped logging cutover. It does not prove rendered
+help or error stability across the full CLI, non-UTF-8 handling, other-platform
+parity, performance, release readiness, or broad workspace health.
 
 Field normalization covers all six primary sources, but even the 527 normalized
 rows do not substitute for captured parser bytes. The detached tree still has

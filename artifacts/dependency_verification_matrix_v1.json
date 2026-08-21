@@ -2729,7 +2729,7 @@
   },
   "inputs": {
     "capability_registry_path": "artifacts/dependency_capability_registry_v1.json",
-    "capability_registry_sha256": "096978a208191c0396dbaf08da114d72e60bd8da583a8e458ee5f9f7085493a7",
+    "capability_registry_sha256": "a91599a15ed45de4261ebef0207023a2c60fa504a2292c2d6051c3c2bc849df9",
     "tracker_path": ".beads/issues.jsonl",
     "tracker_plan_sha256": "d198eb77367ddef5df615506b3451d9cb971ba2a02452e00fa3cac6369671258"
   },

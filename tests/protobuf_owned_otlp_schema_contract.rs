@@ -26,7 +26,7 @@ use std::path::PathBuf;
 
 const ARTIFACT_PATH: &str = "artifacts/protobuf_owned_otlp_schema_v1.json";
 const DOC_PATH: &str = "docs/protobuf_owned_otlp_schema.md";
-const ARTIFACT_SHA256: &str = "37a600ed0e6e02dcfc3fd4bed6617b33e25c57ee6e003087cf4a863d4ec5b132";
+const ARTIFACT_SHA256: &str = "ed5a0bdf017418c3e44254edf4d84653e2d2185e838daf9d8998b936dbc319b6";
 const DOC_SHA256: &str = "17360f46fff6ba94487780ce5e5b692c5af80c3be19442cd5d89c0317fb2337f";
 const SCHEMA_SIGNATURE_SHA256: &str =
     "2b9311b5c766da1b2fb88262aeb89e125c41f8ea4d8406e534a2e9b42839256b";
@@ -37,7 +37,7 @@ const SERVICE_SIGNATURE_SHA256: &str =
 const ORACLE_PIN_SIGNATURE_SHA256: &str =
     "f8d06b6ad60ce88a932eb3426a68007013ae428270159c57c1a889e46f333544";
 const REPOSITORY_PIN_SIGNATURE_SHA256: &str =
-    "10cc2d562b1ba2523416d9702910f4ceb5ad12cf000b1f5e5fd9d8f1c86e04eb";
+    "88e6578465b090d7f994914ec0a35507dbb9e91d112e04fa8249274e32275da7";
 const DOC_BEGIN: &str = "<!-- BEGIN PROTOBUF OWNED OTLP SCHEMA -->";
 const DOC_END: &str = "<!-- END PROTOBUF OWNED OTLP SCHEMA -->";
 
@@ -582,7 +582,7 @@ fn validate_identity_and_authority(value: &Value) -> ValidationResult {
         ("cargo_lock_path", "Cargo.lock"),
         (
             "cargo_lock_sha256",
-            "dc66ff7b4e6d1e75fac66fad2f90f528019a4da55e6012714160e158cc63d236",
+            "95d3aaec0e58be196f08e4b30792f90129213af86ae8e34d2c5862b9feb15880",
         ),
         (
             "wrapper_repository",

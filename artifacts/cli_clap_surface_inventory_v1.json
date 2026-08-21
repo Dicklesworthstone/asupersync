@@ -49,8 +49,8 @@
     },
     {
       "path": "src/bin/offline_tuner.rs",
-      "sha256": "1333ecb1172c084cd2ea3e768d37e585563d751d290d746f5b82cbe8d7037d74",
-      "line_count": 650,
+      "sha256": "61c73ca18846a95ec6939aaa158dc2b063bb97b76a2d34fffa0141dc12e9039c",
+      "line_count": 668,
       "role": "reachable offline tuner parser and dispatch"
     },
     {
@@ -67,8 +67,8 @@
     },
     {
       "path": "Cargo.toml",
-      "sha256": "914cb85f3b3ef24c06e41f332cb21c2361163c99c186d4a8234b237323792b2b",
-      "line_count": 1061,
+      "sha256": "541ed6be1f748cd2897f18ba2679c6d34ff84a57d480db5a11c40ff007f1f1c7",
+      "line_count": 1064,
       "role": "clap feature and binary admission boundary"
     },
     {
@@ -7129,9 +7129,9 @@
     },
     {
       "contract_id": "CLI-ENV-TUNER-01",
-      "state": "SOURCE_OBSERVED",
-      "contract": "offline_tuner initializes env_logger through Env::default after parsing and selects only the fallback filter from the verbose flag",
-      "anchors": ["src/bin/offline_tuner.rs:263"]
+      "state": "EXECUTED_SAME_OR_BETTER",
+      "contract": "offline_tuner does not initialize a logging ecosystem; --verbose remains an owned stdout behavior, valid RUST_LOG cells preserve empty stderr, and invalid RUST_LOG no longer echoes filter contents",
+      "anchors": ["src/bin/offline_tuner.rs:257", "tests/offline_tuner_env_logger_parity.rs"]
     },
     {
       "contract_id": "CLI-EXIT-01",
@@ -7230,35 +7230,36 @@
       "CAP-CLI-OFFLINE-TUNER",
       "CAP-DIAGNOSTICS"
     ],
-    "observed_at_revision": "dedf45df21c723bf8b0f567df2d2164a2133e59a",
-    "audit_state": "STATIC_SOURCE_PINNED_NOT_EXECUTED",
-    "execution_state": "NO_BLACK_BOX_BASELINE_CAPTURED",
+    "observed_at_revision": "d1763182f71682fe18228452ee17f1fec94c1da2",
+    "observed_clean_overlay_fingerprint": "a7515003a5bf61da948d7278e74a1ab0e415e79d8c4c83a5552ab10b80e7a987",
+    "audit_state": "EXECUTED_CLEAN_OVERLAY_PARITY_PROVED",
+    "execution_state": "REMOTE_BLACK_BOX_BASELINE_AND_POST_CUTOVER_CAPTURED",
     "decision": {
       "dependency": "env_logger",
-      "disposition": "KEEP_INCUMBENT",
-      "dependency_exit_allowed": false,
-      "manifest_or_lockfile_edit_allowed": false,
-      "source_behavior_change_allowed": false,
-      "reason": "Static source inspection cannot prove whether env_logger emits records from the admitted binary dependency graph. The required all-command black-box baseline is absent, so capability preservation requires retaining the incumbent."
+      "disposition": "ROOT_EDGE_REMOVED_SAME_OR_BETTER",
+      "dependency_exit_allowed": true,
+      "manifest_or_lockfile_edit_allowed": true,
+      "source_behavior_change_allowed": true,
+      "reason": "The incumbent and post-cutover binaries completed the five-command, two-verbosity, three-filter matrix. Valid cells emitted no env_logger records, while removing the initializer eliminated invalid-filter secret echo without changing command diagnostics, streams, exits, or artifact production."
     },
     "source_pins": [
       {
         "path": "Cargo.toml",
-        "sha256": "914cb85f3b3ef24c06e41f332cb21c2361163c99c186d4a8234b237323792b2b",
-        "line_count": 1061,
-        "role": "cli feature, optional env_logger edge, and offline_tuner binary admission"
+        "sha256": "541ed6be1f748cd2897f18ba2679c6d34ff84a57d480db5a11c40ff007f1f1c7",
+        "line_count": 1064,
+        "role": "cli feature without the former root env_logger edge, explicit parity test admission, and offline_tuner binary admission"
       },
       {
         "path": "Cargo.lock",
-        "sha256": "dc66ff7b4e6d1e75fac66fad2f90f528019a4da55e6012714160e158cc63d236",
-        "line_count": 4666,
-        "role": "locked env_logger package and dependency closure inventory"
+        "sha256": "95d3aaec0e58be196f08e4b30792f90129213af86ae8e34d2c5862b9feb15880",
+        "line_count": 4665,
+        "role": "root asupersync dependency list without env_logger; the locked package remains for conformance"
       },
       {
         "path": "src/bin/offline_tuner.rs",
-        "sha256": "1333ecb1172c084cd2ea3e768d37e585563d751d290d746f5b82cbe8d7037d74",
-        "line_count": 650,
-        "role": "parser, logger initialization, command dispatch, streams, exits, and artifacts"
+        "sha256": "61c73ca18846a95ec6939aaa158dc2b063bb97b76a2d34fffa0141dc12e9039c",
+        "line_count": 668,
+        "role": "parser without ambient logger initialization, command dispatch, streams, exits, artifacts, and focused verbosity unit tests"
       },
       {
         "path": "src/raptorq/offline_tuner.rs",
@@ -7277,6 +7278,18 @@
         "sha256": "bf206faecfd41013a69811bda0173298b4a8da88bd5abc5775f2563ee4e5bce4",
         "line_count": 745,
         "role": "existing scheduler-recommend smoke wrapper and execution receipt shape"
+      },
+      {
+        "path": "tests/offline_tuner_env_logger_parity.rs",
+        "sha256": "ba404efaea8f7b616c0c9088e63214ce37d6fda12ee11a32cdf6f3f493265290",
+        "line_count": 485,
+        "role": "real-binary 30-cell success matrix, negative cases, invalid-filter privacy differential, artifact hashes, and replay receipts"
+      },
+      {
+        "path": "scripts/run_dependency_sovereignty_e2e.sh",
+        "sha256": "e7d7a65e83f6365aeee4ce01a492cc120595188e2771ffdba914f290b5ba21d4",
+        "line_count": 1378,
+        "role": "canonical offline-tuner-logging-parity clean-overlay scenario and retained evidence envelope"
       }
     ],
     "source_pin_measurement_correction": {
@@ -7308,21 +7321,23 @@
       ],
       "initialization_order": [
         "parse argv with Cli::parse",
-        "initialize env_logger from Env::default with the verbose-selected fallback filter",
         "create the output directory",
         "dispatch exactly one parsed command",
         "print a top-level error to stderr and exit 1 on a returned error"
       ],
       "manifest_boundary": {
-        "cli_enables_env_logger": true,
-        "env_logger_optional_dependency": true,
-        "locked_env_logger_version": "0.11.11",
+        "cli_enables_env_logger": false,
+        "root_env_logger_optional_dependency": false,
+        "root_lock_dependency_edge_present": false,
+        "locked_env_logger_version_for_conformance": "0.11.11",
+        "conformance_retains_env_logger": true,
         "tracing_integration_also_enabled_by_cli": true,
-        "static_graph_equivalence_proved": false
+        "locked_clean_overlay_build_passed": true,
+        "cargo_tree_execution_state": "NOT_RUN_RCH_CLASSIFIER_REJECTS_NON_BUILD_COMMAND"
       },
       "logging_and_output_counts": {
-        "env_logger_builder_initializers": 2,
-        "env_default_lookups": 2,
+        "env_logger_builder_initializers": 0,
+        "env_default_lookups": 0,
         "direct_log_or_tracing_tokens_in_binary_and_tuner_module": 0,
         "stdout_print_macro_sites_in_binary": 39,
         "stderr_print_macro_sites_in_binary": 2,
@@ -7331,12 +7346,18 @@
         "filesystem_read_sites_in_binary": 2,
         "wall_clock_artifact_sites_in_binary": 2
       },
-      "source_only_interpretation": "The owned binary and directly invoked tuner module contain no direct log or tracing call sites. This does not prove that dependencies reached by a built command emit no log records, that RUST_LOG is behaviorless, or that replacing env_logger with tracing preserves streams, filters, formatting, redaction, and exits."
+      "source_and_execution_interpretation": "The owned binary and directly invoked tuner module contain no direct log or tracing call sites. Remote black-box execution then showed empty stderr in every valid RUST_LOG cell before and after cutover, so no replacement subscriber was needed. This does not claim that unrelated workspace binaries or the conformance crate have no logging behavior."
     },
     "required_black_box_baseline": {
-      "status": "MISSING_NOT_RUN",
-      "captured_case_count": 0,
-      "captured_cases": [],
+      "status": "CAPTURED_AND_REPLAYED_SAME_OR_BETTER",
+      "captured_case_count": 36,
+      "captured_receipt_count": 37,
+      "captured_cases": [
+        "30 nominal process cells: five commands x two verbosity cells x three valid RUST_LOG cells",
+        "five nonpanic argument, input, parse, output-filesystem, and invalid-enum failures",
+        "one invalid-RUST_LOG privacy differential",
+        "one explicit no-safe-reachable-panic disposition"
+      ],
       "nominal_filter_matrix_cell_count": 30,
       "matrix_derivation": "5 commands x 2 verbosity cells x 3 RUST_LOG cells",
       "commands": [
@@ -7377,75 +7398,128 @@
         "redaction_scan_result",
         "deterministic_replay_command"
       ],
-      "missing_or_unsupported_policy": "A missing, skipped, unsupported, unredacted, or non-replayable cell is not parity evidence and keeps env_logger."
+      "missing_or_unsupported_policy": "A future missing, skipped, unsupported, unredacted, or non-replayable required cell invalidates this scoped parity receipt and blocks reuse of the dependency-exit claim."
+    },
+    "execution_evidence": {
+      "incumbent_baseline": {
+        "feature_set": ["cli", "simd-intrinsics"],
+        "nominal_process_cells": 30,
+        "negative_process_cells": 5,
+        "valid_filter_stderr_records": 0,
+        "invalid_filter_canary_echo_observed": true,
+        "raw_canary_retained": false,
+        "workers": ["vmi1227854", "ovh-a"],
+        "interpretation": "The initial all-tests command exited 101 only because the harness expected a different serde_json wording; the complete nominal matrix and privacy differential executed, and the corrected five-case negative test passed in the focused follow-up."
+      },
+      "post_cutover": {
+        "suite": "dependency-sovereignty",
+        "scenario_id": "offline-tuner-logging-parity",
+        "run_id": "d24mms3-post-cutover-900s",
+        "started_ts": "2026-08-21T19:47:04Z",
+        "ended_ts": "2026-08-21T19:51:57Z",
+        "worker": "vmi1227854",
+        "rch_job_id": "j-29985909466202255",
+        "remote_exit_code": 0,
+        "remote_command_elapsed_ms": 262382,
+        "scenario_elapsed_ms": 293330,
+        "unit_tests": {"passed": 2, "failed": 0},
+        "integration_tests": {"passed": 3, "failed": 0},
+        "nominal_process_cells": 30,
+        "negative_process_cells": 5,
+        "invalid_filter_canary_echo_observed": false,
+        "redaction_failures": 0,
+        "panic_observed": false,
+        "summary_path": "target/e2e-results/dependency-sovereignty/d24mms3-post-cutover-900s/summary.json",
+        "stderr_receipt_path": "target/e2e-results/dependency-sovereignty/d24mms3-post-cutover-900s/offline-tuner-logging-parity/d24mms-3-offline-tuner-logging-parity.stderr.log",
+        "replay": "RCH_REQUIRE_REMOTE=1 E2E_TIMEOUT=900 bash scripts/run_all_e2e.sh --suite dependency-sovereignty --scenario offline-tuner-logging-parity"
+      },
+      "timeout_envelope_observation": {
+        "run_id": "d24mms3-post-cutover",
+        "outer_timeout_seconds": 300,
+        "status": "TIMEOUT_DURING_FRESH_REMOTE_COMPILE",
+        "behavioral_test_result": "NOT_REACHED",
+        "interpretation": "The supported 900-second replay passed; the 300-second receipt is retained as proof-envelope calibration, not counted as a product failure."
+      },
+      "artifact_stability_boundary": "Every generated artifact was present, validly produced by the real command, and recorded with raw SHA-256. optimize timing, candidate selection, temporary paths, and SystemTime fields are intentionally not claimed byte-deterministic across runs; RUST_LOG did not add an artifact or diagnostic channel."
     },
     "cutover_gate": {
       "required_state": "SAME_OR_BETTER",
       "rows": [
         {
           "row_id": "ENVLOG-BASELINE-ALL-COMMANDS",
-          "state": "MISSING",
-          "requirement": "all five commands have admitted nominal, error, and relevant invoked-path receipts"
+          "state": "SAME",
+          "requirement": "all five commands have admitted nominal, error, and relevant invoked-path receipts",
+          "evidence": "30 incumbent and 30 post-cutover nominal cells plus five post-cutover error cells; optimize invoked the real benchmark path"
         },
         {
           "row_id": "ENVLOG-FILTER-PARITY",
-          "state": "MISSING",
-          "requirement": "default, verbose, and RUST_LOG filters preserve or improve observable diagnostics"
+          "state": "SAME",
+          "requirement": "default, verbose, and RUST_LOG filters preserve or improve observable diagnostics",
+          "evidence": "RUST_LOG unset/off/trace produced zero stderr records before and after; --verbose stdout markers remained command-owned"
         },
         {
           "row_id": "ENVLOG-STREAM-EXIT-PARITY",
-          "state": "MISSING",
-          "requirement": "stdout, stderr, panic reporting, and process exits remain SAME or BETTER"
+          "state": "SAME",
+          "requirement": "stdout, stderr, panic reporting, and process exits remain SAME or BETTER",
+          "evidence": "success exits stayed 0, runtime failures stayed 1, clap invalid-enum stayed 2, diagnostics remained on their incumbent streams, and five safe failure classes did not panic"
         },
         {
           "row_id": "ENVLOG-ARTIFACT-REPLAY-PARITY",
-          "state": "MISSING",
-          "requirement": "generated artifacts, harness NDJSON, provenance, and replay commands remain deterministic and complete"
+          "state": "SAME",
+          "requirement": "generated artifacts, harness NDJSON, provenance, and replay commands remain deterministic and complete",
+          "evidence": "all expected artifacts were emitted with raw hashes; the canonical runner retained command, feature, worker, clean-overlay, timing, redaction, cleanup, and replay receipts; volatile benchmark and clock fields retain an explicit byte-determinism no-claim"
         },
         {
           "row_id": "ENVLOG-REDACTION-PARITY",
-          "state": "MISSING",
-          "requirement": "diagnostic and artifact outputs pass the declared secret-redaction scan"
+          "state": "BETTER",
+          "requirement": "diagnostic and artifact outputs pass the declared secret-redaction scan",
+          "evidence": "the incumbent invalid RUST_LOG parser echoed its canary-bearing directive; post-cutover stderr was empty and the retained receipt stored only the redacted differential"
         },
         {
           "row_id": "ENVLOG-REPLACEMENT-UNIT-EVIDENCE",
-          "state": "MISSING",
-          "requirement": "verbosity and filter selection have focused unit evidence"
+          "state": "SAME",
+          "requirement": "verbosity and filter selection have focused unit evidence",
+          "evidence": "two binary unit tests preserve concise default parsing and global --verbose after a subcommand; the black-box matrix proves no replacement filter/subscriber is necessary"
         },
         {
           "row_id": "ENVLOG-DEPENDENCY-LEDGER-CUTOVER",
-          "state": "MISSING",
-          "requirement": "manifest, lockfile, dependency ledger, and checked negative scans are serialized after parity"
+          "state": "SAME",
+          "requirement": "manifest, lockfile, dependency ledger, and checked negative scans are serialized after parity",
+          "evidence": "Cargo.toml and the root asupersync Cargo.lock row omit env_logger; dependency marginal ledger and budget omit normal:env_logger; source scans find no initializer while conformance retains its independent 0.11 edge"
         }
       ],
-      "on_any_missing_or_regressed_row": "KEEP_INCUMBENT",
-      "dependency_exit_allowed": false,
-      "tracker_closure_allowed": false
+      "on_any_missing_or_regressed_row": "ROLL_BACK_ROOT_EDGE_OR_REOPEN_BEAD",
+      "dependency_exit_allowed": true,
+      "tracker_closure_allowed": true
     },
     "no_claims": [
-      "No offline_tuner command, benchmark path, parser, logger, replacement subscriber, or error path was executed.",
-      "Zero direct log or tracing tokens in two pinned owned source files is not proof that the built dependency graph emits no records.",
-      "The 30-cell nominal matrix is a future evidence obligation, not an execution receipt.",
-      "No stdout, stderr, exit, panic, filtering, redaction, artifact, replay, performance, or dependency-graph parity is claimed.",
-      "This receipt does not authorize env_logger removal, manifest or lockfile edits, source behavior changes, tracker closure, release readiness, or broad workspace health claims."
+      "This scoped receipt proves the root offline_tuner env_logger exit only; it does not authorize clap, tracing-integration, host-metadata, or conformance dependency removal.",
+      "The remaining env_logger 0.11 lock package belongs to conformance and is not evidence that the root cli feature still consumes it.",
+      "Raw optimize and candidates artifact hashes are observations, not deterministic goldens, because real benchmark timing, SystemTime, candidate selection, and temporary paths vary.",
+      "No performance improvement, no regression, broad workspace health, release readiness, cross-platform parity, or unrelated CLI byte-golden completion is claimed.",
+      "The 300-second orchestrator timeout did not reach behavioral execution and is not counted as a test failure; the supported 900-second replay is the terminal result."
     ]
   },
   "verification": {
     "contract_path": "tests/cli_clap_surface_inventory_contract.rs",
-    "contract_execution_state": "NOT_RUN_STATIC_ONLY",
+    "contract_execution_state": "REMOTE_FOCUSED_CONTRACT_PASSED_8_OF_8",
     "static_checks": [
       "jq parse",
       "source sha256",
       "source line counts",
       "declaration marker counts",
       "normalized source attribute and field declaration counts",
-      "git diff --check"
+      "git diff --check",
+      "remote offline_tuner unit tests",
+      "remote 30-cell real-binary success matrix",
+      "remote five-case diagnostic matrix",
+      "canonical dependency-sovereignty E2E replay"
     ]
   },
   "no_claims": [
     "No byte-level help, usage, version, stdout, stderr, or exit-code golden was captured.",
-    "No binary or parser was executed.",
-    "No compiler, test, formatter, benchmark, or remote proof lane was run.",
+    "The broad four-binary byte-golden matrix remains unexecuted; the scoped offline-tuner subreceipt executed one Linux clean-overlay matrix only.",
+    "The scoped offline-tuner unit, real-binary integration, and canonical E2E lanes ran remotely; no broad CLI, workspace, benchmark-performance, or cross-platform lane was run.",
     "Field normalization covers all six primary sources with 527 static rows, but it is not byte-capture or parser-execution evidence.",
     "Asupersync consumer states freeze parser-struct dispatch only; they are not independent per-field dataflow or behavioral proof.",
     "Standalone atp consumer states freeze parser-struct dispatch only; they are not independent per-field dataflow or behavioral proof.",

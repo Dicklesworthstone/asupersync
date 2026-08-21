@@ -1026,7 +1026,7 @@
       "parity_modes": ["EXACT_BYTES", "SEMANTIC", "ERROR_CONTRACT", "RESOURCE_ENVELOPE", "LIFECYCLE", "PLATFORM_MATRIX", "OPERATOR_UX"],
       "evidence_ids": ["EVD-CLI-GOLDENS", "EVD-HOST-TOPOLOGY"],
       "downstream_profiles": [],
-      "scenario_ids": ["cli_offline_tuner_help", "cli_offline_tuner_report", "cli_offline_tuner_interrupt"],
+      "scenario_ids": ["cli_offline_tuner_help", "cli_offline_tuner_report", "cli_offline_tuner_interrupt", "offline-tuner-logging-parity"],
       "cases": {
         "positive": {"disposition": "EVIDENCE", "evidence_id": "EVD-CLI-GOLDENS"},
         "empty_boundary": {"disposition": "EVIDENCE", "evidence_id": "EVD-CLI-GOLDENS"},
@@ -1375,14 +1375,14 @@
     "source_pins": [
       {
         "path": "Cargo.toml",
-        "sha256": "914cb85f3b3ef24c06e41f332cb21c2361163c99c186d4a8234b237323792b2b",
-        "line_count": 1061,
+        "sha256": "541ed6be1f748cd2897f18ba2679c6d34ff84a57d480db5a11c40ff007f1f1c7",
+        "line_count": 1064,
         "role": "unconditional normal hashbrown dependency declaration and feature profiles"
       },
       {
         "path": "Cargo.lock",
-        "sha256": "dc66ff7b4e6d1e75fac66fad2f90f528019a4da55e6012714160e158cc63d236",
-        "line_count": 4666,
+        "sha256": "95d3aaec0e58be196f08e4b30792f90129213af86ae8e34d2c5862b9feb15880",
+        "line_count": 4665,
         "role": "direct hashbrown 0.17.1 resolution plus transitive 0.16.1 and 0.17.1 graph context"
       },
       {
@@ -1429,20 +1429,20 @@
       },
       {
         "path": "artifacts/dependency_capability_registry_v1.json",
-        "sha256": "9fa15cca1a7b202ff7a9accc78bb7a052a8f4f830b37ae450959b539633d01fd",
-        "line_count": 6929,
+        "sha256": "450e301a6c3ef5ea5068dad40470bb58bcc0b956da36d8b1e00b0a949e29e1f6",
+        "line_count": 6927,
         "role": "CAP-HASH-MAPS capability, platform, security, lifecycle, and ownership authority"
       },
       {
         "path": "artifacts/dependency_marginal_ledger_v1.json",
-        "sha256": "4e36ca29d7187e3237cfd9f422b2661009a608e93bb5761c7d511d412d66a047",
-        "line_count": 188447,
+        "sha256": "d7102928fea1000bd05580f697b84dc9a9e29306494b245da6498c9a2b453ff3",
+        "line_count": 187615,
         "role": "stale but source-pinned 52-cell hashbrown marginal package graph"
       },
       {
         "path": "scripts/run_dependency_sovereignty_e2e.sh",
-        "sha256": "c2c112d25a005800549df4ed4e5d32b6e8a2c05c4e9045557b074e5740d170d9",
-        "line_count": 1350,
+        "sha256": "e7d7a65e83f6365aeee4ce01a492cc120595188e2771ffdba914f290b5ba21d4",
+        "line_count": 1378,
         "role": "retained dependency-sovereignty scenario catalog lacking reactor_registration_churn"
       },
       {
@@ -1564,7 +1564,7 @@
     },
     "marginal_ledger_assessment": {
       "artifact_path": "artifacts/dependency_marginal_ledger_v1.json",
-      "ledger_source_commit": "00a42d75c072044cbc8a7093885ec19420f21bdc",
+      "ledger_source_commit": "376c313540a58d2c8e6618cf40b4ac87ed36ec53",
       "source_commit_matches_observed_revision": false,
       "fresh_for_cutover": false,
       "hashbrown_measurement_row_count": 52,
@@ -1753,14 +1753,14 @@
     "source_pins": [
       {
         "path": "Cargo.toml",
-        "sha256": "914cb85f3b3ef24c06e41f332cb21c2361163c99c186d4a8234b237323792b2b",
-        "line_count": 1061,
+        "sha256": "541ed6be1f748cd2897f18ba2679c6d34ff84a57d480db5a11c40ff007f1f1c7",
+        "line_count": 1064,
         "role": "default and benchmark-adapters feature boundary plus optional dependency declarations"
       },
       {
         "path": "Cargo.lock",
-        "sha256": "dc66ff7b4e6d1e75fac66fad2f90f528019a4da55e6012714160e158cc63d236",
-        "line_count": 4666,
+        "sha256": "95d3aaec0e58be196f08e4b30792f90129213af86ae8e34d2c5862b9feb15880",
+        "line_count": 4665,
         "role": "locked num_cpus, whoami, and sysinfo package identities"
       },
       {
@@ -1801,8 +1801,8 @@
       },
       {
         "path": "artifacts/dependency_capability_registry_v1.json",
-        "sha256": "9fa15cca1a7b202ff7a9accc78bb7a052a8f4f830b37ae450959b539633d01fd",
-        "line_count": 6929,
+        "sha256": "450e301a6c3ef5ea5068dad40470bb58bcc0b956da36d8b1e00b0a949e29e1f6",
+        "line_count": 6927,
         "role": "CAP-HOST-BENCH-METADATA and CAP-HOST-INTROSPECTION authority"
       },
       {
@@ -1813,8 +1813,8 @@
       },
       {
         "path": "scripts/run_dependency_sovereignty_e2e.sh",
-        "sha256": "c2c112d25a005800549df4ed4e5d32b6e8a2c05c4e9045557b074e5740d170d9",
-        "line_count": 1350,
+        "sha256": "e7d7a65e83f6365aeee4ce01a492cc120595188e2771ffdba914f290b5ba21d4",
+        "line_count": 1378,
         "role": "scenario catalog and retained evidence schema"
       }
     ],
@@ -2051,14 +2051,14 @@
     "source_pins": [
       {
         "path": "Cargo.toml",
-        "sha256": "914cb85f3b3ef24c06e41f332cb21c2361163c99c186d4a8234b237323792b2b",
-        "line_count": 1061,
+        "sha256": "541ed6be1f748cd2897f18ba2679c6d34ff84a57d480db5a11c40ff007f1f1c7",
+        "line_count": 1064,
         "role": "default, proc-macros, and test-internals feature edges plus optional dependency declarations"
       },
       {
         "path": "Cargo.lock",
-        "sha256": "dc66ff7b4e6d1e75fac66fad2f90f528019a4da55e6012714160e158cc63d236",
-        "line_count": 4666,
+        "sha256": "95d3aaec0e58be196f08e4b30792f90129213af86ae8e34d2c5862b9feb15880",
+        "line_count": 4665,
         "role": "root dependency edge and visibility 0.1.1 transitive package identity"
       },
       {
@@ -2093,7 +2093,7 @@
       },
       {
         "path": "src/cx/scope.rs",
-        "sha256": "74e17f014ba1403f6311e11bb7ca95a5c8bddb9a49c5c6060121e097858ce2c5",
+        "sha256": "930b8c56aa4b8742a2191911271c4d2b03da168ed8c1e3b75fed386674f853c6",
         "line_count": 3600,
         "role": "three pub(crate) functions in a generic inherent impl guarded by the incumbent attribute"
       },
@@ -2105,8 +2105,8 @@
       },
       {
         "path": "artifacts/dependency_capability_registry_v1.json",
-        "sha256": "9fa15cca1a7b202ff7a9accc78bb7a052a8f4f830b37ae450959b539633d01fd",
-        "line_count": 6929,
+        "sha256": "450e301a6c3ef5ea5068dad40470bb58bcc0b956da36d8b1e00b0a949e29e1f6",
+        "line_count": 6927,
         "role": "CAP-VISIBILITY-MACRO ownership, semantics, feature, and planned-fixture authority"
       },
       {
@@ -2117,8 +2117,8 @@
       },
       {
         "path": "artifacts/dependency_marginal_ledger_v1.json",
-        "sha256": "4e36ca29d7187e3237cfd9f422b2661009a608e93bb5761c7d511d412d66a047",
-        "line_count": 188447,
+        "sha256": "d7102928fea1000bd05580f697b84dc9a9e29306494b245da6498c9a2b453ff3",
+        "line_count": 187615,
         "role": "stale four-target visibility graph opportunity rows"
       },
       {
@@ -2290,7 +2290,7 @@
     },
     "marginal_ledger_assessment": {
       "artifact_path": "artifacts/dependency_marginal_ledger_v1.json",
-      "ledger_source_commit": "00a42d75c072044cbc8a7093885ec19420f21bdc",
+      "ledger_source_commit": "376c313540a58d2c8e6618cf40b4ac87ed36ec53",
       "source_commit_matches_observed_revision": false,
       "fresh_for_cutover": false,
       "visibility_measurement_row_count": 4,
@@ -2461,14 +2461,14 @@
     "source_pins": [
       {
         "path": "Cargo.toml",
-        "sha256": "914cb85f3b3ef24c06e41f332cb21c2361163c99c186d4a8234b237323792b2b",
-        "line_count": 1061,
+        "sha256": "541ed6be1f748cd2897f18ba2679c6d34ff84a57d480db5a11c40ff007f1f1c7",
+        "line_count": 1064,
         "role": "unconditional direct slab dependency declaration and default feature boundary"
       },
       {
         "path": "Cargo.lock",
-        "sha256": "dc66ff7b4e6d1e75fac66fad2f90f528019a4da55e6012714160e158cc63d236",
-        "line_count": 4666,
+        "sha256": "95d3aaec0e58be196f08e4b30792f90129213af86ae8e34d2c5862b9feb15880",
+        "line_count": 4665,
         "role": "root direct edge and slab 0.4.12 package identity"
       },
       {
@@ -2515,14 +2515,14 @@
       },
       {
         "path": "artifacts/dependency_capability_registry_v1.json",
-        "sha256": "9fa15cca1a7b202ff7a9accc78bb7a052a8f4f830b37ae450959b539633d01fd",
-        "line_count": 6929,
+        "sha256": "450e301a6c3ef5ea5068dad40470bb58bcc0b956da36d8b1e00b0a949e29e1f6",
+        "line_count": 6927,
         "role": "CAP-TOKEN-SLAB source ownership, scenario, safety, and lifecycle authority"
       },
       {
         "path": "artifacts/dependency_marginal_ledger_v1.json",
-        "sha256": "4e36ca29d7187e3237cfd9f422b2661009a608e93bb5761c7d511d412d66a047",
-        "line_count": 188447,
+        "sha256": "d7102928fea1000bd05580f697b84dc9a9e29306494b245da6498c9a2b453ff3",
+        "line_count": 187615,
         "role": "stale 52-row slab profile and target graph opportunity"
       },
       {
@@ -2533,8 +2533,8 @@
       },
       {
         "path": "scripts/run_dependency_sovereignty_e2e.sh",
-        "sha256": "c2c112d25a005800549df4ed4e5d32b6e8a2c05c4e9045557b074e5740d170d9",
-        "line_count": 1350,
+        "sha256": "e7d7a65e83f6365aeee4ce01a492cc120595188e2771ffdba914f290b5ba21d4",
+        "line_count": 1378,
         "role": "dependency-sovereignty runner with neither declared token-slab scenario"
       },
       {
@@ -2675,7 +2675,7 @@
     },
     "marginal_ledger_assessment": {
       "artifact_path": "artifacts/dependency_marginal_ledger_v1.json",
-      "ledger_source_commit": "00a42d75c072044cbc8a7093885ec19420f21bdc",
+      "ledger_source_commit": "376c313540a58d2c8e6618cf40b4ac87ed36ec53",
       "source_commit_matches_observed_revision": false,
       "fresh_for_cutover": false,
       "slab_measurement_row_count": 52,
@@ -2851,10 +2851,10 @@
   "phase2_terminal_readiness_static_audit": {
     "audit_id": "CAP-PHASE2-TERMINAL-READINESS-STATIC-AUDIT-V1",
     "bead_id": "asupersync-d24mms.13",
-    "observed_at_revision": "33f94643ced8f5415ad3c1f0a30cd42ddcb738c9",
-    "captured_at_utc": "2026-08-05T06:00:29Z",
-    "audit_state": "STATIC_GIT_ARTIFACT_AND_TRACKER_TOPOLOGY_PINNED_NOT_EXECUTED",
-    "execution_state": "NO_CHILD_OR_AGGREGATE_EXECUTION_REPLAYED",
+    "observed_at_revision": "376c313540a58d2c8e6618cf40b4ac87ed36ec53",
+    "captured_at_utc": "2026-08-21T20:33:00Z",
+    "audit_state": "EXECUTED_CHILD_EVIDENCE_REFRESHED_AGGREGATE_STILL_BLOCKED",
+    "execution_state": "OFFLINE_TUNER_CHILD_REPLAYED_AGGREGATE_NOT_REPLAYED",
     "registry_binding": {
       "state": "EXACT_PRESENT",
       "registry_path": "artifacts/dependency_capability_registry_v1.json",
@@ -2889,8 +2889,8 @@
     "source_pins": [
       {
         "path": "artifacts/dependency_capability_registry_v1.json",
-        "sha256": "834c0bb0f30adf65ad27256fbae9f903fe9945e37a7d010f90d38971802c74ea",
-        "line_count": 6929,
+        "sha256": "450e301a6c3ef5ea5068dad40470bb58bcc0b956da36d8b1e00b0a949e29e1f6",
+        "line_count": 6927,
         "role": "exact Phase-2 terminal capability binding"
       },
       {
@@ -2901,9 +2901,9 @@
       },
       {
         "path": "artifacts/cli_clap_surface_inventory_v1.json",
-        "sha256": "6e75eaffa3b3a8e64feb38631d7f4d1e65a9126b9338780303e639168687bb55",
-        "line_count": 7443,
-        "role": "offline-tuner env_logger static KEEP gate"
+        "sha256": "1827242c146072794c64eef0f8672e165fb4730f4d50e49f4aa7555b11411479",
+        "line_count": 7531,
+        "role": "offline-tuner env_logger executable SAME-or-BETTER cutover receipt"
       },
       {
         "path": "artifacts/time_utc_rfc3339_foundation_v1.json",
@@ -2919,14 +2919,14 @@
       },
       {
         "path": "artifacts/hex_capability_inventory_v1.json",
-        "sha256": "971385dfaf02570e6a02d52b494bc231e089ab8281bbcde812ff529727c10478",
-        "line_count": 960,
+        "sha256": "70b50e423a89452fc2f47d16a775019c0bc5d7ca6bcdd60971a9c5a159aaedc9",
+        "line_count": 977,
         "role": "hex A1 inventory preceding the still-missing A5 terminal"
       },
       {
         "path": "artifacts/base64_capability_inventory_v1.json",
-        "sha256": "28171082ff529b93cbe951b9de84db9423b8922fde531c82aa21051b933c83eb",
-        "line_count": 417,
+        "sha256": "02f58ff42dd48914ab91c5fc50ad6f44d85f8e3594495fc3ec10958b85a01b74",
+        "line_count": 1018,
         "role": "Base64 A1 inventory preceding the still-missing A6 terminal"
       },
       {
@@ -2937,9 +2937,9 @@
       },
       {
         "path": "scripts/run_dependency_sovereignty_e2e.sh",
-        "sha256": "f2deaf18dd793e3df114c300ffaa15445ccbf0040f9cc3c5b56e89fd19665ccc",
-        "line_count": 1314,
-        "role": "declared UTC and ATP version scenario routes without replay in this audit"
+        "sha256": "e7d7a65e83f6365aeee4ce01a492cc120595188e2771ffdba914f290b5ba21d4",
+        "line_count": 1378,
+        "role": "declared UTC and ATP version routes plus the replayed offline-tuner logging parity route"
       },
       {
         "path": "artifacts/dormant_e2e_inventory_v1.json",
@@ -2956,8 +2956,8 @@
     ],
     "readiness_summary": {
       "required_prerequisite_count": 13,
-      "terminal_ready_count": 1,
-      "blocked_count": 12,
+      "terminal_ready_count": 2,
+      "blocked_count": 11,
       "state_counts": [
         {
           "state": "FOUNDATION_SCOPED_PASS",
@@ -2965,7 +2965,11 @@
         },
         {
           "state": "STATIC_KEEP_GATE_LANDED_BLOCKED",
-          "count": 5
+          "count": 4
+        },
+        {
+          "state": "EXECUTED_ROOT_EDGE_EXIT_READY",
+          "count": 1
         },
         {
           "state": "CHECKPOINT_LANDED_BLOCKED",
@@ -3027,18 +3031,17 @@
       },
       {
         "prerequisite_id": "asupersync-d24mms.3",
-        "readiness_state": "STATIC_KEEP_GATE_LANDED_BLOCKED",
-        "terminal_ready": false,
+        "readiness_state": "EXECUTED_ROOT_EDGE_EXIT_READY",
+        "terminal_ready": true,
         "evidence_refs": [
           "artifacts/cli_clap_surface_inventory_v1.json#env_logger_static_audit"
         ],
         "landing_commits": [
-          "efab658ab3966f68f005b02ba0c5710467523d51"
+          "efab658ab3966f68f005b02ba0c5710467523d51",
+          "376c313540a58d2c8e6618cf40b4ac87ed36ec53"
         ],
-        "landed_scope": "Offline-tuner logging surface inventory and fail-closed KEEP decision.",
-        "missing_terminal_evidence": [
-          "black-box command, filter, stream, exit, artifact and redaction parity"
-        ]
+        "landed_scope": "Executable 30-cell success and five-case diagnostic parity, invalid-filter privacy improvement, canonical clean-overlay E2E replay, and serialized root env_logger edge removal.",
+        "missing_terminal_evidence": []
       },
       {
         "prerequisite_id": "asupersync-d24mms.4",
@@ -3181,20 +3184,20 @@
       }
     ],
     "readiness_decision": {
-      "status": "BLOCKED_12_OF_13_PREREQUISITES_NOT_TERMINAL",
+      "status": "BLOCKED_11_OF_13_PREREQUISITES_NOT_TERMINAL",
       "phase2_terminal_signoff_allowed": false,
       "dependency_exit_allowed": false,
       "manifest_or_lockfile_edit_allowed": false,
       "tracker_closure_allowed": false,
       "required_next_state": "ALL_13_PREREQUISITES_TERMINAL_AND_REPLAYED_WITH_ZERO_UNKNOWN",
       "on_missing_stale_unreplayed_or_regressed_row": "BLOCK_PHASE2_SIGNOFF_AND_KEEP_INCUMBENTS",
-      "reason": "Only the scoped Phase-1 foundation is terminal-ready. Static KEEP gates and landed checkpoints are useful progress, but each explicitly lacks terminal executable evidence or closure authority."
+      "reason": "The scoped Phase-1 foundation and offline-tuner env_logger cutover are terminal-ready. The other eleven prerequisites still lack terminal executable evidence or closure authority."
     },
     "no_claims": [
-      "No Cargo, RCH, compiler, formatter, unit, property, model, E2E, benchmark, service, platform, fuzz, ledger-regeneration, runtime, or aggregate replay lane was executed for this audit.",
-      "Git landing and content-pinned artifact presence do not prove that any child terminal remains executable, current, replayable, or SAME-or-BETTER.",
+      "The offline-tuner child ran remote unit, real-binary integration, canonical E2E, formatter, ledger-regeneration, and focused contract lanes; no Phase-2 aggregate, broad workspace, cross-platform, benchmark-performance, service, model, fuzz, or release lane was executed for this audit.",
+      "Git landing and content-pinned artifact presence do not prove that any other child terminal remains executable, current, replayable, or SAME-or-BETTER.",
       "Stale tracker labels are topology context only; they are not used as proof that landed work is complete or that open work is absent.",
-      "The five static KEEP gates do not authorize their tracker closure, dependency exit, implementation, source migration, manifest edit, or lockfile edit.",
+      "The four remaining static KEEP gates do not authorize their tracker closure, dependency exit, implementation, source migration, manifest edit, or lockfile edit.",
       "This audit does not authorize Phase-2 signoff, dependency exit, public/API/format/protocol/feature/platform/diagnostic/security/user-journey narrowing, release readiness, performance claims, broad workspace health, or deletion of any file."
     ]
   },

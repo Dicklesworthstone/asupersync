@@ -38,7 +38,7 @@ const PATH_TOKEN: &str = concat!("hex", "::");
 const SOURCE_PIN_PATHS_SHA256: &str =
     "8ff7aa63a3c44e801fc536f894aff787d209a9032de2ac69d163bcca1f6cb156";
 const CLAIMS_PROJECTION_SHA256: &str =
-    "f5ffe7318ca737e630e5a65bc3e44c1d665f33da545f4585df47801b3ee5f8b2";
+    "9e18013ac2ac9b4cd9cb0807467e3657c30dbe54c853a3e7479c9117c3114199";
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -530,14 +530,14 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
 
     let census = object(inventory, "occurrence_census");
     for (key, expected) in [
-        ("files", 104),
-        ("lexical_tokens", 254),
-        ("code_or_type_references", 251),
+        ("files", 103),
+        ("lexical_tokens", 262),
+        ("code_or_type_references", 259),
         ("comment_tokens", 3),
         ("cfg_any_disabled_reference_count", 4),
         ("cfg_test_references_embedded_in_production_files", 25),
         ("test_or_test_internals_module_references", 2),
-        ("test_or_conformance_group_references", 124),
+        ("test_or_conformance_group_references", 132),
         ("active_production_references", 96),
         ("unknown_occurrences", 0),
     ] {
@@ -553,7 +553,7 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
             ("FromHexError".to_owned(), 4),
             ("decode".to_owned(), 36),
             ("decode_to_slice".to_owned(), 11),
-            ("encode".to_owned(), 202),
+            ("encode".to_owned(), 210),
             ("tests".to_owned(), 1),
         ])
         || symbol_map(census_value, "code_or_type_symbols")
@@ -561,7 +561,7 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
                 ("FromHexError".to_owned(), 4),
                 ("decode".to_owned(), 34),
                 ("decode_to_slice".to_owned(), 11),
-                ("encode".to_owned(), 202),
+                ("encode".to_owned(), 210),
             ])
     {
         return Err("occurrence symbol summaries drifted".to_owned());
@@ -575,7 +575,7 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
     )?;
     let expected_root_counts = BTreeMap::from([
         ("src", (51, 183)),
-        ("tests", (52, 69)),
+        ("tests", (51, 77)),
         ("conformance", (1, 2)),
         ("examples", (0, 0)),
         ("benches", (0, 0)),
@@ -592,8 +592,8 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
         }
     }
     let call_sites = array(inventory, "call_sites");
-    if call_sites.len() != 104 || row_ids(call_sites, "path").len() != 104 {
-        return Err("call_sites must contain 104 unique paths".to_owned());
+    if call_sites.len() != 103 || row_ids(call_sites, "path").len() != 103 {
+        return Err("call_sites must contain 103 unique paths".to_owned());
     }
     if call_sites.iter().any(|row| {
         text(row, "profile").is_empty()
@@ -1104,15 +1104,15 @@ fn complete_direct_path_census_matches_source() {
             *lexical_symbols.entry(name.clone()).or_default() += count;
         }
     }
-    assert_eq!(actual.len(), 104);
-    assert_eq!(lexical_symbols.values().sum::<u64>(), 254);
+    assert_eq!(actual.len(), 103);
+    assert_eq!(lexical_symbols.values().sum::<u64>(), 262);
     assert_eq!(
         lexical_symbols,
         BTreeMap::from([
             ("FromHexError".to_owned(), 4),
             ("decode".to_owned(), 36),
             ("decode_to_slice".to_owned(), 11),
-            ("encode".to_owned(), 202),
+            ("encode".to_owned(), 210),
             ("tests".to_owned(), 1),
         ])
     );
@@ -1127,7 +1127,7 @@ fn complete_direct_path_census_matches_source() {
                 totals
             },
         );
-    assert_eq!(code_symbols.values().sum::<u64>(), 251);
+    assert_eq!(code_symbols.values().sum::<u64>(), 259);
     assert_eq!(code_symbols.get("decode"), Some(&34));
 }
 
@@ -1178,8 +1178,8 @@ fn reservation_groups_are_disjoint_complete_and_digest_pinned() {
             text(group, "projection_sha256")
         );
     }
-    assert_eq!(counts.values().map(|row| row.0).sum::<u64>(), 104);
-    assert_eq!(counts.values().map(|row| row.1).sum::<u64>(), 254);
+    assert_eq!(counts.values().map(|row| row.0).sum::<u64>(), 103);
+    assert_eq!(counts.values().map(|row| row.1).sum::<u64>(), 262);
 }
 
 #[test]
@@ -1279,7 +1279,7 @@ fn comments_and_disabled_rows_remain_separate_from_active_behavior() {
         .map(|row| symbol_total(&symbol_map(row, "symbols")))
         .sum();
     assert_eq!(call_site_disabled_total, 4);
-    assert_eq!(test_conformance_total, 124);
+    assert_eq!(test_conformance_total, 132);
 
     let logging = find_row(
         array(&inventory, "call_sites"),
@@ -1292,7 +1292,7 @@ fn comments_and_disabled_rows_remain_separate_from_active_behavior() {
         "cfg(any(test, feature = test-internals))"
     );
     assert_eq!(symbol_total(&symbol_map(logging, "symbols")), 2);
-    assert_eq!(251 - test_conformance_total - 25 - 2 - 4, 96);
+    assert_eq!(259 - test_conformance_total - 25 - 2 - 4, 96);
 }
 
 #[test]

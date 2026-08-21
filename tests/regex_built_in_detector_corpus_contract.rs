@@ -41,7 +41,8 @@ const BASELINE_PREVIOUS_SHA256: &str =
 const BASELINE_CURRENT_SHA256: &str =
     "7d73dc99cf9be276ce6adcd66b631a1e60bfe0e44a419d574e5a2414c967befc";
 const LIVE_BASELINE_SHA256: &str =
-    "168e9a0b5f836c1d30b56c1fb6478092d8759b0d1fe144edbdb526cca5a488ad";
+    "df830fc2663de19f857ade1e07feed0ee29f41f9cf6eba84f9c85b1d9c1040bc";
+const LIVE_BASELINE_LINE_COUNT: u64 = 3_213;
 const REGEX_CAPABILITY_ROW_SHA256: &str =
     "5053806ac9a546ea240a6efc0190969da549f31ed03cf17e4b7b40f45adedc5b";
 const LAB_CAPABILITY_ROW_SHA256: &str =
@@ -49,7 +50,7 @@ const LAB_CAPABILITY_ROW_SHA256: &str =
 const SOURCE_PIN_PATHS_SHA256: &str =
     "b5ba6ff6a6eb152e0c3bb263205e8a7d9f9a58fbbb27ec13fd276eb909d9552a";
 const CLAIMS_PROJECTION_SHA256: &str =
-    "653f35f8a117e667a43d8fe45a9b728c0a3b605e3d09e742ee252696e6ad8212";
+    "7ad5c58a874a4a8f1c027e47d02cd9e8286df1e59cec9d2e081b525f6a8bc52e";
 const DOC_BEGIN: &str = "<!-- BEGIN REGEX BUILT-IN DETECTOR CORPUS -->";
 const DOC_END: &str = "<!-- END REGEX BUILT-IN DETECTOR CORPUS -->";
 
@@ -351,7 +352,7 @@ fn validate_post_capture_provenance_refresh(corpus: &Value) -> Result<(), String
         .find(|pin| pin.get("path").and_then(Value::as_str) == Some(BASELINE_PATH))
         .ok_or_else(|| "current baseline source pin is missing".to_owned())?;
     if text(baseline_pin, "sha256") != LIVE_BASELINE_SHA256
-        || number(baseline_pin, "line_count") != number(current, "line_count")
+        || number(baseline_pin, "line_count") != LIVE_BASELINE_LINE_COUNT
     {
         return Err("live baseline source pin drifted".to_owned());
     }

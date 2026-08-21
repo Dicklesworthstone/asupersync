@@ -394,12 +394,12 @@ readiness, performance claims, or broad workspace-health claims.
 
 ## Phase-2 terminal readiness frontier
 
-`CAP-PHASE2-TERMINAL-READINESS-STATIC-AUDIT-V1` records the bounded static
+`CAP-PHASE2-TERMINAL-READINESS-STATIC-AUDIT-V1` records the bounded refreshed
 frontier for `asupersync-d24mms.13` at revision
-`33f94643ced8f5415ad3c1f0a30cd42ddcb738c9`. The result is
-`BLOCKED_12_OF_13_PREREQUISITES_NOT_TERMINAL`: only the scoped Phase-1
-foundation is terminal-ready. No child or aggregate executable evidence was
-replayed for this audit.
+`376c313540a58d2c8e6618cf40b4ac87ed36ec53`. The result is
+`BLOCKED_11_OF_13_PREREQUISITES_NOT_TERMINAL`: the scoped Phase-1 foundation
+and Offline Tuner `env_logger` cutover are terminal-ready. The Offline Tuner
+child was replayed; the Phase-2 aggregate and the other children were not.
 
 This frontier distinguishes useful landed work from terminal proof. A baseline
 capability row marked `EXECUTABLE_COMPLETE` means that the incumbent case
@@ -415,7 +415,7 @@ The exact prerequisite partition is:
 | `asupersync-dep-p1-foundations-upksjk.4` | `FOUNDATION_SCOPED_PASS` | content-pinned Phase-1 foundation receipt | none for its scoped prerequisite role |
 | `asupersync-d24mms.1` | `STATIC_KEEP_GATE_LANDED_BLOCKED` | hash-map inventory and KEEP gate | candidate execution, replay, platform, performance, and fresh ledger |
 | `asupersync-d24mms.2` | `STATIC_KEEP_GATE_LANDED_BLOCKED` | host metadata inventory and KEEP gate | host contexts, profile/platform matrix, schema output, redaction, and replay |
-| `asupersync-d24mms.3` | `STATIC_KEEP_GATE_LANDED_BLOCKED` | offline-tuner logging inventory and KEEP gate | command/filter/stream/exit/artifact parity |
+| `asupersync-d24mms.3` | `EXECUTED_ROOT_EDGE_EXIT_READY` | 30-cell success matrix, five diagnostic failures, privacy improvement, canonical E2E, and root-edge removal | none for its scoped prerequisite role |
 | `asupersync-d24mms.4` | `CHECKPOINT_LANDED_BLOCKED` | owned deterministic UTC formatter checkpoint | sparse graph, ledger, and broader DEP-ADR-011 evidence |
 | `asupersync-d24mms.5` | `NO_DEDICATED_RECEIPT` | incumbent temporary-artifact baseline only | Cargo-built profile classification and fixture-preserving optionalization decision |
 | `asupersync-d24mms.6.10` | `CAMPAIGN_PARTIAL_BLOCKED` | futures-lite A1 inventory | A2-A9 work and A10 terminal receipt |
@@ -433,19 +433,22 @@ labels are stale for several landed commits, so Git ancestry and content-pinned
 artifacts are the progress authority; the tracker is not completion authority
 and was not written.
 
-The state counts are one `FOUNDATION_SCOPED_PASS`, five
-`STATIC_KEEP_GATE_LANDED_BLOCKED`, two `CHECKPOINT_LANDED_BLOCKED`, four
-`CAMPAIGN_PARTIAL_BLOCKED`, and one `NO_DEDICATED_RECEIPT`. Therefore
+The state counts are one `FOUNDATION_SCOPED_PASS`, one
+`EXECUTED_ROOT_EDGE_EXIT_READY`, four `STATIC_KEEP_GATE_LANDED_BLOCKED`, two
+`CHECKPOINT_LANDED_BLOCKED`, four `CAMPAIGN_PARTIAL_BLOCKED`, and one
+`NO_DEDICATED_RECEIPT`. Therefore
 `phase2_terminal_signoff_allowed=false`, `dependency_exit_allowed=false`, and
 `tracker_closure_allowed=false`. The required next state is
 `ALL_13_PREREQUISITES_TERMINAL_AND_REPLAYED_WITH_ZERO_UNKNOWN`; any missing,
 stale, unreplayed, or regressed row keeps the incumbents and blocks Phase-2
 signoff.
 
-No Cargo, RCH, compiler, formatter, unit, property, model, E2E, benchmark,
-service, platform, fuzz, ledger-regeneration, runtime, or aggregate replay lane
-was executed for this frontier. It authorizes no source, manifest, lockfile,
-tracker, dependency, release, performance, broad-health, or deletion action.
+The Offline Tuner child ran remote unit, real-binary integration, canonical
+E2E, formatter, ledger-regeneration, and focused contract lanes. No Phase-2
+aggregate, broad workspace, cross-platform, benchmark-performance, service,
+model, fuzz, or release lane was executed for this frontier. The remaining
+blocked rows authorize no source, manifest, lockfile, tracker, dependency,
+release, performance, broad-health, or deletion action.
 
 ## High-risk boundaries
 

@@ -453,7 +453,6 @@
         "thiserror",
         "tracing",
         "tracing-subscriber",
-        "env_logger",
         "regex"
       ],
       "source_owners": [
@@ -1942,7 +1941,6 @@
         "clap",
         "chrono",
         "time",
-        "env_logger",
         "serde_yaml",
         "toml",
         "lz4_flex"
@@ -2153,7 +2151,6 @@
       "category": "CLI",
       "dependency_owners": [
         "clap",
-        "env_logger",
         "chrono",
         "num_cpus",
         "whoami"
@@ -2213,9 +2210,10 @@
       "scenario_ids": [
         "cli_offline_tuner_help",
         "cli_offline_tuner_report",
-        "cli_offline_tuner_interrupt"
+        "cli_offline_tuner_interrupt",
+        "offline-tuner-logging-parity"
       ],
-      "no_claim_boundary": "Removing env_logger or host crates is blocked until verbosity, diagnostics, privacy, and report provenance are equal or better."
+      "no_claim_boundary": "asupersync-d24mms.3 proved the scoped env_logger exit with verbosity, diagnostics, privacy, stream, exit, artifact, and replay evidence. The broader offline-tuner CLI capability and host crates remain KEEP until their independent help, installed-user-journey, provenance, platform, interruption, and performance obligations pass."
     },
     {
       "capability_id": "CAP-SQLITE",
@@ -4189,8 +4187,8 @@
       },
       {
         "source_path": "src/bin/offline_tuner.rs",
-      "line_count": 650,
-      "sha256": "1333ecb1172c084cd2ea3e768d37e585563d751d290d746f5b82cbe8d7037d74",
+        "line_count": 668,
+        "sha256": "61c73ca18846a95ec6939aaa158dc2b063bb97b76a2d34fffa0141dc12e9039c",
         "capability_ids": [
           "CAP-CLI-OFFLINE-TUNER"
         ]

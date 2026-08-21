@@ -93,9 +93,13 @@ commands can be typed by any user today.
 9. A parser replacement **MUST NOT** be attempted before byte-level argv, help,
    usage, version and error goldens exist for all four binaries, plus non-UTF-8
    argv coverage and real-binary nonzero exit assertions.
-10. The `tracing-integration` edge on `cli` **MUST NOT** be dropped until
-    subscriber initialization and verbose behavior are specified, so removing
-    `env_logger` or `clap` cannot silence diagnostics.
+10. The `tracing-integration` edge on `cli` **MUST NOT** be dropped without its
+    own consumer and diagnostics evidence. `asupersync-d24mms.3` separately
+    proved that `offline_tuner` emitted no incumbent `env_logger` records across
+    all five commands, both verbosity cells, and `RUST_LOG` unset/off/trace, so
+    that root edge required no replacement subscriber. Invalid `RUST_LOG` input
+    now also avoids echoing filter contents to stderr. The conformance crate's
+    independent `env_logger` dependency remains intact.
 
 ## Allowed tradeoffs
 

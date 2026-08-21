@@ -359,7 +359,7 @@
         },
         {
           "name": "cli",
-          "cargo_definition": "cli = [\n    \"dep:clap\",\n    \"dep:time\",\n    \"trace-compression\",\n    \"dep:serde_yaml\",\n    \"dep:chrono\",\n    \"dep:env_logger\",\n    \"config-file\",\n    \"tracing-integration\",\n]",
+          "cargo_definition": "cli = [\n    \"dep:clap\",\n    \"dep:time\",\n    \"trace-compression\",\n    \"dep:serde_yaml\",\n    \"dep:chrono\",\n    \"config-file\",\n    \"tracing-integration\",\n]",
           "effect": "Provides the trace-inspection CLI, the operator-facing consumer of the persisted trace format, and transitively enables trace-compression so any CLI build reads and writes LZ4 trace files.",
           "must_remain": true,
           "no_tokio_guarantee": "No tokio edge."
@@ -2108,7 +2108,7 @@
         },
         {
           "name": "cli",
-          "cargo_definition": "cli = [\n    \"dep:clap\",\n    \"dep:time\",\n    \"trace-compression\",\n    \"dep:serde_yaml\",\n    \"dep:chrono\",\n    \"dep:env_logger\",\n    \"config-file\",\n    \"tracing-integration\",\n]",
+          "cargo_definition": "cli = [\n    \"dep:clap\",\n    \"dep:time\",\n    \"trace-compression\",\n    \"dep:serde_yaml\",\n    \"dep:chrono\",\n    \"config-file\",\n    \"tracing-integration\",\n]",
           "effect": "The only feature that enables `serde_yaml`, and it also pulls in `config-file`. Frozen verbatim because the YAML scenario capability and the TOML config capability both depend on this composition.",
           "must_remain": true,
           "no_tokio_guarantee": "None of these edges introduce tokio."
@@ -2550,7 +2550,7 @@
         },
         {
           "option": "Drop the tracing-integration edge from the cli feature to reduce the marginal graph.",
-          "rejected_because": "The plan flags this as part of this ADR, and the bead requires defining tracing subscriber initialization so that removing env_logger or clap does not silence useful diagnostics. Dropping the edge without first specifying the replacement initialization would remove operator diagnostics. Deferred to the implementation campaign with that requirement attached."
+          "rejected_because": "At ADR resolution time the plan required executable proof before removing env_logger. The later asupersync-d24mms.3 campaign captured the five-command verbosity and RUST_LOG matrix, error streams, exits, artifacts, and invalid-filter redaction behavior. That evidence established that offline_tuner emitted no incumbent log records and required no replacement subscriber; tracing-integration remains enabled for the other CLI surfaces."
         }
       ],
       "preserved_public_symbols": [
@@ -2700,7 +2700,7 @@
           "symbols": [
             "ArchitectureArg"
           ],
-          "note": "Five commands with two global options. Uses env_logger with a RUST_LOG-aware default filter, which is the diagnostics path the bead requires be preserved if env_logger is removed."
+          "note": "Five commands with two global options. The asupersync-d24mms.3 clean-overlay matrix proved that the former env_logger initializer emitted no records for valid RUST_LOG cells; --verbose remains an owned stdout behavior, and invalid RUST_LOG no longer echoes filter contents to stderr."
         }
       ],
       "preserved_feature_flags": [
@@ -2713,8 +2713,8 @@
         },
         {
           "name": "cli",
-          "cargo_definition": "cli = [\n    \"dep:clap\",\n    \"dep:time\",\n    \"trace-compression\",\n    \"dep:serde_yaml\",\n    \"dep:chrono\",\n    \"dep:env_logger\",\n    \"config-file\",\n    \"tracing-integration\",\n]",
-          "effect": "Gates the asupersync and offline_tuner binaries and the whole src/cli module. Note the tracing-integration edge, which the plan flags for review under this ADR, and the env_logger edge that offline_tuner depends on for RUST_LOG-driven verbosity.",
+          "cargo_definition": "cli = [\n    \"dep:clap\",\n    \"dep:time\",\n    \"trace-compression\",\n    \"dep:serde_yaml\",\n    \"dep:chrono\",\n    \"config-file\",\n    \"tracing-integration\",\n]",
+          "effect": "Gates the asupersync and offline_tuner binaries and the whole src/cli module. tracing-integration remains enabled for the CLI surfaces that consume it. The former root env_logger edge was removed only after asupersync-d24mms.3 proved offline_tuner command, filter, stream, exit, artifact, and redaction parity.",
           "must_remain": true,
           "no_tokio_guarantee": "No tokio edge."
         },
@@ -3059,7 +3059,7 @@
         "accepted_providers": "Shells, CI systems and operator scripts consuming argv, exit status, stdout JSON and stderr progress.",
         "pinned_crate_versions": {
           "clap": "4.4 with only the derive feature; resolves to 4.6.x",
-          "env_logger": "enabled by cli and consumed by offline_tuner for RUST_LOG-driven verbosity",
+          "env_logger": "0.11 remains locked only for the conformance crate; the root cli feature and offline_tuner no longer consume it",
           "tracing-subscriber": "enabled by atpd-daemon for operator diagnostics"
         },
         "no_reexport_note": "clap is not re-exported and does not appear in any library public signature; the coupling is confined to the four binaries and the derive-carrying cli modules. That means an owned parser is an internal change from the library's perspective and a total behavioral change from the user's.",
@@ -5867,7 +5867,7 @@
         },
         {
           "name": "cli",
-          "cargo_definition": "cli = [\n    \"dep:clap\",\n    \"dep:time\",\n    \"trace-compression\",\n    \"dep:serde_yaml\",\n    \"dep:chrono\",\n    \"dep:env_logger\",\n    \"config-file\",\n    \"tracing-integration\",\n]",
+          "cargo_definition": "cli = [\n    \"dep:clap\",\n    \"dep:time\",\n    \"trace-compression\",\n    \"dep:serde_yaml\",\n    \"dep:chrono\",\n    \"config-file\",\n    \"tracing-integration\",\n]",
           "effect": "The only feature enabling the time crate, and one of two enabling chrono. Neither is in the default feature set, so a default library build has neither.",
           "must_remain": true,
           "no_tokio_guarantee": "No tokio edge."

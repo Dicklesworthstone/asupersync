@@ -1000,7 +1000,7 @@ fn runner_and_docs_expose_replay_logging_and_no_claim_boundaries() {
         "slab_exit_allowed=false",
         PHASE2_READINESS_AUDIT_ID,
         PHASE2_SIGNOFF_BEAD_ID,
-        "BLOCKED_12_OF_13_PREREQUISITES_NOT_TERMINAL",
+        "BLOCKED_11_OF_13_PREREQUISITES_NOT_TERMINAL",
         "phase2_terminal_signoff_allowed=false",
         "ALL_13_PREREQUISITES_TERMINAL_AND_REPLAYED_WITH_ZERO_UNKNOWN",
         GENERATED_BEGIN,
@@ -1714,36 +1714,36 @@ fn tempfile_claim_time_profile_checkpoint_is_source_pinned_and_fail_closed() {
         (
             "Cargo.lock",
             (
-                "dc66ff7b4e6d1e75fac66fad2f90f528019a4da55e6012714160e158cc63d236",
-                4666_u64,
+                "95d3aaec0e58be196f08e4b30792f90129213af86ae8e34d2c5862b9feb15880",
+                4665_u64,
             ),
         ),
         (
             "Cargo.toml",
             (
-                "914cb85f3b3ef24c06e41f332cb21c2361163c99c186d4a8234b237323792b2b",
-                1061_u64,
+                "541ed6be1f748cd2897f18ba2679c6d34ff84a57d480db5a11c40ff007f1f1c7",
+                1064_u64,
             ),
         ),
         (
             "artifacts/dependency_capability_baseline_v1.json",
             (
-                "168e9a0b5f836c1d30b56c1fb6478092d8759b0d1fe144edbdb526cca5a488ad",
-                3210_u64,
+                "df830fc2663de19f857ade1e07feed0ee29f41f9cf6eba84f9c85b1d9c1040bc",
+                3213_u64,
             ),
         ),
         (
             "artifacts/dependency_capability_registry_v1.json",
             (
-                "9fa15cca1a7b202ff7a9accc78bb7a052a8f4f830b37ae450959b539633d01fd",
-                6929_u64,
+                "450e301a6c3ef5ea5068dad40470bb58bcc0b956da36d8b1e00b0a949e29e1f6",
+                6927_u64,
             ),
         ),
         (
             "artifacts/dependency_marginal_ledger_v1.json",
             (
-                "4e36ca29d7187e3237cfd9f422b2661009a608e93bb5761c7d511d412d66a047",
-                188_447_u64,
+                "d7102928fea1000bd05580f697b84dc9a9e29306494b245da6498c9a2b453ff3",
+                187_615_u64,
             ),
         ),
         (
@@ -1791,15 +1791,15 @@ fn tempfile_claim_time_profile_checkpoint_is_source_pinned_and_fail_closed() {
         (
             "src/net/atp/transport_rq/mod.rs",
             (
-                "fb2b22bf47db0c6a7dc81d3aa4d8aaee067c26dba5fcbefe725d7b6cef95ff8a",
-                15_242_u64,
+                "32af68987501ce529e5bd3f7f5f2ec2a3bac6f53a90e5e085bec2a5ca542ecee",
+                15_307_u64,
             ),
         ),
         (
             "src/net/mod.rs",
             (
-                "a0652a2a243499570d274c670dc3c45125584f65909141a36e97fd585e05761e",
-                118_u64,
+                "9fc745d7dd9206f00f1030fb0994f602d67e7ad7ad2c191ee0e0d652417630bb",
+                119_u64,
             ),
         ),
         (
@@ -1930,7 +1930,7 @@ fn tempfile_claim_time_profile_checkpoint_is_source_pinned_and_fail_closed() {
         .map(|path| count_occurrences(&read_repo_file(path), "tempfile::"))
         .sum::<u64>();
     assert_eq!(source_token_count, 278);
-    assert_eq!(rust_paths_under_with_token("tests", "tempfile::").len(), 94);
+    assert_eq!(rust_paths_under_with_token("tests", "tempfile::").len(), 95);
     assert_eq!(
         rust_paths_under_with_token("benches", "tempfile::").len(),
         2
@@ -3158,15 +3158,15 @@ fn phase2_terminal_readiness_frontier_is_exact_and_fail_closed() {
     assert_eq!(string(audit, "bead_id"), PHASE2_SIGNOFF_BEAD_ID);
     assert_eq!(
         string(audit, "observed_at_revision"),
-        "33f94643ced8f5415ad3c1f0a30cd42ddcb738c9"
+        "376c313540a58d2c8e6618cf40b4ac87ed36ec53"
     );
     assert_eq!(
         string(audit, "audit_state"),
-        "STATIC_GIT_ARTIFACT_AND_TRACKER_TOPOLOGY_PINNED_NOT_EXECUTED"
+        "EXECUTED_CHILD_EVIDENCE_REFRESHED_AGGREGATE_STILL_BLOCKED"
     );
     assert_eq!(
         string(audit, "execution_state"),
-        "NO_CHILD_OR_AGGREGATE_EXECUTION_REPLAYED"
+        "OFFLINE_TUNER_CHILD_REPLAYED_AGGREGATE_NOT_REPLAYED"
     );
 
     let expected_capabilities = BTreeSet::from([
@@ -3215,8 +3215,8 @@ fn phase2_terminal_readiness_frontier_is_exact_and_fail_closed() {
         (
             REGISTRY_PATH,
             (
-                "834c0bb0f30adf65ad27256fbae9f903fe9945e37a7d010f90d38971802c74ea",
-                6929_u64,
+                "450e301a6c3ef5ea5068dad40470bb58bcc0b956da36d8b1e00b0a949e29e1f6",
+                6927_u64,
             ),
         ),
         (
@@ -3229,8 +3229,8 @@ fn phase2_terminal_readiness_frontier_is_exact_and_fail_closed() {
         (
             CLI_INVENTORY_PATH,
             (
-                "6e75eaffa3b3a8e64feb38631d7f4d1e65a9126b9338780303e639168687bb55",
-                7443_u64,
+                "1827242c146072794c64eef0f8672e165fb4730f4d50e49f4aa7555b11411479",
+                7531_u64,
             ),
         ),
         (
@@ -3250,15 +3250,15 @@ fn phase2_terminal_readiness_frontier_is_exact_and_fail_closed() {
         (
             HEX_INVENTORY_PATH,
             (
-                "971385dfaf02570e6a02d52b494bc231e089ab8281bbcde812ff529727c10478",
-                960_u64,
+                "70b50e423a89452fc2f47d16a775019c0bc5d7ca6bcdd60971a9c5a159aaedc9",
+                977_u64,
             ),
         ),
         (
             BASE64_INVENTORY_PATH,
             (
-                "28171082ff529b93cbe951b9de84db9423b8922fde531c82aa21051b933c83eb",
-                417_u64,
+                "02f58ff42dd48914ab91c5fc50ad6f44d85f8e3594495fc3ec10958b85a01b74",
+                1018_u64,
             ),
         ),
         (
@@ -3271,8 +3271,8 @@ fn phase2_terminal_readiness_frontier_is_exact_and_fail_closed() {
         (
             "scripts/run_dependency_sovereignty_e2e.sh",
             (
-                "f2deaf18dd793e3df114c300ffaa15445ccbf0040f9cc3c5b56e89fd19665ccc",
-                1314_u64,
+                "e7d7a65e83f6365aeee4ce01a492cc120595188e2771ffdba914f290b5ba21d4",
+                1378_u64,
             ),
         ),
         (
@@ -3387,12 +3387,16 @@ fn phase2_terminal_readiness_frontier_is_exact_and_fail_closed() {
             ("CHECKPOINT_LANDED_BLOCKED".to_owned(), 2),
             ("FOUNDATION_SCOPED_PASS".to_owned(), 1),
             ("NO_DEDICATED_RECEIPT".to_owned(), 1),
-            ("STATIC_KEEP_GATE_LANDED_BLOCKED".to_owned(), 5),
+            ("STATIC_KEEP_GATE_LANDED_BLOCKED".to_owned(), 4),
+            ("EXECUTED_ROOT_EDGE_EXIT_READY".to_owned(), 1),
         ])
     );
     assert_eq!(
         terminal_ready,
-        BTreeSet::from(["asupersync-dep-p1-foundations-upksjk.4".to_owned()])
+        BTreeSet::from([
+            "asupersync-dep-p1-foundations-upksjk.4".to_owned(),
+            "asupersync-d24mms.3".to_owned(),
+        ])
     );
     assert_eq!(
         landing_commits,
@@ -3402,6 +3406,7 @@ fn phase2_terminal_readiness_frontier_is_exact_and_fail_closed() {
             "2ddb3c79f33119f5e13001ca9c2547c2117b8627".to_owned(),
             "33f94643ced8f5415ad3c1f0a30cd42ddcb738c9".to_owned(),
             "341ac3656a98e8b07749207d2996914b23042fcf".to_owned(),
+            "376c313540a58d2c8e6618cf40b4ac87ed36ec53".to_owned(),
             "42a66e7f4e6733c28c59405c052c68f7a32ea0d7".to_owned(),
             "4d5748b3de2c15985af55e3dfe3c35626d6be543".to_owned(),
             "51543c21a171e2708d3892776c8979fdf2d9fd01".to_owned(),
@@ -3418,8 +3423,8 @@ fn phase2_terminal_readiness_frontier_is_exact_and_fail_closed() {
 
     let summary = object(audit, "readiness_summary");
     assert_eq!(unsigned(summary, "required_prerequisite_count"), 13);
-    assert_eq!(unsigned(summary, "terminal_ready_count"), 1);
-    assert_eq!(unsigned(summary, "blocked_count"), 12);
+    assert_eq!(unsigned(summary, "terminal_ready_count"), 2);
+    assert_eq!(unsigned(summary, "blocked_count"), 11);
     let declared_state_counts = array(summary, "state_counts")
         .iter()
         .map(|row| (string(row, "state").to_owned(), unsigned(row, "count")))
@@ -3446,7 +3451,7 @@ fn phase2_terminal_readiness_frontier_is_exact_and_fail_closed() {
     let cli = parse_json(CLI_INVENTORY_PATH);
     let env_logger = object(&cli, "env_logger_static_audit");
     assert_eq!(string(env_logger, "bead_id"), "asupersync-d24mms.3");
-    assert!(!boolean(
+    assert!(boolean(
         object(env_logger, "cutover_gate"),
         "tracker_closure_allowed"
     ));
@@ -3483,7 +3488,7 @@ fn phase2_terminal_readiness_frontier_is_exact_and_fail_closed() {
     let decision = object(audit, "readiness_decision");
     assert_eq!(
         string(decision, "status"),
-        "BLOCKED_12_OF_13_PREREQUISITES_NOT_TERMINAL"
+        "BLOCKED_11_OF_13_PREREQUISITES_NOT_TERMINAL"
     );
     assert!(!boolean(decision, "phase2_terminal_signoff_allowed"));
     assert!(!boolean(decision, "dependency_exit_allowed"));
@@ -3504,8 +3509,9 @@ fn phase2_terminal_readiness_frontier_is_exact_and_fail_closed() {
         .collect::<Vec<_>>()
         .join(" ");
     for required in [
-        "No Cargo, RCH",
-        "do not prove that any child terminal",
+        "offline-tuner child ran remote unit",
+        "no Phase-2 aggregate",
+        "do not prove that any other child terminal",
         "topology context only",
         "do not authorize their tracker closure",
         "does not authorize Phase-2 signoff",

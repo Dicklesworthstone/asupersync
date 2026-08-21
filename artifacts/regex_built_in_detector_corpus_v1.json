@@ -53,14 +53,14 @@
   "source_pins": [
     {
       "path": "Cargo.toml",
-      "sha256": "914cb85f3b3ef24c06e41f332cb21c2361163c99c186d4a8234b237323792b2b",
-      "line_count": 1061,
+      "sha256": "541ed6be1f748cd2897f18ba2679c6d34ff84a57d480db5a11c40ff007f1f1c7",
+      "line_count": 1064,
       "role": "optional regex dependency selector and metrics feature gate"
     },
     {
       "path": "Cargo.lock",
-      "sha256": "dc66ff7b4e6d1e75fac66fad2f90f528019a4da55e6012714160e158cc63d236",
-      "line_count": 4666,
+      "sha256": "95d3aaec0e58be196f08e4b30792f90129213af86ae8e34d2c5862b9feb15880",
+      "line_count": 4665,
       "role": "incumbent regex dependency resolution"
     },
     {
@@ -89,14 +89,14 @@
     },
     {
       "path": "artifacts/dependency_capability_registry_v1.json",
-      "sha256": "9fa15cca1a7b202ff7a9accc78bb7a052a8f4f830b37ae450959b539633d01fd",
-      "line_count": 6929,
+      "sha256": "450e301a6c3ef5ea5068dad40470bb58bcc0b956da36d8b1e00b0a949e29e1f6",
+      "line_count": 6927,
       "role": "CAP-REGEX-PRIVACY authority"
     },
     {
       "path": "artifacts/dependency_capability_baseline_v1.json",
-      "sha256": "168e9a0b5f836c1d30b56c1fb6478092d8759b0d1fe144edbdb526cca5a488ad",
-      "line_count": 3210,
+      "sha256": "df830fc2663de19f857ade1e07feed0ee29f41f9cf6eba84f9c85b1d9c1040bc",
+      "line_count": 3213,
       "role": "executable-partial blocking baseline authority"
     }
   ],

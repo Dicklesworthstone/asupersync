@@ -635,13 +635,13 @@
   "source_pins": [
     {
       "path": "Cargo.toml",
-      "sha256": "914cb85f3b3ef24c06e41f332cb21c2361163c99c186d4a8234b237323792b2b",
-      "line_count": 1061
+      "sha256": "541ed6be1f748cd2897f18ba2679c6d34ff84a57d480db5a11c40ff007f1f1c7",
+      "line_count": 1064
     },
     {
       "path": "Cargo.lock",
-      "sha256": "dc66ff7b4e6d1e75fac66fad2f90f528019a4da55e6012714160e158cc63d236",
-      "line_count": 4666
+      "sha256": "95d3aaec0e58be196f08e4b30792f90129213af86ae8e34d2c5862b9feb15880",
+      "line_count": 4665
     },
     {
       "path": "src/http/compress.rs",
@@ -685,8 +685,8 @@
     },
     {
       "path": "src/observability/otel.rs",
-      "sha256": "590cb3e34654e71708ca8b623007aaaa4b35b20d602c1455c16890ef7352a72c",
-      "line_count": 14523
+      "sha256": "b036610d07e07b7a7e9ed3e23328d60104f2429cbe464827213a8bff5f7e0db8",
+      "line_count": 14533
     },
     {
       "path": "src/observability/metrics.rs",
@@ -745,18 +745,18 @@
     },
     {
       "path": "artifacts/dependency_capability_registry_v1.json",
-      "sha256": "9fa15cca1a7b202ff7a9accc78bb7a052a8f4f830b37ae450959b539633d01fd",
-      "line_count": 6929
+      "sha256": "450e301a6c3ef5ea5068dad40470bb58bcc0b956da36d8b1e00b0a949e29e1f6",
+      "line_count": 6927
     },
     {
       "path": "artifacts/dependency_capability_baseline_v1.json",
-      "sha256": "168e9a0b5f836c1d30b56c1fb6478092d8759b0d1fe144edbdb526cca5a488ad",
-      "line_count": 3210
+      "sha256": "df830fc2663de19f857ade1e07feed0ee29f41f9cf6eba84f9c85b1d9c1040bc",
+      "line_count": 3213
     },
     {
       "path": "artifacts/dependency_budget_contract_v1.json",
-      "sha256": "fe7540712c246809b05496beeb482a93ecd3de4ea8dc96e05eea123ba4e1be57",
-      "line_count": 4354
+      "sha256": "f302f021ab0444172e9c675a1698b7c749fa16969ad4be304f17d197526bce8c",
+      "line_count": 4341
     },
     {
       "path": "artifacts/dependency_real_service_fixture_matrix_v1.json",
@@ -770,8 +770,8 @@
     },
     {
       "path": "src/web/mod.rs",
-      "sha256": "f45c786c88eb80fff899b1781f58f610fd6b98f04384123455b42b8a6382a3ed",
-      "line_count": 88
+      "sha256": "9d21779103c75c7c110240f6d840f3bda1256266e51f6394cf29451f547d5f05",
+      "line_count": 103
     }
   ],
   "no_claims": [
