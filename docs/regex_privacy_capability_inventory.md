@@ -78,10 +78,10 @@ and are cached. A valid entry pushed directly into the public `pii_patterns`
 vector takes effect, but it forces fallback recompilation of all pattern
 strings on every redaction call and never refreshes the cache.
 
-A directly inserted invalid entry is silently ignored. That observed behavior
-is frozen so the regression is visible, not blessed: it conflicts with the
-registry invariant that custom privacy patterns are never silently ignored and
-is routed as `RGX-R1-GAP-01`.
+A directly inserted invalid entry now fails closed: because the legacy
+`redact_pii` surface has no error channel, it redacts the whole value instead of
+silently allowing data through under an invalid privacy policy. The exact public
+mutation sequence remains a permanent `RGX-R1-GAP-01` regression test.
 
 ## Field policy
 
@@ -186,7 +186,7 @@ build script, proc macro, or native code.
 
 | Gap | Finding | Owner |
 | --- | --- | --- |
-| `RGX-R1-GAP-01` | directly inserted invalid patterns are silently ignored | A3.5 |
+| `RGX-R1-GAP-01` | directly inserted invalid patterns fail closed | resolved by A3.5 |
 | `RGX-R1-GAP-02` | direct mutation recompiles the unbounded vector on every call | A3.4.4 |
 | `RGX-R1-GAP-03` | Debug and syntax diagnostics can expose raw patterns | A3.7.4 |
 | `RGX-R1-GAP-04` | no application-level work, input, memory, or cancellation bounds | A3.3 |
@@ -196,7 +196,7 @@ build script, proc macro, or native code.
 | `RGX-R1-GAP-08` | `SpanConfig` is not compiler-deprecated | A3.5 |
 | `RGX-R1-GAP-09` | registry language is broader than the consumed API | A3.7 |
 | `RGX-R1-GAP-10` | fixed detector scanners do not yet exist | A2 |
-| `RGX-R1-GAP-11` | the historical ATP local regex mock was removed | resolved |
+| `RGX-R1-GAP-11` | the historical ATP local regex mock was removed | `asupersync-d24mms.11` (in progress) |
 | `RGX-R1-GAP-12` | no default-feature privacy journey exists | A5 |
 | `RGX-R1-GAP-13` | stale ADR source-owner gap was already repaired | registry owner |
 | `RGX-R1-GAP-14` | attribute and label drop lists are signal-merged | A5 |

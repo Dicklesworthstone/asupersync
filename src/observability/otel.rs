@@ -278,9 +278,19 @@ impl PrivacyConfig {
             }
         }
 
-        self.pii_patterns
-            .iter()
-            .any(|pattern| Regex::new(pattern).is_ok_and(|compiled| compiled.is_match(value)))
+        for pattern in &self.pii_patterns {
+            match Regex::new(pattern) {
+                Ok(compiled) if compiled.is_match(value) => return true,
+                Ok(_) => {}
+                // `pii_patterns` is a legacy public field, so direct mutation can
+                // bypass the fallible builder. This infallible redaction path has
+                // no error channel; redact conservatively instead of silently
+                // allowing a value through under an invalid privacy policy.
+                Err(_) => return true,
+            }
+        }
+
+        false
     }
 
     /// Apply automatic PII detection and redaction.

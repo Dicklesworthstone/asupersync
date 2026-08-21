@@ -566,8 +566,17 @@ fn mutation_error_panic_and_diagnostic_exposure_remain_explicit() {
     invalid_mutation.pii_patterns.push("(".to_owned());
     assert_eq!(
         invalid_mutation.redact_pii("auth", "secret-42"),
-        "secret-42",
-        "RGX-R1-GAP-01 must remain executable until repaired by its owner"
+        "[REDACTED]",
+        "RGX-R1-GAP-01: invalid direct mutation must fail closed"
+    );
+
+    let mut mixed_mutation = PrivacyConfig::new();
+    mixed_mutation.pii_patterns.push("public-[0-9]+".to_owned());
+    mixed_mutation.pii_patterns.push("[invalid".to_owned());
+    assert_eq!(
+        mixed_mutation.redact_pii("auth", "unmatched-secret"),
+        "[REDACTED]",
+        "one invalid direct entry must fail the entire privacy policy closed"
     );
 
     let canary = "TOP-SECRET-CANARY-[";
