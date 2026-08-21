@@ -697,3 +697,290 @@ fn benchmark_provenance_emitter() {
         })
     );
 }
+
+const R3_6_RELEASE_PERF_SAMPLE_COUNT: usize = 1_001;
+const R3_6_RELEASE_PERF_WARMUP_COUNT: usize = 32;
+
+struct R3_6ReleasePerfScenario {
+    id: &'static str,
+    pattern: &'static str,
+    input: String,
+}
+
+fn r3_6_release_perf_scenarios() -> Vec<R3_6ReleasePerfScenario> {
+    vec![
+        R3_6ReleasePerfScenario {
+            id: "ascii_capture_tail_match",
+            pattern: "([a-z]+)=([0-9]+)$",
+            input: format!("{}key=123456", "x;".repeat(2_048)),
+        },
+        R3_6ReleasePerfScenario {
+            id: "unicode_property_tail_match",
+            pattern: r"\p{Greek}+$",
+            input: format!("{}{}", "latin;".repeat(512), "αβγ".repeat(512)),
+        },
+        R3_6ReleasePerfScenario {
+            id: "ambiguous_alternation_suffix_match",
+            pattern: "(?:a|aa)+b$",
+            input: format!("{}b", "a".repeat(2_048)),
+        },
+        R3_6ReleasePerfScenario {
+            id: "wide_alternation_full_scan_miss",
+            pattern: "(?:a|b|c|d|e|f|g|h|i|j|k|l|m|n|o|p|q|r|s|t|u|v|w|x|y|z)+Z$",
+            input: "abcdefghijklmnopqrstuvwxyz".repeat(128),
+        },
+    ]
+}
+
+fn r3_6_measure_once<T>(operation: impl FnOnce() -> T) -> (u64, T) {
+    let started = Instant::now();
+    let result = black_box(operation());
+    let elapsed = u64::try_from(started.elapsed().as_nanos())
+        .expect("single operation nanoseconds fit in u64")
+        .max(1);
+    (elapsed, result)
+}
+
+fn r3_6_nearest_rank(samples: &[u64], numerator: usize, denominator: usize) -> u64 {
+    assert!(!samples.is_empty());
+    assert!(numerator > 0 && numerator <= denominator);
+    let mut ordered = samples.to_vec();
+    ordered.sort_unstable();
+    let rank = numerator
+        .checked_mul(ordered.len())
+        .and_then(|value| value.checked_add(denominator - 1))
+        .expect("bounded percentile rank")
+        / denominator;
+    ordered[rank.saturating_sub(1)]
+}
+
+fn r3_6_distribution(operation: &str, samples: Vec<u64>, bytes_per_operation: usize) -> Value {
+    assert_eq!(samples.len(), R3_6_RELEASE_PERF_SAMPLE_COUNT);
+    let total_ns = samples.iter().copied().map(u128::from).sum::<u128>().max(1);
+    let sample_count = u128::try_from(samples.len()).expect("sample count fits in u128");
+    let operations_per_second = sample_count
+        .saturating_mul(1_000_000_000)
+        .checked_div(total_ns)
+        .expect("nonzero total nanoseconds");
+    let bytes_per_second = sample_count
+        .saturating_mul(u128::try_from(bytes_per_operation).expect("byte count fits in u128"))
+        .saturating_mul(1_000_000_000)
+        .checked_div(total_ns)
+        .expect("nonzero total nanoseconds");
+    json!({
+        "operation": operation,
+        "sample_count": samples.len(),
+        "bytes_per_operation": bytes_per_operation,
+        "operations_per_second": u64::try_from(operations_per_second)
+            .expect("operation throughput fits in u64"),
+        "bytes_per_second": u64::try_from(bytes_per_second)
+            .expect("byte throughput fits in u64"),
+        "p50_ns": r3_6_nearest_rank(&samples, 50, 100),
+        "p95_ns": r3_6_nearest_rank(&samples, 95, 100),
+        "p999_ns": r3_6_nearest_rank(&samples, 999, 1_000),
+        "raw_ns": samples,
+    })
+}
+
+#[test]
+fn r3_6_release_performance_emitter() {
+    let Ok(target_id) = std::env::var("R3_6_REGEX_PERF_TARGET") else {
+        return;
+    };
+    let scenario_filter = std::env::var("R3_6_REGEX_PERF_SCENARIO").ok();
+    let mut scenario_rows = Vec::new();
+
+    for scenario in r3_6_release_perf_scenarios() {
+        if scenario_filter
+            .as_deref()
+            .is_some_and(|selected| selected != scenario.id)
+        {
+            continue;
+        }
+
+        let config = PrivatePatternConfig::new(scenario.pattern);
+        for _ in 0..R3_6_RELEASE_PERF_WARMUP_COUNT {
+            black_box(
+                PrivatePatternConfig::load(config.clone()).expect("warm owned pattern compile"),
+            );
+            black_box(IncumbentRegex::new(scenario.pattern).expect("warm incumbent compile"));
+        }
+
+        let mut owned_compile_ns = Vec::with_capacity(R3_6_RELEASE_PERF_SAMPLE_COUNT);
+        let mut incumbent_compile_ns = Vec::with_capacity(R3_6_RELEASE_PERF_SAMPLE_COUNT);
+        for _ in 0..R3_6_RELEASE_PERF_SAMPLE_COUNT {
+            let sample_config = config.clone();
+            let (elapsed, loaded) = r3_6_measure_once(|| {
+                PrivatePatternConfig::load(sample_config).expect("owned pattern compile")
+            });
+            owned_compile_ns.push(elapsed);
+            black_box(loaded);
+
+            let (elapsed, incumbent) = r3_6_measure_once(|| {
+                IncumbentRegex::new(black_box(scenario.pattern)).expect("incumbent compile")
+            });
+            incumbent_compile_ns.push(elapsed);
+            black_box(incumbent);
+        }
+
+        let cache = PrivatePatternCache::new(PrivatePatternCacheLimits::default())
+            .expect("valid release performance cache policy");
+        for _ in 0..R3_6_RELEASE_PERF_WARMUP_COUNT {
+            cache.clear();
+            black_box(
+                cache
+                    .get_or_compile(config.clone())
+                    .expect("warm cache miss compile"),
+            );
+        }
+        let mut cache_miss_ns = Vec::with_capacity(R3_6_RELEASE_PERF_SAMPLE_COUNT);
+        for _ in 0..R3_6_RELEASE_PERF_SAMPLE_COUNT {
+            cache.clear();
+            let sample_config = config.clone();
+            let (elapsed, lease) = r3_6_measure_once(|| {
+                cache
+                    .get_or_compile(sample_config)
+                    .expect("cache miss compile")
+            });
+            cache_miss_ns.push(elapsed);
+            black_box(lease);
+        }
+
+        cache.clear();
+        black_box(
+            cache
+                .get_or_compile(config.clone())
+                .expect("prime cache-hit scenario"),
+        );
+        for _ in 0..R3_6_RELEASE_PERF_WARMUP_COUNT {
+            black_box(
+                cache
+                    .get_or_compile(config.clone())
+                    .expect("warm cache hit"),
+            );
+        }
+        let mut cache_hit_ns = Vec::with_capacity(R3_6_RELEASE_PERF_SAMPLE_COUNT);
+        for _ in 0..R3_6_RELEASE_PERF_SAMPLE_COUNT {
+            let sample_config = config.clone();
+            let (elapsed, lease) =
+                r3_6_measure_once(|| cache.get_or_compile(sample_config).expect("cache hit"));
+            cache_hit_ns.push(elapsed);
+            black_box(lease);
+        }
+
+        let owned = PrivatePatternConfig::load(config.clone()).expect("owned matcher compile");
+        let incumbent = IncumbentRegex::new(scenario.pattern).expect("incumbent matcher compile");
+        let expected = incumbent.is_match(&scenario.input);
+        assert_eq!(
+            owned.is_match(&scenario.input).expect("owned preflight"),
+            expected
+        );
+        for _ in 0..R3_6_RELEASE_PERF_WARMUP_COUNT {
+            assert_eq!(
+                black_box(&owned)
+                    .is_match(black_box(&scenario.input))
+                    .expect("warm owned match"),
+                expected
+            );
+            assert_eq!(
+                black_box(&incumbent).is_match(black_box(&scenario.input)),
+                expected
+            );
+        }
+        let mut owned_match_ns = Vec::with_capacity(R3_6_RELEASE_PERF_SAMPLE_COUNT);
+        let mut incumbent_match_ns = Vec::with_capacity(R3_6_RELEASE_PERF_SAMPLE_COUNT);
+        for _ in 0..R3_6_RELEASE_PERF_SAMPLE_COUNT {
+            let (elapsed, matched) = r3_6_measure_once(|| {
+                black_box(&owned)
+                    .is_match(black_box(&scenario.input))
+                    .expect("owned match")
+            });
+            assert_eq!(matched, expected);
+            owned_match_ns.push(elapsed);
+
+            let (elapsed, matched) =
+                r3_6_measure_once(|| black_box(&incumbent).is_match(black_box(&scenario.input)));
+            assert_eq!(matched, expected);
+            incumbent_match_ns.push(elapsed);
+        }
+
+        let live_snapshot = cache.snapshot();
+        assert_eq!(live_snapshot.entries, 1);
+        assert_eq!(live_snapshot.inflight_compiles, 0);
+        assert_eq!(live_snapshot.inflight_compile_accounted_bytes, 0);
+        assert_eq!(
+            live_snapshot.hits,
+            u64::try_from(R3_6_RELEASE_PERF_WARMUP_COUNT + R3_6_RELEASE_PERF_SAMPLE_COUNT)
+                .expect("cache hit count fits")
+        );
+        cache.shutdown();
+        let shutdown_snapshot = cache.snapshot();
+        assert!(shutdown_snapshot.closed);
+        assert_eq!(shutdown_snapshot.entries, 0);
+        assert_eq!(shutdown_snapshot.live_accounted_bytes, 0);
+        assert_eq!(shutdown_snapshot.inflight_compiles, 0);
+        assert_eq!(shutdown_snapshot.inflight_compile_accounted_bytes, 0);
+
+        scenario_rows.push(json!({
+            "scenario_id": scenario.id,
+            "pattern_bytes": scenario.pattern.len(),
+            "input_bytes": scenario.input.len(),
+            "expected_match": expected,
+            "operations": [
+                r3_6_distribution("owned_compile", owned_compile_ns, scenario.pattern.len()),
+                r3_6_distribution(
+                    "incumbent_compile",
+                    incumbent_compile_ns,
+                    scenario.pattern.len(),
+                ),
+                r3_6_distribution("owned_cache_miss", cache_miss_ns, scenario.pattern.len()),
+                r3_6_distribution("owned_cache_hit", cache_hit_ns, scenario.pattern.len()),
+                r3_6_distribution("owned_is_match", owned_match_ns, scenario.input.len()),
+                r3_6_distribution(
+                    "incumbent_is_match",
+                    incumbent_match_ns,
+                    scenario.input.len(),
+                ),
+            ],
+            "cache_snapshot_before_shutdown": {
+                "entries": live_snapshot.entries,
+                "live_accounted_bytes": live_snapshot.live_accounted_bytes,
+                "hits": live_snapshot.hits,
+                "misses": live_snapshot.misses,
+                "compilations": live_snapshot.compilations,
+                "admissions": live_snapshot.admissions,
+                "evictions": live_snapshot.evictions,
+                "clears": live_snapshot.clears,
+            },
+            "cache_snapshot_after_shutdown": {
+                "closed": shutdown_snapshot.closed,
+                "entries": shutdown_snapshot.entries,
+                "live_accounted_bytes": shutdown_snapshot.live_accounted_bytes,
+                "inflight_compiles": shutdown_snapshot.inflight_compiles,
+                "inflight_compile_accounted_bytes": shutdown_snapshot
+                    .inflight_compile_accounted_bytes,
+            },
+        }));
+    }
+
+    assert!(
+        scenario_filter.is_none() || scenario_rows.len() == 1,
+        "selected performance scenario must exist"
+    );
+    assert_eq!(
+        scenario_rows.len(),
+        scenario_filter.as_ref().map_or(4, |_| 1)
+    );
+    println!(
+        "R3_6_REGEX_VM_RELEASE_PERF_RECEIPT={}",
+        json!({
+            "target_id": target_id,
+            "profile": "cargo test --release with debuginfo disabled",
+            "sample_count_per_operation": R3_6_RELEASE_PERF_SAMPLE_COUNT,
+            "warmup_count_per_operation": R3_6_RELEASE_PERF_WARMUP_COUNT,
+            "percentile_method": "nearest-rank",
+            "incumbent_revision": "regex@1.13.1",
+            "scenario_rows": scenario_rows,
+        })
+    );
+}
