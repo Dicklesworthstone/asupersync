@@ -22,8 +22,8 @@
     "contract_id": "dependency-oracle-manifest-reconciliation-v1",
     "bead_id": "asupersync-mnotoo.4.1",
     "capability_id": "CAP-VERIFICATION-PROFILES",
-    "as_of_release": "0.3.9",
-    "as_of_date_utc": "2026-07-25",
+    "as_of_release": "0.4.9",
+    "as_of_date_utc": "2026-08-21",
     "scope_rule": "Every root workspace member, explicitly excluded Rust harness, standalone conformance Cargo project and Cargo.lock is pinned. A pin drift is an unregistered state until this registry is reconciled. Synthetic manifests under tests/fixtures are contract inputs rather than installed oracle edges and are excluded.",
     "unknown_state": "fail-closed",
     "cutover_authorized": false,
@@ -221,9 +221,9 @@
           "evidence": "git log --reverse -S 'httparse = ' -- Cargo.toml"
         },
         "expiry": {
-          "release": "0.3.11",
-          "date_utc": "2026-10-24",
-          "status": "scheduled",
+          "release": "0.4.11",
+          "date_utc": "2026-10-21",
+          "status": "renewed",
           "max_retention_releases": 2
         },
         "independent_corpus": {
@@ -297,9 +297,9 @@
           "evidence": "git log --reverse -S 'tokio-util = ' -- Cargo.toml"
         },
         "expiry": {
-          "release": "0.3.11",
-          "date_utc": "2026-10-24",
-          "status": "scheduled",
+          "release": "0.4.11",
+          "date_utc": "2026-10-21",
+          "status": "renewed",
           "max_retention_releases": 2
         },
         "independent_corpus": {
@@ -375,9 +375,9 @@
           "evidence": "git log --reverse -S 'sqlx = ' -- Cargo.toml"
         },
         "expiry": {
-          "release": "0.3.11",
-          "date_utc": "2026-10-24",
-          "status": "scheduled",
+          "release": "0.4.11",
+          "date_utc": "2026-10-21",
+          "status": "renewed",
           "max_retention_releases": 2
         },
         "independent_corpus": {
@@ -460,9 +460,9 @@
           "evidence": "git log --reverse -S 'redis = ' -- Cargo.toml"
         },
         "expiry": {
-          "release": "0.3.11",
-          "date_utc": "2026-10-24",
-          "status": "scheduled",
+          "release": "0.4.11",
+          "date_utc": "2026-10-21",
+          "status": "renewed",
           "max_retention_releases": 2
         },
         "independent_corpus": {
@@ -547,9 +547,9 @@
           "evidence": "git log --reverse -S 'raptorq = ' -- Cargo.toml"
         },
         "expiry": {
-          "release": "0.3.11",
-          "date_utc": "2026-10-24",
-          "status": "scheduled",
+          "release": "0.4.11",
+          "date_utc": "2026-10-21",
+          "status": "renewed",
           "max_retention_releases": 2
         },
         "independent_corpus": {
@@ -628,9 +628,9 @@
           "evidence": "git log --reverse -S 'tokio = {' -- Cargo.toml"
         },
         "expiry": {
-          "release": "0.3.11",
-          "date_utc": "2026-10-24",
-          "status": "scheduled",
+          "release": "0.4.11",
+          "date_utc": "2026-10-21",
+          "status": "renewed",
           "max_retention_releases": 2
         },
         "independent_corpus": {
@@ -732,9 +732,9 @@
           "evidence": "git log --reverse -S 'h2 = ' -- conformance/Cargo.toml"
         },
         "expiry": {
-          "release": "0.3.11",
-          "date_utc": "2026-10-24",
-          "status": "scheduled",
+          "release": "0.4.11",
+          "date_utc": "2026-10-21",
+          "status": "renewed",
           "max_retention_releases": 2
         },
         "independent_corpus": {
@@ -809,9 +809,9 @@
           "evidence": "git log --reverse -S 'prometheus-client = ' -- conformance/Cargo.toml"
         },
         "expiry": {
-          "release": "0.3.11",
-          "date_utc": "2026-10-24",
-          "status": "scheduled",
+          "release": "0.4.11",
+          "date_utc": "2026-10-21",
+          "status": "renewed",
           "max_retention_releases": 2
         },
         "independent_corpus": {
@@ -908,9 +908,9 @@
           "evidence": "git log --reverse -S 'opentelemetry_sdk = ' -- conformance/Cargo.toml"
         },
         "expiry": {
-          "release": "0.3.11",
-          "date_utc": "2026-10-24",
-          "status": "scheduled",
+          "release": "0.4.11",
+          "date_utc": "2026-10-21",
+          "status": "renewed",
           "max_retention_releases": 2
         },
         "independent_corpus": {
@@ -1015,9 +1015,9 @@
           "evidence": "git log --reverse -S 'opentelemetry-proto = ' -- Cargo.toml"
         },
         "expiry": {
-          "release": "0.3.11",
-          "date_utc": "2026-10-24",
-          "status": "scheduled",
+          "release": "0.4.11",
+          "date_utc": "2026-10-21",
+          "status": "renewed",
           "max_retention_releases": 2
         },
         "independent_corpus": {
@@ -1041,6 +1041,245 @@
         "no_claim_boundary": "Generated-message parity does not prove collector interoperability, resource bounds, redaction, or no-Tokio production graphs."
       }
     ],
+    "retirement_sweep": {
+      "schema_version": "dependency-oracle-retirement-sweep-v1",
+      "bead_id": "asupersync-mnotoo.4.3",
+      "capability_id": "CAP-VERIFICATION-PROFILES",
+      "as_of_release": "0.4.9",
+      "as_of_date_utc": "2026-08-21",
+      "decision_policy": "A due oracle is retired only when repository-owned independent evidence preserves every retained invariant without resolving the incumbent. Otherwise the renewal authority may approve one bounded extension with concrete missing evidence and a next action.",
+      "owner_approval": {
+        "status": "approved",
+        "authority": "bead:asupersync-mnotoo.4",
+        "basis": "The project owner directed execution of the remaining graph-ranked Beads; the compatibility-preserving disposition keeps existing test capability, removes no API or fixture, and remains bounded by the next release/date gate."
+      },
+      "summary": {
+        "due_count": 10,
+        "retired_count": 0,
+        "renewed_count": 10,
+        "pending_count": 0
+      },
+      "scheduled_ci": {
+        "workflow_path": ".github/workflows/nightly-differential-stress.yml",
+        "event": "schedule",
+        "cron": "0 4 * * *",
+        "command": "cargo test -p asupersync --test dependency_oracle_policy_contract -- --nocapture"
+      },
+      "decisions": [
+        {
+          "oracle_id": "active-httparse-http1-reference",
+          "disposition": "renewed",
+          "reviewed_release": "0.4.9",
+          "reviewed_date_utc": "2026-08-21",
+          "previous_expiry_release": "0.3.11",
+          "previous_expiry_date_utc": "2026-10-24",
+          "new_expiry_release": "0.4.11",
+          "new_expiry_date_utc": "2026-10-21",
+          "approved_by": "bead:asupersync-mnotoo.4",
+          "missing_evidence": [
+            "The owned request-head table is not a frozen corpus with independent expected parse outcomes and provenance hashes.",
+            "Removing the reference now would erase the only live cross-parser HTTP/1 request-head comparison."
+          ],
+          "retained_invariants": [
+            "complete, partial, and malformed request-head disposition agrees with the independent parser"
+          ],
+          "production_exclusion_status": "root-dev-edge; default normal cargo-tree inversion remains the focused exclusion proof",
+          "next_action": "Freeze the bounded request-head cases and expected outcomes with provenance, then prove the owned corpus catches seeded parser mutations before retirement."
+        },
+        {
+          "oracle_id": "active-tokio-util-codec-reference",
+          "disposition": "renewed",
+          "reviewed_release": "0.4.9",
+          "reviewed_date_utc": "2026-08-21",
+          "previous_expiry_release": "0.3.11",
+          "previous_expiry_date_utc": "2026-10-24",
+          "new_expiry_release": "0.4.11",
+          "new_expiry_date_utc": "2026-10-21",
+          "approved_by": "bead:asupersync-mnotoo.4",
+          "missing_evidence": [
+            "The owned codec boundary cases still compute comparison results through tokio-util rather than immutable expected frame transcripts.",
+            "No mutation receipt proves the owned-only corpus preserves the length-limit, truncation, and flush invariants after removing the reference."
+          ],
+          "retained_invariants": [
+            "bytes and length-delimited codec framing agrees at empty, boundary, oversize, and malformed inputs"
+          ],
+          "production_exclusion_status": "root-dev-edge; default normal cargo-tree inversion remains the focused exclusion proof",
+          "next_action": "Commit reference-derived byte transcripts with provenance and prove them against seeded codec mutations before retirement."
+        },
+        {
+          "oracle_id": "active-sqlx-mysql-reference",
+          "disposition": "renewed",
+          "reviewed_release": "0.4.9",
+          "reviewed_date_utc": "2026-08-21",
+          "previous_expiry_release": "0.3.11",
+          "previous_expiry_date_utc": "2026-10-24",
+          "new_expiry_release": "0.4.11",
+          "new_expiry_date_utc": "2026-10-21",
+          "approved_by": "bead:asupersync-mnotoo.4",
+          "missing_evidence": [
+            "The scripted peer captures SQLx and asupersync packets during the same run; it does not yet consume an immutable independently sourced packet corpus.",
+            "The frozen corpus lacks complete prepared-value boundary, null-bitmap, signedness, and malformed-packet mutation receipts."
+          ],
+          "retained_invariants": [
+            "COM_STMT_EXECUTE binary values and null/type metadata agree with the independent client"
+          ],
+          "production_exclusion_status": "TLS-free root dev edge; default normal cargo-tree inversion remains the focused exclusion proof",
+          "next_action": "Freeze licensed SQLx packet transcripts for the complete value matrix and prove mutation sensitivity before retirement."
+        },
+        {
+          "oracle_id": "active-redis-rs-reference",
+          "disposition": "renewed",
+          "reviewed_release": "0.4.9",
+          "reviewed_date_utc": "2026-08-21",
+          "previous_expiry_release": "0.3.11",
+          "previous_expiry_date_utc": "2026-10-24",
+          "new_expiry_release": "0.4.11",
+          "new_expiry_date_utc": "2026-10-21",
+          "approved_by": "bead:asupersync-mnotoo.4",
+          "missing_evidence": [
+            "Seven RESP2/RESP3 differential lanes still derive semantic expectations from redis-rs at runtime.",
+            "No independent frozen corpus plus mutation receipt yet covers attributes, big numbers, maps, pushes, INFO, cluster shards, and inline-command rejection together."
+          ],
+          "retained_invariants": [
+            "RESP2/RESP3 parser disposition and semantic values agree across the registered differential families"
+          ],
+          "production_exclusion_status": "root-dev-edge; default normal cargo-tree inversion remains the focused exclusion proof",
+          "next_action": "Freeze exact wire inputs and semantic outputs for all seven families, record provenance, and prove mutation coverage before retirement."
+        },
+        {
+          "oracle_id": "active-raptorq-rs-reference",
+          "disposition": "renewed",
+          "reviewed_release": "0.4.9",
+          "reviewed_date_utc": "2026-08-21",
+          "previous_expiry_release": "0.3.11",
+          "previous_expiry_date_utc": "2026-10-24",
+          "new_expiry_release": "0.4.11",
+          "new_expiry_date_utc": "2026-10-21",
+          "approved_by": "bead:asupersync-mnotoo.4",
+          "missing_evidence": [
+            "The selected RFC-derived inputs are retained, but expected encoded and decoded bytes are still produced by the external implementation during the differential run.",
+            "The owned-only corpus does not yet prove interoperability across the registered K=1, K=42, K=2048, and K=16384 regimes without the incumbent."
+          ],
+          "retained_invariants": [
+            "selected RFC 6330 encoder and decoder outputs interoperate byte-for-byte with an independent implementation"
+          ],
+          "production_exclusion_status": "root-dev-edge; default normal cargo-tree inversion remains the focused exclusion proof",
+          "next_action": "Freeze independently generated source, repair, and decode vectors for every registered regime with provenance and mutation receipts before retirement."
+        },
+        {
+          "oracle_id": "active-tokio-semaphore-reference",
+          "disposition": "renewed",
+          "reviewed_release": "0.4.9",
+          "reviewed_date_utc": "2026-08-21",
+          "previous_expiry_release": "0.3.11",
+          "previous_expiry_date_utc": "2026-10-24",
+          "new_expiry_release": "0.4.11",
+          "new_expiry_date_utc": "2026-10-21",
+          "approved_by": "bead:asupersync-mnotoo.4",
+          "missing_evidence": [
+            "The Tokio dev edge also drives adapter, oneshot, notify, I/O, and migration conformance surfaces outside the registered semaphore comparison.",
+            "The semaphore schedule corpus has no independent wake-order transcript and mutation receipt sufficient to replace the live reference."
+          ],
+          "retained_invariants": [
+            "semaphore permit release and observed wake ordering agree for the registered deterministic schedules",
+            "existing Tokio-boundary conformance targets remain compilable"
+          ],
+          "production_exclusion_status": "root-dev-edge; default normal cargo-tree inversion remains the focused exclusion proof",
+          "next_action": "Separate non-oracle Tokio harness support from the semaphore oracle, freeze wake-order transcripts, and retire only the oracle classification when both are independently proven."
+        },
+        {
+          "oracle_id": "active-h2-reference",
+          "disposition": "renewed",
+          "reviewed_release": "0.4.9",
+          "reviewed_date_utc": "2026-08-21",
+          "previous_expiry_release": "0.3.11",
+          "previous_expiry_date_utc": "2026-10-24",
+          "new_expiry_release": "0.4.11",
+          "new_expiry_date_utc": "2026-10-21",
+          "approved_by": "bead:asupersync-mnotoo.4",
+          "missing_evidence": [
+            "The canonical conformance member has live H2 comparisons while the excluded fuzz copy remains explicitly unwired.",
+            "The source-owned frame corpus does not independently cover complete RFC 7540/9113 state, HPACK, flow-control, and error behavior."
+          ],
+          "retained_invariants": [
+            "registered CONTINUATION, DATA, SETTINGS, GOAWAY, PING, PRIORITY, and HPACK comparisons remain live",
+            "unwired fuzz copies remain fail-closed rather than silently green"
+          ],
+          "production_exclusion_status": "conformance and excluded-fuzz edges only; ordinary production profiles remain forbidden",
+          "next_action": "Complete or retire the unwired fuzz copy, freeze independent RFC vectors for every retained family, and prove the conformance binaries no longer require the live h2 reference."
+        },
+        {
+          "oracle_id": "active-prometheus-client-reference",
+          "disposition": "renewed",
+          "reviewed_release": "0.4.9",
+          "reviewed_date_utc": "2026-08-21",
+          "previous_expiry_release": "0.3.11",
+          "previous_expiry_date_utc": "2026-10-24",
+          "new_expiry_release": "0.4.11",
+          "new_expiry_date_utc": "2026-10-21",
+          "approved_by": "bead:asupersync-mnotoo.4",
+          "missing_evidence": [
+            "The counter, gauge, label, and histogram expectations are still encoded by prometheus-client during conformance runs.",
+            "No immutable exposition corpus with independent provenance and mutation receipts covers escaping, ordering, buckets, and special numeric values."
+          ],
+          "retained_invariants": [
+            "Prometheus text exposition agrees for registered metric and histogram fixtures"
+          ],
+          "production_exclusion_status": "conformance-member edge only; ordinary production profiles remain excluded",
+          "next_action": "Freeze independently generated exposition outputs for every registered fixture and prove mutation sensitivity before retirement."
+        },
+        {
+          "oracle_id": "active-opentelemetry-sdk-reference",
+          "disposition": "renewed",
+          "reviewed_release": "0.4.9",
+          "reviewed_date_utc": "2026-08-21",
+          "previous_expiry_release": "0.3.11",
+          "previous_expiry_date_utc": "2026-10-24",
+          "new_expiry_release": "0.4.11",
+          "new_expiry_date_utc": "2026-10-21",
+          "approved_by": "bead:asupersync-mnotoo.4",
+          "missing_evidence": [
+            "The registered SDK surface remains partial with explicit XFAIL and unavailable rows.",
+            "The root dev edge supplies the in-memory metrics exporter used by tests, so removing it would break non-oracle test support as well as the live baggage and trace-context comparisons."
+          ],
+          "retained_invariants": [
+            "baggage and trace-context propagation comparisons remain live",
+            "unwired SDK surfaces remain explicit XFAIL or unavailable",
+            "in-memory metrics test support remains available"
+          ],
+          "production_exclusion_status": "root-dev and conformance edges; default and metrics normal-edge no-Tokio proofs remain separate",
+          "next_action": "Separate in-memory exporter support from oracle use and complete independent resource, aggregation, and propagation fixtures before retirement."
+        },
+        {
+          "oracle_id": "active-opentelemetry-proto-reference",
+          "disposition": "renewed",
+          "reviewed_release": "0.4.9",
+          "reviewed_date_utc": "2026-08-21",
+          "previous_expiry_release": "0.3.11",
+          "previous_expiry_date_utc": "2026-10-24",
+          "new_expiry_release": "0.4.11",
+          "new_expiry_date_utc": "2026-10-21",
+          "approved_by": "bead:asupersync-mnotoo.4",
+          "missing_evidence": [
+            "Generated-message comparison remains partial with explicit XFAIL and unavailable exporter surfaces.",
+            "The fuzz and test OTLP wire helpers still rely on the generated-message graph for independent encoding and decoding checks."
+          ],
+          "retained_invariants": [
+            "registered OTLP logs, metrics, spans, attributes, and status wire comparisons remain live",
+            "fuzz-only tonic and Tokio exposure remains quarantined from default and metrics production graphs"
+          ],
+          "production_exclusion_status": "root-dev and conformance edges plus explicit fuzz quarantine; default and metrics normal-edge no-Tokio proofs remain separate",
+          "next_action": "Complete independent finite-schema vectors for every signal and prove the fuzz/test wire corpus no longer needs generated incumbent messages before retirement."
+        }
+      ],
+      "removal_receipts": [],
+      "profile_remeasurement_status": "not-applicable-no-manifest-edge-retired",
+      "no_claim_boundaries": [
+        "Renewal preserves differential and conformance coverage; it does not prove either implementation correct.",
+        "No manifest edge, lockfile package, public API, fixture, or runtime behavior changed in this sweep.",
+        "The renewed rows fail closed at release 0.4.11 or UTC date 2026-10-21, whichever is reached first."
+      ]
+    },
     "classified_non_oracle_candidates": [
       {
         "edge_id": "asupersync-tokio-compat/Cargo.toml::dev-dependencies::futures-lite",
@@ -1151,12 +1390,17 @@
       "manifest-pin-drift",
       "unregistered-oracle-edge",
       "expired-active-oracle",
+      "live-release-expiry",
+      "live-date-expiry",
       "missing-owner",
       "missing-test-scope",
       "missing-independent-corpus",
       "missing-removal-bead",
+      "missing-retirement-sweep-decision",
       "lock-version-source-checksum-mismatch",
-      "report-count-drift"
+      "report-count-drift",
+      "unapproved-retirement-renewal",
+      "scheduled-ci-drift"
     ],
     "explicit_no_claims": [
       "This reconciliation does not prove any oracle or owned implementation correct.",

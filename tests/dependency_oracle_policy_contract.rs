@@ -6,6 +6,7 @@
 
 #![allow(missing_docs)]
 
+use chrono::{NaiveDate, Utc};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -13,15 +14,20 @@ use std::path::PathBuf;
 
 const BEAD_ID: &str = "asupersync-dep-p1-foundations-upksjk.3";
 const RECONCILIATION_BEAD_ID: &str = "asupersync-mnotoo.4.1";
+const RETIREMENT_SWEEP_BEAD_ID: &str = "asupersync-mnotoo.4.3";
 const PROGRAM_ID: &str = "asupersync-ir2uf0";
 const ARTIFACT_PATH: &str = "artifacts/dependency_oracle_policy_v1.json";
 const DOC_PATH: &str = "docs/dependency_oracle_policy.md";
 const TRACKER_PATH: &str = ".beads/issues.jsonl";
 const MANIFEST_PATH: &str = "Cargo.toml";
 const LOCK_PATH: &str = "Cargo.lock";
+const NIGHTLY_WORKFLOW_PATH: &str = ".github/workflows/nightly-differential-stress.yml";
 const TAXONOMY_PATH: &str = "artifacts/dependency_safety_taxonomy_v1.json";
 const SCENARIO_ID: &str = "dependency_oracle_policy_contract_v1";
 const RECONCILIATION_CONTRACT_ID: &str = "dependency-oracle-manifest-reconciliation-v1";
+const ORACLE_EXPIRY_CRON: &str = "0 4 * * *";
+const ORACLE_EXPIRY_COMMAND: &str =
+    "cargo test -p asupersync --test dependency_oracle_policy_contract -- --nocapture";
 const PROOF_COMMAND: &str = "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_dependency_oracle_policy\" cargo test -p asupersync --test dependency_oracle_policy_contract -- --nocapture";
 
 const PURE_RUST: &str = "PURE_RUST_IN_WORKSPACE_ORACLE";
@@ -47,6 +53,12 @@ fn reconciliation(policy: &Value) -> &Value {
     policy
         .get("manifest_reconciliation")
         .expect("manifest_reconciliation must exist")
+}
+
+fn retirement_sweep(policy: &Value) -> &Value {
+    reconciliation(policy)
+        .get("retirement_sweep")
+        .expect("retirement_sweep must exist")
 }
 
 fn active_registry(policy: &Value) -> &[Value] {
@@ -247,6 +259,39 @@ fn is_iso_date(date: &str) -> bool {
         _ => return false,
     };
     (1..=days_in_month).contains(&day)
+}
+
+fn parse_release_triplet(release: &str) -> Option<(u64, u64, u64)> {
+    let mut components = release.split('.');
+    let major = components.next()?.parse().ok()?;
+    let minor = components.next()?.parse().ok()?;
+    let patch = components.next()?.parse().ok()?;
+    (components.next().is_none()).then_some((major, minor, patch))
+}
+
+fn release_is_due(current: &str, expiry: &str) -> bool {
+    match (
+        parse_release_triplet(current),
+        parse_release_triplet(expiry),
+    ) {
+        (Some(current), Some(expiry)) => current >= expiry,
+        _ => true,
+    }
+}
+
+fn current_package_release() -> String {
+    let manifest: toml::Value =
+        toml::from_str(&read_repo_file(MANIFEST_PATH)).expect("Cargo.toml must parse");
+    manifest
+        .get("package")
+        .and_then(|package| package.get("version"))
+        .and_then(toml::Value::as_str)
+        .expect("root package.version must exist")
+        .to_owned()
+}
+
+fn current_utc_date() -> String {
+    Utc::now().date_naive().format("%Y-%m-%d").to_string()
 }
 
 fn class_map(policy: &Value) -> BTreeMap<String, &Value> {
@@ -913,6 +958,18 @@ fn validate_active_oracle_row(policy: &Value, row: &Value) -> Vec<String> {
     } else if expiry_date < string(reconciliation, "as_of_date_utc") {
         errors.push(format!("{oracle_id}: active manifest oracle is expired"));
     }
+    let expiry_release = object_string(expiry, "release");
+    if parse_release_triplet(expiry_release).is_none()
+        || parse_release_triplet(string(reconciliation, "as_of_release")).is_none()
+    {
+        errors.push(format!(
+            "{oracle_id}: active expiry release must use numeric major.minor.patch"
+        ));
+    } else if release_is_due(string(reconciliation, "as_of_release"), expiry_release) {
+        errors.push(format!(
+            "{oracle_id}: active manifest oracle reached release expiry"
+        ));
+    }
     if object_integer(expiry, "max_retention_releases") == 0
         || object_integer(expiry, "max_retention_releases") > 2
     {
@@ -947,6 +1004,256 @@ fn validate_active_oracle_row(policy: &Value, row: &Value) -> Vec<String> {
         errors.push(format!(
             "{oracle_id}: renewal requires bead authority and receipts"
         ));
+    }
+
+    errors
+}
+
+fn validate_active_expiry_at(
+    row: &Value,
+    current_release: &str,
+    current_date: &str,
+) -> Vec<String> {
+    let oracle_id = string(row, "oracle_id");
+    let expiry = object(row, "expiry");
+    let expiry_release = object_string(expiry, "release");
+    let expiry_date = object_string(expiry, "date_utc");
+    let mut errors = Vec::new();
+
+    if parse_release_triplet(current_release).is_none()
+        || parse_release_triplet(expiry_release).is_none()
+    {
+        errors.push(format!(
+            "{oracle_id}: live release expiry requires numeric major.minor.patch values"
+        ));
+    } else if release_is_due(current_release, expiry_release) {
+        errors.push(format!(
+            "{oracle_id}: active oracle reached release expiry {expiry_release} at {current_release}"
+        ));
+    }
+
+    match (
+        NaiveDate::parse_from_str(current_date, "%Y-%m-%d"),
+        NaiveDate::parse_from_str(expiry_date, "%Y-%m-%d"),
+    ) {
+        (Ok(current), Ok(expiry)) if current >= expiry => errors.push(format!(
+            "{oracle_id}: active oracle reached UTC date expiry {expiry_date} at {current_date}"
+        )),
+        (Ok(_), Ok(_)) => {}
+        _ => errors.push(format!(
+            "{oracle_id}: live date expiry requires valid ISO-8601 calendar dates"
+        )),
+    }
+
+    errors
+}
+
+fn validate_retirement_sweep(policy: &Value) -> Vec<String> {
+    let reconciliation = reconciliation(policy);
+    let sweep = retirement_sweep(policy);
+    let mut errors = Vec::new();
+
+    for key in [
+        "schema_version",
+        "bead_id",
+        "capability_id",
+        "as_of_release",
+        "as_of_date_utc",
+        "decision_policy",
+        "profile_remeasurement_status",
+    ] {
+        nonempty_string(sweep, key, &mut errors, "retirement-sweep");
+    }
+    if string(sweep, "schema_version") != "dependency-oracle-retirement-sweep-v1" {
+        errors.push("retirement sweep schema drifted".to_owned());
+    }
+    if string(sweep, "bead_id") != RETIREMENT_SWEEP_BEAD_ID {
+        errors.push("retirement sweep bead authority drifted".to_owned());
+    }
+    if string(sweep, "capability_id") != "CAP-VERIFICATION-PROFILES" {
+        errors.push("retirement sweep capability drifted".to_owned());
+    }
+    if string(sweep, "as_of_release") != string(reconciliation, "as_of_release")
+        || string(sweep, "as_of_date_utc") != string(reconciliation, "as_of_date_utc")
+    {
+        errors.push("retirement sweep freshness must match manifest reconciliation".to_owned());
+    }
+
+    let approval = object(sweep, "owner_approval");
+    for key in ["status", "authority", "basis"] {
+        nonempty_object_string(approval, key, &mut errors, "retirement-sweep");
+    }
+    if object_string(approval, "status") != "approved"
+        || object_string(approval, "authority") != "bead:asupersync-mnotoo.4"
+    {
+        errors.push("retirement sweep requires approved parent-bead authority".to_owned());
+    }
+
+    let active_ids = active_registry(policy)
+        .iter()
+        .map(|row| string(row, "oracle_id").to_owned())
+        .collect::<BTreeSet<_>>();
+    let decisions = array(sweep, "decisions");
+    let decision_ids = decisions
+        .iter()
+        .map(|decision| string(decision, "oracle_id").to_owned())
+        .collect::<BTreeSet<_>>();
+    if decisions.len() != decision_ids.len() {
+        errors.push("retirement sweep oracle decisions must be unique".to_owned());
+    }
+    if decision_ids != active_ids {
+        errors
+            .push("every active oracle requires exactly one retirement sweep decision".to_owned());
+    }
+
+    let active_by_id = active_registry(policy)
+        .iter()
+        .map(|row| (string(row, "oracle_id"), row))
+        .collect::<BTreeMap<_, _>>();
+    let mut renewed_count = 0_u64;
+    let mut retired_count = 0_u64;
+    let mut pending_count = 0_u64;
+    for decision in decisions {
+        let oracle_id = string(decision, "oracle_id");
+        for key in [
+            "disposition",
+            "reviewed_release",
+            "reviewed_date_utc",
+            "previous_expiry_release",
+            "previous_expiry_date_utc",
+            "new_expiry_release",
+            "new_expiry_date_utc",
+            "approved_by",
+            "production_exclusion_status",
+            "next_action",
+        ] {
+            nonempty_string(decision, key, &mut errors, oracle_id);
+        }
+        let disposition = string(decision, "disposition");
+        match disposition {
+            "renewed" => renewed_count += 1,
+            "retired" => retired_count += 1,
+            _ => pending_count += 1,
+        }
+        let Some(row) = active_by_id.get(oracle_id).copied() else {
+            continue;
+        };
+        if disposition != "renewed" {
+            errors.push(format!(
+                "{oracle_id}: an active registry row must have a renewed sweep disposition"
+            ));
+        }
+        if string(decision, "approved_by") != object_string(object(row, "renewal"), "authority") {
+            errors.push(format!(
+                "{oracle_id}: renewal approval must come from the registered authority"
+            ));
+        }
+        if string(decision, "reviewed_release") != string(sweep, "as_of_release")
+            || string(decision, "reviewed_date_utc") != string(sweep, "as_of_date_utc")
+        {
+            errors.push(format!(
+                "{oracle_id}: decision freshness must match the retirement sweep"
+            ));
+        }
+        let missing_evidence = string_set(decision, "missing_evidence");
+        let retained_invariants = string_set(decision, "retained_invariants");
+        if missing_evidence.is_empty() || retained_invariants.is_empty() {
+            errors.push(format!(
+                "{oracle_id}: renewal requires concrete missing evidence and retained invariants"
+            ));
+        }
+
+        let expiry = object(row, "expiry");
+        if object_string(expiry, "status") != "renewed"
+            || object_string(expiry, "release") != string(decision, "new_expiry_release")
+            || object_string(expiry, "date_utc") != string(decision, "new_expiry_date_utc")
+        {
+            errors.push(format!(
+                "{oracle_id}: active expiry must match the approved renewal decision"
+            ));
+        }
+        let previous_date_due = match (
+            NaiveDate::parse_from_str(string(decision, "reviewed_date_utc"), "%Y-%m-%d"),
+            NaiveDate::parse_from_str(string(decision, "previous_expiry_date_utc"), "%Y-%m-%d"),
+        ) {
+            (Ok(reviewed), Ok(previous)) => reviewed >= previous,
+            _ => {
+                errors.push(format!(
+                    "{oracle_id}: prior expiry requires valid ISO-8601 calendar dates"
+                ));
+                false
+            }
+        };
+        let previous_release_due = release_is_due(
+            string(decision, "reviewed_release"),
+            string(decision, "previous_expiry_release"),
+        );
+        if !previous_release_due && !previous_date_due {
+            errors.push(format!(
+                "{oracle_id}: renewal must record a prior expiry due by release or UTC date"
+            ));
+        }
+        match (
+            parse_release_triplet(string(decision, "reviewed_release")),
+            parse_release_triplet(string(decision, "new_expiry_release")),
+        ) {
+            (
+                Some((review_major, review_minor, review_patch)),
+                Some((new_major, new_minor, new_patch)),
+            ) if review_major == new_major
+                && review_minor == new_minor
+                && new_patch > review_patch
+                && new_patch <= review_patch + 2 => {}
+            _ => errors.push(format!(
+                "{oracle_id}: renewal must expire within two subsequent patch releases"
+            )),
+        }
+        match (
+            NaiveDate::parse_from_str(string(decision, "reviewed_date_utc"), "%Y-%m-%d"),
+            NaiveDate::parse_from_str(string(decision, "new_expiry_date_utc"), "%Y-%m-%d"),
+        ) {
+            (Ok(reviewed), Ok(next)) if next > reviewed => {}
+            _ => errors.push(format!(
+                "{oracle_id}: renewal date must advance beyond the reviewed date"
+            )),
+        }
+    }
+
+    let summary = object(sweep, "summary");
+    let due_count = object_integer(summary, "due_count");
+    if due_count != decisions.len() as u64
+        || object_integer(summary, "renewed_count") != renewed_count
+        || object_integer(summary, "retired_count") != retired_count
+        || object_integer(summary, "pending_count") != pending_count
+        || pending_count != 0
+    {
+        errors.push("retirement sweep summary counts drifted".to_owned());
+    }
+    if array(sweep, "removal_receipts").len() as u64 != retired_count {
+        errors.push("retirement sweep removal receipts must match retired count".to_owned());
+    }
+    if retired_count == 0
+        && string(sweep, "profile_remeasurement_status")
+            != "not-applicable-no-manifest-edge-retired"
+    {
+        errors.push(
+            "zero-retirement sweep must explicitly mark remeasurement not applicable".to_owned(),
+        );
+    }
+
+    let scheduled_ci = object(sweep, "scheduled_ci");
+    for key in ["workflow_path", "event", "cron", "command"] {
+        nonempty_object_string(scheduled_ci, key, &mut errors, "retirement-sweep");
+    }
+    if object_string(scheduled_ci, "workflow_path") != NIGHTLY_WORKFLOW_PATH
+        || object_string(scheduled_ci, "event") != "schedule"
+        || object_string(scheduled_ci, "cron") != ORACLE_EXPIRY_CRON
+        || object_string(scheduled_ci, "command") != ORACLE_EXPIRY_COMMAND
+    {
+        errors.push("retirement sweep scheduled CI contract drifted".to_owned());
+    }
+    if string_set(sweep, "no_claim_boundaries").is_empty() {
+        errors.push("retirement sweep requires explicit no-claim boundaries".to_owned());
     }
 
     errors
@@ -1013,6 +1320,7 @@ fn validate_manifest_reconciliation(policy: &Value) -> Vec<String> {
             .iter()
             .flat_map(|row| validate_active_oracle_row(policy, row)),
     );
+    errors.extend(validate_retirement_sweep(policy));
 
     let edge_ids = active_edge_ids(policy);
     let expected_edges = expected_active_oracle_edges();
@@ -1687,8 +1995,8 @@ fn manifest_reconciliation_metadata_and_required_fields_are_exact() {
         string(reconciliation, "capability_id"),
         "CAP-VERIFICATION-PROFILES"
     );
-    assert_eq!(string(reconciliation, "as_of_release"), "0.3.9");
-    assert_eq!(string(reconciliation, "as_of_date_utc"), "2026-07-25");
+    assert_eq!(string(reconciliation, "as_of_release"), "0.4.9");
+    assert_eq!(string(reconciliation, "as_of_date_utc"), "2026-08-21");
     assert_eq!(
         reconciliation
             .get("cutover_authorized")
@@ -1727,13 +2035,18 @@ fn manifest_reconciliation_metadata_and_required_fields_are_exact() {
         string_set(reconciliation, "required_negative_fixtures"),
         [
             "expired-active-oracle",
+            "live-date-expiry",
+            "live-release-expiry",
             "lock-version-source-checksum-mismatch",
             "manifest-pin-drift",
             "missing-independent-corpus",
             "missing-owner",
             "missing-removal-bead",
+            "missing-retirement-sweep-decision",
             "missing-test-scope",
             "report-count-drift",
+            "scheduled-ci-drift",
+            "unapproved-retirement-renewal",
             "unregistered-oracle-edge",
         ]
         .into_iter()
@@ -1785,6 +2098,53 @@ fn active_manifest_oracle_registry_is_complete_and_valid() {
         errors.is_empty(),
         "manifest reconciliation errors:\n{}",
         errors.join("\n")
+    );
+}
+
+#[test]
+fn retirement_sweep_is_complete_bounded_and_approved() {
+    let policy = policy();
+    let errors = validate_retirement_sweep(&policy);
+    assert!(
+        errors.is_empty(),
+        "retirement sweep errors:\n{}",
+        errors.join("\n")
+    );
+}
+
+#[test]
+fn live_package_release_and_utc_date_have_not_reached_active_expiry() {
+    let policy = policy();
+    let release = current_package_release();
+    let date = current_utc_date();
+    let errors = active_registry(&policy)
+        .iter()
+        .flat_map(|row| validate_active_expiry_at(row, &release, &date))
+        .collect::<Vec<_>>();
+    assert!(
+        errors.is_empty(),
+        "active dependency-oracle expiry errors at release {release} on {date}:\n{}",
+        errors.join("\n")
+    );
+}
+
+#[test]
+fn scheduled_nightly_workflow_runs_oracle_expiry_contract() {
+    let policy = policy();
+    let scheduled_ci = object(retirement_sweep(&policy), "scheduled_ci");
+    let workflow = read_repo_file(NIGHTLY_WORKFLOW_PATH);
+    let quoted_cron = format!("cron: '{}'", object_string(scheduled_ci, "cron"));
+    assert!(
+        workflow.contains(&quoted_cron),
+        "nightly workflow must retain the registered oracle-expiry cron"
+    );
+    assert!(
+        workflow.contains("name: Enforce dependency-oracle expiry and retirement receipts"),
+        "nightly workflow must name the oracle-expiry gate"
+    );
+    assert!(
+        workflow.contains(object_string(scheduled_ci, "command")),
+        "nightly workflow must run the registered oracle-expiry command"
     );
 }
 
@@ -1947,6 +2307,88 @@ fn negative_fixture_expired_active_manifest_oracle_fails_closed() {
 }
 
 #[test]
+fn negative_fixture_missing_retirement_sweep_decision_fails_closed() {
+    let mut policy = policy();
+    policy
+        .get_mut("manifest_reconciliation")
+        .and_then(|value| value.get_mut("retirement_sweep"))
+        .and_then(|value| value.get_mut("decisions"))
+        .and_then(Value::as_array_mut)
+        .expect("retirement decisions fixture")
+        .pop();
+    let errors = validate_retirement_sweep(&policy);
+    assert!(
+        errors.iter().any(|error| error
+            .contains("every active oracle requires exactly one retirement sweep decision")),
+        "missing decision did not fail closed: {errors:?}"
+    );
+}
+
+#[test]
+fn negative_fixture_unapproved_retirement_renewal_fails_closed() {
+    let mut policy = policy();
+    policy
+        .get_mut("manifest_reconciliation")
+        .and_then(|value| value.get_mut("retirement_sweep"))
+        .and_then(|value| value.get_mut("owner_approval"))
+        .and_then(Value::as_object_mut)
+        .expect("owner approval fixture")
+        .insert("status".to_owned(), Value::String("pending".to_owned()));
+    let errors = validate_retirement_sweep(&policy);
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("requires approved parent-bead authority")),
+        "unapproved renewal did not fail closed: {errors:?}"
+    );
+}
+
+#[test]
+fn negative_fixture_live_release_expiry_fails_closed() {
+    let policy = policy();
+    let row = active_row_by_id(&policy, "active-httparse-http1-reference");
+    let errors = validate_active_expiry_at(row, "0.4.11", "2026-08-21");
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("reached release expiry 0.4.11 at 0.4.11")),
+        "live release expiry did not fail closed: {errors:?}"
+    );
+}
+
+#[test]
+fn negative_fixture_live_date_expiry_fails_closed() {
+    let policy = policy();
+    let row = active_row_by_id(&policy, "active-httparse-http1-reference");
+    let errors = validate_active_expiry_at(row, "0.4.10", "2026-10-21");
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("reached UTC date expiry 2026-10-21")),
+        "live UTC date expiry did not fail closed: {errors:?}"
+    );
+}
+
+#[test]
+fn negative_fixture_scheduled_ci_drift_fails_closed() {
+    let mut policy = policy();
+    policy
+        .get_mut("manifest_reconciliation")
+        .and_then(|value| value.get_mut("retirement_sweep"))
+        .and_then(|value| value.get_mut("scheduled_ci"))
+        .and_then(Value::as_object_mut)
+        .expect("scheduled CI fixture")
+        .insert("cron".to_owned(), Value::String("0 0 1 1 *".to_owned()));
+    let errors = validate_retirement_sweep(&policy);
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("scheduled CI contract drifted")),
+        "scheduled CI drift did not fail closed: {errors:?}"
+    );
+}
+
+#[test]
 fn negative_fixture_lock_checksum_mismatch_fails_closed() {
     let mut policy = policy();
     set_string(
@@ -1998,6 +2440,11 @@ fn reconciliation_docs_preserve_current_and_planned_no_claim_boundaries() {
         "Reverse-cycle | 0 active, 1 planned",
         "declared-reference-not-wired",
         "cutover_authorized = false",
+        RETIREMENT_SWEEP_BEAD_ID,
+        "retired zero and renewed all",
+        "release `0.4.11` or UTC date `2026-10-21`",
+        NIGHTLY_WORKFLOW_PATH,
+        ORACLE_EXPIRY_CRON,
         "Manifest and lockfile pins prove only",
     ] {
         assert!(

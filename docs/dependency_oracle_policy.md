@@ -98,12 +98,40 @@ current H2-only sources do not import. The H2 edge in that excluded member is
 differential skeleton similarly has no RaptorQ or asupersync package edge and
 remains blocked.
 
-The active rows expire at release `0.3.11` or `2026-10-24`, whichever governance
-gate is reached first. Renewal belongs to `asupersync-mnotoo.4` and requires a
-new expiry, owner receipt, corpus status, and production-exclusion evidence.
-Removal and the initial retirement sweep belong to
+The reconciliation snapshot is current at release `0.4.9` on `2026-08-21`.
+Renewal belongs to `asupersync-mnotoo.4` and requires a new expiry, owner
+receipt, corpus status, production-exclusion evidence, and one decision for
+every due active row. Removal and the initial retirement sweep belong to
 `asupersync-mnotoo.4.3`. The machine state remains
 `cutover_authorized = false`.
+
+### Initial retirement sweep
+
+The `asupersync-mnotoo.4.3` sweep reviewed all 10 active rows after their
+original `0.3.11` release deadline had passed. It retired zero and renewed all
+10 through release `0.4.11` or UTC date `2026-10-21`, whichever is reached
+first. This is a bounded preservation decision, not a claim that indefinite
+retention is acceptable. Removing any row now would discard live comparison
+coverage without an independently sufficient replacement corpus.
+
+| Active oracle | Disposition | Evidence still required before retirement |
+| --- | --- | --- |
+| `httparse` HTTP/1 | Renewed | Frozen request-head outcomes with provenance and seeded-parser mutation proof. |
+| `tokio-util` codec | Renewed | Immutable frame transcripts covering bounds, truncation, and flush behavior, plus mutation proof. |
+| `sqlx` MySQL | Renewed | Independently frozen packet transcripts for prepared-value, null-bitmap, signedness, and malformed cases. |
+| `redis-rs` | Renewed | Independent RESP2/RESP3 semantic outputs and mutation proof across all seven registered families. |
+| `raptorq` | Renewed | Independently generated source, repair, and decode vectors for every registered symbol regime. |
+| Tokio semaphore | Renewed | Separation of non-oracle Tokio harness support plus independent wake-order transcripts. |
+| `h2` | Renewed | Complete independent protocol vectors and resolution of the explicitly unwired fuzz copy. |
+| `prometheus-client` | Renewed | Immutable exposition outputs covering escaping, ordering, buckets, and special numeric values. |
+| `opentelemetry_sdk` | Renewed | Separation of exporter test support and completion of independent propagation/resource fixtures. |
+| `opentelemetry-proto` | Renewed | Complete finite-schema vectors for every signal without resolving generated incumbent messages. |
+
+Each machine-readable decision records its old and new deadline, retained
+invariants, concrete missing evidence, production-exclusion status, approving
+bead authority, and next action. Because no manifest edge was retired, profile
+remeasurement is explicitly `not-applicable-no-manifest-edge-retired`; no
+manifest, lockfile, public API, fixture, or runtime behavior changed.
 
 The focused contract fails on:
 
@@ -112,7 +140,10 @@ The focused contract fails on:
 - an expired active row;
 - missing owner, exact test scope, independent corpus, or removal bead;
 - package version, source, or checksum mismatch; and
-- deterministic report count drift.
+- deterministic report count drift;
+- a missing or unapproved retirement decision;
+- drift in the scheduled expiry gate; and
+- an active deadline reached by the live Cargo package version or UTC date.
 
 Manifest and lockfile pins prove only that the reviewed graph text has not
 drifted. They do not prove a package safe, a reference correct, a comparison
@@ -252,11 +283,18 @@ maximum, not a target.
 
 At each release:
 
-1. compare the policy date and release against every active row;
+1. compare the live root `Cargo.toml` package version and current UTC date
+   against every active row;
 2. retire rows whose owning differential corpus is now frozen and sufficient;
 3. close or update the linked retirement bead;
 4. remove the package from every remaining harness when retired; and
 5. capture fresh graph evidence.
+
+The same live version/date check runs every day in
+`.github/workflows/nightly-differential-stress.yml` at `0 4 * * *` using the
+full focused contract command. This prevents an unchanged policy snapshot from
+silently carrying an active oracle beyond either deadline. Release and date
+deadlines are independent: reaching either one fails closed.
 
 An expired active oracle fails closed. An extension is valid only when
 `extension_signoff.status` is `approved` and the row carries:
@@ -279,7 +317,11 @@ fixtures for:
 - manifest or lockfile pin drift;
 - unregistered active oracle edges;
 - expired active manifest-oracle rows;
+- live package-release or UTC-date expiry;
 - missing active owner, test scope, corpus, or removal fields;
+- missing retirement-sweep decisions;
+- unapproved retirement renewals;
+- scheduled expiry-gate drift;
 - lock package identity drift;
 - active report count drift;
 - missing retirement disposition;
@@ -341,6 +383,10 @@ Passing this contract proves only that:
 - all 19 scoped manifests and the lockfile match their reviewed pins;
 - active rows carry package identity, lane, exclusion, expiry, corpus, renewal,
   removal, and no-claim fields;
+- the initial retirement sweep has one approved, bounded decision for every
+  active row and no pending disposition;
+- the live package version and UTC date have not reached either active
+  deadline, and the nightly schedule runs the same gate;
 - the report separates Production | 0, Dev / conformance | 15, Build | 0,
   Native | 0 active, 3 planned, and Reverse-cycle | 0 active, 1 planned;
 - all 24 initial oracle plans have complete governance rows;

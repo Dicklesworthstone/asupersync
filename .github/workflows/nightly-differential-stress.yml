@@ -52,6 +52,10 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-differential-nightly-
 
+      - name: Enforce dependency-oracle expiry and retirement receipts
+        run: |
+          cargo test -p asupersync --test dependency_oracle_policy_contract -- --nocapture
+
       - name: Run nightly differential stress lane
         id: run_nightly
         shell: bash
