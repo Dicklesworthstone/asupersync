@@ -1,4 +1,4 @@
-//! Downstream-consumer contract for Kafka's default-feature boundary.
+//! Downstream-consumer contracts for Kafka's feature boundary.
 //!
 //! The root package's dev-dependency cycle enables internal features for its
 //! ordinary integration tests. This source is therefore also declared as an
@@ -8,15 +8,15 @@
 //!
 //! The crate-local deterministic broker is not a Kafka implementation. Without
 //! the `kafka` feature, a downstream producer must return `FeatureDisabled`
-//! rather than silently route traffic to that internal harness.
+//! rather than silently route traffic to that internal harness. With the
+//! feature enabled, this target must still execute the public real-producer
+//! construction and pre-network validation path instead of reporting a
+//! misleading zero-test success. Broker-side deduplication remains the scope of
+//! the explicitly provisioned `kafka_real_broker` lane.
 
-#[cfg(not(feature = "kafka"))]
 use asupersync::Cx;
-#[cfg(not(feature = "kafka"))]
 use asupersync::messaging::kafka::KafkaError;
-#[cfg(not(feature = "kafka"))]
 use asupersync::messaging::kafka::{KafkaProducer, ProducerConfig};
-#[cfg(not(feature = "kafka"))]
 use asupersync::runtime::RuntimeBuilder;
 
 #[cfg(not(feature = "kafka"))]
@@ -80,6 +80,60 @@ fn default_feature_send_fails_closed_for_every_producer_instance() {
         assert!(
             matches!(second_send, Err(KafkaError::FeatureDisabled)),
             "producer 2 should hit the default-feature fail-closed boundary"
+        );
+    });
+}
+
+#[cfg(feature = "kafka")]
+#[test]
+fn kafka_feature_constructs_real_producer_and_runs_pre_network_send_checks() {
+    let mut config = ProducerConfig::new(vec!["127.0.0.1:1".to_string()])
+        .enable_idempotence(true)
+        .retries(1)
+        .linger_ms(0)
+        .require_kafka_feature();
+    config.max_message_size = 1_000;
+
+    assert!(
+        config.validate().is_ok(),
+        "the kafka feature must satisfy an explicitly required real-producer config"
+    );
+    let producer = KafkaProducer::new(config)
+        .expect("constructing rdkafka's producer is local and must not require a reachable broker");
+    assert!(
+        producer.config().enable_idempotence,
+        "the public producer must preserve the caller's idempotence requirement"
+    );
+
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("build public current-thread runtime");
+    runtime.block_on(async {
+        let cx = Cx::current().expect("Runtime::block_on installs a public Cx");
+        let oversized_payload = vec![b'x'; 1_001];
+        let result = producer
+            .send(
+                &cx,
+                "idempotence-test",
+                Some(b"key"),
+                &oversized_payload,
+                None,
+            )
+            .await;
+
+        assert!(
+            matches!(
+                result,
+                Err(KafkaError::MessageTooLarge {
+                    size: 1_001,
+                    max_size: 1_000
+                })
+            ),
+            "feature-enabled send must execute the public production path and reject an oversized payload before broker I/O; got {result:?}"
+        );
+        assert!(
+            !producer.is_closed(),
+            "a rejected pre-network send must not close the producer"
         );
     });
 }

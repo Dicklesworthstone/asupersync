@@ -2207,15 +2207,12 @@ mod tests {
         }
 
         let manifest = manifest_from_bonded_descriptor(&descriptor);
-        let source_streaming = config.repair_overhead <= 1.0
-            && config.source_retransmit_rounds > 0;
+        let source_streaming = config.repair_overhead <= 1.0 && config.source_retransmit_rounds > 0;
         if !source_streaming {
             return Err("lab bonded matrix must exercise source-streaming decode".to_string());
         }
-        let staging_dir = bonded_e2e_tmp(&format!(
-            "lab_n{}_source_streaming",
-            scenario.donor_count
-        ));
+        let staging_dir =
+            bonded_e2e_tmp(&format!("lab_n{}_source_streaming", scenario.donor_count));
         let mut decoders = vec![new_bonded_entry_decoder(
             &manifest.entries[0],
             &manifest,
@@ -2228,8 +2225,8 @@ mod tests {
             None,
             source_streaming,
         )];
-        let blocks = bonded_block_states(&descriptor, &decoders, 32)
-            .map_err(|error| error.to_string())?;
+        let blocks =
+            bonded_block_states(&descriptor, &decoders, 32).map_err(|error| error.to_string())?;
         let mut symbol_set = BondedReceiverSymbolSet::new();
         let retention = BondedReceiverRetentionPolicy::bounded(128, 128);
         let tag = transfer_tag(&descriptor.transfer_id);
@@ -2238,13 +2235,11 @@ mod tests {
         let mut later_repair_packets = Vec::new();
         let mut late_source_packet = None;
         for packet in packets {
-            let (parsed, _) = parse_symbol_datagram_payload(
-                &packet.payload,
-                packet.payload.len(),
-                tag,
-                false,
-            )
-            .ok_or_else(|| "lab network delivered an invalid bonded datagram".to_string())?;
+            let (parsed, _) =
+                parse_symbol_datagram_payload(&packet.payload, packet.payload.len(), tag, false)
+                    .ok_or_else(|| {
+                        "lab network delivered an invalid bonded datagram".to_string()
+                    })?;
             if parsed.kind.is_source() && parsed.sbn == 0 && parsed.esi == 10 {
                 if late_source_packet.replace(packet).is_some() {
                     return Err("lab schedule emitted duplicate source ESI 10".to_string());
@@ -2323,8 +2318,7 @@ mod tests {
         )
         .await
         .map_err(|error| error.to_string())?;
-        let decode_width_budget =
-            rq_decode_width_budget_for_cx(&cx, &decoders, config.symbol_size);
+        let decode_width_budget = rq_decode_width_budget_for_cx(&cx, &decoders, config.symbol_size);
         let _ = join_all_pending_decodes(&cx, &mut decoders, decode_width_budget)
             .await
             .map_err(|error| error.to_string())?;
@@ -2338,7 +2332,9 @@ mod tests {
             );
         }
         if decoders[0].complete {
-            return Err("block zero completed the entry before the late-source E-9 probe".to_string());
+            return Err(
+                "block zero completed the entry before the late-source E-9 probe".to_string(),
+            );
         }
 
         let progress = symbol_set.block_progress_metrics(
@@ -2346,9 +2342,8 @@ mod tests {
             geometry.source_block_number,
             u32::from(geometry.source_symbols),
         );
-        let block_source_symbols_accepted = u64::from(progress.source_symbols).saturating_sub(
-            u64::try_from(progress.missing_source_esis.len()).unwrap_or(u64::MAX),
-        );
+        let block_source_symbols_accepted = u64::from(progress.source_symbols)
+            .saturating_sub(u64::try_from(progress.missing_source_esis.len()).unwrap_or(u64::MAX));
         let aggregate = symbol_set.aggregate_stats();
         let donor_ingress = (0..scenario.donor_count)
             .map(|donor_index| {
@@ -2455,8 +2450,7 @@ mod tests {
         )
         .await
         .map_err(|error| error.to_string())?;
-        let decode_width_budget =
-            rq_decode_width_budget_for_cx(&cx, &decoders, config.symbol_size);
+        let decode_width_budget = rq_decode_width_budget_for_cx(&cx, &decoders, config.symbol_size);
         let _ = join_all_pending_decodes(&cx, &mut decoders, decode_width_budget)
             .await
             .map_err(|error| error.to_string())?;
