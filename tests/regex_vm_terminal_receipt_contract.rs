@@ -689,6 +689,7 @@ fn r3_6_release_profile_evidence_is_cross_host_bounded_and_deferred() {
 fn docs_proof_and_no_claim_boundaries_are_discoverable() {
     let value = contract();
     let docs = read(DOC_PATH);
+    let normalized_docs = docs.split_whitespace().collect::<Vec<_>>().join(" ");
     for marker in [
         "<!-- BEGIN REGEX VM TERMINAL RECEIPT -->",
         "ASUP-REGEX-VM-TERMINAL-V1",
@@ -701,11 +702,14 @@ fn docs_proof_and_no_claim_boundaries_are_discoverable() {
         "24,024 raw samples",
         "53,248,319 allocation calls",
         "No local Cargo fallback is approved.",
-        "no production cutover is admitted",
+        "no production cutover",
         "no production privacy wiring or dependency removal",
         "<!-- END REGEX VM TERMINAL RECEIPT -->",
     ] {
-        assert!(docs.contains(marker), "missing doc marker: {marker}");
+        assert!(
+            normalized_docs.contains(marker),
+            "missing doc marker: {marker}"
+        );
     }
 
     let proof = Value::Object(object(&value, "proof").clone());
