@@ -30,7 +30,8 @@ pub const DEFAULT_MAX_TOTAL_FOLD_RANGES: usize = 1_048_576;
 pub const DEFAULT_MAX_BOUNDARY_ASSERTIONS: usize = 1_048_576;
 pub const DEFAULT_BACKEND_NESTING_LIMIT: u32 = 250;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FoldBoundaryLimits {
     pub max_fold_atoms: usize,
     pub max_ranges_per_fold: usize,

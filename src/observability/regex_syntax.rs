@@ -14,7 +14,8 @@ pub const DEFAULT_MAX_TOKENS: usize = 1_048_576;
 pub const DEFAULT_MAX_AST_NODES: usize = 1_048_576;
 pub const DEFAULT_MAX_NESTING: usize = 250;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LexerLimits {
     pub max_pattern_bytes: usize,
     /// Maximum number of tokens, including the explicit end-of-input token.
@@ -1002,7 +1003,8 @@ pub fn lex(pattern: &str, limits: LexerLimits) -> Result<Vec<Token>, LexError> {
     Lexer::new(pattern, limits).run()
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ParserLimits {
     pub max_ast_nodes: usize,
     pub max_nesting: usize,

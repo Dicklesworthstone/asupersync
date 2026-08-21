@@ -60,11 +60,17 @@ pub const DEFAULT_MAX_REPLACEMENT_TEMPLATE_BYTES: usize = 64 * 1024;
 pub const DEFAULT_MAX_REPLACEMENT_TOKENS: usize = 16 * 1024;
 pub const DEFAULT_MAX_REPLACEMENT_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
 pub const DEFAULT_MAX_REPLACEMENT_WORK_UNITS: u64 = 64 * 1024 * 1024;
+// JSON can encode one input byte as a six-byte `\u00XX` escape. This ceiling
+// therefore admits every pattern allowed by the default 1 MiB lexer budget,
+// plus ample room for the explicit numeric limit fields.
+pub const DEFAULT_MAX_PRIVATE_PATTERN_CONFIG_BYTES: usize = 8 * 1024 * 1024;
+pub const PRIVATE_PATTERN_CONFIG_SCHEMA_VERSION: u16 = 1;
 
 const FINGERPRINT_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
 const FINGERPRINT_PRIME: u64 = 0x0000_0100_0000_01b3;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct VmLimits {
     pub max_input_bytes: usize,
     pub max_threads_per_offset: usize,
@@ -102,7 +108,8 @@ impl VmLimits {
 /// slot. `vm.max_memory_bytes` covers the complete capture executor, including
 /// its thread frontiers, seen keys, retained trace, result slots, and history
 /// nodes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CaptureVmLimits {
     pub vm: VmLimits,
     pub max_capture_history_nodes: usize,
@@ -127,7 +134,8 @@ impl CaptureVmLimits {
 ///
 /// `capture.vm.max_work_units` and `capture.vm.max_memory_bytes` are whole
 /// iteration ceilings, not fresh budgets for every search attempt.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct IterationVmLimits {
     pub capture: CaptureVmLimits,
     pub max_matches: usize,
@@ -151,7 +159,8 @@ impl IterationVmLimits {
 }
 
 /// Aggregate ceilings for one private replacement-template operation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ReplacementLimits {
     pub max_template_bytes: usize,
     pub max_tokens: usize,
@@ -167,6 +176,317 @@ impl Default for ReplacementLimits {
             max_output_bytes: DEFAULT_MAX_REPLACEMENT_OUTPUT_BYTES,
             max_work_units: DEFAULT_MAX_REPLACEMENT_WORK_UNITS,
         }
+    }
+}
+
+/// Versioned, explicit configuration for one private compiled pattern.
+///
+/// The pattern is retained only because this is the caller-owned
+/// configuration document. Compilation results, errors, and `Debug` output do
+/// not retain or render it. The recipe is crate-private and does not alter the
+/// public [`crate::observability::otel::PrivacyConfig`] contract.
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PrivatePatternConfig {
+    pub schema_version: u16,
+    pub pattern: String,
+    pub compile_limits: PrivateCompileLimits,
+    pub iteration_limits: IterationVmLimits,
+    pub replacement_limits: ReplacementLimits,
+}
+
+impl PrivatePatternConfig {
+    /// Construct a recipe with every current private limit made explicit.
+    pub fn new(pattern: impl Into<String>) -> Self {
+        Self {
+            schema_version: PRIVATE_PATTERN_CONFIG_SCHEMA_VERSION,
+            pattern: pattern.into(),
+            compile_limits: PrivateCompileLimits::default(),
+            iteration_limits: IterationVmLimits::default(),
+            replacement_limits: ReplacementLimits::default(),
+        }
+    }
+
+    /// Serialize the explicit configuration document deterministically.
+    ///
+    /// This is a structural serializer, not an admission step. Schema, limit,
+    /// and pattern validation happens atomically in [`Self::load`] or
+    /// [`Self::load_json`].
+    pub fn to_json(&self) -> Result<String, PrivatePatternConfigError> {
+        self.to_json_with_document_limit(DEFAULT_MAX_PRIVATE_PATTERN_CONFIG_BYTES)
+    }
+
+    /// Serialize without returning a document above the caller's ceiling.
+    pub fn to_json_with_document_limit(
+        &self,
+        max_document_bytes: usize,
+    ) -> Result<String, PrivatePatternConfigError> {
+        let document = serde_json::to_string(self).map_err(PrivatePatternConfigError::encode)?;
+        if document.len() > max_document_bytes {
+            return Err(PrivatePatternConfigError::new(
+                PrivatePatternConfigErrorKind::DocumentLimit,
+            )
+            .with_actual_limit(document.len(), max_document_bytes));
+        }
+        Ok(document)
+    }
+
+    /// Decode, validate, and compile a configuration as one atomic load.
+    ///
+    /// No configuration or partially compiled program escapes on error.
+    pub fn load_json(document: &str) -> Result<LoadedPrivatePattern, PrivatePatternConfigError> {
+        Self::load_json_with_document_limit(document, DEFAULT_MAX_PRIVATE_PATTERN_CONFIG_BYTES)
+    }
+
+    /// Decode and compile with an explicit pre-decode document ceiling.
+    pub fn load_json_with_document_limit(
+        document: &str,
+        max_document_bytes: usize,
+    ) -> Result<LoadedPrivatePattern, PrivatePatternConfigError> {
+        if document.len() > max_document_bytes {
+            return Err(PrivatePatternConfigError::new(
+                PrivatePatternConfigErrorKind::DocumentLimit,
+            )
+            .with_actual_limit(document.len(), max_document_bytes));
+        }
+        let config = serde_json::from_str(document).map_err(PrivatePatternConfigError::decode)?;
+        Self::load(config)
+    }
+
+    /// Validate and compile an already decoded configuration atomically.
+    pub fn load(config: Self) -> Result<LoadedPrivatePattern, PrivatePatternConfigError> {
+        if config.schema_version != PRIVATE_PATTERN_CONFIG_SCHEMA_VERSION {
+            return Err(PrivatePatternConfigError::unsupported_schema(
+                config.schema_version,
+            ));
+        }
+        if let Some((field, actual, limit)) = invalid_iteration_limit(config.iteration_limits) {
+            return Err(PrivatePatternConfigError::new(
+                PrivatePatternConfigErrorKind::InvalidIterationLimits,
+            )
+            .with_field(field)
+            .with_actual_limit(actual, limit));
+        }
+        let compiled = PrivateCompiledPattern::compile(&config.pattern, config.compile_limits)
+            .map_err(PrivatePatternConfigError::compile)?;
+        Ok(LoadedPrivatePattern {
+            compiled,
+            iteration_limits: config.iteration_limits,
+            replacement_limits: config.replacement_limits,
+        })
+    }
+}
+
+impl fmt::Debug for PrivatePatternConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PrivatePatternConfig")
+            .field("schema_version", &self.schema_version)
+            .field("pattern_bytes", &self.pattern.len())
+            .field("compile_limits", &self.compile_limits)
+            .field("iteration_limits", &self.iteration_limits)
+            .field("replacement_limits", &self.replacement_limits)
+            .finish()
+    }
+}
+
+/// Stable category for a private pattern-configuration failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrivatePatternConfigErrorKind {
+    DocumentLimit,
+    Decode,
+    Encode,
+    UnsupportedSchema,
+    InvalidIterationLimits,
+    Compile,
+}
+
+impl PrivatePatternConfigErrorKind {
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::DocumentLimit => "RGX-CONFIG-E001",
+            Self::Decode => "RGX-CONFIG-E002",
+            Self::Encode => "RGX-CONFIG-E003",
+            Self::UnsupportedSchema => "RGX-CONFIG-E004",
+            Self::InvalidIterationLimits => "RGX-CONFIG-E005",
+            Self::Compile => "RGX-CONFIG-E006",
+        }
+    }
+}
+
+/// Source-secret-safe private configuration diagnostic.
+///
+/// JSON text, pattern text, and user-provided string values are discarded.
+/// Decode/encode failures retain only a normalized location; limit failures
+/// retain a static field identifier and numeric bounds; compile failures retain
+/// the already secret-safe private compiler diagnostic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PrivatePatternConfigError {
+    pub kind: PrivatePatternConfigErrorKind,
+    pub field: Option<&'static str>,
+    pub line: Option<usize>,
+    pub column: Option<usize>,
+    pub schema_version: Option<u16>,
+    pub actual: Option<u64>,
+    pub limit: Option<u64>,
+    pub compile_error: Option<PrivateCompileError>,
+}
+
+impl PrivatePatternConfigError {
+    const fn new(kind: PrivatePatternConfigErrorKind) -> Self {
+        Self {
+            kind,
+            field: None,
+            line: None,
+            column: None,
+            schema_version: None,
+            actual: None,
+            limit: None,
+            compile_error: None,
+        }
+    }
+
+    fn decode(error: serde_json::Error) -> Self {
+        Self {
+            kind: PrivatePatternConfigErrorKind::Decode,
+            field: None,
+            line: Some(error.line()),
+            column: Some(error.column()),
+            schema_version: None,
+            actual: None,
+            limit: None,
+            compile_error: None,
+        }
+    }
+
+    fn encode(error: serde_json::Error) -> Self {
+        Self {
+            kind: PrivatePatternConfigErrorKind::Encode,
+            field: None,
+            line: Some(error.line()),
+            column: Some(error.column()),
+            schema_version: None,
+            actual: None,
+            limit: None,
+            compile_error: None,
+        }
+    }
+
+    const fn unsupported_schema(schema_version: u16) -> Self {
+        Self {
+            kind: PrivatePatternConfigErrorKind::UnsupportedSchema,
+            field: None,
+            line: None,
+            column: None,
+            schema_version: Some(schema_version),
+            actual: None,
+            limit: None,
+            compile_error: None,
+        }
+    }
+
+    const fn compile(compile_error: PrivateCompileError) -> Self {
+        Self {
+            kind: PrivatePatternConfigErrorKind::Compile,
+            field: None,
+            line: None,
+            column: None,
+            schema_version: None,
+            actual: None,
+            limit: None,
+            compile_error: Some(compile_error),
+        }
+    }
+
+    fn with_actual_limit<A, L>(mut self, actual: A, limit: L) -> Self
+    where
+        A: TryInto<u64>,
+        L: TryInto<u64>,
+    {
+        self.actual = actual.try_into().ok();
+        self.limit = limit.try_into().ok();
+        self
+    }
+
+    const fn with_field(mut self, field: &'static str) -> Self {
+        self.field = Some(field);
+        self
+    }
+
+    pub const fn code(self) -> &'static str {
+        self.kind.code()
+    }
+}
+
+impl fmt::Display for PrivatePatternConfigError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "[{}] private regex configuration failed",
+            self.kind.code()
+        )?;
+        if let Some(field) = self.field {
+            write!(formatter, " field={field}")?;
+        }
+        if let (Some(line), Some(column)) = (self.line, self.column) {
+            write!(formatter, " line={line} column={column}")?;
+        }
+        if let Some(schema_version) = self.schema_version {
+            write!(formatter, " schema_version={schema_version}")?;
+        }
+        if let (Some(actual), Some(limit)) = (self.actual, self.limit) {
+            write!(formatter, " actual={actual} limit={limit}")?;
+        }
+        if let Some(compile_error) = self.compile_error {
+            write!(
+                formatter,
+                " compile_code={} compile_stage={}",
+                compile_error.code(),
+                compile_error.stage().code()
+            )?;
+        }
+        Ok(())
+    }
+}
+
+fn invalid_iteration_limit(limits: IterationVmLimits) -> Option<(&'static str, u64, u64)> {
+    let vm = limits.capture.vm;
+    if vm.max_input_bytes == 0 {
+        return Some(("iteration.capture.vm.max_input_bytes", 0, 1));
+    }
+    if vm.max_threads_per_offset == 0 {
+        return Some(("iteration.capture.vm.max_threads_per_offset", 0, 1));
+    }
+    if vm.max_memory_bytes < ACCOUNTED_VM_BASE_BYTES {
+        return Some((
+            "iteration.capture.vm.max_memory_bytes",
+            vm.max_memory_bytes,
+            ACCOUNTED_VM_BASE_BYTES,
+        ));
+    }
+    if vm.max_work_units == 0 {
+        return Some(("iteration.capture.vm.max_work_units", 0, 1));
+    }
+    if vm.max_trace_events == 0 {
+        return Some(("iteration.capture.vm.max_trace_events", 0, 1));
+    }
+    if limits.capture.max_capture_history_nodes == 0 {
+        return Some(("iteration.capture.max_capture_history_nodes", 0, 1));
+    }
+    if limits.max_matches == 0 {
+        return Some(("iteration.max_matches", 0, 1));
+    }
+    if limits.max_trace_events == 0 {
+        return Some(("iteration.max_trace_events", 0, 1));
+    }
+    None
+}
+
+impl std::error::Error for PrivatePatternConfigError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.compile_error
+            .as_ref()
+            .map(|error| error as &(dyn std::error::Error + 'static))
     }
 }
 
@@ -563,6 +883,71 @@ impl fmt::Debug for PrivateCompiledPattern {
                 &self.accounted_capture_metadata_bytes,
             )
             .finish_non_exhaustive()
+    }
+}
+
+/// Atomically validated private execution limits and compiled program.
+///
+/// Loading consumes the explicit configuration, copies only its numeric
+/// execution limits, and drops the source pattern after compilation. The
+/// immutable runtime value therefore cannot return or render the pattern.
+pub struct LoadedPrivatePattern {
+    compiled: PrivateCompiledPattern,
+    iteration_limits: IterationVmLimits,
+    replacement_limits: ReplacementLimits,
+}
+
+impl LoadedPrivatePattern {
+    /// Match with the configured aggregate capture/VM limits.
+    pub fn is_match(&self, haystack: &str) -> Result<bool, VmError> {
+        self.compiled
+            .is_match(haystack, self.iteration_limits.capture)
+    }
+
+    /// Find one leftmost-first match with configured limits.
+    pub fn find(&self, haystack: &str) -> Result<Option<CaptureSpan>, VmError> {
+        self.compiled.find(haystack, self.iteration_limits.capture)
+    }
+
+    /// Find one match and its participating captures with configured limits.
+    pub fn captures(&self, haystack: &str) -> Result<Option<VmMatch>, VmError> {
+        self.compiled
+            .captures(haystack, self.iteration_limits.capture)
+    }
+
+    /// Iterate deterministically with the configured aggregate limits.
+    pub fn find_iter(
+        &self,
+        haystack: &str,
+        policy: IterationPolicy,
+    ) -> Result<VmIterationOutcome, VmError> {
+        self.compiled
+            .find_iter(haystack, policy, self.iteration_limits)
+    }
+
+    /// Replace every non-overlapping match with the configured ceilings.
+    pub fn replace_all(
+        &self,
+        haystack: &str,
+        template: &str,
+    ) -> Result<ReplacementOutcome, ReplacementOperationError> {
+        self.compiled.replace_all(
+            haystack,
+            template,
+            self.iteration_limits,
+            self.replacement_limits,
+        )
+    }
+}
+
+impl fmt::Debug for LoadedPrivatePattern {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("LoadedPrivatePattern")
+            .field("compiled", &self.compiled)
+            .field("iteration_limits", &self.iteration_limits)
+            .field("replacement_limits", &self.replacement_limits)
+            .finish()
     }
 }
 
@@ -3602,6 +3987,277 @@ mod tests {
                 .expect("candidate replacement");
             prop_assert_eq!(candidate.output, incumbent);
         }
+    }
+
+    #[test]
+    fn private_pattern_config_round_trips_and_loads_every_candidate_surface() {
+        let pattern = "(?P<private_roundtrip_name>a)(b)?";
+        let mut config = PrivatePatternConfig::new(pattern);
+        config.compile_limits.lexer.max_tokens -= 1;
+        config.compile_limits.parser.max_nesting -= 1;
+        config.compile_limits.semantic.max_semantic_atoms -= 1;
+        config.compile_limits.fold_boundary.max_fold_atoms -= 1;
+        config.compile_limits.ir.max_states -= 1;
+        config.iteration_limits.capture.vm.max_input_bytes -= 1;
+        config.iteration_limits.max_matches -= 1;
+        config.replacement_limits.max_output_bytes -= 1;
+        let encoded = config.to_json().expect("serialize private pattern recipe");
+        assert!(encoded.contains(pattern));
+        assert_eq!(
+            encoded,
+            config.to_json().expect("serialization is deterministic")
+        );
+        assert!(
+            DEFAULT_MAX_PRIVATE_PATTERN_CONFIG_BYTES
+                >= config
+                    .compile_limits
+                    .lexer
+                    .max_pattern_bytes
+                    .saturating_mul(6)
+                    .saturating_add(4 * 1024),
+            "default document ceiling covers worst-case JSON escaping"
+        );
+        let encode_limit = config
+            .to_json_with_document_limit(encoded.len() - 1)
+            .expect_err("serializer does not emit above its document ceiling");
+        assert_eq!(
+            encode_limit.kind,
+            PrivatePatternConfigErrorKind::DocumentLimit
+        );
+        assert_eq!(
+            (encode_limit.actual, encode_limit.limit),
+            (
+                u64::try_from(encoded.len()).ok(),
+                u64::try_from(encoded.len() - 1).ok()
+            )
+        );
+
+        let decoded: PrivatePatternConfig =
+            serde_json::from_str(&encoded).expect("decode explicit config document");
+        assert_eq!(decoded, config);
+        assert_eq!(
+            decoded.to_json().expect("decoded recipe serializes"),
+            encoded
+        );
+        let loaded = PrivatePatternConfig::load_json(&encoded).expect("compile-on-load recipe");
+        PrivatePatternConfig::load_json_with_document_limit(&encoded, encoded.len())
+            .expect("exact document ceiling passes");
+        let document_limit =
+            PrivatePatternConfig::load_json_with_document_limit(&encoded, encoded.len() - 1)
+                .expect_err("one-below document ceiling fails before decoding");
+        assert_eq!(
+            document_limit.kind,
+            PrivatePatternConfigErrorKind::DocumentLimit
+        );
+        assert_eq!(
+            (document_limit.actual, document_limit.limit),
+            (
+                u64::try_from(encoded.len()).ok(),
+                u64::try_from(encoded.len() - 1).ok()
+            )
+        );
+        assert!(loaded.is_match("zab").expect("configured match"));
+        assert_eq!(
+            loaded.find("zab").expect("configured find"),
+            Some(CaptureSpan { start: 1, end: 3 })
+        );
+        assert_eq!(
+            loaded
+                .captures("zab")
+                .expect("configured captures")
+                .expect("selected match")
+                .captures,
+            vec![
+                Some(CaptureSpan { start: 1, end: 2 }),
+                Some(CaptureSpan { start: 2, end: 3 }),
+            ]
+        );
+        assert_eq!(
+            loaded
+                .find_iter("ab a", IterationPolicy::NonOverlapping)
+                .expect("configured iteration")
+                .matches
+                .len(),
+            2
+        );
+        assert_eq!(
+            loaded
+                .replace_all("ab a", "<$private_roundtrip_name>")
+                .expect("configured replacement")
+                .output,
+            "<a> <a>"
+        );
+
+        let config_debug = format!("{config:?}");
+        assert!(config_debug.contains("pattern_bytes"));
+        let loaded_debug = format!("{loaded:?}");
+        for rendered in [config_debug, loaded_debug] {
+            assert!(!rendered.contains(pattern));
+            assert!(!rendered.contains("private_roundtrip_name"));
+        }
+    }
+
+    #[test]
+    fn private_pattern_config_rejects_invalid_documents_atomically_and_secret_safely() {
+        let malformed_document =
+            r#"{"schema_version":1,"pattern":"private_json_canary","compile_limits":}"#;
+        let malformed = PrivatePatternConfig::load_json(malformed_document)
+            .expect_err("malformed JSON must not yield a partial recipe");
+        assert_eq!(malformed.kind, PrivatePatternConfigErrorKind::Decode);
+
+        let mut unknown_value =
+            serde_json::to_value(PrivatePatternConfig::new("a")).expect("serialize config value");
+        unknown_value
+            .as_object_mut()
+            .expect("config object")
+            .insert("private_unknown_canary".to_owned(), serde_json::json!(true));
+        let unknown_document = serde_json::to_string(&unknown_value).expect("unknown field JSON");
+        let unknown = PrivatePatternConfig::load_json(&unknown_document)
+            .expect_err("unknown fields must fail closed");
+        assert_eq!(unknown.kind, PrivatePatternConfigErrorKind::Decode);
+
+        let mut nested_unknown_value =
+            serde_json::to_value(PrivatePatternConfig::new("a")).expect("serialize config value");
+        nested_unknown_value["iteration_limits"]["capture"]["vm"]
+            .as_object_mut()
+            .expect("nested VM limit object")
+            .insert(
+                "private_nested_unknown_canary".to_owned(),
+                serde_json::json!(true),
+            );
+        let nested_unknown_document =
+            serde_json::to_string(&nested_unknown_value).expect("nested unknown field JSON");
+        let nested_unknown = PrivatePatternConfig::load_json(&nested_unknown_document)
+            .expect_err("nested unknown fields must fail closed");
+        assert_eq!(nested_unknown.kind, PrivatePatternConfigErrorKind::Decode);
+
+        let mut missing_value =
+            serde_json::to_value(PrivatePatternConfig::new("private_missing_canary"))
+                .expect("serialize config value");
+        missing_value
+            .as_object_mut()
+            .expect("config object")
+            .remove("compile_limits");
+        let missing_document = serde_json::to_string(&missing_value).expect("missing field JSON");
+        let missing = PrivatePatternConfig::load_json(&missing_document)
+            .expect_err("missing fields must fail closed");
+        assert_eq!(missing.kind, PrivatePatternConfigErrorKind::Decode);
+
+        let mut unsupported = PrivatePatternConfig::new("a");
+        unsupported.schema_version = PRIVATE_PATTERN_CONFIG_SCHEMA_VERSION + 1;
+        let unsupported = PrivatePatternConfig::load(unsupported)
+            .expect_err("unsupported schema must not compile");
+        assert_eq!(
+            unsupported.kind,
+            PrivatePatternConfigErrorKind::UnsupportedSchema
+        );
+
+        let mut invalid_limits = PrivatePatternConfig::new("a");
+        invalid_limits.iteration_limits.max_matches = 0;
+        let invalid_limits = PrivatePatternConfig::load(invalid_limits)
+            .expect_err("invalid execution limits must not compile");
+        assert_eq!(
+            invalid_limits.kind,
+            PrivatePatternConfigErrorKind::InvalidIterationLimits
+        );
+        assert_eq!(invalid_limits.field, Some("iteration.max_matches"));
+        assert_eq!(
+            (invalid_limits.actual, invalid_limits.limit),
+            (Some(0), Some(1))
+        );
+
+        let invalid_pattern = "private_compile_canary\\";
+        let compile = PrivatePatternConfig::load(PrivatePatternConfig::new(invalid_pattern))
+            .expect_err("invalid pattern must not yield a partial compiled value");
+        assert_eq!(compile.kind, PrivatePatternConfigErrorKind::Compile);
+
+        let prior = PrivatePatternConfig::load(PrivatePatternConfig::new("a+"))
+            .expect("load prior pattern");
+        let _ = PrivatePatternConfig::load(PrivatePatternConfig::new("("))
+            .expect_err("later invalid load fails");
+        assert!(prior.is_match("zaaa").expect("prior load remains reusable"));
+
+        let mut zero_replacement = PrivatePatternConfig::new("z");
+        zero_replacement.replacement_limits = ReplacementLimits {
+            max_template_bytes: 0,
+            max_tokens: 0,
+            max_output_bytes: 0,
+            max_work_units: 0,
+        };
+        let zero_replacement = PrivatePatternConfig::load(zero_replacement)
+            .expect("zero replacement ceilings are valid when the operation uses zero");
+        assert_eq!(
+            zero_replacement
+                .replace_all("", "")
+                .expect("zero-use replacement")
+                .output,
+            ""
+        );
+
+        for (error, canary) in [
+            (malformed, "private_json_canary"),
+            (unknown, "private_unknown_canary"),
+            (nested_unknown, "private_nested_unknown_canary"),
+            (missing, "private_missing_canary"),
+            (compile, "private_compile_canary"),
+        ] {
+            for rendered in [error.to_string(), format!("{error:?}")] {
+                assert!(!rendered.contains(canary));
+            }
+        }
+    }
+
+    #[test]
+    fn loaded_private_pattern_is_reusable_across_threads() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<LoadedPrivatePattern>();
+
+        let loaded = std::sync::Arc::new(
+            PrivatePatternConfig::load(PrivatePatternConfig::new("(?P<value>a+)"))
+                .expect("load shared pattern"),
+        );
+        let start = std::sync::Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+        std::thread::scope(|scope| {
+            let mut joins = Vec::new();
+            for _ in 0..8 {
+                let loaded = std::sync::Arc::clone(&loaded);
+                let worker_start = std::sync::Arc::clone(&start);
+                let worker = std::thread::Builder::new().spawn_scoped(scope, move || {
+                    let (lock, ready) = &*worker_start;
+                    let started = lock.lock().expect("shared start gate");
+                    drop(
+                        ready
+                            .wait_while(started, |started| !*started)
+                            .expect("shared start gate wait"),
+                    );
+                    for _ in 0..32 {
+                        assert!(loaded.is_match("zaaa").expect("shared match"));
+                        assert_eq!(
+                            loaded
+                                .replace_all("zaaa", "<$value>")
+                                .expect("shared replacement")
+                                .output,
+                            "z<aaa>"
+                        );
+                    }
+                });
+                match worker {
+                    Ok(join) => joins.push(join),
+                    Err(error) => {
+                        let (lock, ready) = &*start;
+                        *lock.lock().expect("release start gate after spawn failure") = true;
+                        ready.notify_all();
+                        panic!("failed to spawn shared config worker: {error}");
+                    }
+                }
+            }
+            let (lock, ready) = &*start;
+            *lock.lock().expect("release shared start gate") = true;
+            ready.notify_all();
+            for join in joins {
+                join.join().expect("shared config worker");
+            }
+        });
     }
 
     #[test]

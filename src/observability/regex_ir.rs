@@ -36,7 +36,8 @@ pub const ACCOUNTED_CLASS_BYTES: u64 = 32;
 pub const ACCOUNTED_CLASS_RANGE_BYTES: u64 = 8;
 pub const ACCOUNTED_CAPTURE_SLOT_BYTES: u64 = 8;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CompileLimits {
     pub max_states: usize,
     pub max_transitions: usize,

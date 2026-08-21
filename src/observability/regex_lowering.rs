@@ -157,7 +157,8 @@ impl std::error::Error for LowerError {}
 /// ceiling remains owned by its original stage. This value merely gives the
 /// private facade one explicit, reviewable input instead of relying on hidden
 /// defaults or dropping a stage-specific budget.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PrivateCompileLimits {
     pub lexer: LexerLimits,
     pub parser: ParserLimits,
