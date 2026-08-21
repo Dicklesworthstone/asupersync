@@ -204,7 +204,6 @@ cli = [
     "trace-compression",
     "dep:serde_yaml",
     "dep:chrono",
-    "dep:env_logger",
     "config-file",
     "tracing-integration",
 ]
@@ -455,7 +454,6 @@ toml = { version = "1.0", optional = true }
 clap = { version = "4.4", features = ["derive"], optional = true }
 time = { version = ">=0.3", features = ["formatting"], optional = true }
 chrono = { version = "0.4", features = ["serde"], optional = true }
-env_logger = { version = "0.11", optional = true }
 # YAML parsing for FrankenLab scenario files (CLI feature)
 serde_yaml = { version = "0.9", optional = true }
 # SQLite async wrapper - bundled by default for portability; "hooks" enables
@@ -892,6 +890,11 @@ path = "tests/atp/autotune_regression/safety.rs"
 [[test]]
 name = "atp_per_module_logging_redaction_contract"
 path = "tests/atp/per_module/logging_redaction_contract.rs"
+
+[[test]]
+name = "offline_tuner_env_logger_parity"
+path = "tests/offline_tuner_env_logger_parity.rs"
+required-features = ["cli", "simd-intrinsics"]
 
 [[example]]
 name = "spork_minimal_supervised_app"

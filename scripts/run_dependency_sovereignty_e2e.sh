@@ -85,6 +85,8 @@ Cargo-backed scenarios require:
     --scenario dep-sovereignty-asupersync_0h6myr_4_5_04aaef97c5dd
   RCH_REQUIRE_REMOTE=1 bash scripts/run_dependency_sovereignty_e2e.sh \
     --scenario dep-sovereignty-asupersync_dep_p4_nkeys_poc60v_1_3_5e81559b363d
+  RCH_REQUIRE_REMOTE=1 bash scripts/run_dependency_sovereignty_e2e.sh \
+    --scenario offline-tuner-logging-parity
 USAGE
 }
 
@@ -112,12 +114,13 @@ scenario_ids() {
         lz4_cross_version_artifact \
         lz4_malformed_limits \
         dep-sovereignty-asupersync_0h6myr_4_5_04aaef97c5dd \
-        dep-sovereignty-asupersync_dep_p4_nkeys_poc60v_1_3_5e81559b363d
+        dep-sovereignty-asupersync_dep_p4_nkeys_poc60v_1_3_5e81559b363d \
+        offline-tuner-logging-parity
 }
 
 scenario_is_known() {
     case "$1" in
-        catalog | runner-contract | registry-contract | baseline-contract | cutover-policy-contract | verification-matrix-contract | failure-injection-contract | real-service-fixture-contract | feature-platform-consumer-contract | aggregate-signoff-contract | sqlite-parity-aggregate | api-adr-registry-contract | api-adr-phase3-signoff | atp_version_artifacts | dep-sovereignty-asupersync_d24mms_11_d22341de8339 | dep-sovereignty-asupersync_d24mms_4_b6e90e93b1e8 | dep-sovereignty-asupersync_5z2scg_3_5_66765b43947e | dep-sovereignty-asupersync_5z2scg_3_7_94b694387988 | lz4_trace_replay | lz4_cross_version_artifact | lz4_malformed_limits | dep-sovereignty-asupersync_0h6myr_4_5_04aaef97c5dd | dep-sovereignty-asupersync_dep_p4_nkeys_poc60v_1_3_5e81559b363d)
+        catalog | runner-contract | registry-contract | baseline-contract | cutover-policy-contract | verification-matrix-contract | failure-injection-contract | real-service-fixture-contract | feature-platform-consumer-contract | aggregate-signoff-contract | sqlite-parity-aggregate | api-adr-registry-contract | api-adr-phase3-signoff | atp_version_artifacts | dep-sovereignty-asupersync_d24mms_11_d22341de8339 | dep-sovereignty-asupersync_d24mms_4_b6e90e93b1e8 | dep-sovereignty-asupersync_5z2scg_3_5_66765b43947e | dep-sovereignty-asupersync_5z2scg_3_7_94b694387988 | lz4_trace_replay | lz4_cross_version_artifact | lz4_malformed_limits | dep-sovereignty-asupersync_0h6myr_4_5_04aaef97c5dd | dep-sovereignty-asupersync_dep_p4_nkeys_poc60v_1_3_5e81559b363d | offline-tuner-logging-parity)
             return 0
             ;;
         *)
@@ -128,7 +131,7 @@ scenario_is_known() {
 
 scenario_is_cargo() {
     case "$1" in
-        registry-contract | baseline-contract | cutover-policy-contract | verification-matrix-contract | failure-injection-contract | real-service-fixture-contract | feature-platform-consumer-contract | aggregate-signoff-contract | sqlite-parity-aggregate | api-adr-registry-contract | api-adr-phase3-signoff | atp_version_artifacts | dep-sovereignty-asupersync_d24mms_11_d22341de8339 | dep-sovereignty-asupersync_d24mms_4_b6e90e93b1e8 | dep-sovereignty-asupersync_5z2scg_3_5_66765b43947e | dep-sovereignty-asupersync_5z2scg_3_7_94b694387988 | lz4_trace_replay | lz4_cross_version_artifact | lz4_malformed_limits | dep-sovereignty-asupersync_0h6myr_4_5_04aaef97c5dd | dep-sovereignty-asupersync_dep_p4_nkeys_poc60v_1_3_5e81559b363d)
+        registry-contract | baseline-contract | cutover-policy-contract | verification-matrix-contract | failure-injection-contract | real-service-fixture-contract | feature-platform-consumer-contract | aggregate-signoff-contract | sqlite-parity-aggregate | api-adr-registry-contract | api-adr-phase3-signoff | atp_version_artifacts | dep-sovereignty-asupersync_d24mms_11_d22341de8339 | dep-sovereignty-asupersync_d24mms_4_b6e90e93b1e8 | dep-sovereignty-asupersync_5z2scg_3_5_66765b43947e | dep-sovereignty-asupersync_5z2scg_3_7_94b694387988 | lz4_trace_replay | lz4_cross_version_artifact | lz4_malformed_limits | dep-sovereignty-asupersync_0h6myr_4_5_04aaef97c5dd | dep-sovereignty-asupersync_dep_p4_nkeys_poc60v_1_3_5e81559b363d | offline-tuner-logging-parity)
             return 0
             ;;
         *)
@@ -140,7 +143,7 @@ scenario_is_cargo() {
 scenario_surface() {
     case "$1" in
         catalog) printf 'audit' ;;
-        sqlite-parity-aggregate | atp_version_artifacts | dep-sovereignty-asupersync_d24mms_11_d22341de8339 | dep-sovereignty-asupersync_d24mms_4_b6e90e93b1e8 | dep-sovereignty-asupersync_5z2scg_3_5_66765b43947e | dep-sovereignty-asupersync_5z2scg_3_7_94b694387988 | lz4_trace_replay | lz4_cross_version_artifact | lz4_malformed_limits | dep-sovereignty-asupersync_0h6myr_4_5_04aaef97c5dd | dep-sovereignty-asupersync_dep_p4_nkeys_poc60v_1_3_5e81559b363d) printf 'e2e' ;;
+        sqlite-parity-aggregate | atp_version_artifacts | dep-sovereignty-asupersync_d24mms_11_d22341de8339 | dep-sovereignty-asupersync_d24mms_4_b6e90e93b1e8 | dep-sovereignty-asupersync_5z2scg_3_5_66765b43947e | dep-sovereignty-asupersync_5z2scg_3_7_94b694387988 | lz4_trace_replay | lz4_cross_version_artifact | lz4_malformed_limits | dep-sovereignty-asupersync_0h6myr_4_5_04aaef97c5dd | dep-sovereignty-asupersync_dep_p4_nkeys_poc60v_1_3_5e81559b363d | offline-tuner-logging-parity) printf 'e2e' ;;
         runner-contract | failure-injection-contract | real-service-fixture-contract | feature-platform-consumer-contract | aggregate-signoff-contract | api-adr-registry-contract | api-adr-phase3-signoff) printf 'contract' ;;
         *) printf 'integration' ;;
     esac
@@ -169,6 +172,7 @@ scenario_fixture() {
         lz4_malformed_limits) printf 'tests/lz4_trace_integration_e2e.rs' ;;
         dep-sovereignty-asupersync_0h6myr_4_5_04aaef97c5dd) printf 'artifacts/lz4_final_signoff_v1.json' ;;
         dep-sovereignty-asupersync_dep_p4_nkeys_poc60v_1_3_5e81559b363d) printf 'tests/fixtures/dependency-capability-baseline-consumer' ;;
+        offline-tuner-logging-parity) printf 'tests/offline_tuner_env_logger_parity.rs' ;;
     esac
 }
 
@@ -185,6 +189,7 @@ scenario_profile() {
         lz4_trace_replay | lz4_cross_version_artifact | lz4_malformed_limits) printf 'lz4-owned-shadow' ;;
         dep-sovereignty-asupersync_0h6myr_4_5_04aaef97c5dd) printf 'lz4-terminal-keep' ;;
         dep-sovereignty-asupersync_dep_p4_nkeys_poc60v_1_3_5e81559b363d) printf 'nkey-owned-types-default' ;;
+        offline-tuner-logging-parity) printf 'offline-tuner-cli-simd' ;;
         *) printf 'nightly-default' ;;
     esac
 }
@@ -233,6 +238,9 @@ scenario_capabilities() {
         dep-sovereignty-asupersync_dep_p4_nkeys_poc60v_1_3_5e81559b363d)
             printf '["CAP-NKEY-AUTH","CAP-DOWNSTREAM-CONSUMERS","CAP-PUBLIC-API-TOPOLOGY"]'
             ;;
+        offline-tuner-logging-parity)
+            printf '["CAP-CLI-OFFLINE-TUNER","CAP-DIAGNOSTICS","CAP-REAL-SERVICE-E2E"]'
+            ;;
     esac
 }
 
@@ -259,6 +267,9 @@ scenario_features() {
         dep-sovereignty-asupersync_dep_p4_nkeys_poc60v_1_3_5e81559b363d)
             printf '["default"]'
             ;;
+        offline-tuner-logging-parity)
+            printf '["cli","simd-intrinsics"]'
+            ;;
         *)
             printf '[]'
             ;;
@@ -281,6 +292,7 @@ scenario_evidence_owner() {
         lz4_trace_replay | lz4_cross_version_artifact | lz4_malformed_limits) printf 'asupersync-0h6myr.4.4' ;;
         dep-sovereignty-asupersync_0h6myr_4_5_04aaef97c5dd) printf 'asupersync-0h6myr.4.5' ;;
         dep-sovereignty-asupersync_dep_p4_nkeys_poc60v_1_3_5e81559b363d) printf 'asupersync-dep-p4-nkeys-poc60v.1.3' ;;
+        offline-tuner-logging-parity) printf 'asupersync-d24mms.3' ;;
         *) printf '%s' "$EVIDENCE_OWNER" ;;
     esac
 }
@@ -303,6 +315,7 @@ scenario_step_id() {
         lz4_malformed_limits) printf 'lz4-a4-malformed-limits' ;;
         dep-sovereignty-asupersync_0h6myr_4_5_04aaef97c5dd) printf 'lz4-a5-terminal-keep-signoff' ;;
         dep-sovereignty-asupersync_dep_p4_nkeys_poc60v_1_3_5e81559b363d) printf 'nkey-n3-owned-type-redaction' ;;
+        offline-tuner-logging-parity) printf 'd24mms-3-offline-tuner-logging-parity' ;;
         *) printf 'ver-a2-%s' "$1" ;;
     esac
 }
@@ -369,6 +382,9 @@ scenario_command_display() {
             ;;
         dep-sovereignty-asupersync_dep_p4_nkeys_poc60v_1_3_5e81559b363d)
             printf '%s' "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --no-overlay -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=<isolated> cargo test -p asupersync --locked --lib ver_a1_asupersync_dep_p4_nkeys_poc60v_1_3_5e81559b363d -- --nocapture --test-threads=1 && RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --no-overlay -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=<isolated>_consumer cargo test --manifest-path tests/fixtures/dependency-capability-baseline-consumer/Cargo.toml --locked ver_a1_asupersync_dep_p4_nkeys_poc60v_1_3_5e81559b363d__downstream_consumer -- --nocapture --test-threads=1"
+            ;;
+        offline-tuner-logging-parity)
+            printf '%s' "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --overlay-path Cargo.toml --overlay-path Cargo.lock --overlay-path src/bin/offline_tuner.rs --overlay-path tests/offline_tuner_env_logger_parity.rs -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=<isolated> cargo test -p asupersync --locked --features cli,simd-intrinsics --bin offline_tuner --test offline_tuner_env_logger_parity -- --nocapture --test-threads=1"
             ;;
     esac
 }
@@ -957,6 +973,18 @@ execute_scenario() {
                     RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR="${target_dir}_consumer" \
                     cargo test --manifest-path tests/fixtures/dependency-capability-baseline-consumer/Cargo.toml \
                     --locked ver_a1_asupersync_dep_p4_nkeys_poc60v_1_3_5e81559b363d__downstream_consumer \
+                    -- --nocapture --test-threads=1
+            ;;
+        offline-tuner-logging-parity)
+            env RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay \
+                --overlay-path Cargo.toml \
+                --overlay-path Cargo.lock \
+                --overlay-path src/bin/offline_tuner.rs \
+                --overlay-path tests/offline_tuner_env_logger_parity.rs -- \
+                env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 \
+                RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR="$target_dir" \
+                cargo test -p asupersync --locked --features cli,simd-intrinsics \
+                    --bin offline_tuner --test offline_tuner_env_logger_parity \
                     -- --nocapture --test-threads=1
             ;;
     esac

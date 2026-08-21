@@ -257,13 +257,6 @@ impl From<ArchitectureArg> for Gf256ArchitectureClass {
 fn main() {
     let cli = Cli::parse();
 
-    // Initialize logging based on verbosity
-    if cli.verbose {
-        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("debug")).init();
-    } else {
-        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
-    }
-
     // Create output directory
     if let Err(e) = fs::create_dir_all(&cli.output_dir) {
         eprintln!("Error: Failed to create output directory: {}", e);
@@ -647,4 +640,29 @@ fn emit_scheduler_recommendation(
     );
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn verbosity_defaults_to_concise_output() {
+        let cli = Cli::try_parse_from(["offline_tuner", "candidates", "--arch", "scalar"])
+            .expect("baseline candidates command should parse");
+
+        assert!(!cli.verbose);
+        assert_eq!(cli.output_dir, PathBuf::from("tuning_results"));
+        assert!(matches!(cli.command, Commands::Candidates { .. }));
+    }
+
+    #[test]
+    fn global_verbose_flag_remains_available_after_the_subcommand() {
+        let cli =
+            Cli::try_parse_from(["offline_tuner", "validate", "--arch", "scalar", "--verbose"])
+                .expect("global verbose flag should parse after a subcommand");
+
+        assert!(cli.verbose);
+        assert!(matches!(cli.command, Commands::Validate { .. }));
+    }
 }
