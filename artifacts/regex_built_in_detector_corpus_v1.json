@@ -65,8 +65,8 @@
     },
     {
       "path": "src/observability/otel.rs",
-      "sha256": "590cb3e34654e71708ca8b623007aaaa4b35b20d602c1455c16890ef7352a72c",
-      "line_count": 14523,
+      "sha256": "b036610d07e07b7a7e9ed3e23328d60104f2429cbe464827213a8bff5f7e0db8",
+      "line_count": 14533,
       "role": "live custom-first redaction pipeline, built-in patterns, order, tokens and Luhn join"
     },
     {

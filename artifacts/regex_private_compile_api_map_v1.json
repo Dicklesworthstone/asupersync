@@ -1902,7 +1902,7 @@
     ],
     "producer_artifact_pins": [
       {"path":"artifacts/regex_privacy_capability_inventory_v1.json","sha256":"2f0264e45f9362d4b299c235f82b415d553b8f6fd40a05aef25f84c948f75a5e","line_count":1015,"producer_id":"RGX-PRODUCER-INVENTORY"},
-      {"path":"artifacts/regex_built_in_detector_corpus_v1.json","sha256":"3939fe3d8e50cb0784ceabd393dbd7e414abe85b8c62e3673f3fad1062e3725f","line_count":1266,"producer_id":"RGX-PRODUCER-HAND"},
+      {"path":"artifacts/regex_built_in_detector_corpus_v1.json","sha256":"e5ffd9f5d1002903f9a4b5a36dcfba5da5921f639aef64cbac62455bb1e12e0e","line_count":1266,"producer_id":"RGX-PRODUCER-HAND"},
       {"path":"artifacts/regex_syntax_grammar_contract_v1.json","sha256":"e0d47dd1ae0fb0694b540431141fd3b251b5506aeec1d21d8a23a441121aac52","line_count":1169,"producer_id":"RGX-PRODUCER-REGEX-SYNTAX"},
       {"path":"artifacts/regex_syntax_terminal_receipt_v1.json","sha256":"410afeaeb0250a36b8d91c1a78b612c942d729fd495e7752c3f5965bbe8d5fbe","line_count":391,"producer_id":"RGX-PRODUCER-GENERATED"},
       {"path":"artifacts/regex_unicode_table_contract_v1.json","sha256":"45780e1d74e78595275a30caf69e3795621771fe7cf0ef086e040b81236732a3","line_count":525,"producer_id":"RGX-PRODUCER-UCD"},
