@@ -5,13 +5,15 @@
 //! expect gRPC status codes and won't properly parse HTTP error responses.
 
 use asupersync::bytes::Bytes;
+use asupersync::cx::Cx;
 use asupersync::grpc::server::Server;
 use asupersync::grpc::service::{
-    MethodDescriptor, NamedService, ServiceDescriptor, ServiceHandler,
+    MethodDescriptor, NamedService, ServiceDescriptor, ServiceHandler, ServiceHandlerFuture,
 };
 use asupersync::grpc::status::{Code, Status};
 use asupersync::grpc::streaming::{Metadata, Request, Response};
 use asupersync::test_utils::run_test_with_cx;
+use asupersync::types::CancelKind;
 
 // Test service used for routing assertions.
 #[derive(Debug, Clone)]
@@ -39,15 +41,60 @@ impl ServiceHandler for TestService {
     fn method_names(&self) -> Vec<&str> {
         vec!["TestMethod"]
     }
+
+    fn call_unary<'a>(
+        &'a self,
+        _cx: &'a Cx,
+        path: &'a str,
+        request: Request<Bytes>,
+        trailing_metadata: Metadata,
+    ) -> ServiceHandlerFuture<'a> {
+        Box::pin(async move {
+            assert_eq!(path, "/test.TestService/TestMethod");
+            assert!(trailing_metadata.is_empty());
+            Ok(Response::new(request.into_inner()))
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+struct LegacyMetadataOnlyService;
+
+impl NamedService for LegacyMetadataOnlyService {
+    const NAME: &'static str = "legacy.MetadataOnly";
+}
+
+impl ServiceHandler for LegacyMetadataOnlyService {
+    fn descriptor(&self) -> &ServiceDescriptor {
+        static METHODS: &[MethodDescriptor] = &[MethodDescriptor::unary(
+            "LegacyCall",
+            "/legacy.MetadataOnly/LegacyCall",
+        )];
+        static DESCRIPTOR: ServiceDescriptor =
+            ServiceDescriptor::new("MetadataOnly", "legacy", METHODS);
+        &DESCRIPTOR
+    }
+
+    fn method_names(&self) -> Vec<&str> {
+        vec!["LegacyCall"]
+    }
 }
 
 #[test]
 fn test_registered_service_works() {
-    run_test_with_cx(|_cx| async move {
+    run_test_with_cx(|cx| async move {
         let server = Server::builder().add_service(TestService).build();
 
-        // Verify the service was registered
         assert!(server.get_service("test.TestService").is_some());
+        let response = server
+            .dispatch_registered_unary(
+                &cx,
+                "/test.TestService/TestMethod",
+                Request::new(Bytes::from_static(b"request")),
+            )
+            .await
+            .expect("registered callable service must dispatch");
+        assert_eq!(response.into_inner(), Bytes::from_static(b"request"));
         println!("✓ PASS: Registered service found in server");
     });
 }
@@ -65,22 +112,13 @@ fn test_unregistered_service_lookup() {
 }
 
 #[test]
-fn test_dispatch_with_unregistered_service_handler() {
-    // Exercise the dispatch path used when routing identifies an unregistered
-    // service. Since this audit targets server dispatch directly, the handler
-    // returns the canonical gRPC UNIMPLEMENTED status for that routing outcome.
-
-    run_test_with_cx(|_cx| async move {
-        let server = Server::builder().build();
+fn registered_dispatch_rejects_unregistered_service() {
+    run_test_with_cx(|cx| async move {
+        let server = Server::builder().add_service(TestService).build();
 
         let request = Request::with_metadata(Bytes::from("test"), Metadata::new());
-
-        let unregistered_service_handler = |_req: Request<Bytes>| async move {
-            Err::<Response<Bytes>, _>(Status::unimplemented("service not registered"))
-        };
-
         let result = server
-            .dispatch_unary(request, unregistered_service_handler)
+            .dispatch_registered_unary(&cx, "/unregistered.Service/TestMethod", request)
             .await;
 
         match result {
@@ -92,6 +130,63 @@ fn test_dispatch_with_unregistered_service_handler() {
             }
             Ok(_) => panic!("expected grpc-status=12 for unregistered service"),
         }
+    });
+}
+
+#[test]
+fn test_dispatch_with_unknown_registered_method() {
+    run_test_with_cx(|cx| async move {
+        let server = Server::builder().add_service(TestService).build();
+        let result = server
+            .dispatch_registered_unary(
+                &cx,
+                "/test.TestService/UnknownMethod",
+                Request::new(Bytes::from_static(b"test")),
+            )
+            .await;
+
+        let status = result.expect_err("unknown method must fail closed");
+        assert_eq!(status.code(), Code::Unimplemented);
+        assert!(status.message().contains("is not registered"));
+    });
+}
+
+#[test]
+fn legacy_metadata_only_service_remains_source_compatible_and_fails_closed() {
+    run_test_with_cx(|cx| async move {
+        let server = Server::builder()
+            .add_service(LegacyMetadataOnlyService)
+            .build();
+        let result = server
+            .dispatch_registered_unary(
+                &cx,
+                "/legacy.MetadataOnly/LegacyCall",
+                Request::new(Bytes::new()),
+            )
+            .await;
+
+        let status = result.expect_err("legacy metadata-only service is not callable");
+        assert_eq!(status.code(), Code::Unimplemented);
+        assert!(status.message().contains("no callable unary handler"));
+    });
+}
+
+#[test]
+fn registered_dispatch_rejects_pre_cancelled_context_before_calling_service() {
+    run_test_with_cx(|cx| async move {
+        let server = Server::builder().add_service(TestService).build();
+        cx.cancel_with(CancelKind::User, Some("test cancellation"));
+
+        let result = server
+            .dispatch_registered_unary(
+                &cx,
+                "/test.TestService/TestMethod",
+                Request::new(Bytes::from_static(b"must not be echoed")),
+            )
+            .await;
+
+        let status = result.expect_err("pre-cancelled dispatch must not invoke the service");
+        assert_eq!(status.code(), Code::Cancelled);
     });
 }
 
@@ -155,27 +250,27 @@ fn audit_grpc_unregistered_service_behavior() {
     println!("IMPLEMENTATION ANALYSIS:");
     println!("File: src/grpc/server.rs");
     println!("1. Server::services: BTreeMap<String, Arc<dyn ServiceHandler>>");
-    println!("2. Server::get_service(name) -> Option<&Arc<dyn ServiceHandler>>");
-    println!("3. dispatch_unary() method processes requests through interceptor chain");
-    println!("4. Status::unimplemented() creates grpc-status=12\n");
+    println!("2. descriptor-driven route resolution validates service and method paths");
+    println!("3. dispatch_registered_unary() invokes ServiceHandler::call_unary()");
+    println!("4. bind_registered_http2() connects that registry to the native H2 listener");
+    println!("5. Status::unimplemented() creates grpc-status=12\n");
 
     println!("ROUTING BEHAVIOR VERIFICATION:");
     println!("✓ SOUND: Server.get_service() correctly returns None for unregistered services");
     println!("✓ SOUND: Status::unimplemented() maps to grpc-status=12 (not HTTP 404)");
-    println!("✓ SOUND: dispatch_unary() preserves gRPC status semantics");
+    println!("✓ SOUND: registered dispatch preserves gRPC status semantics");
+    println!("✓ SOUND: metadata-only legacy handlers fail closed without an API break");
     println!("✓ SOUND: gRPC status codes properly distinguished from HTTP status codes\n");
 
     println!("EXPECTED BEHAVIOR:");
     println!("When HTTP/2 request arrives for '/unregistered.Service/Method':");
     println!("1. Transport layer parses gRPC path");
-    println!("2. Server.get_service('unregistered.Service') returns None");
-    println!("3. Handler returns Status::unimplemented()");
+    println!("2. Registered route resolution rejects the unknown service");
+    println!("3. No service handler is invoked");
     println!("4. Response contains grpc-status=12 in HTTP/2 trailers");
     println!("5. NOT HTTP 404 status code\n");
 
-    println!("NOTE: This audit verifies the gRPC status semantics.");
-    println!("The actual HTTP/2 -> gRPC routing may be in transport adapters");
-    println!("that call Server::dispatch_unary() with appropriate handlers.");
+    println!("The companion grpc_http2_e2e test proves this route over real TCP/H2.");
 }
 
 #[test]

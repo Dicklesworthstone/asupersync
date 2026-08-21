@@ -24,6 +24,10 @@ use crate::http::h2::listener::{Http2Listener, Http2ListenerConfig};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::http::h2::settings::Settings;
 #[cfg(not(target_arch = "wasm32"))]
+use crate::runtime::RuntimeHandle;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::server::shutdown::ShutdownStats;
+#[cfg(not(target_arch = "wasm32"))]
 use base64::Engine as _;
 
 use super::client::CompressionEncoding;
@@ -36,6 +40,21 @@ use super::streaming::{Metadata, Request, Response};
 
 fn wall_clock_instant_now() -> Instant {
     Instant::now()
+}
+
+/// Poll `future` with the caller-provided capability context installed.
+///
+/// A guard held across `.await` would be tied to the constructing thread and
+/// become incorrect after work stealing. Installing it for each individual
+/// poll keeps explicit capability restrictions and cancellation authoritative
+/// on whichever worker is driving the request.
+async fn poll_with_current_cx<F: Future>(cx: Cx, future: F) -> F::Output {
+    let mut future = std::pin::pin!(future);
+    std::future::poll_fn(|task_cx| {
+        let _guard = Cx::set_current(Some(cx.clone()));
+        future.as_mut().poll(task_cx)
+    })
+    .await
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1297,6 +1316,23 @@ impl Server {
             .stream_idle_timeout(self.config.stream_idle_timeout)
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    fn validate_http2_transport_config(&self) -> io::Result<()> {
+        if self.config.initial_stream_window_size > 0x7fff_ffff {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "gRPC initial stream window exceeds the HTTP/2 31-bit maximum",
+            ));
+        }
+        if !(65_535..=0x7fff_ffff).contains(&self.config.initial_connection_window_size) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "gRPC initial connection window must be within 65535..=2^31-1",
+            ));
+        }
+        Ok(())
+    }
+
     /// Bind the production native HTTP/2 transport and decode unary gRPC
     /// requests before invoking `handler`.
     ///
@@ -1321,18 +1357,7 @@ impl Server {
         F: Fn(GrpcTransportRequest) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<Response<Bytes>, Status>> + Send + 'static,
     {
-        if self.config.initial_stream_window_size > 0x7fff_ffff {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "gRPC initial stream window exceeds the HTTP/2 31-bit maximum",
-            ));
-        }
-        if !(65_535..=0x7fff_ffff).contains(&self.config.initial_connection_window_size) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "gRPC initial connection window must be within 65535..=2^31-1",
-            ));
-        }
+        self.validate_http2_transport_config()?;
         let config = self.http2_listener_config(host_policy);
         let server = Arc::clone(self);
         let handler = Arc::new(handler);
@@ -1342,6 +1367,70 @@ impl Server {
             Box::pin(async move { server.dispatch_http2_unary(request, handler).await })
         };
         Http2Listener::bind_with_config(addr, transport_handler, config).await
+    }
+
+    /// Bind the production native HTTP/2 transport to this server's registered
+    /// [`ServiceHandler`] implementations.
+    ///
+    /// Unlike [`Self::bind_http2`], this path does not accept an unrelated
+    /// catch-all closure. It resolves the request path against the service and
+    /// method descriptors installed through [`ServerBuilder::add_service`],
+    /// invokes [`ServiceHandler::call_unary`], and returns gRPC
+    /// `UNIMPLEMENTED` for malformed, unknown, streaming-only, or legacy
+    /// metadata-only routes. The normal decoded dispatch path still owns
+    /// metadata limits, interceptors, deadlines, response framing, and status
+    /// trailers.
+    ///
+    /// The returned listener exposes its shutdown signal and connection
+    /// manager and must be driven with [`Http2Listener::run`]. Use
+    /// [`Self::serve_http2`] when the caller wants this method to bind and run
+    /// the listener in one operation.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn bind_registered_http2<A>(
+        self: &Arc<Self>,
+        addr: A,
+        host_policy: HostPolicy,
+    ) -> io::Result<Http2Listener<impl Fn(HttpRequest) -> GrpcHttp2Future + Send + Sync + 'static>>
+    where
+        A: std::net::ToSocketAddrs + Send + 'static,
+    {
+        if self.services.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "cannot bind registered gRPC routing without a service",
+            ));
+        }
+        self.validate_http2_transport_config()?;
+        let config = self.http2_listener_config(host_policy);
+        let server = Arc::clone(self);
+        let transport_handler = move |request: HttpRequest| -> GrpcHttp2Future {
+            let server = Arc::clone(&server);
+            Box::pin(async move { server.dispatch_http2_registered_unary(request).await })
+        };
+        Http2Listener::bind_with_config(addr, transport_handler, config).await
+    }
+
+    /// Bind and run the registered-service native HTTP/2 listener.
+    ///
+    /// This is the callable serving counterpart to the legacy [`Self::serve`]
+    /// bind probe. It owns the listener until graceful drain completes and
+    /// returns the transport's shutdown statistics. Run it inside a structured
+    /// runtime task or region so cancellation of the owning task also drops the
+    /// listener and its request subtree.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn serve_http2<A>(
+        self: &Arc<Self>,
+        runtime: &RuntimeHandle,
+        addr: A,
+        host_policy: HostPolicy,
+    ) -> io::Result<ShutdownStats>
+    where
+        A: std::net::ToSocketAddrs + Send + 'static,
+    {
+        self.bind_registered_http2(addr, host_policy)
+            .await?
+            .run(runtime)
+            .await
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -1366,6 +1455,29 @@ impl Server {
                     trailing_metadata,
                 })
             })
+            .await;
+        match result {
+            Ok(response) => match self.encode_http2_unary_response(&response) {
+                Ok(response) => response,
+                Err(status) => Self::http2_status_response(&status),
+            },
+            Err(status) => Self::http2_status_response(&status),
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn dispatch_http2_registered_unary(&self, request: HttpRequest) -> HttpResponse {
+        let (path, request, trailing_metadata) = match self.decode_http2_unary_request(request) {
+            Ok(decoded) => decoded,
+            Err(status) => return Self::http2_status_response(&status),
+        };
+        let Some(cx) = Cx::current() else {
+            return Self::http2_status_response(&Status::internal(
+                "registered gRPC HTTP/2 dispatch requires a runtime Cx",
+            ));
+        };
+        let result = self
+            .dispatch_registered_unary_with_trailers(&cx, &path, request, trailing_metadata)
             .await;
         match result {
             Ok(response) => match self.encode_http2_unary_response(&response) {
@@ -1937,6 +2049,105 @@ impl Server {
         self.connection_registry.get_stats()
     }
 
+    fn resolve_registered_unary(&self, path: &str) -> Result<Arc<dyn ServiceHandler>, Status> {
+        let Some(route) = path.strip_prefix('/') else {
+            return Err(Status::unimplemented(format!(
+                "unknown gRPC method path '{path}'"
+            )));
+        };
+        let mut segments = route.split('/');
+        let (Some(service_name), Some(method_name), None) =
+            (segments.next(), segments.next(), segments.next())
+        else {
+            return Err(Status::unimplemented(format!(
+                "unknown gRPC method path '{path}'"
+            )));
+        };
+        if service_name.is_empty() || method_name.is_empty() {
+            return Err(Status::unimplemented(format!(
+                "unknown gRPC method path '{path}'"
+            )));
+        }
+
+        let service = self.services.get(service_name).ok_or_else(|| {
+            Status::unimplemented(format!("gRPC service '{service_name}' is not registered"))
+        })?;
+        let method = service
+            .descriptor()
+            .methods
+            .iter()
+            .find(|method| method.path == path && method.name == method_name)
+            .ok_or_else(|| {
+                Status::unimplemented(format!("gRPC method '{path}' is not registered"))
+            })?;
+        if !method.is_unary() {
+            return Err(Status::unimplemented(format!(
+                "gRPC method '{path}' is streaming and cannot use unary dispatch"
+            )));
+        }
+        Ok(Arc::clone(service))
+    }
+
+    /// Dispatch a decoded unary request to a registered service.
+    ///
+    /// This is the in-process equivalent of [`Self::bind_registered_http2`].
+    /// Route resolution is descriptor-driven and fails closed with gRPC
+    /// `UNIMPLEMENTED`; successfully resolved calls pass through the same
+    /// metadata, interceptor, deadline, deadline-derived request-region, and
+    /// response pipeline as [`Self::dispatch_unary`]. The supplied `cx` is
+    /// installed for every poll, so its cancellation and capability
+    /// restrictions remain authoritative even when the future moves between
+    /// runtime workers.
+    pub async fn dispatch_registered_unary(
+        &self,
+        cx: &Cx,
+        path: &str,
+        request: Request<Bytes>,
+    ) -> Result<Response<Bytes>, Status> {
+        self.dispatch_registered_unary_with_trailers(cx, path, request, Metadata::new())
+            .await
+    }
+
+    /// Dispatch a decoded unary request while preserving its separate request
+    /// trailer metadata block.
+    pub async fn dispatch_registered_unary_with_trailers(
+        &self,
+        cx: &Cx,
+        path: &str,
+        request: Request<Bytes>,
+        trailing_metadata: Metadata,
+    ) -> Result<Response<Bytes>, Status> {
+        if cx.checkpoint().is_err() {
+            let status = match cx.cancel_reason().map(|reason| reason.kind) {
+                Some(crate::types::CancelKind::Timeout | crate::types::CancelKind::Deadline) => {
+                    Status::deadline_exceeded(
+                        "registered gRPC request deadline elapsed before dispatch",
+                    )
+                }
+                Some(
+                    crate::types::CancelKind::PollQuota | crate::types::CancelKind::CostBudget,
+                ) => Status::resource_exhausted(
+                    "registered gRPC request budget was exhausted before dispatch",
+                ),
+                _ => Status::cancelled("registered gRPC request was cancelled before dispatch"),
+            };
+            return Err(status);
+        }
+        let service = self.resolve_registered_unary(path)?;
+        let path = path.to_owned();
+        let base_cx = cx.clone();
+        let dispatch = self.dispatch_unary(request, move |request| async move {
+            // The outer poll scope below guarantees an explicit context. If a
+            // gRPC deadline is present, `dispatch_unary` temporarily installs
+            // its tighter child request region before this future is polled.
+            let call_cx = Cx::current().unwrap_or_else(|| base_cx.clone());
+            service
+                .call_unary(&call_cx, &path, request, trailing_metadata)
+                .await
+        });
+        poll_with_current_cx(cx.clone(), dispatch).await
+    }
+
     /// Get a service by name.
     #[must_use]
     pub fn get_service(&self, name: &str) -> Option<&Arc<dyn ServiceHandler>> {
@@ -1956,8 +2167,11 @@ impl Server {
     /// - The process can bind a listener at that address
     ///
     /// The listener is immediately dropped after validation. Use
-    /// [`Self::bind_http2`] for the production native HTTP/2 serving path; this
-    /// legacy probe does not accept or dispatch requests.
+    /// [`Self::serve_http2`] to bind, route registered services, and run the
+    /// production native HTTP/2 listener, or [`Self::bind_registered_http2`]
+    /// when the caller needs its shutdown handle before running it. This
+    /// legacy probe remains functional for v0.4.3 compatibility but does not
+    /// accept or dispatch requests.
     #[allow(clippy::unused_async)]
     pub async fn serve(self, addr: &str) -> Result<(), GrpcError> {
         if self.services.is_empty() {

@@ -24,8 +24,8 @@ use asupersync::codec::{Decoder as _, Encoder as _};
 use asupersync::cx::Cx;
 use asupersync::grpc::{
     CallContext, Channel, ChannelConfig, Code, GrpcClient, GrpcCodec, GrpcError, GrpcMessage,
-    HealthService, Metadata, MetadataValue, MethodDescriptor, Request, Response, Server,
-    ServingStatus, Status,
+    HealthService, Metadata, MetadataValue, MethodDescriptor, NamedService, Request, Response,
+    Server, ServiceDescriptor, ServiceHandler, ServiceHandlerFuture, ServingStatus, Status,
 };
 use asupersync::http::h1::server::HostPolicy;
 use asupersync::http::h2::connection::CLIENT_PREFACE;
@@ -39,6 +39,7 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 fn init_test(name: &str) {
@@ -614,6 +615,10 @@ struct ProductionGrpcH2Outcome {
 }
 
 fn production_grpc_h2_client(addr: SocketAddr) -> ProductionGrpcH2Outcome {
+    production_grpc_h2_client_for_path(addr, "/test.Echo/Unary")
+}
+
+fn production_grpc_h2_client_for_path(addr: SocketAddr, path: &str) -> ProductionGrpcH2Outcome {
     let mut outcome = ProductionGrpcH2Outcome::default();
     let mut stream = std::net::TcpStream::connect(addr).expect("connect production gRPC H2");
     stream
@@ -635,7 +640,7 @@ fn production_grpc_h2_client(addr: SocketAddr) -> ProductionGrpcH2Outcome {
         &[
             Header::new(":method", "POST"),
             Header::new(":scheme", "http"),
-            Header::new(":path", "/test.Echo/Unary"),
+            Header::new(":path", path),
             Header::new(":authority", "localhost"),
             Header::new("content-type", "application/grpc"),
             Header::new("te", "trailers"),
@@ -732,6 +737,52 @@ fn production_grpc_h2_client(addr: SocketAddr) -> ProductionGrpcH2Outcome {
     }
 }
 
+#[derive(Clone)]
+struct RegisteredEchoService {
+    calls: Arc<AtomicUsize>,
+}
+
+impl NamedService for RegisteredEchoService {
+    const NAME: &'static str = "test.Echo";
+}
+
+impl ServiceHandler for RegisteredEchoService {
+    fn descriptor(&self) -> &ServiceDescriptor {
+        static METHODS: &[MethodDescriptor] =
+            &[MethodDescriptor::unary("Unary", "/test.Echo/Unary")];
+        static DESCRIPTOR: ServiceDescriptor = ServiceDescriptor::new("Echo", "test", METHODS);
+        &DESCRIPTOR
+    }
+
+    fn method_names(&self) -> Vec<&str> {
+        vec!["Unary"]
+    }
+
+    fn call_unary<'a>(
+        &'a self,
+        cx: &'a Cx,
+        path: &'a str,
+        request: Request<Bytes>,
+        trailing_metadata: Metadata,
+    ) -> ServiceHandlerFuture<'a> {
+        Box::pin(async move {
+            assert_eq!(path, "/test.Echo/Unary");
+            assert!(!cx.is_cancel_requested());
+            assert_eq!(request.get_ref().as_ref(), b"ping");
+            assert!(matches!(
+                trailing_metadata.get("x-client-tail"),
+                Some(MetadataValue::Ascii(value)) if value == "tail-value"
+            ));
+            assert!(matches!(
+                trailing_metadata.get("x-client-token-bin"),
+                Some(MetadataValue::Binary(value)) if value.as_ref() == b"\x01\x02"
+            ));
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(Response::new(Bytes::from_static(b"registered-pong")))
+        })
+    }
+}
+
 /// br-asupersync-v4ob51: the public gRPC transport adapter must exercise the
 /// real H2 listener, advertise both configured flow-control windows and the
 /// stream-admission cap, preserve a request trailer block separately from
@@ -810,6 +861,75 @@ fn production_grpc_adapter_wires_config_and_unary_codec_over_real_h2() {
             .expect("one response frame");
         assert_eq!(decoded.data.as_ref(), b"pong");
         assert!(framed_body.is_empty());
+
+        assert!(manager.begin_drain(Duration::from_secs(5)));
+        let _ = run_handle.await.expect("listener run join");
+    });
+}
+
+/// br-asupersync-u0j91o: registered services must be the callable routing
+/// authority for the native H2 adapter. An unknown method on a registered
+/// service must produce terminal grpc-status=12 without invoking the service.
+#[test]
+fn registered_service_dispatches_and_unknown_method_is_unimplemented_over_real_h2() {
+    let runtime = RuntimeBuilder::new()
+        .worker_threads(2)
+        .build()
+        .expect("build runtime");
+    let handle = runtime.handle();
+
+    runtime.block_on(async move {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let server = Arc::new(
+            Server::builder()
+                .max_recv_message_size(64)
+                .max_send_message_size(64)
+                .stream_idle_timeout(Some(Duration::from_secs(2)))
+                .add_service(RegisteredEchoService {
+                    calls: Arc::clone(&calls),
+                })
+                .build(),
+        );
+        let listener = server
+            .bind_registered_http2(
+                "127.0.0.1:0",
+                HostPolicy::allow_list(vec!["localhost".to_owned()]),
+            )
+            .await
+            .expect("bind registered-service gRPC H2 listener");
+
+        let addr = listener.local_addr().expect("listener local addr");
+        let manager = listener.connection_manager().clone();
+        let run_runtime = handle.clone();
+        let run_handle = handle
+            .clone()
+            .try_spawn(async move { listener.run(&run_runtime).await })
+            .expect("spawn registered-service gRPC H2 listener");
+
+        let registered = std::thread::spawn(move || {
+            production_grpc_h2_client_for_path(addr, "/test.Echo/Unary")
+        })
+        .join()
+        .expect("registered raw gRPC H2 client thread");
+        assert_eq!(registered.http_status.as_deref(), Some("200"));
+        assert_eq!(registered.grpc_status.as_deref(), Some("0"));
+        let mut framed_body = BytesMut::from(registered.framed_body.as_slice());
+        let decoded = GrpcCodec::with_max_size(64)
+            .decode(&mut framed_body)
+            .expect("decode registered response")
+            .expect("one registered response frame");
+        assert_eq!(decoded.data.as_ref(), b"registered-pong");
+        assert!(framed_body.is_empty());
+
+        let unknown = std::thread::spawn(move || {
+            production_grpc_h2_client_for_path(addr, "/test.Echo/Missing")
+        })
+        .join()
+        .expect("unknown-method raw gRPC H2 client thread");
+        assert_eq!(unknown.http_status.as_deref(), Some("200"));
+        assert_eq!(unknown.grpc_status.as_deref(), Some("12"));
+        assert!(unknown.framed_body.is_empty());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
 
         assert!(manager.begin_drain(Duration::from_secs(5)));
         let _ = run_handle.await.expect("listener run join");

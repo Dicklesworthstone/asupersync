@@ -107,7 +107,7 @@ pub use server::{
 };
 pub use service::{
     BidiStreamingMethod, ClientStreamingMethod, MethodDescriptor, NamedService,
-    ServerStreamingMethod, ServiceDescriptor, ServiceHandler, UnaryMethod,
+    ServerStreamingMethod, ServiceDescriptor, ServiceHandler, ServiceHandlerFuture, UnaryMethod,
 };
 pub use status::{Code, GrpcError, Status};
 // br-asupersync-iuoayq: the `Bidirectional<Req, Resp>` marker-only type

@@ -5,8 +5,11 @@
 use std::future::Future;
 use std::pin::Pin;
 
+use crate::bytes::Bytes;
+use crate::cx::Cx;
+
 use super::status::Status;
-use super::streaming::{Request, Response, Streaming};
+use super::streaming::{Metadata, Request, Response, Streaming};
 
 /// A gRPC service method.
 pub trait Method: Send + Sync + 'static {
@@ -201,6 +204,13 @@ pub type UnaryHandler<Req, Resp> = Box<
         + Sync,
 >;
 
+/// Future returned by a callable registered unary service.
+///
+/// The lifetime permits generated service implementations to borrow their
+/// handler state and the explicit request [`Cx`] while the call is in flight.
+pub type ServiceHandlerFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<Response<Bytes>, Status>> + Send + 'a>>;
+
 /// A registered service handler.
 pub trait ServiceHandler: Send + Sync {
     /// Get the service descriptor.
@@ -208,6 +218,30 @@ pub trait ServiceHandler: Send + Sync {
 
     /// Get method names.
     fn method_names(&self) -> Vec<&str>;
+
+    /// Dispatch one decoded unary request for `path`.
+    ///
+    /// [`crate::grpc::Server::bind_registered_http2`] calls this hook only
+    /// after resolving `path` against [`Self::descriptor`] and confirming that
+    /// the descriptor marks the method as unary. The explicit [`Cx`] carries
+    /// the request region's cancellation, deadline, and capabilities. Initial
+    /// metadata remains on `request`; HTTP/2 request trailers are supplied
+    /// separately so their wire ordering is not collapsed.
+    ///
+    /// The default preserves source compatibility for metadata-only service
+    /// implementations shipped before callable routing existed. Such a
+    /// service fails closed with gRPC `UNIMPLEMENTED` instead of being mistaken
+    /// for a callable handler.
+    fn call_unary<'a>(
+        &'a self,
+        _cx: &'a Cx,
+        path: &'a str,
+        _request: Request<Bytes>,
+        _trailing_metadata: Metadata,
+    ) -> ServiceHandlerFuture<'a> {
+        let message = format!("registered service has no callable unary handler for '{path}'");
+        Box::pin(async move { Err(Status::unimplemented(message)) })
+    }
 }
 
 #[cfg(test)]
