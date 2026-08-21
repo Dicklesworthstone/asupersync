@@ -1479,14 +1479,17 @@ impl<T: DeserializeOwned> FromRequest for Form<T> {
 /// in the request extensions by the router.
 ///
 /// ```ignore
+/// use asupersync::web::{FnHandler1, Router, State, get};
+///
 /// #[derive(Clone)]
 /// struct AppState { db: DbPool }
 ///
-/// async fn handler(State(state): State<AppState>) -> String {
+/// fn handler(State(state): State<AppState>) -> String {
 ///     // use state.db
 ///     "ok".into()
 /// }
 ///
+/// let handler = FnHandler1::<_, State<AppState>>::new(handler);
 /// let app = Router::new()
 ///     .route("/", get(handler))
 ///     .with_state(AppState { db });

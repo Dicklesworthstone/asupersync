@@ -7,21 +7,36 @@
 //! # Quick Start
 //!
 //! ```ignore
-//! use asupersync::web::{Router, Json, State, get, post};
+//! use asupersync::Cx;
+//! use asupersync::web::{
+//!     AsyncCxFnHandler1, AsyncCxFnHandler2, Json, JsonExtract, Router, State,
+//!     StatusCode, get,
+//! };
 //!
-//! async fn list_users(State(db): State<Db>) -> Json<Vec<User>> {
-//!     Json(db.list_users().await)
+//! async fn list_users(cx: Cx, State(db): State<Db>) -> Json<Vec<User>> {
+//!     Json(db.list_users(&cx).await)
 //! }
 //!
-//! async fn create_user(State(db): State<Db>, Json(input): Json<CreateUser>) -> StatusCode {
-//!     db.insert(input).await;
+//! async fn create_user(
+//!     cx: Cx,
+//!     State(db): State<Db>,
+//!     JsonExtract(input): JsonExtract<CreateUser>,
+//! ) -> StatusCode {
+//!     db.insert(&cx, input).await;
 //!     StatusCode::CREATED
 //! }
 //!
+//! let list_users = AsyncCxFnHandler1::<_, State<Db>>::new(list_users);
+//! let create_user =
+//!     AsyncCxFnHandler2::<_, State<Db>, JsonExtract<CreateUser>>::new(create_user);
 //! let app = Router::new()
 //!     .route("/users", get(list_users).post(create_user))
 //!     .with_state(db);
 //! ```
+//!
+//! Async handlers that receive [`crate::Cx`] must be wrapped with the matching
+//! `AsyncCxFnHandler*` arity before registration. `JsonExtract<T>` is the
+//! request extractor, while [`Json<T>`](Json) is the response type.
 //!
 //! # Extractors
 //!

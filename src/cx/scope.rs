@@ -19,7 +19,7 @@
 //! cannot escape into a spawned task. The call must run on the context's owner
 //! runtime worker. Off-worker calls, including calls under the lab runtime and
 //! blocking-pool threads, fail with
-//! [`SpawnError::LocalSchedulerUnavailable`](crate::runtime::SpawnError::LocalSchedulerUnavailable).
+//! [`SpawnError::LocalSchedulerUnavailable`].
 //! A local task is stored on that worker and scheduled through a non-stealable
 //! queue, while its output remains `Send + 'static` because the join handle may
 //! be awaited from another thread.
