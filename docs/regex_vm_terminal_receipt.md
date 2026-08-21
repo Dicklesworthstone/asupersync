@@ -31,6 +31,42 @@ This is a synchronous cooperative checkpoint surface. It does not claim
 `Cx`-cancellation integration, task or obligation management, cooperative
 yielding, or preemption between work charges.
 
+## R3.6 bounded cache extension
+
+The R3.6 extension adds a caller-owned `PrivatePatternCache`; there is no
+process-global cache or ambient mutable policy. Its LRU key covers the complete
+private configuration. A bounded fingerprint is only a lookup prefilter: exact
+source equality is required before reuse, so a collision cannot select a
+different pattern or limit policy. Exact comparisons and entry scans consume an
+explicit lookup-work budget.
+
+Cache misses compile outside the cache-state mutex. Count and conservative
+compile-byte ceilings are admitted and released as one coherent accounting
+tuple. Because a default compile reserves about 1.135 GiB from the configured
+stage ceilings, the default 2 GiB aggregate budget intentionally admits one
+in-flight compile. A caller that tightens stage ceilings may explicitly raise
+the count. Duplicate misses may compile concurrently under those explicit
+limits, but admission rechecks exact equality and retains one winner.
+
+Residents have deterministic logical byte charges. Eviction and shutdown drop
+cache ownership without invalidating outstanding leases, and evicted leases
+remain charged until their final owner drops. Source pattern bytes are retained
+in the collision-safe key for that same lifetime, but never rendered by cache
+diagnostics. This is not a memory-erasure, allocator-usable-size, or RSS claim.
+
+Caller-owned cancellation checkpoints run before lookup, before compilation,
+and before admission, always outside the cache mutex. Compilation itself remains
+synchronously work-bounded rather than promptly preemptible; a cancellation
+observed before admission discards the compiled value. Focused tests cover
+racing duplicate compilation, controlled use during eviction, pinned capacity,
+count and byte refusal, lookup-work refusal, cancellation, idempotent shutdown,
+and exact convergence to zero live/in-flight accounting.
+
+The R3.6 release-profile throughput, allocation, RSS, and supported-host latency
+matrix is not yet measured. The disposition therefore remains
+`KEEP_INCUMBENT_DEFER`; this extension authorizes no production privacy wiring,
+public cutover, or dependency removal.
+
 ## Adversarial and replay evidence
 
 The terminal contract checks huge consuming repetition, an ambiguous suffix,

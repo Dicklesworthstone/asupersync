@@ -30,9 +30,17 @@ use regex_lowering::{LowerErrorKind, lower};
 use regex_semantics::SemanticLimits;
 use regex_syntax::{LexerLimits, ParserLimits};
 use regex_vm::{
-    CaptureSpan, DEFAULT_CANCELLATION_CHECK_INTERVAL_WORK_UNITS, IterationPolicy,
-    IterationVmLimits, VmCancellationCheckpoint, VmCancellationControl, VmErrorKind, VmLimits,
-    VmMatch, execute_find_iter, execute_find_iter_with_control, execute_full_with_control,
+    CaptureSpan, DEFAULT_CANCELLATION_CHECK_INTERVAL_WORK_UNITS,
+    DEFAULT_PRIVATE_PATTERN_CACHE_MAX_ENTRIES,
+    DEFAULT_PRIVATE_PATTERN_CACHE_MAX_INFLIGHT_COMPILE_ACCOUNTED_BYTES,
+    DEFAULT_PRIVATE_PATTERN_CACHE_MAX_INFLIGHT_COMPILES,
+    DEFAULT_PRIVATE_PATTERN_CACHE_MAX_LIVE_ACCOUNTED_BYTES,
+    DEFAULT_PRIVATE_PATTERN_CACHE_MAX_LOOKUP_WORK_UNITS,
+    DEFAULT_PRIVATE_PATTERN_CACHE_MAX_PATTERN_BYTES, IterationPolicy, IterationVmLimits,
+    PrivatePatternCache, PrivatePatternCacheCheckpoint, PrivatePatternCacheErrorKind,
+    PrivatePatternCacheLimits, PrivatePatternConfig, VmCancellationCheckpoint,
+    VmCancellationControl, VmErrorKind, VmLimits, VmMatch, execute_find_iter,
+    execute_find_iter_with_control, execute_full_with_control,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -45,7 +53,7 @@ const COMPILER_TERMINAL_SHA256: &str =
     "3a67d943175079ab0378080de5b8ee06fd5e979b0c9555dc30a45cbb62da2f5b";
 const ITERATION_PREDECESSOR_SHA256: &str =
     "f8ad1b1f0b3d6b148524701c39224c51988ef3be2f63531647a5f303439ade92";
-const VM_SOURCE_SHA256: &str = "68f5b24f8ba6cfc454d8287e2285b2a30f572fa8b168e94d316375d7c00bb2e5";
+const VM_SOURCE_SHA256: &str = "eb26edc914e1c2c4683d53132524446a2a84052072202d070581ca9917d27947";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct NormalizedMatch {
@@ -210,6 +218,8 @@ fn identity_authority_pins_and_fail_closed_decision_are_exact() {
     assert!(boolean(&decision, "r3_4_vm_terminal_complete"));
     assert!(boolean(&decision, "explicit_cancellation_checkpoints"));
     assert!(boolean(&decision, "performance_measurement_complete"));
+    assert!(boolean(&decision, "r3_6_bounded_cache_implemented"));
+    assert!(!boolean(&decision, "r3_6_performance_measurement_complete"));
     assert!(!boolean(&decision, "ambient_cancellation_state"));
     assert!(!boolean(&decision, "all_mapped_rows_same_or_better"));
     assert!(!boolean(&decision, "matcher_api_integration_authorized"));
@@ -356,6 +366,106 @@ fn cancellation_sequences_cover_160_intervals_and_cutoffs() {
 }
 
 #[test]
+fn r3_6_cache_policy_is_bounded_exact_private_and_deferred() {
+    let value = contract();
+    let policy = Value::Object(object(&value, "r3_6_cache_policy").clone());
+    assert_eq!(text(&policy, "bead_id"), "asupersync-5z2scg.8.3.6");
+    assert_eq!(
+        text(&policy, "status"),
+        "IMPLEMENTED_FOCUSED_PERFORMANCE_PENDING"
+    );
+    assert_eq!(
+        text(&policy, "ownership"),
+        "CALLER_OWNED_NO_GLOBAL_INSTANCE"
+    );
+    assert_eq!(
+        text(&policy, "key_identity"),
+        "FULL_CONFIG_FINGERPRINT_PREFILTER_EXACT_SOURCE_EQUALITY"
+    );
+    assert!(boolean(&policy, "compile_runs_outside_cache_state_mutex"));
+    assert!(boolean(&policy, "cancellation_callbacks_outside_mutex"));
+    assert!(boolean(&policy, "default_single_inflight_compile"));
+    assert!(!boolean(&policy, "source_erasure_claim"));
+    assert!(!boolean(&policy, "production_cutover_eligible"));
+
+    let limits = Value::Object(object(&policy, "default_limits").clone());
+    let defaults = PrivatePatternCacheLimits::default();
+    assert_eq!(
+        number(&limits, "max_entries"),
+        u64::try_from(DEFAULT_PRIVATE_PATTERN_CACHE_MAX_ENTRIES).expect("entry limit fits")
+    );
+    assert_eq!(
+        number(&limits, "max_pattern_bytes"),
+        u64::try_from(DEFAULT_PRIVATE_PATTERN_CACHE_MAX_PATTERN_BYTES).expect("pattern limit fits")
+    );
+    assert_eq!(
+        number(&limits, "max_live_accounted_bytes"),
+        DEFAULT_PRIVATE_PATTERN_CACHE_MAX_LIVE_ACCOUNTED_BYTES
+    );
+    assert_eq!(
+        number(&limits, "max_inflight_compiles"),
+        u64::try_from(DEFAULT_PRIVATE_PATTERN_CACHE_MAX_INFLIGHT_COMPILES)
+            .expect("compile count fits")
+    );
+    assert_eq!(
+        number(&limits, "max_inflight_compile_accounted_bytes"),
+        DEFAULT_PRIVATE_PATTERN_CACHE_MAX_INFLIGHT_COMPILE_ACCOUNTED_BYTES
+    );
+    assert_eq!(
+        number(&limits, "max_lookup_work_units"),
+        DEFAULT_PRIVATE_PATTERN_CACHE_MAX_LOOKUP_WORK_UNITS
+    );
+    assert_eq!(defaults.max_inflight_compiles, 1);
+
+    let error_codes = array(&policy, "error_codes")
+        .iter()
+        .map(|row| row.as_str().expect("cache error code text"))
+        .collect::<Vec<_>>();
+    let expected_codes = [
+        PrivatePatternCacheErrorKind::InvalidLimits,
+        PrivatePatternCacheErrorKind::PatternLimit,
+        PrivatePatternCacheErrorKind::EntryTooLarge,
+        PrivatePatternCacheErrorKind::CapacityPinned,
+        PrivatePatternCacheErrorKind::Closed,
+        PrivatePatternCacheErrorKind::Cancelled,
+        PrivatePatternCacheErrorKind::Config,
+        PrivatePatternCacheErrorKind::AllocationFailure,
+        PrivatePatternCacheErrorKind::ArithmeticOverflow,
+        PrivatePatternCacheErrorKind::CompileCapacity,
+        PrivatePatternCacheErrorKind::CompileMemoryCapacity,
+        PrivatePatternCacheErrorKind::LookupWorkLimit,
+    ]
+    .map(PrivatePatternCacheErrorKind::code);
+    assert_eq!(error_codes, expected_codes);
+    assert_ne!(
+        PrivatePatternCacheCheckpoint::Lookup,
+        PrivatePatternCacheCheckpoint::Compile
+    );
+    assert_ne!(
+        PrivatePatternCacheCheckpoint::Compile,
+        PrivatePatternCacheCheckpoint::Admission
+    );
+
+    let private_pattern = "r3_6_terminal_private_cache_canary";
+    let cache = PrivatePatternCache::new(defaults).expect("valid cache policy");
+    let lease = cache
+        .get_or_compile(PrivatePatternConfig::new(private_pattern))
+        .expect("admit private cache fixture");
+    assert!(lease.is_match(private_pattern).expect("cached match"));
+    for rendered in [format!("{cache:?}"), format!("{lease:?}")] {
+        assert!(!rendered.contains(private_pattern));
+    }
+    cache.shutdown();
+    drop(lease);
+    let snapshot = cache.snapshot();
+    assert!(snapshot.closed);
+    assert_eq!(snapshot.entries, 0);
+    assert_eq!(snapshot.live_accounted_bytes, 0);
+    assert_eq!(snapshot.inflight_compiles, 0);
+    assert_eq!(snapshot.inflight_compile_accounted_bytes, 0);
+}
+
+#[test]
 fn adversarial_rows_are_bounded_exact_and_panic_free() {
     let cases = [
         ("a*", "a".repeat(20_000)),
@@ -467,6 +577,9 @@ fn docs_proof_and_no_claim_boundaries_are_discoverable() {
         "KEEP_INCUMBENT_DEFER",
         "RGX-VM-E015",
         "caller-supplied",
+        "PrivatePatternCache",
+        "default 2 GiB aggregate budget intentionally admits one",
+        "R3.6 release-profile throughput, allocation, RSS",
         "No local Cargo fallback is approved.",
         "no performance improvement or no-regression claim",
         "no production privacy wiring or dependency removal",
@@ -476,7 +589,12 @@ fn docs_proof_and_no_claim_boundaries_are_discoverable() {
     }
 
     let proof = Value::Object(object(&value, "proof").clone());
-    for key in ["unit_command", "contract_command", "clippy_command"] {
+    for key in [
+        "r3_6_cache_unit_command",
+        "unit_command",
+        "contract_command",
+        "clippy_command",
+    ] {
         let command = text(&proof, key);
         assert!(command.starts_with("RCH_REQUIRE_REMOTE=1 rch exec"));
         assert!(command.contains("--base HEAD"));
@@ -493,6 +611,7 @@ fn docs_proof_and_no_claim_boundaries_are_discoverable() {
         .join("\n");
     for marker in [
         "no production privacy wiring or dependency removal",
+        "no R3.6 release-profile, allocation, RSS, Apple Silicon, or x86 performance result yet",
         "no complete public regex API",
         "no allocation or RSS measurement",
         "no performance improvement or no-regression claim",

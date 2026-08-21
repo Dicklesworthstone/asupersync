@@ -29,9 +29,9 @@
     },
     {
       "path": "src/observability/regex_vm.rs",
-      "sha256": "68f5b24f8ba6cfc454d8287e2285b2a30f572fa8b168e94d316375d7c00bb2e5",
-      "bytes": 130259,
-      "revision": "asupersync-5z2scg.8.3.4.4"
+      "sha256": "eb26edc914e1c2c4683d53132524446a2a84052072202d070581ca9917d27947",
+      "bytes": 251797,
+      "revision": "asupersync-5z2scg.8.3.6"
     },
     {
       "path": "src/observability/mod.rs",
@@ -53,6 +53,8 @@
     "cancelled_operation_returns_partial_outcome": false,
     "adversarial_evidence_complete": true,
     "performance_measurement_complete": true,
+    "r3_6_bounded_cache_implemented": true,
+    "r3_6_performance_measurement_complete": false,
     "all_mapped_rows_same_or_better": false,
     "matcher_api_integration_authorized": false,
     "production_wiring_authorized": false,
@@ -85,6 +87,55 @@
     "built_in_work_limit_precedes_probe": true,
     "partial_success_on_cancel": false,
     "program_reusable_after_cancel": true
+  },
+  "r3_6_cache_policy": {
+    "bead_id": "asupersync-5z2scg.8.3.6",
+    "status": "IMPLEMENTED_FOCUSED_PERFORMANCE_PENDING",
+    "ownership": "CALLER_OWNED_NO_GLOBAL_INSTANCE",
+    "eviction": "BOUNDED_LRU_WITH_LEASE_SAFE_EVICTION",
+    "key_identity": "FULL_CONFIG_FINGERPRINT_PREFILTER_EXACT_SOURCE_EQUALITY",
+    "source_retention": "RETAINED_AND_ACCOUNTED_UNTIL_FINAL_CACHE_OR_LEASE_DROP",
+    "source_erasure_claim": false,
+    "compile_runs_outside_cache_state_mutex": true,
+    "cancellation_callbacks_outside_mutex": true,
+    "default_single_inflight_compile": true,
+    "default_limits": {
+      "max_entries": 256,
+      "max_pattern_bytes": 1048576,
+      "max_live_accounted_bytes": 67108864,
+      "max_inflight_compiles": 1,
+      "max_inflight_compile_accounted_bytes": 2147483648,
+      "max_lookup_work_units": 8388608
+    },
+    "checkpoints": [
+      "Lookup",
+      "Compile",
+      "Admission"
+    ],
+    "error_codes": [
+      "RGX-CACHE-E001",
+      "RGX-CACHE-E002",
+      "RGX-CACHE-E003",
+      "RGX-CACHE-E004",
+      "RGX-CACHE-E005",
+      "RGX-CACHE-E006",
+      "RGX-CACHE-E007",
+      "RGX-CACHE-E008",
+      "RGX-CACHE-E009",
+      "RGX-CACHE-E010",
+      "RGX-CACHE-E011",
+      "RGX-CACHE-E012"
+    ],
+    "accounting": {
+      "resident_bytes_include_evicted_live_leases": true,
+      "compile_count_and_bytes_snapshot_atomically": true,
+      "compile_reservation_derived_from_stage_ceilings": true,
+      "allocator_usable_size_claim": false,
+      "rss_claim": false
+    },
+    "focused_inline_tests": 10,
+    "performance_status": "NOT_YET_MEASURED_FOR_R3_6",
+    "production_cutover_eligible": false
   },
   "adversarial_rows": [
     {
@@ -147,6 +198,7 @@
     "property_cases": 512,
     "privacy_pattern_probes": 4,
     "cancellation_interval_sequence_cases": 160,
+    "r3_6_focused_cache_tests": 10,
     "adversarial_rows": 6,
     "panic_containment": true,
     "deterministic_replay": true,
@@ -316,6 +368,7 @@
     }
   ],
   "proof": {
+    "r3_6_cache_unit_command": "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --overlay-path src/observability/regex_vm.rs -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -j 4 -p asupersync --lib --features metrics 'observability::regex_vm::tests::private_pattern_cache' -- --nocapture",
     "unit_command": "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --overlay-path src/observability/regex_vm.rs -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --features metrics --lib observability::regex_vm::tests -- --nocapture",
     "contract_command": "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --overlay-path src/observability/regex_vm.rs --overlay-path artifacts/regex_vm_terminal_receipt_v1.json --overlay-path docs/regex_vm_terminal_receipt.md --overlay-path tests/regex_vm_terminal_receipt_contract.rs --overlay-path artifacts/regex_vm_iteration_contract_v1.json --overlay-path docs/regex_vm_iteration_contract.md --overlay-path tests/regex_vm_iteration_contract.rs -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --features metrics --test regex_vm_core_contract --test regex_vm_captures_contract --test regex_vm_iteration_contract --test regex_vm_terminal_receipt_contract -- --nocapture",
     "clippy_command": "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --overlay-path src/observability/regex_vm.rs --overlay-path artifacts/regex_vm_terminal_receipt_v1.json --overlay-path docs/regex_vm_terminal_receipt.md --overlay-path tests/regex_vm_terminal_receipt_contract.rs --overlay-path artifacts/regex_vm_iteration_contract_v1.json --overlay-path docs/regex_vm_iteration_contract.md --overlay-path tests/regex_vm_iteration_contract.rs -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo clippy -p asupersync --features metrics --test regex_vm_core_contract --test regex_vm_captures_contract --test regex_vm_iteration_contract --test regex_vm_terminal_receipt_contract -- -D warnings",
@@ -324,6 +377,7 @@
   },
   "no_claims": [
     "no production privacy wiring or dependency removal",
+    "no R3.6 release-profile, allocation, RSS, Apple Silicon, or x86 performance result yet",
     "no complete public regex API or replacement-template expansion",
     "no accepted regex syntax expansion",
     "no persisted or deserializable VM or cancellation state",

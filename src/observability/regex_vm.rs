@@ -12,6 +12,12 @@
 //! privacy wiring and dependency replacement remain downstream work.
 
 use core::fmt;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, AtomicU64, Ordering},
+};
+
+use parking_lot::Mutex;
 
 use super::regex_boundaries::BoundaryEvalErrorKind;
 use super::regex_ir::{
@@ -65,6 +71,31 @@ pub const DEFAULT_MAX_REPLACEMENT_WORK_UNITS: u64 = 64 * 1024 * 1024;
 // plus ample room for the explicit numeric limit fields.
 pub const DEFAULT_MAX_PRIVATE_PATTERN_CONFIG_BYTES: usize = 8 * 1024 * 1024;
 pub const PRIVATE_PATTERN_CONFIG_SCHEMA_VERSION: u16 = 1;
+pub const DEFAULT_PRIVATE_PATTERN_CACHE_MAX_ENTRIES: usize = 256;
+pub const DEFAULT_PRIVATE_PATTERN_CACHE_MAX_PATTERN_BYTES: usize = 1024 * 1024;
+pub const DEFAULT_PRIVATE_PATTERN_CACHE_MAX_LIVE_ACCOUNTED_BYTES: u64 = 64 * 1024 * 1024;
+// Default stage ceilings conservatively reserve about 1.135 GiB per compile.
+// Keep the default count aligned with the 2 GiB aggregate ceiling; callers
+// that lower the stage ceilings can explicitly admit more concurrent misses.
+pub const DEFAULT_PRIVATE_PATTERN_CACHE_MAX_INFLIGHT_COMPILES: usize = 1;
+pub const DEFAULT_PRIVATE_PATTERN_CACHE_MAX_INFLIGHT_COMPILE_ACCOUNTED_BYTES: u64 =
+    2 * 1024 * 1024 * 1024;
+pub const DEFAULT_PRIVATE_PATTERN_CACHE_MAX_LOOKUP_WORK_UNITS: u64 = 8 * 1024 * 1024;
+
+// Conservative logical charge for the resident allocation, its Arc header,
+// cache key fields, and cache-entry metadata. Program, capture-name, and
+// retained-pattern bytes are added separately. This is deterministic policy
+// accounting, not allocator-usable-size or RSS evidence.
+pub const ACCOUNTED_PRIVATE_PATTERN_RESIDENT_OVERHEAD_BYTES: u64 = 512;
+pub const ACCOUNTED_PRIVATE_PATTERN_COMPILE_BASE_BYTES: u64 = 4 * 1024;
+pub const ACCOUNTED_PRIVATE_PATTERN_SOURCE_BYTE: u64 = 4;
+pub const ACCOUNTED_PRIVATE_PATTERN_TOKEN_BYTES: u64 = 256;
+pub const ACCOUNTED_PRIVATE_PATTERN_AST_NODE_BYTES: u64 = 256;
+pub const ACCOUNTED_PRIVATE_PATTERN_SEMANTIC_ATOM_BYTES: u64 = 256;
+pub const ACCOUNTED_PRIVATE_PATTERN_RANGE_BYTES: u64 = 32;
+pub const ACCOUNTED_PRIVATE_PATTERN_FOLD_ATOM_BYTES: u64 = 256;
+pub const ACCOUNTED_PRIVATE_PATTERN_BOUNDARY_BYTES: u64 = 64;
+pub const ACCOUNTED_PRIVATE_PATTERN_LOOKUP_ENTRY_WORK_UNITS: u64 = 32;
 
 const FINGERPRINT_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
 const FINGERPRINT_PRIME: u64 = 0x0000_0100_0000_01b3;
@@ -703,6 +734,17 @@ impl PrivateCompiledPattern {
         })
     }
 
+    /// Deterministic retained-byte charge for the compiled program and capture
+    /// metadata. Allocator bookkeeping and unused capacity are intentionally
+    /// outside this logical accounting boundary.
+    fn accounted_retained_bytes(&self) -> Option<u64> {
+        let capture_metadata = u64::try_from(self.accounted_capture_metadata_bytes).ok()?;
+        self.program
+            .resources
+            .accounted_memory_bytes
+            .checked_add(capture_metadata)
+    }
+
     /// Return whether a leftmost-first match exists.
     pub fn is_match(&self, haystack: &str, limits: CaptureVmLimits) -> Result<bool, VmError> {
         self.captures(haystack, limits)
@@ -904,15 +946,45 @@ impl LoadedPrivatePattern {
             .is_match(haystack, self.iteration_limits.capture)
     }
 
+    /// Match with configured limits and caller-owned cancellation.
+    pub fn is_match_with_control(
+        &self,
+        haystack: &str,
+        control: &mut VmCancellationControl<'_>,
+    ) -> Result<bool, VmError> {
+        self.compiled
+            .is_match_with_control(haystack, self.iteration_limits.capture, control)
+    }
+
     /// Find one leftmost-first match with configured limits.
     pub fn find(&self, haystack: &str) -> Result<Option<CaptureSpan>, VmError> {
         self.compiled.find(haystack, self.iteration_limits.capture)
+    }
+
+    /// Find with configured limits and caller-owned cancellation.
+    pub fn find_with_control(
+        &self,
+        haystack: &str,
+        control: &mut VmCancellationControl<'_>,
+    ) -> Result<Option<CaptureSpan>, VmError> {
+        self.compiled
+            .find_with_control(haystack, self.iteration_limits.capture, control)
     }
 
     /// Find one match and its participating captures with configured limits.
     pub fn captures(&self, haystack: &str) -> Result<Option<VmMatch>, VmError> {
         self.compiled
             .captures(haystack, self.iteration_limits.capture)
+    }
+
+    /// Capture with configured limits and caller-owned cancellation.
+    pub fn captures_with_control(
+        &self,
+        haystack: &str,
+        control: &mut VmCancellationControl<'_>,
+    ) -> Result<Option<VmMatch>, VmError> {
+        self.compiled
+            .captures_with_control(haystack, self.iteration_limits.capture, control)
     }
 
     /// Iterate deterministically with the configured aggregate limits.
@@ -923,6 +995,17 @@ impl LoadedPrivatePattern {
     ) -> Result<VmIterationOutcome, VmError> {
         self.compiled
             .find_iter(haystack, policy, self.iteration_limits)
+    }
+
+    /// Iterate with configured limits and caller-owned cancellation.
+    pub fn find_iter_with_control(
+        &self,
+        haystack: &str,
+        policy: IterationPolicy,
+        control: &mut VmCancellationControl<'_>,
+    ) -> Result<VmIterationOutcome, VmError> {
+        self.compiled
+            .find_iter_with_control(haystack, policy, self.iteration_limits, control)
     }
 
     /// Replace every non-overlapping match with the configured ceilings.
@@ -938,6 +1021,26 @@ impl LoadedPrivatePattern {
             self.replacement_limits,
         )
     }
+
+    /// Replace with configured ceilings and cancellation during match search.
+    ///
+    /// Template parsing and final output emission remain synchronously bounded
+    /// rather than cancellable; this method makes that existing boundary
+    /// available through the configured facade without claiming more.
+    pub fn replace_all_with_match_control(
+        &self,
+        haystack: &str,
+        template: &str,
+        control: &mut VmCancellationControl<'_>,
+    ) -> Result<ReplacementOutcome, ReplacementOperationError> {
+        self.compiled.replace_all_with_match_control(
+            haystack,
+            template,
+            self.iteration_limits,
+            self.replacement_limits,
+            control,
+        )
+    }
 }
 
 impl fmt::Debug for LoadedPrivatePattern {
@@ -947,6 +1050,967 @@ impl fmt::Debug for LoadedPrivatePattern {
             .field("compiled", &self.compiled)
             .field("iteration_limits", &self.iteration_limits)
             .field("replacement_limits", &self.replacement_limits)
+            .finish()
+    }
+}
+
+/// Explicit ceilings for one caller-owned private compiled-pattern cache.
+///
+/// `max_live_accounted_bytes` includes residents that have been evicted from
+/// the cache but remain alive through a caller lease. This prevents eviction
+/// from being misreported as memory reclamation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PrivatePatternCacheLimits {
+    pub max_entries: usize,
+    pub max_pattern_bytes: usize,
+    pub max_live_accounted_bytes: u64,
+    pub max_inflight_compiles: usize,
+    pub max_inflight_compile_accounted_bytes: u64,
+    pub max_lookup_work_units: u64,
+}
+
+impl Default for PrivatePatternCacheLimits {
+    fn default() -> Self {
+        Self {
+            max_entries: DEFAULT_PRIVATE_PATTERN_CACHE_MAX_ENTRIES,
+            max_pattern_bytes: DEFAULT_PRIVATE_PATTERN_CACHE_MAX_PATTERN_BYTES,
+            max_live_accounted_bytes: DEFAULT_PRIVATE_PATTERN_CACHE_MAX_LIVE_ACCOUNTED_BYTES,
+            max_inflight_compiles: DEFAULT_PRIVATE_PATTERN_CACHE_MAX_INFLIGHT_COMPILES,
+            max_inflight_compile_accounted_bytes:
+                DEFAULT_PRIVATE_PATTERN_CACHE_MAX_INFLIGHT_COMPILE_ACCOUNTED_BYTES,
+            max_lookup_work_units: DEFAULT_PRIVATE_PATTERN_CACHE_MAX_LOOKUP_WORK_UNITS,
+        }
+    }
+}
+
+/// Stable, source-text-free failure category for private cache operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrivatePatternCacheErrorKind {
+    InvalidLimits,
+    PatternLimit,
+    EntryTooLarge,
+    CapacityPinned,
+    Closed,
+    Cancelled,
+    Config,
+    AllocationFailure,
+    ArithmeticOverflow,
+    CompileCapacity,
+    CompileMemoryCapacity,
+    LookupWorkLimit,
+}
+
+impl PrivatePatternCacheErrorKind {
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::InvalidLimits => "RGX-CACHE-E001",
+            Self::PatternLimit => "RGX-CACHE-E002",
+            Self::EntryTooLarge => "RGX-CACHE-E003",
+            Self::CapacityPinned => "RGX-CACHE-E004",
+            Self::Closed => "RGX-CACHE-E005",
+            Self::Cancelled => "RGX-CACHE-E006",
+            Self::Config => "RGX-CACHE-E007",
+            Self::AllocationFailure => "RGX-CACHE-E008",
+            Self::ArithmeticOverflow => "RGX-CACHE-E009",
+            Self::CompileCapacity => "RGX-CACHE-E010",
+            Self::CompileMemoryCapacity => "RGX-CACHE-E011",
+            Self::LookupWorkLimit => "RGX-CACHE-E012",
+        }
+    }
+}
+
+/// Source-secret-safe cache failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PrivatePatternCacheError {
+    pub kind: PrivatePatternCacheErrorKind,
+    pub actual: Option<u64>,
+    pub limit: Option<u64>,
+    pub config_error: Option<PrivatePatternConfigError>,
+}
+
+impl PrivatePatternCacheError {
+    const fn new(kind: PrivatePatternCacheErrorKind) -> Self {
+        Self {
+            kind,
+            actual: None,
+            limit: None,
+            config_error: None,
+        }
+    }
+
+    const fn config(config_error: PrivatePatternConfigError) -> Self {
+        Self {
+            kind: PrivatePatternCacheErrorKind::Config,
+            actual: None,
+            limit: None,
+            config_error: Some(config_error),
+        }
+    }
+
+    fn with_actual_limit<A, L>(mut self, actual: A, limit: L) -> Self
+    where
+        A: TryInto<u64>,
+        L: TryInto<u64>,
+    {
+        self.actual = actual.try_into().ok();
+        self.limit = limit.try_into().ok();
+        self
+    }
+
+    pub const fn code(self) -> &'static str {
+        self.kind.code()
+    }
+}
+
+impl fmt::Display for PrivatePatternCacheError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "[{}] private regex cache operation failed",
+            self.kind.code()
+        )?;
+        if let (Some(actual), Some(limit)) = (self.actual, self.limit) {
+            write!(formatter, " actual={actual} limit={limit}")?;
+        }
+        if let Some(config_error) = self.config_error {
+            write!(formatter, " config_code={}", config_error.code())?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for PrivatePatternCacheError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.config_error
+            .as_ref()
+            .map(|error| error as &(dyn std::error::Error + 'static))
+    }
+}
+
+/// Cancellation point around synchronous cache-miss compilation.
+///
+/// Compilation itself remains synchronously work-bounded. A cancellation that
+/// arrives during compilation is observed at `Admission`, discards the
+/// result, and leaves the cache unchanged; this does not claim prompt
+/// mid-compiler preemption.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrivatePatternCacheCheckpoint {
+    Lookup,
+    Compile,
+    Admission,
+}
+
+/// Caller-owned cancellation probe with no ambient runtime dependency.
+pub trait PrivatePatternCacheCancellationProbe {
+    fn should_cancel(&mut self, checkpoint: PrivatePatternCacheCheckpoint) -> bool;
+}
+
+impl<F> PrivatePatternCacheCancellationProbe for F
+where
+    F: FnMut(PrivatePatternCacheCheckpoint) -> bool,
+{
+    fn should_cancel(&mut self, checkpoint: PrivatePatternCacheCheckpoint) -> bool {
+        self(checkpoint)
+    }
+}
+
+/// Explicit cancellation state for one cache lookup/compile/admission attempt.
+pub struct PrivatePatternCacheAdmissionControl<'probe> {
+    probe: &'probe mut dyn PrivatePatternCacheCancellationProbe,
+    cancelled_at: Option<PrivatePatternCacheCheckpoint>,
+}
+
+impl<'probe> PrivatePatternCacheAdmissionControl<'probe> {
+    pub fn new(probe: &'probe mut dyn PrivatePatternCacheCancellationProbe) -> Self {
+        Self {
+            probe,
+            cancelled_at: None,
+        }
+    }
+
+    pub const fn cancelled_at(&self) -> Option<PrivatePatternCacheCheckpoint> {
+        self.cancelled_at
+    }
+
+    fn check(&mut self, checkpoint: PrivatePatternCacheCheckpoint) -> bool {
+        if self.probe.should_cancel(checkpoint) {
+            self.cancelled_at = Some(checkpoint);
+            true
+        } else {
+            false
+        }
+    }
+}
+
+impl fmt::Debug for PrivatePatternCacheAdmissionControl<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PrivatePatternCacheAdmissionControl")
+            .field("cancelled_at", &self.cancelled_at)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PrivatePatternCacheFingerprint {
+    first: u64,
+    second: u64,
+}
+
+fn private_pattern_cache_fingerprint(pattern: &str) -> PrivatePatternCacheFingerprint {
+    let mut first = FINGERPRINT_OFFSET_BASIS;
+    let mut second = 0x6c62_272e_07bb_0142_u64;
+    for byte in pattern.bytes() {
+        first = (first ^ u64::from(byte)).wrapping_mul(FINGERPRINT_PRIME);
+        second = (second ^ u64::from(byte).wrapping_add(0x9d))
+            .rotate_left(7)
+            .wrapping_mul(0x9e37_79b1_85eb_ca87);
+    }
+    PrivatePatternCacheFingerprint { first, second }
+}
+
+/// Collision-safe cache identity.
+///
+/// The complete source pattern is retained so a digest collision can never
+/// select the wrong privacy policy. Its bytes are charged to the live resident,
+/// never rendered by diagnostics, and live until the final cache/lease owner is
+/// dropped. This is not a memory-erasure or RSS non-retention claim.
+#[derive(Clone, PartialEq, Eq)]
+struct PrivatePatternCacheKey {
+    schema_version: u16,
+    pattern: String,
+    fingerprint: PrivatePatternCacheFingerprint,
+    compile_limits: PrivateCompileLimits,
+    iteration_limits: IterationVmLimits,
+    replacement_limits: ReplacementLimits,
+}
+
+impl PrivatePatternCacheKey {
+    fn try_from_config(
+        config: &PrivatePatternConfig,
+        fingerprint: PrivatePatternCacheFingerprint,
+    ) -> Result<Self, PrivatePatternCacheError> {
+        let mut pattern = String::new();
+        pattern
+            .try_reserve_exact(config.pattern.len())
+            .map_err(|_| {
+                PrivatePatternCacheError::new(PrivatePatternCacheErrorKind::AllocationFailure)
+            })?;
+        pattern.push_str(&config.pattern);
+        Ok(Self {
+            schema_version: config.schema_version,
+            pattern,
+            fingerprint,
+            compile_limits: config.compile_limits,
+            iteration_limits: config.iteration_limits,
+            replacement_limits: config.replacement_limits,
+        })
+    }
+
+    fn metadata_matches_config(&self, config: &PrivatePatternConfig) -> bool {
+        self.schema_version == config.schema_version
+            && self.compile_limits == config.compile_limits
+            && self.iteration_limits == config.iteration_limits
+            && self.replacement_limits == config.replacement_limits
+    }
+
+    fn metadata_matches_key(&self, other: &Self) -> bool {
+        self.schema_version == other.schema_version
+            && self.compile_limits == other.compile_limits
+            && self.iteration_limits == other.iteration_limits
+            && self.replacement_limits == other.replacement_limits
+    }
+}
+
+impl fmt::Debug for PrivatePatternCacheKey {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PrivatePatternCacheKey")
+            .field("schema_version", &self.schema_version)
+            .field("pattern_bytes", &self.pattern.len())
+            .field("compile_limits", &self.compile_limits)
+            .field("iteration_limits", &self.iteration_limits)
+            .field("replacement_limits", &self.replacement_limits)
+            .finish()
+    }
+}
+
+struct ResidentPrivatePattern {
+    key: PrivatePatternCacheKey,
+    loaded: LoadedPrivatePattern,
+    accounted_live_bytes: u64,
+    live_accounted_bytes: Arc<AtomicU64>,
+    charged: AtomicBool,
+}
+
+impl Drop for ResidentPrivatePattern {
+    fn drop(&mut self) {
+        if self.charged.swap(false, Ordering::AcqRel) {
+            let previous = self
+                .live_accounted_bytes
+                .fetch_sub(self.accounted_live_bytes, Ordering::AcqRel);
+            debug_assert!(previous >= self.accounted_live_bytes);
+        }
+    }
+}
+
+/// Immutable caller lease for one configured private pattern.
+///
+/// Eviction or cache shutdown removes only the cache's ownership. Existing
+/// leases remain valid and remain charged against the cache's live-byte
+/// ceiling until their final clone is dropped.
+#[derive(Clone)]
+pub struct PrivatePatternLease {
+    resident: Arc<ResidentPrivatePattern>,
+}
+
+impl PrivatePatternLease {
+    pub fn accounted_live_bytes(&self) -> u64 {
+        self.resident.accounted_live_bytes
+    }
+
+    pub fn is_match(&self, haystack: &str) -> Result<bool, VmError> {
+        self.resident.loaded.is_match(haystack)
+    }
+
+    pub fn is_match_with_control(
+        &self,
+        haystack: &str,
+        control: &mut VmCancellationControl<'_>,
+    ) -> Result<bool, VmError> {
+        self.resident
+            .loaded
+            .is_match_with_control(haystack, control)
+    }
+
+    pub fn find(&self, haystack: &str) -> Result<Option<CaptureSpan>, VmError> {
+        self.resident.loaded.find(haystack)
+    }
+
+    pub fn find_with_control(
+        &self,
+        haystack: &str,
+        control: &mut VmCancellationControl<'_>,
+    ) -> Result<Option<CaptureSpan>, VmError> {
+        self.resident.loaded.find_with_control(haystack, control)
+    }
+
+    pub fn captures(&self, haystack: &str) -> Result<Option<VmMatch>, VmError> {
+        self.resident.loaded.captures(haystack)
+    }
+
+    pub fn captures_with_control(
+        &self,
+        haystack: &str,
+        control: &mut VmCancellationControl<'_>,
+    ) -> Result<Option<VmMatch>, VmError> {
+        self.resident
+            .loaded
+            .captures_with_control(haystack, control)
+    }
+
+    pub fn find_iter(
+        &self,
+        haystack: &str,
+        policy: IterationPolicy,
+    ) -> Result<VmIterationOutcome, VmError> {
+        self.resident.loaded.find_iter(haystack, policy)
+    }
+
+    pub fn find_iter_with_control(
+        &self,
+        haystack: &str,
+        policy: IterationPolicy,
+        control: &mut VmCancellationControl<'_>,
+    ) -> Result<VmIterationOutcome, VmError> {
+        self.resident
+            .loaded
+            .find_iter_with_control(haystack, policy, control)
+    }
+
+    pub fn replace_all(
+        &self,
+        haystack: &str,
+        template: &str,
+    ) -> Result<ReplacementOutcome, ReplacementOperationError> {
+        self.resident.loaded.replace_all(haystack, template)
+    }
+
+    pub fn replace_all_with_match_control(
+        &self,
+        haystack: &str,
+        template: &str,
+        control: &mut VmCancellationControl<'_>,
+    ) -> Result<ReplacementOutcome, ReplacementOperationError> {
+        self.resident
+            .loaded
+            .replace_all_with_match_control(haystack, template, control)
+    }
+}
+
+impl fmt::Debug for PrivatePatternLease {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PrivatePatternLease")
+            .field("key", &self.resident.key)
+            .field("accounted_live_bytes", &self.resident.accounted_live_bytes)
+            .field("loaded", &self.resident.loaded)
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PrivatePatternCacheSnapshot {
+    pub closed: bool,
+    pub entries: usize,
+    pub cache_owned_accounted_bytes: u64,
+    pub live_accounted_bytes: u64,
+    pub inflight_compiles: usize,
+    pub inflight_compile_accounted_bytes: u64,
+    pub hits: u64,
+    pub misses: u64,
+    pub compilations: u64,
+    pub admissions: u64,
+    pub duplicate_compiles: u64,
+    pub evictions: u64,
+    pub clears: u64,
+}
+
+struct PrivatePatternCacheEntry {
+    resident: Arc<ResidentPrivatePattern>,
+}
+
+struct PrivatePatternCacheState {
+    entries: Vec<PrivatePatternCacheEntry>,
+    closed: bool,
+    hits: u64,
+    misses: u64,
+    compilations: u64,
+    admissions: u64,
+    duplicate_compiles: u64,
+    evictions: u64,
+    clears: u64,
+}
+
+fn checked_compile_component(count: usize, bytes_per_item: u64) -> Option<u64> {
+    u64::try_from(count).ok()?.checked_mul(bytes_per_item)
+}
+
+/// Conservative logical reservation derived from every compile-stage ceiling.
+///
+/// These charges intentionally exceed the schema element sizes used by the
+/// retained IR. They bound concurrent cache-miss compilation policy; they are
+/// not allocator-usable-size or RSS measurements.
+fn private_pattern_compile_reservation_bytes(
+    config: &PrivatePatternConfig,
+) -> Result<u64, PrivatePatternCacheError> {
+    let limits = config.compile_limits;
+    let components = [
+        checked_compile_component(config.pattern.len(), ACCOUNTED_PRIVATE_PATTERN_SOURCE_BYTE),
+        checked_compile_component(
+            limits.lexer.max_tokens,
+            ACCOUNTED_PRIVATE_PATTERN_TOKEN_BYTES,
+        ),
+        checked_compile_component(
+            limits.parser.max_ast_nodes,
+            ACCOUNTED_PRIVATE_PATTERN_AST_NODE_BYTES,
+        ),
+        checked_compile_component(
+            limits.semantic.max_semantic_atoms,
+            ACCOUNTED_PRIVATE_PATTERN_SEMANTIC_ATOM_BYTES,
+        ),
+        checked_compile_component(
+            limits.semantic.max_total_ranges,
+            ACCOUNTED_PRIVATE_PATTERN_RANGE_BYTES,
+        ),
+        checked_compile_component(
+            limits.fold_boundary.max_fold_atoms,
+            ACCOUNTED_PRIVATE_PATTERN_FOLD_ATOM_BYTES,
+        ),
+        checked_compile_component(
+            limits.fold_boundary.max_total_fold_ranges,
+            ACCOUNTED_PRIVATE_PATTERN_RANGE_BYTES,
+        ),
+        checked_compile_component(
+            limits.fold_boundary.max_boundary_assertions,
+            ACCOUNTED_PRIVATE_PATTERN_BOUNDARY_BYTES,
+        ),
+        Some(limits.ir.max_memory_bytes),
+    ];
+    components
+        .into_iter()
+        .try_fold(
+            ACCOUNTED_PRIVATE_PATTERN_COMPILE_BASE_BYTES,
+            |total, component| total.checked_add(component?),
+        )
+        .ok_or_else(|| {
+            PrivatePatternCacheError::new(PrivatePatternCacheErrorKind::ArithmeticOverflow)
+        })
+}
+
+fn charge_private_pattern_lookup_work(
+    work_units: &mut u64,
+    units: u64,
+    limit: u64,
+) -> Result<(), PrivatePatternCacheError> {
+    let next = work_units.checked_add(units).ok_or_else(|| {
+        PrivatePatternCacheError::new(PrivatePatternCacheErrorKind::ArithmeticOverflow)
+    })?;
+    if next > limit {
+        return Err(
+            PrivatePatternCacheError::new(PrivatePatternCacheErrorKind::LookupWorkLimit)
+                .with_actual_limit(next, limit),
+        );
+    }
+    *work_units = next;
+    Ok(())
+}
+
+fn find_private_pattern_config_entry(
+    state: &PrivatePatternCacheState,
+    config: &PrivatePatternConfig,
+    fingerprint: PrivatePatternCacheFingerprint,
+    work_units: &mut u64,
+    work_limit: u64,
+) -> Result<Option<usize>, PrivatePatternCacheError> {
+    for (index, entry) in state.entries.iter().enumerate() {
+        charge_private_pattern_lookup_work(
+            work_units,
+            ACCOUNTED_PRIVATE_PATTERN_LOOKUP_ENTRY_WORK_UNITS,
+            work_limit,
+        )?;
+        let key = &entry.resident.key;
+        if key.fingerprint != fingerprint || !key.metadata_matches_config(config) {
+            continue;
+        }
+        let exact_bytes = config
+            .pattern
+            .len()
+            .checked_add(key.pattern.len())
+            .and_then(|bytes| u64::try_from(bytes).ok())
+            .ok_or_else(|| {
+                PrivatePatternCacheError::new(PrivatePatternCacheErrorKind::ArithmeticOverflow)
+            })?;
+        charge_private_pattern_lookup_work(work_units, exact_bytes, work_limit)?;
+        if key.pattern == config.pattern {
+            return Ok(Some(index));
+        }
+    }
+    Ok(None)
+}
+
+fn find_private_pattern_key_entry(
+    state: &PrivatePatternCacheState,
+    candidate: &PrivatePatternCacheKey,
+    work_units: &mut u64,
+    work_limit: u64,
+) -> Result<Option<usize>, PrivatePatternCacheError> {
+    for (index, entry) in state.entries.iter().enumerate() {
+        charge_private_pattern_lookup_work(
+            work_units,
+            ACCOUNTED_PRIVATE_PATTERN_LOOKUP_ENTRY_WORK_UNITS,
+            work_limit,
+        )?;
+        let key = &entry.resident.key;
+        if key.fingerprint != candidate.fingerprint || !key.metadata_matches_key(candidate) {
+            continue;
+        }
+        let exact_bytes = candidate
+            .pattern
+            .len()
+            .checked_add(key.pattern.len())
+            .and_then(|bytes| u64::try_from(bytes).ok())
+            .ok_or_else(|| {
+                PrivatePatternCacheError::new(PrivatePatternCacheErrorKind::ArithmeticOverflow)
+            })?;
+        charge_private_pattern_lookup_work(work_units, exact_bytes, work_limit)?;
+        if key.pattern == candidate.pattern {
+            return Ok(Some(index));
+        }
+    }
+    Ok(None)
+}
+
+/// Caller-owned bounded LRU cache for configured private patterns.
+///
+/// The cache has no global instance and starts no tasks or obligations.
+/// Compilation and cancellation callbacks always run outside its mutex. A
+/// concurrent miss may compile redundantly; admission rechecks exact key
+/// equality and retains one deterministic winner.
+pub struct PrivatePatternCache {
+    limits: PrivatePatternCacheLimits,
+    state: Mutex<PrivatePatternCacheState>,
+    live_accounted_bytes: Arc<AtomicU64>,
+    compile_accounting: Mutex<PrivatePatternCompileAccounting>,
+}
+
+struct PrivatePatternCompileAccounting {
+    inflight_compiles: usize,
+    inflight_compile_accounted_bytes: u64,
+}
+
+struct PrivatePatternCompilePermit<'cache> {
+    compile_accounting: &'cache Mutex<PrivatePatternCompileAccounting>,
+    accounted_bytes: u64,
+}
+
+impl Drop for PrivatePatternCompilePermit<'_> {
+    fn drop(&mut self) {
+        let mut accounting = self.compile_accounting.lock();
+        debug_assert!(accounting.inflight_compiles > 0);
+        debug_assert!(accounting.inflight_compile_accounted_bytes >= self.accounted_bytes);
+        accounting.inflight_compiles = accounting.inflight_compiles.saturating_sub(1);
+        accounting.inflight_compile_accounted_bytes = accounting
+            .inflight_compile_accounted_bytes
+            .saturating_sub(self.accounted_bytes);
+    }
+}
+
+impl PrivatePatternCache {
+    pub fn new(limits: PrivatePatternCacheLimits) -> Result<Self, PrivatePatternCacheError> {
+        if limits.max_entries == 0
+            || limits.max_pattern_bytes == 0
+            || limits.max_inflight_compiles == 0
+            || limits.max_inflight_compile_accounted_bytes == 0
+            || limits.max_lookup_work_units == 0
+            || limits.max_live_accounted_bytes < ACCOUNTED_PRIVATE_PATTERN_RESIDENT_OVERHEAD_BYTES
+        {
+            return Err(PrivatePatternCacheError::new(
+                PrivatePatternCacheErrorKind::InvalidLimits,
+            ));
+        }
+        let mut entries = Vec::new();
+        entries.try_reserve_exact(limits.max_entries).map_err(|_| {
+            PrivatePatternCacheError::new(PrivatePatternCacheErrorKind::AllocationFailure)
+        })?;
+        Ok(Self {
+            limits,
+            state: Mutex::new(PrivatePatternCacheState {
+                entries,
+                closed: false,
+                hits: 0,
+                misses: 0,
+                compilations: 0,
+                admissions: 0,
+                duplicate_compiles: 0,
+                evictions: 0,
+                clears: 0,
+            }),
+            live_accounted_bytes: Arc::new(AtomicU64::new(0)),
+            compile_accounting: Mutex::new(PrivatePatternCompileAccounting {
+                inflight_compiles: 0,
+                inflight_compile_accounted_bytes: 0,
+            }),
+        })
+    }
+
+    fn acquire_compile_permit(
+        &self,
+        accounted_bytes: u64,
+    ) -> Result<PrivatePatternCompilePermit<'_>, PrivatePatternCacheError> {
+        let mut accounting = self.compile_accounting.lock();
+        let requested_compiles = accounting.inflight_compiles.checked_add(1).ok_or_else(|| {
+            PrivatePatternCacheError::new(PrivatePatternCacheErrorKind::ArithmeticOverflow)
+        })?;
+        if requested_compiles > self.limits.max_inflight_compiles {
+            return Err(PrivatePatternCacheError::new(
+                PrivatePatternCacheErrorKind::CompileCapacity,
+            )
+            .with_actual_limit(requested_compiles, self.limits.max_inflight_compiles));
+        }
+        let requested_bytes = accounting
+            .inflight_compile_accounted_bytes
+            .checked_add(accounted_bytes)
+            .ok_or_else(|| {
+                PrivatePatternCacheError::new(PrivatePatternCacheErrorKind::ArithmeticOverflow)
+            })?;
+        if requested_bytes > self.limits.max_inflight_compile_accounted_bytes {
+            return Err(PrivatePatternCacheError::new(
+                PrivatePatternCacheErrorKind::CompileMemoryCapacity,
+            )
+            .with_actual_limit(
+                requested_bytes,
+                self.limits.max_inflight_compile_accounted_bytes,
+            ));
+        }
+        accounting.inflight_compiles = requested_compiles;
+        accounting.inflight_compile_accounted_bytes = requested_bytes;
+        Ok(PrivatePatternCompilePermit {
+            compile_accounting: &self.compile_accounting,
+            accounted_bytes,
+        })
+    }
+
+    pub fn get_or_compile(
+        &self,
+        config: PrivatePatternConfig,
+    ) -> Result<PrivatePatternLease, PrivatePatternCacheError> {
+        self.get_or_compile_inner(config, None)
+    }
+
+    pub fn get_or_compile_with_admission_control(
+        &self,
+        config: PrivatePatternConfig,
+        control: &mut PrivatePatternCacheAdmissionControl<'_>,
+    ) -> Result<PrivatePatternLease, PrivatePatternCacheError> {
+        self.get_or_compile_inner(config, Some(control))
+    }
+
+    fn get_or_compile_inner(
+        &self,
+        config: PrivatePatternConfig,
+        mut control: Option<&mut PrivatePatternCacheAdmissionControl<'_>>,
+    ) -> Result<PrivatePatternLease, PrivatePatternCacheError> {
+        {
+            let state = self.state.lock();
+            if state.closed {
+                return Err(PrivatePatternCacheError::new(
+                    PrivatePatternCacheErrorKind::Closed,
+                ));
+            }
+            if config.pattern.len() > self.limits.max_pattern_bytes {
+                return Err(PrivatePatternCacheError::new(
+                    PrivatePatternCacheErrorKind::PatternLimit,
+                )
+                .with_actual_limit(config.pattern.len(), self.limits.max_pattern_bytes));
+            }
+        }
+
+        if control
+            .as_deref_mut()
+            .is_some_and(|control| control.check(PrivatePatternCacheCheckpoint::Lookup))
+        {
+            return Err(PrivatePatternCacheError::new(
+                PrivatePatternCacheErrorKind::Cancelled,
+            ));
+        }
+
+        let mut lookup_work_units = u64::try_from(config.pattern.len()).map_err(|_| {
+            PrivatePatternCacheError::new(PrivatePatternCacheErrorKind::ArithmeticOverflow)
+        })?;
+        if lookup_work_units > self.limits.max_lookup_work_units {
+            return Err(PrivatePatternCacheError::new(
+                PrivatePatternCacheErrorKind::LookupWorkLimit,
+            )
+            .with_actual_limit(lookup_work_units, self.limits.max_lookup_work_units));
+        }
+        let fingerprint = private_pattern_cache_fingerprint(&config.pattern);
+
+        {
+            let mut state = self.state.lock();
+            if state.closed {
+                return Err(PrivatePatternCacheError::new(
+                    PrivatePatternCacheErrorKind::Closed,
+                ));
+            }
+            if let Some(index) = find_private_pattern_config_entry(
+                &state,
+                &config,
+                fingerprint,
+                &mut lookup_work_units,
+                self.limits.max_lookup_work_units,
+            )? {
+                let entry = state.entries.remove(index);
+                state.entries.push(entry);
+                state.hits = state.hits.saturating_add(1);
+                return Ok(PrivatePatternLease {
+                    resident: Arc::clone(&state.entries.last().expect("moved cache hit").resident),
+                });
+            }
+            state.misses = state.misses.saturating_add(1);
+        }
+
+        if control
+            .as_deref_mut()
+            .is_some_and(|control| control.check(PrivatePatternCacheCheckpoint::Compile))
+        {
+            return Err(PrivatePatternCacheError::new(
+                PrivatePatternCacheErrorKind::Cancelled,
+            ));
+        }
+
+        let compile_reservation = private_pattern_compile_reservation_bytes(&config)?;
+        let _compile_permit = self.acquire_compile_permit(compile_reservation)?;
+        let key = PrivatePatternCacheKey::try_from_config(&config, fingerprint)?;
+        let loaded =
+            PrivatePatternConfig::load(config).map_err(PrivatePatternCacheError::config)?;
+        let retained_pattern_bytes = u64::try_from(key.pattern.len()).map_err(|_| {
+            PrivatePatternCacheError::new(PrivatePatternCacheErrorKind::ArithmeticOverflow)
+        })?;
+        let compiled_bytes = loaded.compiled.accounted_retained_bytes().ok_or_else(|| {
+            PrivatePatternCacheError::new(PrivatePatternCacheErrorKind::ArithmeticOverflow)
+        })?;
+        let accounted_live_bytes = ACCOUNTED_PRIVATE_PATTERN_RESIDENT_OVERHEAD_BYTES
+            .checked_add(retained_pattern_bytes)
+            .and_then(|bytes| bytes.checked_add(compiled_bytes))
+            .ok_or_else(|| {
+                PrivatePatternCacheError::new(PrivatePatternCacheErrorKind::ArithmeticOverflow)
+            })?;
+
+        {
+            let mut state = self.state.lock();
+            state.compilations = state.compilations.saturating_add(1);
+        }
+
+        if accounted_live_bytes > self.limits.max_live_accounted_bytes {
+            return Err(
+                PrivatePatternCacheError::new(PrivatePatternCacheErrorKind::EntryTooLarge)
+                    .with_actual_limit(accounted_live_bytes, self.limits.max_live_accounted_bytes),
+            );
+        }
+
+        let resident = Arc::new(ResidentPrivatePattern {
+            key,
+            loaded,
+            accounted_live_bytes,
+            live_accounted_bytes: Arc::clone(&self.live_accounted_bytes),
+            charged: AtomicBool::new(false),
+        });
+
+        if control.is_some_and(|control| control.check(PrivatePatternCacheCheckpoint::Admission)) {
+            return Err(PrivatePatternCacheError::new(
+                PrivatePatternCacheErrorKind::Cancelled,
+            ));
+        }
+
+        let mut state = self.state.lock();
+        if state.closed {
+            return Err(PrivatePatternCacheError::new(
+                PrivatePatternCacheErrorKind::Closed,
+            ));
+        }
+        if let Some(index) = find_private_pattern_key_entry(
+            &state,
+            &resident.key,
+            &mut lookup_work_units,
+            self.limits.max_lookup_work_units,
+        )? {
+            let entry = state.entries.remove(index);
+            state.entries.push(entry);
+            state.duplicate_compiles = state.duplicate_compiles.saturating_add(1);
+            return Ok(PrivatePatternLease {
+                resident: Arc::clone(
+                    &state
+                        .entries
+                        .last()
+                        .expect("moved duplicate winner")
+                        .resident,
+                ),
+            });
+        }
+
+        let live_before = self.live_accounted_bytes.load(Ordering::Acquire);
+        let mut projected_live =
+            live_before
+                .checked_add(accounted_live_bytes)
+                .ok_or_else(|| {
+                    PrivatePatternCacheError::new(PrivatePatternCacheErrorKind::ArithmeticOverflow)
+                })?;
+        let mut projected_entries = state.entries.len().checked_add(1).ok_or_else(|| {
+            PrivatePatternCacheError::new(PrivatePatternCacheErrorKind::ArithmeticOverflow)
+        })?;
+        let mut victim_count = 0_usize;
+        while projected_entries > self.limits.max_entries
+            || projected_live > self.limits.max_live_accounted_bytes
+        {
+            let Some(victim) = state.entries.get(victim_count) else {
+                return Err(PrivatePatternCacheError::new(
+                    PrivatePatternCacheErrorKind::CapacityPinned,
+                )
+                .with_actual_limit(projected_live, self.limits.max_live_accounted_bytes));
+            };
+            projected_entries -= 1;
+            if Arc::strong_count(&victim.resident) == 1 {
+                projected_live =
+                    projected_live.saturating_sub(victim.resident.accounted_live_bytes);
+            }
+            victim_count += 1;
+        }
+
+        if victim_count > 0 {
+            for victim in state.entries.drain(..victim_count) {
+                drop(victim);
+            }
+            state.evictions = state
+                .evictions
+                .saturating_add(u64::try_from(victim_count).unwrap_or(u64::MAX));
+        }
+
+        let live_after_eviction = self.live_accounted_bytes.load(Ordering::Acquire);
+        debug_assert!(
+            live_after_eviction
+                .checked_add(accounted_live_bytes)
+                .is_some_and(|bytes| bytes <= self.limits.max_live_accounted_bytes)
+        );
+        resident.charged.store(true, Ordering::Release);
+        self.live_accounted_bytes
+            .fetch_add(accounted_live_bytes, Ordering::AcqRel);
+        state.entries.push(PrivatePatternCacheEntry {
+            resident: Arc::clone(&resident),
+        });
+        state.admissions = state.admissions.saturating_add(1);
+        Ok(PrivatePatternLease { resident })
+    }
+
+    /// Remove every cache-owned entry without invalidating active leases.
+    pub fn clear(&self) {
+        let mut state = self.state.lock();
+        let removed = state.entries.len();
+        state.entries.clear();
+        state.evictions = state
+            .evictions
+            .saturating_add(u64::try_from(removed).unwrap_or(u64::MAX));
+        state.clears = state.clears.saturating_add(1);
+    }
+
+    /// Close admission and remove every cache-owned entry atomically.
+    ///
+    /// This operation is idempotent. It starts no background cleanup; live
+    /// bytes converge to zero synchronously when outstanding leases are
+    /// dropped.
+    pub fn shutdown(&self) {
+        let mut state = self.state.lock();
+        if state.closed {
+            return;
+        }
+        state.closed = true;
+        let removed = state.entries.len();
+        state.entries.clear();
+        state.evictions = state
+            .evictions
+            .saturating_add(u64::try_from(removed).unwrap_or(u64::MAX));
+    }
+
+    pub fn snapshot(&self) -> PrivatePatternCacheSnapshot {
+        let state = self.state.lock();
+        let compile_accounting = self.compile_accounting.lock();
+        let cache_owned_accounted_bytes = state.entries.iter().fold(0_u64, |bytes, entry| {
+            bytes.saturating_add(entry.resident.accounted_live_bytes)
+        });
+        PrivatePatternCacheSnapshot {
+            closed: state.closed,
+            entries: state.entries.len(),
+            cache_owned_accounted_bytes,
+            live_accounted_bytes: self.live_accounted_bytes.load(Ordering::Acquire),
+            inflight_compiles: compile_accounting.inflight_compiles,
+            inflight_compile_accounted_bytes: compile_accounting.inflight_compile_accounted_bytes,
+            hits: state.hits,
+            misses: state.misses,
+            compilations: state.compilations,
+            admissions: state.admissions,
+            duplicate_compiles: state.duplicate_compiles,
+            evictions: state.evictions,
+            clears: state.clears,
+        }
+    }
+}
+
+impl fmt::Debug for PrivatePatternCache {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PrivatePatternCache")
+            .field("limits", &self.limits)
+            .field("snapshot", &self.snapshot())
             .finish()
     }
 }
@@ -3752,6 +4816,7 @@ mod tests {
     #[test]
     fn compatible_replacement_templates_are_total_and_match_incumbent_edges() {
         let compiled = compile_pattern("(a)");
+        let incumbent = regex::Regex::new("(a)").expect("incumbent pattern");
         for (template, expected) in [
             ("$0", "a"),
             ("${0}", "a"),
@@ -3779,12 +4844,9 @@ mod tests {
                     ReplacementLimits::default(),
                 )
                 .unwrap_or_else(|error| panic!("compatible template {template:?}: {error}"));
-            let incumbent = regex::Regex::new("(a)")
-                .expect("incumbent pattern")
-                .replace_all("a", template)
-                .into_owned();
+            let incumbent_output = incumbent.replace_all("a", template).into_owned();
             assert_eq!(candidate.output, expected, "candidate {template:?}");
-            assert_eq!(candidate.output, incumbent, "incumbent {template:?}");
+            assert_eq!(candidate.output, incumbent_output, "incumbent {template:?}");
         }
     }
 
@@ -4258,6 +5320,542 @@ mod tests {
                 join.join().expect("shared config worker");
             }
         });
+    }
+
+    fn private_cache(limits: PrivatePatternCacheLimits) -> PrivatePatternCache {
+        PrivatePatternCache::new(limits).expect("valid private cache limits")
+    }
+
+    #[test]
+    fn private_pattern_cache_limits_and_failures_are_atomic_and_secret_safe() {
+        let invalid = PrivatePatternCache::new(PrivatePatternCacheLimits {
+            max_entries: 0,
+            ..PrivatePatternCacheLimits::default()
+        })
+        .expect_err("zero entry limit is invalid");
+        assert_eq!(invalid.kind, PrivatePatternCacheErrorKind::InvalidLimits);
+
+        let pattern_limited = private_cache(PrivatePatternCacheLimits {
+            max_pattern_bytes: 1,
+            ..PrivatePatternCacheLimits::default()
+        });
+        let private_pattern = "private-cache-pattern-canary";
+        let limited = pattern_limited
+            .get_or_compile(PrivatePatternConfig::new(private_pattern))
+            .expect_err("pattern ceiling fails before compile");
+        assert_eq!(limited.kind, PrivatePatternCacheErrorKind::PatternLimit);
+        assert_eq!(pattern_limited.snapshot().entries, 0);
+
+        let byte_limited = private_cache(PrivatePatternCacheLimits {
+            max_live_accounted_bytes: ACCOUNTED_PRIVATE_PATTERN_RESIDENT_OVERHEAD_BYTES,
+            ..PrivatePatternCacheLimits::default()
+        });
+        let oversized = byte_limited
+            .get_or_compile(PrivatePatternConfig::new("a"))
+            .expect_err("compiled resident cannot exceed the live-byte ceiling");
+        assert_eq!(oversized.kind, PrivatePatternCacheErrorKind::EntryTooLarge);
+        assert_eq!(byte_limited.snapshot().entries, 0);
+        assert_eq!(byte_limited.snapshot().live_accounted_bytes, 0);
+        assert_eq!(byte_limited.snapshot().inflight_compiles, 0);
+        assert_eq!(byte_limited.snapshot().inflight_compile_accounted_bytes, 0);
+
+        let cache = private_cache(PrivatePatternCacheLimits::default());
+        let malformed_pattern = "private-cache-malformed-canary\\";
+        let malformed = cache
+            .get_or_compile(PrivatePatternConfig::new(malformed_pattern))
+            .expect_err("malformed pattern is never negative-cached");
+        assert_eq!(malformed.kind, PrivatePatternCacheErrorKind::Config);
+        assert_eq!(
+            malformed.config_error.map(|error| error.kind),
+            Some(PrivatePatternConfigErrorKind::Compile)
+        );
+        assert_eq!(cache.snapshot().entries, 0);
+        assert_eq!(cache.snapshot().inflight_compiles, 0);
+        assert_eq!(cache.snapshot().inflight_compile_accounted_bytes, 0);
+        let debug_pattern = "(?P<private_cache_debug_canary>a)";
+        let debug_lease = cache
+            .get_or_compile(PrivatePatternConfig::new(debug_pattern))
+            .expect("admit debug canary pattern");
+        for rendered in [
+            limited.to_string(),
+            format!("{limited:?}"),
+            malformed.to_string(),
+            format!("{malformed:?}"),
+            format!("{cache:?}"),
+            format!("{debug_lease:?}"),
+        ] {
+            assert!(!rendered.contains(private_pattern));
+            assert!(!rendered.contains("private-cache-malformed-canary"));
+            assert!(!rendered.contains("private_cache_debug_canary"));
+        }
+        cache.shutdown();
+        drop(debug_lease);
+        assert_eq!(cache.snapshot().live_accounted_bytes, 0);
+    }
+
+    #[test]
+    fn private_pattern_cache_lru_eviction_tracks_evicted_leases_until_drop() {
+        let cache = private_cache(PrivatePatternCacheLimits {
+            max_entries: 2,
+            ..PrivatePatternCacheLimits::default()
+        });
+        let first = cache
+            .get_or_compile(PrivatePatternConfig::new("a"))
+            .expect("admit first pattern");
+        let second = cache
+            .get_or_compile(PrivatePatternConfig::new("b"))
+            .expect("admit second pattern");
+        let second_bytes = second.accounted_live_bytes();
+        let second_weak = Arc::downgrade(&second.resident);
+
+        let first_hit = cache
+            .get_or_compile(PrivatePatternConfig::new("a"))
+            .expect("refresh first as most recently used");
+        drop(first_hit);
+        let third = cache
+            .get_or_compile(PrivatePatternConfig::new("c"))
+            .expect("third pattern evicts least-recently-used second entry");
+        let after_eviction = cache.snapshot();
+        assert_eq!(after_eviction.entries, 2);
+        assert_eq!(after_eviction.hits, 1);
+        assert_eq!(after_eviction.evictions, 1);
+        assert!(second_weak.upgrade().is_some());
+        assert!(second.is_match("b").expect("evicted lease remains usable"));
+
+        let live_before_second_drop = after_eviction.live_accounted_bytes;
+        drop(second);
+        assert!(second_weak.upgrade().is_none());
+        assert_eq!(
+            cache.snapshot().live_accounted_bytes,
+            live_before_second_drop - second_bytes
+        );
+
+        cache.clear();
+        let after_clear = cache.snapshot();
+        assert_eq!(after_clear.entries, 0);
+        assert!(after_clear.live_accounted_bytes > 0);
+        assert!(
+            first
+                .is_match("a")
+                .expect("cleared first lease remains usable")
+        );
+        assert!(
+            third
+                .is_match("c")
+                .expect("cleared third lease remains usable")
+        );
+        drop(first);
+        drop(third);
+        assert_eq!(cache.snapshot().live_accounted_bytes, 0);
+    }
+
+    #[test]
+    fn private_pattern_cache_pinned_capacity_refusal_preserves_existing_entry() {
+        let sizing_cache = private_cache(PrivatePatternCacheLimits::default());
+        let sizing = sizing_cache
+            .get_or_compile(PrivatePatternConfig::new("a"))
+            .expect("measure deterministic resident charge");
+        let one_resident = sizing.accounted_live_bytes();
+        sizing_cache.shutdown();
+        drop(sizing);
+        assert_eq!(sizing_cache.snapshot().live_accounted_bytes, 0);
+
+        let cache = private_cache(PrivatePatternCacheLimits {
+            max_entries: 2,
+            max_live_accounted_bytes: one_resident,
+            ..PrivatePatternCacheLimits::default()
+        });
+        let admitted = cache
+            .get_or_compile(PrivatePatternConfig::new("a"))
+            .expect("admit one resident");
+        let mut distinct_config = PrivatePatternConfig::new("a");
+        distinct_config.iteration_limits.max_matches -= 1;
+        let refused = cache
+            .get_or_compile(distinct_config)
+            .expect_err("active lease pins the complete live-byte budget");
+        assert_eq!(refused.kind, PrivatePatternCacheErrorKind::CapacityPinned);
+        let snapshot = cache.snapshot();
+        assert_eq!(snapshot.entries, 1);
+        assert_eq!(snapshot.live_accounted_bytes, one_resident);
+        assert_eq!(snapshot.evictions, 0, "failed admission is non-destructive");
+        assert!(
+            admitted
+                .is_match("za")
+                .expect("existing resident survives refusal")
+        );
+        cache.shutdown();
+        assert_eq!(cache.snapshot().entries, 0);
+        assert_eq!(cache.snapshot().live_accounted_bytes, one_resident);
+        drop(admitted);
+        assert_eq!(cache.snapshot().live_accounted_bytes, 0);
+    }
+
+    #[test]
+    fn private_pattern_cache_duplicate_compile_race_admits_one_exact_winner() {
+        let cache = Arc::new(private_cache(PrivatePatternCacheLimits {
+            max_inflight_compiles: 2,
+            max_inflight_compile_accounted_bytes: 3 * 1024 * 1024 * 1024,
+            ..PrivatePatternCacheLimits::default()
+        }));
+        let before_admission = Arc::new(std::sync::Barrier::new(3));
+        let handles = (0..2)
+            .map(|_| {
+                let cache = Arc::clone(&cache);
+                let before_admission = Arc::clone(&before_admission);
+                std::thread::spawn(move || {
+                    let mut probe = |checkpoint| {
+                        if checkpoint == PrivatePatternCacheCheckpoint::Admission {
+                            before_admission.wait();
+                        }
+                        false
+                    };
+                    let mut control = PrivatePatternCacheAdmissionControl::new(&mut probe);
+                    let lease = cache
+                        .get_or_compile_with_admission_control(
+                            PrivatePatternConfig::new("(?P<value>a+)"),
+                            &mut control,
+                        )
+                        .expect("racing compile returns admitted winner");
+                    assert!(lease.is_match("zaaa").expect("winner is usable"));
+                })
+            })
+            .collect::<Vec<_>>();
+        before_admission.wait();
+        for handle in handles {
+            handle.join().expect("duplicate compile worker joins");
+        }
+
+        let snapshot = cache.snapshot();
+        assert_eq!(snapshot.entries, 1);
+        assert_eq!(snapshot.misses, 2);
+        assert_eq!(snapshot.compilations, 2);
+        assert_eq!(snapshot.admissions, 1);
+        assert_eq!(snapshot.duplicate_compiles, 1);
+        assert_eq!(snapshot.inflight_compiles, 0);
+        assert_eq!(snapshot.inflight_compile_accounted_bytes, 0);
+        cache.shutdown();
+        assert_eq!(cache.snapshot().live_accounted_bytes, 0);
+    }
+
+    #[test]
+    fn private_pattern_cache_inflight_compile_ceiling_fails_closed() {
+        let default_reservation =
+            private_pattern_compile_reservation_bytes(&PrivatePatternConfig::new("a"))
+                .expect("default compile reservation is representable");
+        assert_eq!(DEFAULT_PRIVATE_PATTERN_CACHE_MAX_INFLIGHT_COMPILES, 1);
+        assert!(
+            default_reservation
+                <= DEFAULT_PRIVATE_PATTERN_CACHE_MAX_INFLIGHT_COMPILE_ACCOUNTED_BYTES
+        );
+        assert!(
+            default_reservation.saturating_mul(2)
+                > DEFAULT_PRIVATE_PATTERN_CACHE_MAX_INFLIGHT_COMPILE_ACCOUNTED_BYTES,
+            "the default count must not advertise concurrency rejected by the byte ceiling"
+        );
+
+        let cache = Arc::new(private_cache(PrivatePatternCacheLimits {
+            max_inflight_compiles: 1,
+            ..PrivatePatternCacheLimits::default()
+        }));
+        let (compiled_tx, compiled_rx) = std::sync::mpsc::sync_channel(0);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
+        let worker_cache = Arc::clone(&cache);
+        let worker = std::thread::spawn(move || {
+            let mut probe = |checkpoint| {
+                if checkpoint == PrivatePatternCacheCheckpoint::Admission {
+                    compiled_tx
+                        .send(())
+                        .expect("announce occupied compile slot");
+                    release_rx.recv().expect("release occupied compile slot");
+                }
+                false
+            };
+            let mut control = PrivatePatternCacheAdmissionControl::new(&mut probe);
+            worker_cache.get_or_compile_with_admission_control(
+                PrivatePatternConfig::new("a+"),
+                &mut control,
+            )
+        });
+
+        compiled_rx.recv().expect("first compile occupies slot");
+        assert_eq!(cache.snapshot().inflight_compiles, 1);
+        let refused = cache
+            .get_or_compile(PrivatePatternConfig::new("b+"))
+            .expect_err("second concurrent compile exceeds explicit ceiling");
+        assert_eq!(refused.kind, PrivatePatternCacheErrorKind::CompileCapacity);
+        assert_eq!(cache.snapshot().entries, 0);
+        assert_eq!(cache.snapshot().live_accounted_bytes, 0);
+
+        release_tx.send(()).expect("release first compile");
+        let admitted = worker
+            .join()
+            .expect("compile-capacity worker joins")
+            .expect("first compile admits");
+        assert!(admitted.is_match("aaa").expect("first resident is usable"));
+        assert_eq!(cache.snapshot().inflight_compiles, 0);
+        assert_eq!(cache.snapshot().inflight_compile_accounted_bytes, 0);
+        cache.shutdown();
+        drop(admitted);
+        assert_eq!(cache.snapshot().live_accounted_bytes, 0);
+    }
+
+    #[test]
+    fn private_pattern_cache_inflight_compile_byte_ceiling_releases_exactly() {
+        let config = PrivatePatternConfig::new("a+");
+        let reservation = private_pattern_compile_reservation_bytes(&config)
+            .expect("default compile reservation is representable");
+        let cache = Arc::new(private_cache(PrivatePatternCacheLimits {
+            max_inflight_compiles: 2,
+            max_inflight_compile_accounted_bytes: reservation,
+            ..PrivatePatternCacheLimits::default()
+        }));
+        let (compiled_tx, compiled_rx) = std::sync::mpsc::sync_channel(0);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
+        let worker_cache = Arc::clone(&cache);
+        let worker = std::thread::spawn(move || {
+            let mut probe = |checkpoint| {
+                if checkpoint == PrivatePatternCacheCheckpoint::Admission {
+                    compiled_tx
+                        .send(())
+                        .expect("announce occupied compile-byte budget");
+                    release_rx
+                        .recv()
+                        .expect("release occupied compile-byte budget");
+                }
+                false
+            };
+            let mut control = PrivatePatternCacheAdmissionControl::new(&mut probe);
+            worker_cache.get_or_compile_with_admission_control(config, &mut control)
+        });
+
+        compiled_rx
+            .recv()
+            .expect("first compile occupies byte reservation");
+        let occupied = cache.snapshot();
+        assert_eq!(occupied.inflight_compiles, 1);
+        assert_eq!(occupied.inflight_compile_accounted_bytes, reservation);
+        let refused = cache
+            .get_or_compile(PrivatePatternConfig::new("b+"))
+            .expect_err("second compile exceeds aggregate byte reservation");
+        assert_eq!(
+            refused.kind,
+            PrivatePatternCacheErrorKind::CompileMemoryCapacity
+        );
+        assert_eq!(cache.snapshot().inflight_compiles, 1);
+        assert_eq!(
+            cache.snapshot().inflight_compile_accounted_bytes,
+            reservation
+        );
+
+        release_tx.send(()).expect("release first byte reservation");
+        let admitted = worker
+            .join()
+            .expect("compile-byte worker joins")
+            .expect("first compile admits");
+        let released = cache.snapshot();
+        assert_eq!(released.inflight_compiles, 0);
+        assert_eq!(released.inflight_compile_accounted_bytes, 0);
+        cache.shutdown();
+        drop(admitted);
+        assert_eq!(cache.snapshot().live_accounted_bytes, 0);
+    }
+
+    #[test]
+    fn private_pattern_cache_lookup_work_and_closed_precedence_fail_closed() {
+        let pattern = "a".repeat(1024);
+        let exact_hit_work = u64::try_from(pattern.len() * 3).expect("bounded lookup work")
+            + ACCOUNTED_PRIVATE_PATTERN_LOOKUP_ENTRY_WORK_UNITS;
+        let cache = private_cache(PrivatePatternCacheLimits {
+            max_lookup_work_units: exact_hit_work - 1,
+            ..PrivatePatternCacheLimits::default()
+        });
+        let lease = cache
+            .get_or_compile(PrivatePatternConfig::new(pattern.clone()))
+            .expect("first bounded lookup and admission");
+        let work_limited = cache
+            .get_or_compile(PrivatePatternConfig::new(pattern))
+            .expect_err("exact collision-safe verification obeys lookup ceiling");
+        assert_eq!(
+            work_limited.kind,
+            PrivatePatternCacheErrorKind::LookupWorkLimit
+        );
+        assert_eq!(cache.snapshot().hits, 0);
+        assert_eq!(cache.snapshot().entries, 1);
+
+        cache.shutdown();
+        let closed = cache
+            .get_or_compile(PrivatePatternConfig::new("z".repeat(2 * 1024 * 1024)))
+            .expect_err("closed refusal precedes pattern-length diagnostics");
+        assert_eq!(closed.kind, PrivatePatternCacheErrorKind::Closed);
+        assert_eq!((closed.actual, closed.limit), (None, None));
+        drop(lease);
+        assert_eq!(cache.snapshot().live_accounted_bytes, 0);
+    }
+
+    #[test]
+    fn private_pattern_cache_cancellation_callbacks_are_outside_lock_and_never_admit() {
+        let cache = private_cache(PrivatePatternCacheLimits::default());
+        let mut precompile_probe = |checkpoint| {
+            let snapshot = cache.snapshot();
+            assert_eq!(snapshot.entries, 0, "callback can re-enter cache snapshot");
+            checkpoint == PrivatePatternCacheCheckpoint::Compile
+        };
+        let mut precompile_control =
+            PrivatePatternCacheAdmissionControl::new(&mut precompile_probe);
+        let precompile = cache
+            .get_or_compile_with_admission_control(
+                PrivatePatternConfig::new("a"),
+                &mut precompile_control,
+            )
+            .expect_err("precompile cancellation refuses work");
+        assert_eq!(precompile.kind, PrivatePatternCacheErrorKind::Cancelled);
+        assert_eq!(
+            precompile_control.cancelled_at(),
+            Some(PrivatePatternCacheCheckpoint::Compile)
+        );
+        assert_eq!(cache.snapshot().compilations, 0);
+
+        let mut preadmission_probe = |checkpoint| {
+            let snapshot = cache.snapshot();
+            assert_eq!(snapshot.entries, 0, "post-compile callback holds no lock");
+            checkpoint == PrivatePatternCacheCheckpoint::Admission
+        };
+        let mut preadmission_control =
+            PrivatePatternCacheAdmissionControl::new(&mut preadmission_probe);
+        let preadmission = cache
+            .get_or_compile_with_admission_control(
+                PrivatePatternConfig::new("a"),
+                &mut preadmission_control,
+            )
+            .expect_err("post-compile cancellation discards result");
+        assert_eq!(preadmission.kind, PrivatePatternCacheErrorKind::Cancelled);
+        assert_eq!(
+            preadmission_control.cancelled_at(),
+            Some(PrivatePatternCacheCheckpoint::Admission)
+        );
+        let snapshot = cache.snapshot();
+        assert_eq!(snapshot.entries, 0);
+        assert_eq!(snapshot.live_accounted_bytes, 0);
+        assert_eq!(snapshot.compilations, 1);
+        assert_eq!(snapshot.inflight_compiles, 0);
+        assert_eq!(snapshot.inflight_compile_accounted_bytes, 0);
+
+        let admitted = cache
+            .get_or_compile(PrivatePatternConfig::new("a"))
+            .expect("admit cache-hit cancellation fixture");
+        let mut hit_probe = |checkpoint| checkpoint == PrivatePatternCacheCheckpoint::Lookup;
+        let mut hit_control = PrivatePatternCacheAdmissionControl::new(&mut hit_probe);
+        let hit_cancelled = cache
+            .get_or_compile_with_admission_control(PrivatePatternConfig::new("a"), &mut hit_control)
+            .expect_err("lookup cancellation takes precedence over cache hit");
+        assert_eq!(hit_cancelled.kind, PrivatePatternCacheErrorKind::Cancelled);
+        assert_eq!(
+            hit_control.cancelled_at(),
+            Some(PrivatePatternCacheCheckpoint::Lookup)
+        );
+        assert_eq!(cache.snapshot().hits, 0);
+        cache.shutdown();
+        drop(admitted);
+        assert_eq!(cache.snapshot().live_accounted_bytes, 0);
+    }
+
+    #[test]
+    fn private_pattern_cache_shutdown_wins_inflight_admission_and_is_idempotent() {
+        let cache = Arc::new(private_cache(PrivatePatternCacheLimits::default()));
+        let (compiled_tx, compiled_rx) = std::sync::mpsc::sync_channel(0);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
+        let worker_cache = Arc::clone(&cache);
+        let worker = std::thread::spawn(move || {
+            let mut probe = |checkpoint| {
+                if checkpoint == PrivatePatternCacheCheckpoint::Admission {
+                    compiled_tx.send(()).expect("announce compiled result");
+                    release_rx.recv().expect("release admission probe");
+                }
+                false
+            };
+            let mut control = PrivatePatternCacheAdmissionControl::new(&mut probe);
+            worker_cache.get_or_compile_with_admission_control(
+                PrivatePatternConfig::new("a+"),
+                &mut control,
+            )
+        });
+
+        compiled_rx
+            .recv()
+            .expect("worker reached pre-admission state");
+        cache.shutdown();
+        cache.shutdown();
+        release_tx.send(()).expect("release worker");
+        let refused = worker
+            .join()
+            .expect("in-flight compile worker joins")
+            .expect_err("closed cache refuses the compiled result");
+        assert_eq!(refused.kind, PrivatePatternCacheErrorKind::Closed);
+        let snapshot = cache.snapshot();
+        assert!(snapshot.closed);
+        assert_eq!(snapshot.entries, 0);
+        assert_eq!(snapshot.live_accounted_bytes, 0);
+        assert_eq!(snapshot.inflight_compiles, 0);
+        assert_eq!(snapshot.inflight_compile_accounted_bytes, 0);
+        let later = cache
+            .get_or_compile(PrivatePatternConfig::new("b"))
+            .expect_err("closed cache refuses later lookup");
+        assert_eq!(later.kind, PrivatePatternCacheErrorKind::Closed);
+    }
+
+    #[test]
+    fn private_pattern_cache_eviction_races_controlled_use_without_leak() {
+        let cache = Arc::new(private_cache(PrivatePatternCacheLimits {
+            max_entries: 1,
+            ..PrivatePatternCacheLimits::default()
+        }));
+        let lease = cache
+            .get_or_compile(PrivatePatternConfig::new("(a+)"))
+            .expect("admit controlled-use pattern");
+        let weak = Arc::downgrade(&lease.resident);
+        let worker_lease = lease.clone();
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(0);
+        let (go_tx, go_rx) = std::sync::mpsc::sync_channel(0);
+        let worker = std::thread::spawn(move || {
+            ready_tx.send(()).expect("announce held lease");
+            go_rx.recv().expect("begin controlled use");
+            let mut probe = |checkpoint: VmCancellationCheckpoint| checkpoint.sequence == 3;
+            let mut control = VmCancellationControl::new(3, &mut probe).expect("valid control");
+            let private_haystack = "r3_6_probe-aaaa";
+            assert_eq!(
+                private_haystack.find('a'),
+                Some(private_haystack.len() - 4),
+                "controlled-use premise has no earlier match"
+            );
+            let error = worker_lease
+                .find_iter_with_control(
+                    private_haystack,
+                    IterationPolicy::NonOverlapping,
+                    &mut control,
+                )
+                .expect_err("controlled use cancels after eviction");
+            assert_eq!(error.kind, VmErrorKind::Cancelled);
+        });
+
+        ready_rx.recv().expect("worker holds resident lease");
+        let replacement = cache
+            .get_or_compile(PrivatePatternConfig::new("b"))
+            .expect("evict held resident while preserving its lease");
+        assert_eq!(cache.snapshot().entries, 1);
+        assert!(weak.upgrade().is_some());
+        go_tx.send(()).expect("release controlled use");
+        worker.join().expect("controlled-use worker joins");
+        assert!(
+            lease
+                .is_match("zaaa")
+                .expect("evicted original remains usable")
+        );
+
+        cache.shutdown();
+        drop(replacement);
+        drop(lease);
+        assert!(weak.upgrade().is_none());
+        assert_eq!(cache.snapshot().live_accounted_bytes, 0);
     }
 
     #[test]
