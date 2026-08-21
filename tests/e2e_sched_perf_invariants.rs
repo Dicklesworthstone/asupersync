@@ -13,13 +13,11 @@
 //! config-flag combination (stage S4 matrix):
 //! `{spawn_admission: Direct|Mailbox} x {state shape: Unified|Sharded}`.
 //!
-//! Fairness-envelope assertions (the documented
-//! `PreemptionFairnessCertificate::invariant_holds` contract in
-//! `src/runtime/scheduler/three_lane.rs`) are worker-local telemetry
-//! and stay covered by the scheduler's own certificate tests; the e2e
-//! script runs those by name in the same stage. Live-runtime
-//! certificate aggregation is tracked separately (see the bead
-//! comment) rather than silently approximated here.
+//! Fairness-envelope assertions use the production `Runtime` and
+//! `RuntimeHandle` certificate accessors. They aggregate the workers'
+//! actual certificates without broadening the underlying contract:
+//! every certificate remains a worker-local dispatch-step observation,
+//! not a wall-clock or cross-worker fairness claim.
 //!
 //! BREAKAGE REHEARSAL (bead AC5): setting
 //! `ASUPERSYNC_SCHED_E2E_SABOTAGE=quiescence` makes the workload leave
@@ -165,6 +163,40 @@ fn assert_invariant_floor(runtime: &Runtime, cell: &str) {
         "invariant floor violated in cell {cell}: draining regions \
          remain after quiescence"
     );
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let certificates = loop {
+        let certificates = runtime.preemption_fairness_certificates();
+        let handle_certificates = runtime.handle().preemption_fairness_certificates();
+        let observed_dispatches = certificates.iter().fold(0_u64, |total, certificate| {
+            total
+                .saturating_add(certificate.cancel_dispatches)
+                .saturating_add(certificate.timed_dispatches)
+                .saturating_add(certificate.ready_dispatches)
+        });
+        if certificates.len() == runtime.config().worker_threads
+            && observed_dispatches > 0
+            && handle_certificates.as_ref() == Some(&certificates)
+        {
+            break certificates;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "live fairness certificates did not publish production dispatches in cell {cell}: \
+             workers={}, configured={}, observed_dispatches={observed_dispatches}",
+            certificates.len(),
+            runtime.config().worker_threads,
+        );
+        std::thread::yield_now();
+    };
+
+    for (worker_id, certificate) in certificates.iter().enumerate() {
+        assert!(
+            certificate.invariant_holds(),
+            "worker {worker_id} fairness certificate violated its worker-local \
+             dispatch-step contract in cell {cell}: {certificate:?}"
+        );
+    }
 }
 
 fn run_cell(

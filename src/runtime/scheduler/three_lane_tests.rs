@@ -1154,6 +1154,80 @@ fn test_run_once_processes_timers() {
     );
 }
 
+/// br-asupersync-lbhnh0: the production snapshot must cover both worker
+/// driving APIs and retain its documented busy, idle, and shutdown bounds.
+#[test]
+fn lbhnh0_live_fairness_snapshot_publication_boundaries() {
+    let mut runtime_state = RuntimeState::new();
+    let root = runtime_state.create_root_region(Budget::INFINITE);
+    let mut task_ids = Vec::with_capacity(66);
+    let mut _handles = Vec::with_capacity(66);
+    for _ in 0..66 {
+        let (task_id, handle) = runtime_state
+            .create_task(root, Budget::INFINITE, async {})
+            .expect("task create");
+        task_ids.push(task_id);
+        _handles.push(handle);
+    }
+
+    let state = Arc::new(ContendedMutex::new("runtime_state", runtime_state));
+    let mut scheduler = ThreeLaneScheduler::new(1, &state);
+    for &task_id in &task_ids[..64] {
+        scheduler.inject_ready(task_id, 50);
+    }
+    let mut worker = scheduler
+        .take_workers()
+        .into_iter()
+        .next()
+        .expect("single worker");
+
+    for dispatch in 1..=63 {
+        assert!(worker.run_once(), "dispatch {dispatch} should execute");
+    }
+    assert_eq!(
+        scheduler.preemption_fairness_certificates()[0].ready_dispatches,
+        0,
+        "busy publication must not occur before the bounded 64-dispatch cadence"
+    );
+
+    assert!(worker.run_once(), "dispatch 64 should execute");
+    assert_eq!(
+        scheduler.preemption_fairness_certificates()[0].ready_dispatches,
+        64,
+        "the 64th busy dispatch must publish the worker certificate"
+    );
+
+    scheduler.inject_ready(task_ids[64], 50);
+    assert!(worker.run_once(), "dispatch 65 should execute");
+    assert_eq!(
+        scheduler.preemption_fairness_certificates()[0].ready_dispatches,
+        64,
+        "a sub-interval busy dispatch should remain unpublished"
+    );
+    assert!(
+        !worker.run_once(),
+        "the worker should observe an idle boundary"
+    );
+    assert_eq!(
+        scheduler.preemption_fairness_certificates()[0].ready_dispatches,
+        65,
+        "idle observation must publish the final sub-interval dispatch"
+    );
+
+    scheduler.inject_ready(task_ids[65], 50);
+    assert!(worker.run_once(), "dispatch 66 should execute");
+    scheduler.shutdown();
+    assert!(
+        !worker.run_once(),
+        "shutdown should stop single-step execution"
+    );
+    assert_eq!(
+        scheduler.preemption_fairness_certificates()[0].ready_dispatches,
+        66,
+        "shutdown must publish the final sub-interval dispatch"
+    );
+}
+
 #[test]
 fn test_timed_work_not_due_stays_in_queue() {
     use crate::time::{TimerDriverHandle, VirtualClock};

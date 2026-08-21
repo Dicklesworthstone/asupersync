@@ -174,7 +174,7 @@ use crate::runtime::io_driver::IoDriverHandle;
 use crate::runtime::reactor::{IoReactorCapabilitySnapshot, IoUringCapabilityPolicy, Reactor};
 use crate::runtime::resource_monitor::ResourceMonitor;
 use crate::runtime::scheduler::three_lane::{
-    AdaptiveBatchSizingProfile, SchedulerConstructionHandles,
+    AdaptiveBatchSizingProfile, PreemptionFairnessCertificate, SchedulerConstructionHandles,
 };
 use crate::runtime::scheduler::{ThreeLaneScheduler, ThreeLaneWorker};
 use crate::time::TimerDriverHandle;
@@ -3603,6 +3603,20 @@ impl Runtime {
             .io_reactor_capability_snapshot()
     }
 
+    /// Returns the latest worker-local fairness certificate for each runtime worker.
+    ///
+    /// Entries are ordered by worker id. Busy workers publish snapshots at a
+    /// bounded dispatch cadence and publish their final dispatch state before
+    /// idle parking and shutdown.
+    ///
+    /// This is an aggregate of worker-local dispatch-step observations. It does
+    /// not prove wall-clock latency, bounded task poll duration, global priority
+    /// ordering, or cross-worker fairness.
+    #[must_use]
+    pub fn preemption_fairness_certificates(&self) -> Vec<PreemptionFairnessCertificate> {
+        self.inner.scheduler.preemption_fairness_certificates()
+    }
+
     /// Shut down the runtime, waiting at most `timeout` for teardown to finish.
     ///
     /// Ordinary `Runtime` drop performs a blocking teardown: it signals the
@@ -3959,6 +3973,22 @@ impl RuntimeHandle {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .io_reactor_capability_snapshot(),
         )
+    }
+
+    /// Returns the latest worker-local fairness certificate for each runtime worker.
+    ///
+    /// Entries are ordered by worker id. The optional result matches this
+    /// handle's existing strong-or-weak lifetime model: public strong handles
+    /// keep the runtime alive, while an expired runtime-internal weak handle
+    /// returns `None`.
+    ///
+    /// This is an aggregate of worker-local dispatch-step observations. It does
+    /// not prove wall-clock latency, bounded task poll duration, global priority
+    /// ordering, or cross-worker fairness.
+    #[must_use]
+    pub fn preemption_fairness_certificates(&self) -> Option<Vec<PreemptionFairnessCertificate>> {
+        let inner = self.try_inner().ok()?;
+        Some(inner.scheduler.preemption_fairness_certificates())
     }
 
     /// Spawn a task from outside async context.
@@ -8701,9 +8731,19 @@ worker_threads = 16
             matches!(weak_handle.inner, RuntimeHandleRef::Weak(_)),
             "worker-thread current_handle should remain weak to avoid runtime cycles"
         );
+        let certificates = weak_handle
+            .preemption_fairness_certificates()
+            .expect("worker-installed weak handle upgrades while runtime is alive");
+        assert_eq!(certificates.len(), 1);
+        assert!(
+            certificates
+                .iter()
+                .all(|certificate| certificate.invariant_holds())
+        );
 
         drop(runtime);
 
+        assert_eq!(weak_handle.preemption_fairness_certificates(), None);
         let result = weak_handle.try_spawn(async { 42u8 });
         assert!(
             matches!(result, Err(SpawnError::RuntimeUnavailable)),

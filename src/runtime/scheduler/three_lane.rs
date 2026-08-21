@@ -173,6 +173,13 @@ const ADAPTIVE_STREAK_ARMS: [usize; 5] = [4, 8, 16, 32, 64];
 const ADAPTIVE_UCB_DISCOUNT: f64 = 0.95;
 const ADAPTIVE_UCB_CONFIDENCE: f64 = 2.0;
 const ADAPTIVE_EPROCESS_LAMBDA: f64 = 0.5;
+/// Maximum successful dispatches between live fairness-certificate publications.
+///
+/// The worker keeps the authoritative counters in thread-local mutable state.
+/// Publishing less often than every dispatch keeps the production accessor off
+/// the hottest scheduling path while bounding how stale a busy worker's
+/// snapshot can be. Workers also publish before idle parking and on shutdown.
+const PREEMPTION_FAIRNESS_PUBLISH_INTERVAL: u64 = 64;
 // Keep a short spin/yield window for wakeup handoff while still reducing
 // runaway idle burn on noisy wake paths.
 const SPIN_LIMIT: u32 = 8;
@@ -1456,6 +1463,9 @@ pub struct ThreeLaneScheduler {
     parkers: SmallVec<[Parker; 16]>,
     /// Worker handles for thread spawning.
     workers: SmallVec<[ThreeLaneWorker; 16]>,
+    /// Live per-worker fairness certificates retained after workers move into
+    /// their execution threads. Entries are ordered by worker id.
+    preemption_fairness_snapshots: SmallVec<[Arc<RwLock<PreemptionFairnessCertificate>>; 16]>,
     /// Shutdown signal.
     shutdown: Arc<AtomicBool>,
     /// Coordination for waking workers.
@@ -1870,6 +1880,9 @@ impl ThreeLaneScheduler {
         let scheduler_evidence = None;
         let shutdown = Arc::new(AtomicBool::new(false));
         let mut workers = SmallVec::<[ThreeLaneWorker; 16]>::with_capacity(worker_count);
+        let mut preemption_fairness_snapshots = SmallVec::<
+            [Arc<RwLock<PreemptionFairnessCertificate>>; 16],
+        >::with_capacity(worker_count);
         let mut parkers = SmallVec::<[Parker; 16]>::with_capacity(worker_count);
         let mut local_schedulers: Vec<Arc<Mutex<PriorityScheduler>>> =
             Vec::with_capacity(worker_count);
@@ -1919,6 +1932,10 @@ impl ThreeLaneScheduler {
         // Create workers with references to all other workers' schedulers
         for id in 0..worker_count {
             let parker = parkers[id].clone();
+            let preemption_fairness_snapshot = Arc::new(RwLock::new(
+                PreemptionFairnessCertificate::initial(cancel_streak_limit),
+            ));
+            preemption_fairness_snapshots.push(Arc::clone(&preemption_fairness_snapshot));
 
             // Stealers: all other workers' local schedulers (excluding self)
             let stealers: SmallVec<[Arc<Mutex<PriorityScheduler>>; 16]> = local_schedulers
@@ -1991,6 +2008,8 @@ impl ThreeLaneScheduler {
                     adaptive_e_value: 1.0,
                     ..PreemptionMetrics::default()
                 },
+                preemption_fairness_snapshot,
+                last_published_preemption_dispatches: 0,
                 evidence_sink: None,
                 decision_contract: if enable_governor {
                     Some(super::decision_contract::SchedulerDecisionContract::new())
@@ -2037,6 +2056,7 @@ impl ThreeLaneScheduler {
             local_ready,
             parkers,
             workers,
+            preemption_fairness_snapshots,
             shutdown,
             coordinator,
             spawn_mailbox: None,
@@ -2408,6 +2428,7 @@ impl ThreeLaneScheduler {
                 worker.preemption_metrics.adaptive_reward_ema = 0.0;
                 worker.preemption_metrics.adaptive_e_value = 1.0;
             }
+            worker.publish_preemption_fairness_certificate();
         }
     }
 
@@ -2956,6 +2977,23 @@ impl ThreeLaneScheduler {
         std::mem::take(&mut self.workers).into_vec()
     }
 
+    /// Returns the latest production-runtime fairness certificate for each worker.
+    ///
+    /// Entries are ordered by worker id. A busy worker publishes at least once
+    /// every 64 successful dispatches; workers also publish after their final
+    /// dispatch before going idle and when their run loop shuts down.
+    ///
+    /// Each certificate remains a worker-local dispatch-step observation. This
+    /// aggregate does not prove wall-clock latency, bounded task poll duration,
+    /// global priority ordering, or cross-worker fairness.
+    #[must_use]
+    pub fn preemption_fairness_certificates(&self) -> Vec<PreemptionFairnessCertificate> {
+        self.preemption_fairness_snapshots
+            .iter()
+            .map(|snapshot| snapshot.read().clone())
+            .collect()
+    }
+
     /// Signals all workers to shutdown.
     pub fn shutdown(&self) {
         self.shutdown.store(true, Ordering::Release);
@@ -3102,6 +3140,10 @@ pub struct ThreeLaneWorker {
     governor_interval: u32,
     /// Preemption fairness metrics (cancel-lane preemption tracking).
     preemption_metrics: PreemptionMetrics,
+    /// Latest fairness certificate published for production runtime accessors.
+    preemption_fairness_snapshot: Arc<RwLock<PreemptionFairnessCertificate>>,
+    /// Total lane dispatches included in the latest published certificate.
+    last_published_preemption_dispatches: u64,
     /// Optional evidence sink for scheduler decision tracing (bd-1e2if.3).
     evidence_sink: Option<Arc<dyn crate::evidence_sink::EvidenceSink>>,
     /// Decision contract for principled scheduler action selection (bd-1e2if.6).
@@ -4067,6 +4109,28 @@ pub struct PreemptionFairnessCertificate {
 }
 
 impl PreemptionFairnessCertificate {
+    fn initial(base_limit: usize) -> Self {
+        let base_limit = base_limit.max(1);
+        Self {
+            base_limit,
+            effective_limit: base_limit,
+            observed_max_cancel_streak: 0,
+            cancel_dispatches: 0,
+            timed_dispatches: 0,
+            ready_dispatches: 0,
+            fairness_yields: 0,
+            observed_max_ready_stall_steps: 0,
+            observed_max_timed_stall_steps: 0,
+            ready_priority_inversions: 0,
+            max_ready_priority_inversion_gap: 0,
+            fallback_cancel_dispatches: 0,
+            base_limit_exceedances: 0,
+            effective_limit_exceedances: 0,
+            adaptive_enabled: false,
+            adaptive_current_limit: base_limit,
+        }
+    }
+
     /// Returns the worker-local non-cancel dispatch-opportunity bound.
     ///
     /// Under this run's observed policy envelope, sustained eligible
@@ -4491,6 +4555,39 @@ impl ThreeLaneWorker {
         }
     }
 
+    #[inline]
+    fn preemption_dispatches(&self) -> u64 {
+        self.preemption_metrics
+            .cancel_dispatches
+            .saturating_add(self.preemption_metrics.timed_dispatches)
+            .saturating_add(self.preemption_metrics.ready_dispatches)
+    }
+
+    fn publish_preemption_fairness_certificate(&mut self) {
+        let dispatches = self.preemption_dispatches();
+        let certificate = self.preemption_fairness_certificate();
+        *self.preemption_fairness_snapshot.write() = certificate;
+        self.last_published_preemption_dispatches = dispatches;
+    }
+
+    #[inline]
+    fn publish_preemption_fairness_certificate_if_due(&mut self) {
+        if self
+            .preemption_dispatches()
+            .saturating_sub(self.last_published_preemption_dispatches)
+            >= PREEMPTION_FAIRNESS_PUBLISH_INTERVAL
+        {
+            self.publish_preemption_fairness_certificate();
+        }
+    }
+
+    #[inline]
+    fn publish_preemption_fairness_certificate_before_idle(&mut self) {
+        if self.preemption_dispatches() != self.last_published_preemption_dispatches {
+            self.publish_preemption_fairness_certificate();
+        }
+    }
+
     /// Attaches an evidence sink for scheduler decision tracing.
     pub fn set_evidence_sink(&mut self, sink: Arc<dyn crate::evidence_sink::EvidenceSink>) {
         self.evidence_sink = Some(sink);
@@ -4779,8 +4876,11 @@ impl ThreeLaneWorker {
             if let Some(task) = self.next_task() {
                 self.reset_empty_backoff();
                 self.execute(task);
+                self.publish_preemption_fairness_certificate_if_due();
                 continue;
             }
+
+            self.publish_preemption_fairness_certificate_before_idle();
 
             if self.schedule_ready_finalizers() {
                 continue;
@@ -4984,6 +5084,7 @@ impl ThreeLaneWorker {
             self.cancel_streak = 0;
             self.ready_dispatch_streak = 0;
         }
+        self.publish_preemption_fairness_certificate();
     }
 
     #[inline]
@@ -6615,14 +6716,17 @@ impl ThreeLaneWorker {
     /// Returns `true` if a task was executed.
     pub fn run_once(&mut self) -> bool {
         if self.shutdown.load(Ordering::Relaxed) {
+            self.publish_preemption_fairness_certificate();
             return false;
         }
 
         if let Some(task) = self.next_task() {
             self.execute(task);
+            self.publish_preemption_fairness_certificate_if_due();
             return true;
         }
 
+        self.publish_preemption_fairness_certificate_before_idle();
         false
     }
 
