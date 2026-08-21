@@ -7,8 +7,9 @@
 //! deterministic match/capture iteration, explicit overlap policy, Unicode-safe
 //! zero-width progress, and ordered replacement spans. R3.4.4 adds explicit
 //! caller-supplied cancellation checkpoints and terminal adversarial evidence.
-//! Production privacy wiring, replacement-template syntax, and dependency
-//! replacement remain downstream work.
+//! R3.5.3 adds a private, bounded replacement-template parser and capture
+//! expander, including a separately named strict diagnostic mode. Production
+//! privacy wiring and dependency replacement remain downstream work.
 
 use core::fmt;
 
@@ -17,7 +18,9 @@ use super::regex_ir::{
     CaptureSlot, ClassId, CompileError, CompileErrorKind, CompileLimits, Instruction, Program,
     StateId,
 };
-use super::regex_lowering::{PrivateCompileError, PrivateCompileLimits, compile_private};
+use super::regex_lowering::{
+    PrivateCompileError, PrivateCompileLimits, compile_private_with_captures,
+};
 use super::regex_semantics::{ByteRange, CanonicalRanges, ScalarRange};
 
 pub const VM_ID: &str = "ASUP-REGEX-THREAD-SET-VM-V1";
@@ -53,6 +56,10 @@ pub const DEFAULT_MAX_ITERATION_TRACE_EVENTS: usize = 256;
 pub const ACCOUNTED_ITERATION_MATCH_BYTES: u64 = 128;
 pub const ACCOUNTED_ITERATION_TRACE_EVENT_BYTES: u64 = 80;
 pub const DEFAULT_CANCELLATION_CHECK_INTERVAL_WORK_UNITS: u64 = 1_024;
+pub const DEFAULT_MAX_REPLACEMENT_TEMPLATE_BYTES: usize = 64 * 1024;
+pub const DEFAULT_MAX_REPLACEMENT_TOKENS: usize = 16 * 1024;
+pub const DEFAULT_MAX_REPLACEMENT_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
+pub const DEFAULT_MAX_REPLACEMENT_WORK_UNITS: u64 = 64 * 1024 * 1024;
 
 const FINGERPRINT_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
 const FINGERPRINT_PRIME: u64 = 0x0000_0100_0000_01b3;
@@ -143,17 +150,208 @@ impl IterationVmLimits {
     }
 }
 
+/// Aggregate ceilings for one private replacement-template operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReplacementLimits {
+    pub max_template_bytes: usize,
+    pub max_tokens: usize,
+    pub max_output_bytes: usize,
+    pub max_work_units: u64,
+}
+
+impl Default for ReplacementLimits {
+    fn default() -> Self {
+        Self {
+            max_template_bytes: DEFAULT_MAX_REPLACEMENT_TEMPLATE_BYTES,
+            max_tokens: DEFAULT_MAX_REPLACEMENT_TOKENS,
+            max_output_bytes: DEFAULT_MAX_REPLACEMENT_OUTPUT_BYTES,
+            max_work_units: DEFAULT_MAX_REPLACEMENT_WORK_UNITS,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplacementErrorKind {
+    TemplateLimit,
+    TokenLimit,
+    MalformedReference,
+    CaptureIndexOverflow,
+    UnknownCapture,
+    OutputLimit,
+    WorkLimit,
+    ArithmeticOverflow,
+    InvalidMatchBoundary,
+    OverlappingMatch,
+    AllocationFailure,
+}
+
+impl ReplacementErrorKind {
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::TemplateLimit => "RGX-REPLACE-E001",
+            Self::TokenLimit => "RGX-REPLACE-E002",
+            Self::MalformedReference => "RGX-REPLACE-E003",
+            Self::CaptureIndexOverflow => "RGX-REPLACE-E004",
+            Self::UnknownCapture => "RGX-REPLACE-E005",
+            Self::OutputLimit => "RGX-REPLACE-E006",
+            Self::WorkLimit => "RGX-REPLACE-E007",
+            Self::ArithmeticOverflow => "RGX-REPLACE-E008",
+            Self::InvalidMatchBoundary => "RGX-REPLACE-E009",
+            Self::OverlappingMatch => "RGX-REPLACE-E010",
+            Self::AllocationFailure => "RGX-REPLACE-E011",
+        }
+    }
+}
+
+/// Secret-safe replacement failure. Source text and capture names are omitted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReplacementError {
+    pub kind: ReplacementErrorKind,
+    pub offset: Option<usize>,
+    pub actual: Option<u64>,
+    pub limit: Option<u64>,
+}
+
+impl ReplacementError {
+    const fn new(kind: ReplacementErrorKind) -> Self {
+        Self {
+            kind,
+            offset: None,
+            actual: None,
+            limit: None,
+        }
+    }
+
+    const fn with_offset(mut self, offset: usize) -> Self {
+        self.offset = Some(offset);
+        self
+    }
+
+    fn with_actual_limit<A, L>(mut self, actual: A, limit: L) -> Self
+    where
+        A: TryInto<u64>,
+        L: TryInto<u64>,
+    {
+        self.actual = actual.try_into().ok();
+        self.limit = limit.try_into().ok();
+        self
+    }
+
+    pub const fn code(self) -> &'static str {
+        self.kind.code()
+    }
+}
+
+impl fmt::Display for ReplacementError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "[{}] regex replacement failed", self.kind.code())?;
+        if let Some(offset) = self.offset {
+            write!(formatter, " offset={offset}")?;
+        }
+        if let (Some(actual), Some(limit)) = (self.actual, self.limit) {
+            write!(formatter, " actual={actual} limit={limit}")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for ReplacementError {}
+
+#[derive(Debug)]
+pub enum ReplacementOperationError {
+    Template(ReplacementError),
+    Vm(VmError),
+}
+
+impl fmt::Display for ReplacementOperationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Template(error) => error.fmt(formatter),
+            Self::Vm(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for ReplacementOperationError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Template(error) => Some(error),
+            Self::Vm(error) => Some(error),
+        }
+    }
+}
+
+impl From<ReplacementError> for ReplacementOperationError {
+    fn from(error: ReplacementError) -> Self {
+        Self::Template(error)
+    }
+}
+
+impl From<VmError> for ReplacementOperationError {
+    fn from(error: VmError) -> Self {
+        Self::Vm(error)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReplacementResources {
+    pub template_bytes: usize,
+    pub tokens: usize,
+    pub matches_replaced: usize,
+    pub output_bytes: usize,
+    pub work_units: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplacementOutcome {
+    pub output: String,
+    pub resources: ReplacementResources,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ReplacementToken<'template> {
+    Literal(&'template str),
+    Dollar,
+    Capture(usize),
+    Empty,
+}
+
+/// Parsed replacement tokens borrowing the caller-owned template.
+///
+/// `Debug` intentionally reports only normalized counts so replacement text or
+/// capture names cannot leak through diagnostics.
+pub struct ReplacementTemplate<'template> {
+    tokens: Vec<ReplacementToken<'template>>,
+    template_bytes: usize,
+    parse_work_units: u64,
+}
+
+impl fmt::Debug for ReplacementTemplate<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ReplacementTemplate")
+            .field("template_bytes", &self.template_bytes)
+            .field("tokens", &self.tokens.len())
+            .field("parse_work_units", &self.parse_work_units)
+            .finish()
+    }
+}
+
 /// Immutable compile-once facade over the private checked compiler and VM.
 ///
 /// The enclosing module is crate-private and compiled only with `metrics`.
-/// This type stores validated IR and the exact IR limits used to compile it;
-/// it never stores the source pattern, haystack, captures, mutable execution
-/// state, or an ambient cache. Every operation receives explicit work and
-/// memory limits, and controlled variants receive caller-owned cancellation.
-/// Public wiring and incumbent replacement remain separately owned.
+/// This type stores validated IR, the exact IR limits used to compile it, and
+/// only the capture identifiers required for named replacement references. It
+/// never stores the complete source pattern, haystack, capture contents,
+/// mutable execution state, or an ambient cache. Every operation receives
+/// explicit work and memory limits, and controlled variants receive
+/// caller-owned cancellation. Public wiring and incumbent replacement remain
+/// separately owned.
 pub struct PrivateCompiledPattern {
     program: Program,
     compile_limits: CompileLimits,
+    capture_names: Vec<Option<Box<str>>>,
+    accounted_capture_metadata_bytes: usize,
 }
 
 impl PrivateCompiledPattern {
@@ -162,10 +360,26 @@ impl PrivateCompiledPattern {
         pattern: &str,
         limits: PrivateCompileLimits,
     ) -> Result<Self, PrivateCompileError> {
-        let program = compile_private(pattern, limits)?;
+        let output = compile_private_with_captures(pattern, limits)?;
+        // Deterministic accounting covers the exact Vec element footprint and
+        // retained UTF-8 name bytes, not allocator bookkeeping or slack.
+        let accounted_capture_metadata_bytes = output
+            .capture_names
+            .len()
+            .saturating_mul(core::mem::size_of::<Option<Box<str>>>())
+            .saturating_add(
+                output
+                    .capture_names
+                    .iter()
+                    .flatten()
+                    .map(|name| name.len())
+                    .sum::<usize>(),
+            );
         Ok(Self {
-            program,
+            program: output.program,
             compile_limits: limits.ir,
+            capture_names: output.capture_names,
+            accounted_capture_metadata_bytes,
         })
     }
 
@@ -261,6 +475,70 @@ impl PrivateCompiledPattern {
             control,
         )
     }
+
+    /// Parse one incumbent-compatible replacement template without copying it.
+    ///
+    /// Syntax is deliberately total: malformed-looking `$` sequences remain
+    /// literal and unknown references expand to empty, matching `regex` 1.13.
+    pub fn parse_replacement<'template>(
+        &self,
+        template: &'template str,
+        limits: ReplacementLimits,
+    ) -> Result<ReplacementTemplate<'template>, ReplacementError> {
+        ReplacementTemplate::parse(template, &self.capture_names, limits, false)
+    }
+
+    /// Parse a replacement template with typed malformed/unknown diagnostics.
+    ///
+    /// This is an explicit private opt-in and is not used by the compatibility
+    /// replacement path.
+    pub fn parse_replacement_strict<'template>(
+        &self,
+        template: &'template str,
+        limits: ReplacementLimits,
+    ) -> Result<ReplacementTemplate<'template>, ReplacementError> {
+        ReplacementTemplate::parse(template, &self.capture_names, limits, true)
+    }
+
+    /// Replace every non-overlapping match under explicit aggregate ceilings.
+    pub fn replace_all(
+        &self,
+        haystack: &str,
+        template: &str,
+        iteration_limits: IterationVmLimits,
+        replacement_limits: ReplacementLimits,
+    ) -> Result<ReplacementOutcome, ReplacementOperationError> {
+        let template = self.parse_replacement(template, replacement_limits)?;
+        let matches =
+            self.find_iter(haystack, IterationPolicy::NonOverlapping, iteration_limits)?;
+        template
+            .expand(haystack, &matches, replacement_limits)
+            .map_err(Into::into)
+    }
+
+    /// Replace with caller-owned cooperative cancellation during match search.
+    ///
+    /// Template parsing and output emission remain synchronously bounded but
+    /// are not cancellation checkpoints; R3.6 owns that broader policy.
+    pub fn replace_all_with_match_control(
+        &self,
+        haystack: &str,
+        template: &str,
+        iteration_limits: IterationVmLimits,
+        replacement_limits: ReplacementLimits,
+        control: &mut VmCancellationControl<'_>,
+    ) -> Result<ReplacementOutcome, ReplacementOperationError> {
+        let template = self.parse_replacement(template, replacement_limits)?;
+        let matches = self.find_iter_with_control(
+            haystack,
+            IterationPolicy::NonOverlapping,
+            iteration_limits,
+            control,
+        )?;
+        template
+            .expand(haystack, &matches, replacement_limits)
+            .map_err(Into::into)
+    }
 }
 
 impl fmt::Debug for PrivateCompiledPattern {
@@ -273,11 +551,378 @@ impl fmt::Debug for PrivateCompiledPattern {
             .field("classes", &self.program.resources.classes)
             .field("capture_slots", &self.program.resources.capture_slots)
             .field(
-                "accounted_memory_bytes",
+                "named_captures",
+                &self.capture_names.iter().flatten().count(),
+            )
+            .field(
+                "program_accounted_memory_bytes",
                 &self.program.resources.accounted_memory_bytes,
+            )
+            .field(
+                "accounted_capture_metadata_bytes",
+                &self.accounted_capture_metadata_bytes,
             )
             .finish_non_exhaustive()
     }
+}
+
+impl<'template> ReplacementTemplate<'template> {
+    fn parse(
+        template: &'template str,
+        capture_names: &[Option<Box<str>>],
+        limits: ReplacementLimits,
+        strict: bool,
+    ) -> Result<Self, ReplacementError> {
+        if template.len() > limits.max_template_bytes {
+            return Err(ReplacementError::new(ReplacementErrorKind::TemplateLimit)
+                .with_actual_limit(template.len(), limits.max_template_bytes));
+        }
+        let parse_work_units = u64::try_from(template.len())
+            .map_err(|_| ReplacementError::new(ReplacementErrorKind::ArithmeticOverflow))?;
+        if parse_work_units > limits.max_work_units {
+            return Err(ReplacementError::new(ReplacementErrorKind::WorkLimit)
+                .with_actual_limit(parse_work_units, limits.max_work_units));
+        }
+
+        let mut tokens = Vec::new();
+        let mut literal_start = 0_usize;
+        let mut cursor = 0_usize;
+        while cursor < template.len() {
+            let Some(relative) = template[cursor..].find('$') else {
+                break;
+            };
+            let dollar = cursor
+                .checked_add(relative)
+                .ok_or_else(|| ReplacementError::new(ReplacementErrorKind::ArithmeticOverflow))?;
+            push_literal_token(
+                &mut tokens,
+                &template[literal_start..dollar],
+                limits.max_tokens,
+            )?;
+
+            let after_dollar = dollar
+                .checked_add(1)
+                .ok_or_else(|| ReplacementError::new(ReplacementErrorKind::ArithmeticOverflow))?;
+            if template.as_bytes().get(after_dollar) == Some(&b'$') {
+                push_replacement_token(&mut tokens, ReplacementToken::Dollar, limits.max_tokens)?;
+                cursor = after_dollar.checked_add(1).ok_or_else(|| {
+                    ReplacementError::new(ReplacementErrorKind::ArithmeticOverflow)
+                })?;
+                literal_start = cursor;
+                continue;
+            }
+
+            let parsed = if template.as_bytes().get(after_dollar) == Some(&b'{') {
+                let reference_start = after_dollar.checked_add(1).ok_or_else(|| {
+                    ReplacementError::new(ReplacementErrorKind::ArithmeticOverflow)
+                })?;
+                match template[reference_start..].find('}') {
+                    Some(relative_end) => {
+                        let reference_end =
+                            reference_start.checked_add(relative_end).ok_or_else(|| {
+                                ReplacementError::new(ReplacementErrorKind::ArithmeticOverflow)
+                            })?;
+                        let consumed_end = reference_end.checked_add(1).ok_or_else(|| {
+                            ReplacementError::new(ReplacementErrorKind::ArithmeticOverflow)
+                        })?;
+                        Some((&template[reference_start..reference_end], consumed_end))
+                    }
+                    None => None,
+                }
+            } else {
+                let mut reference_end = after_dollar;
+                while template
+                    .as_bytes()
+                    .get(reference_end)
+                    .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+                {
+                    reference_end += 1;
+                }
+                (reference_end > after_dollar)
+                    .then(|| (&template[after_dollar..reference_end], reference_end))
+            };
+
+            let Some((reference, reference_end)) = parsed else {
+                if strict {
+                    return Err(
+                        ReplacementError::new(ReplacementErrorKind::MalformedReference)
+                            .with_offset(dollar),
+                    );
+                }
+                // The incumbent grammar is total. Preserve this dollar as a
+                // literal and continue scanning the remaining template.
+                literal_start = dollar;
+                cursor = after_dollar;
+                continue;
+            };
+
+            let token = resolve_replacement_reference(reference, capture_names, strict, dollar)?;
+            push_replacement_token(&mut tokens, token, limits.max_tokens)?;
+            cursor = reference_end;
+            literal_start = cursor;
+        }
+        push_literal_token(&mut tokens, &template[literal_start..], limits.max_tokens)?;
+        Ok(Self {
+            tokens,
+            template_bytes: template.len(),
+            parse_work_units,
+        })
+    }
+
+    /// Expand this parsed template over ordered non-overlapping matches.
+    pub fn expand(
+        &self,
+        haystack: &str,
+        iterated: &VmIterationOutcome,
+        limits: ReplacementLimits,
+    ) -> Result<ReplacementOutcome, ReplacementError> {
+        if self.template_bytes > limits.max_template_bytes {
+            return Err(ReplacementError::new(ReplacementErrorKind::TemplateLimit)
+                .with_actual_limit(self.template_bytes, limits.max_template_bytes));
+        }
+        if self.tokens.len() > limits.max_tokens {
+            return Err(ReplacementError::new(ReplacementErrorKind::TokenLimit)
+                .with_actual_limit(self.tokens.len(), limits.max_tokens));
+        }
+        if self.parse_work_units > limits.max_work_units {
+            return Err(ReplacementError::new(ReplacementErrorKind::WorkLimit)
+                .with_actual_limit(self.parse_work_units, limits.max_work_units));
+        }
+
+        let mut work_units = self.parse_work_units;
+        let mut output_bytes = 0_usize;
+        let mut cursor = 0_usize;
+        for matched in &iterated.matches {
+            charge_replacement_work(&mut work_units, 1, limits.max_work_units)?;
+            validate_replacement_span(haystack, matched.span)?;
+            if matched.span.start < cursor {
+                return Err(
+                    ReplacementError::new(ReplacementErrorKind::OverlappingMatch)
+                        .with_offset(matched.span.start),
+                );
+            }
+            account_replacement_output(
+                &mut output_bytes,
+                &haystack[cursor..matched.span.start],
+                limits,
+                &mut work_units,
+            )?;
+            for token in &self.tokens {
+                charge_replacement_work(&mut work_units, 1, limits.max_work_units)?;
+                let value = replacement_token_value(haystack, matched, *token)?;
+                if let Some(value) = value {
+                    account_replacement_output(&mut output_bytes, value, limits, &mut work_units)?;
+                }
+            }
+            cursor = matched.span.end;
+        }
+        account_replacement_output(
+            &mut output_bytes,
+            &haystack[cursor..],
+            limits,
+            &mut work_units,
+        )?;
+
+        let emission_work_units = work_units
+            .checked_sub(self.parse_work_units)
+            .ok_or_else(|| ReplacementError::new(ReplacementErrorKind::ArithmeticOverflow))?;
+        charge_replacement_work(&mut work_units, emission_work_units, limits.max_work_units)?;
+
+        // All indexing, arithmetic, work, and output ceilings are now proven.
+        // Allocate exactly once so no partial output exists even internally on
+        // a checked failure.
+        let mut output = String::new();
+        output
+            .try_reserve_exact(output_bytes)
+            .map_err(|_| ReplacementError::new(ReplacementErrorKind::AllocationFailure))?;
+        cursor = 0;
+        for matched in &iterated.matches {
+            output.push_str(&haystack[cursor..matched.span.start]);
+            for token in &self.tokens {
+                if let Some(value) = replacement_token_value(haystack, matched, *token)? {
+                    output.push_str(value);
+                }
+            }
+            cursor = matched.span.end;
+        }
+        output.push_str(&haystack[cursor..]);
+        debug_assert_eq!(output.len(), output_bytes);
+        Ok(ReplacementOutcome {
+            resources: ReplacementResources {
+                template_bytes: self.template_bytes,
+                tokens: self.tokens.len(),
+                matches_replaced: iterated.matches.len(),
+                output_bytes,
+                work_units,
+            },
+            output,
+        })
+    }
+}
+
+fn push_literal_token<'template>(
+    tokens: &mut Vec<ReplacementToken<'template>>,
+    literal: &'template str,
+    max_tokens: usize,
+) -> Result<(), ReplacementError> {
+    if literal.is_empty() {
+        return Ok(());
+    }
+    push_replacement_token(tokens, ReplacementToken::Literal(literal), max_tokens)
+}
+
+fn push_replacement_token<'template>(
+    tokens: &mut Vec<ReplacementToken<'template>>,
+    token: ReplacementToken<'template>,
+    max_tokens: usize,
+) -> Result<(), ReplacementError> {
+    let next = tokens
+        .len()
+        .checked_add(1)
+        .ok_or_else(|| ReplacementError::new(ReplacementErrorKind::ArithmeticOverflow))?;
+    if next > max_tokens {
+        return Err(ReplacementError::new(ReplacementErrorKind::TokenLimit)
+            .with_actual_limit(next, max_tokens));
+    }
+    tokens
+        .try_reserve(1)
+        .map_err(|_| ReplacementError::new(ReplacementErrorKind::AllocationFailure))?;
+    tokens.push(token);
+    Ok(())
+}
+
+fn resolve_replacement_reference<'template>(
+    reference: &str,
+    capture_names: &[Option<Box<str>>],
+    strict: bool,
+    offset: usize,
+) -> Result<ReplacementToken<'template>, ReplacementError> {
+    let numeric = !reference.is_empty() && reference.bytes().all(|byte| byte.is_ascii_digit());
+    if numeric {
+        let index = match reference.parse::<usize>() {
+            Ok(index) => index,
+            Err(_) if strict => {
+                return Err(
+                    ReplacementError::new(ReplacementErrorKind::CaptureIndexOverflow)
+                        .with_offset(offset),
+                );
+            }
+            Err(_) => return Ok(ReplacementToken::Empty),
+        };
+        if index <= capture_names.len() {
+            return Ok(ReplacementToken::Capture(index));
+        }
+        if strict {
+            return Err(ReplacementError::new(ReplacementErrorKind::UnknownCapture)
+                .with_offset(offset)
+                .with_actual_limit(index, capture_names.len()));
+        }
+        return Ok(ReplacementToken::Empty);
+    }
+
+    if strict && !valid_replacement_capture_name(reference) {
+        return Err(
+            ReplacementError::new(ReplacementErrorKind::MalformedReference).with_offset(offset),
+        );
+    }
+    let index = capture_names
+        .iter()
+        .position(|name| name.as_deref() == Some(reference))
+        .and_then(|index| index.checked_add(1));
+    match index {
+        Some(index) => Ok(ReplacementToken::Capture(index)),
+        None if strict => {
+            Err(ReplacementError::new(ReplacementErrorKind::UnknownCapture).with_offset(offset))
+        }
+        None => Ok(ReplacementToken::Empty),
+    }
+}
+
+fn valid_replacement_capture_name(reference: &str) -> bool {
+    let mut chars = reference.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first.is_alphabetic())
+        && chars.all(|value| value == '_' || value.is_alphanumeric())
+}
+
+fn validate_replacement_span(haystack: &str, span: CaptureSpan) -> Result<(), ReplacementError> {
+    if span.start > span.end
+        || span.end > haystack.len()
+        || !haystack.is_char_boundary(span.start)
+        || !haystack.is_char_boundary(span.end)
+    {
+        return Err(
+            ReplacementError::new(ReplacementErrorKind::InvalidMatchBoundary)
+                .with_offset(span.start),
+        );
+    }
+    Ok(())
+}
+
+fn replacement_token_value<'haystack>(
+    haystack: &'haystack str,
+    matched: &VmMatch,
+    token: ReplacementToken<'haystack>,
+) -> Result<Option<&'haystack str>, ReplacementError> {
+    match token {
+        ReplacementToken::Literal(value) => Ok(Some(value)),
+        ReplacementToken::Dollar => Ok(Some("$")),
+        ReplacementToken::Empty => Ok(None),
+        ReplacementToken::Capture(0) => Ok(Some(&haystack[matched.span.start..matched.span.end])),
+        ReplacementToken::Capture(index) => {
+            let capture = matched.captures.get(index - 1).copied().flatten();
+            let Some(span) = capture else {
+                return Ok(None);
+            };
+            validate_replacement_span(haystack, span)?;
+            if span.start < matched.span.start || span.end > matched.span.end {
+                return Err(
+                    ReplacementError::new(ReplacementErrorKind::InvalidMatchBoundary)
+                        .with_offset(span.start),
+                );
+            }
+            Ok(Some(&haystack[span.start..span.end]))
+        }
+    }
+}
+
+fn account_replacement_output(
+    output_bytes: &mut usize,
+    value: &str,
+    limits: ReplacementLimits,
+    work_units: &mut u64,
+) -> Result<(), ReplacementError> {
+    let next = output_bytes
+        .checked_add(value.len())
+        .ok_or_else(|| ReplacementError::new(ReplacementErrorKind::ArithmeticOverflow))?;
+    if next > limits.max_output_bytes {
+        return Err(ReplacementError::new(ReplacementErrorKind::OutputLimit)
+            .with_actual_limit(next, limits.max_output_bytes));
+    }
+    let bytes = u64::try_from(value.len())
+        .map_err(|_| ReplacementError::new(ReplacementErrorKind::ArithmeticOverflow))?;
+    charge_replacement_work(work_units, bytes, limits.max_work_units)?;
+    *output_bytes = next;
+    Ok(())
+}
+
+fn charge_replacement_work(
+    work_units: &mut u64,
+    units: u64,
+    limit: u64,
+) -> Result<(), ReplacementError> {
+    let next = work_units
+        .checked_add(units)
+        .ok_or_else(|| ReplacementError::new(ReplacementErrorKind::ArithmeticOverflow))?;
+    if next > limit {
+        return Err(
+            ReplacementError::new(ReplacementErrorKind::WorkLimit).with_actual_limit(next, limit)
+        );
+    }
+    *work_units = next;
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2623,6 +3268,7 @@ mod tests {
     use super::super::regex_semantics::SemanticLimits;
     use super::super::regex_syntax::{LexerLimits, ParserLimits, SourceSpan};
     use super::*;
+    use proptest::prelude::*;
 
     fn lower_default(pattern: &str) -> Program {
         lower(
@@ -2681,6 +3327,281 @@ mod tests {
     fn compile_pattern(pattern: &str) -> PrivateCompiledPattern {
         PrivateCompiledPattern::compile(pattern, PrivateCompileLimits::default())
             .unwrap_or_else(|error| panic!("private facade rejected {pattern:?}: {error}"))
+    }
+
+    fn replace(pattern: &str, haystack: &str, template: &str) -> ReplacementOutcome {
+        compile_pattern(pattern)
+            .replace_all(
+                haystack,
+                template,
+                IterationVmLimits::default(),
+                ReplacementLimits::default(),
+            )
+            .unwrap_or_else(|error| {
+                panic!("replacement {pattern:?} on {haystack:?} with {template:?}: {error}")
+            })
+    }
+
+    #[test]
+    fn replacement_golden_rows_cover_captures_literals_and_iteration() {
+        for (pattern, haystack, template, expected) in [
+            ("a", "bab", "X", "bXb"),
+            ("a", "bab", "", "bb"),
+            (
+                "(?P<left>a)(?<right>b)?",
+                "ab a",
+                "<$0:$1:${2}:$left:${right}>",
+                "<ab:a:b:a:b> <a:a::a:>",
+            ),
+            ("(a)+", "aaa", "[$1]", "[a]"),
+            ("(a)?b", "b ab", "<$1>", "<> <a>"),
+            ("z", "éa", "$0", "éa"),
+            ("", "éa", "X", "XéXaX"),
+            ("a*", "baa", "_", "_b_"),
+            ("(?P<κ>a)", "a", "${κ}", "a"),
+        ] {
+            assert_eq!(replace(pattern, haystack, template).output, expected);
+        }
+    }
+
+    #[test]
+    fn compatible_replacement_templates_are_total_and_match_incumbent_edges() {
+        let compiled = compile_pattern("(a)");
+        for (template, expected) in [
+            ("$0", "a"),
+            ("${0}", "a"),
+            ("$1", "a"),
+            ("${1}", "a"),
+            ("$missing", ""),
+            ("$99", ""),
+            ("$$", "$"),
+            ("$$$1", "$a"),
+            (r"\$1", r"\a"),
+            ("$1a", ""),
+            ("${1}a", "aa"),
+            ("$", "$"),
+            ("$!", "$!"),
+            ("$é", "$é"),
+            ("${name", "${name"),
+            ("${}", ""),
+            ("$184467440737095516160", ""),
+        ] {
+            let candidate = compiled
+                .replace_all(
+                    "a",
+                    template,
+                    IterationVmLimits::default(),
+                    ReplacementLimits::default(),
+                )
+                .unwrap_or_else(|error| panic!("compatible template {template:?}: {error}"));
+            let incumbent = regex::Regex::new("(a)")
+                .expect("incumbent pattern")
+                .replace_all("a", template)
+                .into_owned();
+            assert_eq!(candidate.output, expected, "candidate {template:?}");
+            assert_eq!(candidate.output, incumbent, "incumbent {template:?}");
+        }
+    }
+
+    #[test]
+    fn strict_replacement_parser_is_explicit_typed_and_secret_safe() {
+        let compiled = compile_pattern("(?P<private_capture_canary>a)");
+        for (template, kind) in [
+            (
+                "${private_template_canary",
+                ReplacementErrorKind::MalformedReference,
+            ),
+            (
+                "$unknown_private_canary",
+                ReplacementErrorKind::UnknownCapture,
+            ),
+            (
+                "$184467440737095516160",
+                ReplacementErrorKind::CaptureIndexOverflow,
+            ),
+        ] {
+            compiled
+                .parse_replacement(template, ReplacementLimits::default())
+                .expect("compatibility parser remains total");
+            let error = compiled
+                .parse_replacement_strict(template, ReplacementLimits::default())
+                .expect_err("strict parser must diagnose the reference");
+            assert_eq!(error.kind, kind);
+            for rendered in [error.to_string(), format!("{error:?}")] {
+                assert!(!rendered.contains("private_template_canary"));
+                assert!(!rendered.contains("unknown_private_canary"));
+                assert!(!rendered.contains("private_capture_canary"));
+            }
+        }
+        let compiled_debug = format!("{compiled:?}");
+        assert!(compiled_debug.contains("accounted_capture_metadata_bytes"));
+        assert!(!compiled_debug.contains("private_capture_canary"));
+    }
+
+    #[test]
+    fn replacement_ceilings_are_exact_and_zero_use_accepts_zero() {
+        let compiled = compile_pattern("(a)");
+        let baseline = compiled
+            .replace_all(
+                "a-a",
+                "<$1>",
+                IterationVmLimits::default(),
+                ReplacementLimits::default(),
+            )
+            .expect("baseline replacement");
+        let exact = ReplacementLimits {
+            max_template_bytes: baseline.resources.template_bytes,
+            max_tokens: baseline.resources.tokens,
+            max_output_bytes: baseline.resources.output_bytes,
+            max_work_units: baseline.resources.work_units,
+        };
+        assert_eq!(
+            compiled
+                .replace_all("a-a", "<$1>", IterationVmLimits::default(), exact)
+                .expect("exact ceilings pass"),
+            baseline
+        );
+
+        for (limits, kind) in [
+            (
+                ReplacementLimits {
+                    max_template_bytes: exact.max_template_bytes - 1,
+                    ..exact
+                },
+                ReplacementErrorKind::TemplateLimit,
+            ),
+            (
+                ReplacementLimits {
+                    max_tokens: exact.max_tokens - 1,
+                    ..exact
+                },
+                ReplacementErrorKind::TokenLimit,
+            ),
+            (
+                ReplacementLimits {
+                    max_output_bytes: exact.max_output_bytes - 1,
+                    ..exact
+                },
+                ReplacementErrorKind::OutputLimit,
+            ),
+            (
+                ReplacementLimits {
+                    max_work_units: exact.max_work_units - 1,
+                    ..exact
+                },
+                ReplacementErrorKind::WorkLimit,
+            ),
+        ] {
+            let error = compiled
+                .replace_all("a-a", "<$1>", IterationVmLimits::default(), limits)
+                .expect_err("one-below ceiling fails");
+            let ReplacementOperationError::Template(error) = error else {
+                panic!("replacement ceiling must not become a VM error");
+            };
+            assert_eq!(error.kind, kind);
+        }
+
+        let zero = compile_pattern("z")
+            .replace_all(
+                "",
+                "",
+                IterationVmLimits::default(),
+                ReplacementLimits {
+                    max_template_bytes: 0,
+                    max_tokens: 0,
+                    max_output_bytes: 0,
+                    max_work_units: 0,
+                },
+            )
+            .expect("genuinely empty replacement accepts exact zero ceilings");
+        assert_eq!(zero.output, "");
+        assert_eq!(zero.resources.output_bytes, 0);
+        assert_eq!(zero.resources.work_units, 0);
+    }
+
+    #[test]
+    fn replacement_preflight_rejects_invalid_spans_before_allocating_output() {
+        let compiled = compile_pattern("(a)");
+        let template = compiled
+            .parse_replacement("$1", ReplacementLimits::default())
+            .expect("template");
+        let outcome = |matches| VmIterationOutcome {
+            matches,
+            resources: IterationVmResources::new(0),
+            execution_fingerprint: 0,
+            trace: Vec::new(),
+            trace_truncated: false,
+        };
+
+        for (haystack, matches, kind) in [
+            (
+                "aa",
+                vec![
+                    VmMatch {
+                        span: CaptureSpan { start: 0, end: 2 },
+                        captures: vec![Some(CaptureSpan { start: 0, end: 1 })],
+                    },
+                    VmMatch {
+                        span: CaptureSpan { start: 1, end: 2 },
+                        captures: vec![Some(CaptureSpan { start: 1, end: 2 })],
+                    },
+                ],
+                ReplacementErrorKind::OverlappingMatch,
+            ),
+            (
+                "é",
+                vec![VmMatch {
+                    span: CaptureSpan { start: 1, end: 2 },
+                    captures: vec![None],
+                }],
+                ReplacementErrorKind::InvalidMatchBoundary,
+            ),
+            (
+                "aa",
+                vec![VmMatch {
+                    span: CaptureSpan { start: 0, end: 1 },
+                    captures: vec![Some(CaptureSpan { start: 0, end: 2 })],
+                }],
+                ReplacementErrorKind::InvalidMatchBoundary,
+            ),
+        ] {
+            let error = template
+                .expand(haystack, &outcome(matches), ReplacementLimits::default())
+                .expect_err("invalid replacement span must fail closed");
+            assert_eq!(error.kind, kind);
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn compatible_replacement_matches_regex_1_13(
+            pattern in prop::sample::select(vec![
+                "a", "(a)", "(a)?b", "(?P<left>a)(b)?", "", "a*", "é", "(ab|a)",
+            ]),
+            haystack in prop::collection::vec(
+                prop::sample::select(vec!['a', 'b', 'é', '$', '_', ' ']),
+                0..24,
+            ).prop_map(|chars| chars.into_iter().collect::<String>()),
+            template in prop::sample::select(vec![
+                "", "X", "$0", "$1", "${1}", "$left", "${left}", "$missing",
+                "$99", "$$", "$$$1", "$1a", "${1}a", "$", "$!", "$é",
+                "${name", "${}", "$184467440737095516160", r"\$1",
+            ]),
+        ) {
+            let incumbent = regex::Regex::new(pattern)
+                .expect("incumbent accepts bounded pattern")
+                .replace_all(&haystack, template)
+                .into_owned();
+            let candidate = compile_pattern(pattern)
+                .replace_all(
+                    &haystack,
+                    template,
+                    IterationVmLimits::default(),
+                    ReplacementLimits::default(),
+                )
+                .expect("candidate replacement");
+            prop_assert_eq!(candidate.output, incumbent);
+        }
     }
 
     #[test]

@@ -166,6 +166,18 @@ pub struct PrivateCompileLimits {
     pub ir: CompileLimits,
 }
 
+/// Source-secret-safe output for private compile-once consumers.
+///
+/// The compiled program never retains the pattern. Capture names are the one
+/// deliberately retained source-derived field because replacement templates
+/// must resolve named groups after compilation. They remain private, bounded
+/// by the lexer pattern limit, and are never rendered by diagnostics or
+/// `Debug` implementations in the VM facade.
+pub struct PrivateCompileOutput {
+    pub program: Program,
+    pub capture_names: Vec<Option<Box<str>>>,
+}
+
 /// Stable stage identity for a private compile failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrivateCompileStage {
@@ -341,6 +353,27 @@ pub fn compile_private(
         limits.ir,
     )
     .map_err(PrivateCompileError::lower)?;
+    let fallback_span = pattern_span(pattern);
+    program
+        .validate(limits.ir)
+        .map_err(|error| PrivateCompileError::ir(error, fallback_span))?;
+    Ok(program)
+}
+
+/// Compile one private program while retaining only its capture-name table.
+pub fn compile_private_with_captures(
+    pattern: &str,
+    limits: PrivateCompileLimits,
+) -> Result<PrivateCompileOutput, PrivateCompileError> {
+    let (program, analysis) = analyze_and_lower(
+        pattern,
+        limits.lexer,
+        limits.parser,
+        limits.semantic,
+        limits.fold_boundary,
+        limits.ir,
+    )
+    .map_err(PrivateCompileError::lower)?;
     // `lower` has now enforced the configured pattern-byte ceiling, so this
     // scalar count cannot turn an otherwise O(1) oversize rejection into an
     // unbounded pre-validation scan.
@@ -348,7 +381,12 @@ pub fn compile_private(
     program
         .validate(limits.ir)
         .map_err(|error| PrivateCompileError::ir(error, fallback_span))?;
-    Ok(program)
+    let capture_names =
+        extract_capture_names(pattern, &analysis, &program).map_err(PrivateCompileError::lower)?;
+    Ok(PrivateCompileOutput {
+        program,
+        capture_names,
+    })
 }
 
 /// Parse, semantically normalize, and lower one pattern into a complete IR.
@@ -364,6 +402,25 @@ pub fn lower(
     fold_boundary_limits: FoldBoundaryLimits,
     compile_limits: CompileLimits,
 ) -> Result<Program, LowerError> {
+    analyze_and_lower(
+        pattern,
+        lexer_limits,
+        parser_limits,
+        semantic_limits,
+        fold_boundary_limits,
+        compile_limits,
+    )
+    .map(|(program, _analysis)| program)
+}
+
+fn analyze_and_lower(
+    pattern: &str,
+    lexer_limits: LexerLimits,
+    parser_limits: ParserLimits,
+    semantic_limits: SemanticLimits,
+    fold_boundary_limits: FoldBoundaryLimits,
+    compile_limits: CompileLimits,
+) -> Result<(Program, FoldBoundaryAnalysis), LowerError> {
     let analysis = regex_boundaries::analyze(
         pattern,
         lexer_limits,
@@ -385,7 +442,38 @@ pub fn lower(
             fallback_span,
         ));
     }
-    LoweringBuilder::new(&analysis, compile_limits).run()
+    let program = LoweringBuilder::new(&analysis, compile_limits).run()?;
+    Ok((program, analysis))
+}
+
+fn extract_capture_names(
+    pattern: &str,
+    analysis: &FoldBoundaryAnalysis,
+    program: &Program,
+) -> Result<Vec<Option<Box<str>>>, LowerError> {
+    let capture_count = program.capture_slots / 2;
+    let mut capture_names = vec![None; capture_count];
+    for node in &analysis.character_semantics.ast.nodes {
+        let AstNodeKind::Capture { index, name, .. } = &node.kind else {
+            continue;
+        };
+        let Some(capture_index) = index.checked_sub(1) else {
+            return Err(LowerError::new(
+                LowerErrorKind::InvalidCaptureIndex,
+                node.span,
+            ));
+        };
+        let Some(entry) = capture_names.get_mut(capture_index) else {
+            return Err(LowerError::new(LowerErrorKind::InvalidAnalysis, node.span));
+        };
+        if let Some(name) = *name {
+            let value = name
+                .source(pattern)
+                .ok_or_else(|| LowerError::new(LowerErrorKind::InvalidAnalysis, name))?;
+            *entry = Some(Box::<str>::from(value));
+        }
+    }
+    Ok(capture_names)
 }
 
 fn compile_limits_hold(limits: CompileLimits) -> bool {
