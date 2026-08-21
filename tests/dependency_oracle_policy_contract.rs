@@ -14,6 +14,7 @@ use std::path::PathBuf;
 
 const BEAD_ID: &str = "asupersync-dep-p1-foundations-upksjk.3";
 const RECONCILIATION_BEAD_ID: &str = "asupersync-mnotoo.4.1";
+const QUARANTINE_BEAD_ID: &str = "asupersync-mnotoo.4.2";
 const RETIREMENT_SWEEP_BEAD_ID: &str = "asupersync-mnotoo.4.3";
 const PROGRAM_ID: &str = "asupersync-ir2uf0";
 const ARTIFACT_PATH: &str = "artifacts/dependency_oracle_policy_v1.json";
@@ -23,6 +24,8 @@ const MANIFEST_PATH: &str = "Cargo.toml";
 const LOCK_PATH: &str = "Cargo.lock";
 const NIGHTLY_WORKFLOW_PATH: &str = ".github/workflows/nightly-differential-stress.yml";
 const TAXONOMY_PATH: &str = "artifacts/dependency_safety_taxonomy_v1.json";
+const SQLITE_PARITY_MANIFEST_PATH: &str = "tests/fixtures/sqlite-parity-consumer/Cargo.toml";
+const SQLITE_PARITY_LOCK_PATH: &str = "tests/fixtures/sqlite-parity-consumer/Cargo.lock";
 const SCENARIO_ID: &str = "dependency_oracle_policy_contract_v1";
 const RECONCILIATION_CONTRACT_ID: &str = "dependency-oracle-manifest-reconciliation-v1";
 const ORACLE_EXPIRY_CRON: &str = "0 4 * * *";
@@ -61,6 +64,26 @@ fn retirement_sweep(policy: &Value) -> &Value {
         .expect("retirement_sweep must exist")
 }
 
+fn quarantine_proof(policy: &Value) -> &Value {
+    reconciliation(policy)
+        .get("quarantine_proof")
+        .expect("quarantine_proof must exist")
+}
+
+fn quarantine_profile_by_id<'a>(policy: &'a Value, profile_id: &str) -> &'a Value {
+    array(quarantine_proof(policy), "profile_matrix")
+        .iter()
+        .find(|row| string(row, "profile_id") == profile_id)
+        .unwrap_or_else(|| panic!("missing quarantine profile {profile_id}"))
+}
+
+fn quarantine_evidence_by_id<'a>(policy: &'a Value, oracle_id: &str) -> &'a Value {
+    array(quarantine_proof(policy), "registry_evidence")
+        .iter()
+        .find(|row| string(row, "oracle_id") == oracle_id)
+        .unwrap_or_else(|| panic!("missing quarantine evidence {oracle_id}"))
+}
+
 fn active_registry(policy: &Value) -> &[Value] {
     array(reconciliation(policy), "active_oracle_registry")
 }
@@ -77,6 +100,13 @@ fn object_object<'a>(value: &'a Map<String, Value>, key: &str) -> &'a Map<String
         .get(key)
         .and_then(Value::as_object)
         .unwrap_or_else(|| panic!("{key} must be an object"))
+}
+
+fn object_array<'a>(value: &'a Map<String, Value>, key: &str) -> &'a [Value] {
+    value
+        .get(key)
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| panic!("{key} must be an array"))
 }
 
 fn array<'a>(value: &'a Value, key: &str) -> &'a [Value] {
@@ -1259,6 +1289,677 @@ fn validate_retirement_sweep(policy: &Value) -> Vec<String> {
     errors
 }
 
+fn validate_quarantine_proof(policy: &Value) -> Vec<String> {
+    let proof = quarantine_proof(policy);
+    let reconciliation = reconciliation(policy);
+    let mut errors = Vec::new();
+
+    for key in [
+        "schema_version",
+        "bead_id",
+        "capability_id",
+        "as_of_release",
+        "as_of_date_utc",
+        "unknown_active_native_state",
+        "external_process_authorization",
+    ] {
+        nonempty_string(proof, key, &mut errors, "quarantine-proof");
+    }
+    if string(proof, "schema_version") != "dependency-oracle-quarantine-proof-v1" {
+        errors.push("quarantine proof schema drifted".to_owned());
+    }
+    if string(proof, "bead_id") != QUARANTINE_BEAD_ID {
+        errors.push("quarantine proof bead authority drifted".to_owned());
+    }
+    if string(proof, "capability_id") != "CAP-VERIFICATION-PROFILES" {
+        errors.push("quarantine proof capability drifted".to_owned());
+    }
+    if string(proof, "as_of_release") != string(reconciliation, "as_of_release")
+        || string(proof, "as_of_date_utc") != string(reconciliation, "as_of_date_utc")
+    {
+        errors.push("quarantine proof freshness must match manifest reconciliation".to_owned());
+    }
+    if string(proof, "unknown_active_native_state") != "block-green" {
+        errors.push("unknown active-native state must block green".to_owned());
+    }
+    let authorization = string(proof, "external_process_authorization");
+    if !authorization.starts_with("none;")
+        || !authorization.contains("do not authorize")
+        || !authorization.contains("package managers")
+    {
+        errors.push("quarantine proof must deny implicit external-process authority".to_owned());
+    }
+
+    let detection = object(proof, "detection_contract");
+    for key in [
+        "cargo_unit_graph_mode",
+        "active_rule",
+        "native_activity_rule",
+        "oracle_role_rule",
+        "reverse_cycle_rule",
+        "unknown_rule",
+    ] {
+        nonempty_object_string(detection, key, &mut errors, "quarantine-proof");
+    }
+    if object_string(detection, "cargo_unit_graph_mode") != "run-custom-build" {
+        errors.push("native detection must inspect Cargo run-custom-build units".to_owned());
+    }
+    if object_string_set(detection, "native_state_allowlist")
+        != ["absent", "active", "declared-inactive"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    {
+        errors.push("native-state allowlist must reject unknown states".to_owned());
+    }
+    let expected_native_rules = [
+        (
+            "libsqlite3-sys",
+            "0.38.1",
+            "libsqlite3-sys:run-custom-build",
+            "active",
+        ),
+        ("psm", "0.1.31", "psm:run-custom-build", "active"),
+        (
+            "rdkafka-sys",
+            "4.10.0+2.12.1",
+            "rdkafka-sys:run-custom-build",
+            "active",
+        ),
+        (
+            "stacker",
+            "0.1.24",
+            "stacker:run-custom-build",
+            "declared-inactive",
+        ),
+    ]
+    .into_iter()
+    .map(|(package, version, unit, state)| (package, (version, unit, state)))
+    .collect::<BTreeMap<_, _>>();
+    let native_rules = object_array(detection, "native_source_rules");
+    let native_rule_ids = native_rules
+        .iter()
+        .map(|row| string(row, "package_name"))
+        .collect::<BTreeSet<_>>();
+    if native_rule_ids != expected_native_rules.keys().copied().collect()
+        || native_rule_ids.len() != native_rules.len()
+    {
+        errors.push("native source-rule inventory must be exact and unique".to_owned());
+    }
+    let lock: toml::Value =
+        toml::from_str(&read_repo_file(LOCK_PATH)).expect("Cargo.lock must parse");
+    let locked_packages = lock
+        .get("package")
+        .and_then(toml::Value::as_array)
+        .expect("Cargo.lock package rows must exist");
+    for rule in native_rules {
+        let package = string(rule, "package_name");
+        let Some((expected_version, expected_unit, expected_state)) =
+            expected_native_rules.get(package)
+        else {
+            continue;
+        };
+        for key in [
+            "resolved_version",
+            "target_triple",
+            "host_triple",
+            "build_script_unit",
+            "native_state",
+            "source_evidence",
+        ] {
+            nonempty_string(rule, key, &mut errors, package);
+        }
+        if string(rule, "resolved_version") != *expected_version
+            || string(rule, "build_script_unit") != *expected_unit
+            || string(rule, "native_state") != *expected_state
+            || string(rule, "target_triple") != "x86_64-unknown-linux-gnu"
+            || string(rule, "host_triple") != "x86_64-unknown-linux-gnu"
+        {
+            errors.push(format!("{package}: native source rule drifted"));
+        }
+        let locked = locked_packages.iter().any(|row| {
+            row.get("name").and_then(toml::Value::as_str) == Some(package)
+                && row.get("version").and_then(toml::Value::as_str) == Some(*expected_version)
+        });
+        if !locked {
+            errors.push(format!(
+                "{package}: native source rule does not match the root lockfile"
+            ));
+        }
+    }
+
+    let pins = array(proof, "isolation_source_pins");
+    let pin_paths = pins
+        .iter()
+        .map(|pin| string(pin, "path").to_owned())
+        .collect::<BTreeSet<_>>();
+    if pin_paths
+        != [SQLITE_PARITY_MANIFEST_PATH, SQLITE_PARITY_LOCK_PATH]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+        || pin_paths.len() != pins.len()
+    {
+        errors.push("quarantine isolation source pins drifted".to_owned());
+    }
+    for pin in pins {
+        let path = string(pin, "path");
+        match std::fs::read(repo_root().join(path)) {
+            Ok(bytes) if sha256_hex(&bytes) == string(pin, "sha256") => {}
+            Ok(_) => errors.push(format!(
+                "quarantine isolation source pin hash drift: {path}"
+            )),
+            Err(error) => errors.push(format!(
+                "quarantine isolation source {path} cannot be read: {error}"
+            )),
+        }
+        if pin
+            .get("scope")
+            .and_then(Value::as_str)
+            .is_none_or(str::is_empty)
+        {
+            errors.push(format!("quarantine isolation source lacks scope: {path}"));
+        }
+    }
+
+    let expected_profiles = [
+        "default-check",
+        "default-all-targets-check",
+        "default-release-check",
+        "sqlite-feature-check",
+        "kafka-feature-check",
+        "all-features-all-targets-check",
+        "all-features-release-check",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect::<BTreeSet<_>>();
+    let profiles = array(proof, "profile_matrix");
+    let profile_ids = profiles
+        .iter()
+        .map(|row| string(row, "profile_id").to_owned())
+        .collect::<BTreeSet<_>>();
+    if profile_ids != expected_profiles || profile_ids.len() != profiles.len() {
+        errors.push("quarantine profile matrix must be exact and unique".to_owned());
+    }
+
+    for profile in profiles {
+        let profile_id = string(profile, "profile_id");
+        for key in [
+            "boundary",
+            "target_triple",
+            "host_triple",
+            "exact_command",
+            "oracle_role",
+            "expected_outcome",
+            "no_claim_boundary",
+        ] {
+            nonempty_string(profile, key, &mut errors, profile_id);
+        }
+        let target = string(profile, "target_triple");
+        let host = string(profile, "host_triple");
+        if target != "x86_64-unknown-linux-gnu" || host != "x86_64-unknown-linux-gnu" {
+            errors.push(format!("{profile_id}: target/host receipt drifted"));
+        }
+        let command = string(profile, "exact_command");
+        for marker in [
+            "RCH_REQUIRE_REMOTE=1 rch exec --",
+            "cargo check --locked",
+            "--target x86_64-unknown-linux-gnu",
+            "-Z unstable-options",
+            "--unit-graph",
+        ] {
+            if !command.contains(marker) {
+                errors.push(format!("{profile_id}: unit-graph command lacks {marker}"));
+            }
+        }
+        if string(profile, "expected_outcome") != "PASS" {
+            errors.push(format!(
+                "{profile_id}: canonical graph recipe must expect PASS"
+            ));
+        }
+        let build_script_units = string_set(profile, "build_script_units");
+        let active_native_units = string_set(profile, "active_native_units");
+        let inactive_native_units = string_set(profile, "inactive_native_units");
+        if build_script_units.iter().any(|unit| {
+            unit.contains("unknown")
+                || !unit.ends_with(":run-custom-build")
+                || unit.split(':').count() != 2
+        }) || active_native_units.iter().any(|unit| {
+            unit.contains("unknown")
+                || !unit.ends_with(":native-compile:active")
+                || unit.split(':').count() != 3
+        }) || inactive_native_units.iter().any(|unit| {
+            unit.contains("unknown")
+                || !unit.ends_with(":native-compile:declared-inactive")
+                || unit.split(':').count() != 3
+        }) {
+            errors.push(format!(
+                "{profile_id}: build-script/native classification is unknown or malformed"
+            ));
+        }
+        let build_packages = build_script_units
+            .iter()
+            .filter_map(|unit| unit.split(':').next())
+            .collect::<BTreeSet<_>>();
+        let classified_native_packages = active_native_units
+            .iter()
+            .chain(&inactive_native_units)
+            .filter_map(|unit| unit.split(':').next())
+            .collect::<BTreeSet<_>>();
+        if build_packages != classified_native_packages {
+            errors.push(format!(
+                "{profile_id}: every governed build script needs one target-specific native classification"
+            ));
+        }
+        if !string_set(profile, "reverse_package_units").is_empty() {
+            errors.push(format!(
+                "{profile_id}: reverse package leaked into workspace graph"
+            ));
+        }
+
+        let (expected_build_units, expected_active_units, expected_inactive_units) =
+            match profile_id {
+                "default-check" | "default-all-targets-check" | "default-release-check" => {
+                    (BTreeSet::new(), BTreeSet::new(), BTreeSet::new())
+                }
+                "sqlite-feature-check" => (
+                    [
+                        "libsqlite3-sys:run-custom-build",
+                        "psm:run-custom-build",
+                        "stacker:run-custom-build",
+                    ]
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect(),
+                    [
+                        "libsqlite3-sys:native-compile:active",
+                        "psm:native-compile:active",
+                    ]
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect(),
+                    std::iter::once("stacker:native-compile:declared-inactive")
+                        .map(str::to_owned)
+                        .collect(),
+                ),
+                "kafka-feature-check" => (
+                    std::iter::once("rdkafka-sys:run-custom-build")
+                        .map(str::to_owned)
+                        .collect(),
+                    std::iter::once("rdkafka-sys:native-compile:active")
+                        .map(str::to_owned)
+                        .collect(),
+                    BTreeSet::new(),
+                ),
+                "all-features-all-targets-check" | "all-features-release-check" => (
+                    [
+                        "libsqlite3-sys:run-custom-build",
+                        "psm:run-custom-build",
+                        "rdkafka-sys:run-custom-build",
+                        "stacker:run-custom-build",
+                    ]
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect(),
+                    [
+                        "libsqlite3-sys:native-compile:active",
+                        "psm:native-compile:active",
+                        "rdkafka-sys:native-compile:active",
+                    ]
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect(),
+                    std::iter::once("stacker:native-compile:declared-inactive")
+                        .map(str::to_owned)
+                        .collect(),
+                ),
+                _ => (BTreeSet::new(), BTreeSet::new(), BTreeSet::new()),
+            };
+        if build_script_units != expected_build_units
+            || active_native_units != expected_active_units
+            || inactive_native_units != expected_inactive_units
+        {
+            errors.push(format!(
+                "{profile_id}: build-script/native unit leakage or omission"
+            ));
+        }
+        let expected_features = match profile_id {
+            "sqlite-feature-check" => ["default", "sqlite"].as_slice(),
+            "kafka-feature-check" => ["default", "kafka"].as_slice(),
+            "all-features-all-targets-check" | "all-features-release-check" => {
+                ["all-features"].as_slice()
+            }
+            _ => ["default"].as_slice(),
+        };
+        if string_set(profile, "feature_vector")
+            != expected_features
+                .iter()
+                .map(|feature| (*feature).to_owned())
+                .collect()
+        {
+            errors.push(format!("{profile_id}: feature vector drifted"));
+        }
+        let expected_command_markers = match profile_id {
+            "default-all-targets-check" => ["--all-targets"].as_slice(),
+            "default-release-check" => ["--release"].as_slice(),
+            "sqlite-feature-check" => ["--features sqlite"].as_slice(),
+            "kafka-feature-check" => ["--features kafka"].as_slice(),
+            "all-features-all-targets-check" => ["--all-features", "--all-targets"].as_slice(),
+            "all-features-release-check" => ["--all-features", "--release"].as_slice(),
+            _ => [].as_slice(),
+        };
+        for marker in expected_command_markers {
+            if !command.contains(marker) {
+                errors.push(format!(
+                    "{profile_id}: command lacks profile marker {marker}"
+                ));
+            }
+        }
+        let expected_role = if profile_id.starts_with("default-") {
+            "absent"
+        } else if profile_id.starts_with("all-features-") {
+            "incumbent-optional-production-edges-not-oracles"
+        } else {
+            "incumbent-optional-production-edge-not-oracle"
+        };
+        if string(profile, "oracle_role") != expected_role {
+            errors.push(format!(
+                "{profile_id}: incumbent/oracle role classification drifted"
+            ));
+        }
+        let all_targets = profile
+            .get("all_targets")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if all_targets != profile_id.contains("all-targets") {
+            errors.push(format!("{profile_id}: all-targets boundary drifted"));
+        }
+        let release = profile
+            .get("release")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if release != profile_id.contains("release") {
+            errors.push(format!("{profile_id}: release boundary drifted"));
+        }
+    }
+
+    let expected_evidence = [
+        (
+            "rdkafka-librdkafka-external-reference",
+            NATIVE,
+            "kafka",
+            ["rdkafka-sys:run-custom-build"].as_slice(),
+            ["rdkafka-sys:native-compile:active"].as_slice(),
+            [].as_slice(),
+        ),
+        (
+            "rusqlite-libsqlite-external-reference",
+            NATIVE,
+            "sqlite",
+            ["libsqlite3-sys:run-custom-build"].as_slice(),
+            ["libsqlite3-sys:native-compile:active"].as_slice(),
+            [].as_slice(),
+        ),
+        (
+            "sqlparser-native-exposure-reference",
+            NATIVE,
+            "sqlite",
+            ["psm:run-custom-build", "stacker:run-custom-build"].as_slice(),
+            ["psm:native-compile:active"].as_slice(),
+            ["stacker:native-compile:declared-inactive"].as_slice(),
+        ),
+        (
+            "frankensqlite-reverse-dependency-reference",
+            REVERSE,
+            "sqlite",
+            [].as_slice(),
+            [].as_slice(),
+            [].as_slice(),
+        ),
+    ];
+    let evidence_rows = array(proof, "registry_evidence");
+    let evidence_ids = evidence_rows
+        .iter()
+        .map(|row| string(row, "oracle_id").to_owned())
+        .collect::<BTreeSet<_>>();
+    if evidence_ids
+        != expected_evidence
+            .iter()
+            .map(|(oracle_id, _, _, _, _, _)| (*oracle_id).to_owned())
+            .collect()
+        || evidence_ids.len() != evidence_rows.len()
+    {
+        errors.push("quarantine registry evidence must be exact and unique".to_owned());
+    }
+
+    for (
+        oracle_id,
+        class,
+        incumbent_feature,
+        expected_build_units,
+        expected_active_units,
+        expected_inactive_units,
+    ) in expected_evidence
+    {
+        let evidence = quarantine_evidence_by_id(policy, oracle_id);
+        let registry = row_by_id(policy, oracle_id);
+        if string(evidence, "oracle_class") != class
+            || string(evidence, "oracle_class") != string(registry, "oracle_class")
+            || string(evidence, "lifecycle_state") != "planned"
+            || string(evidence, "lifecycle_state") != string(registry, "lifecycle_state")
+        {
+            errors.push(format!(
+                "{oracle_id}: quarantine registry projection drifted"
+            ));
+        }
+        if string(evidence, "incumbent_feature") != incumbent_feature {
+            errors.push(format!("{oracle_id}: incumbent feature projection drifted"));
+        }
+        if string_set(evidence, "build_script_units")
+            != expected_build_units
+                .iter()
+                .map(|unit| (*unit).to_owned())
+                .collect()
+            || string_set(evidence, "active_native_units")
+                != expected_active_units
+                    .iter()
+                    .map(|unit| (*unit).to_owned())
+                    .collect()
+            || string_set(evidence, "inactive_native_units")
+                != expected_inactive_units
+                    .iter()
+                    .map(|unit| (*unit).to_owned())
+                    .collect()
+        {
+            errors.push(format!(
+                "{oracle_id}: build-script/native activity evidence drifted"
+            ));
+        }
+        let exclusions = string_set(evidence, "exclusion_profile_ids");
+        if class == NATIVE {
+            let expected_exclusions = [
+                "default-check",
+                "default-all-targets-check",
+                "default-release-check",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<BTreeSet<_>>();
+            if exclusions != expected_exclusions {
+                errors.push(format!("{oracle_id}: exclusion profile matrix drifted"));
+            }
+        } else if exclusions != expected_profiles {
+            errors.push(format!("{oracle_id}: exclusion profile matrix drifted"));
+        }
+        nonempty_string(evidence, "no_claim_boundary", &mut errors, oracle_id);
+        let isolation = object(evidence, "isolated_lane_evidence");
+        for key in ["allowed_profile", "status", "normalized_outcome", "reason"] {
+            nonempty_object_string(isolation, key, &mut errors, oracle_id);
+        }
+        if class == NATIVE {
+            if object_string(isolation, "allowed_profile") != "external-cargo-harness"
+                || object_string(isolation, "status") != "blocked-planned-no-external-manifest"
+                || object_string(isolation, "normalized_outcome") != "BLOCKED"
+                || !isolation.get("manifest_path").is_some_and(Value::is_null)
+                || !isolation.get("lockfile_path").is_some_and(Value::is_null)
+                || !isolation.get("replay_command").is_some_and(Value::is_null)
+            {
+                errors.push(format!(
+                    "{oracle_id}: planned native lane must remain blocked without an external manifest"
+                ));
+            }
+        } else if object_string(isolation, "allowed_profile") != "neutral-synthesized-consumer"
+            || object_string(isolation, "status") != "available-independent-nested-workspace"
+            || object_string(isolation, "normalized_outcome") != "PASS"
+            || object_string(isolation, "manifest_path") != SQLITE_PARITY_MANIFEST_PATH
+            || object_string(isolation, "lockfile_path") != SQLITE_PARITY_LOCK_PATH
+            || !object_string(isolation, "replay_command")
+                .contains("--manifest-path tests/fixtures/sqlite-parity-consumer/Cargo.toml")
+        {
+            errors.push(format!(
+                "{oracle_id}: reverse lane must use the independent neutral consumer"
+            ));
+        }
+    }
+
+    let root_manifest: toml::Value =
+        toml::from_str(&read_repo_file(MANIFEST_PATH)).expect("Cargo.toml must parse");
+    let root_dependencies = root_manifest
+        .get("dependencies")
+        .and_then(toml::Value::as_table)
+        .expect("root dependencies must exist");
+    let root_dev_dependencies = root_manifest
+        .get("dev-dependencies")
+        .and_then(toml::Value::as_table)
+        .expect("root dev-dependencies must exist");
+    let root_build_dependencies = root_manifest
+        .get("build-dependencies")
+        .and_then(toml::Value::as_table);
+    for dependency in ["rdkafka", "rusqlite", "sqlparser"] {
+        if root_dependencies
+            .get(dependency)
+            .and_then(toml::Value::as_table)
+            .and_then(|entry| entry.get("optional"))
+            .and_then(toml::Value::as_bool)
+            != Some(true)
+        {
+            errors.push(format!(
+                "{dependency}: native incumbent must remain an optional normal dependency"
+            ));
+        }
+        if root_dev_dependencies.contains_key(dependency)
+            || root_build_dependencies.is_some_and(|table| table.contains_key(dependency))
+        {
+            errors.push(format!(
+                "{dependency}: native incumbent leaked into dev/build oracle graph"
+            ));
+        }
+    }
+    let root_features = root_manifest
+        .get("features")
+        .and_then(toml::Value::as_table)
+        .expect("root features must exist");
+    let feature_entries = |feature: &str| {
+        root_features
+            .get(feature)
+            .and_then(toml::Value::as_array)
+            .expect("governed root feature must be an array")
+            .iter()
+            .filter_map(toml::Value::as_str)
+            .collect::<BTreeSet<_>>()
+    };
+    if feature_entries("sqlite") != ["dep:rusqlite", "dep:sqlparser"].into_iter().collect()
+        || feature_entries("kafka") != std::iter::once("dep:rdkafka").collect()
+    {
+        errors.push("native incumbent feature mapping drifted".to_owned());
+    }
+    let default_features = feature_entries("default");
+    if default_features.iter().any(|feature| {
+        matches!(
+            *feature,
+            "sqlite" | "kafka" | "dep:rdkafka" | "dep:rusqlite" | "dep:sqlparser"
+        )
+    }) {
+        errors.push("native incumbent leaked into the default feature vector".to_owned());
+    }
+    let root_text = read_repo_file(MANIFEST_PATH).to_ascii_lowercase();
+    let root_lock = read_repo_file(LOCK_PATH).to_ascii_lowercase();
+    if root_text.contains("frankensqlite")
+        || root_text.contains("fsqlite")
+        || root_lock.contains("name = \"fsqlite\"")
+    {
+        errors.push("reverse dependency leaked into the root workspace".to_owned());
+    }
+    let members = root_manifest
+        .get("workspace")
+        .and_then(|workspace| workspace.get("members"))
+        .and_then(toml::Value::as_array)
+        .expect("root workspace members must exist")
+        .iter()
+        .filter_map(toml::Value::as_str)
+        .collect::<BTreeSet<_>>();
+    if members.contains("tests/fixtures/sqlite-parity-consumer") {
+        errors.push("neutral consumer must not become a root workspace member".to_owned());
+    }
+
+    let neutral_manifest: toml::Value =
+        toml::from_str(&read_repo_file(SQLITE_PARITY_MANIFEST_PATH))
+            .expect("neutral SQLite parity manifest must parse");
+    if neutral_manifest.get("workspace").is_none()
+        || neutral_manifest
+            .get("package")
+            .and_then(|package| package.get("publish"))
+            .and_then(toml::Value::as_bool)
+            != Some(false)
+    {
+        errors.push(
+            "neutral consumer lost its independent non-publishable workspace boundary".to_owned(),
+        );
+    }
+    let neutral_dependencies = neutral_manifest
+        .get("dependencies")
+        .and_then(toml::Value::as_table)
+        .expect("neutral consumer dependencies must exist");
+    for dependency in [
+        "asupersync",
+        "asupersync-compat",
+        "fsqlite",
+        "fsqlite-types",
+    ] {
+        if !neutral_dependencies.contains_key(dependency) {
+            errors.push(format!(
+                "neutral consumer lost required comparison dependency {dependency}"
+            ));
+        }
+    }
+    let neutral_lock = read_repo_file(SQLITE_PARITY_LOCK_PATH);
+    for package in ["asupersync", "asupersync-sqlite-parity-consumer", "fsqlite"] {
+        if !neutral_lock.contains(&format!("name = \"{package}\"")) {
+            errors.push(format!("neutral consumer lock lacks {package}"));
+        }
+    }
+
+    if string_set(proof, "required_negative_fixtures")
+        != [
+            "native-build-unit-leakage",
+            "native-isolated-lane-falsely-green",
+            "reverse-consumer-loses-workspace-boundary",
+            "unknown-active-native-state",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
+    {
+        errors.push("quarantine negative-fixture registry drifted".to_owned());
+    }
+    if string_set(proof, "explicit_no_claims").len() < 4 {
+        errors.push("quarantine proof requires explicit no-claim boundaries".to_owned());
+    }
+
+    errors
+}
+
 fn active_edge_ids(policy: &Value) -> BTreeSet<String> {
     active_registry(policy)
         .iter()
@@ -1320,6 +2021,7 @@ fn validate_manifest_reconciliation(policy: &Value) -> Vec<String> {
             .iter()
             .flat_map(|row| validate_active_oracle_row(policy, row)),
     );
+    errors.extend(validate_quarantine_proof(policy));
     errors.extend(validate_retirement_sweep(policy));
 
     let edge_ids = active_edge_ids(policy);
@@ -2048,6 +2750,10 @@ fn manifest_reconciliation_metadata_and_required_fields_are_exact() {
             "scheduled-ci-drift",
             "unapproved-retirement-renewal",
             "unregistered-oracle-edge",
+            "native-build-unit-leakage",
+            "native-isolated-lane-falsely-green",
+            "reverse-consumer-loses-workspace-boundary",
+            "unknown-active-native-state",
         ]
         .into_iter()
         .map(str::to_owned)
@@ -2063,6 +2769,132 @@ fn every_manifest_and_lockfile_pin_is_current() {
         errors.is_empty(),
         "manifest source pin errors:\n{}",
         errors.join("\n")
+    );
+}
+
+#[test]
+fn native_and_reverse_quarantine_is_complete_and_fail_closed() {
+    let policy = policy();
+    let errors = validate_quarantine_proof(&policy);
+    assert!(
+        errors.is_empty(),
+        "native/reverse quarantine errors:\n{}",
+        errors.join("\n")
+    );
+}
+
+#[test]
+fn quarantine_profile_boundaries_cover_default_features_all_targets_and_release() {
+    let policy = policy();
+    for profile_id in [
+        "default-check",
+        "default-all-targets-check",
+        "default-release-check",
+        "sqlite-feature-check",
+        "kafka-feature-check",
+        "all-features-all-targets-check",
+        "all-features-release-check",
+    ] {
+        let profile = quarantine_profile_by_id(&policy, profile_id);
+        assert_eq!(string(profile, "target_triple"), "x86_64-unknown-linux-gnu");
+        assert_eq!(string(profile, "host_triple"), "x86_64-unknown-linux-gnu");
+        assert!(string(profile, "exact_command").contains("--unit-graph"));
+    }
+}
+
+#[test]
+fn negative_fixture_native_build_unit_leakage_fails_closed() {
+    let mut policy = policy();
+    set_string_array(
+        policy
+            .get_mut("manifest_reconciliation")
+            .and_then(|value| value.get_mut("quarantine_proof"))
+            .and_then(|value| value.get_mut("profile_matrix"))
+            .and_then(Value::as_array_mut)
+            .expect("quarantine profile fixture")
+            .iter_mut()
+            .find(|row| string(row, "profile_id") == "default-check")
+            .expect("default profile fixture"),
+        "build_script_units",
+        &["rdkafka-sys:run-custom-build"],
+    );
+    let errors = validate_quarantine_proof(&policy);
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("build-script/native unit leakage or omission")),
+        "native leakage did not fail closed: {errors:?}"
+    );
+}
+
+#[test]
+fn negative_fixture_unknown_active_native_state_fails_closed() {
+    let mut policy = policy();
+    set_string_array(
+        policy
+            .get_mut("manifest_reconciliation")
+            .and_then(|value| value.get_mut("quarantine_proof"))
+            .and_then(|value| value.get_mut("profile_matrix"))
+            .and_then(Value::as_array_mut)
+            .expect("quarantine profile fixture")
+            .iter_mut()
+            .find(|row| string(row, "profile_id") == "sqlite-feature-check")
+            .expect("sqlite profile fixture"),
+        "inactive_native_units",
+        &["stacker:native-compile:unknown"],
+    );
+    let errors = validate_quarantine_proof(&policy);
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("classification is unknown or malformed")),
+        "unknown native state did not fail closed: {errors:?}"
+    );
+}
+
+#[test]
+fn negative_fixture_reverse_consumer_boundary_drift_fails_closed() {
+    let mut policy = policy();
+    let isolation = policy
+        .get_mut("manifest_reconciliation")
+        .and_then(|value| value.get_mut("quarantine_proof"))
+        .and_then(|value| value.get_mut("registry_evidence"))
+        .and_then(Value::as_array_mut)
+        .expect("quarantine evidence fixture")
+        .iter_mut()
+        .find(|row| string(row, "oracle_id") == "frankensqlite-reverse-dependency-reference")
+        .and_then(|row| row.get_mut("isolated_lane_evidence"))
+        .expect("reverse isolation fixture");
+    set_string(isolation, "status", "joined-root-workspace");
+    let errors = validate_quarantine_proof(&policy);
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("reverse lane must use the independent neutral consumer")),
+        "reverse workspace leakage did not fail closed: {errors:?}"
+    );
+}
+
+#[test]
+fn negative_fixture_planned_native_lane_cannot_report_green() {
+    let mut policy = policy();
+    let isolation = policy
+        .get_mut("manifest_reconciliation")
+        .and_then(|value| value.get_mut("quarantine_proof"))
+        .and_then(|value| value.get_mut("registry_evidence"))
+        .and_then(Value::as_array_mut)
+        .expect("quarantine evidence fixture")
+        .iter_mut()
+        .find(|row| string(row, "oracle_id") == "rdkafka-librdkafka-external-reference")
+        .and_then(|row| row.get_mut("isolated_lane_evidence"))
+        .expect("native isolation fixture");
+    set_string(isolation, "status", "available-external-harness");
+    set_string(isolation, "normalized_outcome", "PASS");
+    let errors = validate_quarantine_proof(&policy);
+    assert!(
+        errors.iter().any(|error| error
+            .contains("planned native lane must remain blocked without an external manifest")),
+        "false native green did not fail closed: {errors:?}"
     );
 }
 
@@ -2440,6 +3272,13 @@ fn reconciliation_docs_preserve_current_and_planned_no_claim_boundaries() {
         "Reverse-cycle | 0 active, 1 planned",
         "declared-reference-not-wired",
         "cutover_authorized = false",
+        QUARANTINE_BEAD_ID,
+        "dependency-oracle-quarantine-proof-v1",
+        "default-all-targets-check",
+        "all-features-release-check",
+        "blocked-planned-no-external-manifest",
+        SQLITE_PARITY_MANIFEST_PATH,
+        "native-isolated-lane-falsely-green",
         RETIREMENT_SWEEP_BEAD_ID,
         "retired zero and renewed all",
         "release `0.4.11` or UTC date `2026-10-21`",

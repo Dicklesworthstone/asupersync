@@ -254,6 +254,83 @@ Every oracle row carries:
 Missing or unknown fields fail the contract. A planned harness URI identifies
 the owning location; it is not evidence that the harness already exists.
 
+## Native and reverse-cycle quarantine proof
+
+`asupersync-mnotoo.4.2` adds the machine-readable
+`dependency-oracle-quarantine-proof-v1` packet under
+`manifest_reconciliation.quarantine_proof`. It closes a subtle classification
+gap: package presence in `Cargo.lock` is not proof that a native build is
+active, and native build activity under an explicitly enabled production
+feature is not proof that the same package is a live test oracle.
+
+The contract classifies the exact Cargo `run-custom-build` units reached by an
+explicit feature/profile/target/host unit graph. Only `absent` and `active` are
+green-eligible classifications. A missing target or host, an unclassified
+custom-build unit, a missing feature vector, or any `unknown` native state is a
+hard failure.
+
+The canonical Linux matrix is:
+
+| Profile | Boundary | Reached build scripts | Active native compilation/link boundary | Oracle role |
+|---|---|---|---|---|
+| `default-check` | default normal/build graph | none of the governed candidates | none | absent |
+| `default-all-targets-check` | default tests, examples, benches, and binaries | none of the governed candidates | none | absent |
+| `default-release-check` | default release graph | none of the governed candidates | none | absent |
+| `sqlite-feature-check` | optional `sqlite` production feature | `libsqlite3-sys`, `psm`, `stacker` | `libsqlite3-sys`, `psm`; `stacker` is declared inactive on Linux | incumbent production edges, not oracles |
+| `kafka-feature-check` | optional `kafka` production feature | `rdkafka-sys` | `rdkafka-sys` | incumbent production edge, not oracle |
+| `all-features-all-targets-check` | all features and all targets | all four governed build scripts | `libsqlite3-sys`, `psm`, `rdkafka-sys`; `stacker` is declared inactive on Linux | incumbent production edges, not oracles |
+| `all-features-release-check` | all-features release graph | all four governed build scripts | `libsqlite3-sys`, `psm`, `rdkafka-sys`; `stacker` is declared inactive on Linux | incumbent production edges, not oracles |
+
+Every row records `x86_64-unknown-linux-gnu` as both target and host and embeds
+an exact `RCH_REQUIRE_REMOTE=1 rch exec -- ... cargo check --locked ... -Z
+unstable-options --unit-graph` recipe. The unit graph identifies build-script
+reachability. Target-specific source rules then distinguish active native work
+from no-op build scripts: on Linux `stacker` returns without compiling C while
+`psm` assembles the stack-switching source. Other targets and hosts need their
+own receipts and may not inherit the Linux classification. The graph does not
+claim that compilation or linking succeeded.
+
+The three planned native rows have an explicit isolated-lane result:
+`blocked-planned-no-external-manifest` / `BLOCKED`. Their
+`external-harness://` values are ownership addresses, not installed manifests,
+and therefore cannot report PASS. This is deliberate fail-closed evidence,
+not an omission disguised as green:
+
+- `rdkafka-librdkafka-external-reference` remains a planned external oracle;
+  the root `kafka` feature still activates `rdkafka-sys` as an incumbent.
+- `rusqlite-libsqlite-external-reference` remains a planned external oracle;
+  the root `sqlite` feature still activates bundled `libsqlite3-sys` as an
+  incumbent.
+- `sqlparser-native-exposure-reference` remains a planned external oracle;
+  the root `sqlite` feature still reaches `psm` and `stacker` build scripts,
+  with native assembly active in `psm` and `stacker`'s own Linux build script
+  declared inactive.
+
+No command in this packet implicitly authorizes a broker, system package
+manager, external service, service mutation, or non-Cargo build tool. Creating
+or executing a future external harness requires the owning bead's separate
+authorization and receipts.
+
+The reverse-cycle row has a real neutral boundary at
+`tests/fixtures/sqlite-parity-consumer/Cargo.toml`. That manifest declares its
+own nested `[workspace]`, is non-publishable, and has the separately pinned
+`tests/fixtures/sqlite-parity-consumer/Cargo.lock`. It depends on asupersync and
+FrankenSQLite from outside the root workspace, so Cargo can resolve both sides
+without making FrankenSQLite an asupersync dependency. The focused contract
+pins both files, proves the root manifest and lock remain free of `fsqlite`,
+and rejects loss of the nested-workspace boundary.
+
+The permanent negative fixtures are:
+
+- `native-build-unit-leakage`;
+- `unknown-active-native-state`;
+- `reverse-consumer-loses-workspace-boundary`; and
+- `native-isolated-lane-falsely-green`.
+
+These checks establish quarantine and role classification. They do not prove
+native-code safety, successful linking, broker availability, SQL correctness,
+performance parity, or permission to remove an incumbent dependency.
+
 ## Activation procedure
 
 Before removing a production dependency:

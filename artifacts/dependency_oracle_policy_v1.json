@@ -1041,6 +1041,379 @@
         "no_claim_boundary": "Generated-message parity does not prove collector interoperability, resource bounds, redaction, or no-Tokio production graphs."
       }
     ],
+    "quarantine_proof": {
+      "schema_version": "dependency-oracle-quarantine-proof-v1",
+      "bead_id": "asupersync-mnotoo.4.2",
+      "capability_id": "CAP-VERIFICATION-PROFILES",
+      "as_of_release": "0.4.9",
+      "as_of_date_utc": "2026-08-21",
+      "unknown_active_native_state": "block-green",
+      "external_process_authorization": "none; these reproducible Cargo/RCH commands are evidence recipes and do not authorize brokers, system package managers, service mutation, or non-Cargo build tooling",
+      "detection_contract": {
+        "cargo_unit_graph_mode": "run-custom-build",
+        "native_state_allowlist": [
+          "absent",
+          "active",
+          "declared-inactive"
+        ],
+        "active_rule": "A build script is active only when the resolved target/host unit graph reaches its package run-custom-build unit for the exact feature/profile command. Lockfile presence alone is not activation.",
+        "native_activity_rule": "A reached build script counts as active native compilation only when a target-specific source rule proves that path invokes a compiler, assembler, configure/make, or native linker boundary. A reached no-op build script is declared-inactive; an unclassified path is UNKNOWN and blocks green.",
+        "native_source_rules": [
+          {
+            "package_name": "rdkafka-sys",
+            "resolved_version": "4.10.0+2.12.1",
+            "target_triple": "x86_64-unknown-linux-gnu",
+            "host_triple": "x86_64-unknown-linux-gnu",
+            "build_script_unit": "rdkafka-sys:run-custom-build",
+            "native_state": "active",
+            "source_evidence": "With no rdkafka-sys linking/build feature enabled, build.rs takes its bundled static fallback and invokes configure plus make before linking librdkafka."
+          },
+          {
+            "package_name": "libsqlite3-sys",
+            "resolved_version": "0.38.1",
+            "target_triple": "x86_64-unknown-linux-gnu",
+            "host_triple": "x86_64-unknown-linux-gnu",
+            "build_script_unit": "libsqlite3-sys:run-custom-build",
+            "native_state": "active",
+            "source_evidence": "The root rusqlite bundled feature reaches the libsqlite3-sys build script that compiles and links the SQLite C amalgamation."
+          },
+          {
+            "package_name": "psm",
+            "resolved_version": "0.1.31",
+            "target_triple": "x86_64-unknown-linux-gnu",
+            "host_triple": "x86_64-unknown-linux-gnu",
+            "build_script_unit": "psm:run-custom-build",
+            "native_state": "active",
+            "source_evidence": "psm build.rs selects src/arch/x86_64.s for this target and compiles the assembly into libpsm_s.a."
+          },
+          {
+            "package_name": "stacker",
+            "resolved_version": "0.1.24",
+            "target_triple": "x86_64-unknown-linux-gnu",
+            "host_triple": "x86_64-unknown-linux-gnu",
+            "build_script_unit": "stacker:run-custom-build",
+            "native_state": "declared-inactive",
+            "source_evidence": "stacker build.rs compiles src/arch/windows.c only when TARGET contains windows and returns without compiling C on this Linux target; psm remains the active native subdependency."
+          }
+        ],
+        "oracle_role_rule": "The sqlite, kafka, and all-features profiles classify reachable native units as optional production incumbents while their oracle registry rows remain planned. Treating an incumbent feature edge as a live oracle is a contract error.",
+        "reverse_cycle_rule": "A reverse-dependency oracle is isolated only when its manifest declares an independent nested workspace, has its own tracked lockfile, and is absent from the root workspace members and root dependency tables.",
+        "unknown_rule": "Missing target, host, feature vector, unit-graph command, native build-unit classification, or independent-workspace receipt is UNKNOWN and blocks green."
+      },
+      "isolation_source_pins": [
+        {
+          "path": "tests/fixtures/sqlite-parity-consumer/Cargo.toml",
+          "sha256": "7953e64e52f24df58e76525d667a02c88bc5cc2507500f94c5033d8dbf3ec233",
+          "scope": "neutral-consumer-independent-workspace-manifest"
+        },
+        {
+          "path": "tests/fixtures/sqlite-parity-consumer/Cargo.lock",
+          "sha256": "b6eeaee417a1898c9a4ed5d5847746859382ead9ea19dbc5e3d210eba17d797b",
+          "scope": "neutral-consumer-independent-resolution"
+        }
+      ],
+      "profile_matrix": [
+        {
+          "profile_id": "default-check",
+          "boundary": "workspace-normal-and-build",
+          "feature_vector": [
+            "default"
+          ],
+          "target_triple": "x86_64-unknown-linux-gnu",
+          "host_triple": "x86_64-unknown-linux-gnu",
+          "all_targets": false,
+          "release": false,
+          "exact_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_oracle_o2_default_check\" cargo check --locked -p asupersync --target x86_64-unknown-linux-gnu -Z unstable-options --unit-graph",
+          "oracle_role": "absent",
+          "build_script_units": [],
+          "active_native_units": [],
+          "inactive_native_units": [],
+          "reverse_package_units": [],
+          "expected_outcome": "PASS",
+          "no_claim_boundary": "This excludes only the named native/reverse oracle candidates from the default Linux target/host unit graph."
+        },
+        {
+          "profile_id": "default-all-targets-check",
+          "boundary": "workspace-default-all-targets",
+          "feature_vector": [
+            "default"
+          ],
+          "target_triple": "x86_64-unknown-linux-gnu",
+          "host_triple": "x86_64-unknown-linux-gnu",
+          "all_targets": true,
+          "release": false,
+          "exact_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_oracle_o2_default_all_targets\" cargo check --locked -p asupersync --all-targets --target x86_64-unknown-linux-gnu -Z unstable-options --unit-graph",
+          "oracle_role": "absent",
+          "build_script_units": [],
+          "active_native_units": [],
+          "inactive_native_units": [],
+          "reverse_package_units": [],
+          "expected_outcome": "PASS",
+          "no_claim_boundary": "All targets includes root examples, tests, benches, and binaries for the default feature vector; it is not all-features proof."
+        },
+        {
+          "profile_id": "default-release-check",
+          "boundary": "workspace-default-release",
+          "feature_vector": [
+            "default"
+          ],
+          "target_triple": "x86_64-unknown-linux-gnu",
+          "host_triple": "x86_64-unknown-linux-gnu",
+          "all_targets": false,
+          "release": true,
+          "exact_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_oracle_o2_default_release\" cargo check --locked --release -p asupersync --target x86_64-unknown-linux-gnu -Z unstable-options --unit-graph",
+          "oracle_role": "absent",
+          "build_script_units": [],
+          "active_native_units": [],
+          "inactive_native_units": [],
+          "reverse_package_units": [],
+          "expected_outcome": "PASS",
+          "no_claim_boundary": "Release mode changes code generation but does not broaden the default feature graph."
+        },
+        {
+          "profile_id": "sqlite-feature-check",
+          "boundary": "workspace-optional-production-feature",
+          "feature_vector": [
+            "default",
+            "sqlite"
+          ],
+          "target_triple": "x86_64-unknown-linux-gnu",
+          "host_triple": "x86_64-unknown-linux-gnu",
+          "all_targets": false,
+          "release": false,
+          "exact_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_oracle_o2_sqlite\" cargo check --locked -p asupersync --features sqlite --target x86_64-unknown-linux-gnu -Z unstable-options --unit-graph",
+          "oracle_role": "incumbent-optional-production-edge-not-oracle",
+          "build_script_units": [
+            "libsqlite3-sys:run-custom-build",
+            "psm:run-custom-build",
+            "stacker:run-custom-build"
+          ],
+          "active_native_units": [
+            "libsqlite3-sys:native-compile:active",
+            "psm:native-compile:active"
+          ],
+          "inactive_native_units": [
+            "stacker:native-compile:declared-inactive"
+          ],
+          "reverse_package_units": [],
+          "expected_outcome": "PASS",
+          "no_claim_boundary": "Active SQLite and stack-probing native units are expected incumbent feature work until conditional cutover, not permission to retain them as test oracles."
+        },
+        {
+          "profile_id": "kafka-feature-check",
+          "boundary": "workspace-optional-production-feature",
+          "feature_vector": [
+            "default",
+            "kafka"
+          ],
+          "target_triple": "x86_64-unknown-linux-gnu",
+          "host_triple": "x86_64-unknown-linux-gnu",
+          "all_targets": false,
+          "release": false,
+          "exact_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_oracle_o2_kafka\" cargo check --locked -p asupersync --features kafka --target x86_64-unknown-linux-gnu -Z unstable-options --unit-graph",
+          "oracle_role": "incumbent-optional-production-edge-not-oracle",
+          "build_script_units": [
+            "rdkafka-sys:run-custom-build"
+          ],
+          "active_native_units": [
+            "rdkafka-sys:native-compile:active"
+          ],
+          "inactive_native_units": [],
+          "reverse_package_units": [],
+          "expected_outcome": "PASS",
+          "no_claim_boundary": "The reachable rdkafka-sys native unit is an expected incumbent feature edge until conditional cutover, not a live external oracle."
+        },
+        {
+          "profile_id": "all-features-all-targets-check",
+          "boundary": "workspace-all-features-all-targets",
+          "feature_vector": [
+            "all-features"
+          ],
+          "target_triple": "x86_64-unknown-linux-gnu",
+          "host_triple": "x86_64-unknown-linux-gnu",
+          "all_targets": true,
+          "release": false,
+          "exact_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_oracle_o2_all_features_targets\" cargo check --locked -p asupersync --all-features --all-targets --target x86_64-unknown-linux-gnu -Z unstable-options --unit-graph",
+          "oracle_role": "incumbent-optional-production-edges-not-oracles",
+          "build_script_units": [
+            "libsqlite3-sys:run-custom-build",
+            "psm:run-custom-build",
+            "rdkafka-sys:run-custom-build",
+            "stacker:run-custom-build"
+          ],
+          "active_native_units": [
+            "libsqlite3-sys:native-compile:active",
+            "psm:native-compile:active",
+            "rdkafka-sys:native-compile:active"
+          ],
+          "inactive_native_units": [
+            "stacker:native-compile:declared-inactive"
+          ],
+          "reverse_package_units": [],
+          "expected_outcome": "PASS",
+          "no_claim_boundary": "All-features intentionally activates the optional incumbent packages; this proves role classification and reverse-cycle exclusion, not native-code absence."
+        },
+        {
+          "profile_id": "all-features-release-check",
+          "boundary": "workspace-all-features-release",
+          "feature_vector": [
+            "all-features"
+          ],
+          "target_triple": "x86_64-unknown-linux-gnu",
+          "host_triple": "x86_64-unknown-linux-gnu",
+          "all_targets": false,
+          "release": true,
+          "exact_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_oracle_o2_all_features_release\" cargo check --locked --release -p asupersync --all-features --target x86_64-unknown-linux-gnu -Z unstable-options --unit-graph",
+          "oracle_role": "incumbent-optional-production-edges-not-oracles",
+          "build_script_units": [
+            "libsqlite3-sys:run-custom-build",
+            "psm:run-custom-build",
+            "rdkafka-sys:run-custom-build",
+            "stacker:run-custom-build"
+          ],
+          "active_native_units": [
+            "libsqlite3-sys:native-compile:active",
+            "psm:native-compile:active",
+            "rdkafka-sys:native-compile:active"
+          ],
+          "inactive_native_units": [
+            "stacker:native-compile:declared-inactive"
+          ],
+          "reverse_package_units": [],
+          "expected_outcome": "PASS",
+          "no_claim_boundary": "The release unit graph proves expected incumbent activation and oracle-role quarantine for one target/host, not successful linking or runtime behavior."
+        }
+      ],
+      "registry_evidence": [
+        {
+          "oracle_id": "rdkafka-librdkafka-external-reference",
+          "oracle_class": "NATIVE_OR_C_ORACLE",
+          "lifecycle_state": "planned",
+          "incumbent_feature": "kafka",
+          "build_script_units": [
+            "rdkafka-sys:run-custom-build"
+          ],
+          "active_native_units": [
+            "rdkafka-sys:native-compile:active"
+          ],
+          "inactive_native_units": [],
+          "exclusion_profile_ids": [
+            "default-check",
+            "default-all-targets-check",
+            "default-release-check"
+          ],
+          "isolated_lane_evidence": {
+            "allowed_profile": "external-cargo-harness",
+            "status": "blocked-planned-no-external-manifest",
+            "normalized_outcome": "BLOCKED",
+            "manifest_path": null,
+            "lockfile_path": null,
+            "replay_command": null,
+            "reason": "The registry URI is an ownership contract only. No independent external Kafka oracle manifest is installed, so this row cannot report green or trigger broker/package-manager activity."
+          },
+          "no_claim_boundary": "The root kafka feature still reaches rdkafka-sys as a production incumbent and no external Kafka oracle execution is claimed."
+        },
+        {
+          "oracle_id": "rusqlite-libsqlite-external-reference",
+          "oracle_class": "NATIVE_OR_C_ORACLE",
+          "lifecycle_state": "planned",
+          "incumbent_feature": "sqlite",
+          "build_script_units": [
+            "libsqlite3-sys:run-custom-build"
+          ],
+          "active_native_units": [
+            "libsqlite3-sys:native-compile:active"
+          ],
+          "inactive_native_units": [],
+          "exclusion_profile_ids": [
+            "default-check",
+            "default-all-targets-check",
+            "default-release-check"
+          ],
+          "isolated_lane_evidence": {
+            "allowed_profile": "external-cargo-harness",
+            "status": "blocked-planned-no-external-manifest",
+            "normalized_outcome": "BLOCKED",
+            "manifest_path": null,
+            "lockfile_path": null,
+            "replay_command": null,
+            "reason": "The registry URI is an ownership contract only. The neutral SQLite parity consumer is reverse-cycle evidence, not an activated external rusqlite oracle manifest."
+          },
+          "no_claim_boundary": "The root sqlite feature still reaches bundled libsqlite3-sys as a production incumbent and no external rusqlite oracle execution is claimed."
+        },
+        {
+          "oracle_id": "sqlparser-native-exposure-reference",
+          "oracle_class": "NATIVE_OR_C_ORACLE",
+          "lifecycle_state": "planned",
+          "incumbent_feature": "sqlite",
+          "build_script_units": [
+            "psm:run-custom-build",
+            "stacker:run-custom-build"
+          ],
+          "active_native_units": [
+            "psm:native-compile:active"
+          ],
+          "inactive_native_units": [
+            "stacker:native-compile:declared-inactive"
+          ],
+          "exclusion_profile_ids": [
+            "default-check",
+            "default-all-targets-check",
+            "default-release-check"
+          ],
+          "isolated_lane_evidence": {
+            "allowed_profile": "external-cargo-harness",
+            "status": "blocked-planned-no-external-manifest",
+            "normalized_outcome": "BLOCKED",
+            "manifest_path": null,
+            "lockfile_path": null,
+            "replay_command": null,
+            "reason": "The registry URI is an ownership contract only. No independent external SQL-parser oracle manifest is installed, so the planned row cannot report green."
+          },
+          "no_claim_boundary": "The root sqlite feature still reaches psm/stacker as production-incumbent build units and no external parser oracle execution is claimed."
+        },
+        {
+          "oracle_id": "frankensqlite-reverse-dependency-reference",
+          "oracle_class": "REVERSE_DEPENDENCY_ORACLE",
+          "lifecycle_state": "planned",
+          "incumbent_feature": "sqlite",
+          "build_script_units": [],
+          "active_native_units": [],
+          "inactive_native_units": [],
+          "exclusion_profile_ids": [
+            "default-check",
+            "default-all-targets-check",
+            "default-release-check",
+            "sqlite-feature-check",
+            "kafka-feature-check",
+            "all-features-all-targets-check",
+            "all-features-release-check"
+          ],
+          "isolated_lane_evidence": {
+            "allowed_profile": "neutral-synthesized-consumer",
+            "status": "available-independent-nested-workspace",
+            "normalized_outcome": "PASS",
+            "manifest_path": "tests/fixtures/sqlite-parity-consumer/Cargo.toml",
+            "lockfile_path": "tests/fixtures/sqlite-parity-consumer/Cargo.lock",
+            "replay_command": "env -u CARGO_TARGET_DIR RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --overlay-path tests/fixtures/sqlite-parity-consumer/src/main.rs -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -j 3 --locked --manifest-path tests/fixtures/sqlite-parity-consumer/Cargo.toml --bin asupersync-sqlite-parity-consumer -- --nocapture --test-threads=1",
+            "reason": "The tracked fixture declares its own workspace and lockfile, depends on both engines as a downstream consumer, and never enters the root workspace graph."
+          },
+          "no_claim_boundary": "Independent resolution proves the package-cycle boundary, not full SQLite correctness, durability, performance, or every downstream configuration."
+        }
+      ],
+      "required_negative_fixtures": [
+        "native-build-unit-leakage",
+        "unknown-active-native-state",
+        "reverse-consumer-loses-workspace-boundary",
+        "native-isolated-lane-falsely-green"
+      ],
+      "explicit_no_claims": [
+        "Unit-graph reachability identifies build units but does not prove a native build or link succeeded.",
+        "Optional native incumbents remain supported production features until an independently authorized cutover.",
+        "BLOCKED planned external harnesses are honest non-results, not green isolated-oracle evidence.",
+        "The neutral consumer proves cycle isolation only; it does not authorize adding FrankenSQLite to this workspace."
+      ]
+    },
     "retirement_sweep": {
       "schema_version": "dependency-oracle-retirement-sweep-v1",
       "bead_id": "asupersync-mnotoo.4.3",
@@ -1400,7 +1773,11 @@
       "lock-version-source-checksum-mismatch",
       "report-count-drift",
       "unapproved-retirement-renewal",
-      "scheduled-ci-drift"
+      "scheduled-ci-drift",
+      "native-build-unit-leakage",
+      "unknown-active-native-state",
+      "reverse-consumer-loses-workspace-boundary",
+      "native-isolated-lane-falsely-green"
     ],
     "explicit_no_claims": [
       "This reconciliation does not prove any oracle or owned implementation correct.",
