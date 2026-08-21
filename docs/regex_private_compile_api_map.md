@@ -227,6 +227,53 @@ The exact R3.5.4 source passed these forced-remote lanes with no local fallback:
 This extension is sufficient input for the R3.5.5 terminal receipt. It is not
 authorization for public integration or dependency removal.
 
+## R3.5.5 terminal receipt
+
+<!-- BEGIN R3.5.5 PRIVATE API TERMINAL RECEIPT -->
+
+`ASUP-REGEX-R3-5-PRIVATE-API-TERMINAL-V1` records
+`KEEP_INCUMBENT_DEFER`. It joins all four R3.5 implementation children without
+turning private candidate evidence into public cutover authority. The terminal
+binding has 29 exact compatibility rows: 7 `SAME`, 22 `KEEP`, and zero
+`UNKNOWN`. The inherited compiler join remains 112 rows with three explicit
+`KEEP` gaps, and the 14 R3.5.1-owned syntax cases remain 12 `SAME` plus two
+typed `SAME_CATEGORY` matches.
+
+The final review also repaired `RGX-R1-GAP-01` on source revision
+`903de8267e50fc5ba5652766157bd2083aee6e4c`. Direct mutation of the legacy
+public `pii_patterns` field is still supported, but an invalid entry now causes
+whole-value redaction instead of being silently ignored. No public item,
+signature, field, feature gate, or construction pattern changed.
+
+Seven routed critical/high findings remain visible and therefore keep the
+incumbent decision conservative:
+
+- `RGX-R1-GAP-02`, `RGX-R1-GAP-03`, and `RGX-R1-GAP-04`;
+- `RGX-R1-GAP-05`, `RGX-R1-GAP-06`, and `RGX-R1-GAP-09`; and
+- `RGX-R1-GAP-11`, whose owner `asupersync-d24mms.11` remains in progress.
+
+Historical evidence is not rewritten. Some R3.5.1 revision/hash pairs describe
+current refreshed receipt bytes rather than archival bytes at the named old
+revision, and several R3.5.2-R3.5.4 runs did not retain a complete
+worker/job/command/timestamp tuple. Those limitations are explicit `KEEP`
+evidence debt. The terminal receipt supplies stable case-to-selector bindings
+and one fresh source replay lane at the committed evidence-base revision; it
+does not manufacture missing historical metadata.
+
+The embedded public-contract replay is the exact pre-final candidate run. The
+finalized overlay is deliberately validated after the last receipt edit and
+its immutable RCH receipt is retained in the Bead closure comment and commit
+handoff, rather than inserted here and creating a self-referential rerun loop.
+
+R3.7.1 independent verification may proceed from this receipt. The overall
+R3.7 decision is not ready: R3.6 cache/resource/performance policy and R3.7
+independent security/corpus work remain open. In particular, this receipt does not authorize a public re-export. It also does not authorize `PrivacyConfig`
+integration, compatibility
+shim, production wiring, dependency removal, performance claim, broad workspace
+health claim, release-readiness claim, or local Cargo fallback.
+
+<!-- END R3.5.5 PRIVATE API TERMINAL RECEIPT -->
+
 ## Static validation boundary
 
 Validation includes JSON parsing, source and predecessor hash/line-count

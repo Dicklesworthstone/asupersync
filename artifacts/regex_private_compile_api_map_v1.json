@@ -1137,6 +1137,728 @@
       "no local Cargo fallback approval"
     ]
   },
+  "r3_5_5_terminal_receipt": {
+    "receipt_schema_version": 1,
+    "receipt_id": "ASUP-REGEX-R3-5-PRIVATE-API-TERMINAL-V1",
+    "bead_id": "asupersync-5z2scg.8.3.5.5",
+    "captured_at_utc": "2026-08-21T12:34:19Z",
+    "evidence_base_revision": "903de8267e50fc5ba5652766157bd2083aee6e4c",
+    "security_repair": {
+      "gap_id": "RGX-R1-GAP-01",
+      "source_revision": "903de8267e50fc5ba5652766157bd2083aee6e4c",
+      "source_path": "src/observability/otel.rs",
+      "source_sha256": "b036610d07e07b7a7e9ed3e23328d60104f2429cbe464827213a8bff5f7e0db8",
+      "source_line_count": 14533,
+      "public_api_changed": false,
+      "behavior": "invalid direct pii_patterns mutation redacts the whole value fail closed",
+      "regression_test": "mutation_error_panic_and_diagnostic_exposure_remain_explicit"
+    },
+    "decision": {
+      "disposition": "KEEP_INCUMBENT_DEFER",
+      "r3_5_private_api_complete": true,
+      "r3_7_1_independent_corpus_may_proceed": true,
+      "r3_7_terminal_decision_ready": false,
+      "r3_6_cache_performance_policy_remains_required": true,
+      "unknown_rows": 0,
+      "unresolved_high_findings_complete": true,
+      "unresolved_critical_or_high_gap_ids": [
+        "RGX-R1-GAP-02",
+        "RGX-R1-GAP-03",
+        "RGX-R1-GAP-04",
+        "RGX-R1-GAP-05",
+        "RGX-R1-GAP-06",
+        "RGX-R1-GAP-09",
+        "RGX-R1-GAP-11"
+      ],
+      "public_reexport_authorized": false,
+      "privacy_config_integration_authorized": false,
+      "compatibility_shim_authorized": false,
+      "production_wiring_authorized": false,
+      "dependency_removal_authorized": false,
+      "reason_codes": [
+        "RGX_R1_GAP_01_SECURITY_REPAIRED_WITHOUT_PUBLIC_API_CHANGE",
+        "ALL_R3_5_CHILD_ACCEPTANCE_ROWS_ACCOUNTED",
+        "PUBLIC_AND_KNOWN_NON_PARITY_ROWS_REMAIN_KEEP",
+        "HISTORICAL_PIN_AND_REPLAY_METADATA_LIMITATIONS_EXPLICIT",
+        "SEVEN_ROUTED_CRITICAL_OR_HIGH_GAPS_REMAIN_VISIBLE",
+        "R3_6_AND_R3_7_VERIFICATION_REMAIN_OPEN"
+      ]
+    },
+    "predecessor_receipts": [
+      {
+        "path": "artifacts/regex_privacy_capability_inventory_v1.json",
+        "sha256": "2f0264e45f9362d4b299c235f82b415d553b8f6fd40a05aef25f84c948f75a5e",
+        "line_count": 1015,
+        "role": "frozen public and downstream contract"
+      },
+      {
+        "path": "artifacts/regex_syntax_terminal_receipt_v1.json",
+        "sha256": "410afeaeb0250a36b8d91c1a78b612c942d729fd495e7752c3f5965bbe8d5fbe",
+        "line_count": 391,
+        "role": "31 inherited syntax rows"
+      },
+      {
+        "path": "artifacts/regex_semantic_terminal_receipt_v1.json",
+        "sha256": "42d00d7c92b2b4a9974c252481432142eae2927b9442ffe08265769e00f7c8a2",
+        "line_count": 433,
+        "role": "20 inherited semantic rows"
+      },
+      {
+        "path": "artifacts/regex_compiler_terminal_receipt_v1.json",
+        "sha256": "3a67d943175079ab0378080de5b8ee06fd5e979b0c9555dc30a45cbb62da2f5b",
+        "line_count": 252,
+        "role": "23 AST, 10 quantifier, and 28 validator rows"
+      },
+      {
+        "path": "artifacts/regex_vm_terminal_receipt_v1.json",
+        "sha256": "608b42b5bedeed536884af10b325fff889668e5819a6cdf6d85afcf9debc2265",
+        "line_count": 337,
+        "role": "bounded VM and cancellation terminal"
+      }
+    ],
+    "child_slices": [
+      {
+        "child_id": "asupersync-5z2scg.8.3.5.1",
+        "source_revision": "432be7270481c5439db00f79910465a269512266",
+        "evidence_revisions": [
+          "ef6401e513a3d94913c725383852bb0050b8c582",
+          "56aadb0613f841dedcdc21453b20dff8ba0ac88b",
+          "d9883d90ee3d106dee6cea3d97ff7425d7465d8e"
+        ],
+        "row_references": [
+          "inherited_terminal_row_families",
+          "r3_5_owned_case_contract",
+          "typed_keep_defer_rows",
+          "aggregate_limits",
+          "diagnostic_contract"
+        ],
+        "terminal_state": "COMPLETE_WITH_3_TYPED_KEEP_ROWS"
+      },
+      {
+        "child_id": "asupersync-5z2scg.8.3.5.2",
+        "source_revision": "51df97efd93c1c6ecb60ffff1021cfea032d7958",
+        "implementation_revision": "3edf0d76e7338166e4270e51bce067c3eebcd4f4",
+        "row_references": [
+          "RGX-R354-MATCH",
+          "RGX-R354-FIND",
+          "RGX-R354-CAPTURES",
+          "RGX-R354-ITERATION",
+          "RGX-R354-WHOLE-OP-CANCELLATION"
+        ],
+        "terminal_state": "PRIVATE_FACADE_COMPLETE_PUBLIC_KEEP"
+      },
+      {
+        "child_id": "asupersync-5z2scg.8.3.5.3",
+        "source_revision": "b12cc7ad426805f0c59ec343139ca1da8aefa448",
+        "row_references": [
+          "RGX-R354-REPLACEMENT",
+          "RGX-R354-STRICT-REPLACEMENT"
+        ],
+        "terminal_state": "PRIVATE_REPLACEMENT_COMPLETE_PUBLIC_KEEP"
+      },
+      {
+        "child_id": "asupersync-5z2scg.8.3.5.4",
+        "source_revision": "da992970cbb0590014a36236682c138cd83b41a4",
+        "evidence_revision": "6de5016dc4eccbf02bf7604bf613c033f643af9f",
+        "row_references": [
+          "r3_5_4_compatibility_extension.capability_rows",
+          "r3_5_4_compatibility_extension.configuration_contract",
+          "r3_5_4_compatibility_extension.executable_evidence"
+        ],
+        "terminal_state": "29_ROWS_ZERO_UNKNOWN_KEEP_INCUMBENT"
+      }
+    ],
+    "row_join": {
+      "inherited_terminal_rows": 112,
+      "r3_5_1_owned_cases": 14,
+      "r3_5_1_owned_same_rows": 12,
+      "r3_5_1_owned_same_category_rows": 2,
+      "r3_5_4_compatibility_rows": 29,
+      "terminal_acceptance_clause_rows": 20,
+      "joined_stable_row_ids": 175,
+      "terminal_compatibility_binding_rows": 29,
+      "same_compatibility_rows": 7,
+      "keep_compatibility_rows": 22,
+      "typed_inherited_keep_rows": 3,
+      "unknown_rows": 0
+    },
+    "child_acceptance_clause_rows": [
+      {
+        "clause_id": "RGX-R355-R351-INHERITED-ROWS",
+        "child_id": "asupersync-5z2scg.8.3.5.1",
+        "disposition": "KEEP",
+        "evidence": "112 exact inherited IDs: 109 accepted or typed-invalid parity rows and 3 explicit KEEP rows"
+      },
+      {
+        "clause_id": "RGX-R355-R351-OWNED-CASES",
+        "child_id": "asupersync-5z2scg.8.3.5.1",
+        "disposition": "SAME",
+        "evidence": "14 exact extended-mode and duplicate-name positive, boundary, and malformed cases: 12 SAME and 2 SAME_CATEGORY"
+      },
+      {
+        "clause_id": "RGX-R355-R351-DIAGNOSTICS",
+        "child_id": "asupersync-5z2scg.8.3.5.1",
+        "disposition": "SAME",
+        "evidence": "stable secret-safe codes, stages, spans, and numeric details"
+      },
+      {
+        "clause_id": "RGX-R355-R351-PINS",
+        "child_id": "asupersync-5z2scg.8.3.5.1",
+        "disposition": "KEEP",
+        "evidence": "current predecessor bytes are pinned, but historical revision/hash pairs are not archival-exact and remain explicit KEEP evidence debt"
+      },
+      {
+        "clause_id": "RGX-R355-R351-FOCUSED-PROOF",
+        "child_id": "asupersync-5z2scg.8.3.5.1",
+        "disposition": "SAME",
+        "evidence": "final focused job 29976078336393221 passed 4 of 4"
+      },
+      {
+        "clause_id": "RGX-R355-R352-API-OUTCOMES",
+        "child_id": "asupersync-5z2scg.8.3.5.2",
+        "disposition": "SAME",
+        "evidence": "compile success/failure, match/no-match, find, captures, empty, and zero-width tests"
+      },
+      {
+        "clause_id": "RGX-R355-R352-PRIORITY-SPANS",
+        "child_id": "asupersync-5z2scg.8.3.5.2",
+        "disposition": "SAME",
+        "evidence": "leftmost branch priority and stable byte spans"
+      },
+      {
+        "clause_id": "RGX-R355-R352-LIMIT-CANCEL",
+        "child_id": "asupersync-5z2scg.8.3.5.2",
+        "disposition": "SAME",
+        "evidence": "exact aggregate work, memory, match, trace, and cancellation failures"
+      },
+      {
+        "clause_id": "RGX-R355-R352-REUSE-CONCURRENCY",
+        "child_id": "asupersync-5z2scg.8.3.5.2",
+        "disposition": "SAME",
+        "evidence": "repeated immutable and concurrent Send plus Sync reuse"
+      },
+      {
+        "clause_id": "RGX-R355-R352-PRIVATE-NO-CACHE-WIRING",
+        "child_id": "asupersync-5z2scg.8.3.5.2",
+        "disposition": "KEEP",
+        "evidence": "no raw-pattern Debug, ambient cache, public export, or production call site"
+      },
+      {
+        "clause_id": "RGX-R355-R353-TEMPLATE-SURFACE",
+        "child_id": "asupersync-5z2scg.8.3.5.3",
+        "disposition": "SAME",
+        "evidence": "literal, whole, numbered, named, unmatched, and dollar escaping cases"
+      },
+      {
+        "clause_id": "RGX-R355-R353-EMPTY-ZERO-REPEATED",
+        "child_id": "asupersync-5z2scg.8.3.5.3",
+        "disposition": "SAME",
+        "evidence": "empty, zero-width, Unicode progress, and repeated replacement cases"
+      },
+      {
+        "clause_id": "RGX-R355-R353-MALFORMED-STRICT",
+        "child_id": "asupersync-5z2scg.8.3.5.3",
+        "disposition": "SAME",
+        "evidence": "compatible total malformed handling plus separately named strict typed mode"
+      },
+      {
+        "clause_id": "RGX-R355-R353-LIMITS-ATOMIC",
+        "child_id": "asupersync-5z2scg.8.3.5.3",
+        "disposition": "SAME",
+        "evidence": "exact template, token, output, work, allocation, span, and no-partial-output failures"
+      },
+      {
+        "clause_id": "RGX-R355-R353-NO-CUTOVER",
+        "child_id": "asupersync-5z2scg.8.3.5.3",
+        "disposition": "KEEP",
+        "evidence": "replacement remains private and incumbent public behavior remains wired"
+      },
+      {
+        "clause_id": "RGX-R355-R354-MAP-COVERAGE",
+        "child_id": "asupersync-5z2scg.8.3.5.4",
+        "disposition": "KEEP",
+        "evidence": "29 exact compile through configuration and public-boundary rows with zero UNKNOWN"
+      },
+      {
+        "clause_id": "RGX-R355-R354-CONFIG-ROUNDTRIP",
+        "child_id": "asupersync-5z2scg.8.3.5.4",
+        "disposition": "SAME",
+        "evidence": "deterministic bounded same-target JSON round trip for every private limit family"
+      },
+      {
+        "clause_id": "RGX-R355-R354-ATOMIC-SECRET",
+        "child_id": "asupersync-5z2scg.8.3.5.4",
+        "disposition": "SAME",
+        "evidence": "invalid loads expose no partial value or pattern text"
+      },
+      {
+        "clause_id": "RGX-R355-R354-DOWNSTREAM",
+        "child_id": "asupersync-5z2scg.8.3.5.4",
+        "disposition": "KEEP",
+        "evidence": "public success, failure, direct mutation, repeated use, and concurrent reuse fixture passes"
+      },
+      {
+        "clause_id": "RGX-R355-R354-NO-WIRING",
+        "child_id": "asupersync-5z2scg.8.3.5.4",
+        "disposition": "KEEP",
+        "evidence": "candidate remains crate-private with no shim or production integration"
+      }
+    ],
+    "compatibility_row_bindings": [
+      {
+        "capability_id": "RGX-R354-COMPILE",
+        "case_ids": ["private_compile_facade_completes_the_r3_5_owned_syntax_rows", "private_compiled_pattern_compiles_once_without_retaining_source_text"],
+        "source_revision": "903de8267e50fc5ba5652766157bd2083aee6e4c",
+        "evidence_base_revision": "903de8267e50fc5ba5652766157bd2083aee6e4c",
+        "disposition": "SAME",
+        "replay_lane_ids": ["r3_5_terminal_regex_source"],
+        "no_claim": "no public compile API or error-type replacement"
+      },
+      {
+        "capability_id": "RGX-R354-VALIDATION",
+        "case_ids": ["private_compile_rejects_duplicate_names_without_retaining_source_text", "private_pattern_config_rejects_invalid_documents_atomically_and_secret_safely"],
+        "source_revision": "903de8267e50fc5ba5652766157bd2083aee6e4c",
+        "evidence_base_revision": "903de8267e50fc5ba5652766157bd2083aee6e4c",
+        "disposition": "SAME",
+        "replay_lane_ids": ["r3_5_terminal_regex_source"],
+        "no_claim": "no public validation or exact wording parity"
+      },
+      {
+        "capability_id": "RGX-R354-MATCH",
+        "case_ids": ["private_compiled_pattern_match_find_captures_and_reuse_are_exact"],
+        "source_revision": "903de8267e50fc5ba5652766157bd2083aee6e4c",
+        "evidence_base_revision": "903de8267e50fc5ba5652766157bd2083aee6e4c",
+        "disposition": "SAME",
+        "replay_lane_ids": ["r3_5_terminal_regex_source"],
+        "no_claim": "private UTF-8 string matching only"
+      },
+      {
+        "capability_id": "RGX-R354-FIND",
+        "case_ids": ["private_compiled_pattern_match_find_captures_and_reuse_are_exact"],
+        "source_revision": "903de8267e50fc5ba5652766157bd2083aee6e4c",
+        "evidence_base_revision": "903de8267e50fc5ba5652766157bd2083aee6e4c",
+        "disposition": "SAME",
+        "replay_lane_ids": ["r3_5_terminal_regex_source"],
+        "no_claim": "no public find surface"
+      },
+      {
+        "capability_id": "RGX-R354-CAPTURES",
+        "case_ids": ["private_compiled_pattern_match_find_captures_and_reuse_are_exact"],
+        "source_revision": "903de8267e50fc5ba5652766157bd2083aee6e4c",
+        "evidence_base_revision": "903de8267e50fc5ba5652766157bd2083aee6e4c",
+        "disposition": "SAME",
+        "replay_lane_ids": ["r3_5_terminal_regex_source"],
+        "no_claim": "no public capture-value surface"
+      },
+      {
+        "capability_id": "RGX-R354-ITERATION",
+        "case_ids": ["private_compiled_pattern_iteration_is_stable_and_unicode_safe"],
+        "source_revision": "903de8267e50fc5ba5652766157bd2083aee6e4c",
+        "evidence_base_revision": "903de8267e50fc5ba5652766157bd2083aee6e4c",
+        "disposition": "SAME",
+        "replay_lane_ids": ["r3_5_terminal_regex_source"],
+        "no_claim": "no public captures_iter replacement"
+      },
+      {
+        "capability_id": "RGX-R354-REPLACEMENT",
+        "case_ids": ["replacement_golden_rows_cover_captures_literals_and_iteration", "compatible_replacement_matches_regex_1_13"],
+        "source_revision": "903de8267e50fc5ba5652766157bd2083aee6e4c",
+        "evidence_base_revision": "903de8267e50fc5ba5652766157bd2083aee6e4c",
+        "disposition": "SAME",
+        "replay_lane_ids": ["r3_5_terminal_regex_source"],
+        "no_claim": "no public replacement cutover"
+      },
+      {
+        "capability_id": "RGX-R354-DIAGNOSTICS",
+        "case_ids": ["mutation_error_panic_and_diagnostic_exposure_remain_explicit", "strict_replacement_parser_is_explicit_typed_and_secret_safe"],
+        "source_revision": "903de8267e50fc5ba5652766157bd2083aee6e4c",
+        "evidence_base_revision": "903de8267e50fc5ba5652766157bd2083aee6e4c",
+        "disposition": "KEEP",
+        "replay_lane_ids": ["r3_5_terminal_regex_source", "r3_5_terminal_public_contract"],
+        "no_claim": "private secret-safe diagnostics do not replace public regex::Error or Debug"
+      },
+      {
+        "capability_id": "RGX-R354-LIMITS",
+        "case_ids": ["private_compiled_pattern_limits_cancel_exactly_and_leave_it_reusable", "replacement_ceilings_are_exact_and_zero_use_accepts_zero"],
+        "source_revision": "903de8267e50fc5ba5652766157bd2083aee6e4c",
+        "evidence_base_revision": "903de8267e50fc5ba5652766157bd2083aee6e4c",
+        "disposition": "KEEP",
+        "replay_lane_ids": ["r3_5_terminal_regex_source"],
+        "no_claim": "private limits are not a public limit DTO"
+      },
+      {
+        "capability_id": "RGX-R354-CONFIGURATION",
+        "case_ids": ["private_pattern_config_round_trips_and_loads_every_candidate_surface", "private_pattern_config_rejects_invalid_documents_atomically_and_secret_safely"],
+        "source_revision": "903de8267e50fc5ba5652766157bd2083aee6e4c",
+        "evidence_base_revision": "903de8267e50fc5ba5652766157bd2083aee6e4c",
+        "disposition": "KEEP",
+        "replay_lane_ids": ["r3_5_terminal_regex_source"],
+        "no_claim": "private JSON is not a PrivacyConfig serialization contract"
+      },
+      {
+        "capability_id": "RGX-R354-PUB-NESTED-PATH",
+        "case_ids": ["authority_registry_baseline_and_source_routes_are_truthful"],
+        "source_revision": "903de8267e50fc5ba5652766157bd2083aee6e4c",
+        "evidence_base_revision": "903de8267e50fc5ba5652766157bd2083aee6e4c",
+        "disposition": "KEEP",
+        "replay_lane_ids": ["r3_5_terminal_public_contract"],
+        "no_claim": "no public candidate re-export"
+      },
+      {
+        "capability_id": "RGX-R354-PUB-SPAN-ALIAS",
+        "case_ids": ["authority_registry_baseline_and_source_routes_are_truthful"],
+        "source_revision": "903de8267e50fc5ba5652766157bd2083aee6e4c",
+        "evidence_base_revision": "903de8267e50fc5ba5652766157bd2083aee6e4c",
+        "disposition": "KEEP",
+        "replay_lane_ids": ["r3_5_terminal_public_contract"],
+        "no_claim": "SpanConfig remains a working incumbent alias"
+      },
+      {
+        "capability_id": "RGX-R354-PUB-MUTABLE-FIELDS",
+        "case_ids": ["mutation_error_panic_and_diagnostic_exposure_remain_explicit"],
+        "source_revision": "903de8267e50fc5ba5652766157bd2083aee6e4c",
+        "evidence_base_revision": "903de8267e50fc5ba5652766157bd2083aee6e4c",
+        "disposition": "KEEP",
+        "replay_lane_ids": ["r3_5_terminal_public_contract"],
+        "no_claim": "no required public field or construction change"
+      },
+      {
+        "capability_id": "RGX-R354-PUB-DIRECT-MUTATION",
+        "case_ids": ["mutation_error_panic_and_diagnostic_exposure_remain_explicit", "RGX-R1-GAP-01"],
+        "source_revision": "903de8267e50fc5ba5652766157bd2083aee6e4c",
+        "evidence_base_revision": "903de8267e50fc5ba5652766157bd2083aee6e4c",
+        "disposition": "KEEP",
+        "replay_lane_ids": ["r3_5_terminal_public_contract"],
+        "no_claim": "direct mutation remains supported; invalid entries only change to fail-closed redaction"
+      },
+      {
+        "capability_id": "RGX-R354-PUB-FALLIBLE-BUILDER",
+        "case_ids": ["mutation_error_panic_and_diagnostic_exposure_remain_explicit"],
+        "source_revision": "903de8267e50fc5ba5652766157bd2083aee6e4c",
+        "evidence_base_revision": "903de8267e50fc5ba5652766157bd2083aee6e4c",
+        "disposition": "KEEP",
+        "replay_lane_ids": ["r3_5_terminal_public_contract"],
+        "no_claim": "try_with_pii_pattern retains Result<Self, regex::Error>"
+      },
+      {
+        "capability_id": "RGX-R354-PUB-PANIC-BUILDER",
+        "case_ids": ["mutation_error_panic_and_diagnostic_exposure_remain_explicit"],
+        "source_revision": "903de8267e50fc5ba5652766157bd2083aee6e4c",
+        "evidence_base_revision": "903de8267e50fc5ba5652766157bd2083aee6e4c",
+        "disposition": "KEEP",
+        "replay_lane_ids": ["r3_5_terminal_public_contract"],
+        "no_claim": "with_pii_pattern retains its documented panic contract"
+      },
+      {
+        "capability_id": "RGX-R354-PUB-CLONE-DEBUG",
+        "case_ids": ["mutation_error_panic_and_diagnostic_exposure_remain_explicit", "bounded_resource_and_concurrency_probes_match_the_baseline"],
+        "source_revision": "903de8267e50fc5ba5652766157bd2083aee6e4c",
+        "evidence_base_revision": "903de8267e50fc5ba5652766157bd2083aee6e4c",
+        "disposition": "KEEP",
+        "replay_lane_ids": ["r3_5_terminal_public_contract"],
+        "no_claim": "public Clone and Debug remain unchanged despite known raw-pattern exposure"
+      },
+      {
+        "capability_id": "RGX-R354-PUB-FEATURE-GATE",
+        "case_ids": ["marginal_graph_downstream_routing_docs_and_no_claims_are_exact"],
+        "source_revision": "903de8267e50fc5ba5652766157bd2083aee6e4c",
+        "evidence_base_revision": "903de8267e50fc5ba5652766157bd2083aee6e4c",
+        "disposition": "KEEP",
+        "replay_lane_ids": ["r3_5_terminal_public_contract"],
+        "no_claim": "metrics feature topology is unchanged"
+      },
+      {
+        "capability_id": "RGX-R354-CANDIDATE-VISIBILITY",
+        "case_ids": ["r3_5_4_private_api_compatibility_extension_is_complete_and_source_pinned"],
+        "source_revision": "903de8267e50fc5ba5652766157bd2083aee6e4c",
+        "evidence_base_revision": "903de8267e50fc5ba5652766157bd2083aee6e4c",
+        "disposition": "KEEP",
+        "replay_lane_ids": ["r3_5_terminal_public_contract"],
+        "no_claim": "candidate remains crate-private"
+      },
+      {
+        "capability_id": "RGX-R354-BYTE-REGEX",
+        "case_ids": ["RGX-R355-KEEP-BYTE-REGEX"],
+        "source_revision": "903de8267e50fc5ba5652766157bd2083aee6e4c",
+        "evidence_base_revision": "903de8267e50fc5ba5652766157bd2083aee6e4c",
+        "disposition": "KEEP",
+        "replay_lane_ids": ["r3_5_terminal_public_contract"],
+        "no_claim": "no byte-regex facade or equivalence evidence"
+      },
+      {
+        "capability_id": "RGX-R354-BUILTIN-ORDER-LUHN",
+        "case_ids": ["built_in_detector_corpus_preserves_order_luhn_and_whole_value_tokens"],
+        "source_revision": "903de8267e50fc5ba5652766157bd2083aee6e4c",
+        "evidence_base_revision": "903de8267e50fc5ba5652766157bd2083aee6e4c",
+        "disposition": "KEEP",
+        "replay_lane_ids": ["r3_5_terminal_public_contract"],
+        "no_claim": "built-in detector policy is not replaced"
+      },
+      {
+        "capability_id": "RGX-R354-PRODUCTION-WIRING",
+        "case_ids": ["log_privacy_filters_attributes_but_not_body_and_source_gates_remain_visible"],
+        "source_revision": "903de8267e50fc5ba5652766157bd2083aee6e4c",
+        "evidence_base_revision": "903de8267e50fc5ba5652766157bd2083aee6e4c",
+        "disposition": "KEEP",
+        "replay_lane_ids": ["r3_5_terminal_public_contract"],
+        "no_claim": "production multi-signal wiring remains incomplete"
+      },
+      {
+        "capability_id": "RGX-R354-WHOLE-OP-CANCELLATION",
+        "case_ids": ["private_compiled_pattern_limits_cancel_exactly_and_leave_it_reusable"],
+        "source_revision": "903de8267e50fc5ba5652766157bd2083aee6e4c",
+        "evidence_base_revision": "903de8267e50fc5ba5652766157bd2083aee6e4c",
+        "disposition": "KEEP",
+        "replay_lane_ids": ["r3_5_terminal_regex_source"],
+        "no_claim": "template parsing and output emission are outside match-search cancellation"
+      },
+      {
+        "capability_id": "RGX-R354-STRICT-REPLACEMENT",
+        "case_ids": ["strict_replacement_parser_is_explicit_typed_and_secret_safe"],
+        "source_revision": "903de8267e50fc5ba5652766157bd2083aee6e4c",
+        "evidence_base_revision": "903de8267e50fc5ba5652766157bd2083aee6e4c",
+        "disposition": "KEEP",
+        "replay_lane_ids": ["r3_5_terminal_regex_source"],
+        "no_claim": "strict syntax is private opt-in and not incumbent replacement behavior"
+      },
+      {
+        "capability_id": "RGX-R354-CROSS-TARGET-CONFIG",
+        "case_ids": ["private_pattern_config_round_trips_and_loads_every_candidate_surface"],
+        "source_revision": "903de8267e50fc5ba5652766157bd2083aee6e4c",
+        "evidence_base_revision": "903de8267e50fc5ba5652766157bd2083aee6e4c",
+        "disposition": "KEEP",
+        "replay_lane_ids": ["r3_5_terminal_regex_source"],
+        "no_claim": "no oversized usize portability across targets"
+      },
+      {
+        "capability_id": "RGX-R354-PUBLIC-SERIALIZATION",
+        "case_ids": ["r3_5_4_private_api_compatibility_extension_is_complete_and_source_pinned"],
+        "source_revision": "903de8267e50fc5ba5652766157bd2083aee6e4c",
+        "evidence_base_revision": "903de8267e50fc5ba5652766157bd2083aee6e4c",
+        "disposition": "KEEP",
+        "replay_lane_ids": ["r3_5_terminal_public_contract"],
+        "no_claim": "no PrivacyConfig serde format is introduced"
+      },
+      {
+        "capability_id": "RGX-R354-GAP-NULLABLE-LOOP",
+        "case_ids": ["RGX-COMP-Q-009"],
+        "source_revision": "903de8267e50fc5ba5652766157bd2083aee6e4c",
+        "evidence_base_revision": "903de8267e50fc5ba5652766157bd2083aee6e4c",
+        "disposition": "KEEP",
+        "replay_lane_ids": ["r3_5_terminal_regex_source"],
+        "no_claim": "nullable unbounded repetition parity remains open"
+      },
+      {
+        "capability_id": "RGX-R354-GAP-ZERO-COUNT-CAPTURE",
+        "case_ids": ["RGX-COMP-Q-010"],
+        "source_revision": "903de8267e50fc5ba5652766157bd2083aee6e4c",
+        "evidence_base_revision": "903de8267e50fc5ba5652766157bd2083aee6e4c",
+        "disposition": "KEEP",
+        "replay_lane_ids": ["r3_5_terminal_regex_source"],
+        "no_claim": "zero-count capture erasure parity remains open"
+      },
+      {
+        "capability_id": "RGX-R354-GAP-DOTTED-AGE",
+        "case_ids": ["RGX-R324-U001"],
+        "source_revision": "903de8267e50fc5ba5652766157bd2083aee6e4c",
+        "evidence_base_revision": "903de8267e50fc5ba5652766157bd2083aee6e4c",
+        "disposition": "KEEP",
+        "replay_lane_ids": ["r3_5_terminal_regex_source"],
+        "no_claim": "dotted Unicode Age syntax parity remains open"
+      }
+    ],
+    "known_keep_boundaries": {
+      "compatibility_row_reference": "r3_5_4_compatibility_extension.capability_rows where disposition is KEEP",
+      "compatibility_keep_count": 22,
+      "typed_inherited_row_ids": [
+        "RGX-COMP-Q-009",
+        "RGX-COMP-Q-010",
+        "RGX-R324-U001"
+      ],
+      "remaining_owner_beads": [
+        "asupersync-5z2scg.8.3.6",
+        "asupersync-5z2scg.8.3.7"
+      ],
+      "routed_critical_or_high_gaps": [
+        {
+          "gap_id": "RGX-R1-GAP-02",
+          "severity": "high",
+          "owner": "asupersync-5z2scg.8.3.4.4",
+          "state": "ROUTED"
+        },
+        {
+          "gap_id": "RGX-R1-GAP-03",
+          "severity": "high",
+          "owner": "asupersync-5z2scg.8.3.7.4",
+          "state": "ROUTED"
+        },
+        {
+          "gap_id": "RGX-R1-GAP-04",
+          "severity": "high",
+          "owner": "asupersync-5z2scg.8.3.3",
+          "state": "ROUTED"
+        },
+        {
+          "gap_id": "RGX-R1-GAP-05",
+          "severity": "critical",
+          "owner": "asupersync-5z2scg.8.5",
+          "state": "ROUTED"
+        },
+        {
+          "gap_id": "RGX-R1-GAP-06",
+          "severity": "high",
+          "owner": "asupersync-5z2scg.8.5",
+          "state": "ROUTED"
+        },
+        {
+          "gap_id": "RGX-R1-GAP-09",
+          "severity": "high",
+          "owner": "asupersync-5z2scg.8.3.7",
+          "state": "ROUTED"
+        },
+        {
+          "gap_id": "RGX-R1-GAP-11",
+          "severity": "high",
+          "owner": "asupersync-d24mms.11",
+          "state": "ROUTED"
+        }
+      ],
+      "historical_evidence_limitations": [
+        "R3.5.1 predecessor hashes describe current artifact bytes, not archival bytes at every recorded revision",
+        "R3.5.1 regex_boundaries and regex_lowering source revision/hash pairs are not archival-exact",
+        "R3.5.2 and R3.5.3 originally retained test names rather than artifact-level case IDs; this receipt binds the exact selectors",
+        "some child runs did not retain complete worker, job, command, and timestamp tuples; fresh terminal lanes supersede them for replay"
+      ]
+    },
+    "final_validation_boundary": {
+      "self_referential_receipt_update_forbidden": true,
+      "embedded_public_replay_scope": "exact pre-final candidate overlay; not proof of final receipt bytes",
+      "finalized_overlay_validation_required_after_last_receipt_edit": true,
+      "finalized_overlay_receipt_location": "Bead asupersync-5z2scg.8.3.5.5 closure comment and commit handoff"
+    },
+    "replay_metadata": [
+      {
+        "lane": "r3_5_1_private_compile_final",
+        "job_id": 29976078336393221,
+        "worker": "vmi1227854",
+        "source_revision": "432be7270481c5439db00f79910465a269512266",
+        "result": "PASS_4_OF_4",
+        "metadata_completeness": "PARTIAL_HISTORICAL",
+        "missing_fields": ["exact command", "started_at", "finished_at"]
+      },
+      {
+        "lane": "r3_5_2_private_match_facade",
+        "job_id": 29976114541625416,
+        "worker": "ovh-a",
+        "source_revision": "51df97efd93c1c6ecb60ffff1021cfea032d7958",
+        "result": "PASS_5_OF_5",
+        "metadata_completeness": "PARTIAL_HISTORICAL",
+        "missing_fields": ["exact command", "started_at", "finished_at"]
+      },
+      {
+        "lane": "r3_5_3_private_replacement",
+        "command": "cargo test -p asupersync --lib --features metrics observability::regex_vm::tests -- --nocapture",
+        "source_revision": "b12cc7ad426805f0c59ec343139ca1da8aefa448",
+        "result": "PASS_27_OF_27",
+        "metadata_completeness": "PARTIAL_HISTORICAL",
+        "missing_fields": ["job_id", "worker", "started_at", "finished_at"]
+      },
+      {
+        "lane": "r3_5_4_private_config_and_reuse",
+        "command": "cargo test -p asupersync --lib --features metrics observability::regex_vm::tests -- --nocapture",
+        "source_revision": "da992970cbb0590014a36236682c138cd83b41a4",
+        "worker": "ovh-a",
+        "result": "PASS_30_OF_30",
+        "metadata_completeness": "PARTIAL_HISTORICAL",
+        "missing_fields": ["job_id", "started_at", "finished_at"]
+      },
+      {
+        "lane": "r3_5_4_downstream_consumer",
+        "command": "cargo run --manifest-path tests/fixtures/downstream-consumer-proof/Cargo.toml --features metrics-profile --bin metrics_consumer",
+        "source_revision": "da992970cbb0590014a36236682c138cd83b41a4",
+        "worker": "ovh-a",
+        "result": "PASS_EXIT_0",
+        "metadata_completeness": "PARTIAL_HISTORICAL",
+        "missing_fields": ["job_id", "started_at", "finished_at"]
+      },
+      {
+        "lane": "r3_5_gap_01_fail_closed_regression",
+        "job_id": 29985909466202182,
+        "worker": "vmi1227854",
+        "started_at": "2026-08-21T11:49:07.354882722Z",
+        "source_revision": "903de8267e50fc5ba5652766157bd2083aee6e4c",
+        "command": "cargo test -p asupersync --features metrics --test regex_privacy_capability_inventory_contract mutation_error_panic_and_diagnostic_exposure_remain_explicit -- --nocapture",
+        "result": "PASS_1_OF_1",
+        "remote_required": true,
+        "local_fallback_used": false,
+        "metadata_completeness": "PARTIAL_HISTORICAL",
+        "missing_fields": ["finished_at", "full_rch_command", "requested_cargo_target_dir", "observed_remote_workspace", "observed_remote_target_dir", "clean_overlay_base_revision", "overlay_paths", "overlay_fingerprint"]
+      },
+      {
+        "lane": "r3_5_terminal_regex_source",
+        "job_id": 29985909466202189,
+        "worker": "ovh-a",
+        "started_at": "2026-08-21T12:28:03.514420956Z",
+        "finished_at": "2026-08-21T12:34:18.802639Z",
+        "source_revision": "903de8267e50fc5ba5652766157bd2083aee6e4c",
+        "command": "cargo test -j 4 -p asupersync --lib --features metrics observability::regex -- --nocapture",
+        "full_rch_command": "RCH_WORKER=ovh-a RCH_REQUIRE_REMOTE=1 rch exec --base 903de8267e50fc5ba5652766157bd2083aee6e4c --clean-overlay --no-overlay -- env CARGO_TARGET_DIR=${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_regex_source_r355 CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -j 4 -p asupersync --lib --features metrics observability::regex -- --nocapture",
+        "requested_cargo_target_dir": "/data/tmp/rch_target_regex_source_r355",
+        "observed_remote_workspace": "/data/tmp/rch/asupersync/4fe30dfc059ad51a",
+        "observed_remote_target_dir": "/data/tmp/rch/asupersync/4fe30dfc059ad51a/.rch-target-ovh-a-pool-5df3061708e292ffc39ef9f9f124e41a",
+        "clean_overlay": true,
+        "clean_overlay_base_revision": "903de8267e50fc5ba5652766157bd2083aee6e4c",
+        "no_overlay": true,
+        "overlay_paths": [],
+        "overlay_fingerprint": "fe0d5151031be8fda7951fe7fe1f42f7ce344018fdb3ed21e6ada866b230b195",
+        "working_tree_mode": "CLEAN_COMMITTED_BASE_NO_OVERLAY",
+        "peer_dirt_excluded": true,
+        "result": "PASS_112_OF_112",
+        "remote_required": true,
+        "local_fallback_used": false,
+        "metadata_completeness": "CURRENT_EXACT"
+      },
+      {
+        "lane": "r3_5_terminal_public_contract",
+        "job_id": 29985909466202188,
+        "worker": "ovh-a",
+        "started_at": "2026-08-21T12:25:57.588752801Z",
+        "finished_at": "2026-08-21T12:27:48.280393Z",
+        "source_revision": "903de8267e50fc5ba5652766157bd2083aee6e4c",
+        "command": "cargo test -j 4 -p asupersync --features metrics --test regex_privacy_capability_inventory_contract -- --nocapture",
+        "full_rch_command": "RCH_WORKER=ovh-a RCH_REQUIRE_REMOTE=1 rch exec --base 903de8267e50fc5ba5652766157bd2083aee6e4c --clean-overlay --overlay-path artifacts/regex_privacy_capability_inventory_v1.json --overlay-path artifacts/regex_private_compile_api_map_v1.json --overlay-path docs/regex_private_compile_api_map.md --overlay-path tests/regex_privacy_capability_inventory_contract.rs -- env CARGO_TARGET_DIR=${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_regex_config_r354 CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -j 4 -p asupersync --features metrics --test regex_privacy_capability_inventory_contract -- --nocapture",
+        "requested_cargo_target_dir": "/data/tmp/rch_target_regex_config_r354",
+        "observed_remote_workspace": "/data/tmp/rch/asupersync/cc75160aaf2fa8ba",
+        "observed_remote_target_dir": "/data/tmp/rch/asupersync/cc75160aaf2fa8ba/.rch-target-ovh-a-pool-5df3061708e292ffc39ef9f9f124e41a",
+        "clean_overlay": true,
+        "clean_overlay_base_revision": "903de8267e50fc5ba5652766157bd2083aee6e4c",
+        "overlay_paths": ["artifacts/regex_privacy_capability_inventory_v1.json", "artifacts/regex_private_compile_api_map_v1.json", "docs/regex_private_compile_api_map.md", "tests/regex_privacy_capability_inventory_contract.rs"],
+        "overlay_fingerprint": "2e1c1e700c1ce1f1e8877097f49fc570ed8ffd9861ba9d2b069b5c4ce8a7292b",
+        "working_tree_mode": "CLEAN_BASE_PLUS_EXPLICIT_OVERLAY",
+        "peer_dirt_excluded": true,
+        "result": "PASS_13_OF_13",
+        "remote_required": true,
+        "local_fallback_used": false,
+        "metadata_completeness": "EXACT_CANDIDATE_PRE_FINAL_RECEIPT",
+        "provenance_scope": "does not prove final receipt bytes; finalized overlay validation is retained externally after the last receipt edit"
+      }
+    ],
+    "no_claims": [
+      "no public API or PrivacyConfig integration",
+      "no compatibility shim or production wiring",
+      "no regex or regex-syntax dependency removal authorization",
+      "no exact public error wording or type parity",
+      "no byte-regex or built-in detector-policy replacement",
+      "no whole-operation cancellation or cache policy completion",
+      "no portable oversized usize configuration across targets",
+      "no archival-exact historical revision/hash claim for the identified R3.5.1 pins",
+      "no complete historical worker/job/command/timestamp claim where fields were not retained",
+      "no claim that seven routed critical/high gaps are resolved",
+      "no performance improvement or no-regression claim",
+      "no broad workspace health or release-readiness claim",
+      "no local Cargo fallback approval"
+    ]
+  },
   "static_validation": {
     "json_parse_required": true,
     "source_hash_and_line_count_recheck_required": true,
@@ -1153,12 +1875,16 @@
     "compiler_or_runtime_claim_permitted": true
   },
   "no_claims": [
-    "no R3.5.2 private match facade evidence",
-    "no R3.5 downstream compile and configuration evidence",
     "no public API or PrivacyConfig integration",
-    "no compatibility shim",
-    "no production privacy wiring",
-    "no regex or regex-syntax removal authorization",
+    "no compatibility shim or production wiring",
+    "no regex or regex-syntax dependency removal authorization",
+    "no exact public error wording or type parity",
+    "no byte-regex or built-in detector-policy replacement",
+    "no whole-operation cancellation or cache policy completion",
+    "no portable oversized usize configuration across targets",
+    "no archival-exact historical revision/hash claim for the identified R3.5.1 pins",
+    "no complete historical worker/job/command/timestamp claim where fields were not retained",
+    "no claim that seven routed critical/high gaps are resolved",
     "no performance improvement or no-regression claim",
     "no broad workspace health or release-readiness claim",
     "no local Cargo fallback approval"

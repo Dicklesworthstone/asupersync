@@ -27,6 +27,7 @@
       "PLANNED",
       "BLOCKED",
       "ROUTED",
+      "RESOLVED",
       "RESOLVED_BEFORE_BASELINE",
       "OUT_OF_SCOPE"
     ]
@@ -44,8 +45,8 @@
     },
     {
       "path": "src/observability/otel.rs",
-      "sha256": "590cb3e34654e71708ca8b623007aaaa4b35b20d602c1455c16890ef7352a72c",
-      "line_count": 14523
+      "sha256": "b036610d07e07b7a7e9ed3e23328d60104f2429cbe464827213a8bff5f7e0db8",
+      "line_count": 14533
     },
     {
       "path": "src/observability/mod.rs",
@@ -210,7 +211,7 @@
       "invalid_pattern_paths": {
         "with_pii_pattern": "panics with invalid PrivacyConfig PII regex pattern",
         "try_with_pii_pattern": "returns public regex::Error",
-        "direct_public_vector_mutation": "invalid entries are silently ignored during fallback compilation"
+        "direct_public_vector_mutation": "invalid entries fail closed to whole-value redaction during fallback compilation"
       }
     },
     {
@@ -756,8 +757,8 @@
       "case_id": "RGX-RES-006",
       "class": "direct-invalid-mutation",
       "generator": "push invalid public pii_patterns entry after construction",
-      "expected": "incumbent silently ignores entry and returns original value",
-      "state": "BASELINED_SECURITY_GAP"
+      "expected": "invalid direct entry fails closed to whole-value redaction even when the compiled cache is populated or stale",
+      "state": "RESOLVED"
     }
   ],
   "detector_order": [
@@ -896,7 +897,7 @@
       "severity": "critical",
       "state": "RESOLVED",
       "owner": "asupersync-5z2scg.8.3.5",
-      "summary": "Invalid patterns inserted through the public pii_patterns vector are silently ignored, contradicting the registry invariant that custom privacy patterns are never silently ignored."
+      "summary": "Invalid patterns inserted through the public pii_patterns vector fail closed to whole-value redaction without changing the public API."
     },
     {
       "gap_id": "RGX-R1-GAP-02",

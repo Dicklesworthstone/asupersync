@@ -124,6 +124,49 @@ fn validate_no_unknown(value: &Value, path: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn checked_array<'a>(value: &'a Value, key: &str) -> Result<&'a [Value], String> {
+    value
+        .get(key)
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .ok_or_else(|| format!("{key} must be an array"))
+}
+
+fn checked_object<'a>(
+    value: &'a Value,
+    key: &str,
+) -> Result<&'a serde_json::Map<String, Value>, String> {
+    value
+        .get(key)
+        .and_then(Value::as_object)
+        .ok_or_else(|| format!("{key} must be an object"))
+}
+
+fn checked_text<'a>(value: &'a Value, key: &str) -> Result<&'a str, String> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("{key} must be a string"))
+}
+
+fn checked_string_set(value: &Value, key: &str) -> Result<BTreeSet<String>, String> {
+    checked_array(value, key)?
+        .iter()
+        .map(|entry| {
+            entry
+                .as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| format!("{key} entries must be strings"))
+        })
+        .collect()
+}
+
+fn checked_json_sha256(value: &Value) -> Result<String, String> {
+    let bytes = serde_json::to_vec(value)
+        .map_err(|error| format!("failed to serialize JSON for exact comparison: {error}"))?;
+    Ok(hex::encode(Sha256::digest(bytes)))
+}
+
 fn validate_inventory(inventory: &Value) -> Result<(), String> {
     if inventory.get("schema_version").and_then(Value::as_u64) != Some(1) {
         return Err("schema_version must be 1".to_owned());
@@ -175,6 +218,29 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
         return Err(
             "policy must remain executable-partial, fail-closed, and zero-unknown".to_owned(),
         );
+    }
+    let accepted_states = checked_string_set(
+        inventory
+            .get("policy")
+            .ok_or_else(|| "policy is required".to_owned())?,
+        "accepted_states",
+    )?;
+    let expected_accepted_states: BTreeSet<String> = [
+        "BASELINED",
+        "PRESENT",
+        "ABSENT",
+        "PLANNED",
+        "BLOCKED",
+        "ROUTED",
+        "RESOLVED",
+        "RESOLVED_BEFORE_BASELINE",
+        "OUT_OF_SCOPE",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    if accepted_states != expected_accepted_states {
+        return Err("policy.accepted_states drifted".to_owned());
     }
     validate_no_unknown(inventory, "$")?;
 
@@ -248,6 +314,7 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
     }
     for gap in gaps {
         if text(gap, "owner").is_empty()
+            || !accepted_states.contains(text(gap, "state"))
             || !matches!(
                 text(gap, "state"),
                 "ROUTED" | "RESOLVED" | "RESOLVED_BEFORE_BASELINE"
@@ -384,7 +451,8 @@ fn authority_registry_baseline_and_source_routes_are_truthful() {
     assert!(lockfile.contains("name = \"regex\"\nversion = \"1.13.1\""));
     assert!(source.contains("pub struct PrivacyConfig"));
     assert!(source.contains("pub type SpanConfig = PrivacyConfig;"));
-    assert!(source.contains("Regex::new(pattern).is_ok_and"));
+    assert!(source.contains("Err(_) => return true"));
+    assert!(source.contains("allowing a value through under an invalid privacy policy"));
     assert!(source.contains("fn apply_auto_pii_redaction"));
     assert!(!facade.contains("pub use otel::PrivacyConfig"));
     assert!(!api_map.contains("\"PrivacyConfig\""));
@@ -558,6 +626,18 @@ fn panic_text(payload: Box<dyn std::any::Any + Send>) -> String {
 
 #[test]
 fn mutation_error_panic_and_diagnostic_exposure_remain_explicit() {
+    let inventory = artifact();
+    let invalid_mutation_row = find_row(
+        array(&inventory, "resource_and_concurrency_corpus"),
+        "case_id",
+        "RGX-RES-006",
+    );
+    assert_eq!(text(invalid_mutation_row, "state"), "RESOLVED");
+    assert_eq!(
+        text(invalid_mutation_row, "expected"),
+        "invalid direct entry fails closed to whole-value redaction even when the compiled cache is populated or stale"
+    );
+
     let mut valid_mutation = PrivacyConfig::new();
     valid_mutation.pii_patterns.push("secret-[0-9]+".to_owned());
     assert_eq!(valid_mutation.redact_pii("auth", "secret-42"), "[REDACTED]");
@@ -577,6 +657,26 @@ fn mutation_error_panic_and_diagnostic_exposure_remain_explicit() {
         mixed_mutation.redact_pii("auth", "unmatched-secret"),
         "[REDACTED]",
         "one invalid direct entry must fail the entire privacy policy closed"
+    );
+
+    let mut cached_length_mismatch = PrivacyConfig::new()
+        .try_with_pii_pattern("public-[0-9]+")
+        .expect("valid cached pattern");
+    cached_length_mismatch.pii_patterns.push("(".to_owned());
+    assert_eq!(
+        cached_length_mismatch.redact_pii("auth", "unmatched-secret"),
+        "[REDACTED]",
+        "an invalid direct append must fail closed when the compiled cache was populated"
+    );
+
+    let mut cached_content_mismatch = PrivacyConfig::new()
+        .try_with_pii_pattern("public-[0-9]+")
+        .expect("valid cached pattern");
+    cached_content_mismatch.pii_patterns[0] = "(".to_owned();
+    assert_eq!(
+        cached_content_mismatch.redact_pii("auth", "unmatched-secret"),
+        "[REDACTED]",
+        "an invalid in-place replacement must fail closed when cache length still matches"
     );
 
     let canary = "TOP-SECRET-CANARY-[";
@@ -983,6 +1083,687 @@ fn r3_5_4_private_api_compatibility_extension_is_complete_and_source_pinned() {
             "R3.5.4 documentation must retain {marker}"
         );
     }
+}
+
+fn validate_r3_5_5_terminal(map: &Value, inventory: &Value) -> Result<(), String> {
+    let receipt = map
+        .get("r3_5_5_terminal_receipt")
+        .ok_or_else(|| "r3_5_5_terminal_receipt is required".to_owned())?;
+    validate_no_unknown(receipt, "$.r3_5_5_terminal_receipt")?;
+
+    for (key, expected) in [
+        ("receipt_id", "ASUP-REGEX-R3-5-PRIVATE-API-TERMINAL-V1"),
+        ("bead_id", "asupersync-5z2scg.8.3.5.5"),
+        (
+            "evidence_base_revision",
+            "903de8267e50fc5ba5652766157bd2083aee6e4c",
+        ),
+        ("captured_at_utc", "2026-08-21T12:34:19Z"),
+    ] {
+        if checked_text(receipt, key)? != expected {
+            return Err(format!("R3.5.5 {key} drifted"));
+        }
+    }
+
+    let repair = checked_object(receipt, "security_repair")?;
+    for (key, expected) in [
+        ("gap_id", "RGX-R1-GAP-01"),
+        (
+            "source_revision",
+            "903de8267e50fc5ba5652766157bd2083aee6e4c",
+        ),
+        ("source_path", "src/observability/otel.rs"),
+        (
+            "regression_test",
+            "mutation_error_panic_and_diagnostic_exposure_remain_explicit",
+        ),
+    ] {
+        if repair.get(key).and_then(Value::as_str) != Some(expected) {
+            return Err(format!("security repair {key} drifted"));
+        }
+    }
+    if repair.get("public_api_changed").and_then(Value::as_bool) != Some(false) {
+        return Err("RGX-R1-GAP-01 repair must not change the public API".to_owned());
+    }
+    let repair_path = repair
+        .get("source_path")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "security repair source_path is required".to_owned())?;
+    let repair_bytes = read_repo_bytes(repair_path);
+    if hex::encode(Sha256::digest(&repair_bytes))
+        != repair
+            .get("source_sha256")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "security repair source_sha256 is required".to_owned())?
+        || repair.get("source_line_count").and_then(Value::as_u64)
+            != Some(read_repo_file(repair_path).lines().count() as u64)
+    {
+        return Err("RGX-R1-GAP-01 source pin drifted".to_owned());
+    }
+
+    let decision = checked_object(receipt, "decision")?;
+    if decision.get("disposition").and_then(Value::as_str) != Some("KEEP_INCUMBENT_DEFER")
+        || decision
+            .get("r3_5_private_api_complete")
+            .and_then(Value::as_bool)
+            != Some(true)
+        || decision
+            .get("r3_7_1_independent_corpus_may_proceed")
+            .and_then(Value::as_bool)
+            != Some(true)
+        || decision
+            .get("r3_7_terminal_decision_ready")
+            .and_then(Value::as_bool)
+            != Some(false)
+        || decision
+            .get("r3_6_cache_performance_policy_remains_required")
+            .and_then(Value::as_bool)
+            != Some(true)
+        || decision
+            .get("unresolved_high_findings_complete")
+            .and_then(Value::as_bool)
+            != Some(true)
+        || decision.get("unknown_rows").and_then(Value::as_u64) != Some(0)
+    {
+        return Err("R3.5.5 decision must remain fail-closed and R3.7-bounded".to_owned());
+    }
+    for forbidden in [
+        "public_reexport_authorized",
+        "privacy_config_integration_authorized",
+        "compatibility_shim_authorized",
+        "production_wiring_authorized",
+        "dependency_removal_authorized",
+    ] {
+        if decision.get(forbidden).and_then(Value::as_bool) != Some(false) {
+            return Err(format!("R3.5.5 must not authorize {forbidden}"));
+        }
+    }
+
+    let expected_high_gaps: BTreeSet<String> = checked_array(inventory, "gaps")?
+        .iter()
+        .filter(|row| {
+            row.get("state").and_then(Value::as_str) == Some("ROUTED")
+                && matches!(
+                    row.get("severity").and_then(Value::as_str),
+                    Some("critical" | "high")
+                )
+        })
+        .map(|row| checked_text(row, "gap_id").map(str::to_owned))
+        .collect::<Result<_, _>>()?;
+    if expected_high_gaps.len() != 7 {
+        return Err(
+            "pinned inventory must expose exactly seven routed critical/high gaps".to_owned(),
+        );
+    }
+    if checked_string_set(
+        receipt.get("decision").expect("decision"),
+        "unresolved_critical_or_high_gap_ids",
+    )? != expected_high_gaps
+    {
+        return Err("R3.5.5 must enumerate every routed critical/high gap".to_owned());
+    }
+
+    let expected_predecessors = [
+        (
+            "artifacts/regex_privacy_capability_inventory_v1.json",
+            "2f0264e45f9362d4b299c235f82b415d553b8f6fd40a05aef25f84c948f75a5e",
+            1015,
+        ),
+        (
+            "artifacts/regex_syntax_terminal_receipt_v1.json",
+            "410afeaeb0250a36b8d91c1a78b612c942d729fd495e7752c3f5965bbe8d5fbe",
+            391,
+        ),
+        (
+            "artifacts/regex_semantic_terminal_receipt_v1.json",
+            "42d00d7c92b2b4a9974c252481432142eae2927b9442ffe08265769e00f7c8a2",
+            433,
+        ),
+        (
+            "artifacts/regex_compiler_terminal_receipt_v1.json",
+            "3a67d943175079ab0378080de5b8ee06fd5e979b0c9555dc30a45cbb62da2f5b",
+            252,
+        ),
+        (
+            "artifacts/regex_vm_terminal_receipt_v1.json",
+            "608b42b5bedeed536884af10b325fff889668e5819a6cdf6d85afcf9debc2265",
+            337,
+        ),
+    ];
+    let predecessors = checked_array(receipt, "predecessor_receipts")?;
+    if predecessors.len() != expected_predecessors.len() {
+        return Err("R3.5.5 predecessor receipt count drifted".to_owned());
+    }
+    for (path, digest, line_count) in expected_predecessors {
+        let pin = predecessors
+            .iter()
+            .find(|row| row.get("path").and_then(Value::as_str) == Some(path))
+            .ok_or_else(|| format!("missing predecessor {path}"))?;
+        if pin.get("sha256").and_then(Value::as_str) != Some(digest)
+            || pin.get("line_count").and_then(Value::as_u64) != Some(line_count)
+            || hex::encode(Sha256::digest(read_repo_bytes(path))) != digest
+            || read_repo_file(path).lines().count() as u64 != line_count
+        {
+            return Err(format!("predecessor pin drifted for {path}"));
+        }
+    }
+
+    let expected_children: BTreeSet<String> = (1..=4)
+        .map(|suffix| format!("asupersync-5z2scg.8.3.5.{suffix}"))
+        .collect();
+    let children = checked_array(receipt, "child_slices")?;
+    if row_ids(children, "child_id") != expected_children {
+        return Err("R3.5.5 child slice set drifted".to_owned());
+    }
+    if checked_json_sha256(receipt.get("child_slices").expect("checked child slices"))?
+        != "b22a2217473d7d23b0d3638dd552cf8f2ecbdef4b2c4f5c23ad0f12d885a3bee"
+    {
+        return Err(
+            "R3.5.5 exact child revisions, references, or terminal states drifted".to_owned(),
+        );
+    }
+    let child_sources = [
+        (
+            "asupersync-5z2scg.8.3.5.1",
+            "432be7270481c5439db00f79910465a269512266",
+        ),
+        (
+            "asupersync-5z2scg.8.3.5.2",
+            "51df97efd93c1c6ecb60ffff1021cfea032d7958",
+        ),
+        (
+            "asupersync-5z2scg.8.3.5.3",
+            "b12cc7ad426805f0c59ec343139ca1da8aefa448",
+        ),
+        (
+            "asupersync-5z2scg.8.3.5.4",
+            "da992970cbb0590014a36236682c138cd83b41a4",
+        ),
+    ];
+    for (child_id, source_revision) in child_sources {
+        let child = children
+            .iter()
+            .find(|row| row.get("child_id").and_then(Value::as_str) == Some(child_id))
+            .ok_or_else(|| format!("missing child {child_id}"))?;
+        if child.get("source_revision").and_then(Value::as_str) != Some(source_revision)
+            || checked_array(child, "row_references")?.is_empty()
+        {
+            return Err(format!("child evidence drifted for {child_id}"));
+        }
+    }
+
+    let join = checked_object(receipt, "row_join")?;
+    for (key, expected) in [
+        ("inherited_terminal_rows", 112),
+        ("r3_5_1_owned_cases", 14),
+        ("r3_5_1_owned_same_rows", 12),
+        ("r3_5_1_owned_same_category_rows", 2),
+        ("r3_5_4_compatibility_rows", 29),
+        ("terminal_acceptance_clause_rows", 20),
+        ("joined_stable_row_ids", 175),
+        ("terminal_compatibility_binding_rows", 29),
+        ("same_compatibility_rows", 7),
+        ("keep_compatibility_rows", 22),
+        ("typed_inherited_keep_rows", 3),
+        ("unknown_rows", 0),
+    ] {
+        if join.get(key).and_then(Value::as_u64) != Some(expected) {
+            return Err(format!("row_join.{key} drifted"));
+        }
+    }
+
+    let clauses = checked_array(receipt, "child_acceptance_clause_rows")?;
+    if clauses.len() != 20 || row_ids(clauses, "clause_id").len() != 20 {
+        return Err("R3.5.5 must retain 20 unique child acceptance clauses".to_owned());
+    }
+    if checked_json_sha256(
+        receipt
+            .get("child_acceptance_clause_rows")
+            .expect("checked child clauses"),
+    )? != "864f1f82f349edd212b55f2ffb2c16f28c57bdd14dab2c4b95e1287326aa3bdb"
+    {
+        return Err("R3.5.5 exact child acceptance clauses drifted".to_owned());
+    }
+    for clause in clauses {
+        if !matches!(
+            checked_text(clause, "disposition")?,
+            "SAME" | "BETTER" | "KEEP"
+        ) || checked_text(clause, "evidence")?.is_empty()
+        {
+            return Err("child acceptance clauses must be explicit and evidenced".to_owned());
+        }
+    }
+
+    let extension = map
+        .get("r3_5_4_compatibility_extension")
+        .ok_or_else(|| "R3.5.4 extension is required".to_owned())?;
+    let compatibility_rows = checked_array(extension, "capability_rows")?;
+    let bindings = checked_array(receipt, "compatibility_row_bindings")?;
+    let compatibility_ids = row_ids(compatibility_rows, "surface_id");
+    if bindings.len() != 29
+        || row_ids(bindings, "capability_id").len() != 29
+        || row_ids(bindings, "capability_id") != compatibility_ids
+    {
+        return Err("every compatibility row needs exactly one stable binding".to_owned());
+    }
+    if checked_json_sha256(
+        receipt
+            .get("compatibility_row_bindings")
+            .expect("checked compatibility bindings"),
+    )? != "1922c834a6b3ad16d421d197f48d32f7c78fee2de97d199c8f69344ebd7ad1d2"
+    {
+        return Err(
+            "R3.5.5 exact case, replay, disposition, or no-claim binding drifted".to_owned(),
+        );
+    }
+    let allowed_replay_lanes: BTreeSet<String> = [
+        "r3_5_terminal_regex_source",
+        "r3_5_terminal_public_contract",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    let mut same_count = 0;
+    let mut keep_count = 0;
+    for binding in bindings {
+        let capability_id = checked_text(binding, "capability_id")?;
+        let source_row = compatibility_rows
+            .iter()
+            .find(|row| row.get("surface_id").and_then(Value::as_str) == Some(capability_id))
+            .ok_or_else(|| format!("missing compatibility source row {capability_id}"))?;
+        let disposition = checked_text(binding, "disposition")?;
+        if disposition != checked_text(source_row, "disposition")? {
+            return Err(format!("{capability_id} disposition drifted"));
+        }
+        match disposition {
+            "SAME" => same_count += 1,
+            "KEEP" => keep_count += 1,
+            _ => return Err(format!("{capability_id} has an unsupported disposition")),
+        }
+        if checked_text(binding, "source_revision")? != "903de8267e50fc5ba5652766157bd2083aee6e4c"
+            || checked_text(binding, "evidence_base_revision")?
+                != "903de8267e50fc5ba5652766157bd2083aee6e4c"
+            || checked_array(binding, "case_ids")?.is_empty()
+            || checked_array(binding, "case_ids")?
+                .iter()
+                .any(|value| value.as_str().is_none_or(str::is_empty))
+            || checked_string_set(binding, "replay_lane_ids")?.is_empty()
+            || !checked_string_set(binding, "replay_lane_ids")?.is_subset(&allowed_replay_lanes)
+            || checked_text(binding, "no_claim")?.is_empty()
+        {
+            return Err(format!("{capability_id} has incomplete terminal metadata"));
+        }
+    }
+    if (same_count, keep_count) != (7, 22) {
+        return Err("R3.5.5 compatibility partition must remain 7 SAME / 22 KEEP".to_owned());
+    }
+
+    let boundaries = receipt
+        .get("known_keep_boundaries")
+        .ok_or_else(|| "known_keep_boundaries is required".to_owned())?;
+    if checked_json_sha256(boundaries)?
+        != "a33dd5a577bb0a9c15556a074e3b0ef2bdb59f32715cbf25ac56ab522857eaf7"
+    {
+        return Err("R3.5.5 exact KEEP boundaries or owners drifted".to_owned());
+    }
+    if checked_string_set(boundaries, "typed_inherited_row_ids")?
+        != ["RGX-COMP-Q-009", "RGX-COMP-Q-010", "RGX-R324-U001"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+        || checked_array(boundaries, "historical_evidence_limitations")?.len() != 4
+    {
+        return Err("typed gaps and historical limitations must remain explicit".to_owned());
+    }
+    let routed = checked_array(boundaries, "routed_critical_or_high_gaps")?;
+    if row_ids(routed, "gap_id") != expected_high_gaps
+        || routed.iter().any(|row| {
+            row.get("state").and_then(Value::as_str) != Some("ROUTED")
+                || row
+                    .get("owner")
+                    .and_then(Value::as_str)
+                    .is_none_or(str::is_empty)
+                || !matches!(
+                    row.get("severity").and_then(Value::as_str),
+                    Some("critical" | "high")
+                )
+        })
+    {
+        return Err("routed critical/high gap details are incomplete".to_owned());
+    }
+    for row in routed {
+        let gap_id = checked_text(row, "gap_id")?;
+        let inventory_row = checked_array(inventory, "gaps")?
+            .iter()
+            .find(|candidate| candidate.get("gap_id").and_then(Value::as_str) == Some(gap_id))
+            .ok_or_else(|| format!("routed gap {gap_id} is absent from the pinned inventory"))?;
+        for key in ["severity", "owner", "state"] {
+            if checked_text(row, key)? != checked_text(inventory_row, key)? {
+                return Err(format!("routed gap {gap_id} {key} drifted from inventory"));
+            }
+        }
+    }
+
+    let mut joined_ids = BTreeSet::new();
+    for family in checked_array(map, "inherited_terminal_row_families")? {
+        let ids = checked_array(family, "row_ids")?;
+        if family.get("row_count").and_then(Value::as_u64) != Some(ids.len() as u64) {
+            return Err(format!(
+                "{} row count drifted",
+                checked_text(family, "family_id")?
+            ));
+        }
+        for id in ids {
+            let id = id
+                .as_str()
+                .ok_or_else(|| "inherited row IDs must be strings".to_owned())?;
+            if !joined_ids.insert(id.to_owned()) {
+                return Err(format!("duplicate terminal row ID {id}"));
+            }
+        }
+    }
+    for (rows, key) in [
+        (checked_array(map, "r3_5_owned_case_contract")?, "case_id"),
+        (compatibility_rows, "surface_id"),
+        (clauses, "clause_id"),
+    ] {
+        for row in rows {
+            let id = checked_text(row, key)?;
+            if !joined_ids.insert(id.to_owned()) {
+                return Err(format!("duplicate terminal row ID {id}"));
+            }
+        }
+    }
+    if joined_ids.len() != 175 {
+        return Err(format!(
+            "terminal row join must contain 175 globally unique IDs, found {}",
+            joined_ids.len()
+        ));
+    }
+
+    let replay = checked_array(receipt, "replay_metadata")?;
+    let replay_ids = row_ids(replay, "lane");
+    let final_validation_boundary = serde_json::json!({
+        "self_referential_receipt_update_forbidden": true,
+        "embedded_public_replay_scope": "exact pre-final candidate overlay; not proof of final receipt bytes",
+        "finalized_overlay_validation_required_after_last_receipt_edit": true,
+        "finalized_overlay_receipt_location": "Bead asupersync-5z2scg.8.3.5.5 closure comment and commit handoff"
+    });
+    if receipt.get("final_validation_boundary") != Some(&final_validation_boundary) {
+        return Err("finalized-overlay validation boundary drifted".to_owned());
+    }
+    let gap_replay = replay
+        .iter()
+        .find(|row| {
+            row.get("lane").and_then(Value::as_str) == Some("r3_5_gap_01_fail_closed_regression")
+        })
+        .ok_or_else(|| "missing GAP-01 historical replay lane".to_owned())?;
+    if gap_replay
+        .get("metadata_completeness")
+        .and_then(Value::as_str)
+        != Some("PARTIAL_HISTORICAL")
+        || gap_replay.get("result").and_then(Value::as_str) != Some("PASS_1_OF_1")
+        || gap_replay.get("remote_required").and_then(Value::as_bool) != Some(true)
+        || gap_replay
+            .get("local_fallback_used")
+            .and_then(Value::as_bool)
+            != Some(false)
+        || checked_string_set(gap_replay, "missing_fields")?
+            != [
+                "finished_at",
+                "full_rch_command",
+                "requested_cargo_target_dir",
+                "observed_remote_workspace",
+                "observed_remote_target_dir",
+                "clean_overlay_base_revision",
+                "overlay_paths",
+                "overlay_fingerprint",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    {
+        return Err("GAP-01 historical replay limitations must remain exact".to_owned());
+    }
+
+    let exact_current_replays = [
+        serde_json::json!({
+            "lane": "r3_5_terminal_regex_source",
+            "job_id": 29985909466202189_u64,
+            "worker": "ovh-a",
+            "started_at": "2026-08-21T12:28:03.514420956Z",
+            "finished_at": "2026-08-21T12:34:18.802639Z",
+            "source_revision": "903de8267e50fc5ba5652766157bd2083aee6e4c",
+            "command": "cargo test -j 4 -p asupersync --lib --features metrics observability::regex -- --nocapture",
+            "full_rch_command": "RCH_WORKER=ovh-a RCH_REQUIRE_REMOTE=1 rch exec --base 903de8267e50fc5ba5652766157bd2083aee6e4c --clean-overlay --no-overlay -- env CARGO_TARGET_DIR=${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_regex_source_r355 CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -j 4 -p asupersync --lib --features metrics observability::regex -- --nocapture",
+            "requested_cargo_target_dir": "/data/tmp/rch_target_regex_source_r355",
+            "observed_remote_workspace": "/data/tmp/rch/asupersync/4fe30dfc059ad51a",
+            "observed_remote_target_dir": "/data/tmp/rch/asupersync/4fe30dfc059ad51a/.rch-target-ovh-a-pool-5df3061708e292ffc39ef9f9f124e41a",
+            "clean_overlay": true,
+            "clean_overlay_base_revision": "903de8267e50fc5ba5652766157bd2083aee6e4c",
+            "no_overlay": true,
+            "overlay_paths": [],
+            "overlay_fingerprint": "fe0d5151031be8fda7951fe7fe1f42f7ce344018fdb3ed21e6ada866b230b195",
+            "working_tree_mode": "CLEAN_COMMITTED_BASE_NO_OVERLAY",
+            "peer_dirt_excluded": true,
+            "result": "PASS_112_OF_112",
+            "remote_required": true,
+            "local_fallback_used": false,
+            "metadata_completeness": "CURRENT_EXACT"
+        }),
+        serde_json::json!({
+            "lane": "r3_5_terminal_public_contract",
+            "job_id": 29985909466202188_u64,
+            "worker": "ovh-a",
+            "started_at": "2026-08-21T12:25:57.588752801Z",
+            "finished_at": "2026-08-21T12:27:48.280393Z",
+            "source_revision": "903de8267e50fc5ba5652766157bd2083aee6e4c",
+            "command": "cargo test -j 4 -p asupersync --features metrics --test regex_privacy_capability_inventory_contract -- --nocapture",
+            "full_rch_command": "RCH_WORKER=ovh-a RCH_REQUIRE_REMOTE=1 rch exec --base 903de8267e50fc5ba5652766157bd2083aee6e4c --clean-overlay --overlay-path artifacts/regex_privacy_capability_inventory_v1.json --overlay-path artifacts/regex_private_compile_api_map_v1.json --overlay-path docs/regex_private_compile_api_map.md --overlay-path tests/regex_privacy_capability_inventory_contract.rs -- env CARGO_TARGET_DIR=${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_regex_config_r354 CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -j 4 -p asupersync --features metrics --test regex_privacy_capability_inventory_contract -- --nocapture",
+            "requested_cargo_target_dir": "/data/tmp/rch_target_regex_config_r354",
+            "observed_remote_workspace": "/data/tmp/rch/asupersync/cc75160aaf2fa8ba",
+            "observed_remote_target_dir": "/data/tmp/rch/asupersync/cc75160aaf2fa8ba/.rch-target-ovh-a-pool-5df3061708e292ffc39ef9f9f124e41a",
+            "clean_overlay": true,
+            "clean_overlay_base_revision": "903de8267e50fc5ba5652766157bd2083aee6e4c",
+            "overlay_paths": [
+                "artifacts/regex_privacy_capability_inventory_v1.json",
+                "artifacts/regex_private_compile_api_map_v1.json",
+                "docs/regex_private_compile_api_map.md",
+                "tests/regex_privacy_capability_inventory_contract.rs"
+            ],
+            "overlay_fingerprint": "2e1c1e700c1ce1f1e8877097f49fc570ed8ffd9861ba9d2b069b5c4ce8a7292b",
+            "working_tree_mode": "CLEAN_BASE_PLUS_EXPLICIT_OVERLAY",
+            "peer_dirt_excluded": true,
+            "result": "PASS_13_OF_13",
+            "remote_required": true,
+            "local_fallback_used": false,
+            "metadata_completeness": "EXACT_CANDIDATE_PRE_FINAL_RECEIPT",
+            "provenance_scope": "does not prove final receipt bytes; finalized overlay validation is retained externally after the last receipt edit"
+        }),
+    ];
+    let captured_at = checked_text(receipt, "captured_at_utc")?;
+    for expected in exact_current_replays {
+        let lane = checked_text(&expected, "lane")?;
+        if !replay_ids.contains(lane) {
+            return Err(format!("missing current replay lane {lane}"));
+        }
+        let actual = replay
+            .iter()
+            .find(|row| row.get("lane").and_then(Value::as_str) == Some(lane))
+            .expect("checked current replay lane");
+        if actual != &expected {
+            return Err(format!("current replay lane {lane} provenance drifted"));
+        }
+        if checked_text(actual, "finished_at")? >= captured_at {
+            return Err(format!("receipt capture predates replay lane {lane}"));
+        }
+    }
+
+    let no_claims = checked_array(receipt, "no_claims")?;
+    if no_claims.len() != 13
+        || no_claims
+            .iter()
+            .any(|claim| claim.as_str().is_none_or(str::is_empty))
+    {
+        return Err("R3.5.5 no-claim boundary drifted".to_owned());
+    }
+    if checked_json_sha256(receipt.get("no_claims").expect("checked no-claims"))?
+        != "72829d23dc443085eca79a500b76953c9c21dd7bde2d653c03a71f610d24db77"
+    {
+        return Err("R3.5.5 exact no-claim wording drifted".to_owned());
+    }
+    if map.get("no_claims") != receipt.get("no_claims") {
+        return Err(
+            "artifact-global no-claims must match the current terminal boundary".to_owned(),
+        );
+    }
+
+    let doc = read_repo_file("docs/regex_private_compile_api_map.md");
+    for marker in [
+        "BEGIN R3.5.5 PRIVATE API TERMINAL RECEIPT",
+        "ASUP-REGEX-R3-5-PRIVATE-API-TERMINAL-V1",
+        "KEEP_INCUMBENT_DEFER",
+        "29 exact compatibility rows",
+        "7 `SAME`, 22 `KEEP`",
+        "R3.7.1 independent verification may proceed",
+        "Seven routed critical/high findings remain visible",
+        "does not authorize a public re-export",
+        "END R3.5.5 PRIVATE API TERMINAL RECEIPT",
+    ] {
+        if !doc.contains(marker) {
+            return Err(format!("R3.5.5 documentation must retain {marker}"));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn r3_5_5_terminal_receipt_joins_every_child_and_fails_closed() {
+    let map = parse_repo_json(PRIVATE_API_MAP_PATH);
+    let inventory = artifact();
+    validate_r3_5_5_terminal(&map, &inventory).unwrap_or_else(|error| panic!("{error}"));
+
+    let mut public_cutover = map.clone();
+    public_cutover["r3_5_5_terminal_receipt"]["decision"]["public_reexport_authorized"] =
+        Value::Bool(true);
+    assert!(validate_r3_5_5_terminal(&public_cutover, &inventory).is_err());
+
+    let mut unknown = map.clone();
+    unknown["r3_5_5_terminal_receipt"]["compatibility_row_bindings"][0]["disposition"] =
+        Value::String("UNKNOWN".to_owned());
+    assert!(validate_r3_5_5_terminal(&unknown, &inventory).is_err());
+
+    let mut missing_binding = map.clone();
+    missing_binding["r3_5_5_terminal_receipt"]["compatibility_row_bindings"]
+        .as_array_mut()
+        .expect("binding array")
+        .pop();
+    assert!(validate_r3_5_5_terminal(&missing_binding, &inventory).is_err());
+
+    let mut missing_case = map.clone();
+    missing_case["r3_5_5_terminal_receipt"]["compatibility_row_bindings"][0]["case_ids"] =
+        Value::Array(Vec::new());
+    assert!(validate_r3_5_5_terminal(&missing_case, &inventory).is_err());
+
+    let mut hidden_gap = map.clone();
+    hidden_gap["r3_5_5_terminal_receipt"]["decision"]["unresolved_critical_or_high_gap_ids"]
+        .as_array_mut()
+        .expect("gap array")
+        .pop();
+    assert!(validate_r3_5_5_terminal(&hidden_gap, &inventory).is_err());
+
+    let mut new_hidden_high = inventory.clone();
+    let new_gap = serde_json::json!({
+        "gap_id": "RGX-R1-GAP-15",
+        "severity": "high",
+        "state": "ROUTED",
+        "owner": "asupersync-hidden-owner",
+        "summary": "synthetic hidden high gap"
+    });
+    new_hidden_high["gaps"]
+        .as_array_mut()
+        .expect("gap array")
+        .push(new_gap);
+    assert!(validate_r3_5_5_terminal(&map, &new_hidden_high).is_err());
+
+    let mut stale_source = map.clone();
+    stale_source["r3_5_5_terminal_receipt"]["compatibility_row_bindings"][0]["source_revision"] =
+        Value::String("stale".to_owned());
+    assert!(validate_r3_5_5_terminal(&stale_source, &inventory).is_err());
+
+    let mut stale_child_evidence = map.clone();
+    stale_child_evidence["r3_5_5_terminal_receipt"]["child_slices"][0]["evidence_revisions"][0] =
+        Value::String("stale".to_owned());
+    assert!(validate_r3_5_5_terminal(&stale_child_evidence, &inventory).is_err());
+
+    let mut wrong_clause_owner = map.clone();
+    wrong_clause_owner["r3_5_5_terminal_receipt"]["child_acceptance_clause_rows"][0]["child_id"] =
+        Value::String("asupersync-wrong-child".to_owned());
+    assert!(validate_r3_5_5_terminal(&wrong_clause_owner, &inventory).is_err());
+
+    let mut wrong_owner_bead = map.clone();
+    wrong_owner_bead["r3_5_5_terminal_receipt"]["known_keep_boundaries"]["remaining_owner_beads"]
+        [0] = Value::String("asupersync-wrong-owner".to_owned());
+    assert!(validate_r3_5_5_terminal(&wrong_owner_bead, &inventory).is_err());
+
+    let mut weakened_no_claim = map.clone();
+    weakened_no_claim["r3_5_5_terminal_receipt"]["no_claims"][0] =
+        Value::String("no claim".to_owned());
+    assert!(validate_r3_5_5_terminal(&weakened_no_claim, &inventory).is_err());
+
+    let mut stale_global_no_claim = map.clone();
+    stale_global_no_claim["no_claims"][0] = Value::String("stale historical claim".to_owned());
+    assert!(validate_r3_5_5_terminal(&stale_global_no_claim, &inventory).is_err());
+
+    let mut premature_capture = map.clone();
+    premature_capture["r3_5_5_terminal_receipt"]["captured_at_utc"] =
+        Value::String("2026-08-21T11:54:32Z".to_owned());
+    assert!(validate_r3_5_5_terminal(&premature_capture, &inventory).is_err());
+
+    let mut local_fallback = map.clone();
+    let replay = local_fallback["r3_5_5_terminal_receipt"]["replay_metadata"]
+        .as_array_mut()
+        .expect("replay array");
+    let current = replay
+        .iter_mut()
+        .find(|row| {
+            row.get("lane").and_then(Value::as_str) == Some("r3_5_gap_01_fail_closed_regression")
+        })
+        .expect("current regression lane");
+    current["local_fallback_used"] = Value::Bool(true);
+    assert!(validate_r3_5_5_terminal(&local_fallback, &inventory).is_err());
+
+    let mut zero_test_pass = map.clone();
+    let replay = zero_test_pass["r3_5_5_terminal_receipt"]["replay_metadata"]
+        .as_array_mut()
+        .expect("replay array");
+    let current = replay
+        .iter_mut()
+        .find(|row| {
+            row.get("lane").and_then(Value::as_str) == Some("r3_5_terminal_public_contract")
+        })
+        .expect("terminal public lane");
+    current["result"] = Value::String("PASS_0_OF_0".to_owned());
+    assert!(validate_r3_5_5_terminal(&zero_test_pass, &inventory).is_err());
+
+    let mut missing_rch_command = map.clone();
+    missing_rch_command["r3_5_5_terminal_receipt"]["replay_metadata"]
+        .as_array_mut()
+        .expect("replay array")
+        .iter_mut()
+        .find(|row| {
+            row.get("lane").and_then(Value::as_str) == Some("r3_5_terminal_public_contract")
+        })
+        .expect("terminal public lane")
+        .as_object_mut()
+        .expect("terminal public row")
+        .remove("full_rch_command");
+    assert!(validate_r3_5_5_terminal(&missing_rch_command, &inventory).is_err());
+
+    let mut stale_pin = map.clone();
+    stale_pin["r3_5_5_terminal_receipt"]["predecessor_receipts"][0]["sha256"] =
+        Value::String("stale".to_owned());
+    assert!(validate_r3_5_5_terminal(&stale_pin, &inventory).is_err());
 }
 
 #[test]
