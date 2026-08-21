@@ -1653,6 +1653,242 @@
         "The renewed rows fail closed at release 0.4.11 or UTC date 2026-10-21, whichever is reached first."
       ]
     },
+    "aggregate_signoff": {
+      "schema_version": "dependency-oracle-aggregate-signoff-v1",
+      "bead_id": "asupersync-mnotoo.4.4",
+      "capability_id": "CAP-VERIFICATION-PROFILES",
+      "as_of_release": "0.4.9",
+      "as_of_date_utc": "2026-08-21",
+      "verdict": "PASS_SCOPED_ORACLE_GOVERNANCE",
+      "unknown_state": "block-green",
+      "cutover_authorized": false,
+      "child_evidence": [
+        {
+          "bead_id": "asupersync-mnotoo.4.1",
+          "contract": "dependency-oracle-manifest-reconciliation-v1",
+          "source_commit": "4610374b937d001b76e8c6a46fe7467fe8e8d787",
+          "status": "PASS",
+          "evidence_scope": "Complete manifest and lockfile pin inventory, 10 active package rows, 15 exact manifest edges, classified non-oracle declarations, and fail-closed field and count reconciliation.",
+          "no_claim_boundary": "A manifest or lockfile pin is graph-text evidence, not compilation, runtime, security, or correctness proof."
+        },
+        {
+          "bead_id": "asupersync-mnotoo.4.2",
+          "contract": "dependency-oracle-quarantine-proof-v1",
+          "source_commit": "9bce599cd675ce3243fd3fb4ff060a8c6b0525a5",
+          "status": "PASS",
+          "evidence_scope": "Seven target/host unit-graph profiles, target-specific native activity classification, three honest blocked external-harness rows, and one independent reverse-cycle consumer.",
+          "no_claim_boundary": "Native unit reachability and cycle isolation do not prove native safety, successful linking, broker availability, or SQLite correctness."
+        },
+        {
+          "bead_id": "asupersync-mnotoo.4.3",
+          "contract": "dependency-oracle-retirement-sweep-v1",
+          "source_commit": "c3901f6c862d8343e6045530102157c9cd0e7334",
+          "status": "PASS",
+          "evidence_scope": "One owner-approved bounded decision for every due active row, with concrete missing evidence, retained invariants, next action, and live release/date expiry enforcement.",
+          "no_claim_boundary": "Renewal preserves current comparison coverage and is not a correctness claim or permission for indefinite retention."
+        }
+      ],
+      "inventory_summary": {
+        "planned_registry_row_count": 24,
+        "active_registry_row_count": 10,
+        "total_governed_row_count": 34,
+        "counts_by_class": {
+          "PURE_RUST_IN_WORKSPACE_ORACLE": 26,
+          "NATIVE_OR_C_ORACLE": 3,
+          "REVERSE_DEPENDENCY_ORACLE": 1,
+          "SECURITY_PROTOCOL_ORACLE": 4
+        },
+        "active_manifest_edge_count": 15,
+        "active_production_oracle_edge_count": 0,
+        "active_dev_or_conformance_edge_count": 15,
+        "active_build_dependency_oracle_edge_count": 0,
+        "active_native_oracle_count": 0,
+        "planned_native_oracle_count": 3,
+        "active_reverse_cycle_oracle_count": 0,
+        "planned_reverse_cycle_oracle_count": 1,
+        "due_active_oracle_count": 10,
+        "retired_due_oracle_count": 0,
+        "renewed_due_oracle_count": 10,
+        "pending_due_oracle_count": 0,
+        "unknown_registry_row_count": 0,
+        "unregistered_oracle_edge_count": 0,
+        "expired_active_oracle_count": 0,
+        "missing_required_field_count": 0
+      },
+      "graph_reconciliation": [
+        {
+          "profile_id": "root-default-normal",
+          "boundary": "root-default-normal-and-build",
+          "target_triple": "x86_64-unknown-linux-gnu",
+          "host_triple": "x86_64-unknown-linux-gnu",
+          "exact_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_oracle_o4_root_default\" CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo check --locked -p asupersync --target x86_64-unknown-linux-gnu -Z unstable-options --unit-graph",
+          "resolved_governed_package_ids": [],
+          "semantic_oracle_ids": [],
+          "support_only_registered_package_ids": [],
+          "observed_status": "PASS",
+          "observed_worker": "ovh-a",
+          "observed_exit_code": 0,
+          "observed_unit_count": 197,
+          "observed_at_utc": "2026-08-21",
+          "no_claim_boundary": "This excludes the ten active oracle packages from the root default Linux normal/build graph only."
+        },
+        {
+          "profile_id": "root-default-release",
+          "boundary": "root-default-release",
+          "target_triple": "x86_64-unknown-linux-gnu",
+          "host_triple": "x86_64-unknown-linux-gnu",
+          "exact_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_oracle_o4_root_release\" CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo check --locked -p asupersync --release --target x86_64-unknown-linux-gnu -Z unstable-options --unit-graph",
+          "resolved_governed_package_ids": [],
+          "semantic_oracle_ids": [],
+          "support_only_registered_package_ids": [],
+          "observed_status": "PASS",
+          "observed_worker": "hz2",
+          "observed_exit_code": 0,
+          "observed_unit_count": 197,
+          "observed_at_utc": "2026-08-21",
+          "no_claim_boundary": "Release mode changes code generation but does not broaden the root default feature graph."
+        },
+        {
+          "profile_id": "root-focused-dev",
+          "boundary": "root-focused-test-and-dev-dependencies",
+          "target_triple": "x86_64-unknown-linux-gnu",
+          "host_triple": "x86_64-unknown-linux-gnu",
+          "exact_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_oracle_o4_root_focused_dev\" CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo check --locked -p asupersync --test dependency_oracle_policy_contract --target x86_64-unknown-linux-gnu -Z unstable-options --unit-graph",
+          "resolved_governed_package_ids": [
+            "registry+https://github.com/rust-lang/crates.io-index#h2@0.4.15",
+            "registry+https://github.com/rust-lang/crates.io-index#httparse@1.10.1",
+            "registry+https://github.com/rust-lang/crates.io-index#opentelemetry-proto@0.32.0",
+            "registry+https://github.com/rust-lang/crates.io-index#opentelemetry_sdk@0.32.1",
+            "registry+https://github.com/rust-lang/crates.io-index#prometheus-client@0.25.0",
+            "registry+https://github.com/rust-lang/crates.io-index#raptorq@2.0.1",
+            "registry+https://github.com/rust-lang/crates.io-index#redis@1.4.1",
+            "registry+https://github.com/rust-lang/crates.io-index#sqlx@0.9.0",
+            "registry+https://github.com/rust-lang/crates.io-index#tokio-util@0.7.19",
+            "registry+https://github.com/rust-lang/crates.io-index#tokio@1.53.1"
+          ],
+          "semantic_oracle_ids": [
+            "active-httparse-http1-reference",
+            "active-opentelemetry-proto-reference",
+            "active-opentelemetry-sdk-reference",
+            "active-raptorq-rs-reference",
+            "active-redis-rs-reference",
+            "active-sqlx-mysql-reference",
+            "active-tokio-semaphore-reference",
+            "active-tokio-util-codec-reference"
+          ],
+          "support_only_registered_package_ids": [
+            "registry+https://github.com/rust-lang/crates.io-index#h2@0.4.15",
+            "registry+https://github.com/rust-lang/crates.io-index#prometheus-client@0.25.0"
+          ],
+          "observed_status": "PASS",
+          "observed_worker": "vmi1293453",
+          "observed_exit_code": 0,
+          "observed_unit_count": 395,
+          "observed_at_utc": "2026-08-21",
+          "no_claim_boundary": "Package resolution does not make every resolved package a semantic oracle in this test; only the registered root manifest edges own oracle evidence."
+        },
+        {
+          "profile_id": "conformance-focused-normal",
+          "boundary": "conformance-member-focused-binary-normal-dependencies",
+          "target_triple": "x86_64-unknown-linux-gnu",
+          "host_triple": "x86_64-unknown-linux-gnu",
+          "exact_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_oracle_o4_conformance_focused\" CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo check --locked -p asupersync-conformance --bin h2_continuation_conformance --target x86_64-unknown-linux-gnu -Z unstable-options --unit-graph",
+          "resolved_governed_package_ids": [
+            "registry+https://github.com/rust-lang/crates.io-index#h2@0.4.15",
+            "registry+https://github.com/rust-lang/crates.io-index#httparse@1.10.1",
+            "registry+https://github.com/rust-lang/crates.io-index#opentelemetry-proto@0.32.0",
+            "registry+https://github.com/rust-lang/crates.io-index#opentelemetry_sdk@0.32.1",
+            "registry+https://github.com/rust-lang/crates.io-index#prometheus-client@0.25.0",
+            "registry+https://github.com/rust-lang/crates.io-index#tokio-util@0.7.19",
+            "registry+https://github.com/rust-lang/crates.io-index#tokio@1.53.1"
+          ],
+          "semantic_oracle_ids": [
+            "active-h2-reference",
+            "active-opentelemetry-proto-reference",
+            "active-opentelemetry-sdk-reference",
+            "active-prometheus-client-reference"
+          ],
+          "support_only_registered_package_ids": [
+            "registry+https://github.com/rust-lang/crates.io-index#httparse@1.10.1",
+            "registry+https://github.com/rust-lang/crates.io-index#tokio-util@0.7.19",
+            "registry+https://github.com/rust-lang/crates.io-index#tokio@1.53.1"
+          ],
+          "observed_status": "PASS",
+          "observed_worker": "vmi1149989",
+          "observed_exit_code": 0,
+          "observed_unit_count": 277,
+          "observed_at_utc": "2026-08-21",
+          "no_claim_boundary": "Resolved transitive support packages are not promoted to semantic oracle evidence; only the four registered conformance rows are admitted."
+        }
+      ],
+      "security_protocol_evidence": [
+        {
+          "oracle_id": "x509-parser-security-reference",
+          "lifecycle_state": "planned",
+          "owner": "bead:asupersync-0h6myr.3.9",
+          "disposition": "planned-not-due",
+          "evidence_source": "oracle_registry row corpus_provenance, fixture_source, fixture_license, secret_redaction, and extension_signoff",
+          "corpus_requirement": "Independent DER vectors, browser-PKI corpus material, byte hashes, licenses, expected policy results, and validator version are mandatory before activation.",
+          "redaction_requirement": "Private keys, live certificates, and identifying subject data are forbidden from fixtures and logs.",
+          "resource_bound_requirement": "The activating harness must pin input-size and parser-resource limits and must not infer path-validation correctness from parser agreement."
+        },
+        {
+          "oracle_id": "otlp-generated-security-reference",
+          "lifecycle_state": "planned",
+          "owner": "bead:asupersync-5z2scg.2.10",
+          "disposition": "planned-not-due",
+          "evidence_source": "oracle_registry row corpus_provenance, fixture_source, fixture_license, secret_redaction, and extension_signoff",
+          "corpus_requirement": "Schema revision, collector version, signal type, byte hash, expected result, and limit profile are mandatory before activation.",
+          "redaction_requirement": "Resource attributes, trace baggage, log bodies, and authorization metadata must be synthetic or redacted.",
+          "resource_bound_requirement": "Generated-message and collector comparisons require explicit message, recursion, allocation, and batch bounds."
+        },
+        {
+          "oracle_id": "active-opentelemetry-sdk-reference",
+          "lifecycle_state": "active",
+          "owner": "bead:asupersync-mnotoo.4.3",
+          "disposition": "renewed-until-0.4.11-or-2026-10-21",
+          "evidence_source": "active_oracle_registry independent_corpus plus retirement_sweep decision; explicit XFAIL and unavailable conformance rows remain non-green",
+          "corpus_requirement": "Owned propagation fixtures and the conformance registry remain normative; missing resource, aggregation, and exporter evidence blocks retirement.",
+          "redaction_requirement": "Baggage, trace context, resource attributes, and exporter records used by the corpus must remain synthetic or redacted.",
+          "resource_bound_requirement": "The partial live scope cannot be generalized to arbitrary exporters, signals, or resource limits."
+        },
+        {
+          "oracle_id": "active-opentelemetry-proto-reference",
+          "lifecycle_state": "active",
+          "owner": "bead:asupersync-mnotoo.4.3",
+          "disposition": "renewed-until-0.4.11-or-2026-10-21",
+          "evidence_source": "active_oracle_registry independent_corpus plus retirement_sweep decision; generated-message XFAIL and unavailable rows remain non-green",
+          "corpus_requirement": "Versioned schemas, generated messages, and owned wire fixtures remain normative; missing finite-schema vectors block retirement.",
+          "redaction_requirement": "OTLP attributes, baggage, log bodies, and authorization metadata must remain synthetic or redacted.",
+          "resource_bound_requirement": "Every signal requires explicit message, field-count, recursion, allocation, and batch bounds before a broader claim."
+        }
+      ],
+      "required_negative_fixtures": [
+        "aggregate-missing-child-evidence",
+        "aggregate-unknown-state",
+        "native-build-unit-leakage",
+        "unknown-active-native-state",
+        "live-release-expiry",
+        "live-date-expiry",
+        "missing-owner",
+        "reverse-dependency-in-workspace-dev",
+        "reverse-consumer-loses-workspace-boundary"
+      ],
+      "replay_contract": {
+        "focused_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_dependency_oracle_policy\" cargo test -p asupersync --test dependency_oracle_policy_contract -- --nocapture",
+        "graph_receipt_count": 4,
+        "terminal_log_policy": "The closing Bead comment must retain the exact focused command, RCH worker, exit status, test count, and elapsed result; every graph row above retains its replay command and observed worker/result.",
+        "structured_e2e_owner": "asupersync-dep-p1-foundations-upksjk.6.2",
+        "negative_fixture_signoff_owner": "asupersync-dep-p1-foundations-upksjk.6.6"
+      },
+      "explicit_no_claims": [
+        "PASS_SCOPED_ORACLE_GOVERNANCE proves registry and quarantine policy consistency only; it is not broad workspace or release-readiness proof.",
+        "The signoff authorizes no dependency removal, production cutover, feature change, external service, package manager, or fixture deletion.",
+        "Differential agreement does not prove either implementation correct, secure, interoperable, performant, or complete.",
+        "Planned external native harnesses remain explicit BLOCKED non-results, and partial security/protocol surfaces remain XFAIL or unavailable where registered.",
+        "The graph receipts cover one Linux target/host and their exact feature/target commands; other platforms require separate evidence."
+      ]
+    },
     "classified_non_oracle_candidates": [
       {
         "edge_id": "asupersync-tokio-compat/Cargo.toml::dev-dependencies::futures-lite",
@@ -1760,6 +1996,8 @@
       ]
     },
     "required_negative_fixtures": [
+      "aggregate-missing-child-evidence",
+      "aggregate-unknown-state",
       "manifest-pin-drift",
       "unregistered-oracle-edge",
       "expired-active-oracle",

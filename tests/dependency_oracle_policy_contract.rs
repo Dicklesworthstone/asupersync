@@ -16,6 +16,7 @@ const BEAD_ID: &str = "asupersync-dep-p1-foundations-upksjk.3";
 const RECONCILIATION_BEAD_ID: &str = "asupersync-mnotoo.4.1";
 const QUARANTINE_BEAD_ID: &str = "asupersync-mnotoo.4.2";
 const RETIREMENT_SWEEP_BEAD_ID: &str = "asupersync-mnotoo.4.3";
+const AGGREGATE_SIGNOFF_BEAD_ID: &str = "asupersync-mnotoo.4.4";
 const PROGRAM_ID: &str = "asupersync-ir2uf0";
 const ARTIFACT_PATH: &str = "artifacts/dependency_oracle_policy_v1.json";
 const DOC_PATH: &str = "docs/dependency_oracle_policy.md";
@@ -68,6 +69,19 @@ fn quarantine_proof(policy: &Value) -> &Value {
     reconciliation(policy)
         .get("quarantine_proof")
         .expect("quarantine_proof must exist")
+}
+
+fn aggregate_signoff(policy: &Value) -> &Value {
+    reconciliation(policy)
+        .get("aggregate_signoff")
+        .expect("aggregate_signoff must exist")
+}
+
+fn aggregate_graph_by_id<'a>(policy: &'a Value, profile_id: &str) -> &'a Value {
+    array(aggregate_signoff(policy), "graph_reconciliation")
+        .iter()
+        .find(|row| string(row, "profile_id") == profile_id)
+        .unwrap_or_else(|| panic!("missing aggregate graph profile {profile_id}"))
 }
 
 fn quarantine_profile_by_id<'a>(policy: &'a Value, profile_id: &str) -> &'a Value {
@@ -1960,6 +1974,492 @@ fn validate_quarantine_proof(policy: &Value) -> Vec<String> {
     errors
 }
 
+fn validate_aggregate_signoff(policy: &Value) -> Vec<String> {
+    let signoff = aggregate_signoff(policy);
+    let reconciliation = reconciliation(policy);
+    let mut errors = Vec::new();
+
+    for key in [
+        "schema_version",
+        "bead_id",
+        "capability_id",
+        "as_of_release",
+        "as_of_date_utc",
+        "verdict",
+        "unknown_state",
+    ] {
+        nonempty_string(signoff, key, &mut errors, "aggregate-signoff");
+    }
+    if string(signoff, "schema_version") != "dependency-oracle-aggregate-signoff-v1"
+        || string(signoff, "bead_id") != AGGREGATE_SIGNOFF_BEAD_ID
+        || string(signoff, "capability_id") != "CAP-VERIFICATION-PROFILES"
+        || string(signoff, "verdict") != "PASS_SCOPED_ORACLE_GOVERNANCE"
+        || string(signoff, "unknown_state") != "block-green"
+    {
+        errors.push("aggregate signoff identity or verdict drifted".to_owned());
+    }
+    if string(signoff, "as_of_release") != string(reconciliation, "as_of_release")
+        || string(signoff, "as_of_date_utc") != string(reconciliation, "as_of_date_utc")
+    {
+        errors.push("aggregate signoff freshness must match manifest reconciliation".to_owned());
+    }
+    if signoff.get("cutover_authorized").and_then(Value::as_bool) != Some(false)
+        || reconciliation
+            .get("cutover_authorized")
+            .and_then(Value::as_bool)
+            != Some(false)
+    {
+        errors.push("aggregate signoff must not authorize dependency cutover".to_owned());
+    }
+
+    let expected_children = [
+        (
+            RECONCILIATION_BEAD_ID,
+            RECONCILIATION_CONTRACT_ID,
+            "4610374b937d001b76e8c6a46fe7467fe8e8d787",
+        ),
+        (
+            QUARANTINE_BEAD_ID,
+            "dependency-oracle-quarantine-proof-v1",
+            "9bce599cd675ce3243fd3fb4ff060a8c6b0525a5",
+        ),
+        (
+            RETIREMENT_SWEEP_BEAD_ID,
+            "dependency-oracle-retirement-sweep-v1",
+            "c3901f6c862d8343e6045530102157c9cd0e7334",
+        ),
+    ]
+    .into_iter()
+    .map(|(bead_id, contract, source_commit)| (bead_id, (contract, source_commit)))
+    .collect::<BTreeMap<_, _>>();
+    let children = array(signoff, "child_evidence");
+    let child_ids = children
+        .iter()
+        .map(|row| string(row, "bead_id"))
+        .collect::<BTreeSet<_>>();
+    if child_ids != expected_children.keys().copied().collect() || child_ids.len() != children.len()
+    {
+        errors.push("aggregate child evidence must be exact and unique".to_owned());
+    }
+    for child in children {
+        let bead_id = string(child, "bead_id");
+        let Some((expected_contract, expected_commit)) = expected_children.get(bead_id) else {
+            continue;
+        };
+        if string(child, "contract") != *expected_contract
+            || string(child, "source_commit") != *expected_commit
+            || string(child, "status") != "PASS"
+        {
+            errors.push(format!("{bead_id}: aggregate child receipt drifted"));
+        }
+        for key in ["evidence_scope", "no_claim_boundary"] {
+            nonempty_string(child, key, &mut errors, bead_id);
+        }
+    }
+
+    let planned = array(policy, "oracle_registry");
+    let active = active_registry(policy);
+    let mut all_ids = BTreeSet::new();
+    let mut counts_by_class = BTreeMap::<String, u64>::new();
+    for row in planned.iter().chain(active.iter()) {
+        if !all_ids.insert(string(row, "oracle_id")) {
+            errors.push(format!(
+                "duplicate aggregate oracle id: {}",
+                string(row, "oracle_id")
+            ));
+        }
+        *counts_by_class
+            .entry(string(row, "oracle_class").to_owned())
+            .or_default() += 1;
+    }
+    let inventory = object(signoff, "inventory_summary");
+    let class_counts = object_object(inventory, "counts_by_class");
+    for class in [PURE_RUST, NATIVE, REVERSE, SECURITY] {
+        if object_integer(class_counts, class) != counts_by_class.get(class).copied().unwrap_or(0) {
+            errors.push(format!("aggregate class count drifted: {class}"));
+        }
+    }
+    let report = object(reconciliation, "report");
+    let report_classes = object_object(report, "classes");
+    let retirement = object(retirement_sweep(policy), "summary");
+    let expected_counts = [
+        ("planned_registry_row_count", planned.len() as u64),
+        ("active_registry_row_count", active.len() as u64),
+        ("total_governed_row_count", all_ids.len() as u64),
+        (
+            "active_manifest_edge_count",
+            object_integer(report, "active_oracle_manifest_edge_count"),
+        ),
+        (
+            "active_production_oracle_edge_count",
+            object_integer(
+                object_object(report_classes, "production"),
+                "active_oracle_edge_count",
+            ),
+        ),
+        (
+            "active_dev_or_conformance_edge_count",
+            object_integer(
+                object_object(report_classes, "dev"),
+                "active_oracle_edge_count",
+            ),
+        ),
+        (
+            "active_build_dependency_oracle_edge_count",
+            object_integer(
+                object_object(report_classes, "build"),
+                "active_oracle_edge_count",
+            ),
+        ),
+        (
+            "active_native_oracle_count",
+            object_integer(
+                object_object(report_classes, "native"),
+                "active_oracle_edge_count",
+            ),
+        ),
+        (
+            "planned_native_oracle_count",
+            object_integer(
+                object_object(report_classes, "native"),
+                "planned_oracle_count",
+            ),
+        ),
+        (
+            "active_reverse_cycle_oracle_count",
+            object_integer(
+                object_object(report_classes, "reverse_cycle"),
+                "active_oracle_edge_count",
+            ),
+        ),
+        (
+            "planned_reverse_cycle_oracle_count",
+            object_integer(
+                object_object(report_classes, "reverse_cycle"),
+                "planned_oracle_count",
+            ),
+        ),
+        (
+            "due_active_oracle_count",
+            object_integer(retirement, "due_count"),
+        ),
+        (
+            "retired_due_oracle_count",
+            object_integer(retirement, "retired_count"),
+        ),
+        (
+            "renewed_due_oracle_count",
+            object_integer(retirement, "renewed_count"),
+        ),
+        (
+            "pending_due_oracle_count",
+            object_integer(retirement, "pending_count"),
+        ),
+        ("unknown_registry_row_count", 0),
+        (
+            "unregistered_oracle_edge_count",
+            object_integer(report, "unregistered_oracle_edge_count"),
+        ),
+        (
+            "expired_active_oracle_count",
+            object_integer(report, "expired_active_oracle_count"),
+        ),
+        (
+            "missing_required_field_count",
+            object_integer(report, "missing_required_field_count"),
+        ),
+    ];
+    for (key, expected) in expected_counts {
+        if object_integer(inventory, key) != expected {
+            errors.push(format!("aggregate inventory count drifted: {key}"));
+        }
+    }
+    for zero_key in [
+        "unknown_registry_row_count",
+        "unregistered_oracle_edge_count",
+        "expired_active_oracle_count",
+        "missing_required_field_count",
+        "pending_due_oracle_count",
+    ] {
+        if object_integer(inventory, zero_key) != 0 {
+            errors.push(format!(
+                "aggregate signoff cannot be green with nonzero {zero_key}"
+            ));
+        }
+    }
+
+    let all_active_package_ids = active
+        .iter()
+        .map(|row| string(row, "package_id").to_owned())
+        .collect::<BTreeSet<_>>();
+    let root_semantic_ids = active
+        .iter()
+        .filter(|row| {
+            array(row, "manifest_edges")
+                .iter()
+                .any(|edge| string(edge, "manifest_path") == MANIFEST_PATH)
+        })
+        .map(|row| string(row, "oracle_id").to_owned())
+        .collect::<BTreeSet<_>>();
+    let conformance_semantic_ids = active
+        .iter()
+        .filter(|row| {
+            array(row, "manifest_edges").iter().any(|edge| {
+                string(edge, "manifest_path") == "conformance/Cargo.toml"
+                    && string(edge, "status") != "duplicate-test-edge"
+            })
+        })
+        .map(|row| string(row, "oracle_id").to_owned())
+        .collect::<BTreeSet<_>>();
+    let package_id_for_oracle =
+        |oracle_id: &str| string(active_row_by_id(policy, oracle_id), "package_id").to_owned();
+    let root_semantic_packages = root_semantic_ids
+        .iter()
+        .map(|oracle_id| package_id_for_oracle(oracle_id))
+        .collect::<BTreeSet<_>>();
+    let conformance_semantic_packages = conformance_semantic_ids
+        .iter()
+        .map(|oracle_id| package_id_for_oracle(oracle_id))
+        .collect::<BTreeSet<_>>();
+    let conformance_resolved_names = [
+        "h2",
+        "httparse",
+        "opentelemetry-proto",
+        "opentelemetry_sdk",
+        "prometheus-client",
+        "tokio",
+        "tokio-util",
+    ]
+    .into_iter()
+    .collect::<BTreeSet<_>>();
+    let conformance_resolved_packages = active
+        .iter()
+        .filter(|row| conformance_resolved_names.contains(string(row, "package_name")))
+        .map(|row| string(row, "package_id").to_owned())
+        .collect::<BTreeSet<_>>();
+    let expected_graphs = [
+        (
+            "root-default-normal",
+            197,
+            BTreeSet::new(),
+            BTreeSet::new(),
+            BTreeSet::new(),
+        ),
+        (
+            "root-default-release",
+            197,
+            BTreeSet::new(),
+            BTreeSet::new(),
+            BTreeSet::new(),
+        ),
+        (
+            "root-focused-dev",
+            395,
+            all_active_package_ids.clone(),
+            root_semantic_ids,
+            all_active_package_ids
+                .difference(&root_semantic_packages)
+                .cloned()
+                .collect(),
+        ),
+        (
+            "conformance-focused-normal",
+            277,
+            conformance_resolved_packages.clone(),
+            conformance_semantic_ids,
+            conformance_resolved_packages
+                .difference(&conformance_semantic_packages)
+                .cloned()
+                .collect(),
+        ),
+    ];
+    let graph_ids = array(signoff, "graph_reconciliation")
+        .iter()
+        .map(|row| string(row, "profile_id"))
+        .collect::<BTreeSet<_>>();
+    if graph_ids != expected_graphs.iter().map(|row| row.0).collect()
+        || graph_ids.len() != array(signoff, "graph_reconciliation").len()
+    {
+        errors.push("aggregate graph matrix must be exact and unique".to_owned());
+    }
+    for (profile_id, unit_count, package_ids, semantic_ids, support_ids) in expected_graphs {
+        let graph = aggregate_graph_by_id(policy, profile_id);
+        for key in [
+            "boundary",
+            "target_triple",
+            "host_triple",
+            "exact_command",
+            "observed_status",
+            "observed_worker",
+            "observed_at_utc",
+            "no_claim_boundary",
+        ] {
+            nonempty_string(graph, key, &mut errors, profile_id);
+        }
+        let command = string(graph, "exact_command");
+        if string(graph, "target_triple") != "x86_64-unknown-linux-gnu"
+            || string(graph, "host_triple") != "x86_64-unknown-linux-gnu"
+            || string(graph, "observed_status") != "PASS"
+            || integer(graph, "observed_exit_code") != 0
+            || integer(graph, "observed_unit_count") != unit_count
+            || !command.contains("RCH_REQUIRE_REMOTE=1 rch exec --")
+            || !command.contains("cargo check --locked")
+            || !command.contains("--target x86_64-unknown-linux-gnu")
+            || !command.contains("-Z unstable-options --unit-graph")
+        {
+            errors.push(format!("{profile_id}: aggregate graph receipt drifted"));
+        }
+        if profile_id == "root-default-release" && !command.contains("--release") {
+            errors.push("root-default-release command lost release mode".to_owned());
+        }
+        if profile_id == "root-focused-dev"
+            && !command.contains("--test dependency_oracle_policy_contract")
+        {
+            errors.push("root-focused-dev command lost its focused test target".to_owned());
+        }
+        if profile_id == "conformance-focused-normal"
+            && !command.contains("--bin h2_continuation_conformance")
+        {
+            errors.push("conformance graph command lost its focused binary".to_owned());
+        }
+        if string_set(graph, "resolved_governed_package_ids") != package_ids
+            || string_set(graph, "semantic_oracle_ids") != semantic_ids
+            || string_set(graph, "support_only_registered_package_ids") != support_ids
+        {
+            errors.push(format!(
+                "{profile_id}: package reachability or semantic/support role drifted"
+            ));
+        }
+    }
+
+    let expected_security_ids = [
+        "active-opentelemetry-proto-reference",
+        "active-opentelemetry-sdk-reference",
+        "otlp-generated-security-reference",
+        "x509-parser-security-reference",
+    ]
+    .into_iter()
+    .collect::<BTreeSet<_>>();
+    let security_rows = array(signoff, "security_protocol_evidence");
+    let security_ids = security_rows
+        .iter()
+        .map(|row| string(row, "oracle_id"))
+        .collect::<BTreeSet<_>>();
+    let registered_security_ids = planned
+        .iter()
+        .chain(active.iter())
+        .filter(|row| string(row, "oracle_class") == SECURITY)
+        .map(|row| string(row, "oracle_id"))
+        .collect::<BTreeSet<_>>();
+    if security_ids != expected_security_ids
+        || security_ids != registered_security_ids
+        || security_ids.len() != security_rows.len()
+    {
+        errors.push("aggregate security/protocol evidence must be exact and unique".to_owned());
+    }
+    let decisions = array(retirement_sweep(policy), "decisions");
+    for evidence in security_rows {
+        let oracle_id = string(evidence, "oracle_id");
+        for key in [
+            "lifecycle_state",
+            "owner",
+            "disposition",
+            "evidence_source",
+            "corpus_requirement",
+            "redaction_requirement",
+            "resource_bound_requirement",
+        ] {
+            nonempty_string(evidence, key, &mut errors, oracle_id);
+        }
+        let registered = planned
+            .iter()
+            .chain(active.iter())
+            .find(|row| string(row, "oracle_id") == oracle_id)
+            .expect("aggregate security row must project a registered oracle");
+        if string(evidence, "lifecycle_state") != string(registered, "lifecycle_state")
+            || string(evidence, "owner") != string(registered, "owner")
+        {
+            errors.push(format!("{oracle_id}: security evidence projection drifted"));
+        }
+        let decision = decisions
+            .iter()
+            .find(|row| string(row, "oracle_id") == oracle_id);
+        if string(registered, "lifecycle_state") == "planned" {
+            if string(evidence, "disposition") != "planned-not-due" || decision.is_some() {
+                errors.push(format!(
+                    "{oracle_id}: planned security row has an invalid due disposition"
+                ));
+            }
+        } else {
+            let Some(decision) = decision else {
+                errors.push(format!(
+                    "{oracle_id}: active security row lacks a retirement decision"
+                ));
+                continue;
+            };
+            if string(decision, "disposition") != "renewed"
+                || !string(evidence, "disposition").contains(string(decision, "new_expiry_release"))
+                || !string(evidence, "disposition")
+                    .contains(string(decision, "new_expiry_date_utc"))
+                || string_set(decision, "missing_evidence").is_empty()
+            {
+                errors.push(format!(
+                    "{oracle_id}: active security renewal evidence drifted"
+                ));
+            }
+        }
+    }
+
+    let required_fixtures = string_set(signoff, "required_negative_fixtures");
+    let available_fixtures = string_set(reconciliation, "required_negative_fixtures")
+        .union(&string_set(
+            policy.get("validation").expect("validation must exist"),
+            "required_negative_fixtures",
+        ))
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let expected_fixtures = [
+        "aggregate-missing-child-evidence",
+        "aggregate-unknown-state",
+        "live-date-expiry",
+        "live-release-expiry",
+        "missing-owner",
+        "native-build-unit-leakage",
+        "reverse-consumer-loses-workspace-boundary",
+        "reverse-dependency-in-workspace-dev",
+        "unknown-active-native-state",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect::<BTreeSet<_>>();
+    if required_fixtures != expected_fixtures || !required_fixtures.is_subset(&available_fixtures) {
+        errors.push("aggregate negative-fixture closure drifted".to_owned());
+    }
+
+    let replay = object(signoff, "replay_contract");
+    if object_string(replay, "focused_command") != PROOF_COMMAND
+        || object_integer(replay, "graph_receipt_count")
+            != array(signoff, "graph_reconciliation").len() as u64
+        || object_string(replay, "structured_e2e_owner")
+            != object_string(object(policy, "validation"), "aggregate_e2e_owner")
+        || object_string(replay, "negative_fixture_signoff_owner")
+            != object_string(object(policy, "validation"), "aggregate_signoff_owner")
+    {
+        errors.push("aggregate replay contract drifted".to_owned());
+    }
+    nonempty_object_string(
+        replay,
+        "terminal_log_policy",
+        &mut errors,
+        "aggregate-signoff",
+    );
+    if string_set(signoff, "explicit_no_claims").len() < 5 {
+        errors.push("aggregate signoff requires explicit no-claim boundaries".to_owned());
+    }
+
+    errors
+}
+
 fn active_edge_ids(policy: &Value) -> BTreeSet<String> {
     active_registry(policy)
         .iter()
@@ -2023,6 +2523,7 @@ fn validate_manifest_reconciliation(policy: &Value) -> Vec<String> {
     );
     errors.extend(validate_quarantine_proof(policy));
     errors.extend(validate_retirement_sweep(policy));
+    errors.extend(validate_aggregate_signoff(policy));
 
     let edge_ids = active_edge_ids(policy);
     let expected_edges = expected_active_oracle_edges();
@@ -2736,6 +3237,8 @@ fn manifest_reconciliation_metadata_and_required_fields_are_exact() {
     assert_eq!(
         string_set(reconciliation, "required_negative_fixtures"),
         [
+            "aggregate-missing-child-evidence",
+            "aggregate-unknown-state",
             "expired-active-oracle",
             "live-date-expiry",
             "live-release-expiry",
@@ -2895,6 +3398,138 @@ fn negative_fixture_planned_native_lane_cannot_report_green() {
         errors.iter().any(|error| error
             .contains("planned native lane must remain blocked without an external manifest")),
         "false native green did not fail closed: {errors:?}"
+    );
+}
+
+#[test]
+fn aggregate_signoff_reconciles_every_registry_graph_and_retirement_row() {
+    let policy = policy();
+    let errors = validate_aggregate_signoff(&policy);
+    assert!(
+        errors.is_empty(),
+        "aggregate oracle signoff errors:\n{}",
+        errors.join("\n")
+    );
+
+    let inventory = object(aggregate_signoff(&policy), "inventory_summary");
+    assert_eq!(object_integer(inventory, "total_governed_row_count"), 34);
+    assert_eq!(object_integer(inventory, "unknown_registry_row_count"), 0);
+    assert_eq!(object_integer(inventory, "pending_due_oracle_count"), 0);
+    assert_eq!(
+        object_integer(inventory, "active_production_oracle_edge_count"),
+        0
+    );
+    assert_eq!(
+        object_integer(inventory, "active_build_dependency_oracle_edge_count"),
+        0
+    );
+}
+
+#[test]
+fn aggregate_graph_receipts_separate_resolution_from_semantic_oracle_evidence() {
+    let policy = policy();
+    let default = aggregate_graph_by_id(&policy, "root-default-normal");
+    let release = aggregate_graph_by_id(&policy, "root-default-release");
+    let root_dev = aggregate_graph_by_id(&policy, "root-focused-dev");
+    let conformance = aggregate_graph_by_id(&policy, "conformance-focused-normal");
+
+    assert!(string_set(default, "resolved_governed_package_ids").is_empty());
+    assert!(string_set(release, "resolved_governed_package_ids").is_empty());
+    assert_eq!(
+        string_set(root_dev, "resolved_governed_package_ids").len(),
+        10
+    );
+    assert_eq!(string_set(root_dev, "semantic_oracle_ids").len(), 8);
+    assert_eq!(
+        string_set(root_dev, "support_only_registered_package_ids").len(),
+        2
+    );
+    assert_eq!(
+        string_set(conformance, "resolved_governed_package_ids").len(),
+        7
+    );
+    assert_eq!(string_set(conformance, "semantic_oracle_ids").len(), 4);
+    assert_eq!(
+        string_set(conformance, "support_only_registered_package_ids").len(),
+        3
+    );
+}
+
+#[test]
+fn aggregate_security_rows_keep_independent_corpora_redaction_and_bounds_normative() {
+    let policy = policy();
+    let rows = array(aggregate_signoff(&policy), "security_protocol_evidence");
+    assert_eq!(rows.len(), 4);
+    for row in rows {
+        for key in [
+            "corpus_requirement",
+            "redaction_requirement",
+            "resource_bound_requirement",
+        ] {
+            assert!(
+                !string(row, key).trim().is_empty(),
+                "{} lacks {key}",
+                string(row, "oracle_id")
+            );
+        }
+    }
+}
+
+#[test]
+fn aggregate_required_negative_fixtures_cover_leakage_expiry_owner_and_cycle() {
+    let policy = policy();
+    let fixtures = string_set(aggregate_signoff(&policy), "required_negative_fixtures");
+    for required in [
+        "native-build-unit-leakage",
+        "unknown-active-native-state",
+        "live-release-expiry",
+        "live-date-expiry",
+        "missing-owner",
+        "reverse-dependency-in-workspace-dev",
+        "reverse-consumer-loses-workspace-boundary",
+    ] {
+        assert!(
+            fixtures.contains(required),
+            "aggregate signoff lacks {required}"
+        );
+    }
+}
+
+#[test]
+fn negative_fixture_aggregate_unknown_state_blocks_green() {
+    let mut policy = policy();
+    policy
+        .get_mut("manifest_reconciliation")
+        .and_then(|value| value.get_mut("aggregate_signoff"))
+        .and_then(|value| value.get_mut("inventory_summary"))
+        .and_then(Value::as_object_mut)
+        .expect("aggregate inventory fixture")
+        .insert("unknown_registry_row_count".to_owned(), Value::from(1));
+    let errors = validate_aggregate_signoff(&policy);
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("cannot be green with nonzero unknown_registry_row_count")),
+        "unknown aggregate state did not fail closed: {errors:?}"
+    );
+}
+
+#[test]
+fn negative_fixture_aggregate_missing_child_evidence_blocks_green() {
+    let mut policy = policy();
+    policy
+        .get_mut("manifest_reconciliation")
+        .and_then(|value| value.get_mut("aggregate_signoff"))
+        .and_then(|value| value.get_mut("child_evidence"))
+        .and_then(Value::as_array_mut)
+        .expect("aggregate child evidence fixture")
+        .pop();
+    let errors = validate_aggregate_signoff(&policy);
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("aggregate child evidence must be exact and unique")),
+        "missing aggregate child evidence did not fail closed: {errors:?}"
     );
 }
 
@@ -3282,6 +3917,14 @@ fn reconciliation_docs_preserve_current_and_planned_no_claim_boundaries() {
         RETIREMENT_SWEEP_BEAD_ID,
         "retired zero and renewed all",
         "release `0.4.11` or UTC date `2026-10-21`",
+        AGGREGATE_SIGNOFF_BEAD_ID,
+        "dependency-oracle-aggregate-signoff-v1",
+        "all 34 governed rows",
+        "root-default-normal",
+        "root-default-release",
+        "root-focused-dev",
+        "conformance-focused-normal",
+        "resolution-to-semantic-oracle role confusion",
         NIGHTLY_WORKFLOW_PATH,
         ORACLE_EXPIRY_CRON,
         "Manifest and lockfile pins prove only",

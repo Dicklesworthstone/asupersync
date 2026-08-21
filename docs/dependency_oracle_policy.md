@@ -331,6 +331,66 @@ These checks establish quarantine and role classification. They do not prove
 native-code safety, successful linking, broker availability, SQL correctness,
 performance parity, or permission to remove an incumbent dependency.
 
+## Aggregate governance signoff
+
+`asupersync-mnotoo.4.4` adds the
+`dependency-oracle-aggregate-signoff-v1` packet under
+`manifest_reconciliation.aggregate_signoff`. It is the terminal reconciliation
+of the three child contracts, not a new registry and not a dependency-cutover
+decision.
+
+The aggregate covers all 34 governed rows without duplicating their authority:
+
+| Population | Count | Terminal interpretation |
+|---|---:|---|
+| Planned registry rows | 24 | Incumbent or future-oracle plans remain governed but are not active retained oracles. |
+| Active registry rows | 10 | All are exact dev/conformance references with bounded retirement decisions. |
+| Pure-Rust rows | 26 | 18 planned plus 8 active. |
+| Security/protocol rows | 4 | 2 planned plus 2 active; independent corpus, redaction, and resource-bound requirements remain normative. |
+| Native/C rows | 3 | All remain planned external or fixture-only oracles; none is an ordinary active oracle. |
+| Reverse-cycle rows | 1 | The FrankenSQLite comparison stays planned; its cycle-isolation evidence remains the independent neutral consumer. |
+
+The aggregate report has zero unregistered edges, expired active rows, missing
+required fields, pending retirement decisions, and unknown registry rows. It
+preserves 15 active dev/conformance manifest edges, zero production oracle
+edges, and zero build-dependency oracle edges. Cargo `mode=build` or
+`run-custom-build` units are not automatically build-dependency oracle edges;
+the manifest section and semantic registry row remain authoritative.
+
+Four live Linux target/host unit-graph receipts make the ordinary graph split
+explicit:
+
+| Receipt | Governed packages resolved | Semantic oracle rows admitted |
+|---|---:|---:|
+| `root-default-normal` | 0 | 0 |
+| `root-default-release` | 0 | 0 |
+| `root-focused-dev` | 10 | 8 root rows; `h2` and `prometheus-client` are resolved support in this target, not promoted evidence. |
+| `conformance-focused-normal` | 7 | 4 conformance rows; `httparse`, `tokio`, and `tokio-util` are resolved support only. |
+
+Each receipt records the exact `RCH_REQUIRE_REMOTE=1 rch exec -- ... cargo
+check --locked ... -Z unstable-options --unit-graph` command, target, host,
+worker, exit status, unit count, observation date, resolved package IDs,
+semantic row IDs, support-only package IDs, and a narrow no-claim boundary.
+The aggregate contract derives the semantic sets from the registered manifest
+edges, so transitive reachability cannot silently become oracle evidence.
+
+The security/protocol projection covers all four registered rows:
+
+- the planned X.509 and generated-OTLP rows remain blocked until their
+  independent vectors, licenses, hashes, redaction, and resource limits are
+  complete;
+- the active OpenTelemetry SDK and protobuf rows remain partial, explicitly
+  fail closed on XFAIL/unavailable surfaces, and expire at release `0.4.11` or
+  UTC date `2026-10-21`; and
+- each active row links to its concrete retirement-sweep missing evidence,
+  retained invariants, owner, and next action.
+
+The aggregate's required negative-fixture closure names native leakage,
+unknown native state, stale release and date expiry, missing owner, reverse
+dependency placement, and loss of the neutral-consumer workspace boundary.
+The aggregate cannot be green if any child receipt is missing or any unknown,
+unregistered, expired, incomplete, or pending count is nonzero.
+
 ## Activation procedure
 
 Before removing a production dependency:
@@ -410,7 +470,10 @@ fixtures for:
 - missing feature-unification proof; and
 - allowed/forbidden profile overlap;
 - unknown graph-profile names; and
-- duplicate registry, class, profile, or required-field IDs.
+- duplicate registry, class, profile, or required-field IDs;
+- aggregate child-evidence omission;
+- aggregate unknown-state drift; and
+- resolution-to-semantic-oracle role confusion.
 
 It also checks the current manifest truth: native incumbents remain production
 edges until cutover, are not ordinary dev dependencies, and FrankenSQLite is
@@ -467,6 +530,12 @@ Passing this contract proves only that:
 - the report separates Production | 0, Dev / conformance | 15, Build | 0,
   Native | 0 active, 3 planned, and Reverse-cycle | 0 active, 1 planned;
 - all 24 initial oracle plans have complete governance rows;
+- all 34 planned and active rows are present in the aggregate signoff with zero
+  unknown or pending state;
+- live root normal, root release, focused root dev, and focused conformance
+  unit-graph receipts preserve package-resolution versus semantic-oracle roles;
+- all four security/protocol rows preserve independent-corpus, redaction, and
+  resource-bound requirements;
 - class placement and forbidden graph lanes are internally consistent;
 - retirement beads and aggregate E2E owners exist;
 - current native incumbency is not falsely reported as completed cutover;
