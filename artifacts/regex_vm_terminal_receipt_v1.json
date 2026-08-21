@@ -4,7 +4,7 @@
   "bead_id": "asupersync-5z2scg.8.3.4.4",
   "capability_id": "CAP-REGEX-PRIVACY",
   "terminal_id": "ASUP-REGEX-VM-TERMINAL-V1",
-  "generated_at_utc": "2026-07-26T06:56:02Z",
+  "generated_at_utc": "2026-08-21T14:46:24Z",
   "authority": {
     "compiler_terminal_path": "artifacts/regex_compiler_terminal_receipt_v1.json",
     "compiler_terminal_sha256": "3a67d943175079ab0378080de5b8ee06fd5e979b0c9555dc30a45cbb62da2f5b",
@@ -54,7 +54,7 @@
     "adversarial_evidence_complete": true,
     "performance_measurement_complete": true,
     "r3_6_bounded_cache_implemented": true,
-    "r3_6_performance_measurement_complete": false,
+    "r3_6_performance_measurement_complete": true,
     "all_mapped_rows_same_or_better": false,
     "matcher_api_integration_authorized": false,
     "production_wiring_authorized": false,
@@ -63,7 +63,10 @@
       "CANCELLATION_AND_BOUNDED_VM_ROWS_SAME",
       "RAW_TWO_TARGET_DISTRIBUTIONS_RECORDED",
       "UNOPTIMIZED_MATCH_DISTRIBUTIONS_WORSE_RETAIN_INCUMBENT",
-      "ALLOCATION_AND_RSS_UNKNOWN_NO_REGRESSION_ADMISSION",
+      "R3_4_UNOPTIMIZED_RESOURCE_CELLS_UNKNOWN_NO_REGRESSION_ADMISSION",
+      "R3_6_RELEASE_PROFILE_X86_64_AND_APPLE_SILICON_DISTRIBUTIONS_RECORDED",
+      "R3_6_ALLOCATION_AND_RSS_CENSUS_RECORDED",
+      "R3_6_MATCH_DISTRIBUTIONS_WORSE_RETAIN_INCUMBENT",
       "UPSTREAM_COMPILER_TERMINAL_RETAINS_INCUMBENT",
       "PUBLIC_API_AND_PRODUCTION_WIRING_NOT_EVALUATED"
     ],
@@ -90,7 +93,7 @@
   },
   "r3_6_cache_policy": {
     "bead_id": "asupersync-5z2scg.8.3.6",
-    "status": "IMPLEMENTED_FOCUSED_PERFORMANCE_PENDING",
+    "status": "IMPLEMENTED_MEASURED_KEEP_INCUMBENT_DEFER",
     "ownership": "CALLER_OWNED_NO_GLOBAL_INSTANCE",
     "eviction": "BOUNDED_LRU_WITH_LEASE_SAFE_EVICTION",
     "key_identity": "FULL_CONFIG_FINGERPRINT_PREFILTER_EXACT_SOURCE_EQUALITY",
@@ -134,7 +137,7 @@
       "rss_claim": false
     },
     "focused_inline_tests": 10,
-    "performance_status": "NOT_YET_MEASURED_FOR_R3_6",
+    "performance_status": "MEASURED_RELEASE_PROFILE_TWO_ARCHITECTURES_KEEP_INCUMBENT_DEFER",
     "production_cutover_eligible": false
   },
   "adversarial_rows": [
@@ -341,6 +344,233 @@
     ],
     "admission": "measurement only; no threshold, improvement, or no-regression claim"
   },
+  "r3_6_release_performance_evidence": {
+    "status": "MEASURED_KEEP_INCUMBENT_DEFER",
+    "profile": "cargo test --release with debuginfo disabled",
+    "harness_revision": "3244d50a1d6fb29ea2914b99babd205d88c59522",
+    "harness_sha256": "3f307d38ae61ff4019c0f741090a74e3aac1b7d1dbe5380bb6477638d58df9ec",
+    "allocation_runner_sha256": "6968d0224c35e075d1baa8a2cafb14c0c17f6a24c3cc2ebc1a49e81f91acb577",
+    "measurement_base_revision": "90b960012c191d7da0141d58c6b18bd4616fd8a0",
+    "latency_overlay_fingerprint": "e6eef4ea75c7d1fd6b56fa64093a2c915dfedf88116dd8c3a172b790d5c2f000",
+    "sample_count_per_operation": 1001,
+    "warmup_count_per_operation": 32,
+    "raw_samples_per_target": 24024,
+    "percentile_method": "nearest-rank",
+    "incumbent_revision": "regex@1.13.1",
+    "operation_order": [
+      "owned_compile",
+      "incumbent_compile",
+      "owned_cache_miss",
+      "owned_cache_hit",
+      "owned_is_match",
+      "incumbent_is_match"
+    ],
+    "metric_order": [
+      "operations_per_second",
+      "p50_ns",
+      "p95_ns",
+      "p999_ns"
+    ],
+    "raw_latency_receipts": [
+      {
+        "target_id": "ovh-a-x86_64",
+        "rch_job_id": "29985909466202203",
+        "marker": "R3_6_REGEX_VM_RELEASE_PERF_RECEIPT=",
+        "status": "TERMINAL_EXIT_0_RAW_ARRAYS_RETAINED_IN_RCH_JOB_OUTPUT"
+      },
+      {
+        "target_id": "mac-mini-max-aarch64-apple-darwin",
+        "rch_job_id": "29985909466202206",
+        "marker": "R3_6_REGEX_VM_RELEASE_PERF_RECEIPT=",
+        "status": "TERMINAL_EXIT_0_RAW_ARRAYS_RETAINED_IN_RCH_JOB_OUTPUT"
+      }
+    ],
+    "measurement_commands": [
+      "RCH_WORKER=ovh-a RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --overlay-path tests/regex_vm_terminal_receipt_contract.rs -- env R3_6_REGEX_PERF_TARGET=ovh-a-x86_64 CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test --release -j 4 -p asupersync --features metrics --test regex_vm_terminal_receipt_contract r3_6_release_performance_emitter -- --exact --nocapture",
+      "RCH_WORKER=mac-mini-max RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --overlay-path tests/regex_vm_terminal_receipt_contract.rs -- env PATH='/Users/jemanuel/.cargo/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin' R3_6_REGEX_PERF_TARGET=mac-mini-max-aarch64-apple-darwin CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test --release -j 6 --target aarch64-apple-darwin -p asupersync --features metrics --test regex_vm_terminal_receipt_contract r3_6_release_performance_emitter -- --exact --nocapture",
+      "RCH_WORKER=ts2 RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --overlay-path scripts/alloc_census.sh --overlay-path tests/regex_vm_terminal_receipt_contract.rs -- env PATH='/home/ubuntu/.cargo/bin:/usr/local/bin:/usr/bin:/bin' R3_6_REGEX_PERF_TARGET=ts2-x86_64-heaptrack CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER='scripts/alloc_census.sh --cargo-runner-heaptrack' cargo test --release -j 16 --target x86_64-unknown-linux-gnu -p asupersync --features metrics --test regex_vm_terminal_receipt_contract r3_6_release_performance_emitter -- --exact --nocapture",
+      "RCH_WORKER=mac-mini-max RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --overlay-path scripts/alloc_census.sh --overlay-path tests/regex_vm_terminal_receipt_contract.rs -- env PATH='/Users/jemanuel/.cargo/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin' R3_6_REGEX_PERF_TARGET=mac-mini-max-aarch64-xctrace CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_AARCH64_APPLE_DARWIN_RUNNER='scripts/alloc_census.sh --cargo-runner-xctrace' cargo test --release -j 6 --target aarch64-apple-darwin -p asupersync --features metrics --test regex_vm_terminal_receipt_contract r3_6_release_performance_emitter -- --exact --nocapture"
+    ],
+    "target_rows": [
+      {
+        "target_id": "ovh-a-x86_64",
+        "rch_job_id": "29985909466202203",
+        "host_class": "Linux x86_64",
+        "hardware": "AMD Ryzen 7 5800X, 16 logical CPUs, 67307249664 bytes RAM",
+        "scenario_rows": [
+          {
+            "scenario_id": "ascii_capture_tail_match",
+            "pattern_bytes": 18,
+            "input_bytes": 4106,
+            "expected_match": true,
+            "operation_metrics": [
+              [184960, 5270, 5841, 13215],
+              [52129, 18866, 20067, 41689],
+              [219195, 4529, 4668, 9218],
+              [19870967, 50, 51, 90],
+              [1813, 552288, 563239, 632258],
+              [14545190, 70, 80, 271]
+            ]
+          },
+          {
+            "scenario_id": "unicode_property_tail_match",
+            "pattern_bytes": 11,
+            "input_bytes": 6144,
+            "expected_match": true,
+            "operation_metrics": [
+              [260825, 3797, 4027, 8155],
+              [8293, 119966, 125035, 129203],
+              [410335, 2425, 2474, 5891],
+              [22232093, 41, 51, 80],
+              [2436, 409269, 414008, 597874],
+              [20637473, 40, 61, 511]
+            ]
+          },
+          {
+            "scenario_id": "ambiguous_alternation_suffix_match",
+            "pattern_bytes": 11,
+            "input_bytes": 2049,
+            "expected_match": true,
+            "operation_metrics": [
+              [288301, 3417, 3677, 9799],
+              [67569, 14657, 15589, 22682],
+              [369598, 2695, 2746, 6322],
+              [22556729, 40, 50, 70],
+              [1969, 506231, 514187, 724812],
+              [21134194, 40, 60, 370]
+            ]
+          },
+          {
+            "scenario_id": "wide_alternation_full_scan_miss",
+            "pattern_bytes": 58,
+            "input_bytes": 3328,
+            "expected_match": false,
+            "operation_metrics": [
+              [85748, 11562, 12053, 18225],
+              [52240, 18986, 19747, 26791],
+              [95490, 10419, 10530, 16390],
+              [10497173, 100, 101, 110],
+              [283, 3527941, 3552296, 3856679],
+              [17280668, 50, 120, 591]
+            ]
+          }
+        ]
+      },
+      {
+        "target_id": "mac-mini-max-aarch64-apple-darwin",
+        "rch_job_id": "29985909466202206",
+        "host_class": "Apple Silicon aarch64 macOS",
+        "hardware": "Apple M4 Pro Mac16,11, 14 logical CPUs, 68719476736 bytes RAM",
+        "scenario_rows": [
+          {
+            "scenario_id": "ascii_capture_tail_match",
+            "pattern_bytes": 18,
+            "input_bytes": 4106,
+            "expected_match": true,
+            "operation_metrics": [
+              [133325, 4209, 17958, 95375],
+              [36731, 15917, 67625, 398792],
+              [236980, 4166, 4417, 7875],
+              [28622898, 42, 42, 125],
+              [2036, 485458, 578459, 800250],
+              [7320140, 83, 542, 3584]
+            ]
+          },
+          {
+            "scenario_id": "unicode_property_tail_match",
+            "pattern_bytes": 11,
+            "input_bytes": 6144,
+            "expected_match": true,
+            "operation_metrics": [
+              [359723, 2458, 3625, 20042],
+              [11610, 82500, 106416, 139083],
+              [468251, 2125, 2292, 3709],
+              [32962328, 41, 42, 84],
+              [2545, 385750, 430167, 643583],
+              [7622833, 42, 791, 3750]
+            ]
+          },
+          {
+            "scenario_id": "ambiguous_alternation_suffix_match",
+            "pattern_bytes": 11,
+            "input_bytes": 2049,
+            "expected_match": true,
+            "operation_metrics": [
+              [366673, 2625, 3041, 20541],
+              [70646, 13375, 15250, 100250],
+              [407254, 2458, 2792, 3250],
+              [29812961, 42, 42, 125],
+              [2187, 429250, 556708, 1465167],
+              [5594585, 42, 1042, 5500]
+            ]
+          },
+          {
+            "scenario_id": "wide_alternation_full_scan_miss",
+            "pattern_bytes": 58,
+            "input_bytes": 3328,
+            "expected_match": false,
+            "operation_metrics": [
+              [111892, 8250, 10167, 51375],
+              [63548, 14416, 17875, 116666],
+              [119890, 8166, 9584, 25334],
+              [13170706, 83, 84, 209],
+              [293, 3284334, 4146583, 8148542],
+              [1720283, 292, 1875, 6500]
+            ]
+          }
+        ]
+      }
+    ],
+    "resource_rows": [
+      {
+        "target_id": "ts2-x86_64-heaptrack",
+        "rch_job_id": "29985909466202208",
+        "host_class": "Linux x86_64",
+        "hardware": "AMD Ryzen Threadripper PRO 5995WX, 128 logical CPUs, 265479237632 bytes RAM",
+        "tool": "heaptrack",
+        "raw_trace_path": "/data/tmp/rch/asupersync/d446d4eb5a52fc53/.rch-tmp/asupersync_alloc_census/heaptrack_20260821_103517_2079235.zst",
+        "allocation_calls": 53248319,
+        "temporary_allocations": 19075354,
+        "peak_heap": "1.67M",
+        "peak_rss_including_heaptrack_overhead": "9.99M",
+        "process_lifetime_residual_bytes": 944,
+        "residual_attribution": "592 bytes stripped-test-process startup plus 352 bytes pthread TLS allocate_dtv; not attributed to PrivatePatternCache"
+      },
+      {
+        "target_id": "mac-mini-max-aarch64-xctrace",
+        "rch_job_id": "29985909466202209",
+        "host_class": "Apple Silicon aarch64 macOS",
+        "hardware": "Apple M4 Pro Mac16,11, 14 logical CPUs, 68719476736 bytes RAM",
+        "tool": "Xcode Allocations via xctrace",
+        "raw_trace_path": "/Users/jemanuel/.rch/builds/asupersync/e8761697373330ac/.rch-tmp/asupersync_alloc_census/xctrace_20260821_103913_6365.trace",
+        "allocation_count_total": 53249485,
+        "allocation_count_transient": 53248509,
+        "allocation_count_persistent": 976,
+        "allocation_count_events": 87537504,
+        "total_bytes": 7688683200,
+        "transient_bytes": 7688561664,
+        "persistent_bytes": 121536
+      },
+      {
+        "target_id": "mac-mini-max-aarch64-rss",
+        "host_class": "Apple Silicon aarch64 macOS",
+        "hardware": "Apple M4 Pro Mac16,11, 14 logical CPUs, 68719476736 bytes RAM",
+        "tool": "/usr/bin/time -l",
+        "execution": "direct SSH execution of the exact successful RCH-built release test binary from job 29985909466202209; no Cargo invocation or rebuild",
+        "exit_code": 0,
+        "wall_seconds": 4.55,
+        "maximum_resident_set_bytes": 7766016,
+        "peak_memory_footprint_bytes": 5849376,
+        "page_reclaims": 535,
+        "page_faults": 116,
+        "swaps": 0
+      }
+    ],
+    "cache_shutdown_invariant": "all eight measured target/scenario rows ended closed with zero entries, live accounted bytes, in-flight compiles, and in-flight compile accounted bytes",
+    "observed_ordering": "owned compile and cache-hit paths were strong, but owned is_match throughput was orders of magnitude below regex@1.13.1 for every scenario on both latency targets",
+    "disposition": "KEEP_INCUMBENT_DEFER",
+    "admission": "measurement only; no performance improvement, no-regression, production cutover, allocator-usable-size, or leak-free-process claim"
+  },
   "retained_minimized_cases": [
     {
       "case_id": "RGX-VM-TERM-MIN-001",
@@ -377,13 +607,12 @@
   },
   "no_claims": [
     "no production privacy wiring or dependency removal",
-    "no R3.6 release-profile, allocation, RSS, Apple Silicon, or x86 performance result yet",
+    "no R3.6 performance improvement, no-regression, or production-cutover claim",
     "no complete public regex API or replacement-template expansion",
     "no accepted regex syntax expansion",
     "no persisted or deserializable VM or cancellation state",
-    "no allocation or RSS measurement",
-    "no performance improvement or no-regression claim",
-    "no isolated binary-size or cross-target result",
+    "no allocator-usable-size, zero-process-leak, or production-RSS guarantee",
+    "no isolated binary-size result or target coverage beyond the named x86_64 Linux and Apple Silicon hosts",
     "no broad workspace health or release-readiness claim",
     "no live RCH fleet availability claim",
     "no local Cargo fallback approval"

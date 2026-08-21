@@ -219,7 +219,7 @@ fn identity_authority_pins_and_fail_closed_decision_are_exact() {
     assert!(boolean(&decision, "explicit_cancellation_checkpoints"));
     assert!(boolean(&decision, "performance_measurement_complete"));
     assert!(boolean(&decision, "r3_6_bounded_cache_implemented"));
-    assert!(!boolean(&decision, "r3_6_performance_measurement_complete"));
+    assert!(boolean(&decision, "r3_6_performance_measurement_complete"));
     assert!(!boolean(&decision, "ambient_cancellation_state"));
     assert!(!boolean(&decision, "all_mapped_rows_same_or_better"));
     assert!(!boolean(&decision, "matcher_api_integration_authorized"));
@@ -372,7 +372,7 @@ fn r3_6_cache_policy_is_bounded_exact_private_and_deferred() {
     assert_eq!(text(&policy, "bead_id"), "asupersync-5z2scg.8.3.6");
     assert_eq!(
         text(&policy, "status"),
-        "IMPLEMENTED_FOCUSED_PERFORMANCE_PENDING"
+        "IMPLEMENTED_MEASURED_KEEP_INCUMBENT_DEFER"
     );
     assert_eq!(
         text(&policy, "ownership"),
@@ -568,6 +568,124 @@ fn measured_target_rows_have_raw_provenance_and_honest_unknown_cells() {
 }
 
 #[test]
+fn r3_6_release_profile_evidence_is_cross_host_bounded_and_deferred() {
+    let value = contract();
+    let performance = Value::Object(object(&value, "r3_6_release_performance_evidence").clone());
+    assert_eq!(
+        text(&performance, "status"),
+        "MEASURED_KEEP_INCUMBENT_DEFER"
+    );
+    assert_eq!(
+        text(&performance, "harness_revision"),
+        "3244d50a1d6fb29ea2914b99babd205d88c59522"
+    );
+    assert_eq!(number(&performance, "sample_count_per_operation"), 1_001);
+    assert_eq!(number(&performance, "warmup_count_per_operation"), 32);
+    assert_eq!(number(&performance, "raw_samples_per_target"), 24_024);
+    assert_eq!(text(&performance, "percentile_method"), "nearest-rank");
+    assert_eq!(text(&performance, "disposition"), "KEEP_INCUMBENT_DEFER");
+
+    let operation_order = array(&performance, "operation_order")
+        .iter()
+        .map(|row| row.as_str().expect("operation name"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        operation_order,
+        [
+            "owned_compile",
+            "incumbent_compile",
+            "owned_cache_miss",
+            "owned_cache_hit",
+            "owned_is_match",
+            "incumbent_is_match",
+        ]
+    );
+    assert_eq!(
+        array(&performance, "metric_order"),
+        ["operations_per_second", "p50_ns", "p95_ns", "p999_ns"]
+            .map(Value::from)
+            .as_slice()
+    );
+
+    let expected_targets = [
+        ("ovh-a-x86_64", "29985909466202203"),
+        ("mac-mini-max-aarch64-apple-darwin", "29985909466202206"),
+    ];
+    let target_rows = array(&performance, "target_rows");
+    assert_eq!(target_rows.len(), expected_targets.len());
+    for (target, (expected_id, expected_job)) in target_rows.iter().zip(expected_targets) {
+        assert_eq!(text(target, "target_id"), expected_id);
+        assert_eq!(text(target, "rch_job_id"), expected_job);
+        let scenarios = array(target, "scenario_rows");
+        assert_eq!(scenarios.len(), 4);
+        for scenario in scenarios {
+            let metrics = array(scenario, "operation_metrics");
+            assert_eq!(metrics.len(), operation_order.len());
+            for row in metrics {
+                let cells = row.as_array().expect("operation metric row");
+                assert_eq!(cells.len(), 4);
+                let values = cells
+                    .iter()
+                    .map(|cell| cell.as_u64().expect("positive metric"))
+                    .collect::<Vec<_>>();
+                assert!(values.iter().all(|value| *value > 0));
+                assert!(values[1] <= values[2]);
+                assert!(values[2] <= values[3]);
+            }
+            let owned_match = metrics[4].as_array().expect("owned match metrics");
+            let incumbent_match = metrics[5].as_array().expect("incumbent match metrics");
+            assert!(
+                owned_match[1].as_u64().expect("owned p50")
+                    > incumbent_match[1].as_u64().expect("incumbent p50"),
+                "owned match p50 must retain the incumbent for {} on {expected_id}",
+                text(scenario, "scenario_id")
+            );
+        }
+    }
+
+    let raw_receipts = array(&performance, "raw_latency_receipts");
+    assert_eq!(raw_receipts.len(), 2);
+    assert_eq!(text(&raw_receipts[0], "rch_job_id"), "29985909466202203");
+    assert_eq!(text(&raw_receipts[1], "rch_job_id"), "29985909466202206");
+    for receipt in raw_receipts {
+        assert_eq!(
+            text(receipt, "marker"),
+            "R3_6_REGEX_VM_RELEASE_PERF_RECEIPT="
+        );
+        assert!(text(receipt, "status").contains("TERMINAL_EXIT_0"));
+    }
+
+    let resources = array(&performance, "resource_rows");
+    assert_eq!(resources.len(), 3);
+    let heaptrack = resources
+        .iter()
+        .find(|row| text(row, "target_id") == "ts2-x86_64-heaptrack")
+        .expect("heaptrack resource row");
+    assert_eq!(text(heaptrack, "rch_job_id"), "29985909466202208");
+    assert_eq!(number(heaptrack, "allocation_calls"), 53_248_319);
+    assert_eq!(number(heaptrack, "temporary_allocations"), 19_075_354);
+    assert_eq!(number(heaptrack, "process_lifetime_residual_bytes"), 944);
+
+    let xctrace = resources
+        .iter()
+        .find(|row| text(row, "target_id") == "mac-mini-max-aarch64-xctrace")
+        .expect("xctrace resource row");
+    assert_eq!(text(xctrace, "rch_job_id"), "29985909466202209");
+    assert_eq!(number(xctrace, "allocation_count_total"), 53_249_485);
+    assert_eq!(number(xctrace, "persistent_bytes"), 121_536);
+
+    let rss = resources
+        .iter()
+        .find(|row| text(row, "target_id") == "mac-mini-max-aarch64-rss")
+        .expect("Apple RSS row");
+    assert_eq!(number(rss, "maximum_resident_set_bytes"), 7_766_016);
+    assert_eq!(number(rss, "peak_memory_footprint_bytes"), 5_849_376);
+    assert_eq!(number(rss, "swaps"), 0);
+    assert!(text(&performance, "cache_shutdown_invariant").contains("zero entries"));
+    assert!(text(&performance, "admission").contains("no performance improvement"));
+}
+
+#[test]
 fn docs_proof_and_no_claim_boundaries_are_discoverable() {
     let value = contract();
     let docs = read(DOC_PATH);
@@ -579,9 +697,11 @@ fn docs_proof_and_no_claim_boundaries_are_discoverable() {
         "caller-supplied",
         "PrivatePatternCache",
         "default 2 GiB aggregate budget intentionally admits one",
-        "R3.6 release-profile throughput, allocation, RSS",
+        "R3.6 release-profile matrix is now measured",
+        "24,024 raw samples",
+        "53,248,319 allocation calls",
         "No local Cargo fallback is approved.",
-        "no performance improvement or no-regression claim",
+        "no production cutover is admitted",
         "no production privacy wiring or dependency removal",
         "<!-- END REGEX VM TERMINAL RECEIPT -->",
     ] {
@@ -611,10 +731,9 @@ fn docs_proof_and_no_claim_boundaries_are_discoverable() {
         .join("\n");
     for marker in [
         "no production privacy wiring or dependency removal",
-        "no R3.6 release-profile, allocation, RSS, Apple Silicon, or x86 performance result yet",
+        "no R3.6 performance improvement, no-regression, or production-cutover claim",
         "no complete public regex API",
-        "no allocation or RSS measurement",
-        "no performance improvement or no-regression claim",
+        "no allocator-usable-size, zero-process-leak, or production-RSS guarantee",
         "no broad workspace health or release-readiness claim",
         "no local Cargo fallback approval",
     ] {
