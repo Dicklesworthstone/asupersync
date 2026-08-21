@@ -1916,7 +1916,7 @@
       {"path":"tests/regex_syntax_terminal_receipt_contract.rs","sha256":"b82b7b7d1f38bd5d33cbddd9841375336d546cd0d1fb476397905cf5a3436e48","line_count":520},
       {"path":"tests/regex_semantic_terminal_receipt_contract.rs","sha256":"6bc89410fdffac6603db8562add8426acf3eea4376abe2ccecc410dc3738fbee","line_count":818},
       {"path":"tests/regex_compiler_terminal_receipt_contract.rs","sha256":"23aa6d53db1d662eaf6c45ef87ce4153154f7abfa853eb28218f9756ed72972e","line_count":1357},
-      {"path":"tests/regex_vm_core_contract.rs","sha256":"b225e926a5a319ce82609e6a19cd98cb58b4dbfb5634d6d31319195bc94066","line_count":737},
+      {"path":"tests/regex_vm_core_contract.rs","sha256":"b225e926a5a319ce82609e6a19cd98cb58b4dbfbfb5634d6d31319195bc94066","line_count":737},
       {"path":"tests/regex_vm_captures_contract.rs","sha256":"e641ab926a3221eb9ed2af542e2a4ab9c1f7408f647015e2f50d1bc684bad621","line_count":612},
       {"path":"tests/regex_vm_iteration_contract.rs","sha256":"e15080cdf67caab871674dac663667a4e45ca6c241fd8cab31b351880424daa3","line_count":782},
       {"path":"tests/regex_vm_terminal_receipt_contract.rs","sha256":"1297af65839227b939d15a4740488f67387d02b644e97aa9b8ba6f058e4a00f9","line_count":1109}
