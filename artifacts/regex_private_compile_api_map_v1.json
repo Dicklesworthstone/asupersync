@@ -775,6 +775,368 @@
     "remote_required": true,
     "local_fallback_used": false
   },
+  "r3_5_4_compatibility_extension": {
+    "extension_schema_version": 1,
+    "extension_id": "ASUP-REGEX-PRIVATE-API-COMPATIBILITY-V1",
+    "bead_id": "asupersync-5z2scg.8.3.5.4",
+    "captured_at_utc": "2026-08-21T11:17:00Z",
+    "claim_revision": "da992970cbb0590014a36236682c138cd83b41a4",
+    "historical_r3_5_1_base_preserved": true,
+    "decision": {
+      "disposition": "KEEP_INCUMBENT",
+      "private_candidate_state": "CONFIGURED_COMPILE_ON_LOAD_REUSE_READY",
+      "api_map_complete": true,
+      "unknown_rows": 0,
+      "r3_5_5_may_consume_this_extension": true,
+      "public_reexport_authorized": false,
+      "privacy_config_integration_authorized": false,
+      "compatibility_shim_authorized": false,
+      "production_wiring_authorized": false,
+      "dependency_removal_authorized": false
+    },
+    "source_pins": [
+      {
+        "path": "src/observability/regex_syntax.rs",
+        "sha256": "17dd552c2e5d9ec5e7e06bc4c14d29aac7f0c175609f389d720ad94b6a3514ac",
+        "line_count": 3516,
+        "revision": "da992970cbb0590014a36236682c138cd83b41a4"
+      },
+      {
+        "path": "src/observability/regex_semantics.rs",
+        "sha256": "ab0821e49cb0233c31ec23172c18fde56610e42136ec42dd14da0b02cb1cc64c",
+        "line_count": 1257,
+        "revision": "da992970cbb0590014a36236682c138cd83b41a4"
+      },
+      {
+        "path": "src/observability/regex_boundaries.rs",
+        "sha256": "3f87bdd55ad86cd40d4eb7300595abea4133ec76dac1d144132714abc7835658",
+        "line_count": 1399,
+        "revision": "da992970cbb0590014a36236682c138cd83b41a4"
+      },
+      {
+        "path": "src/observability/regex_ir.rs",
+        "sha256": "aa287fd02abd3a2a4196e01b9c27d86937cb220f796e652263c94726b28f48b4",
+        "line_count": 1317,
+        "revision": "da992970cbb0590014a36236682c138cd83b41a4"
+      },
+      {
+        "path": "src/observability/regex_lowering.rs",
+        "sha256": "c6eb65265b080aa234359b83ff50a7ddaf05b733c411dc7f55abbbe9f652a25f",
+        "line_count": 2071,
+        "revision": "da992970cbb0590014a36236682c138cd83b41a4"
+      },
+      {
+        "path": "src/observability/regex_vm.rs",
+        "sha256": "9537ed38763d388222a3d3d2e00037c54e47c660c24b3c9ee47fbccd7730b312",
+        "line_count": 5198,
+        "revision": "da992970cbb0590014a36236682c138cd83b41a4"
+      },
+      {
+        "path": "tests/fixtures/downstream-consumer-proof/src/bin/metrics_consumer.rs",
+        "sha256": "6864f4d70f99ed3f636d28076fd09e9f229238cb2103ada6d785f4735ddfe13b",
+        "line_count": 68,
+        "revision": "da992970cbb0590014a36236682c138cd83b41a4"
+      }
+    ],
+    "configuration_contract": {
+      "type": "PrivatePatternConfig",
+      "schema_version": 1,
+      "format": "deterministic compact JSON",
+      "default_document_byte_ceiling": 8388608,
+      "unknown_fields": "REJECT",
+      "missing_fields": "REJECT",
+      "unsupported_schema": "REJECT",
+      "invalid_iteration_limits": "REJECT_WITH_STATIC_FIELD_AND_NUMERIC_BOUND",
+      "invalid_pattern": "REJECT_WITH_SECRET_SAFE_PRIVATE_COMPILE_ERROR",
+      "load_is_atomic": true,
+      "serializer_is_structural_not_admission": true,
+      "serializer_never_returns_a_document_above_its_selected_ceiling": true,
+      "explicit_config_retains_pattern": true,
+      "loaded_value_retains_pattern": false,
+      "loaded_value_is_send_sync": true,
+      "replacement_zero_limits_are_valid_when_the_operation_uses_zero": true,
+      "integer_wire_width": "target usize",
+      "cross_target_oversized_integer_disposition": "KEEP"
+    },
+    "capability_rows": [
+      {
+        "surface_id": "RGX-R354-COMPILE",
+        "family": "compile",
+        "incumbent_surface": "regex::Regex::new",
+        "candidate_surface": "PrivatePatternConfig::load and PrivateCompiledPattern::compile",
+        "disposition": "SAME",
+        "evidence": "accepted private compile corpus and compile-on-load tests"
+      },
+      {
+        "surface_id": "RGX-R354-VALIDATION",
+        "family": "validation",
+        "incumbent_surface": "fallible invalid-pattern rejection",
+        "candidate_surface": "atomic schema, limit, and private compiler validation",
+        "disposition": "SAME",
+        "evidence": "malformed, unknown, missing, unsupported, invalid-limit, and invalid-pattern tests"
+      },
+      {
+        "surface_id": "RGX-R354-MATCH",
+        "family": "match",
+        "incumbent_surface": "Regex::is_match",
+        "candidate_surface": "LoadedPrivatePattern::is_match",
+        "disposition": "SAME",
+        "evidence": "focused private VM parity corpus"
+      },
+      {
+        "surface_id": "RGX-R354-FIND",
+        "family": "find",
+        "incumbent_surface": "Regex::find",
+        "candidate_surface": "LoadedPrivatePattern::find",
+        "disposition": "SAME",
+        "evidence": "leftmost-first exact-span tests"
+      },
+      {
+        "surface_id": "RGX-R354-CAPTURES",
+        "family": "captures",
+        "incumbent_surface": "Regex::captures",
+        "candidate_surface": "LoadedPrivatePattern::captures",
+        "disposition": "SAME",
+        "evidence": "participating, optional, named, empty, repeated, and Unicode capture tests"
+      },
+      {
+        "surface_id": "RGX-R354-ITERATION",
+        "family": "iteration",
+        "incumbent_surface": "Regex::find_iter and captures_iter accepted workflows",
+        "candidate_surface": "LoadedPrivatePattern::find_iter",
+        "disposition": "SAME",
+        "evidence": "deterministic non-overlapping, overlapping, empty, and Unicode progress tests"
+      },
+      {
+        "surface_id": "RGX-R354-REPLACEMENT",
+        "family": "replacement",
+        "incumbent_surface": "Regex::replace_all total replacement syntax",
+        "candidate_surface": "LoadedPrivatePattern::replace_all",
+        "disposition": "SAME",
+        "evidence": "golden, edge-table, and property differential against regex 1.13.1"
+      },
+      {
+        "surface_id": "RGX-R354-DIAGNOSTICS",
+        "family": "diagnostics",
+        "incumbent_surface": "public regex::Error type and wording",
+        "candidate_surface": "private stable codes, stages, fields, spans, and numeric bounds",
+        "disposition": "KEEP",
+        "evidence": "secret-safe Display, Debug, source-chain, and redaction-canary tests"
+      },
+      {
+        "surface_id": "RGX-R354-LIMITS",
+        "family": "limits",
+        "incumbent_surface": "incumbent public behavior without candidate limit DTOs",
+        "candidate_surface": "explicit compile, VM, capture, iteration, replacement, and document limits",
+        "disposition": "KEEP",
+        "evidence": "private limit round trip and exact failure tests; no public limit API"
+      },
+      {
+        "surface_id": "RGX-R354-CONFIGURATION",
+        "family": "configuration",
+        "incumbent_surface": "PrivacyConfig public fields and builders",
+        "candidate_surface": "crate-private PrivatePatternConfig versioned JSON recipe",
+        "disposition": "KEEP",
+        "evidence": "deterministic round trip, bounded serialization, atomic load, and immutable reuse tests"
+      },
+      {
+        "surface_id": "RGX-R354-PUB-NESTED-PATH",
+        "family": "public-api",
+        "incumbent_surface": "asupersync::observability::otel::PrivacyConfig",
+        "candidate_surface": "no public candidate re-export",
+        "disposition": "KEEP",
+        "evidence": "downstream metrics consumer compiles and runs the incumbent path"
+      },
+      {
+        "surface_id": "RGX-R354-PUB-SPAN-ALIAS",
+        "family": "public-api",
+        "incumbent_surface": "SpanConfig = PrivacyConfig",
+        "candidate_surface": "no candidate alias",
+        "disposition": "KEEP",
+        "evidence": "frozen public inventory contract"
+      },
+      {
+        "surface_id": "RGX-R354-PUB-MUTABLE-FIELDS",
+        "family": "public-api",
+        "incumbent_surface": "exhaustively constructible mutable PrivacyConfig fields",
+        "candidate_surface": "private recipe cannot replace public struct construction",
+        "disposition": "KEEP",
+        "evidence": "v0.4.3 compatibility gate"
+      },
+      {
+        "surface_id": "RGX-R354-PUB-DIRECT-MUTATION",
+        "family": "configuration",
+        "incumbent_surface": "direct pii_patterns mutation and per-call recompilation with invalid entries skipped",
+        "candidate_surface": "immutable compile-on-load value",
+        "disposition": "KEEP",
+        "evidence": "downstream direct-mutation fixture"
+      },
+      {
+        "surface_id": "RGX-R354-PUB-FALLIBLE-BUILDER",
+        "family": "compile",
+        "incumbent_surface": "try_with_pii_pattern returns Result<Self, regex::Error>",
+        "candidate_surface": "different private error type",
+        "disposition": "KEEP",
+        "evidence": "downstream valid and invalid builder fixture"
+      },
+      {
+        "surface_id": "RGX-R354-PUB-PANIC-BUILDER",
+        "family": "compile",
+        "incumbent_surface": "with_pii_pattern panic behavior",
+        "candidate_surface": "no public equivalent",
+        "disposition": "KEEP",
+        "evidence": "frozen public inventory contract"
+      },
+      {
+        "surface_id": "RGX-R354-PUB-CLONE-DEBUG",
+        "family": "public-api",
+        "incumbent_surface": "PrivacyConfig Clone and Debug including public fields",
+        "candidate_surface": "source-secret-safe private Debug",
+        "disposition": "KEEP",
+        "evidence": "public derives remain unchanged; private Debug has separate contract"
+      },
+      {
+        "surface_id": "RGX-R354-PUB-FEATURE-GATE",
+        "family": "feature",
+        "incumbent_surface": "metrics-gated public PrivacyConfig",
+        "candidate_surface": "metrics-gated crate-private modules",
+        "disposition": "KEEP",
+        "evidence": "downstream metrics-profile run"
+      },
+      {
+        "surface_id": "RGX-R354-CANDIDATE-VISIBILITY",
+        "family": "public-api",
+        "incumbent_surface": "public PrivacyConfig and regex types",
+        "candidate_surface": "pub within pub(crate) regex modules",
+        "disposition": "KEEP",
+        "evidence": "src/observability/mod.rs visibility and no API map re-export"
+      },
+      {
+        "surface_id": "RGX-R354-BYTE-REGEX",
+        "family": "syntax",
+        "incumbent_surface": "regex::bytes workflows",
+        "candidate_surface": "no public byte-regex facade",
+        "disposition": "KEEP",
+        "evidence": "not owned by the private UTF-8 pattern facade"
+      },
+      {
+        "surface_id": "RGX-R354-BUILTIN-ORDER-LUHN",
+        "family": "privacy-behavior",
+        "incumbent_surface": "built-in detector order, tokens, and Luhn handling",
+        "candidate_surface": "not wired to built-in PrivacyConfig policy",
+        "disposition": "KEEP",
+        "evidence": "frozen privacy capability inventory"
+      },
+      {
+        "surface_id": "RGX-R354-PRODUCTION-WIRING",
+        "family": "integration",
+        "incumbent_surface": "PrivacyConfig production redaction path",
+        "candidate_surface": "no production call site",
+        "disposition": "KEEP",
+        "evidence": "R3.5.4 explicitly forbids wiring"
+      },
+      {
+        "surface_id": "RGX-R354-WHOLE-OP-CANCELLATION",
+        "family": "cancellation",
+        "incumbent_surface": "synchronous incumbent operations",
+        "candidate_surface": "match-search control does not cover template parsing or output emission",
+        "disposition": "KEEP",
+        "evidence": "broader cancellation policy remains owned by R3.6"
+      },
+      {
+        "surface_id": "RGX-R354-STRICT-REPLACEMENT",
+        "family": "replacement",
+        "incumbent_surface": "total malformed-looking dollar handling",
+        "candidate_surface": "strict parser is separately named private opt-in only",
+        "disposition": "KEEP",
+        "evidence": "compatible replace_all never uses strict mode"
+      },
+      {
+        "surface_id": "RGX-R354-CROSS-TARGET-CONFIG",
+        "family": "configuration",
+        "incumbent_surface": "no private recipe portability contract",
+        "candidate_surface": "usize-backed JSON limit fields",
+        "disposition": "KEEP",
+        "evidence": "oversized x86_64 to wasm32 integer round trips are explicitly unclaimed"
+      },
+      {
+        "surface_id": "RGX-R354-PUBLIC-SERIALIZATION",
+        "family": "configuration",
+        "incumbent_surface": "PrivacyConfig has no newly imposed serialization contract",
+        "candidate_surface": "private versioned JSON only",
+        "disposition": "KEEP",
+        "evidence": "no serde derive or format added to the public struct"
+      },
+      {
+        "surface_id": "RGX-R354-GAP-NULLABLE-LOOP",
+        "family": "compile",
+        "incumbent_surface": "nullable unbounded repetition accepted",
+        "candidate_surface": "RGX-LOWER-E009",
+        "disposition": "KEEP",
+        "evidence": "inherited RGX-COMP-Q-009"
+      },
+      {
+        "surface_id": "RGX-R354-GAP-ZERO-COUNT-CAPTURE",
+        "family": "captures",
+        "incumbent_surface": "capture erased by zero repetition",
+        "candidate_surface": "RGX-LOWER-E010",
+        "disposition": "KEEP",
+        "evidence": "inherited RGX-COMP-Q-010"
+      },
+      {
+        "surface_id": "RGX-R354-GAP-DOTTED-AGE",
+        "family": "syntax",
+        "incumbent_surface": "dotted Unicode Age value accepted where supported",
+        "candidate_surface": "RGX-LEX-E004",
+        "disposition": "KEEP",
+        "evidence": "inherited RGX-R324-U001"
+      }
+    ],
+    "executable_evidence": [
+      {
+        "lane": "private-regex-vm-config",
+        "worker": "ovh-a",
+        "command": "cargo test -p asupersync --lib --features metrics observability::regex_vm::tests -- --nocapture",
+        "result": "PASS_30_OF_30",
+        "remote_required": true,
+        "local_fallback_used": false
+      },
+      {
+        "lane": "downstream-consumer-metrics-run",
+        "worker": "ovh-a",
+        "command": "cargo run --manifest-path tests/fixtures/downstream-consumer-proof/Cargo.toml --features metrics-profile --bin metrics_consumer",
+        "result": "PASS_EXIT_0",
+        "remote_required": true,
+        "local_fallback_used": false
+      },
+      {
+        "lane": "private-regex-metrics-clippy",
+        "worker": "ovh-a",
+        "command": "cargo clippy -p asupersync --lib --features metrics -- -D warnings",
+        "result": "PASS_EXIT_0",
+        "remote_required": true,
+        "local_fallback_used": false
+      },
+      {
+        "lane": "regex-private-api-compatibility-contract",
+        "worker": "vmi1227854",
+        "command": "cargo test -p asupersync --features metrics --test regex_privacy_capability_inventory_contract -- --nocapture",
+        "result": "PASS_12_OF_12",
+        "remote_required": true,
+        "local_fallback_used": false
+      }
+    ],
+    "no_claims": [
+      "no public candidate API or re-export",
+      "no PrivacyConfig integration or compatibility shim",
+      "no production privacy wiring or dependency removal authorization",
+      "no public error-type or exact wording parity",
+      "no byte-regex, built-in detector-policy, or whole-operation cancellation parity",
+      "no portable oversized usize configuration round trip across targets",
+      "no performance, broad workspace health, or release-readiness claim",
+      "no local Cargo fallback approval"
+    ]
+  },
   "static_validation": {
     "json_parse_required": true,
     "source_hash_and_line_count_recheck_required": true,

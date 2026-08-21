@@ -150,6 +150,83 @@ source lane remotely on `vmi1227854` and exited 0. Public wiring still requires
 the separately owned R3.5.2 match facade and downstream compile/configuration
 evidence.
 
+## R3.5.4 compatibility extension
+
+The `ASUP-REGEX-PRIVATE-API-COMPATIBILITY-V1` extension in the existing
+machine map preserves the historical R3.5.1 receipt above and pins the current
+R3.5.4 implementation at revision
+`da992970cbb0590014a36236682c138cd83b41a4`. Its decision is
+`KEEP_INCUMBENT`: the private candidate now has an executable configuration
+and reuse boundary, but it does not replace, wrap, re-export, or alter the
+public `PrivacyConfig` contract.
+
+The extension maps every required family with an explicit `SAME` or `KEEP`
+disposition and has zero `UNKNOWN` rows:
+
+| Family | Disposition | Exact boundary |
+| --- | --- | --- |
+| compile and validation | `SAME` | private accepted corpus and typed rejection; public `regex::Error` remains `KEEP` |
+| match, find, captures, iteration | `SAME` | private immutable compiled value under explicit aggregate limits |
+| replacement | `SAME` | compatible total syntax; strict diagnostics remain a separately named private opt-in |
+| diagnostics | `KEEP` | private stable secret-safe codes do not replace the public error type or wording |
+| limits | `KEEP` | all candidate limits are explicit and round-tripped, but no public limit DTO is added |
+| configuration | `KEEP` | versioned private JSON does not change public fields, builders, or direct mutation |
+
+The public `KEEP` rows are deliberately granular. They retain the nested
+`observability::otel::PrivacyConfig` path, `SpanConfig` alias, exhaustively
+constructible mutable fields, direct `pii_patterns` mutation and recompilation,
+the fallible and panicking builders, public `Clone`/`Debug`, the `metrics`
+feature gate, byte-regex workflows, built-in detector order/tokens/Luhn policy,
+and the production redaction path. They also retain the inherited nullable-loop,
+zero-count-capture, and dotted-Age gaps. The candidate remains inaccessible to
+external crates.
+
+### Configuration and atomic loading
+
+`PrivatePatternConfig` serializes schema version 1 plus the pattern and every
+compile, VM, capture, iteration, replacement, and document limit. The compact
+JSON encoding is deterministic. Unknown fields, missing fields, unsupported
+schema versions, invalid execution limits, malformed JSON, and invalid patterns
+all fail before a `LoadedPrivatePattern` is returned. A failed load cannot
+modify an already loaded value.
+
+The default document ceiling is 8,388,608 bytes, covering worst-case JSON
+escaping for every pattern admitted by the default 1 MiB lexer budget plus the
+numeric recipe. The serializer never returns a document above its selected
+ceiling. Serialization is structural rather than admission: callers must still
+use `load` or `load_json` to validate schema, limits, and pattern syntax.
+
+Pattern text exists only in the caller-owned explicit recipe and serialized
+document. The loaded value drops it after compilation; its `Debug`, all config
+errors, and the private compiler error chain omit it. The loaded value is
+immutable and `Send + Sync`; the focused test forces eight workers through one
+shared start gate and exercises repeated matching and replacement.
+
+The JSON integer representation uses Rust `usize` fields. R3.5.4 proves
+same-target round trips only. Values accepted on a 64-bit target but too large
+for `usize` on wasm32 are an explicit target-local `KEEP` / no-claim boundary,
+not portable configuration evidence.
+
+### Downstream executable evidence
+
+The existing real fixture
+`tests/fixtures/downstream-consumer-proof/src/bin/metrics_consumer.rs` compiles
+and runs against the path dependency under `metrics-profile`. It proves the
+incumbent public path still supports valid and invalid fallible construction,
+direct field mutation, repeated redaction, and concurrent shared reuse. It does
+not import the private candidate or claim a compatibility shim.
+
+The exact R3.5.4 source passed these forced-remote lanes with no local fallback:
+
+- private regex VM/config: 30 of 30 tests passed on `ovh-a`;
+- downstream metrics consumer: process exit 0 on `ovh-a`; and
+- metrics library Clippy with `-D warnings`: process exit 0 on `ovh-a`; and
+- regex privacy capability inventory contract: 12 of 12 tests passed on
+  `vmi1227854`.
+
+This extension is sufficient input for the R3.5.5 terminal receipt. It is not
+authorization for public integration or dependency removal.
+
 ## Static validation boundary
 
 Validation includes JSON parsing, source and predecessor hash/line-count
@@ -159,10 +236,12 @@ workspace, benchmark, service, or release gate.
 
 ## No-claim boundary
 
-This completes the private R3.5.1 compile boundary only. It makes no claim of
-an R3.5.2 private match facade, downstream compile/configuration evidence,
-public API or `PrivacyConfig` integration, production wiring, dependency
-removal, performance, broad workspace health, or release readiness. The
-incumbent stays in place.
+The historical base completes the private R3.5.1 compile boundary. The R3.5.4
+extension adds private match/find/capture/iteration/replacement configuration
+and downstream public-compatibility evidence. Neither layer claims public API
+or `PrivacyConfig` integration, a compatibility shim, production wiring,
+dependency removal, portable oversized cross-target configuration, whole-
+operation cancellation, performance, broad workspace health, or release
+readiness. The incumbent stays in place.
 
 <!-- END PRIVATE REGEX COMPILE API MAP -->

@@ -28,6 +28,7 @@ const CAPABILITY_REGISTRY_PATH: &str = "artifacts/dependency_capability_registry
 const BASELINE_PATH: &str = "artifacts/dependency_capability_baseline_v1.json";
 const MARGINAL_LEDGER_PATH: &str = "artifacts/dependency_marginal_ledger_v1.json";
 const API_SURFACE_MAP_PATH: &str = "artifacts/api_surface_map_v1.json";
+const PRIVATE_API_MAP_PATH: &str = "artifacts/regex_private_compile_api_map_v1.json";
 const BEAD_ID: &str = "asupersync-5z2scg.8.1";
 const PROGRAM_ID: &str = "asupersync-ir2uf0";
 const CAPABILITY_ID: &str = "CAP-REGEX-PRIVACY";
@@ -759,6 +760,219 @@ fn marginal_graph_downstream_routing_docs_and_no_claims_are_exact() {
         "No local Cargo fallback",
     ] {
         assert!(doc.contains(marker), "documentation must retain {marker}");
+    }
+}
+
+#[test]
+fn r3_5_4_private_api_compatibility_extension_is_complete_and_source_pinned() {
+    let map = parse_repo_json(PRIVATE_API_MAP_PATH);
+    let extension = map
+        .get("r3_5_4_compatibility_extension")
+        .expect("R3.5.4 compatibility extension");
+    for (key, expected) in [
+        ("extension_id", "ASUP-REGEX-PRIVATE-API-COMPATIBILITY-V1"),
+        ("bead_id", "asupersync-5z2scg.8.3.5.4"),
+        ("claim_revision", "da992970cbb0590014a36236682c138cd83b41a4"),
+    ] {
+        assert_eq!(
+            extension.get(key).and_then(Value::as_str),
+            Some(expected),
+            "R3.5.4 {key} drifted"
+        );
+    }
+    assert_eq!(
+        extension
+            .get("historical_r3_5_1_base_preserved")
+            .and_then(Value::as_bool),
+        Some(true)
+    );
+    validate_no_unknown(
+        extension
+            .get("capability_rows")
+            .expect("R3.5.4 capability rows"),
+        "$.r3_5_4_compatibility_extension.capability_rows",
+    )
+    .expect("R3.5.4 extension must contain no UNKNOWN row");
+
+    for pin in array(extension, "source_pins") {
+        let path = text(pin, "path");
+        let bytes = read_repo_bytes(path);
+        assert_eq!(
+            hex::encode(Sha256::digest(&bytes)),
+            text(pin, "sha256"),
+            "{path} R3.5.4 source pin drifted"
+        );
+        assert_eq!(
+            pin.get("line_count").and_then(Value::as_u64),
+            Some(read_repo_file(path).lines().count() as u64),
+            "{path} R3.5.4 line count drifted"
+        );
+        assert_eq!(
+            pin.get("revision").and_then(Value::as_str),
+            Some("da992970cbb0590014a36236682c138cd83b41a4")
+        );
+    }
+    assert_eq!(array(extension, "source_pins").len(), 7);
+
+    let rows = array(extension, "capability_rows");
+    let expected_ids: BTreeSet<String> = [
+        "RGX-R354-COMPILE",
+        "RGX-R354-VALIDATION",
+        "RGX-R354-MATCH",
+        "RGX-R354-FIND",
+        "RGX-R354-CAPTURES",
+        "RGX-R354-ITERATION",
+        "RGX-R354-REPLACEMENT",
+        "RGX-R354-DIAGNOSTICS",
+        "RGX-R354-LIMITS",
+        "RGX-R354-CONFIGURATION",
+        "RGX-R354-PUB-NESTED-PATH",
+        "RGX-R354-PUB-SPAN-ALIAS",
+        "RGX-R354-PUB-MUTABLE-FIELDS",
+        "RGX-R354-PUB-DIRECT-MUTATION",
+        "RGX-R354-PUB-FALLIBLE-BUILDER",
+        "RGX-R354-PUB-PANIC-BUILDER",
+        "RGX-R354-PUB-CLONE-DEBUG",
+        "RGX-R354-PUB-FEATURE-GATE",
+        "RGX-R354-CANDIDATE-VISIBILITY",
+        "RGX-R354-BYTE-REGEX",
+        "RGX-R354-BUILTIN-ORDER-LUHN",
+        "RGX-R354-PRODUCTION-WIRING",
+        "RGX-R354-WHOLE-OP-CANCELLATION",
+        "RGX-R354-STRICT-REPLACEMENT",
+        "RGX-R354-CROSS-TARGET-CONFIG",
+        "RGX-R354-PUBLIC-SERIALIZATION",
+        "RGX-R354-GAP-NULLABLE-LOOP",
+        "RGX-R354-GAP-ZERO-COUNT-CAPTURE",
+        "RGX-R354-GAP-DOTTED-AGE",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    assert_eq!(row_ids(rows, "surface_id"), expected_ids);
+
+    let same_ids: BTreeSet<&str> = [
+        "RGX-R354-COMPILE",
+        "RGX-R354-VALIDATION",
+        "RGX-R354-MATCH",
+        "RGX-R354-FIND",
+        "RGX-R354-CAPTURES",
+        "RGX-R354-ITERATION",
+        "RGX-R354-REPLACEMENT",
+    ]
+    .into_iter()
+    .collect();
+    for row in rows {
+        let surface_id = text(row, "surface_id");
+        assert_eq!(
+            text(row, "disposition"),
+            if same_ids.contains(surface_id) {
+                "SAME"
+            } else {
+                "KEEP"
+            },
+            "{surface_id} must remain explicitly SAME or KEEP"
+        );
+        assert!(!text(row, "evidence").is_empty());
+    }
+
+    let decision = object(extension, "decision");
+    assert_eq!(
+        decision.get("disposition").and_then(Value::as_str),
+        Some("KEEP_INCUMBENT")
+    );
+    assert_eq!(
+        decision.get("unknown_rows").and_then(Value::as_u64),
+        Some(0)
+    );
+    for forbidden in [
+        "public_reexport_authorized",
+        "privacy_config_integration_authorized",
+        "compatibility_shim_authorized",
+        "production_wiring_authorized",
+        "dependency_removal_authorized",
+    ] {
+        assert_eq!(
+            decision.get(forbidden).and_then(Value::as_bool),
+            Some(false),
+            "R3.5.4 must not authorize {forbidden}"
+        );
+    }
+
+    let config = object(extension, "configuration_contract");
+    assert_eq!(
+        config.get("schema_version").and_then(Value::as_u64),
+        Some(1)
+    );
+    assert_eq!(
+        config
+            .get("default_document_byte_ceiling")
+            .and_then(Value::as_u64),
+        Some(8 * 1024 * 1024)
+    );
+    for key in [
+        "load_is_atomic",
+        "serializer_is_structural_not_admission",
+        "serializer_never_returns_a_document_above_its_selected_ceiling",
+        "explicit_config_retains_pattern",
+        "loaded_value_is_send_sync",
+        "replacement_zero_limits_are_valid_when_the_operation_uses_zero",
+    ] {
+        assert_eq!(
+            config.get(key).and_then(Value::as_bool),
+            Some(true),
+            "configuration contract lost {key}"
+        );
+    }
+    assert_eq!(
+        config
+            .get("loaded_value_retains_pattern")
+            .and_then(Value::as_bool),
+        Some(false)
+    );
+    assert_eq!(
+        config
+            .get("cross_target_oversized_integer_disposition")
+            .and_then(Value::as_str),
+        Some("KEEP")
+    );
+
+    let evidence = array(extension, "executable_evidence");
+    assert_eq!(evidence.len(), 4);
+    for row in evidence {
+        assert!(text(row, "result").starts_with("PASS"));
+        assert_eq!(
+            row.get("remote_required").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            row.get("local_fallback_used").and_then(Value::as_bool),
+            Some(false)
+        );
+    }
+
+    let facade = read_repo_file("src/observability/mod.rs");
+    assert!(facade.contains("pub(crate) mod regex_vm;"));
+    assert!(!facade.contains("pub mod regex_vm;"));
+    let downstream =
+        read_repo_file("tests/fixtures/downstream-consumer-proof/src/bin/metrics_consumer.rs");
+    assert!(downstream.contains("asupersync::observability::otel::PrivacyConfig"));
+    assert!(!downstream.contains("PrivatePatternConfig"));
+
+    let doc = read_repo_file("docs/regex_private_compile_api_map.md");
+    for marker in [
+        "R3.5.4 compatibility extension",
+        "ASUP-REGEX-PRIVATE-API-COMPATIBILITY-V1",
+        "da992970cbb0590014a36236682c138cd83b41a4",
+        "target-local `KEEP`",
+        "KEEP_INCUMBENT",
+        "metrics_consumer.rs",
+        "30 of 30 tests passed",
+    ] {
+        assert!(
+            doc.contains(marker),
+            "R3.5.4 documentation must retain {marker}"
+        );
     }
 }
 
