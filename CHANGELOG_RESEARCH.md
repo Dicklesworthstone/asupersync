@@ -232,3 +232,44 @@ Changelog corrections made from this pass:
   summary
 - replaced the historical low-signal fuzz-target phrase "and more" with the
   concrete channel state-machine boundary
+
+## 2026-08-21 Post-v0.4.9 gRPC Routing Delta
+
+Scope: reconcile the first callable registered-service gRPC transport change
+after `v0.4.9` before refreshing the canonical agent skill.
+
+Sources used:
+
+- commit `3c73a334c02e9976bda712c19b07221360bc7f3e`
+- `src/grpc/service.rs`, `src/grpc/server.rs`, and `src/grpc/mod.rs`
+- `tests/grpc_http2_e2e.rs` and
+  `tests/grpc_unregistered_service_audit.rs`
+- the closed Bead `asupersync-u0j91o`
+
+Conclusions:
+
+- `ServiceHandler::call_unary` and `ServiceHandlerFuture` are additive. The
+  default hook returns gRPC `UNIMPLEMENTED`; the in-repo legacy-shaped
+  implementation proves that an impl supplying only the former required items
+  needs no new trait item. This is not blanket downstream compile evidence.
+- `Server::dispatch_registered_unary` and
+  `Server::dispatch_registered_unary_with_trailers` are the in-process
+  descriptor-driven paths; the shorter form supplies an empty trailer block.
+  `Server::bind_registered_http2` and `Server::serve_http2` connect the same
+  registry to the native H2 listener and its existing metadata,
+  interceptor, deadline, request-region, cancellation, framing, and trailer
+  behavior.
+- The established `Server::serve` remains a bind-and-drop readiness probe for
+  v0.4.3 compatibility. The established `bind_http2` catch-all handler seam
+  also remains available.
+- The real transport regression uses a TCP/H2 exchange against a registered
+  callable service and proves success, request-trailer delivery, response
+  framing, and unknown-method `UNIMPLEMENTED`. Focused audit coverage separately
+  proves callable in-process dispatch, unregistered lookup/service, unknown
+  registered methods, pre-dispatch cancellation, and legacy metadata-only
+  handlers. Source inspection establishes the streaming-only and malformed-path
+  fail-closed branches; those two branches are not claimed as executed by the
+  focused audit tests.
+- This is unreleased `main` behavior after `v0.4.9`; it must not be described
+  as part of the published 0.4.9 crate until a later release contains the
+  commit.

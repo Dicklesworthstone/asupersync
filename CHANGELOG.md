@@ -10,7 +10,7 @@ Asupersync is a spec-first, cancel-correct, capability-secure async runtime for 
 - Commit links point to representative commits, not exhaustive lists.
 - Organized by landed capabilities within each version, not by diff order.
 
-Scope window: current work through 2026-08-20, reconstructed from git history,
+Scope window: current work through 2026-08-21, reconstructed from git history,
 beads, benchmark ledgers, and live repo artifacts; the latest release baseline
 is `v0.4.9`.
 
@@ -60,7 +60,22 @@ is `v0.4.9`.
 
 ## [Unreleased]
 
-_No unreleased changes._
+### gRPC server routing
+
+- **Registered unary services can now be called through the native HTTP/2
+  listener.** The additive `ServiceHandler::call_unary` hook,
+  `ServiceHandlerFuture`, `Server::dispatch_registered_unary`,
+  `Server::dispatch_registered_unary_with_trailers`,
+  `Server::bind_registered_http2`, and `Server::serve_http2` connect
+  descriptor-registered services to the production H2 framing, metadata,
+  interceptor, deadline, request-region, cancellation, and status-trailer
+  pipeline. Unknown, malformed, streaming-only, and legacy metadata-only
+  routes fail closed with gRPC `UNIMPLEMENTED`. The new trait method has a
+  default implementation, so an implementation that supplies only the former
+  required trait items needs no new item (covered by the in-repo legacy-shaped
+  implementation); legacy `Server::serve` remains a bind probe and `bind_http2`
+  remains the explicit catch-all transport seam
+  ([`3c73a33`](https://github.com/Dicklesworthstone/asupersync/commit/3c73a334c02e9976bda712c19b07221360bc7f3e)).
 
 ## [v0.4.9] - 2026-08-20
 
