@@ -1295,8 +1295,7 @@ pub struct AdmittedRegion {
 /// directly.
 #[derive(Default)]
 pub struct AdmittedRegionSlot {
-    inner:
-        Mutex<Option<Result<AdmittedRegion, crate::runtime::region_table::RegionCreateError>>>,
+    inner: Mutex<Option<Result<AdmittedRegion, crate::runtime::region_table::RegionCreateError>>>,
     waiters: Mutex<Vec<std::task::Waker>>,
 }
 
@@ -1338,8 +1337,7 @@ impl AdmittedRegionSlot {
     /// Returns the published outcome, taking it out of the slot.
     pub fn take(
         &self,
-    ) -> Option<Result<AdmittedRegion, crate::runtime::region_table::RegionCreateError>>
-    {
+    ) -> Option<Result<AdmittedRegion, crate::runtime::region_table::RegionCreateError>> {
         self.inner.lock().take()
     }
 
@@ -1520,9 +1518,7 @@ impl SpawnMailbox {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.queue.is_empty()
-            && self.handle_cancels.is_empty()
-            && self.region_commands.is_empty()
+        self.queue.is_empty() && self.handle_cancels.is_empty() && self.region_commands.is_empty()
     }
 
     /// Total requests ever enqueued.
@@ -1678,10 +1674,7 @@ impl SpawnGateway {
     /// Fails closed with [`SpawnError::RuntimeUnavailable`] when the owning
     /// runtime is already gone; the failure is observed by the caller before
     /// any slot is awaited, so a dropped runtime can never hang an opening.
-    pub(crate) fn enqueue_region_command(
-        &self,
-        command: RegionCommand,
-    ) -> Result<(), SpawnError> {
+    pub(crate) fn enqueue_region_command(&self, command: RegionCommand) -> Result<(), SpawnError> {
         let Some(_liveness_guard) = self.liveness_guard() else {
             return Err(SpawnError::RuntimeUnavailable);
         };
@@ -1693,18 +1686,19 @@ impl SpawnGateway {
         Ok(())
     }
 
-    /// Returns true while the runtime that owns this gateway is alive.
-    #[must_use]
-    pub(crate) fn runtime_is_alive(&self) -> bool {
-        self.liveness_guard().is_some()
-    }
-
     fn notify_handle_cancel(&self) {
         if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             (self.notify)();
         })) {
             std::mem::forget(payload);
         }
+    }
+
+    /// Clones the gateway's runtime liveness token for producer-side
+    /// fail-closed checks while a mint publication is still pending.
+    #[must_use]
+    pub(crate) fn runtime_liveness_weak(&self) -> std::sync::Weak<()> {
+        std::sync::Weak::clone(&self.runtime_liveness)
     }
 }
 

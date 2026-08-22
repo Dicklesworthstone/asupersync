@@ -5944,6 +5944,62 @@ impl ThreeLaneWorker {
         }
     }
 
+    /// Applies region lifecycle commands (bd-asupersync-ambient-child-region-0fm8l)
+    /// on the runtime-owned side of the scheduler boundary. Producers holding
+    /// only an ambient `&Cx` enqueue plain data; this consumer performs the
+    /// authoritative record transitions under the runtime lock and publishes
+    /// mint outcomes into caller-shared slots strictly after the lock drops,
+    /// mirroring the "publish lanes, then dispatch Wakers" spawn discipline.
+    fn drain_region_commands(&mut self) {
+        const REGION_COMMAND_BATCH: usize = 8;
+
+        let Some(mailbox) = self.spawn_mailbox.as_ref() else {
+            return;
+        };
+        if mailbox.region_commands_are_empty() {
+            return;
+        }
+        let mut commands = Vec::with_capacity(REGION_COMMAND_BATCH);
+        if mailbox.dequeue_region_commands_into(REGION_COMMAND_BATCH, &mut commands) == 0 {
+            return;
+        }
+
+        let mut publications: Vec<(
+            std::sync::Arc<crate::runtime::spawn_mailbox::AdmittedRegionSlot>,
+            Result<
+                crate::runtime::spawn_mailbox::AdmittedRegion,
+                crate::runtime::region_table::RegionCreateError,
+            >,
+        )> = Vec::with_capacity(commands.len());
+        {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for command in commands {
+                match command {
+                    crate::runtime::spawn_mailbox::RegionCommand::Create(request) => {
+                        let (slot, outcome) = state.open_child_region_command(request);
+                        publications.push((slot, outcome));
+                    }
+                    crate::runtime::spawn_mailbox::RegionCommand::Cancel { region_id, reason } => {
+                        state.close_region_command(region_id, &reason);
+                    }
+                    crate::runtime::spawn_mailbox::RegionCommand::Close { region_id } => {
+                        let completion =
+                            crate::types::CancelReason::user("owned child region body finished");
+                        state.close_region_command(region_id, &completion);
+                    }
+                }
+            }
+        }
+        // Publication wakes producer futures; it runs only after the runtime
+        // lock is released so a woken opener never contends mid-transition.
+        for (slot, outcome) in publications {
+            slot.publish(outcome);
+        }
+    }
+
     pub fn next_task(&mut self) -> Option<TaskId> {
         // PHASE -0.6: TaskHandle abort/JoinFuture Drop enqueue callback-free
         // commands. Apply their authoritative task-state transition here.
@@ -5966,6 +6022,14 @@ impl ThreeLaneWorker {
         // worker's thread-local lane (br-asupersync-i9y5wb / A2.2a). One
         // TLS emptiness check when idle.
         self.drain_local_spawn_admissions();
+
+        // PHASE 0.7: Region lifecycle commands from ambient-&Cx producers
+        // (bd-asupersync-ambient-child-region-0fm8l). Runs AFTER spawn
+        // admission so a Close/Cancel observed while a body spawn is still
+        // in-flight sees the admitted task record (or has its pending-spawn
+        // credit released by the denial path) before the close protocol
+        // advances — otherwise the credit strands the region in Closing.
+        self.drain_region_commands();
 
         // Admission publication can run a retained cancellation Waker after
         // making the new task visible. If that callback aborts another managed

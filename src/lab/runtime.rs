@@ -2998,6 +2998,7 @@ impl LabRuntime {
             }
 
             self.drain_handle_cancel_requests();
+            self.drain_region_commands();
             self.drain_deferred_cancel_dispatches();
             let is_empty = self.scheduler.lock().is_empty();
             if is_empty && !self.has_pending_dispatch_commands() {
@@ -3648,6 +3649,53 @@ impl LabRuntime {
         wakes.dispatch();
     }
 
+    /// Applies region lifecycle commands (bd-asupersync-ambient-child-region-0fm8l)
+    /// synchronously at the same deterministic point as handle cancels: the
+    /// authoritative record transitions run against the lab state, and mint
+    /// outcomes publish into caller-shared slots afterwards.
+    fn drain_region_commands(&mut self) {
+        const REGION_COMMAND_BATCH: usize = 8;
+
+        if self.spawn_mailbox.region_commands_are_empty() {
+            return;
+        }
+        let mut commands = Vec::with_capacity(REGION_COMMAND_BATCH);
+        if self
+            .spawn_mailbox
+            .dequeue_region_commands_into(REGION_COMMAND_BATCH, &mut commands)
+            == 0
+        {
+            return;
+        }
+
+        let mut publications: Vec<(
+            std::sync::Arc<crate::runtime::spawn_mailbox::AdmittedRegionSlot>,
+            Result<
+                crate::runtime::spawn_mailbox::AdmittedRegion,
+                crate::runtime::region_table::RegionCreateError,
+            >,
+        )> = Vec::with_capacity(commands.len());
+        for command in commands {
+            match command {
+                crate::runtime::spawn_mailbox::RegionCommand::Create(request) => {
+                    let (slot, outcome) = self.state.open_child_region_command(request);
+                    publications.push((slot, outcome));
+                }
+                crate::runtime::spawn_mailbox::RegionCommand::Cancel { region_id, reason } => {
+                    self.state.close_region_command(region_id, &reason);
+                }
+                crate::runtime::spawn_mailbox::RegionCommand::Close { region_id } => {
+                    let completion =
+                        crate::types::CancelReason::user("owned child region body finished");
+                    self.state.close_region_command(region_id, &completion);
+                }
+            }
+        }
+        for (slot, outcome) in publications {
+            slot.publish(outcome);
+        }
+    }
+
     fn drain_deferred_cancel_dispatches(&mut self) {
         let batches = self.state.take_deferred_cancel_dispatches();
         if batches.is_empty() {
@@ -3698,7 +3746,8 @@ impl LabRuntime {
         self.steps += 1;
         self.drain_deferred_cancel_dispatches();
         self.drain_spawn_admissions();
-        // Admission publication can invoke a retained cancellation Waker.
+        self.drain_handle_cancel_requests();
+        self.drain_region_commands();
         // Consume any command it enqueued before selecting runnable work.
         self.drain_handle_cancel_requests();
         self.drain_deferred_cancel_dispatches();

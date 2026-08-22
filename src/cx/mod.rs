@@ -57,6 +57,7 @@
 
 pub mod cap;
 pub mod capacity_ticket;
+pub mod child_region;
 pub mod cx;
 pub mod macaroon;
 pub mod registry;
@@ -85,6 +86,7 @@ pub use macaroon::{
 pub use registry::{
     NameLease, NameLeaseError, NameRegistry, RegistryCap, RegistryEvent, RegistryHandle,
 };
+pub use child_region::{ChildRegion, ChildRegionError, ChildRegionOpening, ChildRegionSpec};
 pub use scope::Scope;
 pub use scoped_cpu::{CpuCx, ScopedCpu, ScopedCpuError};
 pub use wrappers::{

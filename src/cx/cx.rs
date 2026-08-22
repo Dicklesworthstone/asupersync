@@ -3796,6 +3796,55 @@ impl<Caps> Cx<Caps> {
         .with_pending_spawn_counter(self.pending_spawn_counter_handle())
     }
 
+    /// Derives an owned child region from this ambient context
+    /// (bd-asupersync-ambient-child-region-0fm8l).
+    ///
+    /// The mint is command-driven: the request rides this context's spawn
+    /// gateway through its liveness guard, the scheduler performs the
+    /// authoritative record transitions at its dispatch point, and the
+    /// returned future resolves once publication lands — with the child's
+    /// principal [`Cx`] carrying the met budget and pending-spawn credits.
+    /// Parent linkage uses this context's region, so parent cancellation
+    /// propagates through the standard region-tree protocol while the child
+    /// stays independently cancellable via [`ChildRegion::cancel`].
+    ///
+    /// # Errors
+    ///
+    /// Fails closed with [`ChildRegionError::NoRuntimeGateway`] when this
+    /// context was built without runtime wiring; detached contexts never
+    /// invent ambient authority.
+    pub fn open_child_region(
+        &self,
+        spec: crate::cx::child_region::ChildRegionSpec,
+    ) -> crate::cx::child_region::ChildRegionOpening {
+        use crate::cx::child_region::{ChildRegionError, ChildRegionOpening};
+        let Some(gateway) = self.handles.spawn_gateway.clone() else {
+            return ChildRegionOpening::failed(ChildRegionError::NoRuntimeGateway);
+        };
+        let principal_task_id = gateway.mailbox().allocate_task_id();
+        let slot = std::sync::Arc::new(crate::runtime::spawn_mailbox::AdmittedRegionSlot::new());
+        let request = crate::runtime::spawn_mailbox::CreateRegionRequest {
+            parent: self.region_id(),
+            budget: spec.budget.unwrap_or_else(|| self.budget()),
+            capability_budget: spec
+                .capability_budget
+                .unwrap_or(CapabilityBudget::UNSPECIFIED),
+            requirements: spec.requirements,
+            priority: spec.priority,
+            principal_task_id,
+            slot: std::sync::Arc::clone(&slot),
+        };
+        if gateway
+            .enqueue_region_command(crate::runtime::spawn_mailbox::RegionCommand::Create(
+                request,
+            ))
+            .is_err()
+        {
+            return ChildRegionOpening::failed(ChildRegionError::RuntimeUnavailable);
+        }
+        ChildRegionOpening::new(slot, gateway.runtime_liveness_weak())
+    }
+
     /// Creates a [`Scope`](super::Scope) bound to this context's region with a custom budget.
     ///
     /// This is used by the `scope!` macro when a budget is specified:
