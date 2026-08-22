@@ -2996,9 +2996,7 @@ impl LabRuntime {
                     break;
                 }
             }
-
             self.drain_handle_cancel_requests();
-            self.drain_region_commands();
             self.drain_deferred_cancel_dispatches();
             let is_empty = self.scheduler.lock().is_empty();
             if is_empty && !self.has_pending_dispatch_commands() {
