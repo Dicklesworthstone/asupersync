@@ -1272,7 +1272,10 @@ pub(crate) enum RegionCommand {
         region_id: RegionId,
         reason: CancelReason,
     },
-    /// Begin the close protocol for a region whose body work has finished.
+    /// Begin the close protocol for a region. Emitted both by
+    /// [`crate::cx::ChildRegion::close`] after body work finishes and by the
+    /// `Drop` backstop for abandoned handles (whose body may still be
+    /// running; the close protocol cancels whatever remains).
     Close { region_id: RegionId },
 }
 
