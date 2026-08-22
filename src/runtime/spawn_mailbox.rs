@@ -1293,6 +1293,14 @@ pub struct AdmittedRegion {
 /// producers enqueue with the slot attached, workers publish exactly once,
 /// and waiting futures register their wakers here so publication wakes them
 /// directly.
+///
+/// # Single-consumer contract
+///
+/// Exactly one [`crate::cx::ChildRegionOpening`] polls a given slot — the
+/// opening returned by the same `open_child_region` call that minted it.
+/// `take` removes the outcome, so a second consumer would either hang (value
+/// already taken) or spin (registered after publication); neither can occur
+/// under this contract, and neither is handled.
 #[derive(Default)]
 pub struct AdmittedRegionSlot {
     inner: Mutex<Option<Result<AdmittedRegion, crate::runtime::region_table::RegionCreateError>>>,
