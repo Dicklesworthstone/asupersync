@@ -4186,11 +4186,15 @@ impl RuntimeState {
         let record_budget = self
             .region(child_region)
             .map_or(budget, crate::record::RegionRecord::budget);
+        let observability = self
+            .observability
+            .as_ref()
+            .map(|obs| obs.for_task(child_region, principal_task_id));
         let principal_cx = crate::cx::Cx::new_with_drivers(
             child_region,
             principal_task_id,
             record_budget,
-            None,
+            observability,
             self.io_driver_handle(),
             None,
             self.timer_driver_handle(),
@@ -4206,6 +4210,12 @@ impl RuntimeState {
             self.region(child_region)
                 .map(crate::record::RegionRecord::pending_spawn_handle),
         );
+        // Mirror the mailbox-admission wiring so the principal context
+        // observes and records exactly what an admitted task context would:
+        // trace events flow to the runtime trace buffer, and cancellation
+        // loser-drain history stays attributable.
+        principal_cx.set_trace_buffer(self.trace_handle());
+        principal_cx.set_loser_drain_history_handle(self.loser_drain_history_handle());
         let close_notify = self
             .region(child_region)
             .map(|region| region.close_notify.clone())
