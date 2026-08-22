@@ -199,12 +199,18 @@ pub struct ChildRegion {
     cx: crate::cx::Cx,
     close_notify: Arc<Mutex<RegionCloseState>>,
     gateway: Option<Arc<SpawnGateway>>,
+    /// Set once a structured close has been requested for this handle
+    /// ([`Self::close`]); defuses the [`Drop`] backstop so a completed close
+    /// never enqueues a second, redundant Close command for a region that is
+    /// already closing or closed.
+    closed: bool,
 }
 
 impl std::fmt::Debug for ChildRegion {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ChildRegion")
             .field("region_id", &self.region_id)
+            .field("closed", &self.closed)
             .finish_non_exhaustive()
     }
 }
@@ -217,6 +223,7 @@ impl ChildRegion {
             cx: admitted.cx,
             close_notify: admitted.close_notify,
             gateway: handles,
+            closed: false,
         }
     }
 
@@ -269,7 +276,11 @@ impl ChildRegion {
     ///
     /// Fails closed when no runtime gateway is wired or the owning runtime
     /// is gone before the close command could be enqueued.
-    pub async fn close(self) -> Result<(), ChildRegionError> {
+    pub async fn close(mut self) -> Result<(), ChildRegionError> {
+        // Defuse the Drop backstop FIRST: this structured close is the close
+        // the backstop exists to request, so a completed close() must never
+        // enqueue a second Close for an already-closing region.
+        self.closed = true;
         self.enqueue(RegionCommand::Close {
             region_id: self.region_id,
         })?;
@@ -286,9 +297,11 @@ impl Drop for ChildRegion {
         // Best-effort structured-close backstop: an abandoned handle must not
         // leak live children. Enqueue failures are swallowed because Drop can
         // neither block nor panic (same boundary as handle-cancel enqueue).
-        let _ = self.enqueue(RegionCommand::Close {
-            region_id: self.region_id,
-        });
+        if !self.closed {
+            let _ = self.enqueue(RegionCommand::Close {
+                region_id: self.region_id,
+            });
+        }
     }
 }
 
