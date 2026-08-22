@@ -417,7 +417,7 @@ mod tests {
             // close() cannot RESOLVE until the region truly reaches Closed —
             // an in-flight body is drained, never silently dropped, and the
             // waiter observes completion of whatever the body actually ran.
-            let mut body = child
+            let body = child
                 .cx()
                 .spawn(move |_task_cx| async move {
                     for _ in 0..64 {
@@ -448,8 +448,9 @@ mod tests {
                 .await
                 .expect("owned child region mints");
             let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-            let body_done = std::sync::Arc::clone(&done);
-            let body = child
+            // The handle stays bound (underscore-prefixed) so the body task
+            // is not dropped mid-test; quiescence, not the handle, ends it.
+            let _body = child
                 .cx()
                 .spawn(move |task_cx| async move {
                     loop {
@@ -523,7 +524,7 @@ mod tests {
 
     #[test]
     fn lab_runtime_drains_region_commands_deterministically() {
-        crate::lab::run_async_under_lab(0x5EED_u64, |root_cx: Cx| async move {
+        let _report = crate::lab::run_async_under_lab(0x5EED_u64, |root_cx: Cx| async move {
             let child = root_cx
                 .open_child_region(ChildRegionSpec::inherit())
                 .await
