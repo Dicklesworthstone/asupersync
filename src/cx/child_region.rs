@@ -400,7 +400,7 @@ mod tests {
     }
 
     #[test]
-    fn close_resolves_only_after_body_work_finishes() {
+    fn close_resolves_only_at_true_quiescence_draining_an_oblivious_body() {
         let runtime = RuntimeBuilder::current_thread()
             .build()
             .expect("current-thread runtime builds");
@@ -412,6 +412,11 @@ mod tests {
                 .expect("owned child region mints");
             let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
             let body_done = std::sync::Arc::clone(&done);
+            // Deliberately cancellation-oblivious: no checkpoints. The close
+            // protocol MAY cancel this work; what this test pins is that
+            // close() cannot RESOLVE until the region truly reaches Closed —
+            // an in-flight body is drained, never silently dropped, and the
+            // waiter observes completion of whatever the body actually ran.
             let mut body = child
                 .cx()
                 .spawn(move |_task_cx| async move {
@@ -425,7 +430,42 @@ mod tests {
             child.close().await.expect("quiescent close resolves");
             assert!(
                 done.load(std::sync::atomic::Ordering::Acquire),
-                "quiescent close must not cancel unfinished body work early"
+                "close resolved before the drained body finished its stores"
+            );
+            let _ = body;
+        });
+    }
+
+    #[test]
+    fn early_close_cancels_checkpoint_aware_body_and_still_quiesces() {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("current-thread runtime builds");
+        let parent = runtime.request_cx_with_budget(Budget::with_deadline_at_secs(10));
+        runtime.block_on_with_cx(parent.clone(), async move {
+            let child = parent
+                .open_child_region(ChildRegionSpec::inherit())
+                .await
+                .expect("owned child region mints");
+            let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let body_done = std::sync::Arc::clone(&done);
+            let mut body = child
+                .cx()
+                .spawn(move |task_cx| async move {
+            // Close while the body is still looping: the documented contract
+            // is that remaining children are CANCELLED, so the aware body
+            // must abort without ever setting done — and the close must then
+            // still reach true quiescence (which implies every task, this
+            // body included, reached a terminal state before close resolved).
+            child.close().await.expect("close reaches quiescence");
+            assert!(
+                !done.load(std::sync::atomic::Ordering::Acquire),
+                "an aborted checkpoint-aware body must not run to completion"
+            );
+            let _ = body.join(&child.cx()).await;
+            assert!(
+                !done.load(std::sync::atomic::Ordering::Acquire),
+                "an aborted checkpoint-aware body must not run to completion"
             );
         });
     }
