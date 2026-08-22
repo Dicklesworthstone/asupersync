@@ -559,14 +559,29 @@ impl SymbolCancelToken {
             return None;
         }
 
-        // br-asupersync-wze4x9: Replace infinite spin with bounded retry + yield
-        // to prevent livelock under thread contention. The race window should
-        // resolve quickly under normal circumstances.
-        const MAX_RETRIES: u32 = 1000;
-        for _attempt in 0..MAX_RETRIES {
+        // br-asupersync-wze4x9: bounded wait instead of infinite spin. The
+        // bound must still outlast a LEGITIMATE in-flight cancel(), where the
+        // writer holds the reason write lock across real setup work before
+        // publishing `cancelled_at`. A fixed 100x100ns retry budget exhausts
+        // inside ordinary millisecond-scale windows and made children inherit
+        // a zero timestamp (caught by
+        // cancelled_at_snapshot_for_child_livelock_regression). Use
+        // exponential backoff capped at 5ms against a wall-clock deadline.
+        const MAX_WAIT: std::time::Duration = std::time::Duration::from_millis(500);
+        let started = std::time::Instant::now();
+        let mut backoff = std::time::Duration::from_nanos(100);
+        loop {
             let nanos = self.state.cancelled_at.load(Ordering::Acquire);
             if nanos != u64::MAX {
                 return Some(Time::from_nanos(nanos));
+            }
+
+            if started.elapsed() >= MAX_WAIT {
+                // Degraded fallback: cancelled with the timestamp still
+                // unpublished after half a second indicates a stuck writer,
+                // not ordinary contention. Report cancellation rather than
+                // hanging child creation.
+                return Some(Time::ZERO);
             }
 
             if let Some(reason_guard) = self.state.reason.try_read() {
@@ -587,13 +602,9 @@ impl SymbolCancelToken {
                 });
             }
 
-            // Yield control instead of spinning to prevent livelock
-            std::thread::sleep(std::time::Duration::from_nanos(100));
+            std::thread::sleep(backoff);
+            backoff = (backoff * 2).min(std::time::Duration::from_millis(5));
         }
-
-        // If we exceed retry limit, fall back to Time::ZERO (cancelled but unknown timestamp)
-        // This should be extremely rare and indicates a pathological contention scenario.
-        Some(Time::ZERO)
     }
 
     /// Creates a child token linked to this one.
