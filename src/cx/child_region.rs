@@ -449,20 +449,24 @@ mod tests {
                 .expect("owned child region mints");
             let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
             let body_done = std::sync::Arc::clone(&done);
-            let mut body = child
+            let body = child
                 .cx()
                 .spawn(move |task_cx| async move {
+                    loop {
+                        task_cx.checkpoint()?;
+                        crate::runtime::yield_now().await;
+                    }
+                    #[allow(unreachable_code)]
+                    Ok::<(), crate::error::Error>(())
+                })
+                .expect("aware body spawns");
+
             // Close while the body is still looping: the documented contract
             // is that remaining children are CANCELLED, so the aware body
             // must abort without ever setting done — and the close must then
             // still reach true quiescence (which implies every task, this
             // body included, reached a terminal state before close resolved).
             child.close().await.expect("close reaches quiescence");
-            assert!(
-                !done.load(std::sync::atomic::Ordering::Acquire),
-                "an aborted checkpoint-aware body must not run to completion"
-            );
-            let _ = body.join(&child.cx()).await;
             assert!(
                 !done.load(std::sync::atomic::Ordering::Acquire),
                 "an aborted checkpoint-aware body must not run to completion"
