@@ -223,6 +223,16 @@ fn serve_loop(
     while running.load(Ordering::Relaxed) {
         match listener.accept() {
             Ok((mut stream, _peer)) => {
+                // BSD/macOS inherit O_NONBLOCK from the listener on accepted
+                // sockets (Linux does not). Without clearing it, the handler's
+                // first read returns WouldBlock instantly, the connection is
+                // torn down before its guard can hold a slot, and the
+                // max_connections limiter never trips. Restore blocking mode;
+                // the timeouts below bound each phase instead.
+                let _ = stream.set_nonblocking(false);
+                let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+                let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(5)));
+
                 // Atomically increment-then-check to prevent TOCTOU race
                 // where multiple threads pass the limit check simultaneously.
                 let prev = active_connections.fetch_add(1, Ordering::Relaxed);
@@ -233,13 +243,10 @@ fn serve_loop(
                     continue;
                 }
 
-                let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
-                let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(5)));
                 let snapshot_fn = Arc::clone(snapshot_fn);
                 let memory_residency_snapshot_fn = Arc::clone(memory_residency_snapshot_fn);
                 let active_connections_for_thread = Arc::clone(active_connections);
-
-                if thread::Builder::new()
+                let _ = thread::Builder::new()
                     .name("asupersync-debug-connection".to_string())
                     .spawn(move || {
                         let _active_connection =
@@ -248,10 +255,7 @@ fn serve_loop(
                             handle_connection(stream, &snapshot_fn, &memory_residency_snapshot_fn);
                         }));
                     })
-                    .is_err()
-                {
-                    active_connections.fetch_sub(1, Ordering::Relaxed);
-                }
+                    .map_err(|_| active_connections.fetch_sub(1, Ordering::Relaxed));
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 // Nonblocking accept lets stop() terminate promptly even with no traffic.
