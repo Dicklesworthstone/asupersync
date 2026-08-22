@@ -1232,10 +1232,138 @@ pub(crate) fn coalesce_handle_cancel_requests(
     }
     coalesced
 }
+/// Producer-side request to mint a child region record under a parent
+/// (bd-asupersync-ambient-child-region-0fm8l). The producer holds only an
+/// ambient [`crate::cx::Cx`]; the scheduler worker performs the actual
+/// `RuntimeState` mint at the same dispatch point where mailbox spawns are
+/// admitted, then publishes the outcome into the caller-shared
+/// [`AdmittedRegionSlot`].
+pub(crate) struct CreateRegionRequest {
+    pub(crate) parent: RegionId,
+    pub(crate) budget: Budget,
+    pub(crate) capability_budget: crate::types::CapabilityBudget,
+    pub(crate) requirements: crate::types::CapabilityBudgetRequirements,
+    pub(crate) priority: crate::runtime::resource_monitor::RegionPriority,
+    /// Provisional identity for the child region's principal capability
+    /// context, allocated from the mailbox id space by the producer. No
+    /// task record carries it; body work spawned through the child context
+    /// mints its own canonical records at admission.
+    pub(crate) principal_task_id: TaskId,
+    pub(crate) slot: Arc<AdmittedRegionSlot>,
+}
+
+impl fmt::Debug for CreateRegionRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CreateRegionRequest")
+            .field("parent", &self.parent)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Commands that mutate region lifecycle state but carry no task payload.
+#[derive(Debug)]
+pub(crate) enum RegionCommand {
+    /// Mint a child region and publish the owned handle parts.
+    Create(CreateRegionRequest),
+    /// Request cancellation for an existing region (idempotent in effect:
+    /// unknown regions are tolerated so late cancels after close never
+    /// fail).
+    Cancel {
+        region_id: RegionId,
+        reason: CancelReason,
+    },
+    /// Begin the close protocol for a region whose body work has finished.
+    Close { region_id: RegionId },
+}
+
+/// Worker-published outcome parts of one successfully minted child region.
+///
+/// Everything a caller needs to own the child region without ever holding
+/// `RuntimeState`: the child identity, an admission-built child capability
+/// context, and the shared close-state handle quiescence awaits poll.
+pub struct AdmittedRegion {
+    pub(crate) region_id: RegionId,
+    pub(crate) cx: crate::cx::Cx,
+    pub(crate) close_notify: Arc<Mutex<crate::record::region::RegionCloseState>>,
+}
+
+/// One-shot slot the worker fills when a [`RegionCommand::Create`] resolves.
+///
+/// Mirrors the publish-after-admission discipline of [`AdmittedTaskSlot`]:
+/// producers enqueue with the slot attached, workers publish exactly once,
+/// and waiting futures register their wakers here so publication wakes them
+/// directly.
+#[derive(Default)]
+pub struct AdmittedRegionSlot {
+    inner:
+        Mutex<Option<Result<AdmittedRegion, crate::runtime::region_table::RegionCreateError>>>,
+    waiters: Mutex<Vec<std::task::Waker>>,
+}
+
+impl fmt::Debug for AdmittedRegionSlot {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let pending = self.inner.lock().is_none();
+        f.debug_struct("AdmittedRegionSlot")
+            .field("pending", &pending)
+            .finish()
+    }
+}
+
+impl AdmittedRegionSlot {
+    /// Creates an empty, unresolved slot.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Publishes the mint outcome exactly once. Later publications are
+    /// ignored (first writer wins) and all registered wakers are woken.
+    pub(crate) fn publish(
+        &self,
+        result: Result<AdmittedRegion, crate::runtime::region_table::RegionCreateError>,
+    ) {
+        let waiters = {
+            let mut inner = self.inner.lock();
+            if inner.is_some() {
+                return;
+            }
+            *inner = Some(result);
+            std::mem::take(&mut *self.waiters.lock())
+        };
+        for waker in waiters {
+            waker.wake();
+        }
+    }
+
+    /// Returns the published outcome, taking it out of the slot.
+    pub fn take(
+        &self,
+    ) -> Option<Result<AdmittedRegion, crate::runtime::region_table::RegionCreateError>>
+    {
+        self.inner.lock().take()
+    }
+
+    /// Returns true while the mint outcome is still pending.
+    #[must_use]
+    pub fn is_pending(&self) -> bool {
+        self.inner.lock().is_none()
+    }
+
+    pub(crate) fn register(&self, waker: std::task::Waker) {
+        // Re-check under the lock: publication may have landed between the
+        // caller's take() attempt and this registration.
+        if !self.inner.lock().is_none() {
+            waker.wake_by_ref();
+            return;
+        }
+        self.waiters.lock().push(waker);
+    }
+}
 
 pub struct SpawnMailbox {
     queue: GlobalFifoQueue<SpawnRequest>,
     handle_cancels: GlobalFifoQueue<HandleCancelRequest>,
+    region_commands: GlobalFifoQueue<RegionCommand>,
     ids: SpawnIdAllocator,
     trace: Option<TraceBufferHandle>,
     total_enqueued: AtomicU64,
@@ -1249,6 +1377,7 @@ impl SpawnMailbox {
         Self {
             queue: GlobalFifoQueue::default(),
             handle_cancels: GlobalFifoQueue::default(),
+            region_commands: GlobalFifoQueue::default(),
             ids: SpawnIdAllocator::new(),
             trace: None,
             total_enqueued: AtomicU64::new(0),
@@ -1359,17 +1488,41 @@ impl SpawnMailbox {
         self.queue.is_empty()
     }
 
-    /// Best-effort snapshot of queued spawn requests plus handle-cancel
-    /// commands. Lifetime enqueue/dequeue counters below remain spawn-only.
-    #[must_use]
-    pub fn len(&self) -> usize {
-        self.queue.len().saturating_add(self.handle_cancels.len())
+    /// Enqueues a region lifecycle command. Never blocks and never drops.
+    pub(crate) fn enqueue_region_command(&self, command: RegionCommand) {
+        self.region_commands.push(command);
     }
 
-    /// Returns true if the mailbox appears empty.
+    /// Dequeues up to `max` region commands into `out`, preserving FIFO
+    /// order. Returns the number drained.
+    pub(crate) fn dequeue_region_commands_into(
+        &self,
+        max: usize,
+        out: &mut Vec<RegionCommand>,
+    ) -> usize {
+        self.region_commands.pop_batch_into(max, out)
+    }
+
     #[must_use]
+    pub(crate) fn region_commands_are_empty(&self) -> bool {
+        self.region_commands.is_empty()
+    }
+
+    /// Best-effort snapshot of queued spawn requests plus handle-cancel and
+    /// region lifecycle commands. Lifetime enqueue/dequeue counters below
+    /// remain spawn-only.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.queue
+            .len()
+            .saturating_add(self.handle_cancels.len())
+            .saturating_add(self.region_commands.len())
+    }
+
     pub fn is_empty(&self) -> bool {
-        self.queue.is_empty() && self.handle_cancels.is_empty()
+        self.queue.is_empty()
+            && self.handle_cancels.is_empty()
+            && self.region_commands.is_empty()
     }
 
     /// Total requests ever enqueued.
@@ -1518,6 +1671,32 @@ impl SpawnGateway {
         self.mailbox
             .enqueue_handle_cancel_with_admitted_slot(task_id, reason, admitted_slot);
         true
+    }
+
+    /// Enqueues a region lifecycle command and wakes the consumer side.
+    ///
+    /// Fails closed with [`SpawnError::RuntimeUnavailable`] when the owning
+    /// runtime is already gone; the failure is observed by the caller before
+    /// any slot is awaited, so a dropped runtime can never hang an opening.
+    pub(crate) fn enqueue_region_command(
+        &self,
+        command: RegionCommand,
+    ) -> Result<(), SpawnError> {
+        let Some(_liveness_guard) = self.liveness_guard() else {
+            return Err(SpawnError::RuntimeUnavailable);
+        };
+        self.mailbox.enqueue_region_command(command);
+        // Region commands resolve caller-shared slots, so a broken notifier
+        // must not unwind through caller code (same fail-closed boundary as
+        // handle cancels).
+        self.notify_handle_cancel();
+        Ok(())
+    }
+
+    /// Returns true while the runtime that owns this gateway is alive.
+    #[must_use]
+    pub(crate) fn runtime_is_alive(&self) -> bool {
+        self.liveness_guard().is_some()
     }
 
     fn notify_handle_cancel(&self) {

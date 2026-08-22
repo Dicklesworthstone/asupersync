@@ -4127,6 +4127,110 @@ impl RuntimeState {
         Ok((task_id, cx, now))
     }
 
+    /// Authoritative worker-side processing of one region lifecycle command
+    /// (bd-asupersync-ambient-child-region-0fm8l).
+    ///
+    /// Called by the scheduler at the same dispatch point where mailbox
+    /// spawns are admitted, under the runtime lock. These helpers perform
+    /// only record transitions and return effects; callers publish results
+    /// and dispatch wakers strictly after releasing the lock, mirroring the
+    /// "publish lanes, then dispatch Wakers" admission discipline.
+
+    /// Mints a child region for a producer holding only an ambient `&Cx`.
+    ///
+    /// Builds the child principal capability context exactly as mailbox task
+    /// admission does (`admit_spawn_record_in`) so spawning through it rides
+    /// the standard gateway path with the child's pending-spawn credits.
+    /// Returns the caller-shared slot plus the mint outcome for publication
+    /// once the runtime lock is released.
+    pub(crate) fn open_child_region_command(
+        &mut self,
+        request: crate::runtime::spawn_mailbox::CreateRegionRequest,
+    ) -> (
+        std::sync::Arc<crate::runtime::spawn_mailbox::AdmittedRegionSlot>,
+        Result<crate::runtime::spawn_mailbox::AdmittedRegion, RegionCreateError>,
+    ) {
+        let outcome = self.mint_child_region_parts(
+            request.parent,
+            request.budget,
+            request.capability_budget,
+            request.requirements,
+            request.priority,
+            request.principal_task_id,
+        );
+        (request.slot, outcome)
+    }
+
+    /// Cancel arm of a region lifecycle command: mirror of Scope::region's
+    /// `Outcome::Cancelled` close branch. Requests cancellation, begins
+    /// close, advances toward quiescence, and defers waker dispatch.
+    pub(crate) fn cancel_region_command(&mut self, region_id: RegionId, reason: &CancelReason) {
+        let effects = self.cancel_request(region_id, reason, None);
+        if let Some(region) = self.region(region_id) {
+            region.begin_close(None);
+        }
+        self.advance_region_state(region_id);
+        self.defer_cancel_dispatch(effects);
+    }
+
+    /// Close arm of a region lifecycle command: mirror of Scope::region's
+    /// `Outcome::Ok` branch. Body work finished normally; begin close and
+    /// advance so remaining children cancel and finalizers run to quiescence.
+    pub(crate) fn close_region_command(&mut self, region_id: RegionId) {
+        if let Some(region) = self.region(region_id) {
+            region.begin_close(None);
+        }
+        self.advance_region_state(region_id);
+    }
+
+    /// Mint-and-wire core behind [`Self::open_child_region_command`].
+    fn mint_child_region_parts(
+        &mut self,
+        parent: RegionId,
+        budget: Budget,
+        capability_budget: crate::types::CapabilityBudget,
+        requirements: crate::types::CapabilityBudgetRequirements,
+        priority: RegionPriority,
+        principal_task_id: TaskId,
+    ) -> Result<crate::runtime::spawn_mailbox::AdmittedRegion, RegionCreateError> {
+        let child_region = self.create_child_region_with_capability_budget_and_priority(
+            parent,
+            budget,
+            capability_budget,
+            requirements,
+            priority,
+        )?;
+        let record_budget =
+            self.region(child_region)
+                .map_or(budget, crate::record::RegionRecord::budget);
+        let principal_cx = crate::cx::Cx::new_with_drivers(
+            child_region,
+            principal_task_id,
+            record_budget,
+            None,
+            self.io_driver_handle(),
+            None,
+            self.timer_driver_handle(),
+            Some(self.entropy_source.fork(principal_task_id)),
+        )
+        .with_blocking_pool_handle(self.blocking_pool_handle())
+        .with_logical_clock(self.logical_clock_mode.build_handle(self.timer_driver_handle()))
+        .with_spawn_gateway(self.spawn_gateway.clone())
+        .with_pending_spawn_counter(
+            self.region(child_region)
+                .map(crate::record::RegionRecord::pending_spawn_handle),
+        );
+        let close_notify = self
+            .region(child_region)
+            .map(|region| region.close_notify.clone())
+            .expect("child region record was minted above");
+        Ok(crate::runtime::spawn_mailbox::AdmittedRegion {
+            region_id: child_region,
+            cx: principal_cx,
+            close_notify,
+        })
+    }
+
     /// Send-path admission tail: stores the payload centrally under the
     /// canonical arena id and publishes the admitted identity.
     fn finish_send_spawn_admission_in(
