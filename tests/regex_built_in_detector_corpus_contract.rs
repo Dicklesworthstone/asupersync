@@ -50,7 +50,7 @@ const LAB_CAPABILITY_ROW_SHA256: &str =
 const SOURCE_PIN_PATHS_SHA256: &str =
     "b5ba6ff6a6eb152e0c3bb263205e8a7d9f9a58fbbb27ec13fd276eb909d9552a";
 const CLAIMS_PROJECTION_SHA256: &str =
-    "9b00db92d9f3e89c48dbcd1dc4ca042ee43cddfb58a1325109ce19398db53215";
+    "7b04c73c6a2c2cd68698125201f56eb7ed90c622a2a0177a2dd8a028f7f14b01";
 const DOC_BEGIN: &str = "<!-- BEGIN REGEX BUILT-IN DETECTOR CORPUS -->";
 const DOC_END: &str = "<!-- END REGEX BUILT-IN DETECTOR CORPUS -->";
 
@@ -929,6 +929,8 @@ fn live_pattern_identity_order_tokens_and_custom_priority_are_pinned() {
             .expect("phone detector source"),
     ];
     assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
+    assert!(source.contains("scan_fixed_card_candidates(value"));
+    assert!(source.contains(".is_some_and(Self::is_luhn_valid_card)"));
     assert!(source.contains(".find_iter(value)"));
     assert!(source.contains(".any(Self::is_luhn_valid_card)"));
 

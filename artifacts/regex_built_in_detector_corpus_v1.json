@@ -65,9 +65,9 @@
     },
     {
       "path": "src/observability/otel.rs",
-      "sha256": "acb6cd65865d33403a22688d65967583b5c3912c93f4e501f5cad0aff4fbffd4",
-      "line_count": 15143,
-      "role": "live custom-first redaction pipeline, bounded email and SSN scanners with incumbent fallback, remaining built-in patterns, order, tokens and Luhn join"
+      "sha256": "a0ddc92dd9a91e8ac8b62dbee6bf2505aadba0f4504a525eb6ae32ebd28540ef",
+      "line_count": 15490,
+      "role": "live custom-first redaction pipeline, bounded email, SSN and payment-card candidate scanners with incumbent fallback, remaining phone pattern, order, tokens and allocation-free Luhn join"
     },
     {
       "path": "src/observability/mod.rs",
@@ -1253,7 +1253,28 @@
         "CUSTOM_PATTERN_NON_DISPATCH"
       ]
     },
-    "r2_3_card_luhn_state": "CORPUS_READY_NOT_IMPLEMENTED",
+    "r2_3_card_luhn_state": "IMPLEMENTED_FOCUSED_REMOTE_PROOF",
+    "r2_3_card_luhn_evidence": {
+      "implementation_revision": "702f1cc7849dc9cce9e30590566563c4d78cac88",
+      "source_sha256": "a0ddc92dd9a91e8ac8b62dbee6bf2505aadba0f4504a525eb6ae32ebd28540ef",
+      "remote_job_id": "j-29988810699833430",
+      "worker": "ovh-a",
+      "test_filter": "fixed_card",
+      "tests_passed": 4,
+      "tests_failed": 0,
+      "clean_overlay_base": "fa11b2c822c68785e3cfef8d00d80262c4d77ab4",
+      "clean_overlay_fingerprint": "abb75afdaaf08bf82661d737a04633adb1eef0228d8a9b89ef79c5108f683baf",
+      "corpus_contract_state": "PENDING_FOCUSED_CONTRACT",
+      "discarded_zero_test_job_id": "j-29988810699833429",
+      "discarded_zero_test_reason": "SHARED_PATH_SOURCE_SYNC_DID_NOT_INCLUDE_DIRTY_SCANNER_SOURCE",
+      "claims": [
+        "ALL_17_R2_1_CARD_CANDIDATE_AND_LUHN_VECTORS",
+        "GENERATED_LENGTH_SEPARATOR_AND_UNICODE_BOUNDARY_DIFFERENTIAL_MATRIX",
+        "BOUNDED_LARGE_INPUT_AND_LIMIT_FALLBACK",
+        "EXACT_CUSTOM_PATTERN_NON_DISPATCH",
+        "WHOLE_VALUE_CARD_REDACTION_OUTCOMES"
+      ]
+    },
     "r2_4_phone_dispatch_state": "CORPUS_READY_NOT_IMPLEMENTED",
     "r2_5_terminal_receipt_state": "BLOCKED_PENDING_IMPLEMENTATION_AND_DYNAMIC_EVIDENCE",
     "mismatch_action": "DISABLE_AFFECTED_FAST_PATH_AND_KEEP_INCUMBENT",

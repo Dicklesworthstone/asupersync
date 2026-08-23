@@ -163,7 +163,16 @@ authorize dependency exit or cutover.
   non-dispatch. Corpus/source-pin reconciliation passed 8/8 tests in remote job
   `j-29988810699833426`. These lanes do not prove a performance improvement or
   authorize regex removal.
-- R2.3 consumes card candidates and independent Luhn verdicts.
+- R2.3 consumed the 17 card-candidate spans and independent Luhn verdicts and
+  is implemented in revision `702f1cc78`. Clean-overlay RCH job
+  `j-29988810699833430` passed 4/4 focused tests on `ovh-a` with `-D warnings`:
+  every frozen row, generated lengths 13 through 19 across accepted separator
+  and Unicode/word-boundary forms, valid and invalid checksums, multiple
+  candidates, exact whole-value output, bounded input/work/output refusal,
+  incumbent fallback, and custom-pattern non-dispatch. Job
+  `j-29988810699833429` exited zero but selected zero tests after its shared-path
+  sync omitted the dirty source; it is explicitly discarded as evidence. This
+  lane does not prove a performance improvement or authorize regex removal.
 - R2.4 consumes phone spans and the closed dispatch identity.
 - R2.5 may aggregate the work only after implementation, generated
   equivalence, resource evidence, and named-host measurements exist.
