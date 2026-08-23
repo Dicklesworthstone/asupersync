@@ -8956,7 +8956,7 @@ mod tests {
         );
 
         let oversized = format!(
-            "a@b.co{}",
+            "a@b.co {}",
             "x".repeat(FIXED_PII_MAX_INPUT_BYTES.saturating_add(1))
         );
         assert_eq!(

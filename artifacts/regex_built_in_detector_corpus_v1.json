@@ -53,21 +53,21 @@
   "source_pins": [
     {
       "path": "Cargo.toml",
-      "sha256": "541ed6be1f748cd2897f18ba2679c6d34ff84a57d480db5a11c40ff007f1f1c7",
-      "line_count": 1064,
+      "sha256": "0f02e4fefedf5e9013054df794ece6f8fb259134fdbd95376e61d486c043fde3",
+      "line_count": 1074,
       "role": "optional regex dependency selector and metrics feature gate"
     },
     {
       "path": "Cargo.lock",
-      "sha256": "95d3aaec0e58be196f08e4b30792f90129213af86ae8e34d2c5862b9feb15880",
-      "line_count": 4665,
+      "sha256": "513cfba8f8671e69aab32317e042bd00737b9bfb30e2234012d6605f320f7a6a",
+      "line_count": 4664,
       "role": "incumbent regex dependency resolution"
     },
     {
       "path": "src/observability/otel.rs",
-      "sha256": "b036610d07e07b7a7e9ed3e23328d60104f2429cbe464827213a8bff5f7e0db8",
-      "line_count": 14533,
-      "role": "live custom-first redaction pipeline, built-in patterns, order, tokens and Luhn join"
+      "sha256": "acb6cd65865d33403a22688d65967583b5c3912c93f4e501f5cad0aff4fbffd4",
+      "line_count": 15143,
+      "role": "live custom-first redaction pipeline, bounded email and SSN scanners with incumbent fallback, remaining built-in patterns, order, tokens and Luhn join"
     },
     {
       "path": "src/observability/mod.rs",
@@ -95,8 +95,8 @@
     },
     {
       "path": "artifacts/dependency_capability_baseline_v1.json",
-      "sha256": "df830fc2663de19f857ade1e07feed0ee29f41f9cf6eba84f9c85b1d9c1040bc",
-      "line_count": 3213,
+      "sha256": "70ae911193a4b3d9d1d38ac5581dd5064bae1c5efb947e022619ea1e2eef6858",
+      "line_count": 3264,
       "role": "executable-partial blocking baseline authority"
     }
   ],
@@ -1237,7 +1237,22 @@
     "unknown_rows": 0
   },
   "downstream_handoff": {
-    "r2_2_email_ssn_state": "CORPUS_READY_NOT_IMPLEMENTED",
+    "r2_2_email_ssn_state": "IMPLEMENTED_FOCUSED_REMOTE_PROOF",
+    "r2_2_email_ssn_evidence": {
+      "remote_job_id": "j-29988810699833424",
+      "corpus_contract_job_id": "j-29988810699833426",
+      "worker": "ovh-a",
+      "test_filter": "fixed_email_and_ssn",
+      "tests_passed": 3,
+      "tests_failed": 0,
+      "corpus_contract_tests_passed": 8,
+      "claims": [
+        "ALL_27_R2_1_EMAIL_AND_SSN_VECTORS",
+        "GENERATED_UNICODE_BOUNDARY_DIFFERENTIAL_MATRIX",
+        "BOUNDED_LARGE_INPUT_AND_LIMIT_FALLBACK",
+        "CUSTOM_PATTERN_NON_DISPATCH"
+      ]
+    },
     "r2_3_card_luhn_state": "CORPUS_READY_NOT_IMPLEMENTED",
     "r2_4_phone_dispatch_state": "CORPUS_READY_NOT_IMPLEMENTED",
     "r2_5_terminal_receipt_state": "BLOCKED_PENDING_IMPLEMENTATION_AND_DYNAMIC_EVIDENCE",

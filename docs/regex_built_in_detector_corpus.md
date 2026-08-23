@@ -37,9 +37,11 @@ scanner equivalence scaffolding; it does not widen the current public API.
 | 3 | `RGX-BUILTIN-CARD` | `\b(?:\d[ -]?){13,19}\b` | non-overlapping candidates, then any Luhn-valid candidate | `[CARD_REDACTED]` |
 | 4 | `RGX-BUILTIN-PHONE` | `(?x)\b(?:\+?1[\s.-]?)?(?:\(?\d{3}\)?[\s.-]?)\d{3}[\s.-]?\d{4}\b` | existence | `[PHONE_REDACTED]` |
 
-These identities are corpus names only. Production currently uses
-function-local pattern literals and `OnceLock`s; it has no detector enum or
-fast-path allowset.
+These identities are corpus names only. At R2.1 capture time, production used
+function-local pattern literals and `OnceLock`s. R2.2 now routes only the
+hard-coded automatic email and SSN identities through bounded scanners, with
+the frozen regexes retained as fail-closed fallbacks. Production still has no
+general detector enum or R2.4 fast-path allowset.
 
 ## Span semantics and frozen edge behavior
 
@@ -153,7 +155,14 @@ authorize dependency exit or cutover.
 
 ## Downstream handoff
 
-- R2.2 consumes the email and SSN spans.
+- R2.2 consumed the email and SSN spans and is implemented with focused remote
+  proof in RCH job `j-29988810699833424`: three tests passed on `ovh-a` with
+  `-D warnings`. The lane covers every 15-email and 12-SSN R2.1 vector, a
+  generated Unicode/boundary differential matrix, bounded large input,
+  checked input/work/output ceilings, incumbent fallback, and custom-pattern
+  non-dispatch. Corpus/source-pin reconciliation passed 8/8 tests in remote job
+  `j-29988810699833426`. These lanes do not prove a performance improvement or
+  authorize regex removal.
 - R2.3 consumes card candidates and independent Luhn verdicts.
 - R2.4 consumes phone spans and the closed dispatch identity.
 - R2.5 may aggregate the work only after implementation, generated
