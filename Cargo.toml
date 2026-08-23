@@ -145,6 +145,7 @@ serialization-golden-harnesses = []
 real-service-e2e = [
     "channel-mpsc-select-e2e",
     "cross-subsystem-recovery-e2e",
+    "distributed-hash-snapshot-recovery-e2e",
     "h3-websocket-e2e",
     "obligation-cleanup-e2e",
     "raptorq-roundtrip-e2e",
@@ -155,6 +156,10 @@ channel-mpsc-select-e2e = []
 # journeys. It reuses the real obligation-cleanup harness for the worker-loss
 # row while keeping the rest of the profile dependency-free.
 cross-subsystem-recovery-e2e = ["obligation-cleanup-e2e", "proc-macros"]
+# Focused maintained replacement for the dormant distributed hash-ring and
+# authenticated snapshot recovery journeys. Test-only identifiers are exposed
+# solely to this integration-test profile.
+distributed-hash-snapshot-recovery-e2e = ["test-internals"]
 # Focused proof lane for the H3 WebSocket endpoint/result E2E harness.
 h3-websocket-e2e = []
 # Focused proof lane for the deterministic RaptorQ roundtrip E2E harness.

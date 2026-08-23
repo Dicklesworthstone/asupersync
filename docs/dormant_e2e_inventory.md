@@ -144,6 +144,40 @@ command, source revision, feature profile, deterministic seeds, cancellation
 boundaries, cleanup state, and replay command. Canonical
 `scripts/run_all_e2e.sh` integration remains owned by A5.
 
+## A4 maintained-lane recovery disposition
+
+`asupersync-d24mms.12.4` preserves the undeclared 828-line distributed source
+for audit history and restores its five real capabilities in
+`tests/distributed_hash_snapshot_recovery_e2e.rs`. The focused
+`distributed-hash-snapshot-recovery-e2e` profile exposes test-only identifiers
+without enabling the `real-service-e2e` umbrella. Every snapshot crosses a real
+file boundary and an explicit authentication check; every host worker is
+joined before its temporary root is explicitly removed.
+
+| Dormant row | Maintained operation | Externally observed result and cleanup |
+| --- | --- | --- |
+| `DORMANT-DIST-001` | fixed-seed ring scale-up and peer failure | Only keys assigned to the added peer move on scale-up; only keys owned by the failed peer move on removal; membership and vnode ownership are exact |
+| `DORMANT-DIST-002` | authenticated snapshot file roundtrip | Signed bytes are written, fsynced, read, authenticated, and compared field-by-field; the closed file and temporary root are absent afterward |
+| `DORMANT-DIST-003` | concurrent snapshot persistence with cancellation | Six joined host workers cross two barriers; five publish isolated authenticated files, one coordinator-cancelled worker creates no file, and receipt collection is time-bounded |
+| `DORMANT-DIST-004` | real-file failure boundaries | Missing, empty, truncated, and tampered snapshots preserve exact I/O or `SnapshotError` outcomes; no invalid snapshot is published |
+| `DORMANT-DIST-005` | peer failure, migration retry, and restart | Failed-peer keys reroute, a tampered transfer fails closed, exact bytes retry and publish, the same peer identity restores its assignment map, and shutdown releases every vnode and data directory |
+
+Run the focused, remote-required receipt validator with:
+
+```bash
+RCH_REQUIRE_REMOTE=1 \
+bash scripts/distributed_hash_snapshot_recovery_proof_runner.sh
+```
+
+The runner admits a clean overlay from `HEAD` containing only `Cargo.toml` and
+the maintained integration test, rejects local fallback, bounds the full RCH
+command, requires all five scenario IDs exactly once, and accepts no skips,
+infrastructure blockers, expected/actual drift, or first-failure receipt. Its
+`run_report.json`, `scenario_rows.jsonl`, and `run.log` retain the exact remote
+command, source revision, feature profile, fixed seeds, lifecycle/cleanup
+state, and replay command. Canonical `scripts/run_all_e2e.sh` integration and
+aggregate redaction/provenance reporting remain owned by A5.
+
 ## No-claim boundary
 
 This packet proves inventory completeness, source pins, dormant module state,
@@ -168,3 +202,14 @@ A5 runner admission. `DORMANT-INT-017` proves `RegionBridge` snapshot lag and
 healing only. The deliberate panic text in `DORMANT-INT-011` is caught test
 input, not an uncaught test failure; the subsequent receipt is emitted only
 after the same runtime successfully serves and closes a replacement channel.
+
+The A4 maintained lane does not claim a multi-process remote runtime, socket or
+network transport, service discovery, peer TLS identity, WAN retry behavior,
+PBFT or consensus safety, a production wire-format freeze, throughput,
+performance improvement, broad workspace health, release readiness, or
+canonical A5 runner admission. The dormant source never exercised those
+surfaces. Its "peers" are deterministic `HashRing` identities and its migration
+boundary is authenticated snapshot bytes crossing isolated real files. The
+focused test and receipt runner were authored in the same slice, so this is
+self-verification rather than independent review; a planted zero-receipt run
+must still be retained to show that the runner fails closed.
