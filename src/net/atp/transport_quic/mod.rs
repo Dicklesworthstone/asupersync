@@ -10250,6 +10250,29 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Test scratch dir whose path has no symlinked ancestors.
+    ///
+    /// macOS `$TMPDIR` lives under `/var`, and `/var -> /private/var` is an
+    /// OS-level symlink. The ATP destination traversal defense correctly
+    /// rejects any symlinked ancestor, so scratch roots are handed to the
+    /// transfer at their canonical (`/private/var/...`) spelling instead.
+    struct CanonTempDir {
+        _dir: tempfile::TempDir,
+        path: std::path::PathBuf,
+    }
+
+    impl CanonTempDir {
+        fn path(&self) -> &std::path::Path {
+            &self.path
+        }
+    }
+
+    fn canon_tempdir() -> CanonTempDir {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().canonicalize().expect("canonicalize temp dir");
+        CanonTempDir { _dir: dir, path }
+    }
     use crate::net::atp::protocol::frames::{Frame, ProtocolVersion};
     use crate::net::quic_native::{
         DEFAULT_MAX_PACKET_BYTES, NativeQuicConnectionConfig, PacketNumberSpace, QuicConnection,
@@ -13316,7 +13339,7 @@ mod tests {
     #[test]
     fn quic_delta_receiver_requests_noop_only_for_live_exact_destination() {
         let cx = Cx::for_testing();
-        let temp = tempfile::tempdir().expect("tempdir");
+        let temp = canon_tempdir();
         let source_root = temp.path().join("source");
         let dest = temp.path().join("dest");
         std::fs::create_dir_all(&source_root).expect("source dir");
@@ -14079,10 +14102,10 @@ mod tests {
     #[test]
     fn quic_prepare_source_manifest_preserves_explicit_empty_directory_entry() {
         let cx = Cx::for_testing();
-        let temp = tempfile::tempdir().expect("temp dir");
+        let temp = canon_tempdir();
         let root = temp.path().join("payload");
         std::fs::create_dir_all(root.join("empty")).expect("create empty dir");
-        let dest = tempfile::tempdir().expect("dest dir");
+        let dest = canon_tempdir();
 
         let config = trusted_quic_config();
         let prepared = block_on(prepare_source_manifest(&cx, &root, &config))
@@ -14120,10 +14143,10 @@ mod tests {
     #[test]
     fn quic_prepare_source_manifest_preserves_empty_directory_root() {
         let cx = Cx::for_testing();
-        let temp = tempfile::tempdir().expect("temp dir");
+        let temp = canon_tempdir();
         let root = temp.path().join("payload");
         std::fs::create_dir_all(&root).expect("create empty root");
-        let dest = tempfile::tempdir().expect("dest dir");
+        let dest = canon_tempdir();
 
         let config = trusted_quic_config();
         let prepared = block_on(prepare_source_manifest(&cx, &root, &config))
@@ -14628,7 +14651,7 @@ mod tests {
         let (cx, client, server) = established_pair();
         let mut native_client = client.inner().clone();
         let mut native_server = server.inner().clone();
-        let temp = tempfile::tempdir().expect("temp dir");
+        let temp = canon_tempdir();
         let root = temp.path().join("payload");
         std::fs::create_dir_all(root.join("nested")).expect("create nested dir");
         let alpha = varied_bytes(384, 67);
@@ -14657,7 +14680,7 @@ mod tests {
         let mut client_to_server_pn = 0u64;
         let mut server_to_client_pn = 0u64;
         let peer: SocketAddr = "127.0.0.1:4433".parse().expect("peer addr");
-        let dest = tempfile::tempdir().expect("dest dir");
+        let dest = canon_tempdir();
         let mut receiver_committed = false;
 
         let report = block_on(send_prepared_source_over_established_native_connection(
@@ -14808,7 +14831,7 @@ mod tests {
         let (cx, client, server) = established_pair();
         let mut native_client = client.inner().clone();
         let mut native_server = server.inner().clone();
-        let temp = tempfile::tempdir().expect("temp dir");
+        let temp = canon_tempdir();
         let root = temp.path().join("payload");
         std::fs::create_dir_all(root.join("nested")).expect("create nested dir");
         let alpha = varied_bytes(384, 73);
@@ -14830,7 +14853,7 @@ mod tests {
         let mut client_to_server_pn = 0u64;
         let mut server_to_client_pn = 0u64;
         let peer: SocketAddr = "127.0.0.1:4433".parse().expect("peer addr");
-        let dest = tempfile::tempdir().expect("dest dir");
+        let dest = canon_tempdir();
         let mut receiver_committed = false;
 
         let report = block_on(send_prepared_source_over_established_native_connection(
@@ -15556,7 +15579,7 @@ mod tests {
         .expect("deliver accepted connection payload");
 
         let peer: SocketAddr = "127.0.0.1:4433".parse().expect("peer addr");
-        let temp = tempfile::tempdir().expect("temp dir");
+        let temp = canon_tempdir();
         let report = block_on(receive_connection(
             &cx,
             server.inner().clone(),
@@ -16016,7 +16039,7 @@ mod tests {
         assert_eq!(symbols_accepted, 3);
         assert_eq!(feedback_rounds, 1);
 
-        let temp = tempfile::tempdir().expect("temp dir");
+        let temp = canon_tempdir();
         let (receipt, committed_paths) = block_on(commit_decoded_entries(
             &cx,
             temp.path(),

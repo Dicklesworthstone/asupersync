@@ -1,5 +1,28 @@
 use super::*;
 
+/// Test scratch dir whose path has no symlinked ancestors.
+///
+/// macOS `$TMPDIR` lives under `/var`, and `/var -> /private/var` is an
+/// OS-level symlink. The ATP destination traversal defense correctly
+/// rejects any symlinked ancestor, so scratch roots are handed to the
+/// transfer at their canonical (`/private/var/...`) spelling instead.
+struct CanonTempDir {
+    _dir: tempfile::TempDir,
+    path: std::path::PathBuf,
+}
+
+impl CanonTempDir {
+    fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+fn canon_tempdir() -> CanonTempDir {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().canonicalize().expect("canonicalize temp dir");
+    CanonTempDir { _dir: dir, path }
+}
+
 #[test]
 fn hello_ack_udp_ports_defaults_to_legacy_port() {
     let ack = HelloAck {
@@ -2445,7 +2468,7 @@ fn rq_delta_manifest_is_strict_and_bounded() {
 fn rq_delta_live_file_selects_noop_and_revalidates_source() {
     futures_lite::future::block_on(async {
         let cx = Cx::for_testing();
-        let source_dir = tempfile::tempdir().unwrap();
+        let source_dir = canon_tempdir();
         let source = source_dir.path().join("payload.bin");
         std::fs::write(&source, b"payload").unwrap();
         let (root_name, is_directory, mut entries, empty_directories) =
@@ -2500,7 +2523,7 @@ fn rq_delta_live_file_selects_noop_and_revalidates_source() {
         assert!(manifest.delta_manifest.is_some());
         validate_manifest(&manifest, &config).unwrap();
 
-        let dest = tempfile::tempdir().unwrap();
+        let dest = canon_tempdir();
         let destination = dest.path().join(&root_name);
         std::fs::write(&destination, b"payload").unwrap();
         let request = build_rq_receiver_delta_request(&cx, dest.path(), &config, &manifest)
@@ -3214,7 +3237,7 @@ fn rq_source_topology_captures_nested_empty_directories_and_keeps_links_fail_clo
 
 #[test]
 fn rq_receive_staging_creation_returns_cleanup_owner() {
-    let root = tempfile::tempdir().expect("temporary directory");
+    let root = canon_tempdir();
     let dest = root.path().join("destination");
     let guard = futures_lite::future::block_on(create_receive_staging_guard(&dest, "rqtransfer1"))
         .expect("create guarded receive staging directory");
@@ -7043,7 +7066,7 @@ fn digest_for_bytes(rel_path: &str, bytes: &[u8]) -> EntryDigest {
 
 #[test]
 fn verify_and_commit_replaces_readonly_regular_file_with_staged_metadata() {
-    let dest = tempfile::tempdir().expect("dest dir");
+    let dest = canon_tempdir();
     let staging_dir = dest.path().join(".atp-rq-regular-staging");
     std::fs::create_dir_all(&staging_dir).expect("staging dir");
     let staging_path = staging_dir.join("0");
@@ -7382,7 +7405,7 @@ fn validate_manifest_accepts_and_bounds_fragment_table() {
 
 #[test]
 fn verify_and_commit_reassembles_fragmented_file() {
-    let dest = tempfile::tempdir().expect("dest dir");
+    let dest = canon_tempdir();
     let staging_dir = dest.path().join(".atp-rq-fragment-staging");
     std::fs::create_dir_all(&staging_dir).expect("staging dir");
 
@@ -7562,7 +7585,7 @@ fn verify_and_commit_reassembles_fragmented_file() {
 
 #[test]
 fn verify_and_commit_renames_contiguous_single_file_fragment_staging() {
-    let dest = tempfile::tempdir().expect("dest dir");
+    let dest = canon_tempdir();
     let receive_staging_dir = dest.path().join(".atp-rq-staging-rqtransfer1-0");
     let fragment_dir = receive_staging_dir.join(RQ_SINGLE_FILE_FRAGMENT_STAGING_DIR);
     std::fs::create_dir_all(&fragment_dir).expect("fragment staging dir");
@@ -7654,7 +7677,7 @@ fn verify_and_commit_rejects_tampered_contiguous_fragment_and_cleans_staging() {
 
 #[test]
 fn contiguous_fragment_staging_accepts_out_of_order_datagram_writes() {
-    let dest = tempfile::tempdir().expect("dest dir");
+    let dest = canon_tempdir();
     let receive_staging_dir = dest.path().join(".atp-rq-staging-rqtransfer1-0");
     let fragment_dir = receive_staging_dir.join(RQ_SINGLE_FILE_FRAGMENT_STAGING_DIR);
     let staging_path = fragment_dir.join("0");
@@ -7698,7 +7721,7 @@ fn contiguous_fragment_staging_accepts_out_of_order_datagram_writes() {
 
 #[test]
 fn verify_and_commit_uses_source_stream_trailer_digests_for_manifest_placeholders() {
-    let dest = tempfile::tempdir().expect("dest dir");
+    let dest = canon_tempdir();
     let staging_dir = dest.path().join(".atp-rq-trailer-staging");
     std::fs::create_dir_all(&staging_dir).expect("staging dir");
 
@@ -8185,7 +8208,7 @@ fn pack_small_files_respects_configured_object_ceiling() {
 /// into the member files on disk, byte-identical.
 #[test]
 fn verify_and_commit_splits_packed_object_into_members() {
-    let dest = tempfile::tempdir().expect("dest dir");
+    let dest = canon_tempdir();
     let staging_dir = dest.path().join(".atp-rq-test-staging");
     std::fs::create_dir_all(&staging_dir).expect("staging dir");
 

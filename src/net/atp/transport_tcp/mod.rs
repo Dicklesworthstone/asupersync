@@ -4473,6 +4473,24 @@ where
 mod tests {
     use super::*;
 
+    /// Test scratch dir whose path has no symlinked ancestors.
+    ///
+    /// macOS `$TMPDIR` lives under `/var`, and `/var -> /private/var` is an
+    /// OS-level symlink. The ATP destination traversal defense correctly
+    /// rejects any symlinked ancestor, so scratch roots are canonicalized
+    /// before paths are handed to transfers.
+    fn canonical_test_root(name: &str) -> std::path::PathBuf {
+        let base = std::env::temp_dir().join(format!(
+            "{}-{}-{}",
+            name,
+            std::process::id(),
+            STAGING_SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).expect("create test root");
+        base.canonicalize().expect("canonicalize test root")
+    }
+
     #[test]
     fn content_delta_accepts_only_ordinary_windows_file_attributes() {
         for attributes in [None, Some(0), Some(0x0000_0020)] {
@@ -5195,13 +5213,7 @@ mod tests {
         validate_manifest(&manifest, &TransferConfig::default())
             .expect("directory metadata manifest");
 
-        let base = std::env::temp_dir().join(format!(
-            "atp-directory-kind-guard-{}-{}",
-            std::process::id(),
-            STAGING_SEQ.fetch_add(1, Ordering::Relaxed)
-        ));
-        let _ = std::fs::remove_dir_all(&base);
-        std::fs::create_dir_all(&base).expect("create destination base");
+        let base = canonical_test_root("atp-directory-kind-guard");
         let wrong_kind = base.join("nested");
         std::fs::write(&wrong_kind, b"must remain a regular file")
             .expect("write wrong-kind destination leaf");
@@ -5441,13 +5453,7 @@ mod tests {
             metadata
         }
 
-        let base = std::env::temp_dir().join(format!(
-            "atp-directory-mirror-order-{}-{}",
-            std::process::id(),
-            STAGING_SEQ.fetch_add(1, Ordering::Relaxed)
-        ));
-        let _ = std::fs::remove_dir_all(&base);
-        std::fs::create_dir_all(&base).expect("create mirror ordering test root");
+        let base = canonical_test_root("atp-directory-mirror-order");
         let dest_dir = base.join("dest");
         let transfer_root = dest_dir.join("r");
         let empty_dir = transfer_root.join("empty");
