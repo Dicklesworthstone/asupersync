@@ -155,6 +155,9 @@ impl<'scope, Caps: Send + Sync + 'static> ScopedCpu<'scope, '_, Caps> {
     ///
     /// # Errors
     ///
+    /// [`ScopedCpuError::Cancelled`] when the scope is already draining or
+    /// the owning task's cancellation/budget checkpoint refuses new work.
+    ///
     /// [`ScopedCpuError::WorkerCapExceeded`] when the declared worker
     /// cap is already reached — a structured refusal, no thread is
     /// created.
@@ -162,6 +165,13 @@ impl<'scope, Caps: Send + Sync + 'static> ScopedCpu<'scope, '_, Caps> {
     where
         F: FnOnce(&CpuCx<Caps>) + Send + 'scope,
     {
+        if self.latch.load(Ordering::Acquire) {
+            return Err(ScopedCpuError::Cancelled(crate::error::Error::new(
+                crate::error::ErrorKind::Cancelled,
+            )));
+        }
+        self.cx.checkpoint().map_err(ScopedCpuError::Cancelled)?;
+
         let child = self.spawned.fetch_add(1, Ordering::AcqRel);
         if child >= self.cap {
             // Undo the reservation so later (possibly smaller) retries
@@ -443,6 +453,62 @@ mod tests {
         assert!(
             child_saw_cancel.load(Ordering::SeqCst),
             "looping child must observe the latch and drain (no hang)"
+        );
+    }
+
+    #[test]
+    fn post_latch_spawn_is_refused_without_starting_worker_ne8jdw() {
+        let cx = Cx::for_testing();
+        let late_worker_ran = AtomicBool::new(false);
+
+        let err = cx
+            .scoped_cpu(2, |scope| {
+                scope
+                    .spawn(|_| panic!("raise scope latch"))
+                    .expect("first child fits under cap");
+
+                while !scope.latch.load(Ordering::Acquire) {
+                    std::thread::yield_now();
+                }
+
+                let late_spawn = scope.spawn(|_| {
+                    late_worker_ran.store(true, Ordering::SeqCst);
+                });
+                assert!(matches!(late_spawn, Err(ScopedCpuError::Cancelled(_))));
+                assert_eq!(scope.spawned(), 1, "refused worker is not counted");
+            })
+            .expect_err("first child panic must surface after drain");
+
+        assert!(matches!(
+            err,
+            ScopedCpuError::ChildPanicked { child: 0, .. }
+        ));
+        assert!(
+            !late_worker_ran.load(Ordering::SeqCst),
+            "post-latch worker body must never start"
+        );
+    }
+
+    #[test]
+    fn cancelled_scope_refuses_new_worker_ne8jdw() {
+        let cx = Cx::for_testing();
+        let worker_ran = AtomicBool::new(false);
+
+        let err = cx
+            .scoped_cpu(1, |scope| {
+                cx.set_cancel_requested(true);
+                let spawn = scope.spawn(|_| {
+                    worker_ran.store(true, Ordering::SeqCst);
+                });
+                assert!(matches!(spawn, Err(ScopedCpuError::Cancelled(_))));
+                assert_eq!(scope.spawned(), 0, "refused worker is not counted");
+            })
+            .expect_err("exit checkpoint must retain cancellation");
+
+        assert!(matches!(err, ScopedCpuError::Cancelled(_)));
+        assert!(
+            !worker_ran.load(Ordering::SeqCst),
+            "cancelled scope must not start newly submitted work"
         );
     }
 }
