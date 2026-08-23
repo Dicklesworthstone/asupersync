@@ -44,6 +44,12 @@ const CSRF_TOKEN_KEY: &str = "__asupersync.csrf_token";
 /// expiration check (br-asupersync-7udumi).
 const LAST_ACCESSED_KEY: &str = "__asupersync.last_accessed_unix_secs";
 
+/// Reserved key under which the session's original creation time is stored.
+/// Unlike [`LAST_ACCESSED_KEY`], this timestamp is preserved across ordinary
+/// requests and ID regeneration so an absolute server-side TTL cannot be
+/// extended indefinitely by activity.
+const CREATED_AT_KEY: &str = "__asupersync.created_at_unix_secs";
+
 /// br-asupersync-hifab2 — Reserved key set by [`Session::regenerate`] to
 /// signal the middleware that the session ID must be rotated at response
 /// time. The middleware deletes the old store entry, mints a fresh ID,
@@ -247,10 +253,18 @@ impl SessionData {
 
 /// In-memory session store. Data is lost on process restart.
 ///
-/// Suitable for development and single-process deployments.
+/// Suitable for development and single-process deployments. [`Self::new`]
+/// remains unbounded for backwards compatibility; use
+/// [`Self::with_max_sessions`] when memory residency must be capped.
 #[derive(Clone, Default)]
 pub struct MemoryStore {
-    sessions: Arc<Mutex<HashMap<String, SessionData>>>,
+    state: Arc<Mutex<MemoryStoreState>>,
+}
+
+#[derive(Default)]
+struct MemoryStoreState {
+    sessions: HashMap<String, SessionData>,
+    max_sessions: Option<usize>,
 }
 
 impl MemoryStore {
@@ -258,35 +272,59 @@ impl MemoryStore {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            sessions: Arc::new(Mutex::new(HashMap::new())),
+            state: Arc::new(Mutex::new(MemoryStoreState::default())),
+        }
+    }
+
+    /// Create an empty memory store capped at `max_sessions` entries.
+    ///
+    /// Saving a new session at capacity evicts the least recently accessed
+    /// entry according to the middleware's server-side timestamp, with the
+    /// session ID as a deterministic tie-breaker. Updating an existing entry
+    /// never evicts another session.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `max_sessions` is zero.
+    #[must_use]
+    pub fn with_max_sessions(max_sessions: usize) -> Self {
+        assert!(max_sessions > 0, "max_sessions must be greater than zero");
+        Self {
+            state: Arc::new(Mutex::new(MemoryStoreState {
+                sessions: HashMap::new(),
+                max_sessions: Some(max_sessions),
+            })),
         }
     }
 
     /// Number of active sessions.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.sessions.lock().len()
+        self.state.lock().sessions.len()
     }
 
     /// Returns `true` if there are no sessions.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.sessions.lock().is_empty()
+        self.state.lock().sessions.is_empty()
     }
 }
 
 impl fmt::Debug for MemoryStore {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let count = self.sessions.lock().len();
-        f.debug_struct("MemoryStore")
-            .field("sessions", &count)
-            .finish()
+        let state = self.state.lock();
+        let mut debug = f.debug_struct("MemoryStore");
+        debug.field("sessions", &state.sessions.len());
+        if let Some(max_sessions) = state.max_sessions {
+            debug.field("max_sessions", &max_sessions);
+        }
+        debug.finish()
     }
 }
 
 impl SessionStore for MemoryStore {
     fn load(&self, id: &str) -> Option<SessionData> {
-        self.sessions.lock().get(id).cloned()
+        self.state.lock().sessions.get(id).cloned()
     }
 
     fn save(&self, id: &str, data: &SessionData) {
@@ -294,12 +332,37 @@ impl SessionStore for MemoryStore {
         // Reset modified flag so reloaded sessions don't appear pre-modified,
         // which would cause unnecessary re-saves and Set-Cookie headers.
         stored.modified = false;
-        self.sessions.lock().insert(id.to_string(), stored);
+        let mut state = self.state.lock();
+        if !state.sessions.contains_key(id)
+            && state
+                .max_sessions
+                .is_some_and(|max_sessions| state.sessions.len() >= max_sessions)
+        {
+            let evicted = state
+                .sessions
+                .iter()
+                .min_by(|(id_a, data_a), (id_b, data_b)| {
+                    session_last_accessed(data_a)
+                        .cmp(&session_last_accessed(data_b))
+                        .then_with(|| id_a.cmp(id_b))
+                })
+                .map(|(evicted_id, _)| evicted_id.clone());
+            if let Some(evicted_id) = evicted {
+                state.sessions.remove(&evicted_id);
+            }
+        }
+        state.sessions.insert(id.to_string(), stored);
     }
 
     fn delete(&self, id: &str) {
-        self.sessions.lock().remove(id);
+        self.state.lock().sessions.remove(id);
     }
+}
+
+fn session_last_accessed(data: &SessionData) -> u64 {
+    data.get(LAST_ACCESSED_KEY)
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0)
 }
 
 // ─── Session ID generation ──────────────────────────────────────────────────
@@ -527,6 +590,7 @@ impl SessionConfig {
 pub struct SessionLayer<S: SessionStore> {
     store: Arc<S>,
     config: SessionConfig,
+    absolute_ttl_seconds: Option<u64>,
 }
 
 impl<S: SessionStore> SessionLayer<S> {
@@ -547,6 +611,7 @@ impl<S: SessionStore> SessionLayer<S> {
         Self {
             store: Arc::new(store),
             config,
+            absolute_ttl_seconds: None,
         }
     }
 
@@ -622,6 +687,16 @@ impl<S: SessionStore> SessionLayer<S> {
         self
     }
 
+    /// Set the absolute server-side session TTL in seconds.
+    ///
+    /// Unlike [`Self::idle_ttl_seconds`], activity does not extend this
+    /// lifetime. ID regeneration also preserves the original creation time.
+    #[must_use]
+    pub const fn absolute_ttl_seconds(mut self, seconds: u64) -> Self {
+        self.absolute_ttl_seconds = Some(seconds);
+        self
+    }
+
     /// Toggle CSRF protection. Default is enabled — disable only for
     /// API-only endpoints that authenticate every request via a bearer
     /// token unrelated to the session cookie. (br-asupersync-7udumi)
@@ -642,6 +717,7 @@ impl<S: SessionStore> SessionLayer<S> {
             inner,
             store: self.store,
             config: self.config,
+            absolute_ttl_seconds: self.absolute_ttl_seconds,
         }
     }
 }
@@ -664,6 +740,7 @@ impl<S: SessionStore, H: Handler> crate::service::Layer<H> for SessionLayer<S> {
             inner,
             store: Arc::clone(&self.store),
             config: self.config.clone(),
+            absolute_ttl_seconds: self.absolute_ttl_seconds,
         }
     }
 }
@@ -672,6 +749,7 @@ impl<S: SessionStore> fmt::Debug for SessionLayer<S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SessionLayer")
             .field("config", &self.config)
+            .field("absolute_ttl_seconds", &self.absolute_ttl_seconds)
             .finish_non_exhaustive()
     }
 }
@@ -683,6 +761,7 @@ pub struct SessionMiddleware<S: SessionStore, H: Handler> {
     inner: H,
     store: Arc<S>,
     config: SessionConfig,
+    absolute_ttl_seconds: Option<u64>,
 }
 
 impl<S: SessionStore, H: Handler> Handler for SessionMiddleware<S, H> {
@@ -712,13 +791,13 @@ impl<S: SessionStore, H: Handler> Handler for SessionMiddleware<S, H> {
 
             // 2. Load existing session data.
             //    If the client-supplied ID is not in the store, regenerate to
-            //    prevent session-fixation attacks. Also: if an idle TTL is
-            //    configured and the session's last_accessed is too old,
-            //    server-side delete + new id (br-asupersync-7udumi).
+            //    prevent session-fixation attacks. Also: if an idle or
+            //    absolute TTL is configured and elapsed, server-side delete
+            //    + new id (br-asupersync-7udumi, br-asupersync-ne8jdw).
             let mut session_data = if is_new {
                 SessionData::new()
             } else if let Some(data) = self.store.load(&session_id) {
-                if self.is_idle_expired(&data) {
+                if self.is_idle_expired(&data) || self.is_absolute_expired(&data) {
                     self.store.delete(&session_id);
                     let Some(new_id) = generate_session_id() else {
                         return Response::new(
@@ -910,6 +989,9 @@ impl<S: SessionStore, H: Handler> Handler for SessionMiddleware<S, H> {
                     self.store.delete(&session_id);
                 }
             } else if should_save_session {
+                if session_data.get(CREATED_AT_KEY).is_none() {
+                    session_data.insert(CREATED_AT_KEY, now_unix_secs().to_string());
+                }
                 session_data.insert(LAST_ACCESSED_KEY, now_unix_secs().to_string());
                 self.store.save(&session_id, &session_data);
             }
@@ -959,6 +1041,22 @@ impl<S: SessionStore, H: Handler> SessionMiddleware<S, H> {
         };
         let now = now_unix_secs();
         now.saturating_sub(last) > ttl
+    }
+
+    /// Returns true if the configured absolute TTL has elapsed since the
+    /// session's original creation timestamp. Pre-ne8jdw sessions without the
+    /// timestamp are admitted once and stamped on the following save.
+    fn is_absolute_expired(&self, data: &SessionData) -> bool {
+        let Some(ttl) = self.absolute_ttl_seconds else {
+            return false;
+        };
+        let Some(created_at) = data
+            .get(CREATED_AT_KEY)
+            .and_then(|value| value.parse::<u64>().ok())
+        else {
+            return false;
+        };
+        now_unix_secs().saturating_sub(created_at) > ttl
     }
 }
 
@@ -1266,6 +1364,36 @@ mod tests {
         assert!(store.is_empty());
     }
 
+    #[test]
+    fn bounded_memory_store_evicts_least_recent_session_ne8jdw() {
+        let store = MemoryStore::with_max_sessions(2);
+        for (id, last_accessed) in [("old", 10_u64), ("current", 20_u64)] {
+            let mut data = SessionData::new();
+            data.insert(LAST_ACCESSED_KEY, last_accessed.to_string());
+            store.save(id, &data);
+        }
+
+        let mut newest = SessionData::new();
+        newest.insert(LAST_ACCESSED_KEY, "30");
+        store.save("new", &newest);
+
+        assert_eq!(store.len(), 2);
+        assert!(store.load("old").is_none());
+        assert!(store.load("current").is_some());
+        assert!(store.load("new").is_some());
+
+        let mut updated = SessionData::new();
+        updated.insert(LAST_ACCESSED_KEY, "40");
+        store.save("current", &updated);
+        assert_eq!(store.len(), 2, "updating in place must not evict");
+    }
+
+    #[test]
+    #[should_panic(expected = "max_sessions must be greater than zero")]
+    fn bounded_memory_store_rejects_zero_capacity_ne8jdw() {
+        let _store = MemoryStore::with_max_sessions(0);
+    }
+
     // ================================================================
     // Session ID
     // ================================================================
@@ -1361,7 +1489,8 @@ mod tests {
             .http_only(false)
             .secure(true)
             .same_site(SameSite::None)
-            .max_age(7200);
+            .max_age(7200)
+            .absolute_ttl_seconds(14_400);
 
         assert_eq!(layer.config.cookie_name, "my_session");
         assert_eq!(layer.config.cookie_path, "/app");
@@ -1369,6 +1498,7 @@ mod tests {
         assert!(layer.config.secure);
         assert_eq!(layer.config.same_site, SameSite::None);
         assert_eq!(layer.config.max_age, Some(7200));
+        assert_eq!(layer.absolute_ttl_seconds, Some(14_400));
     }
 
     #[test]
@@ -1492,6 +1622,40 @@ mod tests {
             "must not reuse attacker-supplied ID"
         );
         assert_eq!(store.len(), 1);
+    }
+
+    #[test]
+    fn middleware_absolute_ttl_expires_active_session_ne8jdw() {
+        let store = MemoryStore::new();
+        let expired_id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let mut data = SessionData::new();
+        data.insert("user", "alice");
+        data.insert(
+            CREATED_AT_KEY,
+            now_unix_secs().saturating_sub(11).to_string(),
+        );
+        data.insert(LAST_ACCESSED_KEY, now_unix_secs().to_string());
+        store.save(expired_id, &data);
+
+        let handler = SessionLayer::new(store.clone())
+            .absolute_ttl_seconds(10)
+            .wrap(TestHandler);
+        let mut req = Request::new("GET", "/");
+        req.headers
+            .insert("cookie".to_string(), format!("session_id={expired_id}"));
+
+        let resp = handler.call(req);
+        let new_id = extract_set_cookie_id(resp.set_cookies.first().expect("fresh cookie"));
+        assert_ne!(new_id, expired_id);
+        assert!(store.load(expired_id).is_none());
+        assert_eq!(store.len(), 1);
+        assert!(
+            store
+                .load(new_id)
+                .and_then(|session| session.get(CREATED_AT_KEY).map(str::to_string))
+                .is_some(),
+            "replacement session must receive a creation timestamp"
+        );
     }
 
     /// br-asupersync-hifab2: end-to-end session-fixation defence.
@@ -2067,6 +2231,7 @@ mod tests {
         let original_id = "1111222233334444aaaabbbbccccdddd".to_string();
         let mut seeded = SessionData::new();
         seeded.insert("authed_user", "bob");
+        seeded.insert(CREATED_AT_KEY, "123");
         store.save(&original_id, &seeded);
         assert_eq!(store.len(), 1);
 
@@ -2090,7 +2255,12 @@ mod tests {
             store.load(&original_id).is_none(),
             "original session must be deleted after rotation"
         );
-        assert!(store.load(new_id).is_some(), "new session must be present");
+        let rotated = store.load(new_id).expect("new session must be present");
+        assert_eq!(
+            rotated.get(CREATED_AT_KEY),
+            Some("123"),
+            "ID regeneration must not reset the absolute lifetime"
+        );
     }
 
     /// br-asupersync-ehtkns regression: a handler that emits its own
