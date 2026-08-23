@@ -814,6 +814,21 @@
       "current_rch_behavior": "mapped_not_rerun_in_vf1"
     },
     {
+      "lane_id": "downstream-consumer-direct-minimal-check",
+      "source": "proof_lane_manifest_v1",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_downstream_consumer_direct_minimal_default CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo +nightly-2026-07-05 check -j 2 -Z direct-minimal-versions --locked --manifest-path tests/fixtures/downstream-consumer-proof/Cargo.toml --bin default_consumer",
+      "intended_guarantee": "Tracked independent direct-minimal lock compiles the default downstream consumer on the pinned nightly.",
+      "package_or_surface": "asupersync-downstream-consumer-proof",
+      "target_kind": "compile_frontier",
+      "features": [],
+      "cfg_test_enabled": "no",
+      "dev_dependency_edges": "none_expected",
+      "conformance_expected": "not_expected",
+      "normal_edge_tokio_expectation": "not_applicable",
+      "resource_envelope_class": "compile-frontier-heavy",
+      "current_rch_behavior": "green_observed"
+    },
+    {
       "lane_id": "downstream-consumer-default-kafka-test",
       "source": "proof_lane_manifest_v1",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_downstream_consumer_kafka_default CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test --manifest-path tests/fixtures/downstream-consumer-proof/Cargo.toml --test kafka_default_feature_surface -- --nocapture",

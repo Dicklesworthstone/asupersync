@@ -6,6 +6,45 @@
   "package_name": "asupersync-downstream-consumer-proof",
   "external_workspace_required": true,
   "status_claim_id": "downstream-consumer-public-api-proof",
+  "minimum_version_policy": {
+    "bead_id": "asupersync-mnotoo.3.5",
+    "toolchain_path": "rust-toolchain.toml",
+    "toolchain_sha256": "7be955420e9a82164d4c4307e141035b29cd395ba6f621af32f3fddfb4013f63",
+    "toolchain_channel": "nightly-2026-07-05",
+    "root_manifest_path": "Cargo.toml",
+    "root_manifest_sha256": "0f02e4fefedf5e9013054df794ece6f8fb259134fdbd95376e61d486c043fde3",
+    "fixture_manifest_sha256": "d47df61ac5359be24bef210d62f4d72b4a45b3d6c4c7189f2766c509a71fc3b3",
+    "tracked_lock_path": "tests/fixtures/downstream-consumer-proof/Cargo.lock",
+    "tracked_lock_sha256": "de886934a709b70389afc553daa0a5a91b3d716f1ce51a4bc7198dfb6649c19a",
+    "tracked_package_count": 214,
+    "resolution_policy": "direct-minimal-versions",
+    "generation_command": "cargo +nightly-2026-07-05 -Z direct-minimal-versions generate-lockfile --manifest-path tests/fixtures/downstream-consumer-proof/Cargo.toml",
+    "fresh_remote_receipt": {
+      "worker_id": "ovh-a",
+      "job_id": 29988810699833377,
+      "exit_code": 0,
+      "duration_ms": 84310,
+      "observed_at": "2026-08-23T11:43:54Z"
+    },
+    "transitive_minimal_probe": {
+      "status": "blocked_upstream_transitive_range",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_downstream_consumer_minimal_default CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo +nightly-2026-07-05 check -j 2 -Z minimal-versions --locked --manifest-path tests/fixtures/downstream-consumer-proof/Cargo.toml --bin default_consumer",
+      "worker_id": "ovh-a",
+      "job_id": 29988810699833376,
+      "exit_code": 101,
+      "selected_package": "curve25519-dalek 4.0.0",
+      "dependency_path": "asupersync -> nkeys 0.4.5 -> ed25519-dalek 2.0.0 -> curve25519-dalek 4.0.0",
+      "diagnostic": "E0635 unknown feature stdsimd",
+      "disposition": "Do not add an unused production dependency solely to constrain this transitive range. Keep full transitive-minimal support unclaimed until the upstream range or Cargo policy selects a toolchain-compatible release."
+    },
+    "update_policy": [
+      "Regenerate the independent lock with the exact pinned nightly and direct-minimal command after the root manifest, fixture manifest, toolchain, or tracked lock changes.",
+      "Review the lock diff, run the locked remote compile lane, and update all checked hashes and the proof receipt together.",
+      "Re-run the full transitive-minimal probe; preserve the precise blocker unless it reaches terminal green without a local fallback or a production-only constraint dependency."
+    ],
+    "stable_subset_bound": "No numeric stable MSRV is declared because Cargo.toml has no rust-version. The separate stable lane remains --no-default-features --features proc-macros.",
+    "default_feature_bound": "The exact nightly-2026-07-05 snapshot is required because default features include nightly-outcome-try; it is not a numeric MSRV range."
+  },
   "positive_profiles": [
     {
       "profile_id": "default-public-surface-run",
@@ -73,6 +112,16 @@
   ],
   "dependency_profiles": [
     {
+      "profile_id": "direct-minimal-default-check",
+      "lane_id": "downstream-consumer-direct-minimal-check",
+      "guarantee_id": "downstream-consumer-direct-minimal-resolution",
+      "fixture_features": [],
+      "root_feature_flags": [],
+      "lock_path": "tests/fixtures/downstream-consumer-proof/Cargo.lock",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_downstream_consumer_direct_minimal_default CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo +nightly-2026-07-05 check -j 2 -Z direct-minimal-versions --locked --manifest-path tests/fixtures/downstream-consumer-proof/Cargo.toml --bin default_consumer",
+      "expected_signal": "the independent direct-minimal lock compiles the default consumer on pinned nightly-2026-07-05 and exits 0"
+    },
+    {
       "profile_id": "default-no-tokio-tree",
       "lane_id": "downstream-consumer-default-tokio-tree",
       "guarantee_id": "downstream-consumer-default-tokio-free",
@@ -115,6 +164,12 @@
     "release-readiness",
     "test-internals-public-api",
     "current-head-runtime-behavior",
-    "all-FrankenGraphDB-behavior"
+    "all-FrankenGraphDB-behavior",
+    "numeric-stable-msrv",
+    "transitive-minimal-versions",
+    "universal-vendoring-reproducibility",
+    "advisory-clean-consumer-graphs",
+    "publisher-identity",
+    "source-trust"
   ]
 }

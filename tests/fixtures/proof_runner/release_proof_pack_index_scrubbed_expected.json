@@ -55,7 +55,7 @@
       },
       "summary": {
         "claim_count": 36,
-        "lane_count": 62,
+        "lane_count": 63,
         "green_claim_count": 14,
         "yellow_claim_count": 22,
         "red_claim_count": 0,
@@ -267,6 +267,14 @@
         "downstream-consumer-default-tokio-free"
       ],
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_downstream_consumer_tokio_tree cargo tree -e normal --manifest-path tests/fixtures/downstream-consumer-proof/Cargo.toml -i tokio"
+    },
+    {
+      "lane_id": "downstream-consumer-direct-minimal-check",
+      "expected_signal": "the independent direct-minimal lock compiles the default consumer on pinned nightly-2026-07-05 and exits 0",
+      "guarantee_ids": [
+        "downstream-consumer-direct-minimal-resolution"
+      ],
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_downstream_consumer_direct_minimal_default CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo +nightly-2026-07-05 check -j 2 -Z direct-minimal-versions --locked --manifest-path tests/fixtures/downstream-consumer-proof/Cargo.toml --bin default_consumer"
     },
     {
       "lane_id": "downstream-consumer-internal-negative-check",
@@ -568,7 +576,7 @@
   "summaries": {
     "proof_console": {
       "claim_count": 36,
-      "lane_count": 62,
+      "lane_count": 63,
       "green_claim_count": 14,
       "yellow_claim_count": 22,
       "red_claim_count": 0,
@@ -617,8 +625,8 @@
   "summary": {
     "source_artifact_count": 6,
     "missing_source_artifact_count": 0,
-    "proof_lane_count": 62,
-    "proof_command_count": 62,
+    "proof_lane_count": 63,
+    "proof_command_count": 63,
     "rch_outcome_count": 0,
     "rch_log_count": 0,
     "rch_outcome_provenance_failure_count": 0

@@ -469,6 +469,7 @@
     "proof-lane-manifest-verifier",
     "downstream-consumer-v044-cancel-compatibility",
     "downstream-consumer-default-public-api",
+    "downstream-consumer-direct-minimal-resolution",
     "downstream-consumer-default-kafka-fail-closed",
     "downstream-consumer-metrics-public-api",
     "downstream-consumer-channel-public-api",
@@ -1319,6 +1320,26 @@
       ]
     },
     {
+      "lane_id": "downstream-consumer-direct-minimal-check",
+      "kind": "compile_frontier",
+      "resource_envelope_class": "compile-frontier-heavy",
+      "package": "asupersync-downstream-consumer-proof",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_downstream_consumer_direct_minimal_default CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo +nightly-2026-07-05 check -j 2 -Z direct-minimal-versions --locked --manifest-path tests/fixtures/downstream-consumer-proof/Cargo.toml --bin default_consumer",
+      "guarantee_ids": [
+        "downstream-consumer-direct-minimal-resolution"
+      ],
+      "feature_flags": [],
+      "expected_signal": "the independent direct-minimal lock compiles the default consumer on pinned nightly-2026-07-05 and exits 0",
+      "source_paths": [
+        "Cargo.toml",
+        "rust-toolchain.toml",
+        "tests/fixtures/downstream-consumer-proof/Cargo.toml",
+        "tests/fixtures/downstream-consumer-proof/Cargo.lock",
+        "tests/fixtures/downstream-consumer-proof/src/bin/default_consumer.rs",
+        "artifacts/downstream_consumer_proof_v1.json"
+      ]
+    },
+    {
       "lane_id": "downstream-consumer-default-kafka-test",
       "kind": "test_frontier",
       "resource_envelope_class": "test-frontier-heavy",
@@ -2053,6 +2074,12 @@
       "guarantee_id": "downstream-consumer-default-public-api",
       "lane_ids": [
         "downstream-consumer-default-run"
+      ]
+    },
+    {
+      "guarantee_id": "downstream-consumer-direct-minimal-resolution",
+      "lane_ids": [
+        "downstream-consumer-direct-minimal-check"
       ]
     },
     {

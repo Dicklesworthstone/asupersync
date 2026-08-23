@@ -1,11 +1,15 @@
 #![allow(missing_docs)]
 
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 const ARTIFACT_PATH: &str = "artifacts/downstream_consumer_proof_v1.json";
 const FIXTURE_MANIFEST_PATH: &str = "tests/fixtures/downstream-consumer-proof/Cargo.toml";
+const FIXTURE_LOCK_PATH: &str = "tests/fixtures/downstream-consumer-proof/Cargo.lock";
+const ROOT_MANIFEST_PATH: &str = "Cargo.toml";
+const TOOLCHAIN_PATH: &str = "rust-toolchain.toml";
 const MANIFEST_PATH: &str = "artifacts/proof_lane_manifest_v1.json";
 const SNAPSHOT_PATH: &str = "artifacts/proof_status_snapshot_v1.json";
 
@@ -21,6 +25,60 @@ fn read_repo_file(relative: &str) -> String {
 fn json(relative: &str) -> Value {
     serde_json::from_str(&read_repo_file(relative))
         .unwrap_or_else(|err| panic!("parse {relative}: {err}"))
+}
+
+fn sha256(text: &str) -> String {
+    hex::encode(Sha256::digest(text.as_bytes()))
+}
+
+fn lock_packages(lock: &str) -> Vec<toml::Value> {
+    let parsed = toml::from_str::<toml::Value>(lock).expect("parse fixture Cargo.lock");
+    parsed
+        .get("package")
+        .and_then(toml::Value::as_array)
+        .expect("fixture Cargo.lock package array")
+        .clone()
+}
+
+fn minimum_version_errors(artifact: &Value, lock: &str) -> Vec<String> {
+    let mut errors = Vec::new();
+    let policy = object(artifact, "minimum_version_policy");
+
+    if string(policy, "resolution_policy") != "direct-minimal-versions" {
+        errors.push("resolution policy drift".to_owned());
+    }
+    if string(policy, "tracked_lock_sha256") != sha256(lock) {
+        errors.push("tracked direct-minimal lock hash drift".to_owned());
+    }
+    if policy["tracked_package_count"].as_u64() != Some(lock_packages(lock).len() as u64) {
+        errors.push("tracked direct-minimal package count drift".to_owned());
+    }
+    let generation = string(policy, "generation_command");
+    for marker in [
+        "cargo +nightly-2026-07-05",
+        "-Z direct-minimal-versions",
+        "generate-lockfile",
+        FIXTURE_MANIFEST_PATH,
+    ] {
+        if !generation.contains(marker) {
+            errors.push(format!("generation command missing {marker}"));
+        }
+    }
+
+    let blocker = object(policy, "transitive_minimal_probe");
+    for (key, expected) in [
+        ("status", "blocked_upstream_transitive_range"),
+        ("selected_package", "curve25519-dalek 4.0.0"),
+        ("diagnostic", "E0635 unknown feature stdsimd"),
+    ] {
+        if string(blocker, key) != expected {
+            errors.push(format!("transitive-minimal blocker {key} drift"));
+        }
+    }
+    if !string(blocker, "command").contains("-Z minimal-versions --locked") {
+        errors.push("transitive-minimal blocker command drift".to_owned());
+    }
+    errors
 }
 
 fn array<'a>(value: &'a Value, key: &str) -> &'a Vec<Value> {
@@ -129,6 +187,93 @@ fn fixture_is_external_workspace_and_does_not_enable_test_internals() {
     assert!(
         !fixture_manifest.contains("test-internals"),
         "the downstream fixture must not opt into internal test helpers"
+    );
+}
+
+#[test]
+fn direct_minimal_consumer_lock_and_toolchain_are_checked_exactly() {
+    let artifact = json(ARTIFACT_PATH);
+    let policy = object(&artifact, "minimum_version_policy");
+    let lock = read_repo_file(FIXTURE_LOCK_PATH);
+
+    assert!(
+        read_repo_file(".gitignore")
+            .contains("!tests/fixtures/downstream-consumer-proof/Cargo.lock"),
+        "the standalone consumer lock must remain tracked"
+    );
+    assert_eq!(
+        sha256(&read_repo_file(ROOT_MANIFEST_PATH)),
+        string(policy, "root_manifest_sha256")
+    );
+    assert_eq!(
+        sha256(&read_repo_file(FIXTURE_MANIFEST_PATH)),
+        string(policy, "fixture_manifest_sha256")
+    );
+    assert_eq!(
+        sha256(&read_repo_file(TOOLCHAIN_PATH)),
+        string(policy, "toolchain_sha256")
+    );
+    assert_eq!(string(policy, "toolchain_channel"), "nightly-2026-07-05");
+    assert!(minimum_version_errors(&artifact, &lock).is_empty());
+
+    let packages = lock_packages(&lock);
+    let has_package = |name: &str, version: &str, source: Option<&str>| {
+        packages.iter().any(|package| {
+            package.get("name").and_then(toml::Value::as_str) == Some(name)
+                && package.get("version").and_then(toml::Value::as_str) == Some(version)
+                && package.get("source").and_then(toml::Value::as_str) == source
+        })
+    };
+    assert!(has_package("asupersync", "0.4.9", None));
+    assert!(has_package(
+        "asupersync",
+        "0.4.4",
+        Some("registry+https://github.com/rust-lang/crates.io-index")
+    ));
+    assert!(has_package(
+        "curve25519-dalek",
+        "4.1.3",
+        Some("registry+https://github.com/rust-lang/crates.io-index")
+    ));
+
+    let profile = array(&artifact, "dependency_profiles")
+        .iter()
+        .find(|entry| entry["profile_id"].as_str() == Some("direct-minimal-default-check"))
+        .expect("direct-minimal downstream profile");
+    assert_eq!(string(profile, "lock_path"), FIXTURE_LOCK_PATH);
+    for marker in [
+        "RCH_REQUIRE_REMOTE=1 rch exec --",
+        "cargo +nightly-2026-07-05 check -j 2",
+        "-Z direct-minimal-versions --locked",
+        "--bin default_consumer",
+    ] {
+        assert!(
+            string(profile, "command").contains(marker),
+            "direct-minimal compile command missing {marker}"
+        );
+    }
+}
+
+#[test]
+fn direct_minimal_policy_negative_mutations_fail_closed() {
+    let artifact = json(ARTIFACT_PATH);
+    let lock = read_repo_file(FIXTURE_LOCK_PATH);
+
+    let mut stale_lock = lock.clone();
+    stale_lock.push_str("# planted stale lock mutation\n");
+    assert!(
+        minimum_version_errors(&artifact, &stale_lock)
+            .iter()
+            .any(|error| error.contains("lock hash drift"))
+    );
+
+    let mut weakened = artifact.clone();
+    weakened["minimum_version_policy"]["resolution_policy"] =
+        Value::String("maximum-versions".to_owned());
+    assert!(
+        minimum_version_errors(&weakened, &lock)
+            .iter()
+            .any(|error| error.contains("resolution policy drift"))
     );
 }
 

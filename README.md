@@ -629,8 +629,17 @@ current contributor/release pin, `nightly-2026-07-05`, from
 `rust-toolchain.toml`. That exact snapshot is a compatibility instruction, not
 a numeric stable MSRV or promised lower bound. The stable subset currently has
 no numeric MSRV claim because `Cargo.toml` does not declare `rust-version`, and
-the existing synthesized-consumer proof covers current public API profiles
-rather than minimum dependency versions.
+the stable lane remains limited to `--no-default-features --features
+proc-macros`.
+
+The standalone downstream fixture now commits its own direct-minimal lock. The
+pinned-nightly `downstream-consumer-direct-minimal-check` lane verifies that
+lock against the default public consumer. Full transitive-minimal resolution is
+not claimed: its current fail-closed probe selects `curve25519-dalek 4.0.0`
+through `nkeys` / `ed25519-dalek`, which fails on the pinned nightly because it
+requests the removed `stdsimd` feature. That precise blocker is recorded in the
+[downstream consumer artifact](./artifacts/downstream_consumer_proof_v1.json)
+rather than hidden behind an unused production constraint dependency.
 
 Applications should commit and enforce their own lockfile. Vendoring is an
 optional source-availability control that must be maintained together with that

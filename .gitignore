@@ -5,6 +5,7 @@ target-*/
 target_*/
 Cargo.lock
 !fuzz/Cargo.lock
+!tests/fixtures/downstream-consumer-proof/Cargo.lock
 
 # IDE
 .idea/

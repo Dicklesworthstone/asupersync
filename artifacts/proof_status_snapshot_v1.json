@@ -825,6 +825,7 @@
       "manifest_guarantee_ids": [
         "downstream-consumer-v044-cancel-compatibility",
         "downstream-consumer-default-public-api",
+        "downstream-consumer-direct-minimal-resolution",
         "downstream-consumer-default-kafka-fail-closed",
         "downstream-consumer-metrics-public-api",
         "downstream-consumer-channel-public-api",
@@ -835,6 +836,7 @@
       "manifest_lane_ids": [
         "downstream-consumer-v044-cancel-compat-run",
         "downstream-consumer-default-run",
+        "downstream-consumer-direct-minimal-check",
         "downstream-consumer-default-kafka-test",
         "downstream-consumer-metrics-run",
         "downstream-consumer-channel-profile-run",
@@ -845,6 +847,7 @@
       "proof_commands": [
         "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_downstream_consumer_v044_cancel_compat CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo run --manifest-path tests/fixtures/downstream-consumer-proof/Cargo.toml --bin v044_cancel_compat_consumer",
         "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_downstream_consumer_default CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo run --manifest-path tests/fixtures/downstream-consumer-proof/Cargo.toml --bin default_consumer",
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_downstream_consumer_direct_minimal_default CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo +nightly-2026-07-05 check -j 2 -Z direct-minimal-versions --locked --manifest-path tests/fixtures/downstream-consumer-proof/Cargo.toml --bin default_consumer",
         "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_downstream_consumer_kafka_default CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test --manifest-path tests/fixtures/downstream-consumer-proof/Cargo.toml --test kafka_default_feature_surface -- --nocapture",
         "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_downstream_consumer_metrics CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo run --manifest-path tests/fixtures/downstream-consumer-proof/Cargo.toml --features metrics-profile --bin metrics_consumer",
         "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_downstream_consumer_channel CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo run --manifest-path tests/fixtures/downstream-consumer-proof/Cargo.toml --features channel-mpsc-select-e2e-profile --bin channel_profile_consumer",
@@ -853,7 +856,7 @@
         "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_downstream_consumer_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test downstream_consumer_proof_contract -- --nocapture"
       ],
       "blocked_frontier": null,
-      "notes": "Yellow frontier overall because the fixture's other public profiles still require fresh reruns. The exact published =0.4.4 cancellation profile has a fresh clean-overlay RCH pass at base c059250ddbe775e78cf8edde57ac78a2a3e4c618: job 29982692904796167 on ovh-a, exit 0, remote command 104684 ms / total 120378 ms, overlay fingerprint 8b760ac256b79b9e0e35644bd006bda134317f98de0b67d131bc50ce58a57056; it emitted V044_CANCEL_COMPAT_NEGATIVE_RED, V044_CANCEL_COMPAT_POSITIVE_GREEN, and V044_CANCEL_COMPAT_CASES=3. No-claim boundaries: all-root-integration-tests-default-clean, broad-workspace-health, conformance-crate, conformance-dev-dependency-cycle-removal, kafka-backend-behavior, performance, release-readiness, test-internals-public-api, current-head-runtime-behavior, all-FrankenGraphDB-behavior."
+      "notes": "Yellow frontier overall because the fixture's other public profiles still require fresh reruns. The direct-minimal default profile has a fresh remote pass: job 29988810699833377 on ovh-a, exit 0, 84310 ms, using the tracked independent lock and pinned nightly-2026-07-05. The stronger full transitive-minimal probe is not green: job 29988810699833376 selected curve25519-dalek 4.0.0 through nkeys and ed25519-dalek, then failed with E0635 for removed stdsimd; no local fallback or production constraint dependency was used. The exact published =0.4.4 cancellation profile also has a fresh clean-overlay RCH pass at base c059250ddbe775e78cf8edde57ac78a2a3e4c618: job 29982692904796167 on ovh-a, exit 0, remote command 104684 ms / total 120378 ms, overlay fingerprint 8b760ac256b79b9e0e35644bd006bda134317f98de0b67d131bc50ce58a57056; it emitted V044_CANCEL_COMPAT_NEGATIVE_RED, V044_CANCEL_COMPAT_POSITIVE_GREEN, and V044_CANCEL_COMPAT_CASES=3. No-claim boundaries: all-root-integration-tests-default-clean, broad-workspace-health, conformance-crate, conformance-dev-dependency-cycle-removal, kafka-backend-behavior, performance, release-readiness, test-internals-public-api, current-head-runtime-behavior, all-FrankenGraphDB-behavior, numeric-stable-msrv, transitive-minimal-versions, universal-vendoring-reproducibility, advisory-clean-consumer-graphs, publisher-identity, source-trust."
     },
     {
       "claim_id": "memory-residency-replay-e2e-contract",
