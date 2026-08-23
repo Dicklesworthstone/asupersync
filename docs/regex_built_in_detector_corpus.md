@@ -173,6 +173,9 @@ authorize dependency exit or cutover.
   `j-29988810699833429` exited zero but selected zero tests after its shared-path
   sync omitted the dirty source; it is explicitly discarded as evidence. This
   lane does not prove a performance improvement or authorize regex removal.
+  The source pins, structural fail-closed checks, independent vectors, and docs
+  markers passed 8/8 in clean-overlay RCH job `j-29988810699833433`, bound to
+  committed base `dcdc8915a`.
 - R2.4 consumes phone spans and the closed dispatch identity.
 - R2.5 may aggregate the work only after implementation, generated
   equivalence, resource evidence, and named-host measurements exist.

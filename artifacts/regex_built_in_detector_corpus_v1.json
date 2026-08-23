@@ -1264,9 +1264,24 @@
       "tests_failed": 0,
       "clean_overlay_base": "fa11b2c822c68785e3cfef8d00d80262c4d77ab4",
       "clean_overlay_fingerprint": "abb75afdaaf08bf82661d737a04633adb1eef0228d8a9b89ef79c5108f683baf",
-      "corpus_contract_state": "PENDING_FOCUSED_CONTRACT",
+      "corpus_contract_state": "PASSED_FOCUSED_REMOTE_CONTRACT",
+      "corpus_contract_job_id": "j-29988810699833433",
+      "corpus_contract_tests_passed": 8,
+      "corpus_contract_tests_failed": 0,
+      "corpus_contract_clean_overlay_base": "dcdc8915aa3fe227939ca4eb14ee0d5b38473ef6",
+      "corpus_contract_clean_overlay_fingerprint": "fe0d5151031be8fda7951fe7fe1f42f7ce344018fdb3ed21e6ada866b230b195",
       "discarded_zero_test_job_id": "j-29988810699833429",
       "discarded_zero_test_reason": "SHARED_PATH_SOURCE_SYNC_DID_NOT_INCLUDE_DIRTY_SCANNER_SOURCE",
+      "non_final_contract_attempts": [
+        {
+          "job_id": "j-29988810699833431",
+          "result": "SEVEN_PASS_ONE_CONTRACT_LOCAL_CANONICAL_HASH_DRIFT"
+        },
+        {
+          "job_id": "j-29988810699833432",
+          "result": "SHARED_PATH_REMOTE_CHECKOUT_DID_NOT_MATCH_COMMITTED_HEAD"
+        }
+      ],
       "claims": [
         "ALL_17_R2_1_CARD_CANDIDATE_AND_LUHN_VECTORS",
         "GENERATED_LENGTH_SEPARATOR_AND_UNICODE_BOUNDARY_DIFFERENTIAL_MATRIX",
