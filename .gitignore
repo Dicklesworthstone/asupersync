@@ -4,6 +4,7 @@
 target-*/
 target_*/
 Cargo.lock
+!fuzz/Cargo.lock
 
 # IDE
 .idea/

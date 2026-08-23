@@ -8,13 +8,18 @@ use std::path::{Path, PathBuf};
 const POLICY_PATH: &str = "artifacts/dependency_supply_chain_policy_v1.json";
 const DENY_PATH: &str = "deny.toml";
 const AUDIT_PATH: &str = ".cargo/audit.toml";
+const GITIGNORE_PATH: &str = ".gitignore";
+const FUZZ_MANIFEST_PATH: &str = "fuzz/Cargo.toml";
+const FUZZ_CONFORMANCE_MANIFEST_PATH: &str = "fuzz/conformance/Cargo.toml";
+const FUZZ_LOCK_PATH: &str = "fuzz/Cargo.lock";
+const TOOLCHAIN_PATH: &str = "rust-toolchain.toml";
 const RUNNER_PATH: &str = "scripts/ci/audit_dependencies.sh";
 const DOC_PATH: &str = "docs/dependency_supply_chain_policy.md";
 const WORKFLOW_PATH: &str = ".github/workflows/ci.yml";
 const MANIFEST_PATH: &str = "artifacts/proof_lane_manifest_v1.json";
 const SNAPSHOT_PATH: &str = "artifacts/proof_status_snapshot_v1.json";
 const LANE_ID: &str = "dependency-supply-chain-policy-contract";
-const PROOF_COMMAND: &str = "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_dependency_supply_chain_policy CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test dependency_supply_chain_policy_contract -- --nocapture";
+const PROOF_COMMAND: &str = "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_dependency_supply_chain_policy CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -j 2 -p asupersync --test dependency_supply_chain_policy_contract -- --nocapture";
 
 fn repo_path(relative: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join(relative)
@@ -193,20 +198,41 @@ fn checked_manifest_and_lockfile_fingerprints_match() {
     let fuzz = &policy["excluded_fuzz_workspace"];
     let fuzz_manifest = text(fuzz, "manifest_path");
     let fuzz_lockfile = text(fuzz, "lockfile_path");
-    if repo_path(fuzz_lockfile).is_file() {
-        assert_eq!(sha256(fuzz_manifest), text(fuzz, "manifest_sha256"));
-        assert_eq!(sha256(fuzz_lockfile), text(fuzz, "lockfile_sha256"));
-    } else {
-        assert_eq!(
-            text(fuzz, "cargo_deny_status"),
-            "blocked_stale_lockfile",
-            "an RCH overlay that excludes the fuzz lock must retain its blocked row"
-        );
-        assert!(
-            text(fuzz, "overall_interpretation").contains("cannot be cited"),
-            "missing excluded-fuzz inputs cannot become green contract evidence"
-        );
-    }
+    let fuzz_conformance_manifest = text(fuzz, "conformance_manifest_path");
+    assert!(
+        repo_path(fuzz_lockfile).is_file(),
+        "tracked fuzz lock missing"
+    );
+    assert_eq!(fuzz["lockfile_tracked"].as_bool(), Some(true));
+    assert!(read(GITIGNORE_PATH).contains("!fuzz/Cargo.lock"));
+    assert_eq!(sha256(fuzz_manifest), text(fuzz, "manifest_sha256"));
+    assert_eq!(sha256(fuzz_lockfile), text(fuzz, "lockfile_sha256"));
+    assert_eq!(
+        sha256(fuzz_conformance_manifest),
+        text(fuzz, "conformance_manifest_sha256")
+    );
+    assert_eq!(
+        read(fuzz_manifest).lines().count() as u64,
+        fuzz["manifest_line_count"]
+            .as_u64()
+            .expect("fuzz manifest lines")
+    );
+    assert_eq!(
+        read(fuzz_lockfile).lines().count() as u64,
+        fuzz["lockfile_line_count"]
+            .as_u64()
+            .expect("fuzz lock lines")
+    );
+    assert_eq!(
+        read(fuzz_conformance_manifest).lines().count() as u64,
+        fuzz["conformance_manifest_line_count"]
+            .as_u64()
+            .expect("fuzz conformance manifest lines")
+    );
+    assert_eq!(sha256(TOOLCHAIN_PATH), text(&fuzz["toolchain"], "sha256"));
+    assert_eq!(text(&fuzz["toolchain"], "channel"), "nightly-2026-07-05");
+    assert_eq!(text(fuzz, "cargo_deny_status"), "pass");
+    assert_eq!(text(fuzz, "cargo_audit_status"), "pass");
 }
 
 #[test]
@@ -216,17 +242,10 @@ fn duplicate_baselines_match_both_checked_lockfiles() {
         lockfile_duplicates("Cargo.lock"),
         artifact_ratchet(&policy, "root")
     );
-    if repo_path("fuzz/Cargo.lock").is_file() {
-        assert_eq!(
-            lockfile_duplicates("fuzz/Cargo.lock"),
-            artifact_ratchet(&policy, "fuzz")
-        );
-    } else {
-        assert_eq!(
-            text(&policy["duplicate_version_ratchets"]["fuzz"], "policy"),
-            "Snapshot-only while the fuzz lock is stale. It is non-green and must be regenerated and re-reviewed before promotion."
-        );
-    }
+    assert_eq!(
+        lockfile_duplicates(FUZZ_LOCK_PATH),
+        artifact_ratchet(&policy, "fuzz")
+    );
 
     let mut reduced = lockfile_duplicates("Cargo.lock");
     let first = reduced
@@ -274,11 +293,45 @@ fn license_source_and_graph_scope_are_explicit() {
         Some(true)
     );
     assert_eq!(text(&policy["source_policy"], "required_git_spec"), "rev");
+    assert!(deny.contains("\"NCSA\""));
+    assert!(
+        array(&policy["license_policy"], "allowed_spdx_identifiers")
+            .iter()
+            .any(|item| item.as_str() == Some("NCSA"))
+    );
+    assert!(read(FUZZ_MANIFEST_PATH).contains("license = \"MIT OR Apache-2.0\""));
     assert!(
         array(&policy["root_workspace"], "coverage")
             .iter()
             .any(|item| item.as_str() == Some("proc-macro"))
     );
+}
+
+#[test]
+fn fuzz_native_edges_and_tokio_quarantine_are_explicit() {
+    let policy = json(POLICY_PATH);
+    let fuzz = &policy["excluded_fuzz_workspace"];
+    let lock = read(FUZZ_LOCK_PATH);
+    let fuzz_manifest = read(FUZZ_MANIFEST_PATH);
+    let conformance_manifest = read(FUZZ_CONFORMANCE_MANIFEST_PATH);
+
+    assert!(lock.contains("name = \"libfuzzer-sys\"\nversion = \"0.4.13\""));
+    assert!(lock.contains("name = \"cc\"\nversion = \"1.4.4\""));
+    assert_eq!(
+        text(
+            &fuzz["native_build_edges"]["libfuzzer_sys"],
+            "license_expression"
+        ),
+        "(MIT OR Apache-2.0) AND NCSA"
+    );
+    assert!(text(&fuzz["native_build_edges"]["cc"], "prerequisites").contains("C/C++ compiler"));
+    assert!(fuzz_manifest.contains("\"gen-tonic-messages\""));
+    assert!(conformance_manifest.contains("tokio = { version = \"1\""));
+    assert_eq!(
+        text(&fuzz["tokio_quarantine"], "state"),
+        "expected_excluded_fuzz_only"
+    );
+    assert!(text(&fuzz["tokio_quarantine"], "production_boundary").contains("no tokio path"));
 }
 
 #[test]
@@ -295,6 +348,7 @@ fn negative_fixtures_are_safe_and_cover_each_policy_class() {
         BTreeSet::from([
             "advisory-ignore-removed",
             "duplicate-version-added",
+            "fuzz-license-ncsa-removed",
             "license-isc-removed",
             "unknown-git-source",
         ])
@@ -303,6 +357,8 @@ fn negative_fixtures_are_safe_and_cover_each_policy_class() {
         "mktemp -d",
         "deny-advisory.toml",
         "deny-license.toml",
+        "deny-fuzz-license.toml",
+        "license-ncsa-removed.jsonl",
         "duplicates-mutated.json",
         "metadata-original.json",
         "fixture_failures",
@@ -335,10 +391,12 @@ fn ci_and_runbook_use_the_canonical_runner_and_preserve_receipts() {
         assert!(workflow.contains(marker), "workflow missing {marker}");
     }
     for marker in [
-        "PASS_ROOT_FUZZ_NON_GREEN",
+        "both locked dependency-policy surfaces passed",
         "BLOCKED_EXTERNAL",
         "RUSTSEC-2026-0204",
         "RUSTSEC-2026-0190",
+        "libfuzzer-sys 0.4.13",
+        "NCSA",
         "release readiness",
         "rch_target_dependency_supply_chain_policy",
         "dependency_supply_chain_policy_contract",
@@ -377,7 +435,7 @@ fn proof_manifest_and_status_snapshot_map_the_scoped_contract() {
         &vec![Value::from(PROOF_COMMAND)]
     );
     assert!(
-        text(status, "notes").contains("excluded fuzz"),
+        text(status, "notes").contains("excluded-fuzz"),
         "status must preserve the fuzz no-claim boundary"
     );
 }

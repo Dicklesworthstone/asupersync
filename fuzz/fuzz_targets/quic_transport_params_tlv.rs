@@ -7,8 +7,8 @@ use asupersync::net::quic_core::{
     QuicCoreError, TP_ACK_DELAY_EXPONENT, TP_DISABLE_ACTIVE_MIGRATION, TP_INITIAL_MAX_DATA,
     TP_INITIAL_MAX_STREAM_DATA_BIDI_LOCAL, TP_INITIAL_MAX_STREAM_DATA_BIDI_REMOTE,
     TP_INITIAL_MAX_STREAM_DATA_UNI, TP_INITIAL_MAX_STREAMS_BIDI, TP_INITIAL_MAX_STREAMS_UNI,
-    TP_MAX_ACK_DELAY, TP_MAX_IDLE_TIMEOUT, TP_MAX_UDP_PAYLOAD_SIZE, TransportParameters,
-    UnknownTransportParameter, encode_varint,
+    TP_MAX_ACK_DELAY, TP_MAX_DATAGRAM_FRAME_SIZE, TP_MAX_IDLE_TIMEOUT, TP_MAX_UDP_PAYLOAD_SIZE,
+    TransportParameters, UnknownTransportParameter, encode_varint,
 };
 
 /// Fuzz input for QUIC transport parameters TLV codec testing
@@ -56,6 +56,8 @@ struct FuzzTransportParams {
     max_ack_delay: Option<u16>,
     /// Disable active migration flag
     disable_active_migration: bool,
+    /// Maximum DATAGRAM frame size
+    max_datagram_frame_size: Option<u16>,
     /// Unknown parameters to include
     unknown_params: Vec<FuzzUnknownParam>,
 }
@@ -86,6 +88,7 @@ impl From<FuzzTransportParams> for TransportParameters {
             ack_delay_exponent: fuzz.ack_delay_exponent.map(|v| v as u64),
             max_ack_delay: fuzz.max_ack_delay.map(|v| v as u64),
             disable_active_migration: fuzz.disable_active_migration,
+            max_datagram_frame_size: fuzz.max_datagram_frame_size.map(|v| v as u64),
             unknown: fuzz
                 .unknown_params
                 .into_iter()
@@ -112,11 +115,12 @@ fn is_known_transport_parameter_id(id: u64) -> bool {
             | TP_ACK_DELAY_EXPONENT
             | TP_MAX_ACK_DELAY
             | TP_DISABLE_ACTIVE_MIGRATION
+            | TP_MAX_DATAGRAM_FRAME_SIZE
     )
 }
 
 fn can_assert_exact_round_trip(params: &TransportParameters) -> bool {
-    let mut ids = Vec::with_capacity(11 + params.unknown.len());
+    let mut ids = Vec::with_capacity(12 + params.unknown.len());
     for id in known_ids_present(params) {
         ids.push(id);
     }
@@ -130,7 +134,7 @@ fn can_assert_exact_round_trip(params: &TransportParameters) -> bool {
 }
 
 fn known_ids_present(params: &TransportParameters) -> Vec<u64> {
-    let mut ids = Vec::with_capacity(11);
+    let mut ids = Vec::with_capacity(12);
     push_present(&mut ids, params.max_idle_timeout, TP_MAX_IDLE_TIMEOUT);
     push_present(
         &mut ids,
@@ -168,6 +172,11 @@ fn known_ids_present(params: &TransportParameters) -> Vec<u64> {
     if params.disable_active_migration {
         ids.push(TP_DISABLE_ACTIVE_MIGRATION);
     }
+    push_present(
+        &mut ids,
+        params.max_datagram_frame_size,
+        TP_MAX_DATAGRAM_FRAME_SIZE,
+    );
     ids
 }
 
@@ -355,7 +364,8 @@ fn valid_value_for_parameter(id: u64) -> Vec<u8> {
         | TP_INITIAL_MAX_STREAM_DATA_UNI
         | TP_INITIAL_MAX_STREAMS_BIDI
         | TP_INITIAL_MAX_STREAMS_UNI
-        | TP_MAX_ACK_DELAY => encode_u64_value(1),
+        | TP_MAX_ACK_DELAY
+        | TP_MAX_DATAGRAM_FRAME_SIZE => encode_u64_value(1),
         _ => vec![0xa5, 0x5a],
     }
 }

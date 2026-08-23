@@ -218,7 +218,7 @@
       "guarantee_ids": [
         "dependency-supply-chain-policy-contract"
       ],
-      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_dependency_supply_chain_policy CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test dependency_supply_chain_policy_contract -- --nocapture"
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_dependency_supply_chain_policy CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -j 2 -p asupersync --test dependency_supply_chain_policy_contract -- --nocapture"
     },
     {
       "lane_id": "dirty-tree-ownership-receipt-contract",
@@ -386,7 +386,7 @@
       "guarantee_ids": [
         "fuzz-manifest-smoke"
       ],
-      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fuzz_manifest_smoke CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo check --manifest-path fuzz/Cargo.toml"
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fuzz_manifest_smoke CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo check -j 2 --locked --manifest-path fuzz/Cargo.toml"
     },
     {
       "lane_id": "fuzz-tokio-quarantine-tree",

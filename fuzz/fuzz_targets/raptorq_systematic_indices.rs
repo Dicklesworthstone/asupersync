@@ -203,6 +203,17 @@ fn assert_repair_equation_is_bounded(params: &SystematicParams, esi: u32) {
                 );
             }
         }
+        Err(SystematicError::RepairEsiBelowK { esi: source_esi, k }) => {
+            assert_eq!(
+                source_esi, esi,
+                "source-range error must report the queried ESI"
+            );
+            assert_eq!(
+                k, params.k as u32,
+                "source-range error must report the first valid repair ESI"
+            );
+            assert!(source_esi < k, "source-range error requires ESI below K");
+        }
         Err(SystematicError::EsiOverflow {
             esi: overflow_esi,
             padding_delta,

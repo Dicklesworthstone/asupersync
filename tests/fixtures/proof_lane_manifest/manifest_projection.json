@@ -612,7 +612,7 @@
       "kind": "compile_frontier",
       "resource_envelope_class": "compile-frontier-heavy",
       "package": "fuzz",
-      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fuzz_manifest_smoke CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo check --manifest-path fuzz/Cargo.toml",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fuzz_manifest_smoke CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo check -j 2 --locked --manifest-path fuzz/Cargo.toml",
       "guarantee_ids": [
         "fuzz-manifest-smoke"
       ],
@@ -1749,15 +1749,20 @@
       "kind": "artifact_contract",
       "resource_envelope_class": "artifact-contract-medium",
       "package": "asupersync",
-      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_dependency_supply_chain_policy CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test dependency_supply_chain_policy_contract -- --nocapture",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_dependency_supply_chain_policy CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -j 2 -p asupersync --test dependency_supply_chain_policy_contract -- --nocapture",
       "guarantee_ids": [
         "dependency-supply-chain-policy-contract"
       ],
       "feature_flags": [],
       "expected_signal": "dependency_supply_chain_policy_contract tests pass",
       "source_paths": [
+        ".gitignore",
         "deny.toml",
         ".cargo/audit.toml",
+        "rust-toolchain.toml",
+        "fuzz/Cargo.toml",
+        "fuzz/Cargo.lock",
+        "fuzz/conformance/Cargo.toml",
         "scripts/ci/audit_dependencies.sh",
         ".github/workflows/ci.yml",
         "artifacts/dependency_supply_chain_policy_v1.json",

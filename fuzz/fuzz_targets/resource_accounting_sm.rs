@@ -6,7 +6,7 @@ use asupersync::record::ObligationKind;
 use asupersync::record::region::AdmissionKind;
 use libfuzzer_sys::fuzz_target;
 
-const OBLIGATION_KIND_COUNT: usize = 5;
+const OBLIGATION_KIND_COUNT: usize = 6;
 const ADMISSION_KIND_COUNT: usize = 4;
 
 #[derive(Arbitrary, Clone, Copy, Debug)]
@@ -16,6 +16,7 @@ enum FuzzObligationKind {
     Lease,
     IoOp,
     SemaphorePermit,
+    Transaction,
 }
 
 #[derive(Arbitrary, Clone, Copy, Debug)]
@@ -323,6 +324,7 @@ fn obligation_kind(kind: FuzzObligationKind) -> ObligationKind {
         FuzzObligationKind::Lease => ObligationKind::Lease,
         FuzzObligationKind::IoOp => ObligationKind::IoOp,
         FuzzObligationKind::SemaphorePermit => ObligationKind::SemaphorePermit,
+        FuzzObligationKind::Transaction => ObligationKind::Transaction,
     }
 }
 
@@ -342,6 +344,7 @@ fn obligation_index(kind: ObligationKind) -> usize {
         ObligationKind::Lease => 2,
         ObligationKind::IoOp => 3,
         ObligationKind::SemaphorePermit => 4,
+        ObligationKind::Transaction => 5,
     }
 }
 
@@ -361,6 +364,7 @@ fn all_obligation_kinds() -> [ObligationKind; OBLIGATION_KIND_COUNT] {
         ObligationKind::Lease,
         ObligationKind::IoOp,
         ObligationKind::SemaphorePermit,
+        ObligationKind::Transaction,
     ]
 }
 

@@ -284,6 +284,7 @@ fuzz_target!(|input: SlidingWindowInput| {
         max_wait_time: Time::from_millis(max_wait_ms),
         immediate_delivery: false,
         max_sequence_gap,
+        ..ReordererConfig::default()
     });
     let mut model = SlidingWindowModel::new(
         max_wait_ms.saturating_mul(1_000_000),

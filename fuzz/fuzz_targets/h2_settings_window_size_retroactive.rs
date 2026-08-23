@@ -643,11 +643,7 @@ fn create_headers_frame(stream_id: u32) -> Frame {
 fn create_data_frame(stream_id: u32, size: u32) -> Frame {
     let payload = vec![0u8; size as usize];
 
-    let data_frame = DataFrame {
-        stream_id,
-        data: Bytes::from(payload),
-        end_stream: false,
-    };
+    let data_frame = DataFrame::new(stream_id, Bytes::from(payload), false);
     Frame::Data(data_frame)
 }
 

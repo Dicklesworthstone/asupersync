@@ -798,13 +798,13 @@
       "lane_id": "fuzz-manifest-smoke",
       "kind": "compile_frontier",
       "resource_envelope_class": "compile-frontier-heavy",
-      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fuzz_manifest_smoke CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo check --manifest-path fuzz/Cargo.toml",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fuzz_manifest_smoke CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo check -j 2 --locked --manifest-path fuzz/Cargo.toml",
       "package": "fuzz",
       "feature_flags": [],
       "guarantee_ids": [
         "fuzz-manifest-smoke"
       ],
-      "covers": "The fuzz manifest and registered fuzz targets typecheck as a cargo-fuzz workspace.",
+      "covers": "The tracked fuzz lock, fuzz manifest, and registered fuzz targets typecheck together as a cargo-fuzz workspace.",
       "explicit_not_covered": "Does not run coverage-guided campaigns, sanitizers, or individual crash reproductions.",
       "expected_signal": "cargo check exits 0 or records the first fuzz target compile blocker",
       "source_paths": [
@@ -3131,18 +3131,23 @@
       "lane_id": "dependency-supply-chain-policy-contract",
       "kind": "artifact_contract",
       "resource_envelope_class": "artifact-contract-medium",
-      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_dependency_supply_chain_policy CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test dependency_supply_chain_policy_contract -- --nocapture",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_dependency_supply_chain_policy CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -j 2 -p asupersync --test dependency_supply_chain_policy_contract -- --nocapture",
       "package": "asupersync",
       "feature_flags": [],
       "guarantee_ids": [
         "dependency-supply-chain-policy-contract"
       ],
-      "covers": "Dependency supply-chain policy schema, exact Cargo scanner versions, RustSec database freshness contract, root and excluded-fuzz lockfile fingerprints, advisory exception ownership and expiry, license/source policy, duplicate ratchets, safe negative-fixture wiring, CI receipts, runbook boundaries, and proof manifest/status mapping stay aligned.",
-      "explicit_not_covered": "Fresh scanner execution until scripts/ci/audit_dependencies.sh run is executed, a green excluded fuzz graph, undisclosed vulnerabilities, legal advice, publisher identity, release readiness, broad workspace health, runtime correctness, performance, or live RCH fleet availability.",
+      "covers": "Dependency supply-chain policy schema, exact Cargo scanner versions, RustSec database freshness contract, tracked root and excluded-fuzz lockfile fingerprints, excluded-fuzz toolchain/native-edge/Tokio-quarantine declarations, advisory exception ownership and expiry, license/source policy, both duplicate ratchets, safe negative-fixture wiring, CI receipts, runbook boundaries, and proof manifest/status mapping stay aligned.",
+      "explicit_not_covered": "Fresh scanner execution until scripts/ci/audit_dependencies.sh run is executed, fuzz-target compilation or behavior, undisclosed vulnerabilities, legal advice, publisher identity, release readiness, broad workspace health, runtime correctness, performance, or live RCH fleet availability.",
       "expected_signal": "dependency_supply_chain_policy_contract tests pass",
       "source_paths": [
+        ".gitignore",
         "deny.toml",
         ".cargo/audit.toml",
+        "rust-toolchain.toml",
+        "fuzz/Cargo.toml",
+        "fuzz/Cargo.lock",
+        "fuzz/conformance/Cargo.toml",
         "scripts/ci/audit_dependencies.sh",
         ".github/workflows/ci.yml",
         "artifacts/dependency_supply_chain_policy_v1.json",
@@ -3158,11 +3163,11 @@
         "pinned Cargo scanner installation unavailable",
         "RustSec advisory database missing or older than seven days",
         "root Cargo.lock or policy baseline drift",
-        "excluded fuzz lock remains stale and non-green",
+        "excluded fuzz manifest, tracked lock, toolchain, native-edge, or duplicate-ratchet drift",
         "manifest projection golden drift",
         "proof-status marker drift"
       ],
-      "escalation_notes": "Use this lane only for the checked policy and integration contract. Cite live root scanner health only from a current runner receipt. The excluded fuzz row remains non-green until its separately owned lockfile and advisory findings are resolved.",
+      "escalation_notes": "Use this lane only for the checked policy and integration contract. Cite live root or excluded-fuzz scanner health only from a current runner receipt; the Rust contract alone is not scanner execution evidence or fuzz-target proof.",
       "proof_reuse_policy": {
         "cache_hits_allowed": true,
         "allowed_claim_scopes": [

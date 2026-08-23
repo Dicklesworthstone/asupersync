@@ -1,8 +1,9 @@
 # Dependency supply-chain policy
 
 The canonical dependency gate is `scripts/ci/audit_dependencies.sh`. It applies
-the checked `deny.toml` and `.cargo/audit.toml` policies to the root workspace
-without updating a lockfile or build tree. Its machine-readable policy is
+the checked `deny.toml` and `.cargo/audit.toml` policies to both the root
+workspace and the separately locked, workspace-excluded `fuzz/` graph without
+updating either lockfile or build tree. Its machine-readable policy is
 `artifacts/dependency_supply_chain_policy_v1.json`.
 
 ## Tool and database admission
@@ -31,6 +32,10 @@ The root `Cargo.toml` virtual workspace is evaluated with its locked graph,
 all workspace members and features, normal/build/dev/proc-macro edges, and the
 Apple, Linux, Windows, and wasm target filters in `deny.toml`.
 
+The separately tracked `fuzz/Cargo.lock` is evaluated through
+`fuzz/Cargo.toml` with the same advisory, license, source, and duplicate-version
+policy. Workspace exclusion is an execution boundary, not a safety exemption.
+
 - Advisories and yanked crates are denied. Informational unmaintained and
   unsound findings are policy failures unless an explicit exception records
   package, reason, owner, and expiry.
@@ -47,6 +52,10 @@ The sole current root advisory exception is `RUSTSEC-2025-0134` for
 `rustls-pemfile` 2.2.0. It is owned by `asupersync-mnotoo.4.3`, expires on
 2026-09-01, and has no automatic renewal. The planned remediation is migration
 to `rustls-pki-types::pem::PemObject`.
+
+The 2026-08-23 live refresh also advanced `h2` from 0.4.15 to 0.4.18 for
+`RUSTSEC-2026-0258` and `event-listener` from 5.4.1 to 5.4.2 for
+`RUSTSEC-2026-0221`; neither advisory is ignored.
 
 ## Downstream bounds, lockfiles, and vendoring
 
@@ -109,9 +118,10 @@ DEPENDENCY_AUDIT_OUTPUT_DIR="${TMPDIR:-/tmp}/asupersync-dependency-audit" \
 
 The output directory contains `summary.json`, `events.ndjson`, the database
 receipt, raw JSON scanner output, the observed duplicate inventory, and any
-ratchet expansions. The root result exits nonzero for an advisory, license,
-source, or duplicate-ratchet violation. A passing root scan with a non-green
-excluded fuzz graph is reported as `PASS_ROOT_FUZZ_NON_GREEN`, not `PASS`.
+ratchet expansions for both graphs. The result exits nonzero for an advisory,
+license, source, or duplicate-ratchet violation in either graph. `PASS` means
+both locked dependency-policy surfaces passed; there is no root-only green
+fallback for a non-green excluded fuzz graph.
 
 The CI job uses a repository artifact output directory, runs the same pinned
 tool installation and gate, and uploads the complete receipt directory even
@@ -138,24 +148,67 @@ DEPENDENCY_AUDIT_OUTPUT_DIR="${TMPDIR:-/tmp}/asupersync-dependency-self-test" \
   scripts/ci/audit_dependencies.sh self-test
 ```
 
-It proves four fail-closed paths: removing the `RUSTSEC-2025-0134` exception,
-removing the required ISC license allowance, adding an unreviewed duplicate
-version, and replacing one metadata source with an unapproved revision-pinned
-Git URL. Each fixture must produce the expected named rejection.
+It proves five fail-closed paths: removing the `RUSTSEC-2025-0134` exception,
+removing the required root ISC license allowance, removing the fuzz-only NCSA
+allowance required by `libfuzzer-sys`, adding an unreviewed duplicate version,
+and replacing one metadata source with an unapproved revision-pinned Git URL.
+Each fixture must produce the expected named rejection.
 
 ## Excluded fuzz workspace
 
 `fuzz/Cargo.toml` is outside the root virtual workspace, so the runner reports
-it separately. At the 2026-07-25 baseline, `cargo-deny --locked` is blocked
-because `fuzz/Cargo.lock` requires regeneration, and `cargo-audit` reports
-`RUSTSEC-2026-0204` (`crossbeam-epoch` 0.9.18) plus `RUSTSEC-2026-0190`
-(`anyhow` 1.0.102). This policy-only gate does not rewrite that lockfile.
-`asupersync-mnotoo.3.4` owns the excluded-fuzz graph follow-up.
+it separately and requires its own tracked `fuzz/Cargo.lock`. The lock inherits
+the repository's `nightly-2026-07-05` rustup override from
+`rust-toolchain.toml`. Its direct `libfuzzer-sys 0.4.13` edge depends on
+`cc 1.4.4`; building a fuzz target therefore requires the pinned nightly plus
+a working C/C++ compiler, linker, and archiver. `cc` also records
+`find-msvc-tools`, `jobserver`, `libc`, and `shlex` as build-support edges.
+
+The 2026-08-23 refresh removed `crossbeam-epoch 0.9.18`
+(`RUSTSEC-2026-0204`) from the graph and updated `anyhow 1.0.102`
+(`RUSTSEC-2026-0190`) to 1.0.104. The checked scan reports zero advisories.
+`libfuzzer-sys` declares `(MIT OR Apache-2.0) AND NCSA`; NCSA is deliberately
+allowed and its removal is covered by the fuzz-specific negative fixture.
+
+Tokio remains quarantined to non-production edges. The excluded fuzz graph has
+a direct Tokio edge in `fuzz/conformance/` for vendor-comparison scaffolding,
+and `opentelemetry-proto`'s `gen-tonic-messages` feature carries generated
+tonic/Tokio wire helpers. Those expected paths do not weaken the separate
+default and metrics production proofs, both of which must still report no Tokio
+path.
+
+### Updating the excluded fuzz graph
+
+Review `fuzz/Cargo.toml`, `fuzz/conformance/Cargo.toml`, and upstream release
+and security notes before changing resolution. Preview and then perform the
+Cargo-only lock update:
+
+```bash
+cargo update --manifest-path fuzz/Cargo.toml --dry-run
+cargo update --manifest-path fuzz/Cargo.toml
+```
+
+Review the full lock diff, especially native/build-script edges, source URLs,
+license expressions, Tokio/tonic paths, and removals or additions to duplicate
+families. Then update the checked fingerprints and downward-only duplicate
+ratchet in `artifacts/dependency_supply_chain_policy_v1.json`. Do not approve
+an expansion merely because Cargo selected it. Run the direct scanners and
+safe fixtures, followed by the focused remote Rust contract and the canonical
+locked fuzz-manifest compile:
+
+```bash
+RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_fuzz_manifest_smoke" CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo check -j 2 --locked --manifest-path fuzz/Cargo.toml
+```
+
+The compile must use RCH and the tracked lock; scanner success is not a
+substitute for that execution.
 
 ## No-claim boundaries
 
-A root pass does not prove the excluded fuzz workspace is green. Scanner
-freshness does not prove that no undisclosed vulnerability exists. License
+A policy `PASS` covers the checked root and excluded-fuzz dependency graphs at
+the recorded manifest, lock, tool, and RustSec revisions. It does not prove
+that any fuzz target compiles, runs, or finds all defects. Scanner freshness
+does not prove that no undisclosed vulnerability exists. License
 metadata evaluation is not legal advice. The duplicate ratchet prevents
 expansion but does not endorse retained duplication. Source allowlisting does
 not authenticate publishers or prove crate correctness. This lane does not

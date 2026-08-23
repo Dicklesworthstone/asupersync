@@ -485,11 +485,7 @@ fn normalize_stream_id(raw_stream_id: u32) -> u32 {
 
 /// Create a DATA frame
 fn create_data_frame(stream_id: u32, data: Vec<u8>, end_stream: bool) -> DataFrame {
-    DataFrame {
-        stream_id,
-        data: Bytes::from(data),
-        end_stream,
-    }
+    DataFrame::new(stream_id, Bytes::from(data), end_stream)
 }
 
 /// Create a HEADERS frame

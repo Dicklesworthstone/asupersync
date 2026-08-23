@@ -268,13 +268,17 @@ run_gate() {
     local fuzz_audit_output="${OUTPUT_DIR}/cargo-audit-fuzz.json"
     local root_duplicates="${OUTPUT_DIR}/root-duplicates.json"
     local root_duplicate_expansions="${OUTPUT_DIR}/root-duplicate-expansions.json"
+    local fuzz_duplicates="${OUTPUT_DIR}/fuzz-duplicates.json"
+    local fuzz_duplicate_expansions="${OUTPUT_DIR}/fuzz-duplicate-expansions.json"
     local deny_rc=0
     local audit_rc=0
     local fuzz_deny_rc=0
     local fuzz_audit_rc=0
     local db_repo
     local duplicate_expansion_count
+    local fuzz_duplicate_expansion_count
     local root_status
+    local fuzz_status
     local fuzz_deny_status
     local fuzz_audit_status
     local overall_outcome
@@ -297,6 +301,9 @@ run_gate() {
         >"${fuzz_deny_output}" 2>&1 || fuzz_deny_rc=$?
     cargo-audit audit --file fuzz/Cargo.lock --db "${db_repo}" --no-fetch --deny warnings --json \
         >"${fuzz_audit_output}" 2>&1 || fuzz_audit_rc=$?
+    lockfile_duplicates fuzz/Cargo.lock "${fuzz_duplicates}"
+    duplicate_expansions "${fuzz_duplicates}" fuzz "${fuzz_duplicate_expansions}"
+    fuzz_duplicate_expansion_count="$(jq 'length' "${fuzz_duplicate_expansions}")"
 
     root_status="pass"
     if ((deny_rc != 0 || audit_rc != 0 || duplicate_expansion_count != 0)); then
@@ -305,18 +312,21 @@ run_gate() {
 
     fuzz_deny_status="pass"
     if ((fuzz_deny_rc != 0)); then
-        fuzz_deny_status="blocked_stale_lockfile"
+        fuzz_deny_status="fail_policy"
     fi
     fuzz_audit_status="pass"
     if ((fuzz_audit_rc != 0)); then
-        fuzz_audit_status="fail_known_advisories"
+        fuzz_audit_status="fail_advisories"
+    fi
+    fuzz_status="pass"
+    if [[ "${fuzz_deny_status}" != "pass" || "${fuzz_audit_status}" != "pass" ]] ||
+        ((fuzz_duplicate_expansion_count != 0)); then
+        fuzz_status="fail"
     fi
 
-    overall_outcome="PASS_ROOT_FUZZ_NON_GREEN"
-    if [[ "${root_status}" != "pass" ]]; then
+    overall_outcome="PASS"
+    if [[ "${root_status}" != "pass" || "${fuzz_status}" != "pass" ]]; then
         overall_outcome="FAIL"
-    elif [[ "${fuzz_deny_status}" == "pass" && "${fuzz_audit_status}" == "pass" ]]; then
-        overall_outcome="PASS"
     fi
 
     jq -n \
@@ -324,11 +334,13 @@ run_gate() {
         --arg bead_id "asupersync-mnotoo.2" \
         --arg outcome "${overall_outcome}" \
         --arg root_status "${root_status}" \
+        --arg fuzz_status "${fuzz_status}" \
         --arg fuzz_deny_status "${fuzz_deny_status}" \
         --arg fuzz_audit_status "${fuzz_audit_status}" \
         --argjson cargo_deny_exit "${deny_rc}" \
         --argjson cargo_audit_exit "${audit_rc}" \
         --argjson duplicate_expansion_count "${duplicate_expansion_count}" \
+        --argjson fuzz_duplicate_expansion_count "${fuzz_duplicate_expansion_count}" \
         --argjson fuzz_cargo_deny_exit "${fuzz_deny_rc}" \
         --argjson fuzz_cargo_audit_exit "${fuzz_audit_rc}" \
         --slurpfile database "${OUTPUT_DIR}/advisory-database-receipt.json" \
@@ -345,27 +357,23 @@ run_gate() {
                 duplicate_expansion_count: $duplicate_expansion_count
             },
             excluded_fuzz_workspace: {
-                status: (
-                    if $fuzz_deny_status == "pass" and $fuzz_audit_status == "pass"
-                    then "pass"
-                    else "non_green"
-                    end
-                ),
+                status: $fuzz_status,
                 cargo_deny_status: $fuzz_deny_status,
                 cargo_deny_exit: $fuzz_cargo_deny_exit,
                 cargo_audit_status: $fuzz_audit_status,
-                cargo_audit_exit: $fuzz_cargo_audit_exit
+                cargo_audit_exit: $fuzz_cargo_audit_exit,
+                duplicate_expansion_count: $fuzz_duplicate_expansion_count
             },
-            no_claim: "A root pass is not evidence that the excluded fuzz workspace is green."
+            no_claim: "A PASS covers the checked root and excluded-fuzz dependency policies only; it does not prove fuzz-target behavior, release readiness, or undisclosed-vulnerability absence."
         }' >"${SUMMARY_PATH}"
 
     emit_event "root-workspace" "${root_status}" \
         "cargo-deny=${deny_rc}; cargo-audit=${audit_rc}; duplicate-expansions=${duplicate_expansion_count}"
-    emit_event "excluded-fuzz-workspace" "non_green" \
-        "cargo-deny=${fuzz_deny_status}; cargo-audit=${fuzz_audit_status}"
+    emit_event "excluded-fuzz-workspace" "${fuzz_status}" \
+        "cargo-deny=${fuzz_deny_status}; cargo-audit=${fuzz_audit_status}; duplicate-expansions=${fuzz_duplicate_expansion_count}"
 
     jq . "${SUMMARY_PATH}"
-    if [[ "${root_status}" != "pass" ]]; then
+    if [[ "${overall_outcome}" != "PASS" ]]; then
         return 1
     fi
 }
@@ -380,12 +388,14 @@ self_test() {
     local fixture_failures=0
     local advisory_rc=0
     local license_rc=0
+    local fuzz_license_rc=0
     local source_rc=0
     local duplicate_count
 
     fixture_dir="$(mktemp -d "${TMPDIR:-/tmp}/asupersync-dependency-fixtures.XXXXXX")"
     sed '/RUSTSEC-2025-0134/d' deny.toml >"${fixture_dir}/deny-advisory.toml"
     sed '/^[[:space:]]*"ISC",$/d' deny.toml >"${fixture_dir}/deny-license.toml"
+    sed '/^[[:space:]]*"NCSA",$/d' deny.toml >"${fixture_dir}/deny-fuzz-license.toml"
 
     cargo-deny --locked --workspace --log-level error --format json \
         check --config deny.toml advisories \
@@ -416,6 +426,19 @@ self_test() {
     else
         emit_event "fixture-license-isc-removed" "pass" \
             "temporary config rejected the removed ISC allowance"
+    fi
+
+    cargo-deny --manifest-path fuzz/Cargo.toml --locked --log-level error --format json \
+        check --config "${fixture_dir}/deny-fuzz-license.toml" licenses \
+        >"${fixture_dir}/license-ncsa-removed.jsonl" 2>&1 || fuzz_license_rc=$?
+    if ((fuzz_license_rc == 0)) ||
+        ! grep -q 'NCSA' "${fixture_dir}/license-ncsa-removed.jsonl"; then
+        emit_event "fixture-fuzz-license-ncsa-removed" "fail" \
+            "expected libfuzzer-sys to reject the removed NCSA allowance"
+        fixture_failures=$((fixture_failures + 1))
+    else
+        emit_event "fixture-fuzz-license-ncsa-removed" "pass" \
+            "temporary config rejected libfuzzer-sys without NCSA"
     fi
 
     lockfile_duplicates Cargo.lock "${fixture_dir}/duplicates.json"

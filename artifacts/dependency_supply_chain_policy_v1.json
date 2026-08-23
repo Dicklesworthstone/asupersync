@@ -3,8 +3,8 @@
   "artifact_id": "dependency-supply-chain-policy-v1",
   "bead_id": "asupersync-mnotoo.2",
   "capability_id": "CAP-VERIFICATION-PROFILES",
-  "policy_as_of_date_utc": "2026-07-25",
-  "decision": "ENFORCE_ROOT_AND_FAIL_CLOSED_ON_EXCLUDED_FUZZ_DRIFT",
+  "policy_as_of_date_utc": "2026-08-23",
+  "decision": "ENFORCE_ROOT_AND_EXCLUDED_FUZZ_GRAPHS",
   "tools": {
     "cargo_deny": {
       "crate": "cargo-deny",
@@ -42,10 +42,10 @@
   "root_workspace": {
     "manifest_path": "Cargo.toml",
     "lockfile_path": "Cargo.lock",
-    "manifest_sha256": "541ed6be1f748cd2897f18ba2679c6d34ff84a57d480db5a11c40ff007f1f1c7",
-    "lockfile_sha256": "95d3aaec0e58be196f08e4b30792f90129213af86ae8e34d2c5862b9feb15880",
-    "manifest_line_count": 1064,
-    "lockfile_line_count": 4665,
+    "manifest_sha256": "0f02e4fefedf5e9013054df794ece6f8fb259134fdbd95376e61d486c043fde3",
+    "lockfile_sha256": "513cfba8f8671e69aab32317e042bd00737b9bfb30e2234012d6605f320f7a6a",
+    "manifest_line_count": 1074,
+    "lockfile_line_count": 4664,
     "coverage": [
       "normal",
       "build",
@@ -57,36 +57,82 @@
     ],
     "cargo_deny_status": "pass",
     "cargo_audit_status": "pass",
-    "observed_dependency_count": 469
+    "observed_dependency_count": 469,
+    "resolved_advisory_blockers": [
+      {
+        "id": "RUSTSEC-2026-0258",
+        "package": "h2",
+        "previous_version": "0.4.15",
+        "resolved_version": "0.4.18",
+        "patched_version_requirement": ">=0.4.16"
+      },
+      {
+        "id": "RUSTSEC-2026-0221",
+        "package": "event-listener",
+        "previous_version": "5.4.1",
+        "resolved_version": "5.4.2",
+        "patched_version_requirement": ">=5.4.2"
+      }
+    ]
   },
   "excluded_fuzz_workspace": {
     "manifest_path": "fuzz/Cargo.toml",
     "lockfile_path": "fuzz/Cargo.lock",
-    "manifest_sha256": "857925379ab7068f3faf94435e44b87adfc96c2d716f19b5c1cfdffbbfbd580d",
-    "lockfile_sha256": "d91db6afd228ec60aa57d5782cbe5ae3bf7170f5e2c37dd15280e7b476e95271",
-    "manifest_line_count": 6233,
-    "lockfile_line_count": 3731,
-    "cargo_deny_status": "blocked_stale_lockfile",
-    "cargo_deny_blocker": "cargo metadata --locked requires updating fuzz/Cargo.lock; a dry run would relock 165 packages, which is outside this policy-only bead.",
-    "cargo_audit_status": "fail_known_advisories",
-    "observed_dependency_count": 372,
-    "observed_advisories": [
+    "conformance_manifest_path": "fuzz/conformance/Cargo.toml",
+    "manifest_sha256": "e27d7e616b079f2102a2d179907709a7e484fad4f77ea13ccb8a9e9ab56b9385",
+    "lockfile_sha256": "20759c1751928147250b1b385fa78dcdb4e7f8d7f4b61e73222982b71fe838fe",
+    "conformance_manifest_sha256": "0b2f13450fd2c8b7f5376912160cf1fd1f2b5b5d92bae0703cd683805b1c274f",
+    "manifest_line_count": 6234,
+    "lockfile_line_count": 3752,
+    "conformance_manifest_line_count": 50,
+    "lockfile_tracked": true,
+    "toolchain": {
+      "path": "rust-toolchain.toml",
+      "sha256": "7be955420e9a82164d4c4307e141035b29cd395ba6f621af32f3fddfb4013f63",
+      "channel": "nightly-2026-07-05",
+      "components": ["rustfmt", "clippy"],
+      "inheritance": "The excluded fuzz workspace is below the repository root and therefore inherits this parent rustup override."
+    },
+    "cargo_deny_status": "pass",
+    "cargo_audit_status": "pass",
+    "observed_dependency_count": 378,
+    "observed_advisories": [],
+    "resolved_advisory_blockers": [
       {
         "id": "RUSTSEC-2026-0204",
         "package": "crossbeam-epoch",
-        "resolved_version": "0.9.18",
+        "previous_version": "0.9.18",
         "patched_version_requirement": ">=0.9.20",
-        "disposition": "block_fuzz_green_until_lock_refresh"
+        "disposition": "removed_from_refreshed_fuzz_graph"
       },
       {
         "id": "RUSTSEC-2026-0190",
         "package": "anyhow",
-        "resolved_version": "1.0.102",
+        "previous_version": "1.0.102",
+        "resolved_version": "1.0.104",
         "patched_version_requirement": ">=1.0.103",
-        "disposition": "block_fuzz_green_until_lock_refresh"
+        "disposition": "refreshed_to_1.0.104"
       }
     ],
-    "overall_interpretation": "The root workspace lane may pass, but the excluded-fuzz row remains explicitly non-green and cannot be cited as fuzz graph health."
+    "native_build_edges": {
+      "libfuzzer_sys": {
+        "version": "0.4.13",
+        "license_expression": "(MIT OR Apache-2.0) AND NCSA",
+        "dependencies": ["arbitrary", "cc"]
+      },
+      "cc": {
+        "version": "1.4.4",
+        "dependencies": ["find-msvc-tools", "jobserver", "libc", "shlex"],
+        "prerequisites": "A working C/C++ compiler, linker, archiver, and the pinned nightly Rust toolchain are required to build libFuzzer targets."
+      }
+    },
+    "tokio_quarantine": {
+      "state": "expected_excluded_fuzz_only",
+      "direct_satellite_edge": "fuzz/conformance/Cargo.toml uses tokio for vendor-comparison scaffolding.",
+      "generated_message_edge": "fuzz/Cargo.toml enables opentelemetry-proto gen-tonic-messages, which carries tonic/tokio wire helpers.",
+      "production_boundary": "Default and metrics production dependency proofs remain separate and must contain no tokio path."
+    },
+    "overall_interpretation": "The checked excluded-fuzz lock, advisory, license, source, native-edge, duplicate-ratchet, and Tokio-quarantine policy surfaces are green at this revision."
   },
   "advisory_exceptions": [
     {
@@ -118,6 +164,7 @@
       "LGPL-2.1-or-later",
       "LicenseRef-MIT-OpenAI-Anthropic-Rider",
       "MIT",
+      "NCSA",
       "Unicode-3.0",
       "Unlicense",
       "Zlib"
@@ -167,30 +214,32 @@
       ]
     },
     "fuzz": {
-      "policy": "Snapshot-only while the fuzz lock is stale. It is non-green and must be regenerated and re-reviewed before promotion.",
+      "policy": "The tracked excluded-fuzz lock is ratcheted down: duplicate families or versions may disappear, but expansion requires an explicit reviewed baseline update.",
       "allowed": [
-        { "name": "block-buffer", "versions": ["0.10.4", "0.12.0"] },
+        { "name": "aead", "versions": ["0.5.2", "0.6.1"] },
+        { "name": "base64", "versions": ["0.22.1", "0.23.1"] },
+        { "name": "block-buffer", "versions": ["0.10.4", "0.12.1"] },
+        { "name": "chacha20", "versions": ["0.10.1", "0.9.1"] },
+        { "name": "chacha20poly1305", "versions": ["0.10.1", "0.11.0"] },
+        { "name": "cipher", "versions": ["0.4.4", "0.5.2"] },
         { "name": "const-oid", "versions": ["0.10.2", "0.9.6"] },
         { "name": "core-foundation", "versions": ["0.10.1", "0.9.4"] },
         { "name": "cpufeatures", "versions": ["0.2.17", "0.3.0"] },
-        { "name": "crypto-common", "versions": ["0.1.7", "0.2.1"] },
+        { "name": "crypto-common", "versions": ["0.1.7", "0.2.2"] },
         { "name": "digest", "versions": ["0.10.7", "0.11.3"] },
-        { "name": "foldhash", "versions": ["0.1.5", "0.2.0"] },
-        { "name": "getrandom", "versions": ["0.2.17", "0.3.4", "0.4.2"] },
-        { "name": "hashbrown", "versions": ["0.15.5", "0.16.1", "0.17.1"] },
-        { "name": "hmac", "versions": ["0.12.1", "0.13.0"] },
+        { "name": "getrandom", "versions": ["0.2.17", "0.3.4", "0.4.3"] },
+        { "name": "hashbrown", "versions": ["0.16.1", "0.17.1"] },
+        { "name": "inout", "versions": ["0.1.4", "0.2.2"] },
+        { "name": "poly1305", "versions": ["0.8.0", "0.9.1"] },
         { "name": "r-efi", "versions": ["5.3.0", "6.0.0"] },
-        { "name": "rand", "versions": ["0.8.6", "0.9.4"] },
+        { "name": "rand", "versions": ["0.8.7", "0.9.5"] },
         { "name": "rand_chacha", "versions": ["0.3.1", "0.9.0"] },
-        { "name": "rand_core", "versions": ["0.6.4", "0.9.5"] },
-        { "name": "redox_syscall", "versions": ["0.5.18", "0.8.1"] },
+        { "name": "rand_core", "versions": ["0.10.1", "0.6.4", "0.9.5"] },
         { "name": "sha2", "versions": ["0.10.9", "0.11.0"] },
-        { "name": "windows-core", "versions": ["0.57.0", "0.62.2"] },
-        { "name": "windows-implement", "versions": ["0.57.0", "0.60.2"] },
-        { "name": "windows-interface", "versions": ["0.57.0", "0.59.3"] },
-        { "name": "windows-result", "versions": ["0.1.2", "0.4.1"] },
-        { "name": "windows-sys", "versions": ["0.52.0", "0.61.2"] },
-        { "name": "wit-bindgen", "versions": ["0.51.0", "0.57.1"] }
+        { "name": "syn", "versions": ["2.0.119", "3.0.3"] },
+        { "name": "universal-hash", "versions": ["0.5.1", "0.6.1"] },
+        { "name": "wasi", "versions": ["0.11.1+wasi-snapshot-preview1", "0.14.7+wasi-0.2.4"] },
+        { "name": "windows-sys", "versions": ["0.52.0", "0.61.2"] }
       ]
     }
   },
@@ -206,6 +255,12 @@
       "policy_class": "licenses",
       "mutation": "Remove ISC from a temporary deny.toml copy.",
       "expected": "cargo-deny exits nonzero and rejects untrusted 0.9.0."
+    },
+    {
+      "fixture_id": "fuzz-license-ncsa-removed",
+      "policy_class": "excluded-fuzz-licenses",
+      "mutation": "Remove NCSA from a temporary deny.toml copy.",
+      "expected": "cargo-deny exits nonzero and rejects libfuzzer-sys because its NCSA term is no longer admitted."
     },
     {
       "fixture_id": "duplicate-version-added",
@@ -224,16 +279,16 @@
     "install": "scripts/ci/audit_dependencies.sh install-tools",
     "direct_main": "scripts/ci/audit_dependencies.sh run",
     "negative_fixtures": "scripts/ci/audit_dependencies.sh self-test",
-    "focused_contract": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_dependency_supply_chain_policy CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test dependency_supply_chain_policy_contract -- --nocapture"
+    "focused_contract": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_dependency_supply_chain_policy CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -j 2 -p asupersync --test dependency_supply_chain_policy_contract -- --nocapture"
   },
   "outcome_taxonomy": {
-    "pass": "Root workspace tools, database, config, advisory scan, license/source policy, and duplicate ratchet all pass.",
+    "pass": "Root and excluded-fuzz tools, database, locked graphs, advisory scans, license/source policies, and duplicate ratchets all pass.",
     "fail": "A policy violation is observed.",
     "blocked": "A required tool, exact version, database, freshness field, lock consistency, or executable evidence surface is unavailable.",
     "unsupported": "The requested graph cannot be represented by the pinned tool; this is non-green."
   },
   "no_claim_boundaries": [
-    "A root PASS does not prove excluded fuzz green; the current fuzz row is explicitly blocked and vulnerable.",
+    "A PASS proves only the checked root and excluded-fuzz dependency policy at the recorded manifest, lock, tool, and advisory-database revisions; it does not prove fuzz-target behavior.",
     "A fresh advisory database and zero reported vulnerability are not proof that no undisclosed vulnerability exists.",
     "License metadata checks are not legal advice and do not exhaustively inspect every source file.",
     "A duplicate ratchet prevents expansion; it does not prove the retained duplicates are desirable or cost-free.",

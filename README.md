@@ -1440,9 +1440,10 @@ policy and interpretation in
 [`artifacts/dependency_supply_chain_policy_v1.json`](artifacts/dependency_supply_chain_policy_v1.json)
 and
 [`docs/dependency_supply_chain_policy.md`](docs/dependency_supply_chain_policy.md).
-Its focused proof lane is `dependency-supply-chain-policy-contract`. A root
-scanner pass does not claim that the separately excluded fuzz workspace is
-green; consult the live receipt for its explicit non-green status.
+Its focused proof lane is `dependency-supply-chain-policy-contract`. The gate
+requires both the root and separately tracked excluded-fuzz graphs to pass;
+consult the live runner receipt for scanner evidence. The Rust contract alone
+does not prove scanner execution, fuzz-target compilation or fuzz behavior.
 
 ## Using Asupersync as a Dependency
 

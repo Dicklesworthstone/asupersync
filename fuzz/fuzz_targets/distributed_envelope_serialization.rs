@@ -186,6 +186,7 @@ fn build_config(input: &DistributedEncodingInput) -> EncodingConfig {
         min_repair_symbols: input.min_repair_symbols.min(MAX_REPAIR_REQUEST),
         max_source_blocks,
         repair_overhead: 1.25,
+        path_quality: None,
     }
 }
 
@@ -310,6 +311,7 @@ fn apply_mutation(mutation: &Mutation, encoder: &mut StateEncoder, encoded: &Enc
                     repair_count: encoded.repair_count,
                     original_size: encoded.original_size,
                     encoded_at: encoded.encoded_at,
+                    layout_decision: encoded.layout_decision,
                 };
                 assert!(
                     encoder.generate_repair(&degraded, 1).is_err(),
@@ -328,6 +330,7 @@ fn apply_mutation(mutation: &Mutation, encoder: &mut StateEncoder, encoded: &Enc
                     repair_count: encoded.repair_count,
                     original_size: encoded.original_size,
                     encoded_at: encoded.encoded_at,
+                    layout_decision: encoded.layout_decision,
                 };
                 assert!(
                     encoder.generate_repair(&malformed, 1).is_err(),

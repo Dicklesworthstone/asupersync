@@ -283,6 +283,7 @@ fuzz_target!(|input: TransportAggregatorInput| {
             max_wait_time: Time::from_millis(max_wait_ms),
             immediate_delivery: false,
             max_sequence_gap,
+            ..ReordererConfig::default()
         },
         flush_interval: Time::from_millis(flush_interval_ms),
         ..AggregatorConfig::default()

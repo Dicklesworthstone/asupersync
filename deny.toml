@@ -44,6 +44,7 @@ allow = [
     "LGPL-2.1-or-later",
     "LicenseRef-MIT-OpenAI-Anthropic-Rider",
     "MIT",
+    "NCSA",
     "Unicode-3.0",
     "Unlicense",
     "Zlib",

@@ -7,6 +7,7 @@ version = "0.0.0"
 authors = ["Automated"]
 publish = false
 edition = "2024"
+license = "MIT OR Apache-2.0"
 
 [package.metadata]
 cargo-fuzz = true
