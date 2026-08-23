@@ -1694,7 +1694,7 @@ impl KafkaProducer {
 
     /// Flush all pending messages.
     ///
-    /// Blocks until all messages in the queue are sent or the timeout expires.
+    /// Waits until all messages in the queue are sent or the timeout expires.
     #[allow(unused_variables, clippy::unused_async)]
     pub async fn flush(&self, cx: &Cx, timeout: Duration) -> Result<(), KafkaError> {
         self.flush_inner(cx, timeout, false).await
@@ -1750,7 +1750,10 @@ impl KafkaProducer {
                     return Err(KafkaError::Broker("flush timeout elapsed".to_string()));
                 }
                 let tick = remaining.min(Duration::from_millis(10));
-                self.producer.poll(tick);
+                // ThreadedProducer already owns a dedicated librdkafka polling
+                // thread. Polling it here would block this async executor thread
+                // for up to `tick`; yield through the runtime timer instead.
+                wait_retry_backoff(cx, tick).await?;
                 if remaining <= tick {
                     remaining = Duration::ZERO;
                 } else {
@@ -2733,9 +2736,7 @@ mod tests {
         clippy::future_not_send
     )]
     use super::*;
-    #[cfg(not(feature = "kafka"))]
     use crate::time::{TimerDriverHandle, VirtualClock};
-    #[cfg(not(feature = "kafka"))]
     use crate::types::{Budget, RegionId, TaskId};
     #[cfg(feature = "kafka")]
     use futures_lite::future;
@@ -3731,6 +3732,35 @@ mod tests {
             std::future::Future::poll(wait.as_mut(), &mut task_cx),
             std::task::Poll::Ready(Ok(()))
         ));
+    }
+
+    #[cfg(feature = "kafka")]
+    #[test]
+    fn producer_flush_yields_while_operation_is_active_ne8jdw() {
+        let producer = KafkaProducer::new(ProducerConfig::default()).unwrap();
+        let operation = producer.begin_operation().unwrap();
+        let clock = Arc::new(VirtualClock::new());
+        let timer = TimerDriverHandle::with_virtual_clock(clock);
+        let cx = Cx::new_with_drivers(
+            RegionId::new_for_test(0, 1),
+            TaskId::new_for_test(0, 0),
+            Budget::INFINITE,
+            None,
+            None,
+            None,
+            Some(timer),
+            None,
+        );
+        let mut flush = Box::pin(producer.flush(&cx, Duration::from_millis(50)));
+        let mut task_cx = Context::from_waker(Waker::noop());
+
+        assert!(
+            matches!(flush.as_mut().poll(&mut task_cx), Poll::Pending),
+            "flush must yield instead of blocking the executor through the entire timeout"
+        );
+
+        drop(flush);
+        drop(operation);
     }
 
     #[cfg(feature = "kafka")]
