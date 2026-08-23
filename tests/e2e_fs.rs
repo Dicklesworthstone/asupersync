@@ -16,6 +16,7 @@ use asupersync::io::{AsyncReadExt, AsyncWriteExt};
 use asupersync::stream::StreamExt as _;
 use futures_lite::future;
 use serde_json::{Value, json};
+use std::collections::HashSet;
 use std::io;
 use std::path::Path;
 use std::path::PathBuf;
@@ -60,6 +61,13 @@ const FS_PARITY_WAVE2_SCENARIOS: &[&str] = &[
     "io-uring-cancellation-support-boundary",
     "io-uring-unknown-completion-attribution",
     "read-dir-drop-cancellation",
+    "dormant-fs-normal-recursive-traversal",
+    "dormant-fs-simple-symlink-traversal",
+    "dormant-fs-circular-symlink-detection",
+    "dormant-fs-broken-symlink-handling",
+    "dormant-fs-mixed-symlink-tree",
+    "dormant-fs-cross-root-vfs-traversal",
+    "dormant-fs-bounded-partial-traversal",
 ];
 
 const FS_PARITY_WAVE2_ROW_FIELDS: &[&str] = &[
@@ -124,6 +132,8 @@ fn fs_parity_platform() -> String {
 fn fs_parity_backend(scenario_id: &str) -> &'static str {
     if scenario_id.starts_with("io-uring-") {
         "io_uring"
+    } else if scenario_id.starts_with("dormant-fs-") {
+        "unix_vfs"
     } else {
         "unix-spawn_blocking_io"
     }
@@ -1226,6 +1236,615 @@ async fn fs_proof_read_dir_drop_cancellation(temp_root: &Path) -> Result<FsProof
     ))
 }
 
+#[derive(Debug, Default)]
+struct RealVfsTraversalEvidence {
+    entries_seen: u64,
+    directories_visited: u64,
+    files_read: u64,
+    bytes_read: u64,
+    symlinks_seen: u64,
+    symlinks_followed: u64,
+    cycles_detected: u64,
+    broken_links: u64,
+    max_depth: usize,
+    truncated: bool,
+    pending_items_after_stop: usize,
+    canonical_files: HashSet<PathBuf>,
+}
+
+impl RealVfsTraversalEvidence {
+    fn metadata_summary(&self) -> String {
+        format!(
+            "entries={},dirs={},files={},bytes={},symlinks={},followed={},cycles={},broken={},max_depth={},truncated={},pending_after_stop={}",
+            self.entries_seen,
+            self.directories_visited,
+            self.files_read,
+            self.bytes_read,
+            self.symlinks_seen,
+            self.symlinks_followed,
+            self.cycles_detected,
+            self.broken_links,
+            self.max_depth,
+            self.truncated,
+            self.pending_items_after_stop,
+        )
+    }
+}
+
+#[derive(Debug)]
+struct RealVfsTraversalItem {
+    path: PathBuf,
+    depth: usize,
+    ancestor_directories: Vec<PathBuf>,
+}
+
+async fn walk_real_vfs_tree(
+    root: &Path,
+    entry_budget: Option<usize>,
+) -> Result<RealVfsTraversalEvidence, String> {
+    let vfs = fs::UnixVfs::new();
+    let mut evidence = RealVfsTraversalEvidence::default();
+    let mut visited_directories = HashSet::new();
+    let mut pending = vec![RealVfsTraversalItem {
+        path: root.to_path_buf(),
+        depth: 0,
+        ancestor_directories: Vec::new(),
+    }];
+
+    while let Some(item) = pending.pop() {
+        if entry_budget.is_some_and(|budget| evidence.entries_seen as usize >= budget) {
+            evidence.truncated = true;
+            pending.push(item);
+            break;
+        }
+
+        evidence.entries_seen += 1;
+        evidence.max_depth = evidence.max_depth.max(item.depth);
+        let link_metadata = vfs
+            .symlink_metadata(&item.path)
+            .await
+            .map_err(|err| format!("symlink_metadata {}: {err}", item.path.display()))?;
+
+        if link_metadata.is_symlink() {
+            evidence.symlinks_seen += 1;
+            vfs.read_link(&item.path)
+                .await
+                .map_err(|err| format!("read_link {}: {err}", item.path.display()))?;
+
+            let canonical_target = match vfs.canonicalize(&item.path).await {
+                Ok(target) => target,
+                Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                    evidence.broken_links += 1;
+                    continue;
+                }
+                Err(err) => {
+                    return Err(format!(
+                        "canonicalize symlink {}: {:?}: {err}",
+                        item.path.display(),
+                        err.kind()
+                    ));
+                }
+            };
+
+            if item.ancestor_directories.contains(&canonical_target) {
+                evidence.cycles_detected += 1;
+                continue;
+            }
+
+            evidence.symlinks_followed += 1;
+            let target_metadata = vfs.metadata(&item.path).await.map_err(|err| {
+                format!("metadata through symlink {}: {err}", item.path.display())
+            })?;
+            if target_metadata.is_file() {
+                if evidence.canonical_files.insert(canonical_target) {
+                    let bytes = vfs.read(&item.path).await.map_err(|err| {
+                        format!("read through symlink {}: {err}", item.path.display())
+                    })?;
+                    evidence.files_read += 1;
+                    evidence.bytes_read += bytes.len() as u64;
+                }
+                continue;
+            }
+            if !target_metadata.is_dir() {
+                continue;
+            }
+            if !visited_directories.insert(canonical_target.clone()) {
+                continue;
+            }
+
+            evidence.directories_visited += 1;
+            let mut read_dir = vfs.read_dir(&item.path).await.map_err(|err| {
+                format!("read_dir through symlink {}: {err}", item.path.display())
+            })?;
+            let mut children = Vec::new();
+            while let Some(entry) = read_dir.next_entry().await.map_err(|err| {
+                format!("next_entry through symlink {}: {err}", item.path.display())
+            })? {
+                children.push(entry.path());
+            }
+            drop(read_dir);
+            children.sort();
+            let mut ancestors = item.ancestor_directories;
+            ancestors.push(canonical_target);
+            for child in children.into_iter().rev() {
+                pending.push(RealVfsTraversalItem {
+                    path: child,
+                    depth: item.depth + 1,
+                    ancestor_directories: ancestors.clone(),
+                });
+            }
+            continue;
+        }
+
+        if link_metadata.is_file() {
+            let canonical_file = vfs
+                .canonicalize(&item.path)
+                .await
+                .map_err(|err| format!("canonicalize file {}: {err}", item.path.display()))?;
+            if evidence.canonical_files.insert(canonical_file) {
+                let bytes = vfs
+                    .read(&item.path)
+                    .await
+                    .map_err(|err| format!("read file {}: {err}", item.path.display()))?;
+                evidence.files_read += 1;
+                evidence.bytes_read += bytes.len() as u64;
+            }
+            continue;
+        }
+
+        if !link_metadata.is_dir() {
+            continue;
+        }
+        let canonical_directory = vfs
+            .canonicalize(&item.path)
+            .await
+            .map_err(|err| format!("canonicalize directory {}: {err}", item.path.display()))?;
+        if item.ancestor_directories.contains(&canonical_directory) {
+            evidence.cycles_detected += 1;
+            continue;
+        }
+        if !visited_directories.insert(canonical_directory.clone()) {
+            continue;
+        }
+
+        evidence.directories_visited += 1;
+        let mut read_dir = vfs
+            .read_dir(&item.path)
+            .await
+            .map_err(|err| format!("read_dir {}: {err}", item.path.display()))?;
+        let mut children = Vec::new();
+        while let Some(entry) = read_dir
+            .next_entry()
+            .await
+            .map_err(|err| format!("next_entry {}: {err}", item.path.display()))?
+        {
+            children.push(entry.path());
+        }
+        drop(read_dir);
+        children.sort();
+        let mut ancestors = item.ancestor_directories;
+        ancestors.push(canonical_directory);
+        for child in children.into_iter().rev() {
+            pending.push(RealVfsTraversalItem {
+                path: child,
+                depth: item.depth + 1,
+                ancestor_directories: ancestors.clone(),
+            });
+        }
+    }
+
+    evidence.pending_items_after_stop = pending.len();
+    Ok(evidence)
+}
+
+async fn fs_proof_dormant_normal_traversal(temp_root: &Path) -> Result<FsProofEvidence, String> {
+    let root = temp_root.join("dormant-fs-normal-recursive-traversal");
+    let vfs = fs::UnixVfs::new();
+    vfs.create_dir_all(&root.join("alpha/beta"))
+        .await
+        .map_err(|err| format!("create nested normal fixture: {err}"))?;
+    vfs.create_dir(&root.join("empty-dir"))
+        .await
+        .map_err(|err| format!("create empty normal fixture: {err}"))?;
+    vfs.write(&root.join("empty.bin"), b"")
+        .await
+        .map_err(|err| format!("write empty normal fixture: {err}"))?;
+    vfs.write(&root.join("alpha/alpha.txt"), b"alpha")
+        .await
+        .map_err(|err| format!("write nested normal fixture: {err}"))?;
+    vfs.write(&root.join("alpha/beta/omega.txt"), b"omega")
+        .await
+        .map_err(|err| format!("write deep normal fixture: {err}"))?;
+    let large = vec![0x5a; 256 * 1024];
+    vfs.write(&root.join("large.bin"), &large)
+        .await
+        .map_err(|err| format!("write large normal fixture: {err}"))?;
+
+    let evidence = walk_real_vfs_tree(&root, None).await?;
+    let expected_bytes = large.len() as u64 + 10;
+    if evidence.directories_visited != 4
+        || evidence.files_read != 4
+        || evidence.bytes_read != expected_bytes
+        || evidence.symlinks_seen != 0
+        || evidence.truncated
+    {
+        return Err(format!(
+            "normal traversal drift: {} expected_dirs=4 expected_files=4 expected_bytes={expected_bytes}",
+            evidence.metadata_summary()
+        ));
+    }
+
+    Ok(FsProofEvidence::supported(
+        evidence.bytes_read,
+        evidence.metadata_summary(),
+    ))
+}
+
+#[cfg(unix)]
+async fn fs_proof_dormant_simple_symlinks_unix(
+    temp_root: &Path,
+) -> Result<FsProofEvidence, String> {
+    let root = temp_root.join("dormant-fs-simple-symlink-traversal");
+    let vfs = fs::UnixVfs::new();
+    vfs.create_dir_all(&root.join("targets/nested"))
+        .await
+        .map_err(|err| format!("create simple symlink targets: {err}"))?;
+    vfs.create_dir(&root.join("links"))
+        .await
+        .map_err(|err| format!("create simple symlink links dir: {err}"))?;
+    vfs.write(&root.join("targets/target.txt"), b"target")
+        .await
+        .map_err(|err| format!("write simple symlink file target: {err}"))?;
+    vfs.write(&root.join("targets/nested/nested.txt"), b"nested")
+        .await
+        .map_err(|err| format!("write simple symlink dir target: {err}"))?;
+    fs::symlink(
+        root.join("targets/target.txt"),
+        root.join("links/link-file"),
+    )
+    .await
+    .map_err(|err| format!("create simple file symlink: {err}"))?;
+    fs::symlink(root.join("targets/nested"), root.join("links/link-dir"))
+        .await
+        .map_err(|err| format!("create simple directory symlink: {err}"))?;
+
+    let evidence = walk_real_vfs_tree(&root, None).await?;
+    if evidence.files_read != 2
+        || evidence.bytes_read != 12
+        || evidence.symlinks_seen != 2
+        || evidence.symlinks_followed != 2
+        || evidence.cycles_detected != 0
+        || evidence.broken_links != 0
+    {
+        return Err(format!(
+            "simple symlink traversal drift: {}",
+            evidence.metadata_summary()
+        ));
+    }
+    Ok(FsProofEvidence::supported(
+        evidence.bytes_read,
+        evidence.metadata_summary(),
+    ))
+}
+
+#[cfg(unix)]
+async fn fs_proof_dormant_circular_symlinks_unix(
+    temp_root: &Path,
+) -> Result<FsProofEvidence, String> {
+    let root = temp_root.join("dormant-fs-circular-symlink-detection");
+    let vfs = fs::UnixVfs::new();
+    for name in ["a", "b", "c", "self"] {
+        vfs.create_dir_all(&root.join(name))
+            .await
+            .map_err(|err| format!("create circular directory {name}: {err}"))?;
+        vfs.write(
+            &root.join(name).join(format!("{name}.txt")),
+            name.as_bytes(),
+        )
+        .await
+        .map_err(|err| format!("write circular file {name}: {err}"))?;
+    }
+    fs::symlink(root.join("b"), root.join("a/to-b"))
+        .await
+        .map_err(|err| format!("create a-to-b symlink: {err}"))?;
+    fs::symlink(root.join("c"), root.join("b/to-c"))
+        .await
+        .map_err(|err| format!("create b-to-c symlink: {err}"))?;
+    fs::symlink(root.join("a"), root.join("c/to-a"))
+        .await
+        .map_err(|err| format!("create c-to-a symlink: {err}"))?;
+    fs::symlink(root.join("self"), root.join("self/to-self"))
+        .await
+        .map_err(|err| format!("create self symlink: {err}"))?;
+
+    let evidence = walk_real_vfs_tree(&root, None).await?;
+    if evidence.directories_visited != 5
+        || evidence.files_read != 4
+        || evidence.bytes_read != 7
+        || evidence.symlinks_seen != 4
+        || evidence.cycles_detected != 2
+        || evidence.entries_seen > 16
+    {
+        return Err(format!(
+            "circular symlink traversal drift: {}",
+            evidence.metadata_summary()
+        ));
+    }
+    Ok(FsProofEvidence::supported(
+        evidence.bytes_read,
+        evidence.metadata_summary(),
+    ))
+}
+
+#[cfg(unix)]
+async fn fs_proof_dormant_broken_symlinks_unix(
+    temp_root: &Path,
+) -> Result<FsProofEvidence, String> {
+    let root = temp_root.join("dormant-fs-broken-symlink-handling");
+    let vfs = fs::UnixVfs::new();
+    vfs.create_dir_all(&root)
+        .await
+        .map_err(|err| format!("create broken symlink root: {err}"))?;
+    vfs.write(&root.join("valid.txt"), b"valid")
+        .await
+        .map_err(|err| format!("write broken symlink control file: {err}"))?;
+    fs::symlink(root.join("never-created"), root.join("missing-link"))
+        .await
+        .map_err(|err| format!("create missing-target symlink: {err}"))?;
+    let removed_target = root.join("removed-target");
+    vfs.write(&removed_target, b"remove-me")
+        .await
+        .map_err(|err| format!("write removed symlink target: {err}"))?;
+    fs::symlink(&removed_target, root.join("removed-link"))
+        .await
+        .map_err(|err| format!("create removed-target symlink: {err}"))?;
+    vfs.remove_file(&removed_target)
+        .await
+        .map_err(|err| format!("remove symlink target: {err}"))?;
+
+    let evidence = walk_real_vfs_tree(&root, None).await?;
+    if evidence.files_read != 1
+        || evidence.bytes_read != 5
+        || evidence.symlinks_seen != 2
+        || evidence.broken_links != 2
+        || evidence.cycles_detected != 0
+    {
+        return Err(format!(
+            "broken symlink traversal drift: {}",
+            evidence.metadata_summary()
+        ));
+    }
+    Ok(FsProofEvidence::supported(
+        evidence.bytes_read,
+        evidence.metadata_summary(),
+    ))
+}
+
+#[cfg(unix)]
+async fn fs_proof_dormant_mixed_symlinks_unix(temp_root: &Path) -> Result<FsProofEvidence, String> {
+    let root = temp_root.join("dormant-fs-mixed-symlink-tree");
+    let vfs = fs::UnixVfs::new();
+    vfs.create_dir_all(&root.join("real/tree"))
+        .await
+        .map_err(|err| format!("create mixed real tree: {err}"))?;
+    vfs.create_dir_all(&root.join("cycle"))
+        .await
+        .map_err(|err| format!("create mixed cycle dir: {err}"))?;
+    vfs.write(&root.join("real/tree/data.txt"), b"mixed-data")
+        .await
+        .map_err(|err| format!("write mixed data file: {err}"))?;
+    vfs.write(&root.join("real/root.txt"), b"root-data")
+        .await
+        .map_err(|err| format!("write mixed root file: {err}"))?;
+    fs::symlink(root.join("real/tree"), root.join("link-to-tree"))
+        .await
+        .map_err(|err| format!("create mixed directory link: {err}"))?;
+    fs::symlink(root.join("real/root.txt"), root.join("link-to-file"))
+        .await
+        .map_err(|err| format!("create mixed file link: {err}"))?;
+    fs::symlink(root.join("cycle"), root.join("cycle/back"))
+        .await
+        .map_err(|err| format!("create mixed cycle link: {err}"))?;
+    fs::symlink(root.join("missing"), root.join("broken"))
+        .await
+        .map_err(|err| format!("create mixed broken link: {err}"))?;
+
+    let evidence = walk_real_vfs_tree(&root, None).await?;
+    if evidence.files_read != 2
+        || evidence.bytes_read != 19
+        || evidence.symlinks_seen != 4
+        || evidence.cycles_detected != 1
+        || evidence.broken_links != 1
+        || evidence.truncated
+    {
+        return Err(format!(
+            "mixed symlink traversal drift: {}",
+            evidence.metadata_summary()
+        ));
+    }
+    Ok(FsProofEvidence::supported(
+        evidence.bytes_read,
+        evidence.metadata_summary(),
+    ))
+}
+
+#[cfg(unix)]
+async fn fs_proof_dormant_cross_root_vfs_unix(temp_root: &Path) -> Result<FsProofEvidence, String> {
+    let root = temp_root.join("dormant-fs-cross-root-vfs-traversal");
+    let root_a = root.join("root-a");
+    let root_b = root.join("root-b");
+    let vfs = fs::UnixVfs::new();
+    vfs.create_dir_all(&root_a)
+        .await
+        .map_err(|err| format!("create cross-root a: {err}"))?;
+    vfs.create_dir_all(&root_b)
+        .await
+        .map_err(|err| format!("create cross-root b: {err}"))?;
+    vfs.write(&root_a.join("a.txt"), b"root-a")
+        .await
+        .map_err(|err| format!("write cross-root a file: {err}"))?;
+    let root_b_file = root_b.join("b.txt");
+    vfs.write(&root_b_file, b"root-b")
+        .await
+        .map_err(|err| format!("write cross-root b file: {err}"))?;
+    fs::symlink(&root_b, root_a.join("to-b"))
+        .await
+        .map_err(|err| format!("create cross-root a-to-b link: {err}"))?;
+    fs::symlink(&root_a, root_b.join("to-a"))
+        .await
+        .map_err(|err| format!("create cross-root b-to-a link: {err}"))?;
+
+    let evidence = walk_real_vfs_tree(&root_a, None).await?;
+    let canonical_b_file = vfs
+        .canonicalize(&root_b_file)
+        .await
+        .map_err(|err| format!("canonicalize cross-root b file: {err}"))?;
+    if evidence.directories_visited != 2
+        || evidence.files_read != 2
+        || evidence.bytes_read != 12
+        || evidence.symlinks_seen != 2
+        || evidence.cycles_detected != 1
+        || !evidence.canonical_files.contains(&canonical_b_file)
+    {
+        return Err(format!(
+            "cross-root VFS traversal drift: {}",
+            evidence.metadata_summary()
+        ));
+    }
+    Ok(FsProofEvidence::supported(
+        evidence.bytes_read,
+        format!(
+            "{},cross_root_file_observed=true,mount_isolation_claim=false",
+            evidence.metadata_summary()
+        ),
+    ))
+}
+
+async fn fs_proof_dormant_partial_traversal(temp_root: &Path) -> Result<FsProofEvidence, String> {
+    let root = temp_root.join("dormant-fs-bounded-partial-traversal");
+    let vfs = fs::UnixVfs::new();
+    for dir_idx in 0..4 {
+        let dir = root.join(format!("dir-{dir_idx}"));
+        vfs.create_dir_all(&dir)
+            .await
+            .map_err(|err| format!("create partial traversal dir {dir_idx}: {err}"))?;
+        for file_idx in 0..4 {
+            let payload = format!("payload-{dir_idx}{file_idx}");
+            vfs.write(
+                &dir.join(format!("file-{file_idx}.txt")),
+                payload.as_bytes(),
+            )
+            .await
+            .map_err(|err| format!("write partial traversal file {dir_idx}/{file_idx}: {err}"))?;
+        }
+    }
+
+    let partial = walk_real_vfs_tree(&root, Some(5)).await?;
+    let complete = walk_real_vfs_tree(&root, None).await?;
+    if !partial.truncated
+        || partial.entries_seen != 5
+        || partial.pending_items_after_stop == 0
+        || complete.truncated
+        || complete.entries_seen != 21
+        || complete.directories_visited != 5
+        || complete.files_read != 16
+        || complete.bytes_read != 160
+    {
+        return Err(format!(
+            "bounded partial traversal drift: partial=({}) complete=({})",
+            partial.metadata_summary(),
+            complete.metadata_summary()
+        ));
+    }
+    Ok(FsProofEvidence::supported(
+        complete.bytes_read,
+        format!(
+            "partial=({}),complete=({}),all_iterators_dropped=true",
+            partial.metadata_summary(),
+            complete.metadata_summary()
+        ),
+    ))
+}
+
+fn unsupported_unix_symlink_traversal(scenario_id: &str) -> FsProofEvidence {
+    FsProofEvidence {
+        bytes_actual: 0,
+        metadata_actual: format!("scenario={scenario_id},unsupported_platform=non_unix"),
+        unsupported_reason: "real symlink traversal recovery requires Unix symlink support"
+            .to_string(),
+    }
+}
+
+async fn fs_proof_dormant_simple_symlinks(temp_root: &Path) -> Result<FsProofEvidence, String> {
+    #[cfg(unix)]
+    {
+        fs_proof_dormant_simple_symlinks_unix(temp_root).await
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = temp_root;
+        Ok(unsupported_unix_symlink_traversal(
+            "dormant-fs-simple-symlink-traversal",
+        ))
+    }
+}
+
+async fn fs_proof_dormant_circular_symlinks(temp_root: &Path) -> Result<FsProofEvidence, String> {
+    #[cfg(unix)]
+    {
+        fs_proof_dormant_circular_symlinks_unix(temp_root).await
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = temp_root;
+        Ok(unsupported_unix_symlink_traversal(
+            "dormant-fs-circular-symlink-detection",
+        ))
+    }
+}
+
+async fn fs_proof_dormant_broken_symlinks(temp_root: &Path) -> Result<FsProofEvidence, String> {
+    #[cfg(unix)]
+    {
+        fs_proof_dormant_broken_symlinks_unix(temp_root).await
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = temp_root;
+        Ok(unsupported_unix_symlink_traversal(
+            "dormant-fs-broken-symlink-handling",
+        ))
+    }
+}
+
+async fn fs_proof_dormant_mixed_symlinks(temp_root: &Path) -> Result<FsProofEvidence, String> {
+    #[cfg(unix)]
+    {
+        fs_proof_dormant_mixed_symlinks_unix(temp_root).await
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = temp_root;
+        Ok(unsupported_unix_symlink_traversal(
+            "dormant-fs-mixed-symlink-tree",
+        ))
+    }
+}
+
+async fn fs_proof_dormant_cross_root_vfs(temp_root: &Path) -> Result<FsProofEvidence, String> {
+    #[cfg(unix)]
+    {
+        fs_proof_dormant_cross_root_vfs_unix(temp_root).await
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = temp_root;
+        Ok(unsupported_unix_symlink_traversal(
+            "dormant-fs-cross-root-vfs-traversal",
+        ))
+    }
+}
+
 async fn fs_parity_wave2_run() -> io::Result<Vec<Value>> {
     let bead_id = std::env::var("ASUPERSYNC_FS_PARITY_BEAD_ID")
         .unwrap_or_else(|_| "asupersync-oc0ybw".to_string());
@@ -1423,6 +2042,69 @@ async fn fs_parity_wave2_run() -> io::Result<Vec<Value>> {
             metadata_expected: "dropped_after_first_entry,dir_still_accessible=true",
             cancellation_point: "drop_after_first_entry",
             result: fs_proof_read_dir_drop_cancellation(&temp_root).await,
+        },
+        FsProofScenario {
+            scenario_id: "dormant-fs-normal-recursive-traversal",
+            api: "UnixVfs/Vfs/ReadDir",
+            operation: "real_recursive_empty_large_nested_file_traversal",
+            bytes_expected: 262_154,
+            metadata_expected: "dirs=4,files=4,bytes=262154,symlinks=0,truncated=false",
+            cancellation_point: "none_all_operations_awaited",
+            result: fs_proof_dormant_normal_traversal(&temp_root).await,
+        },
+        FsProofScenario {
+            scenario_id: "dormant-fs-simple-symlink-traversal",
+            api: "UnixVfs/Vfs/ReadDir/fs::symlink",
+            operation: "real_file_and_directory_symlink_traversal",
+            bytes_expected: 12,
+            metadata_expected: "files=2,symlinks=2,followed=2,cycles=0,broken=0",
+            cancellation_point: "none_all_operations_awaited",
+            result: fs_proof_dormant_simple_symlinks(&temp_root).await,
+        },
+        FsProofScenario {
+            scenario_id: "dormant-fs-circular-symlink-detection",
+            api: "UnixVfs/Vfs/ReadDir/fs::symlink",
+            operation: "real_three_directory_and_self_cycle_traversal",
+            bytes_expected: 7,
+            metadata_expected: "dirs=5,files=4,symlinks=4,cycles=2,entries_bounded=true",
+            cancellation_point: "cycle_detected_before_revisit",
+            result: fs_proof_dormant_circular_symlinks(&temp_root).await,
+        },
+        FsProofScenario {
+            scenario_id: "dormant-fs-broken-symlink-handling",
+            api: "UnixVfs/Vfs/ReadDir/fs::symlink",
+            operation: "real_never_created_and_removed_target_handling",
+            bytes_expected: 5,
+            metadata_expected: "files=1,symlinks=2,broken=2,cycles=0",
+            cancellation_point: "none_all_operations_awaited",
+            result: fs_proof_dormant_broken_symlinks(&temp_root).await,
+        },
+        FsProofScenario {
+            scenario_id: "dormant-fs-mixed-symlink-tree",
+            api: "UnixVfs/Vfs/ReadDir/fs::symlink",
+            operation: "real_files_directories_valid_cycle_and_broken_links",
+            bytes_expected: 19,
+            metadata_expected: "files=2,symlinks=4,cycles=1,broken=1,truncated=false",
+            cancellation_point: "cycle_detected_before_revisit",
+            result: fs_proof_dormant_mixed_symlinks(&temp_root).await,
+        },
+        FsProofScenario {
+            scenario_id: "dormant-fs-cross-root-vfs-traversal",
+            api: "UnixVfs/Vfs/ReadDir/fs::symlink",
+            operation: "real_cross_root_bidirectional_symlink_traversal",
+            bytes_expected: 12,
+            metadata_expected: "dirs=2,files=2,symlinks=2,cycles=1,cross_root_file_observed=true,mount_isolation_claim=false",
+            cancellation_point: "cross_root_cycle_detected_before_revisit",
+            result: fs_proof_dormant_cross_root_vfs(&temp_root).await,
+        },
+        FsProofScenario {
+            scenario_id: "dormant-fs-bounded-partial-traversal",
+            api: "UnixVfs/Vfs/ReadDir",
+            operation: "entry_budget_stop_drop_iterators_then_complete_replay",
+            bytes_expected: 160,
+            metadata_expected: "partial_entries=5,pending_after_stop_positive,complete_entries=21,files=16,all_iterators_dropped=true",
+            cancellation_point: "entry_budget_exhausted",
+            result: fs_proof_dormant_partial_traversal(&temp_root).await,
         },
     ];
 

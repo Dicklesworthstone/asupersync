@@ -63,6 +63,42 @@ Every repaired concurrency scenario must assert no task leaks, no obligation
 leaks, loser draining after races, and region-close quiescence. A TempDir drop
 is not by itself proof of runtime cleanup.
 
+## A2 maintained-lane recovery disposition
+
+`asupersync-d24mms.12.2` preserves the undeclared 1,223-line source file for
+audit history and restores its useful journeys in the maintained
+`tests/e2e_fs.rs` real-filesystem lane. The dormant file's `MockVfsLayer` did
+not implement the current `Vfs` trait and its cross-mount scenario was only a
+pair of host-filesystem symlinks. The recovered scenarios instead execute
+through `UnixVfs`, `Vfs`, `ReadDir`, and Asupersync's symlink/path operations.
+
+| Dormant inventory row | Maintained scenario row | Disposition |
+| --- | --- | --- |
+| `DORMANT-FS-001` aggregate | all seven `dormant-fs-*` rows | Equal-or-better active runner coverage, including bounded partial traversal and replay |
+| `DORMANT-FS-002` normal traversal | `dormant-fs-normal-recursive-traversal` | Empty, nested, and 256 KiB files with exact directory/file/byte accounting |
+| simple-symlink logical scenario | `dormant-fs-simple-symlink-traversal` | Real file and directory symlinks with canonical-file deduplication |
+| `DORMANT-FS-003` circular links | `dormant-fs-circular-symlink-detection` | Real three-directory and self cycles with exact cycle count and bounded entry count |
+| `DORMANT-FS-004` broken links | `dormant-fs-broken-symlink-handling` | Never-created and removed targets with exact dangling-link count |
+| `DORMANT-FS-005` mixed tree | `dormant-fs-mixed-symlink-tree` | Real directories, files, valid links, a cycle, and a dangling link in one traversal |
+| cross-VFS logical scenario | `dormant-fs-cross-root-vfs-traversal` | Real bidirectional cross-root traversal; explicitly no mount-isolation claim |
+| partial/cancel boundary | `dormant-fs-bounded-partial-traversal` | Entry-budget stop, iterator drop, and complete replay with exact cleanup-visible accounting |
+
+The focused runner accepts a bead override while retaining the historical
+default:
+
+```bash
+RCH_REQUIRE_REMOTE=1 \
+ASUPERSYNC_FS_PARITY_BEAD_ID=asupersync-d24mms.12.2 \
+bash scripts/fs_parity_proof_runner.sh \
+  target/fs-parity-proof/asupersync-d24mms.12.2
+```
+
+Its `scenario_rows.jsonl` and `run_report.json` include exact byte, metadata,
+error, bounded-stop, platform-support, and temporary-root cleanup fields.
+Unix-only symlink rows emit an explicit unsupported verdict elsewhere; they do
+not silently pass. Canonical `scripts/run_all_e2e.sh` integration and aggregate
+logging remain owned by A5 (`asupersync-d24mms.12.5`).
+
 ## No-claim boundary
 
 This packet proves inventory completeness, source pins, dormant module state,
@@ -70,3 +106,10 @@ and captured compile drift only. It does not prove that the dormant tests
 compile, run, are deterministic, are superseded, or provide canonical E2E
 evidence. It makes no broad workspace, performance, release-readiness,
 runtime-correctness, or live-service claim.
+
+The A2 maintained-lane mapping does not claim a virtual mount implementation,
+mount isolation, rollback of filesystem mutations after future drop, broad
+workspace health, or canonical A5 runner admission. All recovered operations
+are awaited before temporary-root removal; the bounded partial row proves an
+iterator-drop and replay boundary, not preemptive cancellation of an in-flight
+host syscall.

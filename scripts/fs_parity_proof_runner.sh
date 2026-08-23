@@ -11,13 +11,14 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-OUT_DIR="${1:-$PROJECT_DIR/target/fs-parity-proof/asupersync-oc0ybw}"
+BEAD_ID="${ASUPERSYNC_FS_PARITY_BEAD_ID:-asupersync-oc0ybw}"
+OUT_DIR="${1:-$PROJECT_DIR/target/fs-parity-proof/$BEAD_ID}"
 LOG_FILE="$OUT_DIR/run.log"
 ROWS_FILE="$OUT_DIR/scenario_rows.jsonl"
 REPORT_FILE="$OUT_DIR/run_report.json"
-BEAD_ID="asupersync-oc0ybw"
 RCH_BIN="${RCH_BIN:-rch}"
 CARGO_BIN="${CARGO_BIN:-cargo}"
+CARGO_JOBS="${ASUPERSYNC_FS_PARITY_JOBS:-2}"
 RCH_LOCAL_FALLBACK_PATTERN='^\[RCH\] local \(|falling back to local|local fallback|fallback to local|executing locally'
 
 EXPECTED_SCENARIOS=(
@@ -42,6 +43,13 @@ EXPECTED_SCENARIOS=(
   "io-uring-cancellation-support-boundary"
   "io-uring-unknown-completion-attribution"
   "read-dir-drop-cancellation"
+  "dormant-fs-normal-recursive-traversal"
+  "dormant-fs-simple-symlink-traversal"
+  "dormant-fs-circular-symlink-detection"
+  "dormant-fs-broken-symlink-handling"
+  "dormant-fs-mixed-symlink-tree"
+  "dormant-fs-cross-root-vfs-traversal"
+  "dormant-fs-bounded-partial-traversal"
 )
 
 REQUIRED_ROW_FIELDS=(
@@ -98,7 +106,7 @@ CMD=(
   "RUSTFLAGS=-C debuginfo=0"
   "ASUPERSYNC_FS_PARITY_PROOF_DIR=$OUT_DIR"
   "ASUPERSYNC_FS_PARITY_BEAD_ID=$BEAD_ID"
-  "$CARGO_BIN" test -p asupersync
+  "$CARGO_BIN" test -j "$CARGO_JOBS" -p asupersync
   --test e2e_fs
   --features "$FEATURES"
   fs_parity_wave2_proof_runner_logs_required_scenarios
@@ -111,6 +119,7 @@ log "scenario_filter=fs_parity_wave2_proof_runner_logs_required_scenarios"
 log "output_dir=$OUT_DIR"
 log "git_sha=$GIT_SHA"
 log "features=$FEATURES"
+log "cargo_jobs=$CARGO_JOBS"
 log "rch_target_dir=$RCH_TARGET_DIR"
 log "command=$(printf '%q ' "${CMD[@]}")"
 
@@ -120,7 +129,7 @@ TEST_STATUS="${PIPESTATUS[0]}"
 set -e
 reject_rch_local_fallback_log
 
-grep -E '^\{.*"bead_id":"asupersync-oc0ybw".*\}$' "$LOG_FILE" > "$ROWS_FILE" || true
+grep -E "^\\{.*\"bead_id\":\"${BEAD_ID}\".*\\}$" "$LOG_FILE" > "$ROWS_FILE" || true
 
 MISSING_SCENARIOS=()
 for scenario in "${EXPECTED_SCENARIOS[@]}"; do
