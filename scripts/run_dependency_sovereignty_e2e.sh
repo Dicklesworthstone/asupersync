@@ -20,6 +20,10 @@ REAL_SERVICE_FIXTURE_MATRIX="$PROJECT_ROOT/artifacts/dependency_real_service_fix
 FEATURE_PLATFORM_CONSUMER_MATRIX="$PROJECT_ROOT/artifacts/dependency_feature_platform_consumer_matrix_v1.json"
 FINAL_SIGNOFF_MATRIX="$PROJECT_ROOT/artifacts/dependency_verification_final_signoff_v1.json"
 REGISTRY="$PROJECT_ROOT/artifacts/dependency_capability_registry_v1.json"
+DORMANT_INVENTORY="$PROJECT_ROOT/artifacts/dormant_e2e_inventory_v1.json"
+DORMANT_FS_RUNNER="$PROJECT_ROOT/scripts/fs_parity_proof_runner.sh"
+DORMANT_INT_RUNNER="$PROJECT_ROOT/scripts/cross_subsystem_recovery_proof_runner.sh"
+DORMANT_DIST_RUNNER="$PROJECT_ROOT/scripts/distributed_hash_snapshot_recovery_proof_runner.sh"
 SUITE_ID="dependency-sovereignty"
 SUITE_SCENARIO_ID="E2E-SUITE-DEPENDENCY-SOVEREIGNTY"
 BEAD_ID="asupersync-dep-p1-foundations-upksjk.6.2"
@@ -89,6 +93,12 @@ Cargo-backed scenarios require:
     --scenario offline-tuner-logging-parity
   RCH_REQUIRE_REMOTE=1 bash scripts/run_dependency_sovereignty_e2e.sh \
     --scenario temp_artifacts
+  RCH_REQUIRE_REMOTE=1 bash scripts/run_dependency_sovereignty_e2e.sh \
+    --scenario dormant-e2e-aggregate-signoff
+
+The dormant aggregate runs the maintained filesystem, cross-subsystem, and
+distributed lanes once each. Every original DORMANT-* inventory ID is also a
+stable alias that runs its owning lane and emits a checked disposition report.
 USAGE
 }
 
@@ -118,13 +128,22 @@ scenario_ids() {
         dep-sovereignty-asupersync_0h6myr_4_5_04aaef97c5dd \
         dep-sovereignty-asupersync_dep_p4_nkeys_poc60v_1_3_5e81559b363d \
         offline-tuner-logging-parity \
-        temp_artifacts
+        temp_artifacts \
+        dormant-e2e-filesystem-recovery \
+        dormant-e2e-cross-subsystem-recovery \
+        dormant-e2e-distributed-recovery \
+        dormant-e2e-aggregate-signoff
+    jq -r '.test_inventory[].scenario_id' "$DORMANT_INVENTORY"
 }
 
 scenario_is_known() {
     case "$1" in
-        catalog | runner-contract | registry-contract | baseline-contract | cutover-policy-contract | verification-matrix-contract | failure-injection-contract | real-service-fixture-contract | feature-platform-consumer-contract | aggregate-signoff-contract | sqlite-parity-aggregate | api-adr-registry-contract | api-adr-phase3-signoff | atp_version_artifacts | dep-sovereignty-asupersync_d24mms_11_d22341de8339 | dep-sovereignty-asupersync_d24mms_4_b6e90e93b1e8 | dep-sovereignty-asupersync_5z2scg_3_5_66765b43947e | dep-sovereignty-asupersync_5z2scg_3_7_94b694387988 | lz4_trace_replay | lz4_cross_version_artifact | lz4_malformed_limits | dep-sovereignty-asupersync_0h6myr_4_5_04aaef97c5dd | dep-sovereignty-asupersync_dep_p4_nkeys_poc60v_1_3_5e81559b363d | offline-tuner-logging-parity | temp_artifacts)
+        catalog | runner-contract | registry-contract | baseline-contract | cutover-policy-contract | verification-matrix-contract | failure-injection-contract | real-service-fixture-contract | feature-platform-consumer-contract | aggregate-signoff-contract | sqlite-parity-aggregate | api-adr-registry-contract | api-adr-phase3-signoff | atp_version_artifacts | dep-sovereignty-asupersync_d24mms_11_d22341de8339 | dep-sovereignty-asupersync_d24mms_4_b6e90e93b1e8 | dep-sovereignty-asupersync_5z2scg_3_5_66765b43947e | dep-sovereignty-asupersync_5z2scg_3_7_94b694387988 | lz4_trace_replay | lz4_cross_version_artifact | lz4_malformed_limits | dep-sovereignty-asupersync_0h6myr_4_5_04aaef97c5dd | dep-sovereignty-asupersync_dep_p4_nkeys_poc60v_1_3_5e81559b363d | offline-tuner-logging-parity | temp_artifacts | dormant-e2e-filesystem-recovery | dormant-e2e-cross-subsystem-recovery | dormant-e2e-distributed-recovery | dormant-e2e-aggregate-signoff)
             return 0
+            ;;
+        DORMANT-*)
+            jq -e --arg id "$1" '.test_inventory | any(.scenario_id == $id)' \
+                "$DORMANT_INVENTORY" >/dev/null
             ;;
         *)
             return 1
@@ -134,7 +153,7 @@ scenario_is_known() {
 
 scenario_is_cargo() {
     case "$1" in
-        registry-contract | baseline-contract | cutover-policy-contract | verification-matrix-contract | failure-injection-contract | real-service-fixture-contract | feature-platform-consumer-contract | aggregate-signoff-contract | sqlite-parity-aggregate | api-adr-registry-contract | api-adr-phase3-signoff | atp_version_artifacts | dep-sovereignty-asupersync_d24mms_11_d22341de8339 | dep-sovereignty-asupersync_d24mms_4_b6e90e93b1e8 | dep-sovereignty-asupersync_5z2scg_3_5_66765b43947e | dep-sovereignty-asupersync_5z2scg_3_7_94b694387988 | lz4_trace_replay | lz4_cross_version_artifact | lz4_malformed_limits | dep-sovereignty-asupersync_0h6myr_4_5_04aaef97c5dd | dep-sovereignty-asupersync_dep_p4_nkeys_poc60v_1_3_5e81559b363d | offline-tuner-logging-parity | temp_artifacts)
+        registry-contract | baseline-contract | cutover-policy-contract | verification-matrix-contract | failure-injection-contract | real-service-fixture-contract | feature-platform-consumer-contract | aggregate-signoff-contract | sqlite-parity-aggregate | api-adr-registry-contract | api-adr-phase3-signoff | atp_version_artifacts | dep-sovereignty-asupersync_d24mms_11_d22341de8339 | dep-sovereignty-asupersync_d24mms_4_b6e90e93b1e8 | dep-sovereignty-asupersync_5z2scg_3_5_66765b43947e | dep-sovereignty-asupersync_5z2scg_3_7_94b694387988 | lz4_trace_replay | lz4_cross_version_artifact | lz4_malformed_limits | dep-sovereignty-asupersync_0h6myr_4_5_04aaef97c5dd | dep-sovereignty-asupersync_dep_p4_nkeys_poc60v_1_3_5e81559b363d | offline-tuner-logging-parity | temp_artifacts | dormant-e2e-filesystem-recovery | dormant-e2e-cross-subsystem-recovery | dormant-e2e-distributed-recovery | dormant-e2e-aggregate-signoff | DORMANT-*)
             return 0
             ;;
         *)
@@ -146,7 +165,7 @@ scenario_is_cargo() {
 scenario_surface() {
     case "$1" in
         catalog) printf 'audit' ;;
-        sqlite-parity-aggregate | atp_version_artifacts | dep-sovereignty-asupersync_d24mms_11_d22341de8339 | dep-sovereignty-asupersync_d24mms_4_b6e90e93b1e8 | dep-sovereignty-asupersync_5z2scg_3_5_66765b43947e | dep-sovereignty-asupersync_5z2scg_3_7_94b694387988 | lz4_trace_replay | lz4_cross_version_artifact | lz4_malformed_limits | dep-sovereignty-asupersync_0h6myr_4_5_04aaef97c5dd | dep-sovereignty-asupersync_dep_p4_nkeys_poc60v_1_3_5e81559b363d | offline-tuner-logging-parity | temp_artifacts) printf 'e2e' ;;
+        sqlite-parity-aggregate | atp_version_artifacts | dep-sovereignty-asupersync_d24mms_11_d22341de8339 | dep-sovereignty-asupersync_d24mms_4_b6e90e93b1e8 | dep-sovereignty-asupersync_5z2scg_3_5_66765b43947e | dep-sovereignty-asupersync_5z2scg_3_7_94b694387988 | lz4_trace_replay | lz4_cross_version_artifact | lz4_malformed_limits | dep-sovereignty-asupersync_0h6myr_4_5_04aaef97c5dd | dep-sovereignty-asupersync_dep_p4_nkeys_poc60v_1_3_5e81559b363d | offline-tuner-logging-parity | temp_artifacts | dormant-e2e-* | DORMANT-*) printf 'e2e' ;;
         runner-contract | failure-injection-contract | real-service-fixture-contract | feature-platform-consumer-contract | aggregate-signoff-contract | api-adr-registry-contract | api-adr-phase3-signoff) printf 'contract' ;;
         *) printf 'integration' ;;
     esac
@@ -177,6 +196,7 @@ scenario_fixture() {
         dep-sovereignty-asupersync_dep_p4_nkeys_poc60v_1_3_5e81559b363d) printf 'tests/fixtures/dependency-capability-baseline-consumer' ;;
         offline-tuner-logging-parity) printf 'tests/offline_tuner_env_logger_parity.rs' ;;
         temp_artifacts) printf 'tests/temp_artifact_lifecycle.rs' ;;
+        dormant-e2e-* | DORMANT-*) printf 'artifacts/dormant_e2e_inventory_v1.json' ;;
     esac
 }
 
@@ -195,6 +215,10 @@ scenario_profile() {
         dep-sovereignty-asupersync_dep_p4_nkeys_poc60v_1_3_5e81559b363d) printf 'nkey-owned-types-default' ;;
         offline-tuner-logging-parity) printf 'offline-tuner-cli-simd' ;;
         temp_artifacts) printf 'tempfile-default-sparse-combined-lifecycle' ;;
+        dormant-e2e-filesystem-recovery | DORMANT-FS-*) printf 'dormant-filesystem-maintained' ;;
+        dormant-e2e-cross-subsystem-recovery | DORMANT-INT-*) printf 'dormant-cross-subsystem-maintained' ;;
+        dormant-e2e-distributed-recovery | DORMANT-DIST-*) printf 'dormant-distributed-maintained' ;;
+        dormant-e2e-aggregate-signoff) printf 'dormant-e2e-aggregate' ;;
         *) printf 'nightly-default' ;;
     esac
 }
@@ -202,6 +226,9 @@ scenario_profile() {
 scenario_capabilities() {
     case "$1" in
         catalog | runner-contract | verification-matrix-contract | failure-injection-contract | real-service-fixture-contract | aggregate-signoff-contract)
+            printf '["CAP-REAL-SERVICE-E2E","CAP-VERIFICATION-PROFILES"]'
+            ;;
+        dormant-e2e-* | DORMANT-*)
             printf '["CAP-REAL-SERVICE-E2E","CAP-VERIFICATION-PROFILES"]'
             ;;
         sqlite-parity-aggregate)
@@ -281,6 +308,18 @@ scenario_features() {
         temp_artifacts)
             printf '["benchmark-adapters","cli","default","no-default-features","test-internals"]'
             ;;
+        dormant-e2e-filesystem-recovery | DORMANT-FS-*)
+            printf '["test-internals"]'
+            ;;
+        dormant-e2e-cross-subsystem-recovery | DORMANT-INT-*)
+            printf '["cross-subsystem-recovery-e2e","no-default-features"]'
+            ;;
+        dormant-e2e-distributed-recovery | DORMANT-DIST-*)
+            printf '["distributed-hash-snapshot-recovery-e2e","no-default-features"]'
+            ;;
+        dormant-e2e-aggregate-signoff)
+            printf '["cross-subsystem-recovery-e2e","distributed-hash-snapshot-recovery-e2e","test-internals"]'
+            ;;
         *)
             printf '[]'
             ;;
@@ -305,6 +344,10 @@ scenario_evidence_owner() {
         dep-sovereignty-asupersync_dep_p4_nkeys_poc60v_1_3_5e81559b363d) printf 'asupersync-dep-p4-nkeys-poc60v.1.3' ;;
         offline-tuner-logging-parity) printf 'asupersync-d24mms.3' ;;
         temp_artifacts) printf 'asupersync-d24mms.5' ;;
+        dormant-e2e-filesystem-recovery | DORMANT-FS-*) printf 'asupersync-d24mms.12.2' ;;
+        dormant-e2e-cross-subsystem-recovery | DORMANT-INT-*) printf 'asupersync-d24mms.12.3' ;;
+        dormant-e2e-distributed-recovery | DORMANT-DIST-*) printf 'asupersync-d24mms.12.4' ;;
+        dormant-e2e-aggregate-signoff) printf 'asupersync-d24mms.12.5' ;;
         *) printf '%s' "$EVIDENCE_OWNER" ;;
     esac
 }
@@ -329,6 +372,7 @@ scenario_step_id() {
         dep-sovereignty-asupersync_dep_p4_nkeys_poc60v_1_3_5e81559b363d) printf 'nkey-n3-owned-type-redaction' ;;
         offline-tuner-logging-parity) printf 'd24mms-3-offline-tuner-logging-parity' ;;
         temp_artifacts) printf 'd24mms-5-temp-artifact-lifecycle' ;;
+        dormant-e2e-* | DORMANT-*) printf 'd24mms-12-5-%s' "${1//./-}" ;;
         *) printf 'ver-a2-%s' "$1" ;;
     esac
 }
@@ -401,6 +445,9 @@ scenario_command_display() {
             ;;
         temp_artifacts)
             printf '%s' "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --overlay-path scripts/run_dependency_sovereignty_e2e.sh --overlay-path docs/dependency_capability_baseline.md --overlay-path src/atp/benchmark/suite.rs --overlay-path src/net/atp/transport_quic/mod.rs --overlay-path src/net/atp/transport_rq/mod.rs --overlay-path src/net/atp/transport_rq/transport_rq_tests.rs --overlay-path src/test_logging.rs --overlay-path tests/dependency_capability_baseline_contract.rs --overlay-path tests/e2e_log_quality_schema.rs --overlay-path tests/temp_artifact_lifecycle.rs -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=<isolated> bash -lc '<default, sparse, combined tempfile graph checks plus focused lifecycle and production-consumer tests>'"
+            ;;
+        dormant-e2e-* | DORMANT-*)
+            printf '%s' "RCH_REQUIRE_REMOTE=1 bash scripts/run_all_e2e.sh --suite dependency-sovereignty --scenario $scenario_id"
             ;;
     esac
 }
@@ -534,12 +581,13 @@ FAILURE_CONFIG_DIGEST=""
 REAL_SERVICE_FIXTURE_CONFIG_DIGEST=""
 FEATURE_PLATFORM_CONSUMER_CONFIG_DIGEST=""
 FINAL_SIGNOFF_CONFIG_DIGEST=""
+DORMANT_INVENTORY_DIGEST=""
 
 if [[ -e "$RUN_DIR" ]]; then
     printf 'refusing to overwrite retained evidence directory: %s\n' "$RUN_DIR" >&2
     exit 73
 fi
-if [[ ! -f "$MATRIX" || ! -f "$FAILURE_MATRIX" || ! -f "$REAL_SERVICE_FIXTURE_MATRIX" || ! -f "$FEATURE_PLATFORM_CONSUMER_MATRIX" || ! -f "$FINAL_SIGNOFF_MATRIX" || ! -f "$REGISTRY" ]]; then
+if [[ ! -f "$MATRIX" || ! -f "$FAILURE_MATRIX" || ! -f "$REAL_SERVICE_FIXTURE_MATRIX" || ! -f "$FEATURE_PLATFORM_CONSUMER_MATRIX" || ! -f "$FINAL_SIGNOFF_MATRIX" || ! -f "$REGISTRY" || ! -f "$DORMANT_INVENTORY" || ! -x "$DORMANT_FS_RUNNER" || ! -x "$DORMANT_INT_RUNNER" || ! -x "$DORMANT_DIST_RUNNER" ]]; then
     printf 'required dependency-sovereignty inputs are missing\n' >&2
     exit 66
 fi
@@ -593,6 +641,7 @@ FAILURE_CONFIG_DIGEST="$(sha256_file "$FAILURE_MATRIX")"
 REAL_SERVICE_FIXTURE_CONFIG_DIGEST="$(sha256_file "$REAL_SERVICE_FIXTURE_MATRIX")"
 FEATURE_PLATFORM_CONSUMER_CONFIG_DIGEST="$(sha256_file "$FEATURE_PLATFORM_CONSUMER_MATRIX")"
 FINAL_SIGNOFF_CONFIG_DIGEST="$(sha256_file "$FINAL_SIGNOFF_MATRIX")"
+DORMANT_INVENTORY_DIGEST="$(sha256_file "$DORMANT_INVENTORY")"
 jq -n \
     --arg schema_version "dependency-sovereignty-environment-v1" \
     --arg run_id "$RUN_ID" \
@@ -613,6 +662,7 @@ jq -n \
     --arg real_service_fixture_config_digest "$REAL_SERVICE_FIXTURE_CONFIG_DIGEST" \
     --arg feature_platform_consumer_config_digest "$FEATURE_PLATFORM_CONSUMER_CONFIG_DIGEST" \
     --arg final_signoff_config_digest "$FINAL_SIGNOFF_CONFIG_DIGEST" \
+    --arg dormant_inventory_digest "$DORMANT_INVENTORY_DIGEST" \
     --arg redaction_policy "metadata-and-secret-patterns-v1" \
     '{
       schema_version: $schema_version,
@@ -648,6 +698,10 @@ jq -n \
           {
             source: "artifacts/dependency_verification_final_signoff_v1.json",
             sha256: $final_signoff_config_digest
+          },
+          {
+            source: "artifacts/dormant_e2e_inventory_v1.json",
+            sha256: $dormant_inventory_digest
           }
         ]
       },
@@ -775,6 +829,350 @@ classify_result() {
     else
         printf 'COMMAND_FAILURE'
     fi
+}
+
+dormant_lane_for_selection() {
+    case "$1" in
+        dormant-e2e-filesystem-recovery | DORMANT-FS-*) printf 'filesystem' ;;
+        dormant-e2e-cross-subsystem-recovery | DORMANT-INT-*) printf 'cross-subsystem' ;;
+        dormant-e2e-distributed-recovery | DORMANT-DIST-*) printf 'distributed' ;;
+        *) return 64 ;;
+    esac
+}
+
+dormant_owner_for_lane() {
+    case "$1" in
+        filesystem) printf 'asupersync-d24mms.12.2' ;;
+        cross-subsystem) printf 'asupersync-d24mms.12.3' ;;
+        distributed) printf 'asupersync-d24mms.12.4' ;;
+        *) return 64 ;;
+    esac
+}
+
+dormant_runner_for_lane() {
+    case "$1" in
+        filesystem) printf '%s' "$DORMANT_FS_RUNNER" ;;
+        cross-subsystem) printf '%s' "$DORMANT_INT_RUNNER" ;;
+        distributed) printf '%s' "$DORMANT_DIST_RUNNER" ;;
+        *) return 64 ;;
+    esac
+}
+
+validate_dormant_lane_report() {
+    local lane="$1"
+    local report="$2"
+    jq -e --arg lane "$lane" '
+      (.validation_passed == true) and
+      (.test_status == 0) and
+      ((.git_sha | type) == "string" and (.git_sha | length) > 0) and
+      ((.command | type) == "string" and (.command | contains("rch"))) and
+      ((.rch_target_dir | type) == "string" and (.rch_target_dir | length) > 0) and
+      (((.missing_scenarios // []) | length) == 0) and
+      (((.duplicate_scenarios // []) | length) == 0) and
+      (((.missing_fields // []) | length) == 0) and
+      (((.drifts // []) | length) == 0) and
+      (if $lane == "filesystem" then
+         (.row_count == 28 and .pass_count == 26 and .skip_count == 2 and .fail_count == 0) and
+         ([.rows[] | select(.verdict == "skip") | .scenario_id] | sort) ==
+           ["io-uring-cancellation-support-boundary", "io-uring-unknown-completion-attribution"] and
+         all(.rows[]; .cleanup_status == "removed") and
+         all(.rows[] | select(.verdict == "skip"); ((.unsupported_reason // "") | length) > 0)
+       elif $lane == "cross-subsystem" then
+         (.row_count == 17 and .pass_count == 16 and .skip_count == 1 and .fail_count == 0) and
+         ([.rows[] | select(.verdict == "skip") | .scenario_id] == ["DORMANT-INT-005"]) and
+         (.rows[] | select(.scenario_id == "DORMANT-INT-005") | .unsupported_reason) == "PLACEHOLDER_NOT_EVIDENCE" and
+         all(.rows[]; ((.cleanup_status | type) == "string" and (.cleanup_status | length) > 0))
+       elif $lane == "distributed" then
+         (.row_count == 5 and .pass_count == 5 and .skip_count == 0 and .fail_count == 0) and
+         all(.rows[]; (.verdict == "pass" and (.cleanup_status | type) == "object" and (.cleanup_status | length) > 0))
+       else false end)
+    ' "$report" >/dev/null
+}
+
+run_dormant_lane() {
+    local lane="$1"
+    local selection_root="$2"
+    local child_dir="$selection_root/children/$lane"
+    local runner
+    runner="$(dormant_runner_for_lane "$lane")" || return $?
+    mkdir -p "$child_dir"
+
+    case "$lane" in
+        filesystem)
+            ASUPERSYNC_FS_PARITY_BEAD_ID=asupersync-d24mms.12.2 \
+                bash "$runner" "$child_dir" || return $?
+            ;;
+        cross-subsystem)
+            ASUPERSYNC_CROSS_SUBSYSTEM_BEAD_ID=asupersync-d24mms.12.3 \
+                bash "$runner" "$child_dir" || return $?
+            ;;
+        distributed)
+            ASUPERSYNC_DISTRIBUTED_RECOVERY_BEAD_ID=asupersync-d24mms.12.4 \
+                bash "$runner" "$child_dir" || return $?
+            ;;
+    esac
+
+    validate_dormant_lane_report "$lane" "$child_dir/run_report.json" || return $?
+    jq -c --arg lane "$lane" --arg path "${child_dir#"$RUN_DIR/"}/run_report.json" '
+      {
+        lane: $lane,
+        report: $path,
+        bead_id,
+        git_sha,
+        command,
+        features,
+        rch_target_dir,
+        test_status,
+        row_count,
+        pass_count,
+        skip_count,
+        fail_count,
+        validation_passed
+      }
+    ' "$child_dir/run_report.json" >>"$selection_root/child_reports.ndjson"
+}
+
+emit_dormant_disposition_rows() {
+    local selection="$1"
+    local lane="$2"
+    local selection_root="$3"
+    local child_report="$selection_root/children/$lane/run_report.json"
+    local owner
+    local runner
+    owner="$(dormant_owner_for_lane "$lane")" || return $?
+    runner="$(dormant_runner_for_lane "$lane")" || return $?
+    runner="${runner#"$PROJECT_ROOT/"}"
+
+    jq -c \
+      --arg selection "$selection" \
+      --arg owner "$owner" \
+      --arg lane "$lane" \
+      --arg runner "$runner" \
+      --arg child_report "${child_report#"$RUN_DIR/"}" \
+      --slurpfile child "$child_report" '
+      def maintained_ids($id):
+        if $id == "DORMANT-FS-001" then [
+          "dormant-fs-normal-recursive-traversal",
+          "dormant-fs-simple-symlink-traversal",
+          "dormant-fs-circular-symlink-detection",
+          "dormant-fs-broken-symlink-handling",
+          "dormant-fs-mixed-symlink-tree",
+          "dormant-fs-cross-root-vfs-traversal",
+          "dormant-fs-bounded-partial-traversal"
+        ]
+        elif $id == "DORMANT-FS-002" then ["dormant-fs-normal-recursive-traversal"]
+        elif $id == "DORMANT-FS-003" then ["dormant-fs-circular-symlink-detection"]
+        elif $id == "DORMANT-FS-004" then ["dormant-fs-broken-symlink-handling"]
+        elif $id == "DORMANT-FS-005" then ["dormant-fs-mixed-symlink-tree"]
+        else [$id] end;
+      .test_inventory[]
+      | select(
+          if ($selection | startswith("DORMANT-")) then .scenario_id == $selection
+          else .repair_owner == $owner end
+        )
+      | . as $inventory
+      | maintained_ids($inventory.scenario_id) as $ids
+      | ([$ids[] as $id | $child[0].rows[] | select(.scenario_id == $id)]) as $receipts
+      | {
+          schema_version: "dormant-e2e-disposition-row-v1",
+          dormant_scenario_id: $inventory.scenario_id,
+          source_file: $inventory.source_file,
+          original_test_function: $inventory.test_function,
+          original_status: $inventory.status,
+          repair_owner: $inventory.repair_owner,
+          disposition: (if $inventory.scenario_id == "DORMANT-INT-005" then "PLACEHOLDER_NOT_EVIDENCE" else "EQUAL_OR_BETTER" end),
+          canonical_lane: $lane,
+          runner_script: $runner,
+          child_report: $child_report,
+          maintained_scenario_ids: $ids,
+          maintained_receipts: [
+            $receipts[] | {
+              scenario_id,
+              verdict,
+              cleanup_status,
+              unsupported_reason: (.unsupported_reason // null),
+              infrastructure_blocker: (.infrastructure_blocker // null),
+              first_failure: (.first_failure // null)
+            }
+          ],
+          receipt_complete: (($receipts | length) == ($ids | length)),
+          accepted: (
+            (($receipts | length) == ($ids | length)) and
+            (if $inventory.scenario_id == "DORMANT-INT-005" then
+               all($receipts[]; .verdict == "skip" and .unsupported_reason == "PLACEHOLDER_NOT_EVIDENCE")
+             else all($receipts[]; .verdict == "pass") end)
+          ),
+          cleanup_complete: all($receipts[];
+            (.cleanup_status != null) and
+            (if (.cleanup_status | type) == "string" then (.cleanup_status | length) > 0
+             elif (.cleanup_status | type) == "object" then (.cleanup_status | length) > 0
+             else false end)),
+          proof_source_revision: $child[0].git_sha,
+          proof_command: $child[0].command,
+          feature_profile: $child[0].features,
+          deleted_or_migrated: false,
+          unknown: false,
+          replay_command: ("RCH_REQUIRE_REMOTE=1 bash scripts/run_all_e2e.sh --suite dependency-sovereignty --scenario " + $inventory.scenario_id),
+          no_claim_boundary: "Disposition proves maintained equal-or-better receipt coverage only; child lane no-claim boundaries remain controlling."
+        }
+    ' "$DORMANT_INVENTORY" >>"$selection_root/dispositions.ndjson"
+}
+
+validate_dormant_sources() {
+    local selection_root="$1"
+    local rows_file="$selection_root/source_files.ndjson"
+    : >"$rows_file"
+    while IFS=$'\t' read -r relative expected_sha expected_lines; do
+        local absolute="$PROJECT_ROOT/$relative"
+        local actual_sha=""
+        local actual_lines=0
+        local exists=false
+        if [[ -f "$absolute" ]]; then
+            exists=true
+            actual_sha="$(sha256_file "$absolute")" || return $?
+            actual_lines="$(awk 'END { print NR }' "$absolute")"
+        fi
+        jq -cn \
+          --arg path "$relative" \
+          --arg expected_sha256 "$expected_sha" \
+          --arg actual_sha256 "$actual_sha" \
+          --argjson expected_line_count "$expected_lines" \
+          --argjson actual_line_count "$actual_lines" \
+          --argjson exists "$exists" '
+          {
+            path: $path,
+            expected_sha256: $expected_sha256,
+            actual_sha256: $actual_sha256,
+            expected_line_count: $expected_line_count,
+            actual_line_count: $actual_line_count,
+            exists: $exists,
+            deleted_or_migrated: false,
+            preserved: ($exists and $expected_sha256 == $actual_sha256 and $expected_line_count == $actual_line_count)
+          }
+        ' >>"$rows_file"
+    done < <(jq -r '.modules[] | [.path, .sha256, .line_count] | @tsv' "$DORMANT_INVENTORY")
+    jq -se 'length == 3 and all(.[]; .preserved == true)' "$rows_file" >/dev/null
+}
+
+dormant_expected_ids_json() {
+    local selection="$1"
+    case "$selection" in
+        dormant-e2e-aggregate-signoff)
+            jq '[.test_inventory[].scenario_id]' "$DORMANT_INVENTORY"
+            ;;
+        dormant-e2e-filesystem-recovery)
+            jq '[.test_inventory[] | select(.repair_owner == "asupersync-d24mms.12.2") | .scenario_id]' "$DORMANT_INVENTORY"
+            ;;
+        dormant-e2e-cross-subsystem-recovery)
+            jq '[.test_inventory[] | select(.repair_owner == "asupersync-d24mms.12.3") | .scenario_id]' "$DORMANT_INVENTORY"
+            ;;
+        dormant-e2e-distributed-recovery)
+            jq '[.test_inventory[] | select(.repair_owner == "asupersync-d24mms.12.4") | .scenario_id]' "$DORMANT_INVENTORY"
+            ;;
+        DORMANT-*)
+            jq -n --arg id "$selection" '[$id]'
+            ;;
+        *) return 64 ;;
+    esac
+}
+
+finalize_dormant_selection() {
+    local selection="$1"
+    local selection_root="$2"
+    local report="$selection_root/disposition_report.json"
+    local expected_json
+    local rows_json
+    local sources_json
+    local child_reports_json
+    local validation_passed
+
+    validate_dormant_sources "$selection_root" || return $?
+    expected_json="$(dormant_expected_ids_json "$selection")" || return $?
+    rows_json="$(jq -s . "$selection_root/dispositions.ndjson")" || return $?
+    sources_json="$(jq -s . "$selection_root/source_files.ndjson")" || return $?
+    child_reports_json="$(jq -s . "$selection_root/child_reports.ndjson")" || return $?
+    validation_passed="$(jq -nr \
+      --argjson expected "$expected_json" \
+      --argjson rows "$rows_json" \
+      --argjson sources "$sources_json" \
+      --argjson children "$child_reports_json" '
+      (($expected - [$rows[].dormant_scenario_id]) | length) == 0 and
+      (([$rows[].dormant_scenario_id] - $expected) | length) == 0 and
+      ($rows | group_by(.dormant_scenario_id) | all(.[]; length == 1)) and
+      all($rows[]; .receipt_complete and .accepted and .cleanup_complete and (.unknown | not) and (.deleted_or_migrated | not)) and
+      ($sources | length) == 3 and all($sources[]; .preserved) and
+      ($children | length) > 0 and all($children[]; .validation_passed and .test_status == 0)
+    ')"
+
+    jq -n \
+      --arg schema_version "dormant-e2e-disposition-report-v1" \
+      --arg bead_id "asupersync-d24mms.12.5" \
+      --arg selection_id "$selection" \
+      --arg source_inventory "artifacts/dormant_e2e_inventory_v1.json" \
+      --arg source_revision "$SOURCE_REVISION" \
+      --arg generated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      --argjson expected_ids "$expected_json" \
+      --argjson dispositions "$rows_json" \
+      --argjson source_files "$sources_json" \
+      --argjson child_reports "$child_reports_json" \
+      --argjson validation_passed "$validation_passed" '
+      {
+        schema_version: $schema_version,
+        bead_id: $bead_id,
+        selection_id: $selection_id,
+        source_inventory: $source_inventory,
+        source_revision: $source_revision,
+        generated_at: $generated_at,
+        expected_dormant_scenario_ids: $expected_ids,
+        counts: {
+          expected: ($expected_ids | length),
+          disposition_rows: ($dispositions | length),
+          equal_or_better: ([$dispositions[] | select(.disposition == "EQUAL_OR_BETTER")] | length),
+          placeholder_not_evidence: ([$dispositions[] | select(.disposition == "PLACEHOLDER_NOT_EVIDENCE")] | length),
+          unknown: ([$dispositions[] | select(.unknown)] | length),
+          deleted_or_migrated: ([$dispositions[] | select(.deleted_or_migrated)] | length)
+        },
+        source_files: $source_files,
+        child_reports: $child_reports,
+        dispositions: $dispositions,
+        validation_passed: $validation_passed,
+        redaction_result: "passed",
+        cleanup_result: "passed",
+        replay_command: ("RCH_REQUIRE_REMOTE=1 bash scripts/run_all_e2e.sh --suite dependency-sovereignty --scenario " + $selection_id),
+        no_claim_boundaries: [
+          "The report proves canonical discovery, child-runner admission, disposition completeness, redaction, replay metadata, and source preservation only.",
+          "It does not prove broad workspace health, release readiness, performance, live external-service interoperability, dependency exit, or surfaces excluded by A2, A3, and A4."
+        ]
+      }
+    ' >"$report"
+
+    if [[ "$validation_passed" != "true" ]]; then
+        printf 'dormant disposition validation failed: %s\n' "$report" >&2
+        return 1
+    fi
+    printf 'Dormant disposition: %s\n' "$report"
+}
+
+run_dormant_selection() {
+    local selection="$1"
+    local selection_root="$RUN_DIR/$selection/dormant-signoff"
+    local lane
+    mkdir -p "$selection_root"
+    : >"$selection_root/dispositions.ndjson"
+    : >"$selection_root/child_reports.ndjson"
+
+    if [[ "$selection" == "dormant-e2e-aggregate-signoff" ]]; then
+        for lane in filesystem cross-subsystem distributed; do
+            run_dormant_lane "$lane" "$selection_root" || return $?
+            emit_dormant_disposition_rows "$selection" "$lane" "$selection_root" || return $?
+        done
+    else
+        lane="$(dormant_lane_for_selection "$selection")" || return $?
+        run_dormant_lane "$lane" "$selection_root" || return $?
+        emit_dormant_disposition_rows "$selection" "$lane" "$selection_root" || return $?
+    fi
+
+    finalize_dormant_selection "$selection" "$selection_root"
 }
 
 run_classifier_contract() {
@@ -1061,11 +1459,18 @@ execute_scenario() {
                 cargo test --locked -p asupersync --test e2e_log_quality_schema \
                     dependency_sovereignty_ -j 2 -- --nocapture --test-threads=1
             ;;
+        dormant-e2e-* | DORMANT-*)
+            run_dormant_selection "$scenario_id"
+            ;;
     esac
 }
 
 export MATRIX FAILURE_MATRIX REAL_SERVICE_FIXTURE_MATRIX FEATURE_PLATFORM_CONSUMER_MATRIX FINAL_SIGNOFF_MATRIX PROJECT_ROOT CANARY SOURCE_REVISION STEP_TIMEOUT
-export -f classify_result execute_scenario redact_stream run_classifier_contract
+export DORMANT_INVENTORY DORMANT_FS_RUNNER DORMANT_INT_RUNNER DORMANT_DIST_RUNNER RUN_DIR
+export -f classify_result execute_scenario redact_stream run_classifier_contract sha256_file
+export -f dormant_lane_for_selection dormant_owner_for_lane dormant_runner_for_lane
+export -f validate_dormant_lane_report run_dormant_lane emit_dormant_disposition_rows
+export -f validate_dormant_sources dormant_expected_ids_json finalize_dormant_selection run_dormant_selection
 
 TOTAL=0
 PASSED=0
@@ -1300,6 +1705,11 @@ if grep -R -Fq -e "$NKEY_SECRET_CANARY" -e "$NKEY_DOWNSTREAM_CANARY" "$RUN_DIR";
     fi
 fi
 
+DORMANT_DISPOSITION_REPORTS_JSON="$(
+    find "$RUN_DIR" -type f -path '*/dormant-signoff/disposition_report.json' \
+        -printf '%P\n' | LC_ALL=C sort | jq -R . | jq -s .
+)"
+
 ENDED_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 STATUS="passed"
 FAILURE_CLASS="none"
@@ -1313,6 +1723,7 @@ jq -s \
     --arg run_id "$RUN_ID" \
     --arg source_revision "$SOURCE_REVISION" \
     --arg seed "$SEED" \
+    --argjson dormant_disposition_reports "$DORMANT_DISPOSITION_REPORTS_JSON" \
     --arg no_claim_boundary "Replay metadata proves runner reproducibility only; it does not prove replacement parity, real-service interoperability, release readiness, or dependency exit." \
     '{
       schema_version: $schema_version,
@@ -1322,7 +1733,7 @@ jq -s \
       scenario_ids: (map(.scenario_id)),
       replay_commands: (map({scenario_id, command: .replay_pointer})),
       failing_scenarios: (map(select(.observed_outcome != "PASSED" and .observed_outcome != "DRY_RUN" and .observed_outcome != "NOT_RUN_FAIL_FAST") | {scenario_id, observed_outcome, first_failing_invariant})),
-      artifact_paths: [
+      artifact_paths: ([
         "summary.json",
         "events.ndjson",
         "scenarios.ndjson",
@@ -1330,7 +1741,8 @@ jq -s \
         "artifact_manifest.ndjson",
         "environment.json",
         "repro_manifest.json"
-      ],
+      ] + $dormant_disposition_reports),
+      dormant_disposition_reports: $dormant_disposition_reports,
       no_claim_boundary: $no_claim_boundary
     }' "$SCENARIOS" >"$REPRO_MANIFEST"
 
@@ -1352,6 +1764,7 @@ jq -n \
     --arg environment_json "$ENVIRONMENT" \
     --arg repro_manifest_json "$REPRO_MANIFEST" \
     --arg first_failing_invariant "$FIRST_FAILURE" \
+    --argjson dormant_disposition_reports "$DORMANT_DISPOSITION_REPORTS_JSON" \
     --argjson total "$TOTAL" \
     --argjson passed "$PASSED" \
     --argjson failed "$FAILED" \
@@ -1383,17 +1796,19 @@ jq -n \
         validation_stages_ndjson: $validation_stages_ndjson,
         artifact_manifest_ndjson: $artifact_manifest_ndjson,
         environment_json: $environment_json,
-        repro_manifest_json: $repro_manifest_json
+        repro_manifest_json: $repro_manifest_json,
+        dormant_disposition_reports: $dormant_disposition_reports
       },
       first_failing_invariant: (if $first_failing_invariant == "" then null else $first_failing_invariant end),
       cleanup_result: "passed",
       redaction_policy: "metadata-and-secret-patterns-v1",
-      no_claim_boundary: "This suite proves runner, schema, replay, redaction, and cleanup contracts only. It does not prove campaign implementations, replacement parity, real-service interoperability, performance, release readiness, broad workspace health, or dependency exit."
+      no_claim_boundary: "This suite proves runner, schema, replay, redaction, cleanup, and selected dormant-disposition contracts only. It does not prove campaign implementations outside selected child receipts, performance, release readiness, broad workspace health, live external-service interoperability, or dependency exit."
     }' >"$SUMMARY"
 
 {
     printf '%s\n' "$SUMMARY" "$EVENTS" "$SCENARIOS" "$VALIDATION_STAGES" "$ENVIRONMENT" "$REPRO_MANIFEST"
-    find "$RUN_DIR" -mindepth 2 -type f -name '*.log' -print
+    find "$RUN_DIR" -mindepth 2 -type f \
+        \( -name '*.log' -o -path '*/dormant-signoff/*' \) -print
 } | LC_ALL=C sort -u | while IFS= read -r artifact_path; do
     [[ -f "$artifact_path" ]] || continue
     jq -cn \
@@ -1420,6 +1835,7 @@ write_pointer() {
         --arg artifact_manifest "$ARTIFACT_MANIFEST" \
         --arg environment "$ENVIRONMENT" \
         --arg repro_manifest "$REPRO_MANIFEST" \
+        --argjson dormant_disposition_reports "$DORMANT_DISPOSITION_REPORTS_JSON" \
         '{
           schema_version: $schema_version,
           run_id: $run_id,
@@ -1430,7 +1846,8 @@ write_pointer() {
           validation_stages: $validation_stages,
           artifact_manifest: $artifact_manifest,
           environment: $environment,
-          repro_manifest: $repro_manifest
+          repro_manifest: $repro_manifest,
+          dormant_disposition_reports: $dormant_disposition_reports
         }' >"$temporary_path"
     mv "$temporary_path" "$pointer_path"
 }

@@ -178,6 +178,38 @@ command, source revision, feature profile, fixed seeds, lifecycle/cleanup
 state, and replay command. Canonical `scripts/run_all_e2e.sh` integration and
 aggregate redaction/provenance reporting remain owned by A5.
 
+## A5 canonical runner and disposition signoff
+
+`asupersync-d24mms.12.5` routes the restored lanes through the existing
+`dependency-sovereignty` suite rather than creating another orchestrator. Its
+stable scenario list contains every one of the 27 original `DORMANT-*`
+inventory IDs, three maintained-lane aliases, and one aggregate alias:
+
+```bash
+bash scripts/run_dependency_sovereignty_e2e.sh --list
+RCH_REQUIRE_REMOTE=1 \
+bash scripts/run_all_e2e.sh --suite dependency-sovereignty \
+  --scenario dormant-e2e-aggregate-signoff
+```
+
+The aggregate invokes the A2 filesystem, A3 cross-subsystem, and A4 distributed
+proof runners once each. An individual `DORMANT-*` replay invokes only its
+owning lane. The retained
+`<run>/dormant-e2e-aggregate-signoff/dormant-signoff/disposition_report.json`
+derives its 27 rows from `artifacts/dormant_e2e_inventory_v1.json` and the fresh
+child `run_report.json` files. It fails closed on a missing or duplicate
+receipt, an unaccepted verdict, empty cleanup evidence, child validation drift,
+or any hash/line-count change to the three dormant source files.
+
+The enclosing dependency-sovereignty bundle retains `summary.json`,
+`events.ndjson`, `scenarios.ndjson`, `validation_stages.ndjson`, per-scenario
+stdout/stderr, child logs and reports, environment/tool/RCH provenance,
+artifact hashes, redaction results, and exact replay commands. `DORMANT-INT-005`
+remains the sole `PLACEHOLDER_NOT_EVIDENCE` disposition; it is an explicit skip
+and never promoted to executed coverage. The other 26 original entrypoints
+must resolve to `EQUAL_OR_BETTER`, with zero `UNKNOWN` and zero deleted or
+migrated source files.
+
 ## No-claim boundary
 
 This packet proves inventory completeness, source pins, dormant module state,
@@ -213,3 +245,10 @@ boundary is authenticated snapshot bytes crossing isolated real files. The
 focused test and receipt runner were authored in the same slice, so this is
 self-verification rather than independent review; a planted zero-receipt run
 must still be retained to show that the runner fails closed.
+
+The A5 aggregate proves canonical discovery/routing, child receipt admission,
+disposition completeness, source preservation, artifact schema, redaction,
+replay metadata, and cleanup fields only. It does not convert A2/A3/A4
+self-verification into independent review, widen any child no-claim boundary,
+prove performance, release readiness, broad workspace health, live external
+service interoperability, or authorize dependency exit.

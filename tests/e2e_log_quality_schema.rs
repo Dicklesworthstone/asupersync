@@ -720,6 +720,27 @@ fn dependency_sovereignty_runner_is_registered_and_fail_closed() {
         "REPRO_COMMAND",
         "--argjson feature_flags",
         "feature_flags: $feature_flags",
+        "artifacts/dormant_e2e_inventory_v1.json",
+        "scripts/fs_parity_proof_runner.sh",
+        "scripts/cross_subsystem_recovery_proof_runner.sh",
+        "scripts/distributed_hash_snapshot_recovery_proof_runner.sh",
+        "dormant-e2e-filesystem-recovery",
+        "dormant-e2e-cross-subsystem-recovery",
+        "dormant-e2e-distributed-recovery",
+        "dormant-e2e-aggregate-signoff",
+        "dormant-e2e-disposition-report-v1",
+        "DORMANT-FS-001",
+        "dormant-fs-bounded-partial-traversal",
+        "DORMANT-INT-005",
+        "PLACEHOLDER_NOT_EVIDENCE",
+        "dormant_expected_ids_json",
+        "validate_dormant_lane_report",
+        "validate_dormant_sources",
+        "awk 'END { print NR }'",
+        "receipt_complete",
+        "cleanup_complete",
+        "deleted_or_migrated: false",
+        "dormant_disposition_reports",
     ] {
         assert!(
             runner.contains(token),
@@ -753,6 +774,81 @@ fn dependency_sovereignty_runner_is_registered_and_fail_closed() {
         scenario_guard < report_creation,
         "unknown dependency scenarios must be rejected before report creation"
     );
+}
+
+#[test]
+fn dependency_sovereignty_lists_every_dormant_inventory_scenario() {
+    let inventory: Value = serde_json::from_str(
+        &fs::read_to_string("artifacts/dormant_e2e_inventory_v1.json")
+            .expect("read dormant E2E inventory"),
+    )
+    .expect("parse dormant E2E inventory");
+    let expected = inventory["test_inventory"]
+        .as_array()
+        .expect("dormant test_inventory array")
+        .iter()
+        .map(|row| {
+            row["scenario_id"]
+                .as_str()
+                .expect("dormant scenario_id")
+                .to_owned()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(expected.len(), 27, "inventory entrypoint count drift");
+
+    let output = Command::new("bash")
+        .arg("scripts/run_dependency_sovereignty_e2e.sh")
+        .arg("--list")
+        .current_dir(repo_root())
+        .output()
+        .expect("list dependency-sovereignty scenarios");
+    assert!(
+        output.status.success(),
+        "scenario list failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let listed = String::from_utf8(output.stdout)
+        .expect("scenario list must be UTF-8")
+        .lines()
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+
+    for scenario_id in &expected {
+        assert_eq!(
+            listed
+                .iter()
+                .filter(|listed| *listed == scenario_id)
+                .count(),
+            1,
+            "dormant scenario must be listed exactly once: {scenario_id}"
+        );
+    }
+    for lane in [
+        "dormant-e2e-filesystem-recovery",
+        "dormant-e2e-cross-subsystem-recovery",
+        "dormant-e2e-distributed-recovery",
+        "dormant-e2e-aggregate-signoff",
+    ] {
+        assert!(
+            listed.iter().any(|listed| listed == lane),
+            "canonical dormant lane missing from --list: {lane}"
+        );
+    }
+
+    let modules = inventory["modules"]
+        .as_array()
+        .expect("dormant modules array");
+    assert_eq!(modules.len(), 3, "dormant source module count drift");
+    for module in modules {
+        let relative = module["path"].as_str().expect("module path");
+        let source = fs::read_to_string(relative)
+            .unwrap_or_else(|error| panic!("read preserved dormant source {relative}: {error}"));
+        assert_eq!(
+            source.lines().count(),
+            module["line_count"].as_u64().expect("module line_count") as usize,
+            "preserved dormant source line-count drift: {relative}"
+        );
+    }
 }
 
 #[test]
@@ -799,6 +895,15 @@ fn run_all_orchestrator_rejects_invalid_dependency_scenario_boundaries() {
                 "unknown_scenario",
             ],
             "Unknown dependency sovereignty scenario: unknown_scenario",
+        ),
+        (
+            vec![
+                "--suite",
+                "dependency-sovereignty",
+                "--scenario",
+                "DORMANT-INT-999",
+            ],
+            "Unknown dependency sovereignty scenario: DORMANT-INT-999",
         ),
     ];
 
@@ -905,6 +1010,11 @@ fn dependency_sovereignty_smoke_emits_complete_redacted_bundle() {
     assert_eq!(summary["counts"]["total"], 2);
     assert_eq!(summary["counts"]["passed"], 2);
     assert_eq!(summary["counts"]["failed"], 0);
+    assert_eq!(
+        summary["artifacts"]["dormant_disposition_reports"],
+        serde_json::json!([]),
+        "contract-only smoke must not fabricate dormant execution evidence"
+    );
     assert!(
         summary["artifact_path"]
             .as_str()
