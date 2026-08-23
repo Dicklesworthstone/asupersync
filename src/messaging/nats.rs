@@ -2125,6 +2125,19 @@ impl NatsClient {
 
     /// Try to parse a complete message from the buffer.
     pub(crate) fn try_parse_message(&mut self) -> Result<Option<NatsMessage>, NatsError> {
+        let result = self.try_parse_message_inner();
+        if result.is_err() {
+            // A malformed server frame leaves the byte stream desynchronized:
+            // retaining the same transport would make every later operation
+            // observe the same invalid prefix. Fail closed and let the normal
+            // reconnect path replace both the transport and read buffer.
+            self.connected = false;
+            let _ = self.stream.shutdown(std::net::Shutdown::Both);
+        }
+        result
+    }
+
+    fn try_parse_message_inner(&mut self) -> Result<Option<NatsMessage>, NatsError> {
         let buf = self.read_buf.available();
         if buf.is_empty() {
             return Ok(None);
@@ -2996,6 +3009,10 @@ impl NatsClient {
     pub async fn process(&mut self, cx: &Cx) -> Result<(), NatsError> {
         cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
 
+        if !self.connected {
+            return Err(NatsError::NotConnected);
+        }
+
         let mut processed_any = false;
         loop {
             match self.try_parse_message()? {
@@ -3055,6 +3072,17 @@ impl NatsClient {
     /// Get server info.
     pub fn server_info(&self) -> Option<ServerInfo> {
         self.state.server_info.lock().clone()
+    }
+}
+
+impl Drop for NatsClient {
+    fn drop(&mut self) {
+        // `close()` is the graceful path, but dropping the owner must still
+        // terminate subscription receivers and make the transport unusable.
+        self.state.closed.store(true, Ordering::Release);
+        self.state.subscriptions.lock().clear();
+        self.connected = false;
+        let _ = self.stream.shutdown(std::net::Shutdown::Both);
     }
 }
 
@@ -5535,5 +5563,108 @@ mod tests {
         });
 
         server.join().expect("server join");
+    }
+
+    #[test]
+    fn malformed_server_frame_poisoning_disconnects_client_ne8jdw() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept client");
+            let mut byte = [0_u8; 1];
+            stream.read(&mut byte).expect("observe client shutdown")
+        });
+
+        run_test_with_cx(|cx| async move {
+            let stream = TcpStream::connect(format!("{addr}"))
+                .await
+                .expect("connect client");
+            let mut client = NatsClient {
+                config: NatsConfig::default(),
+                stream: stream.into(),
+                read_buf: NatsReadBuffer::new(),
+                state: Arc::new(SharedState::new()),
+                next_sid: AtomicU64::new(1),
+                connected: true,
+                tls_required_on_connect: false,
+            };
+            client
+                .read_buf
+                .extend(b"PING invalid\r\n")
+                .expect("buffer malformed frame");
+
+            let err = client
+                .process(&cx)
+                .await
+                .expect_err("malformed server frame must fail closed");
+            assert!(matches!(err, NatsError::Protocol(_)));
+            assert!(!client.connected, "protocol error must poison connection");
+
+            let follow_up = client
+                .process(&cx)
+                .await
+                .expect_err("poisoned connection must reject later processing");
+            assert!(matches!(follow_up, NatsError::NotConnected));
+        });
+
+        assert_eq!(server.join().expect("server join"), 0);
+    }
+
+    #[test]
+    fn dropping_client_terminates_subscription_receivers_ne8jdw() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept client");
+            let mut byte = [0_u8; 1];
+            stream.read(&mut byte).expect("observe client shutdown")
+        });
+
+        run_test_with_cx(|cx| async move {
+            let stream = TcpStream::connect(format!("{addr}"))
+                .await
+                .expect("connect client");
+            let state = Arc::new(SharedState::new());
+            let sid = 73;
+            let (tx, rx) = mpsc::channel(8);
+            state.subscriptions.lock().insert(
+                sid,
+                SubscriptionState {
+                    subject: "events.lifecycle".to_string(),
+                    queue_group: None,
+                    sender: tx,
+                },
+            );
+            let mut subscription = Subscription {
+                sid,
+                subject: "events.lifecycle".to_string(),
+                rx,
+                state: Arc::clone(&state),
+            };
+            let client = NatsClient {
+                config: NatsConfig::default(),
+                stream: stream.into(),
+                read_buf: NatsReadBuffer::new(),
+                state: Arc::clone(&state),
+                next_sid: AtomicU64::new(1),
+                connected: true,
+                tls_required_on_connect: false,
+            };
+
+            drop(client);
+
+            assert!(state.closed.load(Ordering::Acquire));
+            assert!(state.subscriptions.lock().is_empty());
+            assert!(
+                subscription
+                    .next(&cx)
+                    .await
+                    .expect("subscription close result")
+                    .is_none(),
+                "dropping the client must terminate subscription receivers"
+            );
+        });
+
+        assert_eq!(server.join().expect("server join"), 0);
     }
 }
