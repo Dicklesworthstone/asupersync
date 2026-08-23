@@ -522,6 +522,93 @@ fn scan_fixed_ssns(
     })
 }
 
+fn fixed_card_candidate_at(
+    input: &str,
+    start: usize,
+    digits: &retained_regex_syntax::hir::ClassUnicode,
+    work: &mut FixedPiiWorkBudget,
+) -> Result<Option<FixedPiiSpan>, FixedPiiScanError> {
+    let mut cursor = start;
+    let mut digit_count = 0_usize;
+    let mut best_end = None;
+
+    while digit_count < 19 {
+        let Some(value) = input[cursor..].chars().next() else {
+            break;
+        };
+        if !fixed_class_contains(digits, value, work)? {
+            break;
+        }
+        cursor = cursor
+            .checked_add(value.len_utf8())
+            .ok_or(FixedPiiScanError::WorkLimit)?;
+        digit_count = digit_count
+            .checked_add(1)
+            .ok_or(FixedPiiScanError::WorkLimit)?;
+
+        if digit_count >= 13 && fixed_unicode_word_boundary(input, cursor, work)? {
+            best_end = Some(cursor);
+        }
+
+        let Some(separator) = input[cursor..].chars().next() else {
+            break;
+        };
+        work.charge(1)?;
+        if !matches!(separator, ' ' | '-') {
+            continue;
+        }
+        cursor = cursor
+            .checked_add(separator.len_utf8())
+            .ok_or(FixedPiiScanError::WorkLimit)?;
+        if digit_count >= 13 && fixed_unicode_word_boundary(input, cursor, work)? {
+            best_end = Some(cursor);
+        }
+    }
+
+    Ok(best_end.map(|end_byte| FixedPiiSpan {
+        start_byte: start,
+        end_byte,
+    }))
+}
+
+fn scan_fixed_card_candidates(
+    input: &str,
+    limits: FixedPiiScanLimits,
+    stop_after_first: bool,
+) -> Result<FixedPiiScan, FixedPiiScanError> {
+    let mut work = FixedPiiWorkBudget::new(input, limits)?;
+    let digits = fixed_decimal_digit_class()?;
+    let mut matches = Vec::new();
+    let mut cursor = 0_usize;
+
+    while cursor < input.len() {
+        let value = input[cursor..]
+            .chars()
+            .next()
+            .ok_or(FixedPiiScanError::WorkLimit)?;
+        if fixed_class_contains(&digits, value, &mut work)?
+            && fixed_unicode_word_boundary(input, cursor, &mut work)?
+            && let Some(span) = fixed_card_candidate_at(input, cursor, &digits, &mut work)?
+        {
+            let next_cursor = span.end_byte;
+            push_fixed_pii_span(&mut matches, span, limits)?;
+            if stop_after_first {
+                break;
+            }
+            cursor = next_cursor;
+            continue;
+        }
+        cursor = cursor
+            .checked_add(value.len_utf8())
+            .ok_or(FixedPiiScanError::WorkLimit)?;
+    }
+
+    Ok(FixedPiiScan {
+        matches,
+        work_units: work.used,
+    })
+}
+
 impl PrivacyConfig {
     /// Create a new privacy configuration with defaults.
     #[must_use]
@@ -722,11 +809,21 @@ impl PrivacyConfig {
         let card_candidate_re = CARD_CANDIDATE_RE.get_or_init(|| {
             Regex::new(r"\b(?:\d[ -]?){13,19}\b").expect("built-in payment-card regex must compile")
         });
-        if card_candidate_re
-            .find_iter(value)
-            .map(|matched| matched.as_str())
-            .any(Self::is_luhn_valid_card)
-        {
+        let card_match = scan_fixed_card_candidates(value, FixedPiiScanLimits::default(), false)
+            .map(|scan| {
+                scan.matches.iter().any(|span| {
+                    value
+                        .get(span.start_byte..span.end_byte)
+                        .is_some_and(Self::is_luhn_valid_card)
+                })
+            })
+            .unwrap_or_else(|_| {
+                card_candidate_re
+                    .find_iter(value)
+                    .map(|matched| matched.as_str())
+                    .any(Self::is_luhn_valid_card)
+            });
+        if card_match {
             return "[CARD_REDACTED]".to_string();
         }
 
@@ -742,26 +839,28 @@ impl PrivacyConfig {
     }
 
     fn is_luhn_valid_card(candidate: &str) -> bool {
-        let digits: Vec<u32> = candidate.chars().filter_map(|ch| ch.to_digit(10)).collect();
-        if !(13..=19).contains(&digits.len()) {
-            return false;
-        }
-
-        let mut sum = 0;
+        let mut digit_count = 0_usize;
+        let mut sum = 0_usize;
         let mut double = false;
-        for digit in digits.iter().rev() {
-            let mut value = *digit;
+        for mut value in candidate.chars().rev().filter_map(|ch| ch.to_digit(10)) {
+            let Some(next_digit_count) = digit_count.checked_add(1) else {
+                return false;
+            };
+            digit_count = next_digit_count;
             if double {
                 value *= 2;
                 if value > 9 {
                     value -= 9;
                 }
             }
-            sum += value;
+            let Some(next_sum) = sum.checked_add(value as usize) else {
+                return false;
+            };
+            sum = next_sum;
             double = !double;
         }
 
-        sum % 10 == 0
+        (13..=19).contains(&digit_count) && sum % 10 == 0
     }
 }
 
@@ -8776,6 +8875,44 @@ mod tests {
             .collect()
     }
 
+    fn reference_luhn_card(candidate: &str) -> bool {
+        let digits: Vec<u32> = candidate.chars().filter_map(|ch| ch.to_digit(10)).collect();
+        if !(13..=19).contains(&digits.len()) {
+            return false;
+        }
+        let sum: u32 = digits
+            .iter()
+            .rev()
+            .enumerate()
+            .map(|(index, digit)| {
+                if index % 2 == 0 {
+                    *digit
+                } else {
+                    let doubled = digit * 2;
+                    if doubled > 9 { doubled - 9 } else { doubled }
+                }
+            })
+            .sum();
+        sum % 10 == 0
+    }
+
+    fn valid_luhn_card_with_len(len: usize) -> String {
+        assert!((13..=19).contains(&len));
+        let prefix = "4".repeat(len - 1);
+        (0..=9)
+            .map(|check| format!("{prefix}{check}"))
+            .find(|candidate| reference_luhn_card(candidate))
+            .expect("one decimal check digit must satisfy Luhn")
+    }
+
+    fn card_with_separator(digits: &str, separator: &str) -> String {
+        digits
+            .chars()
+            .map(|digit| digit.to_string())
+            .collect::<Vec<_>>()
+            .join(separator)
+    }
+
     fn materialize_fixed_scanner_input(row: &serde_json::Value) -> String {
         if let Some(input) = row.get("input").and_then(serde_json::Value::as_str) {
             return input.to_owned();
@@ -8912,6 +9049,207 @@ mod tests {
     }
 
     #[test]
+    fn fixed_card_scanner_and_luhn_match_every_r2_1_vector() {
+        let artifact: serde_json::Value = serde_json::from_str(include_str!(
+            "../../artifacts/regex_built_in_detector_corpus_v1.json"
+        ))
+        .expect("R2.1 detector corpus must parse");
+        let card_re = Regex::new(r"\b(?:\d[ -]?){13,19}\b").expect("frozen card regex");
+
+        for row in artifact["detector_vectors"]
+            .as_array()
+            .expect("detector_vectors array")
+        {
+            if row["detector_id"] != "RGX-BUILTIN-CARD" {
+                continue;
+            }
+            let case_id = row["case_id"].as_str().expect("case_id");
+            let input = materialize_fixed_scanner_input(row);
+            let expected: Vec<(usize, usize, bool)> = row["expected_matches"]
+                .as_array()
+                .expect("expected_matches array")
+                .iter()
+                .map(|span| {
+                    let start = span["start_byte"]
+                        .as_u64()
+                        .and_then(|value| usize::try_from(value).ok())
+                        .expect("start_byte fits usize");
+                    let end = span["end_byte"]
+                        .as_u64()
+                        .and_then(|value| usize::try_from(value).ok())
+                        .expect("end_byte fits usize");
+                    let luhn_valid = span["luhn_valid"].as_bool().expect("luhn_valid");
+                    (start, end, luhn_valid)
+                })
+                .collect();
+            let scan = scan_fixed_card_candidates(&input, FixedPiiScanLimits::default(), false)
+                .unwrap_or_else(|error| panic!("{case_id} scanner failed: {error:?}"));
+            let incumbent: Vec<(usize, usize)> = card_re
+                .find_iter(&input)
+                .map(|matched| (matched.start(), matched.end()))
+                .collect();
+            let expected_spans: Vec<(usize, usize)> = expected
+                .iter()
+                .map(|(start, end, _)| (*start, *end))
+                .collect();
+
+            assert_eq!(fixed_span_pairs(&scan), expected_spans, "{case_id} corpus");
+            assert_eq!(fixed_span_pairs(&scan), incumbent, "{case_id} incumbent");
+            for (span, (_, _, expected_luhn)) in scan.matches.iter().zip(&expected) {
+                let candidate = input
+                    .get(span.start_byte..span.end_byte)
+                    .expect("scanner span must be a UTF-8 boundary");
+                assert_eq!(
+                    PrivacyConfig::is_luhn_valid_card(candidate),
+                    *expected_luhn,
+                    "{case_id} Luhn verdict"
+                );
+                assert_eq!(
+                    PrivacyConfig::is_luhn_valid_card(candidate),
+                    reference_luhn_card(candidate),
+                    "{case_id} independent Luhn reference"
+                );
+            }
+            let expected_accepts = row["expected_detector_accepts"]
+                .as_bool()
+                .expect("expected_detector_accepts");
+            assert_eq!(
+                scan.matches.iter().any(|span| {
+                    input
+                        .get(span.start_byte..span.end_byte)
+                        .is_some_and(PrivacyConfig::is_luhn_valid_card)
+                }),
+                expected_accepts,
+                "{case_id} detector outcome"
+            );
+            assert_eq!(
+                PrivacyConfig::new()
+                    .with_auto_pii_detection()
+                    .redact_pii("payment.card", &input),
+                if expected_accepts {
+                    "[CARD_REDACTED]".to_owned()
+                } else {
+                    input.clone()
+                },
+                "{case_id} whole-value redaction outcome"
+            );
+        }
+    }
+
+    #[test]
+    fn fixed_card_generated_lengths_separators_and_boundaries_match_incumbent() {
+        let card_re = Regex::new(r"\b(?:\d[ -]?){13,19}\b").expect("frozen card regex");
+
+        for len in 13..=19 {
+            let valid = valid_luhn_card_with_len(len);
+            let mut invalid = valid.clone().into_bytes();
+            let last = invalid.last_mut().expect("generated card is non-empty");
+            *last = if *last == b'9' { b'0' } else { *last + 1 };
+            let invalid = String::from_utf8(invalid).expect("ASCII card digits");
+
+            for digits in [&valid, &invalid] {
+                for separator in ["", " ", "-"] {
+                    let candidate = card_with_separator(digits, separator);
+                    for (prefix, suffix) in
+                        [("", ""), ("🙂", "🙂"), ("x", ""), ("", "x"), (" ", " next")]
+                    {
+                        let input = format!("{prefix}{candidate}{suffix}");
+                        let scan = scan_fixed_card_candidates(
+                            &input,
+                            FixedPiiScanLimits::default(),
+                            false,
+                        )
+                        .expect("generated card scan");
+                        let incumbent: Vec<(usize, usize)> = card_re
+                            .find_iter(&input)
+                            .map(|matched| (matched.start(), matched.end()))
+                            .collect();
+                        assert_eq!(
+                            fixed_span_pairs(&scan),
+                            incumbent,
+                            "len={len} separator={separator:?} input={input:?}"
+                        );
+                        for span in &scan.matches {
+                            let matched = input
+                                .get(span.start_byte..span.end_byte)
+                                .expect("generated scanner span");
+                            assert_eq!(
+                                PrivacyConfig::is_luhn_valid_card(matched),
+                                reference_luhn_card(matched),
+                                "Luhn len={len} separator={separator:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        for digits in ["4".repeat(12), "4".repeat(20)] {
+            let scan = scan_fixed_card_candidates(&digits, FixedPiiScanLimits::default(), false)
+                .expect("out-of-range card scan");
+            let incumbent: Vec<(usize, usize)> = card_re
+                .find_iter(&digits)
+                .map(|matched| (matched.start(), matched.end()))
+                .collect();
+            assert_eq!(fixed_span_pairs(&scan), incumbent, "length boundary");
+        }
+    }
+
+    #[test]
+    fn fixed_card_scanner_bounds_work_output_and_falls_back() {
+        let input = "4111111111111112/4012888888881881 ".repeat(4_096);
+        let scan = scan_fixed_card_candidates(&input, FixedPiiScanLimits::default(), false)
+            .expect("bounded large card scan");
+        assert_eq!(scan.matches.len(), 8_192);
+        assert!(scan.work_units <= FIXED_PII_MAX_WORK_UNITS);
+        assert_eq!(
+            scan.matches
+                .iter()
+                .filter_map(|span| input.get(span.start_byte..span.end_byte))
+                .filter(|candidate| PrivacyConfig::is_luhn_valid_card(candidate))
+                .count(),
+            4_096
+        );
+
+        let input_limited = FixedPiiScanLimits {
+            max_input_bytes: 5,
+            ..FixedPiiScanLimits::default()
+        };
+        assert_eq!(
+            scan_fixed_card_candidates("4111111111111111", input_limited, false),
+            Err(FixedPiiScanError::InputLimit)
+        );
+        let output_limited = FixedPiiScanLimits {
+            max_matches: 1,
+            ..FixedPiiScanLimits::default()
+        };
+        assert_eq!(
+            scan_fixed_card_candidates("4111111111111112/4012888888881881", output_limited, false),
+            Err(FixedPiiScanError::OutputLimit)
+        );
+        let work_limited = FixedPiiScanLimits {
+            max_work_units: 0,
+            ..FixedPiiScanLimits::default()
+        };
+        assert_eq!(
+            scan_fixed_card_candidates("4111111111111111", work_limited, false),
+            Err(FixedPiiScanError::WorkLimit)
+        );
+
+        let oversized = format!(
+            "4111111111111111 {}",
+            "x".repeat(FIXED_PII_MAX_INPUT_BYTES.saturating_add(1))
+        );
+        assert_eq!(
+            PrivacyConfig::new()
+                .with_auto_pii_detection()
+                .redact_pii("oversized.card", &oversized),
+            "[CARD_REDACTED]",
+            "the scanner input ceiling must fall through to the incumbent"
+        );
+    }
+
+    #[test]
     fn fixed_email_and_ssn_scanners_bound_large_input_work_and_output() {
         let input = "a@b.co/123-45-6789 ".repeat(4_096);
         let emails = scan_fixed_emails(&input, FixedPiiScanLimits::default(), false)
@@ -8969,12 +9307,21 @@ mod tests {
     }
 
     #[test]
-    fn custom_pattern_equal_to_builtin_never_uses_fixed_scanner_token() {
+    fn fixed_email_and_ssn_and_fixed_card_custom_patterns_never_use_builtin_tokens() {
         let config = PrivacyConfig::new()
             .try_with_pii_pattern(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,63}\b")
             .expect("built-in-shaped custom pattern compiles")
             .with_auto_pii_detection();
         assert_eq!(config.redact_pii("user.email", "a@b.co"), "[REDACTED]");
+
+        let config = PrivacyConfig::new()
+            .try_with_pii_pattern(r"\b(?:\d[ -]?){13,19}\b")
+            .expect("built-in-shaped custom pattern compiles")
+            .with_auto_pii_detection();
+        assert_eq!(
+            config.redact_pii("payment.card", "4111111111111111"),
+            "[REDACTED]"
+        );
     }
 
     fn collect_grafana_queries(value: &serde_json::Value, output: &mut Vec<String>) {
