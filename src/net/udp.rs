@@ -151,6 +151,21 @@ impl UdpPlatform {
     }
 }
 
+#[inline]
+const fn build_supports_native_sendmmsg() -> bool {
+    cfg!(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "freebsd",
+        target_os = "netbsd"
+    ))
+}
+
+#[inline]
+const fn build_supports_udp_gso() -> bool {
+    cfg!(any(target_os = "linux", target_os = "android"))
+}
+
 /// Tri-state socket capability report.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UdpCapability {
@@ -202,16 +217,12 @@ pub struct UdpBatchCapabilities {
 impl Default for UdpBatchCapabilities {
     #[inline]
     fn default() -> Self {
-        Self::for_platform(UdpPlatform::current())
+        Self::for_target_support(build_supports_native_sendmmsg())
     }
 }
 
 impl UdpBatchCapabilities {
-    /// Return batching capabilities exposed by this build target.
-    #[inline]
-    #[must_use]
-    pub const fn for_platform(platform: UdpPlatform) -> Self {
-        let native_send_batch = matches!(platform, UdpPlatform::Linux);
+    const fn for_target_support(native_send_batch: bool) -> Self {
         Self {
             native_send_batch,
             native_recv_batch: false,
@@ -219,6 +230,13 @@ impl UdpBatchCapabilities {
             portable_recv_batch: true,
             default_fallback_batch: 32,
         }
+    }
+
+    /// Return batching capabilities exposed by this build target.
+    #[inline]
+    #[must_use]
+    pub const fn for_platform(platform: UdpPlatform) -> Self {
+        Self::for_target_support(matches!(platform, UdpPlatform::Linux))
     }
 }
 
@@ -238,19 +256,25 @@ pub struct UdpSendAccelerationCapabilities {
 impl Default for UdpSendAccelerationCapabilities {
     #[inline]
     fn default() -> Self {
-        match UdpPlatform::current() {
-            UdpPlatform::Linux => Self {
-                sendmmsg: UdpCapability::Supported,
-                gso: UdpCapability::Supported,
-                max_sendmmsg_batch: UDP_MAX_SENDMMSG_BATCH,
-                max_gso_segments: UDP_MAX_GSO_SEGMENTS,
+        Self::for_target_support(build_supports_native_sendmmsg(), build_supports_udp_gso())
+    }
+}
+
+impl UdpSendAccelerationCapabilities {
+    const fn for_target_support(sendmmsg: bool, gso: bool) -> Self {
+        Self {
+            sendmmsg: if sendmmsg {
+                UdpCapability::Supported
+            } else {
+                UdpCapability::Unsupported
             },
-            _ => Self {
-                sendmmsg: UdpCapability::Unsupported,
-                gso: UdpCapability::Unsupported,
-                max_sendmmsg_batch: UDP_MAX_SENDMMSG_BATCH,
-                max_gso_segments: UDP_MAX_GSO_SEGMENTS,
+            gso: if gso {
+                UdpCapability::Supported
+            } else {
+                UdpCapability::Unsupported
             },
+            max_sendmmsg_batch: UDP_MAX_SENDMMSG_BATCH,
+            max_gso_segments: UDP_MAX_GSO_SEGMENTS,
         }
     }
 }
@@ -1170,14 +1194,21 @@ fn native_sendmmsg_none_addrs(len: usize) -> NativeSendmmsgAddrList {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-// `Sent` and `WouldBlock` are only constructed inside the
-// `cfg(any(target_os = "linux", target_os = "android"))` native sendmmsg/GSO
-// batch paths; on other Unix targets (e.g. macOS) the batch send falls back to
-// `Unavailable`, so those variants are unconstructed there. Without this the
-// crate-level `deny(dead_code)` (non-Windows) turns that into a hard error and
-// breaks the apple-darwin build. Matches the existing
+// `Sent` and `WouldBlock` are only constructed on targets with a native
+// sendmmsg/GSO batch path; on other Unix targets (e.g. macOS) the batch send
+// falls back to `Unavailable`, so those variants are unconstructed there.
+// Without this the crate-level `deny(dead_code)` (non-Windows) turns that into
+// a hard error and breaks the apple-darwin build. Matches the existing
 // `cfg_attr(target_arch = "wasm32", allow(dead_code))` precedent in this file.
-#[cfg_attr(not(any(target_os = "linux", target_os = "android")), allow(dead_code))]
+#[cfg_attr(
+    not(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "freebsd",
+        target_os = "netbsd"
+    )),
+    allow(dead_code)
+)]
 #[derive(Debug)]
 enum NativeSendBatchAttempt {
     Sent(UdpBatchIoReport),
@@ -2896,10 +2927,30 @@ mod tests {
             assert!(capabilities.batching.portable_recv_batch);
             assert_eq!(
                 capabilities.batching.native_send_batch,
-                matches!(UdpPlatform::current(), UdpPlatform::Linux)
+                build_supports_native_sendmmsg()
             );
             assert!(!capabilities.batching.native_recv_batch);
         });
+    }
+
+    #[test]
+    fn udp_default_capabilities_follow_compiled_native_paths() {
+        let batching_supported = UdpBatchCapabilities::for_target_support(true);
+        assert!(batching_supported.native_send_batch);
+        let batching_portable = UdpBatchCapabilities::for_target_support(false);
+        assert!(!batching_portable.native_send_batch);
+
+        let android = UdpSendAccelerationCapabilities::for_target_support(true, true);
+        assert_eq!(android.sendmmsg, UdpCapability::Supported);
+        assert_eq!(android.gso, UdpCapability::Supported);
+
+        let bsd = UdpSendAccelerationCapabilities::for_target_support(true, false);
+        assert_eq!(bsd.sendmmsg, UdpCapability::Supported);
+        assert_eq!(bsd.gso, UdpCapability::Unsupported);
+
+        let portable = UdpSendAccelerationCapabilities::for_target_support(false, false);
+        assert_eq!(portable.sendmmsg, UdpCapability::Unsupported);
+        assert_eq!(portable.gso, UdpCapability::Unsupported);
     }
 
     #[test]
@@ -3672,7 +3723,7 @@ mod tests {
     }
 
     #[test]
-    fn udp_unconnected_batch_send_prefers_native_sendmmsg_on_linux() {
+    fn udp_unconnected_batch_send_prefers_native_sendmmsg_on_supported_targets() {
         future::block_on(async {
             let mut receiver = UdpSocket::bind("127.0.0.1:0").await.unwrap();
             let receiver_addr = receiver.local_addr().unwrap();
@@ -3704,14 +3755,10 @@ mod tests {
                 b"native-one".len() + b"native-two".len()
             );
 
-            if matches!(UdpPlatform::current(), UdpPlatform::Linux) {
-                assert!(sent.native_send_batch_used);
-                assert!(!sent.gso_send_used);
-                assert!(!sent.fallback_used);
-            } else {
-                assert!(!sent.native_send_batch_used);
-                assert!(sent.fallback_used);
-            }
+            let native = build_supports_native_sendmmsg();
+            assert_eq!(sent.native_send_batch_used, native);
+            assert!(!sent.gso_send_used);
+            assert_eq!(sent.fallback_used, !native);
 
             let received = receiver.recv_batch_from(2, 32).await.unwrap();
             assert_eq!(received.report.packets_processed, 2);
@@ -3727,7 +3774,7 @@ mod tests {
     }
 
     #[test]
-    fn udp_connected_batch_send_prefers_native_sendmmsg_on_linux() {
+    fn udp_connected_batch_send_prefers_native_sendmmsg_on_supported_targets() {
         future::block_on(async {
             let mut receiver = UdpSocket::bind("127.0.0.1:0").await.unwrap();
             let receiver_addr = receiver.local_addr().unwrap();
@@ -3760,14 +3807,10 @@ mod tests {
                 b"native-one".len() + b"native-two".len()
             );
 
-            if matches!(UdpPlatform::current(), UdpPlatform::Linux) {
-                assert!(sent.native_send_batch_used);
-                assert!(!sent.gso_send_used);
-                assert!(!sent.fallback_used);
-            } else {
-                assert!(!sent.native_send_batch_used);
-                assert!(sent.fallback_used);
-            }
+            let native = build_supports_native_sendmmsg();
+            assert_eq!(sent.native_send_batch_used, native);
+            assert!(!sent.gso_send_used);
+            assert_eq!(sent.fallback_used, !native);
 
             let received = receiver.recv_batch_from(2, 32).await.unwrap();
             assert_eq!(received.report.packets_processed, 2);
@@ -3819,14 +3862,10 @@ mod tests {
                     .sum::<usize>()
             );
 
-            if matches!(UdpPlatform::current(), UdpPlatform::Linux) {
-                assert!(sent.native_send_batch_used);
-                assert!(!sent.gso_send_used);
-                assert!(!sent.fallback_used);
-            } else {
-                assert!(!sent.native_send_batch_used);
-                assert!(sent.fallback_used);
-            }
+            let native = build_supports_native_sendmmsg();
+            assert_eq!(sent.native_send_batch_used, native);
+            assert!(!sent.gso_send_used);
+            assert_eq!(sent.fallback_used, !native);
 
             let received = receiver
                 .recv_batch_from(packets.len(), UDP_DEFAULT_GSO_SEGMENT_BYTES)
@@ -3837,7 +3876,7 @@ mod tests {
     }
 
     #[test]
-    fn udp_unconnected_batch_send_uses_gso_for_fixed_size_payloads_on_linux() {
+    fn udp_unconnected_batch_send_uses_gso_for_fixed_size_payloads_on_supported_targets() {
         future::block_on(async {
             let mut receiver = UdpSocket::bind("127.0.0.1:0").await.unwrap();
             let receiver_addr = receiver.local_addr().unwrap();
@@ -3861,14 +3900,10 @@ mod tests {
                 UDP_DEFAULT_GSO_SEGMENT_BYTES * packets.len()
             );
 
-            if matches!(UdpPlatform::current(), UdpPlatform::Linux) {
-                assert!(sent.native_send_batch_used);
-                assert!(sent.gso_send_used);
-                assert!(!sent.fallback_used);
-            } else {
-                assert!(!sent.native_send_batch_used);
-                assert!(sent.fallback_used);
-            }
+            let native = build_supports_native_sendmmsg();
+            assert_eq!(sent.native_send_batch_used, native);
+            assert_eq!(sent.gso_send_used, build_supports_udp_gso());
+            assert_eq!(sent.fallback_used, !native);
 
             let received = receiver
                 .recv_batch_from(packets.len(), UDP_DEFAULT_GSO_SEGMENT_BYTES)
@@ -3891,7 +3926,7 @@ mod tests {
     }
 
     #[test]
-    fn udp_connected_batch_send_uses_gso_for_fixed_size_payloads_on_linux() {
+    fn udp_connected_batch_send_uses_gso_for_fixed_size_payloads_on_supported_targets() {
         future::block_on(async {
             let mut receiver = UdpSocket::bind("127.0.0.1:0").await.unwrap();
             let receiver_addr = receiver.local_addr().unwrap();
@@ -3916,14 +3951,10 @@ mod tests {
                 UDP_DEFAULT_GSO_SEGMENT_BYTES * packets.len()
             );
 
-            if matches!(UdpPlatform::current(), UdpPlatform::Linux) {
-                assert!(sent.native_send_batch_used);
-                assert!(sent.gso_send_used);
-                assert!(!sent.fallback_used);
-            } else {
-                assert!(!sent.native_send_batch_used);
-                assert!(sent.fallback_used);
-            }
+            let native = build_supports_native_sendmmsg();
+            assert_eq!(sent.native_send_batch_used, native);
+            assert_eq!(sent.gso_send_used, build_supports_udp_gso());
+            assert_eq!(sent.fallback_used, !native);
 
             let received = receiver
                 .recv_batch_from(packets.len(), UDP_DEFAULT_GSO_SEGMENT_BYTES)
@@ -3946,7 +3977,7 @@ mod tests {
     }
 
     #[test]
-    fn udp_connected_payload_batch_send_uses_gso_for_fixed_size_payloads_on_linux() {
+    fn udp_connected_payload_batch_send_uses_gso_for_fixed_size_payloads_on_supported_targets() {
         future::block_on(async {
             let mut receiver = UdpSocket::bind("127.0.0.1:0").await.unwrap();
             let receiver_addr = receiver.local_addr().unwrap();
@@ -3965,14 +3996,10 @@ mod tests {
                 UDP_DEFAULT_GSO_SEGMENT_BYTES * payload_refs.len()
             );
 
-            if matches!(UdpPlatform::current(), UdpPlatform::Linux) {
-                assert!(sent.native_send_batch_used);
-                assert!(sent.gso_send_used);
-                assert!(!sent.fallback_used);
-            } else {
-                assert!(!sent.native_send_batch_used);
-                assert!(sent.fallback_used);
-            }
+            let native = build_supports_native_sendmmsg();
+            assert_eq!(sent.native_send_batch_used, native);
+            assert_eq!(sent.gso_send_used, build_supports_udp_gso());
+            assert_eq!(sent.fallback_used, !native);
 
             let received = receiver
                 .recv_batch_from(payload_refs.len(), UDP_DEFAULT_GSO_SEGMENT_BYTES)
