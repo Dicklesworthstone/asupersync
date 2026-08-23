@@ -1349,9 +1349,9 @@
     "audit_id": "CAP-HASH-MAPS-STATIC-AUDIT-V1",
     "bead_id": "asupersync-d24mms.1",
     "capability_id": "CAP-HASH-MAPS",
-    "observed_at_revision": "4d5748b3de2c15985af55e3dfe3c35626d6be543",
-    "audit_state": "STATIC_SOURCE_PINNED_NOT_EXECUTED",
-    "execution_state": "NO_REPLACEMENT_OR_BENCHMARK_MATRIX_EXECUTED",
+    "observed_at_revision": "e531006885bc7df52c9d537cf8bff7528343829c",
+    "audit_state": "TERMINAL_KEEP_SOURCE_PINNED",
+    "execution_state": "NO_REPLACEMENT_OR_BENCHMARK_MATRIX_EXECUTED_KEEP_TRIGGERED",
     "decision": {
       "dependency": "hashbrown",
       "candidate": "std::collections",
@@ -1359,8 +1359,8 @@
       "dependency_exit_allowed": false,
       "manifest_or_lockfile_edit_allowed": false,
       "source_behavior_change_allowed": false,
-      "tracker_closure_allowed": false,
-      "reason": "The two-file production inventory is statically complete, but replacement execution, collision posture, deterministic replay, platform coverage, allocator behavior, tail latency, and fresh marginal-ledger evidence are absent. Static API compatibility cannot authorize a scheduler/reactor hot-path cutover."
+      "tracker_closure_allowed": true,
+      "reason": "The current-revision two-file production inventory is complete, but replacement execution, collision posture, deterministic replay, platform coverage, allocator behavior, tail latency, and fresh marginal-ledger evidence are absent. The bead contract makes inconclusive evidence a successful terminal KEEP outcome, so the tracker may close only as KEEP_INCUMBENT; source, manifest, and lockfile cutover remain forbidden."
     },
     "dependency_contract": {
       "manifest_kind": "unconditional normal dependency",
@@ -1441,8 +1441,8 @@
       },
       {
         "path": "scripts/run_dependency_sovereignty_e2e.sh",
-        "sha256": "e7d7a65e83f6365aeee4ce01a492cc120595188e2771ffdba914f290b5ba21d4",
-        "line_count": 1378,
+        "sha256": "b2ee7da479aa7e61167abdf164f14441dd81020d5d441a9220e3bbbc314a5c24",
+        "line_count": 1452,
         "role": "retained dependency-sovereignty scenario catalog lacking reactor_registration_churn"
       },
       {
@@ -1667,6 +1667,20 @@
       ],
       "missing_or_unsupported_policy": "A missing, skipped, stale, unredacted, non-replayable, or statistically inconclusive cell is not SAME-or-BETTER evidence and keeps hashbrown."
     },
+    "terminal_keep_receipt": {
+      "receipt_id": "CAP-HASH-MAPS-TERMINAL-KEEP-V1",
+      "source_revision": "e531006885bc7df52c9d537cf8bff7528343829c",
+      "decision": "KEEP_INCUMBENT",
+      "closure_basis": "FAIL_CLOSED_MISSING_SAME_OR_BETTER_MATRIX",
+      "cutover_attempted": false,
+      "source_or_manifest_changed": false,
+      "unmet_gate_count": 8,
+      "unmet_gate_disposition": "KEEP_INCUMBENT",
+      "tracker_closure_allowed": true,
+      "focused_contract_command": "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --overlay-path artifacts/dependency_capability_baseline_v1.json --overlay-path docs/dependency_capability_baseline.md --overlay-path tests/dependency_capability_baseline_contract.rs -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_d24mms_1_hashmap_terminal cargo test -j 2 -p asupersync --test dependency_capability_baseline_contract hash_map_terminal_keep_is_source_pinned_and_fail_closed -- --nocapture",
+      "focused_contract_scope": "current source pins, exact hashbrown call-site and operation inventory, registry and marginal-ledger joins, missing-gate fail-closed policy, and KEEP-only tracker closure",
+      "proof_state": "REQUIRES_TERMINAL_RCH_CONTRACT_OUTPUT"
+    },
     "cutover_gate": {
       "required_state": "SAME_OR_BETTER",
       "rows": [
@@ -1718,15 +1732,18 @@
       ],
       "on_any_missing_or_regressed_row": "KEEP_INCUMBENT",
       "hashbrown_exit_allowed": false,
-      "tracker_closure_allowed": false
+      "tracker_closure_allowed": false,
+      "terminal_keep_tracker_closure_allowed": true,
+      "tracker_closure_disposition": "CLOSE_AS_KEEP_INCUMBENT_ONLY"
     },
     "no_claims": [
-      "No hash-map replacement, source behavior change, compiler, formatter, unit test, property test, conformance test, E2E test, benchmark, Cargo lane, RCH lane, platform cell, or marginal-ledger regeneration was executed.",
+      "No hash-map replacement, source behavior change, candidate unit/property/differential matrix, E2E replacement journey, benchmark, platform comparison, or marginal-ledger regeneration was executed.",
+      "The focused remote Rust contract validates this terminal KEEP packet and its current source joins; it is not scheduler/reactor replacement, runtime-parity, or performance evidence.",
       "Static std API-shape compatibility does not prove scheduler or reactor semantic parity.",
       "Declared source tests and EVD-REACTOR-REGISTRATION are existing surfaces, not current replacement execution receipts.",
       "The historical scheduler allocation note is not a same-source hashbrown-versus-std comparison for these two consumers.",
       "The stale marginal ledger quantifies graph opportunity but does not authorize cutover.",
-      "This audit does not authorize hashbrown removal, manifest or lockfile edits, source behavior changes, tracker closure, performance claims, release readiness, or broad workspace-health claims."
+      "This receipt authorizes tracker closure only as KEEP_INCUMBENT. It does not authorize hashbrown removal, manifest or lockfile edits, source behavior changes, performance claims, release readiness, or broad workspace-health claims."
     ]
   },
   "host_benchmark_metadata_static_audit": {

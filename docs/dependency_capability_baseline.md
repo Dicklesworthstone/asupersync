@@ -133,11 +133,13 @@ does not overclaim that future work.
 ## Hash-map hot-path static audit
 
 `CAP-HASH-MAPS-STATIC-AUDIT-V1` records the bounded static audit for
-`asupersync-d24mms.1`. It is `STATIC_SOURCE_PINNED_NOT_EXECUTED`: thirteen
-source pins establish a complete two-file production inventory at revision
-`4d5748b3de2c15985af55e3dfe3c35626d6be543`, but no replacement, compiler,
-test, benchmark, platform, or E2E lane ran. Its execution state is
-`NO_REPLACEMENT_OR_BENCHMARK_MATRIX_EXECUTED`.
+`asupersync-d24mms.1` and now carries terminal receipt
+`CAP-HASH-MAPS-TERMINAL-KEEP-V1`. It is
+`TERMINAL_KEEP_SOURCE_PINNED`: thirteen source pins establish a complete
+two-file production inventory at revision
+`e531006885bc7df52c9d537cf8bff7528343829c`. No replacement or comparison
+matrix ran, so its execution state is
+`NO_REPLACEMENT_OR_BENCHMARK_MATRIX_EXECUTED_KEEP_TRIGGERED`.
 
 The dependency owns three internal collection roles:
 
@@ -150,7 +152,7 @@ The dependency owns three internal collection roles:
   cleanup. Their collection order is also not observed.
 
 The APIs have an apparent `std::collections` analogue, but API shape is not
-replacement proof for these hot paths. Source currently declares 39 local-
+replacement proof for these hot paths. Source currently declares 40 local-
 queue unit tests, 36 epoll unit tests, ten local-queue metamorphic test
 attributes across seven `proptest!` blocks, five mock reactor conformance
 tests, and two real-reactor E2E tests. None is a current candidate-versus-
@@ -161,7 +163,7 @@ implemented in the retained dependency-sovereignty runner.
 The marginal ledger contains 52 `normal:hashbrown` profile/target rows across
 thirteen feature profiles and four target triples, with zero, two, or four
 marginal package versions depending on the cell. Its source commit is
-`ddea6250aee80357756fa1f39456823df88f7af1`, not the observed revision, and
+`376c313540a58d2c8e6618cf40b4ac87ed36ec53`, not the observed revision, and
 its unsafe exposure remains `unclassified-fail-closed`. It is useful graph
 context, not fresh favorable cutover evidence.
 
@@ -172,9 +174,15 @@ allocation and RSS measurements, replayable redacted E2E receipts, and a fresh
 classified marginal ledger. Only the inventory gate is `STATIC_COMPLETE`; the
 other eight gates are `MISSING`.
 
-The disposition is `KEEP_INCUMBENT` and `hashbrown_exit_allowed=false`. This
-packet does not authorize source, manifest, or lockfile edits, tracker closure,
-performance claims, release readiness, or broad workspace-health claims.
+The disposition is `KEEP_INCUMBENT` and `hashbrown_exit_allowed=false`. The
+bead contract explicitly makes missing or inconclusive same-or-better evidence
+a successful terminal KEEP outcome, so `tracker_closure_allowed=true` only
+with disposition `CLOSE_AS_KEEP_INCUMBENT_ONLY`. The focused remote Rust
+contract checks current source pins, the exact call-site and operation
+inventory, registry and marginal-ledger joins, and this fail-closed closure
+rule. It is not replacement, runtime-parity, benchmark, or platform evidence.
+This packet does not authorize source, manifest, or lockfile edits, performance
+claims, release readiness, or broad workspace-health claims.
 
 ## Host benchmark metadata static audit
 

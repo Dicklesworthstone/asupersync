@@ -978,7 +978,7 @@ fn runner_and_docs_expose_replay_logging_and_no_claim_boundaries() {
         "consumer-full",
         HASH_MAP_AUDIT_ID,
         HASH_MAP_BEAD_ID,
-        "NO_REPLACEMENT_OR_BENCHMARK_MATRIX_EXECUTED",
+        "NO_REPLACEMENT_OR_BENCHMARK_MATRIX_EXECUTED_KEEP_TRIGGERED",
         "hashbrown_exit_allowed=false",
         HOST_METADATA_AUDIT_ID,
         HOST_METADATA_BEAD_ID,
@@ -1014,23 +1014,20 @@ fn runner_and_docs_expose_replay_logging_and_no_claim_boundaries() {
 }
 
 #[test]
-fn hash_map_static_audit_is_source_pinned_and_fail_closed() {
+fn hash_map_terminal_keep_is_source_pinned_and_fail_closed() {
     let value = artifact();
     let audit = object(&value, "hash_map_static_audit");
     assert_eq!(string(audit, "audit_id"), HASH_MAP_AUDIT_ID);
     assert_eq!(string(audit, "bead_id"), HASH_MAP_BEAD_ID);
     assert_eq!(string(audit, "capability_id"), "CAP-HASH-MAPS");
-    assert_eq!(
-        string(audit, "audit_state"),
-        "STATIC_SOURCE_PINNED_NOT_EXECUTED"
-    );
+    assert_eq!(string(audit, "audit_state"), "TERMINAL_KEEP_SOURCE_PINNED");
     assert_eq!(
         string(audit, "execution_state"),
-        "NO_REPLACEMENT_OR_BENCHMARK_MATRIX_EXECUTED"
+        "NO_REPLACEMENT_OR_BENCHMARK_MATRIX_EXECUTED_KEEP_TRIGGERED"
     );
     assert_eq!(
         string(audit, "observed_at_revision"),
-        "4d5748b3de2c15985af55e3dfe3c35626d6be543"
+        "e531006885bc7df52c9d537cf8bff7528343829c"
     );
 
     let decision = object(audit, "decision");
@@ -1040,7 +1037,7 @@ fn hash_map_static_audit_is_source_pinned_and_fail_closed() {
     assert!(!boolean(decision, "dependency_exit_allowed"));
     assert!(!boolean(decision, "manifest_or_lockfile_edit_allowed"));
     assert!(!boolean(decision, "source_behavior_change_allowed"));
-    assert!(!boolean(decision, "tracker_closure_allowed"));
+    assert!(boolean(decision, "tracker_closure_allowed"));
 
     let dependency = object(audit, "dependency_contract");
     assert_eq!(
@@ -1375,6 +1372,39 @@ fn hash_map_static_audit_is_source_pinned_and_fail_closed() {
     assert_eq!(array(matrix, "required_metrics").len(), 8);
     assert_eq!(array(matrix, "required_record_fields").len(), 14);
 
+    let receipt = object(audit, "terminal_keep_receipt");
+    assert_eq!(
+        string(receipt, "receipt_id"),
+        "CAP-HASH-MAPS-TERMINAL-KEEP-V1"
+    );
+    assert_eq!(string(receipt, "decision"), "KEEP_INCUMBENT");
+    assert_eq!(
+        string(receipt, "closure_basis"),
+        "FAIL_CLOSED_MISSING_SAME_OR_BETTER_MATRIX"
+    );
+    assert!(!boolean(receipt, "cutover_attempted"));
+    assert!(!boolean(receipt, "source_or_manifest_changed"));
+    assert_eq!(unsigned(receipt, "unmet_gate_count"), 8);
+    assert_eq!(string(receipt, "unmet_gate_disposition"), "KEEP_INCUMBENT");
+    assert!(boolean(receipt, "tracker_closure_allowed"));
+    assert_eq!(
+        string(receipt, "proof_state"),
+        "REQUIRES_TERMINAL_RCH_CONTRACT_OUTPUT"
+    );
+    let command = string(receipt, "focused_contract_command");
+    for required in [
+        "RCH_REQUIRE_REMOTE=1",
+        "--base HEAD",
+        "--clean-overlay",
+        "dependency_capability_baseline_contract",
+        "hash_map_terminal_keep_is_source_pinned_and_fail_closed",
+    ] {
+        assert!(
+            command.contains(required),
+            "receipt command missing {required}"
+        );
+    }
+
     let gate = object(audit, "cutover_gate");
     assert_eq!(string(gate, "required_state"), "SAME_OR_BETTER");
     let gate_rows = array(gate, "rows");
@@ -1399,6 +1429,11 @@ fn hash_map_static_audit_is_source_pinned_and_fail_closed() {
     );
     assert!(!boolean(gate, "hashbrown_exit_allowed"));
     assert!(!boolean(gate, "tracker_closure_allowed"));
+    assert!(boolean(gate, "terminal_keep_tracker_closure_allowed"));
+    assert_eq!(
+        string(gate, "tracker_closure_disposition"),
+        "CLOSE_AS_KEEP_INCUMBENT_ONLY"
+    );
 
     let no_claims = array(audit, "no_claims")
         .iter()
@@ -1412,6 +1447,7 @@ fn hash_map_static_audit_is_source_pinned_and_fail_closed() {
         "not a same-source hashbrown-versus-std comparison",
         "does not authorize cutover",
         "does not authorize hashbrown removal",
+        "authorizes tracker closure only as KEEP_INCUMBENT",
     ] {
         assert!(no_claims.contains(required), "missing no-claim: {required}");
     }
@@ -1728,8 +1764,8 @@ fn tempfile_claim_time_profile_checkpoint_is_source_pinned_and_fail_closed() {
         (
             "artifacts/dependency_capability_baseline_v1.json",
             (
-                "df830fc2663de19f857ade1e07feed0ee29f41f9cf6eba84f9c85b1d9c1040bc",
-                3213_u64,
+                "b481fb848738cbcde7472d8ced1904a7c1656c41caf48c414bff295f3d3e5a2b",
+                3230_u64,
             ),
         ),
         (
