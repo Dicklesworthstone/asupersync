@@ -2098,6 +2098,27 @@ impl NatsClient {
         }
     }
 
+    /// Commit a received request reply before best-effort subscription cleanup.
+    ///
+    /// Once the reply is parsed, an UNSUB write failure must not replace it
+    /// with an error: callers could retry an operation that already completed
+    /// at the service. The failed write still leaves the client disconnected
+    /// through `unsubscribe`'s fail-closed transport state.
+    async fn finalize_request_reply(
+        &mut self,
+        cx: &Cx,
+        sid: u64,
+        message: Message,
+    ) -> Result<Message, NatsError> {
+        self.cleanup_request_subscription(cx, sid, "reply_received")
+            .await;
+        if let Some(err) = Self::reply_status_error(&message) {
+            Err(err)
+        } else {
+            Ok(message)
+        }
+    }
+
     /// Write a server-required `PONG` response.
     ///
     /// If the client is currently considered connected, fail closed around
@@ -2632,11 +2653,7 @@ impl NatsClient {
                     }
                     Some(NatsMessage::Msg(m)) => {
                         if m.sid == sub.sid() {
-                            self.unsubscribe(cx, sub.sid()).await?;
-                            if let Some(err) = Self::reply_status_error(&m) {
-                                return Err(err);
-                            }
-                            return Ok(m);
+                            return self.finalize_request_reply(cx, sub.sid(), m).await;
                         }
                         self.dispatch_message(m);
                         processed_any = true;
@@ -2669,11 +2686,7 @@ impl NatsClient {
             }
 
             if let Some(msg) = sub.try_next() {
-                self.unsubscribe(cx, sub.sid()).await?;
-                if let Some(err) = Self::reply_status_error(&msg) {
-                    return Err(err);
-                }
-                return Ok(msg);
+                return self.finalize_request_reply(cx, sub.sid(), msg).await;
             }
         }
     }
@@ -2746,11 +2759,7 @@ impl NatsClient {
                     Some(NatsMessage::Msg(m)) => {
                         if m.sid == sub.sid() {
                             // This is our reply - clean up and return
-                            self.unsubscribe(cx, sub.sid()).await?;
-                            if let Some(err) = Self::reply_status_error(&m) {
-                                return Err(err);
-                            }
-                            return Ok(m);
+                            return self.finalize_request_reply(cx, sub.sid(), m).await;
                         }
                         // Dispatch to other subscriptions
                         self.dispatch_message(m);
@@ -2785,11 +2794,7 @@ impl NatsClient {
 
             // Also check the subscription channel in case message was already dispatched
             if let Some(msg) = sub.try_next() {
-                self.unsubscribe(cx, sub.sid()).await?;
-                if let Some(err) = Self::reply_status_error(&msg) {
-                    return Err(err);
-                }
-                return Ok(msg);
+                return self.finalize_request_reply(cx, sub.sid(), msg).await;
             }
         }
     }
@@ -4863,6 +4868,67 @@ mod tests {
         assert!(
             line.is_none(),
             "disconnected unsubscribe must not emit UNSUB, got {line:?}"
+        );
+    }
+
+    #[test]
+    fn received_reply_survives_unsubscribe_cleanup_failure_ne8jdw() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept client");
+            stream
+                .set_read_timeout(Some(Duration::from_millis(250)))
+                .expect("set read timeout");
+            let mut reader = BufReader::new(stream);
+            read_optional_protocol_line(&mut reader)
+        });
+
+        run_test_with_cx(|cx| async move {
+            let stream = TcpStream::connect(format!("{addr}"))
+                .await
+                .expect("connect client");
+            let state = Arc::new(SharedState::new());
+            let sid = 42;
+            let (tx, _rx) = mpsc::channel(8);
+            state.subscriptions.lock().insert(
+                sid,
+                SubscriptionState {
+                    subject: "_INBOX.reply".to_string(),
+                    queue_group: None,
+                    sender: tx,
+                },
+            );
+            let mut client = NatsClient {
+                config: NatsConfig::default(),
+                stream: stream.into(),
+                read_buf: NatsReadBuffer::new(),
+                state: Arc::clone(&state),
+                next_sid: AtomicU64::new(1),
+                connected: false,
+                tls_required_on_connect: false,
+            };
+            let message = Message {
+                subject: "_INBOX.reply".to_string(),
+                sid,
+                reply_to: None,
+                headers: None,
+                payload: b"completed".to_vec(),
+            };
+
+            let reply = client
+                .finalize_request_reply(&cx, sid, message)
+                .await
+                .expect("cleanup failure must not replace a completed reply");
+            assert_eq!(reply.payload, b"completed");
+            assert!(state.subscriptions.lock().is_empty());
+            assert!(!client.connected);
+        });
+
+        let line = server.join().expect("server join");
+        assert!(
+            line.is_none(),
+            "failed cleanup on a disconnected client must not emit wire bytes"
         );
     }
 
