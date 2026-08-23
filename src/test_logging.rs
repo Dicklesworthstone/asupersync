@@ -3238,7 +3238,15 @@ impl FixtureService for TempDirFixture {
     }
 
     fn start(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        let dir = tempfile::Builder::new().prefix(&self.prefix).tempdir()?;
+        let mut builder = tempfile::Builder::new();
+        builder.prefix(&self.prefix);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            builder.permissions(std::fs::Permissions::from_mode(0o700));
+        }
+        let dir = builder.tempdir()?;
         tracing::debug!(
             service = %self.service_name,
             path = %dir.path().display(),

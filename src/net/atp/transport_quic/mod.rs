@@ -4153,12 +4153,17 @@ async fn prepare_source_manifest(
                 let tempdir = match pack_tempdir.as_ref() {
                     Some(dir) => dir,
                     None => {
-                        let dir = tempfile::Builder::new()
-                            .prefix(".atp-quic-pack-")
-                            .tempdir()
-                            .map_err(|err| {
-                                QuicTransportError::Source(format!("create pack tempdir: {err}"))
-                            })?;
+                        let mut tempdir_builder = tempfile::Builder::new();
+                        tempdir_builder.prefix(".atp-quic-pack-");
+                        #[cfg(unix)]
+                        {
+                            use std::os::unix::fs::PermissionsExt as _;
+
+                            tempdir_builder.permissions(std::fs::Permissions::from_mode(0o700));
+                        }
+                        let dir = tempdir_builder.tempdir().map_err(|err| {
+                            QuicTransportError::Source(format!("create pack tempdir: {err}"))
+                        })?;
                         pack_tempdir = Some(dir);
                         pack_tempdir.as_ref().expect("pack tempdir just installed")
                     }
@@ -13797,6 +13802,27 @@ mod tests {
         };
         let prepared = block_on(prepare_source_manifest(&cx, &root, &config))
             .expect("source manifest prepares");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            let mode = std::fs::metadata(
+                prepared
+                    .pack_tempdir
+                    .as_ref()
+                    .expect("packed source retains its tempdir")
+                    .path(),
+            )
+            .expect("QUIC pack tempdir metadata")
+            .permissions()
+            .mode();
+            assert_eq!(
+                mode & 0o077,
+                0,
+                "QUIC pack tempdir exposed group/other permissions"
+            );
+        }
 
         assert_eq!(prepared.manifest.root_name, "payload");
         assert!(prepared.manifest.is_directory);

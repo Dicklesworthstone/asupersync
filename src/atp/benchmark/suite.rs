@@ -5,7 +5,7 @@ use crate::atp::benchmark::{
 };
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use tempfile::TempDir;
+use tempfile::{Builder, TempDir};
 use tokio::fs;
 
 /// Comprehensive benchmark suite that runs baseline tools and ATP profiles.
@@ -52,7 +52,15 @@ impl BenchmarkSuite {
         config: &BenchmarkConfig,
     ) -> Result<BenchmarkReport, BenchmarkError> {
         // Set up working directory
-        let work_dir = TempDir::new().map_err(BenchmarkError::Io)?;
+        let mut work_dir_builder = Builder::new();
+        work_dir_builder.prefix("asupersync-benchmark-");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            work_dir_builder.permissions(std::fs::Permissions::from_mode(0o700));
+        }
+        let work_dir = work_dir_builder.tempdir().map_err(BenchmarkError::Io)?;
         let source_path = work_dir.path().join("test_source");
         let dest_base = work_dir.path().join("dest");
 

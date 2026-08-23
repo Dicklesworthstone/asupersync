@@ -5640,10 +5640,15 @@ async fn pack_small_files_with_deferred_singleton_digests(
         return Ok((entries, logical_digests, None));
     }
 
-    let tempdir = tempfile::Builder::new()
-        .prefix(".atp-rq-pack-")
-        .tempdir()
-        .map_err(RqError::Io)?;
+    let mut tempdir_builder = tempfile::Builder::new();
+    tempdir_builder.prefix(".atp-rq-pack-");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        tempdir_builder.permissions(std::fs::Permissions::from_mode(0o700));
+    }
+    let tempdir = tempdir_builder.tempdir().map_err(RqError::Io)?;
 
     let mut new_entries: Vec<RqSourceEntry> = Vec::with_capacity(groups.len());
     let mut logical_digests: Vec<EntryDigest> = Vec::with_capacity(entries.len());

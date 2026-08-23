@@ -7998,7 +7998,21 @@ fn pack_small_files_records_offsets_lens_and_member_sha() {
     let config = RqConfig::default();
     let (packed, logical_digests, tempdir) =
         futures_lite::future::block_on(pack_small_files(entries, &config)).expect("pack");
-    let _tempdir = tempdir.expect("a pack temp dir was produced");
+    let tempdir = tempdir.expect("a pack temp dir was produced");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let mode = std::fs::metadata(tempdir.path())
+            .expect("pack tempdir metadata")
+            .permissions()
+            .mode();
+        assert_eq!(
+            mode & 0o077,
+            0,
+            "RQ pack tempdir exposed group/other permissions"
+        );
+    }
 
     assert_eq!(
         packed.len(),

@@ -1749,8 +1749,8 @@ fn tempfile_claim_time_profile_checkpoint_is_source_pinned_and_fail_closed() {
         (
             "src/atp/benchmark/suite.rs",
             (
-                "4c53f1453815ab28acd88ceff677cc837200044bf65a5739f464d1120b7f11a9",
-                341_u64,
+                "e5516a91702a38bfb7f21c35b29f302849b4a1514e7618ecc046148268f7fc57",
+                349_u64,
             ),
         ),
         (
@@ -1784,15 +1784,15 @@ fn tempfile_claim_time_profile_checkpoint_is_source_pinned_and_fail_closed() {
         (
             "src/net/atp/transport_quic/mod.rs",
             (
-                "306a5043ba0bf7614ceb7b40d29836730285f24ed4a01e402c9576bd0e55e770",
-                17_212_u64,
+                "8d7a990223406a9e854855aba87e4fcd80f7f45eac8db3693d42822cd33932c7",
+                17_238_u64,
             ),
         ),
         (
             "src/net/atp/transport_rq/mod.rs",
             (
-                "32af68987501ce529e5bd3f7f5f2ec2a3bac6f53a90e5e085bec2a5ca542ecee",
-                15_307_u64,
+                "85b46af1366be022c7ebdd82bc2092fb9395a22609bbd4b7995120e6c9ad800c",
+                15_312_u64,
             ),
         ),
         (
@@ -1805,8 +1805,8 @@ fn tempfile_claim_time_profile_checkpoint_is_source_pinned_and_fail_closed() {
         (
             "src/test_logging.rs",
             (
-                "85bb7979d1fa1e63c54b230f55b68c8e0f6deea57e6068365b6f91db04cf8848",
-                5919_u64,
+                "e6a1cd7541225f1fbbb843ef39bcb1181d0390cb14438a5ebd5c332f0273e2f0",
+                5927_u64,
             ),
         ),
     ]);
@@ -1866,6 +1866,7 @@ fn tempfile_claim_time_profile_checkpoint_is_source_pinned_and_fail_closed() {
     for required in [
         "Option<tempfile::TempDir>",
         "tempfile::Builder::new()",
+        "tempdir_builder.permissions(std::fs::Permissions::from_mode(0o700))",
         "_pack_tempdir: Option<tempfile::TempDir>",
     ] {
         assert!(
@@ -1880,7 +1881,8 @@ fn tempfile_claim_time_profile_checkpoint_is_source_pinned_and_fail_closed() {
     for required in [
         "pack_tempdir: Option<std::sync::Arc<tempfile::TempDir>>",
         "let mut pack_tempdir: Option<tempfile::TempDir> = None;",
-        "let dir = tempfile::Builder::new()",
+        "let mut tempdir_builder = tempfile::Builder::new()",
+        "tempdir_builder.permissions(std::fs::Permissions::from_mode(0o700))",
     ] {
         assert!(
             quic_production.contains(required),
@@ -1900,7 +1902,10 @@ fn tempfile_claim_time_profile_checkpoint_is_source_pinned_and_fail_closed() {
         count_occurrences(production_before_test_module(&benchmark), "tempfile::"),
         1
     );
-    assert!(benchmark.contains("let work_dir = TempDir::new()"));
+    assert!(benchmark.contains("let mut work_dir_builder = Builder::new()"));
+    assert!(
+        benchmark.contains("work_dir_builder.permissions(std::fs::Permissions::from_mode(0o700))")
+    );
 
     let lib = read_repo_file("src/lib.rs");
     assert!(lib.contains("#[cfg(any(test, feature = \"test-internals\"))]\npub mod test_logging;"));
@@ -1910,6 +1915,10 @@ fn tempfile_claim_time_profile_checkpoint_is_source_pinned_and_fail_closed() {
         .map(|(production, _)| production)
         .expect("test logging must retain its cfg(test) module boundary");
     assert_eq!(count_occurrences(test_logging_production, "tempfile::"), 4);
+    assert!(
+        test_logging_production
+            .contains("builder.permissions(std::fs::Permissions::from_mode(0o700))")
+    );
 
     let source_paths = rust_source_paths_with_token("tempfile::");
     assert_eq!(source_paths.len(), 80);
@@ -1918,6 +1927,7 @@ fn tempfile_claim_time_profile_checkpoint_is_source_pinned_and_fail_closed() {
         "src/bin/asupersync.rs",
         "src/net/atp/transport_quic/mod.rs",
         "src/net/atp/transport_rq/mod.rs",
+        "src/net/atp/transport_rq/transport_rq_tests.rs",
         "src/test_logging.rs",
     ] {
         assert!(
@@ -1930,7 +1940,7 @@ fn tempfile_claim_time_profile_checkpoint_is_source_pinned_and_fail_closed() {
         .map(|path| count_occurrences(&read_repo_file(path), "tempfile::"))
         .sum::<u64>();
     assert_eq!(source_token_count, 278);
-    assert_eq!(rust_paths_under_with_token("tests", "tempfile::").len(), 95);
+    assert_eq!(rust_paths_under_with_token("tests", "tempfile::").len(), 96);
     assert_eq!(
         rust_paths_under_with_token("benches", "tempfile::").len(),
         2
@@ -1951,6 +1961,43 @@ fn tempfile_claim_time_profile_checkpoint_is_source_pinned_and_fail_closed() {
         "NO_DEDICATED_RECEIPT"
     );
     assert!(!boolean(tempfile_row, "terminal_ready"));
+
+    let lifecycle = read_repo_file("tests/temp_artifact_lifecycle.rs");
+    for required in [
+        "temp_artifact_success_error_panic_and_cancellation_cleanup",
+        "temp_artifact_permissions_and_owned_retention_are_bounded",
+        "parallel_temp_artifact_runs_are_isolated_and_clean",
+        "test_logging_temp_dir_fixture_cleans_on_stop",
+        "benchmark_suite_work_dir_lifetime_matches_suite_lifetime",
+    ] {
+        assert!(
+            lifecycle.contains(required),
+            "missing executable tempfile lifecycle case: {required}"
+        );
+    }
+    let runner = read_repo_file("scripts/run_dependency_sovereignty_e2e.sh");
+    for required in [
+        "temp_artifacts",
+        "d24mms-5-temp-artifact-lifecycle",
+        "cargo check --locked -p asupersync --no-default-features --lib",
+        "--features test-internals --lib",
+        "--features benchmark-adapters --lib",
+        "--features cli --bin asupersync",
+        "--features cli,test-internals,benchmark-adapters",
+        "--lib --bin asupersync",
+        "pack_small_files_",
+        "quic_prepare_source_manifest_hashes_files_with_streaming_digests",
+        "tempfile_claim_time_profile_checkpoint_is_source_pinned_and_fail_closed",
+        "src/atp/benchmark/suite.rs",
+        "src/net/atp/transport_quic/mod.rs",
+        "src/net/atp/transport_rq/mod.rs",
+        "src/test_logging.rs",
+    ] {
+        assert!(
+            runner.contains(required),
+            "missing tempfile executable runner token: {required}"
+        );
+    }
 
     let docs = read_repo_file(DOC_PATH);
     for required in [

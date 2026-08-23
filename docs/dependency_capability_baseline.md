@@ -258,15 +258,15 @@ pins the following current resolution boundaries:
 | `benchmark-adapters` | `src/atp/benchmark/suite.rs` owns a `TempDir` work directory | benchmark optionalization would require `dep:tempfile` in `benchmark-adapters` |
 | `test-internals` | `src/test_logging.rs` exposes `TempDirFixture` when `test || test-internals` | test-internals optionalization would require `dep:tempfile` in `test-internals` |
 
-The current repository `src/` census contains 80 Rust files and 277 qualified
+The current repository `src/` census contains 80 Rust files and 278 qualified
 `tempfile::` tokens. This is a drift detector, not a Cargo-built profile
 classification: inline tests and dormant harnesses account for many tokens, so
-the checkpoint does not claim zero `UNKNOWN`. The post-checkpoint `tests/`
-lexical census contains 94 Rust files; one is this contract and contains only
-checkpoint literals, which demonstrates why lexical presence is not dependency
-resolution proof. The dev edge remains necessary for broad integration and
-inline tests, the two current benchmark files, and the test-only example
-fixture.
+the checkpoint does not claim zero `UNKNOWN`. The current `tests/` lexical
+census contains 96 Rust files: the 94-file claim-base set, this static contract,
+and the executable `tests/temp_artifact_lifecycle.rs` fixture. This demonstrates
+why lexical presence is not dependency-resolution proof. The dev edge remains
+necessary for broad integration and inline tests, the two current benchmark
+files, and the test-only example fixture.
 
 At the claim base, `Cargo.toml` still has separate normal and dev declarations
 spelled `3.25`, while `Cargo.lock` resolves `3.27.0`. Those are pinned observed
@@ -284,6 +284,23 @@ Cargo-built default/sparse/combined profile inventory, lifecycle and cleanup
 evidence, platform coverage, canonical replay/redaction artifacts, and a
 serialized manifest/lock/ledger decision only if every capability remains
 SAME-or-BETTER.
+
+The follow-up `temp_artifacts` scenario in
+`scripts/run_dependency_sovereignty_e2e.sh` is the executable Linux tranche. It
+combines the pinned normal-edge manifest/lock contract with Cargo-built default,
+sparse `test-internals`, `benchmark-adapters`, and `cli` profiles, their relevant
+combined profile, the dedicated
+success/error/panic/cancellation/permission/retention/parallel lifecycle
+fixture, and focused default ATP, CLI replay, test-logging, and benchmark
+consumers. The first admitted lifecycle run exposed inherited group/other mode
+bits on a remote worker. The production-owned benchmark, test-fixture, RQ-pack,
+and QUIC-pack constructors now request Unix mode `0700`; the executable fixture
+requests the same mode and verifies that the benchmark and test-fixture paths
+do not expose group/other permissions. Its canonical replay command is
+`RCH_REQUIRE_REMOTE=1 bash scripts/run_all_e2e.sh --suite dependency-sovereignty --scenario temp_artifacts`.
+This lane does not authorize optionalization: the default native consumers make
+`KEEP_INCUMBENT` the no-loss result. It also does not claim macOS or Windows
+execution, broad workspace health, performance improvement, or dependency exit.
 
 ## Visibility macro static audit
 
