@@ -992,7 +992,7 @@ fn runner_and_docs_expose_replay_logging_and_no_claim_boundaries() {
         "normal_dependency_optionalization_allowed=false",
         VISIBILITY_AUDIT_ID,
         VISIBILITY_BEAD_ID,
-        "NO_MACRO_REPLACEMENT_OR_COMPILE_MATRIX_EXECUTED",
+        "NO_MACRO_REPLACEMENT_OR_COMPILE_MATRIX_EXECUTED_KEEP_TRIGGERED",
         "visibility_exit_allowed=false",
         SLAB_AUDIT_ID,
         SLAB_BEAD_ID,
@@ -1764,8 +1764,8 @@ fn tempfile_claim_time_profile_checkpoint_is_source_pinned_and_fail_closed() {
         (
             "artifacts/dependency_capability_baseline_v1.json",
             (
-                "b481fb848738cbcde7472d8ced1904a7c1656c41caf48c414bff295f3d3e5a2b",
-                3230_u64,
+                "76d35f1fbf39637d5a0ccc0d7c1f4a986b2808c3f85aa8f43faab48d86a0a104",
+                3247_u64,
             ),
         ),
         (
@@ -2311,23 +2311,20 @@ fn sqlite_cycle_policy_remains_visible() {
 }
 
 #[test]
-fn visibility_macro_static_audit_is_source_pinned_and_fail_closed() {
+fn visibility_macro_terminal_keep_is_source_pinned_and_fail_closed() {
     let value = artifact();
     let audit = object(&value, "visibility_macro_static_audit");
     assert_eq!(string(audit, "audit_id"), VISIBILITY_AUDIT_ID);
     assert_eq!(string(audit, "bead_id"), VISIBILITY_BEAD_ID);
     assert_eq!(string(audit, "capability_id"), "CAP-VISIBILITY-MACRO");
-    assert_eq!(
-        string(audit, "audit_state"),
-        "STATIC_SOURCE_PINNED_NOT_EXECUTED"
-    );
+    assert_eq!(string(audit, "audit_state"), "TERMINAL_KEEP_SOURCE_PINNED");
     assert_eq!(
         string(audit, "execution_state"),
-        "NO_MACRO_REPLACEMENT_OR_COMPILE_MATRIX_EXECUTED"
+        "NO_MACRO_REPLACEMENT_OR_COMPILE_MATRIX_EXECUTED_KEEP_TRIGGERED"
     );
     assert_eq!(
         string(audit, "observed_at_revision"),
-        "42a66e7f4e6733c28c59405c052c68f7a32ea0d7"
+        "52b8b5368ca6c161ed4481fa91f94f0efe6d3c98"
     );
 
     let decision = object(audit, "decision");
@@ -2343,7 +2340,7 @@ fn visibility_macro_static_audit_is_source_pinned_and_fail_closed() {
         decision,
         "macro_or_source_behavior_change_allowed"
     ));
-    assert!(!boolean(decision, "tracker_closure_allowed"));
+    assert!(boolean(decision, "tracker_closure_allowed"));
 
     let dependency = object(audit, "dependency_contract");
     assert_eq!(
@@ -2667,6 +2664,39 @@ fn visibility_macro_static_audit_is_source_pinned_and_fail_closed() {
     assert_eq!(array(matrix, "target_cells").len(), 4);
     assert_eq!(array(matrix, "diagnostic_cells").len(), 6);
 
+    let receipt = object(audit, "terminal_keep_receipt");
+    assert_eq!(
+        string(receipt, "receipt_id"),
+        "CAP-VISIBILITY-MACRO-TERMINAL-KEEP-V1"
+    );
+    assert_eq!(string(receipt, "decision"), "KEEP_INCUMBENT");
+    assert_eq!(
+        string(receipt, "closure_basis"),
+        "FAIL_CLOSED_MISSING_SPARSE_FEATURE_AND_HYGIENE_MATRIX"
+    );
+    assert!(!boolean(receipt, "cutover_attempted"));
+    assert!(!boolean(receipt, "macro_source_or_manifest_changed"));
+    assert_eq!(unsigned(receipt, "unmet_gate_count"), 8);
+    assert_eq!(string(receipt, "unmet_gate_disposition"), "KEEP_INCUMBENT");
+    assert!(boolean(receipt, "tracker_closure_allowed"));
+    assert_eq!(
+        string(receipt, "proof_state"),
+        "REQUIRES_TERMINAL_RCH_CONTRACT_OUTPUT"
+    );
+    let command = string(receipt, "focused_contract_command");
+    for required in [
+        "RCH_REQUIRE_REMOTE=1",
+        "--base HEAD",
+        "--clean-overlay",
+        "dependency_capability_baseline_contract",
+        "visibility_macro_terminal_keep_is_source_pinned_and_fail_closed",
+    ] {
+        assert!(
+            command.contains(required),
+            "receipt command missing {required}"
+        );
+    }
+
     let gate = object(audit, "cutover_gate");
     assert_eq!(string(gate, "required_state"), "SAME_OR_BETTER");
     let gate_rows = array(gate, "rows");
@@ -2691,6 +2721,11 @@ fn visibility_macro_static_audit_is_source_pinned_and_fail_closed() {
     );
     assert!(!boolean(gate, "visibility_exit_allowed"));
     assert!(!boolean(gate, "tracker_closure_allowed"));
+    assert!(boolean(gate, "terminal_keep_tracker_closure_allowed"));
+    assert_eq!(
+        string(gate, "tracker_closure_disposition"),
+        "CLOSE_AS_KEEP_INCUMBENT_ONLY"
+    );
 
     let no_claims = array(audit, "no_claims")
         .iter()
@@ -2703,6 +2738,7 @@ fn visibility_macro_static_audit_is_source_pinned_and_fail_closed() {
         "not a visibility replacement receipt",
         "does not authorize cutover",
         "does not authorize visibility removal",
+        "authorizes tracker closure only as KEEP_INCUMBENT",
     ] {
         assert!(no_claims.contains(required), "missing no-claim: {required}");
     }

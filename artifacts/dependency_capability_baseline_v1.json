@@ -2037,9 +2037,9 @@
     "audit_id": "CAP-VISIBILITY-MACRO-STATIC-AUDIT-V1",
     "bead_id": "asupersync-d24mms.7",
     "capability_id": "CAP-VISIBILITY-MACRO",
-    "observed_at_revision": "42a66e7f4e6733c28c59405c052c68f7a32ea0d7",
-    "audit_state": "STATIC_SOURCE_PINNED_NOT_EXECUTED",
-    "execution_state": "NO_MACRO_REPLACEMENT_OR_COMPILE_MATRIX_EXECUTED",
+    "observed_at_revision": "52b8b5368ca6c161ed4481fa91f94f0efe6d3c98",
+    "audit_state": "TERMINAL_KEEP_SOURCE_PINNED",
+    "execution_state": "NO_MACRO_REPLACEMENT_OR_COMPILE_MATRIX_EXECUTED_KEEP_TRIGGERED",
     "decision": {
       "dependency": "visibility",
       "candidate": "owned exact-scope attribute in asupersync-macros",
@@ -2047,8 +2047,8 @@
       "dependency_exit_allowed": false,
       "manifest_or_lockfile_edit_allowed": false,
       "macro_or_source_behavior_change_allowed": false,
-      "tracker_closure_allowed": false,
-      "reason": "All twelve incumbent attributes are statically inventoried, but no owned macro, visibility-specific UI corpus, privacy-off proof, sparse-feature compile, package-cycle proof, downstream consumer scenario, or current replay receipt exists."
+      "tracker_closure_allowed": true,
+      "reason": "All twelve incumbent attributes are inventoried at the current revision, but no owned macro, visibility-specific UI corpus, privacy-off proof, sparse-feature compile, package-cycle proof, downstream consumer scenario, or current replay receipt exists. The bead contract makes any sparse-feature or hygiene uncertainty a successful terminal KEEP outcome, so the tracker may close only as KEEP_INCUMBENT; macro publication, source migration, feature rewiring, and dependency exit remain forbidden."
     },
     "dependency_contract": {
       "manifest_kind": "optional normal dependency",
@@ -2104,8 +2104,8 @@
       },
       {
         "path": "src/cx/cx.rs",
-        "sha256": "2e9b20ad5c3aefba1619e93831640ab2d6eead53922e31a87c305dc0f431f95b",
-        "line_count": 7816,
+        "sha256": "f480928f0ad1b56a2b501a607c3153c7cf05119360b6c16971266fcd048e096a",
+        "line_count": 7865,
         "role": "one already-public struct, four constructors, and one receiver method guarded by the incumbent attribute"
       },
       {
@@ -2380,6 +2380,20 @@
       ],
       "missing_or_unsupported_policy": "A missing, skipped, stale, cycle-blocked, non-replayable, or diagnostic-regressed cell is not SAME-or-BETTER evidence and keeps visibility."
     },
+    "terminal_keep_receipt": {
+      "receipt_id": "CAP-VISIBILITY-MACRO-TERMINAL-KEEP-V1",
+      "source_revision": "52b8b5368ca6c161ed4481fa91f94f0efe6d3c98",
+      "decision": "KEEP_INCUMBENT",
+      "closure_basis": "FAIL_CLOSED_MISSING_SPARSE_FEATURE_AND_HYGIENE_MATRIX",
+      "cutover_attempted": false,
+      "macro_source_or_manifest_changed": false,
+      "unmet_gate_count": 8,
+      "unmet_gate_disposition": "KEEP_INCUMBENT",
+      "tracker_closure_allowed": true,
+      "focused_contract_command": "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --overlay-path artifacts/dependency_capability_baseline_v1.json --overlay-path docs/dependency_capability_baseline.md --overlay-path tests/dependency_capability_baseline_contract.rs -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_d24mms_7_visibility_terminal cargo test -j 2 -p asupersync --test dependency_capability_baseline_contract visibility_macro_terminal_keep_is_source_pinned_and_fail_closed -- --nocapture",
+      "focused_contract_scope": "current source pins, exact attribute and item-shape inventory, feature and macro-cycle topology, registry and marginal-ledger joins, missing-gate fail-closed policy, and KEEP-only tracker closure",
+      "proof_state": "REQUIRES_TERMINAL_RCH_CONTRACT_OUTPUT"
+    },
     "cutover_gate": {
       "required_state": "SAME_OR_BETTER",
       "rows": [
@@ -2431,14 +2445,17 @@
       ],
       "on_any_missing_or_regressed_row": "KEEP_INCUMBENT",
       "visibility_exit_allowed": false,
-      "tracker_closure_allowed": false
+      "tracker_closure_allowed": false,
+      "terminal_keep_tracker_closure_allowed": true,
+      "tracker_closure_disposition": "CLOSE_AS_KEEP_INCUMBENT_ONLY"
     },
     "no_claims": [
-      "No owned visibility macro, source migration, manifest edit, lockfile edit, compiler, formatter, unit test, trybuild test, downstream test, Cargo lane, RCH lane, or replay scenario was executed.",
+      "No owned visibility macro, source migration, manifest edit, lockfile edit, visibility UI corpus, sparse-feature candidate compile, downstream replacement test, or replay scenario was executed.",
+      "The focused remote Rust contract validates this terminal KEEP packet and its current source joins; it is not macro expansion, hygiene, diagnostic, privacy, sparse-feature, package-cycle, or downstream parity evidence.",
       "A complete twelve-occurrence source inventory does not prove expansion, hygiene, span, diagnostic, privacy, sparse-feature, package-cycle, or downstream parity.",
       "EVD-PROC-MACROS is adjacent macro-crate evidence, not a visibility replacement receipt.",
       "The stale four-row marginal ledger quantifies a one-package graph opportunity but does not authorize cutover.",
-      "This audit does not authorize visibility removal, owned macro publication, feature rewiring, source behavior changes, tracker closure, release readiness, or broad workspace-health claims."
+      "This receipt authorizes tracker closure only as KEEP_INCUMBENT. It does not authorize visibility removal, owned macro publication, feature rewiring, source behavior changes, release readiness, or broad workspace-health claims."
     ]
   },
   "slab_static_audit": {

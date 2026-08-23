@@ -313,13 +313,14 @@ execution, broad workspace health, performance improvement, or dependency exit.
 ## Visibility macro static audit
 
 `CAP-VISIBILITY-MACRO-STATIC-AUDIT-V1` records the bounded static audit for
-`asupersync-d24mms.7`. It is `STATIC_SOURCE_PINNED_NOT_EXECUTED`: fourteen
-source pins establish the incumbent feature, macro-crate, attribute, registry,
-runner, consumer, and marginal-ledger topology at revision
-`42a66e7f4e6733c28c59405c052c68f7a32ea0d7`. No macro implementation, source
-migration, manifest or lockfile edit, compiler, formatter, test, Cargo lane,
-RCH lane, or replay scenario ran. Its execution state is
-`NO_MACRO_REPLACEMENT_OR_COMPILE_MATRIX_EXECUTED`.
+`asupersync-d24mms.7` and now carries terminal receipt
+`CAP-VISIBILITY-MACRO-TERMINAL-KEEP-V1`. It is
+`TERMINAL_KEEP_SOURCE_PINNED`: fourteen source pins establish the incumbent
+feature, macro-crate, attribute, registry, runner, consumer, and
+marginal-ledger topology at revision
+`52b8b5368ca6c161ed4481fa91f94f0efe6d3c98`. No macro implementation or
+comparison matrix ran, so its execution state is
+`NO_MACRO_REPLACEMENT_OR_COMPILE_MATRIX_EXECUTED_KEEP_TRIGGERED`.
 
 The current inventory is twelve identical `visibility::make(pub)` tokens
 across four production files, correcting the tracker description's stale
@@ -356,9 +357,16 @@ semantic classification, UI corpus, privacy-off behavior, sparse-feature and
 cycle proof, hygiene/span/diagnostic parity, platform/profile compilation,
 downstream replay, and fresh serialized ledger cutover are `MISSING`. The
 disposition is `KEEP_INCUMBENT` and `visibility_exit_allowed=false`. This
-packet does not authorize macro publication, feature rewiring, source,
-manifest, lockfile, or tracker edits, release readiness, or broad
-workspace-health claims.
+bead's contract explicitly makes any sparse-feature or hygiene uncertainty a
+successful terminal KEEP outcome. `tracker_closure_allowed=true` applies only
+to `CLOSE_AS_KEEP_INCUMBENT_ONLY`; the cutover gate itself remains closed. The
+focused remote Rust contract checks the current source pins, exact attribute
+and item-shape inventory, feature and macro-cycle topology, registry and
+marginal-ledger joins, and this fail-closed closure rule. It is not macro
+expansion, hygiene, diagnostic, privacy, sparse-feature, package-cycle, or
+downstream parity evidence. This packet does not authorize macro publication,
+feature rewiring, source, manifest, or lockfile edits, release readiness, or
+broad workspace-health claims.
 
 ## Slab consumer static audit
 
