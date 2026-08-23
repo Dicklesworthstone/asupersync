@@ -1301,7 +1301,12 @@
       "tests_failed": 0,
       "clean_overlay_base": "c0599ebc6507429b4e5dad833fc13a8438a8971c",
       "clean_overlay_fingerprint": "926a8ac4260971a302070de69abaeee19218bafbf19adf80267025e5f35c44da",
-      "corpus_contract_state": "PENDING_FOCUSED_REMOTE_CONTRACT",
+      "corpus_contract_state": "PASSED_FOCUSED_REMOTE_CONTRACT",
+      "corpus_contract_job_id": "j-29988810699833436",
+      "corpus_contract_tests_passed": 8,
+      "corpus_contract_tests_failed": 0,
+      "corpus_contract_clean_overlay_base": "6fc933a4acdfb2a5d078252f904fb640efc06f22",
+      "corpus_contract_clean_overlay_fingerprint": "fe0d5151031be8fda7951fe7fe1f42f7ce344018fdb3ed21e6ada866b230b195",
       "claims": [
         "ALL_18_R2_1_PHONE_VECTORS",
         "GENERATED_SHAPE_SEPARATOR_COUNTRY_CODE_AND_UNICODE_BOUNDARY_MATRIX",

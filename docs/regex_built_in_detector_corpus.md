@@ -185,7 +185,10 @@ authorize dependency exit or cutover.
   boundaries, all 19 pipeline outcomes, bounded input/work/output refusal with
   incumbent fallback, and exact or drifted custom-pattern non-dispatch. This is
   `IMPLEMENTED_EXACT_BUILTINS_CUSTOM_ON_INCUMBENT`; it does not expose or widen
-  a public detector-identity API.
+  a public detector-identity API. The source pins, closed dispatch state,
+  independent vectors, pipeline outcomes, docs markers, and fail-closed
+  mutations passed 8/8 in clean-overlay RCH job `j-29988810699833436`, bound to
+  committed base `6fc933a4a`.
 - R2.5 may aggregate the work only after implementation, generated
   equivalence, resource evidence, and named-host measurements exist.
 

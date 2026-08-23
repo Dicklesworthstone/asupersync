@@ -50,7 +50,7 @@ const LAB_CAPABILITY_ROW_SHA256: &str =
 const SOURCE_PIN_PATHS_SHA256: &str =
     "b5ba6ff6a6eb152e0c3bb263205e8a7d9f9a58fbbb27ec13fd276eb909d9552a";
 const CLAIMS_PROJECTION_SHA256: &str =
-    "7629423e2af562ef581e6ff5b1069e469c550a4de8fcdcf8b9299ae49608123c";
+    "252623303f92479190998b86bbeca61f9f41932d775e8e9d09716ba8f7f1782f";
 const DOC_BEGIN: &str = "<!-- BEGIN REGEX BUILT-IN DETECTOR CORPUS -->";
 const DOC_END: &str = "<!-- END REGEX BUILT-IN DETECTOR CORPUS -->";
 
@@ -522,7 +522,14 @@ fn validate_inventory(corpus: &Value) -> Result<(), String> {
         || r2_4_text("test_filter") != Some("fixed_phone")
         || r2_4_number("tests_passed") != Some(5)
         || r2_4_number("tests_failed") != Some(0)
-        || r2_4_text("corpus_contract_state") != Some("PENDING_FOCUSED_REMOTE_CONTRACT")
+        || r2_4_text("corpus_contract_state") != Some("PASSED_FOCUSED_REMOTE_CONTRACT")
+        || r2_4_text("corpus_contract_job_id") != Some("j-29988810699833436")
+        || r2_4_number("corpus_contract_tests_passed") != Some(8)
+        || r2_4_number("corpus_contract_tests_failed") != Some(0)
+        || r2_4_text("corpus_contract_clean_overlay_base")
+            != Some("6fc933a4acdfb2a5d078252f904fb640efc06f22")
+        || r2_4_text("corpus_contract_clean_overlay_fingerprint")
+            != Some("fe0d5151031be8fda7951fe7fe1f42f7ce344018fdb3ed21e6ada866b230b195")
     {
         return Err("R2.4 phone dispatch evidence drifted".to_owned());
     }
@@ -1208,6 +1215,7 @@ fn docs_ignore_rule_and_static_no_claims_are_discoverable() {
         "implements no scanner",
         "IMPLEMENTED_EXACT_BUILTINS_CUSTOM_ON_INCUMBENT",
         "j-29988810699833435",
+        "j-29988810699833436",
         "No local Cargo fallback is approved",
     ] {
         assert!(doc.contains(required), "documentation missing {required}");
