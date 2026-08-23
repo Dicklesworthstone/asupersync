@@ -686,7 +686,7 @@ fn snapshot_declares_schema_sources_and_required_categories() {
     );
     assert_eq!(
         actual.len(),
-        36,
+        37,
         "snapshot must cover the requested claim list"
     );
 }

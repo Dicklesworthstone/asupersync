@@ -1222,6 +1222,21 @@
       "normal_edge_tokio_expectation": "unknown_needs_vf2",
       "resource_envelope_class": "artifact-contract-medium",
       "current_rch_behavior": "green_observed"
+    },
+    {
+      "lane_id": "dependency-ci-provenance-final-signoff",
+      "source": "proof_lane_manifest_v1",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_dependency_ci_provenance_final_signoff CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -j 2 -p asupersync --test dependency_ci_provenance_final_signoff_contract -- --nocapture",
+      "intended_guarantee": "Scoped P1-P5 dependency CI/provenance aggregate with static-only JavaScript, fresh Cargo scanner receipt, excluded-fuzz quarantine, downstream minimum-version boundary, generated-document drift receipt, safe overclaim fixtures, replay commands, and KEEP/DEFER no-claim boundaries.",
+      "package_or_surface": "asupersync",
+      "target_kind": "artifact_contract",
+      "features": [],
+      "cfg_test_enabled": "yes",
+      "dev_dependency_edges": "dev_graph_expected",
+      "conformance_expected": "unknown_needs_vf2",
+      "normal_edge_tokio_expectation": "unknown_needs_vf2",
+      "resource_envelope_class": "artifact-contract-medium",
+      "current_rch_behavior": "green_observed"
     }
   ],
   "known_regressions_or_blockers": [

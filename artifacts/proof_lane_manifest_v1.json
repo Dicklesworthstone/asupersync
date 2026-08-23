@@ -557,7 +557,8 @@
     "clean-overlay-proof-orchestration-contract",
     "proof-traffic-final-signoff",
     "dependency-supply-chain-policy-contract",
-    "dependency-budget-contract"
+    "dependency-budget-contract",
+    "dependency-ci-provenance-final-signoff"
   ],
   "lanes": [
     {
@@ -3284,6 +3285,71 @@
           "live-rch-fleet-availability"
         ]
       }
+    },
+    {
+      "lane_id": "dependency-ci-provenance-final-signoff",
+      "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_dependency_ci_provenance_final_signoff CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -j 2 -p asupersync --test dependency_ci_provenance_final_signoff_contract -- --nocapture",
+      "package": "asupersync",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "dependency-ci-provenance-final-signoff"
+      ],
+      "covers": "The P1-P5 child tracker outcomes, content-pinned policy artifacts, reviewed full-SHA action inventory, owner-selected static-only JavaScript receipt, recorded fresh root/excluded-fuzz scanner receipt, fuzz native/Tokio quarantine, feature/target/host graph projection, direct-minimal pass plus preserved transitive blocker, generated AGENTS drift receipt, fail-closed overclaim mutations, deterministic replay commands, closeout checklist, docs markers, and proof manifest/status mapping stay aligned.",
+      "explicit_not_covered": "Executable JavaScript package-tree audit or lock closure, package-manager authority, action trustworthiness or workflow execution, undisclosed-vulnerability absence, legal compliance, publisher identity, fuzz-target behavior, full transitive-minimal support, numeric stable MSRV, universal vendoring reproducibility, dependency or feature cutover, file deletion, release readiness, broad workspace health, runtime correctness, performance, live RCH fleet availability, local Cargo fallback, or parent-epic closure by inference.",
+      "expected_signal": "all dependency_ci_provenance_final_signoff_contract tests pass with the STATIC_ONLY and KEEP/DEFER boundaries intact",
+      "source_paths": [
+        "artifacts/dependency_ci_provenance_final_signoff_v1.json",
+        "artifacts/github_actions_provenance_v1.json",
+        "artifacts/dependency_supply_chain_policy_v1.json",
+        "artifacts/downstream_consumer_proof_v1.json",
+        "artifacts/dependency_budget_contract_v1.json",
+        ".github/wasm_typescript_package_policy.json",
+        "docs/dependency_ci_provenance_final_signoff.md",
+        "tests/dependency_ci_provenance_final_signoff_contract.rs",
+        "artifacts/proof_lane_manifest_v1.json",
+        "artifacts/proof_status_snapshot_v1.json",
+        "tests/fixtures/proof_lane_manifest/manifest_projection.json",
+        "README.md",
+        "AGENTS.md"
+      ],
+      "common_unrelated_blockers": [
+        "a P1-P5 child is no longer closed with its accepted scoped outcome",
+        "a content-pinned child artifact or static package inventory drifts",
+        "the RustSec database receipt is missing or stale",
+        "excluded-fuzz native-edge or Tokio-quarantine metadata drifts",
+        "the direct-minimal pass or transitive-minimal blocker is overstated",
+        "the generated AGENTS projection drifts",
+        "manifest projection golden drift",
+        "proof-status marker drift"
+      ],
+      "escalation_notes": "Rerun scripts/ci/audit_dependencies.sh run before citing current scanner health. Preserve the owner-selected JavaScript STATIC_ONLY outcome; this lane cannot invoke a package manager or upgrade absent executable evidence to green. Preserve every child no-claim boundary and KEEP/DEFER whenever dependency-exit authority is absent.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "dependency-ci-provenance-final-signoff"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "fresh-scanner-pass",
+          "javascript-package-tree-health",
+          "package-manager-authority",
+          "action-trustworthiness",
+          "workflow-execution",
+          "dependency-removal-authority",
+          "dependency-cutover-authority",
+          "release-readiness",
+          "workspace-health",
+          "runtime-correctness",
+          "security",
+          "performance",
+          "fuzz-target-behavior",
+          "live-rch-fleet-availability"
+        ]
+      }
     }
   ],
   "guarantees": [
@@ -3726,6 +3792,13 @@
       "description": "The exact direct-edge allowset, synthesized-consumer package-ID graph ceilings, automatic downward ratchet, reviewed upward-exception path, safe negative fixtures, and scoped no-claim boundaries have a canonical verifier command.",
       "lane_ids": [
         "dependency-budget-contract"
+      ]
+    },
+    {
+      "guarantee_id": "dependency-ci-provenance-final-signoff",
+      "description": "The P1-P5 dependency CI/provenance child outcomes, content-pinned sources, static-only JavaScript decision, fresh Cargo scanner receipt, excluded-fuzz quarantine, downstream minimum-version boundary, generated-document drift receipt, safe overclaim fixtures, operator replay, proof mapping, and scoped KEEP/DEFER boundaries have a canonical verifier command.",
+      "lane_ids": [
+        "dependency-ci-provenance-final-signoff"
       ]
     }
   ],

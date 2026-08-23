@@ -1454,6 +1454,19 @@ requires both the root and separately tracked excluded-fuzz graphs to pass;
 consult the live runner receipt for scanner evidence. The Rust contract alone
 does not prove scanner execution, fuzz-target compilation or fuzz behavior.
 
+## Dependency CI/provenance final signoff
+
+The scoped terminal packet for the Phase-9 CI provenance campaign is
+[`artifacts/dependency_ci_provenance_final_signoff_v1.json`](artifacts/dependency_ci_provenance_final_signoff_v1.json),
+checked by the `dependency-ci-provenance-final-signoff` lane. It joins the
+full-SHA GitHub Actions inventory, the owner-selected static-only JavaScript
+package-tree receipt, fresh root/excluded-fuzz Cargo scanner evidence, the
+direct-minimal downstream consumer result, and the generated AGENTS dependency
+table contract. Its verdict is `PASS_SCOPED_KEEP_DEFER`, not release green. See
+[`docs/dependency_ci_provenance_final_signoff.md`](docs/dependency_ci_provenance_final_signoff.md)
+for replay and no-claim boundaries. The signoff grants no package-manager,
+dependency-cutover, file-deletion, or local-Cargo-fallback authority.
+
 ## Using Asupersync as a Dependency
 
 ### Cargo.toml

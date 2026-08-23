@@ -487,7 +487,8 @@
     "clean-overlay-proof-orchestration-contract",
     "proof-traffic-final-signoff",
     "dependency-supply-chain-policy-contract",
-    "dependency-budget-contract"
+    "dependency-budget-contract",
+    "dependency-ci-provenance-final-signoff"
   ],
   "lanes": [
     {
@@ -1821,6 +1822,33 @@
         "README.md",
         "AGENTS.md"
       ]
+    },
+    {
+      "lane_id": "dependency-ci-provenance-final-signoff",
+      "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
+      "package": "asupersync",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_dependency_ci_provenance_final_signoff CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -j 2 -p asupersync --test dependency_ci_provenance_final_signoff_contract -- --nocapture",
+      "guarantee_ids": [
+        "dependency-ci-provenance-final-signoff"
+      ],
+      "feature_flags": [],
+      "expected_signal": "all dependency_ci_provenance_final_signoff_contract tests pass with the STATIC_ONLY and KEEP/DEFER boundaries intact",
+      "source_paths": [
+        "artifacts/dependency_ci_provenance_final_signoff_v1.json",
+        "artifacts/github_actions_provenance_v1.json",
+        "artifacts/dependency_supply_chain_policy_v1.json",
+        "artifacts/downstream_consumer_proof_v1.json",
+        "artifacts/dependency_budget_contract_v1.json",
+        ".github/wasm_typescript_package_policy.json",
+        "docs/dependency_ci_provenance_final_signoff.md",
+        "tests/dependency_ci_provenance_final_signoff_contract.rs",
+        "artifacts/proof_lane_manifest_v1.json",
+        "artifacts/proof_status_snapshot_v1.json",
+        "tests/fixtures/proof_lane_manifest/manifest_projection.json",
+        "README.md",
+        "AGENTS.md"
+      ]
     }
   ],
   "guarantees": [
@@ -2200,6 +2228,12 @@
       "guarantee_id": "dependency-budget-contract",
       "lane_ids": [
         "dependency-budget-contract"
+      ]
+    },
+    {
+      "guarantee_id": "dependency-ci-provenance-final-signoff",
+      "lane_ids": [
+        "dependency-ci-provenance-final-signoff"
       ]
     }
   ]

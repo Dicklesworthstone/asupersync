@@ -1,0 +1,338 @@
+{
+  "schema_version": 1,
+  "artifact_id": "dependency-ci-provenance-final-signoff-v1",
+  "bead_id": "asupersync-mnotoo.3.7",
+  "program_id": "asupersync-mnotoo.3",
+  "input_head": "102a556d0f6f516125a3137676beeb70d4f00d27",
+  "generated_at_utc": "2026-08-23T12:35:48Z",
+  "verdict": {
+    "outcome": "PASS_SCOPED_KEEP_DEFER",
+    "all_required_children_closed": true,
+    "cargo_policy_scopes_green": true,
+    "javascript_package_tree_status": "STATIC_ONLY_EXECUTABLE_AUDIT_DEFERRED",
+    "dependency_exit_allowed": false,
+    "cutover_authority": false,
+    "package_manager_execution_authorized": false,
+    "file_deletion_authorized": false
+  },
+  "source_contracts": [
+    {
+      "path": "artifacts/github_actions_provenance_v1.json",
+      "sha256": "672dfd9850e494f6142f588a430c682fa61c20fb911136c5770d29cfce80485e",
+      "owner_bead_id": "asupersync-mnotoo.3.1"
+    },
+    {
+      "path": "artifacts/dependency_supply_chain_policy_v1.json",
+      "sha256": "16698fa4ba13ed60d6ac8cabe014646046b0c511902709ec9842f9d38ff5fd10",
+      "owner_bead_id": "asupersync-mnotoo.3.4"
+    },
+    {
+      "path": "artifacts/downstream_consumer_proof_v1.json",
+      "sha256": "b75a883ef6c479759a6a6dac64825f1cc3694b721528da157c157de45793ec8e",
+      "owner_bead_id": "asupersync-mnotoo.3.5"
+    },
+    {
+      "path": "artifacts/dependency_budget_contract_v1.json",
+      "sha256": "6991875691889a82937991677b189f8f7eb7300d8796aaa637ec9611fcec282c",
+      "owner_bead_id": "asupersync-mnotoo.3.6"
+    },
+    {
+      "path": ".github/wasm_typescript_package_policy.json",
+      "sha256": "2dd95933ba97c780691270dbf6858c5c25c4b40ce9e02fa74e2339aece65d764",
+      "owner_bead_id": "asupersync-mnotoo.3.3"
+    },
+    {
+      "path": "package.json",
+      "sha256": "5a1a2261bee0a3ee8ffd3f15c005515429b7ba0a68ca450f6854bf5229a65db1",
+      "owner_bead_id": "asupersync-mnotoo.3.3"
+    },
+    {
+      "path": "pnpm-workspace.yaml",
+      "sha256": "0fb360452b0231d114d0b0ad6cc76bb48fe528382f55827cf93739bf64ec79e1",
+      "owner_bead_id": "asupersync-mnotoo.3.3"
+    },
+    {
+      "path": ".npmrc",
+      "sha256": "a3b2649f2796c19a3e2f2da8ae30e2e713b76d9097e942ecfa18a1d9265dcb16",
+      "owner_bead_id": "asupersync-mnotoo.3.3"
+    }
+  ],
+  "child_outcomes": [
+    {
+      "bead_id": "asupersync-mnotoo.3.1",
+      "required_status": "closed",
+      "outcome": "PASS_STATIC_PROVENANCE",
+      "implementation_commits": [
+        "8fbb66b25e62ec2237d194320b3241456605ca79",
+        "5ba64923cffa193d093d0785b5174774e612a7cb"
+      ],
+      "tracker_close_reason": "Implementation and current focused proof are complete: every inventoried GitHub Actions reference is immutably pinned with reviewed provenance/update policy and fail-closed contract coverage.",
+      "evidence_surface": "github_actions_provenance"
+    },
+    {
+      "bead_id": "asupersync-mnotoo.3.2",
+      "required_status": "closed",
+      "outcome": "OWNER_SELECTED_STATIC_ONLY",
+      "implementation_commits": [],
+      "tracker_close_reason": "Owner chose C: static inventory only under the Cargo-only project policy.",
+      "evidence_surface": "tracker_owner_decision"
+    },
+    {
+      "bead_id": "asupersync-mnotoo.3.3",
+      "required_status": "closed",
+      "outcome": "PASS_STATIC_EXECUTABLE_AUDIT_DEFERRED",
+      "implementation_commits": [],
+      "tracker_close_reason": "STATIC_ONLY terminal receipt: no committed JS lockfile and no package-manager execution authority; executable audit remains with the Browser Edition release process.",
+      "evidence_surface": "javascript_package_tree_static_receipt"
+    },
+    {
+      "bead_id": "asupersync-mnotoo.3.4",
+      "required_status": "closed",
+      "outcome": "PASS_ROOT_AND_EXCLUDED_FUZZ_POLICY",
+      "implementation_commits": [
+        "7aa7b18deafc9320db0dc288b37ec14ad99b00c6"
+      ],
+      "tracker_close_reason": "Excluded fuzz Cargo trust-domain audit, enforcement, tracked lock, and terminal proof are complete.",
+      "evidence_surface": "dependency_supply_chain_policy"
+    },
+    {
+      "bead_id": "asupersync-mnotoo.3.5",
+      "required_status": "closed",
+      "outcome": "PASS_DIRECT_MINIMAL_TRANSITIVE_MINIMAL_BLOCKED",
+      "implementation_commits": [
+        "c691fb07769f6ea0c40524a0d08e671772208b40"
+      ],
+      "tracker_close_reason": "Implemented scoped downstream direct-minimal consumer gate with precise full-transitive blocker and lock/vendor guidance.",
+      "evidence_surface": "downstream_minimum_version_consumer"
+    },
+    {
+      "bead_id": "asupersync-mnotoo.3.6",
+      "required_status": "closed",
+      "outcome": "PASS_GENERATED_DOCUMENT_DRIFT_CONTRACT",
+      "implementation_commits": [
+        "13d6363659a4ffc860344ac96526656299c146f1"
+      ],
+      "tracker_close_reason": "Implemented, remotely verified, committed, and pushed",
+      "evidence_surface": "generated_agents_dependency_table"
+    }
+  ],
+  "github_actions_provenance": {
+    "workflow_file_count": 12,
+    "action_reference_count": 182,
+    "distinct_action_repository_count": 13,
+    "exception_count": 0,
+    "revision_format": "lowercase-full-40-hex-commit-sha",
+    "version_comment_required": true,
+    "reviewed_date_utc": "2026-08-05",
+    "execution_status": "NOT_EXECUTION_EVIDENCE"
+  },
+  "javascript_package_tree_decision": {
+    "owner_decision_bead_id": "asupersync-mnotoo.3.2",
+    "receipt_bead_id": "asupersync-mnotoo.3.3",
+    "decision": "STATIC_ONLY",
+    "package_manager_execution_authorized": false,
+    "package_manager_invoked_by_signoff": false,
+    "external_owner": "Browser Edition package and release process",
+    "tracked_package_manifest_count": 15,
+    "tracked_package_manifests": [
+      "package.json",
+      "packages/browser-core/package.json",
+      "packages/browser/package.json",
+      "packages/next/package.json",
+      "packages/react/package.json",
+      "tests/fixtures/browser-native-message-stream-consumer/package.json",
+      "tests/fixtures/dedicated-worker-consumer/package.json",
+      "tests/fixtures/next-turbopack-consumer/package.json",
+      "tests/fixtures/react-consumer/package.json",
+      "tests/fixtures/rust-browser-consumer/package.json",
+      "tests/fixtures/rust-browser-consumer/pkg/package.json",
+      "tests/fixtures/service-worker-broker-consumer/package.json",
+      "tests/fixtures/shared-worker-consumer/package.json",
+      "tests/fixtures/vite-vanilla-consumer/package.json",
+      "tests/fixtures/webpack-consumer/package.json"
+    ],
+    "tracked_lockfiles": [],
+    "configured_package_manager": "pnpm@10.34.3",
+    "node_engine": ">=18.12.0",
+    "pnpm_engine": ">=10.34.3",
+    "workspace_admission": [
+      "packages/*"
+    ],
+    "lifecycle_policy": {
+      "enable_pre_post_scripts": true,
+      "strict_peer_dependencies": false,
+      "only_built_dependencies": [
+        "sharp"
+      ]
+    },
+    "known_native_or_prebuilt_risks": [
+      "sharp/libvips",
+      "Next SWC"
+    ],
+    "unknowns": [
+      "advisory status",
+      "registry resolution",
+      "download integrity",
+      "lifecycle behavior",
+      "native binary safety",
+      "duplicate or unused packages",
+      "fixture dependency closures",
+      "reproducibility"
+    ]
+  },
+  "fresh_cargo_scanner_receipt": {
+    "command": "scripts/ci/audit_dependencies.sh run",
+    "observed_at_utc": "2026-08-23T12:35:48Z",
+    "outcome": "PASS",
+    "cargo_deny_version": "0.19.4",
+    "cargo_audit_version": "0.22.2",
+    "advisory_database": {
+      "url": "https://github.com/RustSec/advisory-db",
+      "revision": "bf5c0d245a92671908518d7e765914d437954ed6",
+      "commit_timestamp_utc": "2026-08-21T08:28:40+02:00",
+      "age_seconds": 194825,
+      "maximum_age_seconds": 604800,
+      "fetched": true,
+      "fresh": true
+    },
+    "root_workspace": {
+      "status": "pass",
+      "cargo_deny_exit": 0,
+      "cargo_audit_exit": 0,
+      "duplicate_expansion_count": 0
+    },
+    "excluded_fuzz_workspace": {
+      "status": "pass",
+      "cargo_deny_exit": 0,
+      "cargo_audit_exit": 0,
+      "duplicate_expansion_count": 0,
+      "tokio_quarantine": "expected_excluded_fuzz_only",
+      "native_build_edges": [
+        "libfuzzer-sys 0.4.13",
+        "cc 1.4.4"
+      ]
+    }
+  },
+  "cargo_graph_matrix": {
+    "feature_profiles": [
+      "cli",
+      "compression",
+      "default",
+      "fuzz-quarantine",
+      "io-uring",
+      "kafka",
+      "loom-tests",
+      "metrics",
+      "minimal",
+      "sqlite",
+      "tls",
+      "trace-compression"
+    ],
+    "target_triples": [
+      "aarch64-apple-darwin",
+      "wasm32-unknown-unknown",
+      "x86_64-pc-windows-msvc",
+      "x86_64-unknown-linux-gnu"
+    ],
+    "host_triples": [
+      "x86_64-unknown-linux-gnu"
+    ],
+    "consumer_edge_kinds": [
+      "normal",
+      "target-normal"
+    ],
+    "root_manifest_sha256": "0f02e4fefedf5e9013054df794ece6f8fb259134fdbd95376e61d486c043fde3",
+    "root_lock_sha256": "513cfba8f8671e69aab32317e042bd00737b9bfb30e2234012d6605f320f7a6a",
+    "excluded_fuzz_manifest_sha256": "e27d7e616b079f2102a2d179907709a7e484fad4f77ea13ccb8a9e9ab56b9385",
+    "excluded_fuzz_lock_sha256": "20759c1751928147250b1b385fa78dcdb4e7f8d7f4b61e73222982b71fe838fe"
+  },
+  "downstream_minimum_version_receipt": {
+    "toolchain": "nightly-2026-07-05",
+    "resolution_policy": "direct-minimal-versions",
+    "tracked_package_count": 214,
+    "direct_minimal_status": "pass",
+    "direct_minimal_rch_job_id": 29988810699833377,
+    "direct_minimal_rch_worker": "ovh-a",
+    "full_transitive_minimal_status": "blocked_upstream_transitive_range",
+    "full_transitive_minimal_rch_job_id": 29988810699833376,
+    "blocker_package": "curve25519-dalek 4.0.0",
+    "blocker_path": "asupersync -> nkeys 0.4.5 -> ed25519-dalek 2.0.0 -> curve25519-dalek 4.0.0",
+    "blocker_diagnostic": "E0635 unknown feature stdsimd",
+    "numeric_stable_msrv_claimed": false,
+    "universal_vendor_reproducibility_claimed": false
+  },
+  "generated_dependency_documentation_receipt": {
+    "status": "pass",
+    "budget_allowed_direct_edge_count": 106,
+    "generated_row_count": 14,
+    "displayed_dependency_name_count": 15,
+    "begin_marker": "<!-- BEGIN GENERATED AGENTS KEY DEPENDENCIES -->",
+    "end_marker": "<!-- END GENERATED AGENTS KEY DEPENDENCIES -->",
+    "check_mode": "read-only",
+    "automatic_local_rewrite": false,
+    "focused_rch_job_id": 29988810699833392
+  },
+  "canonical_commands": {
+    "live_cargo_scanners": "scripts/ci/audit_dependencies.sh run",
+    "github_actions_contract": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_github_actions_provenance CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -j 2 -p asupersync --test github_actions_provenance_contract -- --nocapture",
+    "supply_chain_contract": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_dependency_supply_chain_policy CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -j 2 -p asupersync --test dependency_supply_chain_policy_contract -- --nocapture",
+    "downstream_consumer_contract": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_downstream_consumer_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -j 2 -p asupersync --test downstream_consumer_proof_contract -- --nocapture",
+    "generated_document_contract": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_dependency_budget_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -j 2 -p asupersync --features dependency-ledger --test dependency_budget_contract -- --nocapture",
+    "focused_signoff": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_dependency_ci_provenance_final_signoff CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -j 2 -p asupersync --test dependency_ci_provenance_final_signoff_contract -- --nocapture"
+  },
+  "deterministic_replay_order": [
+    "scripts/ci/audit_dependencies.sh run",
+    "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_dependency_ci_provenance_final_signoff CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -j 2 -p asupersync --test dependency_ci_provenance_final_signoff_contract -- --nocapture"
+  ],
+  "negative_fixture_catalog": [
+    {
+      "fixture_id": "child-not-closed",
+      "expected_error": "child-not-closed"
+    },
+    {
+      "fixture_id": "javascript-execution-authorized",
+      "expected_error": "unauthorized-package-manager"
+    },
+    {
+      "fixture_id": "stale-advisory-database",
+      "expected_error": "stale-advisory-database"
+    },
+    {
+      "fixture_id": "excluded-fuzz-tokio-quarantine-removed",
+      "expected_error": "fuzz-quarantine-drift"
+    },
+    {
+      "fixture_id": "transitive-minimal-blocker-erased",
+      "expected_error": "transitive-minimal-overclaim"
+    },
+    {
+      "fixture_id": "generated-document-row-drift",
+      "expected_error": "generated-document-drift"
+    },
+    {
+      "fixture_id": "dependency-exit-authorized",
+      "expected_error": "authority-overclaim"
+    },
+    {
+      "fixture_id": "source-contract-hash-drift",
+      "expected_error": "source-contract-drift"
+    }
+  ],
+  "operator_closeout_checklist": [
+    "Confirm child beads asupersync-mnotoo.3.1 through asupersync-mnotoo.3.6 are closed with their original scoped outcomes.",
+    "Run the pinned root and excluded-fuzz Cargo scanners and record the exact RustSec revision and freshness fields.",
+    "Do not invoke a JavaScript package manager; preserve the owner-selected STATIC_ONLY receipt and external Browser Edition ownership.",
+    "Preserve the direct-minimal pass and full-transitive-minimal blocker as separate outcomes.",
+    "Run the focused remote-required signoff contract without a local Cargo fallback.",
+    "Review the final artifact, proof-status row, no-claim boundaries, and tracker transition before closing the bead."
+  ],
+  "no_claim_boundaries": [
+    "The scoped aggregate proves that the named P1-P5 policy, static-receipt, Cargo scanner, downstream-consumer, and generated-document surfaces agree at the recorded inputs; it is not a release-readiness or broad workspace-health result.",
+    "The JavaScript package tree remains STATIC_ONLY with no executable audit, dependency-closure, advisory, integrity, lifecycle, native-binary, or reproducibility claim.",
+    "Full-SHA GitHub Action selection prevents mutable-ref drift but does not prove action trustworthiness, maintainer identity, least privilege, runner isolation, workflow success, or artifact integrity.",
+    "Fresh Cargo scanner passes do not prove the absence of undisclosed vulnerabilities, legal compliance, publisher identity, fuzz-target behavior, runtime correctness, or performance.",
+    "Direct-minimal consumer compilation does not prove full transitive-minimal support, a numeric stable MSRV, universal vendoring reproducibility, or every downstream feature/platform combination.",
+    "The generated AGENTS table is a curated 14-row summary rather than the complete direct-edge allowset, and no automatic local rewrite path is authorized.",
+    "This signoff does not authorize dependency removal, dependency or feature cutover, package-manager execution, file deletion, local Cargo fallback, or closure of the parent epic by inference."
+  ]
+}

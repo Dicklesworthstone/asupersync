@@ -54,10 +54,10 @@
         "mode": "proof-console-report"
       },
       "summary": {
-        "claim_count": 36,
-        "lane_count": 63,
-        "green_claim_count": 14,
-        "yellow_claim_count": 22,
+        "claim_count": 37,
+        "lane_count": 64,
+        "green_claim_count": 16,
+        "yellow_claim_count": 21,
         "red_claim_count": 0,
         "stale_blocker_count": 0,
         "unsupported_broad_claim_count": 0,
@@ -206,11 +206,19 @@
     },
     {
       "lane_id": "dependency-budget-contract",
-      "expected_signal": "dependency_budget_contract tests pass",
+      "expected_signal": "all dependency_budget_contract tests pass, including Cargo-built AGENTS render/check and fail-closed mutation coverage",
       "guarantee_ids": [
         "dependency-budget-contract"
       ],
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_dependency_budget_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -j 2 -p asupersync --features dependency-ledger --test dependency_budget_contract -- --nocapture"
+    },
+    {
+      "lane_id": "dependency-ci-provenance-final-signoff",
+      "expected_signal": "all dependency_ci_provenance_final_signoff_contract tests pass with the STATIC_ONLY and KEEP/DEFER boundaries intact",
+      "guarantee_ids": [
+        "dependency-ci-provenance-final-signoff"
+      ],
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_dependency_ci_provenance_final_signoff CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -j 2 -p asupersync --test dependency_ci_provenance_final_signoff_contract -- --nocapture"
     },
     {
       "lane_id": "dependency-supply-chain-policy-contract",
@@ -575,10 +583,10 @@
   ],
   "summaries": {
     "proof_console": {
-      "claim_count": 36,
-      "lane_count": 63,
-      "green_claim_count": 14,
-      "yellow_claim_count": 22,
+      "claim_count": 37,
+      "lane_count": 64,
+      "green_claim_count": 16,
+      "yellow_claim_count": 21,
       "red_claim_count": 0,
       "stale_blocker_count": 0,
       "unsupported_broad_claim_count": 0,
@@ -625,8 +633,8 @@
   "summary": {
     "source_artifact_count": 6,
     "missing_source_artifact_count": 0,
-    "proof_lane_count": 63,
-    "proof_command_count": 63,
+    "proof_lane_count": 64,
+    "proof_command_count": 64,
     "rch_outcome_count": 0,
     "rch_log_count": 0,
     "rch_outcome_provenance_failure_count": 0

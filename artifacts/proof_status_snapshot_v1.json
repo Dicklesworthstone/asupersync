@@ -97,7 +97,8 @@
     "clean-overlay proof orchestration contract",
     "proof traffic final signoff",
     "dependency supply-chain policy contract",
-    "dependency budget contract"
+    "dependency budget contract",
+    "dependency CI provenance final signoff"
   ],
   "claim_categories": [
     {
@@ -1183,6 +1184,33 @@
       ],
       "blocked_frontier": null,
       "notes": "Fresh focused RCH pass on 2026-08-23: job 29988810699833392 on ovh-a, remote exit 0 in 992 ms execution / 19096 ms total, 11 passed and 0 failed/ignored/measured/filtered. The exact -j 2 lane proves the direct-edge allowset, frozen ledger fingerprint, synthesized-consumer package-ID ceilings, curated 14-row AGENTS projection metadata and joins, deterministic renderer, read-only marker checker, fail-closed missing/extra/duplicate/stale/reordered/unknown-field/marker/CLI fixtures, reviewed-exception schema, and proof/docs mapping. It does not claim a complete display of all allowed edges, automatic local AGENTS rewriting, dependency removal or cutover authority, compilation beyond the Cargo-built contract surfaces, runtime correctness, security, performance, interoperability, release readiness, broad workspace health, workspace dev/build graph health, excluded fuzz health, or live RCH fleet availability."
+    },
+    {
+      "claim_id": "dependency-ci-provenance-final-signoff",
+      "category": "dependency CI provenance final signoff",
+      "status": "green",
+      "proof_evidence_status": "fresh-rch-pass",
+      "doc_claim_markers": {
+        "README.md": [
+          "Dependency CI/provenance final signoff",
+          "dependency-ci-provenance-final-signoff"
+        ],
+        "AGENTS.md": [
+          "dependency CI/provenance final signoff",
+          "dependency-ci-provenance-final-signoff"
+        ]
+      },
+      "manifest_guarantee_ids": [
+        "dependency-ci-provenance-final-signoff"
+      ],
+      "manifest_lane_ids": [
+        "dependency-ci-provenance-final-signoff"
+      ],
+      "proof_commands": [
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_dependency_ci_provenance_final_signoff CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -j 2 -p asupersync --test dependency_ci_provenance_final_signoff_contract -- --nocapture"
+      ],
+      "blocked_frontier": null,
+      "notes": "Fresh focused RCH pass on 2026-08-23: job 29988810699833397 on ovh-a, remote exit 0 in 1082 ms execution / 19109 ms total, 6 passed and 0 failed/ignored/measured/filtered. Cite this green row only for the scoped P1-P5 tracker/artifact joins, static-only JavaScript decision, recorded 2026-08-23 RustSec bf5c0d245a92671908518d7e765914d437954ed6 scanner receipt, excluded-fuzz quarantine, direct-minimal pass plus preserved transitive blocker, generated AGENTS drift receipt, eight fail-closed overclaim fixtures, deterministic replay, proof mapping, and KEEP/DEFER boundaries. It does not prove executable JavaScript package-tree health, action trustworthiness or workflow execution, undisclosed-vulnerability absence, legal compliance, publisher identity, fuzz behavior, full transitive-minimal support, release readiness, broad workspace health, runtime correctness, performance, live RCH fleet availability, local Cargo fallback approval, file-deletion permission, dependency cutover, or parent-epic closure."
     }
   ],
   "proof_reuse_status_rows": [
