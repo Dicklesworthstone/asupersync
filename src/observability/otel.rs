@@ -269,6 +269,19 @@ fn fixed_decimal_digit_class() -> Result<retained_regex_syntax::hir::ClassUnicod
     }
 }
 
+fn fixed_unicode_space_class() -> Result<retained_regex_syntax::hir::ClassUnicode, FixedPiiScanError>
+{
+    use retained_regex_syntax::hir::{Class, HirKind};
+
+    let hir = retained_regex_syntax::Parser::new()
+        .parse(r"\s")
+        .map_err(|_| FixedPiiScanError::UnicodeTableUnavailable)?;
+    match hir.kind() {
+        HirKind::Class(Class::Unicode(class)) => Ok(class.clone()),
+        _ => Err(FixedPiiScanError::UnicodeTableUnavailable),
+    }
+}
+
 fn fixed_email_local_char(
     letters: &retained_regex_syntax::hir::ClassUnicode,
     value: char,
@@ -609,6 +622,177 @@ fn scan_fixed_card_candidates(
     })
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FixedPhoneCountry {
+    PlusOne,
+    One,
+    None,
+}
+
+fn fixed_take_digits(
+    input: &str,
+    mut cursor: usize,
+    count: usize,
+    digits: &retained_regex_syntax::hir::ClassUnicode,
+    work: &mut FixedPiiWorkBudget,
+) -> Result<Option<usize>, FixedPiiScanError> {
+    for _ in 0..count {
+        let Some(value) = input[cursor..].chars().next() else {
+            return Ok(None);
+        };
+        if !fixed_class_contains(digits, value, work)? {
+            return Ok(None);
+        }
+        cursor = cursor
+            .checked_add(value.len_utf8())
+            .ok_or(FixedPiiScanError::WorkLimit)?;
+    }
+    Ok(Some(cursor))
+}
+
+fn fixed_take_phone_separator(
+    input: &str,
+    cursor: usize,
+    spaces: &retained_regex_syntax::hir::ClassUnicode,
+    work: &mut FixedPiiWorkBudget,
+) -> Result<usize, FixedPiiScanError> {
+    let Some(value) = input[cursor..].chars().next() else {
+        return Ok(cursor);
+    };
+    if fixed_class_contains(spaces, value, work)? || matches!(value, '.' | '-') {
+        cursor
+            .checked_add(value.len_utf8())
+            .ok_or(FixedPiiScanError::WorkLimit)
+    } else {
+        Ok(cursor)
+    }
+}
+
+fn fixed_phone_variant_at(
+    input: &str,
+    start: usize,
+    country: FixedPhoneCountry,
+    digits: &retained_regex_syntax::hir::ClassUnicode,
+    spaces: &retained_regex_syntax::hir::ClassUnicode,
+    work: &mut FixedPiiWorkBudget,
+) -> Result<Option<usize>, FixedPiiScanError> {
+    let mut cursor = start;
+    match country {
+        FixedPhoneCountry::PlusOne => {
+            work.charge(1)?;
+            if !input[cursor..].starts_with('+') {
+                return Ok(None);
+            }
+            cursor = cursor.checked_add(1).ok_or(FixedPiiScanError::WorkLimit)?;
+            work.charge(1)?;
+            if !input[cursor..].starts_with('1') {
+                return Ok(None);
+            }
+            cursor = cursor.checked_add(1).ok_or(FixedPiiScanError::WorkLimit)?;
+            cursor = fixed_take_phone_separator(input, cursor, spaces, work)?;
+        }
+        FixedPhoneCountry::One => {
+            work.charge(1)?;
+            if !input[cursor..].starts_with('1') {
+                return Ok(None);
+            }
+            cursor = cursor.checked_add(1).ok_or(FixedPiiScanError::WorkLimit)?;
+            cursor = fixed_take_phone_separator(input, cursor, spaces, work)?;
+        }
+        FixedPhoneCountry::None => {}
+    }
+
+    work.charge(1)?;
+    if input[cursor..].starts_with('(') {
+        cursor = cursor.checked_add(1).ok_or(FixedPiiScanError::WorkLimit)?;
+    }
+    let Some(next) = fixed_take_digits(input, cursor, 3, digits, work)? else {
+        return Ok(None);
+    };
+    cursor = next;
+    work.charge(1)?;
+    if input[cursor..].starts_with(')') {
+        cursor = cursor.checked_add(1).ok_or(FixedPiiScanError::WorkLimit)?;
+    }
+    cursor = fixed_take_phone_separator(input, cursor, spaces, work)?;
+    let Some(next) = fixed_take_digits(input, cursor, 3, digits, work)? else {
+        return Ok(None);
+    };
+    cursor = fixed_take_phone_separator(input, next, spaces, work)?;
+    let Some(end) = fixed_take_digits(input, cursor, 4, digits, work)? else {
+        return Ok(None);
+    };
+    if !fixed_unicode_word_boundary(input, end, work)? {
+        return Ok(None);
+    }
+    Ok(Some(end))
+}
+
+fn fixed_phone_match_at(
+    input: &str,
+    start: usize,
+    digits: &retained_regex_syntax::hir::ClassUnicode,
+    spaces: &retained_regex_syntax::hir::ClassUnicode,
+    work: &mut FixedPiiWorkBudget,
+) -> Result<Option<FixedPiiSpan>, FixedPiiScanError> {
+    let mut best_end = None;
+    for country in [
+        FixedPhoneCountry::PlusOne,
+        FixedPhoneCountry::One,
+        FixedPhoneCountry::None,
+    ] {
+        if let Some(end) = fixed_phone_variant_at(input, start, country, digits, spaces, work)?
+            && best_end.map_or(true, |current| end > current)
+        {
+            best_end = Some(end);
+        }
+    }
+    Ok(best_end.map(|end_byte| FixedPiiSpan {
+        start_byte: start,
+        end_byte,
+    }))
+}
+
+fn scan_fixed_phones(
+    input: &str,
+    limits: FixedPiiScanLimits,
+    stop_after_first: bool,
+) -> Result<FixedPiiScan, FixedPiiScanError> {
+    let mut work = FixedPiiWorkBudget::new(input, limits)?;
+    let digits = fixed_decimal_digit_class()?;
+    let spaces = fixed_unicode_space_class()?;
+    let mut matches = Vec::new();
+    let mut cursor = 0_usize;
+
+    while cursor < input.len() {
+        let value = input[cursor..]
+            .chars()
+            .next()
+            .ok_or(FixedPiiScanError::WorkLimit)?;
+        let is_digit = fixed_class_contains(&digits, value, &mut work)?;
+        if (is_digit || matches!(value, '+' | '('))
+            && fixed_unicode_word_boundary(input, cursor, &mut work)?
+            && let Some(span) = fixed_phone_match_at(input, cursor, &digits, &spaces, &mut work)?
+        {
+            let next_cursor = span.end_byte;
+            push_fixed_pii_span(&mut matches, span, limits)?;
+            if stop_after_first {
+                break;
+            }
+            cursor = next_cursor;
+            continue;
+        }
+        cursor = cursor
+            .checked_add(value.len_utf8())
+            .ok_or(FixedPiiScanError::WorkLimit)?;
+    }
+
+    Ok(FixedPiiScan {
+        matches,
+        work_units: work.used,
+    })
+}
+
 impl PrivacyConfig {
     /// Create a new privacy configuration with defaults.
     #[must_use]
@@ -827,11 +1011,16 @@ impl PrivacyConfig {
             return "[CARD_REDACTED]".to_string();
         }
 
-        let phone_re = PHONE_RE.get_or_init(|| {
-            Regex::new(r"(?x)\b(?:\+?1[\s.-]?)?(?:\(?\d{3}\)?[\s.-]?)\d{3}[\s.-]?\d{4}\b")
-                .expect("built-in phone regex must compile")
-        });
-        if phone_re.is_match(value) {
+        let phone_re = || {
+            PHONE_RE.get_or_init(|| {
+                Regex::new(r"(?x)\b(?:\+?1[\s.-]?)?(?:\(?\d{3}\)?[\s.-]?)\d{3}[\s.-]?\d{4}\b")
+                    .expect("built-in phone regex must compile")
+            })
+        };
+        let phone_match = scan_fixed_phones(value, FixedPiiScanLimits::default(), true)
+            .map(|scan| scan.is_match())
+            .unwrap_or_else(|_| phone_re().is_match(value));
+        if phone_match {
             return "[PHONE_REDACTED]".to_string();
         }
 
@@ -9250,6 +9439,187 @@ mod tests {
     }
 
     #[test]
+    fn fixed_phone_scanner_matches_every_r2_1_span_and_redaction() {
+        let artifact: serde_json::Value = serde_json::from_str(include_str!(
+            "../../artifacts/regex_built_in_detector_corpus_v1.json"
+        ))
+        .expect("R2.1 detector corpus must parse");
+        let phone_re =
+            Regex::new(r"(?x)\b(?:\+?1[\s.-]?)?(?:\(?\d{3}\)?[\s.-]?)\d{3}[\s.-]?\d{4}\b")
+                .expect("frozen phone regex");
+
+        for row in artifact["detector_vectors"]
+            .as_array()
+            .expect("detector_vectors array")
+        {
+            if row["detector_id"] != "RGX-BUILTIN-PHONE" {
+                continue;
+            }
+            let case_id = row["case_id"].as_str().expect("case_id");
+            let input = materialize_fixed_scanner_input(row);
+            let expected: Vec<(usize, usize)> = row["expected_matches"]
+                .as_array()
+                .expect("expected_matches array")
+                .iter()
+                .map(|span| {
+                    let start = span["start_byte"]
+                        .as_u64()
+                        .and_then(|value| usize::try_from(value).ok())
+                        .expect("start_byte fits usize");
+                    let end = span["end_byte"]
+                        .as_u64()
+                        .and_then(|value| usize::try_from(value).ok())
+                        .expect("end_byte fits usize");
+                    (start, end)
+                })
+                .collect();
+            let scan = scan_fixed_phones(&input, FixedPiiScanLimits::default(), false)
+                .unwrap_or_else(|error| panic!("{case_id} scanner failed: {error:?}"));
+            let incumbent: Vec<(usize, usize)> = phone_re
+                .find_iter(&input)
+                .map(|matched| (matched.start(), matched.end()))
+                .collect();
+            let expected_accepts = row["expected_detector_accepts"]
+                .as_bool()
+                .expect("expected_detector_accepts");
+
+            assert_eq!(fixed_span_pairs(&scan), expected, "{case_id} corpus");
+            assert_eq!(fixed_span_pairs(&scan), incumbent, "{case_id} incumbent");
+            assert_eq!(scan.is_match(), expected_accepts, "{case_id} detector");
+            assert_eq!(
+                PrivacyConfig::new()
+                    .with_auto_pii_detection()
+                    .redact_pii("contact.phone", &input),
+                if expected_accepts {
+                    "[PHONE_REDACTED]".to_owned()
+                } else {
+                    input.clone()
+                },
+                "{case_id} whole-value redaction"
+            );
+        }
+    }
+
+    #[test]
+    fn fixed_phone_generated_shapes_boundaries_and_separators_match_incumbent() {
+        let phone_re =
+            Regex::new(r"(?x)\b(?:\+?1[\s.-]?)?(?:\(?\d{3}\)?[\s.-]?)\d{3}[\s.-]?\d{4}\b")
+                .expect("frozen phone regex");
+
+        for prefix in ["", "🙂", "é", "x", "x+"] {
+            for country in ["", "1", "1-", "1 ", "1.", "+1", "+1-", "+1 ", "+1.", "2"] {
+                for area in ["415", "(415)", "(415", "415)"] {
+                    for separator in ["", " ", "-", ".", "\u{a0}"] {
+                        for suffix in ["", "🙂", "é", "x"] {
+                            let input = format!(
+                                "{prefix}{country}{area}{separator}555{separator}2671{suffix}"
+                            );
+                            let scan =
+                                scan_fixed_phones(&input, FixedPiiScanLimits::default(), false)
+                                    .expect("generated phone scan");
+                            let incumbent: Vec<(usize, usize)> = phone_re
+                                .find_iter(&input)
+                                .map(|matched| (matched.start(), matched.end()))
+                                .collect();
+                            assert_eq!(
+                                fixed_span_pairs(&scan),
+                                incumbent,
+                                "generated phone {input:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fixed_phone_dispatch_preserves_every_r2_1_pipeline_outcome() {
+        let artifact: serde_json::Value = serde_json::from_str(include_str!(
+            "../../artifacts/regex_built_in_detector_corpus_v1.json"
+        ))
+        .expect("R2.1 detector corpus must parse");
+
+        for row in artifact["pipeline_vectors"]
+            .as_array()
+            .expect("pipeline_vectors array")
+        {
+            let case_id = row["case_id"].as_str().expect("case_id");
+            let mut config = PrivacyConfig::new();
+            if let Some(pattern) = row["custom_pattern"].as_str() {
+                config = config
+                    .try_with_pii_pattern(pattern)
+                    .unwrap_or_else(|error| panic!("{case_id} custom pattern: {error}"));
+            }
+            if row["auto_pii_detection"]
+                .as_bool()
+                .expect("auto_pii_detection")
+            {
+                config = config.with_auto_pii_detection();
+            }
+            let input = materialize_fixed_scanner_input(row);
+            assert_eq!(
+                config.redact_pii("pipeline.value", &input),
+                row["expected_output"].as_str().expect("expected_output"),
+                "{case_id} exact detector order and custom dispatch"
+            );
+        }
+    }
+
+    #[test]
+    fn fixed_phone_scanner_bounds_work_output_and_falls_back() {
+        let input = "4155552671/2125550100 ".repeat(4_096);
+        let scan = scan_fixed_phones(&input, FixedPiiScanLimits::default(), false)
+            .expect("bounded large phone scan");
+        assert_eq!(scan.matches.len(), 8_192);
+        assert!(scan.work_units <= FIXED_PII_MAX_WORK_UNITS);
+
+        let input_limited = FixedPiiScanLimits {
+            max_input_bytes: 5,
+            ..FixedPiiScanLimits::default()
+        };
+        assert_eq!(
+            scan_fixed_phones("4155552671", input_limited, false),
+            Err(FixedPiiScanError::InputLimit)
+        );
+        let output_limited = FixedPiiScanLimits {
+            max_matches: 1,
+            ..FixedPiiScanLimits::default()
+        };
+        assert_eq!(
+            scan_fixed_phones("4155552671/2125550100", output_limited, false),
+            Err(FixedPiiScanError::OutputLimit)
+        );
+        assert_eq!(
+            fixed_span_pairs(
+                &scan_fixed_phones("4155552671/2125550100", output_limited, true)
+                    .expect("first-match phone mode stays within output limit")
+            ),
+            vec![(0, 10)]
+        );
+        let work_limited = FixedPiiScanLimits {
+            max_work_units: 0,
+            ..FixedPiiScanLimits::default()
+        };
+        assert_eq!(
+            scan_fixed_phones("4155552671", work_limited, false),
+            Err(FixedPiiScanError::WorkLimit)
+        );
+
+        let oversized = format!(
+            "4155552671 {}",
+            "x".repeat(FIXED_PII_MAX_INPUT_BYTES.saturating_add(1))
+        );
+        assert_eq!(
+            PrivacyConfig::new()
+                .with_auto_pii_detection()
+                .redact_pii("oversized.phone", &oversized),
+            "[PHONE_REDACTED]",
+            "the phone scanner input ceiling must fall through to the incumbent"
+        );
+    }
+
+    #[test]
     fn fixed_email_and_ssn_scanners_bound_large_input_work_and_output() {
         let input = "a@b.co/123-45-6789 ".repeat(4_096);
         let emails = scan_fixed_emails(&input, FixedPiiScanLimits::default(), false)
@@ -9307,7 +9677,7 @@ mod tests {
     }
 
     #[test]
-    fn fixed_email_and_ssn_and_fixed_card_custom_patterns_never_use_builtin_tokens() {
+    fn fixed_email_and_ssn_and_fixed_card_and_fixed_phone_custom_patterns_use_incumbent() {
         let config = PrivacyConfig::new()
             .try_with_pii_pattern(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,63}\b")
             .expect("built-in-shaped custom pattern compiles")
@@ -9320,6 +9690,26 @@ mod tests {
             .with_auto_pii_detection();
         assert_eq!(
             config.redact_pii("payment.card", "4111111111111111"),
+            "[REDACTED]"
+        );
+
+        let config = PrivacyConfig::new()
+            .try_with_pii_pattern(
+                r"(?x)\b(?:\+?1[\s.-]?)?(?:\(?\d{3}\)?[\s.-]?)\d{3}[\s.-]?\d{4}\b",
+            )
+            .expect("built-in-shaped custom phone pattern compiles")
+            .with_auto_pii_detection();
+        assert_eq!(
+            config.redact_pii("contact.phone", "4155552671"),
+            "[REDACTED]"
+        );
+
+        let config = PrivacyConfig::new()
+            .try_with_pii_pattern(r"\b\d{3}[.-]\d{3}[.-]\d{4}\b")
+            .expect("drifted custom phone pattern compiles")
+            .with_auto_pii_detection();
+        assert_eq!(
+            config.redact_pii("contact.phone", "415-555-2671"),
             "[REDACTED]"
         );
     }
