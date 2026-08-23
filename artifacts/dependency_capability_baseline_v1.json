@@ -2462,9 +2462,9 @@
     "audit_id": "CAP-TOKEN-SLAB-STATIC-AUDIT-V1",
     "bead_id": "asupersync-d24mms.8",
     "capability_id": "CAP-TOKEN-SLAB",
-    "observed_at_revision": "341ac3656a98e8b07749207d2996914b23042fcf",
-    "audit_state": "STATIC_SOURCE_PINNED_NOT_EXECUTED",
-    "execution_state": "NO_REPLACEMENT_OR_CONSUMER_MATRIX_EXECUTED",
+    "observed_at_revision": "3b7cc05c8e848017419312b77f02c9b1129598d5",
+    "audit_state": "TERMINAL_KEEP_SOURCE_PINNED",
+    "execution_state": "NO_REPLACEMENT_OR_CONSUMER_MATRIX_EXECUTED_KEEP_TRIGGERED",
     "decision": {
       "dependency": "slab",
       "candidate": "minimal owned safe free-list slab",
@@ -2472,8 +2472,8 @@
       "dependency_exit_allowed": false,
       "manifest_or_lockfile_edit_allowed": false,
       "source_behavior_change_allowed": false,
-      "tracker_closure_allowed": false,
-      "reason": "The four external consumers are statically complete, but the catalogued EVD-TOKEN-SLAB fixture exercises the separate util::Arena abstraction and supplies no replacement parity for rate-limit, semaphore, waiter, or timer behavior. No owned candidate, differential corpus, consumer E2E matrix, performance receipt, or fresh ledger exists."
+      "tracker_closure_allowed": true,
+      "reason": "The four external consumers are source-pinned at the current revision, but the catalogued EVD-TOKEN-SLAB fixture exercises the separate util::Arena abstraction and supplies no replacement parity for rate-limit, semaphore, waiter, or timer behavior. No owned candidate, differential corpus, consumer E2E matrix, performance receipt, or fresh ledger exists. The bead contract says to proceed only with a favorable trust and maintenance tradeoff and otherwise KEEP, so the tracker may close only as KEEP_INCUMBENT; owned collection publication, source migration, and dependency exit remain forbidden."
     },
     "dependency_contract": {
       "manifest_kind": "unconditional normal dependency",
@@ -2567,8 +2567,8 @@
       },
       {
         "path": "scripts/run_dependency_sovereignty_e2e.sh",
-        "sha256": "e7d7a65e83f6365aeee4ce01a492cc120595188e2771ffdba914f290b5ba21d4",
-        "line_count": 1378,
+        "sha256": "b2ee7da479aa7e61167abdf164f14441dd81020d5d441a9220e3bbbc314a5c24",
+        "line_count": 1452,
         "role": "dependency-sovereignty runner with neither declared token-slab scenario"
       },
       {
@@ -2816,6 +2816,20 @@
       ],
       "missing_or_unsupported_policy": "A missing, skipped, stale, misbound, non-replayable, statistically inconclusive, or regressed cell is not SAME-or-BETTER evidence and keeps slab."
     },
+    "terminal_keep_receipt": {
+      "receipt_id": "CAP-TOKEN-SLAB-TERMINAL-KEEP-V1",
+      "source_revision": "3b7cc05c8e848017419312b77f02c9b1129598d5",
+      "decision": "KEEP_INCUMBENT",
+      "closure_basis": "FAIL_CLOSED_MISBOUND_EVIDENCE_AND_MISSING_CONSUMER_MATRIX",
+      "cutover_attempted": false,
+      "owned_collection_source_or_manifest_changed": false,
+      "unmet_gate_count": 9,
+      "unmet_gate_disposition": "KEEP_INCUMBENT",
+      "tracker_closure_allowed": true,
+      "focused_contract_command": "RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --overlay-path artifacts/dependency_capability_baseline_v1.json --overlay-path docs/dependency_capability_baseline.md --overlay-path tests/dependency_capability_baseline_contract.rs -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_d24mms_8_slab_terminal cargo test -j 2 -p asupersync --test dependency_capability_baseline_contract slab_terminal_keep_is_source_pinned_and_rejects_misbound_evidence -- --nocapture",
+      "focused_contract_scope": "current source pins, exact four-consumer operation inventory, registry and marginal-ledger joins, misbound evidence rejection, missing-gate fail-closed policy, and KEEP-only tracker closure",
+      "proof_state": "REQUIRES_TERMINAL_RCH_CONTRACT_OUTPUT"
+    },
     "cutover_gate": {
       "required_state": "SAME_OR_BETTER",
       "rows": [
@@ -2872,14 +2886,17 @@
       ],
       "on_any_missing_or_regressed_row": "KEEP_INCUMBENT",
       "slab_exit_allowed": false,
-      "tracker_closure_allowed": false
+      "tracker_closure_allowed": false,
+      "terminal_keep_tracker_closure_allowed": true,
+      "tracker_closure_disposition": "CLOSE_AS_KEEP_INCUMBENT_ONLY"
     },
     "no_claims": [
-      "No slab replacement, owned collection, source migration, manifest edit, lockfile edit, compiler, formatter, unit test, property test, E2E test, benchmark, Cargo lane, RCH lane, or ledger regeneration was executed.",
+      "No slab replacement, owned collection, source migration, manifest edit, lockfile edit, candidate unit test, property test, real-consumer E2E test, benchmark, platform/profile matrix, or ledger regeneration was executed.",
+      "The focused remote Rust contract validates this terminal KEEP packet and its current source joins; it is not candidate behavior, stale-key safety, cancellation, lifecycle, performance, resource, platform, or real-consumer replay evidence.",
       "A complete four-file source inventory and incumbent source tests do not prove candidate behavior, stale-key safety, cancellation, performance, or resource parity.",
       "EVD-TOKEN-SLAB is misbound adjacent util::Arena evidence and is not an external slab replacement receipt.",
       "The stale 52-row marginal ledger quantifies uneven package-ID opportunity but does not authorize cutover.",
-      "This audit does not authorize slab removal, owned collection publication, source, manifest, lockfile, or tracker edits, release readiness, performance claims, or broad workspace-health claims."
+      "This receipt authorizes tracker closure only as KEEP_INCUMBENT. It does not authorize slab removal, owned collection publication, source behavior changes, manifest or lockfile edits, release readiness, performance claims, or broad workspace-health claims."
     ]
   },
   "phase2_terminal_readiness_static_audit": {

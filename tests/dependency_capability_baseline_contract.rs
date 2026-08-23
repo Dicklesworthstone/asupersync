@@ -996,7 +996,7 @@ fn runner_and_docs_expose_replay_logging_and_no_claim_boundaries() {
         "visibility_exit_allowed=false",
         SLAB_AUDIT_ID,
         SLAB_BEAD_ID,
-        "NO_REPLACEMENT_OR_CONSUMER_MATRIX_EXECUTED",
+        "NO_REPLACEMENT_OR_CONSUMER_MATRIX_EXECUTED_KEEP_TRIGGERED",
         "slab_exit_allowed=false",
         PHASE2_READINESS_AUDIT_ID,
         PHASE2_SIGNOFF_BEAD_ID,
@@ -1764,8 +1764,8 @@ fn tempfile_claim_time_profile_checkpoint_is_source_pinned_and_fail_closed() {
         (
             "artifacts/dependency_capability_baseline_v1.json",
             (
-                "76d35f1fbf39637d5a0ccc0d7c1f4a986b2808c3f85aa8f43faab48d86a0a104",
-                3247_u64,
+                "70ae911193a4b3d9d1d38ac5581dd5064bae1c5efb947e022619ea1e2eef6858",
+                3264_u64,
             ),
         ),
         (
@@ -2745,23 +2745,20 @@ fn visibility_macro_terminal_keep_is_source_pinned_and_fail_closed() {
 }
 
 #[test]
-fn slab_static_audit_is_source_pinned_and_rejects_misbound_evidence() {
+fn slab_terminal_keep_is_source_pinned_and_rejects_misbound_evidence() {
     let value = artifact();
     let audit = object(&value, "slab_static_audit");
     assert_eq!(string(audit, "audit_id"), SLAB_AUDIT_ID);
     assert_eq!(string(audit, "bead_id"), SLAB_BEAD_ID);
     assert_eq!(string(audit, "capability_id"), "CAP-TOKEN-SLAB");
-    assert_eq!(
-        string(audit, "audit_state"),
-        "STATIC_SOURCE_PINNED_NOT_EXECUTED"
-    );
+    assert_eq!(string(audit, "audit_state"), "TERMINAL_KEEP_SOURCE_PINNED");
     assert_eq!(
         string(audit, "execution_state"),
-        "NO_REPLACEMENT_OR_CONSUMER_MATRIX_EXECUTED"
+        "NO_REPLACEMENT_OR_CONSUMER_MATRIX_EXECUTED_KEEP_TRIGGERED"
     );
     assert_eq!(
         string(audit, "observed_at_revision"),
-        "341ac3656a98e8b07749207d2996914b23042fcf"
+        "3b7cc05c8e848017419312b77f02c9b1129598d5"
     );
 
     let decision = object(audit, "decision");
@@ -2774,7 +2771,7 @@ fn slab_static_audit_is_source_pinned_and_rejects_misbound_evidence() {
     assert!(!boolean(decision, "dependency_exit_allowed"));
     assert!(!boolean(decision, "manifest_or_lockfile_edit_allowed"));
     assert!(!boolean(decision, "source_behavior_change_allowed"));
-    assert!(!boolean(decision, "tracker_closure_allowed"));
+    assert!(boolean(decision, "tracker_closure_allowed"));
 
     let dependency = object(audit, "dependency_contract");
     assert_eq!(
@@ -3228,6 +3225,42 @@ fn slab_static_audit_is_source_pinned_and_rejects_misbound_evidence() {
     assert_eq!(array(matrix, "target_cells").len(), 4);
     assert_eq!(array(matrix, "required_metrics").len(), 8);
 
+    let receipt = object(audit, "terminal_keep_receipt");
+    assert_eq!(
+        string(receipt, "receipt_id"),
+        "CAP-TOKEN-SLAB-TERMINAL-KEEP-V1"
+    );
+    assert_eq!(string(receipt, "decision"), "KEEP_INCUMBENT");
+    assert_eq!(
+        string(receipt, "closure_basis"),
+        "FAIL_CLOSED_MISBOUND_EVIDENCE_AND_MISSING_CONSUMER_MATRIX"
+    );
+    assert!(!boolean(receipt, "cutover_attempted"));
+    assert!(!boolean(
+        receipt,
+        "owned_collection_source_or_manifest_changed"
+    ));
+    assert_eq!(unsigned(receipt, "unmet_gate_count"), 9);
+    assert_eq!(string(receipt, "unmet_gate_disposition"), "KEEP_INCUMBENT");
+    assert!(boolean(receipt, "tracker_closure_allowed"));
+    assert_eq!(
+        string(receipt, "proof_state"),
+        "REQUIRES_TERMINAL_RCH_CONTRACT_OUTPUT"
+    );
+    let command = string(receipt, "focused_contract_command");
+    for required in [
+        "RCH_REQUIRE_REMOTE=1",
+        "--base HEAD",
+        "--clean-overlay",
+        "dependency_capability_baseline_contract",
+        "slab_terminal_keep_is_source_pinned_and_rejects_misbound_evidence",
+    ] {
+        assert!(
+            command.contains(required),
+            "receipt command missing {required}"
+        );
+    }
+
     let gate = object(audit, "cutover_gate");
     assert_eq!(string(gate, "required_state"), "SAME_OR_BETTER");
     let gate_rows = array(gate, "rows");
@@ -3252,6 +3285,11 @@ fn slab_static_audit_is_source_pinned_and_rejects_misbound_evidence() {
     );
     assert!(!boolean(gate, "slab_exit_allowed"));
     assert!(!boolean(gate, "tracker_closure_allowed"));
+    assert!(boolean(gate, "terminal_keep_tracker_closure_allowed"));
+    assert_eq!(
+        string(gate, "tracker_closure_disposition"),
+        "CLOSE_AS_KEEP_INCUMBENT_ONLY"
+    );
 
     let no_claims = array(audit, "no_claims")
         .iter()
@@ -3264,6 +3302,7 @@ fn slab_static_audit_is_source_pinned_and_rejects_misbound_evidence() {
         "misbound adjacent util::Arena evidence",
         "does not authorize cutover",
         "does not authorize slab removal",
+        "authorizes tracker closure only as KEEP_INCUMBENT",
     ] {
         assert!(no_claims.contains(required), "missing no-claim: {required}");
     }

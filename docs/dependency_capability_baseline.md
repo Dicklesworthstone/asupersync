@@ -371,12 +371,12 @@ broad workspace-health claims.
 ## Slab consumer static audit
 
 `CAP-TOKEN-SLAB-STATIC-AUDIT-V1` records the bounded static audit for
-`asupersync-d24mms.8`. It is `STATIC_SOURCE_PINNED_NOT_EXECUTED`: fourteen
-source pins revalidate the four external production consumers at revision
-`341ac3656a98e8b07749207d2996914b23042fcf`. No owned collection, source
-migration, manifest or lockfile edit, compiler, formatter, test, benchmark,
-Cargo lane, RCH lane, E2E scenario, or ledger regeneration ran. Its execution
-state is `NO_REPLACEMENT_OR_CONSUMER_MATRIX_EXECUTED`.
+`asupersync-d24mms.8` and now carries terminal receipt
+`CAP-TOKEN-SLAB-TERMINAL-KEEP-V1`. It is `TERMINAL_KEEP_SOURCE_PINNED`:
+fourteen source pins revalidate the four external production consumers at
+revision `3b7cc05c8e848017419312b77f02c9b1129598d5`. No owned collection or
+comparison matrix ran, so its execution state is
+`NO_REPLACEMENT_OR_CONSUMER_MATRIX_EXECUTED_KEEP_TRIGGERED`.
 
 The tracker baseline remains exact and is not a scope cap:
 
@@ -421,8 +421,16 @@ owned-API differential behavior, stale-key safety, cancellation/panic/shutdown
 quiescence, property/conformance coverage, real-consumer replay, platform and
 profile compilation, performance/resource ratchets, and fresh serialized
 ledger cutover are `MISSING`. The disposition is `KEEP_INCUMBENT` and
-`slab_exit_allowed=false`. This packet does not authorize slab removal, owned
-collection publication, source, manifest, lockfile, or tracker edits, release
+`slab_exit_allowed=false`. The bead explicitly says to proceed only on a
+favorable trust and maintenance tradeoff and otherwise KEEP.
+`tracker_closure_allowed=true` applies only to
+`CLOSE_AS_KEEP_INCUMBENT_ONLY`; the cutover gate itself remains closed. The
+focused remote Rust contract checks the current source pins, exact consumer
+operation inventory, registry and marginal-ledger joins, misbound evidence
+rejection, and this fail-closed closure rule. It is not candidate behavior,
+stale-key safety, cancellation, lifecycle, performance, resource, platform,
+or real-consumer replay evidence. This packet does not authorize slab removal,
+owned collection publication, source, manifest, or lockfile edits, release
 readiness, performance claims, or broad workspace-health claims.
 
 ## Phase-2 terminal readiness frontier
