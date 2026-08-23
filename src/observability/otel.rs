@@ -130,6 +130,398 @@ pub struct PrivacyConfig {
     compiled_pii_patterns: Vec<Regex>,
 }
 
+const FIXED_PII_MAX_INPUT_BYTES: usize = 1024 * 1024;
+const FIXED_PII_MAX_MATCHES: usize = 65_536;
+const FIXED_PII_MAX_WORK_UNITS: usize = 16 * 1024 * 1024 + 64;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FixedPiiSpan {
+    start_byte: usize,
+    end_byte: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FixedPiiScan {
+    matches: Vec<FixedPiiSpan>,
+    work_units: usize,
+}
+
+impl FixedPiiScan {
+    fn is_match(&self) -> bool {
+        debug_assert!(self.work_units <= FIXED_PII_MAX_WORK_UNITS);
+        !self.matches.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FixedPiiScanLimits {
+    max_input_bytes: usize,
+    max_matches: usize,
+    max_work_units: usize,
+}
+
+impl Default for FixedPiiScanLimits {
+    fn default() -> Self {
+        Self {
+            max_input_bytes: FIXED_PII_MAX_INPUT_BYTES,
+            max_matches: FIXED_PII_MAX_MATCHES,
+            max_work_units: FIXED_PII_MAX_WORK_UNITS,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FixedPiiScanError {
+    InputLimit,
+    WorkLimit,
+    OutputLimit,
+    UnicodeTableUnavailable,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct FixedPiiWorkBudget {
+    used: usize,
+    limit: usize,
+}
+
+impl FixedPiiWorkBudget {
+    fn new(input: &str, limits: FixedPiiScanLimits) -> Result<Self, FixedPiiScanError> {
+        if input.len() > limits.max_input_bytes {
+            return Err(FixedPiiScanError::InputLimit);
+        }
+        Ok(Self {
+            used: 0,
+            limit: limits.max_work_units,
+        })
+    }
+
+    fn charge(&mut self, units: usize) -> Result<(), FixedPiiScanError> {
+        self.used = self
+            .used
+            .checked_add(units)
+            .ok_or(FixedPiiScanError::WorkLimit)?;
+        if self.used > self.limit {
+            return Err(FixedPiiScanError::WorkLimit);
+        }
+        Ok(())
+    }
+}
+
+fn fixed_class_contains(
+    class: &retained_regex_syntax::hir::ClassUnicode,
+    value: char,
+    work: &mut FixedPiiWorkBudget,
+) -> Result<bool, FixedPiiScanError> {
+    work.charge(1)?;
+    Ok(class
+        .ranges()
+        .binary_search_by(|range| {
+            if value < range.start() {
+                core::cmp::Ordering::Greater
+            } else if value > range.end() {
+                core::cmp::Ordering::Less
+            } else {
+                core::cmp::Ordering::Equal
+            }
+        })
+        .is_ok())
+}
+
+fn fixed_unicode_word_boundary(
+    input: &str,
+    offset: usize,
+    work: &mut FixedPiiWorkBudget,
+) -> Result<bool, FixedPiiScanError> {
+    let previous = input[..offset].chars().next_back();
+    let next = input[offset..].chars().next();
+    let mut is_word = |value: Option<char>| -> Result<bool, FixedPiiScanError> {
+        work.charge(1)?;
+        let Some(value) = value else {
+            return Ok(false);
+        };
+        retained_regex_syntax::try_is_word_character(value)
+            .map_err(|_| FixedPiiScanError::UnicodeTableUnavailable)
+    };
+    Ok(is_word(previous)? != is_word(next)?)
+}
+
+fn fixed_email_letter_class() -> Result<retained_regex_syntax::hir::ClassUnicode, FixedPiiScanError>
+{
+    use retained_regex_syntax::hir::{ClassUnicode, ClassUnicodeRange};
+
+    let mut class = ClassUnicode::new([ClassUnicodeRange::new('A', 'Z')]);
+    class
+        .try_case_fold_simple()
+        .map_err(|_| FixedPiiScanError::UnicodeTableUnavailable)?;
+    Ok(class)
+}
+
+fn fixed_decimal_digit_class() -> Result<retained_regex_syntax::hir::ClassUnicode, FixedPiiScanError>
+{
+    use retained_regex_syntax::hir::{Class, HirKind};
+
+    let hir = retained_regex_syntax::Parser::new()
+        .parse(r"\d")
+        .map_err(|_| FixedPiiScanError::UnicodeTableUnavailable)?;
+    match hir.kind() {
+        HirKind::Class(Class::Unicode(class)) => Ok(class.clone()),
+        _ => Err(FixedPiiScanError::UnicodeTableUnavailable),
+    }
+}
+
+fn fixed_email_local_char(
+    letters: &retained_regex_syntax::hir::ClassUnicode,
+    value: char,
+    work: &mut FixedPiiWorkBudget,
+) -> Result<bool, FixedPiiScanError> {
+    Ok(fixed_class_contains(letters, value, work)?
+        || value.is_ascii_digit()
+        || matches!(value, '.' | '_' | '%' | '+' | '-'))
+}
+
+fn fixed_email_domain_char(
+    letters: &retained_regex_syntax::hir::ClassUnicode,
+    value: char,
+    work: &mut FixedPiiWorkBudget,
+) -> Result<bool, FixedPiiScanError> {
+    Ok(fixed_class_contains(letters, value, work)?
+        || value.is_ascii_digit()
+        || matches!(value, '.' | '-'))
+}
+
+fn push_fixed_pii_span(
+    matches: &mut Vec<FixedPiiSpan>,
+    span: FixedPiiSpan,
+    limits: FixedPiiScanLimits,
+) -> Result<(), FixedPiiScanError> {
+    if matches.len() >= limits.max_matches {
+        return Err(FixedPiiScanError::OutputLimit);
+    }
+    matches
+        .try_reserve(1)
+        .map_err(|_| FixedPiiScanError::OutputLimit)?;
+    matches.push(span);
+    Ok(())
+}
+
+fn fixed_email_match_at(
+    input: &str,
+    search_start: usize,
+    at: usize,
+    letters: &retained_regex_syntax::hir::ClassUnicode,
+    work: &mut FixedPiiWorkBudget,
+) -> Result<Option<FixedPiiSpan>, FixedPiiScanError> {
+    let mut local_run_start = at;
+    for (relative, value) in input[search_start..at].char_indices().rev() {
+        if !fixed_email_local_char(letters, value, work)? {
+            break;
+        }
+        local_run_start = search_start
+            .checked_add(relative)
+            .ok_or(FixedPiiScanError::WorkLimit)?;
+    }
+    if local_run_start == at {
+        return Ok(None);
+    }
+
+    let mut match_start = None;
+    for (relative, _) in input[local_run_start..at].char_indices() {
+        let offset = local_run_start
+            .checked_add(relative)
+            .ok_or(FixedPiiScanError::WorkLimit)?;
+        if fixed_unicode_word_boundary(input, offset, work)? {
+            match_start = Some(offset);
+            break;
+        }
+    }
+    let Some(match_start) = match_start else {
+        return Ok(None);
+    };
+
+    let domain_start = at.checked_add(1).ok_or(FixedPiiScanError::WorkLimit)?;
+    let mut domain_end = domain_start;
+    for (relative, value) in input[domain_start..].char_indices() {
+        if !fixed_email_domain_char(letters, value, work)? {
+            break;
+        }
+        domain_end = domain_start
+            .checked_add(relative)
+            .and_then(|offset| offset.checked_add(value.len_utf8()))
+            .ok_or(FixedPiiScanError::WorkLimit)?;
+    }
+
+    for (relative, value) in input[domain_start..domain_end].char_indices().rev() {
+        if value != '.' {
+            continue;
+        }
+        let dot = domain_start
+            .checked_add(relative)
+            .ok_or(FixedPiiScanError::WorkLimit)?;
+        if dot == domain_start {
+            continue;
+        }
+        let tld_start = dot.checked_add(1).ok_or(FixedPiiScanError::WorkLimit)?;
+        let mut letter_count = 0_usize;
+        let mut match_end = tld_start;
+        for (tld_relative, tld_char) in input[tld_start..].char_indices() {
+            if !fixed_class_contains(letters, tld_char, work)? {
+                break;
+            }
+            letter_count = letter_count
+                .checked_add(1)
+                .ok_or(FixedPiiScanError::WorkLimit)?;
+            match_end = tld_start
+                .checked_add(tld_relative)
+                .and_then(|offset| offset.checked_add(tld_char.len_utf8()))
+                .ok_or(FixedPiiScanError::WorkLimit)?;
+            if letter_count == 64 {
+                break;
+            }
+        }
+        if (2..=63).contains(&letter_count) && fixed_unicode_word_boundary(input, match_end, work)?
+        {
+            return Ok(Some(FixedPiiSpan {
+                start_byte: match_start,
+                end_byte: match_end,
+            }));
+        }
+    }
+
+    Ok(None)
+}
+
+fn scan_fixed_emails(
+    input: &str,
+    limits: FixedPiiScanLimits,
+    stop_after_first: bool,
+) -> Result<FixedPiiScan, FixedPiiScanError> {
+    let mut work = FixedPiiWorkBudget::new(input, limits)?;
+    if !input.as_bytes().contains(&b'@') {
+        work.charge(input.len())?;
+        return Ok(FixedPiiScan {
+            matches: Vec::new(),
+            work_units: work.used,
+        });
+    }
+    let letters = fixed_email_letter_class()?;
+    let mut matches = Vec::new();
+    let mut cursor = 0_usize;
+
+    while cursor < input.len() {
+        let mut next_at = None;
+        for (relative, value) in input[cursor..].char_indices() {
+            work.charge(1)?;
+            if value == '@' {
+                next_at = Some(
+                    cursor
+                        .checked_add(relative)
+                        .ok_or(FixedPiiScanError::WorkLimit)?,
+                );
+                break;
+            }
+        }
+        let Some(at) = next_at else {
+            break;
+        };
+        if let Some(span) = fixed_email_match_at(input, cursor, at, &letters, &mut work)? {
+            let next_cursor = span.end_byte;
+            push_fixed_pii_span(&mut matches, span, limits)?;
+            if stop_after_first {
+                break;
+            }
+            cursor = next_cursor;
+        } else {
+            cursor = at.checked_add(1).ok_or(FixedPiiScanError::WorkLimit)?;
+        }
+    }
+
+    Ok(FixedPiiScan {
+        matches,
+        work_units: work.used,
+    })
+}
+
+fn fixed_ssn_match_at(
+    input: &str,
+    start: usize,
+    digits: &retained_regex_syntax::hir::ClassUnicode,
+    work: &mut FixedPiiWorkBudget,
+) -> Result<Option<FixedPiiSpan>, FixedPiiScanError> {
+    let mut cursor = start;
+    for group_len in [3_usize, 2, 4] {
+        for _ in 0..group_len {
+            let Some(value) = input[cursor..].chars().next() else {
+                return Ok(None);
+            };
+            if !fixed_class_contains(digits, value, work)? {
+                return Ok(None);
+            }
+            cursor = cursor
+                .checked_add(value.len_utf8())
+                .ok_or(FixedPiiScanError::WorkLimit)?;
+        }
+        if group_len != 4 {
+            work.charge(1)?;
+            if !input[cursor..].starts_with('-') {
+                return Ok(None);
+            }
+            cursor = cursor.checked_add(1).ok_or(FixedPiiScanError::WorkLimit)?;
+        }
+    }
+    if !fixed_unicode_word_boundary(input, cursor, work)? {
+        return Ok(None);
+    }
+    Ok(Some(FixedPiiSpan {
+        start_byte: start,
+        end_byte: cursor,
+    }))
+}
+
+fn scan_fixed_ssns(
+    input: &str,
+    limits: FixedPiiScanLimits,
+    stop_after_first: bool,
+) -> Result<FixedPiiScan, FixedPiiScanError> {
+    let mut work = FixedPiiWorkBudget::new(input, limits)?;
+    if !input.as_bytes().contains(&b'-') {
+        work.charge(input.len())?;
+        return Ok(FixedPiiScan {
+            matches: Vec::new(),
+            work_units: work.used,
+        });
+    }
+    let digits = fixed_decimal_digit_class()?;
+    let mut matches = Vec::new();
+    let mut cursor = 0_usize;
+
+    while cursor < input.len() {
+        let value = input[cursor..]
+            .chars()
+            .next()
+            .ok_or(FixedPiiScanError::WorkLimit)?;
+        if fixed_class_contains(&digits, value, &mut work)?
+            && fixed_unicode_word_boundary(input, cursor, &mut work)?
+            && let Some(span) = fixed_ssn_match_at(input, cursor, &digits, &mut work)?
+        {
+            let next_cursor = span.end_byte;
+            push_fixed_pii_span(&mut matches, span, limits)?;
+            if stop_after_first {
+                break;
+            }
+            cursor = next_cursor;
+            continue;
+        }
+        cursor = cursor
+            .checked_add(value.len_utf8())
+            .ok_or(FixedPiiScanError::WorkLimit)?;
+    }
+
+    Ok(FixedPiiScan {
+        matches,
+        work_units: work.used,
+    })
+}
+
 impl PrivacyConfig {
     /// Create a new privacy configuration with defaults.
     #[must_use]
@@ -302,18 +694,28 @@ impl PrivacyConfig {
         static SSN_RE: OnceLock<Regex> = OnceLock::new();
         static CARD_CANDIDATE_RE: OnceLock<Regex> = OnceLock::new();
 
-        let email_re = EMAIL_RE.get_or_init(|| {
-            Regex::new(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,63}\b")
-                .expect("built-in email regex must compile")
-        });
-        if email_re.is_match(value) {
+        let email_re = || {
+            EMAIL_RE.get_or_init(|| {
+                Regex::new(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,63}\b")
+                    .expect("built-in email regex must compile")
+            })
+        };
+        let email_match = scan_fixed_emails(value, FixedPiiScanLimits::default(), true)
+            .map(|scan| scan.is_match())
+            .unwrap_or_else(|_| email_re().is_match(value));
+        if email_match {
             return "[EMAIL_REDACTED]".to_string();
         }
 
-        let ssn_re = SSN_RE.get_or_init(|| {
-            Regex::new(r"\b\d{3}-\d{2}-\d{4}\b").expect("built-in SSN regex must compile")
-        });
-        if ssn_re.is_match(value) {
+        let ssn_re = || {
+            SSN_RE.get_or_init(|| {
+                Regex::new(r"\b\d{3}-\d{2}-\d{4}\b").expect("built-in SSN regex must compile")
+            })
+        };
+        let ssn_match = scan_fixed_ssns(value, FixedPiiScanLimits::default(), true)
+            .map(|scan| scan.is_match())
+            .unwrap_or_else(|_| ssn_re().is_match(value));
+        if ssn_match {
             return "[SSN_REDACTED]".to_string();
         }
 
@@ -8365,6 +8767,214 @@ mod tests {
             config.redact_pii("correlation.id", "ticket 4111 1111 1111 1112"),
             "ticket 4111 1111 1111 1112"
         );
+    }
+
+    fn fixed_span_pairs(scan: &FixedPiiScan) -> Vec<(usize, usize)> {
+        scan.matches
+            .iter()
+            .map(|span| (span.start_byte, span.end_byte))
+            .collect()
+    }
+
+    fn materialize_fixed_scanner_input(row: &serde_json::Value) -> String {
+        if let Some(input) = row.get("input").and_then(serde_json::Value::as_str) {
+            return input.to_owned();
+        }
+        let recipe = row
+            .get("input_recipe")
+            .and_then(serde_json::Value::as_object)
+            .expect("scanner corpus row must provide input or input_recipe");
+        let prefix = recipe
+            .get("prefix")
+            .and_then(serde_json::Value::as_str)
+            .expect("recipe prefix");
+        let repeated = recipe
+            .get("repeat")
+            .and_then(serde_json::Value::as_str)
+            .expect("recipe repeat");
+        let repeat_count = recipe
+            .get("repeat_count")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|count| usize::try_from(count).ok())
+            .expect("recipe repeat_count fits usize");
+        let suffix = recipe
+            .get("suffix")
+            .and_then(serde_json::Value::as_str)
+            .expect("recipe suffix");
+        format!("{prefix}{}{suffix}", repeated.repeat(repeat_count))
+    }
+
+    #[test]
+    fn fixed_email_and_ssn_scanners_match_every_r2_1_span() {
+        let artifact: serde_json::Value = serde_json::from_str(include_str!(
+            "../../artifacts/regex_built_in_detector_corpus_v1.json"
+        ))
+        .expect("R2.1 detector corpus must parse");
+        let vectors = artifact["detector_vectors"]
+            .as_array()
+            .expect("detector_vectors array");
+        let email_re = Regex::new(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,63}\b")
+            .expect("frozen email regex");
+        let ssn_re = Regex::new(r"\b\d{3}-\d{2}-\d{4}\b").expect("frozen SSN regex");
+
+        for row in vectors {
+            let detector = row["detector_id"].as_str().expect("detector_id");
+            if !matches!(detector, "RGX-BUILTIN-EMAIL" | "RGX-BUILTIN-SSN") {
+                continue;
+            }
+            let case_id = row["case_id"].as_str().expect("case_id");
+            let input = materialize_fixed_scanner_input(row);
+            let expected: Vec<(usize, usize)> = row["expected_matches"]
+                .as_array()
+                .expect("expected_matches array")
+                .iter()
+                .map(|span| {
+                    let start = span["start_byte"]
+                        .as_u64()
+                        .and_then(|value| usize::try_from(value).ok())
+                        .expect("start_byte fits usize");
+                    let end = span["end_byte"]
+                        .as_u64()
+                        .and_then(|value| usize::try_from(value).ok())
+                        .expect("end_byte fits usize");
+                    (start, end)
+                })
+                .collect();
+            let scan = if detector == "RGX-BUILTIN-EMAIL" {
+                scan_fixed_emails(&input, FixedPiiScanLimits::default(), false)
+            } else {
+                scan_fixed_ssns(&input, FixedPiiScanLimits::default(), false)
+            }
+            .unwrap_or_else(|error| panic!("{case_id} scanner failed: {error:?}"));
+            let incumbent: Vec<(usize, usize)> = if detector == "RGX-BUILTIN-EMAIL" {
+                email_re
+                    .find_iter(&input)
+                    .map(|matched| (matched.start(), matched.end()))
+                    .collect()
+            } else {
+                ssn_re
+                    .find_iter(&input)
+                    .map(|matched| (matched.start(), matched.end()))
+                    .collect()
+            };
+
+            assert_eq!(fixed_span_pairs(&scan), expected, "{case_id} corpus span");
+            assert_eq!(
+                fixed_span_pairs(&scan),
+                incumbent,
+                "{case_id} incumbent span"
+            );
+            assert!(
+                scan.work_units <= FIXED_PII_MAX_WORK_UNITS,
+                "{case_id} work"
+            );
+        }
+    }
+
+    #[test]
+    fn fixed_email_and_ssn_generated_matrix_matches_incumbent() {
+        let email_re = Regex::new(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,63}\b")
+            .expect("frozen email regex");
+        let ssn_re = Regex::new(r"\b\d{3}-\d{2}-\d{4}\b").expect("frozen SSN regex");
+
+        for prefix in ["", " ", "🙂", "é", "!"] {
+            for local in ["a", "A.B+tag", "ſ", "_x", ".a", "a-"] {
+                for domain in ["b.co", "EXAMPLE.COM", "K.co", "x.co.uk", "b.co-x"] {
+                    for suffix in ["", " ", "🙂", "é", ",next"] {
+                        let input = format!("{prefix}{local}@{domain}{suffix}");
+                        let actual =
+                            scan_fixed_emails(&input, FixedPiiScanLimits::default(), false)
+                                .expect("generated email scan");
+                        let expected: Vec<(usize, usize)> = email_re
+                            .find_iter(&input)
+                            .map(|matched| (matched.start(), matched.end()))
+                            .collect();
+                        assert_eq!(fixed_span_pairs(&actual), expected, "email {input:?}");
+                    }
+                }
+            }
+        }
+
+        for prefix in ["", " ", "🙂", "é", "x", "-"] {
+            for ssn in ["123-45-6789", "١٢٣-٤٥-٦٧٨٩", "123-45-678", "123–45–6789"] {
+                for suffix in ["", " ", "🙂", "é", "x", "/987-65-4321"] {
+                    let input = format!("{prefix}{ssn}{suffix}");
+                    let actual = scan_fixed_ssns(&input, FixedPiiScanLimits::default(), false)
+                        .expect("generated SSN scan");
+                    let expected: Vec<(usize, usize)> = ssn_re
+                        .find_iter(&input)
+                        .map(|matched| (matched.start(), matched.end()))
+                        .collect();
+                    assert_eq!(fixed_span_pairs(&actual), expected, "SSN {input:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fixed_email_and_ssn_scanners_bound_large_input_work_and_output() {
+        let input = "a@b.co/123-45-6789 ".repeat(4_096);
+        let emails = scan_fixed_emails(&input, FixedPiiScanLimits::default(), false)
+            .expect("bounded large email scan");
+        let ssns = scan_fixed_ssns(&input, FixedPiiScanLimits::default(), false)
+            .expect("bounded large SSN scan");
+        assert_eq!(emails.matches.len(), 4_096);
+        assert_eq!(ssns.matches.len(), 4_096);
+        assert!(emails.work_units <= FIXED_PII_MAX_WORK_UNITS);
+        assert!(ssns.work_units <= FIXED_PII_MAX_WORK_UNITS);
+
+        let input_limited = FixedPiiScanLimits {
+            max_input_bytes: 5,
+            ..FixedPiiScanLimits::default()
+        };
+        assert_eq!(
+            scan_fixed_emails("a@b.co", input_limited, false),
+            Err(FixedPiiScanError::InputLimit)
+        );
+        let output_limited = FixedPiiScanLimits {
+            max_matches: 1,
+            ..FixedPiiScanLimits::default()
+        };
+        assert_eq!(
+            scan_fixed_emails("a@b.co,c@d.io", output_limited, false),
+            Err(FixedPiiScanError::OutputLimit)
+        );
+        assert_eq!(
+            fixed_span_pairs(
+                &scan_fixed_emails("a@b.co,c@d.io", output_limited, true)
+                    .expect("first-match mode stays within the output budget")
+            ),
+            vec![(0, 6)]
+        );
+        let work_limited = FixedPiiScanLimits {
+            max_work_units: 0,
+            ..FixedPiiScanLimits::default()
+        };
+        assert_eq!(
+            scan_fixed_ssns("123-45-6789", work_limited, false),
+            Err(FixedPiiScanError::WorkLimit)
+        );
+
+        let oversized = format!(
+            "a@b.co{}",
+            "x".repeat(FIXED_PII_MAX_INPUT_BYTES.saturating_add(1))
+        );
+        assert_eq!(
+            PrivacyConfig::new()
+                .with_auto_pii_detection()
+                .redact_pii("oversized.email", &oversized),
+            "[EMAIL_REDACTED]",
+            "the scanner input ceiling must fall through to the incumbent"
+        );
+    }
+
+    #[test]
+    fn custom_pattern_equal_to_builtin_never_uses_fixed_scanner_token() {
+        let config = PrivacyConfig::new()
+            .try_with_pii_pattern(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,63}\b")
+            .expect("built-in-shaped custom pattern compiles")
+            .with_auto_pii_detection();
+        assert_eq!(config.redact_pii("user.email", "a@b.co"), "[REDACTED]");
     }
 
     fn collect_grafana_queries(value: &serde_json::Value, output: &mut Vec<String>) {
