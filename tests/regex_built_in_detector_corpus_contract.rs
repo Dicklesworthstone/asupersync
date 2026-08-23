@@ -4,8 +4,8 @@
 //! Fixture: artifacts/regex_built_in_detector_corpus_v1.json
 //!
 //! The vectors are independently authored and the incumbent is used only as
-//! a differential oracle. This test implements no scanner, production
-//! dispatch, performance claim, dependency exit, or cutover.
+//! a differential oracle. This contract implements no scanner, performance
+//! claim, dependency exit, or cutover.
 
 #![cfg(feature = "metrics")]
 #![allow(missing_docs)]
@@ -50,7 +50,7 @@ const LAB_CAPABILITY_ROW_SHA256: &str =
 const SOURCE_PIN_PATHS_SHA256: &str =
     "b5ba6ff6a6eb152e0c3bb263205e8a7d9f9a58fbbb27ec13fd276eb909d9552a";
 const CLAIMS_PROJECTION_SHA256: &str =
-    "fe549090469eb37ab0ea295448769460cf9dd87e2f57e958f664dae987685cfe";
+    "7629423e2af562ef581e6ff5b1069e469c550a4de8fcdcf8b9299ae49608123c";
 const DOC_BEGIN: &str = "<!-- BEGIN REGEX BUILT-IN DETECTOR CORPUS -->";
 const DOC_END: &str = "<!-- END REGEX BUILT-IN DETECTOR CORPUS -->";
 
@@ -483,6 +483,8 @@ fn validate_inventory(corpus: &Value) -> Result<(), String> {
 
     let authority = object(corpus, "authority");
     if authority.get("current_action").and_then(Value::as_str) != Some("KEEP_INCUMBENT")
+        || authority.get("fast_path_state").and_then(Value::as_str)
+            != Some("IMPLEMENTED_EXACT_BUILTINS_WITH_INCUMBENT_FALLBACK")
         || authority
             .get("dependency_exit_allowed")
             .and_then(Value::as_bool)
@@ -503,6 +505,26 @@ fn validate_inventory(corpus: &Value) -> Result<(), String> {
         if authority.get(key).and_then(Value::as_str) != Some(owner) {
             return Err(format!("{key} must remain routed to {owner}"));
         }
+    }
+
+    let r2_4 = object(
+        &corpus["downstream_handoff"],
+        "r2_4_phone_dispatch_evidence",
+    );
+    let r2_4_text = |key| r2_4.get(key).and_then(Value::as_str);
+    let r2_4_number = |key| r2_4.get(key).and_then(Value::as_u64);
+    if corpus["downstream_handoff"]["r2_4_phone_dispatch_state"].as_str()
+        != Some("IMPLEMENTED_FOCUSED_REMOTE_PROOF")
+        || r2_4_text("implementation_revision") != Some("5285afb061c77389b553e0ca536486a6c0275375")
+        || r2_4_text("source_sha256")
+            != Some("63f77b2b3e198f87abfec86d9ff36ba135b573224ca28b83a6bacb3336db67b2")
+        || r2_4_text("remote_job_id") != Some("j-29988810699833435")
+        || r2_4_text("test_filter") != Some("fixed_phone")
+        || r2_4_number("tests_passed") != Some(5)
+        || r2_4_number("tests_failed") != Some(0)
+        || r2_4_text("corpus_contract_state") != Some("PENDING_FOCUSED_REMOTE_CONTRACT")
+    {
+        return Err("R2.4 phone dispatch evidence drifted".to_owned());
     }
 
     let policy = object(corpus, "policy");
@@ -727,7 +749,7 @@ fn validate_inventory(corpus: &Value) -> Result<(), String> {
         .and_then(Value::as_bool)
         != Some(false)
         || allowset.get("state").and_then(Value::as_str)
-            != Some("SPECIFICATION_ONLY_NOT_IMPLEMENTED")
+            != Some("IMPLEMENTED_EXACT_BUILTINS_CUSTOM_ON_INCUMBENT")
         || allowset
             .get("duplicate_or_conflicting_identity_action")
             .and_then(Value::as_str)
@@ -930,6 +952,7 @@ fn live_pattern_identity_order_tokens_and_custom_priority_are_pinned() {
     ];
     assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
     assert!(source.contains("scan_fixed_card_candidates(value"));
+    assert!(source.contains("scan_fixed_phones(value"));
     assert!(source.contains(".is_some_and(Self::is_luhn_valid_card)"));
     assert!(source.contains(".find_iter(value)"));
     assert!(source.contains(".any(Self::is_luhn_valid_card)"));
@@ -1183,6 +1206,8 @@ fn docs_ignore_rule_and_static_no_claims_are_discoverable() {
         "1,853 lines and lost none",
         "NOT_RUN_BY_R2_1_STATIC_LANE",
         "implements no scanner",
+        "IMPLEMENTED_EXACT_BUILTINS_CUSTOM_ON_INCUMBENT",
+        "j-29988810699833435",
         "No local Cargo fallback is approved",
     ] {
         assert!(doc.contains(required), "documentation missing {required}");

@@ -121,7 +121,7 @@ custom matching while automatic detection is disabled.
 
 ## Exact dispatch identity and fallback
 
-The future R2.4 allowset is closed over eight fields: origin, detector ID,
+The R2.4 allowset is closed over eight fields: origin, detector ID,
 pattern, regex mode, match strategy, post-filter, output token, and replacement
 scope. Equality of pattern text alone is insufficient.
 
@@ -132,7 +132,9 @@ unrecognized, duplicate, or conflicting identities must stay on the complete
 incumbent engine without publishing a partial scanner result.
 
 Eight negative fixtures mutate each identity dimension and require that exact
-fallback. R2.1 specifies this allowset but does not implement it.
+fallback. R2.1 specified this allowset. R2.4 now implements the fixed automatic
+built-ins directly; custom patterns remain on the incumbent engine and execute
+before automatic detection.
 
 ## Post-capture source-pin refresh
 
@@ -176,7 +178,14 @@ authorize dependency exit or cutover.
   The source pins, structural fail-closed checks, independent vectors, and docs
   markers passed 8/8 in clean-overlay RCH job `j-29988810699833433`, bound to
   committed base `dcdc8915a`.
-- R2.4 consumes phone spans and the closed dispatch identity.
+- R2.4 consumed all 18 phone rows and the closed dispatch identity in revision
+  `5285afb06`. Clean-overlay RCH job `j-29988810699833435` passed 5/5 focused
+  tests on `ovh-a` with `-D warnings`: every frozen phone span and whole-value
+  token, generated accepted shapes, separators, country-code forms, Unicode
+  boundaries, all 19 pipeline outcomes, bounded input/work/output refusal with
+  incumbent fallback, and exact or drifted custom-pattern non-dispatch. This is
+  `IMPLEMENTED_EXACT_BUILTINS_CUSTOM_ON_INCUMBENT`; it does not expose or widen
+  a public detector-identity API.
 - R2.5 may aggregate the work only after implementation, generated
   equivalence, resource evidence, and named-host measurements exist.
 
@@ -212,8 +221,10 @@ No local Cargo fallback is approved.
 
 ## No-claim boundary
 
-This corpus does not implement a scanner, prove performance or resource
-bounds, authorize changing/removing `regex`, or authorize production cutover.
+R2.1 itself implemented no scanner; the R2.2-R2.4 handoff now records four
+focused implementations. Neither the corpus nor those focused lanes prove
+performance or resource parity, authorize changing/removing `regex`, or
+authorize dependency cutover.
 It does not establish exhaustive detection, eliminate false positives or false
 negatives, prove protection for real personal data, or prove complete
 multi-signal privacy wiring. It does not prove broad workspace health, release

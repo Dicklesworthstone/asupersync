@@ -14,7 +14,7 @@
     "source": "artifacts/dependency_capability_registry_v1.json#CAP-REGEX-PRIVACY",
     "registry_disposition": "KEEP_UNTIL_PARITY",
     "current_action": "KEEP_INCUMBENT",
-    "fast_path_state": "SPECIFICATION_ONLY_NOT_IMPLEMENTED",
+    "fast_path_state": "IMPLEMENTED_EXACT_BUILTINS_WITH_INCUMBENT_FALLBACK",
     "cutover_state": "BLOCKED_PENDING_EQUIVALENCE_AND_RESOURCE_EVIDENCE",
     "dependency_exit_allowed": false,
     "custom_pattern_fast_path_allowed": false,
@@ -65,9 +65,9 @@
     },
     {
       "path": "src/observability/otel.rs",
-      "sha256": "a0ddc92dd9a91e8ac8b62dbee6bf2505aadba0f4504a525eb6ae32ebd28540ef",
-      "line_count": 15490,
-      "role": "live custom-first redaction pipeline, bounded email, SSN and payment-card candidate scanners with incumbent fallback, remaining phone pattern, order, tokens and allocation-free Luhn join"
+      "sha256": "63f77b2b3e198f87abfec86d9ff36ba135b573224ca28b83a6bacb3336db67b2",
+      "line_count": 15880,
+      "role": "live custom-first redaction pipeline, four bounded exact built-in scanners with incumbent fallback, detector order, tokens and allocation-free Luhn join"
     },
     {
       "path": "src/observability/mod.rs",
@@ -289,7 +289,7 @@
     }
   ],
   "dispatch_allowset": {
-    "state": "SPECIFICATION_ONLY_NOT_IMPLEMENTED",
+    "state": "IMPLEMENTED_EXACT_BUILTINS_CUSTOM_ON_INCUMBENT",
     "identity_fields": [
       "origin",
       "detector_id",
@@ -1290,7 +1290,27 @@
         "WHOLE_VALUE_CARD_REDACTION_OUTCOMES"
       ]
     },
-    "r2_4_phone_dispatch_state": "CORPUS_READY_NOT_IMPLEMENTED",
+    "r2_4_phone_dispatch_state": "IMPLEMENTED_FOCUSED_REMOTE_PROOF",
+    "r2_4_phone_dispatch_evidence": {
+      "implementation_revision": "5285afb061c77389b553e0ca536486a6c0275375",
+      "source_sha256": "63f77b2b3e198f87abfec86d9ff36ba135b573224ca28b83a6bacb3336db67b2",
+      "remote_job_id": "j-29988810699833435",
+      "worker": "ovh-a",
+      "test_filter": "fixed_phone",
+      "tests_passed": 5,
+      "tests_failed": 0,
+      "clean_overlay_base": "c0599ebc6507429b4e5dad833fc13a8438a8971c",
+      "clean_overlay_fingerprint": "926a8ac4260971a302070de69abaeee19218bafbf19adf80267025e5f35c44da",
+      "corpus_contract_state": "PENDING_FOCUSED_REMOTE_CONTRACT",
+      "claims": [
+        "ALL_18_R2_1_PHONE_VECTORS",
+        "GENERATED_SHAPE_SEPARATOR_COUNTRY_CODE_AND_UNICODE_BOUNDARY_MATRIX",
+        "ALL_19_R2_1_PIPELINE_OUTCOMES",
+        "BOUNDED_LARGE_INPUT_AND_LIMIT_FALLBACK",
+        "EXACT_AND_DRIFTED_CUSTOM_PATTERN_NON_DISPATCH",
+        "WHOLE_VALUE_PHONE_REDACTION_OUTCOMES"
+      ]
+    },
     "r2_5_terminal_receipt_state": "BLOCKED_PENDING_IMPLEMENTATION_AND_DYNAMIC_EVIDENCE",
     "mismatch_action": "DISABLE_AFFECTED_FAST_PATH_AND_KEEP_INCUMBENT",
     "custom_pattern_action": "KEEP_ON_COMPLETE_INCUMBENT_ENGINE"
