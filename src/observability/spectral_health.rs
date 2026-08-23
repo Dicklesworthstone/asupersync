@@ -1426,7 +1426,8 @@ fn kendall_tau(values: &[f64]) -> Option<f64> {
             } else if diff < -f64::EPSILON {
                 discordant += 1;
             }
-            // Ties are excluded (tau-b with continuous data assumption).
+            // Value ties contribute to the tau-b denominator below but
+            // are neither concordant nor discordant.
         }
     }
 
@@ -1435,8 +1436,17 @@ fn kendall_tau(values: &[f64]) -> Option<f64> {
         return Some(0.0);
     }
 
+    // Time indices are unique, so tau-b's general denominator
+    // sqrt((n0 - n1) * (n0 - n2)) simplifies to
+    // sqrt(n0 * (concordant + discordant)): n1 is zero and value-tied
+    // pairs account for n2. Dividing only by comparable pairs would be
+    // Goodman-Kruskal gamma and would overstate trends with repeated values.
     #[allow(clippy::cast_precision_loss)]
-    Some((concordant - discordant) as f64 / total as f64)
+    let total_pairs = (n as f64) * ((n - 1) as f64) / 2.0;
+    #[allow(clippy::cast_precision_loss)]
+    let denominator = (total_pairs * total as f64).sqrt();
+    #[allow(clippy::cast_precision_loss)]
+    Some((concordant - discordant) as f64 / denominator)
 }
 
 /// Spearman's rank correlation coefficient for time-series trend detection.
@@ -3141,6 +3151,22 @@ mod tests {
         assert!(
             tau.unwrap().abs() < 1e-10,
             "constant series should give tau = 0, got {tau:?}"
+        );
+    }
+
+    #[test]
+    fn kendall_tau_b_penalizes_value_ties_ne8jdw() {
+        let values = [1.0, 1.0, 2.0, 2.0];
+        let tau = kendall_tau(&values).expect("tie-aware tau-b");
+        let expected = (2.0_f64 / 3.0).sqrt();
+
+        assert!(
+            (tau - expected).abs() < 1e-12,
+            "tau-b must include tied pairs in its denominator: expected {expected}, got {tau}"
+        );
+        assert!(
+            tau < 1.0,
+            "Goodman-Kruskal gamma would incorrectly report a perfect trend"
         );
     }
 
