@@ -287,6 +287,11 @@ pub fn decode_trailers(body: &[u8]) -> Result<TrailerFrame, GrpcError> {
 
 /// Maximum gRPC-Web frame size (same as default gRPC max message size).
 const DEFAULT_MAX_FRAME_SIZE: usize = 4 * 1024 * 1024;
+const WEB_FRAME_HEADER_SIZE: usize = 5;
+
+fn checked_web_frame_size(payload_len: usize) -> Option<usize> {
+    WEB_FRAME_HEADER_SIZE.checked_add(payload_len)
+}
 
 /// Codec for reading/writing gRPC-Web frames (data + trailer).
 ///
@@ -369,7 +374,7 @@ impl WebFrameCodec {
             return Err(GrpcError::protocol(message));
         }
 
-        if src.len() < 5 {
+        if src.len() < WEB_FRAME_HEADER_SIZE {
             return Ok(None);
         }
 
@@ -407,12 +412,19 @@ impl WebFrameCodec {
             return Err(GrpcError::MessageTooLarge);
         }
 
-        if src.len() < 5 + length {
+        let Some(frame_size) = checked_web_frame_size(length) else {
+            self.poison(format!(
+                "gRPC-Web frame length {length} overflows the target address space"
+            ));
+            return Err(GrpcError::MessageTooLarge);
+        };
+
+        if src.len() < frame_size {
             return Ok(None);
         }
 
         // Consume the header.
-        let _ = src.split_to(5);
+        let _ = src.split_to(WEB_FRAME_HEADER_SIZE);
         let payload = src.split_to(length).freeze();
 
         let is_trailer = flag & TRAILER_FLAG != 0;
@@ -1203,6 +1215,12 @@ mod tests {
         let ok = matches!(result, Err(GrpcError::MessageTooLarge));
         crate::assert_with_log!(ok, "encode rejects oversized frame", true, ok);
         crate::test_complete!("test_frame_too_large");
+    }
+
+    #[test]
+    fn grpc_web_frame_size_checked_add_rejects_address_space_overflow_ne8jdw() {
+        assert_eq!(checked_web_frame_size(0), Some(WEB_FRAME_HEADER_SIZE));
+        assert_eq!(checked_web_frame_size(usize::MAX), None);
     }
 
     #[test]
