@@ -8,7 +8,8 @@
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
 
 const AGENTS_PATH: &str = "AGENTS.md";
 const ARTIFACT_PATH: &str = "artifacts/dependency_budget_contract_v1.json";
@@ -19,7 +20,9 @@ const CONTRACT_PATH: &str = "tests/dependency_budget_contract.rs";
 const BEAD_ID: &str = "asupersync-mnotoo.1";
 const ARTIFACT_ID: &str = "dependency-budget-contract-v1";
 const LANE_ID: &str = "dependency-budget-contract";
-const PROOF_COMMAND: &str = "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_dependency_budget_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --features dependency-ledger --test dependency_budget_contract -- --nocapture";
+const PROOF_COMMAND: &str = "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_dependency_budget_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -j 2 -p asupersync --features dependency-ledger --test dependency_budget_contract -- --nocapture";
+const AGENTS_BEGIN: &str = "<!-- BEGIN GENERATED AGENTS KEY DEPENDENCIES -->";
+const AGENTS_END: &str = "<!-- END GENERATED AGENTS KEY DEPENDENCIES -->";
 
 type GraphKey = (String, String, String);
 type GraphCounts = BTreeMap<GraphKey, (u64, u64)>;
@@ -31,6 +34,41 @@ fn repo_root() -> PathBuf {
 fn read(path: &str) -> String {
     std::fs::read_to_string(repo_root().join(path))
         .unwrap_or_else(|error| panic!("read {path}: {error}"))
+}
+
+fn generated_agents_region(document: &str) -> &str {
+    let (_, after_begin) = document
+        .split_once(&format!("{AGENTS_BEGIN}\n"))
+        .expect("AGENTS begin marker");
+    let (region, _) = after_begin
+        .split_once(AGENTS_END)
+        .expect("AGENTS end marker");
+    region
+}
+
+fn run_agents_generator(repo: &Path, budget: &Path, mode: &str, extra: &[&str]) -> Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_dependency_marginal_ledger"));
+    command
+        .arg("--repo-root")
+        .arg(repo)
+        .arg("--agents-key-dependencies-from-budget")
+        .arg(budget)
+        .arg(mode)
+        .args(extra)
+        .output()
+        .expect("run dependency_marginal_ledger AGENTS mode")
+}
+
+fn assert_failed_with(output: &Output, marker: &str) {
+    assert!(
+        !output.status.success(),
+        "negative command unexpectedly passed"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(marker),
+        "negative stderr missing {marker:?}: {stderr}"
+    );
 }
 
 fn json(path: &str) -> Value {
@@ -253,6 +291,12 @@ fn header_provenance_and_documentation_are_pinned() {
         "reviewed exception",
         "ratchet down",
         "synthesized out-of-workspace consumer",
+        "--agents-key-dependencies-from-budget",
+        "--render-agents-key-dependencies",
+        "--check-agents-key-dependencies",
+        AGENTS_BEGIN,
+        AGENTS_END,
+        "apply_patch",
         LANE_ID,
         "does not authorize dependency removal",
     ] {
@@ -268,12 +312,336 @@ fn header_provenance_and_documentation_are_pinned() {
         "graph-ceiling-increase",
         "synthesized-consumer",
         "Package IDs",
+        "--agents-key-dependencies-from-budget",
+        "--render-agents-key-dependencies",
+        "--check-agents-key-dependencies",
+        AGENTS_BEGIN,
     ] {
         assert!(
             generator.contains(marker),
             "generator marker missing: {marker}"
         );
     }
+}
+
+#[test]
+fn agents_key_dependency_projection_joins_exact_budget_metadata() {
+    let budget = json(ARTIFACT_PATH);
+    let projection = &budget["agents_key_dependencies"];
+    let projection_keys = projection
+        .as_object()
+        .expect("agents_key_dependencies object")
+        .keys()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        projection_keys,
+        BTreeSet::from([
+            "schema_version",
+            "bead_id",
+            "heading",
+            "begin_marker",
+            "end_marker",
+            "columns",
+            "consumer_profile_vocabulary",
+            "tier_vocabulary",
+            "rows",
+        ])
+    );
+    assert_eq!(number(projection, "schema_version"), 1);
+    assert_eq!(text(projection, "bead_id"), "asupersync-mnotoo.3.6");
+    assert_eq!(text(projection, "heading"), "### Key Dependencies");
+    assert_eq!(text(projection, "begin_marker"), AGENTS_BEGIN);
+    assert_eq!(text(projection, "end_marker"), AGENTS_END);
+    assert_eq!(
+        array(projection, "columns"),
+        ["Crate", "Purpose", "Feature/Profile", "Tier"]
+    );
+    assert_eq!(
+        array(projection, "tier_vocabulary"),
+        [
+            "core-runtime",
+            "optional-production",
+            "development-test",
+            "development-benchmark",
+        ]
+    );
+    let expected_profiles = array(&budget, "graph_ceilings")
+        .iter()
+        .map(|row| text(row, "feature_profile").to_owned())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        string_set(projection, "consumer_profile_vocabulary"),
+        expected_profiles
+    );
+
+    let allowed_edges = array(&budget, "allowed_direct_dependencies")
+        .iter()
+        .map(|row| (text(row, "edge_id"), row))
+        .collect::<BTreeMap<_, _>>();
+    let rows = array(projection, "rows");
+    assert_eq!(rows.len(), 14);
+    assert_eq!(
+        rows.iter()
+            .map(|row| text(row, "row_id"))
+            .collect::<Vec<_>>(),
+        [
+            "key-thiserror",
+            "key-crossbeam-queue",
+            "key-parking-lot",
+            "key-polling",
+            "key-slab",
+            "key-smallvec",
+            "key-pin-project",
+            "key-serde-json",
+            "key-socket2",
+            "key-rustls",
+            "key-rusqlite",
+            "key-proptest",
+            "key-criterion",
+            "key-rayon",
+        ]
+    );
+    assert_eq!(
+        rows.iter()
+            .map(|row| number(row, "display_order"))
+            .collect::<Vec<_>>(),
+        (1..=14).map(|index| index * 10).collect::<Vec<_>>()
+    );
+
+    let mut projected_dependencies = BTreeSet::new();
+    for row in rows {
+        let dependencies = string_set(row, "dependency_names");
+        assert!(!dependencies.is_empty());
+        for dependency in &dependencies {
+            assert!(
+                projected_dependencies.insert(dependency.clone()),
+                "dependency {dependency} appears in multiple display rows"
+            );
+        }
+        let expected_crate_cell = array(row, "dependency_names")
+            .iter()
+            .map(|name| format!("`{}`", name.as_str().expect("dependency name")))
+            .collect::<Vec<_>>()
+            .join(" + ");
+        assert_eq!(text(row, "crate_cell"), expected_crate_cell);
+        text(row, "purpose");
+        text(row, "feature_profile_cell");
+
+        let mut joined_dependencies = BTreeSet::new();
+        let mut joined_targets = BTreeSet::new();
+        for edge_id in string_set(row, "direct_edge_ids") {
+            let edge = allowed_edges
+                .get(edge_id.as_str())
+                .unwrap_or_else(|| panic!("unknown projected edge {edge_id}"));
+            joined_dependencies.insert(text(edge, "dependency_name").to_owned());
+            assert_eq!(
+                edge["optional"].as_bool(),
+                row["optional"].as_bool(),
+                "optional metadata drift for {edge_id}"
+            );
+            if let Some(condition) = edge["target_condition"].as_str() {
+                joined_targets.insert(condition.to_owned());
+            }
+        }
+        assert_eq!(joined_dependencies, dependencies);
+        assert_eq!(joined_targets, string_set(row, "target_conditions"));
+        assert_ne!(
+            row.get("feature_profiles").is_some(),
+            row.get("development_scope").is_some(),
+            "each row needs exactly one activation selector"
+        );
+    }
+    assert_eq!(projected_dependencies.len(), 15);
+}
+
+#[test]
+fn cargo_renderer_reproduces_the_marked_agents_table_and_check_is_read_only() {
+    let root = repo_root();
+    let budget = root.join(ARTIFACT_PATH);
+    let render = run_agents_generator(&root, &budget, "--render-agents-key-dependencies", &[]);
+    assert!(
+        render.status.success(),
+        "render failed: {}",
+        String::from_utf8_lossy(&render.stderr)
+    );
+    assert!(
+        render.stderr.is_empty(),
+        "render diagnostics leaked on success"
+    );
+    assert_eq!(
+        String::from_utf8(render.stdout).expect("render stdout utf8"),
+        generated_agents_region(&read(AGENTS_PATH))
+    );
+
+    let before = std::fs::read(root.join(AGENTS_PATH)).expect("read AGENTS before check");
+    let check = run_agents_generator(&root, &budget, "--check-agents-key-dependencies", &[]);
+    assert!(
+        check.status.success(),
+        "check failed: {}",
+        String::from_utf8_lossy(&check.stderr)
+    );
+    assert!(check.stdout.is_empty());
+    assert!(check.stderr.is_empty());
+    assert_eq!(
+        std::fs::read(root.join(AGENTS_PATH)).expect("read AGENTS after check"),
+        before,
+        "check mode must not mutate AGENTS.md"
+    );
+}
+
+#[test]
+fn projection_and_marker_negative_mutations_fail_closed() {
+    let root = repo_root();
+    let temp = tempfile::tempdir().expect("create negative fixture directory");
+    let budget_path = temp.path().join("budget.json");
+    let canonical = json(ARTIFACT_PATH);
+
+    let mut missing = canonical.clone();
+    missing["agents_key_dependencies"]["rows"]
+        .as_array_mut()
+        .expect("rows")
+        .pop();
+    std::fs::write(
+        &budget_path,
+        serde_json::to_vec(&missing).expect("serialize missing row"),
+    )
+    .expect("write missing-row budget");
+    assert_failed_with(
+        &run_agents_generator(&root, &budget_path, "--render-agents-key-dependencies", &[]),
+        "reviewed canonical seed",
+    );
+
+    let mut extra = canonical.clone();
+    let mut extra_row = extra["agents_key_dependencies"]["rows"][0].clone();
+    extra_row["row_id"] = Value::String("key-extra".to_owned());
+    extra_row["display_order"] = Value::from(150);
+    extra["agents_key_dependencies"]["rows"]
+        .as_array_mut()
+        .expect("rows")
+        .push(extra_row);
+    std::fs::write(
+        &budget_path,
+        serde_json::to_vec(&extra).expect("serialize extra row"),
+    )
+    .expect("write extra-row budget");
+    assert_failed_with(
+        &run_agents_generator(&root, &budget_path, "--render-agents-key-dependencies", &[]),
+        "occurs in multiple rows",
+    );
+
+    let mut stale = canonical.clone();
+    stale["agents_key_dependencies"]["rows"][0]["purpose"] =
+        Value::String("stale planted purpose".to_owned());
+    std::fs::write(
+        &budget_path,
+        serde_json::to_vec(&stale).expect("serialize stale row"),
+    )
+    .expect("write stale-row budget");
+    assert_failed_with(
+        &run_agents_generator(&root, &budget_path, "--render-agents-key-dependencies", &[]),
+        "reviewed canonical seed",
+    );
+
+    let mut reordered = canonical.clone();
+    reordered["agents_key_dependencies"]["rows"]
+        .as_array_mut()
+        .expect("rows")
+        .swap(0, 1);
+    std::fs::write(
+        &budget_path,
+        serde_json::to_vec(&reordered).expect("serialize reordered rows"),
+    )
+    .expect("write reordered budget");
+    assert_failed_with(
+        &run_agents_generator(&root, &budget_path, "--render-agents-key-dependencies", &[]),
+        "ascending display_order",
+    );
+
+    let mut unknown = canonical;
+    unknown["agents_key_dependencies"]["rows"][0]["planted_unknown"] = Value::Bool(true);
+    std::fs::write(
+        &budget_path,
+        serde_json::to_vec(&unknown).expect("serialize unknown field"),
+    )
+    .expect("write unknown-field budget");
+    assert_failed_with(
+        &run_agents_generator(&root, &budget_path, "--render-agents-key-dependencies", &[]),
+        "unknown field",
+    );
+
+    let canonical_budget = root.join(ARTIFACT_PATH);
+    let agents = read(AGENTS_PATH);
+    for (case, mutated, marker) in [
+        (
+            "content-drift",
+            agents.replacen("Ergonomic error type derivation", "planted drift", 1),
+            "generated region drift",
+        ),
+        (
+            "missing-marker",
+            agents.replacen(AGENTS_BEGIN, "<!-- planted missing begin -->", 1),
+            "markers must each occur once",
+        ),
+        (
+            "duplicate-marker",
+            agents.replacen(AGENTS_BEGIN, &format!("{AGENTS_BEGIN}\n{AGENTS_BEGIN}"), 1),
+            "markers must each occur once",
+        ),
+        (
+            "reversed-markers",
+            agents
+                .replace(AGENTS_BEGIN, "<!-- planted temporary marker -->")
+                .replace(AGENTS_END, AGENTS_BEGIN)
+                .replace("<!-- planted temporary marker -->", AGENTS_END),
+            "reversed or nested",
+        ),
+    ] {
+        let case_root = temp.path().join(case);
+        std::fs::create_dir(&case_root).expect("create marker case directory");
+        std::fs::write(case_root.join(AGENTS_PATH), mutated).expect("write marker case");
+        assert_failed_with(
+            &run_agents_generator(
+                &case_root,
+                &canonical_budget,
+                "--check-agents-key-dependencies",
+                &[],
+            ),
+            marker,
+        );
+    }
+}
+
+#[test]
+fn agents_modes_reject_ambiguous_or_ledger_generation_options() {
+    let root = repo_root();
+    let budget = root.join(ARTIFACT_PATH);
+    assert_failed_with(
+        &run_agents_generator(
+            &root,
+            &budget,
+            "--render-agents-key-dependencies",
+            &["--output", "-"],
+        ),
+        "cannot be combined with ledger-generation options",
+    );
+    assert_failed_with(
+        &run_agents_generator(
+            &root,
+            &budget,
+            "--render-agents-key-dependencies",
+            &["--check-agents-key-dependencies"],
+        ),
+        "select exactly one",
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_dependency_marginal_ledger"))
+        .arg("--repo-root")
+        .arg(&root)
+        .arg("--render-agents-key-dependencies")
+        .output()
+        .expect("run missing-input negative");
+    assert_failed_with(&output, "requires both an input budget");
 }
 
 #[test]
@@ -494,8 +862,8 @@ fn proof_manifest_status_and_docs_map_the_scoped_lane() {
         .iter()
         .find(|claim| text(claim, "claim_id") == LANE_ID)
         .expect("dependency budget status row");
-    assert_eq!(text(claim, "status"), "yellow_scoped");
-    assert_eq!(text(claim, "proof_evidence_status"), "rerun-required");
+    assert_eq!(text(claim, "status"), "green");
+    assert_eq!(text(claim, "proof_evidence_status"), "fresh-rch-pass");
     assert_eq!(
         string_set(claim, "manifest_lane_ids"),
         BTreeSet::from([LANE_ID.to_owned()])

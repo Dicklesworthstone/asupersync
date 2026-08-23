@@ -955,6 +955,250 @@
       "target_condition": "cfg(windows)"
     }
   ],
+  "agents_key_dependencies": {
+    "schema_version": 1,
+    "bead_id": "asupersync-mnotoo.3.6",
+    "heading": "### Key Dependencies",
+    "begin_marker": "<!-- BEGIN GENERATED AGENTS KEY DEPENDENCIES -->",
+    "end_marker": "<!-- END GENERATED AGENTS KEY DEPENDENCIES -->",
+    "columns": [
+      "Crate",
+      "Purpose",
+      "Feature/Profile",
+      "Tier"
+    ],
+    "consumer_profile_vocabulary": [
+      "cli",
+      "compression",
+      "default",
+      "fuzz-quarantine",
+      "io-uring",
+      "kafka",
+      "loom-tests",
+      "metrics",
+      "minimal",
+      "sqlite",
+      "tls",
+      "trace-compression"
+    ],
+    "tier_vocabulary": [
+      "core-runtime",
+      "optional-production",
+      "development-test",
+      "development-benchmark"
+    ],
+    "rows": [
+      {
+        "row_id": "key-thiserror",
+        "display_order": 10,
+        "dependency_names": ["thiserror"],
+        "direct_edge_ids": ["normal:thiserror"],
+        "purpose": "Ergonomic error type derivation",
+        "optional": false,
+        "target_conditions": [],
+        "crate_cell": "`thiserror`",
+        "feature_profile_cell": "all consumer profiles",
+        "tier": "core-runtime",
+        "feature_profiles": [
+          "cli", "compression", "default", "fuzz-quarantine", "io-uring", "kafka",
+          "loom-tests", "metrics", "minimal", "sqlite", "tls", "trace-compression"
+        ]
+      },
+      {
+        "row_id": "key-crossbeam-queue",
+        "display_order": 20,
+        "dependency_names": ["crossbeam-queue"],
+        "direct_edge_ids": ["normal:crossbeam-queue"],
+        "purpose": "Lock-free concurrent queues",
+        "optional": false,
+        "target_conditions": [],
+        "crate_cell": "`crossbeam-queue`",
+        "feature_profile_cell": "all consumer profiles",
+        "tier": "core-runtime",
+        "feature_profiles": [
+          "cli", "compression", "default", "fuzz-quarantine", "io-uring", "kafka",
+          "loom-tests", "metrics", "minimal", "sqlite", "tls", "trace-compression"
+        ]
+      },
+      {
+        "row_id": "key-parking-lot",
+        "display_order": 30,
+        "dependency_names": ["parking_lot"],
+        "direct_edge_ids": ["normal:parking_lot"],
+        "purpose": "Fast synchronization primitives",
+        "optional": false,
+        "target_conditions": [],
+        "crate_cell": "`parking_lot`",
+        "feature_profile_cell": "all consumer profiles",
+        "tier": "core-runtime",
+        "feature_profiles": [
+          "cli", "compression", "default", "fuzz-quarantine", "io-uring", "kafka",
+          "loom-tests", "metrics", "minimal", "sqlite", "tls", "trace-compression"
+        ]
+      },
+      {
+        "row_id": "key-polling",
+        "display_order": 40,
+        "dependency_names": ["polling"],
+        "direct_edge_ids": ["target-normal:cfg(not(target_arch = \"wasm32\")):polling"],
+        "purpose": "Portable epoll/kqueue/IOCP polling",
+        "optional": false,
+        "target_conditions": ["cfg(not(target_arch = \"wasm32\"))"],
+        "crate_cell": "`polling`",
+        "feature_profile_cell": "all consumer profiles; `cfg(not(target_arch = \"wasm32\"))`",
+        "tier": "core-runtime",
+        "feature_profiles": [
+          "cli", "compression", "default", "fuzz-quarantine", "io-uring", "kafka",
+          "loom-tests", "metrics", "minimal", "sqlite", "tls", "trace-compression"
+        ]
+      },
+      {
+        "row_id": "key-slab",
+        "display_order": 50,
+        "dependency_names": ["slab"],
+        "direct_edge_ids": ["normal:slab"],
+        "purpose": "Pre-allocated storage for fixed-size records",
+        "optional": false,
+        "target_conditions": [],
+        "crate_cell": "`slab`",
+        "feature_profile_cell": "all consumer profiles",
+        "tier": "core-runtime",
+        "feature_profiles": [
+          "cli", "compression", "default", "fuzz-quarantine", "io-uring", "kafka",
+          "loom-tests", "metrics", "minimal", "sqlite", "tls", "trace-compression"
+        ]
+      },
+      {
+        "row_id": "key-smallvec",
+        "display_order": 60,
+        "dependency_names": ["smallvec"],
+        "direct_edge_ids": ["normal:smallvec"],
+        "purpose": "Stack-allocated small vectors",
+        "optional": false,
+        "target_conditions": [],
+        "crate_cell": "`smallvec`",
+        "feature_profile_cell": "all consumer profiles",
+        "tier": "core-runtime",
+        "feature_profiles": [
+          "cli", "compression", "default", "fuzz-quarantine", "io-uring", "kafka",
+          "loom-tests", "metrics", "minimal", "sqlite", "tls", "trace-compression"
+        ]
+      },
+      {
+        "row_id": "key-pin-project",
+        "display_order": 70,
+        "dependency_names": ["pin-project"],
+        "direct_edge_ids": ["normal:pin-project"],
+        "purpose": "Safe pin projections",
+        "optional": false,
+        "target_conditions": [],
+        "crate_cell": "`pin-project`",
+        "feature_profile_cell": "all consumer profiles",
+        "tier": "core-runtime",
+        "feature_profiles": [
+          "cli", "compression", "default", "fuzz-quarantine", "io-uring", "kafka",
+          "loom-tests", "metrics", "minimal", "sqlite", "tls", "trace-compression"
+        ]
+      },
+      {
+        "row_id": "key-serde-json",
+        "display_order": 80,
+        "dependency_names": ["serde", "serde_json"],
+        "direct_edge_ids": ["normal:serde", "normal:serde_json"],
+        "purpose": "Serialization",
+        "optional": false,
+        "target_conditions": [],
+        "crate_cell": "`serde` + `serde_json`",
+        "feature_profile_cell": "all consumer profiles",
+        "tier": "core-runtime",
+        "feature_profiles": [
+          "cli", "compression", "default", "fuzz-quarantine", "io-uring", "kafka",
+          "loom-tests", "metrics", "minimal", "sqlite", "tls", "trace-compression"
+        ]
+      },
+      {
+        "row_id": "key-socket2",
+        "display_order": 90,
+        "dependency_names": ["socket2"],
+        "direct_edge_ids": ["target-normal:cfg(not(target_arch = \"wasm32\")):socket2"],
+        "purpose": "Low-level socket configuration",
+        "optional": false,
+        "target_conditions": ["cfg(not(target_arch = \"wasm32\"))"],
+        "crate_cell": "`socket2`",
+        "feature_profile_cell": "all consumer profiles; `cfg(not(target_arch = \"wasm32\"))`",
+        "tier": "core-runtime",
+        "feature_profiles": [
+          "cli", "compression", "default", "fuzz-quarantine", "io-uring", "kafka",
+          "loom-tests", "metrics", "minimal", "sqlite", "tls", "trace-compression"
+        ]
+      },
+      {
+        "row_id": "key-rustls",
+        "display_order": 100,
+        "dependency_names": ["rustls"],
+        "direct_edge_ids": ["normal:rustls"],
+        "purpose": "TLS support",
+        "optional": true,
+        "target_conditions": [],
+        "crate_cell": "`rustls`",
+        "feature_profile_cell": "`tls`; optional",
+        "tier": "optional-production",
+        "feature_profiles": ["tls"]
+      },
+      {
+        "row_id": "key-rusqlite",
+        "display_order": 110,
+        "dependency_names": ["rusqlite"],
+        "direct_edge_ids": ["normal:rusqlite"],
+        "purpose": "SQLite async wrapper",
+        "optional": true,
+        "target_conditions": [],
+        "crate_cell": "`rusqlite`",
+        "feature_profile_cell": "`sqlite`; optional",
+        "tier": "optional-production",
+        "feature_profiles": ["sqlite"]
+      },
+      {
+        "row_id": "key-proptest",
+        "display_order": 120,
+        "dependency_names": ["proptest"],
+        "direct_edge_ids": ["dev:proptest"],
+        "purpose": "Property-based testing",
+        "optional": false,
+        "target_conditions": [],
+        "crate_cell": "`proptest`",
+        "feature_profile_cell": "`development_scope = \"test\"`",
+        "tier": "development-test",
+        "development_scope": "test"
+      },
+      {
+        "row_id": "key-criterion",
+        "display_order": 130,
+        "dependency_names": ["criterion"],
+        "direct_edge_ids": ["target-dev:cfg(not(windows)):criterion"],
+        "purpose": "Benchmarking",
+        "optional": false,
+        "target_conditions": ["cfg(not(windows))"],
+        "crate_cell": "`criterion`",
+        "feature_profile_cell": "`development_scope = \"benchmark\"`; `cfg(not(windows))`",
+        "tier": "development-benchmark",
+        "development_scope": "benchmark"
+      },
+      {
+        "row_id": "key-rayon",
+        "display_order": 140,
+        "dependency_names": ["rayon"],
+        "direct_edge_ids": ["dev:rayon"],
+        "purpose": "Data parallelism for CPU-bound work",
+        "optional": false,
+        "target_conditions": [],
+        "crate_cell": "`rayon`",
+        "feature_profile_cell": "`development_scope = \"benchmark\"`",
+        "tier": "development-benchmark",
+        "development_scope": "benchmark"
+      }
+    ]
+  },
   "artifact_id": "dependency-budget-contract-v1",
   "bead_id": "asupersync-mnotoo.1",
   "capability_id": "CAP-DEPENDENCY-LEDGER",
@@ -4285,19 +4529,22 @@
     "The budget is a deterministic projection of the frozen marginal ledger; it does not run a second resolver with different feature unification.",
     "Only graph records whose canonical profile scope is synthesized-consumer are admitted as graph ceilings.",
     "Cargo package IDs define graph reachability in the source ledger; both package-version and unique package-name counts are retained.",
-    "Each direct-edge cell key is feature profile, target triple, host triple, and dependency edge kind."
+    "Each direct-edge cell key is feature profile, target triple, host triple, and dependency edge kind.",
+    "The AGENTS Key Dependencies table is a checked curated projection whose dependency names join the complete direct-edge allowset."
   ],
   "negative_fixture_contract": {
     "direct_dependency_addition": "Inject a synthetic normal:trivial edge into the parsed manifest inventory; validation must reject it.",
     "graph_ceiling_increase": "Increment a synthesized-consumer package-version count above its stored ceiling; validation must reject it.",
     "graph_ratchet_down": "Decrement both current graph counts; validation must accept the smaller graph so regeneration can lower the ceilings.",
+    "agents_key_dependencies": "Missing, extra, duplicate, stale, reordered, unknown-field, marker-drift, and incompatible-CLI mutations must fail without repository writes.",
     "repository_files_are_not_mutated": true
   },
   "no_claim_boundaries": [
     "This contract enforces checked dependency and resolved-graph budgets; it does not authorize dependency removal, replacement, or cutover.",
     "Cargo resolution counts do not prove compilation, runtime correctness, security, performance, interoperability, release readiness, or broad workspace health.",
     "The workspace dev/build audit and excluded fuzz health remain separately scoped evidence and are not synthesized-consumer graph claims.",
-    "A reviewed exception documents a rare budget increase; it is not evidence that the added dependency or larger graph is desirable."
+    "A reviewed exception documents a rare budget increase; it is not evidence that the added dependency or larger graph is desirable.",
+    "The generated AGENTS table is a curated operator summary, not a complete display of every allowed direct edge."
   ],
   "program_id": "asupersync-ir2uf0",
   "ratchet_policy": {

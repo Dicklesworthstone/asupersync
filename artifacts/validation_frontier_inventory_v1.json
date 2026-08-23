@@ -1209,8 +1209,8 @@
     {
       "lane_id": "dependency-budget-contract",
       "source": "proof_lane_manifest_v1",
-      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_dependency_budget_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --features dependency-ledger --test dependency_budget_contract -- --nocapture",
-      "intended_guarantee": "Dependency budget artifact contract.",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_dependency_budget_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -j 2 -p asupersync --features dependency-ledger --test dependency_budget_contract -- --nocapture",
+      "intended_guarantee": "Dependency budget artifact plus generated AGENTS key-dependency metadata, renderer, and read-only marker-drift contract.",
       "package_or_surface": "asupersync",
       "target_kind": "artifact_contract",
       "features": [
@@ -1221,7 +1221,7 @@
       "conformance_expected": "unknown_needs_vf2",
       "normal_edge_tokio_expectation": "unknown_needs_vf2",
       "resource_envelope_class": "artifact-contract-medium",
-      "current_rch_behavior": "mapped_not_rerun_in_vf1"
+      "current_rch_behavior": "green_observed"
     }
   ],
   "known_regressions_or_blockers": [

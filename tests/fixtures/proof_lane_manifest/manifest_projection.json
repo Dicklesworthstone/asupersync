@@ -1801,14 +1801,14 @@
       "kind": "artifact_contract",
       "resource_envelope_class": "artifact-contract-medium",
       "package": "asupersync",
-      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_dependency_budget_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --features dependency-ledger --test dependency_budget_contract -- --nocapture",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_dependency_budget_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -j 2 -p asupersync --features dependency-ledger --test dependency_budget_contract -- --nocapture",
       "guarantee_ids": [
         "dependency-budget-contract"
       ],
       "feature_flags": [
         "dependency-ledger"
       ],
-      "expected_signal": "dependency_budget_contract tests pass",
+      "expected_signal": "all dependency_budget_contract tests pass, including Cargo-built AGENTS render/check and fail-closed mutation coverage",
       "source_paths": [
         "artifacts/dependency_budget_contract_v1.json",
         "artifacts/dependency_marginal_ledger_v1.json",

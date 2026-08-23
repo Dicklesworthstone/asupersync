@@ -44,24 +44,22 @@ it is not substituted for a neutral consumer ceiling. The fuzz-quarantine
 profile is a synthesized consumer and remains explicitly quarantined rather
 than becoming a production claim.
 
-## AGENTS key-dependency projection readiness
+## AGENTS key-dependency projection
 
-Bead `asupersync-mnotoo.3.6` owns a future Cargo-built projection of the
-`AGENTS.md` **Key Dependencies** table. That projection is not implemented or
-admitted yet. The current sources expose a concrete metadata gap that must be
-closed before a generator can be truthful:
+Bead `asupersync-mnotoo.3.6` owns the Cargo-built projection of the `AGENTS.md`
+**Key Dependencies** table. The checked budget metadata, renderer, marker-scoped
+table, and focused drift contract form one fail-closed surface:
 
 | Surface | Current checked state | Required projection state |
 | --- | --- | --- |
-| `allowed_direct_dependencies` | 105 exact edge rows with dependency/package name, edge kind, manifest table, target condition, and optionality | Retain these rows as the manifest-membership authority |
-| Documentation metadata | No purpose, feature/profile, documentation tier, display grouping, or display order fields | Add an explicit checked projection object; do not infer prose from crate names or Cargo kinds |
-| `AGENTS.md` table | 14 manually curated rows covering 15 crate names because `serde` and `serde_json` share one row; two columns only | Render the exact checked row set with Crate, Purpose, Feature/Profile, and Tier columns |
-| Cargo generator | `dependency_marginal_ledger` can emit the ledger and budget only | Add one explicit AGENTS render/check mode that reuses the checked budget input |
-| Contract | Pins broad README/AGENTS markers, direct edges, and graph ceilings | Reject missing, extra, duplicate, stale, reordered, or differently rendered projection rows |
+| `allowed_direct_dependencies` | 106 exact edge rows with dependency/package name, edge kind, manifest table, target condition, and optionality | Manifest-membership authority joined by every projected dependency |
+| `agents_key_dependencies` | Explicit purpose, feature/profile, tier, grouping, display, and order metadata | Canonical 14-row curated projection; prose is never inferred from crate names or Cargo kinds |
+| `AGENTS.md` table | 14 generated rows covering 15 crate names because `serde` and `serde_json` share one explicit group | Exact four-column bytes between unique markers |
+| Cargo generator | `dependency_marginal_ledger` emits the ledger/budget and has exclusive AGENTS render/check modes | Both modes reuse and validate the checked budget input |
+| Contract | Pins the metadata, joins, table bytes, CLI behavior, direct edges, and graph ceilings | Missing, extra, duplicate, stale, reordered, or differently rendered rows fail CI |
 
-The budget artifact must gain one canonical `agents_key_dependencies`
-projection object before AGENTS generation is enabled. Its row schema must
-contain:
+The budget artifact contains one canonical `agents_key_dependencies` projection
+object. Its row schema contains:
 
 - a stable `row_id` and integer `display_order`;
 - one or more exact `dependency_names`, allowing a grouped display row only
@@ -80,17 +78,15 @@ replacement for the complete 105-edge allowset.
 
 ### Reviewed projection seed
 
-The following seed preserves the current reviewed purpose meaning and order
+The following canonical seed preserves the reviewed purpose meaning and order
 while separating activation details from purpose text and pinning the exact
-direct-edge joins needed by the future machine object. It is design input only:
-until the object, renderer, and contract land, this table is not a second
-metadata authority and does not make the AGENTS table generated.
+direct-edge joins in the machine object.
 
 For readability, **all consumer profiles** below means the exact current
 profile vocabulary: `cli`, `compression`, `default`, `fuzz-quarantine`,
 `io-uring`, `kafka`, `loom-tests`, `metrics`, `minimal`, `sqlite`, `tls`, and
 `trace-compression`. That phrase is documentation shorthand, not an admissible
-JSON feature value; the future object must store the expanded values. Dev rows
+JSON feature value; the object stores the expanded values. Dev rows
 instead use an explicit `development_scope`, which is mutually exclusive with
 `feature_profiles`. The closed tier enum for this projection is
 `core-runtime`, `optional-production`, `development-test`, and
@@ -115,7 +111,7 @@ instead use an explicit `development_scope`, which is mutually exclusive with
 
 ### Pinned projection object and table bytes
 
-The future top-level `agents_key_dependencies` value is an object, not a
+The top-level `agents_key_dependencies` value is an object, not a
 second free-form document. It has exactly these object-level fields:
 
 - `schema_version`, fixed at `1`;
@@ -192,24 +188,22 @@ delimiter (`|`). Render mode emits neither marker line. Check mode compares
 the bytes immediately after the begin marker's LF through the LF immediately
 before the end marker, so whitespace-only drift is still drift.
 
-The future contract must validate each edge string above against
+The contract validates each edge string above against
 `allowed_direct_dependencies`, expand each consumer-profile set against the
 graph-ceiling vocabulary, and verify the two target conditions verbatim. The
 rendered Feature/Profile cells may use concise display text, but that text must
 come from checked projection metadata rather than being reconstructed from
 Cargo edge kinds.
 
-The future renderer must use unique begin/end marker lines, fail on missing,
+The renderer uses unique begin/end marker lines, fails on missing,
 duplicate, nested, or reversed markers, and replace only the bytes between
 those markers. Check mode must render in memory and reject drift without
 writing; the reviewed update path must use the same rendered bytes and preserve
-every byte outside the marked region. Until the metadata object, renderer,
-markers, and focused contract land together, the table remains manually
-maintained and this lane makes no generated-document or drift-prevention claim.
+every byte outside the marked region.
 
 ### Pinned renderer interface and remote boundary
 
-The future implementation must use these exact, trimmed marker lines:
+The implementation uses these exact, trimmed marker lines:
 
 ```text
 <!-- BEGIN GENERATED AGENTS KEY DEPENDENCIES -->
@@ -219,10 +213,9 @@ The future implementation must use these exact, trimmed marker lines:
 The `### Key Dependencies` heading stays outside the generated region. The
 begin marker must be the next nonblank line after that heading, the end marker
 must precede the next heading, and only the four-column Markdown table belongs
-between them. The markers must not be added to `AGENTS.md` until the metadata
-object, renderer, and focused contract land in the same reviewed change.
+between them.
 
-The Cargo-built tool must extend the existing argument style with one input
+The Cargo-built tool extends the existing argument style with one input
 selector, `--agents-key-dependencies-from-budget PATH`, and exactly one of two
 mutually exclusive modes:
 
@@ -232,12 +225,40 @@ mutually exclusive modes:
   region in `AGENTS.md`, exits nonzero on any marker or content drift, and
   performs no writes.
 
-These modes may accept the existing `--repo-root` selector. They must reject
+These modes accept the existing `--repo-root` selector. They reject
 ledger-generation options such as `--work-dir`, `--output`, `--source-commit`,
 `--budget-from-ledger`, `--jobs`, `--offline`, `--profiles`, and `--targets`
 rather than silently combining two output contracts. Render stdout contains
 the table only; diagnostics belong on stderr so a caller never mistakes a
 status line for documentation.
+
+Render and inspect the canonical table through remote-required RCH:
+
+```bash
+RCH_REQUIRE_REMOTE=1 rch exec -- env \
+  CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_dependency_budget_agents_render \
+  CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 \
+  RUSTFLAGS='-D warnings -C debuginfo=0' \
+  cargo run --quiet -p asupersync \
+    --bin dependency_marginal_ledger \
+    --no-default-features --features dependency-ledger -- \
+    --agents-key-dependencies-from-budget artifacts/dependency_budget_contract_v1.json \
+    --render-agents-key-dependencies
+```
+
+After the reviewed marker-scoped patch, use the read-only check mode:
+
+```bash
+RCH_REQUIRE_REMOTE=1 rch exec -- env \
+  CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_dependency_budget_agents_check \
+  CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 \
+  RUSTFLAGS='-D warnings -C debuginfo=0' \
+  cargo run --quiet -p asupersync \
+    --bin dependency_marginal_ledger \
+    --no-default-features --features dependency-ledger -- \
+    --agents-key-dependencies-from-budget artifacts/dependency_budget_contract_v1.json \
+    --check-agents-key-dependencies
+```
 
 Cargo execution remains remote-only. A process running on an RCH worker must
 not be assumed to mutate the local checkout, and the render command must never
@@ -340,7 +361,7 @@ RCH_REQUIRE_REMOTE=1 rch exec -- \
   env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_dependency_budget_contract" \
       CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 \
       RUSTFLAGS='-D warnings -C debuginfo=0' \
-  cargo test -p asupersync --features dependency-ledger \
+  cargo test -j 2 -p asupersync --features dependency-ledger \
     --test dependency_budget_contract -- --nocapture
 ```
 
@@ -350,9 +371,12 @@ The canonical focused proof lane is `dependency-budget-contract`.
 
 Passing the lane proves the checked allowset, synthesized-consumer cell keys,
 ledger fingerprint, graph ceilings, safe negative fixtures, generator markers,
-documentation markers, and proof-manifest/status mapping remain aligned.
+the curated AGENTS projection metadata/direct-edge joins/rendered bytes/read-only
+checker, documentation markers, and proof-manifest/status mapping remain
+aligned.
 
 It does not prove compilation, runtime correctness, security, performance,
 interoperability, release readiness, broad workspace health, workspace
 dev/build graph health, excluded fuzz health, live RCH fleet availability, or
-permission to change a dependency.
+permission to change a dependency. The 14 generated rows are an operator-facing
+curated summary, not a complete display of all allowed direct edges.

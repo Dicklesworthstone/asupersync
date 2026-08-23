@@ -204,7 +204,7 @@ This is expected to additionally surface `opentelemetry_sdk` (via the dev-dep `t
 
 **dependency supply-chain policy contract:** `artifacts/dependency_supply_chain_policy_v1.json`, checked by `tests/dependency_supply_chain_policy_contract.rs`, is the scoped policy packet for `asupersync-mnotoo.2` plus excluded-fuzz follow-up `asupersync-mnotoo.3.4`. Its focused manifest lane is `dependency-supply-chain-policy-contract`; cite it only for exact Cargo scanner pins, RustSec database freshness requirements, checked root/fuzz lockfile fingerprints, excluded-fuzz toolchain/native-edge/Tokio-quarantine declarations, advisory exception ownership/expiry, license/source rules, duplicate ratchets, safe negative fixtures, CI/runbook wiring, proof manifest/status rows, and no-claim boundaries. Live root and excluded-fuzz scanner status comes from `scripts/ci/audit_dependencies.sh run`, not from the Rust contract alone. The runbook is `docs/dependency_supply_chain_policy.md`. It does not prove fuzz-target compilation or behavior, undisclosed-vulnerability absence, legal compliance, publisher identity, release readiness, broad workspace health, runtime correctness, performance, or live RCH fleet availability.
 
-**dependency budget contract:** `artifacts/dependency_budget_contract_v1.json`, checked by `tests/dependency_budget_contract.rs`, is the scoped Phase-9 ratchet for `asupersync-mnotoo.1`. Its focused manifest lane is `dependency-budget-contract`; cite it only for the exact direct Cargo edge allowset, refreshed marginal-ledger fingerprint, synthesized-consumer package-ID graph ceilings keyed by feature profile/target/host plus edge-kind partitions, safe negative fixtures, automatic downward ratchet, reviewed upward-exception schema, generator/docs markers, proof manifest/status rows, and no-claim boundaries. The generator is `src/bin/dependency_marginal_ledger.rs --budget-from-ledger`; it rejects stale manifest inventory and unreviewed graph growth before output. The runbook is `docs/dependency_budget_contract.md`. It does not authorize dependency removal or cutover and does not prove compilation, runtime correctness, security, performance, interoperability, release readiness, broad workspace health, workspace dev/build graph health, excluded fuzz health, or live RCH fleet availability.
+**dependency budget contract:** `artifacts/dependency_budget_contract_v1.json`, checked by `tests/dependency_budget_contract.rs`, is the scoped Phase-9 ratchet for `asupersync-mnotoo.1` plus the generated key-dependency projection for `asupersync-mnotoo.3.6`. Its focused manifest lane is `dependency-budget-contract`; cite it only for the exact direct Cargo edge allowset, refreshed marginal-ledger fingerprint, synthesized-consumer package-ID graph ceilings keyed by feature profile/target/host plus edge-kind partitions, the curated AGENTS projection metadata/direct-edge joins/rendered marker bytes/read-only drift checker, safe negative fixtures, automatic downward ratchet, reviewed upward-exception schema, generator/docs markers, proof manifest/status rows, and no-claim boundaries. The Cargo-built generator is `src/bin/dependency_marginal_ledger.rs`; `--budget-from-ledger` emits the budget, while the mutually exclusive `--render-agents-key-dependencies` and `--check-agents-key-dependencies` modes consume its checked projection without an automatic local rewrite path. The runbook is `docs/dependency_budget_contract.md`. It does not authorize dependency removal or cutover; the 14 generated rows are not the complete direct-edge allowset; and the lane does not prove compilation, runtime correctness, security, performance, interoperability, release readiness, broad workspace health, workspace dev/build graph health, excluded fuzz health, or live RCH fleet availability.
 
 **Pattern**: All async functions take `&Cx` as first parameter. The `Cx` flows down through structured concurrency scopes.
 
@@ -217,22 +217,24 @@ This is expected to additionally surface `opentelemetry_sdk` (via the dev-dep `t
 
 ### Key Dependencies
 
-| Crate | Purpose |
-|-------|---------|
-| `thiserror` | Ergonomic error type derivation |
-| `crossbeam-queue` | Lock-free concurrent queues |
-| `parking_lot` | Fast synchronization primitives |
-| `polling` | Portable epoll/kqueue/IOCP polling |
-| `slab` | Pre-allocated storage for fixed-size records |
-| `smallvec` | Stack-allocated small vectors |
-| `pin-project` | Safe pin projections |
-| `serde` + `serde_json` | Serialization |
-| `socket2` | Low-level socket configuration |
-| `rustls` | TLS support (optional, via `tls` feature) |
-| `rusqlite` | SQLite async wrapper (optional, via `sqlite` feature) |
-| `proptest` | Property-based testing (dev) |
-| `criterion` | Benchmarking (dev) |
-| `rayon` | Data parallelism for CPU-bound work (dev/bench only) |
+<!-- BEGIN GENERATED AGENTS KEY DEPENDENCIES -->
+| Crate | Purpose | Feature/Profile | Tier |
+| --- | --- | --- | --- |
+| `thiserror` | Ergonomic error type derivation | all consumer profiles | `core-runtime` |
+| `crossbeam-queue` | Lock-free concurrent queues | all consumer profiles | `core-runtime` |
+| `parking_lot` | Fast synchronization primitives | all consumer profiles | `core-runtime` |
+| `polling` | Portable epoll/kqueue/IOCP polling | all consumer profiles; `cfg(not(target_arch = "wasm32"))` | `core-runtime` |
+| `slab` | Pre-allocated storage for fixed-size records | all consumer profiles | `core-runtime` |
+| `smallvec` | Stack-allocated small vectors | all consumer profiles | `core-runtime` |
+| `pin-project` | Safe pin projections | all consumer profiles | `core-runtime` |
+| `serde` + `serde_json` | Serialization | all consumer profiles | `core-runtime` |
+| `socket2` | Low-level socket configuration | all consumer profiles; `cfg(not(target_arch = "wasm32"))` | `core-runtime` |
+| `rustls` | TLS support | `tls`; optional | `optional-production` |
+| `rusqlite` | SQLite async wrapper | `sqlite`; optional | `optional-production` |
+| `proptest` | Property-based testing | `development_scope = "test"` | `development-test` |
+| `criterion` | Benchmarking | `development_scope = "benchmark"`; `cfg(not(windows))` | `development-benchmark` |
+| `rayon` | Data parallelism for CPU-bound work | `development_scope = "benchmark"` | `development-benchmark` |
+<!-- END GENERATED AGENTS KEY DEPENDENCIES -->
 
 ### Workspace Members
 

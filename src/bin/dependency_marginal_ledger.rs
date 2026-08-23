@@ -34,6 +34,11 @@ const BUDGET_CAPABILITY_ID: &str = "CAP-DEPENDENCY-LEDGER";
 const BUDGET_CONTRACT_PATH: &str = "tests/dependency_budget_contract.rs";
 const BUDGET_DOC_PATH: &str = "docs/dependency_budget_contract.md";
 const BUDGET_LEDGER_PATH: &str = "artifacts/dependency_marginal_ledger_v1.json";
+const AGENTS_PATH: &str = "AGENTS.md";
+const AGENTS_KEY_DEPENDENCIES_BEAD_ID: &str = "asupersync-mnotoo.3.6";
+const AGENTS_KEY_DEPENDENCIES_HEADING: &str = "### Key Dependencies";
+const AGENTS_KEY_DEPENDENCIES_BEGIN: &str = "<!-- BEGIN GENERATED AGENTS KEY DEPENDENCIES -->";
+const AGENTS_KEY_DEPENDENCIES_END: &str = "<!-- END GENERATED AGENTS KEY DEPENDENCIES -->";
 const TAXONOMY_PATH: &str = "artifacts/dependency_safety_taxonomy_v1.json";
 const GENERATOR_PATH: &str = "src/bin/dependency_marginal_ledger.rs";
 const CONTRACT_PATH: &str = "tests/dependency_marginal_ledger_contract.rs";
@@ -152,6 +157,14 @@ struct Config {
     offline: bool,
     selected_profiles: Option<BTreeSet<String>>,
     selected_targets: Option<BTreeSet<String>>,
+    agents_key_dependencies_from_budget: Option<PathBuf>,
+    agents_key_dependencies_mode: Option<AgentsKeyDependenciesMode>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AgentsKeyDependenciesMode {
+    Render,
+    Check,
 }
 
 impl Config {
@@ -166,6 +179,9 @@ impl Config {
         let mut offline = false;
         let mut selected_profiles = None;
         let mut selected_targets = None;
+        let mut agents_key_dependencies_from_budget = None;
+        let mut agents_key_dependencies_mode = None;
+        let mut ledger_mode_options = BTreeSet::new();
 
         while let Some(arg) = args.next() {
             match arg.to_string_lossy().as_ref() {
@@ -173,15 +189,18 @@ impl Config {
                     repo_root = PathBuf::from(required_arg(&mut args, "--repo-root")?);
                 }
                 "--work-dir" => {
+                    ledger_mode_options.insert("--work-dir");
                     work_dir = Some(PathBuf::from(required_arg(&mut args, "--work-dir")?));
                 }
                 "--output" => {
+                    ledger_mode_options.insert("--output");
                     let value = required_arg(&mut args, "--output")?;
                     if value != "-" {
                         output = Some(PathBuf::from(value));
                     }
                 }
                 "--source-commit" => {
+                    ledger_mode_options.insert("--source-commit");
                     source_commit = Some(
                         required_arg(&mut args, "--source-commit")?
                             .to_string_lossy()
@@ -189,12 +208,14 @@ impl Config {
                     );
                 }
                 "--budget-from-ledger" => {
+                    ledger_mode_options.insert("--budget-from-ledger");
                     budget_from_ledger = Some(PathBuf::from(required_arg(
                         &mut args,
                         "--budget-from-ledger",
                     )?));
                 }
                 "--jobs" => {
+                    ledger_mode_options.insert("--jobs");
                     let value = required_arg(&mut args, "--jobs")?;
                     jobs = value
                         .to_string_lossy()
@@ -204,12 +225,35 @@ impl Config {
                         return Err("--jobs must be in 1..=32".into());
                     }
                 }
-                "--offline" => offline = true,
+                "--offline" => {
+                    ledger_mode_options.insert("--offline");
+                    offline = true;
+                }
                 "--profiles" => {
+                    ledger_mode_options.insert("--profiles");
                     selected_profiles = Some(csv_set(&required_arg(&mut args, "--profiles")?));
                 }
                 "--targets" => {
+                    ledger_mode_options.insert("--targets");
                     selected_targets = Some(csv_set(&required_arg(&mut args, "--targets")?));
+                }
+                "--agents-key-dependencies-from-budget" => {
+                    agents_key_dependencies_from_budget = Some(PathBuf::from(required_arg(
+                        &mut args,
+                        "--agents-key-dependencies-from-budget",
+                    )?));
+                }
+                "--render-agents-key-dependencies" => {
+                    set_agents_key_dependencies_mode(
+                        &mut agents_key_dependencies_mode,
+                        AgentsKeyDependenciesMode::Render,
+                    )?;
+                }
+                "--check-agents-key-dependencies" => {
+                    set_agents_key_dependencies_mode(
+                        &mut agents_key_dependencies_mode,
+                        AgentsKeyDependenciesMode::Check,
+                    )?;
                 }
                 "--help" | "-h" => {
                     print_help();
@@ -227,6 +271,25 @@ impl Config {
         let output = output.map(|path| absolutize_cli_path(&repo_root, path));
         let budget_from_ledger =
             budget_from_ledger.map(|path| absolutize_cli_path(&repo_root, path));
+        let agents_key_dependencies_from_budget =
+            agents_key_dependencies_from_budget.map(|path| absolutize_cli_path(&repo_root, path));
+        if agents_key_dependencies_mode.is_some() || agents_key_dependencies_from_budget.is_some() {
+            if agents_key_dependencies_mode.is_none()
+                || agents_key_dependencies_from_budget.is_none()
+            {
+                return Err(
+                    "AGENTS key-dependency mode requires both an input budget and exactly one render/check selector"
+                        .into(),
+                );
+            }
+            if !ledger_mode_options.is_empty() {
+                return Err(format!(
+                    "AGENTS key-dependency mode cannot be combined with ledger-generation options: {}",
+                    ledger_mode_options.into_iter().collect::<Vec<_>>().join(", ")
+                )
+                .into());
+            }
+        }
         Ok(Self {
             repo_root,
             work_dir,
@@ -237,6 +300,8 @@ impl Config {
             offline,
             selected_profiles,
             selected_targets,
+            agents_key_dependencies_from_budget,
+            agents_key_dependencies_mode,
         })
     }
 
@@ -291,6 +356,16 @@ impl Config {
     }
 }
 
+fn set_agents_key_dependencies_mode(
+    selected: &mut Option<AgentsKeyDependenciesMode>,
+    requested: AgentsKeyDependenciesMode,
+) -> Result<()> {
+    if selected.replace(requested).is_some() {
+        return Err("select exactly one AGENTS key-dependency render/check mode".into());
+    }
+    Ok(())
+}
+
 fn absolutize_cli_path(repo_root: &Path, path: PathBuf) -> PathBuf {
     if path.is_absolute() {
         path
@@ -319,7 +394,10 @@ fn print_help() {
         "dependency_marginal_ledger [--repo-root PATH] [--work-dir PATH] \
          [--output PATH|-] [--source-commit SHA] [--profiles CSV] \
          [--targets CSV] [--jobs 1..=32] [--offline] \
-         [--budget-from-ledger PATH]"
+         [--budget-from-ledger PATH]\n\
+         dependency_marginal_ledger [--repo-root PATH] \
+         --agents-key-dependencies-from-budget PATH \
+         (--render-agents-key-dependencies|--check-agents-key-dependencies)"
     );
 }
 
@@ -332,6 +410,616 @@ struct DirectDependency {
     target_condition: Option<String>,
     optional: bool,
     manifest_table: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct AgentsKeyDependencies {
+    schema_version: u64,
+    bead_id: String,
+    heading: String,
+    begin_marker: String,
+    end_marker: String,
+    columns: Vec<String>,
+    consumer_profile_vocabulary: Vec<String>,
+    tier_vocabulary: Vec<String>,
+    rows: Vec<AgentsKeyDependencyRow>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct AgentsKeyDependencyRow {
+    row_id: String,
+    display_order: u64,
+    dependency_names: Vec<String>,
+    direct_edge_ids: Vec<String>,
+    purpose: String,
+    optional: bool,
+    target_conditions: Vec<String>,
+    crate_cell: String,
+    feature_profile_cell: String,
+    tier: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    feature_profiles: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    development_scope: Option<String>,
+}
+
+fn owned_strings(values: &[&str]) -> Vec<String> {
+    values.iter().map(|value| (*value).to_owned()).collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn agents_key_dependency_row(
+    row_id: &str,
+    display_order: u64,
+    dependency_names: &[&str],
+    direct_edge_ids: &[&str],
+    purpose: &str,
+    optional: bool,
+    target_conditions: &[&str],
+    crate_cell: &str,
+    feature_profile_cell: &str,
+    tier: &str,
+    feature_profiles: Option<Vec<String>>,
+    development_scope: Option<&str>,
+) -> AgentsKeyDependencyRow {
+    AgentsKeyDependencyRow {
+        row_id: row_id.to_owned(),
+        display_order,
+        dependency_names: owned_strings(dependency_names),
+        direct_edge_ids: owned_strings(direct_edge_ids),
+        purpose: purpose.to_owned(),
+        optional,
+        target_conditions: owned_strings(target_conditions),
+        crate_cell: crate_cell.to_owned(),
+        feature_profile_cell: feature_profile_cell.to_owned(),
+        tier: tier.to_owned(),
+        feature_profiles,
+        development_scope: development_scope.map(str::to_owned),
+    }
+}
+
+fn canonical_consumer_profiles() -> Vec<String> {
+    owned_strings(&[
+        "cli",
+        "compression",
+        "default",
+        "fuzz-quarantine",
+        "io-uring",
+        "kafka",
+        "loom-tests",
+        "metrics",
+        "minimal",
+        "sqlite",
+        "tls",
+        "trace-compression",
+    ])
+}
+
+fn canonical_agents_key_dependencies() -> AgentsKeyDependencies {
+    let all_profiles = canonical_consumer_profiles();
+    AgentsKeyDependencies {
+        schema_version: 1,
+        bead_id: AGENTS_KEY_DEPENDENCIES_BEAD_ID.to_owned(),
+        heading: AGENTS_KEY_DEPENDENCIES_HEADING.to_owned(),
+        begin_marker: AGENTS_KEY_DEPENDENCIES_BEGIN.to_owned(),
+        end_marker: AGENTS_KEY_DEPENDENCIES_END.to_owned(),
+        columns: owned_strings(&["Crate", "Purpose", "Feature/Profile", "Tier"]),
+        consumer_profile_vocabulary: all_profiles.clone(),
+        tier_vocabulary: owned_strings(&[
+            "core-runtime",
+            "optional-production",
+            "development-test",
+            "development-benchmark",
+        ]),
+        rows: vec![
+            agents_key_dependency_row(
+                "key-thiserror",
+                10,
+                &["thiserror"],
+                &["normal:thiserror"],
+                "Ergonomic error type derivation",
+                false,
+                &[],
+                "`thiserror`",
+                "all consumer profiles",
+                "core-runtime",
+                Some(all_profiles.clone()),
+                None,
+            ),
+            agents_key_dependency_row(
+                "key-crossbeam-queue",
+                20,
+                &["crossbeam-queue"],
+                &["normal:crossbeam-queue"],
+                "Lock-free concurrent queues",
+                false,
+                &[],
+                "`crossbeam-queue`",
+                "all consumer profiles",
+                "core-runtime",
+                Some(all_profiles.clone()),
+                None,
+            ),
+            agents_key_dependency_row(
+                "key-parking-lot",
+                30,
+                &["parking_lot"],
+                &["normal:parking_lot"],
+                "Fast synchronization primitives",
+                false,
+                &[],
+                "`parking_lot`",
+                "all consumer profiles",
+                "core-runtime",
+                Some(all_profiles.clone()),
+                None,
+            ),
+            agents_key_dependency_row(
+                "key-polling",
+                40,
+                &["polling"],
+                &["target-normal:cfg(not(target_arch = \"wasm32\")):polling"],
+                "Portable epoll/kqueue/IOCP polling",
+                false,
+                &["cfg(not(target_arch = \"wasm32\"))"],
+                "`polling`",
+                "all consumer profiles; `cfg(not(target_arch = \"wasm32\"))`",
+                "core-runtime",
+                Some(all_profiles.clone()),
+                None,
+            ),
+            agents_key_dependency_row(
+                "key-slab",
+                50,
+                &["slab"],
+                &["normal:slab"],
+                "Pre-allocated storage for fixed-size records",
+                false,
+                &[],
+                "`slab`",
+                "all consumer profiles",
+                "core-runtime",
+                Some(all_profiles.clone()),
+                None,
+            ),
+            agents_key_dependency_row(
+                "key-smallvec",
+                60,
+                &["smallvec"],
+                &["normal:smallvec"],
+                "Stack-allocated small vectors",
+                false,
+                &[],
+                "`smallvec`",
+                "all consumer profiles",
+                "core-runtime",
+                Some(all_profiles.clone()),
+                None,
+            ),
+            agents_key_dependency_row(
+                "key-pin-project",
+                70,
+                &["pin-project"],
+                &["normal:pin-project"],
+                "Safe pin projections",
+                false,
+                &[],
+                "`pin-project`",
+                "all consumer profiles",
+                "core-runtime",
+                Some(all_profiles.clone()),
+                None,
+            ),
+            agents_key_dependency_row(
+                "key-serde-json",
+                80,
+                &["serde", "serde_json"],
+                &["normal:serde", "normal:serde_json"],
+                "Serialization",
+                false,
+                &[],
+                "`serde` + `serde_json`",
+                "all consumer profiles",
+                "core-runtime",
+                Some(all_profiles.clone()),
+                None,
+            ),
+            agents_key_dependency_row(
+                "key-socket2",
+                90,
+                &["socket2"],
+                &["target-normal:cfg(not(target_arch = \"wasm32\")):socket2"],
+                "Low-level socket configuration",
+                false,
+                &["cfg(not(target_arch = \"wasm32\"))"],
+                "`socket2`",
+                "all consumer profiles; `cfg(not(target_arch = \"wasm32\"))`",
+                "core-runtime",
+                Some(all_profiles),
+                None,
+            ),
+            agents_key_dependency_row(
+                "key-rustls",
+                100,
+                &["rustls"],
+                &["normal:rustls"],
+                "TLS support",
+                true,
+                &[],
+                "`rustls`",
+                "`tls`; optional",
+                "optional-production",
+                Some(owned_strings(&["tls"])),
+                None,
+            ),
+            agents_key_dependency_row(
+                "key-rusqlite",
+                110,
+                &["rusqlite"],
+                &["normal:rusqlite"],
+                "SQLite async wrapper",
+                true,
+                &[],
+                "`rusqlite`",
+                "`sqlite`; optional",
+                "optional-production",
+                Some(owned_strings(&["sqlite"])),
+                None,
+            ),
+            agents_key_dependency_row(
+                "key-proptest",
+                120,
+                &["proptest"],
+                &["dev:proptest"],
+                "Property-based testing",
+                false,
+                &[],
+                "`proptest`",
+                "`development_scope = \"test\"`",
+                "development-test",
+                None,
+                Some("test"),
+            ),
+            agents_key_dependency_row(
+                "key-criterion",
+                130,
+                &["criterion"],
+                &["target-dev:cfg(not(windows)):criterion"],
+                "Benchmarking",
+                false,
+                &["cfg(not(windows))"],
+                "`criterion`",
+                "`development_scope = \"benchmark\"`; `cfg(not(windows))`",
+                "development-benchmark",
+                None,
+                Some("benchmark"),
+            ),
+            agents_key_dependency_row(
+                "key-rayon",
+                140,
+                &["rayon"],
+                &["dev:rayon"],
+                "Data parallelism for CPU-bound work",
+                false,
+                &[],
+                "`rayon`",
+                "`development_scope = \"benchmark\"`",
+                "development-benchmark",
+                None,
+                Some("benchmark"),
+            ),
+        ],
+    }
+}
+
+fn is_sorted_unique(values: &[String]) -> bool {
+    values.windows(2).all(|pair| pair[0] < pair[1])
+}
+
+fn validate_markdown_cell(value: &str, field: &str) -> Result<()> {
+    if value.is_empty() || value.trim() != value {
+        return Err(format!("{field} must be nonempty and trimmed").into());
+    }
+    if value.contains(['\r', '\n', '|']) {
+        return Err(format!("{field} contains a forbidden Markdown table delimiter").into());
+    }
+    Ok(())
+}
+
+fn validate_agents_key_dependencies(
+    budget: &JsonValue,
+    projection: &AgentsKeyDependencies,
+) -> Result<()> {
+    if projection.schema_version != 1
+        || projection.bead_id != AGENTS_KEY_DEPENDENCIES_BEAD_ID
+        || projection.heading != AGENTS_KEY_DEPENDENCIES_HEADING
+        || projection.begin_marker != AGENTS_KEY_DEPENDENCIES_BEGIN
+        || projection.end_marker != AGENTS_KEY_DEPENDENCIES_END
+    {
+        return Err("AGENTS key-dependency projection header drift".into());
+    }
+    if projection.columns != owned_strings(&["Crate", "Purpose", "Feature/Profile", "Tier"])
+        || projection.tier_vocabulary
+            != owned_strings(&[
+                "core-runtime",
+                "optional-production",
+                "development-test",
+                "development-benchmark",
+            ])
+    {
+        return Err("AGENTS key-dependency column or tier vocabulary drift".into());
+    }
+    if !is_sorted_unique(&projection.consumer_profile_vocabulary) {
+        return Err("consumer profile vocabulary must be sorted and unique".into());
+    }
+    let graph_profiles = json_array(budget, "graph_ceilings")?
+        .iter()
+        .map(|row| Ok(json_string(row, "feature_profile")?.to_owned()))
+        .collect::<Result<BTreeSet<_>>>()?;
+    if projection
+        .consumer_profile_vocabulary
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        != graph_profiles
+    {
+        return Err("consumer profile vocabulary does not match graph ceilings".into());
+    }
+
+    let allowed_edges = json_array(budget, "allowed_direct_dependencies")?
+        .iter()
+        .map(|row| Ok((json_string(row, "edge_id")?.to_owned(), row)))
+        .collect::<Result<BTreeMap<_, _>>>()?;
+    let profile_vocabulary = projection
+        .consumer_profile_vocabulary
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let tier_vocabulary = projection
+        .tier_vocabulary
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let mut row_ids = BTreeSet::new();
+    let mut display_orders = BTreeSet::new();
+    let mut dependency_names = BTreeSet::new();
+    let mut previous_order = 0;
+
+    for row in &projection.rows {
+        validate_markdown_cell(&row.row_id, "row_id")?;
+        validate_markdown_cell(&row.purpose, "purpose")?;
+        validate_markdown_cell(&row.crate_cell, "crate_cell")?;
+        validate_markdown_cell(&row.feature_profile_cell, "feature_profile_cell")?;
+        validate_markdown_cell(&row.tier, "tier")?;
+        if !row_ids.insert(row.row_id.as_str()) {
+            return Err(format!("duplicate row_id {}", row.row_id).into());
+        }
+        if row.display_order == 0 || !display_orders.insert(row.display_order) {
+            return Err(format!("invalid or duplicate display_order {}", row.display_order).into());
+        }
+        if row.display_order <= previous_order {
+            return Err("projection rows are not in ascending display_order".into());
+        }
+        previous_order = row.display_order;
+        if row.dependency_names.is_empty()
+            || row.direct_edge_ids.is_empty()
+            || !is_sorted_unique(&row.direct_edge_ids)
+        {
+            return Err(format!("{} has empty or duplicate direct metadata", row.row_id).into());
+        }
+        if row.dependency_names.iter().collect::<BTreeSet<_>>().len() != row.dependency_names.len()
+        {
+            return Err(format!("{} has duplicate dependency names", row.row_id).into());
+        }
+        for dependency in &row.dependency_names {
+            validate_markdown_cell(dependency, "dependency_name")?;
+            if !dependency_names.insert(dependency.as_str()) {
+                return Err(format!("dependency {dependency} occurs in multiple rows").into());
+            }
+        }
+        if row.target_conditions.iter().collect::<BTreeSet<_>>().len()
+            != row.target_conditions.len()
+        {
+            return Err(format!("{} has duplicate target conditions", row.row_id).into());
+        }
+        let expected_crate_cell = row
+            .dependency_names
+            .iter()
+            .map(|name| format!("`{name}`"))
+            .collect::<Vec<_>>()
+            .join(" + ");
+        if row.crate_cell != expected_crate_cell {
+            return Err(
+                format!("{} crate_cell does not match dependency_names", row.row_id).into(),
+            );
+        }
+
+        let row_dependency_names = row
+            .dependency_names
+            .iter()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        let mut joined_names = BTreeSet::new();
+        let mut joined_targets = BTreeSet::new();
+        for edge_id in &row.direct_edge_ids {
+            let edge = allowed_edges
+                .get(edge_id)
+                .ok_or_else(|| format!("{} references unknown edge {edge_id}", row.row_id))?;
+            let dependency_name = json_string(edge, "dependency_name")?;
+            if !row_dependency_names.contains(dependency_name) {
+                return Err(format!(
+                    "{} edge {edge_id} belongs to unlisted dependency {dependency_name}",
+                    row.row_id
+                )
+                .into());
+            }
+            joined_names.insert(dependency_name);
+            if json_bool(edge, "optional")? != row.optional {
+                return Err(format!("{} optionality disagrees with {edge_id}", row.row_id).into());
+            }
+            if let Some(condition) = edge.get("target_condition").and_then(JsonValue::as_str) {
+                joined_targets.insert(condition);
+            }
+        }
+        if joined_names != row_dependency_names {
+            return Err(format!("{} does not join every dependency name", row.row_id).into());
+        }
+        if joined_targets
+            != row
+                .target_conditions
+                .iter()
+                .map(String::as_str)
+                .collect::<BTreeSet<_>>()
+        {
+            return Err(format!("{} target-condition metadata drift", row.row_id).into());
+        }
+
+        match (&row.feature_profiles, &row.development_scope) {
+            (Some(profiles), None) => {
+                if profiles.is_empty()
+                    || !is_sorted_unique(profiles)
+                    || !profiles
+                        .iter()
+                        .all(|profile| profile_vocabulary.contains(profile.as_str()))
+                {
+                    return Err(format!("{} feature profile metadata drift", row.row_id).into());
+                }
+                if !matches!(row.tier.as_str(), "core-runtime" | "optional-production") {
+                    return Err(
+                        format!("{} production profile has development tier", row.row_id).into(),
+                    );
+                }
+            }
+            (None, Some(scope)) if matches!(scope.as_str(), "test" | "benchmark") => {
+                let expected_tier = if scope == "test" {
+                    "development-test"
+                } else {
+                    "development-benchmark"
+                };
+                if row.tier != expected_tier {
+                    return Err(
+                        format!("{} development tier does not match scope", row.row_id).into(),
+                    );
+                }
+            }
+            _ => {
+                return Err(format!(
+                    "{} must declare exactly one feature_profiles/development_scope selector",
+                    row.row_id
+                )
+                .into());
+            }
+        }
+        if !tier_vocabulary.contains(row.tier.as_str()) {
+            return Err(format!("{} has unknown tier {}", row.row_id, row.tier).into());
+        }
+    }
+
+    if projection != &canonical_agents_key_dependencies() {
+        return Err(
+            "AGENTS key-dependency projection differs from the reviewed canonical seed".into(),
+        );
+    }
+    Ok(())
+}
+
+fn render_agents_key_dependencies(projection: &AgentsKeyDependencies) -> String {
+    let mut rendered = String::from(
+        "| Crate | Purpose | Feature/Profile | Tier |\n\
+         | --- | --- | --- | --- |\n",
+    );
+    for row in &projection.rows {
+        rendered.push_str(&format!(
+            "| {} | {} | {} | `{}` |\n",
+            row.crate_cell, row.purpose, row.feature_profile_cell, row.tier
+        ));
+    }
+    rendered
+}
+
+fn load_agents_key_dependencies(budget_path: &Path) -> Result<(AgentsKeyDependencies, String)> {
+    let budget = serde_json::from_slice::<JsonValue>(&fs::read(budget_path)?)?;
+    let value = budget
+        .get("agents_key_dependencies")
+        .cloned()
+        .ok_or("budget artifact is missing agents_key_dependencies")?;
+    let projection = serde_json::from_value::<AgentsKeyDependencies>(value)?;
+    validate_agents_key_dependencies(&budget, &projection)?;
+    let rendered = render_agents_key_dependencies(&projection);
+    Ok((projection, rendered))
+}
+
+fn exact_marker_lines(document: &str, marker: &str) -> Vec<(usize, usize)> {
+    let mut result = Vec::new();
+    let mut offset = 0;
+    for segment in document.split_inclusive('\n') {
+        if segment
+            .strip_suffix('\n')
+            .is_some_and(|line| line == marker)
+        {
+            result.push((offset, offset + segment.len()));
+        }
+        offset += segment.len();
+    }
+    result
+}
+
+fn agents_key_dependencies_region<'a>(
+    document: &'a str,
+    projection: &AgentsKeyDependencies,
+) -> Result<&'a str> {
+    let begin = exact_marker_lines(document, &projection.begin_marker);
+    let end = exact_marker_lines(document, &projection.end_marker);
+    if begin.len() != 1 || end.len() != 1 {
+        return Err(format!(
+            "AGENTS key-dependency markers must each occur once as exact LF-terminated lines; begin={}, end={}",
+            begin.len(),
+            end.len()
+        )
+        .into());
+    }
+    let (begin_start, begin_after) = begin[0];
+    let (end_start, end_after) = end[0];
+    if begin_after > end_start {
+        return Err("AGENTS key-dependency markers are reversed or nested".into());
+    }
+    let previous_nonblank = document[..begin_start]
+        .lines()
+        .rev()
+        .find(|line| !line.trim().is_empty());
+    if previous_nonblank != Some(projection.heading.as_str()) {
+        return Err(
+            "AGENTS key-dependency begin marker is not immediately after its heading".into(),
+        );
+    }
+    let next_nonblank = document[end_after..]
+        .lines()
+        .find(|line| !line.trim().is_empty());
+    if !next_nonblank.is_some_and(|line| line.starts_with('#')) {
+        return Err("AGENTS key-dependency end marker does not precede the next heading".into());
+    }
+    Ok(&document[begin_after..end_start])
+}
+
+fn run_agents_key_dependencies(config: &Config, mode: AgentsKeyDependenciesMode) -> Result<()> {
+    let budget_path = config
+        .agents_key_dependencies_from_budget
+        .as_deref()
+        .ok_or("missing AGENTS key-dependency budget path")?;
+    let (projection, rendered) = load_agents_key_dependencies(budget_path)?;
+    match mode {
+        AgentsKeyDependenciesMode::Render => print!("{rendered}"),
+        AgentsKeyDependenciesMode::Check => {
+            let agents = fs::read_to_string(config.repo_root.join(AGENTS_PATH))?;
+            let current = agents_key_dependencies_region(&agents, &projection)?;
+            if current != rendered {
+                return Err("AGENTS Key Dependencies generated region drift".into());
+            }
+        }
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -521,6 +1209,9 @@ fn main() {
 
 fn run() -> Result<()> {
     let config = Config::parse()?;
+    if let Some(mode) = config.agents_key_dependencies_mode {
+        return run_agents_key_dependencies(&config, mode);
+    }
     let manifest_path = config.repo_root.join("Cargo.toml");
     let manifest_text = fs::read_to_string(&manifest_path)?;
     let manifest = toml::from_str::<TomlValue>(&manifest_text)?;
@@ -921,6 +1612,7 @@ fn generate_dependency_budget(
         })
         .collect::<Vec<_>>();
 
+    let agents_key_dependencies = serde_json::to_value(canonical_agents_key_dependencies())?;
     let artifact = json!({
         "schema_version": 1,
         "artifact_id": BUDGET_ARTIFACT_ID,
@@ -946,6 +1638,7 @@ fn generate_dependency_budget(
             "fail_closed": true
         },
         "allowed_direct_dependencies": allowed_direct_dependencies,
+        "agents_key_dependencies": agents_key_dependencies,
         "direct_edge_cells": direct_edge_cells,
         "graph_ceilings": graph_ceilings,
         "excluded_graph_scopes": excluded_graph_scopes,
@@ -954,19 +1647,22 @@ fn generate_dependency_budget(
             "direct_dependency_addition": "Inject a synthetic normal:trivial edge into the parsed manifest inventory; validation must reject it.",
             "graph_ceiling_increase": "Increment a synthesized-consumer package-version count above its stored ceiling; validation must reject it.",
             "graph_ratchet_down": "Decrement both current graph counts; validation must accept the smaller graph so regeneration can lower the ceilings.",
+            "agents_key_dependencies": "Missing, extra, duplicate, stale, reordered, unknown-field, marker-drift, and incompatible-CLI mutations must fail without repository writes.",
             "repository_files_are_not_mutated": true
         },
         "methodology": [
             "The budget is a deterministic projection of the frozen marginal ledger; it does not run a second resolver with different feature unification.",
             "Only graph records whose canonical profile scope is synthesized-consumer are admitted as graph ceilings.",
             "Cargo package IDs define graph reachability in the source ledger; both package-version and unique package-name counts are retained.",
-            "Each direct-edge cell key is feature profile, target triple, host triple, and dependency edge kind."
+            "Each direct-edge cell key is feature profile, target triple, host triple, and dependency edge kind.",
+            "The AGENTS Key Dependencies table is a checked curated projection whose dependency names join the complete direct-edge allowset."
         ],
         "no_claim_boundaries": [
             "This contract enforces checked dependency and resolved-graph budgets; it does not authorize dependency removal, replacement, or cutover.",
             "Cargo resolution counts do not prove compilation, runtime correctness, security, performance, interoperability, release readiness, or broad workspace health.",
             "The workspace dev/build audit and excluded fuzz health remain separately scoped evidence and are not synthesized-consumer graph claims.",
-            "A reviewed exception documents a rare budget increase; it is not evidence that the added dependency or larger graph is desirable."
+            "A reviewed exception documents a rare budget increase; it is not evidence that the added dependency or larger graph is desirable.",
+            "The generated AGENTS table is a curated operator summary, not a complete display of every allowed direct edge."
         ]
     });
 
@@ -1112,6 +1808,13 @@ fn json_usize(value: &JsonValue, key: &str) -> Result<usize> {
         .and_then(JsonValue::as_u64)
         .ok_or_else(|| format!("JSON field {key} must be an unsigned integer"))?;
     usize::try_from(number).map_err(|_| format!("JSON field {key} exceeds usize").into())
+}
+
+fn json_bool(value: &JsonValue, key: &str) -> Result<bool> {
+    value
+        .get(key)
+        .and_then(JsonValue::as_bool)
+        .ok_or_else(|| format!("JSON field {key} must be a boolean").into())
 }
 
 fn resolve_measurements_parallel(
