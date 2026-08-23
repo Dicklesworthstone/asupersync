@@ -99,6 +99,51 @@ Unix-only symlink rows emit an explicit unsupported verdict elsewhere; they do
 not silently pass. Canonical `scripts/run_all_e2e.sh` integration and aggregate
 logging remain owned by A5 (`asupersync-d24mms.12.5`).
 
+## A3 maintained-lane recovery disposition
+
+`asupersync-d24mms.12.3` preserves the undeclared 5,728-line Tokio-era source
+for audit history and restores its useful journeys in
+`src/real_cross_subsystem_recovery_e2e_tests.rs`. The focused
+`cross-subsystem-recovery-e2e` profile includes `proc-macros` for the crate's
+test attributes and `obligation-cleanup-e2e` for the real worker-restart
+obligation ledger harness; it does not enable the `real-service-e2e` umbrella.
+
+| Dormant row | Maintained operation | Externally observed result and cleanup |
+| --- | --- | --- |
+| `DORMANT-INT-001` | broadcast fanout after one consumer drops | Both healthy subscribers receive every accepted value; sender drop produces explicit closure |
+| `DORMANT-INT-002` | two-tier circuit-breaker recovery | Both breakers open, reject, half-open on virtual time, close, and expose exact transition metrics |
+| `DORMANT-INT-003` | isolated `RegionBridge` failure | Failed region reaches `Closed`; the peer accepts additional work; both end with no live work |
+| `DORMANT-INT-004` | bounded two-stage MPSC pipeline | Upstream and downstream `Full` boundaries are observed, accepted values are exact, queues drain |
+| `DORMANT-INT-005` | placeholder disposition | Exactly one explicit `skip` with `PLACEHOLDER_NOT_EVIDENCE`; it is never counted as executed coverage |
+| `DORMANT-INT-006` | supervisor restart with pending acks | Existing real obligation harness asserts empty pending/leak counts and runtime quiescence |
+| `DORMANT-INT-007` | pre-admitted zero-delay hedge | `Cx::race_drained` returns one success only after the pending loser is cancelled, dropped, and drained |
+| `DORMANT-INT-008` | three bridge replacement generations | Each replacement applies the current real snapshot with monotonic sequence/task state; active bridge closes |
+| `DORMANT-INT-009` | broker-generation reconnect | First broadcast generation closes visibly; the next generation resumes exact accepted delivery and closes |
+| `DORMANT-INT-010` | interrupted RaptorQ decode | An insufficient decode fails, retained equations resume, and all source bytes reconstruct exactly |
+| `DORMANT-INT-011` | runtime panic containment | A caught injected `block_on` panic is followed by successful runtime reuse and explicit subscription closure |
+| `DORMANT-INT-012` | virtual-time burst limiting | Three tokens admit, the next request blocks, refill admits recovery work, and all admitted calls complete |
+| `DORMANT-INT-013` | loopback/H2 churn | 32 joined TCP connections carry codec-decoded SETTINGS frames; 32 real H2 stream slots reset, prune, and drain |
+| `DORMANT-INT-014` | timer-wheel churn | 256 timers split into 128 explicit cancels and 128 expirations; the wheel ends empty |
+| `DORMANT-INT-015` | checkpoint/snapshot resume | Four virtual-hour checkpoints match uninterrupted state; an owned `ASUPSNAP` envelope round-trips and validates |
+| `DORMANT-INT-016` | bounded memory-pressure recovery | Capacity refusal is exact, drain restores admission, all six accepted values arrive, backlog returns to zero |
+| `DORMANT-INT-017` | partitioned snapshot healing | One follower misses sequence 2 while the other advances; healing applies the monotonic snapshot and all bridges close |
+
+Run the focused, remote-required receipt validator with:
+
+```bash
+RCH_REQUIRE_REMOTE=1 \
+bash scripts/cross_subsystem_recovery_proof_runner.sh
+```
+
+The runner uses RCH clean-overlay admission from `HEAD` plus the three compile
+inputs (`Cargo.toml`, `src/lib.rs`, and the maintained module), rejects local
+fallback, requires all 17 row IDs exactly once, compares `expected` to `actual`
+for all 16 active rows, and permits only the named placeholder disposition.
+Its `run_report.json`, `scenario_rows.jsonl`, and `run.log` retain the remote
+command, source revision, feature profile, deterministic seeds, cancellation
+boundaries, cleanup state, and replay command. Canonical
+`scripts/run_all_e2e.sh` integration remains owned by A5.
+
 ## No-claim boundary
 
 This packet proves inventory completeness, source pins, dormant module state,
@@ -113,3 +158,13 @@ workspace health, or canonical A5 runner admission. All recovered operations
 are awaited before temporary-root removal; the bounded partial row proves an
 iterator-drop and replay boundary, not preemptive cancellation of an in-flight
 host syscall.
+
+The A3 maintained lane does not claim production throughput, a multi-process
+broker, HTTP request/response interoperability beyond the exercised loopback
+SETTINGS wire and H2 connection-slot surfaces, durable application checkpoint
+payloads beyond the owned runtime snapshot envelope, PBFT/consensus safety, a
+real network partition, broad workspace health, release readiness, or canonical
+A5 runner admission. `DORMANT-INT-017` proves `RegionBridge` snapshot lag and
+healing only. The deliberate panic text in `DORMANT-INT-011` is caught test
+input, not an uncaught test failure; the subsequent receipt is emitted only
+after the same runtime successfully serves and closes a replacement channel.
