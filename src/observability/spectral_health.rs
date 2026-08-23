@@ -903,7 +903,8 @@ pub struct BifurcationWarning {
     pub lag1_autocorrelation: Option<f64>,
     /// Rolling sample variance of the current history window.
     pub rolling_variance: Option<f64>,
-    /// Ratio of second-half variance to first-half variance.
+    /// Ratio of second-half variance to first-half variance. This is positive
+    /// infinity when a constant first half is followed by positive variance.
     pub variance_ratio: Option<f64>,
     /// Ratio of sign changes in first differences (flicker score).
     pub flicker_score: f64,
@@ -1100,7 +1101,7 @@ impl SpectralHistory {
         let rolling_variance = sample_variance(&values);
         let variance_ratio = variance_ratio_halves(&values);
         let variance_growth = variance_ratio
-            .is_some_and(|vr| vr >= thresholds.variance_growth_ratio_threshold && vr.is_finite());
+            .is_some_and(|vr| vr >= thresholds.variance_growth_ratio_threshold && !vr.is_nan());
 
         // (4) Kendall's tau and Spearman's rho: nonparametric monotone trend tests.
         // Tau uses pairwise concordance (robust), rho uses squared rank differences
@@ -1388,8 +1389,15 @@ fn variance_ratio_halves(values: &[f64]) -> Option<f64> {
     let mid = n / 2;
     let v1 = sample_variance(&values[..mid])?;
     let v2 = sample_variance(&values[mid..])?;
+    if !v1.is_finite() || !v2.is_finite() {
+        return None;
+    }
     if v1 <= f64::EPSILON {
-        None
+        if v2 <= f64::EPSILON {
+            None
+        } else {
+            Some(f64::INFINITY)
+        }
     } else {
         Some(v2 / v1)
     }
@@ -2763,6 +2771,33 @@ mod tests {
     fn linear_regression_single_value() {
         assert!(linear_regression_slope(&[42.0]).abs() < f64::EPSILON);
         assert!(linear_regression_slope(&[]).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn variance_ratio_detects_growth_from_constant_baseline_ne8jdw() {
+        let values = [1.0, 1.0, 1.0, 1.0, 0.5, 1.5, 0.75, 1.25];
+        let ratio = variance_ratio_halves(&values).expect("positive second-half variance");
+        assert!(ratio.is_infinite() && ratio.is_sign_positive());
+
+        assert!(variance_ratio_halves(&[1.0; 8]).is_none());
+        assert_eq!(
+            variance_ratio_halves(&[0.0, 1.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0]),
+            Some(0.0)
+        );
+    }
+
+    #[test]
+    fn variance_growth_from_constant_baseline_raises_warning_ne8jdw() {
+        let thresholds = SpectralThresholds::default();
+        let mut history = SpectralHistory::new(8);
+        for value in [1.0, 1.0, 1.0, 1.0, 0.5, 1.5, 0.75, 1.25] {
+            history.record(value);
+        }
+
+        let warning = history.analyze(&thresholds).expect("enough history");
+        let ratio = warning.variance_ratio.expect("variance growth ratio");
+        assert!(ratio.is_infinite() && ratio.is_sign_positive());
+        assert!(warning.severity >= EarlyWarningSeverity::Watch);
     }
 
     // -- SpectralHealthMonitor integration -------------------------------------
