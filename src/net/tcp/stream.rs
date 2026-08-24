@@ -2260,7 +2260,7 @@ mod tests {
         #[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "openbsd"))]
         {
             // On BSD systems, verify SO_NOSIGPIPE socket option
-            let mut opt_value: libc::c_int = 1;
+            let opt_value: libc::c_int = 1;
             let result = unsafe {
                 libc::setsockopt(
                     client_fd,
