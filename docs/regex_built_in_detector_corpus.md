@@ -132,9 +132,12 @@ unrecognized, duplicate, or conflicting identities must stay on the complete
 incumbent engine without publishing a partial scanner result.
 
 Eight negative fixtures mutate each identity dimension and require that exact
-fallback. R2.1 specified this allowset. R2.4 now implements the fixed automatic
-built-ins directly; custom patterns remain on the incumbent engine and execute
-before automatic detection.
+fallback. R2.1 specified this allowset. R2.4 implemented the fixed automatic
+built-ins directly, while custom patterns remained on the incumbent engine.
+R2.5 named-host measurements found higher latency and allocation counts for
+the fixed scanners, so production automatic dispatch now keeps all four
+built-ins on the incumbent regex engine. The scanner implementations remain
+available only to the focused equivalence and bounded-resource tests.
 
 ## Post-capture source-pin refresh
 
@@ -189,8 +192,16 @@ authorize dependency exit or cutover.
   independent vectors, pipeline outcomes, docs markers, and fail-closed
   mutations passed 8/8 in clean-overlay RCH job `j-29988810699833436`, bound to
   committed base `6fc933a4a`.
-- R2.5 may aggregate the work only after implementation, generated
-  equivalence, resource evidence, and named-host measurements exist.
+- R2.5 has captured its terminal-receipt inputs. Exact-source release jobs
+  `j-29988810699833441` and `j-29988810699833442` each passed the six-scenario
+  candidate/incumbent replay with 2,001 samples per operation on named hosts
+  `ovh-a` and `vmi1293453`. Heaptrack jobs `j-29988810699833444` and
+  `j-29988810699833445` passed the isolated candidate and incumbent allocation
+  cells on evidence-only host `ts2`. The terminal receipt remains pending its
+  own focused contract. Because every measured candidate latency cell regressed
+  and the candidate allocation count was higher, R2.5 has disabled all four
+  fixed-scanner production fast paths and kept the incumbent. It authorizes no
+  dependency exit, custom-pattern narrowing, or global performance claim.
 
 Any disagreement disables the affected future fast path and keeps the
 incumbent. No custom language may be narrowed.
