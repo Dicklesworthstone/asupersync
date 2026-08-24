@@ -14,10 +14,12 @@
 //! let msg = sub.next(cx).await?;
 //! ```
 
-use crate::channel::mpsc;
+use crate::channel::{mpsc, oneshot};
+use crate::combinator::select::{Either, Select};
 use crate::cx::Cx;
 use crate::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
 use crate::net::TcpStream;
+use crate::runtime::TaskHandle;
 #[cfg(feature = "tls")]
 use crate::tls::{TlsConnector, TlsConnectorBuilder, TlsStream};
 use crate::tracing_compat::warn;
@@ -1412,6 +1414,8 @@ struct SharedState {
     subscriptions: Mutex<HashMap<u64, SubscriptionState>>,
     server_info: Mutex<Option<ServerInfo>>,
     closed: std::sync::atomic::AtomicBool,
+    connected: std::sync::atomic::AtomicBool,
+    processed_epoch: AtomicU64,
 }
 
 impl SharedState {
@@ -1420,6 +1424,8 @@ impl SharedState {
             subscriptions: Mutex::new(HashMap::new()),
             server_info: Mutex::new(None),
             closed: std::sync::atomic::AtomicBool::new(false),
+            connected: std::sync::atomic::AtomicBool::new(false),
+            processed_epoch: AtomicU64::new(0),
         }
     }
 }
@@ -1577,8 +1583,12 @@ fn build_default_nats_tls_connector() -> Result<TlsConnector, NatsError> {
     }
 }
 
-/// NATS client with Cx integration.
-pub struct NatsClient {
+/// The single-owner NATS protocol engine.
+///
+/// Runtime-wired clients move this value into the connection supervisor. A
+/// direct mode remains available for contexts without a spawn gateway so the
+/// v0.4.3 test-internals surface keeps its established behavior.
+struct NatsConnection {
     config: NatsConfig,
     stream: NatsStream,
     read_buf: NatsReadBuffer,
@@ -1592,7 +1602,7 @@ pub struct NatsClient {
     tls_required_on_connect: bool,
 }
 
-impl fmt::Debug for NatsClient {
+impl fmt::Debug for NatsConnection {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("NatsClient")
             .field("host", &self.config.host)
@@ -1602,15 +1612,7 @@ impl fmt::Debug for NatsClient {
     }
 }
 
-impl NatsClient {
-    /// Connect to a NATS server.
-    pub async fn connect(cx: &Cx, url: &str) -> Result<Self, NatsError> {
-        cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
-
-        let config = NatsConfig::from_url(url)?;
-        Self::connect_with_config(cx, config).await
-    }
-
+impl NatsConnection {
     /// Connect with explicit configuration.
     pub async fn connect_with_config(cx: &Cx, config: NatsConfig) -> Result<Self, NatsError> {
         cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
@@ -1679,6 +1681,7 @@ impl NatsClient {
         // cleartext NATS handshake.
         client.send_connect(cx).await?;
         client.connected = true;
+        client.state.connected.store(true, Ordering::Release);
 
         cx.trace("nats: connection established");
         Ok(client)
@@ -3071,7 +3074,460 @@ impl NatsClient {
             let _ = self.stream.shutdown(std::net::Shutdown::Both);
         }
         self.connected = false;
+        self.state.connected.store(false, Ordering::Release);
         Ok(())
+    }
+}
+
+impl Drop for NatsConnection {
+    fn drop(&mut self) {
+        // `close()` is the graceful path, but dropping the owner must still
+        // terminate subscription receivers and make the transport unusable.
+        self.state.closed.store(true, Ordering::Release);
+        self.state.subscriptions.lock().clear();
+        self.connected = false;
+        self.state.connected.store(false, Ordering::Release);
+        let _ = self.stream.shutdown(std::net::Shutdown::Both);
+    }
+}
+
+const NATS_SUPERVISOR_COMMAND_CAPACITY: usize = 64;
+
+/// NATS client with Cx integration.
+///
+/// When the supplied [`Cx`] is backed by an asupersync runtime, the client
+/// starts one region-owned connection supervisor. That task is the exclusive
+/// owner of socket reads and writes, so it can answer server `PING` frames and
+/// dispatch subscription messages even while the caller is otherwise idle.
+/// Contexts without a spawn gateway retain the cooperative v0.4.3 transport
+/// behavior for compatibility with lightweight test harnesses.
+pub struct NatsClient {
+    config: NatsConfig,
+    state: Arc<SharedState>,
+    mode: NatsClientMode,
+}
+
+enum NatsClientMode {
+    Direct(NatsConnection),
+    Supervised(NatsSupervisor),
+}
+
+struct NatsSupervisor {
+    commands: mpsc::Sender<NatsSupervisorCommand>,
+    task: Option<TaskHandle<()>>,
+}
+
+enum NatsSupervisorCommand {
+    Publish {
+        cx: Cx,
+        subject: String,
+        payload: Vec<u8>,
+        reply: oneshot::Sender<Result<(), NatsError>>,
+    },
+    PublishRequest {
+        cx: Cx,
+        subject: String,
+        reply_to: String,
+        payload: Vec<u8>,
+        reply: oneshot::Sender<Result<(), NatsError>>,
+    },
+    PublishRequestWithHeaders {
+        cx: Cx,
+        subject: String,
+        reply_to: String,
+        headers: Vec<(String, Vec<u8>)>,
+        payload: Vec<u8>,
+        reply: oneshot::Sender<Result<(), NatsError>>,
+    },
+    RequestWithHeaders {
+        cx: Cx,
+        subject: String,
+        headers: Vec<(String, Vec<u8>)>,
+        payload: Vec<u8>,
+        reply: oneshot::Sender<Result<Message, NatsError>>,
+    },
+    Request {
+        cx: Cx,
+        subject: String,
+        payload: Vec<u8>,
+        reply: oneshot::Sender<Result<Message, NatsError>>,
+    },
+    Subscribe {
+        cx: Cx,
+        subject: String,
+        queue_group: Option<String>,
+        reply: oneshot::Sender<Result<Subscription, NatsError>>,
+    },
+    Unsubscribe {
+        cx: Cx,
+        sid: u64,
+        reply: oneshot::Sender<Result<(), NatsError>>,
+    },
+    Ping {
+        cx: Cx,
+        reply: oneshot::Sender<Result<(), NatsError>>,
+    },
+    Process {
+        cx: Cx,
+        after_epoch: u64,
+        reply: oneshot::Sender<Result<(), NatsError>>,
+    },
+    Close {
+        cx: Cx,
+        reply: oneshot::Sender<Result<(), NatsError>>,
+    },
+}
+
+impl fmt::Debug for NatsClient {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let connected = match &self.mode {
+            NatsClientMode::Direct(connection) => connection.connected,
+            NatsClientMode::Supervised(_) => self.state.connected.load(Ordering::Acquire),
+        };
+        f.debug_struct("NatsClient")
+            .field("host", &self.config.host)
+            .field("port", &self.config.port)
+            .field("connected", &connected)
+            .finish_non_exhaustive()
+    }
+}
+
+impl NatsSupervisor {
+    async fn request<T>(
+        &self,
+        cx: &Cx,
+        build: impl FnOnce(Cx, oneshot::Sender<Result<T, NatsError>>) -> NatsSupervisorCommand,
+    ) -> Result<T, NatsError> {
+        let (reply, mut response) = oneshot::channel();
+        self.commands
+            .send(cx, build(cx.clone(), reply))
+            .await
+            .map_err(|error| match error {
+                mpsc::SendError::Cancelled(_) => NatsError::Cancelled,
+                mpsc::SendError::Disconnected(_) | mpsc::SendError::Full(_) => NatsError::Closed,
+            })?;
+        response.recv(cx).await.map_err(|error| match error {
+            oneshot::RecvError::Cancelled => NatsError::Cancelled,
+            oneshot::RecvError::Closed | oneshot::RecvError::PolledAfterCompletion => {
+                NatsError::Closed
+            }
+        })?
+    }
+}
+
+impl NatsClient {
+    /// Connect to a NATS server.
+    pub async fn connect(cx: &Cx, url: &str) -> Result<Self, NatsError> {
+        cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
+        let config = NatsConfig::from_url(url)?;
+        Self::connect_with_config(cx, config).await
+    }
+
+    /// Connect with explicit configuration.
+    pub async fn connect_with_config(cx: &Cx, config: NatsConfig) -> Result<Self, NatsError> {
+        let connection = NatsConnection::connect_with_config(cx, config).await?;
+        let config = connection.config.clone();
+        let state = Arc::clone(&connection.state);
+
+        if cx.spawn_gateway_handle().is_none() || cx.pending_spawn_counter_handle().is_none() {
+            return Ok(Self {
+                config,
+                state,
+                mode: NatsClientMode::Direct(connection),
+            });
+        }
+
+        let (commands, receiver) = mpsc::channel(NATS_SUPERVISOR_COMMAND_CAPACITY);
+        let task = cx
+            .spawn(move |supervisor_cx| async move {
+                run_nats_supervisor(&supervisor_cx, connection, receiver).await;
+            })
+            .map_err(|_| NatsError::NotConnected)?;
+
+        Ok(Self {
+            config,
+            state,
+            mode: NatsClientMode::Supervised(NatsSupervisor {
+                commands,
+                task: Some(task),
+            }),
+        })
+    }
+
+    /// Publish a message to a subject.
+    pub async fn publish(
+        &mut self,
+        cx: &Cx,
+        subject: &str,
+        payload: &[u8],
+    ) -> Result<(), NatsError> {
+        match &mut self.mode {
+            NatsClientMode::Direct(connection) => connection.publish(cx, subject, payload).await,
+            NatsClientMode::Supervised(supervisor) => {
+                let subject = subject.to_string();
+                let payload = payload.to_vec();
+                supervisor
+                    .request(cx, move |cx, reply| NatsSupervisorCommand::Publish {
+                        cx,
+                        subject,
+                        payload,
+                        reply,
+                    })
+                    .await
+            }
+        }
+    }
+
+    /// Publish a message with a reply-to subject.
+    pub async fn publish_request(
+        &mut self,
+        cx: &Cx,
+        subject: &str,
+        reply_to: &str,
+        payload: &[u8],
+    ) -> Result<(), NatsError> {
+        match &mut self.mode {
+            NatsClientMode::Direct(connection) => {
+                connection
+                    .publish_request(cx, subject, reply_to, payload)
+                    .await
+            }
+            NatsClientMode::Supervised(supervisor) => {
+                let subject = subject.to_string();
+                let reply_to = reply_to.to_string();
+                let payload = payload.to_vec();
+                supervisor
+                    .request(cx, move |cx, reply| NatsSupervisorCommand::PublishRequest {
+                        cx,
+                        subject,
+                        reply_to,
+                        payload,
+                        reply,
+                    })
+                    .await
+            }
+        }
+    }
+
+    /// Publish a message with NATS v1 headers and a reply-to subject.
+    pub async fn publish_request_with_headers(
+        &mut self,
+        cx: &Cx,
+        subject: &str,
+        reply_to: &str,
+        headers: &[(&str, &[u8])],
+        payload: &[u8],
+    ) -> Result<(), NatsError> {
+        match &mut self.mode {
+            NatsClientMode::Direct(connection) => {
+                connection
+                    .publish_request_with_headers(cx, subject, reply_to, headers, payload)
+                    .await
+            }
+            NatsClientMode::Supervised(supervisor) => {
+                let subject = subject.to_string();
+                let reply_to = reply_to.to_string();
+                let headers = headers
+                    .iter()
+                    .map(|(name, value)| ((*name).to_string(), (*value).to_vec()))
+                    .collect();
+                let payload = payload.to_vec();
+                supervisor
+                    .request(cx, move |cx, reply| {
+                        NatsSupervisorCommand::PublishRequestWithHeaders {
+                            cx,
+                            subject,
+                            reply_to,
+                            headers,
+                            payload,
+                            reply,
+                        }
+                    })
+                    .await
+            }
+        }
+    }
+
+    /// Request/reply pattern with NATS v1 headers.
+    pub async fn request_with_headers(
+        &mut self,
+        cx: &Cx,
+        subject: &str,
+        headers: &[(&str, &[u8])],
+        payload: &[u8],
+    ) -> Result<Message, NatsError> {
+        match &mut self.mode {
+            NatsClientMode::Direct(connection) => {
+                connection
+                    .request_with_headers(cx, subject, headers, payload)
+                    .await
+            }
+            NatsClientMode::Supervised(supervisor) => {
+                let subject = subject.to_string();
+                let headers = headers
+                    .iter()
+                    .map(|(name, value)| ((*name).to_string(), (*value).to_vec()))
+                    .collect();
+                let payload = payload.to_vec();
+                supervisor
+                    .request(cx, move |cx, reply| {
+                        NatsSupervisorCommand::RequestWithHeaders {
+                            cx,
+                            subject,
+                            headers,
+                            payload,
+                            reply,
+                        }
+                    })
+                    .await
+            }
+        }
+    }
+
+    /// Request/reply pattern: publish and wait for a single response.
+    pub async fn request(
+        &mut self,
+        cx: &Cx,
+        subject: &str,
+        payload: &[u8],
+    ) -> Result<Message, NatsError> {
+        match &mut self.mode {
+            NatsClientMode::Direct(connection) => connection.request(cx, subject, payload).await,
+            NatsClientMode::Supervised(supervisor) => {
+                let subject = subject.to_string();
+                let payload = payload.to_vec();
+                supervisor
+                    .request(cx, move |cx, reply| NatsSupervisorCommand::Request {
+                        cx,
+                        subject,
+                        payload,
+                        reply,
+                    })
+                    .await
+            }
+        }
+    }
+
+    /// Subscribe to a subject.
+    pub async fn subscribe(&mut self, cx: &Cx, subject: &str) -> Result<Subscription, NatsError> {
+        match &mut self.mode {
+            NatsClientMode::Direct(connection) => connection.subscribe(cx, subject).await,
+            NatsClientMode::Supervised(supervisor) => {
+                let subject = subject.to_string();
+                supervisor
+                    .request(cx, move |cx, reply| NatsSupervisorCommand::Subscribe {
+                        cx,
+                        subject,
+                        queue_group: None,
+                        reply,
+                    })
+                    .await
+            }
+        }
+    }
+
+    /// Subscribe with a queue group.
+    pub async fn queue_subscribe(
+        &mut self,
+        cx: &Cx,
+        subject: &str,
+        queue_group: &str,
+    ) -> Result<Subscription, NatsError> {
+        match &mut self.mode {
+            NatsClientMode::Direct(connection) => {
+                connection.queue_subscribe(cx, subject, queue_group).await
+            }
+            NatsClientMode::Supervised(supervisor) => {
+                let subject = subject.to_string();
+                let queue_group = Some(queue_group.to_string());
+                supervisor
+                    .request(cx, move |cx, reply| NatsSupervisorCommand::Subscribe {
+                        cx,
+                        subject,
+                        queue_group,
+                        reply,
+                    })
+                    .await
+            }
+        }
+    }
+
+    /// Unsubscribe from a subscription.
+    pub async fn unsubscribe(&mut self, cx: &Cx, sid: u64) -> Result<(), NatsError> {
+        match &mut self.mode {
+            NatsClientMode::Direct(connection) => connection.unsubscribe(cx, sid).await,
+            NatsClientMode::Supervised(supervisor) => {
+                supervisor
+                    .request(cx, move |cx, reply| NatsSupervisorCommand::Unsubscribe {
+                        cx,
+                        sid,
+                        reply,
+                    })
+                    .await
+            }
+        }
+    }
+
+    /// Send PING and wait for PONG.
+    pub async fn ping(&mut self, cx: &Cx) -> Result<(), NatsError> {
+        match &mut self.mode {
+            NatsClientMode::Direct(connection) => connection.ping(cx).await,
+            NatsClientMode::Supervised(supervisor) => {
+                supervisor
+                    .request(cx, |cx, reply| NatsSupervisorCommand::Ping { cx, reply })
+                    .await
+            }
+        }
+    }
+
+    /// Wait until the supervisor has processed at least one incoming frame.
+    ///
+    /// The method remains a compatibility surface for callers that explicitly
+    /// pump subscriptions. Supervised clients already process continuously; an
+    /// epoch captured before command enqueue prevents a race from waiting for a
+    /// second frame when the supervisor handled the first one concurrently.
+    pub async fn process(&mut self, cx: &Cx) -> Result<(), NatsError> {
+        match &mut self.mode {
+            NatsClientMode::Direct(connection) => connection.process(cx).await,
+            NatsClientMode::Supervised(supervisor) => {
+                let after_epoch = self.state.processed_epoch.load(Ordering::Acquire);
+                supervisor
+                    .request(cx, move |cx, reply| NatsSupervisorCommand::Process {
+                        cx,
+                        after_epoch,
+                        reply,
+                    })
+                    .await
+            }
+        }
+    }
+
+    /// Close the connection gracefully and drain its supervisor task.
+    pub async fn close(&mut self, cx: &Cx) -> Result<(), NatsError> {
+        cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
+        match &mut self.mode {
+            NatsClientMode::Direct(connection) => connection.close(cx).await,
+            NatsClientMode::Supervised(supervisor) => {
+                if !self.state.connected.load(Ordering::Acquire) {
+                    self.state.closed.store(true, Ordering::Release);
+                    self.state.subscriptions.lock().clear();
+                    if let Some(mut task) = supervisor.task.take() {
+                        task.abort();
+                        let _ = task.join(cx).await;
+                    }
+                    return Ok(());
+                }
+                let result = supervisor
+                    .request(cx, |cx, reply| NatsSupervisorCommand::Close { cx, reply })
+                    .await;
+                if result.is_ok()
+                    && let Some(mut task) = supervisor.task.take()
+                {
+                    task.join(cx).await.map_err(|_| NatsError::Closed)?;
+                }
+                result
+            }
+        }
     }
 
     /// Get server info.
@@ -3082,13 +3538,230 @@ impl NatsClient {
 
 impl Drop for NatsClient {
     fn drop(&mut self) {
-        // `close()` is the graceful path, but dropping the owner must still
-        // terminate subscription receivers and make the transport unusable.
         self.state.closed.store(true, Ordering::Release);
         self.state.subscriptions.lock().clear();
-        self.connected = false;
-        let _ = self.stream.shutdown(std::net::Shutdown::Both);
+        if let NatsClientMode::Supervised(supervisor) = &self.mode
+            && let Some(task) = &supervisor.task
+        {
+            task.abort();
+        }
     }
+}
+
+async fn run_nats_supervisor(
+    supervisor_cx: &Cx,
+    mut connection: NatsConnection,
+    mut commands: mpsc::Receiver<NatsSupervisorCommand>,
+) {
+    loop {
+        match drain_supervisor_frames(&mut connection).await {
+            Ok(processed) => {
+                if processed > 0 {
+                    connection
+                        .state
+                        .processed_epoch
+                        .fetch_add(processed, Ordering::AcqRel);
+                    continue;
+                }
+            }
+            Err(error) => {
+                if !recover_supervisor_connection(supervisor_cx, &mut connection, error).await {
+                    break;
+                }
+                continue;
+            }
+        }
+
+        // Both operations are drop-cancel-safe: mpsc recv leaves the queued
+        // command untouched, and poll_read commits no bytes while pending. A
+        // selected command therefore cannot steal socket bytes, and a selected
+        // read cannot lose a command reservation.
+        let selected = {
+            let read = Box::pin(connection.read_more());
+            let command = Box::pin(commands.recv(supervisor_cx));
+            Select::new(read, command).await
+        };
+
+        match selected {
+            Ok(Either::Left(Ok(()))) => {}
+            Ok(Either::Left(Err(error))) => {
+                if !recover_supervisor_connection(supervisor_cx, &mut connection, error).await {
+                    break;
+                }
+            }
+            Ok(Either::Right(Ok(command))) => {
+                if !handle_supervisor_command(&mut connection, command).await {
+                    break;
+                }
+            }
+            Ok(Either::Right(Err(_))) | Err(_) => break,
+        }
+    }
+
+    connection.state.closed.store(true, Ordering::Release);
+    connection.state.connected.store(false, Ordering::Release);
+    connection.state.subscriptions.lock().clear();
+    connection.connected = false;
+    let _ = connection.stream.shutdown(std::net::Shutdown::Both);
+}
+
+async fn drain_supervisor_frames(connection: &mut NatsConnection) -> Result<u64, NatsError> {
+    let mut processed = 0_u64;
+    loop {
+        match connection.try_parse_message()? {
+            Some(NatsMessage::Ping) => connection.send_server_pong().await?,
+            Some(NatsMessage::Msg(message)) => connection.dispatch_message(message),
+            Some(NatsMessage::Err(error)) => return Err(NatsError::Server(error)),
+            Some(NatsMessage::Info(info)) => {
+                *connection.state.server_info.lock() = Some(info);
+            }
+            Some(NatsMessage::Ok | NatsMessage::Pong) => {}
+            None => return Ok(processed),
+        }
+        processed = processed.saturating_add(1);
+    }
+}
+
+async fn recover_supervisor_connection(
+    cx: &Cx,
+    connection: &mut NatsConnection,
+    error: NatsError,
+) -> bool {
+    cx.trace(&format!(
+        "nats: supervisor transport error ({error}); entering reconnect lifecycle"
+    ));
+    connection.connected = false;
+    connection.state.connected.store(false, Ordering::Release);
+    let _ = connection.stream.shutdown(std::net::Shutdown::Both);
+    let reconnected = connection.try_reconnect(cx).await.is_ok();
+    connection
+        .state
+        .connected
+        .store(reconnected, Ordering::Release);
+    reconnected
+}
+
+async fn handle_supervisor_command(
+    connection: &mut NatsConnection,
+    command: NatsSupervisorCommand,
+) -> bool {
+    match command {
+        NatsSupervisorCommand::Publish {
+            cx,
+            subject,
+            payload,
+            reply,
+        } => {
+            let _ = reply.send_blocking(connection.publish(&cx, &subject, &payload).await);
+        }
+        NatsSupervisorCommand::PublishRequest {
+            cx,
+            subject,
+            reply_to,
+            payload,
+            reply,
+        } => {
+            let _ = reply.send_blocking(
+                connection
+                    .publish_request(&cx, &subject, &reply_to, &payload)
+                    .await,
+            );
+        }
+        NatsSupervisorCommand::PublishRequestWithHeaders {
+            cx,
+            subject,
+            reply_to,
+            headers,
+            payload,
+            reply,
+        } => {
+            let headers = headers
+                .iter()
+                .map(|(name, value)| (name.as_str(), value.as_slice()))
+                .collect::<Vec<_>>();
+            let _ = reply.send_blocking(
+                connection
+                    .publish_request_with_headers(&cx, &subject, &reply_to, &headers, &payload)
+                    .await,
+            );
+        }
+        NatsSupervisorCommand::RequestWithHeaders {
+            cx,
+            subject,
+            headers,
+            payload,
+            reply,
+        } => {
+            let headers = headers
+                .iter()
+                .map(|(name, value)| (name.as_str(), value.as_slice()))
+                .collect::<Vec<_>>();
+            let _ = reply.send_blocking(
+                connection
+                    .request_with_headers(&cx, &subject, &headers, &payload)
+                    .await,
+            );
+        }
+        NatsSupervisorCommand::Request {
+            cx,
+            subject,
+            payload,
+            reply,
+        } => {
+            let _ = reply.send_blocking(connection.request(&cx, &subject, &payload).await);
+        }
+        NatsSupervisorCommand::Subscribe {
+            cx,
+            subject,
+            queue_group,
+            reply,
+        } => {
+            let result = if let Some(queue_group) = queue_group {
+                connection
+                    .queue_subscribe(&cx, &subject, &queue_group)
+                    .await
+            } else {
+                connection.subscribe(&cx, &subject).await
+            };
+            let _ = reply.send_blocking(result);
+        }
+        NatsSupervisorCommand::Unsubscribe { cx, sid, reply } => {
+            let _ = reply.send_blocking(connection.unsubscribe(&cx, sid).await);
+        }
+        NatsSupervisorCommand::Ping { cx, reply } => {
+            let _ = reply.send_blocking(connection.ping(&cx).await);
+        }
+        NatsSupervisorCommand::Process {
+            cx,
+            after_epoch,
+            reply,
+        } => {
+            let already_processed =
+                connection.state.processed_epoch.load(Ordering::Acquire) > after_epoch;
+            let result = if already_processed {
+                Ok(())
+            } else {
+                connection.process(&cx).await
+            };
+            if result.is_ok() && !already_processed {
+                connection
+                    .state
+                    .processed_epoch
+                    .fetch_add(1, Ordering::AcqRel);
+            }
+            let _ = reply.send_blocking(result);
+        }
+        NatsSupervisorCommand::Close { cx, reply } => {
+            let result = connection.close(&cx).await;
+            let _ = reply.send_blocking(result);
+            return false;
+        }
+    }
+    connection
+        .state
+        .connected
+        .store(connection.connected, Ordering::Release);
+    true
 }
 
 fn parse_hmsg_frame(
@@ -3566,7 +4239,7 @@ mod tests {
                 .await
                 .expect("connect reconnect client");
             let state = Arc::new(SharedState::new());
-            let mut client = NatsClient {
+            let mut client = NatsConnection {
                 config: NatsConfig::default(),
                 stream: stream.into(),
                 read_buf: NatsReadBuffer::new(),
@@ -3608,7 +4281,7 @@ mod tests {
             insert_replay_subscription(&state, 2, "orders.*", Some("workers"));
             insert_replay_subscription(&state, 5, "events.>", None);
 
-            let mut client = NatsClient {
+            let mut client = NatsConnection {
                 config: NatsConfig::default(),
                 stream: stream.into(),
                 read_buf: NatsReadBuffer::new(),
@@ -3658,7 +4331,7 @@ mod tests {
             let first_stream = TcpStream::connect(format!("{first_addr}"))
                 .await
                 .expect("connect first reconnect client");
-            let mut client = NatsClient {
+            let mut client = NatsConnection {
                 config: NatsConfig::default(),
                 stream: first_stream.into(),
                 read_buf: NatsReadBuffer::new(),
@@ -3727,7 +4400,7 @@ mod tests {
 
             let state = Arc::new(SharedState::new());
             insert_replay_subscription(&state, 42, "svc.echo", None);
-            let mut client = NatsClient {
+            let mut client = NatsConnection {
                 config: NatsConfig::default(),
                 stream: stream.into(),
                 read_buf: NatsReadBuffer::new(),
@@ -4776,7 +5449,7 @@ mod tests {
                 max_payload: 32,
                 ..ServerInfo::default()
             });
-            let mut client = NatsClient {
+            let mut client = NatsConnection {
                 config: NatsConfig {
                     max_payload: 32,
                     ..Default::default()
@@ -4843,7 +5516,7 @@ mod tests {
                 },
             );
 
-            let mut client = NatsClient {
+            let mut client = NatsConnection {
                 config: NatsConfig::default(),
                 stream: stream.into(),
                 read_buf: NatsReadBuffer::new(),
@@ -4899,7 +5572,7 @@ mod tests {
                     sender: tx,
                 },
             );
-            let mut client = NatsClient {
+            let mut client = NatsConnection {
                 config: NatsConfig::default(),
                 stream: stream.into(),
                 read_buf: NatsReadBuffer::new(),
@@ -4949,7 +5622,7 @@ mod tests {
             let stream = TcpStream::connect(format!("{addr}"))
                 .await
                 .expect("connect client");
-            let mut client = NatsClient {
+            let mut client = NatsConnection {
                 config: NatsConfig::default(),
                 stream: stream.into(),
                 read_buf: NatsReadBuffer::new(),
@@ -4994,7 +5667,7 @@ mod tests {
             let stream = TcpStream::connect(format!("{addr}"))
                 .await
                 .expect("connect client");
-            let mut client = NatsClient {
+            let mut client = NatsConnection {
                 config: NatsConfig::default(),
                 stream: stream.into(),
                 read_buf: NatsReadBuffer::new(),
@@ -5073,7 +5746,7 @@ mod tests {
                 .await
                 .expect("connect client");
             let state = Arc::new(SharedState::new());
-            let mut client = NatsClient {
+            let mut client = NatsConnection {
                 config: NatsConfig::default(),
                 stream: stream.into(),
                 read_buf: NatsReadBuffer::new(),
@@ -5217,7 +5890,7 @@ mod tests {
             let stream = TcpStream::connect(format!("{addr}"))
                 .await
                 .expect("connect client");
-            let mut client = NatsClient {
+            let mut client = NatsConnection {
                 config: NatsConfig::default(),
                 stream: stream.into(),
                 read_buf: NatsReadBuffer::new(),
@@ -5272,7 +5945,7 @@ mod tests {
             payload: Vec::new(),
         };
 
-        let err = NatsClient::reply_status_error(&message)
+        let err = NatsConnection::reply_status_error(&message)
             .expect("empty status-only HMSG reply must surface as error");
         match err {
             NatsError::Server(message) => {
@@ -5302,7 +5975,7 @@ mod tests {
             let stream = TcpStream::connect(format!("{addr}"))
                 .await
                 .expect("connect client");
-            let mut client = NatsClient {
+            let mut client = NatsConnection {
                 config: NatsConfig::default(),
                 stream: stream.into(),
                 read_buf: NatsReadBuffer::new(),
@@ -5334,7 +6007,7 @@ mod tests {
             assert!(message.payload.is_empty());
             assert_eq!(message.headers.as_deref(), Some(headers.as_slice()));
 
-            let err = NatsClient::reply_status_error(&message)
+            let err = NatsConnection::reply_status_error(&message)
                 .expect("status-line HMSG reply must surface as server error");
             match err {
                 NatsError::Server(message) => {
@@ -5603,7 +6276,7 @@ mod tests {
             let stream = TcpStream::connect(format!("{addr}"))
                 .await
                 .expect("connect client");
-            let mut client = NatsClient {
+            let mut client = NatsConnection {
                 config: NatsConfig::default(),
                 stream: stream.into(),
                 read_buf: NatsReadBuffer::new(),
@@ -5645,7 +6318,7 @@ mod tests {
             let stream = TcpStream::connect(format!("{addr}"))
                 .await
                 .expect("connect client");
-            let mut client = NatsClient {
+            let mut client = NatsConnection {
                 config: NatsConfig::default(),
                 stream: stream.into(),
                 read_buf: NatsReadBuffer::new(),
@@ -5707,7 +6380,7 @@ mod tests {
                 rx,
                 state: Arc::clone(&state),
             };
-            let client = NatsClient {
+            let client = NatsConnection {
                 config: NatsConfig::default(),
                 stream: stream.into(),
                 read_buf: NatsReadBuffer::new(),

@@ -35,14 +35,12 @@
 //! oracle is the protocol grammar described in
 //! https://docs.nats.io/reference/reference-protocols/nats-protocol —
 //! deviations either side would surface as a panic / timeout.
-//! Subscribe / wildcard delivery is intentionally out of scope here:
-//! the NATS client's current design pumps inbound MSGs only on the
-//! caller's API call (no background reader task), so a wire-level
-//! wildcard test would require additional pump plumbing that is
-//! tracked separately.
+//! The supervisor scenarios also cover idle server PING handling, ordered
+//! subscription delivery without an explicit `process()` call, reconnect
+//! replay, graceful close, and drop-triggered supervisor cancellation.
 
 use asupersync::cx::Cx;
-use asupersync::messaging::nats::{NatsClient, NatsError};
+use asupersync::messaging::nats::{NatsClient, NatsConfig, NatsError};
 use asupersync::runtime::RuntimeBuilder;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
@@ -209,4 +207,232 @@ fn nats_handshake_aborts_before_connect_when_tls_required_vynlt0() {
         captured.is_none(),
         "client must NOT send CONNECT when tls_required=true; server captured: {captured:?}"
     );
+}
+
+fn read_nats_line(reader: &mut BufReader<std::net::TcpStream>) -> String {
+    let mut line = String::new();
+    let bytes = reader.read_line(&mut line).expect("read NATS line");
+    assert!(bytes > 0, "peer closed before sending a NATS line");
+    line.trim_end_matches(['\r', '\n']).to_string()
+}
+
+#[test]
+fn nats_supervisor_answers_idle_ping_and_delivers_in_order_7207gg() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind supervisor listener");
+    let addr = listener.local_addr().expect("listener addr");
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept supervisor client");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("set read timeout");
+        stream
+            .set_write_timeout(Some(Duration::from_secs(5)))
+            .expect("set write timeout");
+        stream
+            .write_all(
+                b"INFO {\"server_id\":\"idle\",\"version\":\"2.10.0\",\"proto\":1,\"max_payload\":1048576}\r\n",
+            )
+            .expect("write INFO");
+        stream.flush().expect("flush INFO");
+
+        let mut reader = BufReader::new(stream);
+        assert!(read_nats_line(&mut reader).starts_with("CONNECT "));
+        assert_eq!(read_nats_line(&mut reader), "SUB events.idle 1");
+
+        reader
+            .get_mut()
+            .write_all(b"PING\r\n")
+            .expect("write idle PING");
+        reader.get_mut().flush().expect("flush idle PING");
+        assert_eq!(
+            read_nats_line(&mut reader),
+            "PONG",
+            "supervisor must answer without process()"
+        );
+
+        reader
+            .get_mut()
+            .write_all(b"MSG events.idle 1 5\r\nfirst\r\nMSG events.idle 1 6\r\nsecond\r\n")
+            .expect("write ordered messages");
+        reader.get_mut().flush().expect("flush ordered messages");
+
+        let mut byte = [0_u8; 1];
+        reader
+            .get_mut()
+            .read(&mut byte)
+            .expect("observe graceful supervisor shutdown")
+    });
+
+    let runtime = RuntimeBuilder::new()
+        .worker_threads(2)
+        .build()
+        .expect("build runtime");
+    runtime.block_on(runtime.handle().spawn(async move {
+        let cx = Cx::current().expect("runtime task context");
+        let mut client = NatsClient::connect(&cx, &format!("nats://{addr}"))
+            .await
+            .expect("connect supervised client");
+        let mut subscription = client
+            .subscribe(&cx, "events.idle")
+            .await
+            .expect("subscribe");
+
+        let first = subscription
+            .next(&cx)
+            .await
+            .expect("first receive")
+            .expect("first message");
+        let second = subscription
+            .next(&cx)
+            .await
+            .expect("second receive")
+            .expect("second message");
+        assert_eq!(first.payload, b"first");
+        assert_eq!(second.payload, b"second");
+
+        client.close(&cx).await.expect("close supervised client");
+        assert!(
+            subscription
+                .next(&cx)
+                .await
+                .expect("closed subscription result")
+                .is_none()
+        );
+    }));
+
+    assert_eq!(server.join().expect("server join"), 0);
+}
+
+#[test]
+fn nats_supervisor_reconnect_replays_active_subscription_7207gg() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind reconnect listener");
+    let addr = listener.local_addr().expect("listener addr");
+    let server = thread::spawn(move || {
+        let mut subscriptions = Vec::new();
+        for connection_index in 0..2 {
+            let (mut stream, _) = listener.accept().expect("accept reconnect client");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("set read timeout");
+            stream
+                .set_write_timeout(Some(Duration::from_secs(5)))
+                .expect("set write timeout");
+            stream
+                .write_all(
+                    b"INFO {\"server_id\":\"reconnect\",\"version\":\"2.10.0\",\"proto\":1,\"max_payload\":1048576}\r\n",
+                )
+                .expect("write INFO");
+            stream.flush().expect("flush INFO");
+
+            let mut reader = BufReader::new(stream);
+            assert!(read_nats_line(&mut reader).starts_with("CONNECT "));
+            subscriptions.push(read_nats_line(&mut reader));
+
+            if connection_index == 1 {
+                reader
+                    .get_mut()
+                    .write_all(b"MSG events.reconnect 1 9\r\nreplayed!\r\n")
+                    .expect("write replayed message");
+                reader.get_mut().flush().expect("flush replayed message");
+                let mut byte = [0_u8; 1];
+                assert_eq!(
+                    reader
+                        .get_mut()
+                        .read(&mut byte)
+                        .expect("observe reconnect supervisor shutdown"),
+                    0
+                );
+            }
+        }
+        subscriptions
+    });
+
+    let runtime = RuntimeBuilder::new()
+        .worker_threads(2)
+        .build()
+        .expect("build runtime");
+    runtime.block_on(runtime.handle().spawn(async move {
+        let cx = Cx::current().expect("runtime task context");
+        let mut config =
+            NatsConfig::from_url(&format!("nats://{addr}")).expect("parse reconnect URL");
+        config.reconnect_delay = Duration::ZERO;
+        config.max_reconnect_delay = Duration::ZERO;
+        config.max_reconnect_attempts = 3;
+        let mut client = NatsClient::connect_with_config(&cx, config)
+            .await
+            .expect("connect supervised client");
+        let mut subscription = client
+            .subscribe(&cx, "events.reconnect")
+            .await
+            .expect("subscribe before reconnect");
+
+        let message = subscription
+            .next(&cx)
+            .await
+            .expect("reconnect receive")
+            .expect("message after replay");
+        assert_eq!(message.payload, b"replayed!");
+        client.close(&cx).await.expect("close reconnected client");
+    }));
+
+    assert_eq!(
+        server.join().expect("server join"),
+        vec![
+            "SUB events.reconnect 1".to_string(),
+            "SUB events.reconnect 1".to_string()
+        ]
+    );
+}
+
+#[test]
+fn nats_supervisor_drop_cancels_task_and_releases_subscription_7207gg() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind drop listener");
+    let addr = listener.local_addr().expect("listener addr");
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept drop client");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("set read timeout");
+        stream
+            .write_all(
+                b"INFO {\"server_id\":\"drop\",\"version\":\"2.10.0\",\"proto\":1,\"max_payload\":1048576}\r\n",
+            )
+            .expect("write INFO");
+        stream.flush().expect("flush INFO");
+
+        let mut reader = BufReader::new(stream);
+        assert!(read_nats_line(&mut reader).starts_with("CONNECT "));
+        assert_eq!(read_nats_line(&mut reader), "SUB events.drop 1");
+        let mut byte = [0_u8; 1];
+        reader
+            .get_mut()
+            .read(&mut byte)
+            .expect("observe cancelled supervisor shutdown")
+    });
+
+    let runtime = RuntimeBuilder::new()
+        .worker_threads(2)
+        .build()
+        .expect("build runtime");
+    runtime.block_on(runtime.handle().spawn(async move {
+        let cx = Cx::current().expect("runtime task context");
+        let mut client = NatsClient::connect(&cx, &format!("nats://{addr}"))
+            .await
+            .expect("connect supervised client");
+        let mut subscription = client
+            .subscribe(&cx, "events.drop")
+            .await
+            .expect("subscribe before drop");
+
+        drop(client);
+        assert!(
+            subscription
+                .next(&cx)
+                .await
+                .expect("dropped-client subscription result")
+                .is_none()
+        );
+    }));
+
+    assert_eq!(server.join().expect("server join"), 0);
 }
