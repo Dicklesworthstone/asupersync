@@ -18,7 +18,8 @@ use std::time::Instant;
 const ARTIFACT_PATH: &str = "artifacts/regex_fixed_detector_terminal_receipt_v1.json";
 const CORPUS_PATH: &str = "artifacts/regex_built_in_detector_corpus_v1.json";
 const DOC_PATH: &str = "docs/regex_fixed_detector_terminal_receipt.md";
-const CLAIMS_PROJECTION_SHA256: &str = "PENDING_MEASUREMENTS";
+const CLAIMS_PROJECTION_SHA256: &str =
+    "1949fa0388595aeaea8cb271bda4ab75298f93d90755fae4ac0f4c1cd105660c";
 const DOC_BEGIN: &str = "<!-- BEGIN REGEX FIXED DETECTOR TERMINAL RECEIPT -->";
 const DOC_END: &str = "<!-- END REGEX FIXED DETECTOR TERMINAL RECEIPT -->";
 
@@ -87,7 +88,7 @@ fn sha256(path: &str) -> String {
 
 fn contains_unknown(value: &Value) -> bool {
     match value {
-        Value::String(value) => value.contains("UNKNOWN"),
+        Value::String(value) => value == "UNKNOWN",
         Value::Array(values) => values.iter().any(contains_unknown),
         Value::Object(values) => values.values().any(contains_unknown),
         Value::Null | Value::Bool(_) | Value::Number(_) => false,
@@ -183,7 +184,7 @@ fn validate_receipt(receipt: &Value, corpus: &Value) -> Result<(), String> {
 
     let authority = object(receipt, "authority");
     if authority.get("terminal_state").and_then(Value::as_str)
-        != Some("ADMIT_FOUR_FIXED_BUILTINS_KEEP_INCUMBENT")
+        != Some("KEEP_INCUMBENT_DISABLE_REGRESSED_FIXED_FAST_PATHS")
         || authority
             .get("dependency_exit_allowed")
             .and_then(Value::as_bool)
@@ -198,6 +199,19 @@ fn validate_receipt(receipt: &Value, corpus: &Value) -> Result<(), String> {
             != Some(0)
     {
         return Err("terminal authority overclaims or retains a high finding".to_owned());
+    }
+    if string_set(&receipt["authority"], "authorized_fixed_fast_paths") != BTreeSet::new()
+        || string_set(&receipt["authority"], "disabled_fixed_fast_paths")
+            != BTreeSet::from([
+                "RGX-BUILTIN-EMAIL".to_owned(),
+                "RGX-BUILTIN-SSN".to_owned(),
+                "RGX-BUILTIN-CARD".to_owned(),
+                "RGX-BUILTIN-PHONE".to_owned(),
+            ])
+        || authority.get("rollback_revision").and_then(Value::as_str)
+            != Some("d35453f0bdff943915dcf642fa09a30affb8a917")
+    {
+        return Err("terminal authorization set or rollback revision drifted".to_owned());
     }
 
     let pins = array(receipt, "source_pins");
@@ -225,8 +239,12 @@ fn validate_receipt(receipt: &Value, corpus: &Value) -> Result<(), String> {
     }
     let mut bound_detector_cases = BTreeSet::new();
     for row in dispositions {
-        if !matches!(text(row, "disposition"), "SAME" | "BETTER" | "KEEP") {
-            return Err("detector disposition must be SAME, BETTER or KEEP".to_owned());
+        if text(row, "disposition") != "KEEP"
+            || text(row, "reason") != "NAMED_HOST_LATENCY_AND_ALLOCATION_REGRESSION"
+            || text(row, "source_revision").is_empty()
+            || array(row, "replay_job_ids").is_empty()
+        {
+            return Err("regressed detector must retain source-bound KEEP evidence".to_owned());
         }
         for case_id in string_set(row, "case_ids") {
             if !bound_detector_cases.insert(case_id) {
@@ -256,6 +274,14 @@ fn validate_receipt(receipt: &Value, corpus: &Value) -> Result<(), String> {
         != Some(true)
         || dispatch
             .get("scanner_refusal_uses_incumbent")
+            .and_then(Value::as_bool)
+            != Some(true)
+        || dispatch
+            .get("fixed_scanner_fast_path_enabled")
+            .and_then(Value::as_bool)
+            != Some(false)
+        || dispatch
+            .get("production_automatic_detection_uses_incumbent")
             .and_then(Value::as_bool)
             != Some(true)
         || dispatch.get("built_in_order").and_then(Value::as_array)
@@ -288,7 +314,10 @@ fn validate_receipt(receipt: &Value, corpus: &Value) -> Result<(), String> {
         return Err("at least two named latency targets are required".to_owned());
     }
     for target in latency_targets {
-        if text(target, "rch_job_id").is_empty() || array(target, "scenario_rows").len() != 6 {
+        if text(target, "rch_job_id").is_empty()
+            || text(target, "outcome") != "ALL_CANDIDATE_LATENCY_CELLS_REGRESSED"
+            || array(target, "scenario_rows").len() != 6
+        {
             return Err("named latency target is incomplete".to_owned());
         }
         for scenario in array(target, "scenario_rows") {
@@ -306,6 +335,18 @@ fn validate_receipt(receipt: &Value, corpus: &Value) -> Result<(), String> {
                     return Err("latency distribution contains an empty cell".to_owned());
                 }
             }
+            let candidate = &operations[0];
+            let incumbent = &operations[1];
+            if text(candidate, "operation") != "candidate"
+                || text(incumbent, "operation") != "incumbent"
+                || number(candidate, "operations_per_second")
+                    >= number(incumbent, "operations_per_second")
+                || number(candidate, "p50_ns") <= number(incumbent, "p50_ns")
+                || number(candidate, "p95_ns") <= number(incumbent, "p95_ns")
+                || number(candidate, "p999_ns") <= number(incumbent, "p999_ns")
+            {
+                return Err("latency regression decision is not supported by every cell".to_owned());
+            }
         }
     }
     let allocations = measurements
@@ -318,6 +359,31 @@ fn validate_receipt(receipt: &Value, corpus: &Value) -> Result<(), String> {
             .any(|row| number(row, "allocation_calls") == 0 || text(row, "rch_job_id").is_empty())
     {
         return Err("candidate and incumbent allocation cells are required".to_owned());
+    }
+    let candidate = &allocations[0];
+    let incumbent = &allocations[1];
+    if text(candidate, "operation") != "candidate"
+        || text(incumbent, "operation") != "incumbent"
+        || number(candidate, "allocation_calls") <= number(incumbent, "allocation_calls")
+        || number(candidate, "temporary_allocations") <= number(incumbent, "temporary_allocations")
+        || text(candidate, "outcome") != "REGRESSION_AGAINST_INCUMBENT"
+    {
+        return Err("allocation regression decision is not supported".to_owned());
+    }
+
+    let replay = object(receipt, "replay_metadata");
+    if replay.get("rollback_revision").and_then(Value::as_str)
+        != Some("d35453f0bdff943915dcf642fa09a30affb8a917")
+        || replay
+            .get("rollback_focused_job_id")
+            .and_then(Value::as_str)
+            != Some("j-29988810699833448")
+        || replay
+            .get("rollback_corpus_contract_job_id")
+            .and_then(Value::as_str)
+            != Some("j-29988810699833449")
+    {
+        return Err("rollback replay evidence drifted".to_owned());
     }
 
     if canonical_sha256(&claims_projection(receipt)) != CLAIMS_PROJECTION_SHA256 {
@@ -364,6 +430,11 @@ fn terminal_receipt_mutations_fail_closed() {
     custom_cutover["authority"]["custom_pattern_fast_path_allowed"] = Value::Bool(true);
     assert!(validate_receipt(&custom_cutover, &corpus).is_err());
 
+    let mut enabled_fast_path = original.clone();
+    enabled_fast_path["dispatch_safety"]["fixed_scanner_fast_path_enabled"] = Value::Bool(true);
+    enabled_fast_path["authority"]["authorized_fixed_fast_paths"] = json!(["RGX-BUILTIN-EMAIL"]);
+    assert!(validate_receipt(&enabled_fast_path, &corpus).is_err());
+
     let mut missing_case = original.clone();
     missing_case["detector_dispositions"][0]["case_ids"]
         .as_array_mut()
@@ -387,7 +458,7 @@ fn documentation_markers_replay_commands_and_no_claims_are_discoverable() {
     assert_eq!(doc.matches(DOC_BEGIN).count(), 1);
     assert_eq!(doc.matches(DOC_END).count(), 1);
     for required in [
-        "ADMIT_FOUR_FIXED_BUILTINS_KEEP_INCUMBENT",
+        "KEEP_INCUMBENT_DISABLE_REGRESSED_FIXED_FAST_PATHS",
         "RCH_REQUIRE_REMOTE=1",
         "heaptrack",
         "No local Cargo fallback is approved",
@@ -574,6 +645,12 @@ fn r2_5_release_performance_emitter() {
     let Ok(target_id) = std::env::var("R2_5_FIXED_DETECTOR_PERF_TARGET") else {
         return;
     };
+    assert!(
+        !read("src/observability/otel.rs")
+            .contains("const FIXED_PII_SCANNER_FAST_PATH_ENABLED: bool = false;"),
+        "the candidate was rolled back; replay the historical harness with --base \
+         03a6fa83274c65f383c04d9a541bb94b2d3ee54f"
+    );
     let operation_filter = std::env::var("R2_5_FIXED_DETECTOR_PERF_OPERATION").ok();
     assert!(matches!(
         operation_filter.as_deref(),

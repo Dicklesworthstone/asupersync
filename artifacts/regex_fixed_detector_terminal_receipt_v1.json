@@ -5,29 +5,456 @@
   "bead_id": "asupersync-5z2scg.8.2.5",
   "capability_id": "CAP-REGEX-PRIVACY",
   "captured_date_utc": "2026-08-24",
-  "receipt_state": "PENDING_NAMED_HOST_MEASUREMENTS",
+  "receipt_state": "KEEP_INCUMBENT_AFTER_NAMED_HOST_REGRESSION",
   "authority": {
-    "terminal_state": "PENDING_NAMED_HOST_MEASUREMENTS",
+    "terminal_state": "KEEP_INCUMBENT_DISABLE_REGRESSED_FIXED_FAST_PATHS",
+    "decision_basis": "EVERY_NAMED_HOST_LATENCY_CELL_REGRESSED_AND_CANDIDATE_ALLOCATION_COUNT_INCREASED",
+    "authorized_fixed_fast_paths": [],
+    "disabled_fixed_fast_paths": [
+      "RGX-BUILTIN-EMAIL",
+      "RGX-BUILTIN-SSN",
+      "RGX-BUILTIN-CARD",
+      "RGX-BUILTIN-PHONE"
+    ],
     "dependency_exit_allowed": false,
     "custom_pattern_fast_path_allowed": false,
+    "rollback_revision": "d35453f0bdff943915dcf642fa09a30affb8a917",
     "unresolved_high_findings": 0
   },
-  "source_pins": [],
-  "predecessor_evidence": [],
-  "detector_dispositions": [],
+  "source_pins": [
+    {
+      "path": "src/observability/otel.rs",
+      "sha256": "f0e0586716bc3871b0d18cfa16a846c42453cdb530c6b2055942155c9557b562",
+      "line_count": 15908,
+      "role": "production custom-first redaction pipeline with fixed-scanner fast-path gate disabled"
+    },
+    {
+      "path": "artifacts/regex_built_in_detector_corpus_v1.json",
+      "sha256": "7522512d491402e79273aa576207d60e7b50b49d60a4d4acd44ed2024fe19b56",
+      "line_count": 1388,
+      "role": "frozen R2.1 detector and public-pipeline corpus plus R2.2 through R2.5 evidence handoff"
+    },
+    {
+      "path": "scripts/alloc_census.sh",
+      "sha256": "6968d0224c35e075d1baa8a2cafb14c0c17f6a24c3cc2ebc1a49e81f91acb577",
+      "line_count": 274,
+      "role": "heaptrack Cargo-runner allocation census"
+    },
+    {
+      "path": "Cargo.lock",
+      "sha256": "513cfba8f8671e69aab32317e042bd00737b9bfb30e2234012d6605f320f7a6a",
+      "line_count": 4664,
+      "role": "resolved incumbent regex dependency revision"
+    }
+  ],
+  "predecessor_evidence": [
+    {
+      "phase": "R2.1",
+      "source_revision": "d35453f0bdff943915dcf642fa09a30affb8a917",
+      "artifact": "artifacts/regex_built_in_detector_corpus_v1.json",
+      "replay_job_id": "j-29988810699833449",
+      "result": "8 passed; 0 failed"
+    },
+    {
+      "phase": "R2.2",
+      "source_revision": "a3bf8f2cd01815f5784e116e07fd986ecff95b86",
+      "focused_job_id": "j-29988810699833424",
+      "contract_job_id": "j-29988810699833427",
+      "result": "3 focused and 8 contract tests passed"
+    },
+    {
+      "phase": "R2.3",
+      "source_revision": "702f1cc7849dc9cce9e30590566563c4d78cac88",
+      "focused_job_id": "j-29988810699833430",
+      "contract_job_id": "j-29988810699833434",
+      "result": "4 focused and 8 contract tests passed"
+    },
+    {
+      "phase": "R2.4",
+      "source_revision": "5285afb061c77389b553e0ca536486a6c0275375",
+      "focused_job_id": "j-29988810699833435",
+      "contract_job_id": "j-29988810699833437",
+      "result": "5 focused and 8 contract tests passed"
+    },
+    {
+      "phase": "R2.5 rollback",
+      "source_revision": "d35453f0bdff943915dcf642fa09a30affb8a917",
+      "focused_job_id": "j-29988810699833448",
+      "contract_job_id": "j-29988810699833449",
+      "result": "45 focused library and 8 corpus-contract tests passed"
+    }
+  ],
+  "detector_dispositions": [
+    {
+      "detector_id": "RGX-BUILTIN-EMAIL",
+      "disposition": "KEEP",
+      "reason": "NAMED_HOST_LATENCY_AND_ALLOCATION_REGRESSION",
+      "source_revision": "a3bf8f2cd01815f5784e116e07fd986ecff95b86",
+      "replay_job_ids": [
+        "j-29988810699833424",
+        "j-29988810699833448",
+        "j-29988810699833449"
+      ],
+      "case_ids": [
+        "RGX-R2-EMAIL-001",
+        "RGX-R2-EMAIL-002",
+        "RGX-R2-EMAIL-003",
+        "RGX-R2-EMAIL-004",
+        "RGX-R2-EMAIL-005",
+        "RGX-R2-EMAIL-006",
+        "RGX-R2-EMAIL-007",
+        "RGX-R2-EMAIL-008",
+        "RGX-R2-EMAIL-009",
+        "RGX-R2-EMAIL-010",
+        "RGX-R2-EMAIL-011",
+        "RGX-R2-EMAIL-012",
+        "RGX-R2-EMAIL-013",
+        "RGX-R2-EMAIL-014",
+        "RGX-R2-EMAIL-015"
+      ]
+    },
+    {
+      "detector_id": "RGX-BUILTIN-SSN",
+      "disposition": "KEEP",
+      "reason": "NAMED_HOST_LATENCY_AND_ALLOCATION_REGRESSION",
+      "source_revision": "a3bf8f2cd01815f5784e116e07fd986ecff95b86",
+      "replay_job_ids": [
+        "j-29988810699833424",
+        "j-29988810699833448",
+        "j-29988810699833449"
+      ],
+      "case_ids": [
+        "RGX-R2-SSN-001",
+        "RGX-R2-SSN-002",
+        "RGX-R2-SSN-003",
+        "RGX-R2-SSN-004",
+        "RGX-R2-SSN-005",
+        "RGX-R2-SSN-006",
+        "RGX-R2-SSN-007",
+        "RGX-R2-SSN-008",
+        "RGX-R2-SSN-009",
+        "RGX-R2-SSN-010",
+        "RGX-R2-SSN-011",
+        "RGX-R2-SSN-012"
+      ]
+    },
+    {
+      "detector_id": "RGX-BUILTIN-CARD",
+      "disposition": "KEEP",
+      "reason": "NAMED_HOST_LATENCY_AND_ALLOCATION_REGRESSION",
+      "source_revision": "702f1cc7849dc9cce9e30590566563c4d78cac88",
+      "replay_job_ids": [
+        "j-29988810699833430",
+        "j-29988810699833448",
+        "j-29988810699833449"
+      ],
+      "case_ids": [
+        "RGX-R2-CARD-001",
+        "RGX-R2-CARD-002",
+        "RGX-R2-CARD-003",
+        "RGX-R2-CARD-004",
+        "RGX-R2-CARD-005",
+        "RGX-R2-CARD-006",
+        "RGX-R2-CARD-007",
+        "RGX-R2-CARD-008",
+        "RGX-R2-CARD-009",
+        "RGX-R2-CARD-010",
+        "RGX-R2-CARD-011",
+        "RGX-R2-CARD-012",
+        "RGX-R2-CARD-013",
+        "RGX-R2-CARD-014",
+        "RGX-R2-CARD-015",
+        "RGX-R2-CARD-016",
+        "RGX-R2-CARD-017"
+      ]
+    },
+    {
+      "detector_id": "RGX-BUILTIN-PHONE",
+      "disposition": "KEEP",
+      "reason": "NAMED_HOST_LATENCY_AND_ALLOCATION_REGRESSION",
+      "source_revision": "5285afb061c77389b553e0ca536486a6c0275375",
+      "replay_job_ids": [
+        "j-29988810699833435",
+        "j-29988810699833448",
+        "j-29988810699833449"
+      ],
+      "case_ids": [
+        "RGX-R2-PHONE-001",
+        "RGX-R2-PHONE-002",
+        "RGX-R2-PHONE-003",
+        "RGX-R2-PHONE-004",
+        "RGX-R2-PHONE-005",
+        "RGX-R2-PHONE-006",
+        "RGX-R2-PHONE-007",
+        "RGX-R2-PHONE-008",
+        "RGX-R2-PHONE-009",
+        "RGX-R2-PHONE-010",
+        "RGX-R2-PHONE-011",
+        "RGX-R2-PHONE-012",
+        "RGX-R2-PHONE-013",
+        "RGX-R2-PHONE-014",
+        "RGX-R2-PHONE-015",
+        "RGX-R2-PHONE-016",
+        "RGX-R2-PHONE-017",
+        "RGX-R2-PHONE-018"
+      ]
+    }
+  ],
   "pipeline_disposition": {
-    "disposition": "PENDING",
-    "case_ids": []
+    "disposition": "SAME",
+    "source_revision": "d35453f0bdff943915dcf642fa09a30affb8a917",
+    "replay_job_ids": [
+      "j-29988810699833448",
+      "j-29988810699833449"
+    ],
+    "case_ids": [
+      "RGX-R2-PIPE-001",
+      "RGX-R2-PIPE-002",
+      "RGX-R2-PIPE-003",
+      "RGX-R2-PIPE-004",
+      "RGX-R2-PIPE-005",
+      "RGX-R2-PIPE-006",
+      "RGX-R2-PIPE-007",
+      "RGX-R2-PIPE-008",
+      "RGX-R2-PIPE-009",
+      "RGX-R2-PIPE-010",
+      "RGX-R2-PIPE-011",
+      "RGX-R2-PIPE-012",
+      "RGX-R2-PIPE-013",
+      "RGX-R2-PIPE-014",
+      "RGX-R2-PIPE-015",
+      "RGX-R2-PIPE-016",
+      "RGX-R2-PIPE-017",
+      "RGX-R2-PIPE-018",
+      "RGX-R2-PIPE-019"
+    ]
   },
-  "dispatch_safety": {},
-  "bounded_resource_evidence": {},
+  "dispatch_safety": {
+    "fixed_scanner_fast_path_enabled": false,
+    "built_in_order": [
+      "RGX-BUILTIN-EMAIL",
+      "RGX-BUILTIN-SSN",
+      "RGX-BUILTIN-CARD",
+      "RGX-BUILTIN-PHONE"
+    ],
+    "custom_patterns_use_incumbent": true,
+    "scanner_refusal_uses_incumbent": true,
+    "production_automatic_detection_uses_incumbent": true,
+    "fallback_action": "RETURN_COMPLETE_INCUMBENT_RESULT_WITHOUT_PARTIAL_SCANNER_PUBLICATION"
+  },
+  "bounded_resource_evidence": {
+    "max_input_bytes": 1048576,
+    "max_matches": 65536,
+    "max_work_units": 16777280,
+    "refusal_action": "FALL_THROUGH_TO_INCUMBENT_WITHOUT_PARTIAL_RESULT",
+    "scanner_implementations_retained_for_equivalence_tests": true,
+    "focused_replay_job_id": "j-29988810699833448",
+    "focused_replay_result": "45 passed; 0 failed"
+  },
   "named_host_measurements": {
-    "latency_targets": [],
-    "allocation_targets": []
+    "latency_targets": [
+      {
+        "target_id": "ovh-a-x86_64",
+        "worker": "ovh-a",
+        "host": {
+          "os": "linux",
+          "arch": "x86_64",
+          "logical_parallelism": 16,
+          "cpu_model": "AMD Ryzen 7 5800X 8-Core Processor",
+          "memory_kib": 65729736
+        },
+        "rch_job_id": "j-29988810699833441",
+        "clean_overlay_base": "03a6fa83274c65f383c04d9a541bb94b2d3ee54f",
+        "clean_overlay_fingerprint": "fe0d5151031be8fda7951fe7fe1f42f7ce344018fdb3ed21e6ada866b230b195",
+        "profile": "cargo test --release with debuginfo disabled",
+        "sample_count_per_operation": 2001,
+        "warmup_count_per_operation": 64,
+        "percentile_method": "nearest-rank",
+        "outcome": "ALL_CANDIDATE_LATENCY_CELLS_REGRESSED",
+        "scenario_rows": [
+          {
+            "scenario_id": "email_hit",
+            "input_bytes": 39,
+            "operations": [
+              {"operation": "candidate", "sample_count": 2001, "operations_per_second": 1797057, "p50_ns": 551, "p95_ns": 581, "p999_ns": 721},
+              {"operation": "incumbent", "sample_count": 2001, "operations_per_second": 11356670, "p50_ns": 90, "p95_ns": 91, "p999_ns": 120}
+            ]
+          },
+          {
+            "scenario_id": "ssn_hit",
+            "input_bytes": 15,
+            "operations": [
+              {"operation": "candidate", "sample_count": 2001, "operations_per_second": 2371398, "p50_ns": 421, "p95_ns": 431, "p999_ns": 641},
+              {"operation": "incumbent", "sample_count": 2001, "operations_per_second": 11685353, "p50_ns": 80, "p95_ns": 91, "p999_ns": 201}
+            ]
+          },
+          {
+            "scenario_id": "card_hit",
+            "input_bytes": 24,
+            "operations": [
+              {"operation": "candidate", "sample_count": 2001, "operations_per_second": 1957814, "p50_ns": 511, "p95_ns": 511, "p999_ns": 821},
+              {"operation": "incumbent", "sample_count": 2001, "operations_per_second": 5116103, "p50_ns": 190, "p95_ns": 211, "p999_ns": 471}
+            ]
+          },
+          {
+            "scenario_id": "phone_hit",
+            "input_bytes": 22,
+            "operations": [
+              {"operation": "candidate", "sample_count": 2001, "operations_per_second": 536058, "p50_ns": 1834, "p95_ns": 1883, "p999_ns": 6392},
+              {"operation": "incumbent", "sample_count": 2001, "operations_per_second": 6069301, "p50_ns": 161, "p95_ns": 171, "p999_ns": 271}
+            ]
+          },
+          {
+            "scenario_id": "mixed_priority",
+            "input_bytes": 43,
+            "operations": [
+              {"operation": "candidate", "sample_count": 2001, "operations_per_second": 1787036, "p50_ns": 551, "p95_ns": 581, "p999_ns": 751},
+              {"operation": "incumbent", "sample_count": 2001, "operations_per_second": 12807957, "p50_ns": 80, "p95_ns": 81, "p999_ns": 130}
+            ]
+          },
+          {
+            "scenario_id": "large_miss",
+            "input_bytes": 51200,
+            "operations": [
+              {"operation": "candidate", "sample_count": 2001, "operations_per_second": 977, "p50_ns": 993809, "p95_ns": 1194625, "p999_ns": 1755273},
+              {"operation": "incumbent", "sample_count": 2001, "operations_per_second": 5486, "p50_ns": 176480, "p95_ns": 219561, "p999_ns": 280024}
+            ]
+          }
+        ]
+      },
+      {
+        "target_id": "vmi1293453-x86_64",
+        "worker": "vmi1293453",
+        "host": {
+          "os": "linux",
+          "arch": "x86_64",
+          "logical_parallelism": 8,
+          "cpu_model": "AMD EPYC Processor (with IBPB)",
+          "memory_kib": 30799832
+        },
+        "rch_job_id": "j-29988810699833442",
+        "clean_overlay_base": "03a6fa83274c65f383c04d9a541bb94b2d3ee54f",
+        "clean_overlay_fingerprint": "fe0d5151031be8fda7951fe7fe1f42f7ce344018fdb3ed21e6ada866b230b195",
+        "profile": "cargo test --release with debuginfo disabled",
+        "sample_count_per_operation": 2001,
+        "warmup_count_per_operation": 64,
+        "percentile_method": "nearest-rank",
+        "outcome": "ALL_CANDIDATE_LATENCY_CELLS_REGRESSED",
+        "scenario_rows": [
+          {
+            "scenario_id": "email_hit",
+            "input_bytes": 39,
+            "operations": [
+              {"operation": "candidate", "sample_count": 2001, "operations_per_second": 1410846, "p50_ns": 531, "p95_ns": 751, "p999_ns": 11187},
+              {"operation": "incumbent", "sample_count": 2001, "operations_per_second": 10516026, "p50_ns": 90, "p95_ns": 120, "p999_ns": 191}
+            ]
+          },
+          {
+            "scenario_id": "ssn_hit",
+            "input_bytes": 15,
+            "operations": [
+              {"operation": "candidate", "sample_count": 2001, "operations_per_second": 2394803, "p50_ns": 351, "p95_ns": 521, "p999_ns": 6300},
+              {"operation": "incumbent", "sample_count": 2001, "operations_per_second": 10592121, "p50_ns": 100, "p95_ns": 120, "p999_ns": 511}
+            ]
+          },
+          {
+            "scenario_id": "card_hit",
+            "input_bytes": 24,
+            "operations": [
+              {"operation": "candidate", "sample_count": 2001, "operations_per_second": 1840870, "p50_ns": 480, "p95_ns": 711, "p999_ns": 10035},
+              {"operation": "incumbent", "sample_count": 2001, "operations_per_second": 4444740, "p50_ns": 210, "p95_ns": 300, "p999_ns": 2233}
+            ]
+          },
+          {
+            "scenario_id": "phone_hit",
+            "input_bytes": 22,
+            "operations": [
+              {"operation": "candidate", "sample_count": 2001, "operations_per_second": 449006, "p50_ns": 2093, "p95_ns": 2504, "p999_ns": 43225},
+              {"operation": "incumbent", "sample_count": 2001, "operations_per_second": 6998534, "p50_ns": 131, "p95_ns": 141, "p999_ns": 230}
+            ]
+          },
+          {
+            "scenario_id": "mixed_priority",
+            "input_bytes": 43,
+            "operations": [
+              {"operation": "candidate", "sample_count": 2001, "operations_per_second": 1432944, "p50_ns": 701, "p95_ns": 781, "p999_ns": 14201},
+              {"operation": "incumbent", "sample_count": 2001, "operations_per_second": 9050203, "p50_ns": 110, "p95_ns": 120, "p999_ns": 140}
+            ]
+          },
+          {
+            "scenario_id": "large_miss",
+            "input_bytes": 51200,
+            "operations": [
+              {"operation": "candidate", "sample_count": 2001, "operations_per_second": 353, "p50_ns": 1249530, "p95_ns": 1679645, "p999_ns": 68019244},
+              {"operation": "incumbent", "sample_count": 2001, "operations_per_second": 2407, "p50_ns": 213058, "p95_ns": 240981, "p999_ns": 53243494}
+            ]
+          }
+        ]
+      }
+    ],
+    "allocation_targets": [
+      {
+        "target_id": "ts2-x86_64-heaptrack-candidate",
+        "worker": "ts2",
+        "host_name": "thinkstation2",
+        "instrumentation": "heaptrack Cargo runner",
+        "operation": "candidate",
+        "rch_job_id": "j-29988810699833444",
+        "clean_overlay_base": "2264da2b68b026016dc7ed77119f0b585a881f9f",
+        "clean_overlay_fingerprint": "fe0d5151031be8fda7951fe7fe1f42f7ce344018fdb3ed21e6ada866b230b195",
+        "allocation_calls": 191937,
+        "temporary_allocations": 61441,
+        "peak_heap": "2.82M",
+        "peak_rss": "10.77M",
+        "leaked": "616.66K",
+        "outcome": "REGRESSION_AGAINST_INCUMBENT"
+      },
+      {
+        "target_id": "ts2-x86_64-heaptrack-incumbent",
+        "worker": "ts2",
+        "host_name": "thinkstation2",
+        "instrumentation": "heaptrack Cargo runner",
+        "operation": "incumbent",
+        "rch_job_id": "j-29988810699833445",
+        "clean_overlay_base": "2264da2b68b026016dc7ed77119f0b585a881f9f",
+        "clean_overlay_fingerprint": "fe0d5151031be8fda7951fe7fe1f42f7ce344018fdb3ed21e6ada866b230b195",
+        "allocation_calls": 39127,
+        "temporary_allocations": 26336,
+        "peak_heap": "2.82M",
+        "peak_rss": "10.32M",
+        "leaked": "616.66K",
+        "outcome": "RETAINED_BASELINE"
+      }
+    ]
   },
-  "replay_metadata": {},
-  "rollback_triggers": [],
+  "replay_metadata": {
+    "measurement_harness_revision": "03a6fa83274c65f383c04d9a541bb94b2d3ee54f",
+    "measurement_harness_sha256": "9389878ba089a80034cee88b214907e48e45a841faaafbf3cb178b624bf474a5",
+    "measurement_region_sha256": "72f85949072c4828b351b428a97f6d22885a1f39a1bcf0552570878a8d8f638a",
+    "measurement_clean_overlay_fingerprint": "fe0d5151031be8fda7951fe7fe1f42f7ce344018fdb3ed21e6ada866b230b195",
+    "allocation_measurement_base": "2264da2b68b026016dc7ed77119f0b585a881f9f",
+    "relevant_surface_delta_between_measurement_bases": "NONE",
+    "rollback_revision": "d35453f0bdff943915dcf642fa09a30affb8a917",
+    "rollback_focused_job_id": "j-29988810699833448",
+    "rollback_corpus_contract_job_id": "j-29988810699833449",
+    "raw_latency_samples_retained_in_job_output": true,
+    "commands": [
+      "RCH_REQUIRE_REMOTE=1 rch exec --base 03a6fa83274c65f383c04d9a541bb94b2d3ee54f --clean-overlay --no-overlay -- env R2_5_FIXED_DETECTOR_PERF_TARGET=<named-target> CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test --release -j 2 -p asupersync --features metrics --test regex_fixed_detector_terminal_receipt_contract r2_5_release_performance_emitter -- --exact --nocapture",
+      "RCH_REQUIRE_REMOTE=1 rch exec --base 2264da2b68b026016dc7ed77119f0b585a881f9f --clean-overlay --no-overlay -- env R2_5_FIXED_DETECTOR_PERF_TARGET=<allocation-target> R2_5_FIXED_DETECTOR_PERF_OPERATION=<candidate-or-incumbent> CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER='scripts/alloc_census.sh --cargo-runner-heaptrack' cargo test --release --target x86_64-unknown-linux-gnu -p asupersync --features metrics --test regex_fixed_detector_terminal_receipt_contract r2_5_release_performance_emitter -- --exact --nocapture"
+    ]
+  },
+  "rollback_triggers": [
+    "Any frozen detector semantic disagreement keeps that detector on the incumbent.",
+    "Any custom-pattern or configuration dispatch ambiguity keeps the complete operation on the incumbent.",
+    "Any scanner resource refusal keeps the complete operation on the incumbent without publishing a partial result.",
+    "Any named-host latency or allocation regression disables the affected fast path.",
+    "Any source-pin, corpus, measurement, or replay drift invalidates this receipt."
+  ],
   "no_claim_boundaries": [
-    "This placeholder authorizes no fast path, dependency exit, or performance claim."
+    "This receipt authorizes no fixed-scanner production fast path.",
+    "This receipt does not authorize dependency removal or regex feature narrowing.",
+    "This receipt does not authorize custom-pattern fast-path dispatch.",
+    "Named-host measurements are raw host-specific evidence, not a global performance claim.",
+    "This focused receipt does not prove broad workspace health, release readiness, production workload performance, or live RCH fleet availability."
   ]
 }
