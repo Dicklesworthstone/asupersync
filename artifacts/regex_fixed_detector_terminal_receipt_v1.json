@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "artifact_id": "regex-fixed-detector-terminal-receipt-v1",
+  "program_id": "asupersync-ir2uf0",
+  "bead_id": "asupersync-5z2scg.8.2.5",
+  "capability_id": "CAP-REGEX-PRIVACY",
+  "captured_date_utc": "2026-08-24",
+  "receipt_state": "PENDING_NAMED_HOST_MEASUREMENTS",
+  "authority": {
+    "terminal_state": "PENDING_NAMED_HOST_MEASUREMENTS",
+    "dependency_exit_allowed": false,
+    "custom_pattern_fast_path_allowed": false,
+    "unresolved_high_findings": 0
+  },
+  "source_pins": [],
+  "predecessor_evidence": [],
+  "detector_dispositions": [],
+  "pipeline_disposition": {
+    "disposition": "PENDING",
+    "case_ids": []
+  },
+  "dispatch_safety": {},
+  "bounded_resource_evidence": {},
+  "named_host_measurements": {
+    "latency_targets": [],
+    "allocation_targets": []
+  },
+  "replay_metadata": {},
+  "rollback_triggers": [],
+  "no_claim_boundaries": [
+    "This placeholder authorizes no fast path, dependency exit, or performance claim."
+  ]
+}
