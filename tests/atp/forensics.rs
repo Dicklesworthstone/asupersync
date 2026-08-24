@@ -581,7 +581,7 @@ fn capture_system_state(output_dir: &Path) -> SystemState {
 #[cfg(unix)]
 fn available_disk_space(path: &Path) -> Option<u64> {
     let stat = nix::sys::statvfs::statvfs(path).ok()?;
-    stat.blocks_available().checked_mul(stat.fragment_size())
+    u64::from(stat.blocks_available()).checked_mul(stat.fragment_size())
 }
 
 #[cfg(not(unix))]
