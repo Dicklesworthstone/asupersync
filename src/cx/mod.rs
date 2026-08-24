@@ -74,6 +74,7 @@ pub use capacity_ticket::{
     CapacityTicketRefusal, CapacityTicketRequest, CapacityTicketWorkKind, request_capacity_ticket,
     request_capacity_ticket_from_budget,
 };
+pub use child_region::{ChildRegion, ChildRegionError, ChildRegionOpening, ChildRegionSpec};
 pub(crate) use cx::CancelWakerToken;
 pub use cx::{
     BudgetStats, CapabilityLayerSnapshot, CapabilitySnapshot, CostBudgetStats, Cx,
@@ -86,7 +87,6 @@ pub use macaroon::{
 pub use registry::{
     NameLease, NameLeaseError, NameRegistry, RegistryCap, RegistryEvent, RegistryHandle,
 };
-pub use child_region::{ChildRegion, ChildRegionError, ChildRegionOpening, ChildRegionSpec};
 pub use scope::Scope;
 pub use scoped_cpu::{CpuCx, ScopedCpu, ScopedCpuError};
 pub use wrappers::{
