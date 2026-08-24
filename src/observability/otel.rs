@@ -133,6 +133,10 @@ pub struct PrivacyConfig {
 const FIXED_PII_MAX_INPUT_BYTES: usize = 1024 * 1024;
 const FIXED_PII_MAX_MATCHES: usize = 65_536;
 const FIXED_PII_MAX_WORK_UNITS: usize = 16 * 1024 * 1024 + 64;
+// R2.5 named-host measurements showed higher latency and allocation counts for
+// every fixed-scanner cell. Keep the implementations available for focused
+// equivalence tests, but fail closed to the retained regex engine in production.
+const FIXED_PII_SCANNER_FAST_PATH_ENABLED: bool = false;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct FixedPiiSpan {
@@ -971,9 +975,13 @@ impl PrivacyConfig {
                     .expect("built-in email regex must compile")
             })
         };
-        let email_match = scan_fixed_emails(value, FixedPiiScanLimits::default(), true)
-            .map(|scan| scan.is_match())
-            .unwrap_or_else(|_| email_re().is_match(value));
+        let email_match = if FIXED_PII_SCANNER_FAST_PATH_ENABLED {
+            scan_fixed_emails(value, FixedPiiScanLimits::default(), true)
+                .map(|scan| scan.is_match())
+                .unwrap_or_else(|_| email_re().is_match(value))
+        } else {
+            email_re().is_match(value)
+        };
         if email_match {
             return "[EMAIL_REDACTED]".to_string();
         }
@@ -983,9 +991,13 @@ impl PrivacyConfig {
                 Regex::new(r"\b\d{3}-\d{2}-\d{4}\b").expect("built-in SSN regex must compile")
             })
         };
-        let ssn_match = scan_fixed_ssns(value, FixedPiiScanLimits::default(), true)
-            .map(|scan| scan.is_match())
-            .unwrap_or_else(|_| ssn_re().is_match(value));
+        let ssn_match = if FIXED_PII_SCANNER_FAST_PATH_ENABLED {
+            scan_fixed_ssns(value, FixedPiiScanLimits::default(), true)
+                .map(|scan| scan.is_match())
+                .unwrap_or_else(|_| ssn_re().is_match(value))
+        } else {
+            ssn_re().is_match(value)
+        };
         if ssn_match {
             return "[SSN_REDACTED]".to_string();
         }
@@ -993,20 +1005,27 @@ impl PrivacyConfig {
         let card_candidate_re = CARD_CANDIDATE_RE.get_or_init(|| {
             Regex::new(r"\b(?:\d[ -]?){13,19}\b").expect("built-in payment-card regex must compile")
         });
-        let card_match = scan_fixed_card_candidates(value, FixedPiiScanLimits::default(), false)
-            .map(|scan| {
-                scan.matches.iter().any(|span| {
-                    value
-                        .get(span.start_byte..span.end_byte)
-                        .is_some_and(Self::is_luhn_valid_card)
+        let card_match = if FIXED_PII_SCANNER_FAST_PATH_ENABLED {
+            scan_fixed_card_candidates(value, FixedPiiScanLimits::default(), false)
+                .map(|scan| {
+                    scan.matches.iter().any(|span| {
+                        value
+                            .get(span.start_byte..span.end_byte)
+                            .is_some_and(Self::is_luhn_valid_card)
+                    })
                 })
-            })
-            .unwrap_or_else(|_| {
-                card_candidate_re
-                    .find_iter(value)
-                    .map(|matched| matched.as_str())
-                    .any(Self::is_luhn_valid_card)
-            });
+                .unwrap_or_else(|_| {
+                    card_candidate_re
+                        .find_iter(value)
+                        .map(|matched| matched.as_str())
+                        .any(Self::is_luhn_valid_card)
+                })
+        } else {
+            card_candidate_re
+                .find_iter(value)
+                .map(|matched| matched.as_str())
+                .any(Self::is_luhn_valid_card)
+        };
         if card_match {
             return "[CARD_REDACTED]".to_string();
         }
@@ -1017,9 +1036,13 @@ impl PrivacyConfig {
                     .expect("built-in phone regex must compile")
             })
         };
-        let phone_match = scan_fixed_phones(value, FixedPiiScanLimits::default(), true)
-            .map(|scan| scan.is_match())
-            .unwrap_or_else(|_| phone_re().is_match(value));
+        let phone_match = if FIXED_PII_SCANNER_FAST_PATH_ENABLED {
+            scan_fixed_phones(value, FixedPiiScanLimits::default(), true)
+                .map(|scan| scan.is_match())
+                .unwrap_or_else(|_| phone_re().is_match(value))
+        } else {
+            phone_re().is_match(value)
+        };
         if phone_match {
             return "[PHONE_REDACTED]".to_string();
         }
@@ -9128,6 +9151,11 @@ mod tests {
             .and_then(serde_json::Value::as_str)
             .expect("recipe suffix");
         format!("{prefix}{}{suffix}", repeated.repeat(repeat_count))
+    }
+
+    #[test]
+    fn fixed_scanner_fast_path_stays_disabled_after_r2_5_regression() {
+        assert!(!FIXED_PII_SCANNER_FAST_PATH_ENABLED);
     }
 
     #[test]

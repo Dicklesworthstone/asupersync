@@ -132,9 +132,12 @@ unrecognized, duplicate, or conflicting identities must stay on the complete
 incumbent engine without publishing a partial scanner result.
 
 Eight negative fixtures mutate each identity dimension and require that exact
-fallback. R2.1 specified this allowset. R2.4 now implements the fixed automatic
-built-ins directly; custom patterns remain on the incumbent engine and execute
-before automatic detection.
+fallback. R2.1 specified this allowset. R2.4 implemented the fixed automatic
+built-ins directly, while custom patterns remained on the incumbent engine.
+R2.5 named-host measurements found higher latency and allocation counts for
+the fixed scanners, so production automatic dispatch now keeps all four
+built-ins on the incumbent regex engine. The scanner implementations remain
+available only to the focused equivalence and bounded-resource tests.
 
 ## Post-capture source-pin refresh
 
@@ -195,8 +198,10 @@ authorize dependency exit or cutover.
   `ovh-a` and `vmi1293453`. Heaptrack jobs `j-29988810699833444` and
   `j-29988810699833445` passed the isolated candidate and incumbent allocation
   cells on evidence-only host `ts2`. The terminal receipt remains pending its
-  own focused contract and therefore still authorizes no dependency exit,
-  custom-pattern narrowing, or global performance claim.
+  own focused contract. Because every measured candidate latency cell regressed
+  and the candidate allocation count was higher, R2.5 has disabled all four
+  fixed-scanner production fast paths and kept the incumbent. It authorizes no
+  dependency exit, custom-pattern narrowing, or global performance claim.
 
 Any disagreement disables the affected future fast path and keeps the
 incumbent. No custom language may be narrowed.

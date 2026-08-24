@@ -50,7 +50,7 @@ const LAB_CAPABILITY_ROW_SHA256: &str =
 const SOURCE_PIN_PATHS_SHA256: &str =
     "b5ba6ff6a6eb152e0c3bb263205e8a7d9f9a58fbbb27ec13fd276eb909d9552a";
 const CLAIMS_PROJECTION_SHA256: &str =
-    "0438f4532b57df051fdc4ed9ed6f843ebb12897a810bcc5aa93271cfcc7e4102";
+    "5bd528506f8ff52c9f3e0f9ad37cae2fa79a25a04cab8945d91a69c2390cc245";
 const DOC_BEGIN: &str = "<!-- BEGIN REGEX BUILT-IN DETECTOR CORPUS -->";
 const DOC_END: &str = "<!-- END REGEX BUILT-IN DETECTOR CORPUS -->";
 
@@ -484,7 +484,7 @@ fn validate_inventory(corpus: &Value) -> Result<(), String> {
     let authority = object(corpus, "authority");
     if authority.get("current_action").and_then(Value::as_str) != Some("KEEP_INCUMBENT")
         || authority.get("fast_path_state").and_then(Value::as_str)
-            != Some("IMPLEMENTED_EXACT_BUILTINS_WITH_INCUMBENT_FALLBACK")
+            != Some("DISABLED_AFTER_NAMED_HOST_RESOURCE_REGRESSION")
         || authority
             .get("dependency_exit_allowed")
             .and_then(Value::as_bool)
@@ -539,7 +539,7 @@ fn validate_inventory(corpus: &Value) -> Result<(), String> {
         .as_object()
         .ok_or("R2.5 terminal receipt evidence must be an object")?;
     if corpus["downstream_handoff"]["r2_5_terminal_receipt_state"].as_str()
-        != Some("TERMINAL_RECEIPT_EVIDENCE_CAPTURED_PENDING_FINAL_CONTRACT")
+        != Some("KEEP_INCUMBENT_FIXED_FAST_PATHS_DISABLED_PENDING_FINAL_CONTRACT")
         || r2_5.get("artifact_path").and_then(Value::as_str)
             != Some("artifacts/regex_fixed_detector_terminal_receipt_v1.json")
         || r2_5

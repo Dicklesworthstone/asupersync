@@ -14,8 +14,8 @@
     "source": "artifacts/dependency_capability_registry_v1.json#CAP-REGEX-PRIVACY",
     "registry_disposition": "KEEP_UNTIL_PARITY",
     "current_action": "KEEP_INCUMBENT",
-    "fast_path_state": "IMPLEMENTED_EXACT_BUILTINS_WITH_INCUMBENT_FALLBACK",
-    "cutover_state": "BLOCKED_PENDING_EQUIVALENCE_AND_RESOURCE_EVIDENCE",
+    "fast_path_state": "DISABLED_AFTER_NAMED_HOST_RESOURCE_REGRESSION",
+    "cutover_state": "KEEP_INCUMBENT_TERMINAL",
     "dependency_exit_allowed": false,
     "custom_pattern_fast_path_allowed": false,
     "email_and_ssn_owner": "asupersync-5z2scg.8.2.2",
@@ -65,9 +65,9 @@
     },
     {
       "path": "src/observability/otel.rs",
-      "sha256": "63f77b2b3e198f87abfec86d9ff36ba135b573224ca28b83a6bacb3336db67b2",
-      "line_count": 15880,
-      "role": "live custom-first redaction pipeline, four bounded exact built-in scanners with incumbent fallback, detector order, tokens and allocation-free Luhn join"
+      "sha256": "f0e0586716bc3871b0d18cfa16a846c42453cdb530c6b2055942155c9557b562",
+      "line_count": 15908,
+      "role": "live custom-first incumbent regex redaction pipeline, four disabled bounded scanner implementations retained for equivalence tests, detector order, tokens and allocation-free Luhn join"
     },
     {
       "path": "src/observability/mod.rs",
@@ -1316,7 +1316,7 @@
         "WHOLE_VALUE_PHONE_REDACTION_OUTCOMES"
       ]
     },
-    "r2_5_terminal_receipt_state": "TERMINAL_RECEIPT_EVIDENCE_CAPTURED_PENDING_FINAL_CONTRACT",
+    "r2_5_terminal_receipt_state": "KEEP_INCUMBENT_FIXED_FAST_PATHS_DISABLED_PENDING_FINAL_CONTRACT",
     "r2_5_terminal_receipt_evidence": {
       "artifact_path": "artifacts/regex_fixed_detector_terminal_receipt_v1.json",
       "measurement_harness_revision": "03a6fa83274c65f383c04d9a541bb94b2d3ee54f",
