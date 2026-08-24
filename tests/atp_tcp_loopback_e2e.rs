@@ -23,10 +23,16 @@ fn unique_tmp(label: &str) -> PathBuf {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos());
-    std::env::temp_dir().join(format!(
+    let root = std::env::temp_dir().join(format!(
         "atp_tcp_e2e_{label}_{}_{nanos}",
         std::process::id()
-    ))
+    ));
+    std::fs::create_dir_all(&root).expect("create e2e temp root");
+    // Canonicalize so no ancestor is an OS-level symlink (macOS
+    // /var -> /private/var): the ATP destination traversal defense
+    // correctly rejects symlinked ancestors, and these loopback
+    // destinations must be judged only on their own tree.
+    root.canonicalize().expect("canonicalize e2e temp root")
 }
 
 fn preserve_artifact_root(root: &Path) {
