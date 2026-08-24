@@ -35,18 +35,18 @@
   "source_pins": [
     {
       "path": "Cargo.toml",
-      "sha256": "914cb85f3b3ef24c06e41f332cb21c2361163c99c186d4a8234b237323792b2b",
-      "line_count": 1061
+      "sha256": "0f02e4fefedf5e9013054df794ece6f8fb259134fdbd95376e61d486c043fde3",
+      "line_count": 1074
     },
     {
       "path": "Cargo.lock",
-      "sha256": "dc66ff7b4e6d1e75fac66fad2f90f528019a4da55e6012714160e158cc63d236",
-      "line_count": 4666
+      "sha256": "513cfba8f8671e69aab32317e042bd00737b9bfb30e2234012d6605f320f7a6a",
+      "line_count": 4664
     },
     {
       "path": "src/observability/otel.rs",
-      "sha256": "b036610d07e07b7a7e9ed3e23328d60104f2429cbe464827213a8bff5f7e0db8",
-      "line_count": 14533
+      "sha256": "f0e0586716bc3871b0d18cfa16a846c42453cdb530c6b2055942155c9557b562",
+      "line_count": 15908
     },
     {
       "path": "src/observability/mod.rs",
@@ -70,13 +70,13 @@
     },
     {
       "path": "artifacts/dependency_capability_registry_v1.json",
-      "sha256": "9fa15cca1a7b202ff7a9accc78bb7a052a8f4f830b37ae450959b539633d01fd",
-      "line_count": 6929
+      "sha256": "450e301a6c3ef5ea5068dad40470bb58bcc0b956da36d8b1e00b0a949e29e1f6",
+      "line_count": 6927
     },
     {
       "path": "artifacts/dependency_marginal_ledger_v1.json",
-      "sha256": "4e36ca29d7187e3237cfd9f422b2661009a608e93bb5761c7d511d412d66a047",
-      "line_count": 188447
+      "sha256": "d7102928fea1000bd05580f697b84dc9a9e29306494b245da6498c9a2b453ff3",
+      "line_count": 187615
     },
     {
       "path": "artifacts/api_surface_map_v1.json",
@@ -124,7 +124,7 @@
   "occurrence_census": {
     "privacy_config": {
       "files": 2,
-      "tokens": 19,
+      "tokens": 34,
       "paths": [
         "src/observability/otel.rs",
         "tests/fixtures/dependency-capability-baseline-consumer/src/lib.rs"
@@ -155,11 +155,11 @@
     },
     "regex_identifier_tokens": {
       "files": 1,
-      "tokens": 12,
+      "tokens": 20,
       "classifications": [
         {
           "path": "src/observability/otel.rs",
-          "tokens": 12,
+          "tokens": 20,
           "classification": "real dependency type, compile, match, and detector sites"
         }
       ]

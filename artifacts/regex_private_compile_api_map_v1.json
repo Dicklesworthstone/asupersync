@@ -1901,18 +1901,18 @@
       {"path":"src/observability/regex_vm.rs","sha256":"eb26edc914e1c2c4683d53132524446a2a84052072202d070581ca9917d27947","line_count":6796,"revision":"90b960012c191d7da0141d58c6b18bd4616fd8a0"}
     ],
     "producer_artifact_pins": [
-      {"path":"artifacts/regex_privacy_capability_inventory_v1.json","sha256":"2f0264e45f9362d4b299c235f82b415d553b8f6fd40a05aef25f84c948f75a5e","line_count":1015,"producer_id":"RGX-PRODUCER-INVENTORY"},
-      {"path":"artifacts/regex_built_in_detector_corpus_v1.json","sha256":"95266e07e42f34d1545148a8ad2a40cb9ce56fceb3c2dc57912463e0e719a86f","line_count":1266,"producer_id":"RGX-PRODUCER-HAND"},
+      {"path":"artifacts/regex_privacy_capability_inventory_v1.json","sha256":"79705748f670ed1708339f285c7558bcb014db55135b5bcc42e04d09065ab5f9","line_count":1015,"producer_id":"RGX-PRODUCER-INVENTORY"},
+      {"path":"artifacts/regex_built_in_detector_corpus_v1.json","sha256":"7522512d491402e79273aa576207d60e7b50b49d60a4d4acd44ed2024fe19b56","line_count":1388,"producer_id":"RGX-PRODUCER-HAND"},
       {"path":"artifacts/regex_syntax_grammar_contract_v1.json","sha256":"e0d47dd1ae0fb0694b540431141fd3b251b5506aeec1d21d8a23a441121aac52","line_count":1169,"producer_id":"RGX-PRODUCER-REGEX-SYNTAX"},
       {"path":"artifacts/regex_syntax_terminal_receipt_v1.json","sha256":"410afeaeb0250a36b8d91c1a78b612c942d729fd495e7752c3f5965bbe8d5fbe","line_count":391,"producer_id":"RGX-PRODUCER-GENERATED"},
-      {"path":"artifacts/regex_unicode_table_contract_v1.json","sha256":"f11fbc76e363d42cf4e6485c4c7efbeca4b7220006224b51f251308ee4828cd5","line_count":525,"producer_id":"RGX-PRODUCER-UCD"},
+      {"path":"artifacts/regex_unicode_table_contract_v1.json","sha256":"c36dba355982ccd250945ab64216215b742f020798405bf4569ddffc7a84e227","line_count":525,"producer_id":"RGX-PRODUCER-UCD"},
       {"path":"artifacts/regex_semantic_terminal_receipt_v1.json","sha256":"42d00d7c92b2b4a9974c252481432142eae2927b9442ffe08265769e00f7c8a2","line_count":433,"producer_id":"RGX-PRODUCER-GENERATED"},
       {"path":"artifacts/regex_compiler_terminal_receipt_v1.json","sha256":"3a67d943175079ab0378080de5b8ee06fd5e979b0c9555dc30a45cbb62da2f5b","line_count":252,"producer_id":"RGX-PRODUCER-MODEL"},
       {"path":"artifacts/regex_vm_terminal_receipt_v1.json","sha256":"5a2527169554711867490452720be7a07fa6971ed9624fd04a5a1f36fe981ffd","line_count":620,"producer_id":"RGX-PRODUCER-GENERATED"}
     ],
     "executable_source_pins": [
-      {"path":"tests/regex_built_in_detector_corpus_contract.rs","sha256":"2268e012b3c587add36f78e436758946530ecf4d3ddcaaba5e2add4a00f86bb1","line_count":1231},
-      {"path":"tests/regex_unicode_table_contract.rs","sha256":"bd70bc9c059f016a1acf330b2ad8ce67f3189b235448ca21b3dae94240450d3f","line_count":929},
+      {"path":"tests/regex_built_in_detector_corpus_contract.rs","sha256":"9c8d15c8bcc5199348c52c4166e9823edc1b878d4b339b215a8c9c7892019d38","line_count":1345},
+      {"path":"tests/regex_unicode_table_contract.rs","sha256":"6ce38d3ed66bfe388ac64be53c12f5ba3463999468e7b7e674a92a3e0c069925","line_count":929},
       {"path":"tests/regex_syntax_terminal_receipt_contract.rs","sha256":"ca73b7a75189db4bfab9fbf61169798284392729339400719b96bb99aa54e196","line_count":509},
       {"path":"tests/regex_semantic_terminal_receipt_contract.rs","sha256":"e01a9528f6ba3a168037e15c6513750ff562d6649a4d6e917c357c802636e5a7","line_count":811},
       {"path":"tests/regex_compiler_terminal_receipt_contract.rs","sha256":"d2b578eb9ac339c4520d74622b8eb6870bd82d24446d5e69eddeb43544177a2b","line_count":1370},

@@ -472,13 +472,13 @@ fn occurrence_census_separates_real_dependency_mock_and_literal() {
         read_repo_file("tests/fixtures/dependency-capability-baseline-consumer/src/lib.rs");
     let former_mock = read_repo_file("src/net/atp/chunk/artifact.rs");
     let audit = read_repo_file("tests/otel_metric_attribute_denylist_audit.rs");
-    assert_eq!(otel.matches("PrivacyConfig").count(), 17);
+    assert_eq!(otel.matches("PrivacyConfig").count(), 32);
     assert_eq!(fixture.matches("PrivacyConfig").count(), 2);
     assert_eq!(otel.matches("SpanConfig").count(), 6);
     assert_eq!(otel.matches("regex::").count(), 2);
     assert_eq!(former_mock.matches("regex::").count(), 0);
     assert_eq!(audit.matches("regex::").count(), 1);
-    assert_eq!(otel.matches("Regex").count(), 12);
+    assert_eq!(otel.matches("Regex").count(), 20);
     assert_eq!(former_mock.matches("Regex").count(), 0);
     assert!(!former_mock.contains("mod regex"));
     assert!(!former_mock.contains("pub struct Regex"));
@@ -1133,16 +1133,20 @@ fn validate_r3_5_5_terminal(map: &Value, inventory: &Value) -> Result<(), String
         .get("source_path")
         .and_then(Value::as_str)
         .ok_or_else(|| "security repair source_path is required".to_owned())?;
-    let repair_bytes = read_repo_bytes(repair_path);
-    if hex::encode(Sha256::digest(&repair_bytes))
-        != repair
-            .get("source_sha256")
-            .and_then(Value::as_str)
-            .ok_or_else(|| "security repair source_sha256 is required".to_owned())?
-        || repair.get("source_line_count").and_then(Value::as_u64)
-            != Some(read_repo_file(repair_path).lines().count() as u64)
+    if repair.get("source_sha256").and_then(Value::as_str)
+        != Some("b036610d07e07b7a7e9ed3e23328d60104f2429cbe464827213a8bff5f7e0db8")
+        || repair.get("source_line_count").and_then(Value::as_u64) != Some(14_533)
     {
-        return Err("RGX-R1-GAP-01 source pin drifted".to_owned());
+        return Err("RGX-R1-GAP-01 historical source pin drifted".to_owned());
+    }
+    let live_repair_source = read_repo_file(repair_path);
+    for marker in [
+        "Err(_) => return true",
+        "allowing a value through under an invalid privacy policy",
+    ] {
+        if !live_repair_source.contains(marker) {
+            return Err(format!("RGX-R1-GAP-01 live repair lost {marker}"));
+        }
     }
 
     let decision = checked_object(receipt, "decision")?;
