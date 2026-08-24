@@ -38,23 +38,27 @@
 
 use crate::lab::util::stack_trace;
 use crate::trace::distributed::DistTraceId;
-use std::collections::{HashMap, HashSet, VecDeque};
+use crate::types::Time;
+use crate::util::{DetBuildHasher, DetHashMap, DetHashSet};
+use std::collections::VecDeque;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// br-asupersync-1zvt0a — Wall-clock proxy for `WakerEvent` /
-/// `WakerViolation` timestamp fields. In production stamps real
-/// `waker_event_now()`; under `cfg(any(test, feature =
-/// "deterministic-mode"))` returns `UNIX_EPOCH` so per-run timestamps
-/// drop out of the violation stream and trace-certificate hashes /
-/// DPOR class fingerprints become stable across replays.
+/// br-asupersync-1zvt0a — Ambient-clock proxy for `WakerEvent` /
+/// `WakerViolation` timestamp fields. In production it stamps real wall-clock
+/// time; under `cfg(any(test, feature = "deterministic-mode"))` it returns
+/// `UNIX_EPOCH` so per-run timestamps drop out of the violation stream and
+/// trace-certificate hashes / DPOR class fingerprints become stable across
+/// replays. Lab integrations override this proxy with logical time through
+/// [`WakerDedupOracle::set_logical_time`], which also activates age and race
+/// thresholds as virtual time advances.
 ///
 /// Note: every WakerEvent / WakerViolation field is still typed as
 /// `SystemTime` (the bead's structural concern). Switching the type
 /// to `crate::types::Time` is a larger refactor — every event-creation
 /// site needs a `now: Time` parameter and every public method
 /// signature changes — and is tracked as follow-up. This proxy
-/// addresses the violation-stream determinism leak (the
-/// user-observable consequence) without an API break.
+/// addresses the violation-stream determinism leak and previously inert lab
+/// thresholds (the user-observable consequences) without an API break.
 #[inline]
 fn waker_event_now() -> SystemTime {
     #[cfg(any(test, feature = "deterministic-mode"))]
@@ -64,6 +68,30 @@ fn waker_event_now() -> SystemTime {
     #[cfg(not(any(test, feature = "deterministic-mode")))]
     {
         SystemTime::now()
+    }
+}
+
+/// Clock used by the oracle's age and race detectors.
+///
+/// `Ambient` preserves the existing standalone API behavior. `Logical` lets a
+/// `LabRuntime` synchronize the oracle with virtual time before feeding an
+/// event batch or requesting a report.
+#[derive(Debug, Clone, Copy)]
+enum WakerClock {
+    Ambient,
+    Logical(SystemTime),
+}
+
+impl WakerClock {
+    fn now(self) -> SystemTime {
+        match self {
+            Self::Ambient => waker_event_now(),
+            Self::Logical(now) => now,
+        }
+    }
+
+    fn from_logical(now: Time) -> Self {
+        Self::Logical(UNIX_EPOCH + std::time::Duration::from_nanos(now.as_nanos()))
     }
 }
 
@@ -374,6 +402,14 @@ impl ViolationRecord {
     /// Create a new violation record with enhanced diagnostics.
     #[must_use]
     pub fn new(violation: WakerDedupViolation, config: &WakerDedupConfig) -> Self {
+        Self::new_at(violation, config, waker_event_now())
+    }
+
+    fn new_at(
+        violation: WakerDedupViolation,
+        config: &WakerDedupConfig,
+        timestamp: SystemTime,
+    ) -> Self {
         let trace_id = match &violation {
             WakerDedupViolation::LostWakeup { trace_id, .. } => *trace_id,
             WakerDedupViolation::SpuriousWakeup { trace_id, .. } => *trace_id,
@@ -398,7 +434,7 @@ impl ViolationRecord {
 
         Self {
             violation,
-            timestamp: waker_event_now(),
+            timestamp,
             trace_id,
             stack_trace,
             replay_command,
@@ -496,10 +532,12 @@ pub struct WakerDedupStatistics {
 #[derive(Debug)]
 pub struct WakerDedupOracle {
     config: WakerDedupConfig,
+    /// Time source for event stamps and age/race thresholds.
+    clock: WakerClock,
     /// Track waker state by waker ID
-    wakers: HashMap<WakerId, WakerState>,
+    wakers: DetHashMap<WakerId, WakerState>,
     /// Track wakers by channel for cleanup
-    channel_wakers: HashMap<ChannelId, HashSet<WakerId>>,
+    channel_wakers: DetHashMap<ChannelId, DetHashSet<WakerId>>,
     /// Track recent registration events for race detection
     recent_registrations: VecDeque<(WakerId, SystemTime)>,
     /// Track recent wakeup events for race detection
@@ -524,8 +562,12 @@ impl WakerDedupOracle {
     pub fn new(config: WakerDedupConfig) -> Self {
         Self {
             config,
-            wakers: HashMap::new(),
-            channel_wakers: HashMap::new(),
+            clock: WakerClock::Ambient,
+            // Waker and channel IDs are trusted internal keys. An explicit lab
+            // seed keeps violation traversal stable even when the crate is
+            // built without `test-internals`.
+            wakers: DetHashMap::with_hasher(DetBuildHasher::for_lab()),
+            channel_wakers: DetHashMap::with_hasher(DetBuildHasher::for_lab()),
             recent_registrations: VecDeque::new(),
             recent_wakeups: VecDeque::new(),
             violations: Vec::new(),
@@ -559,6 +601,21 @@ impl WakerDedupOracle {
         })
     }
 
+    /// Synchronize event stamps and age/race thresholds with logical runtime
+    /// time.
+    ///
+    /// Lab integrations should call this before feeding a batch of waker events.
+    /// [`crate::lab::oracle::OracleSuite`] also calls it before checking or
+    /// reporting so queued-waker age detectors advance with virtual time.
+    pub fn set_logical_time(&mut self, now: Time) {
+        self.clock = WakerClock::from_logical(now);
+    }
+
+    #[inline]
+    fn now(&self) -> SystemTime {
+        self.clock.now()
+    }
+
     /// Record a waker registration event
     pub fn on_waker_registered(
         &mut self,
@@ -571,7 +628,7 @@ impl WakerDedupOracle {
             return;
         }
 
-        let now = waker_event_now();
+        let now = self.now();
 
         // Check for race with recent wakeups
         if self.config.detect_registration_races {
@@ -595,7 +652,7 @@ impl WakerDedupOracle {
         self.wakers.insert(waker_id, state);
         self.channel_wakers
             .entry(channel_id)
-            .or_default()
+            .or_insert_with(|| DetHashSet::with_hasher(DetBuildHasher::for_lab()))
             .insert(waker_id);
 
         // Track for race detection
@@ -620,7 +677,7 @@ impl WakerDedupOracle {
             return;
         }
 
-        let now = waker_event_now();
+        let now = self.now();
 
         if let Some(state) = self.wakers.get(&waker_id) {
             match &state.status {
@@ -667,7 +724,7 @@ impl WakerDedupOracle {
             return;
         }
 
-        let now = waker_event_now();
+        let now = self.now();
 
         if let Some(state) = self.wakers.get_mut(&waker_id) {
             match &state.status {
@@ -729,7 +786,7 @@ impl WakerDedupOracle {
             return;
         }
 
-        let now = waker_event_now();
+        let now = self.now();
 
         if let Some(state) = self.wakers.get_mut(&waker_id) {
             match &state.status {
@@ -750,7 +807,7 @@ impl WakerDedupOracle {
             self.stats.total_wakers_dropped += 1;
         }
 
-        // Note: We don't remove from wakers HashMap immediately to allow
+        // Note: We don't remove from the waker map immediately to allow
         // detection of use-after-drop violations
     }
 
@@ -773,7 +830,7 @@ impl WakerDedupOracle {
                     channel_id: state.channel_id,
                     expected_queued,
                     actual_queued,
-                    detected_at: waker_event_now(),
+                    detected_at: self.now(),
                     trace_id,
                 };
                 self.record_violation(violation);
@@ -797,6 +854,7 @@ impl WakerDedupOracle {
 
     /// Reset the oracle state
     pub fn reset(&mut self) {
+        self.clock = WakerClock::Ambient;
         self.wakers.clear();
         self.channel_wakers.clear();
         self.recent_registrations.clear();
@@ -818,7 +876,7 @@ impl WakerDedupOracle {
         self.violations.push(violation.clone());
 
         // Enhanced format with diagnostics
-        let record = ViolationRecord::new(violation.clone(), &self.config);
+        let record = ViolationRecord::new_at(violation.clone(), &self.config, self.now());
 
         // Emit structured log if enabled
         if self.config.structured_logging {
@@ -884,7 +942,7 @@ impl WakerDedupOracle {
 
     /// Check for leaked wakers
     fn check_for_leaked_wakers(&mut self) {
-        let now = waker_event_now();
+        let now = self.now();
         let leak_threshold = std::time::Duration::from_secs(60); // 1 minute
         let mut leaked_wakers = Vec::new();
         let mut violations_to_record = Vec::new();
@@ -925,7 +983,7 @@ impl WakerDedupOracle {
 
     /// Check for lost wakeups
     fn check_for_lost_wakeups(&mut self) {
-        let now = waker_event_now();
+        let now = self.now();
         let lost_threshold = std::time::Duration::from_secs(30); // 30 seconds
         let mut violations_to_record = Vec::new();
 
@@ -955,7 +1013,7 @@ impl WakerDedupOracle {
 
     /// Clean up tracking data to prevent memory leaks
     fn cleanup_tracking_data(&mut self) {
-        let now = waker_event_now();
+        let now = self.now();
         let cleanup_window = std::time::Duration::from_secs(300); // 5 minutes
 
         // Clean up old registration events
@@ -1161,6 +1219,103 @@ mod tests {
 
         let _violations = oracle.check_for_violations().unwrap();
         // May or may not detect race depending on timing
+    }
+
+    #[test]
+    fn logical_time_makes_registration_race_window_exact() {
+        fn registration_races_at(reregistered_at: Time) -> usize {
+            let mut oracle = WakerDedupOracle::new(WakerDedupConfig {
+                enforcement: EnforcementMode::Collect,
+                race_detection_window_ms: 5,
+                ..Default::default()
+            });
+            let waker_id = WakerId(7);
+            let channel_id = ChannelId(11);
+
+            oracle.set_logical_time(Time::ZERO);
+            oracle.on_waker_registered(waker_id, channel_id, true, None);
+            oracle.set_logical_time(Time::from_millis(20));
+            oracle.on_waker_actually_woken(waker_id, None);
+            oracle.set_logical_time(reregistered_at);
+            oracle.on_waker_registered(waker_id, channel_id, true, None);
+
+            oracle
+                .check_for_violations()
+                .expect("collect mode returns violations")
+                .iter()
+                .filter(|violation| {
+                    matches!(violation, WakerDedupViolation::RegistrationRace { .. })
+                })
+                .count()
+        }
+
+        assert_eq!(registration_races_at(Time::from_millis(24)), 1);
+        assert_eq!(registration_races_at(Time::from_millis(26)), 0);
+    }
+
+    #[test]
+    fn logical_time_activates_lost_wakeup_and_leak_thresholds() {
+        let mut oracle = WakerDedupOracle::new(WakerDedupConfig {
+            enforcement: EnforcementMode::Collect,
+            ..Default::default()
+        });
+
+        oracle.set_logical_time(Time::ZERO);
+        oracle.on_waker_registered(WakerId(1), ChannelId(1), true, None);
+
+        oracle.set_logical_time(Time::from_secs(31));
+        let violations = oracle
+            .check_for_violations()
+            .expect("collect mode returns violations");
+        assert!(matches!(
+            violations.as_slice(),
+            [WakerDedupViolation::LostWakeup { .. }]
+        ));
+
+        oracle.set_logical_time(Time::from_secs(61));
+        let violations = oracle
+            .check_for_violations()
+            .expect("collect mode returns violations");
+        assert_eq!(
+            violations
+                .iter()
+                .filter(|violation| matches!(violation, WakerDedupViolation::WakerLeak { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(oracle.statistics().total_lost_wakeups, 1);
+        assert_eq!(oracle.statistics().total_leaks, 1);
+        assert_eq!(oracle.statistics().active_wakers, 0);
+    }
+
+    #[test]
+    fn logical_time_violation_order_is_replay_stable() {
+        fn lost_wakeup_order() -> Vec<WakerId> {
+            let mut oracle = WakerDedupOracle::new(WakerDedupConfig {
+                enforcement: EnforcementMode::Collect,
+                ..Default::default()
+            });
+            oracle.set_logical_time(Time::ZERO);
+            for id in [9, 2, 17, 4, 31, 6] {
+                oracle.on_waker_registered(WakerId(id), ChannelId(id % 3), true, None);
+            }
+            oracle.set_logical_time(Time::from_secs(31));
+            oracle
+                .check_for_violations()
+                .expect("collect mode returns violations")
+                .into_iter()
+                .filter_map(|violation| match violation {
+                    WakerDedupViolation::LostWakeup { waker_id, .. } => Some(waker_id),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let expected = lost_wakeup_order();
+        assert_eq!(expected.len(), 6);
+        for _ in 0..16 {
+            assert_eq!(lost_wakeup_order(), expected);
+        }
     }
 
     #[test]

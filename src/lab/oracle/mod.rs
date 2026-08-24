@@ -528,6 +528,7 @@ impl OracleSuite {
     /// Checks all oracles and returns any violations.
     #[must_use]
     pub fn check_all(&mut self, now: Time) -> Vec<OracleViolation> {
+        self.waker_dedup.set_logical_time(now);
         let mut violations = Vec::new();
 
         if let Err(v) = self.task_leak.check(now) {
@@ -701,6 +702,7 @@ impl OracleSuite {
     #[must_use]
     #[allow(clippy::too_many_lines)]
     pub fn report(&mut self, now: Time) -> OracleReport {
+        self.waker_dedup.set_logical_time(now);
         let entries = vec![
             OracleEntryReport::from_result(
                 "task_leak",
@@ -1397,6 +1399,33 @@ mod tests {
         let empty = violations.is_empty();
         crate::assert_with_log!(empty, "suite clean", true, empty);
         crate::test_complete!("oracle_suite_default_is_clean");
+    }
+
+    #[test]
+    fn oracle_suite_routes_logical_time_to_waker_age_checks() {
+        init_test("oracle_suite_routes_logical_time_to_waker_age_checks");
+        let mut suite = OracleSuite::new();
+        suite.waker_dedup = WakerDedupOracle::new(WakerDedupConfig {
+            enforcement: waker_dedup::EnforcementMode::Collect,
+            ..Default::default()
+        });
+        suite.waker_dedup.set_logical_time(Time::ZERO);
+        suite.waker_dedup.on_waker_registered(
+            WakerDedupId(1),
+            waker_dedup::ChannelId(1),
+            true,
+            None,
+        );
+
+        let violations = suite.check_all(Time::from_secs(31));
+        let found = violations.iter().any(|violation| {
+            matches!(
+                violation,
+                OracleViolation::WakerDedup(WakerDedupViolation::LostWakeup { .. })
+            )
+        });
+        crate::assert_with_log!(found, "lost wakeup", true, found);
+        crate::test_complete!("oracle_suite_routes_logical_time_to_waker_age_checks");
     }
 
     #[test]
