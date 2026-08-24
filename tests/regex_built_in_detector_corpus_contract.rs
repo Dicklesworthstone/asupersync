@@ -50,7 +50,7 @@ const LAB_CAPABILITY_ROW_SHA256: &str =
 const SOURCE_PIN_PATHS_SHA256: &str =
     "b5ba6ff6a6eb152e0c3bb263205e8a7d9f9a58fbbb27ec13fd276eb909d9552a";
 const CLAIMS_PROJECTION_SHA256: &str =
-    "252623303f92479190998b86bbeca61f9f41932d775e8e9d09716ba8f7f1782f";
+    "0438f4532b57df051fdc4ed9ed6f843ebb12897a810bcc5aa93271cfcc7e4102";
 const DOC_BEGIN: &str = "<!-- BEGIN REGEX BUILT-IN DETECTOR CORPUS -->";
 const DOC_END: &str = "<!-- END REGEX BUILT-IN DETECTOR CORPUS -->";
 
@@ -532,6 +532,84 @@ fn validate_inventory(corpus: &Value) -> Result<(), String> {
             != Some("fe0d5151031be8fda7951fe7fe1f42f7ce344018fdb3ed21e6ada866b230b195")
     {
         return Err("R2.4 phone dispatch evidence drifted".to_owned());
+    }
+
+    let r2_5_value = &corpus["downstream_handoff"]["r2_5_terminal_receipt_evidence"];
+    let r2_5 = r2_5_value
+        .as_object()
+        .ok_or("R2.5 terminal receipt evidence must be an object")?;
+    if corpus["downstream_handoff"]["r2_5_terminal_receipt_state"].as_str()
+        != Some("TERMINAL_RECEIPT_EVIDENCE_CAPTURED_PENDING_FINAL_CONTRACT")
+        || r2_5.get("artifact_path").and_then(Value::as_str)
+            != Some("artifacts/regex_fixed_detector_terminal_receipt_v1.json")
+        || r2_5
+            .get("measurement_harness_revision")
+            .and_then(Value::as_str)
+            != Some("03a6fa83274c65f383c04d9a541bb94b2d3ee54f")
+        || r2_5
+            .get("measurement_harness_sha256")
+            .and_then(Value::as_str)
+            != Some("9389878ba089a80034cee88b214907e48e45a841faaafbf3cb178b624bf474a5")
+        || r2_5
+            .get("measurement_region_sha256")
+            .and_then(Value::as_str)
+            != Some("72f85949072c4828b351b428a97f6d22885a1f39a1bcf0552570878a8d8f638a")
+        || r2_5
+            .get("clean_overlay_fingerprint")
+            .and_then(Value::as_str)
+            != Some("fe0d5151031be8fda7951fe7fe1f42f7ce344018fdb3ed21e6ada866b230b195")
+        || r2_5
+            .get("relevant_surface_delta_between_bases")
+            .and_then(Value::as_str)
+            != Some("NONE")
+    {
+        return Err("R2.5 terminal receipt handoff drifted".to_owned());
+    }
+    let latency_jobs = array(r2_5_value, "latency_jobs");
+    let allocation_jobs = array(r2_5_value, "allocation_jobs");
+    if latency_jobs.len() != 2
+        || allocation_jobs.len() != 2
+        || latency_jobs.iter().any(|job| {
+            number(job, "tests_passed") != 1
+                || number(job, "tests_failed") != 0
+                || text(job, "job_id").is_empty()
+        })
+        || allocation_jobs.iter().any(|job| {
+            number(job, "allocation_calls") == 0
+                || number(job, "temporary_allocations") == 0
+                || number(job, "tests_passed") != 1
+                || number(job, "tests_failed") != 0
+                || text(job, "job_id").is_empty()
+        })
+    {
+        return Err("R2.5 named-host measurement handoff is incomplete".to_owned());
+    }
+    for (job, (job_id, worker)) in latency_jobs.iter().zip([
+        ("j-29988810699833441", "ovh-a"),
+        ("j-29988810699833442", "vmi1293453"),
+    ]) {
+        if text(job, "job_id") != job_id
+            || text(job, "worker") != worker
+            || text(job, "clean_overlay_base") != "03a6fa83274c65f383c04d9a541bb94b2d3ee54f"
+        {
+            return Err("R2.5 latency job identity drifted".to_owned());
+        }
+    }
+    for (job, (job_id, operation, allocation_calls, temporary_allocations)) in
+        allocation_jobs.iter().zip([
+            ("j-29988810699833444", "candidate", 191_937, 61_441),
+            ("j-29988810699833445", "incumbent", 39_127, 26_336),
+        ])
+    {
+        if text(job, "job_id") != job_id
+            || text(job, "worker") != "ts2"
+            || text(job, "operation") != operation
+            || text(job, "clean_overlay_base") != "2264da2b68b026016dc7ed77119f0b585a881f9f"
+            || number(job, "allocation_calls") != allocation_calls
+            || number(job, "temporary_allocations") != temporary_allocations
+        {
+            return Err("R2.5 allocation job identity drifted".to_owned());
+        }
     }
 
     let policy = object(corpus, "policy");

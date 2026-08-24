@@ -189,8 +189,14 @@ authorize dependency exit or cutover.
   independent vectors, pipeline outcomes, docs markers, and fail-closed
   mutations passed 8/8 in clean-overlay RCH job `j-29988810699833436`, bound to
   committed base `6fc933a4a`.
-- R2.5 may aggregate the work only after implementation, generated
-  equivalence, resource evidence, and named-host measurements exist.
+- R2.5 has captured its terminal-receipt inputs. Exact-source release jobs
+  `j-29988810699833441` and `j-29988810699833442` each passed the six-scenario
+  candidate/incumbent replay with 2,001 samples per operation on named hosts
+  `ovh-a` and `vmi1293453`. Heaptrack jobs `j-29988810699833444` and
+  `j-29988810699833445` passed the isolated candidate and incumbent allocation
+  cells on evidence-only host `ts2`. The terminal receipt remains pending its
+  own focused contract and therefore still authorizes no dependency exit,
+  custom-pattern narrowing, or global performance claim.
 
 Any disagreement disables the affected future fast path and keeps the
 incumbent. No custom language may be narrowed.
