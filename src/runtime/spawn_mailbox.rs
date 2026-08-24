@@ -1563,6 +1563,7 @@ pub struct SpawnGateway {
     notify: Arc<dyn Fn() + Send + Sync>,
     clock: Option<crate::time::TimerDriverHandle>,
     runtime_liveness: std::sync::Weak<()>,
+    scoped_cpu_admission: Arc<crate::cx::scoped_cpu::ScopedCpuAdmission>,
 }
 
 impl SpawnGateway {
@@ -1581,7 +1582,21 @@ impl SpawnGateway {
             notify,
             clock,
             runtime_liveness,
+            scoped_cpu_admission: Arc::new(crate::cx::scoped_cpu::ScopedCpuAdmission::new(
+                usize::MAX,
+            )),
         }
+    }
+
+    /// Configures the runtime-wide ceiling for borrowed scoped CPU workers.
+    pub(crate) fn set_scoped_cpu_worker_limit(&self, limit: usize) {
+        self.scoped_cpu_admission.set_limit(limit);
+    }
+
+    /// Returns the runtime-owned scoped CPU admission pool.
+    #[must_use]
+    pub(crate) fn scoped_cpu_admission(&self) -> Arc<crate::cx::scoped_cpu::ScopedCpuAdmission> {
+        Arc::clone(&self.scoped_cpu_admission)
     }
 
     /// The underlying mailbox (for id allocation and tests).

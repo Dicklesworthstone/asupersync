@@ -2224,6 +2224,7 @@ impl BrowserRuntimeBuilder {
 #[derive(Clone)]
 pub struct RuntimeBuilder {
     config: RuntimeConfig,
+    scoped_cpu_worker_limit: Option<usize>,
     reactor: Option<Arc<dyn Reactor>>,
     io_driver: Option<IoDriverHandle>,
     io_uring_capability_policy: IoUringCapabilityPolicy,
@@ -2241,6 +2242,7 @@ impl RuntimeBuilder {
     pub fn new() -> Self {
         Self {
             config: RuntimeConfig::default(),
+            scoped_cpu_worker_limit: None,
             reactor: None,
             io_driver: None,
             io_uring_capability_policy: IoUringCapabilityPolicy::default(),
@@ -2265,6 +2267,18 @@ impl RuntimeBuilder {
     #[must_use]
     pub fn worker_threads(mut self, n: usize) -> Self {
         self.config.worker_threads = n;
+        self
+    }
+
+    /// Set the runtime-wide admission ceiling for borrowed scoped CPU workers.
+    ///
+    /// Every [`Cx::scoped_cpu`](crate::cx::Cx::scoped_cpu) call backed by this
+    /// runtime retains its own declared worker cap, while all such calls share
+    /// this additional global ceiling. A zero limit is normalized to one.
+    /// Without this explicit setting, the v0.4.3 per-scope behavior is retained.
+    #[must_use]
+    pub fn scoped_cpu_worker_limit(mut self, limit: usize) -> Self {
+        self.scoped_cpu_worker_limit = Some(limit.max(1));
         self
     }
 
@@ -2858,6 +2872,7 @@ impl RuntimeBuilder {
     pub fn build(self) -> Result<Runtime, Error> {
         let Self {
             config,
+            scoped_cpu_worker_limit,
             reactor,
             io_driver,
             io_uring_capability_policy,
@@ -2913,7 +2928,7 @@ impl RuntimeBuilder {
         // deadline-monitor surfaces (E1.2 subsystems 1-3d + step 4). The
         // default shape remains `Unified`; the default flip is E1.3
         // (br-asupersync-sched-hot-path-perf-bt4y5f.2.3) bake evidence.
-        Runtime::with_config_and_platform_snapshot(
+        let runtime = Runtime::with_config_and_platform_snapshot(
             config,
             reactor,
             io_driver,
@@ -2921,7 +2936,21 @@ impl RuntimeBuilder {
             entropy_source,
             terminal_io_reactor_snapshot,
             host_services.as_ref(),
-        )
+        )?;
+        if let Some(limit) = scoped_cpu_worker_limit {
+            let gateway = {
+                let guard = runtime
+                    .inner
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                guard.spawn_gateway()
+            };
+            if let Some(gateway) = gateway {
+                gateway.set_scoped_cpu_worker_limit(limit);
+            }
+        }
+        Ok(runtime)
     }
 
     /// Inspect the truthful browser execution ladder for the current host.

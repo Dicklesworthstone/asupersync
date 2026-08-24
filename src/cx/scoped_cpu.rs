@@ -35,6 +35,15 @@
 //!   task is inside `scoped_cpu` until every worker has joined —
 //!   request → drain → finalize holds by construction.
 //!
+//! # Runtime-wide admission
+//!
+//! Runtime-backed contexts share one admission pool through their runtime
+//! gateway. Every borrowed worker acquires a permit before its OS thread starts,
+//! so concurrent scopes cannot multiply their per-scope caps past the runtime's
+//! configured worker ceiling. Waiting remains cancellation-aware, and the
+//! permit is released by ordinary completion, cancellation, or contained panic.
+//! Contexts without runtime wiring retain the v0.4.3 per-scope behavior.
+//!
 //! # Blocking discipline
 //!
 //! [`Cx::scoped_cpu`] BLOCKS the calling thread until the scope
@@ -44,9 +53,77 @@
 //! for the duration, exactly as any long blocking section would.
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::Duration;
 
 use super::cx::Cx;
+
+const ADMISSION_CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(2);
+
+/// Runtime-owned permit pool for borrowed CPU workers.
+pub(crate) struct ScopedCpuAdmission {
+    limit: AtomicUsize,
+    in_use: Mutex<usize>,
+    available: Condvar,
+}
+
+impl ScopedCpuAdmission {
+    #[must_use]
+    pub(crate) fn new(limit: usize) -> Self {
+        Self {
+            limit: AtomicUsize::new(limit.max(1)),
+            in_use: Mutex::new(0),
+            available: Condvar::new(),
+        }
+    }
+
+    pub(crate) fn set_limit(&self, limit: usize) {
+        self.limit.store(limit.max(1), Ordering::Release);
+        self.available.notify_all();
+    }
+
+    fn acquire<Caps>(
+        self: &Arc<Self>,
+        cx: &Cx<Caps>,
+    ) -> Result<ScopedCpuPermit, crate::error::Error> {
+        loop {
+            cx.checkpoint()?;
+            let mut in_use = self
+                .in_use
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if *in_use < self.limit.load(Ordering::Acquire) {
+                *in_use += 1;
+                return Ok(ScopedCpuPermit {
+                    admission: Arc::clone(self),
+                });
+            }
+            let (guard, _) = self
+                .available
+                .wait_timeout(in_use, ADMISSION_CANCEL_POLL_INTERVAL)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            drop(guard);
+        }
+    }
+}
+
+struct ScopedCpuPermit {
+    admission: Arc<ScopedCpuAdmission>,
+}
+
+impl Drop for ScopedCpuPermit {
+    fn drop(&mut self) {
+        let mut in_use = self
+            .admission
+            .in_use
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        debug_assert!(*in_use > 0, "scoped CPU admission permit underflow");
+        *in_use = in_use.saturating_sub(1);
+        drop(in_use);
+        self.admission.available.notify_one();
+    }
+}
 
 /// Structured failure from a [`Cx::scoped_cpu`] region.
 #[derive(Debug)]
@@ -141,6 +218,7 @@ pub struct ScopedCpu<'scope, 'env, Caps> {
     panic_box: Arc<Mutex<Option<(usize, String)>>>,
     spawned: Arc<AtomicUsize>,
     cap: usize,
+    admission: Arc<ScopedCpuAdmission>,
 }
 
 impl<'scope, Caps: Send + Sync + 'static> ScopedCpu<'scope, '_, Caps> {
@@ -179,10 +257,32 @@ impl<'scope, Caps: Send + Sync + 'static> ScopedCpu<'scope, '_, Caps> {
             self.spawned.fetch_sub(1, Ordering::AcqRel);
             return Err(ScopedCpuError::WorkerCapExceeded { cap: self.cap });
         }
+        let permit = match self.admission.acquire(&self.cx) {
+            Ok(permit) => permit,
+            Err(error) => {
+                self.spawned.fetch_sub(1, Ordering::AcqRel);
+                return Err(ScopedCpuError::Cancelled(error));
+            }
+        };
+        // Cancellation or a sibling panic may have raced admission. Refuse
+        // before handing the permit to an OS thread.
+        if self.latch.load(Ordering::Acquire) {
+            self.spawned.fetch_sub(1, Ordering::AcqRel);
+            drop(permit);
+            return Err(ScopedCpuError::Cancelled(crate::error::Error::new(
+                crate::error::ErrorKind::Cancelled,
+            )));
+        }
+        if let Err(error) = self.cx.checkpoint() {
+            self.spawned.fetch_sub(1, Ordering::AcqRel);
+            drop(permit);
+            return Err(ScopedCpuError::Cancelled(error));
+        }
         let cx = self.cx.clone();
         let latch = Arc::clone(&self.latch);
         let panic_box = Arc::clone(&self.panic_box);
         self.scope.spawn(move || {
+            let _permit = permit;
             let child_cx = CpuCx {
                 cx,
                 latch: Arc::clone(&latch),
@@ -243,6 +343,10 @@ impl<Caps: Send + Sync + 'static> Cx<Caps> {
         // Entry checkpoint: refuse to start work under a pending
         // cancellation or an exhausted budget.
         self.checkpoint().map_err(ScopedCpuError::Cancelled)?;
+        let admission = self.spawn_gateway_handle().map_or_else(
+            || Arc::new(ScopedCpuAdmission::new(worker_cap)),
+            |gateway| gateway.scoped_cpu_admission(),
+        );
         let latch = Arc::new(AtomicBool::new(false));
         let panic_box: Arc<Mutex<Option<(usize, String)>>> = Arc::new(Mutex::new(None));
         let spawned = Arc::new(AtomicUsize::new(0));
@@ -254,6 +358,7 @@ impl<Caps: Send + Sync + 'static> Cx<Caps> {
                 panic_box: Arc::clone(&panic_box),
                 spawned: Arc::clone(&spawned),
                 cap: worker_cap,
+                admission,
             };
             // If the orchestrator closure itself panics, raise the latch
             // BEFORE the implicit `std::thread::scope` join. Otherwise a child

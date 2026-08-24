@@ -23,12 +23,13 @@ mod common;
 
 use common::init_test_logging;
 
+use asupersync::cx::ScopedCpuError;
 use asupersync::lab::chaos::ChaosConfig;
 use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::runtime::config::AdaptiveReadyBatchConfig;
 use asupersync::runtime::deadline_monitor::{AdaptiveDeadlineConfig, MonitorConfig};
 use asupersync::runtime::{RegionLimits, RuntimeBuilder, SpawnError};
-use asupersync::types::Time;
+use asupersync::types::{Budget, Time};
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -938,4 +939,214 @@ fn builder_verify_039_spawn_with_cx_admission_failure() {
     );
 
     test_complete!("builder_verify_039_spawn_with_cx_admission_failure");
+}
+
+/// Y20JXO-001: one runtime-wide permit serializes independent CPU scopes.
+#[test]
+fn runtime_admission_serializes_concurrent_scopes_y20jxo() {
+    let runtime = RuntimeBuilder::new()
+        .worker_threads(2)
+        .scoped_cpu_worker_limit(1)
+        .enable_platform_reactor(false)
+        .build()
+        .expect("build one-permit runtime");
+    let first_cx = runtime.handle().request_cx_with_budget(Budget::INFINITE);
+    let second_cx = runtime.handle().request_cx_with_budget(Budget::INFINITE);
+
+    let release_first = Arc::new(AtomicBool::new(false));
+    let release_for_worker = Arc::clone(&release_first);
+    let (first_started_tx, first_started_rx) = std::sync::mpsc::channel();
+    let first = std::thread::spawn(move || {
+        first_cx.scoped_cpu(1, |scope| {
+            scope
+                .spawn(move |_| {
+                    first_started_tx.send(()).expect("signal first worker");
+                    while !release_for_worker.load(Ordering::Acquire) {
+                        std::thread::yield_now();
+                    }
+                })
+                .expect("first worker admitted");
+        })
+    });
+    first_started_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("first worker starts");
+
+    let (second_attempted_tx, second_attempted_rx) = std::sync::mpsc::channel();
+    let (second_started_tx, second_started_rx) = std::sync::mpsc::channel();
+    let second = std::thread::spawn(move || {
+        second_cx.scoped_cpu(1, |scope| {
+            second_attempted_tx
+                .send(())
+                .expect("signal second admission attempt");
+            scope
+                .spawn(move |_| {
+                    second_started_tx.send(()).expect("signal second worker");
+                })
+                .expect("second worker eventually admitted");
+        })
+    });
+    second_attempted_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("second scope reaches admission");
+    assert!(
+        second_started_rx
+            .recv_timeout(Duration::from_millis(50))
+            .is_err(),
+        "second worker must not start before runtime admission"
+    );
+
+    release_first.store(true, Ordering::Release);
+    second_started_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("released permit admits second worker");
+    first
+        .join()
+        .expect("join first orchestrator")
+        .expect("first scope succeeds");
+    second
+        .join()
+        .expect("join second orchestrator")
+        .expect("second scope succeeds");
+}
+
+/// Y20JXO-002: cancellation refuses a waiting worker and leaks no permit.
+#[test]
+fn cancellation_while_waiting_refuses_worker_and_releases_budget_y20jxo() {
+    let runtime = RuntimeBuilder::new()
+        .worker_threads(2)
+        .scoped_cpu_worker_limit(1)
+        .enable_platform_reactor(false)
+        .build()
+        .expect("build one-permit runtime");
+    let holder_cx = runtime.handle().request_cx_with_budget(Budget::INFINITE);
+    let waiter_cx = runtime.handle().request_cx_with_budget(Budget::INFINITE);
+    let cancel_waiter = waiter_cx.clone();
+
+    let release_holder = Arc::new(AtomicBool::new(false));
+    let release_for_worker = Arc::clone(&release_holder);
+    let (holder_started_tx, holder_started_rx) = std::sync::mpsc::channel();
+    let holder = std::thread::spawn(move || {
+        holder_cx.scoped_cpu(1, |scope| {
+            scope
+                .spawn(move |_| {
+                    holder_started_tx.send(()).expect("signal holder worker");
+                    while !release_for_worker.load(Ordering::Acquire) {
+                        std::thread::yield_now();
+                    }
+                })
+                .expect("holder worker admitted");
+        })
+    });
+    holder_started_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("holder worker starts");
+
+    let waiter_ran = Arc::new(AtomicBool::new(false));
+    let waiter_ran_in_worker = Arc::clone(&waiter_ran);
+    let (waiter_attempted_tx, waiter_attempted_rx) = std::sync::mpsc::channel();
+    let (waiter_done_tx, waiter_done_rx) = std::sync::mpsc::channel();
+    let waiter = std::thread::spawn(move || {
+        let result = waiter_cx.scoped_cpu(1, |scope| {
+            waiter_attempted_tx
+                .send(())
+                .expect("signal waiter admission attempt");
+            scope.spawn(move |_| {
+                waiter_ran_in_worker.store(true, Ordering::Release);
+            })
+        });
+        waiter_done_tx.send(result).expect("signal waiter result");
+    });
+    waiter_attempted_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("waiter reaches admission");
+    cancel_waiter.set_cancel_requested(true);
+    let waiter_result = waiter_done_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("cancelled admission wait completes");
+    assert!(matches!(waiter_result, Err(ScopedCpuError::Cancelled(_))));
+    assert!(
+        !waiter_ran.load(Ordering::Acquire),
+        "cancelled waiter must not start a worker"
+    );
+    waiter.join().expect("join waiter orchestrator");
+
+    release_holder.store(true, Ordering::Release);
+    holder
+        .join()
+        .expect("join holder orchestrator")
+        .expect("holder scope succeeds");
+
+    let fresh_cx = runtime.handle().request_cx_with_budget(Budget::INFINITE);
+    let fresh_ran = AtomicBool::new(false);
+    fresh_cx
+        .scoped_cpu(1, |scope| {
+            scope
+                .spawn(|_| fresh_ran.store(true, Ordering::Release))
+                .expect("cancelled waiter did not leak a permit");
+        })
+        .expect("fresh scope succeeds");
+    assert!(fresh_ran.load(Ordering::Acquire));
+}
+
+/// Y20JXO-003: every terminal path returns its runtime-wide permit.
+#[test]
+fn admission_releases_after_error_cancellation_and_panic_y20jxo() {
+    let runtime = RuntimeBuilder::new()
+        .worker_threads(2)
+        .scoped_cpu_worker_limit(1)
+        .enable_platform_reactor(false)
+        .build()
+        .expect("build one-permit runtime");
+
+    let error_cx = runtime.handle().request_cx_with_budget(Budget::INFINITE);
+    let worker_cap_error = error_cx
+        .scoped_cpu(0, |scope| scope.spawn(|_| {}))
+        .expect("healthy outer scope");
+    assert!(matches!(
+        worker_cap_error,
+        Err(ScopedCpuError::WorkerCapExceeded { cap: 0 })
+    ));
+
+    let cancelled_cx = runtime.handle().request_cx_with_budget(Budget::INFINITE);
+    let cancel_worker = cancelled_cx.clone();
+    let cancelled = cancelled_cx
+        .scoped_cpu(1, |scope| {
+            let (started_tx, started_rx) = std::sync::mpsc::channel();
+            scope
+                .spawn(move |child| {
+                    started_tx.send(()).expect("signal cancel worker");
+                    while child.checkpoint().is_ok() {
+                        std::thread::yield_now();
+                    }
+                })
+                .expect("cancel worker admitted");
+            started_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("cancel worker starts");
+            cancel_worker.set_cancel_requested(true);
+        })
+        .expect_err("exit checkpoint surfaces worker cancellation");
+    assert!(matches!(cancelled, ScopedCpuError::Cancelled(_)));
+
+    let panic_cx = runtime.handle().request_cx_with_budget(Budget::INFINITE);
+    let panicked = panic_cx
+        .scoped_cpu(1, |scope| {
+            scope
+                .spawn(|_| panic!("admission panic release"))
+                .expect("panic worker admitted");
+        })
+        .expect_err("contained panic surfaces");
+    assert!(matches!(panicked, ScopedCpuError::ChildPanicked { .. }));
+
+    let fresh_cx = runtime.handle().request_cx_with_budget(Budget::INFINITE);
+    let fresh_ran = AtomicBool::new(false);
+    fresh_cx
+        .scoped_cpu(1, |scope| {
+            scope
+                .spawn(|_| fresh_ran.store(true, Ordering::Release))
+                .expect("all terminal paths released their permits");
+        })
+        .expect("fresh scope succeeds");
+    assert!(fresh_ran.load(Ordering::Acquire));
 }
