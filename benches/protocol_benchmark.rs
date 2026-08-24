@@ -65,12 +65,10 @@ fn pipelined_requests(request_count: usize) -> Vec<u8> {
 }
 
 fn legacy_find_crlf(buf: &[u8]) -> Option<usize> {
-    for idx in memchr_iter(b'\n', buf) {
-        if idx > 0 && buf[idx - 1] == b'\r' {
-            return Some(idx - 1);
-        }
-    }
-    None
+    // Mirror the short-line scan retained by the chunked body decoders in
+    // `http/h1/{client,stream}.rs`. Keep this benchmark tied to the production
+    // call-site shape so it can justify (or refute) replacing that exact code.
+    buf.windows(2).position(|window| window == b"\r\n")
 }
 
 fn optimized_find_crlf(buf: &[u8]) -> Option<usize> {
