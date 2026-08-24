@@ -802,6 +802,21 @@ impl Drop for OnStopMaskGuard {
     }
 }
 
+async fn catch_graceful_drain_handler<A: Actor>(
+    actor: &mut A,
+    cx: &Cx,
+    msg: A::Message,
+) -> std::thread::Result<()> {
+    use crate::cx::scope::CatchUnwind;
+
+    // The async wrapper is intentional: `Actor::handle` may panic either while
+    // constructing its future or while that future is polled.
+    CatchUnwind {
+        inner: async { actor.handle(cx, msg).await },
+    }
+    .await
+}
+
 /// Internal: runs the actor message loop.
 ///
 /// This function is the core of the actor runtime. It:
@@ -831,11 +846,21 @@ async fn run_actor_loop<A: Actor>(mut actor: A, cx: Cx, cell: &mut ActorCell<A::
     // br-asupersync-foa8ir: Add periodic yielding to prevent mailbox starvation
     let mut messages_processed = 0u32;
     const YIELD_INTERVAL: u32 = 8; // Yield every 8 messages for fairness
+    let mut pending_drain_message = None;
+    let mut graceful_drain_panic = None;
 
     loop {
         // Check for cancellation
         if cx.checkpoint().is_err() {
             cx.trace("actor::cancel_requested");
+            break;
+        }
+
+        // Once graceful stop is visible, move all remaining delivery into the
+        // explicit drain phase. That phase preserves the first handler panic
+        // while continuing to invoke the buffered FIFO tail.
+        if cell.state.load() == ActorState::Stopping {
+            cx.trace("actor::graceful_drain_requested");
             break;
         }
 
@@ -852,6 +877,14 @@ async fn run_actor_loop<A: Actor>(mut actor: A, cx: Cx, cell: &mut ActorCell<A::
 
         match recv_result {
             Ok(msg) => {
+                // stop() can race with a ready receive after the loop-top state
+                // check. Retain the value for the drain instead of invoking an
+                // unprotected shutdown handler on the main-loop path.
+                if cell.state.load() == ActorState::Stopping {
+                    pending_drain_message = Some(msg);
+                    cx.trace("actor::graceful_drain_requested");
+                    break;
+                }
                 actor.handle(&cx, msg).await;
 
                 // Yield periodically to maintain fairness with other tasks.
@@ -894,12 +927,26 @@ async fn run_actor_loop<A: Actor>(mut actor: A, cx: Cx, cell: &mut ActorCell<A::
     cell.mailbox.close();
 
     if is_aborted {
+        drop(pending_drain_message);
         while let Ok(_msg) = cell.mailbox.try_recv() {}
     } else {
         let mut drained: u64 = 0;
         let mut drain_yield_counter = 0u32;
-        while let Ok(msg) = cell.mailbox.try_recv() {
-            actor.handle(&cx, msg).await;
+        loop {
+            let msg = match pending_drain_message.take() {
+                Some(msg) => msg,
+                None => match cell.mailbox.try_recv() {
+                    Ok(msg) => msg,
+                    Err(_) => break,
+                },
+            };
+
+            if let Err(payload) = catch_graceful_drain_handler(&mut actor, &cx, msg).await {
+                cx.trace("actor::handler_panicked_during_drain");
+                if graceful_drain_panic.is_none() {
+                    graceful_drain_panic = Some(payload);
+                }
+            }
             drained += 1;
 
             // br-asupersync-foa8ir: Yield during drain to prevent starvation.
@@ -936,8 +983,22 @@ async fn run_actor_loop<A: Actor>(mut actor: A, cx: Cx, cell: &mut ActorCell<A::
         guard.mask_depth += 1;
     }
     let mask_guard = OnStopMaskGuard(inner);
-    actor.on_stop(&cx).await;
-    drop(mask_guard);
+    if let Some(drain_panic) = graceful_drain_panic {
+        use crate::cx::scope::CatchUnwind;
+
+        let cleanup = CatchUnwind {
+            inner: async { actor.on_stop(&cx).await },
+        }
+        .await;
+        drop(mask_guard);
+        if cleanup.is_err() {
+            cx.trace("actor::on_stop_panicked_after_drain_panic");
+        }
+        std::panic::resume_unwind(drain_panic);
+    } else {
+        actor.on_stop(&cx).await;
+        drop(mask_guard);
+    }
 
     actor
 }
@@ -2034,6 +2095,104 @@ mod tests {
         assert!(stopped.load(Ordering::SeqCst), "on_stop was called");
 
         crate::test_complete!("actor_drains_mailbox_on_cancel");
+    }
+
+    /// A graceful stop must invoke every already-committed message even when
+    /// one drain handler panics. The first panic remains the terminal task/join
+    /// outcome, and cleanup still runs after the FIFO tail.
+    #[test]
+    fn native_actor_graceful_drain_continues_after_handler_panic() {
+        #[derive(Debug)]
+        struct DrainPanicActor {
+            events: Arc<parking_lot::Mutex<Vec<&'static str>>>,
+        }
+
+        impl Actor for DrainPanicActor {
+            type Message = u8;
+
+            fn on_start(&mut self, _cx: &Cx) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+                self.events.lock().push("start");
+                Box::pin(async {})
+            }
+
+            fn handle(
+                &mut self,
+                _cx: &Cx,
+                msg: u8,
+            ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+                match msg {
+                    0 => self.events.lock().push("handle-0"),
+                    1 => {
+                        self.events.lock().push("handle-1-panic");
+                        panic!("graceful drain handler panic");
+                    }
+                    2 => self.events.lock().push("handle-2"),
+                    3 => self.events.lock().push("handle-3"),
+                    _ => unreachable!("fixture message outside 0..=3"),
+                }
+                Box::pin(async {})
+            }
+
+            fn on_stop(&mut self, _cx: &Cx) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+                self.events.lock().push("stop");
+                Box::pin(async {})
+            }
+        }
+
+        init_test("native_actor_graceful_drain_continues_after_handler_panic");
+        let runtime = crate::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .expect("build native current-thread runtime");
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let cx: Cx = Cx::for_testing();
+        let scope = crate::cx::Scope::<FailFast>::new(root, Budget::INFINITE);
+        let events = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let actor = DrainPanicActor {
+            events: Arc::clone(&events),
+        };
+        let (mut handle, mut stored) = scope
+            .spawn_actor(&mut state, &cx, actor, 8)
+            .expect("spawn actor");
+
+        for msg in 0..=3 {
+            handle.try_send(msg).expect("queue drain fixture");
+        }
+        handle.stop();
+
+        let task_outcome = runtime.block_on(std::future::poll_fn(|task_cx| stored.poll(task_cx)));
+        match task_outcome {
+            Outcome::Panicked(payload) => assert_eq!(
+                payload.message(),
+                "graceful drain handler panic",
+                "task outcome preserves first drain panic"
+            ),
+            other => panic!("expected panicked actor task, got {other:?}"),
+        }
+
+        match runtime.block_on(handle.join(&cx)) {
+            Err(JoinError::Panicked(payload)) => assert_eq!(
+                payload.message(),
+                "graceful drain handler panic",
+                "join preserves first drain panic"
+            ),
+            other => panic!("expected panicked actor join, got {other:?}"),
+        }
+        assert_eq!(
+            *events.lock(),
+            vec![
+                "start",
+                "handle-0",
+                "handle-1-panic",
+                "handle-2",
+                "handle-3",
+                "stop",
+            ],
+            "graceful drain must invoke the committed FIFO tail and cleanup after a handler panic"
+        );
+        assert_eq!(handle.state.load(), ActorState::Stopped);
+
+        crate::test_complete!("native_actor_graceful_drain_continues_after_handler_panic");
     }
 
     /// E2E: ActorRef liveness tracks actor lifecycle (Created -> Stopping -> Stopped).
