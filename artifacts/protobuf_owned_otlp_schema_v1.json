@@ -24,7 +24,7 @@
       "crate_version": "0.32.0",
       "crates_io_checksum_sha256": "56d658ba1faf63f7b9c492cfbe6e0ec365440a16132d3270c1065f7b33f1b638",
       "cargo_lock_path": "Cargo.lock",
-      "cargo_lock_sha256": "95d3aaec0e58be196f08e4b30792f90129213af86ae8e34d2c5862b9feb15880",
+      "cargo_lock_sha256": "513cfba8f8671e69aab32317e042bd00737b9bfb30e2234012d6605f320f7a6a",
       "wrapper_repository": "https://github.com/open-telemetry/opentelemetry-rust",
       "wrapper_repository_commit": "ec289cb3c6f8260951699c51df968560943c1451",
       "path_in_wrapper_repository": "opentelemetry-proto",
@@ -137,7 +137,7 @@
     "repository_source_baseline": [
       {
         "path": "Cargo.toml",
-        "sha256": "541ed6be1f748cd2897f18ba2679c6d34ff84a57d480db5a11c40ff007f1f1c7",
+        "sha256": "0f02e4fefedf5e9013054df794ece6f8fb259134fdbd95376e61d486c043fde3",
         "role": "feature and dependency quarantine authority"
       },
       {
@@ -157,12 +157,12 @@
       },
       {
         "path": "src/observability/otlp_proto.rs",
-        "sha256": "1d9b19295230754329a93ce474c16366b01842ec1bf64796d5f5b42e16fe17c5",
+        "sha256": "5b6dff11b72b1bce8ba4abdd73794d3eaacb440aedb8d6c6b25166e2c8b5018f",
         "role": "complete bounded common, resource, metrics, trace, logs, and collector implementation"
       },
       {
         "path": "src/observability/otel.rs",
-        "sha256": "b036610d07e07b7a7e9ed3e23328d60104f2429cbe464827213a8bff5f7e0db8",
+        "sha256": "f0e0586716bc3871b0d18cfa16a846c42453cdb530c6b2055942155c9557b562",
         "role": "current metrics, logs, reference builder, and producer-limit baseline"
       },
       {

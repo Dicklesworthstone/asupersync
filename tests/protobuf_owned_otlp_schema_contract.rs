@@ -26,7 +26,7 @@ use std::path::PathBuf;
 
 const ARTIFACT_PATH: &str = "artifacts/protobuf_owned_otlp_schema_v1.json";
 const DOC_PATH: &str = "docs/protobuf_owned_otlp_schema.md";
-const ARTIFACT_SHA256: &str = "ed5a0bdf017418c3e44254edf4d84653e2d2185e838daf9d8998b936dbc319b6";
+const ARTIFACT_SHA256: &str = "1d39a4531f2afb5b97bf5c8ed0d670701abadfa52b101c79fc31a6c6ff8deade";
 const DOC_SHA256: &str = "17360f46fff6ba94487780ce5e5b692c5af80c3be19442cd5d89c0317fb2337f";
 const SCHEMA_SIGNATURE_SHA256: &str =
     "2b9311b5c766da1b2fb88262aeb89e125c41f8ea4d8406e534a2e9b42839256b";
@@ -37,7 +37,7 @@ const SERVICE_SIGNATURE_SHA256: &str =
 const ORACLE_PIN_SIGNATURE_SHA256: &str =
     "f8d06b6ad60ce88a932eb3426a68007013ae428270159c57c1a889e46f333544";
 const REPOSITORY_PIN_SIGNATURE_SHA256: &str =
-    "88e6578465b090d7f994914ec0a35507dbb9e91d112e04fa8249274e32275da7";
+    "45c619e779e902166a94a4d8426fbaad334c8edc8defcf618b74813876d0ea1e";
 const DOC_BEGIN: &str = "<!-- BEGIN PROTOBUF OWNED OTLP SCHEMA -->";
 const DOC_END: &str = "<!-- END PROTOBUF OWNED OTLP SCHEMA -->";
 
@@ -582,7 +582,7 @@ fn validate_identity_and_authority(value: &Value) -> ValidationResult {
         ("cargo_lock_path", "Cargo.lock"),
         (
             "cargo_lock_sha256",
-            "95d3aaec0e58be196f08e4b30792f90129213af86ae8e34d2c5862b9feb15880",
+            "513cfba8f8671e69aab32317e042bd00737b9bfb30e2234012d6605f320f7a6a",
         ),
         (
             "wrapper_repository",
@@ -1899,6 +1899,48 @@ fn validate_live_repository_pins(value: &Value) -> ValidationResult {
     Ok(())
 }
 
+fn validate_registered_unit_test_prefixes(value: &Value) -> ValidationResult {
+    let handoff = array(value, "evidence_handoff")?;
+    let a3 = handoff
+        .iter()
+        .find(|row| row.get("owner").and_then(Value::as_str) == Some("asupersync-5z2scg.1.3"))
+        .ok_or_else(|| "A3 handoff row is required".to_owned())?;
+    let prefixes = array(a3, "required_test_prefixes")?
+        .iter()
+        .map(|row| {
+            row.as_str()
+                .ok_or_else(|| "test prefixes must be text".to_owned())
+        })
+        .collect::<ValidationResult<Vec<_>>>()?;
+    let source = read_repo_file("src/observability/otlp_proto.rs");
+    let mut lines = source.lines();
+    let mut test_count = 0usize;
+
+    while let Some(line) = lines.next() {
+        if line.trim() != "#[test]" {
+            continue;
+        }
+        test_count += 1;
+        let declaration = lines
+            .by_ref()
+            .find(|candidate| !candidate.trim().is_empty())
+            .ok_or_else(|| "OTLP #[test] is missing its function declaration".to_owned())?
+            .trim_start();
+        if !prefixes
+            .iter()
+            .any(|prefix| declaration.starts_with(&format!("fn {prefix}__")))
+        {
+            return Err(format!(
+                "OTLP unit test does not use a registered A3 prefix: {declaration}"
+            ));
+        }
+    }
+    if test_count == 0 {
+        return Err("OTLP unit-test census must not be empty".to_owned());
+    }
+    Ok(())
+}
+
 fn validate_operator_doc(doc: &str, value: &Value) -> ValidationResult {
     if sha256_hex(doc.as_bytes()) != DOC_SHA256 {
         return Err("operator document bytes changed without authority review".to_owned());
@@ -1972,6 +2014,8 @@ fn ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__local_invariants__canonical_packet
     let value = artifact();
     validate_contract(&value).expect("canonical authority packet must validate");
     validate_live_repository_pins(&value).expect("live repository pins must match");
+    validate_registered_unit_test_prefixes(&value)
+        .expect("owned OTLP unit tests must use registered A3 prefixes");
     assert_eq!(sha256_hex(&read_repo_bytes(ARTIFACT_PATH)), ARTIFACT_SHA256);
     assert_eq!(sha256_hex(&read_repo_bytes(DOC_PATH)), DOC_SHA256);
 }

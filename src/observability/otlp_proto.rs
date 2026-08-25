@@ -5390,7 +5390,7 @@ mod tests {
     }
 
     #[test]
-    fn ver_a1_asupersync_5z2scg_1_3_3548cd7b1804_local_invariants_trace_round_trip_preserves_every_field_family()
+    fn ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__local_invariants__trace_round_trip_preserves_every_field_family()
      {
         let mut span = valid_span();
         span.parent_span_id = vec![0x55; MAX_SPAN_ID_BYTES];
@@ -5466,7 +5466,7 @@ mod tests {
     }
 
     #[test]
-    fn ver_a1_asupersync_5z2scg_1_3_3548cd7b1804_property_matrix_trace_presence_merge_reserved_and_wire_types()
+    fn ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__property_matrix__trace_presence_merge_reserved_and_wire_types()
      {
         let mut status_message = ProtobufWireEncoder::new(limits());
         status_message
@@ -5629,7 +5629,7 @@ mod tests {
     }
 
     #[test]
-    fn ver_a1_asupersync_5z2scg_1_3_3548cd7b1804_local_invariants_trace_collection_limits_are_exact()
+    fn ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__local_invariants__trace_collection_limits_are_exact()
      {
         TracesData {
             resource_spans: vec![ResourceSpans::default(); MAX_RESOURCE_GROUPS_PER_REQUEST],
@@ -5774,7 +5774,7 @@ mod tests {
     }
 
     #[test]
-    fn ver_a1_asupersync_5z2scg_1_3_3548cd7b1804_local_invariants_trace_scalar_limits_and_semantics()
+    fn ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__local_invariants__trace_scalar_limits_and_semantics()
      {
         let mut exact = valid_span();
         exact.name = "n".repeat(MAX_SPAN_NAME_BYTES);
@@ -5990,7 +5990,7 @@ mod tests {
     }
 
     #[test]
-    fn ver_a1_asupersync_5z2scg_1_3_3548cd7b1804_lab_lifecycle_trace_failure_state() {
+    fn ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__lab_lifecycle__trace_failure_state() {
         let mut malformed = ProtobufWireEncoder::new(limits());
         malformed
             .write_string(5, "retained before ID failure")
@@ -6018,7 +6018,7 @@ mod tests {
     }
 
     #[test]
-    fn ver_a1_asupersync_5z2scg_1_3_3548cd7b1804_downstream_consumer_trace_generic_codec() {
+    fn ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__downstream_consumer__trace_generic_codec() {
         let model = TracesData {
             resource_spans: vec![ResourceSpans {
                 scope_spans: vec![ScopeSpans {
@@ -6038,7 +6038,8 @@ mod tests {
     }
 
     #[test]
-    fn collector_metrics_round_trip_preserves_presence_unknowns_and_merge_semantics() {
+    fn ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__property_matrix__collector_metrics_round_trip_preserves_presence_unknowns_and_merge_semantics()
+     {
         let request = ExportMetricsServiceRequest {
             resource_metrics: vec![ResourceMetrics::default()],
             unknown_fields: UnknownFields::new(),
@@ -6151,7 +6152,8 @@ mod tests {
     }
 
     #[test]
-    fn collector_metrics_limits_and_partial_success_invariants_are_exact() {
+    fn ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__local_invariants__collector_metrics_limits_and_partial_success_invariants_are_exact()
+     {
         let exact_request = ExportMetricsServiceRequest {
             resource_metrics: vec![ResourceMetrics::default(); MAX_RESOURCE_GROUPS_PER_REQUEST],
             unknown_fields: UnknownFields::new(),
@@ -6332,7 +6334,7 @@ mod tests {
     }
 
     #[test]
-    fn ver_a1_asupersync_5z2scg_1_3_3548cd7b1804_property_matrix_collector_trace_and_logs_round_trip()
+    fn ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__property_matrix__collector_trace_and_logs_round_trip()
      {
         let trace_request = ExportTraceServiceRequest {
             resource_spans: vec![ResourceSpans::default()],
@@ -6531,8 +6533,8 @@ mod tests {
     }
 
     #[test]
-    fn ver_a1_asupersync_5z2scg_1_3_3548cd7b1804_local_invariants_collector_trace_and_logs_limits()
-    {
+    fn ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__local_invariants__collector_trace_and_logs_limits()
+     {
         macro_rules! assert_request_limits {
             ($request:ident, $field:ident, $resource:ident, $resource_name:literal) => {{
                 $request {
@@ -6718,7 +6720,7 @@ mod tests {
     }
 
     #[test]
-    fn ver_a1_asupersync_5z2scg_1_3_3548cd7b1804_lab_lifecycle_collector_trace_and_logs_failure_state()
+    fn ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__lab_lifecycle__collector_trace_and_logs_failure_state()
      {
         macro_rules! assert_failure_state {
             ($partial:ident, $rejected_field:ident, $invariant:literal) => {{
@@ -6770,7 +6772,7 @@ mod tests {
     }
 
     #[test]
-    fn ver_a1_asupersync_5z2scg_1_3_3548cd7b1804_property_matrix_logs_all_fields_round_trip() {
+    fn ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__property_matrix__logs_all_fields_round_trip() {
         let record = LogRecord {
             time_unix_nano: 11,
             severity_number: SeverityNumber::Warn3.as_raw(),
@@ -6867,7 +6869,8 @@ mod tests {
     }
 
     #[test]
-    fn logs_merge_reserved_and_forward_values_are_preserved() {
+    fn ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__property_matrix__logs_merge_reserved_and_forward_values_are_preserved()
+     {
         let first_body = string_value("first")
             .encode_to_bytes(limits())
             .expect("encode first body fragment");
@@ -6960,7 +6963,7 @@ mod tests {
     }
 
     #[test]
-    fn ver_a1_asupersync_5z2scg_1_3_3548cd7b1804_local_invariants_logs_limits_are_exact() {
+    fn ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__local_invariants__logs_limits_are_exact() {
         LogsData {
             resource_logs: vec![ResourceLogs::default(); MAX_RESOURCE_GROUPS_PER_REQUEST],
             unknown_fields: UnknownFields::new(),
@@ -7226,7 +7229,7 @@ mod tests {
     }
 
     #[test]
-    fn ver_a1_asupersync_5z2scg_1_3_3548cd7b1804_lab_lifecycle_logs_failure_state() {
+    fn ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__lab_lifecycle__logs_failure_state() {
         let mut malformed = ProtobufWireEncoder::new(limits());
         malformed
             .write_string(3, "retained before ID failure")
@@ -7244,7 +7247,7 @@ mod tests {
     }
 
     #[test]
-    fn ver_a1_asupersync_5z2scg_1_3_3548cd7b1804_downstream_consumer_logs_generic_codec() {
+    fn ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__downstream_consumer__logs_generic_codec() {
         let model = LogsData {
             resource_logs: vec![ResourceLogs::default()],
             unknown_fields: UnknownFields::new(),
@@ -7258,7 +7261,8 @@ mod tests {
     }
 
     #[test]
-    fn common_resource_round_trip_is_deterministic() {
+    fn ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__local_invariants__common_resource_round_trip_is_deterministic()
+     {
         let resource = Resource {
             attributes: vec![
                 KeyValue {
@@ -7295,7 +7299,8 @@ mod tests {
     }
 
     #[test]
-    fn any_value_same_message_oneof_member_merges_and_other_member_replaces() {
+    fn ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__property_matrix__any_value_same_message_oneof_member_merges_and_other_member_replaces()
+     {
         let two_arrays = [
             0x2a, 0x05, 0x0a, 0x03, 0x0a, 0x01, b'a', 0x2a, 0x05, 0x0a, 0x03, 0x0a, 0x01, b'b',
         ];
@@ -7313,7 +7318,8 @@ mod tests {
     }
 
     #[test]
-    fn common_limits_accept_exact_boundaries_and_reject_one_over() {
+    fn ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__local_invariants__common_limits_accept_exact_boundaries_and_reject_one_over()
+     {
         let exact_string = AnyValue {
             value: Some(AnyValueValue::String("x".repeat(MAX_ATTRIBUTE_VALUE_BYTES))),
             unknown_fields: UnknownFields::new(),
@@ -7416,7 +7422,8 @@ mod tests {
     }
 
     #[test]
-    fn recursive_any_value_depth_is_exact_and_fail_closed() {
+    fn ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__local_invariants__recursive_any_value_depth_is_exact_and_fail_closed()
+     {
         let exact = nested_array(MAX_ANY_VALUE_DEPTH)
             .encode_to_bytes(limits())
             .expect("exact AnyValue depth");
@@ -7457,7 +7464,8 @@ mod tests {
     }
 
     #[test]
-    fn unknown_group_is_preserved_verbatim() {
+    fn ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__property_matrix__unknown_group_is_preserved_verbatim()
+     {
         let group = [0x5b, 0x60, 0x01, 0x5c];
         let decoded = Resource::decode_from_bytes(&group, limits()).expect("decode unknown group");
         assert_eq!(decoded.unknown_fields.as_bytes(), group);
@@ -7471,7 +7479,8 @@ mod tests {
     }
 
     #[test]
-    fn fresh_decode_returns_no_partial_model_and_merge_documents_partial_mutation() {
+    fn ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__lab_lifecycle__fresh_decode_returns_no_partial_model_and_merge_documents_partial_mutation()
+     {
         let malformed = [0x0a, 0x02, b'o', b'k', 0x12];
         assert!(AnyValue::decode_from_bytes(&malformed, limits()).is_err());
 
@@ -7509,7 +7518,8 @@ mod tests {
     }
 
     #[test]
-    fn malformed_utf8_and_duplicate_attribute_keys_are_typed_errors() {
+    fn ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__local_invariants__malformed_utf8_and_duplicate_attribute_keys_are_typed_errors()
+     {
         assert!(matches!(
             AnyValue::decode_from_bytes(&[0x0a, 0x01, 0xff], limits()),
             Err(ProtobufWireError::InvalidUtf8 { .. })
@@ -7538,7 +7548,8 @@ mod tests {
     }
 
     #[test]
-    fn pinned_common_and_resource_invariants_fail_closed() {
+    fn ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__local_invariants__pinned_common_and_resource_invariants_fail_closed()
+     {
         let conflicting_key = KeyValue {
             key: "service.name".to_owned(),
             key_strindex: 1,
@@ -7620,7 +7631,7 @@ mod tests {
     }
 
     #[test]
-    fn ver_a1_asupersync_5z2scg_1_3_3548cd7b1804_local_invariants_metrics_round_trip() {
+    fn ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__local_invariants__metrics_round_trip() {
         let mut metric_unknown = UnknownFields::new();
         metric_unknown
             .try_record_raw(&[0x78, 0x01])
@@ -7773,7 +7784,7 @@ mod tests {
     }
 
     #[test]
-    fn ver_a1_asupersync_5z2scg_1_3_3548cd7b1804_property_matrix_metrics_oneofs_merge() {
+    fn ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__property_matrix__metrics_oneofs_merge() {
         let first_gauge = Gauge {
             data_points: vec![number_point(NumberDataPointValue::Double(1.0))],
             unknown_fields: UnknownFields::new(),
@@ -7848,7 +7859,7 @@ mod tests {
     }
 
     #[test]
-    fn ver_a1_asupersync_5z2scg_1_3_3548cd7b1804_local_invariants_metrics_limits() {
+    fn ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__local_invariants__metrics_limits() {
         MetricsData {
             resource_metrics: vec![ResourceMetrics::default(); MAX_RESOURCE_GROUPS_PER_REQUEST],
             unknown_fields: UnknownFields::new(),
@@ -8147,7 +8158,7 @@ mod tests {
     }
 
     #[test]
-    fn ver_a1_asupersync_5z2scg_1_3_3548cd7b1804_local_invariants_metrics_semantics() {
+    fn ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__local_invariants__metrics_semantics() {
         assert!(matches!(
             Sum::default().encode_to_bytes(limits()),
             Err(ProtobufWireError::SchemaInvariant {
@@ -8363,7 +8374,7 @@ mod tests {
     }
 
     #[test]
-    fn ver_a1_asupersync_5z2scg_1_3_3548cd7b1804_property_matrix_metrics_packed_and_reserved() {
+    fn ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__property_matrix__metrics_packed_and_reserved() {
         let mut unpacked = ProtobufWireEncoder::new(limits());
         unpacked
             .write_fixed64(3, 1)
@@ -8451,7 +8462,7 @@ mod tests {
     }
 
     #[test]
-    fn ver_a1_asupersync_5z2scg_1_3_3548cd7b1804_lab_lifecycle_metrics_failure_state() {
+    fn ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__lab_lifecycle__metrics_failure_state() {
         let malformed = [0x0a, 0x02, b'o', b'k', 0x2a];
         assert!(Metric::decode_from_bytes(&malformed, limits()).is_err());
 
@@ -8547,7 +8558,7 @@ mod tests {
     }
 
     #[test]
-    fn ver_a1_asupersync_5z2scg_1_3_3548cd7b1804_downstream_consumer_collector_requests_generic_codec()
+    fn ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__downstream_consumer__collector_requests_generic_codec()
      {
         let metrics_model = ExportMetricsServiceRequest {
             resource_metrics: vec![ResourceMetrics::default()],
@@ -8601,7 +8612,8 @@ mod tests {
     }
 
     #[test]
-    fn owned_otlp_metrics_numeric_invariants_refuse_nonfinite_and_reversed_ranges() {
+    fn ver_a1_asupersync_5z2scg_1_3_3548cd7b1804__local_invariants__owned_otlp_metrics_numeric_invariants_refuse_nonfinite_and_reversed_ranges()
+     {
         let nonfinite_number = NumberDataPoint {
             time_unix_nano: 1,
             value: Some(NumberDataPointValue::Double(f64::NAN)),
