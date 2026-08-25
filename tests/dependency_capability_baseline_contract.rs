@@ -1750,15 +1750,15 @@ fn tempfile_claim_time_profile_checkpoint_is_source_pinned_and_fail_closed() {
         (
             "Cargo.lock",
             (
-                "95d3aaec0e58be196f08e4b30792f90129213af86ae8e34d2c5862b9feb15880",
-                4665_u64,
+                "513cfba8f8671e69aab32317e042bd00737b9bfb30e2234012d6605f320f7a6a",
+                4664_u64,
             ),
         ),
         (
             "Cargo.toml",
             (
-                "541ed6be1f748cd2897f18ba2679c6d34ff84a57d480db5a11c40ff007f1f1c7",
-                1064_u64,
+                "0f02e4fefedf5e9013054df794ece6f8fb259134fdbd95376e61d486c043fde3",
+                1074_u64,
             ),
         ),
         (
@@ -1806,8 +1806,8 @@ fn tempfile_claim_time_profile_checkpoint_is_source_pinned_and_fail_closed() {
         (
             "src/lib.rs",
             (
-                "22ce17632d6a98843ebd6b9f855a430aef3ea6da07a6657e3311ad87b78c1b7f",
-                468_u64,
+                "ef194ab05a262d0b3584b0841c81d8c94645926ba87ea54e3dfc630469c50edb",
+                470_u64,
             ),
         ),
         (
@@ -1820,8 +1820,8 @@ fn tempfile_claim_time_profile_checkpoint_is_source_pinned_and_fail_closed() {
         (
             "src/net/atp/transport_quic/mod.rs",
             (
-                "8d7a990223406a9e854855aba87e4fcd80f7f45eac8db3693d42822cd33932c7",
-                17_238_u64,
+                "d5af349eeb53b31221e5ce592fe027524b33639c1fae181dd3c0d3f6de60567f",
+                17_261_u64,
             ),
         ),
         (
@@ -1975,8 +1975,8 @@ fn tempfile_claim_time_profile_checkpoint_is_source_pinned_and_fail_closed() {
         .iter()
         .map(|path| count_occurrences(&read_repo_file(path), "tempfile::"))
         .sum::<u64>();
-    assert_eq!(source_token_count, 278);
-    assert_eq!(rust_paths_under_with_token("tests", "tempfile::").len(), 96);
+    assert_eq!(source_token_count, 262);
+    assert_eq!(rust_paths_under_with_token("tests", "tempfile::").len(), 98);
     assert_eq!(
         rust_paths_under_with_token("benches", "tempfile::").len(),
         2
