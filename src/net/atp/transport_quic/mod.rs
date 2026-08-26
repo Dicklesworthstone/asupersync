@@ -14206,6 +14206,117 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn quic_decoded_sparse_commit_covers_regular_and_packed_members() {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let sparse_bytes = |len: usize, marker: &[u8]| {
+            let mut bytes = vec![0u8; len];
+            bytes[..marker.len()].copy_from_slice(marker);
+            let tail = len.checked_sub(marker.len()).expect("marker fits fixture");
+            bytes[tail..].copy_from_slice(marker);
+            bytes
+        };
+        let regular = sparse_bytes(2 * 1024 * 1024, b"regular-managed");
+        let packed_a = sparse_bytes(512 * 1024, b"packed-managed-a");
+        let packed_b = sparse_bytes(512 * 1024, b"packed-managed-b");
+        let logical_entries = vec![
+            ("regular.bin".to_string(), regular.clone()),
+            ("packed-a.bin".to_string(), packed_a.clone()),
+            ("packed-b.bin".to_string(), packed_b.clone()),
+        ];
+        let mut manifest = manifest_from_entries("payload", true, &logical_entries);
+        let regular_entry = manifest.entries[0].clone();
+        manifest.entries = vec![
+            regular_entry,
+            quic_packed_entry(
+                1,
+                0,
+                &[
+                    ("packed-a.bin", packed_a.as_slice()),
+                    ("packed-b.bin", packed_b.as_slice()),
+                ],
+            ),
+        ];
+
+        let mut packed = packed_a.clone();
+        packed.extend_from_slice(&packed_b);
+        let decoders = vec![
+            QuicEntryDecoder {
+                index: 0,
+                object_id: entry_object_id(&manifest.transfer_id, 0),
+                size: u64::try_from(regular.len()).expect("regular size fits u64"),
+                pipeline: None,
+                complete: true,
+                data: regular.clone(),
+                pending_decodes: Vec::new(),
+            },
+            QuicEntryDecoder {
+                index: 1,
+                object_id: entry_object_id(&manifest.transfer_id, 1),
+                size: u64::try_from(packed.len()).expect("pack size fits u64"),
+                pipeline: None,
+                complete: true,
+                data: packed,
+                pending_decodes: Vec::new(),
+            },
+        ];
+
+        let cx = Cx::for_testing();
+        let dest = canon_tempdir();
+        let (receipt, committed_paths) = block_on(commit_decoded_entries_with_options(
+            &cx,
+            dest.path(),
+            &manifest,
+            &decoders,
+            0,
+            0,
+            QuicDecodeStats::default(),
+            &trusted_quic_config(),
+            &QuicReceiveOptions::new().with_sparse_files(true),
+        ))
+        .expect("commit sparse decoded entries");
+        assert!(receipt.committed && receipt.sha_ok && receipt.merkle_ok);
+        assert_eq!(receipt.files, 3);
+        let root = dest.path().join("payload");
+        let expected_paths = vec![
+            root.join("regular.bin"),
+            root.join("packed-a.bin"),
+            root.join("packed-b.bin"),
+        ];
+        assert_eq!(committed_paths, expected_paths);
+        assert_eq!(
+            receipt.committed_paths,
+            expected_paths
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+        );
+
+        for (name, expected) in [
+            ("regular.bin", regular),
+            ("packed-a.bin", packed_a),
+            ("packed-b.bin", packed_b),
+        ] {
+            let path = root.join(name);
+            assert_eq!(
+                std::fs::read(&path).expect("read sparse decoded commit"),
+                expected,
+                "decoded sparse commit must preserve logical bytes for {name}"
+            );
+            let metadata = std::fs::metadata(&path).expect("sparse decoded metadata");
+            assert_eq!(
+                metadata.len(),
+                u64::try_from(expected.len()).expect("expected size fits u64")
+            );
+            assert!(
+                metadata.blocks().saturating_mul(512) < metadata.len() / 2,
+                "decoded sparse commit must allocate below half its logical size for {name}"
+            );
+        }
+    }
+
     #[cfg(windows)]
     #[test]
     fn quic_decoded_regular_commit_replaces_stale_readonly_destination() {
