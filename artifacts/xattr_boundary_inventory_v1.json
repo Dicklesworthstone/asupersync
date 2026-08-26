@@ -80,8 +80,8 @@
     },
     {
       "path": "src/bin/atp.rs",
-      "sha256": "fa68f1bfb4f6e59fd3d4a0c781a5e5b7b2cce13ad2d39ee2ec084f068a837c9f",
-      "line_count": 12723
+      "sha256": "0f03821061502ebf736cd8f90865177ef8ed614ff8e779cfc1ebc314793a7f43",
+      "line_count": 12881
     },
     {
       "path": "tests/atp_tcp_metadata_fidelity.rs",
@@ -188,7 +188,7 @@
       "occurrence_id": "XATTR-OCC-CLI",
       "state": "PRESENT",
       "paths": ["src/bin/atp.rs"],
-      "classification": "CLI-selected metadata policy retains default xattr-disabled behavior"
+      "classification": "CLI defaults remain xattr-disabled; explicit QUIC send, recv, and serve flags opt into capture or apply"
     },
     {
       "occurrence_id": "XATTR-OCC-TEST",
@@ -314,7 +314,7 @@
       "surface_id": "XATTR-CLI-DEFAULT",
       "state": "PRESENT",
       "path": "selected_cli_metadata_policy",
-      "semantics": "the CLI enables symlink preservation but leaves extended attributes disabled"
+      "semantics": "the CLI default enables symlink preservation and leaves extended attributes disabled; QUIC-only flags explicitly overlay xattr capture or apply"
     }
   ],
   "semantic_matrix": [
@@ -412,8 +412,8 @@
     {
       "semantic_id": "XATTR-SEM-DEFAULT-OFF",
       "state": "PRESENT",
-      "observed": "Default, portable, and the selected CLI policy leave xattr preservation disabled",
-      "contract_boundary": "xattr parity is an explicit library opt-in and is not the ordinary CLI journey",
+      "observed": "Default, portable, and ordinary CLI policy leave xattr preservation disabled; QUIC send, recv, and serve require an explicit flag",
+      "contract_boundary": "direct QUIC peers opt in independently, SSH bootstrap forwards the option, and TCP, RQ, or auto selection rejects it",
       "route": "operator documentation"
     }
   ],
@@ -552,7 +552,7 @@
       "journey_id": "XATTR-JOURNEY-OTHER-TRANSPORTS-CLI",
       "state": "BLOCKED_MISSING_EVIDENCE",
       "path": "other ATP transports and CLI",
-      "evidence": "the only direct xattr roundtrip fixture is TCP and the selected CLI policy disables xattrs"
+      "evidence": "the CLI exposes a default-off QUIC opt-in and a real-UDP source fixture exists, but parser or compile evidence is not a retained terminal transfer receipt"
     },
     {
       "journey_id": "XATTR-JOURNEY-CANONICAL-RUNNER",
@@ -674,7 +674,7 @@
       "gap_id": "XATTR-A1-GAP-07",
       "severity": "HIGH",
       "state": "ROUTED",
-      "finding": "the only direct roundtrip covers one regular file over TCP, not directory, symlink, error, race, lifecycle, CLI, or other transport cells",
+      "finding": "retained runtime evidence covers one regular-file TCP roundtrip; the QUIC source fixture lacks a terminal runtime receipt and error, race, lifecycle, and cross-platform cells remain absent",
       "owner": "CAP-XATTR E2E owner",
       "replacement_required": false
     },
@@ -722,8 +722,8 @@
       "gap_id": "XATTR-A1-GAP-13",
       "severity": "MEDIUM",
       "state": "ROUTED",
-      "finding": "the ordinary CLI policy disables xattrs without an operator-facing parity statement",
-      "owner": "ATP CLI documentation owner",
+      "finding": "the QUIC CLI opt-in lacks retained transfer parity, namespace and aggregate-size limits, and rollback evidence",
+      "owner": "ATP CLI evidence and security owner",
       "replacement_required": false
     }
   ],
@@ -767,7 +767,7 @@
   "no_claim_boundaries": [
     "This source inventory does not prove macOS, FreeBSD, NetBSD, other-Unix, Windows, or wasm runtime behavior.",
     "A target-filtered cargo metadata cell is dependency-graph evidence, not a runtime platform receipt.",
-    "The existing regular-file TCP fixture does not prove directory, symlink, permission, unsupported-filesystem, size-race, lifecycle, CLI, or other-transport behavior.",
+    "The retained regular-file TCP receipt and unexecuted QUIC source fixture do not prove permission, unsupported-filesystem, size-race, lifecycle, CLI, or cross-platform behavior.",
     "A test that returns when setup fails is not a typed unsupported-platform success claim.",
     "Best-effort capture and apply do not prove complete metadata preservation or transactional rollback.",
     "The marginal ledger does not prove runtime correctness, release readiness, or performance.",

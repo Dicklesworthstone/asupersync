@@ -389,6 +389,15 @@ struct SendArgs {
     /// This does not enable QUIC delta without a shared authentication key.
     #[arg(long)]
     rq_allow_unauthenticated_lab: bool,
+    /// Capture extended attributes over QUIC. The receiver must also opt in;
+    /// SSH bootstrap forwards this option. Disabled by default.
+    #[arg(long)]
+    preserve_xattrs: bool,
+    /// Authorize QUIC FIFO recreation on the receiver. SSH bootstrap forwards
+    /// this option; direct receivers must opt in separately. Sockets and device
+    /// nodes remain skipped. Disabled by default.
+    #[arg(long)]
+    allow_special_files: bool,
     // ─── QUIC (`--transport quic`) TLS material ───
     /// PEM file of CA certificate(s) the sender trusts to verify the receiver's
     /// QUIC server certificate (quic only). Required unless the receiver's
@@ -492,6 +501,14 @@ struct RecvArgs {
     /// Explicitly disable RQ symbol authentication for loopback/lab-only runs.
     #[arg(long)]
     rq_allow_unauthenticated_lab: bool,
+    /// Accept and apply extended attributes over QUIC. The sender must also opt
+    /// in. Disabled by default.
+    #[arg(long)]
+    preserve_xattrs: bool,
+    /// Allow QUIC FIFO recreation in the destination. Sockets and device nodes
+    /// remain skipped. Disabled by default.
+    #[arg(long)]
+    allow_special_files: bool,
     /// PEM certificate chain the QUIC receiver presents to senders (quic only).
     #[arg(long, value_name = "PATH")]
     server_cert: Option<PathBuf>,
@@ -835,6 +852,29 @@ fn selected_cli_metadata_policy() -> MetadataPolicy {
         preserve_timestamps: true,
         ..MetadataPolicy::default()
     }
+}
+
+fn selected_cli_quic_metadata_policy(preserve_xattrs: bool) -> MetadataPolicy {
+    MetadataPolicy {
+        preserve_extended_attributes: preserve_xattrs,
+        ..selected_cli_metadata_policy()
+    }
+}
+
+fn validate_quic_metadata_options(
+    transport: Transport,
+    preserve_xattrs: bool,
+    allow_special_files: bool,
+) -> Result<(), String> {
+    if transport != Transport::Quic {
+        if preserve_xattrs {
+            return Err("--preserve-xattrs requires --transport quic".to_string());
+        }
+        if allow_special_files {
+            return Err("--allow-special-files requires --transport quic".to_string());
+        }
+    }
+    Ok(())
 }
 
 fn tcp_receive_config(max_bytes: u64, enable_delta: bool, one_shot: bool) -> TransferConfig {
@@ -1263,7 +1303,8 @@ fn quic_config_send(
         enable_delta: cli_quic_delta_enabled(args.no_delta),
         bwlimit_bps: normalize_bwlimit_bps(args.bwlimit_bps)?,
         handshake_timeout: Duration::from_millis(args.quic_handshake_timeout_ms),
-        metadata_policy: selected_cli_metadata_policy(),
+        metadata_policy: selected_cli_quic_metadata_policy(args.preserve_xattrs),
+        allow_special_files: args.allow_special_files,
         preserve_hardlinks: true,
         ..QuicConfig::default()
     };
@@ -1313,7 +1354,8 @@ fn quic_config_recv(
         enable_delta: cli_quic_delta_enabled(args.no_delta),
         accept_timeout: recv_listen_timeout(args)?,
         handshake_timeout: Duration::from_millis(args.quic_handshake_timeout_ms),
-        metadata_policy: selected_cli_metadata_policy(),
+        metadata_policy: selected_cli_quic_metadata_policy(args.preserve_xattrs),
+        allow_special_files: args.allow_special_files,
         preserve_hardlinks: true,
         ..QuicConfig::default()
     };
@@ -1683,6 +1725,11 @@ fn resolve(target: &str) -> Result<Vec<SocketAddr>, String> {
 }
 
 fn run_send(mut args: SendArgs) -> Result<(), String> {
+    validate_quic_metadata_options(
+        args.transport,
+        args.preserve_xattrs,
+        args.allow_special_files,
+    )?;
     validate_requested_bwlimit_transport(args.transport, args.bwlimit_bps)?;
     validate_user_transfer_namespace(&args.source)?;
     // `--dry-run` computes the transfer plan from the source and prints it
@@ -1754,10 +1801,12 @@ fn validate_auto_security_policy(args: &SendArgs) -> Result<(), String> {
 fn run_send_dry_run(args: &SendArgs) -> Result<(), String> {
     let runtime = build_runtime(args.workers)?;
     let source = args.source.clone();
-    // Use the exact config a real TCP send would (`tcp_config`) so the printed
-    // plan matches what the transfer commits: same chunk size, metadata policy
-    // (symlink/dir/special-file handling), and hardlink dedup.
-    let cfg = tcp_config(args.max_bytes, false);
+    // Use the shared transfer-plan config as the base, then overlay QUIC's
+    // explicit xattr opt-in so dry-run reports the same metadata capture policy
+    // as the real send. Chunking, symlink/dir/special handling, and hardlink
+    // dedup otherwise remain identical.
+    let mut cfg = tcp_config(args.max_bytes, false);
+    cfg.metadata_policy = selected_cli_quic_metadata_policy(args.preserve_xattrs);
     let rq_cfg = (args.transport == Transport::Rq)
         .then(|| rq_send_config(args))
         .transpose()?;
@@ -6873,6 +6922,12 @@ fn spawn_remote_receiver(
         argv.push("--no-delta".to_string());
     }
     if args.transport == Transport::Quic {
+        if args.preserve_xattrs {
+            argv.push("--preserve-xattrs".to_string());
+        }
+        if args.allow_special_files {
+            argv.push("--allow-special-files".to_string());
+        }
         // Validated in `run_send_via_ssh`; these are paths on the remote host.
         if let Some(cert) = &args.server_cert {
             argv.push("--server-cert".to_string());
@@ -8603,6 +8658,11 @@ async fn create_receive_destination(dest: &Path) -> Result<(), String> {
 }
 
 fn run_recv(mut args: RecvArgs, persistent: bool) -> Result<(), String> {
+    validate_quic_metadata_options(
+        args.transport,
+        args.preserve_xattrs,
+        args.allow_special_files,
+    )?;
     if args.allow_unauthenticated_delta_sidecar {
         return Err(
             "--allow-unauthenticated-delta-sidecar was removed; RQ delta negotiation is authenticated on the existing control stream"
@@ -9207,6 +9267,104 @@ mod tests {
         .expect("RQ CLI config");
         assert_eq!(rq.metadata_policy, policy);
         assert!(rq.preserve_hardlinks);
+    }
+
+    #[test]
+    fn quic_metadata_cli_flags_are_opt_in_and_transport_scoped() {
+        let send = Cli::try_parse_from([
+            "atp",
+            "send",
+            "payload",
+            "127.0.0.1:8472",
+            "--transport",
+            "quic",
+            "--preserve-xattrs",
+            "--allow-special-files",
+        ])
+        .expect("parse QUIC send metadata flags");
+        let Command::Send(send) = send.command else {
+            panic!("expected send command");
+        };
+        assert!(send.preserve_xattrs);
+        assert!(send.allow_special_files);
+
+        let recv = Cli::try_parse_from([
+            "atp",
+            "recv",
+            "destination",
+            "--transport",
+            "quic",
+            "--preserve-xattrs",
+            "--allow-special-files",
+        ])
+        .expect("parse QUIC receive metadata flags");
+        let Command::Recv(recv) = recv.command else {
+            panic!("expected recv command");
+        };
+        assert!(recv.preserve_xattrs);
+        assert!(recv.allow_special_files);
+
+        let serve = Cli::try_parse_from([
+            "atp",
+            "serve",
+            "destination",
+            "--transport",
+            "quic",
+            "--preserve-xattrs",
+            "--allow-special-files",
+        ])
+        .expect("parse QUIC serve metadata flags");
+        let Command::Serve(serve) = serve.command else {
+            panic!("expected serve command");
+        };
+        assert!(serve.preserve_xattrs);
+        assert!(serve.allow_special_files);
+
+        let send_defaults = Cli::try_parse_from([
+            "atp",
+            "send",
+            "payload",
+            "127.0.0.1:8472",
+            "--transport",
+            "quic",
+        ])
+        .expect("parse default QUIC send metadata flags");
+        let Command::Send(send_defaults) = send_defaults.command else {
+            panic!("expected send command");
+        };
+        assert!(!send_defaults.preserve_xattrs);
+        assert!(!send_defaults.allow_special_files);
+
+        for command in ["recv", "serve"] {
+            let defaults =
+                Cli::try_parse_from(["atp", command, "destination", "--transport", "quic"])
+                    .expect("parse default QUIC receive metadata flags");
+            let defaults = match defaults.command {
+                Command::Recv(args) | Command::Serve(args) => args,
+                _ => panic!("expected receive command"),
+            };
+            assert!(!defaults.preserve_xattrs);
+            assert!(!defaults.allow_special_files);
+        }
+
+        let policy = selected_cli_quic_metadata_policy(true);
+        assert!(policy.preserve_timestamps);
+        assert!(policy.preserve_extended_attributes);
+        assert!(!selected_cli_quic_metadata_policy(false).preserve_extended_attributes);
+        validate_quic_metadata_options(Transport::Quic, true, true)
+            .expect("QUIC accepts explicit metadata options");
+        for transport in [Transport::Tcp, Transport::Rq, Transport::Auto] {
+            for (preserve_xattrs, allow_special_files, rejected_flag) in [
+                (true, false, "--preserve-xattrs"),
+                (false, true, "--allow-special-files"),
+            ] {
+                let error =
+                    validate_quic_metadata_options(transport, preserve_xattrs, allow_special_files)
+                        .expect_err("non-QUIC transport must reject metadata fidelity flag");
+                assert!(error.contains(rejected_flag));
+                assert!(error.contains("requires --transport quic"));
+            }
+        }
     }
 
     #[test]

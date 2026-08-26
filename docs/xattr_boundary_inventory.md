@@ -70,9 +70,13 @@ the incumbent's fd extension trait.
 ## ATP data and policy contract
 
 `MetadataPolicy::preserve_extended_attributes` is public. It is false for
-`Default` and `portable()`, true for `full_preservation()`, and remains false
-in the CLI-selected metadata policy. Extended-attribute preservation is an
-explicit library opt-in, not the ordinary CLI journey.
+`Default` and `portable()`, and true for `full_preservation()`. The ordinary
+CLI journey remains default-off. QUIC `send`, `recv`, and `serve` expose an
+explicit `--preserve-xattrs` opt-in; direct peers must opt in independently,
+while SSH bootstrap forwards the sender's option to the receiver. TCP, RQ,
+and auto transport selection reject the option rather than silently dropping
+the requested fidelity. The opt-in does not add a namespace allowlist,
+aggregate-size budget, or transactional rollback.
 
 Successful capture stores attributes in `EntryMetadata::xattrs`, a
 `BTreeMap<String, Vec<u8>>`. The map provides canonical UTF-8 name ordering
@@ -192,13 +196,13 @@ evidence remains a blocker, never parity.
 | `XATTR-A1-GAP-04` | allocation, retry, count, and aggregate limits are absent | resource policy |
 | `XATTR-A1-GAP-05` | apply is partial, stringly typed, and has no rollback | apply contract |
 | `XATTR-A1-GAP-06` | setup failure returns a successful test result | CAP-XATTR tests |
-| `XATTR-A1-GAP-07` | only one regular-file TCP journey is directly exercised | CAP-XATTR E2E |
+| `XATTR-A1-GAP-07` | retained runtime evidence covers one regular-file TCP journey; the QUIC source fixture lacks a terminal runtime receipt | CAP-XATTR E2E |
 | `XATTR-A1-GAP-08` | all three canonical scenarios are absent from the runner | suite owner |
 | `XATTR-A1-GAP-09` | one fixture is assigned evidence classes it does not cover | baseline owner |
 | `XATTR-A1-GAP-10` | registry source owners omit real consumers | registry owner |
 | `XATTR-A1-GAP-11` | API surface map has no capability mapping | surface-map owner |
 | `XATTR-A1-GAP-12` | non-Linux runtime receipts are absent | platform proof |
-| `XATTR-A1-GAP-13` | CLI disables xattrs without an operator parity statement | CLI docs |
+| `XATTR-A1-GAP-13` | QUIC CLI opt-in lacks retained transfer parity, namespace/size limits, and rollback evidence | CLI evidence/security |
 
 Every gap is incumbent hardening, evidence, or documentation work. None is a
 finding that replacement is required.
