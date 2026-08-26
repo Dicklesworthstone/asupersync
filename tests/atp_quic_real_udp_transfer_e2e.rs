@@ -18,12 +18,16 @@
 use std::collections::VecDeque;
 use std::io::ErrorKind;
 use std::net::{SocketAddr, UdpSocket};
+#[cfg(unix)]
+use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+#[cfg(unix)]
+use asupersync::atp::object::MetadataPolicy;
 use asupersync::cx::Cx;
 use asupersync::net::atp::transport_quic::native_link::{
     QuicClientTls, QuicServerTls, bind_server_endpoint, receive_on_endpoint,
@@ -1181,6 +1185,154 @@ fn real_udp_quic_transfer_directory_tree_authenticated() {
     assert_eq!(std::fs::read(base.join("a.bin")).expect("read a"), a);
     assert_eq!(std::fs::read(base.join("sub/b.bin")).expect("read b"), b);
     assert_eq!(std::fs::read(base.join("sub/c.txt")).expect("read c"), c);
+    assert_no_staging_residue(dst.path());
+}
+
+#[cfg(unix)]
+#[test]
+fn real_udp_quic_transfer_metadata_fidelity_authenticated() {
+    let src = tempfile::tempdir().expect("src dir");
+    let dst = tempfile::tempdir().expect("dst dir");
+    let root = src.path().join("metadata-tree");
+    std::fs::create_dir_all(&root).expect("create metadata tree");
+
+    let payload = root.join("payload.bin");
+    std::fs::write(&payload, b"quic metadata fidelity\n").expect("write payload");
+    std::fs::set_permissions(&payload, std::fs::Permissions::from_mode(0o640))
+        .expect("set payload mode");
+    let fixed_mtime = std::time::UNIX_EPOCH + Duration::from_secs(1_600_000_123);
+    std::fs::File::open(&payload)
+        .expect("open payload for timestamp")
+        .set_times(std::fs::FileTimes::new().set_modified(fixed_mtime))
+        .expect("set payload mtime");
+    let xattr_name = "user.asupersync.quic-metadata-e2e";
+    let xattr_value = b"metadata-value\0with-binary";
+    let xattr_supported = xattr::set(&payload, xattr_name, xattr_value).is_ok();
+
+    let empty = root.join("empty-dir");
+    std::fs::create_dir(&empty).expect("create empty directory");
+    std::fs::set_permissions(&empty, std::fs::Permissions::from_mode(0o750))
+        .expect("set empty directory mode");
+
+    std::os::unix::fs::symlink("payload.bin", root.join("relative-link"))
+        .expect("create relative symlink");
+    std::os::unix::fs::symlink("missing-target", root.join("dangling-link"))
+        .expect("create dangling symlink");
+
+    let hardlink_primary = root.join("hardlink-a.txt");
+    let hardlink_alias = root.join("hardlink-b.txt");
+    std::fs::write(&hardlink_primary, b"shared hardlink content\n")
+        .expect("write hardlink primary");
+    std::fs::hard_link(&hardlink_primary, &hardlink_alias).expect("create hardlink alias");
+
+    let fifo = root.join("events.fifo");
+    nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::from_bits_truncate(0o620))
+        .expect("create source FIFO");
+    std::fs::set_permissions(&fifo, std::fs::Permissions::from_mode(0o620)).expect("set FIFO mode");
+
+    let mut cfg = authenticated_configs(0x6D37_A001);
+    cfg.send.metadata_policy = MetadataPolicy::full_preservation();
+    cfg.recv.metadata_policy = MetadataPolicy::full_preservation();
+    cfg.send.allow_special_files = true;
+    cfg.recv.allow_special_files = true;
+    cfg.send.preserve_hardlinks = true;
+    cfg.recv.preserve_hardlinks = true;
+
+    let (send, recv) = run_transfer(cfg.send, cfg.recv, &root, dst.path());
+    let send = send.expect("metadata-fidelity send_path completes over real UDP");
+    let recv = recv.expect("metadata-fidelity receiver commits");
+    assert_receive_report_counters(&send, &recv, 47, 7);
+    assert_eq!(send.files, 7, "sender must report all logical entries");
+    assert!(send.receipt.committed, "sender receipt must report commit");
+    assert!(send.receipt.sha_ok, "sender receipt must report SHA proof");
+    assert!(
+        send.receipt.merkle_ok,
+        "sender receipt must report merkle proof"
+    );
+    assert!(recv.committed, "receiver must report commit");
+    assert_eq!(send.transfer_id, recv.transfer_id);
+
+    let out = dst.path().join("metadata-tree");
+    assert_eq!(
+        std::fs::read(out.join("payload.bin")).expect("read committed payload"),
+        b"quic metadata fidelity\n"
+    );
+    let payload_metadata = std::fs::metadata(out.join("payload.bin")).expect("payload metadata");
+    assert_eq!(payload_metadata.permissions().mode() & 0o7777, 0o640);
+    assert_eq!(
+        payload_metadata
+            .modified()
+            .expect("payload mtime")
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("payload mtime after epoch")
+            .as_secs(),
+        1_600_000_123
+    );
+    if xattr_supported {
+        assert_eq!(
+            xattr::get(out.join("payload.bin"), xattr_name).expect("read committed xattr"),
+            Some(xattr_value.to_vec()),
+            "xattr value must round-trip byte-identically"
+        );
+    }
+
+    let empty_metadata =
+        std::fs::symlink_metadata(out.join("empty-dir")).expect("committed empty directory");
+    assert!(empty_metadata.is_dir(), "empty directory must survive");
+    assert_eq!(empty_metadata.permissions().mode() & 0o7777, 0o750);
+    assert!(
+        std::fs::read_dir(out.join("empty-dir"))
+            .expect("read committed empty directory")
+            .next()
+            .is_none(),
+        "empty directory must remain empty"
+    );
+
+    for (name, target) in [
+        ("relative-link", Path::new("payload.bin")),
+        ("dangling-link", Path::new("missing-target")),
+    ] {
+        let link = out.join(name);
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .expect("committed symlink")
+                .file_type()
+                .is_symlink(),
+            "{name} must remain a symlink"
+        );
+        assert_eq!(std::fs::read_link(link).expect("read symlink"), target);
+    }
+    assert!(
+        !out.join("dangling-link").exists(),
+        "dangling symlink must remain unresolved"
+    );
+
+    let out_hardlink_primary = out.join("hardlink-a.txt");
+    let out_hardlink_alias = out.join("hardlink-b.txt");
+    assert_eq!(
+        std::fs::read(&out_hardlink_primary).expect("read hardlink primary"),
+        b"shared hardlink content\n"
+    );
+    assert_eq!(
+        std::fs::read(&out_hardlink_alias).expect("read hardlink alias"),
+        b"shared hardlink content\n"
+    );
+    let primary_metadata =
+        std::fs::metadata(&out_hardlink_primary).expect("hardlink primary metadata");
+    let alias_metadata = std::fs::metadata(&out_hardlink_alias).expect("hardlink alias metadata");
+    assert_eq!(
+        (primary_metadata.dev(), primary_metadata.ino()),
+        (alias_metadata.dev(), alias_metadata.ino()),
+        "hardlink entries must share an inode after commit"
+    );
+
+    let fifo_metadata =
+        std::fs::symlink_metadata(out.join("events.fifo")).expect("committed FIFO metadata");
+    assert!(
+        fifo_metadata.file_type().is_fifo(),
+        "FIFO must be recreated"
+    );
+    assert_eq!(fifo_metadata.permissions().mode() & 0o7777, 0o620);
     assert_no_staging_residue(dst.path());
 }
 
