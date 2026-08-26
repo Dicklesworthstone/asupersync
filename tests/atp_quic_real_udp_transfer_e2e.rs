@@ -658,6 +658,45 @@ fn assert_no_staging_residue(dest_dir: &Path) {
     }
 }
 
+#[cfg(unix)]
+fn write_sparse_fixture(path: &Path, logical_size: usize, marker: &[u8]) -> Vec<u8> {
+    let mut file = std::fs::File::create(path).expect("create sparse fixture");
+    file.set_len(u64::try_from(logical_size).expect("sparse fixture size fits u64"))
+        .expect("pre-size sparse fixture");
+    file.write_all(marker).expect("write sparse fixture prefix");
+    let tail_offset = logical_size
+        .checked_sub(marker.len())
+        .expect("sparse fixture exceeds marker");
+    file.seek(std::io::SeekFrom::Start(
+        u64::try_from(tail_offset).expect("sparse fixture tail fits u64"),
+    ))
+    .expect("seek sparse fixture tail");
+    file.write_all(marker).expect("write sparse fixture suffix");
+    file.sync_all().expect("sync sparse fixture");
+    let mut expected = vec![0u8; logical_size];
+    expected[..marker.len()].copy_from_slice(marker);
+    expected[tail_offset..].copy_from_slice(marker);
+    expected
+}
+
+#[cfg(unix)]
+fn assert_sparse_fixture(path: &Path, expected: &[u8], context: &str) {
+    assert_eq!(
+        std::fs::read(path).expect("read sparse fixture"),
+        expected,
+        "sparse reconstruction must preserve logical bytes for {context}"
+    );
+    let metadata = std::fs::metadata(path).expect("sparse fixture metadata");
+    assert_eq!(
+        metadata.len(),
+        u64::try_from(expected.len()).expect("expected sparse size fits u64")
+    );
+    assert!(
+        metadata.blocks().saturating_mul(512) < metadata.len() / 2,
+        "sparse allocation must remain below half the logical size for {context}"
+    );
+}
+
 fn assert_send_fails_closed_before_commit(send: QuicConfig, recv: QuicConfig, file_name: &str) {
     let src = tempfile::tempdir().expect("src dir");
     let dst = tempfile::tempdir().expect("dst dir");
@@ -1254,25 +1293,6 @@ fn real_udp_quic_transfer_metadata_fidelity_authenticated() {
         .expect("write hardlink primary");
     std::fs::hard_link(&hardlink_primary, &hardlink_alias).expect("create hardlink alias");
 
-    let write_sparse_fixture = |path: &Path, logical_size: usize, marker: &[u8]| {
-        let mut file = std::fs::File::create(path).expect("create sparse fixture");
-        file.set_len(u64::try_from(logical_size).expect("sparse fixture size fits u64"))
-            .expect("pre-size sparse fixture");
-        file.write_all(marker).expect("write sparse fixture prefix");
-        let tail_offset = logical_size
-            .checked_sub(marker.len())
-            .expect("sparse fixture exceeds marker");
-        file.seek(std::io::SeekFrom::Start(
-            u64::try_from(tail_offset).expect("sparse fixture tail fits u64"),
-        ))
-        .expect("seek sparse fixture tail");
-        file.write_all(marker).expect("write sparse fixture suffix");
-        file.sync_all().expect("sync sparse fixture");
-        let mut expected = vec![0u8; logical_size];
-        expected[..marker.len()].copy_from_slice(marker);
-        expected[tail_offset..].copy_from_slice(marker);
-        expected
-    };
     let packed_sparse = root.join("packed-sparse.bin");
     let packed_sparse_expected = write_sparse_fixture(&packed_sparse, 512 * 1024, b"packed-sparse");
     let regular_sparse = root.join("regular-sparse.bin");
@@ -1409,21 +1429,83 @@ fn real_udp_quic_transfer_metadata_fidelity_authenticated() {
         ("regular-sparse.bin", regular_sparse_expected),
     ] {
         let committed = out.join(name);
-        assert_eq!(
-            std::fs::read(&committed).expect("read committed sparse fixture"),
-            expected,
-            "sparse reconstruction must preserve logical bytes for {name}"
-        );
-        let metadata = std::fs::metadata(&committed).expect("committed sparse metadata");
-        assert_eq!(
-            metadata.len(),
-            u64::try_from(expected.len()).expect("expected sparse size fits u64")
-        );
-        assert!(
-            metadata.blocks().saturating_mul(512) < metadata.len() / 2,
-            "receiver opt-in must preserve sparse allocation for {name}"
-        );
+        assert_sparse_fixture(&committed, &expected, name);
     }
+    assert_no_staging_residue(dst.path());
+}
+
+#[cfg(unix)]
+#[test]
+fn real_udp_quic_source_stream_preserves_sparse_regular_and_packed_entries() {
+    let src = tempfile::tempdir().expect("src dir");
+    let dst = tempfile::tempdir().expect("dst dir");
+    let root = src.path().join("source-stream-sparse-tree");
+    std::fs::create_dir_all(&root).expect("create source-stream sparse tree");
+
+    let packed_a = root.join("packed-a-sparse.bin");
+    let packed_a_expected = write_sparse_fixture(&packed_a, 256 * 1024, b"packed-a-source-stream");
+    let packed_b = root.join("packed-b-sparse.bin");
+    let packed_b_expected = write_sparse_fixture(&packed_b, 256 * 1024, b"packed-b-source-stream");
+    let regular = root.join("regular-sparse.bin");
+    let regular_expected =
+        write_sparse_fixture(&regular, 2 * 1024 * 1024, b"regular-source-stream");
+    assert_sparse_fixture(&packed_a, &packed_a_expected, "packed source A");
+    assert_sparse_fixture(&packed_b, &packed_b_expected, "packed source B");
+    assert_sparse_fixture(&regular, &regular_expected, "regular source");
+
+    let cfg = transport_authenticated_configs();
+    let (send, recv) = run_transfer_with_options(
+        cfg.send,
+        cfg.recv,
+        &root,
+        dst.path(),
+        QuicReceiveOptions::new().with_sparse_files(true),
+    );
+    let send = send.expect("source-stream sparse send completes over real UDP");
+    let recv = recv.expect("source-stream sparse receiver commits");
+    let expected_bytes =
+        u64::try_from(packed_a_expected.len() + packed_b_expected.len() + regular_expected.len())
+            .expect("sparse fixture total fits u64");
+    assert!(recv.committed, "source-stream receiver must commit");
+    assert_eq!(recv.bytes_received, expected_bytes);
+    assert_eq!(send.bytes_sent, expected_bytes);
+    assert_eq!(recv.files, 3);
+    assert_eq!(send.files, 3);
+    assert_eq!(send.transfer_id, recv.transfer_id);
+    assert_eq!(send.receipt.symbols_accepted, recv.symbols_accepted);
+    assert_eq!(send.receipt.feedback_rounds, recv.feedback_rounds);
+    assert_eq!(send.receipt.decode_count, recv.decode_count);
+    assert_eq!(
+        send.symbols_sent, 0,
+        "source-stream sender must not emit RaptorQ symbols"
+    );
+    assert_eq!(
+        (
+            recv.symbols_accepted,
+            recv.decode_count,
+            recv.feedback_rounds
+        ),
+        (0, 0, 0),
+        "lossless transport-auth transfer must prove the reliable source-stream path"
+    );
+    assert!(send.receipt.committed && send.receipt.sha_ok && send.receipt.merkle_ok);
+
+    let out = dst.path().join("source-stream-sparse-tree");
+    assert_sparse_fixture(
+        &out.join("packed-a-sparse.bin"),
+        &packed_a_expected,
+        "packed source-stream destination A",
+    );
+    assert_sparse_fixture(
+        &out.join("packed-b-sparse.bin"),
+        &packed_b_expected,
+        "packed source-stream destination B",
+    );
+    assert_sparse_fixture(
+        &out.join("regular-sparse.bin"),
+        &regular_expected,
+        "regular source-stream destination",
+    );
     assert_no_staging_residue(dst.path());
 }
 
