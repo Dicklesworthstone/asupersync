@@ -8477,7 +8477,7 @@ fn write_quic_packed_member_batch_streaming(
                 out.set_len(member.len)?;
                 let mut remaining = member.len;
                 let mut copied = 0u64;
-                let mut buffer = vec![0u8; QUIC_SOURCE_STREAM_READ_CHUNK];
+                let mut buffer = vec![0u8; super::QUIC_SOURCE_STREAM_READ_CHUNK];
                 while remaining != 0 {
                     let limit = usize::try_from(remaining)
                         .unwrap_or(usize::MAX)
