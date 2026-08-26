@@ -59,7 +59,7 @@ use crate::net::atp::transport_common::metadata::{
 use crate::net::atp::transport_common::metadata::{
     HardlinkIdentity, commit_hardlink_transactionally, commit_staged_regular_file_transactionally,
     commit_symlink_transactionally, path_is_link_or_reparse, validate_entry_metadata_for_receive,
-    validate_symlink_metadata_for_receive,
+    validate_symlink_metadata_for_receive, write_sparse_zero_runs,
 };
 use crate::net::atp::transport_common::streaming::collect_entries_with_policy;
 use crate::net::atp::transport_common::{
@@ -1617,47 +1617,6 @@ fn data_frame(index: u32, offset: u64, chunk: &[u8]) -> Result<Frame, TransportE
         .map_err(|e| TransportError::Frame(e.to_string()))
 }
 
-/// Write `chunk` to `file`, punching holes for long zero runs by seeking past
-/// them instead of writing, so a sparse source stays sparse on disk. The caller
-/// must have `set_len` the file to its full length up front, so any trailing
-/// hole is preserved. Content is unchanged — holes read back as zeros — so the
-/// per-entry digest (computed over the full received stream) is unaffected.
-async fn write_chunk_sparse(
-    file: &mut crate::fs::File,
-    chunk: &[u8],
-) -> Result<(), TransportError> {
-    // Zero runs at least this long (one filesystem block) are punched as holes;
-    // shorter runs are written, since a sub-block hole saves no allocation.
-    const HOLE_THRESHOLD: usize = 4096;
-    let mut pos = 0;
-    while pos < chunk.len() {
-        let start = pos;
-        if chunk[pos] == 0 {
-            while pos < chunk.len() && chunk[pos] == 0 {
-                pos += 1;
-            }
-            let run = pos - start;
-            if run >= HOLE_THRESHOLD {
-                let run = i64::try_from(run).map_err(|_| {
-                    TransportError::Io(std::io::Error::new(
-                        std::io::ErrorKind::InvalidInput,
-                        "sparse zero run length exceeds i64::MAX",
-                    ))
-                })?;
-                file.seek(std::io::SeekFrom::Current(run)).await?;
-            } else {
-                file.write_all(&chunk[start..pos]).await?;
-            }
-        } else {
-            while pos < chunk.len() && chunk[pos] != 0 {
-                pos += 1;
-            }
-            file.write_all(&chunk[start..pos]).await?;
-        }
-    }
-    Ok(())
-}
-
 fn parse_data_frame(frame: &Frame) -> Result<(u32, u64, &[u8]), TransportError> {
     let p = frame.payload();
     if p.len() < 12 {
@@ -2784,7 +2743,7 @@ mod unused_delta_payload_helpers {
                         .await?;
                     file.seek(SeekFrom::Start(offset)).await?;
                     if config.sparse_files {
-                        write_chunk_sparse(&mut file, chunk).await?;
+                        write_sparse_zero_runs(&mut file, chunk).await?;
                     } else {
                         file.write_all(chunk).await?;
                     }
@@ -3916,7 +3875,7 @@ pub async fn receive_connection(
                         )));
                     };
                     if config.sparse_files {
-                        write_chunk_sparse(file, chunk).await?;
+                        write_sparse_zero_runs(file, chunk).await?;
                     } else {
                         file.write_all(chunk).await?;
                     }

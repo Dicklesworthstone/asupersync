@@ -769,6 +769,7 @@ async fn create_guarded_temporary_hardlink(
 async fn create_guarded_temporary_file(
     candidate: PathBuf,
     contents: Vec<u8>,
+    sparse_files: bool,
 ) -> io::Result<TemporaryLeafGuard> {
     crate::runtime::spawn_blocking_io(move || {
         use std::io::Write as _;
@@ -778,12 +779,106 @@ async fn create_guarded_temporary_file(
             .create_new(true)
             .open(&candidate)?;
         let guard = TemporaryLeafGuard::new(candidate, ReplaceableLeafKind::RegularFile);
-        file.write_all(&contents)?;
+        if sparse_files {
+            let logical_len = u64::try_from(contents.len()).map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "sparse file length exceeds u64::MAX",
+                )
+            })?;
+            file.set_len(logical_len)?;
+            write_sparse_zero_runs_sync(&mut file, &contents)?;
+        } else {
+            file.write_all(&contents)?;
+        }
         file.sync_all()?;
         drop(file);
         Ok(guard)
     })
     .await
+}
+
+/// Minimum zero-run length represented as a filesystem hole.
+///
+/// This is an allocation heuristic matching rsync-style sparse reconstruction,
+/// not an attempt to reproduce the sender's exact extent map. Runs shorter
+/// than one common filesystem block remain ordinary written zeros.
+pub(crate) const SPARSE_ZERO_RUN_THRESHOLD: usize = 4096;
+
+/// Write logical bytes while seeking across long zero runs.
+///
+/// The caller must pre-size the file to its final logical length so trailing
+/// holes remain visible as zeros. The function preserves byte content but does
+/// not claim exact source-extent fidelity.
+pub(crate) async fn write_sparse_zero_runs(
+    file: &mut crate::fs::File,
+    chunk: &[u8],
+) -> io::Result<()> {
+    use crate::io::AsyncWriteExt as _;
+
+    let mut pos = 0;
+    while pos < chunk.len() {
+        let start = pos;
+        if chunk[pos] == 0 {
+            while pos < chunk.len() && chunk[pos] == 0 {
+                pos += 1;
+            }
+            let run = pos - start;
+            if run >= SPARSE_ZERO_RUN_THRESHOLD {
+                let run = i64::try_from(run).map_err(|_| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "sparse zero run length exceeds i64::MAX",
+                    )
+                })?;
+                file.seek(std::io::SeekFrom::Current(run)).await?;
+            } else {
+                file.write_all(&chunk[start..pos]).await?;
+            }
+        } else {
+            while pos < chunk.len() && chunk[pos] != 0 {
+                pos += 1;
+            }
+            file.write_all(&chunk[start..pos]).await?;
+        }
+    }
+    Ok(())
+}
+
+/// Synchronous counterpart used inside an existing blocking-pool task.
+pub(crate) fn write_sparse_zero_runs_sync(
+    file: &mut std::fs::File,
+    chunk: &[u8],
+) -> io::Result<()> {
+    use std::io::{Seek as _, Write as _};
+
+    let mut pos = 0;
+    while pos < chunk.len() {
+        let start = pos;
+        if chunk[pos] == 0 {
+            while pos < chunk.len() && chunk[pos] == 0 {
+                pos += 1;
+            }
+            let run = pos - start;
+            if run >= SPARSE_ZERO_RUN_THRESHOLD {
+                let run = i64::try_from(run).map_err(|_| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "sparse zero run length exceeds i64::MAX",
+                    )
+                })?;
+                file.seek(std::io::SeekFrom::Current(run))?;
+            } else {
+                file.write_all(&chunk[start..pos])?;
+            }
+        } else {
+            while pos < chunk.len() && chunk[pos] != 0 {
+                pos += 1;
+            }
+            file.write_all(&chunk[start..pos])?;
+        }
+    }
+    Ok(())
 }
 
 /// Create and transactionally install a typed symbolic link.
@@ -898,10 +993,34 @@ pub async fn commit_regular_bytes_with_metadata_transactionally(
     contents: &[u8],
     metadata: Option<&EntryMetadata>,
 ) -> Result<MetadataApplyReport, StreamingError> {
+    commit_regular_bytes_with_metadata_transactionally_inner(out_path, contents, metadata, false)
+        .await
+}
+
+/// Sparse-reconstruct logical bytes in an owned sibling before atomically
+/// replacing the destination.
+///
+/// This preserves content while representing long zero runs as holes. It does
+/// not reproduce the sender's exact filesystem extent map.
+pub(crate) async fn commit_regular_bytes_sparse_with_metadata_transactionally(
+    out_path: &Path,
+    contents: &[u8],
+    metadata: Option<&EntryMetadata>,
+) -> Result<MetadataApplyReport, StreamingError> {
+    commit_regular_bytes_with_metadata_transactionally_inner(out_path, contents, metadata, true)
+        .await
+}
+
+async fn commit_regular_bytes_with_metadata_transactionally_inner(
+    out_path: &Path,
+    contents: &[u8],
+    metadata: Option<&EntryMetadata>,
+    sparse_files: bool,
+) -> Result<MetadataApplyReport, StreamingError> {
     let mut staged = None;
     for _ in 0..32 {
         let candidate = unique_symlink_sibling(out_path, "file-new")?;
-        match create_guarded_temporary_file(candidate, contents.to_vec()).await {
+        match create_guarded_temporary_file(candidate, contents.to_vec(), sparse_files).await {
             Ok(guard) => {
                 staged = Some(guard);
                 break;

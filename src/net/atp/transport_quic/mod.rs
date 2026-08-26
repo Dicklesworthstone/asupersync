@@ -551,6 +551,55 @@ pub struct QuicConfig {
     pub server_tls: Option<native_link::QuicServerTls>,
 }
 
+/// Receiver-only filesystem reconstruction options for ATP-over-QUIC.
+///
+/// This type is separate from [`QuicConfig`] so adding receiver behaviors does
+/// not break callers that construct the public transport config exhaustively.
+/// All options default off, preserving the established dense-file behavior.
+/// Sparse allocation is currently available only on Unix and remains subject
+/// to the destination filesystem's hole-allocation support.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct QuicReceiveOptions {
+    sparse_files: bool,
+}
+
+impl QuicReceiveOptions {
+    /// Create receiver options with compatibility-preserving defaults.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            sparse_files: false,
+        }
+    }
+
+    /// Reconstruct long zero runs as filesystem holes when enabled.
+    ///
+    /// This is a content-preserving allocation heuristic. It does not claim to
+    /// reproduce the sender's exact filesystem extent map.
+    #[must_use]
+    pub const fn with_sparse_files(mut self, enabled: bool) -> Self {
+        self.sparse_files = enabled;
+        self
+    }
+
+    /// Whether the receiver reconstructs long zero runs as filesystem holes.
+    #[must_use]
+    pub const fn sparse_files(&self) -> bool {
+        self.sparse_files
+    }
+
+    fn validate(&self) -> Result<(), QuicTransportError> {
+        if self.sparse_files() && !cfg!(unix) {
+            return Err(QuicTransportError::Config(
+                "QUIC sparse-file reconstruction currently requires Unix; Windows needs an \
+                 FSCTL_SET_SPARSE implementation before this option can be enabled"
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Public per-symbol authentication posture for ATP-over-QUIC.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QuicSymbolAuthMode {
@@ -9579,6 +9628,7 @@ async fn commit_quic_metadata_entry(
     Ok(QuicMetadataCommit::Regular)
 }
 
+#[cfg(test)]
 async fn commit_decoded_entries(
     cx: &Cx,
     dest_dir: &Path,
@@ -9588,6 +9638,31 @@ async fn commit_decoded_entries(
     feedback_rounds: u32,
     decode_stats: QuicDecodeStats,
     config: &QuicConfig,
+) -> Result<(ReceiveReceipt, Vec<PathBuf>), QuicTransportError> {
+    commit_decoded_entries_with_options(
+        cx,
+        dest_dir,
+        manifest,
+        decoders,
+        symbols_accepted,
+        feedback_rounds,
+        decode_stats,
+        config,
+        &QuicReceiveOptions::default(),
+    )
+    .await
+}
+
+async fn commit_decoded_entries_with_options(
+    cx: &Cx,
+    dest_dir: &Path,
+    manifest: &TransferManifest,
+    decoders: &[QuicEntryDecoder],
+    symbols_accepted: u64,
+    feedback_rounds: u32,
+    decode_stats: QuicDecodeStats,
+    config: &QuicConfig,
+    options: &QuicReceiveOptions,
 ) -> Result<(ReceiveReceipt, Vec<PathBuf>), QuicTransportError> {
     let mut receipt = verify_in_memory_receipt(manifest, decoders);
     receipt.symbols_accepted = symbols_accepted;
@@ -9634,12 +9709,21 @@ async fn commit_decoded_entries(
                         member.rel_path
                     ))
                 })?;
-                let report = crate::net::atp::transport_common::metadata::commit_regular_bytes_with_metadata_transactionally(
-                    &member_path,
-                    slice,
-                    member.metadata.as_ref(),
-                )
-                .await?;
+                let report = if options.sparse_files() {
+                    crate::net::atp::transport_common::metadata::commit_regular_bytes_sparse_with_metadata_transactionally(
+                        &member_path,
+                        slice,
+                        member.metadata.as_ref(),
+                    )
+                    .await?
+                } else {
+                    crate::net::atp::transport_common::metadata::commit_regular_bytes_with_metadata_transactionally(
+                        &member_path,
+                        slice,
+                        member.metadata.as_ref(),
+                    )
+                    .await?
+                };
                 trace_quic_metadata_skips(cx, &member_path, &report);
                 committed_paths.push(member_path);
             }
@@ -9663,12 +9747,21 @@ async fn commit_decoded_entries(
             crate::fs::create_dir_all(parent).await?;
         }
         reject_quic_destination_symlink_prefix(&base, &out_path).await?;
-        let report = crate::net::atp::transport_common::metadata::commit_regular_bytes_with_metadata_transactionally(
-            &out_path,
-            &decoder.data,
-            entry.metadata.as_ref(),
-        )
-        .await?;
+        let report = if options.sparse_files() {
+            crate::net::atp::transport_common::metadata::commit_regular_bytes_sparse_with_metadata_transactionally(
+                &out_path,
+                &decoder.data,
+                entry.metadata.as_ref(),
+            )
+            .await?
+        } else {
+            crate::net::atp::transport_common::metadata::commit_regular_bytes_with_metadata_transactionally(
+                &out_path,
+                &decoder.data,
+                entry.metadata.as_ref(),
+            )
+            .await?
+        };
         trace_quic_metadata_skips(cx, &out_path, &report);
         committed_paths.push(out_path);
     }
@@ -9842,6 +9935,7 @@ async fn receive_established_native_connection(
     dest_dir: &Path,
     config: QuicConfig,
     peer_id: &str,
+    options: QuicReceiveOptions,
 ) -> Result<ReceiveReport, QuicTransportError> {
     let mut config = effective_quic_receiver_config(&config)?;
     let mut control = NativeQuicFrameTransport::for_stream(first_client_bidi_stream());
@@ -9937,7 +10031,7 @@ async fn receive_established_native_connection(
         }
     }
 
-    let (receipt, committed_paths) = commit_decoded_entries(
+    let (receipt, committed_paths) = commit_decoded_entries_with_options(
         cx,
         dest_dir,
         &manifest,
@@ -9946,6 +10040,7 @@ async fn receive_established_native_connection(
         feedback_rounds,
         decode_stats,
         &config,
+        &options,
     )
     .await?;
     send_native_proof(cx, &mut connection, &mut control, &receipt)?;
@@ -9980,7 +10075,13 @@ async fn receive_established_native_connection(
 /// sink is attached — no stdout/stderr from the runtime. The env-gated
 /// `ATP_QUIC_TRACE` hook (see `quic_native`) remains the per-frame diagnostic
 /// channel for the B2/B3 wire paths.
-fn trace_config_summary(cx: &Cx, operation: &str, config: &QuicConfig, peer_id: &str) {
+fn trace_config_summary(
+    cx: &Cx,
+    operation: &str,
+    config: &QuicConfig,
+    peer_id: &str,
+    receive_options: Option<&QuicReceiveOptions>,
+) {
     let protocol = ATP_QUIC_PROTOCOL.to_string();
     let symbol_size = config.symbol_size.to_string();
     let max_block_size = config.max_block_size.to_string();
@@ -10002,6 +10103,10 @@ fn trace_config_summary(cx: &Cx, operation: &str, config: &QuicConfig, peer_id: 
     let metadata_policy = format!("{:?}", config.metadata_policy);
     let allow_special_files = config.allow_special_files.to_string();
     let preserve_hardlinks = config.preserve_hardlinks.to_string();
+    let sparse_files = receive_options.map_or_else(
+        || "not-applicable".to_string(),
+        |options| options.sparse_files().to_string(),
+    );
     cx.trace_with_fields(
         "atp_quic.transport.start",
         &[
@@ -10036,6 +10141,7 @@ fn trace_config_summary(cx: &Cx, operation: &str, config: &QuicConfig, peer_id: 
             ("metadata_policy", &metadata_policy),
             ("allow_special_files", &allow_special_files),
             ("preserve_hardlinks", &preserve_hardlinks),
+            ("sparse_files", &sparse_files),
         ],
     );
 }
@@ -10066,7 +10172,7 @@ pub async fn send_path(
 ) -> Result<SendReport, QuicTransportError> {
     cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
     config.validate()?;
-    trace_config_summary(cx, "send_path", &config, peer_id);
+    trace_config_summary(cx, "send_path", &config, peer_id, None);
     let prepared = prepare_source_manifest(cx, source, &config).await?;
     let config = prepared.effective_config(&config);
     config.validate()?;
@@ -10106,11 +10212,34 @@ pub async fn receive_path(
     config: QuicConfig,
     peer_id: &str,
 ) -> Result<ReceiveReport, QuicTransportError> {
+    receive_path_with_options(
+        cx,
+        listen,
+        dest_dir,
+        config,
+        peer_id,
+        QuicReceiveOptions::default(),
+    )
+    .await
+}
+
+/// [`receive_path`] with explicit receiver-only filesystem options.
+#[cfg(feature = "tls")]
+pub async fn receive_path_with_options(
+    cx: &Cx,
+    listen: SocketAddr,
+    dest_dir: &Path,
+    config: QuicConfig,
+    peer_id: &str,
+    options: QuicReceiveOptions,
+) -> Result<ReceiveReport, QuicTransportError> {
     cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
+    options.validate()?;
     config.validate()?;
-    trace_config_summary(cx, "receive_path", &config, peer_id);
+    trace_config_summary(cx, "receive_path", &config, peer_id, Some(&options));
     let endpoint = native_link::bind_server_endpoint(cx, listen).await?;
-    native_link::receive_on_endpoint(cx, endpoint, dest_dir, &config, peer_id).await
+    native_link::receive_on_endpoint_with_options(cx, endpoint, dest_dir, &config, peer_id, options)
+        .await
 }
 
 // ─── Public API: receive ─────────────────────────────────────────────────────
@@ -10133,9 +10262,30 @@ pub async fn receive_once(
     config: QuicConfig,
     peer_id: &str,
 ) -> Result<ReceiveReport, QuicTransportError> {
+    receive_once_with_options(
+        cx,
+        endpoint,
+        dest_dir,
+        config,
+        peer_id,
+        QuicReceiveOptions::default(),
+    )
+    .await
+}
+
+/// [`receive_once`] with explicit receiver-only filesystem options.
+pub async fn receive_once_with_options(
+    cx: &Cx,
+    endpoint: &mut ManagedQuicEndpoint,
+    dest_dir: &Path,
+    config: QuicConfig,
+    peer_id: &str,
+    options: QuicReceiveOptions,
+) -> Result<ReceiveReport, QuicTransportError> {
     cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
+    options.validate()?;
     config.validate()?;
-    trace_config_summary(cx, "receive_once", &config, peer_id);
+    trace_config_summary(cx, "receive_once", &config, peer_id, Some(&options));
 
     let Some(accepted) = endpoint.take_next_connection(cx)? else {
         return Err(QuicTransportError::Timeout {
@@ -10162,6 +10312,7 @@ pub async fn receive_once(
         dest_dir,
         config,
         peer_id,
+        options,
     )
     .await
 }
@@ -10187,10 +10338,34 @@ pub async fn receive_connection(
     config: QuicConfig,
     peer_id: &str,
 ) -> Result<ReceiveReport, QuicTransportError> {
+    receive_connection_with_options(
+        cx,
+        connection,
+        peer,
+        dest_dir,
+        config,
+        peer_id,
+        QuicReceiveOptions::default(),
+    )
+    .await
+}
+
+/// [`receive_connection`] with explicit receiver-only filesystem options.
+pub async fn receive_connection_with_options(
+    cx: &Cx,
+    connection: NativeQuicConnection,
+    peer: SocketAddr,
+    dest_dir: &Path,
+    config: QuicConfig,
+    peer_id: &str,
+    options: QuicReceiveOptions,
+) -> Result<ReceiveReport, QuicTransportError> {
     cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
+    options.validate()?;
     config.validate()?;
-    trace_config_summary(cx, "receive_connection", &config, peer_id);
-    receive_established_native_connection(cx, connection, peer, dest_dir, config, peer_id).await
+    trace_config_summary(cx, "receive_connection", &config, peer_id, Some(&options));
+    receive_established_native_connection(cx, connection, peer, dest_dir, config, peer_id, options)
+        .await
 }
 
 /// Drain routed endpoint connections, handling each accepted connection as a
@@ -10208,18 +10383,45 @@ pub async fn receive_connection(
 #[allow(clippy::needless_pass_by_value)]
 pub async fn serve<F>(
     cx: &Cx,
+    endpoint: ManagedQuicEndpoint,
+    dest_dir: PathBuf,
+    config: QuicConfig,
+    peer_id: String,
+    on_result: F,
+) -> Result<(), QuicTransportError>
+where
+    F: FnMut(Result<ReceiveReport, QuicTransportError>),
+{
+    serve_with_options(
+        cx,
+        endpoint,
+        dest_dir,
+        config,
+        peer_id,
+        QuicReceiveOptions::default(),
+        on_result,
+    )
+    .await
+}
+
+/// [`serve`] with explicit receiver-only filesystem options.
+#[allow(clippy::needless_pass_by_value)]
+pub async fn serve_with_options<F>(
+    cx: &Cx,
     mut endpoint: ManagedQuicEndpoint,
     dest_dir: PathBuf,
     config: QuicConfig,
     peer_id: String,
+    options: QuicReceiveOptions,
     mut on_result: F,
 ) -> Result<(), QuicTransportError>
 where
     F: FnMut(Result<ReceiveReport, QuicTransportError>),
 {
     cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
+    options.validate()?;
     config.validate()?;
-    trace_config_summary(cx, "serve", &config, &peer_id);
+    trace_config_summary(cx, "serve", &config, &peer_id, Some(&options));
 
     loop {
         cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
@@ -10243,6 +10445,7 @@ where
             &dest_dir,
             config.clone(),
             &peer_id,
+            options,
         )
         .await;
         on_result(result);
@@ -10252,6 +10455,45 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quic_receive_options_are_default_off_and_traced_within_field_budget() {
+        let default_options = QuicReceiveOptions::new();
+        assert_eq!(default_options, QuicReceiveOptions::default());
+        assert!(!default_options.sparse_files());
+        let sparse_options = default_options.with_sparse_files(true);
+        assert!(sparse_options.sparse_files());
+        #[cfg(unix)]
+        sparse_options
+            .validate()
+            .expect("Unix admits sparse reconstruction attempts");
+        #[cfg(not(unix))]
+        assert!(matches!(
+            sparse_options.validate(),
+            Err(QuicTransportError::Config(_))
+        ));
+
+        let cx = Cx::for_testing();
+        let collector = crate::observability::LogCollector::new(8)
+            .with_min_level(crate::observability::LogLevel::Trace);
+        cx.set_diagnostic_context(crate::observability::DiagnosticContext::new());
+        cx.set_log_collector(collector.clone());
+        trace_config_summary(
+            &cx,
+            "receive_once",
+            &QuicConfig::default(),
+            "receiver",
+            Some(&sparse_options),
+        );
+
+        let entries = collector.peek();
+        let config = entries
+            .iter()
+            .find(|entry| entry.message() == "atp_quic.transport.config")
+            .expect("QUIC receive config trace");
+        assert_eq!(config.get_field("sparse_files"), Some("true"));
+        assert!(config.field_count() <= 12);
+    }
 
     /// Test scratch dir whose path has no symlinked ancestors.
     ///

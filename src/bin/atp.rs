@@ -398,6 +398,10 @@ struct SendArgs {
     /// nodes remain skipped. Disabled by default.
     #[arg(long)]
     allow_special_files: bool,
+    /// Reconstruct long zero runs as filesystem holes on a supported Unix QUIC receiver.
+    /// For `send`, this is forwarded only to an SSH-bootstrapped receiver.
+    #[arg(long)]
+    sparse_files: bool,
     // ─── QUIC (`--transport quic`) TLS material ───
     /// PEM file of CA certificate(s) the sender trusts to verify the receiver's
     /// QUIC server certificate (quic only). Required unless the receiver's
@@ -509,6 +513,9 @@ struct RecvArgs {
     /// remain skipped. Disabled by default.
     #[arg(long)]
     allow_special_files: bool,
+    /// Reconstruct long zero runs as filesystem holes on a supported Unix QUIC receiver.
+    #[arg(long)]
+    sparse_files: bool,
     /// PEM certificate chain the QUIC receiver presents to senders (quic only).
     #[arg(long, value_name = "PATH")]
     server_cert: Option<PathBuf>,
@@ -865,6 +872,7 @@ fn validate_quic_metadata_options(
     transport: Transport,
     preserve_xattrs: bool,
     allow_special_files: bool,
+    sparse_files: bool,
 ) -> Result<(), String> {
     if transport != Transport::Quic {
         if preserve_xattrs {
@@ -873,6 +881,19 @@ fn validate_quic_metadata_options(
         if allow_special_files {
             return Err("--allow-special-files requires --transport quic".to_string());
         }
+        if sparse_files {
+            return Err("--sparse-files requires --transport quic".to_string());
+        }
+    }
+    Ok(())
+}
+
+fn validate_quic_receiver_sparse_platform(sparse_files: bool) -> Result<(), String> {
+    if sparse_files && !cfg!(unix) {
+        return Err(
+            "--sparse-files currently requires a Unix receiver; Windows needs FSCTL_SET_SPARSE"
+                .to_string(),
+        );
     }
     Ok(())
 }
@@ -1729,6 +1750,7 @@ fn run_send(mut args: SendArgs) -> Result<(), String> {
         args.transport,
         args.preserve_xattrs,
         args.allow_special_files,
+        args.sparse_files,
     )?;
     validate_requested_bwlimit_transport(args.transport, args.bwlimit_bps)?;
     validate_user_transfer_namespace(&args.source)?;
@@ -1761,6 +1783,7 @@ fn run_send(mut args: SendArgs) -> Result<(), String> {
     };
     match resolve(&args.target) {
         Ok(addresses) => {
+            validate_send_sparse_delivery(args.sparse_files, false)?;
             let rq_config_override = prepared_auth
                 .as_ref()
                 .filter(|_| matches!(args.transport, Transport::Rq | Transport::Auto))
@@ -1780,12 +1803,22 @@ fn run_send(mut args: SendArgs) -> Result<(), String> {
         }
         Err(resolve_error) => {
             if let Some(remote) = RemoteTarget::parse(&args.target) {
+                validate_send_sparse_delivery(args.sparse_files, true)?;
                 run_send_via_ssh(args, &remote, prepared_auth)
             } else {
                 Err(resolve_error)
             }
         }
     }
+}
+
+fn validate_send_sparse_delivery(sparse_files: bool, ssh_bootstrap: bool) -> Result<(), String> {
+    if sparse_files && !ssh_bootstrap {
+        return Err(
+            "--sparse-files on send requires an SSH target so the receiver can opt in".to_string(),
+        );
+    }
+    Ok(())
 }
 
 fn validate_auto_security_policy(args: &SendArgs) -> Result<(), String> {
@@ -6876,6 +6909,18 @@ fn probe_remote_tailscale_ipv4(
     Some(candidate.to_string())
 }
 
+fn append_quic_remote_receiver_options(args: &SendArgs, argv: &mut Vec<String>) {
+    if args.preserve_xattrs {
+        argv.push("--preserve-xattrs".to_string());
+    }
+    if args.allow_special_files {
+        argv.push("--allow-special-files".to_string());
+    }
+    if args.sparse_files {
+        argv.push("--sparse-files".to_string());
+    }
+}
+
 fn spawn_remote_receiver(
     args: &SendArgs,
     remote: &RemoteTarget,
@@ -6922,12 +6967,7 @@ fn spawn_remote_receiver(
         argv.push("--no-delta".to_string());
     }
     if args.transport == Transport::Quic {
-        if args.preserve_xattrs {
-            argv.push("--preserve-xattrs".to_string());
-        }
-        if args.allow_special_files {
-            argv.push("--allow-special-files".to_string());
-        }
+        append_quic_remote_receiver_options(args, &mut argv);
         // Validated in `run_send_via_ssh`; these are paths on the remote host.
         if let Some(cert) = &args.server_cert {
             argv.push("--server-cert".to_string());
@@ -8662,7 +8702,9 @@ fn run_recv(mut args: RecvArgs, persistent: bool) -> Result<(), String> {
         args.transport,
         args.preserve_xattrs,
         args.allow_special_files,
+        args.sparse_files,
     )?;
+    validate_quic_receiver_sparse_platform(args.sparse_files)?;
     if args.allow_unauthenticated_delta_sidecar {
         return Err(
             "--allow-unauthenticated-delta-sidecar was removed; RQ delta negotiation is authenticated on the existing control stream"
@@ -8867,11 +8909,14 @@ fn run_recv(mut args: RecvArgs, persistent: bool) -> Result<(), String> {
             #[cfg(feature = "tls")]
             {
                 let cfg = quic_config_recv(&args, rq_auth.as_ref())?;
+                let receive_options =
+                    asupersync::net::atp::transport_quic::QuicReceiveOptions::new()
+                        .with_sparse_files(args.sparse_files);
                 drop(rq_auth);
                 let chosen_fanout = cfg.datagram_fanout.max(1);
                 runtime.block_on(runtime.handle().spawn(async move {
                     use asupersync::net::atp::transport_quic::native_link::{
-                        bind_server_endpoint, receive_on_endpoint,
+                        bind_server_endpoint, receive_on_endpoint_with_options,
                     };
                     let cx = Cx::current().expect("receiver cx");
                     if one_shot {
@@ -8885,9 +8930,16 @@ fn run_recv(mut args: RecvArgs, persistent: bool) -> Result<(), String> {
                             dest.display()
                         );
                         let start = Instant::now();
-                        let report = receive_on_endpoint(&cx, endpoint, &dest, &cfg, &peer_id)
-                            .await
-                            .map_err(|e| e.to_string())?;
+                        let report = receive_on_endpoint_with_options(
+                            &cx,
+                            endpoint,
+                            &dest,
+                            &cfg,
+                            &peer_id,
+                            receive_options,
+                        )
+                        .await
+                        .map_err(|e| e.to_string())?;
                         let elapsed = start.elapsed();
                         handle_post_receive_delta(&dest, delta_enabled, max_bytes)?;
                         print_atp_metrics_line(
@@ -8922,7 +8974,16 @@ fn run_recv(mut args: RecvArgs, persistent: bool) -> Result<(), String> {
                                     .await
                                     .map_err(|e| e.to_string())?
                             };
-                            match receive_on_endpoint(&cx, current, &dest, &cfg, &peer_id).await {
+                            match receive_on_endpoint_with_options(
+                                &cx,
+                                current,
+                                &dest,
+                                &cfg,
+                                &peer_id,
+                                receive_options,
+                            )
+                            .await
+                            {
                                 Ok(r) => {
                                     if let Err(err) =
                                         handle_post_receive_delta(&dest, delta_enabled, max_bytes)
@@ -9280,6 +9341,7 @@ mod tests {
             "quic",
             "--preserve-xattrs",
             "--allow-special-files",
+            "--sparse-files",
         ])
         .expect("parse QUIC send metadata flags");
         let Command::Send(send) = send.command else {
@@ -9287,6 +9349,7 @@ mod tests {
         };
         assert!(send.preserve_xattrs);
         assert!(send.allow_special_files);
+        assert!(send.sparse_files);
 
         let recv = Cli::try_parse_from([
             "atp",
@@ -9296,6 +9359,7 @@ mod tests {
             "quic",
             "--preserve-xattrs",
             "--allow-special-files",
+            "--sparse-files",
         ])
         .expect("parse QUIC receive metadata flags");
         let Command::Recv(recv) = recv.command else {
@@ -9303,6 +9367,7 @@ mod tests {
         };
         assert!(recv.preserve_xattrs);
         assert!(recv.allow_special_files);
+        assert!(recv.sparse_files);
 
         let serve = Cli::try_parse_from([
             "atp",
@@ -9312,6 +9377,7 @@ mod tests {
             "quic",
             "--preserve-xattrs",
             "--allow-special-files",
+            "--sparse-files",
         ])
         .expect("parse QUIC serve metadata flags");
         let Command::Serve(serve) = serve.command else {
@@ -9319,6 +9385,7 @@ mod tests {
         };
         assert!(serve.preserve_xattrs);
         assert!(serve.allow_special_files);
+        assert!(serve.sparse_files);
 
         let send_defaults = Cli::try_parse_from([
             "atp",
@@ -9334,6 +9401,7 @@ mod tests {
         };
         assert!(!send_defaults.preserve_xattrs);
         assert!(!send_defaults.allow_special_files);
+        assert!(!send_defaults.sparse_files);
 
         for command in ["recv", "serve"] {
             let defaults =
@@ -9345,26 +9413,54 @@ mod tests {
             };
             assert!(!defaults.preserve_xattrs);
             assert!(!defaults.allow_special_files);
+            assert!(!defaults.sparse_files);
         }
 
         let policy = selected_cli_quic_metadata_policy(true);
         assert!(policy.preserve_timestamps);
         assert!(policy.preserve_extended_attributes);
         assert!(!selected_cli_quic_metadata_policy(false).preserve_extended_attributes);
-        validate_quic_metadata_options(Transport::Quic, true, true)
+        validate_quic_metadata_options(Transport::Quic, true, true, true)
             .expect("QUIC accepts explicit metadata options");
         for transport in [Transport::Tcp, Transport::Rq, Transport::Auto] {
-            for (preserve_xattrs, allow_special_files, rejected_flag) in [
-                (true, false, "--preserve-xattrs"),
-                (false, true, "--allow-special-files"),
+            for (preserve_xattrs, allow_special_files, sparse_files, rejected_flag) in [
+                (true, false, false, "--preserve-xattrs"),
+                (false, true, false, "--allow-special-files"),
+                (false, false, true, "--sparse-files"),
             ] {
-                let error =
-                    validate_quic_metadata_options(transport, preserve_xattrs, allow_special_files)
-                        .expect_err("non-QUIC transport must reject metadata fidelity flag");
+                let error = validate_quic_metadata_options(
+                    transport,
+                    preserve_xattrs,
+                    allow_special_files,
+                    sparse_files,
+                )
+                .expect_err("non-QUIC transport must reject metadata fidelity flag");
                 assert!(error.contains(rejected_flag));
                 assert!(error.contains("requires --transport quic"));
             }
         }
+
+        let ssh_send = SendArgs::try_parse_from([
+            "atp-send",
+            "payload",
+            "user@receiver:/destination",
+            "--transport",
+            "quic",
+            "--sparse-files",
+        ])
+        .expect("parse SSH sparse receiver option");
+        let mut remote_argv = Vec::new();
+        append_quic_remote_receiver_options(&ssh_send, &mut remote_argv);
+        assert_eq!(remote_argv, vec!["--sparse-files".to_string()]);
+        validate_send_sparse_delivery(true, true).expect("SSH forwards sparse receiver option");
+        let error = validate_send_sparse_delivery(true, false)
+            .expect_err("direct sender cannot configure receiver allocation");
+        assert!(error.contains("requires an SSH target"));
+        #[cfg(unix)]
+        validate_quic_receiver_sparse_platform(true)
+            .expect("Unix receiver admits sparse allocation attempts");
+        #[cfg(not(unix))]
+        assert!(validate_quic_receiver_sparse_platform(true).is_err());
     }
 
     #[test]

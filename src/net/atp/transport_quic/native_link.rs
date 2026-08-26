@@ -99,8 +99,8 @@ use crate::types::symbol::{Symbol, SymbolId, SymbolKind};
 use super::{
     NativeQuicFrameTransport, QuicBlockRepairRequest, QuicConfig, QuicControlReply,
     QuicEntryEncoder, QuicHello, QuicHelloAck, QuicNeedMore, QuicPreparedSource,
-    QuicSourceSymbolRequest, QuicSprayPacingDecision, QuicTransportError, ReceiveReceipt,
-    ReceiveReport, SendReport, TransferManifest,
+    QuicReceiveOptions, QuicSourceSymbolRequest, QuicSprayPacingDecision, QuicTransportError,
+    ReceiveReceipt, ReceiveReport, SendReport, TransferManifest,
 };
 
 /// Shared QUIC Initial Destination Connection ID for ATP-over-QUIC.
@@ -7901,6 +7901,7 @@ struct QuicStagedEntryReceive {
     staging_cursor: Option<u64>,
     staging_unflushed_bytes: usize,
     cache_staging_file: bool,
+    sparse_files: bool,
     /// `Some` while every accepted write has been sequential from offset 0;
     /// dropped on the first out-of-order write (e.g. decoded FEC blocks
     /// landing out of order), which falls back to the post-stream hash pass.
@@ -7908,7 +7909,22 @@ struct QuicStagedEntryReceive {
 }
 
 impl QuicStagedEntryReceive {
+    #[cfg(test)]
     fn new(staging_path: PathBuf, entry_size: u64, manifest_entries: usize) -> Self {
+        Self::new_with_options(
+            staging_path,
+            entry_size,
+            manifest_entries,
+            &QuicReceiveOptions::default(),
+        )
+    }
+
+    fn new_with_options(
+        staging_path: PathBuf,
+        entry_size: u64,
+        manifest_entries: usize,
+        options: &QuicReceiveOptions,
+    ) -> Self {
         Self {
             staging_path,
             created: false,
@@ -7916,7 +7932,10 @@ impl QuicStagedEntryReceive {
             staging_cursor: None,
             staging_unflushed_bytes: 0,
             cache_staging_file: should_cache_quic_staging_file(entry_size, manifest_entries),
-            inline_hash: Some(QuicInlineEntryHash::new()),
+            sparse_files: options.sparse_files(),
+            // Sparse reconstruction is verified from the staged file itself so
+            // seek/write mistakes cannot be hidden by a hash of inbound bytes.
+            inline_hash: (!options.sparse_files()).then(QuicInlineEntryHash::new),
         }
     }
 
@@ -8086,7 +8105,12 @@ impl QuicStagedEntryReceive {
                         file.seek(std::io::SeekFrom::Start(offset)).await?;
                     }
                 }
-                file.write_all(data).await?;
+                if self.sparse_files {
+                    crate::net::atp::transport_common::metadata::write_sparse_zero_runs(file, data)
+                        .await?;
+                } else {
+                    file.write_all(data).await?;
+                }
                 if should_flush {
                     file.flush().await?;
                 }
@@ -8098,7 +8122,12 @@ impl QuicStagedEntryReceive {
 
         let mut file = self.open_staging_file(entry).await?;
         file.seek(std::io::SeekFrom::Start(offset)).await?;
-        file.write_all(data).await?;
+        if self.sparse_files {
+            crate::net::atp::transport_common::metadata::write_sparse_zero_runs(&mut file, data)
+                .await?;
+        } else {
+            file.write_all(data).await?;
+        }
         file.flush().await?;
         Ok(())
     }
@@ -8351,6 +8380,7 @@ fn write_quic_packed_member_batch_oneshot(
     staging_path: PathBuf,
     members: Vec<QuicPackedMemberWrite>,
     span_len: usize,
+    sparse_files: bool,
 ) -> std::io::Result<QuicPackedBatchWrite> {
     use std::io::{Read as _, Write as _};
 
@@ -8381,7 +8411,15 @@ fn write_quic_packed_member_batch_oneshot(
                 .open(&member.staging_path)?;
             let guard =
                 QuicPackedStagingGuard::new(member.staging_path.clone(), staging_root.clone());
-            out.write_all(&staged[start..end])?;
+            if sparse_files {
+                out.set_len(member.len)?;
+                crate::net::atp::transport_common::metadata::write_sparse_zero_runs_sync(
+                    &mut out,
+                    &staged[start..end],
+                )?;
+            } else {
+                out.write_all(&staged[start..end])?;
+            }
             out.sync_all()?;
             drop(out);
             let deferred = member
@@ -8414,6 +8452,7 @@ fn write_quic_packed_member_batch_oneshot(
 fn write_quic_packed_member_batch_streaming(
     staging_path: PathBuf,
     members: Vec<QuicPackedMemberWrite>,
+    sparse_files: bool,
 ) -> std::io::Result<QuicPackedBatchWrite> {
     use std::io::{Read as _, Seek as _, Write as _};
 
@@ -8434,10 +8473,34 @@ fn write_quic_packed_member_batch_streaming(
                 .open(&member.staging_path)?;
             let guard =
                 QuicPackedStagingGuard::new(member.staging_path.clone(), staging_root.clone());
-            let copied = std::io::copy(
-                &mut std::io::Read::by_ref(&mut source).take(member.len),
-                &mut out,
-            )?;
+            let copied = if sparse_files {
+                out.set_len(member.len)?;
+                let mut remaining = member.len;
+                let mut copied = 0u64;
+                let mut buffer = vec![0u8; QUIC_SOURCE_STREAM_READ_CHUNK];
+                while remaining != 0 {
+                    let limit = usize::try_from(remaining)
+                        .unwrap_or(usize::MAX)
+                        .min(buffer.len());
+                    let read = source.read(&mut buffer[..limit])?;
+                    if read == 0 {
+                        break;
+                    }
+                    crate::net::atp::transport_common::metadata::write_sparse_zero_runs_sync(
+                        &mut out,
+                        &buffer[..read],
+                    )?;
+                    let read = u64::try_from(read).unwrap_or(u64::MAX);
+                    copied = copied.saturating_add(read);
+                    remaining = remaining.saturating_sub(read);
+                }
+                copied
+            } else {
+                std::io::copy(
+                    &mut std::io::Read::by_ref(&mut source).take(member.len),
+                    &mut out,
+                )?
+            };
             if copied != member.len {
                 return Err(std::io::Error::other(format!(
                     "short read while splitting packed member {}",
@@ -8478,6 +8541,7 @@ fn write_quic_packed_member_batch_streaming(
 async fn write_quic_packed_member_batch(
     staging_path: &Path,
     members: &[QuicPackedMemberWrite],
+    sparse_files: bool,
 ) -> Result<QuicPackedBatchWrite, QuicTransportError> {
     let span_end = members
         .iter()
@@ -8501,7 +8565,7 @@ async fn write_quic_packed_member_batch(
             .collect::<Vec<_>>();
         let staging_display = staging_path.display().to_string();
         return crate::runtime::spawn_blocking_io(move || {
-            write_quic_packed_member_batch_oneshot(staging, batch, span_len)
+            write_quic_packed_member_batch_oneshot(staging, batch, span_len, sparse_files)
         })
         .await
         .map_err(|err| QuicTransportError::Source(format!("{staging_display}: {err}")));
@@ -8520,7 +8584,7 @@ async fn write_quic_packed_member_batch(
         .collect::<Vec<_>>();
     let staging_display = staging_path.display().to_string();
     crate::runtime::spawn_blocking_io(move || {
-        write_quic_packed_member_batch_streaming(staging, batch)
+        write_quic_packed_member_batch_streaming(staging, batch, sparse_files)
     })
     .await
     .map_err(|err| QuicTransportError::Source(format!("{staging_display}: {err}")))
@@ -8588,6 +8652,7 @@ async fn commit_staged_entries(
     manifest: &TransferManifest,
     staged: &mut [QuicStagedEntryReceive],
     config: &QuicConfig,
+    options: &QuicReceiveOptions,
 ) -> Result<(ReceiveReceipt, Vec<PathBuf>), QuicTransportError> {
     let mut read_buf = vec![0_u8; config.chunk_size.max(1)];
     let mut sha_ok = true;
@@ -8664,8 +8729,12 @@ async fn commit_staged_entries(
                         metadata: member.metadata.clone(),
                     });
                 }
-                let mut batch =
-                    write_quic_packed_member_batch(&staged_entry.staging_path, &writes).await?;
+                let mut batch = write_quic_packed_member_batch(
+                    &staged_entry.staging_path,
+                    &writes,
+                    options.sparse_files(),
+                )
+                .await?;
                 for (path, report) in &batch.reports {
                     super::trace_quic_metadata_skips(cx, path, report);
                 }
@@ -9435,6 +9504,7 @@ async fn run_receiver_session(
     dest_dir: &Path,
     config: &QuicConfig,
     peer_id: &str,
+    options: &QuicReceiveOptions,
 ) -> Result<ReceiveReport, QuicTransportError> {
     let mut config = super::effective_quic_receiver_config(config)?;
     config.validate()?;
@@ -9744,10 +9814,11 @@ async fn run_receiver_session(
         .iter()
         .enumerate()
         .map(|(i, entry)| {
-            QuicStagedEntryReceive::new(
+            QuicStagedEntryReceive::new_with_options(
                 staging_dir.join(i.to_string()),
                 entry.size,
                 manifest.entries.len(),
+                options,
             )
         })
         .collect::<Vec<_>>();
@@ -9793,6 +9864,7 @@ async fn run_receiver_session(
                 &manifest,
                 &mut staged,
                 config,
+                options,
             )
             .await?;
             receipt.symbols_accepted = symbols_accepted;
@@ -10283,6 +10355,7 @@ async fn run_receiver_session(
             &manifest,
             &mut staged,
             config,
+            options,
         )
         .await?;
         receipt.symbols_accepted = symbols_accepted;
@@ -10380,6 +10453,27 @@ pub async fn receive_on_endpoint(
     config: &QuicConfig,
     peer_id: &str,
 ) -> Result<ReceiveReport, QuicTransportError> {
+    receive_on_endpoint_with_options(
+        cx,
+        endpoint,
+        dest_dir,
+        config,
+        peer_id,
+        QuicReceiveOptions::default(),
+    )
+    .await
+}
+
+/// [`receive_on_endpoint`] with explicit receiver-only filesystem options.
+pub async fn receive_on_endpoint_with_options(
+    cx: &Cx,
+    endpoint: QuicUdpEndpoint,
+    dest_dir: &Path,
+    config: &QuicConfig,
+    peer_id: &str,
+    options: QuicReceiveOptions,
+) -> Result<ReceiveReport, QuicTransportError> {
+    options.validate()?;
     let config = super::effective_quic_receiver_config(config)?;
     let config = &config;
     config.validate()?;
@@ -10397,7 +10491,7 @@ pub async fn receive_on_endpoint(
     // the same bounded replay path as freshly received UDP packets instead of
     // bulk-ingesting before manifest parsing creates decoders.
     link.queue_received_packets(early_data);
-    run_receiver_session(cx, &mut link, dest_dir, config, peer_id).await
+    run_receiver_session(cx, &mut link, dest_dir, config, peer_id, &options).await
 }
 
 /// Bind a server UDP endpoint on `listen` for the native QUIC receive path.
