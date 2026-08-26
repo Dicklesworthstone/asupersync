@@ -9536,6 +9536,8 @@ async fn commit_quic_metadata_entry(
                 let mode = metadata.unix_mode.unwrap_or(0o644);
                 let _ = crate::fs::remove_file(out_path).await;
                 crate::net::atp::transport_common::metadata::recreate_fifo(out_path, mode).await?;
+                let report = apply_entry_metadata(out_path, metadata).await?;
+                trace_quic_metadata_skips(cx, out_path, &report);
                 return Ok(QuicMetadataCommit::Committed);
             }
         }
@@ -17091,6 +17093,65 @@ mod tests {
             validate_quic_manifest(&manifest, &trusted_quic_config()),
             Err(QuicTransportError::Source(message)) if message.contains("case collision")
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn quic_fifo_commit_applies_selected_metadata_and_traces_skips() {
+        use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+
+        let cx = Cx::for_testing();
+        let trace = TraceBufferHandle::new(8);
+        cx.set_trace_buffer(trace.clone());
+        let dest = tempfile::tempdir().expect("destination temp dir");
+        let out_path = dest.path().join("payload/named-pipe");
+
+        let entries = vec![("named-pipe".to_string(), Vec::new())];
+        let mut manifest = manifest_from_entries("payload", true, &entries);
+        manifest.entries[0].metadata = Some(EntryMetadata {
+            file_kind: FileKind::Fifo,
+            unix_mode: Some(0o640),
+            mtime_unix_secs: Some(1),
+            ..EntryMetadata::default()
+        });
+        manifest.metadata_root_hex = manifest_metadata_commitment(&manifest);
+        let decoders = vec![QuicEntryDecoder {
+            index: 0,
+            object_id: entry_object_id(&manifest.transfer_id, 0),
+            size: 0,
+            pipeline: None,
+            complete: true,
+            data: Vec::new(),
+            pending_decodes: Vec::new(),
+        }];
+        let config = QuicConfig {
+            allow_special_files: true,
+            ..trusted_quic_config()
+        };
+
+        let (receipt, committed_paths) = block_on(commit_decoded_entries(
+            &cx,
+            dest.path(),
+            &manifest,
+            &decoders,
+            0,
+            0,
+            QuicDecodeStats::default(),
+            &config,
+        ))
+        .expect("FIFO metadata commit succeeds");
+
+        assert!(receipt.committed);
+        assert_eq!(committed_paths, vec![out_path.clone()]);
+        let metadata = std::fs::symlink_metadata(&out_path).expect("FIFO metadata");
+        assert!(metadata.file_type().is_fifo());
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o640);
+        assert!(trace.snapshot().iter().any(|event| {
+            matches!(
+                &event.data,
+                TraceData::Message(message) if message == "atp_quic_metadata_skipped"
+            )
+        }));
     }
 
     #[cfg(windows)]
