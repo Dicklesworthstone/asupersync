@@ -616,6 +616,85 @@ fn authenticated_topology_roundtrip_spans_datagram_and_control_source_paths() {
     }
 }
 
+#[cfg(unix)]
+#[test]
+fn bonded_special_entry_proves_and_sprays_zero_symbols() {
+    use std::os::unix::net::UnixListener as StdUnixListener;
+
+    use asupersync::net::atp::bonding::{DonorAssignment, derive_bonded_descriptor};
+    use asupersync::net::atp::transport_common::FileKind;
+    use asupersync::net::atp::transport_rq::donate_path;
+
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos());
+    let src_dir = PathBuf::from("/tmp").join(format!("asb-sock-{}-{nanos}", std::process::id()));
+    std::fs::create_dir_all(&src_dir).expect("create special-entry source root");
+    let socket_path = src_dir.join("control.sock");
+    let _socket_listener = StdUnixListener::bind(&socket_path).expect("bind source unix socket");
+    let udp_sink = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind UDP sink");
+    let receiver_endpoint = udp_sink.local_addr().expect("UDP sink address");
+    let config = test_config();
+
+    let runtime = RuntimeBuilder::multi_thread()
+        .worker_threads(2)
+        .enable_platform_reactor(true)
+        .build()
+        .expect("bonded special-entry runtime");
+    let source_root = src_dir.clone();
+    let (descriptor, report) = runtime
+        .block_on(runtime.handle().spawn(async move {
+            let cx = Cx::current().expect("bonded special-entry cx");
+            let descriptor = derive_bonded_descriptor(
+                &cx,
+                &source_root,
+                config.symbol_size,
+                u64::try_from(config.max_block_size).unwrap_or(u64::MAX),
+                u64::MAX,
+                None,
+            )
+            .await?;
+            let assignment = DonorAssignment::new_static(0, 1, vec![receiver_endpoint], None);
+            let report = donate_path(
+                &cx,
+                &descriptor,
+                &assignment,
+                receiver_endpoint,
+                &source_root,
+                config,
+            )
+            .await?;
+            Ok::<_, RqError>((descriptor, report))
+        }))
+        .expect("special entry proves and sprays");
+
+    assert_eq!(descriptor.entries.len(), 1);
+    let entry = &descriptor.entries[0];
+    assert_eq!(entry.rel_path, "control.sock");
+    assert_eq!(entry.size, 0);
+    assert_eq!(
+        entry.sha256_hex,
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    );
+    assert_eq!(descriptor.total_bytes, 0);
+    assert_eq!(descriptor.entry_source_block_count(entry.index), Some(0));
+    let metadata = descriptor
+        .metadata
+        .as_ref()
+        .expect("bonded special-entry metadata")
+        .entries
+        .iter()
+        .find(|candidate| candidate.rel_path == entry.rel_path)
+        .expect("socket metadata row");
+    assert_eq!(metadata.metadata.file_kind, FileKind::Socket);
+
+    assert_eq!(report.entries, 1);
+    assert_eq!(report.blocks, 0);
+    assert_eq!(report.source_symbols_sent, 0);
+    assert_eq!(report.repair_symbols_sent, 0);
+    assert_eq!(report.symbols_sent, 0);
+}
+
 #[test]
 fn source_stream_trailer_roundtrip_multifile_and_fragmented() {
     let root = unique_tmp("trailer_frag");

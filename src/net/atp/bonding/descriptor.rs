@@ -552,8 +552,9 @@ impl BondTransferDescriptor {
     }
 
     /// Donor enrolment proof over an on-disk copy rooted at `root_dir`: stream-hash
-    /// each entry's local file and run [`Self::verify_local_digests`]. Returns
-    /// `Ok(())` only if every byte matches; otherwise refuse to donate.
+    /// content entries, verify topology-only entries without opening them, and run
+    /// [`Self::verify_local_digests`]. Returns `Ok(())` only if every byte and
+    /// topology kind matches; otherwise refuse to donate.
     ///
     /// Covers single-file-per-entry copies (the common case and every directory
     /// tree). A coalesced (E-15 `members`) entry's bytes are reassembled by the
@@ -624,6 +625,7 @@ impl BondTransferDescriptor {
             });
         }
         if !matches!(metadata.file_kind, FileKind::Symlink | FileKind::Directory)
+            && !metadata.file_kind.is_special()
             && metadata.hardlink_target.is_none()
         {
             return Ok(None);
@@ -643,6 +645,13 @@ impl BondTransferDescriptor {
                 })?;
             }
             (FileKind::Directory, None) => {
+                validate_symlink_metadata_for_receive(&entry.rel_path, metadata).map_err(|_| {
+                    BondProofError::EntryMismatch {
+                        rel_path: entry.rel_path.clone(),
+                    }
+                })?;
+            }
+            (kind, None) if kind.is_special() => {
                 validate_symlink_metadata_for_receive(&entry.rel_path, metadata).map_err(|_| {
                     BondProofError::EntryMismatch {
                         rel_path: entry.rel_path.clone(),
@@ -732,6 +741,20 @@ fn verify_local_topology_entry_sync(
                     message: error.to_string(),
                 })?;
             if !matches!(link_kind, PathLinkKind::NotLink) || !observed.is_dir() {
+                return Err(BondProofError::EntryMismatch {
+                    rel_path: entry.rel_path.clone(),
+                });
+            }
+        }
+        (kind, None) if kind.is_special() => {
+            let observed =
+                read_entry_metadata_sync(&path, &MetadataPolicy::portable()).map_err(|error| {
+                    BondProofError::Io {
+                        rel_path: entry.rel_path.clone(),
+                        message: error.into_message(),
+                    }
+                })?;
+            if observed.file_kind != *kind {
                 return Err(BondProofError::EntryMismatch {
                     rel_path: entry.rel_path.clone(),
                 });
