@@ -9517,7 +9517,7 @@ mod tests {
     }
 
     #[test]
-    fn rq_dry_run_rejects_the_same_hardlink_topology_as_send() {
+    fn rq_dry_run_accepts_the_same_hardlink_topology_as_send() {
         let temp = tempfile::tempdir().expect("temporary directory");
         let source = temp.path().join("payload");
         fs::create_dir(&source).expect("source root");
@@ -9536,9 +9536,7 @@ mod tests {
         ])
         .expect("parse RQ dry-run args");
 
-        let error =
-            run_send_dry_run(&args).expect_err("dry-run must apply real-send hardlink validation");
-        assert!(error.contains("cannot preserve hardlink identity"));
+        run_send_dry_run(&args).expect("dry-run and real send both preserve hardlink topology");
     }
 
     #[test]
@@ -12177,7 +12175,7 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
     }
 
     #[test]
-    fn bond_descriptor_rejects_unsupported_topology_before_creation() {
+    fn bond_descriptor_preserves_hardlinks_and_rejects_unrepresented_empty_trees() {
         let temp = tempfile::tempdir().expect("temporary directory");
         let runtime = build_runtime(2).expect("bond test runtime");
 
@@ -12189,9 +12187,18 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
             hardlinks.join("duplicate.bin"),
         )
         .expect("hardlink duplicate");
-        let error = bond_test_try_derive(&runtime, &hardlinks)
-            .expect_err("RQ bonding must not flatten hardlinks");
-        assert!(error.contains("cannot preserve hardlink identity"));
+        let descriptor = bond_test_try_derive(&runtime, &hardlinks)
+            .expect("RQ bonding preserves hardlink topology");
+        let metadata = descriptor.metadata.expect("bonded metadata commitment");
+        let alias = metadata
+            .entries
+            .iter()
+            .find(|entry| entry.rel_path == "duplicate.bin")
+            .expect("hardlink alias metadata");
+        assert_eq!(
+            alias.metadata.hardlink_target.as_deref(),
+            Some("primary.bin")
+        );
 
         let empty_tree = temp.path().join("empty-tree");
         fs::create_dir_all(empty_tree.join("nested-empty")).expect("nested empty directory");

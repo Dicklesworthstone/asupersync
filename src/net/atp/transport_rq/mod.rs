@@ -97,11 +97,12 @@ use crate::net::atp::protocol::session::TransferNonce;
 use crate::net::atp::protocol::varint::VarInt;
 use crate::net::atp::transport_common::delta::ATP_DELTA_CHUNK_MANIFEST_SCHEMA;
 use crate::net::atp::transport_common::metadata::{
-    DirectoryMetadataEntry, DirectoryMetadataManifest, EntryMetadata, HardlinkIdentity,
+    DirectoryMetadataEntry, DirectoryMetadataManifest, EntryMetadata, FileKind, HardlinkIdentity,
     MetadataApplyReport, PathLinkKind, apply_entry_metadata, capture_directory_metadata_manifest,
-    classify_path_link_sync, commit_staged_regular_file_transactionally, inode_key_if_regular_sync,
-    metadata_commitment, path_is_link_or_reparse, read_entry_metadata_sync,
-    validate_entry_metadata_for_receive,
+    classify_path_link, classify_path_link_sync, commit_hardlink_transactionally,
+    commit_staged_regular_file_transactionally, commit_symlink_transactionally,
+    inode_key_if_regular_sync, metadata_commitment, path_is_link_or_reparse,
+    read_entry_metadata_sync, validate_entry_metadata_for_receive,
 };
 use crate::net::atp::transport_common::{
     DeltaChunkWire, DeltaManifestWire, DeltaObjectRequest, DeltaWireMode, EntryDigest,
@@ -522,13 +523,12 @@ pub struct RqConfig {
     pub max_transfer_bytes: u64,
     /// Filesystem metadata captured by the sender and accepted by the receiver.
     ///
-    /// RQ preserves regular-file metadata and the complete directory topology,
-    /// including nested empty directories. Symlinks/reparse points remain
-    /// fail-closed at source preflight.
+    /// RQ preserves regular-file metadata, portable symlinks, and the complete
+    /// directory topology, including nested empty directories. Unsupported
+    /// reparse points remain fail-closed at source preflight.
     pub metadata_policy: MetadataPolicy,
-    /// Detect source hardlinks and fail before transfer rather than silently
-    /// flattening inode identity. RQ does not yet encode hardlink topology; use
-    /// TCP or QUIC when this requested fidelity is present.
+    /// Preserve source hardlink identity with metadata-only aliases instead of
+    /// flattening every path into an independent content object.
     pub preserve_hardlinks: bool,
     /// Maximum time a one-shot receiver waits for the TCP control accept.
     pub accept_timeout: Duration,
@@ -5091,16 +5091,17 @@ struct RqSourceDirectory {
 async fn collect_entries(
     root: &Path,
 ) -> Result<(String, bool, Vec<RqSourceEntry>, Vec<RqSourceDirectory>), RqError> {
-    if path_is_link_or_reparse(root).await.map_err(RqError::Io)? {
-        return Err(RqError::Source(format!(
-            "{}: RQ does not support symlink or reparse-point sources; use TCP or QUIC with portable metadata",
-            root.display()
-        )));
-    }
+    let root_is_symlink = match classify_path_link(root).await.map_err(RqError::Io)? {
+        PathLinkKind::Symlink(_) => true,
+        PathLinkKind::UnsupportedReparse => {
+            return Err(RqError::Source(format!(
+                "{}: unsupported Windows reparse point",
+                root.display()
+            )));
+        }
+        PathLinkKind::NotLink => false,
+    };
 
-    let meta = crate::fs::metadata(root)
-        .await
-        .map_err(|e| RqError::Source(format!("{}: {e}", root.display())))?;
     let root_name = match root.file_name() {
         None => "transfer".to_string(),
         Some(name) => name
@@ -5120,6 +5121,26 @@ async fn collect_entries(
         ))
     })?;
 
+    if root_is_symlink {
+        return Ok((
+            root_name.clone(),
+            false,
+            vec![RqSourceEntry {
+                rel_path: root_name,
+                abs_path: root.to_path_buf(),
+                metadata: EntryMetadata::default(),
+                source_offset: 0,
+                source_len: None,
+                members: Vec::new(),
+                fragment: None,
+            }],
+            Vec::new(),
+        ));
+    }
+
+    let meta = crate::fs::metadata(root)
+        .await
+        .map_err(|e| RqError::Source(format!("{}: {e}", root.display())))?;
     if meta.is_file() {
         return Ok((
             root_name.clone(),
@@ -5178,18 +5199,26 @@ async fn capture_source_metadata(
     .map_err(|error| RqError::Source(error.into_message()))?;
 
     let mut hardlink_primaries = BTreeMap::<HardlinkIdentity, String>::new();
-    for (entry, (metadata, identity)) in entries.iter_mut().zip(captured) {
-        if !matches!(
-            metadata.file_kind,
-            crate::net::atp::transport_common::FileKind::Regular
-        ) {
+    for (entry, (mut metadata, identity)) in entries.iter_mut().zip(captured) {
+        if !matches!(metadata.file_kind, FileKind::Regular | FileKind::Symlink) {
             return Err(RqError::Source(format!(
-                "{}: RQ supports regular-file metadata only; found {:?}",
+                "{}: RQ supports regular files and portable symlinks only; found {:?}",
                 entry.abs_path.display(),
                 metadata.file_kind
             )));
         }
-        if preserve_hardlinks && identity.is_none() {
+        validate_entry_metadata_for_receive(&entry.rel_path, &metadata, policy).map_err(
+            |error| {
+                RqError::Source(format!(
+                    "{}: source metadata is not portable: {error}",
+                    entry.abs_path.display()
+                ))
+            },
+        )?;
+        if preserve_hardlinks
+            && matches!(metadata.file_kind, FileKind::Regular)
+            && identity.is_none()
+        {
             return Err(RqError::Source(format!(
                 "{}: RQ cannot verify source hardlink identity on this filesystem; use TCP or QUIC",
                 entry.rel_path
@@ -5197,12 +5226,13 @@ async fn capture_source_metadata(
         }
         if let Some(identity) = identity {
             if let Some(primary) = hardlink_primaries.get(&identity) {
-                return Err(RqError::Source(format!(
-                    "{}: RQ cannot preserve hardlink identity with {primary}; use TCP or QUIC",
-                    entry.rel_path
-                )));
+                metadata.hardlink_target = Some(primary.clone());
+            } else {
+                hardlink_primaries.insert(identity, entry.rel_path.clone());
             }
-            hardlink_primaries.insert(identity, entry.rel_path.clone());
+        }
+        if matches!(metadata.file_kind, FileKind::Symlink) || metadata.hardlink_target.is_some() {
+            entry.source_len = Some(0);
         }
         entry.metadata = metadata;
     }
@@ -5344,14 +5374,15 @@ fn metadata_manifest_from_source_entries(
         .collect::<Vec<_>>();
     let directories = (!directories.is_empty()).then_some(directories);
     let commitment_hex = rq_metadata_commitment_with_directories(&pairs, directories.as_ref());
-    let entries = entries
+    let mut entries = entries
         .iter()
         .filter(|entry| !entry.metadata.is_bare())
         .map(|entry| RqMetadataEntry {
             rel_path: entry.rel_path.clone(),
             metadata: entry.metadata.clone(),
         })
-        .collect();
+        .collect::<Vec<_>>();
+    entries.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
     RqMetadataManifest {
         version: RQ_METADATA_MANIFEST_VERSION,
         commitment_hex,
@@ -5362,9 +5393,9 @@ fn metadata_manifest_from_source_entries(
 
 /// Validate that `root` can be represented losslessly by the RQ wire format.
 ///
-/// RQ transfers regular files plus committed metadata for their complete
-/// directory tree, including nested empty directories. It fails closed for
-/// symlinks/reparse points instead of silently following them.
+/// RQ transfers regular files, preserved hardlink aliases, portable symlinks,
+/// and committed metadata for the complete directory tree, including nested
+/// empty directories. Unsupported reparse points still fail closed.
 pub async fn validate_source_compatibility(root: &Path) -> Result<(), RqError> {
     validate_source_compatibility_with_config(root, &RqConfig::default()).await
 }
@@ -5424,12 +5455,7 @@ fn collect_dir<'a>(
             .map_err(|e| RqError::Source(format!("{}: {e}", dir.display())))?
         {
             let path = entry.path();
-            if path_is_link_or_reparse(&path).await.map_err(RqError::Io)? {
-                return Err(RqError::Source(format!(
-                    "{}: RQ does not support symlink or reparse-point entries; use TCP or QUIC with portable metadata",
-                    path.display()
-                )));
-            }
+            let link_kind = classify_path_link(&path).await.map_err(RqError::Io)?;
             let name = entry
                 .file_name()
                 .to_str()
@@ -5450,7 +5476,17 @@ fn collect_dir<'a>(
                 .file_type()
                 .await
                 .map_err(|e| RqError::Source(format!("{}: {e}", path.display())))?;
-            children.push((name, path, ft.is_dir()));
+            let is_dir = match link_kind {
+                PathLinkKind::NotLink => ft.is_dir(),
+                PathLinkKind::Symlink(_) => false,
+                PathLinkKind::UnsupportedReparse => {
+                    return Err(RqError::Source(format!(
+                        "{}: unsupported Windows reparse point",
+                        path.display()
+                    )));
+                }
+            };
+            children.push((name, path, is_dir));
         }
         children.sort_by(|a, b| a.0.cmp(&b.0));
 
@@ -5585,14 +5621,21 @@ async fn pack_small_files_with_deferred_singleton_digests(
     let mut current: Vec<usize> = Vec::new();
     let mut current_bytes: u64 = 0;
     for (idx, entry) in entries.iter().enumerate() {
+        let topology_only = matches!(entry.metadata.file_kind, FileKind::Symlink)
+            || entry.metadata.hardlink_target.is_some();
+        if topology_only {
+            if !current.is_empty() {
+                groups.push(std::mem::take(&mut current));
+                current_bytes = 0;
+            }
+            groups.push(vec![idx]);
+            continue;
+        }
         // Hash here purely to learn the size cheaply? No — hashing twice would
         // double the disk read. Instead size is read from metadata; the content
         // sha is computed once below (for packed members) or by the caller's
         // per-object loop (for unpacked entries via the temp/real abs_path).
-        let size = crate::fs::metadata(&entry.abs_path)
-            .await
-            .map_err(|e| RqError::Source(format!("{}: {e}", entry.abs_path.display())))?
-            .len();
+        let size = source_entry_size(entry).await?;
         if size >= PACK_THRESHOLD {
             // Flush any in-progress small-file group, then emit this large file
             // as its own (unpacked) singleton group.
@@ -5626,7 +5669,7 @@ async fn pack_small_files_with_deferred_singleton_digests(
         if !defer_singleton_digests {
             for entry in &entries {
                 let (size, content_id, content_sha256) =
-                    hash_file_streaming(&entry.abs_path, &mut hash_buf)
+                    hash_source_entry_streaming(entry, &mut hash_buf)
                         .await
                         .map_err(|e| RqError::Source(e.into_message()))?;
                 logical_digests.push(EntryDigest {
@@ -5660,7 +5703,7 @@ async fn pack_small_files_with_deferred_singleton_digests(
             let entry = &entries[group[0]];
             if !defer_singleton_digests {
                 let (size, content_id, content_sha256) =
-                    hash_file_streaming(&entry.abs_path, &mut hash_buf)
+                    hash_source_entry_streaming(entry, &mut hash_buf)
                         .await
                         .map_err(|e| RqError::Source(e.into_message()))?;
                 logical_digests.push(EntryDigest {
@@ -5804,10 +5847,7 @@ async fn split_large_entries_with_digest_mode(
             continue;
         }
 
-        let size = crate::fs::metadata(&entry.abs_path)
-            .await
-            .map_err(|e| RqError::Source(format!("{}: {e}", entry.abs_path.display())))?
-            .len();
+        let size = source_entry_size(&entry).await?;
         let plan = plan_multi_object_split(size, split_config)
             .map_err(|e| RqError::Coding(e.to_string()))?;
         if !plan.is_split() {
@@ -6057,19 +6097,15 @@ fn validate_metadata_manifest(
             "metadata manifest declares {metadata_records} records (max {MAX_MANIFEST_ENTRIES})"
         )));
     }
-    if metadata_manifest.entries.len() > logical_paths.len() {
-        return Err(RqError::Frame(format!(
-            "metadata manifest declares {} entries for {} logical files",
-            metadata_manifest.entries.len(),
-            logical_paths.len()
-        )));
-    }
-
     let logical_by_key = logical_paths
         .iter()
-        .map(|path| (portable_path_collision_key(path), *path))
+        .map(|path| (portable_path_collision_key(path), (*path).to_string()))
         .collect::<BTreeMap<_, _>>();
     let mut metadata_by_key = BTreeMap::<String, (&str, &EntryMetadata)>::new();
+    let all_paths = logical_paths
+        .iter()
+        .map(|path| (*path).to_string())
+        .collect::<BTreeSet<_>>();
     for entry in &metadata_manifest.entries {
         validate_manifest_rel_path(&entry.rel_path)?;
         if entry.metadata.is_bare() {
@@ -6085,14 +6121,14 @@ fn validate_metadata_manifest(
                 entry.rel_path
             )));
         };
-        if *expected_path != entry.rel_path {
+        if expected_path != &entry.rel_path {
             return Err(RqError::Frame(format!(
                 "metadata manifest path {} aliases logical path {expected_path}",
                 entry.rel_path
             )));
         }
         if metadata_by_key
-            .insert(key, (entry.rel_path.as_str(), &entry.metadata))
+            .insert(key.clone(), (entry.rel_path.as_str(), &entry.metadata))
             .is_some()
         {
             return Err(RqError::Frame(format!(
@@ -6100,20 +6136,114 @@ fn validate_metadata_manifest(
                 entry.rel_path
             )));
         }
-        validate_rq_metadata_value(
+        if !matches!(
+            entry.metadata.file_kind,
+            FileKind::Regular | FileKind::Symlink
+        ) {
+            return Err(RqError::Frame(format!(
+                "metadata manifest entry {} has unsupported topology kind {:?}",
+                entry.rel_path, entry.metadata.file_kind
+            )));
+        }
+        if entry.metadata.hardlink_target.is_some()
+            && !matches!(entry.metadata.file_kind, FileKind::Regular)
+        {
+            return Err(RqError::Frame(format!(
+                "metadata manifest entry {} declares a hardlink on non-regular metadata",
+                entry.rel_path
+            )));
+        }
+        if entry.metadata.hardlink_target.is_some() && !config.preserve_hardlinks {
+            return Err(RqError::Frame(format!(
+                "metadata manifest hardlink entry {} is denied by receiver policy",
+                entry.rel_path
+            )));
+        }
+        validate_entry_metadata_for_receive(
             &entry.rel_path,
             &entry.metadata,
-            crate::net::atp::transport_common::FileKind::Regular,
-            config,
-        )?;
-    }
-
-    if let Some(directories) = &metadata_manifest.directories {
-        validate_directory_metadata_manifest(directories, logical_paths, is_directory, config)?;
+            &config.metadata_policy,
+        )
+        .map_err(|error| {
+            RqError::Frame(format!(
+                "metadata manifest entry {} is denied: {error}",
+                entry.rel_path
+            ))
+        })?;
     }
 
     let bare_metadata = EntryMetadata::default();
-    let canonical_refs = logical_paths
+    for entry in &metadata_manifest.entries {
+        let Some(primary_rel) = &entry.metadata.hardlink_target else {
+            continue;
+        };
+        validate_manifest_rel_path(primary_rel)?;
+        let primary_key = portable_path_collision_key(primary_rel);
+        let Some(content_primary) = logical_by_key.get(&primary_key) else {
+            return Err(RqError::Frame(format!(
+                "metadata manifest hardlink entry {} targets missing content primary {primary_rel}",
+                entry.rel_path
+            )));
+        };
+        if content_primary != primary_rel || primary_rel >= &entry.rel_path {
+            return Err(RqError::Frame(format!(
+                "metadata manifest hardlink entry {} targets non-prior primary {primary_rel}",
+                entry.rel_path
+            )));
+        }
+        let primary_metadata = metadata_by_key
+            .get(&primary_key)
+            .map_or(&bare_metadata, |(_, metadata)| *metadata);
+        if !matches!(primary_metadata.file_kind, FileKind::Regular)
+            || primary_metadata.hardlink_target.is_some()
+        {
+            return Err(RqError::Frame(format!(
+                "metadata manifest hardlink entry {} targets non-plain primary {primary_rel}",
+                entry.rel_path
+            )));
+        }
+        let mut alias_metadata = entry.metadata.clone();
+        alias_metadata.hardlink_target = None;
+        if &alias_metadata != primary_metadata {
+            return Err(RqError::Frame(format!(
+                "metadata manifest hardlink entry {} declares metadata different from primary {primary_rel}",
+                entry.rel_path
+            )));
+        }
+    }
+
+    let symlink_paths = metadata_manifest
+        .entries
+        .iter()
+        .filter(|entry| matches!(entry.metadata.file_kind, FileKind::Symlink))
+        .map(|entry| entry.rel_path.as_str())
+        .collect::<Vec<_>>();
+    for path in &all_paths {
+        let path_key = portable_path_collision_key(path);
+        for symlink in &symlink_paths {
+            let symlink_key = portable_path_collision_key(symlink);
+            if path_key.len() > symlink_key.len()
+                && path_key.as_bytes()[symlink_key.len()] == b'/'
+                && path_key.starts_with(&symlink_key)
+            {
+                return Err(RqError::Frame(format!(
+                    "manifest path {path} is nested under symlink entry {symlink}"
+                )));
+            }
+        }
+    }
+    validate_portable_path_set(all_paths.iter().map(String::as_str))
+        .map_err(|error| RqError::Frame(format!("unsafe manifest path tree: {error}")))?;
+
+    let all_path_refs = all_paths
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    if let Some(directories) = &metadata_manifest.directories {
+        validate_directory_metadata_manifest(directories, &all_path_refs, is_directory, config)?;
+    }
+
+    let canonical_refs = all_path_refs
         .iter()
         .map(|path| {
             let key = portable_path_collision_key(path);
@@ -6131,6 +6261,68 @@ fn validate_metadata_manifest(
         return Err(RqError::Frame(
             "manifest metadata commitment mismatch".to_string(),
         ));
+    }
+    Ok(())
+}
+
+fn validate_rq_topology_content_shape(manifest: &TransferManifest) -> Result<(), RqError> {
+    let metadata_by_path = manifest
+        .metadata
+        .as_ref()
+        .map(|metadata| {
+            metadata
+                .entries
+                .iter()
+                .map(|entry| (entry.rel_path.as_str(), &entry.metadata))
+                .collect::<BTreeMap<_, _>>()
+        })
+        .unwrap_or_default();
+    let bare_metadata = EntryMetadata::default();
+    let empty_sha256_hex = hex_encode(&Sha256::digest(b""));
+    let placeholder = sha256_hex_placeholder();
+
+    let validate_content_entry = |rel_path: &str,
+                                  size: u64,
+                                  sha256_hex: &str,
+                                  direct: bool|
+     -> Result<(), RqError> {
+        let metadata = metadata_by_path
+            .get(rel_path)
+            .copied()
+            .unwrap_or(&bare_metadata);
+        let topology_only =
+            matches!(metadata.file_kind, FileKind::Symlink) || metadata.hardlink_target.is_some();
+        if topology_only && !direct {
+            return Err(RqError::Frame(format!(
+                "metadata-only topology entry {rel_path} must be a direct, unpacked, unfragmented manifest entry"
+            )));
+        }
+        if topology_only
+            && (size != 0
+                || (sha256_hex != empty_sha256_hex.as_str() && sha256_hex != placeholder.as_str()))
+        {
+            return Err(RqError::Frame(format!(
+                "metadata-only topology entry {rel_path} must carry canonical empty content"
+            )));
+        }
+        Ok(())
+    };
+
+    for entry in &manifest.entries {
+        if let Some(fragment) = &entry.fragment {
+            validate_content_entry(
+                &fragment.rel_path,
+                fragment.logical_size,
+                &fragment.sha256_hex,
+                false,
+            )?;
+        } else if entry.members.is_empty() {
+            validate_content_entry(&entry.rel_path, entry.size, &entry.sha256_hex, true)?;
+        } else {
+            for member in &entry.members {
+                validate_content_entry(&member.rel_path, member.len, &member.sha256_hex, false)?;
+            }
+        }
     }
     Ok(())
 }
@@ -6434,6 +6626,7 @@ fn validate_manifest(manifest: &TransferManifest, config: &RqConfig) -> Result<(
         manifest.is_directory,
         config,
     )?;
+    validate_rq_topology_content_shape(manifest)?;
     validate_rq_delta_manifest(manifest)?;
     Ok(())
 }
@@ -6447,6 +6640,12 @@ fn validate_rq_delta_manifest(manifest: &TransferManifest) -> Result<(), RqError
             "RQ delta manifest is supported only for one unpacked regular file".to_string(),
         ));
     };
+    let metadata = rq_manifest_entry_metadata(manifest, &entry.rel_path);
+    if !matches!(metadata.file_kind, FileKind::Regular) || metadata.hardlink_target.is_some() {
+        return Err(RqError::Frame(
+            "RQ delta manifest cannot target a metadata-only topology entry".to_string(),
+        ));
+    }
     if u64::try_from(delta.chunks.len()).unwrap_or(u64::MAX) > RQ_DELTA_MAX_MANIFEST_CHUNKS {
         return Err(RqError::Frame(
             "RQ delta manifest declares too many chunks".to_string(),
@@ -9528,6 +9727,13 @@ async fn hash_source_entry_streaming(
     entry: &RqSourceEntry,
     buf: &mut [u8],
 ) -> Result<(u64, crate::atp::object::ObjectId, [u8; 32]), StreamingError> {
+    if entry.source_len == Some(0) {
+        return Ok((
+            0,
+            crate::atp::object::ObjectId::content(crate::atp::object::ContentId::from_bytes(b"")),
+            Sha256::digest(b"").into(),
+        ));
+    }
     if entry.source_offset == 0 && entry.source_len.is_none() {
         return hash_file_streaming(&entry.abs_path, buf).await;
     }
@@ -9546,6 +9752,13 @@ async fn hash_file_range_streaming(
     len: u64,
     buf: &mut [u8],
 ) -> Result<(u64, crate::atp::object::ObjectId, [u8; 32]), StreamingError> {
+    if len == 0 {
+        return Ok((
+            0,
+            crate::atp::object::ObjectId::content(crate::atp::object::ContentId::from_bytes(b"")),
+            Sha256::digest(b"").into(),
+        ));
+    }
     let mut file = crate::fs::File::open(path)
         .await
         .map_err(|e| StreamingError::new(format!("{}: {e}", path.display())))?;
@@ -9754,29 +9967,40 @@ where
                     enc.index
                 ))
             })?;
-        let mut file = crate::fs::File::open(&enc.abs_path)
-            .await
-            .map_err(|e| RqError::Source(format!("{}: {e}", enc.abs_path.display())))?;
-        let source_offset = u64::try_from(enc.source_offset).map_err(|_| {
-            RqError::Source(format!(
-                "{}: source offset does not fit u64: {}",
-                enc.abs_path.display(),
-                enc.source_offset
-            ))
-        })?;
-        file.seek(std::io::SeekFrom::Start(source_offset))
-            .await
-            .map_err(|e| RqError::Source(format!("{}: {e}", enc.abs_path.display())))?;
         let mut remaining = u64::try_from(enc.size).map_err(|_| RqError::TooLarge {
             size: u64::MAX,
             max: u64::try_from(usize::MAX).unwrap_or(u64::MAX),
         })?;
+        let mut file = if remaining > 0 {
+            let source_offset = u64::try_from(enc.source_offset).map_err(|_| {
+                RqError::Source(format!(
+                    "{}: source offset does not fit u64: {}",
+                    enc.abs_path.display(),
+                    enc.source_offset
+                ))
+            })?;
+            let mut file = crate::fs::File::open(&enc.abs_path)
+                .await
+                .map_err(|e| RqError::Source(format!("{}: {e}", enc.abs_path.display())))?;
+            file.seek(std::io::SeekFrom::Start(source_offset))
+                .await
+                .map_err(|e| RqError::Source(format!("{}: {e}", enc.abs_path.display())))?;
+            Some(file)
+        } else {
+            None
+        };
         let mut offset = 0u64;
         let mut entry_hash =
             crate::net::atp::transport_common::StagedEntryReceive::new(enc.abs_path.clone());
         while remaining > 0 {
             cx.checkpoint().map_err(|_| RqError::Cancelled)?;
             let want = usize::try_from(remaining.min(buf.len() as u64)).unwrap_or(buf.len());
+            let file = file.as_mut().ok_or_else(|| {
+                RqError::Coding(format!(
+                    "control source entry {} lost its non-empty source handle",
+                    enc.index
+                ))
+            })?;
             let n = file
                 .read(&mut buf[..want])
                 .await
@@ -12459,6 +12683,18 @@ async fn reject_rq_destination_ancestors(path: &Path) -> Result<(), RqError> {
 // The earlier cached planning pass is only an optimization and cannot authorize
 // a later write because another process may replace a previously missing prefix.
 async fn reject_destination_symlink_prefix(base: &Path, out_path: &Path) -> Result<(), RqError> {
+    reject_destination_symlink_path(base, out_path, true).await
+}
+
+async fn reject_destination_symlink_ancestors(base: &Path, out_path: &Path) -> Result<(), RqError> {
+    reject_destination_symlink_path(base, out_path, false).await
+}
+
+async fn reject_destination_symlink_path(
+    base: &Path,
+    out_path: &Path,
+    include_leaf: bool,
+) -> Result<(), RqError> {
     let rel = out_path.strip_prefix(base).map_err(|_| {
         RqError::Source(format!(
             "destination path {} is outside safe base {}",
@@ -12475,7 +12711,13 @@ async fn reject_destination_symlink_prefix(base: &Path, out_path: &Path) -> Resu
             )));
         };
     }
-    reject_rq_destination_ancestors(out_path).await
+    if include_leaf {
+        reject_rq_destination_ancestors(out_path).await
+    } else if let Some(parent) = out_path.parent() {
+        reject_rq_destination_ancestors(parent).await
+    } else {
+        Ok(())
+    }
 }
 
 /// Planning-time variant that skips path prefixes already inspected in
@@ -13158,6 +13400,12 @@ async fn verify_and_commit(
             staging_path: PathBuf,
             metadata: EntryMetadata,
         },
+        /// Metadata-only topology entry: publish a symlink or hardlink after its
+        /// canonical empty content digest passes the global integrity gate.
+        Topology {
+            rel_path: String,
+            metadata: EntryMetadata,
+        },
         /// Packed entry: split the staging file into member byte ranges.
         Split {
             staging_path: PathBuf,
@@ -13249,13 +13497,22 @@ async fn verify_and_commit(
                 content_sha256,
             });
             logical_files = logical_files.saturating_add(1);
-            commits.push(EntryCommit::Rename {
-                rel_path: e.rel_path.clone(),
-                staging_path: decoder.staging_path.clone(),
-                metadata: metadata_by_path
-                    .get(e.rel_path.as_str())
-                    .map_or_else(EntryMetadata::default, |metadata| (*metadata).clone()),
-            });
+            let metadata = metadata_by_path
+                .get(e.rel_path.as_str())
+                .map_or_else(EntryMetadata::default, |metadata| (*metadata).clone());
+            if matches!(metadata.file_kind, FileKind::Symlink) || metadata.hardlink_target.is_some()
+            {
+                commits.push(EntryCommit::Topology {
+                    rel_path: e.rel_path.clone(),
+                    metadata,
+                });
+            } else {
+                commits.push(EntryCommit::Rename {
+                    rel_path: e.rel_path.clone(),
+                    staging_path: decoder.staging_path.clone(),
+                    metadata,
+                });
+            }
         } else {
             // E-15 packed object: split the staging file into member byte ranges,
             // verify each member's own SHA-256, and build a per-member logical
@@ -13367,6 +13624,11 @@ async fn verify_and_commit(
                 out_path: PathBuf,
                 metadata: EntryMetadata,
             },
+            Topology {
+                rel_path: String,
+                out_path: PathBuf,
+                metadata: EntryMetadata,
+            },
             Members {
                 staging_path: PathBuf,
                 members: Vec<PackedMemberWrite>,
@@ -13380,6 +13642,7 @@ async fn verify_and_commit(
             },
         }
         let mut writes: Vec<CommitWrite> = Vec::with_capacity(logical_digests.len());
+        let mut topology_writes: Vec<CommitWrite> = Vec::new();
         for commit in &commits {
             match commit {
                 EntryCommit::Rename {
@@ -13424,6 +13687,18 @@ async fn verify_and_commit(
                         members: member_writes,
                     });
                 }
+                EntryCommit::Topology { rel_path, metadata } => {
+                    let out_path = if manifest.is_directory {
+                        join_relative(&base, rel_path)?
+                    } else {
+                        base.clone()
+                    };
+                    topology_writes.push(CommitWrite::Topology {
+                        rel_path: rel_path.clone(),
+                        out_path,
+                        metadata: metadata.clone(),
+                    });
+                }
                 EntryCommit::Fragments {
                     rel_path,
                     shards,
@@ -13450,6 +13725,11 @@ async fn verify_and_commit(
                 }
             }
         }
+        // Publish every verified content object before any link topology. In
+        // particular, fragmented primaries are assembled only after the
+        // manifest loop above; allowing an alias to run first could bind it to
+        // a stale destination inode that the later primary commit replaces.
+        writes.extend(topology_writes);
         commit_plan_micros = commit_plan_micros.saturating_add(elapsed_micros_since(plan_started));
 
         let symlink_started = trace_commit.then(Instant::now);
@@ -13466,6 +13746,20 @@ async fn verify_and_commit(
                         &mut verified_prefixes,
                     )
                     .await?;
+                }
+                CommitWrite::Topology {
+                    out_path, metadata, ..
+                } => {
+                    if matches!(metadata.file_kind, FileKind::Symlink) {
+                        reject_destination_symlink_ancestors(&base, out_path).await?;
+                    } else {
+                        reject_destination_symlink_prefix_cached(
+                            &base,
+                            out_path,
+                            &mut verified_prefixes,
+                        )
+                        .await?;
+                    }
                 }
                 CommitWrite::Members { members, .. } => {
                     for member in members {
@@ -13548,6 +13842,38 @@ async fn verify_and_commit(
                             .into_iter()
                             .map(|member| member.out_path.display().to_string()),
                     );
+                }
+                CommitWrite::Topology {
+                    rel_path,
+                    out_path,
+                    metadata,
+                } => {
+                    if matches!(metadata.file_kind, FileKind::Symlink) {
+                        reject_destination_symlink_ancestors(&base, &out_path).await?;
+                        if let Some(parent) = out_path.parent() {
+                            crate::fs::create_dir_all(parent).await?;
+                        }
+                        reject_destination_symlink_ancestors(&base, &out_path).await?;
+                        commit_symlink_transactionally(&rel_path, &out_path, &metadata)
+                            .await
+                            .map_err(|error| RqError::Source(error.into_message()))?;
+                    } else if let Some(primary_rel) = &metadata.hardlink_target {
+                        reject_destination_symlink_prefix(&base, &out_path).await?;
+                        if let Some(parent) = out_path.parent() {
+                            crate::fs::create_dir_all(parent).await?;
+                        }
+                        reject_destination_symlink_prefix(&base, &out_path).await?;
+                        let primary_path = join_relative(&base, primary_rel)?;
+                        reject_destination_symlink_prefix(&base, &primary_path).await?;
+                        commit_hardlink_transactionally(&primary_path, &out_path)
+                            .await
+                            .map_err(|error| RqError::Source(error.into_message()))?;
+                    } else {
+                        return Err(RqError::Source(format!(
+                            "validated topology entry {rel_path} has no topology metadata"
+                        )));
+                    }
+                    committed_paths.push(out_path.display().to_string());
                 }
                 CommitWrite::Fragments {
                     shards,

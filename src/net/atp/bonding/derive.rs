@@ -29,7 +29,7 @@ use super::BondTransferDescriptor;
 /// attributes, ownership, and timestamps are not byte identity and would make
 /// identical content derive different enrollment descriptors, so this commits
 /// only the portable content/path shape ([`MetadataPolicy::portable`]) while
-/// keeping topology checks (including hardlink rejection). The per-entry
+/// preserving hardlink aliases as zero-content topology entries. The per-entry
 /// SHA-256 digests and flat-graph merkle root come from [`plan_transfer`]; the
 /// transfer id is the RaptorQ derivation ([`transfer_id_hex`]); the agreed
 /// RaptorQ object params (`symbol_size`, `max_block_size`) and the optional

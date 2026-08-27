@@ -3187,7 +3187,7 @@ fn rq_directory_metadata_preserves_root_and_nested_on_initial_and_update() {
 
 #[cfg(unix)]
 #[test]
-fn rq_source_topology_captures_nested_empty_directories_and_keeps_links_fail_closed() {
+fn rq_topology_source_captures_empty_directories_and_portable_symlinks() {
     let empty_root = tempfile::tempdir().expect("empty transfer root");
     futures_lite::future::block_on(validate_source_compatibility(empty_root.path()))
         .expect("an explicit empty transfer root remains representable");
@@ -3229,8 +3229,49 @@ fn rq_source_topology_captures_nested_empty_directories_and_keeps_links_fail_clo
     std::fs::write(linked.path().join("target"), b"target").expect("write target");
     std::os::unix::fs::symlink("target", linked.path().join("link"))
         .expect("create source symlink");
+    std::os::unix::fs::symlink("missing-target", linked.path().join("dangling"))
+        .expect("create dangling source symlink");
+    let preserving = RqConfig {
+        metadata_policy: MetadataPolicy::default(),
+        ..RqConfig::default()
+    };
+    futures_lite::future::block_on(validate_source_compatibility_with_config(
+        linked.path(),
+        &preserving,
+    ))
+    .expect("portable relative symlinks are representable by RQ");
+    let captured = futures_lite::future::block_on(source_metadata_manifest_with_config(
+        linked.path(),
+        &preserving,
+    ))
+    .expect("capture relative and dangling symlink metadata");
+    let metadata = captured
+        .entries
+        .iter()
+        .map(|entry| (entry.rel_path.as_str(), &entry.metadata))
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(
+        metadata
+            .get("link")
+            .and_then(|entry| entry.symlink_target.as_deref()),
+        Some("target")
+    );
+    assert_eq!(
+        metadata
+            .get("dangling")
+            .and_then(|entry| entry.symlink_target.as_deref()),
+        Some("missing-target")
+    );
+
+    let portable = RqConfig {
+        metadata_policy: MetadataPolicy::portable(),
+        ..RqConfig::default()
+    };
     assert!(matches!(
-        futures_lite::future::block_on(validate_source_compatibility(linked.path())),
+        futures_lite::future::block_on(validate_source_compatibility_with_config(
+            linked.path(),
+            &portable,
+        )),
         Err(RqError::Source(ref message)) if message.contains("symlink")
     ));
 }
@@ -3252,7 +3293,7 @@ fn rq_receive_staging_creation_returns_cleanup_owner() {
 
 #[cfg(any(unix, windows))]
 #[test]
-fn rq_requested_hardlink_fidelity_fails_before_transfer() {
+fn rq_topology_requested_hardlink_fidelity_emits_zero_content_alias() {
     let root = tempfile::tempdir().expect("hardlink source root");
     let primary = root.path().join("a-primary");
     let secondary = root.path().join("b-secondary");
@@ -3263,12 +3304,55 @@ fn rq_requested_hardlink_fidelity_fails_before_transfer() {
         preserve_hardlinks: true,
         ..RqConfig::default()
     };
-    let error = futures_lite::future::block_on(validate_source_compatibility_with_config(
+    futures_lite::future::block_on(validate_source_compatibility_with_config(
         root.path(),
         &preserving,
     ))
-    .expect_err("requested RQ hardlink fidelity must fail closed during dry-run preflight");
-    assert!(error.to_string().contains("hardlink identity"), "{error}");
+    .expect("requested RQ hardlink fidelity is representable");
+    let preserved = futures_lite::future::block_on(source_metadata_manifest_with_config(
+        root.path(),
+        &preserving,
+    ))
+    .expect("capture hardlink topology");
+    let primary = preserved
+        .entries
+        .iter()
+        .find(|entry| entry.rel_path == "a-primary")
+        .expect("primary metadata");
+    let alias = preserved
+        .entries
+        .iter()
+        .find(|entry| entry.rel_path == "b-secondary")
+        .expect("hardlink alias metadata");
+    assert_eq!(alias.metadata.hardlink_target.as_deref(), Some("a-primary"));
+    let mut alias_without_target = alias.metadata.clone();
+    alias_without_target.hardlink_target = None;
+    assert_eq!(alias_without_target, primary.metadata);
+
+    let (_, _, mut source_entries, _) =
+        futures_lite::future::block_on(collect_entries(root.path())).expect("collect hardlinks");
+    futures_lite::future::block_on(capture_source_metadata(
+        &mut source_entries,
+        &preserving.metadata_policy,
+        true,
+    ))
+    .expect("capture hardlink source plan");
+    let (planned, digests, pack_tempdir) =
+        futures_lite::future::block_on(pack_small_files(source_entries, &preserving))
+            .expect("plan hardlink objects without opening the alias");
+    assert!(pack_tempdir.is_none());
+    assert_eq!(planned.len(), 2);
+    let alias_plan = planned
+        .iter()
+        .find(|entry| entry.rel_path == "b-secondary")
+        .expect("planned alias");
+    assert_eq!(alias_plan.source_len, Some(0));
+    let alias_digest = digests
+        .iter()
+        .find(|digest| digest.rel_path == "b-secondary")
+        .expect("alias digest");
+    assert_eq!(alias_digest.size, 0);
+    assert_eq!(alias_digest.content_sha256, Sha256::digest(b"").into());
 
     let flattened = futures_lite::future::block_on(source_metadata_manifest_with_config(
         root.path(),
@@ -7182,6 +7266,214 @@ fn verify_and_commit_replaces_readonly_regular_file_with_staged_metadata() {
         std::fs::set_permissions(&out_path, permissions)
             .expect("clear regular output readonly for cleanup");
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn rq_topology_commit_waits_for_fragmented_primary_and_preserves_links() {
+    let dest = canon_tempdir();
+    let base = dest.path().join("payload");
+    let staging_dir = dest.path().join(".atp-rq-topology-staging");
+    std::fs::create_dir_all(&base).expect("destination base");
+    std::fs::create_dir_all(&staging_dir).expect("staging dir");
+    std::fs::write(base.join("a-primary"), b"stale destination inode")
+        .expect("write stale primary");
+
+    let first = b"replacement fragment one ".to_vec();
+    let second = b"replacement fragment two".to_vec();
+    let mut whole = Vec::with_capacity(first.len() + second.len());
+    whole.extend_from_slice(&first);
+    whole.extend_from_slice(&second);
+    let whole_sha = hex_encode(&Sha256::digest(&whole));
+    let empty_sha = hex_encode(&Sha256::digest(b""));
+
+    let alias_metadata = EntryMetadata {
+        hardlink_target: Some("a-primary".to_string()),
+        ..EntryMetadata::default()
+    };
+    let link_metadata = EntryMetadata {
+        file_kind: FileKind::Symlink,
+        symlink_target: Some("a-primary".to_string()),
+        ..EntryMetadata::default()
+    };
+    let dangling_metadata = EntryMetadata {
+        file_kind: FileKind::Symlink,
+        symlink_target: Some("missing-target".to_string()),
+        ..EntryMetadata::default()
+    };
+    let metadata_pairs = [
+        ("a-primary", EntryMetadata::default()),
+        ("b-alias", alias_metadata.clone()),
+        ("c-link", link_metadata.clone()),
+        ("d-dangling", dangling_metadata.clone()),
+    ];
+    let metadata_refs = metadata_pairs
+        .iter()
+        .map(|(path, metadata)| (*path, metadata))
+        .collect::<Vec<_>>();
+    let metadata = RqMetadataManifest {
+        version: RQ_METADATA_MANIFEST_VERSION,
+        commitment_hex: rq_metadata_commitment(&metadata_refs),
+        entries: vec![
+            RqMetadataEntry {
+                rel_path: "b-alias".to_string(),
+                metadata: alias_metadata.clone(),
+            },
+            RqMetadataEntry {
+                rel_path: "c-link".to_string(),
+                metadata: link_metadata,
+            },
+            RqMetadataEntry {
+                rel_path: "d-dangling".to_string(),
+                metadata: dangling_metadata,
+            },
+        ],
+        directories: None,
+    };
+
+    let mut logical_digests = vec![digest_for_bytes("a-primary", &whole)];
+    logical_digests.extend(
+        ["b-alias", "c-link", "d-dangling"]
+            .into_iter()
+            .map(|path| digest_for_bytes(path, b"")),
+    );
+    let manifest = TransferManifest {
+        transfer_id: "rqtopology1".to_string(),
+        root_name: "payload".to_string(),
+        is_directory: true,
+        total_bytes: whole.len() as u64,
+        merkle_root_hex: flat_merkle_root_from_digests(&logical_digests),
+        metadata: Some(metadata),
+        delta_manifest: None,
+        // Put every topology object before the fragmented primary. Commit order
+        // must still be content-first rather than trusting manifest order.
+        entries: vec![
+            ManifestEntry {
+                index: 0,
+                rel_path: "b-alias".to_string(),
+                size: 0,
+                sha256_hex: empty_sha.clone(),
+                members: Vec::new(),
+                fragment: None,
+            },
+            ManifestEntry {
+                index: 1,
+                rel_path: "c-link".to_string(),
+                size: 0,
+                sha256_hex: empty_sha.clone(),
+                members: Vec::new(),
+                fragment: None,
+            },
+            ManifestEntry {
+                index: 2,
+                rel_path: "d-dangling".to_string(),
+                size: 0,
+                sha256_hex: empty_sha,
+                members: Vec::new(),
+                fragment: None,
+            },
+            fragment_entry(
+                3,
+                ".atp-fragment-0-0",
+                &first,
+                LargeObjectFragment {
+                    rel_path: "a-primary".to_string(),
+                    shard_index: 0,
+                    shard_count: 2,
+                    logical_offset: 0,
+                    len: first.len() as u64,
+                    logical_size: whole.len() as u64,
+                    sha256_hex: whole_sha.clone(),
+                },
+            ),
+            fragment_entry(
+                4,
+                ".atp-fragment-0-1",
+                &second,
+                LargeObjectFragment {
+                    rel_path: "a-primary".to_string(),
+                    shard_index: 1,
+                    shard_count: 2,
+                    logical_offset: first.len() as u64,
+                    len: second.len() as u64,
+                    logical_size: whole.len() as u64,
+                    sha256_hex: whole_sha,
+                },
+            ),
+        ],
+    };
+    let config = RqConfig {
+        preserve_hardlinks: true,
+        ..RqConfig::default()
+    };
+    validate_manifest(&manifest, &config).expect("topology manifest validates");
+
+    let staging_paths = (0..manifest.entries.len())
+        .map(|index| staging_dir.join(index.to_string()))
+        .collect::<Vec<_>>();
+    for path in &staging_paths[..3] {
+        std::fs::write(path, b"").expect("write empty topology staging object");
+    }
+    std::fs::write(&staging_paths[3], &first).expect("write first fragment");
+    std::fs::write(&staging_paths[4], &second).expect("write second fragment");
+    let mut decoders = manifest
+        .entries
+        .iter()
+        .zip(&staging_paths)
+        .map(|(entry, staging_path)| EntryDecoder {
+            index: entry.index,
+            object_id: entry_object_id(&manifest.transfer_id, entry.index),
+            size: entry.size,
+            pipeline: None,
+            complete: true,
+            staging_path: staging_path.clone(),
+            staging_write_offset: 0,
+            staging_file_len: entry.size,
+            staging_shared: false,
+            staging_created: true,
+            staging_file: None,
+            staging_cursor: None,
+            staging_unflushed_bytes: 0,
+            cache_staging_file: false,
+            bytes_written: entry.size,
+            max_block_size: DEFAULT_MAX_BLOCK_SIZE,
+            source_streaming: false,
+            source_blocks: Vec::new(),
+            pending_decodes: Vec::new(),
+            inc: None,
+            inc_digest: None,
+            source_write_buffer: Vec::new(),
+            source_write_buffer_offset: None,
+        })
+        .collect::<Vec<_>>();
+
+    let receipt = futures_lite::future::block_on(verify_and_commit(
+        &manifest,
+        &mut decoders,
+        dest.path(),
+        0,
+        0,
+        &BTreeMap::new(),
+        &CompletionDigestIndex::default(),
+    ))
+    .expect("verify and commit topology");
+
+    assert!(receipt.committed);
+    assert!(receipt.sha_ok);
+    assert!(receipt.merkle_ok);
+    assert_eq!(receipt.files, 4);
+    let primary = base.join("a-primary");
+    let alias = base.join("b-alias");
+    assert_eq!(std::fs::read(&primary).expect("read primary"), whole);
+    assert_eq!(inode_for(&primary), inode_for(&alias));
+    assert_eq!(
+        std::fs::read_link(base.join("c-link")).unwrap(),
+        Path::new("a-primary")
+    );
+    assert_eq!(
+        std::fs::read_link(base.join("d-dangling")).unwrap(),
+        Path::new("missing-target")
+    );
 }
 
 fn fragment_entry(
