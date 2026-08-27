@@ -583,6 +583,44 @@ pub struct RqConfig {
     pub delta_control_timeout: Duration,
 }
 
+/// Receiver-only filesystem reconstruction options for ATP-over-RaptorQ.
+///
+/// This type is separate from [`RqConfig`] so adding receiver behaviors does
+/// not break callers that construct the public transport config exhaustively.
+/// All options default off. Special-file metadata is still authenticated and
+/// integrity-checked when recreation is disabled, but the destination entry is
+/// skipped rather than materialized as an ordinary zero-byte file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RqReceiveOptions {
+    allow_special_files: bool,
+}
+
+impl RqReceiveOptions {
+    /// Create receiver options with compatibility-preserving defaults.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            allow_special_files: false,
+        }
+    }
+
+    /// Recreate portable special files when the platform and kind support it.
+    ///
+    /// Currently this enables FIFO recreation on Unix. Sockets and device
+    /// nodes remain safe skips, as do all special kinds on non-Unix targets.
+    #[must_use]
+    pub const fn with_allow_special_files(mut self, enabled: bool) -> Self {
+        self.allow_special_files = enabled;
+        self
+    }
+
+    /// Whether supported special files may be recreated at the destination.
+    #[must_use]
+    pub const fn allow_special_files(&self) -> bool {
+        self.allow_special_files
+    }
+}
+
 /// Public per-symbol authentication posture for ATP-over-RaptorQ.
 ///
 /// This reports whether the UDP symbol plane is configured to verify tags. It
@@ -5200,9 +5238,11 @@ async fn capture_source_metadata(
 
     let mut hardlink_primaries = BTreeMap::<HardlinkIdentity, String>::new();
     for (entry, (mut metadata, identity)) in entries.iter_mut().zip(captured) {
-        if !matches!(metadata.file_kind, FileKind::Regular | FileKind::Symlink) {
+        if !matches!(metadata.file_kind, FileKind::Regular | FileKind::Symlink)
+            && !metadata.file_kind.is_special()
+        {
             return Err(RqError::Source(format!(
-                "{}: RQ supports regular files and portable symlinks only; found {:?}",
+                "{}: RQ supports regular files, portable symlinks, and metadata-only special files; found {:?}",
                 entry.abs_path.display(),
                 metadata.file_kind
             )));
@@ -5231,7 +5271,10 @@ async fn capture_source_metadata(
                 hardlink_primaries.insert(identity, entry.rel_path.clone());
             }
         }
-        if matches!(metadata.file_kind, FileKind::Symlink) || metadata.hardlink_target.is_some() {
+        if matches!(metadata.file_kind, FileKind::Symlink)
+            || metadata.file_kind.is_special()
+            || metadata.hardlink_target.is_some()
+        {
             entry.source_len = Some(0);
         }
         entry.metadata = metadata;
@@ -5622,6 +5665,7 @@ async fn pack_small_files_with_deferred_singleton_digests(
     let mut current_bytes: u64 = 0;
     for (idx, entry) in entries.iter().enumerate() {
         let topology_only = matches!(entry.metadata.file_kind, FileKind::Symlink)
+            || entry.metadata.file_kind.is_special()
             || entry.metadata.hardlink_target.is_some();
         if topology_only {
             if !current.is_empty() {
@@ -6139,7 +6183,8 @@ fn validate_metadata_manifest(
         if !matches!(
             entry.metadata.file_kind,
             FileKind::Regular | FileKind::Symlink
-        ) {
+        ) && !entry.metadata.file_kind.is_special()
+        {
             return Err(RqError::Frame(format!(
                 "metadata manifest entry {} has unsupported topology kind {:?}",
                 entry.rel_path, entry.metadata.file_kind
@@ -6290,8 +6335,9 @@ fn validate_rq_topology_content_shape(manifest: &TransferManifest) -> Result<(),
             .get(rel_path)
             .copied()
             .unwrap_or(&bare_metadata);
-        let topology_only =
-            matches!(metadata.file_kind, FileKind::Symlink) || metadata.hardlink_target.is_some();
+        let topology_only = matches!(metadata.file_kind, FileKind::Symlink)
+            || metadata.file_kind.is_special()
+            || metadata.hardlink_target.is_some();
         if topology_only && !direct {
             return Err(RqError::Frame(format!(
                 "metadata-only topology entry {rel_path} must be a direct, unpacked, unfragmented manifest entry"
@@ -10353,6 +10399,28 @@ pub async fn receive_once(
     config: RqConfig,
     peer_id: &str,
 ) -> Result<ReceiveReport, RqError> {
+    receive_once_with_options(
+        cx,
+        control_listener,
+        udp_bind_ip,
+        dest_dir,
+        config,
+        peer_id,
+        RqReceiveOptions::default(),
+    )
+    .await
+}
+
+/// [`receive_once`] with explicit receiver-only filesystem options.
+pub async fn receive_once_with_options(
+    cx: &Cx,
+    control_listener: &TcpListener,
+    udp_bind_ip: &str,
+    dest_dir: &Path,
+    config: RqConfig,
+    peer_id: &str,
+    options: RqReceiveOptions,
+) -> Result<ReceiveReport, RqError> {
     let (stream, peer) = match crate::time::timeout(
         cx.now(),
         config.accept_timeout,
@@ -10369,7 +10437,17 @@ pub async fn receive_once(
             )));
         }
     };
-    receive_connection(cx, stream, peer, udp_bind_ip, dest_dir, config, peer_id).await
+    receive_connection_with_options(
+        cx,
+        stream,
+        peer,
+        udp_bind_ip,
+        dest_dir,
+        config,
+        peer_id,
+        options,
+    )
+    .await
 }
 
 async fn bind_rq_receiver_udp_fanout(
@@ -10412,6 +10490,31 @@ pub async fn receive_connection(
     dest_dir: &Path,
     config: RqConfig,
     peer_id: &str,
+) -> Result<ReceiveReport, RqError> {
+    receive_connection_with_options(
+        cx,
+        stream,
+        peer,
+        udp_bind_ip,
+        dest_dir,
+        config,
+        peer_id,
+        RqReceiveOptions::default(),
+    )
+    .await
+}
+
+/// [`receive_connection`] with explicit receiver-only filesystem options.
+#[allow(clippy::too_many_arguments)]
+pub async fn receive_connection_with_options(
+    cx: &Cx,
+    stream: TcpStream,
+    peer: SocketAddr,
+    udp_bind_ip: &str,
+    dest_dir: &Path,
+    config: RqConfig,
+    peer_id: &str,
+    options: RqReceiveOptions,
 ) -> Result<ReceiveReport, RqError> {
     if config.delta_control_timeout.is_zero() {
         return Err(RqError::Control(
@@ -10828,6 +10931,7 @@ pub async fn receive_connection(
             &mut decoders,
             dest_dir,
             peer,
+            options,
         )
             .await;
         }
@@ -11018,7 +11122,7 @@ pub async fn receive_connection(
 
                 if pending.is_empty() {
                     // Verify + commit + Proof.
-                    let receipt = verify_and_commit(
+                    let receipt = verify_and_commit_with_options(
                         &manifest,
                         &mut decoders,
                         dest_dir,
@@ -11026,6 +11130,7 @@ pub async fn receive_connection(
                         feedback_rounds,
                         &std::collections::BTreeMap::new(),
                         &completion_digests,
+                        options,
                     )
                     .await?;
                     control
@@ -11300,6 +11405,7 @@ async fn receive_control_source_stream<S>(
     decoders: &mut [EntryDecoder],
     dest_dir: &Path,
     peer: SocketAddr,
+    options: RqReceiveOptions,
 ) -> Result<ReceiveReport, RqError>
 where
     S: AsyncReadExt + AsyncWriteExt + Unpin,
@@ -11363,7 +11469,7 @@ where
                     });
                 }
 
-                let receipt = verify_and_commit(
+                let receipt = verify_and_commit_with_options(
                     manifest,
                     decoders,
                     dest_dir,
@@ -11371,6 +11477,7 @@ where
                     0,
                     &logical_done,
                     &completion_digests,
+                    options,
                 )
                 .await?;
                 control
@@ -12945,7 +13052,9 @@ async fn apply_rq_entry_metadata(
     for (required, field) in [
         (cfg!(unix) && metadata.unix_mode.is_some(), "mode"),
         (
-            cfg!(any(unix, windows)) && metadata.mtime_unix_secs.is_some(),
+            cfg!(any(unix, windows))
+                && !metadata.file_kind.is_special()
+                && metadata.mtime_unix_secs.is_some(),
             "mtime",
         ),
         (
@@ -13355,6 +13464,30 @@ async fn verify_and_commit(
     logical_precomputed: &BTreeMap<String, (u64, crate::atp::object::ObjectId, [u8; 32])>,
     completion_digests: &CompletionDigestIndex,
 ) -> Result<ReceiveReceipt, RqError> {
+    verify_and_commit_with_options(
+        manifest,
+        decoders,
+        dest_dir,
+        symbols_accepted,
+        feedback_rounds,
+        logical_precomputed,
+        completion_digests,
+        RqReceiveOptions::default(),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn verify_and_commit_with_options(
+    manifest: &TransferManifest,
+    decoders: &mut [EntryDecoder],
+    dest_dir: &Path,
+    symbols_accepted: u64,
+    feedback_rounds: u32,
+    logical_precomputed: &BTreeMap<String, (u64, crate::atp::object::ObjectId, [u8; 32])>,
+    completion_digests: &CompletionDigestIndex,
+    options: RqReceiveOptions,
+) -> Result<ReceiveReceipt, RqError> {
     let trace_commit = std::env::var_os("ATP_RQ_TRACE").is_some();
     let total_started = trace_commit.then(Instant::now);
     let mut close_flush_micros = 0u64;
@@ -13500,7 +13633,9 @@ async fn verify_and_commit(
             let metadata = metadata_by_path
                 .get(e.rel_path.as_str())
                 .map_or_else(EntryMetadata::default, |metadata| (*metadata).clone());
-            if matches!(metadata.file_kind, FileKind::Symlink) || metadata.hardlink_target.is_some()
+            if matches!(metadata.file_kind, FileKind::Symlink)
+                || metadata.file_kind.is_special()
+                || metadata.hardlink_target.is_some()
             {
                 commits.push(EntryCommit::Topology {
                     rel_path: e.rel_path.clone(),
@@ -13750,7 +13885,19 @@ async fn verify_and_commit(
                 CommitWrite::Topology {
                     out_path, metadata, ..
                 } => {
-                    if matches!(metadata.file_kind, FileKind::Symlink) {
+                    if metadata.file_kind.is_special() {
+                        #[cfg(unix)]
+                        if matches!(metadata.file_kind, FileKind::Fifo)
+                            && options.allow_special_files()
+                        {
+                            reject_destination_symlink_prefix_cached(
+                                &base,
+                                out_path,
+                                &mut verified_prefixes,
+                            )
+                            .await?;
+                        }
+                    } else if matches!(metadata.file_kind, FileKind::Symlink) {
                         reject_destination_symlink_ancestors(&base, out_path).await?;
                     } else {
                         reject_destination_symlink_prefix_cached(
@@ -13848,6 +13995,39 @@ async fn verify_and_commit(
                     out_path,
                     metadata,
                 } => {
+                    if metadata.file_kind.is_special() {
+                        #[cfg(unix)]
+                        if matches!(metadata.file_kind, FileKind::Fifo)
+                            && options.allow_special_files()
+                        {
+                            reject_destination_symlink_prefix(&base, &out_path).await?;
+                            if let Some(parent) = out_path.parent() {
+                                crate::fs::create_dir_all(parent).await?;
+                            }
+                            reject_destination_symlink_prefix(&base, &out_path).await?;
+                            let report = crate::net::atp::transport_common::metadata::commit_fifo_transactionally(
+                                &out_path,
+                                &metadata,
+                            )
+                            .await
+                            .map_err(|error| RqError::Source(error.into_message()))?;
+                            for (field, reason) in report.skipped {
+                                rqtrace!(
+                                    "receiver: metadata field {field} skipped for {}: {reason}",
+                                    out_path.display()
+                                );
+                            }
+                            committed_paths.push(out_path.display().to_string());
+                            continue;
+                        }
+                        rqtrace!(
+                            "receiver: special file skipped path={} kind={:?} allow_special_files={}",
+                            out_path.display(),
+                            metadata.file_kind,
+                            options.allow_special_files()
+                        );
+                        continue;
+                    }
                     if matches!(metadata.file_kind, FileKind::Symlink) {
                         reject_destination_symlink_ancestors(&base, &out_path).await?;
                         if let Some(parent) = out_path.parent() {
@@ -15609,6 +15789,34 @@ pub async fn serve<F>(
     dest_dir: PathBuf,
     config: RqConfig,
     peer_id: String,
+    on_result: F,
+) -> Result<(), RqError>
+where
+    F: FnMut(Result<ReceiveReport, RqError>),
+{
+    serve_with_options(
+        cx,
+        control_listener,
+        udp_bind_ip,
+        dest_dir,
+        config,
+        peer_id,
+        RqReceiveOptions::default(),
+        on_result,
+    )
+    .await
+}
+
+/// [`serve`] with explicit receiver-only filesystem options.
+#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
+pub async fn serve_with_options<F>(
+    cx: &Cx,
+    control_listener: TcpListener,
+    udp_bind_ip: String,
+    dest_dir: PathBuf,
+    config: RqConfig,
+    peer_id: String,
+    options: RqReceiveOptions,
     mut on_result: F,
 ) -> Result<(), RqError>
 where
@@ -15619,7 +15827,7 @@ where
             return Ok(());
         }
         let (stream, peer) = control_listener.accept().await?;
-        let result = receive_connection(
+        let result = receive_connection_with_options(
             cx,
             stream,
             peer,
@@ -15627,6 +15835,7 @@ where
             &dest_dir,
             config.clone(),
             &peer_id,
+            options,
         )
         .await;
         on_result(result);

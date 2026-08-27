@@ -828,9 +828,11 @@ fn safe_entry_path(root_dir: &Path, rel_path: &str) -> Option<PathBuf> {
 mod tests {
     use super::*;
     use crate::atp::object::{ContentId, ObjectId};
+    use crate::net::atp::transport_common::metadata::{
+        SymlinkTargetInfo, SymlinkTargetKind, SymlinkTargetSemantics,
+    };
     use crate::net::atp::transport_common::{
-        DirectoryMetadataEntry, DirectoryMetadataManifest, EntryMetadata, SymlinkTargetInfo,
-        SymlinkTargetKind, SymlinkTargetSemantics,
+        DirectoryMetadataEntry, DirectoryMetadataManifest, EntryMetadata,
     };
     use crate::net::atp::transport_rq::{RqMetadataEntry, RqMetadataManifest};
     use sha2::{Digest, Sha256};

@@ -2613,6 +2613,18 @@ fn validate_manifest_accepts_sane_bounds() {
     assert!(validate_manifest(&manifest, &RqConfig::default()).is_ok());
 }
 
+#[test]
+fn rq_special_file_receive_options_default_to_safe_skip_and_allow_explicit_fifo_opt_in() {
+    let defaults = RqReceiveOptions::new();
+    assert_eq!(defaults, RqReceiveOptions::default());
+    assert!(!defaults.allow_special_files());
+    assert!(
+        defaults
+            .with_allow_special_files(true)
+            .allow_special_files()
+    );
+}
+
 fn one_entry_metadata_manifest(path: &str, metadata: EntryMetadata) -> RqMetadataManifest {
     let commitment_hex = rq_metadata_commitment(&[(path, &metadata)]);
     RqMetadataManifest {
@@ -2624,6 +2636,90 @@ fn one_entry_metadata_manifest(path: &str, metadata: EntryMetadata) -> RqMetadat
         }],
         directories: None,
     }
+}
+
+fn one_special_entry_manifest(kind: FileKind) -> TransferManifest {
+    let rel_path = "pipe";
+    let metadata = EntryMetadata {
+        file_kind: kind,
+        unix_mode: Some(0o640),
+        ..EntryMetadata::default()
+    };
+    let digest = digest_for_bytes(rel_path, b"");
+    TransferManifest {
+        transfer_id: "rqspecialfiles".to_string(),
+        root_name: "payload".to_string(),
+        is_directory: true,
+        total_bytes: 0,
+        merkle_root_hex: flat_merkle_root_from_digests(std::slice::from_ref(&digest)),
+        metadata: Some(one_entry_metadata_manifest(rel_path, metadata)),
+        delta_manifest: None,
+        entries: vec![ManifestEntry {
+            index: 0,
+            rel_path: rel_path.to_string(),
+            size: 0,
+            sha256_hex: hex_encode(&digest.content_sha256),
+            members: Vec::new(),
+            fragment: None,
+        }],
+    }
+}
+
+#[test]
+fn rq_special_file_metadata_requires_direct_canonical_empty_content() {
+    for kind in [
+        FileKind::Fifo,
+        FileKind::Socket,
+        FileKind::BlockDevice,
+        FileKind::CharDevice,
+    ] {
+        validate_manifest(&one_special_entry_manifest(kind), &RqConfig::default())
+            .expect("direct canonical-empty special metadata is valid");
+    }
+
+    let mut nonzero = one_special_entry_manifest(FileKind::Fifo);
+    nonzero.entries[0].size = 1;
+    nonzero.total_bytes = 1;
+    assert!(matches!(
+        validate_manifest(&nonzero, &RqConfig::default()),
+        Err(RqError::Frame(ref message)) if message.contains("canonical empty content")
+    ));
+
+    let mut nonempty_digest = one_special_entry_manifest(FileKind::Fifo);
+    nonempty_digest.entries[0].sha256_hex = hex_encode(&Sha256::digest(b"not empty"));
+    assert!(matches!(
+        validate_manifest(&nonempty_digest, &RqConfig::default()),
+        Err(RqError::Frame(ref message)) if message.contains("canonical empty content")
+    ));
+
+    let mut fragmented = one_special_entry_manifest(FileKind::Fifo);
+    fragmented.entries[0].rel_path = ".atp-fragment-0-0".to_string();
+    fragmented.entries[0].fragment = Some(LargeObjectFragment {
+        rel_path: "pipe".to_string(),
+        shard_index: 0,
+        shard_count: 1,
+        logical_offset: 0,
+        len: 0,
+        logical_size: 0,
+        sha256_hex: hex_encode(&Sha256::digest(b"")),
+    });
+    assert!(matches!(
+        validate_manifest(&fragmented, &RqConfig::default()),
+        Err(RqError::Frame(ref message)) if message.contains("direct, unpacked, unfragmented")
+    ));
+
+    let mut packed = one_special_entry_manifest(FileKind::Fifo);
+    packed.entries[0].rel_path = ".atp-pack-0".to_string();
+    packed.entries[0].members = vec![PackedMember {
+        rel_path: "pipe".to_string(),
+        offset: 0,
+        len: 0,
+        sha256_hex: hex_encode(&Sha256::digest(b"")),
+    }];
+    assert!(matches!(
+        validate_manifest(&packed, &RqConfig::default()),
+        Err(RqError::Frame(ref message)) if message.contains("direct, unpacked, unfragmented")
+    ));
 }
 
 #[test]
@@ -3352,7 +3448,8 @@ fn rq_topology_requested_hardlink_fidelity_emits_zero_content_alias() {
         .find(|digest| digest.rel_path == "b-secondary")
         .expect("alias digest");
     assert_eq!(alias_digest.size, 0);
-    assert_eq!(alias_digest.content_sha256, Sha256::digest(b"").into());
+    let empty_sha256: [u8; 32] = Sha256::digest(b"").into();
+    assert_eq!(alias_digest.content_sha256, empty_sha256);
 
     let flattened = futures_lite::future::block_on(source_metadata_manifest_with_config(
         root.path(),
@@ -3369,6 +3466,54 @@ fn rq_topology_requested_hardlink_fidelity_emits_zero_content_alias() {
             .collect::<BTreeSet<_>>(),
         BTreeSet::from(["a-primary", "b-secondary"])
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn rq_special_file_source_directory_captures_fifo_without_opening_or_packing_it() {
+    use nix::sys::stat::Mode;
+
+    let root = tempfile::tempdir().expect("RQ special-file source root");
+    let fifo = root.path().join("a-pipe");
+    nix::unistd::mkfifo(&fifo, Mode::from_bits_truncate(0o640)).expect("create source FIFO");
+    std::fs::write(root.path().join("b-regular"), b"regular bytes").expect("write regular sibling");
+
+    let config = RqConfig::default();
+    let (_, is_directory, mut source_entries, _) =
+        futures_lite::future::block_on(collect_entries(root.path())).expect("collect source tree");
+    assert!(is_directory);
+    futures_lite::future::block_on(capture_source_metadata(
+        &mut source_entries,
+        &config.metadata_policy,
+        config.preserve_hardlinks,
+    ))
+    .expect("capture FIFO metadata without opening it");
+
+    let fifo_source = source_entries
+        .iter()
+        .find(|entry| entry.rel_path == "a-pipe")
+        .expect("captured FIFO source entry");
+    assert_eq!(fifo_source.metadata.file_kind, FileKind::Fifo);
+    assert_eq!(fifo_source.source_len, Some(0));
+
+    let (planned, digests, pack_tempdir) =
+        futures_lite::future::block_on(pack_small_files(source_entries, &config))
+            .expect("plan FIFO as metadata-only topology");
+    assert!(pack_tempdir.is_none(), "FIFO must not enter a content pack");
+    let fifo_plan = planned
+        .iter()
+        .find(|entry| entry.rel_path == "a-pipe")
+        .expect("planned FIFO entry");
+    assert!(fifo_plan.members.is_empty());
+    assert_eq!(fifo_plan.source_len, Some(0));
+    let fifo_digest = digests
+        .iter()
+        .find(|digest| digest.rel_path == "a-pipe")
+        .expect("canonical FIFO digest");
+    assert_eq!(fifo_digest.size, 0);
+    let empty_sha256: [u8; 32] = Sha256::digest(b"").into();
+    assert_eq!(fifo_digest.content_sha256, empty_sha256);
+    assert!(planned.iter().any(|entry| entry.rel_path == "b-regular"));
 }
 
 #[test]
@@ -7148,6 +7293,38 @@ fn digest_for_bytes(rel_path: &str, bytes: &[u8]) -> EntryDigest {
     }
 }
 
+fn complete_staged_decoder(
+    entry: &ManifestEntry,
+    transfer_id: &str,
+    path: PathBuf,
+) -> EntryDecoder {
+    EntryDecoder {
+        index: entry.index,
+        object_id: entry_object_id(transfer_id, entry.index),
+        size: entry.size,
+        pipeline: None,
+        complete: true,
+        staging_path: path,
+        staging_write_offset: 0,
+        staging_file_len: entry.size,
+        staging_shared: false,
+        staging_created: true,
+        staging_file: None,
+        staging_cursor: None,
+        staging_unflushed_bytes: 0,
+        cache_staging_file: false,
+        bytes_written: entry.size,
+        max_block_size: DEFAULT_MAX_BLOCK_SIZE,
+        source_streaming: false,
+        source_blocks: Vec::new(),
+        pending_decodes: Vec::new(),
+        inc: None,
+        inc_digest: None,
+        source_write_buffer: Vec::new(),
+        source_write_buffer_offset: None,
+    }
+}
+
 #[test]
 fn verify_and_commit_replaces_readonly_regular_file_with_staged_metadata() {
     let dest = canon_tempdir();
@@ -7473,6 +7650,125 @@ fn rq_topology_commit_waits_for_fragmented_primary_and_preserves_links() {
     assert_eq!(
         std::fs::read_link(base.join("d-dangling")).unwrap(),
         Path::new("missing-target")
+    );
+}
+
+#[test]
+fn rq_special_file_default_skip_preserves_existing_destination_leaf() {
+    let dest = canon_tempdir();
+    let base = dest.path().join("payload");
+    let staging_dir = dest.path().join(".atp-rq-special-skip-staging");
+    std::fs::create_dir_all(&base).expect("destination base");
+    std::fs::create_dir_all(&staging_dir).expect("staging dir");
+    let out_path = base.join("pipe");
+    std::fs::write(&out_path, b"preserve existing regular file")
+        .expect("write existing destination leaf");
+
+    let manifest = one_special_entry_manifest(FileKind::Fifo);
+    validate_manifest(&manifest, &RqConfig::default()).expect("special manifest validates");
+    let staging_path = staging_dir.join("0");
+    std::fs::write(&staging_path, b"").expect("write canonical empty staging entry");
+    let mut decoders = vec![complete_staged_decoder(
+        &manifest.entries[0],
+        &manifest.transfer_id,
+        staging_path,
+    )];
+
+    let receipt = futures_lite::future::block_on(verify_and_commit(
+        &manifest,
+        &mut decoders,
+        dest.path(),
+        0,
+        0,
+        &BTreeMap::new(),
+        &CompletionDigestIndex::default(),
+    ))
+    .expect("default special-file policy skips safely");
+
+    assert!(receipt.committed);
+    assert!(receipt.committed_paths.is_empty());
+    assert_eq!(
+        std::fs::read(&out_path).expect("read preserved destination leaf"),
+        b"preserve existing regular file"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn rq_special_file_opt_in_recreates_fifo_and_mode() {
+    use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+
+    let dest = canon_tempdir();
+    let staging_dir = dest.path().join(".atp-rq-special-fifo-staging");
+    std::fs::create_dir_all(&staging_dir).expect("staging dir");
+    let manifest = one_special_entry_manifest(FileKind::Fifo);
+    validate_manifest(&manifest, &RqConfig::default()).expect("special manifest validates");
+    let staging_path = staging_dir.join("0");
+    std::fs::write(&staging_path, b"").expect("write canonical empty staging entry");
+    let mut decoders = vec![complete_staged_decoder(
+        &manifest.entries[0],
+        &manifest.transfer_id,
+        staging_path,
+    )];
+
+    let receipt = futures_lite::future::block_on(verify_and_commit_with_options(
+        &manifest,
+        &mut decoders,
+        dest.path(),
+        0,
+        0,
+        &BTreeMap::new(),
+        &CompletionDigestIndex::default(),
+        RqReceiveOptions::new().with_allow_special_files(true),
+    ))
+    .expect("explicit special-file policy recreates FIFO");
+
+    let out_path = dest.path().join("payload/pipe");
+    let metadata = std::fs::symlink_metadata(&out_path).expect("FIFO metadata");
+    assert!(metadata.file_type().is_fifo());
+    assert_eq!(metadata.permissions().mode() & 0o7777, 0o640);
+    assert_eq!(
+        receipt.committed_paths,
+        vec![out_path.display().to_string()]
+    );
+}
+
+#[cfg(not(unix))]
+#[test]
+fn rq_special_file_opt_in_is_still_a_safe_platform_skip() {
+    let dest = canon_tempdir();
+    let base = dest.path().join("payload");
+    let staging_dir = dest.path().join(".atp-rq-special-platform-staging");
+    std::fs::create_dir_all(&base).expect("destination base");
+    std::fs::create_dir_all(&staging_dir).expect("staging dir");
+    let out_path = base.join("pipe");
+    std::fs::write(&out_path, b"preserve unsupported destination")
+        .expect("write existing destination leaf");
+    let manifest = one_special_entry_manifest(FileKind::Fifo);
+    let staging_path = staging_dir.join("0");
+    std::fs::write(&staging_path, b"").expect("write canonical empty staging entry");
+    let mut decoders = vec![complete_staged_decoder(
+        &manifest.entries[0],
+        &manifest.transfer_id,
+        staging_path,
+    )];
+
+    let receipt = futures_lite::future::block_on(verify_and_commit_with_options(
+        &manifest,
+        &mut decoders,
+        dest.path(),
+        0,
+        0,
+        &BTreeMap::new(),
+        &CompletionDigestIndex::default(),
+        RqReceiveOptions::new().with_allow_special_files(true),
+    ))
+    .expect("unsupported platform skips special file");
+
+    assert!(receipt.committed_paths.is_empty());
+    assert_eq!(
+        std::fs::read(&out_path).unwrap(),
+        b"preserve unsupported destination"
     );
 }
 

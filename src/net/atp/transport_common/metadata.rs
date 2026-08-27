@@ -798,6 +798,28 @@ async fn create_guarded_temporary_file(
     .await
 }
 
+#[cfg(unix)]
+async fn create_guarded_temporary_fifo(
+    candidate: PathBuf,
+    mode: u32,
+) -> io::Result<TemporaryLeafGuard> {
+    crate::runtime::spawn_blocking_io(move || {
+        use nix::sys::stat::Mode;
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let perm_bits = mode & 0o7777;
+        nix::unistd::mkfifo(
+            &candidate,
+            Mode::from_bits_truncate(perm_bits as libc::mode_t),
+        )
+        .map_err(|error| io::Error::from_raw_os_error(error as i32))?;
+        let guard = TemporaryLeafGuard::new(candidate.clone(), ReplaceableLeafKind::RegularFile);
+        std::fs::set_permissions(&candidate, std::fs::Permissions::from_mode(perm_bits))?;
+        Ok(guard)
+    })
+    .await
+}
+
 /// Minimum zero-run length represented as a filesystem hole.
 ///
 /// This is an allocation heuristic matching rsync-style sparse reconstruction,
@@ -2919,6 +2941,64 @@ pub async fn recreate_fifo(out_path: &Path, mode: u32) -> Result<(), StreamingEr
     Ok(())
 }
 
+/// Create and metadata-prepare a FIFO in a unique sibling before atomically
+/// replacing the destination leaf.
+///
+/// Any FIFO creation, permission, metadata, or final-install failure leaves an
+/// existing destination untouched and cleans up the owned staging FIFO.
+///
+/// # Errors
+///
+/// Returns [`StreamingError`] when staging, required mode preservation, or the
+/// atomic destination replacement fails.
+#[cfg(unix)]
+pub async fn commit_fifo_transactionally(
+    out_path: &Path,
+    metadata: &EntryMetadata,
+) -> Result<MetadataApplyReport, StreamingError> {
+    let mode = metadata.unix_mode.unwrap_or(0o644);
+    let mut staged = None;
+    for _ in 0..32 {
+        let candidate = unique_symlink_sibling(out_path, "fifo-new")?;
+        match create_guarded_temporary_fifo(candidate, mode).await {
+            Ok(guard) => {
+                staged = Some(guard);
+                break;
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => {
+                return Err(StreamingError::new(format!(
+                    "{}: create staged FIFO: {error}",
+                    out_path.display()
+                )));
+            }
+        }
+    }
+    let mut staged_guard = staged.ok_or_else(|| {
+        StreamingError::new(format!(
+            "{}: unable to allocate unique FIFO staging leaf",
+            out_path.display()
+        ))
+    })?;
+    let staged = staged_guard.path.clone();
+    let report = apply_entry_metadata(&staged, metadata).await?;
+    if metadata.unix_mode.is_some() && !report.applied.contains(&"mode") {
+        let reason = report
+            .skipped
+            .iter()
+            .find_map(|(field, reason)| (*field == "mode").then_some(reason.as_str()))
+            .unwrap_or("mode was not applied");
+        return Err(StreamingError::new(format!(
+            "{}: staged FIFO mode was not preserved: {reason}",
+            out_path.display()
+        )));
+    }
+    install_staged_leaf_transactionally(&staged, out_path, ReplaceableLeafKind::RegularFile)
+        .await?;
+    staged_guard.disarm();
+    Ok(report)
+}
+
 /// Non-unix FIFO recreation is unsupported and fails closed.
 ///
 /// # Errors
@@ -3125,6 +3205,67 @@ mod tests {
                     .file_name()
                     .to_string_lossy()
                     .starts_with(".atp-sym-backup-"))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn transactional_fifo_commit_replaces_leaf_without_temp_leaks() {
+        use std::os::unix::fs::{FileTypeExt as _, PermissionsExt as _};
+
+        let root = tempfile::tempdir().expect("temporary directory");
+        let destination = root.path().join("destination");
+        std::fs::write(&destination, b"old regular destination").expect("write destination");
+        let metadata = EntryMetadata {
+            file_kind: FileKind::Fifo,
+            unix_mode: Some(0o640),
+            ..EntryMetadata::default()
+        };
+
+        futures_lite::future::block_on(commit_fifo_transactionally(&destination, &metadata))
+            .expect("commit FIFO transactionally");
+        let committed = std::fs::symlink_metadata(&destination).expect("FIFO metadata");
+        assert!(committed.file_type().is_fifo());
+        assert_eq!(committed.permissions().mode() & 0o7777, 0o640);
+        assert!(
+            std::fs::read_dir(root.path())
+                .expect("read root")
+                .all(|entry| !entry
+                    .expect("entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".atp-sym-fifo-new-"))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn transactional_fifo_commit_failure_preserves_existing_destination() {
+        let root = tempfile::tempdir().expect("temporary directory");
+        let destination = root.path().join("destination");
+        std::fs::create_dir(&destination).expect("create protected destination directory");
+        let metadata = EntryMetadata {
+            file_kind: FileKind::Fifo,
+            unix_mode: Some(0o640),
+            ..EntryMetadata::default()
+        };
+
+        let error =
+            futures_lite::future::block_on(commit_fifo_transactionally(&destination, &metadata))
+                .expect_err("FIFO must not replace an existing directory");
+        assert!(error.to_string().contains("directory"));
+        assert!(
+            destination.is_dir(),
+            "failed install must preserve destination"
+        );
+        assert!(
+            std::fs::read_dir(root.path())
+                .expect("read root")
+                .all(|entry| !entry
+                    .expect("entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".atp-sym-fifo-new-"))
         );
     }
 
