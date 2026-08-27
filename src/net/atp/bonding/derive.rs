@@ -29,11 +29,12 @@ use super::BondTransferDescriptor;
 /// attributes, ownership, and timestamps are not byte identity and would make
 /// identical content derive different enrollment descriptors, so this commits
 /// only the portable content/path shape ([`MetadataPolicy::portable`]) while
-/// preserving hardlink aliases as zero-content topology entries. The per-entry
-/// SHA-256 digests and flat-graph merkle root come from [`plan_transfer`]; the
-/// transfer id is the RaptorQ derivation ([`transfer_id_hex`]); the agreed
-/// RaptorQ object params (`symbol_size`, `max_block_size`) and the optional
-/// shared-key id (`auth_key_id`) are the params every participant must match.
+/// preserving relative symlinks and hardlink aliases as zero-content topology
+/// entries. The per-entry SHA-256 digests and flat-graph merkle root come from
+/// [`plan_transfer`]; the transfer id is the RaptorQ derivation
+/// ([`transfer_id_hex`]); the agreed RaptorQ object params (`symbol_size`,
+/// `max_block_size`) and the optional shared-key id (`auth_key_id`) are the
+/// params every participant must match.
 ///
 /// The chunk size used for the plan pass is [`DEFAULT_CHUNK_SIZE`], the exact
 /// value the CLI's `tcp_config(max_bytes, false).chunk_size` produces (it does
@@ -54,8 +55,12 @@ pub async fn derive_bonded_descriptor(
 ) -> Result<BondTransferDescriptor, RqError> {
     // Portable capture only: platform metadata is not byte identity and would
     // make identical content derive different enrollment descriptors. Bonded
-    // transfers always preserve hardlink topology (the CLI's `rq_config`
-    // posture), so a hardlink secondary is sent content-free identically here.
+    // transfers always preserve portable symlink and hardlink topology (the
+    // CLI's `rq_config` posture), so those entries are sent content-free.
+    let metadata_policy = MetadataPolicy {
+        preserve_symlinks: true,
+        ..MetadataPolicy::portable()
+    };
     let descriptor_config = RqConfig {
         symbol_size,
         // Clamp to >= symbol_size, mirroring the SDK/CLI `build_config` posture
@@ -65,7 +70,7 @@ pub async fn derive_bonded_descriptor(
             .unwrap_or(usize::MAX)
             .max(usize::from(symbol_size.max(1))),
         max_transfer_bytes: max_bytes,
-        metadata_policy: MetadataPolicy::portable(),
+        metadata_policy,
         preserve_hardlinks: true,
         ..RqConfig::default()
     };

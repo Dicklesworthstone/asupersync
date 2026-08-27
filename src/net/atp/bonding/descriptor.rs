@@ -45,7 +45,8 @@ use sha2::{Digest, Sha256};
 
 use crate::atp::object::MetadataPolicy;
 use crate::net::atp::transport_common::metadata::{
-    inode_key_if_regular_sync, read_entry_metadata_sync, validate_symlink_metadata_for_receive,
+    PathLinkKind, classify_path_link_sync, inode_key_if_regular_sync, read_entry_metadata_sync,
+    validate_symlink_metadata_for_receive,
 };
 use crate::net::atp::transport_common::{
     EntryDigest, EntryMetadata, FileKind, flat_merkle_root_from_digests, hash_file_streaming,
@@ -604,8 +605,17 @@ impl BondTransferDescriptor {
         let mut matches = metadata_manifest
             .entries
             .iter()
-            .filter(|candidate| candidate.rel_path == entry.rel_path);
-        let Some(metadata_entry) = matches.next() else {
+            .filter(|candidate| candidate.rel_path == entry.rel_path)
+            .map(|candidate| &candidate.metadata)
+            .chain(
+                metadata_manifest
+                    .directories
+                    .iter()
+                    .flat_map(|directories| directories.entries.iter())
+                    .filter(|candidate| candidate.rel_path == entry.rel_path)
+                    .map(|candidate| &candidate.metadata),
+            );
+        let Some(metadata) = matches.next() else {
             return Ok(None);
         };
         if matches.next().is_some() {
@@ -613,8 +623,9 @@ impl BondTransferDescriptor {
                 rel_path: entry.rel_path.clone(),
             });
         }
-        let metadata = &metadata_entry.metadata;
-        if !matches!(metadata.file_kind, FileKind::Symlink) && metadata.hardlink_target.is_none() {
+        if !matches!(metadata.file_kind, FileKind::Symlink | FileKind::Directory)
+            && metadata.hardlink_target.is_none()
+        {
             return Ok(None);
         }
         if entry.size != 0 || entry.sha256_hex != canonical_empty_sha256_hex() {
@@ -625,6 +636,13 @@ impl BondTransferDescriptor {
 
         match (&metadata.file_kind, metadata.hardlink_target.as_deref()) {
             (FileKind::Symlink, None) => {
+                validate_symlink_metadata_for_receive(&entry.rel_path, metadata).map_err(|_| {
+                    BondProofError::EntryMismatch {
+                        rel_path: entry.rel_path.clone(),
+                    }
+                })?;
+            }
+            (FileKind::Directory, None) => {
                 validate_symlink_metadata_for_receive(&entry.rel_path, metadata).map_err(|_| {
                     BondProofError::EntryMismatch {
                         rel_path: entry.rel_path.clone(),
@@ -698,6 +716,22 @@ fn verify_local_topology_entry_sync(
                 || observed.symlink_target != expected.symlink_target
                 || observed.symlink_target_info != expected.symlink_target_info
             {
+                return Err(BondProofError::EntryMismatch {
+                    rel_path: entry.rel_path.clone(),
+                });
+            }
+        }
+        (FileKind::Directory, None) => {
+            let link_kind = classify_path_link_sync(&path).map_err(|error| BondProofError::Io {
+                rel_path: entry.rel_path.clone(),
+                message: error.to_string(),
+            })?;
+            let observed =
+                std::fs::symlink_metadata(&path).map_err(|error| BondProofError::Io {
+                    rel_path: entry.rel_path.clone(),
+                    message: error.to_string(),
+                })?;
+            if !matches!(link_kind, PathLinkKind::NotLink) || !observed.is_dir() {
                 return Err(BondProofError::EntryMismatch {
                     rel_path: entry.rel_path.clone(),
                 });
@@ -795,7 +829,8 @@ mod tests {
     use super::*;
     use crate::atp::object::{ContentId, ObjectId};
     use crate::net::atp::transport_common::{
-        EntryMetadata, SymlinkTargetInfo, SymlinkTargetKind, SymlinkTargetSemantics,
+        DirectoryMetadataEntry, DirectoryMetadataManifest, EntryMetadata, SymlinkTargetInfo,
+        SymlinkTargetKind, SymlinkTargetSemantics,
     };
     use crate::net::atp::transport_rq::{RqMetadataEntry, RqMetadataManifest};
     use sha2::{Digest, Sha256};
@@ -1206,6 +1241,39 @@ mod tests {
             futures_lite::future::block_on(desc.prove_local_holding(drifted.path())),
             Err(BondProofError::EntryMismatch {
                 rel_path: "b-link.bin".to_string(),
+            })
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bonded_topology_local_holding_rejects_a_symlink_in_place_of_an_empty_directory() {
+        use std::os::unix::fs::symlink;
+
+        let mut desc = descriptor_for(&[(0, "empty-dir", b"")]);
+        desc.metadata = Some(RqMetadataManifest {
+            version: 1,
+            commitment_hex: "77".repeat(32),
+            entries: Vec::new(),
+            directories: Some(DirectoryMetadataManifest {
+                root: None,
+                entries: vec![DirectoryMetadataEntry {
+                    rel_path: "empty-dir".to_string(),
+                    metadata: EntryMetadata {
+                        file_kind: FileKind::Directory,
+                        ..EntryMetadata::default()
+                    },
+                }],
+            }),
+        });
+
+        let donor = tempfile::tempdir().expect("directory donor root");
+        std::fs::create_dir(donor.path().join("actual-dir")).expect("create actual directory");
+        symlink("actual-dir", donor.path().join("empty-dir")).expect("create directory symlink");
+        assert_eq!(
+            futures_lite::future::block_on(desc.prove_local_holding(donor.path())),
+            Err(BondProofError::EntryMismatch {
+                rel_path: "empty-dir".to_string(),
             })
         );
     }

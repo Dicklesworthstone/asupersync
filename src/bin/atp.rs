@@ -12095,6 +12095,21 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
         bond_test_try_derive(runtime, path).expect("derive bonded descriptor")
     }
 
+    fn bond_test_prove_local_holding(
+        runtime: &asupersync::runtime::Runtime,
+        descriptor: &BondTransferDescriptor,
+        path: &Path,
+    ) -> Result<(), String> {
+        let descriptor = descriptor.clone();
+        let source = path.to_path_buf();
+        runtime.block_on(runtime.handle().spawn(async move {
+            descriptor
+                .prove_local_holding(&source)
+                .await
+                .map_err(|error| error.to_string())
+        }))
+    }
+
     fn write_bond_payload(root: &Path, first: &[u8]) {
         fs::create_dir_all(root.join("sub")).expect("payload dirs");
         let paths = [root.join("a.bin"), root.join("sub/b.bin")];
@@ -12175,55 +12190,137 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
     }
 
     #[test]
-    fn bond_descriptor_preserves_hardlinks_and_rejects_unrepresented_empty_trees() {
+    fn bond_descriptor_preserves_hardlinks_and_empty_directories() {
         let temp = tempfile::tempdir().expect("temporary directory");
         let runtime = build_runtime(2).expect("bond test runtime");
 
         let hardlinks = temp.path().join("hardlinks");
         fs::create_dir(&hardlinks).expect("hardlink root");
-        fs::write(hardlinks.join("primary.bin"), b"same inode").expect("hardlink primary");
+        fs::write(hardlinks.join("a-primary.bin"), b"same inode").expect("hardlink primary");
         fs::hard_link(
-            hardlinks.join("primary.bin"),
-            hardlinks.join("duplicate.bin"),
+            hardlinks.join("a-primary.bin"),
+            hardlinks.join("b-alias.bin"),
         )
-        .expect("hardlink duplicate");
+        .expect("hardlink alias");
         let descriptor = bond_test_try_derive(&runtime, &hardlinks)
             .expect("RQ bonding preserves hardlink topology");
-        let metadata = descriptor.metadata.expect("bonded metadata commitment");
+        let metadata = descriptor
+            .metadata
+            .as_ref()
+            .expect("bonded metadata commitment");
         let alias = metadata
             .entries
             .iter()
-            .find(|entry| entry.rel_path == "duplicate.bin")
+            .find(|entry| entry.rel_path == "b-alias.bin")
             .expect("hardlink alias metadata");
         assert_eq!(
             alias.metadata.hardlink_target.as_deref(),
-            Some("primary.bin")
+            Some("a-primary.bin")
         );
+        let alias_entry = descriptor
+            .entries
+            .iter()
+            .find(|entry| entry.rel_path == "b-alias.bin")
+            .expect("hardlink alias descriptor row");
+        assert_eq!(alias_entry.size, 0);
+        assert_eq!(
+            alias_entry.sha256_hex,
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        bond_test_prove_local_holding(&runtime, &descriptor, &hardlinks)
+            .expect("bonded hardlink donor proves local topology");
 
         let empty_tree = temp.path().join("empty-tree");
         fs::create_dir_all(empty_tree.join("nested-empty")).expect("nested empty directory");
-        let error = bond_test_try_derive(&runtime, &empty_tree)
-            .expect_err("RQ bonding must not flatten nested empty directories");
-        assert!(
-            error.contains("cannot represent nested empty directories"),
-            "unexpected empty-tree rejection: {error}"
+        let empty_descriptor = bond_test_try_derive(&runtime, &empty_tree)
+            .expect("RQ bonding preserves nested empty directories");
+        let empty_entry = empty_descriptor
+            .entries
+            .iter()
+            .find(|entry| entry.rel_path == "nested-empty")
+            .expect("empty-directory descriptor row");
+        assert_eq!(empty_entry.size, 0);
+        assert_eq!(
+            empty_entry.sha256_hex,
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         );
+        let directory_metadata = empty_descriptor
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.directories.as_ref())
+            .and_then(|directories| {
+                directories
+                    .entries
+                    .iter()
+                    .find(|entry| entry.rel_path == "nested-empty")
+            })
+            .expect("empty-directory metadata row");
+        assert!(matches!(
+            directory_metadata.metadata.file_kind,
+            asupersync::net::atp::transport_common::FileKind::Directory
+        ));
+        bond_test_prove_local_holding(&runtime, &empty_descriptor, &empty_tree)
+            .expect("bonded empty-directory donor proves local topology");
     }
 
     #[cfg(unix)]
     #[test]
-    fn bond_descriptor_rejects_symlinks_before_creation() {
+    fn bond_descriptor_preserves_relative_and_dangling_symlinks() {
         use std::os::unix::fs::symlink;
 
         let temp = tempfile::tempdir().expect("temporary directory");
         let source = temp.path().join("source");
         fs::create_dir(&source).expect("source root");
-        fs::write(source.join("target.bin"), b"target").expect("symlink target");
-        symlink("target.bin", source.join("link.bin")).expect("source symlink");
+        fs::write(source.join("a-target.bin"), b"target").expect("symlink target");
+        symlink("a-target.bin", source.join("b-link.bin")).expect("source symlink");
+        symlink("missing.bin", source.join("c-dangling.bin")).expect("source dangling symlink");
         let runtime = build_runtime(2).expect("bond test runtime");
-        let error = bond_test_try_derive(&runtime, &source)
-            .expect_err("RQ bonding must not flatten symlinks");
-        assert!(error.contains("symlink") || error.contains("reparse"));
+        let descriptor = bond_test_try_derive(&runtime, &source)
+            .expect("RQ bonding preserves portable symlink topology");
+        let metadata = descriptor
+            .metadata
+            .as_ref()
+            .expect("bonded metadata commitment");
+        let link = metadata
+            .entries
+            .iter()
+            .find(|entry| entry.rel_path == "b-link.bin")
+            .expect("relative symlink metadata");
+        assert_eq!(
+            link.metadata.symlink_target.as_deref(),
+            Some("a-target.bin")
+        );
+        let dangling = metadata
+            .entries
+            .iter()
+            .find(|entry| entry.rel_path == "c-dangling.bin")
+            .expect("dangling symlink metadata");
+        assert_eq!(
+            dangling.metadata.symlink_target.as_deref(),
+            Some("missing.bin")
+        );
+        for rel_path in ["b-link.bin", "c-dangling.bin"] {
+            let entry = descriptor
+                .entries
+                .iter()
+                .find(|entry| entry.rel_path == rel_path)
+                .expect("symlink descriptor row");
+            assert_eq!(entry.size, 0);
+            assert_eq!(
+                entry.sha256_hex,
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            );
+        }
+        assert_eq!(
+            descriptor.transfer_id,
+            channel_bonding::transfer_id_hex(
+                &descriptor.merkle_root_hex,
+                descriptor.total_bytes,
+                descriptor.entries.len(),
+            )
+        );
+        bond_test_prove_local_holding(&runtime, &descriptor, &source)
+            .expect("bonded symlink donor proves local topology");
     }
 
     /// The CLI no longer constructs donor assignments — the receiver's
