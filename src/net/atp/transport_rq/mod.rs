@@ -5180,12 +5180,12 @@ async fn capture_source_metadata(
         .iter()
         .map(|entry| entry.abs_path.clone())
         .collect::<Vec<_>>();
-    let policy = policy.clone();
+    let read_policy = policy.clone();
     let captured = crate::runtime::spawn_blocking(move || {
         paths
             .iter()
             .map(|path| {
-                let metadata = read_entry_metadata_sync(path, &policy)?;
+                let metadata = read_entry_metadata_sync(path, &read_policy)?;
                 let identity = if preserve_hardlinks {
                     inode_key_if_regular_sync(path)?
                 } else {
@@ -5207,7 +5207,7 @@ async fn capture_source_metadata(
                 metadata.file_kind
             )));
         }
-        validate_entry_metadata_for_receive(&entry.rel_path, &metadata, policy).map_err(
+        validate_entry_metadata_for_receive(&entry.rel_path, &metadata, &policy).map_err(
             |error| {
                 RqError::Source(format!(
                     "{}: source metadata is not portable: {error}",
