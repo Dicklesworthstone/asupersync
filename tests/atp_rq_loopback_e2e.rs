@@ -18,7 +18,8 @@ use std::thread;
 use asupersync::cx::Cx;
 use asupersync::net::TcpListener;
 use asupersync::net::atp::transport_rq::{
-    ReceiveReport, RqConfig, RqError, SendReport, receive_once, send_path,
+    ReceiveReport, RqConfig, RqError, RqReceiveOptions, SendReport, receive_once_with_options,
+    send_path,
 };
 use asupersync::runtime::RuntimeBuilder;
 use asupersync::security::SecurityContext;
@@ -152,6 +153,17 @@ fn spawn_receiver(
     SocketAddr,
     thread::JoinHandle<Result<ReceiveReport, RqError>>,
 ) {
+    spawn_receiver_with_options(dest_dir, config, RqReceiveOptions::default())
+}
+
+fn spawn_receiver_with_options(
+    dest_dir: PathBuf,
+    config: RqConfig,
+    options: RqReceiveOptions,
+) -> (
+    SocketAddr,
+    thread::JoinHandle<Result<ReceiveReport, RqError>>,
+) {
     let (addr_tx, addr_rx) = mpsc::channel::<SocketAddr>();
     let handle = thread::spawn(move || {
         let runtime = RuntimeBuilder::multi_thread()
@@ -164,7 +176,16 @@ fn spawn_receiver(
             let listener = TcpListener::bind("127.0.0.1:0").await?;
             let addr = listener.local_addr()?;
             addr_tx.send(addr).expect("send addr");
-            receive_once(&cx, &listener, "127.0.0.1", &dest_dir, config, "receiver").await
+            receive_once_with_options(
+                &cx,
+                &listener,
+                "127.0.0.1",
+                &dest_dir,
+                config,
+                "receiver",
+                options,
+            )
+            .await
         }))
     });
     let addr = addr_rx.recv().expect("receiver bound address");
@@ -474,6 +495,123 @@ fn authenticated_directory_roundtrip_preserves_nested_and_multiple_empty_directo
                 & 0o7777,
             0o751,
             "empty-directory mode must round-trip"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn authenticated_topology_roundtrip_spans_datagram_and_control_source_paths() {
+    use nix::sys::stat::Mode;
+    use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _, PermissionsExt as _, symlink};
+
+    let root = unique_tmp("auth_topology");
+    let src_dir = root.join("src");
+    let tree = src_dir.join("project");
+    std::fs::create_dir_all(&tree).expect("create topology source tree");
+
+    let payload: Vec<u8> = (0..131_111u32)
+        .map(|index| (index.wrapping_mul(2_654_435_761).rotate_left(9) >> 13) as u8)
+        .collect();
+    let primary = tree.join("a-primary.bin");
+    std::fs::write(&primary, &payload).expect("write topology primary");
+    std::fs::hard_link(&primary, tree.join("b-hardlink.bin")).expect("create hardlink alias");
+    symlink("a-primary.bin", tree.join("c-relative-link")).expect("create relative symlink");
+    symlink("missing-target", tree.join("d-dangling-link")).expect("create dangling symlink");
+    let fifo = tree.join("e-pipe");
+    nix::unistd::mkfifo(&fifo, Mode::from_bits_truncate(0o640)).expect("create source FIFO");
+    std::fs::set_permissions(&fifo, std::fs::Permissions::from_mode(0o640))
+        .expect("set exact source FIFO mode");
+
+    for (label, datagram_path) in [("datagram", true), ("control-source", false)] {
+        let dst_dir = root.join(format!("dst-{label}"));
+        std::fs::create_dir_all(&dst_dir).expect("create topology destination root");
+
+        let mut receiver_config = if datagram_path {
+            auth_datagram_test_config()
+        } else {
+            auth_test_config()
+        };
+        receiver_config.preserve_hardlinks = true;
+        let sender_config = receiver_config.clone();
+        let options = RqReceiveOptions::new().with_allow_special_files(true);
+        let (addr, recv_handle) =
+            spawn_receiver_with_options(dst_dir.clone(), receiver_config, options);
+        let send = run_sender(addr, tree.clone(), sender_config)
+            .unwrap_or_else(|error| panic!("{label} topology send failed: {error}"));
+        let recv = recv_handle
+            .join()
+            .expect("topology receiver thread")
+            .unwrap_or_else(|error| panic!("{label} topology receive failed: {error}"));
+
+        assert!(send.receipt.committed, "{label} sender receipt");
+        assert!(send.receipt.sha_ok, "{label} sender SHA receipt");
+        assert!(send.receipt.merkle_ok, "{label} sender Merkle receipt");
+        assert!(recv.committed, "{label} receiver commit");
+        if datagram_path {
+            assert!(
+                send.symbols_sent > 0,
+                "datagram path must spray UDP symbols"
+            );
+            assert!(
+                recv.symbols_accepted > 0,
+                "datagram path must accept UDP symbols"
+            );
+        } else {
+            assert_eq!(
+                send.symbols_sent, 0,
+                "control-source path must not spray UDP symbols"
+            );
+            assert_eq!(
+                recv.symbols_accepted, 0,
+                "control-source path must not accept UDP symbols"
+            );
+        }
+
+        let base = dst_dir.join("project");
+        let received_primary = base.join("a-primary.bin");
+        let received_hardlink = base.join("b-hardlink.bin");
+        assert_eq!(
+            std::fs::read(&received_primary).expect("read received primary"),
+            payload,
+            "{label} primary bytes"
+        );
+        assert_eq!(
+            std::fs::read(&received_hardlink).expect("read received hardlink"),
+            payload,
+            "{label} hardlink bytes"
+        );
+        let primary_metadata =
+            std::fs::metadata(&received_primary).expect("received primary metadata");
+        let hardlink_metadata =
+            std::fs::metadata(&received_hardlink).expect("received hardlink metadata");
+        assert_eq!(
+            primary_metadata.dev(),
+            hardlink_metadata.dev(),
+            "{label} dev"
+        );
+        assert_eq!(
+            primary_metadata.ino(),
+            hardlink_metadata.ino(),
+            "{label} ino"
+        );
+        assert_eq!(
+            std::fs::read_link(base.join("c-relative-link")).expect("relative symlink target"),
+            PathBuf::from("a-primary.bin"),
+            "{label} relative symlink"
+        );
+        assert_eq!(
+            std::fs::read_link(base.join("d-dangling-link")).expect("dangling symlink target"),
+            PathBuf::from("missing-target"),
+            "{label} dangling symlink"
+        );
+        let fifo_metadata =
+            std::fs::symlink_metadata(base.join("e-pipe")).expect("received FIFO metadata");
+        assert!(fifo_metadata.file_type().is_fifo(), "{label} FIFO type");
+        assert_eq!(
+            fifo_metadata.permissions().mode() & 0o7777,
+            0o640,
+            "{label} FIFO mode"
         );
     }
 }
