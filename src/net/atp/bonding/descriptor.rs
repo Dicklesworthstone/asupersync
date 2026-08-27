@@ -43,8 +43,13 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::atp::object::MetadataPolicy;
+use crate::net::atp::transport_common::metadata::{
+    inode_key_if_regular_sync, read_entry_metadata_sync, validate_symlink_metadata_for_receive,
+};
 use crate::net::atp::transport_common::{
-    EntryDigest, flat_merkle_root_from_digests, hash_file_streaming, hex_encode,
+    EntryDigest, EntryMetadata, FileKind, flat_merkle_root_from_digests, hash_file_streaming,
+    hex_encode,
 };
 use crate::net::atp::transport_rq::{ManifestEntry, RqMetadataManifest, TransferManifest};
 use crate::types::symbol::ObjectId as RaptorqObjectId;
@@ -553,9 +558,21 @@ impl BondTransferDescriptor {
     /// tree). A coalesced (E-15 `members`) entry's bytes are reassembled by the
     /// donor before this call; that reassembly is out of Phase-A scope.
     pub async fn prove_local_holding(&self, root_dir: &Path) -> Result<(), BondProofError> {
+        self.validate()?;
         let mut buf = vec![0u8; BOND_HASH_BUFFER_SIZE];
         let mut digests: Vec<EntryDigest> = Vec::with_capacity(self.entries.len());
         for entry in &self.entries {
+            if let Some(metadata) = self.topology_metadata_for_entry(entry)? {
+                let root_dir = root_dir.to_path_buf();
+                let entry = entry.clone();
+                let metadata = metadata.clone();
+                let digest = crate::runtime::spawn_blocking(move || {
+                    verify_local_topology_entry_sync(&root_dir, &entry, &metadata)
+                })
+                .await?;
+                digests.push(digest);
+                continue;
+            }
             let path = safe_entry_path(root_dir, &entry.rel_path).ok_or_else(|| {
                 BondProofError::UnsafePath {
                     rel_path: entry.rel_path.clone(),
@@ -576,6 +593,146 @@ impl BondTransferDescriptor {
         }
         self.verify_local_digests(&digests)
     }
+
+    fn topology_metadata_for_entry(
+        &self,
+        entry: &BondEntry,
+    ) -> Result<Option<&EntryMetadata>, BondProofError> {
+        let Some(metadata_manifest) = &self.metadata else {
+            return Ok(None);
+        };
+        let mut matches = metadata_manifest
+            .entries
+            .iter()
+            .filter(|candidate| candidate.rel_path == entry.rel_path);
+        let Some(metadata_entry) = matches.next() else {
+            return Ok(None);
+        };
+        if matches.next().is_some() {
+            return Err(BondProofError::EntryMismatch {
+                rel_path: entry.rel_path.clone(),
+            });
+        }
+        let metadata = &metadata_entry.metadata;
+        if !matches!(metadata.file_kind, FileKind::Symlink) && metadata.hardlink_target.is_none() {
+            return Ok(None);
+        }
+        if entry.size != 0 || entry.sha256_hex != canonical_empty_sha256_hex() {
+            return Err(BondProofError::EntryMismatch {
+                rel_path: entry.rel_path.clone(),
+            });
+        }
+
+        match (&metadata.file_kind, metadata.hardlink_target.as_deref()) {
+            (FileKind::Symlink, None) => {
+                validate_symlink_metadata_for_receive(&entry.rel_path, metadata).map_err(|_| {
+                    BondProofError::EntryMismatch {
+                        rel_path: entry.rel_path.clone(),
+                    }
+                })?;
+            }
+            (FileKind::Regular, Some(primary_rel)) => {
+                let primary_is_plain = self.entries.iter().any(|candidate| {
+                    candidate.rel_path == primary_rel
+                        && primary_rel < entry.rel_path.as_str()
+                        && metadata_manifest
+                            .entries
+                            .iter()
+                            .find(|metadata_entry| metadata_entry.rel_path == primary_rel)
+                            .is_none_or(|metadata_entry| {
+                                matches!(metadata_entry.metadata.file_kind, FileKind::Regular)
+                                    && metadata_entry.metadata.hardlink_target.is_none()
+                            })
+                });
+                if !primary_is_plain {
+                    return Err(BondProofError::EntryMismatch {
+                        rel_path: entry.rel_path.clone(),
+                    });
+                }
+            }
+            _ => {
+                return Err(BondProofError::EntryMismatch {
+                    rel_path: entry.rel_path.clone(),
+                });
+            }
+        }
+        Ok(Some(metadata))
+    }
+}
+
+fn canonical_empty_sha256_hex() -> String {
+    hex_encode(&Sha256::digest(b""))
+}
+
+fn canonical_empty_digest(rel_path: String) -> EntryDigest {
+    EntryDigest {
+        rel_path,
+        size: 0,
+        content_id: crate::atp::object::ObjectId::content(
+            crate::atp::object::ContentId::from_bytes(b""),
+        ),
+        content_sha256: Sha256::digest(b"").into(),
+    }
+}
+
+fn verify_local_topology_entry_sync(
+    root_dir: &Path,
+    entry: &BondEntry,
+    expected: &EntryMetadata,
+) -> Result<EntryDigest, BondProofError> {
+    let path =
+        safe_entry_path(root_dir, &entry.rel_path).ok_or_else(|| BondProofError::UnsafePath {
+            rel_path: entry.rel_path.clone(),
+        })?;
+
+    match (&expected.file_kind, expected.hardlink_target.as_deref()) {
+        (FileKind::Symlink, None) => {
+            let mut policy = MetadataPolicy::portable();
+            policy.preserve_symlinks = true;
+            let observed =
+                read_entry_metadata_sync(&path, &policy).map_err(|error| BondProofError::Io {
+                    rel_path: entry.rel_path.clone(),
+                    message: error.into_message(),
+                })?;
+            if !matches!(observed.file_kind, FileKind::Symlink)
+                || observed.symlink_target != expected.symlink_target
+                || observed.symlink_target_info != expected.symlink_target_info
+            {
+                return Err(BondProofError::EntryMismatch {
+                    rel_path: entry.rel_path.clone(),
+                });
+            }
+        }
+        (FileKind::Regular, Some(primary_rel)) => {
+            let primary_path = safe_entry_path(root_dir, primary_rel).ok_or_else(|| {
+                BondProofError::UnsafePath {
+                    rel_path: primary_rel.to_string(),
+                }
+            })?;
+            let alias_identity =
+                inode_key_if_regular_sync(&path).map_err(|error| BondProofError::Io {
+                    rel_path: entry.rel_path.clone(),
+                    message: error.into_message(),
+                })?;
+            let primary_identity =
+                inode_key_if_regular_sync(&primary_path).map_err(|error| BondProofError::Io {
+                    rel_path: primary_rel.to_string(),
+                    message: error.into_message(),
+                })?;
+            if alias_identity.is_none() || alias_identity != primary_identity {
+                return Err(BondProofError::EntryMismatch {
+                    rel_path: entry.rel_path.clone(),
+                });
+            }
+        }
+        _ => {
+            return Err(BondProofError::EntryMismatch {
+                rel_path: entry.rel_path.clone(),
+            });
+        }
+    }
+
+    Ok(canonical_empty_digest(entry.rel_path.clone()))
 }
 
 /// Derive the per-entry RaptorQ object id from a transfer id and entry index.
@@ -637,7 +794,9 @@ fn safe_entry_path(root_dir: &Path, rel_path: &str) -> Option<PathBuf> {
 mod tests {
     use super::*;
     use crate::atp::object::{ContentId, ObjectId};
-    use crate::net::atp::transport_common::EntryMetadata;
+    use crate::net::atp::transport_common::{
+        EntryMetadata, SymlinkTargetInfo, SymlinkTargetKind, SymlinkTargetSemantics,
+    };
     use crate::net::atp::transport_rq::{RqMetadataEntry, RqMetadataManifest};
     use sha2::{Digest, Sha256};
 
@@ -939,6 +1098,116 @@ mod tests {
         let desc = descriptor_for(&[(0, "empty.bin", b"")]);
         assert_eq!(desc.entry_source_block_count(0), Some(0));
         assert!(desc.entry_block_geometry(0, 0).is_none());
+    }
+
+    #[test]
+    fn bonded_topology_local_holding_verifies_hardlink_identity_without_hashing_alias() {
+        let mut desc =
+            descriptor_for(&[(0, "a-primary.bin", b"same inode"), (1, "b-alias.bin", b"")]);
+        desc.metadata = Some(RqMetadataManifest {
+            version: 1,
+            commitment_hex: "55".repeat(32),
+            entries: vec![RqMetadataEntry {
+                rel_path: "b-alias.bin".to_string(),
+                metadata: EntryMetadata {
+                    hardlink_target: Some("a-primary.bin".to_string()),
+                    ..EntryMetadata::default()
+                },
+            }],
+            directories: None,
+        });
+
+        let linked = tempfile::tempdir().expect("linked donor root");
+        std::fs::write(linked.path().join("a-primary.bin"), b"same inode")
+            .expect("write hardlink primary");
+        std::fs::hard_link(
+            linked.path().join("a-primary.bin"),
+            linked.path().join("b-alias.bin"),
+        )
+        .expect("create hardlink alias");
+        futures_lite::future::block_on(desc.prove_local_holding(linked.path()))
+            .expect("matching hardlink topology proves local holding");
+
+        let independent = tempfile::tempdir().expect("independent donor root");
+        std::fs::write(independent.path().join("a-primary.bin"), b"same inode")
+            .expect("write independent primary");
+        std::fs::write(independent.path().join("b-alias.bin"), b"same inode")
+            .expect("write independent alias bytes");
+        assert_eq!(
+            futures_lite::future::block_on(desc.prove_local_holding(independent.path())),
+            Err(BondProofError::EntryMismatch {
+                rel_path: "b-alias.bin".to_string(),
+            })
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bonded_topology_local_holding_verifies_relative_and_dangling_symlink_targets() {
+        use std::os::unix::fs::symlink;
+
+        let mut desc = descriptor_for(&[
+            (0, "a-primary.bin", b"target bytes"),
+            (1, "b-link.bin", b""),
+            (2, "c-dangling.bin", b""),
+        ]);
+        desc.metadata = Some(RqMetadataManifest {
+            version: 1,
+            commitment_hex: "66".repeat(32),
+            entries: vec![
+                RqMetadataEntry {
+                    rel_path: "b-link.bin".to_string(),
+                    metadata: EntryMetadata {
+                        file_kind: FileKind::Symlink,
+                        symlink_target: Some("a-primary.bin".to_string()),
+                        symlink_target_info: Some(SymlinkTargetInfo {
+                            kind: Some(SymlinkTargetKind::File),
+                            semantics: SymlinkTargetSemantics::PortableRelative,
+                        }),
+                        ..EntryMetadata::default()
+                    },
+                },
+                RqMetadataEntry {
+                    rel_path: "c-dangling.bin".to_string(),
+                    metadata: EntryMetadata {
+                        file_kind: FileKind::Symlink,
+                        symlink_target: Some("missing.bin".to_string()),
+                        symlink_target_info: Some(SymlinkTargetInfo {
+                            kind: None,
+                            semantics: SymlinkTargetSemantics::PortableRelative,
+                        }),
+                        ..EntryMetadata::default()
+                    },
+                },
+            ],
+            directories: None,
+        });
+
+        let matching = tempfile::tempdir().expect("matching symlink donor root");
+        std::fs::write(matching.path().join("a-primary.bin"), b"target bytes")
+            .expect("write symlink target");
+        symlink("a-primary.bin", matching.path().join("b-link.bin"))
+            .expect("create relative symlink");
+        symlink("missing.bin", matching.path().join("c-dangling.bin"))
+            .expect("create dangling symlink");
+        futures_lite::future::block_on(desc.prove_local_holding(matching.path()))
+            .expect("matching symlink topology proves local holding");
+
+        let drifted = tempfile::tempdir().expect("drifted symlink donor root");
+        std::fs::write(drifted.path().join("a-primary.bin"), b"target bytes")
+            .expect("write expected target");
+        std::fs::write(drifted.path().join("other.bin"), b"target bytes")
+            .expect("write drifted target");
+        symlink("other.bin", drifted.path().join("b-link.bin"))
+            .expect("create drifted relative symlink");
+        symlink("missing.bin", drifted.path().join("c-dangling.bin"))
+            .expect("create dangling symlink");
+        assert_eq!(
+            futures_lite::future::block_on(desc.prove_local_holding(drifted.path())),
+            Err(BondProofError::EntryMismatch {
+                rel_path: "b-link.bin".to_string(),
+            })
+        );
     }
 
     #[test]
