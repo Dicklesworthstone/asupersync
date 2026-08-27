@@ -52,6 +52,7 @@ fn write_fixture(dir: &Path, sha_match: bool) {
         r#"{"schema_version":"arq-quic-e2e-event-v1","ts":"2026-06-17T00:00:01Z","stage":"receiver_ready","status":"passed","message":"fixture"}"#,
         r#"{"schema_version":"arq-quic-e2e-event-v1","ts":"2026-06-17T00:00:02Z","stage":"sender_transfer","status":"passed","message":"fixture"}"#,
         r#"{"schema_version":"arq-quic-e2e-event-v1","ts":"2026-06-17T00:00:03Z","stage":"sha256_verify","status":"passed","message":"fixture"}"#,
+        r#"{"schema_version":"arq-quic-e2e-event-v1","ts":"2026-06-17T00:00:04Z","stage":"metadata_fidelity","status":"passed","message":"fixture","details":{"status":"passed"}}"#,
         r#"{"schema_version":"arq-quic-e2e-event-v1","ts":"2026-06-17T00:00:04Z","stage":"summary","status":"passed","message":"fixture","details":{"transport_counters":{"no_claim":"fixture no-claim"}}}"#,
         r#"{"schema_version":"arq-quic-e2e-event-v1","ts":"2026-06-17T00:00:04Z","stage":"offline_validation","status":"passed","message":"fixture"}"#,
     ];
@@ -70,6 +71,28 @@ fn write_fixture(dir: &Path, sha_match: bool) {
   "sender": {{"event":"atp_send","transport":"quic","committed":true,"bytes_sent":8192}},
   "receiver": {{"event":"atp_receive","transport":"quic","committed":true,"bytes_received":8192}},
   "sha256_match": {sha_match},
+  "metadata_fidelity": {{
+    "status": "passed",
+    "entries_verified": 9,
+    "payload_bytes_match": true,
+    "payload_mode": "640",
+    "payload_mtime_epoch": 1600000123,
+    "xattr_supported": false,
+    "xattr_match": false,
+    "empty_directory": true,
+    "empty_directory_mode": "750",
+    "relative_symlink_target": "payload.bin",
+    "dangling_symlink_target": "missing-target",
+    "hardlink_identity": true,
+    "fifo": true,
+    "fifo_mode": "620",
+    "packed_sparse_content": true,
+    "packed_sparse_allocation": true,
+    "regular_sparse_content": true,
+    "regular_sparse_allocation": true,
+    "staging_clean": true,
+    "no_claim": "synthetic validator fixture; not live transfer evidence"
+  }},
   "metrics": {{
     "sender_max_rss_kb": 12345,
     "receiver_max_rss_kb": 23456,
@@ -159,6 +182,34 @@ fn loopback_from_output_rejects_corrupted_summary() {
     assert!(
         !output.status.success(),
         "validator accepted corrupted fixture; stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn loopback_from_output_rejects_missing_metadata_fidelity_proof() {
+    let root = unique_tmp("missing_metadata_fidelity");
+    write_fixture(&root, true);
+
+    let summary_path = root.join("summary.json");
+    let summary = std::fs::read_to_string(&summary_path).expect("read summary fixture");
+    write_file(
+        &summary_path,
+        &summary.replace(
+            r#""hardlink_identity": true"#,
+            r#""hardlink_identity": false"#,
+        ),
+    );
+
+    let output = Command::new(repo_root().join("scripts/run_arq_quic_loopback_e2e.sh"))
+        .args(["--from-output", root.to_str().unwrap()])
+        .output()
+        .expect("run loopback from-output validator");
+
+    assert!(
+        !output.status.success(),
+        "validator accepted missing hardlink-identity proof; stdout: {}; stderr: {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
@@ -1875,6 +1926,14 @@ fn loopback_script_runs_real_atp_binary() {
     assert!(summary.contains(r#""schema_version": "arq-quic-loopback-e2e-summary-v1""#));
     assert!(summary.contains(r#""transport": "quic""#));
     assert!(summary.contains(r#""sha256_match": true"#));
+    assert!(summary.contains(r#""metadata_fidelity": {"#));
+    assert!(summary.contains(r#""entries_verified": 9"#));
+    assert!(summary.contains(r#""payload_mode": "640""#));
+    assert!(summary.contains(r#""hardlink_identity": true"#));
+    assert!(summary.contains(r#""fifo": true"#));
+    assert!(summary.contains(r#""packed_sparse_allocation": true"#));
+    assert!(summary.contains(r#""regular_sparse_allocation": true"#));
+    assert!(summary.contains(r#""staging_clean": true"#));
     assert!(summary.contains(r#""sender_max_rss_kb":"#));
     assert!(summary.contains(r#""receiver_max_rss_kb":"#));
     assert!(summary.contains(r#""peak_max_rss_kb":"#));
@@ -1886,4 +1945,5 @@ fn loopback_script_runs_real_atp_binary() {
     assert!(events.contains(r#""stage":"receiver_ready","status":"passed""#));
     assert!(events.contains(r#""stage":"sender_transfer","status":"passed""#));
     assert!(events.contains(r#""stage":"sha256_verify","status":"passed""#));
+    assert!(events.contains(r#""stage":"metadata_fidelity","status":"passed""#));
 }

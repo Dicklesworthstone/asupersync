@@ -73,8 +73,13 @@ require_cmd python3
 require_cmd openssl
 require_cmd sha256sum
 require_cmd awk
+require_cmd cmp
+require_cmd find
 require_cmd grep
+require_cmd mkfifo
+require_cmd readlink
 require_cmd sed
+require_cmd stat
 
 emit_event() {
     local stage="$1"
@@ -115,6 +120,7 @@ emit_summary_event() {
             bytes_sent:.bytes_sent,
             bytes_received:.bytes_received,
             sha256_match:.sha256_match,
+            metadata_fidelity:.metadata_fidelity,
             metrics:.metrics,
             transport_counters:.transport_counters
           }
@@ -169,6 +175,121 @@ print(f"{seconds:.6f}")
 PY
 }
 
+verify_sparse_file() {
+    local source="$1"
+    local received="$2"
+    local label="$3"
+    local source_size source_blocks received_size received_blocks
+
+    cmp -s "$source" "$received" || {
+        echo "$label content differs" >&2
+        return 1
+    }
+    source_size="$(stat -c '%s' "$source")"
+    source_blocks="$(stat -c '%b' "$source")"
+    received_size="$(stat -c '%s' "$received")"
+    received_blocks="$(stat -c '%b' "$received")"
+    (( source_blocks * 512 < source_size / 2 )) || {
+        echo "$label source fixture is not sparse" >&2
+        return 1
+    }
+    (( received_blocks * 512 < received_size / 2 )) || {
+        echo "$label received file lost sparse allocation" >&2
+        return 1
+    }
+}
+
+verify_metadata_fidelity() {
+    local source_root="$1"
+    local received_root="$2"
+    local xattr_supported="$3"
+
+    cmp -s "$source_root/payload.bin" "$received_root/payload.bin" || {
+        echo "metadata payload differs" >&2
+        return 1
+    }
+    [[ "$(stat -c '%a' "$received_root/payload.bin")" == "640" ]] || {
+        echo "metadata payload mode differs" >&2
+        return 1
+    }
+    [[ "$(stat -c '%Y' "$received_root/payload.bin")" == "1600000123" ]] || {
+        echo "metadata payload mtime differs" >&2
+        return 1
+    }
+    [[ -d "$received_root/empty-dir" ]] || {
+        echo "empty directory missing" >&2
+        return 1
+    }
+    [[ "$(stat -c '%a' "$received_root/empty-dir")" == "750" ]] || {
+        echo "empty directory mode differs" >&2
+        return 1
+    }
+    [[ -z "$(find "$received_root/empty-dir" -mindepth 1 -maxdepth 1 -print -quit)" ]] || {
+        echo "empty directory is not empty" >&2
+        return 1
+    }
+    [[ -L "$received_root/relative-link" ]] || {
+        echo "relative symlink missing" >&2
+        return 1
+    }
+    [[ "$(readlink "$received_root/relative-link")" == "payload.bin" ]] || {
+        echo "relative symlink target differs" >&2
+        return 1
+    }
+    [[ -L "$received_root/dangling-link" ]] || {
+        echo "dangling symlink missing" >&2
+        return 1
+    }
+    [[ "$(readlink "$received_root/dangling-link")" == "missing-target" ]] || {
+        echo "dangling symlink target differs" >&2
+        return 1
+    }
+    [[ ! -e "$received_root/dangling-link" ]] || {
+        echo "dangling symlink unexpectedly resolves" >&2
+        return 1
+    }
+    cmp -s "$source_root/hardlink-a.txt" "$received_root/hardlink-a.txt" || {
+        echo "hardlink payload differs" >&2
+        return 1
+    }
+    cmp -s "$received_root/hardlink-a.txt" "$received_root/hardlink-b.txt" || {
+        echo "hardlink contents differ" >&2
+        return 1
+    }
+    [[ "$(stat -c '%d:%i' "$received_root/hardlink-a.txt")" == "$(stat -c '%d:%i' "$received_root/hardlink-b.txt")" ]] || {
+        echo "hardlink inode identity differs" >&2
+        return 1
+    }
+    [[ -p "$received_root/events.fifo" ]] || {
+        echo "FIFO was not recreated" >&2
+        return 1
+    }
+    [[ "$(stat -c '%a' "$received_root/events.fifo")" == "620" ]] || {
+        echo "FIFO mode differs" >&2
+        return 1
+    }
+    verify_sparse_file "$source_root/packed-sparse.bin" "$received_root/packed-sparse.bin" "packed sparse file" || return 1
+    verify_sparse_file "$source_root/regular-sparse.bin" "$received_root/regular-sparse.bin" "regular sparse file" || return 1
+    if [[ "$xattr_supported" == "true" ]]; then
+        if ! python3 - "$received_root/payload.bin" <<'PY'
+import os
+import sys
+
+value = os.getxattr(sys.argv[1], "user.asupersync.quic-metadata-e2e")
+if value != b"metadata-value\0with-binary":
+    raise SystemExit("received xattr differs")
+PY
+        then
+            echo "received xattr differs" >&2
+            return 1
+        fi
+    fi
+    [[ -z "$(find "$(dirname "$received_root")" -maxdepth 1 -name '.atp-*-staging-*' -print -quit)" ]] || {
+        echo "ATP staging residue remains" >&2
+        return 1
+    }
+}
+
 validate_output() {
     local dir="$1"
     local summary="$dir/summary.json"
@@ -192,6 +313,27 @@ validate_output() {
       .receiver.event == "atp_receive" and
       .receiver.transport == "quic" and
       .receiver.committed == true and
+      .metadata_fidelity.status == "passed" and
+      .metadata_fidelity.entries_verified == 9 and
+      .metadata_fidelity.payload_bytes_match == true and
+      .metadata_fidelity.payload_mode == "640" and
+      .metadata_fidelity.payload_mtime_epoch == 1600000123 and
+      (.metadata_fidelity.xattr_supported | type == "boolean") and
+      (.metadata_fidelity.xattr_match | type == "boolean") and
+      .metadata_fidelity.xattr_match == .metadata_fidelity.xattr_supported and
+      .metadata_fidelity.empty_directory == true and
+      .metadata_fidelity.empty_directory_mode == "750" and
+      .metadata_fidelity.relative_symlink_target == "payload.bin" and
+      .metadata_fidelity.dangling_symlink_target == "missing-target" and
+      .metadata_fidelity.hardlink_identity == true and
+      .metadata_fidelity.fifo == true and
+      .metadata_fidelity.fifo_mode == "620" and
+      .metadata_fidelity.packed_sparse_content == true and
+      .metadata_fidelity.packed_sparse_allocation == true and
+      .metadata_fidelity.regular_sparse_content == true and
+      .metadata_fidelity.regular_sparse_allocation == true and
+      .metadata_fidelity.staging_clean == true and
+      (.metadata_fidelity.no_claim | type == "string" and length > 0) and
       (.metrics.sender_max_rss_kb | type == "number") and
       (.metrics.receiver_max_rss_kb | type == "number") and
       (.metrics.peak_max_rss_kb | type == "number") and
@@ -221,13 +363,14 @@ validate_output() {
     ' "$summary" >/dev/null
 
     jq -e -s '
-      length >= 5 and
+      length >= 6 and
       all(.[]; .schema_version == "arq-quic-e2e-event-v1" and
         (.stage | type == "string" and length > 0) and
         (.status as $s | ["started","passed","failed"] | index($s) != null)) and
       any(.[]; .stage == "receiver_ready" and .status == "passed") and
       any(.[]; .stage == "sender_transfer" and .status == "passed") and
       any(.[]; .stage == "sha256_verify" and .status == "passed") and
+      any(.[]; .stage == "metadata_fidelity" and .status == "passed" and .details.status == "passed") and
       any(.[]; .stage == "summary" and .status == "passed" and (.details.transport_counters.no_claim | type == "string"))
     ' "$events" >/dev/null
 }
@@ -262,8 +405,13 @@ emit_event "build_atp" "passed" "using atp binary $ATP_BIN"
 
 "$SCRIPT_DIR/atp_bench_gen_certs.sh" "$OUTPUT_DIR/tls" 127.0.0.1 > "$OUTPUT_DIR/certs.log" 2>&1
 
-PAYLOAD="$OUTPUT_DIR/source/payload.bin"
-python3 - "$PAYLOAD" "$PAYLOAD_BYTES" <<'PY'
+SOURCE_TREE="$OUTPUT_DIR/source/metadata-tree"
+PAYLOAD="$SOURCE_TREE/payload.bin"
+PACKED_SPARSE="$SOURCE_TREE/packed-sparse.bin"
+REGULAR_SPARSE="$SOURCE_TREE/regular-sparse.bin"
+mkdir -p "$SOURCE_TREE/empty-dir"
+SOURCE_XATTR_SUPPORTED="$(python3 - "$PAYLOAD" "$PAYLOAD_BYTES" "$PACKED_SPARSE" "$REGULAR_SPARSE" <<'PY'
+import os
 import pathlib
 import sys
 
@@ -271,8 +419,38 @@ path = pathlib.Path(sys.argv[1])
 size = int(sys.argv[2])
 path.parent.mkdir(parents=True, exist_ok=True)
 path.write_bytes(bytes((i * 17) % 251 for i in range(size)))
+os.chmod(path, 0o640)
+os.utime(path, (1_600_000_123, 1_600_000_123))
+
+for sparse_path, sparse_size, marker in [
+    (pathlib.Path(sys.argv[3]), 512 * 1024, b"packed-sparse"),
+    (pathlib.Path(sys.argv[4]), 2 * 1024 * 1024, b"regular-sparse"),
+]:
+    with sparse_path.open("wb") as handle:
+        handle.write(marker)
+        handle.seek(sparse_size - len(marker))
+        handle.write(marker)
+
+try:
+    os.setxattr(path, "user.asupersync.quic-metadata-e2e", b"metadata-value\0with-binary")
+except OSError:
+    print("false")
+else:
+    print("true")
 PY
-emit_event "payload" "passed" "wrote deterministic payload"
+)"
+chmod 750 "$SOURCE_TREE/empty-dir"
+ln -s "payload.bin" "$SOURCE_TREE/relative-link"
+ln -s "missing-target" "$SOURCE_TREE/dangling-link"
+printf 'shared hardlink content\n' > "$SOURCE_TREE/hardlink-a.txt"
+ln "$SOURCE_TREE/hardlink-a.txt" "$SOURCE_TREE/hardlink-b.txt"
+mkfifo "$SOURCE_TREE/events.fifo"
+chmod 620 "$SOURCE_TREE/events.fifo"
+verify_sparse_file "$PACKED_SPARSE" "$PACKED_SPARSE" "packed sparse source fixture"
+verify_sparse_file "$REGULAR_SPARSE" "$REGULAR_SPARSE" "regular sparse source fixture"
+emit_event "payload" "passed" "wrote heterogeneous metadata-fidelity tree" "$(jq -cn \
+    --argjson xattr_supported "$SOURCE_XATTR_SUPPORTED" \
+    '{entries:9,xattr_supported:$xattr_supported,packed_sparse_bytes:524288,regular_sparse_bytes:2097152}')"
 
 RECEIVER_JSON="$OUTPUT_DIR/receiver.json"
 RECEIVER_STDERR="$OUTPUT_DIR/receiver.stderr"
@@ -287,6 +465,9 @@ SENDER_TIME="$OUTPUT_DIR/sender.time.txt"
     --once \
     --server-cert "$OUTPUT_DIR/tls/leaf.pem" \
     --server-key "$OUTPUT_DIR/tls/leaf.key" \
+    --preserve-xattrs \
+    --allow-special-files \
+    --sparse-files \
     --rq-auth-key-hex "$AUTH_KEY_HEX" \
     > "$RECEIVER_JSON" 2> "$RECEIVER_STDERR" &
 RECEIVER_PID=$!
@@ -311,10 +492,12 @@ done
 emit_event "receiver_ready" "passed" "receiver listening on $LISTEN_ADDR"
 
 emit_event "sender_transfer" "started" "running atp send --transport quic"
-if /usr/bin/time -v -o "$SENDER_TIME" "$ATP_BIN" send "$PAYLOAD" "$LISTEN_ADDR" \
+if /usr/bin/time -v -o "$SENDER_TIME" "$ATP_BIN" send "$SOURCE_TREE" "$LISTEN_ADDR" \
     --transport quic \
     --ca "$OUTPUT_DIR/tls/ca.pem" \
     --server-name "$SERVER_NAME" \
+    --preserve-xattrs \
+    --allow-special-files \
     --rq-auth-key-hex "$AUTH_KEY_HEX" \
     > "$SENDER_JSON" 2> "$SENDER_STDERR"; then
     emit_event "sender_transfer" "passed" "sender completed"
@@ -330,7 +513,8 @@ wait "$RECEIVER_PID"
 emit_event "receiver_transfer" "passed" "receiver exited after one transfer"
 
 SOURCE_SHA="$(sha256sum "$PAYLOAD" | awk '{print $1}')"
-RECEIVED="$OUTPUT_DIR/dest/payload.bin"
+DEST_TREE="$OUTPUT_DIR/dest/metadata-tree"
+RECEIVED="$DEST_TREE/payload.bin"
 [[ -f "$RECEIVED" ]] || { emit_event "sha256_verify" "failed" "received payload missing"; exit 1; }
 RECEIVED_SHA="$(sha256sum "$RECEIVED" | awk '{print $1}')"
 if [[ "$SOURCE_SHA" != "$RECEIVED_SHA" ]]; then
@@ -341,6 +525,43 @@ emit_event "sha256_verify" "passed" "source and received sha256 match" "$(jq -cn
     --arg source_sha "$SOURCE_SHA" \
     --arg received_sha "$RECEIVED_SHA" \
     '{source_sha256:$source_sha,received_sha256:$received_sha,match:true}')"
+
+if ! METADATA_ERROR="$(verify_metadata_fidelity "$SOURCE_TREE" "$DEST_TREE" "$SOURCE_XATTR_SUPPORTED" 2>&1)"; then
+    emit_event "metadata_fidelity" "failed" "metadata-fidelity verification failed" "$(jq -cn \
+        --arg error "$METADATA_ERROR" \
+        '{error:$error}')"
+    printf '%s\n' "$METADATA_ERROR" >&2
+    exit 1
+fi
+METADATA_FIDELITY_JSON="$(jq -cn \
+    --arg source_tree "$SOURCE_TREE" \
+    --arg received_tree "$DEST_TREE" \
+    --argjson xattr_supported "$SOURCE_XATTR_SUPPORTED" \
+    '{
+      status:"passed",
+      source_tree:$source_tree,
+      received_tree:$received_tree,
+      entries_verified:9,
+      payload_bytes_match:true,
+      payload_mode:"640",
+      payload_mtime_epoch:1600000123,
+      xattr_supported:$xattr_supported,
+      xattr_match:$xattr_supported,
+      empty_directory:true,
+      empty_directory_mode:"750",
+      relative_symlink_target:"payload.bin",
+      dangling_symlink_target:"missing-target",
+      hardlink_identity:true,
+      fifo:true,
+      fifo_mode:"620",
+      packed_sparse_content:true,
+      packed_sparse_allocation:true,
+      regular_sparse_content:true,
+      regular_sparse_allocation:true,
+      staging_clean:true,
+      no_claim:"This real-binary loopback result proves only the retained QUIC metadata-fidelity fixture on this Unix filesystem. It does not prove RQ parity, cross-host behavior, exact hole extents, privileged uid/gid restoration, broad workspace health, performance, or release readiness."
+    }')"
+emit_event "metadata_fidelity" "passed" "heterogeneous metadata tree committed faithfully" "$METADATA_FIDELITY_JSON"
 
 SENDER_MAX_RSS_KB="$(extract_max_rss_kb "$SENDER_TIME")"
 RECEIVER_MAX_RSS_KB="$(extract_max_rss_kb "$RECEIVER_TIME")"
@@ -376,6 +597,7 @@ jq -n \
     --argjson sender_max_rss_kb "$SENDER_MAX_RSS_KB" \
     --argjson receiver_max_rss_kb "$RECEIVER_MAX_RSS_KB" \
     --argjson peak_max_rss_kb "$PEAK_MAX_RSS_KB" \
+    --argjson metadata_fidelity "$METADATA_FIDELITY_JSON" \
     '($sender[0].symbols_sent // null) as $symbols_sent |
     ($receiver[0].symbols_accepted // null) as $symbols_accepted |
     ($sender[0].feedback_rounds // null) as $feedback_rounds_sender |
@@ -397,6 +619,7 @@ jq -n \
       receiver: $receiver[0],
       sha256: {source: $source_sha, received: $received_sha, match: ($source_sha == $received_sha)},
       sha256_match: ($source_sha == $received_sha),
+      metadata_fidelity: $metadata_fidelity,
       metrics: {
         sender_max_rss_kb: $sender_max_rss_kb,
         receiver_max_rss_kb: $receiver_max_rss_kb,
