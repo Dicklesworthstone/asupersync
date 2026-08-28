@@ -398,7 +398,7 @@ struct SendArgs {
     /// and device nodes remain skipped. Disabled by default.
     #[arg(long)]
     allow_special_files: bool,
-    /// Reconstruct long zero runs as filesystem holes on a supported Unix QUIC receiver.
+    /// Reconstruct long zero runs as filesystem holes on a supported Unix RQ or QUIC receiver.
     /// For `send`, this is forwarded only to an SSH-bootstrapped receiver.
     #[arg(long)]
     sparse_files: bool,
@@ -513,7 +513,7 @@ struct RecvArgs {
     /// nodes remain skipped. Disabled by default.
     #[arg(long)]
     allow_special_files: bool,
-    /// Reconstruct long zero runs as filesystem holes on a supported Unix QUIC receiver.
+    /// Reconstruct long zero runs as filesystem holes on a supported Unix RQ or QUIC receiver.
     #[arg(long)]
     sparse_files: bool,
     /// PEM certificate chain the QUIC receiver presents to senders (quic only).
@@ -880,13 +880,13 @@ fn validate_transport_metadata_options(
     if allow_special_files && !matches!(transport, Transport::Rq | Transport::Quic) {
         return Err("--allow-special-files requires --transport rq or quic".to_string());
     }
-    if sparse_files && transport != Transport::Quic {
-        return Err("--sparse-files requires --transport quic".to_string());
+    if sparse_files && !matches!(transport, Transport::Rq | Transport::Quic) {
+        return Err("--sparse-files requires --transport rq or quic".to_string());
     }
     Ok(())
 }
 
-fn validate_quic_receiver_sparse_platform(sparse_files: bool) -> Result<(), String> {
+fn validate_receiver_sparse_platform(sparse_files: bool) -> Result<(), String> {
     if sparse_files && !cfg!(unix) {
         return Err(
             "--sparse-files currently requires a Unix receiver; Windows needs FSCTL_SET_SPARSE"
@@ -947,8 +947,13 @@ fn rq_config_base(
     })
 }
 
-fn rq_receive_options(allow_special_files: bool) -> transport_rq::RqReceiveOptions {
-    transport_rq::RqReceiveOptions::new().with_allow_special_files(allow_special_files)
+fn rq_receive_options(
+    allow_special_files: bool,
+    sparse_files: bool,
+) -> transport_rq::RqReceiveOptions {
+    transport_rq::RqReceiveOptions::new()
+        .with_allow_special_files(allow_special_files)
+        .with_sparse_files(sparse_files)
 }
 
 fn rq_config(
@@ -6920,8 +6925,6 @@ fn append_remote_receiver_options(args: &SendArgs, argv: &mut Vec<String>) {
         if args.preserve_xattrs {
             argv.push("--preserve-xattrs".to_string());
         }
-    }
-    if args.transport == Transport::Quic {
         if args.sparse_files {
             argv.push("--sparse-files".to_string());
         }
@@ -8711,7 +8714,7 @@ fn run_recv(mut args: RecvArgs, persistent: bool) -> Result<(), String> {
         args.allow_special_files,
         args.sparse_files,
     )?;
-    validate_quic_receiver_sparse_platform(args.sparse_files)?;
+    validate_receiver_sparse_platform(args.sparse_files)?;
     if args.allow_unauthenticated_delta_sidecar {
         return Err(
             "--allow-unauthenticated-delta-sidecar was removed; RQ delta negotiation is authenticated on the existing control stream"
@@ -8837,7 +8840,8 @@ fn run_recv(mut args: RecvArgs, persistent: bool) -> Result<(), String> {
             cfg.metadata_policy = selected_cli_opt_in_metadata_policy(args.preserve_xattrs);
             cfg.enable_delta = !args.no_delta;
             cfg.accept_timeout = recv_listen_timeout(&args)?;
-            let receive_options = rq_receive_options(args.allow_special_files);
+            let receive_options =
+                rq_receive_options(args.allow_special_files, args.sparse_files);
             let chosen_fanout = cfg.udp_fanout.max(1);
             runtime.block_on(runtime.handle().spawn(async move {
                 let cx = Cx::current().expect("receiver cx");
@@ -9407,6 +9411,7 @@ mod tests {
                 "rq",
                 "--preserve-xattrs",
                 "--allow-special-files",
+                "--sparse-files",
             ])
             .expect("parse RQ metadata receive flags");
             let rq = match rq.command {
@@ -9415,7 +9420,7 @@ mod tests {
             };
             assert!(rq.allow_special_files);
             assert!(rq.preserve_xattrs);
-            assert!(!rq.sparse_files);
+            assert!(rq.sparse_files);
         }
 
         let send_defaults = Cli::try_parse_from([
@@ -9453,14 +9458,14 @@ mod tests {
         assert!(!selected_cli_opt_in_metadata_policy(false).preserve_extended_attributes);
         validate_transport_metadata_options(Transport::Quic, true, true, true)
             .expect("QUIC accepts explicit metadata options");
-        validate_transport_metadata_options(Transport::Rq, true, true, false)
-            .expect("RQ accepts explicit xattr and special-file policies");
-        assert!(rq_receive_options(true).allow_special_files());
-        assert!(!rq_receive_options(false).allow_special_files());
-        let error = validate_transport_metadata_options(Transport::Rq, true, false, true)
-            .expect_err("RQ must still reject QUIC-only sparse allocation");
-        assert!(error.contains("--sparse-files"));
-        assert!(error.contains("requires --transport quic"));
+        validate_transport_metadata_options(Transport::Rq, true, true, true)
+            .expect("RQ accepts explicit xattr, special-file, and sparse policies");
+        let rq_options = rq_receive_options(true, true);
+        assert!(rq_options.allow_special_files());
+        assert!(rq_options.sparse_files());
+        let rq_defaults = rq_receive_options(false, false);
+        assert!(!rq_defaults.allow_special_files());
+        assert!(!rq_defaults.sparse_files());
         for transport in [Transport::Tcp, Transport::Auto] {
             let error = validate_transport_metadata_options(transport, true, false, false)
                 .expect_err("transport must reject unsupported xattr policy");
@@ -9469,6 +9474,10 @@ mod tests {
             let error = validate_transport_metadata_options(transport, false, true, false)
                 .expect_err("transport must reject unsupported special-file policy");
             assert!(error.contains("--allow-special-files"));
+            assert!(error.contains("requires --transport rq or quic"));
+            let error = validate_transport_metadata_options(transport, false, false, true)
+                .expect_err("transport must reject unsupported sparse policy");
+            assert!(error.contains("--sparse-files"));
             assert!(error.contains("requires --transport rq or quic"));
         }
 
@@ -9493,6 +9502,7 @@ mod tests {
             "rq",
             "--preserve-xattrs",
             "--allow-special-files",
+            "--sparse-files",
             "--rq-auth-key-hex",
             VALID_KEY_HEX,
         ])
@@ -9505,7 +9515,8 @@ mod tests {
             rq_remote_argv,
             vec![
                 "--allow-special-files".to_string(),
-                "--preserve-xattrs".to_string()
+                "--preserve-xattrs".to_string(),
+                "--sparse-files".to_string()
             ]
         );
         validate_send_sparse_delivery(true, true).expect("SSH forwards sparse receiver option");
@@ -9513,10 +9524,10 @@ mod tests {
             .expect_err("direct sender cannot configure receiver allocation");
         assert!(error.contains("requires an SSH target"));
         #[cfg(unix)]
-        validate_quic_receiver_sparse_platform(true)
+        validate_receiver_sparse_platform(true)
             .expect("Unix receiver admits sparse allocation attempts");
         #[cfg(not(unix))]
-        assert!(validate_quic_receiver_sparse_platform(true).is_err());
+        assert!(validate_receiver_sparse_platform(true).is_err());
     }
 
     #[test]

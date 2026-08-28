@@ -2614,15 +2614,24 @@ fn validate_manifest_accepts_sane_bounds() {
 }
 
 #[test]
-fn rq_special_file_receive_options_default_to_safe_skip_and_allow_explicit_fifo_opt_in() {
+fn rq_receive_options_default_to_safe_skip_and_allow_explicit_filesystem_opt_ins() {
     let defaults = RqReceiveOptions::new();
     assert_eq!(defaults, RqReceiveOptions::default());
     assert!(!defaults.allow_special_files());
+    assert!(!defaults.sparse_files());
     assert!(
         defaults
             .with_allow_special_files(true)
             .allow_special_files()
     );
+    assert!(defaults.with_sparse_files(true).sparse_files());
+    #[cfg(unix)]
+    defaults
+        .with_sparse_files(true)
+        .validate()
+        .expect("Unix admits sparse reconstruction");
+    #[cfg(not(unix))]
+    assert!(defaults.with_sparse_files(true).validate().is_err());
 }
 
 fn one_entry_metadata_manifest(path: &str, metadata: EntryMetadata) -> RqMetadataManifest {
@@ -9046,6 +9055,7 @@ fn packed_member_streaming_helpers_reuse_small_buffers() {
         &staging_path,
         &writes,
         &mut write_buf,
+        false,
     ))
     .expect("batched member commit");
 
@@ -9098,6 +9108,7 @@ fn packed_member_batch_oneshot_spans_and_fallback_commit_identically() {
         &staging_path,
         &writes,
         &mut write_buf,
+        false,
     ))
     .expect("one-shot span commit");
     assert_eq!(std::fs::read(out_root.join("a.bin")).expect("read a"), a);
@@ -9118,6 +9129,7 @@ fn packed_member_batch_oneshot_spans_and_fallback_commit_identically() {
         &staging_path,
         &solo,
         &mut write_buf,
+        false,
     ))
     .expect("single-member fallback commit");
     assert_eq!(
@@ -9161,6 +9173,7 @@ fn packed_member_staging_guard_cleans_unclaimed_blocking_result() {
         &staging_path,
         &writes,
         &mut write_buf,
+        false,
     ))
     .expect("create derived packed members");
     assert!(staging_path.exists());

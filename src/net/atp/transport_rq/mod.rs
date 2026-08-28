@@ -102,7 +102,8 @@ use crate::net::atp::transport_common::metadata::{
     classify_path_link, classify_path_link_sync, commit_hardlink_transactionally,
     commit_staged_regular_file_transactionally, commit_symlink_transactionally,
     inode_key_if_regular_sync, metadata_commitment, path_is_link_or_reparse,
-    read_entry_metadata_sync, validate_entry_metadata_for_receive,
+    read_entry_metadata_sync, validate_entry_metadata_for_receive, write_sparse_zero_runs,
+    write_sparse_zero_runs_sync,
 };
 use crate::net::atp::transport_common::{
     DeltaChunkWire, DeltaManifestWire, DeltaObjectRequest, DeltaWireMode, EntryDigest,
@@ -593,6 +594,7 @@ pub struct RqConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct RqReceiveOptions {
     allow_special_files: bool,
+    sparse_files: bool,
 }
 
 impl RqReceiveOptions {
@@ -601,6 +603,7 @@ impl RqReceiveOptions {
     pub const fn new() -> Self {
         Self {
             allow_special_files: false,
+            sparse_files: false,
         }
     }
 
@@ -618,6 +621,33 @@ impl RqReceiveOptions {
     #[must_use]
     pub const fn allow_special_files(&self) -> bool {
         self.allow_special_files
+    }
+
+    /// Reconstruct long zero runs as filesystem holes when enabled.
+    ///
+    /// This is a receiver allocation policy over verified logical bytes, not a
+    /// claim that the sender's exact extent map is preserved.
+    #[must_use]
+    pub const fn with_sparse_files(mut self, enabled: bool) -> Self {
+        self.sparse_files = enabled;
+        self
+    }
+
+    /// Whether the receiver reconstructs long zero runs as filesystem holes.
+    #[must_use]
+    pub const fn sparse_files(&self) -> bool {
+        self.sparse_files
+    }
+
+    fn validate(self) -> Result<(), RqError> {
+        if self.sparse_files() && !cfg!(unix) {
+            return Err(RqError::Io(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "RQ sparse-file reconstruction currently requires Unix; Windows needs \
+                 FSCTL_SET_SPARSE",
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -10421,6 +10451,7 @@ pub async fn receive_once_with_options(
     peer_id: &str,
     options: RqReceiveOptions,
 ) -> Result<ReceiveReport, RqError> {
+    options.validate()?;
     let (stream, peer) = match crate::time::timeout(
         cx.now(),
         config.accept_timeout,
@@ -10516,6 +10547,7 @@ pub async fn receive_connection_with_options(
     peer_id: &str,
     options: RqReceiveOptions,
 ) -> Result<ReceiveReport, RqError> {
+    options.validate()?;
     if config.delta_control_timeout.is_zero() {
         return Err(RqError::Control(
             "RQ delta_control_timeout must be greater than zero".to_string(),
@@ -13033,6 +13065,47 @@ fn packed_member_staging_path(pack_staging_path: &Path, member_index: usize) -> 
     pack_staging_path.with_file_name(file_name)
 }
 
+fn sparse_staging_path(staging_path: &Path) -> PathBuf {
+    let mut file_name = staging_path.file_name().map_or_else(
+        || std::ffi::OsString::from("rq-entry"),
+        std::ffi::OsString::from,
+    );
+    file_name.push(".sparse.staged");
+    staging_path.with_file_name(file_name)
+}
+
+async fn write_sparse_staging_copy(
+    source_path: &Path,
+    sparse_path: &Path,
+    buf: &mut [u8],
+) -> Result<(), RqError> {
+    let mut source = crate::fs::File::open(source_path)
+        .await
+        .map_err(|error| RqError::Source(format!("{}: {error}", source_path.display())))?;
+    let logical_len = source.metadata().await?.len();
+    let mut sparse = crate::fs::File::create_new(sparse_path).await?;
+    sparse.set_len(logical_len).await?;
+
+    let mut remaining = logical_len;
+    while remaining > 0 {
+        let want = usize::try_from(remaining.min(buf.len() as u64)).unwrap_or(buf.len());
+        let read = source
+            .read(&mut buf[..want])
+            .await
+            .map_err(|error| RqError::Source(format!("{}: {error}", source_path.display())))?;
+        if read == 0 {
+            return Err(RqError::Source(format!(
+                "{}: short read while sparse-reconstructing verified staging bytes",
+                source_path.display()
+            )));
+        }
+        write_sparse_zero_runs(&mut sparse, &buf[..read]).await?;
+        remaining -= read as u64;
+    }
+    sparse.flush().await?;
+    Ok(())
+}
+
 async fn apply_rq_entry_metadata(
     out_path: &Path,
     metadata: &EntryMetadata,
@@ -13223,6 +13296,7 @@ fn write_packed_member_batch_oneshot(
     members: Vec<PackedMemberWrite>,
     span_start: u64,
     span_len: usize,
+    sparse_files: bool,
 ) -> std::io::Result<PackedMemberStagingGuard> {
     use std::io::{Read, Seek};
 
@@ -13248,7 +13322,13 @@ fn write_packed_member_batch_oneshot(
             .checked_add(len)
             .filter(|end| *end <= staged.len())
             .ok_or_else(|| std::io::Error::other("packed member range exceeds staged span"))?;
-        std::fs::write(&member.write_path, &staged[start..end])?;
+        if sparse_files {
+            let mut out = std::fs::File::create(&member.write_path)?;
+            out.set_len(member.len)?;
+            write_sparse_zero_runs_sync(&mut out, &staged[start..end])?;
+        } else {
+            std::fs::write(&member.write_path, &staged[start..end])?;
+        }
     }
     Ok(staging_guard)
 }
@@ -13257,6 +13337,7 @@ async fn write_packed_member_batch(
     staging_path: &Path,
     members: &[PackedMemberWrite],
     buf: &mut [u8],
+    sparse_files: bool,
 ) -> Result<PackedMemberStagingGuard, RqError> {
     let span_start = members.iter().map(|member| member.offset).min();
     let span_end = members
@@ -13272,7 +13353,13 @@ async fn write_packed_member_batch(
         let batch = members.to_vec();
         let staging_display = staging_path.display().to_string();
         return crate::runtime::spawn_blocking_io(move || {
-            write_packed_member_batch_oneshot(staging, batch, span_start, span_len)
+            write_packed_member_batch_oneshot(
+                staging,
+                batch,
+                span_start,
+                span_len,
+                sparse_files,
+            )
         })
         .await
         .map_err(|e| RqError::Source(format!("{staging_display}: {e}")));
@@ -13307,6 +13394,9 @@ async fn write_packed_member_batch(
         }
 
         let mut out = crate::fs::File::create(&member.write_path).await?;
+        if sparse_files {
+            out.set_len(member.len).await?;
+        }
         let mut remaining = member.len;
         while remaining > 0 {
             let want = usize::try_from(remaining.min(buf.len() as u64)).unwrap_or(buf.len());
@@ -13321,7 +13411,11 @@ async fn write_packed_member_batch(
                     member.out_path.display()
                 )));
             }
-            out.write_all(&buf[..n]).await?;
+            if sparse_files {
+                write_sparse_zero_runs(&mut out, &buf[..n]).await?;
+            } else {
+                out.write_all(&buf[..n]).await?;
+            }
             remaining -= n as u64;
             cursor = cursor.saturating_add(n as u64);
         }
@@ -13378,8 +13472,13 @@ async fn write_large_object_fragments(
     shards: &[LargeObjectCommitShard],
     out_path: &Path,
     buf: &mut [u8],
+    sparse_files: bool,
 ) -> Result<(), RqError> {
     let mut out = crate::fs::File::create(out_path).await?;
+    if sparse_files {
+        let logical_len = shards.first().map_or(0, |shard| shard.fragment.logical_size);
+        out.set_len(logical_len).await?;
+    }
     for shard in shards {
         let mut file = crate::fs::File::open(&shard.staging_path)
             .await
@@ -13401,7 +13500,11 @@ async fn write_large_object_fragments(
                     shard.fragment.rel_path
                 )));
             }
-            out.write_all(&buf[..n]).await?;
+            if sparse_files {
+                write_sparse_zero_runs(&mut out, &buf[..n]).await?;
+            } else {
+                out.write_all(&buf[..n]).await?;
+            }
             remaining -= n as u64;
         }
     }
@@ -13844,12 +13947,15 @@ async fn verify_and_commit_with_options(
                     } else {
                         base.clone()
                     };
-                    let (staging_path, requires_assembly) =
+                    let (staging_path, requires_assembly) = if !options.sparse_files() {
                         if let Some(staging_path) = contiguous_fragment_staging_path(shards) {
                             (staging_path, false)
                         } else {
                             (assembled_fragment_staging_path(shards, writes.len())?, true)
-                        };
+                        }
+                    } else {
+                        (assembled_fragment_staging_path(shards, writes.len())?, true)
+                    };
                     writes.push(CommitWrite::Fragments {
                         shards: shards.clone(),
                         staging_path,
@@ -13931,6 +14037,14 @@ async fn verify_and_commit_with_options(
                     out_path,
                     metadata,
                 } => {
+                    let staging_path = if options.sparse_files() {
+                        let sparse_path = sparse_staging_path(&staging_path);
+                        write_sparse_staging_copy(&staging_path, &sparse_path, &mut hash_buf)
+                            .await?;
+                        sparse_path
+                    } else {
+                        staging_path
+                    };
                     let deferred_metadata =
                         prepare_rq_entry_metadata_for_commit(&staging_path, &metadata).await?;
                     reject_destination_symlink_prefix(&base, &out_path).await?;
@@ -13954,8 +14068,13 @@ async fn verify_and_commit_with_options(
                     // staging file once, in offset order. This preserves the
                     // per-file outputs while avoiding one staging open/seek and
                     // one allocation per small tree file.
-                    let _member_staging_guard =
-                        write_packed_member_batch(&staging_path, &members, &mut hash_buf).await?;
+                    let _member_staging_guard = write_packed_member_batch(
+                        &staging_path,
+                        &members,
+                        &mut hash_buf,
+                        options.sparse_files(),
+                    )
+                    .await?;
                     let mut deferred_metadata = Vec::with_capacity(members.len());
                     for member in &members {
                         deferred_metadata.push(
@@ -14063,7 +14182,13 @@ async fn verify_and_commit_with_options(
                     metadata,
                 } => {
                     if requires_assembly {
-                        write_large_object_fragments(&shards, &staging_path, &mut hash_buf).await?;
+                        write_large_object_fragments(
+                            &shards,
+                            &staging_path,
+                            &mut hash_buf,
+                            options.sparse_files(),
+                        )
+                        .await?;
                     }
                     let deferred_metadata =
                         prepare_rq_entry_metadata_for_commit(&staging_path, &metadata).await?;
@@ -15822,6 +15947,7 @@ pub async fn serve_with_options<F>(
 where
     F: FnMut(Result<ReceiveReport, RqError>),
 {
+    options.validate()?;
     loop {
         if cx.is_cancel_requested() {
             return Ok(());
