@@ -51,21 +51,54 @@ fn write_fixture(dir: &Path, sha_match: bool) {
 }
 
 fn write_fixture_for_transport(dir: &Path, sha_match: bool, transport: &str) {
+    write_fixture_for_transport_with_missing_integrity(dir, sha_match, transport, None);
+}
+
+fn write_fixture_for_transport_with_missing_integrity(
+    dir: &Path,
+    sha_match: bool,
+    transport: &str,
+    missing_integrity: Option<&str>,
+) {
     let (decode_count, decode_micros, decode_available, decode_time_per_block_micros) =
         match transport {
             "quic" => ("1", "25", "true", "25.0"),
             "rq" => ("null", "null", "false", "null"),
             other => panic!("unsupported fixture transport: {other}"),
         };
-    let event_lines = [
-        r#"{"schema_version":"arq-quic-e2e-event-v1","ts":"2026-06-17T00:00:00Z","stage":"setup","status":"started","message":"fixture"}"#,
-        r#"{"schema_version":"arq-quic-e2e-event-v1","ts":"2026-06-17T00:00:01Z","stage":"receiver_ready","status":"passed","message":"fixture"}"#,
-        r#"{"schema_version":"arq-quic-e2e-event-v1","ts":"2026-06-17T00:00:02Z","stage":"sender_transfer","status":"passed","message":"fixture"}"#,
-        r#"{"schema_version":"arq-quic-e2e-event-v1","ts":"2026-06-17T00:00:03Z","stage":"sha256_verify","status":"passed","message":"fixture"}"#,
-        r#"{"schema_version":"arq-quic-e2e-event-v1","ts":"2026-06-17T00:00:04Z","stage":"metadata_fidelity","status":"passed","message":"fixture","details":{"status":"passed"}}"#,
-        r#"{"schema_version":"arq-quic-e2e-event-v1","ts":"2026-06-17T00:00:04Z","stage":"summary","status":"passed","message":"fixture","details":{"transport_counters":{"no_claim":"fixture no-claim"}}}"#,
-        r#"{"schema_version":"arq-quic-e2e-event-v1","ts":"2026-06-17T00:00:04Z","stage":"offline_validation","status":"passed","message":"fixture"}"#,
+    let transport_integrity_json = format!(
+        r#"{{"transport":"{transport}","flat_merkle_root_hex":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","metadata_commitment_hex":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}"#
+    );
+    let integrity_roots_json = format!(
+        r#"{{"status":"passed","transport":"{transport}","source_before":{transport_integrity_json},"source_after":{transport_integrity_json},"received":{transport_integrity_json},"source_stable":true,"destination_match":true,"live_sender_merkle_match":true,"receiver_merkle_commit_gate_observed":true,"metadata_commitment_match":true,"no_claim":"synthetic validator fixture; not live root evidence"}}"#
+    );
+    let mut event_lines = vec![
+        r#"{"schema_version":"arq-quic-e2e-event-v1","ts":"2026-06-17T00:00:00Z","stage":"setup","status":"started","message":"fixture"}"#.to_string(),
+        r#"{"schema_version":"arq-quic-e2e-event-v1","ts":"2026-06-17T00:00:01Z","stage":"receiver_ready","status":"passed","message":"fixture"}"#.to_string(),
+        r#"{"schema_version":"arq-quic-e2e-event-v1","ts":"2026-06-17T00:00:02Z","stage":"sender_transfer","status":"passed","message":"fixture"}"#.to_string(),
+        r#"{"schema_version":"arq-quic-e2e-event-v1","ts":"2026-06-17T00:00:03Z","stage":"sha256_verify","status":"passed","message":"fixture"}"#.to_string(),
     ];
+    for rel_path in [
+        "payload.bin",
+        "empty-dir",
+        "relative-link",
+        "dangling-link",
+        "hardlink-a.txt",
+        "hardlink-b.txt",
+        "events.fifo",
+        "packed-sparse.bin",
+        "regular-sparse.bin",
+    ] {
+        event_lines.push(format!(
+            r#"{{"schema_version":"arq-quic-e2e-event-v1","ts":"2026-06-17T00:00:04Z","stage":"metadata_entry","status":"passed","message":"fixture","details":{{"rel_path":"{rel_path}","status":"passed","checks":{{"fixture":true}}}}}}"#
+        ));
+    }
+    event_lines.extend([
+        r#"{"schema_version":"arq-quic-e2e-event-v1","ts":"2026-06-17T00:00:04Z","stage":"metadata_fidelity","status":"passed","message":"fixture","details":{"status":"passed"}}"#.to_string(),
+        format!(r#"{{"schema_version":"arq-quic-e2e-event-v1","ts":"2026-06-17T00:00:04Z","stage":"integrity_roots","status":"passed","message":"fixture","details":{integrity_roots_json}}}"#),
+        r#"{"schema_version":"arq-quic-e2e-event-v1","ts":"2026-06-17T00:00:04Z","stage":"summary","status":"passed","message":"fixture","details":{"transport_counters":{"no_claim":"fixture no-claim"}}}"#.to_string(),
+        r#"{"schema_version":"arq-quic-e2e-event-v1","ts":"2026-06-17T00:00:04Z","stage":"offline_validation","status":"passed","message":"fixture"}"#.to_string(),
+    ]);
     write_file(
         &dir.join("events.ndjson"),
         &format!("{}\n", event_lines.join("\n")),
@@ -73,17 +106,28 @@ fn write_fixture_for_transport(dir: &Path, sha_match: bool, transport: &str) {
 
     let summary = format!(
         r#"{{
-  "schema_version": "arq-quic-loopback-e2e-summary-v1",
+  "schema_version": "arq-quic-loopback-e2e-summary-v2",
   "status": "passed",
   "transport": "{transport}",
   "bytes_sent": 8192,
   "bytes_received": 8192,
-  "sender": {{"event":"atp_send","transport":"{transport}","committed":true,"bytes_sent":8192}},
+  "sender": {{"event":"atp_send","transport":"{transport}","committed":true,"bytes_sent":8192,"merkle_ok":true,"merkle_root":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}},
   "receiver": {{"event":"atp_receive","transport":"{transport}","committed":true,"bytes_received":8192}},
   "sha256_match": {sha_match},
   "metadata_fidelity": {{
     "status": "passed",
     "entries_verified": 9,
+    "entries": [
+      {{"rel_path":"payload.bin","status":"passed","checks":{{"fixture":true}}}},
+      {{"rel_path":"empty-dir","status":"passed","checks":{{"fixture":true}}}},
+      {{"rel_path":"relative-link","status":"passed","checks":{{"fixture":true}}}},
+      {{"rel_path":"dangling-link","status":"passed","checks":{{"fixture":true}}}},
+      {{"rel_path":"hardlink-a.txt","status":"passed","checks":{{"fixture":true}}}},
+      {{"rel_path":"hardlink-b.txt","status":"passed","checks":{{"fixture":true}}}},
+      {{"rel_path":"events.fifo","status":"passed","checks":{{"fixture":true}}}},
+      {{"rel_path":"packed-sparse.bin","status":"passed","checks":{{"fixture":true}}}},
+      {{"rel_path":"regular-sparse.bin","status":"passed","checks":{{"fixture":true}}}}
+    ],
     "payload_bytes_match": true,
     "payload_mode": "640",
     "payload_mtime_epoch": 1600000123,
@@ -96,6 +140,7 @@ fn write_fixture_for_transport(dir: &Path, sha_match: bool, transport: &str) {
     "hardlink_identity": true,
     "fifo": true,
     "fifo_mode": "620",
+    "fifo_mtime_epoch": 1600000789,
     "packed_sparse_content": true,
     "packed_sparse_allocation": true,
     "regular_sparse_content": true,
@@ -103,6 +148,7 @@ fn write_fixture_for_transport(dir: &Path, sha_match: bool, transport: &str) {
     "staging_clean": true,
     "no_claim": "synthetic validator fixture; not live transfer evidence"
   }},
+  "integrity_roots": {integrity_roots_json},
   "metrics": {{
     "sender_max_rss_kb": 12345,
     "receiver_max_rss_kb": 23456,
@@ -135,10 +181,25 @@ fn write_fixture_for_transport(dir: &Path, sha_match: bool, transport: &str) {
     "decode_micros_available": {decode_available},
     "no_claim": "fixture decode metrics no-claim"
   }},
-  "artifacts": {{"events_ndjson":"events.ndjson"}}
+  "artifacts": {{
+    "events_ndjson":"events.ndjson",
+    "source_integrity_before":"source.integrity.before.json",
+    "source_integrity_after":"source.integrity.after.json",
+    "received_integrity":"received.integrity.json"
+  }}
 }}"#
     );
     write_file(&dir.join("summary.json"), &summary);
+    let integrity_artifact = format!(r#"{{"transport_integrity":{transport_integrity_json}}}"#);
+    for name in [
+        "source.integrity.before.json",
+        "source.integrity.after.json",
+        "received.integrity.json",
+    ] {
+        if missing_integrity != Some(name) {
+            write_file(&dir.join(name), &integrity_artifact);
+        }
+    }
 }
 
 fn read_lossy(path: &Path) -> String {
@@ -153,6 +214,18 @@ fn real_loopback_debug_dump(root: &Path) -> String {
         ("receiver.json", root.join("receiver.json")),
         ("sender.stderr", root.join("sender.stderr")),
         ("receiver.stderr", root.join("receiver.stderr")),
+        (
+            "source.integrity.before.json",
+            root.join("source.integrity.before.json"),
+        ),
+        (
+            "source.integrity.after.json",
+            root.join("source.integrity.after.json"),
+        ),
+        (
+            "received.integrity.json",
+            root.join("received.integrity.json"),
+        ),
         ("sender.time.txt", root.join("sender.time.txt")),
         ("receiver.time.txt", root.join("receiver.time.txt")),
         ("certs.log", root.join("certs.log")),
@@ -194,6 +267,77 @@ fn loopback_from_output_accepts_valid_rq_retained_artifacts() {
     assert!(
         output.status.success(),
         "validator rejected valid RQ fixture; stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn loopback_from_output_accepts_legacy_v1_without_v2_commitment_fields() {
+    let root = unique_tmp("legacy_v1");
+    write_fixture(&root, true);
+
+    let summary_path = root.join("summary.json");
+    let mut summary: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(&summary_path).expect("read summary fixture"),
+    )
+    .expect("parse summary fixture");
+    summary["schema_version"] =
+        serde_json::Value::String("arq-quic-loopback-e2e-summary-v1".to_string());
+    summary
+        .as_object_mut()
+        .expect("summary object")
+        .remove("integrity_roots");
+    summary["metadata_fidelity"]
+        .as_object_mut()
+        .expect("metadata fidelity object")
+        .remove("entries");
+    summary["metadata_fidelity"]
+        .as_object_mut()
+        .expect("metadata fidelity object")
+        .remove("fifo_mtime_epoch");
+    let artifacts = summary["artifacts"]
+        .as_object_mut()
+        .expect("artifacts object");
+    artifacts.remove("source_integrity_before");
+    artifacts.remove("source_integrity_after");
+    artifacts.remove("received_integrity");
+    write_file(
+        &summary_path,
+        &serde_json::to_string_pretty(&summary).expect("serialize legacy fixture"),
+    );
+
+    let output = Command::new(repo_root().join("scripts/run_arq_quic_loopback_e2e.sh"))
+        .args(["--from-output", root.to_str().unwrap()])
+        .output()
+        .expect("run legacy v1 validator");
+
+    assert!(
+        output.status.success(),
+        "validator rejected compatible legacy v1 fixture; stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn loopback_from_output_rejects_missing_integrity_artifact() {
+    let root = unique_tmp("missing_integrity_artifact");
+    write_fixture_for_transport_with_missing_integrity(
+        &root,
+        true,
+        "quic",
+        Some("received.integrity.json"),
+    );
+
+    let output = Command::new(repo_root().join("scripts/run_arq_quic_loopback_e2e.sh"))
+        .args(["--from-output", root.to_str().unwrap()])
+        .output()
+        .expect("run validator without retained destination integrity artifact");
+
+    assert!(
+        !output.status.success(),
+        "validator accepted missing integrity artifact; stdout: {}; stderr: {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
@@ -294,6 +438,95 @@ fn loopback_from_output_rejects_metadata_event_without_details() {
     assert!(
         !output.status.success(),
         "validator accepted metadata event without details; stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn loopback_from_output_rejects_missing_per_entry_receipt() {
+    let root = unique_tmp("missing_per_entry_receipt");
+    write_fixture(&root, true);
+
+    let events_path = root.join("events.ndjson");
+    let events = std::fs::read_to_string(&events_path).expect("read events fixture");
+    let filtered = events
+        .lines()
+        .filter(|line| {
+            !(line.contains(r#""stage":"metadata_entry""#)
+                && line.contains(r#""rel_path":"events.fifo""#))
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    write_file(&events_path, &format!("{filtered}\n"));
+
+    let output = Command::new(repo_root().join("scripts/run_arq_quic_loopback_e2e.sh"))
+        .args(["--from-output", root.to_str().unwrap()])
+        .output()
+        .expect("run validator without one per-entry receipt");
+
+    assert!(
+        !output.status.success(),
+        "validator accepted missing per-entry receipt; stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn loopback_from_output_rejects_substituted_per_entry_receipt() {
+    let root = unique_tmp("substituted_per_entry_receipt");
+    write_fixture(&root, true);
+
+    let events_path = root.join("events.ndjson");
+    let events = std::fs::read_to_string(&events_path).expect("read events fixture");
+    write_file(
+        &events_path,
+        &events.replacen(
+            r#""rel_path":"events.fifo""#,
+            r#""rel_path":"substituted-entry""#,
+            1,
+        ),
+    );
+
+    let output = Command::new(repo_root().join("scripts/run_arq_quic_loopback_e2e.sh"))
+        .args(["--from-output", root.to_str().unwrap()])
+        .output()
+        .expect("run validator with substituted per-entry receipt");
+
+    assert!(
+        !output.status.success(),
+        "validator accepted substituted per-entry receipt; stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn loopback_from_output_rejects_root_mismatch_hidden_by_pass_flags() {
+    let root = unique_tmp("root_mismatch");
+    write_fixture(&root, true);
+
+    let summary_path = root.join("summary.json");
+    let mut summary: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(&summary_path).expect("read summary fixture"),
+    )
+    .expect("parse summary fixture");
+    summary["integrity_roots"]["received"]["metadata_commitment_hex"] =
+        serde_json::Value::String("cc".repeat(32));
+    write_file(
+        &summary_path,
+        &serde_json::to_string_pretty(&summary).expect("serialize mismatched summary fixture"),
+    );
+
+    let output = Command::new(repo_root().join("scripts/run_arq_quic_loopback_e2e.sh"))
+        .args(["--from-output", root.to_str().unwrap()])
+        .output()
+        .expect("run validator with mismatched received metadata root");
+
+    assert!(
+        !output.status.success(),
+        "validator accepted mismatched roots hidden by PASS flags; stdout: {}; stderr: {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
@@ -2146,17 +2379,24 @@ fn run_real_atp_metadata_loopback(transport: &str, artifact_label: &str) {
     let summary = std::fs::read_to_string(root.join("summary.json")).expect("read summary");
     let events = std::fs::read_to_string(root.join("events.ndjson")).expect("read events");
 
-    assert!(summary.contains(r#""schema_version": "arq-quic-loopback-e2e-summary-v1""#));
+    assert!(summary.contains(r#""schema_version": "arq-quic-loopback-e2e-summary-v2""#));
     assert!(summary.contains(&format!(r#""transport": "{transport}""#)));
     assert!(summary.contains(r#""sha256_match": true"#));
     assert!(summary.contains(r#""metadata_fidelity": {"#));
     assert!(summary.contains(r#""entries_verified": 9"#));
+    assert!(summary.contains(r#""entries": ["#));
     assert!(summary.contains(r#""payload_mode": "640""#));
     assert!(summary.contains(r#""hardlink_identity": true"#));
     assert!(summary.contains(r#""fifo": true"#));
     assert!(summary.contains(r#""packed_sparse_allocation": true"#));
     assert!(summary.contains(r#""regular_sparse_allocation": true"#));
     assert!(summary.contains(r#""staging_clean": true"#));
+    assert!(summary.contains(r#""integrity_roots": {"#));
+    assert!(summary.contains(r#""source_stable": true"#));
+    assert!(summary.contains(r#""destination_match": true"#));
+    assert!(summary.contains(r#""live_sender_merkle_match": true"#));
+    assert!(summary.contains(r#""receiver_merkle_commit_gate_observed": true"#));
+    assert!(summary.contains(r#""metadata_commitment_match": true"#));
     assert!(summary.contains(r#""sender_max_rss_kb":"#));
     assert!(summary.contains(r#""receiver_max_rss_kb":"#));
     assert!(summary.contains(r#""peak_max_rss_kb":"#));
@@ -2176,7 +2416,22 @@ fn run_real_atp_metadata_loopback(transport: &str, artifact_label: &str) {
     assert!(events.contains(r#""stage":"receiver_ready","status":"passed""#));
     assert!(events.contains(r#""stage":"sender_transfer","status":"passed""#));
     assert!(events.contains(r#""stage":"sha256_verify","status":"passed""#));
+    assert_eq!(
+        events
+            .matches(r#""stage":"metadata_entry","status":"passed""#)
+            .count(),
+        9,
+        "retained events must contain one PASS receipt per logical metadata entry"
+    );
     assert!(events.contains(r#""stage":"metadata_fidelity","status":"passed""#));
+    assert!(events.contains(r#""stage":"integrity_roots","status":"passed""#));
+    for artifact in [
+        "source.integrity.before.json",
+        "source.integrity.after.json",
+        "received.integrity.json",
+    ] {
+        assert!(root.join(artifact).is_file(), "missing retained {artifact}");
+    }
 }
 
 #[test]

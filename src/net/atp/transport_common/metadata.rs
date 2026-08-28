@@ -2409,6 +2409,32 @@ fn unix_parts_to_system_time(seconds: i64, nanos: u32) -> Option<std::time::Syst
     }
 }
 
+#[cfg(all(unix, not(target_os = "redox")))]
+fn set_special_file_mtime_no_open(path: &Path, seconds: i64, nanos: u32) -> Result<(), String> {
+    use nix::fcntl::AT_FDCWD;
+    use nix::sys::stat::{UtimensatFlags, utimensat};
+    use nix::sys::time::TimeSpec;
+
+    let seconds = libc::time_t::try_from(seconds)
+        .map_err(|_| "mtime seconds out of platform range".to_string())?;
+    let nanos = libc::c_long::try_from(nanos % 1_000_000_000)
+        .map_err(|_| "mtime nanoseconds out of platform range".to_string())?;
+    let mtime = TimeSpec::new(seconds, nanos);
+    utimensat(
+        AT_FDCWD,
+        path,
+        &TimeSpec::UTIME_OMIT,
+        &mtime,
+        UtimensatFlags::NoFollowSymlink,
+    )
+    .map_err(|error| error.to_string())
+}
+
+#[cfg(all(unix, target_os = "redox"))]
+fn set_special_file_mtime_no_open(_path: &Path, _seconds: i64, _nanos: u32) -> Result<(), String> {
+    Err("path-based special-file timestamps are unsupported on Redox".to_string())
+}
+
 /// Windows capture: regular/directory metadata plus typed symbolic links.
 ///
 /// # Errors
@@ -2657,8 +2683,8 @@ pub(crate) fn inode_key_if_regular_sync(
 /// Applies in a safe order — times, then xattrs, then ownership, then mode last
 /// — so a restrictive mode (e.g. `0o444`) does not block the earlier steps.
 /// Ownership failures (typically `EPERM` without privilege) and unsupported
-/// xattrs are recorded as skipped, not fatal. Open-based metadata operations are
-/// skipped for special files such as FIFOs, where opening the path can block.
+/// xattrs are recorded as skipped, not fatal. Special-file timestamps use a
+/// no-follow path operation so applying metadata never opens and blocks on a FIFO.
 /// Symlink entries are created by the caller's commit step, not here.
 ///
 /// # Errors
@@ -2695,34 +2721,38 @@ pub fn apply_entry_metadata_sync(
 
     let mut report = MetadataApplyReport::default();
     let special_file = meta.file_kind.is_special();
+    let fifo = matches!(meta.file_kind, FileKind::Fifo);
 
     // Applies in a safe order — times, then xattrs, then ownership, then mode
     // last — so a restrictive mode (e.g. `0o444`) does not block the earlier
-    // steps. Open-based operations are skipped for special files such as
-    // FIFOs, where opening the path can block.
-    if let Some(secs) = (!special_file).then_some(meta.mtime_unix_secs).flatten() {
+    // steps. Special-file timestamps use `utimensat` by path because opening a
+    // FIFO can block; regular files keep the handle-based standard-library path.
+    if let Some(secs) = meta.mtime_unix_secs {
         let mtime_nanos = meta.mtime_nanos.unwrap_or(0);
-        let applied = unix_parts_to_system_time(secs, mtime_nanos)
-            .ok_or_else(|| "mtime out of representable range".to_string())
-            .and_then(|when| {
-                let times = std::fs::FileTimes::new().set_modified(when);
-                std::fs::File::open(out_path)
-                    .and_then(|f| f.set_times(times))
-                    .map_err(|e| e.to_string())
-            });
+        let applied = if fifo {
+            set_special_file_mtime_no_open(out_path, secs, mtime_nanos)
+        } else if special_file {
+            Err("path-based timestamp apply skipped for non-FIFO special file".to_string())
+        } else {
+            unix_parts_to_system_time(secs, mtime_nanos)
+                .ok_or_else(|| "mtime out of representable range".to_string())
+                .and_then(|when| {
+                    let times = std::fs::FileTimes::new().set_modified(when);
+                    std::fs::File::open(out_path)
+                        .and_then(|f| f.set_times(times))
+                        .map_err(|e| e.to_string())
+                })
+        };
         match applied {
             Ok(()) => report.mark_applied("mtime"),
             Err(e) => report.mark_skipped("mtime", e),
         }
     }
-    if special_file && meta.mtime_unix_secs.is_some() {
-        report.mark_skipped(
-            "mtime",
-            "open-based timestamp apply skipped for special file".to_string(),
-        );
-    }
 
-    if !meta.xattrs.is_empty() && !special_file {
+    // `xattr::set` is the no-follow path operation (`lsetxattr` on Linux and
+    // macOS), so a swapped symlink cannot redirect the write through the FIFO
+    // path. Other special file kinds retain the conservative skip behavior.
+    if !meta.xattrs.is_empty() && (!special_file || fifo) {
         let mut any_applied = false;
         for (name, value) in &meta.xattrs {
             match xattr::set(out_path, name, value) {
@@ -2734,8 +2764,11 @@ pub fn apply_entry_metadata_sync(
             report.mark_applied("xattr");
         }
     }
-    if special_file && !meta.xattrs.is_empty() {
-        report.mark_skipped("xattr", "xattr apply skipped for special file".to_string());
+    if special_file && !fifo && !meta.xattrs.is_empty() {
+        report.mark_skipped(
+            "xattr",
+            "xattr apply skipped for non-FIFO special file".to_string(),
+        );
     }
 
     if let (Some(u), Some(g)) = (meta.uid, meta.gid) {
@@ -3280,7 +3313,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn transactional_fifo_commit_replaces_leaf_without_temp_leaks() {
-        use std::os::unix::fs::{FileTypeExt as _, PermissionsExt as _};
+        use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _, PermissionsExt as _};
 
         let root = tempfile::tempdir().expect("temporary directory");
         let destination = root.path().join("destination");
@@ -3288,6 +3321,8 @@ mod tests {
         let metadata = EntryMetadata {
             file_kind: FileKind::Fifo,
             unix_mode: Some(0o640),
+            mtime_unix_secs: Some(1_600_000_789),
+            mtime_nanos: Some(123_456_789),
             ..EntryMetadata::default()
         };
 
@@ -3296,6 +3331,10 @@ mod tests {
         let committed = std::fs::symlink_metadata(&destination).expect("FIFO metadata");
         assert!(committed.file_type().is_fifo());
         assert_eq!(committed.permissions().mode() & 0o7777, 0o640);
+        assert_eq!(
+            (committed.mtime(), committed.mtime_nsec()),
+            (1_600_000_789, 123_456_789)
+        );
         assert!(
             std::fs::read_dir(root.path())
                 .expect("read root")
@@ -4059,6 +4098,65 @@ mod tests {
         .expect("capture pre-epoch mtime");
         assert_eq!(captured.mtime_unix_secs, meta.mtime_unix_secs);
         assert_eq!(captured.mtime_nanos, meta.mtime_nanos);
+    }
+
+    #[cfg(all(unix, not(target_os = "redox")))]
+    #[test]
+    fn apply_metadata_preserves_fifo_mtime_without_opening_it() {
+        use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _, PermissionsExt as _};
+
+        let root = tempfile::tempdir().expect("temporary directory");
+        let path = root.path().join("events.fifo");
+        nix::unistd::mkfifo(&path, nix::sys::stat::Mode::from_bits_truncate(0o600))
+            .expect("create FIFO fixture");
+        let meta = EntryMetadata {
+            file_kind: FileKind::Fifo,
+            unix_mode: Some(0o620),
+            mtime_unix_secs: Some(1_600_000_789),
+            mtime_nanos: Some(123_456_789),
+            ..EntryMetadata::default()
+        };
+
+        let report = apply_entry_metadata_sync(&path, &meta).expect("apply FIFO metadata");
+        assert!(report.applied.contains(&"mtime"), "report: {report:?}");
+        assert!(report.applied.contains(&"mode"), "report: {report:?}");
+
+        let observed = std::fs::symlink_metadata(&path).expect("stat FIFO after metadata apply");
+        assert!(observed.file_type().is_fifo());
+        assert_eq!(observed.permissions().mode() & 0o7777, 0o620);
+        assert_eq!(
+            (observed.mtime(), observed.mtime_nsec()),
+            (1_600_000_789, 123_456_789)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fifo_xattr_apply_does_not_follow_a_swapped_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().expect("temporary directory");
+        let target = root.path().join("outside-target");
+        let path = root.path().join("events.fifo");
+        std::fs::write(&target, b"unchanged").expect("write target fixture");
+        symlink(&target, &path).expect("replace FIFO path with symlink fixture");
+
+        let attribute = "user.asupersync-fifo-nofollow";
+        let meta = EntryMetadata {
+            file_kind: FileKind::Fifo,
+            xattrs: std::collections::BTreeMap::from([(
+                attribute.to_string(),
+                b"must-not-redirect".to_vec(),
+            )]),
+            ..EntryMetadata::default()
+        };
+
+        let _report = apply_entry_metadata_sync(&path, &meta).expect("apply FIFO metadata");
+        assert_ne!(
+            xattr::get(&target, attribute).expect("read target xattr"),
+            Some(b"must-not-redirect".to_vec()),
+            "FIFO xattr application followed a swapped symlink"
+        );
     }
 
     #[test]

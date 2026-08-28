@@ -424,8 +424,10 @@ struct SendArgs {
     /// PEM private key for the spawned receiver's certificate.
     #[arg(long, value_name = "REMOTE_PATH")]
     server_key: Option<PathBuf>,
-    /// Compute and print the transfer plan (file list, sizes, total bytes, merkle
+    /// Compute and print the transfer plan (file list, sizes, total bytes, Merkle
     /// root) as JSON without connecting or sending anything (rsync `--dry-run`).
+    /// RQ and QUIC plans also include their exact transport-specific content and
+    /// metadata commitments under `transport_integrity`.
     #[arg(long)]
     dry_run: bool,
     /// Disable transparent ATP delta planning and force the current full-object
@@ -1316,11 +1318,44 @@ fn quic_with_resolved_auth(
 
 /// Build the sending QUIC config: client TLS trust + transport auth + tuning.
 #[cfg(feature = "tls")]
+fn quic_source_config(
+    args: &SendArgs,
+    auth_override: Option<&RqAuthChoice>,
+) -> Result<asupersync::net::atp::transport_quic::QuicConfig, String> {
+    use asupersync::net::atp::transport_quic::QuicConfig;
+    let symbol_size = resolved_symbol_size(args.symbol_size, true);
+    let base = QuicConfig {
+        symbol_size,
+        max_block_size: args.max_block_size.effective_for_quic(symbol_size)?,
+        repair_overhead: args.repair_overhead.max(1.0),
+        round0_loss_target: normalize_loss_pct(args.rq_round0_loss_pct, "--rq-round0-loss-pct")?,
+        max_transfer_bytes: args.max_bytes,
+        enable_delta: cli_quic_delta_enabled(args.no_delta),
+        bwlimit_bps: normalize_bwlimit_bps(args.bwlimit_bps)?,
+        handshake_timeout: Duration::from_millis(args.quic_handshake_timeout_ms),
+        metadata_policy: selected_cli_opt_in_metadata_policy(args.preserve_xattrs),
+        allow_special_files: args.allow_special_files,
+        preserve_hardlinks: true,
+        ..QuicConfig::default()
+    };
+    let cfg = match auth_override {
+        Some(auth) => quic_with_resolved_auth(base, auth),
+        None => quic_with_transport_auth(
+            base,
+            args.rq_auth_key_hex.as_deref(),
+            args.rq_allow_unauthenticated_lab,
+        )?,
+    };
+    Ok(cfg)
+}
+
+/// Build the sending QUIC config: client TLS trust + transport auth + tuning.
+#[cfg(feature = "tls")]
 fn quic_config_send(
     args: &SendArgs,
     auth_override: Option<&RqAuthChoice>,
 ) -> Result<asupersync::net::atp::transport_quic::QuicConfig, String> {
-    use asupersync::net::atp::transport_quic::{QuicConfig, native_link::QuicClientTls};
+    use asupersync::net::atp::transport_quic::native_link::QuicClientTls;
     use asupersync::net::quic_native::handshake_driver::ATP_QUIC_ALPN;
 
     let (roots, pinned_leafs) = match args.ca.as_deref() {
@@ -1339,29 +1374,7 @@ fn quic_config_send(
     let config = quic_cli_client_config(roots, pinned_leafs, vec![ATP_QUIC_ALPN.to_vec()])
         .map_err(|e| format!("build QUIC client TLS config: {e:?}"))?;
 
-    let symbol_size = resolved_symbol_size(args.symbol_size, true);
-    let base = QuicConfig {
-        symbol_size,
-        max_block_size: args.max_block_size.effective_for_quic(symbol_size)?,
-        repair_overhead: args.repair_overhead.max(1.0),
-        round0_loss_target: normalize_loss_pct(args.rq_round0_loss_pct, "--rq-round0-loss-pct")?,
-        max_transfer_bytes: args.max_bytes,
-        enable_delta: cli_quic_delta_enabled(args.no_delta),
-        bwlimit_bps: normalize_bwlimit_bps(args.bwlimit_bps)?,
-        handshake_timeout: Duration::from_millis(args.quic_handshake_timeout_ms),
-        metadata_policy: selected_cli_opt_in_metadata_policy(args.preserve_xattrs),
-        allow_special_files: args.allow_special_files,
-        preserve_hardlinks: true,
-        ..QuicConfig::default()
-    };
-    let mut cfg = match auth_override {
-        Some(auth) => quic_with_resolved_auth(base, auth),
-        None => quic_with_transport_auth(
-            base,
-            args.rq_auth_key_hex.as_deref(),
-            args.rq_allow_unauthenticated_lab,
-        )?,
-    };
+    let mut cfg = quic_source_config(args, auth_override)?;
     cfg.client_tls = Some(QuicClientTls {
         server_name,
         config,
@@ -1853,9 +1866,10 @@ fn validate_auto_security_policy(args: &SendArgs) -> Result<(), String> {
     Ok(())
 }
 
-/// Print the transfer plan (file list, sizes, total bytes, merkle root) the
+/// Print the transfer plan (file list, sizes, total bytes, Merkle root) the
 /// transport *would* send, computed via a bounded-memory streaming hash pass
-/// with no network I/O. Transport-agnostic: the plan is identical for `tcp`/`rq`.
+/// with no network I/O. RQ and QUIC also emit transport-owned content and
+/// metadata roots; TCP retains the original transport-agnostic plan shape.
 fn run_send_dry_run(args: &SendArgs) -> Result<(), String> {
     let runtime = build_runtime(args.workers)?;
     let source = args.source.clone();
@@ -1868,6 +1882,10 @@ fn run_send_dry_run(args: &SendArgs) -> Result<(), String> {
     let rq_cfg = (args.transport == Transport::Rq)
         .then(|| rq_send_config(args))
         .transpose()?;
+    #[cfg(feature = "tls")]
+    let quic_cfg = (args.transport == Transport::Quic)
+        .then(|| quic_source_config(args, None))
+        .transpose()?;
     let plan_metadata_policy = rq_cfg.as_ref().map_or_else(
         || cfg.metadata_policy.clone(),
         |rq| rq.metadata_policy.clone(),
@@ -1875,15 +1893,31 @@ fn run_send_dry_run(args: &SendArgs) -> Result<(), String> {
     let plan_preserve_hardlinks = rq_cfg
         .as_ref()
         .map_or(cfg.preserve_hardlinks, |rq| rq.preserve_hardlinks);
-    let plan = runtime
+    let (plan, transport_integrity) = runtime
         .block_on(runtime.handle().spawn(async move {
             let cx = Cx::current().expect("dry-run cx");
-            if let Some(rq_cfg) = rq_cfg.as_ref() {
-                transport_rq::validate_source_compatibility_with_config(&source, rq_cfg)
+            let transport_integrity = if let Some(rq_cfg) = rq_cfg.as_ref() {
+                let (flat_merkle_root_hex, metadata_commitment_hex) =
+                    transport_rq::source_integrity_roots(&cx, &source, rq_cfg)
+                        .await
+                        .map_err(|error| error.to_string())?;
+                Some((flat_merkle_root_hex, Some(metadata_commitment_hex)))
+            } else {
+                #[cfg(feature = "tls")]
+                if let Some(quic_cfg) = quic_cfg.as_ref() {
+                    let roots = asupersync::net::atp::transport_quic::source_integrity_roots(
+                        &cx, &source, quic_cfg,
+                    )
                     .await
                     .map_err(|error| error.to_string())?;
-            }
-            plan_transfer(
+                    Some(roots)
+                } else {
+                    None
+                }
+                #[cfg(not(feature = "tls"))]
+                None
+            };
+            let plan = plan_transfer(
                 &cx,
                 &source,
                 cfg.chunk_size,
@@ -1891,11 +1925,27 @@ fn run_send_dry_run(args: &SendArgs) -> Result<(), String> {
                 plan_preserve_hardlinks,
             )
             .await
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?;
+            Ok::<_, String>((plan, transport_integrity))
         }))
         .map_err(|e| e.to_string())?;
     enforce_transfer_size("send source", plan.total_bytes, args.max_bytes)?;
-    print_json(&plan);
+    let mut output = serde_json::to_value(&plan)
+        .map_err(|error| format!("serialize dry-run transfer plan: {error}"))?;
+    if let Some((flat_merkle_root_hex, metadata_commitment_hex)) = transport_integrity {
+        output
+            .as_object_mut()
+            .expect("serialized transfer plan is an object")
+            .insert(
+                "transport_integrity".to_string(),
+                serde_json::json!({
+                    "transport": args.transport.cli_arg(),
+                    "flat_merkle_root_hex": flat_merkle_root_hex,
+                    "metadata_commitment_hex": metadata_commitment_hex,
+                }),
+            );
+    }
+    print_json(&output);
     Ok(())
 }
 

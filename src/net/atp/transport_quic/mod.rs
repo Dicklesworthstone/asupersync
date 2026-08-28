@@ -10216,6 +10216,28 @@ fn trace_config_summary(
 
 // ─── Public API: send ────────────────────────────────────────────────────────
 
+/// Compute the exact content and metadata roots a QUIC send prepares for
+/// `source` under `config`, without opening a network connection.
+///
+/// This executes the same source walk, hardlink resolution, packing, hashing,
+/// directory capture, and manifest validation as [`send_path`]. It is intended
+/// for retained preflight/postflight evidence; comparing roots captured before
+/// a live send with roots captured from the source and committed destination
+/// afterwards supports a bounded point-in-time comparison. It is not an atomic
+/// filesystem snapshot and does not exclude transient intervening mutations.
+pub async fn source_integrity_roots(
+    cx: &Cx,
+    source: &Path,
+    config: &QuicConfig,
+) -> Result<(String, Option<String>), QuicTransportError> {
+    cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
+    let prepared = prepare_source_manifest(cx, source, config).await?;
+    Ok((
+        prepared.manifest.merkle_root_hex.clone(),
+        prepared.manifest.metadata_root_hex.clone(),
+    ))
+}
+
 /// Transfer the file or directory at `source` to `addr` over a real QUIC
 /// connection.
 ///
@@ -17608,8 +17630,8 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn quic_fifo_commit_applies_selected_metadata_and_traces_skips() {
-        use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+    fn quic_fifo_commit_applies_selected_metadata_without_skip() {
+        use std::os::unix::fs::{FileTypeExt, MetadataExt as _, PermissionsExt};
 
         let cx = Cx::for_testing();
         let trace = TraceBufferHandle::new(8);
@@ -17623,6 +17645,7 @@ mod tests {
             file_kind: FileKind::Fifo,
             unix_mode: Some(0o640),
             mtime_unix_secs: Some(1),
+            mtime_nanos: Some(123_456_789),
             ..EntryMetadata::default()
         });
         manifest.metadata_root_hex = manifest_metadata_commitment(&manifest);
@@ -17657,8 +17680,9 @@ mod tests {
         let metadata = std::fs::symlink_metadata(&out_path).expect("FIFO metadata");
         assert!(metadata.file_type().is_fifo());
         assert_eq!(metadata.permissions().mode() & 0o777, 0o640);
-        assert!(trace.snapshot().iter().any(|event| {
-            matches!(
+        assert_eq!((metadata.mtime(), metadata.mtime_nsec()), (1, 123_456_789));
+        assert!(trace.snapshot().iter().all(|event| {
+            !matches!(
                 &event.data,
                 TraceData::Message(message) if message == "atp_quic_metadata_skipped"
             )

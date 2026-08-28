@@ -5516,6 +5516,53 @@ pub async fn source_metadata_manifest_with_config(
     Ok(metadata_manifest_from_source_entries(&entries, directories))
 }
 
+/// Compute the exact content and metadata roots a regular RQ send prepares for
+/// `source` under `config`, without opening a network connection.
+///
+/// The content root is derived from the same logical digests as [`send_path`]:
+/// small-file packing and large-object splitting cannot change it. The metadata
+/// root is the mandatory protocol-v4 commitment produced by the same topology,
+/// hardlink, directory, and metadata-policy capture used by the live sender.
+///
+/// This helper is intended for retained preflight/postflight evidence. Callers
+/// can compare a root captured before the send with roots captured from the
+/// source and committed destination after the receiver reports success for a
+/// bounded point-in-time check. It is not an atomic filesystem snapshot and
+/// does not exclude transient intervening mutations.
+pub async fn source_integrity_roots(
+    cx: &Cx,
+    source: &Path,
+    config: &RqConfig,
+) -> Result<(String, String), RqError> {
+    cx.checkpoint().map_err(|_| RqError::Cancelled)?;
+    let (_, is_directory, mut entries, empty_directories) = collect_entries(source).await?;
+    capture_source_metadata(
+        &mut entries,
+        &config.metadata_policy,
+        config.preserve_hardlinks,
+    )
+    .await?;
+    let directories = if is_directory {
+        capture_rq_directory_metadata_manifest(source, &empty_directories, &config.metadata_policy)
+            .await?
+    } else {
+        DirectoryMetadataManifest::default()
+    };
+    let total_bytes = source_entries_total_bytes(&entries).await?;
+    if total_bytes > config.max_transfer_bytes {
+        return Err(RqError::TooLarge {
+            size: total_bytes,
+            max: config.max_transfer_bytes,
+        });
+    }
+    let metadata = metadata_manifest_from_source_entries(&entries, directories);
+    let (_, logical_digests, _pack_tempdir) = pack_small_files(entries, config).await?;
+    Ok((
+        flat_merkle_root_from_digests(&logical_digests),
+        metadata.commitment_hex,
+    ))
+}
+
 fn collect_dir<'a>(
     dir: &'a Path,
     prefix: String,

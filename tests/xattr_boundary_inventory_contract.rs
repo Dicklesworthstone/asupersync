@@ -514,7 +514,7 @@ fn source_topology_matches_the_exact_call_and_policy_inventory() {
         "if let Ok(Some(value)) = value",
         "return BTreeMap::new();",
         "report.mark_skipped(\"xattr\", format!(\"{name}: {e}\"))",
-        "xattr apply skipped for special file",
+        "xattr apply skipped for non-FIFO special file",
     ] {
         assert!(
             metadata.contains(marker),

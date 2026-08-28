@@ -6,6 +6,9 @@
 #   - events.ndjson: ordered script-stage events
 #   - summary.json: machine-readable transfer summary
 #   - sender.json / receiver.json: raw atp JSON reports
+#   - source.integrity.before.json / source.integrity.after.json: exact
+#     transport manifest roots bracketing the live send
+#   - received.integrity.json: exact roots recomputed from committed output
 #   - sender.time.txt: /usr/bin/time -v sender metrics
 #   - receiver.time.txt: /usr/bin/time -v receiver metrics
 #
@@ -91,6 +94,7 @@ require_cmd mkfifo
 require_cmd readlink
 require_cmd sed
 require_cmd stat
+require_cmd touch
 
 emit_event() {
     local stage="$1"
@@ -132,6 +136,7 @@ emit_summary_event() {
             bytes_received:.bytes_received,
             sha256_match:.sha256_match,
             metadata_fidelity:.metadata_fidelity,
+            integrity_roots:.integrity_roots,
             metrics:.metrics,
             transport_counters:.transport_counters
           }
@@ -279,6 +284,10 @@ verify_metadata_fidelity() {
         echo "FIFO mode differs" >&2
         return 1
     }
+    [[ "$(stat -c '%Y' "$received_root/events.fifo")" == "1600000789" ]] || {
+        echo "FIFO mtime differs" >&2
+        return 1
+    }
     verify_sparse_file "$source_root/packed-sparse.bin" "$received_root/packed-sparse.bin" "packed sparse file" || return 1
     verify_sparse_file "$source_root/regular-sparse.bin" "$received_root/regular-sparse.bin" "regular sparse file" || return 1
     if [[ "$xattr_supported" == "true" ]]; then
@@ -301,16 +310,47 @@ PY
     }
 }
 
+capture_transport_integrity() {
+    local root="$1"
+    local output="$2"
+
+    "$ATP_BIN" send "$root" 127.0.0.1:1 \
+        --dry-run \
+        --transport "$ATP_TRANSPORT" \
+        --preserve-xattrs \
+        --allow-special-files \
+        --rq-auth-key-hex "$AUTH_KEY_HEX" \
+        > "$output"
+}
+
 validate_output() {
     local dir="$1"
     local summary="$dir/summary.json"
     local events="$dir/events.ndjson"
+    local source_before="$dir/source.integrity.before.json"
+    local source_after="$dir/source.integrity.after.json"
+    local received_integrity="$dir/received.integrity.json"
+    local summary_schema
 
     [[ -s "$summary" ]] || { echo "missing summary.json in $dir" >&2; return 1; }
     [[ -s "$events" ]] || { echo "missing events.ndjson in $dir" >&2; return 1; }
+    summary_schema="$(jq -r '.schema_version // empty' "$summary")"
+    case "$summary_schema" in
+        arq-quic-loopback-e2e-summary-v1) ;;
+        arq-quic-loopback-e2e-summary-v2)
+            [[ -s "$source_before" ]] || { echo "missing source.integrity.before.json in $dir" >&2; return 1; }
+            [[ -s "$source_after" ]] || { echo "missing source.integrity.after.json in $dir" >&2; return 1; }
+            [[ -s "$received_integrity" ]] || { echo "missing received.integrity.json in $dir" >&2; return 1; }
+            ;;
+        *)
+            echo "unsupported summary schema in $summary" >&2
+            return 1
+            ;;
+    esac
 
     jq -e '
-      .schema_version == "arq-quic-loopback-e2e-summary-v1" and
+      (.schema_version == "arq-quic-loopback-e2e-summary-v1" or
+        .schema_version == "arq-quic-loopback-e2e-summary-v2") and
       .status == "passed" and
       (.transport == "quic" or .transport == "rq") and
       .sha256_match == true and
@@ -345,6 +385,42 @@ validate_output() {
       .metadata_fidelity.regular_sparse_allocation == true and
       .metadata_fidelity.staging_clean == true and
       (.metadata_fidelity.no_claim | type == "string" and length > 0) and
+      (if .schema_version == "arq-quic-loopback-e2e-summary-v2" then
+        .sender.merkle_ok == true and
+        (.metadata_fidelity.entries | length) == 9 and
+        ([.metadata_fidelity.entries[].rel_path] | unique | length) == 9 and
+        all(.metadata_fidelity.entries[];
+          .status == "passed" and (.checks | type == "object")) and
+        ([.metadata_fidelity.entries[].rel_path] | sort) ==
+          (["payload.bin","empty-dir","relative-link","dangling-link","hardlink-a.txt","hardlink-b.txt","events.fifo","packed-sparse.bin","regular-sparse.bin"] | sort) and
+        .metadata_fidelity.fifo_mtime_epoch == 1600000789 and
+        (.integrity_roots as $r |
+          $r.status == "passed" and
+          $r.transport == .transport and
+          $r.source_before.transport == .transport and
+          $r.source_after.transport == .transport and
+          $r.received.transport == .transport and
+          ($r.source_before.flat_merkle_root_hex | test("^[0-9a-f]{64}$")) and
+          ($r.source_before.metadata_commitment_hex | test("^[0-9a-f]{64}$")) and
+          ($r.source_after.flat_merkle_root_hex | test("^[0-9a-f]{64}$")) and
+          ($r.source_after.metadata_commitment_hex | test("^[0-9a-f]{64}$")) and
+          ($r.received.flat_merkle_root_hex | test("^[0-9a-f]{64}$")) and
+          ($r.received.metadata_commitment_hex | test("^[0-9a-f]{64}$")) and
+          $r.source_before.flat_merkle_root_hex == $r.source_after.flat_merkle_root_hex and
+          $r.source_before.flat_merkle_root_hex == $r.received.flat_merkle_root_hex and
+          $r.source_before.metadata_commitment_hex == $r.source_after.metadata_commitment_hex and
+          $r.source_before.metadata_commitment_hex == $r.received.metadata_commitment_hex and
+          .sender.merkle_root == $r.source_before.flat_merkle_root_hex and
+          $r.source_stable == true and
+          $r.destination_match == true and
+          $r.live_sender_merkle_match == true and
+          $r.receiver_merkle_commit_gate_observed == true and
+          $r.metadata_commitment_match == true and
+          ($r.no_claim | type == "string" and length > 0)) and
+        (.artifacts.source_integrity_before | type == "string" and length > 0) and
+        (.artifacts.source_integrity_after | type == "string" and length > 0) and
+        (.artifacts.received_integrity | type == "string" and length > 0)
+      else true end) and
       (.metrics.sender_max_rss_kb | type == "number") and
       (.metrics.receiver_max_rss_kb | type == "number") and
       (.metrics.peak_max_rss_kb | type == "number") and
@@ -397,7 +473,25 @@ validate_output() {
       (.artifacts.events_ndjson | type == "string")
     ' "$summary" >/dev/null
 
-    jq -e -s '
+    if [[ "$summary_schema" == "arq-quic-loopback-e2e-summary-v2" ]]; then
+        jq -e -n \
+            --slurpfile summary "$summary" \
+            --slurpfile before "$source_before" \
+            --slurpfile after "$source_after" \
+            --slurpfile received "$received_integrity" '
+          ($summary | length) == 1 and
+          ($before | length) == 1 and
+          ($after | length) == 1 and
+          ($received | length) == 1 and
+          $before[0].transport_integrity == $summary[0].integrity_roots.source_before and
+          $after[0].transport_integrity == $summary[0].integrity_roots.source_after and
+          $received[0].transport_integrity == $summary[0].integrity_roots.received
+        ' >/dev/null
+    fi
+
+    jq -e -s \
+        --arg summary_schema "$summary_schema" \
+        --slurpfile summary "$summary" '
       length >= 6 and
       all(.[]; .schema_version == "arq-quic-e2e-event-v1" and
         (.stage | type == "string" and length > 0) and
@@ -406,6 +500,15 @@ validate_output() {
       any(.[]; .stage == "sender_transfer" and .status == "passed") and
       any(.[]; .stage == "sha256_verify" and .status == "passed") and
       any(.[]; .stage == "metadata_fidelity" and .status == "passed" and .details.status == "passed") and
+      (if $summary_schema == "arq-quic-loopback-e2e-summary-v2" then
+        ([.[] | select(.stage == "metadata_entry" and .status == "passed") | .details] | sort_by(.rel_path)) ==
+          ($summary[0].metadata_fidelity.entries | sort_by(.rel_path)) and
+        all(.[] | select(.stage == "metadata_entry" and .status == "passed");
+          .details.status == "passed" and (.details.checks | type == "object")) and
+        ([.[] | select(.stage == "integrity_roots" and .status == "passed")] | length) == 1 and
+        ([.[] | select(.stage == "integrity_roots" and .status == "passed")][0].details ==
+          $summary[0].integrity_roots)
+      else true end) and
       any(.[]; .stage == "summary" and .status == "passed" and (.details.transport_counters.no_claim | type == "string"))
     ' "$events" >/dev/null
 }
@@ -483,11 +586,22 @@ printf 'shared hardlink content\n' > "$SOURCE_TREE/hardlink-a.txt"
 ln "$SOURCE_TREE/hardlink-a.txt" "$SOURCE_TREE/hardlink-b.txt"
 mkfifo "$SOURCE_TREE/events.fifo"
 chmod 620 "$SOURCE_TREE/events.fifo"
+touch -m -d @1600000789 "$SOURCE_TREE/events.fifo"
 verify_sparse_file "$PACKED_SPARSE" "$PACKED_SPARSE" "packed sparse source fixture"
 verify_sparse_file "$REGULAR_SPARSE" "$REGULAR_SPARSE" "regular sparse source fixture"
 emit_event "payload" "passed" "wrote heterogeneous metadata-fidelity tree" "$(jq -cn \
     --argjson xattr_supported "$SOURCE_XATTR_SUPPORTED" \
     '{entries:9,xattr_supported:$xattr_supported,packed_sparse_bytes:524288,regular_sparse_bytes:2097152}')"
+
+SOURCE_INTEGRITY_BEFORE="$OUTPUT_DIR/source.integrity.before.json"
+SOURCE_INTEGRITY_AFTER="$OUTPUT_DIR/source.integrity.after.json"
+RECEIVED_INTEGRITY="$OUTPUT_DIR/received.integrity.json"
+if capture_transport_integrity "$SOURCE_TREE" "$SOURCE_INTEGRITY_BEFORE"; then
+    emit_event "source_integrity_before" "passed" "captured exact $ATP_TRANSPORT source roots before transfer"
+else
+    emit_event "source_integrity_before" "failed" "failed to capture source roots before transfer"
+    exit 1
+fi
 
 RECEIVER_JSON="$OUTPUT_DIR/receiver.json"
 RECEIVER_STDERR="$OUTPUT_DIR/receiver.stderr"
@@ -598,17 +712,62 @@ if ! METADATA_ERROR="$(verify_metadata_fidelity "$SOURCE_TREE" "$DEST_TREE" "$SO
     printf '%s\n' "$METADATA_ERROR" >&2
     exit 1
 fi
+PAYLOAD_MODE="$(stat -c '%a' "$DEST_TREE/payload.bin")"
+PAYLOAD_MTIME="$(stat -c '%Y' "$DEST_TREE/payload.bin")"
+EMPTY_DIR_MODE="$(stat -c '%a' "$DEST_TREE/empty-dir")"
+RELATIVE_LINK_TARGET="$(readlink "$DEST_TREE/relative-link")"
+DANGLING_LINK_TARGET="$(readlink "$DEST_TREE/dangling-link")"
+HARDLINK_INODE="$(stat -c '%d:%i' "$DEST_TREE/hardlink-a.txt")"
+FIFO_MODE="$(stat -c '%a' "$DEST_TREE/events.fifo")"
+FIFO_MTIME="$(stat -c '%Y' "$DEST_TREE/events.fifo")"
+PACKED_SPARSE_SIZE="$(stat -c '%s' "$DEST_TREE/packed-sparse.bin")"
+PACKED_SPARSE_BLOCKS="$(stat -c '%b' "$DEST_TREE/packed-sparse.bin")"
+REGULAR_SPARSE_SIZE="$(stat -c '%s' "$DEST_TREE/regular-sparse.bin")"
+REGULAR_SPARSE_BLOCKS="$(stat -c '%b' "$DEST_TREE/regular-sparse.bin")"
+METADATA_ENTRIES_JSON="$(jq -cn \
+    --arg source_sha "$SOURCE_SHA" \
+    --arg received_sha "$RECEIVED_SHA" \
+    --arg payload_mode "$PAYLOAD_MODE" \
+    --argjson payload_mtime "$PAYLOAD_MTIME" \
+    --argjson xattr_supported "$SOURCE_XATTR_SUPPORTED" \
+    --arg empty_dir_mode "$EMPTY_DIR_MODE" \
+    --arg relative_link_target "$RELATIVE_LINK_TARGET" \
+    --arg dangling_link_target "$DANGLING_LINK_TARGET" \
+    --arg hardlink_inode "$HARDLINK_INODE" \
+    --arg fifo_mode "$FIFO_MODE" \
+    --argjson fifo_mtime "$FIFO_MTIME" \
+    --argjson packed_sparse_size "$PACKED_SPARSE_SIZE" \
+    --argjson packed_sparse_blocks "$PACKED_SPARSE_BLOCKS" \
+    --argjson regular_sparse_size "$REGULAR_SPARSE_SIZE" \
+    --argjson regular_sparse_blocks "$REGULAR_SPARSE_BLOCKS" \
+    '[
+      {rel_path:"payload.bin",kind:"regular",status:"passed",checks:{source_sha256:$source_sha,received_sha256:$received_sha,bytes_match:true,mode:$payload_mode,mtime_epoch:$payload_mtime,xattr:{supported:$xattr_supported,match:$xattr_supported}}},
+      {rel_path:"empty-dir",kind:"directory",status:"passed",checks:{present:true,empty:true,mode:$empty_dir_mode}},
+      {rel_path:"relative-link",kind:"symlink",status:"passed",checks:{present:true,target:$relative_link_target}},
+      {rel_path:"dangling-link",kind:"symlink",status:"passed",checks:{present:true,target:$dangling_link_target,resolves:false}},
+      {rel_path:"hardlink-a.txt",kind:"regular",status:"passed",checks:{content_match:true,inode_identity:$hardlink_inode}},
+      {rel_path:"hardlink-b.txt",kind:"hardlink",status:"passed",checks:{content_match:true,inode_identity:$hardlink_inode,relinked:true}},
+      {rel_path:"events.fifo",kind:"fifo",status:"passed",checks:{present:true,mode:$fifo_mode,mtime_epoch:$fifo_mtime}},
+      {rel_path:"packed-sparse.bin",kind:"regular",status:"passed",checks:{content_match:true,sparse_allocation:true,size_bytes:$packed_sparse_size,allocated_blocks_512:$packed_sparse_blocks}},
+      {rel_path:"regular-sparse.bin",kind:"regular",status:"passed",checks:{content_match:true,sparse_allocation:true,size_bytes:$regular_sparse_size,allocated_blocks_512:$regular_sparse_blocks}}
+    ]')"
+while IFS= read -r metadata_entry; do
+    METADATA_ENTRY_PATH="$(jq -r '.rel_path' <<<"$metadata_entry")"
+    emit_event "metadata_entry" "passed" "verified metadata entry $METADATA_ENTRY_PATH" "$metadata_entry"
+done < <(jq -c '.[]' <<<"$METADATA_ENTRIES_JSON")
 METADATA_NO_CLAIM="This real-binary loopback result proves only the retained $ATP_TRANSPORT metadata-fidelity fixture on this Unix filesystem. A single-transport receipt does not prove cross-transport parity, cross-host behavior, exact hole extents, privileged uid/gid restoration, broad workspace health, performance, or release readiness."
 METADATA_FIDELITY_JSON="$(jq -cn \
     --arg source_tree "$SOURCE_TREE" \
     --arg received_tree "$DEST_TREE" \
     --argjson xattr_supported "$SOURCE_XATTR_SUPPORTED" \
+    --argjson entries "$METADATA_ENTRIES_JSON" \
     --arg no_claim "$METADATA_NO_CLAIM" \
     '{
       status:"passed",
       source_tree:$source_tree,
       received_tree:$received_tree,
       entries_verified:9,
+      entries:$entries,
       payload_bytes_match:true,
       payload_mode:"640",
       payload_mtime_epoch:1600000123,
@@ -621,6 +780,7 @@ METADATA_FIDELITY_JSON="$(jq -cn \
       hardlink_identity:true,
       fifo:true,
       fifo_mode:"620",
+      fifo_mtime_epoch:1600000789,
       packed_sparse_content:true,
       packed_sparse_allocation:true,
       regular_sparse_content:true,
@@ -629,6 +789,54 @@ METADATA_FIDELITY_JSON="$(jq -cn \
       no_claim:$no_claim
     }')"
 emit_event "metadata_fidelity" "passed" "heterogeneous metadata tree committed faithfully" "$METADATA_FIDELITY_JSON"
+
+if ! capture_transport_integrity "$SOURCE_TREE" "$SOURCE_INTEGRITY_AFTER"; then
+    emit_event "integrity_roots" "failed" "failed to capture source roots after transfer"
+    exit 1
+fi
+if ! capture_transport_integrity "$DEST_TREE" "$RECEIVED_INTEGRITY"; then
+    emit_event "integrity_roots" "failed" "failed to capture committed destination roots"
+    exit 1
+fi
+INTEGRITY_NO_CLAIM="These point-in-time roots prove only that the selected transport's source preparation was stable before/after this loopback and reproduced by the committed destination. The live sender Merkle root and commit receipt are cross-checked; there is no atomic filesystem snapshot or cross-host, cross-filesystem, cross-version, performance, broad-workspace, or release-readiness claim."
+INTEGRITY_ROOTS_JSON="$(jq -cn \
+    --slurpfile before "$SOURCE_INTEGRITY_BEFORE" \
+    --slurpfile after "$SOURCE_INTEGRITY_AFTER" \
+    --slurpfile received "$RECEIVED_INTEGRITY" \
+    --slurpfile sender "$SENDER_JSON" \
+    --slurpfile receiver "$RECEIVER_JSON" \
+    --arg transport "$ATP_TRANSPORT" \
+    --arg no_claim "$INTEGRITY_NO_CLAIM" \
+    '($before[0].transport_integrity) as $b |
+    ($after[0].transport_integrity) as $a |
+    ($received[0].transport_integrity) as $r |
+    {
+      status:"passed",
+      transport:$transport,
+      source_before:$b,
+      source_after:$a,
+      received:$r,
+      source_stable:(($b.flat_merkle_root_hex == $a.flat_merkle_root_hex) and ($b.metadata_commitment_hex == $a.metadata_commitment_hex)),
+      destination_match:(($b.flat_merkle_root_hex == $r.flat_merkle_root_hex) and ($b.metadata_commitment_hex == $r.metadata_commitment_hex)),
+      live_sender_merkle_match:($sender[0].merkle_root == $b.flat_merkle_root_hex),
+      receiver_merkle_commit_gate_observed:(($sender[0].merkle_ok == true) and ($sender[0].committed == true) and ($receiver[0].committed == true)),
+      metadata_commitment_match:($b.metadata_commitment_hex == $r.metadata_commitment_hex),
+      no_claim:$no_claim
+    }')"
+if ! jq -e '
+    .status == "passed" and
+    (.source_before.flat_merkle_root_hex | test("^[0-9a-f]{64}$")) and
+    (.source_before.metadata_commitment_hex | test("^[0-9a-f]{64}$")) and
+    .source_stable == true and
+    .destination_match == true and
+    .live_sender_merkle_match == true and
+    .receiver_merkle_commit_gate_observed == true and
+    .metadata_commitment_match == true
+  ' <<<"$INTEGRITY_ROOTS_JSON" >/dev/null; then
+    emit_event "integrity_roots" "failed" "transport integrity roots did not agree" "$INTEGRITY_ROOTS_JSON"
+    exit 1
+fi
+emit_event "integrity_roots" "passed" "transport Merkle and metadata commitments agree" "$INTEGRITY_ROOTS_JSON"
 
 SENDER_MAX_RSS_KB="$(extract_max_rss_kb "$SENDER_TIME")"
 RECEIVER_MAX_RSS_KB="$(extract_max_rss_kb "$RECEIVER_TIME")"
@@ -657,6 +865,9 @@ jq -n \
     --arg receiver_stderr "$RECEIVER_STDERR" \
     --arg sender_time "$SENDER_TIME" \
     --arg receiver_time "$RECEIVER_TIME" \
+    --arg source_integrity_before "$SOURCE_INTEGRITY_BEFORE" \
+    --arg source_integrity_after "$SOURCE_INTEGRITY_AFTER" \
+    --arg received_integrity "$RECEIVED_INTEGRITY" \
     --arg transport "$ATP_TRANSPORT" \
     --arg sender_elapsed_raw "$SENDER_ELAPSED_RAW" \
     --arg receiver_elapsed_raw "$RECEIVER_ELAPSED_RAW" \
@@ -666,6 +877,7 @@ jq -n \
     --argjson receiver_max_rss_kb "$RECEIVER_MAX_RSS_KB" \
     --argjson peak_max_rss_kb "$PEAK_MAX_RSS_KB" \
     --argjson metadata_fidelity "$METADATA_FIDELITY_JSON" \
+    --argjson integrity_roots "$INTEGRITY_ROOTS_JSON" \
     '($sender[0].symbols_sent // null) as $symbols_sent |
     ($receiver[0].symbols_accepted // null) as $symbols_accepted |
     ($sender[0].feedback_rounds // null) as $feedback_rounds_sender |
@@ -675,7 +887,7 @@ jq -n \
     ($receiver[0].bytes_received // 0) as $bytes_received |
     (if $sender_elapsed_seconds > 0 then $sender_elapsed_seconds else $receiver_elapsed_seconds end) as $transfer_elapsed_seconds |
     {
-      schema_version: "arq-quic-loopback-e2e-summary-v1",
+      schema_version: "arq-quic-loopback-e2e-summary-v2",
       status: "passed",
       transport: $transport,
       output_dir: $output_dir,
@@ -688,6 +900,7 @@ jq -n \
       sha256: {source: $source_sha, received: $received_sha, match: ($source_sha == $received_sha)},
       sha256_match: ($source_sha == $received_sha),
       metadata_fidelity: $metadata_fidelity,
+      integrity_roots: $integrity_roots,
       metrics: {
         sender_max_rss_kb: $sender_max_rss_kb,
         receiver_max_rss_kb: $receiver_max_rss_kb,
@@ -752,7 +965,10 @@ jq -n \
         sender_stderr: $sender_stderr,
         receiver_stderr: $receiver_stderr,
         sender_time: $sender_time,
-        receiver_time: $receiver_time
+        receiver_time: $receiver_time,
+        source_integrity_before: $source_integrity_before,
+        source_integrity_after: $source_integrity_after,
+        received_integrity: $received_integrity
       }
     }' > "$OUTPUT_DIR/summary.json"
 
