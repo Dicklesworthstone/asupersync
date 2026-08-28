@@ -344,13 +344,26 @@ validate_output() {
       (.metrics.transfer_elapsed_seconds | type == "number" and . >= 0) and
       (.metrics.goodput_bytes_per_second | type == "number" and . >= 0) and
       (.metrics.goodput_bits_per_second | type == "number" and . >= 0) and
-      (.metrics.symbol_loss_rate | type == "number" and . >= 0 and . <= 1) and
       (.metrics.feedback_rounds_total | type == "number" and . >= 0) and
       (.metrics.decode_time_per_block_micros | type == "number" and . >= 0) and
-      .transport_counters.symbols_sent_available == true and
-      (.transport_counters.symbols_sent | type == "number" and . > 0) and
-      .transport_counters.symbols_accepted_available == true and
-      (.transport_counters.symbols_accepted | type == "number" and . > 0) and
+      (.transport_counters as $c |
+        $c.symbols_sent_available == true and
+        ($c.symbols_sent | type == "number" and . >= 0) and
+        $c.symbols_accepted_available == true and
+        ($c.symbols_accepted | type == "number" and . >= 0) and
+        ((($c.symbols_sent == 0) and ($c.symbols_accepted == 0)) or
+          (($c.symbols_sent > 0) and ($c.symbols_accepted > 0) and
+            ($c.symbols_accepted <= $c.symbols_sent))) and
+        (if $c.symbols_sent > 0 then
+          .metrics.symbol_loss_rate_available == true and
+          .metrics.symbol_loss_rate_mode == "observed-raptorq-symbols" and
+          (.metrics.symbol_loss_rate | type == "number" and . >= 0 and . <= 1) and
+          .metrics.symbol_loss_rate == (($c.symbols_sent - $c.symbols_accepted) / $c.symbols_sent)
+        else
+          .metrics.symbol_loss_rate_available == false and
+          .metrics.symbol_loss_rate_mode == "not-applicable-no-symbols" and
+          .metrics.symbol_loss_rate == null
+        end)) and
       .transport_counters.feedback_rounds_available == true and
       (.transport_counters.feedback_rounds_sender | type == "number" and . >= 0) and
       (.transport_counters.feedback_rounds_receiver | type == "number" and . >= 0) and
@@ -634,7 +647,18 @@ jq -n \
         symbol_loss_rate: (
           if (($symbols_sent | type) == "number" and $symbols_sent > 0 and (($symbols_accepted | type) == "number"))
           then (([($symbols_sent - $symbols_accepted), 0] | max) / $symbols_sent)
-          else 0
+          else null
+          end
+        ),
+        symbol_loss_rate_available: (
+          (($symbols_sent | type) == "number") and
+          ($symbols_sent > 0) and
+          (($symbols_accepted | type) == "number")
+        ),
+        symbol_loss_rate_mode: (
+          if (($symbols_sent | type) == "number") and ($symbols_sent > 0)
+          then "observed-raptorq-symbols"
+          else "not-applicable-no-symbols"
           end
         ),
         feedback_rounds_total: (
@@ -661,7 +685,7 @@ jq -n \
         feedback_rounds_available: ((($feedback_rounds_sender | type) == "number") and (($feedback_rounds_receiver | type) == "number")),
         decode_count_available: (($decode_count | type) == "number"),
         decode_micros_available: (($decode_micros | type) == "number"),
-        no_claim: "Loopback summary derives goodput and symbol-loss headline metrics from retained time/CLI artifacts, and exposes sender/receiver peak RSS plus receiver decode block count/time. The loss rate is a loopback artifact metric, not a fleet/network-loss proof. H2 still does not claim metrics-provider emission, fanout/per-path stats, avg RSS, optional-metrics off-overhead, or fleet proof."
+        no_claim: "Loopback summary derives goodput from retained time/CLI artifacts and exposes sender/receiver peak RSS plus receiver decode block count/time. Symbol loss is numeric only when RaptorQ symbols were attempted; zero-symbol source-stream transfers report it as null and not applicable. Any numeric loss rate remains a loopback artifact metric, not a fleet/network-loss proof. H2 still does not claim metrics-provider emission, fanout/per-path stats, avg RSS, optional-metrics off-overhead, or fleet proof."
       },
       artifacts: {
         events_ndjson: $events,

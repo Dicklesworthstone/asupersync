@@ -104,14 +104,16 @@ fn write_fixture(dir: &Path, sha_match: bool) {
     "transfer_elapsed_seconds": 0.01,
     "goodput_bytes_per_second": 819200.0,
     "goodput_bits_per_second": 6553600.0,
-    "symbol_loss_rate": 0.0,
+    "symbol_loss_rate": null,
+    "symbol_loss_rate_available": false,
+    "symbol_loss_rate_mode": "not-applicable-no-symbols",
     "feedback_rounds_total": 0,
     "decode_time_per_block_micros": 25.0
   }},
   "transport_counters": {{
     "source":"atp-cli-json",
-    "symbols_sent": 64,
-    "symbols_accepted": 64,
+    "symbols_sent": 0,
+    "symbols_accepted": 0,
     "feedback_rounds_sender": 0,
     "feedback_rounds_receiver": 0,
     "decode_count": 1,
@@ -244,6 +246,65 @@ fn loopback_from_output_rejects_missing_counter_values_even_when_flags_claim_ava
 }
 
 #[test]
+fn loopback_from_output_rejects_negative_symbol_counter_values() {
+    for counter in ["symbols_sent", "symbols_accepted"] {
+        let root = unique_tmp(&format!("negative_{counter}"));
+        write_fixture(&root, true);
+
+        let summary_path = root.join("summary.json");
+        let summary = std::fs::read_to_string(&summary_path).expect("read summary fixture");
+        let needle = format!(r#""{counter}": 0"#);
+        let replacement = format!(r#""{counter}": -1"#);
+        write_file(&summary_path, &summary.replace(&needle, &replacement));
+
+        let output = Command::new(repo_root().join("scripts/run_arq_quic_loopback_e2e.sh"))
+            .args(["--from-output", root.to_str().unwrap()])
+            .output()
+            .expect("run loopback from-output validator");
+
+        assert!(
+            !output.status.success(),
+            "validator accepted negative {counter}; stdout: {}; stderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+#[test]
+fn loopback_from_output_rejects_incoherent_symbol_counter_pairs() {
+    for (symbols_sent, symbols_accepted) in [(0, 1), (1, 0), (1, 2)] {
+        let root = unique_tmp(&format!("mixed_symbols_{symbols_sent}_{symbols_accepted}"));
+        write_fixture(&root, true);
+
+        let summary_path = root.join("summary.json");
+        let summary = std::fs::read_to_string(&summary_path).expect("read summary fixture");
+        let summary = summary
+            .replace(
+                r#""symbols_sent": 0"#,
+                &format!(r#""symbols_sent": {symbols_sent}"#),
+            )
+            .replace(
+                r#""symbols_accepted": 0"#,
+                &format!(r#""symbols_accepted": {symbols_accepted}"#),
+            );
+        write_file(&summary_path, &summary);
+
+        let output = Command::new(repo_root().join("scripts/run_arq_quic_loopback_e2e.sh"))
+            .args(["--from-output", root.to_str().unwrap()])
+            .output()
+            .expect("run loopback from-output validator");
+
+        assert!(
+            !output.status.success(),
+            "validator accepted incoherent symbol counters sent={symbols_sent} accepted={symbols_accepted}; stdout: {}; stderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+#[test]
 fn loopback_from_output_rejects_missing_receiver_rss_metric() {
     let root = unique_tmp("missing_receiver_rss");
     write_fixture(&root, true);
@@ -306,10 +367,19 @@ fn loopback_from_output_rejects_out_of_range_symbol_loss_metric() {
 
     let summary_path = root.join("summary.json");
     let summary = std::fs::read_to_string(&summary_path).expect("read summary fixture");
-    write_file(
-        &summary_path,
-        &summary.replace(r#""symbol_loss_rate": 0.0"#, r#""symbol_loss_rate": 1.25"#),
-    );
+    let summary = summary
+        .replace(r#""symbol_loss_rate": null"#, r#""symbol_loss_rate": 1.25"#)
+        .replace(
+            r#""symbol_loss_rate_available": false"#,
+            r#""symbol_loss_rate_available": true"#,
+        )
+        .replace(
+            r#""symbol_loss_rate_mode": "not-applicable-no-symbols""#,
+            r#""symbol_loss_rate_mode": "observed-raptorq-symbols""#,
+        )
+        .replace(r#""symbols_sent": 0"#, r#""symbols_sent": 64"#)
+        .replace(r#""symbols_accepted": 0"#, r#""symbols_accepted": 64"#);
+    write_file(&summary_path, &summary);
 
     let output = Command::new(repo_root().join("scripts/run_arq_quic_loopback_e2e.sh"))
         .args(["--from-output", root.to_str().unwrap()])
@@ -319,6 +389,77 @@ fn loopback_from_output_rejects_out_of_range_symbol_loss_metric() {
     assert!(
         !output.status.success(),
         "validator accepted out-of-range symbol-loss metric; stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn loopback_from_output_accepts_observed_symbol_loss_metric() {
+    let root = unique_tmp("observed_symbol_loss");
+    write_fixture(&root, true);
+
+    let summary_path = root.join("summary.json");
+    let summary = std::fs::read_to_string(&summary_path).expect("read summary fixture");
+    let summary = summary
+        .replace(
+            r#""symbol_loss_rate": null"#,
+            r#""symbol_loss_rate": 0.0625"#,
+        )
+        .replace(
+            r#""symbol_loss_rate_available": false"#,
+            r#""symbol_loss_rate_available": true"#,
+        )
+        .replace(
+            r#""symbol_loss_rate_mode": "not-applicable-no-symbols""#,
+            r#""symbol_loss_rate_mode": "observed-raptorq-symbols""#,
+        )
+        .replace(r#""symbols_sent": 0"#, r#""symbols_sent": 64"#)
+        .replace(r#""symbols_accepted": 0"#, r#""symbols_accepted": 60"#);
+    write_file(&summary_path, &summary);
+
+    let output = Command::new(repo_root().join("scripts/run_arq_quic_loopback_e2e.sh"))
+        .args(["--from-output", root.to_str().unwrap()])
+        .output()
+        .expect("run loopback from-output validator");
+
+    assert!(
+        output.status.success(),
+        "validator rejected coherent observed symbol loss; stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn loopback_from_output_rejects_symbol_loss_inconsistent_with_counters() {
+    let root = unique_tmp("inconsistent_symbol_loss");
+    write_fixture(&root, true);
+
+    let summary_path = root.join("summary.json");
+    let summary = std::fs::read_to_string(&summary_path).expect("read summary fixture");
+    let summary = summary
+        .replace(r#""symbol_loss_rate": null"#, r#""symbol_loss_rate": 0.5"#)
+        .replace(
+            r#""symbol_loss_rate_available": false"#,
+            r#""symbol_loss_rate_available": true"#,
+        )
+        .replace(
+            r#""symbol_loss_rate_mode": "not-applicable-no-symbols""#,
+            r#""symbol_loss_rate_mode": "observed-raptorq-symbols""#,
+        )
+        .replace(r#""symbols_sent": 0"#, r#""symbols_sent": 64"#)
+        .replace(r#""symbols_accepted": 0"#, r#""symbols_accepted": 60"#);
+    write_file(&summary_path, &summary);
+
+    let output = Command::new(repo_root().join("scripts/run_arq_quic_loopback_e2e.sh"))
+        .args(["--from-output", root.to_str().unwrap()])
+        .output()
+        .expect("run loopback from-output validator");
+
+    assert!(
+        !output.status.success(),
+        "validator accepted symbol loss inconsistent with counters; stdout: {}; stderr: {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
