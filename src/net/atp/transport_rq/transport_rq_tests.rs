@@ -7663,6 +7663,197 @@ fn rq_topology_commit_waits_for_fragmented_primary_and_preserves_links() {
 }
 
 #[test]
+fn verify_and_commit_preflight_rejects_late_hardlink_directory_without_publishing_primary() {
+    let dest = canon_tempdir();
+    let base = dest.path().join("payload");
+    let staging_dir = dest.path().join(".atp-rq-preflight-hardlink-staging");
+    std::fs::create_dir_all(&base).expect("destination base");
+    std::fs::create_dir_all(&staging_dir).expect("staging dir");
+
+    let primary_path = base.join("a-primary");
+    let alias_path = base.join("z-alias");
+    std::fs::write(&primary_path, b"old primary bytes").expect("write old primary");
+    std::fs::create_dir(&alias_path).expect("create conflicting alias directory");
+
+    let primary_bytes = b"new primary bytes".to_vec();
+    let primary_metadata = EntryMetadata::default();
+    let alias_metadata = EntryMetadata {
+        hardlink_target: Some("a-primary".to_string()),
+        ..EntryMetadata::default()
+    };
+    let metadata_refs = [
+        ("a-primary", &primary_metadata),
+        ("z-alias", &alias_metadata),
+    ];
+    let metadata = RqMetadataManifest {
+        version: RQ_METADATA_MANIFEST_VERSION,
+        commitment_hex: rq_metadata_commitment(&metadata_refs),
+        entries: vec![RqMetadataEntry {
+            rel_path: "z-alias".to_string(),
+            metadata: alias_metadata,
+        }],
+        directories: None,
+    };
+    let logical_digests = vec![
+        digest_for_bytes("a-primary", &primary_bytes),
+        digest_for_bytes("z-alias", b""),
+    ];
+    let manifest = TransferManifest {
+        transfer_id: "rqpreflighthardlink".to_string(),
+        root_name: "payload".to_string(),
+        is_directory: true,
+        total_bytes: primary_bytes.len() as u64,
+        merkle_root_hex: flat_merkle_root_from_digests(&logical_digests),
+        metadata: Some(metadata),
+        delta_manifest: None,
+        entries: vec![
+            ManifestEntry {
+                index: 0,
+                rel_path: "a-primary".to_string(),
+                size: primary_bytes.len() as u64,
+                sha256_hex: hex_encode(&Sha256::digest(&primary_bytes)),
+                members: Vec::new(),
+                fragment: None,
+            },
+            ManifestEntry {
+                index: 1,
+                rel_path: "z-alias".to_string(),
+                size: 0,
+                sha256_hex: hex_encode(&Sha256::digest(b"")),
+                members: Vec::new(),
+                fragment: None,
+            },
+        ],
+    };
+    validate_manifest(
+        &manifest,
+        &RqConfig {
+            preserve_hardlinks: true,
+            ..RqConfig::default()
+        },
+    )
+    .expect("hardlink conflict manifest validates");
+
+    let primary_staging = staging_dir.join("0");
+    let alias_staging = staging_dir.join("1");
+    std::fs::write(&primary_staging, &primary_bytes).expect("write primary staging");
+    std::fs::write(&alias_staging, b"").expect("write alias staging");
+    let mut decoders = vec![
+        complete_staged_decoder(&manifest.entries[0], &manifest.transfer_id, primary_staging),
+        complete_staged_decoder(&manifest.entries[1], &manifest.transfer_id, alias_staging),
+    ];
+
+    let error = futures_lite::future::block_on(verify_and_commit(
+        &manifest,
+        &mut decoders,
+        dest.path(),
+        0,
+        0,
+        &BTreeMap::new(),
+        &CompletionDigestIndex::default(),
+    ))
+    .expect_err("hardlink directory conflict must fail before publication");
+
+    assert!(error.to_string().contains("real directory"));
+    assert_eq!(
+        std::fs::read(&primary_path).expect("read unchanged primary"),
+        b"old primary bytes"
+    );
+    assert!(alias_path.is_dir());
+}
+
+#[test]
+fn verify_and_commit_preflight_rejects_directory_metadata_file_without_publishing_content() {
+    let dest = canon_tempdir();
+    let base = dest.path().join("payload");
+    let staging_dir = dest.path().join(".atp-rq-preflight-directory-staging");
+    std::fs::create_dir_all(&base).expect("destination base");
+    std::fs::create_dir_all(&staging_dir).expect("staging dir");
+
+    let content_path = base.join("a-content");
+    let directory_path = base.join("z-directory");
+    std::fs::write(&content_path, b"old content bytes").expect("write old content");
+    std::fs::write(&directory_path, b"blocking regular file").expect("write directory conflict");
+
+    let content_bytes = b"new content bytes".to_vec();
+    let content_metadata = EntryMetadata::default();
+    let directories = DirectoryMetadataManifest {
+        root: None,
+        entries: vec![DirectoryMetadataEntry {
+            rel_path: "z-directory".to_string(),
+            metadata: EntryMetadata {
+                file_kind: FileKind::Directory,
+                mtime_unix_secs: Some(1_700_000_000),
+                ..EntryMetadata::default()
+            },
+        }],
+    };
+    let digest = digest_for_bytes("a-content", &content_bytes);
+    let manifest = TransferManifest {
+        transfer_id: "rqpreflightdirectory".to_string(),
+        root_name: "payload".to_string(),
+        is_directory: true,
+        total_bytes: content_bytes.len() as u64,
+        merkle_root_hex: flat_merkle_root_from_digests(std::slice::from_ref(&digest)),
+        metadata: Some(RqMetadataManifest {
+            version: RQ_METADATA_MANIFEST_VERSION,
+            commitment_hex: rq_metadata_commitment_with_directories(
+                &[("a-content", &content_metadata)],
+                Some(&directories),
+            ),
+            entries: Vec::new(),
+            directories: Some(directories),
+        }),
+        delta_manifest: None,
+        entries: vec![ManifestEntry {
+            index: 0,
+            rel_path: "a-content".to_string(),
+            size: content_bytes.len() as u64,
+            sha256_hex: hex_encode(&digest.content_sha256),
+            members: Vec::new(),
+            fragment: None,
+        }],
+    };
+    validate_manifest(
+        &manifest,
+        &RqConfig {
+            metadata_policy: MetadataPolicy::full_preservation(),
+            ..RqConfig::default()
+        },
+    )
+    .expect("directory conflict manifest validates");
+
+    let staging_path = staging_dir.join("0");
+    std::fs::write(&staging_path, &content_bytes).expect("write content staging");
+    let mut decoders = vec![complete_staged_decoder(
+        &manifest.entries[0],
+        &manifest.transfer_id,
+        staging_path,
+    )];
+
+    let error = futures_lite::future::block_on(verify_and_commit(
+        &manifest,
+        &mut decoders,
+        dest.path(),
+        0,
+        0,
+        &BTreeMap::new(),
+        &CompletionDigestIndex::default(),
+    ))
+    .expect_err("directory metadata conflict must fail before publication");
+
+    assert!(error.to_string().contains("not a directory"));
+    assert_eq!(
+        std::fs::read(&content_path).expect("read unchanged content"),
+        b"old content bytes"
+    );
+    assert_eq!(
+        std::fs::read(&directory_path).expect("read unchanged directory conflict"),
+        b"blocking regular file"
+    );
+}
+
+#[test]
 fn rq_special_file_default_skip_preserves_existing_destination_leaf() {
     let dest = canon_tempdir();
     let base = dest.path().join("payload");

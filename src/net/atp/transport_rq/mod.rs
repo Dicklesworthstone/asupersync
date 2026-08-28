@@ -12907,6 +12907,147 @@ async fn reject_existing_symlink(path: &Path) -> Result<(), RqError> {
     }
 }
 
+fn validated_destination_components(
+    base: &Path,
+    out_path: &Path,
+) -> Result<Vec<std::ffi::OsString>, RqError> {
+    let rel = out_path.strip_prefix(base).map_err(|_| {
+        RqError::Source(format!(
+            "destination path {} is outside safe base {}",
+            out_path.display(),
+            base.display()
+        ))
+    })?;
+    rel.components()
+        .map(|component| match component {
+            Component::Normal(component) => Ok(component.to_os_string()),
+            _ => Err(RqError::Source(format!(
+                "unsafe destination component in {}",
+                out_path.display()
+            ))),
+        })
+        .collect()
+}
+
+async fn preflight_required_destination_directory(path: &Path) -> Result<(), RqError> {
+    let kind = match classify_path_link(path).await {
+        Ok(kind) => kind,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(RqError::Source(format!(
+                "destination directory preflight failed for {}: {error}",
+                path.display()
+            )));
+        }
+    };
+    match kind {
+        PathLinkKind::NotLink => match crate::fs::symlink_metadata(path).await {
+            Ok(metadata) if metadata.is_dir() => Ok(()),
+            Ok(_) => Err(RqError::Source(format!(
+                "destination path component is not a directory: {}",
+                path.display()
+            ))),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(RqError::Source(format!(
+                "destination directory preflight failed for {}: {error}",
+                path.display()
+            ))),
+        },
+        PathLinkKind::Symlink(_) => Err(RqError::Source(format!(
+            "destination directory crosses existing symlink: {}",
+            path.display()
+        ))),
+        PathLinkKind::UnsupportedReparse => Err(RqError::Source(format!(
+            "destination directory is an unsupported reparse point: {}",
+            path.display()
+        ))),
+    }
+}
+
+async fn preflight_replaceable_destination_leaf(
+    path: &Path,
+    allow_symlink_leaf: bool,
+) -> Result<(), RqError> {
+    let kind = match classify_path_link(path).await {
+        Ok(kind) => kind,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(RqError::Source(format!(
+                "destination leaf preflight failed for {}: {error}",
+                path.display()
+            )));
+        }
+    };
+    match kind {
+        PathLinkKind::NotLink => match crate::fs::symlink_metadata(path).await {
+            Ok(metadata) if metadata.is_dir() => Err(RqError::Source(format!(
+                "destination leaf is a real directory and cannot be replaced: {}",
+                path.display()
+            ))),
+            Ok(_) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(RqError::Source(format!(
+                "destination leaf preflight failed for {}: {error}",
+                path.display()
+            ))),
+        },
+        PathLinkKind::Symlink(_) if allow_symlink_leaf => Ok(()),
+        PathLinkKind::Symlink(_) => Err(RqError::Source(format!(
+            "destination leaf is an existing symlink: {}",
+            path.display()
+        ))),
+        PathLinkKind::UnsupportedReparse => Err(RqError::Source(format!(
+            "destination leaf is an unsupported reparse point: {}",
+            path.display()
+        ))),
+    }
+}
+
+async fn preflight_destination_leaf(
+    base: &Path,
+    out_path: &Path,
+    directory_transfer: bool,
+    allow_symlink_leaf: bool,
+) -> Result<(), RqError> {
+    let components = validated_destination_components(base, out_path)?;
+    if !directory_transfer {
+        if !components.is_empty() {
+            return Err(RqError::Source(format!(
+                "single-file destination {} does not resolve to safe base {}",
+                out_path.display(),
+                base.display()
+            )));
+        }
+        return preflight_replaceable_destination_leaf(base, allow_symlink_leaf).await;
+    }
+
+    preflight_required_destination_directory(base).await?;
+    let Some((leaf, parents)) = components.split_last() else {
+        return Err(RqError::Source(format!(
+            "directory entry resolves to transfer root rather than a leaf: {}",
+            out_path.display()
+        )));
+    };
+    let mut current = base.to_path_buf();
+    for component in parents {
+        current.push(component);
+        preflight_required_destination_directory(&current).await?;
+    }
+    current.push(leaf);
+    preflight_replaceable_destination_leaf(&current, allow_symlink_leaf).await
+}
+
+async fn preflight_destination_directory(base: &Path, out_path: &Path) -> Result<(), RqError> {
+    let components = validated_destination_components(base, out_path)?;
+    let mut current = base.to_path_buf();
+    preflight_required_destination_directory(&current).await?;
+    for component in components {
+        current.push(component);
+        preflight_required_destination_directory(&current).await?;
+    }
+    Ok(())
+}
+
 async fn persist_decoded_block(
     dec: &mut EntryDecoder,
     block_sbn: u8,
@@ -13842,12 +13983,7 @@ async fn verify_and_commit_with_options(
         // escape or collide under `dest_dir`.
         let base = safe_base_for_root_name(dest_dir, &manifest.root_name)?;
         reject_existing_symlink(dest_dir).await?;
-        if manifest.is_directory && manifest.entries.is_empty() {
-            reject_destination_symlink_prefix(&base, &base).await?;
-            crate::fs::create_dir_all(&base).await?;
-            reject_destination_symlink_prefix(&base, &base).await?;
-            committed_paths.push(base.display().to_string());
-        }
+        let create_empty_directory_root = manifest.is_directory && manifest.entries.is_empty();
 
         // Resolve every LOGICAL destination path, rejecting any symlink prefix,
         // before writing anything.
@@ -13967,6 +14103,69 @@ async fn verify_and_commit_with_options(
         // manifest loop above; allowing an alias to run first could bind it to
         // a stale destination inode that the later primary commit replaces.
         writes.extend(topology_writes);
+
+        // Reject every deterministic destination-shape conflict before the
+        // first final-namespace mutation. This is an early failure boundary,
+        // not write authorization: every mutation below retains its uncached
+        // symlink/reparse checks to catch concurrent replacement races.
+        if manifest.is_directory {
+            preflight_destination_directory(&base, &base).await?;
+        }
+        for write in &writes {
+            match write {
+                CommitWrite::Rename { out_path, .. } | CommitWrite::Fragments { out_path, .. } => {
+                    preflight_destination_leaf(&base, out_path, manifest.is_directory, false)
+                        .await?;
+                }
+                CommitWrite::Topology {
+                    out_path, metadata, ..
+                } => {
+                    if metadata.file_kind.is_special() {
+                        if cfg!(unix)
+                            && matches!(metadata.file_kind, FileKind::Fifo)
+                            && options.allow_special_files()
+                        {
+                            preflight_destination_leaf(
+                                &base,
+                                out_path,
+                                manifest.is_directory,
+                                false,
+                            )
+                            .await?;
+                        }
+                    } else {
+                        preflight_destination_leaf(
+                            &base,
+                            out_path,
+                            manifest.is_directory,
+                            matches!(metadata.file_kind, FileKind::Symlink),
+                        )
+                        .await?;
+                    }
+                }
+                CommitWrite::Members { members, .. } => {
+                    for member in members {
+                        preflight_destination_leaf(
+                            &base,
+                            &member.out_path,
+                            manifest.is_directory,
+                            false,
+                        )
+                        .await?;
+                    }
+                }
+            }
+        }
+        if let Some(directories) = manifest
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.directories.as_ref())
+        {
+            for entry in &directories.entries {
+                let out_path = join_relative(&base, &entry.rel_path)?;
+                preflight_destination_directory(&base, &out_path).await?;
+            }
+        }
         commit_plan_micros = commit_plan_micros.saturating_add(elapsed_micros_since(plan_started));
 
         let symlink_started = trace_commit.then(Instant::now);
@@ -14026,6 +14225,12 @@ async fn verify_and_commit_with_options(
             symlink_guard_micros.saturating_add(elapsed_micros_since(symlink_started));
 
         let write_started = trace_commit.then(Instant::now);
+        if create_empty_directory_root {
+            reject_destination_symlink_prefix(&base, &base).await?;
+            crate::fs::create_dir_all(&base).await?;
+            reject_destination_symlink_prefix(&base, &base).await?;
+            committed_paths.push(base.display().to_string());
+        }
         for write in writes {
             match write {
                 CommitWrite::Rename {
