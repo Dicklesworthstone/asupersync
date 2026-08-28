@@ -8234,6 +8234,64 @@ fn verify_and_commit_renames_contiguous_single_file_fragment_staging() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn verify_and_commit_sparse_reconstructs_contiguous_fragment_staging() {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let dest = canon_tempdir();
+    let receive_staging_dir = dest.path().join(".atp-rq-staging-rqtransfer1-sparse");
+    let fragment_dir = receive_staging_dir.join(RQ_SINGLE_FILE_FRAGMENT_STAGING_DIR);
+    std::fs::create_dir_all(&fragment_dir).expect("fragment staging dir");
+
+    let mut a = vec![0u8; 512 * 1024];
+    let mut b = vec![0u8; 512 * 1024];
+    a[..17].copy_from_slice(b"sparse-fragment-a");
+    let b_tail = b.len() - 17;
+    b[b_tail..].copy_from_slice(b"sparse-fragment-b");
+    let mut whole = Vec::with_capacity(a.len() + b.len());
+    whole.extend_from_slice(&a);
+    whole.extend_from_slice(&b);
+    let staging_path = fragment_dir.join("0");
+    std::fs::write(&staging_path, &whole).expect("write dense contiguous fragment staging");
+
+    let manifest = two_fragment_manifest(&a, &b);
+    let mut decoders = shared_fragment_decoders(&manifest, &staging_path, true, true);
+    let staging_inode = inode_for(&staging_path);
+    let receipt = futures_lite::future::block_on(verify_and_commit_with_options(
+        &manifest,
+        &mut decoders,
+        dest.path(),
+        0,
+        0,
+        &BTreeMap::new(),
+        &CompletionDigestIndex::default(),
+        RqReceiveOptions::new().with_sparse_files(true),
+    ))
+    .expect("verify sparse contiguous fragmented file");
+
+    assert!(receipt.committed);
+    assert!(receipt.sha_ok);
+    assert!(receipt.merkle_ok);
+    let out_path = dest.path().join("huge.bin");
+    assert_eq!(std::fs::read(&out_path).expect("read sparse output"), whole);
+    let metadata = std::fs::metadata(&out_path).expect("sparse output metadata");
+    assert_eq!(metadata.len(), whole.len() as u64);
+    assert!(
+        metadata.blocks().saturating_mul(512) < metadata.len() / 2,
+        "sparse fragment output must allocate less than half its logical size"
+    );
+    assert_ne!(
+        inode_for(&out_path),
+        staging_inode,
+        "sparse fragment commit must publish a reconstructed inode"
+    );
+    assert!(
+        staging_path.exists(),
+        "the outer receive staging guard owns the original dense fragment staging"
+    );
+}
+
 #[test]
 fn verify_and_commit_rejects_tampered_contiguous_fragment_and_cleans_staging() {
     let dest = tempfile::tempdir().expect("dest dir");
