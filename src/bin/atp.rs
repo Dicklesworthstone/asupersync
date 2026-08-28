@@ -634,6 +634,14 @@ struct BondRecvArgs {
     /// Explicitly disable RQ symbol authentication for loopback/lab-only runs.
     #[arg(long)]
     rq_allow_unauthenticated_lab: bool,
+    /// Authorize FIFO recreation in the bonded destination. Sockets and device
+    /// nodes remain skipped. Disabled by default.
+    #[arg(long)]
+    allow_special_files: bool,
+    /// Reconstruct long zero runs as filesystem holes on a supported Unix
+    /// bonded receiver. Disabled by default.
+    #[arg(long)]
+    sparse_files: bool,
 }
 
 #[derive(Parser)]
@@ -717,6 +725,15 @@ struct BondPullArgs {
     /// Explicitly disable RQ symbol authentication for loopback/lab-only runs.
     #[arg(long)]
     rq_allow_unauthenticated_lab: bool,
+    /// Authorize FIFO recreation in the local bonded destination. This
+    /// receiver-only option is not forwarded to donors. Disabled by default.
+    #[arg(long)]
+    allow_special_files: bool,
+    /// Reconstruct long zero runs as filesystem holes in the local bonded
+    /// destination on supported Unix receivers. This receiver-only option is
+    /// not forwarded to donors. Disabled by default.
+    #[arg(long)]
+    sparse_files: bool,
 }
 
 #[derive(Parser)]
@@ -2014,6 +2031,8 @@ async fn bond_donate_transfer(
 /// to a fail-closed commit.
 fn run_bond_recv(args: BondRecvArgs) -> Result<(), String> {
     validate_bond_expected_donors(args.expect_donors)?;
+    validate_receiver_sparse_platform(args.sparse_files)?;
+    let receive_options = rq_receive_options(args.allow_special_files, args.sparse_files);
     let symbol_size = resolved_symbol_size(args.symbol_size, false);
     let mut config = rq_config(
         args.max_bytes,
@@ -2056,6 +2075,7 @@ fn run_bond_recv(args: BondRecvArgs) -> Result<(), String> {
             &udp_bind_ip,
             expect_donors,
             config,
+            receive_options,
             &peer_id,
             None,
         )
@@ -2093,6 +2113,7 @@ async fn bond_recv_serve(
     udp_bind_ip: &str,
     expected_donors: u32,
     config: RqConfig,
+    receive_options: transport_rq::RqReceiveOptions,
     peer_id: &str,
     on_bound: Option<mpsc::Sender<SocketAddr>>,
 ) -> Result<transport_rq::BondedReceiveReport, String> {
@@ -2108,7 +2129,7 @@ async fn bond_recv_serve(
     if let Some(ready) = on_bound {
         let _ = ready.send(bound);
     }
-    transport_rq::receive_bonded(
+    transport_rq::receive_bonded_with_options(
         cx,
         descriptor,
         dest,
@@ -2118,6 +2139,7 @@ async fn bond_recv_serve(
         config,
         peer_id,
         None,
+        receive_options,
     )
     .await
     .map_err(|error| error.to_string())
@@ -2508,6 +2530,8 @@ fn terminate_bond_pull_legs(legs: &mut [BondPullDonorLeg]) {
 /// IN-PROCESS, then SSH-launch one `bond-donate` leg per donor host dialing
 /// the explicit control address, and wait for the fail-closed commit.
 fn run_bond_pull(mut args: BondPullArgs) -> Result<(), String> {
+    validate_receiver_sparse_platform(args.sparse_files)?;
+    let receive_options = rq_receive_options(args.allow_special_files, args.sparse_files);
     let donors: Vec<String> = args
         .donors
         .iter()
@@ -2593,6 +2617,7 @@ fn run_bond_pull(mut args: BondPullArgs) -> Result<(), String> {
                         &udp_bind_ip,
                         expected_donors,
                         config,
+                        receive_options,
                         &peer_id,
                         Some(ready_tx),
                     )
@@ -12080,9 +12105,31 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
             "--expect-donors",
             "2",
             "--rq-allow-unauthenticated-lab",
+            "--allow-special-files",
+            "--sparse-files",
         ])
         .expect("parse bond-recv");
-        assert!(matches!(recv.command, Command::BondRecv(_)));
+        let Command::BondRecv(recv) = recv.command else {
+            panic!("expected bond-recv command");
+        };
+        assert!(recv.allow_special_files);
+        assert!(recv.sparse_files);
+
+        let recv_defaults = Cli::try_parse_from([
+            "atp",
+            "bond-recv",
+            "/srv/dest",
+            "/srv/source",
+            "--expect-donors",
+            "1",
+            "--rq-allow-unauthenticated-lab",
+        ])
+        .expect("parse default bond-recv options");
+        let Command::BondRecv(recv_defaults) = recv_defaults.command else {
+            panic!("expected default bond-recv command");
+        };
+        assert!(!recv_defaults.allow_special_files);
+        assert!(!recv_defaults.sparse_files);
 
         let pull = Cli::try_parse_from([
             "atp",
@@ -12098,6 +12145,8 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
             "--remote-shell",
             "powershell",
             "--rq-allow-unauthenticated-lab",
+            "--allow-special-files",
+            "--sparse-files",
         ])
         .expect("parse Windows bond-pull");
         let Command::BondPull(pull) = pull.command else {
@@ -12105,6 +12154,8 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
         };
         assert_eq!(pull.remote_shell, RemoteShell::Powershell);
         assert_eq!(pull.donors, vec!["wlap"]);
+        assert!(pull.allow_special_files);
+        assert!(pull.sparse_files);
 
         let descriptor = Cli::try_parse_from([
             "atp",
@@ -12618,6 +12669,8 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
             rq_auth_key_hex: None,
             rq_auth_key_stdin: false,
             rq_allow_unauthenticated_lab: true,
+            allow_special_files: false,
+            sparse_files: false,
         }
     }
 
@@ -12916,22 +12969,51 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
     /// relies on.
     #[test]
     fn bond_cli_two_donor_loopback_commits() {
+        bond_cli_two_donor_loopback_case(false);
+    }
+
+    /// Unix receivers opt in to sparse reconstruction and FIFO recreation
+    /// without replacing the portable bonded CLI proof above.
+    #[cfg(unix)]
+    #[test]
+    fn bond_cli_two_donor_loopback_reconstructs_opted_in_topology() {
+        bond_cli_two_donor_loopback_case(true);
+    }
+
+    fn bond_cli_two_donor_loopback_case(reconstruct_opted_in_topology: bool) {
+        #[cfg(unix)]
+        use nix::sys::stat::Mode;
+        #[cfg(unix)]
+        use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _};
+
         let temp = tempfile::tempdir().expect("temporary directory");
         let payload: Vec<u8> = (0..200_003u32)
             .map(|i| (i.wrapping_mul(2_654_435_761) >> 11) as u8)
             .collect();
+        #[cfg(unix)]
+        let sparse_len = 262_144u64;
+        #[cfg(unix)]
+        let sparse_marker = b"bonded-cli-sparse";
         let donor_a_dir = temp.path().join("donor-a");
         let donor_b_dir = temp.path().join("donor-b");
         let recv_copy_dir = temp.path().join("receiver-copy");
         let dst_dir = temp.path().join("dst");
-        for dir in [&donor_a_dir, &donor_b_dir, &recv_copy_dir, &dst_dir] {
+        let donor_a_source = donor_a_dir.join("project");
+        let donor_b_source = donor_b_dir.join("project");
+        let recv_copy_source = recv_copy_dir.join("project");
+        for dir in [
+            &donor_a_source,
+            &donor_b_source,
+            &recv_copy_source,
+            &dst_dir,
+        ] {
             fs::create_dir_all(dir).expect("create e2e dir");
         }
         // Give each replica a stable timestamp even though bonded descriptors
         // intentionally exclude platform metadata: enrollment identity is
         // content/path based so Windows and Unix donors can agree.
         let modified = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
-        for dir in [&donor_a_dir, &donor_b_dir, &recv_copy_dir] {
+        for dir in [&donor_a_source, &donor_b_source, &recv_copy_source] {
             let path = dir.join("payload.bin");
             fs::write(&path, &payload).expect("write e2e payload");
             fs::File::options()
@@ -12940,6 +13022,28 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
                 .expect("open e2e payload")
                 .set_times(fs::FileTimes::new().set_modified(modified))
                 .expect("set deterministic e2e mtime");
+
+            #[cfg(unix)]
+            if reconstruct_opted_in_topology {
+                let sparse_path = dir.join("sparse.bin");
+                let mut sparse = fs::File::create(&sparse_path).expect("create sparse fixture");
+                sparse.set_len(sparse_len).expect("size sparse fixture");
+                sparse
+                    .write_all(sparse_marker)
+                    .expect("write sparse fixture prefix");
+                sparse.sync_all().expect("sync sparse fixture");
+                nix::unistd::mkfifo(&dir.join("events.pipe"), Mode::from_bits_truncate(0o620))
+                    .expect("create bonded CLI FIFO fixture");
+            }
+        }
+        #[cfg(unix)]
+        if reconstruct_opted_in_topology {
+            let source_sparse_metadata =
+                fs::metadata(donor_a_source.join("sparse.bin")).expect("source sparse metadata");
+            assert!(
+                source_sparse_metadata.blocks().saturating_mul(512) < sparse_len / 2,
+                "source fixture must expose sparse allocation"
+            );
         }
 
         // The exact CLI config plumbing (`rq_config`) with small blocks so
@@ -12961,7 +13065,7 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
 
         let (ready_tx, ready_rx) = mpsc::channel::<SocketAddr>();
         let receiver = {
-            let source = recv_copy_dir.join("payload.bin");
+            let source = recv_copy_source;
             let dest = dst_dir.clone();
             let config = config.clone();
             thread::spawn(
@@ -12985,6 +13089,10 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
                             "127.0.0.1",
                             2,
                             config,
+                            rq_receive_options(
+                                reconstruct_opted_in_topology,
+                                reconstruct_opted_in_topology,
+                            ),
                             "bond-e2e-receiver",
                             Some(ready_tx),
                         )
@@ -13017,8 +13125,8 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
                 },
             )
         };
-        let donor_a = spawn_donor(donor_a_dir.join("payload.bin"));
-        let donor_b = spawn_donor(donor_b_dir.join("payload.bin"));
+        let donor_a = spawn_donor(donor_a_source);
+        let donor_b = spawn_donor(donor_b_source);
 
         let report_a = donor_a
             .join()
@@ -13034,11 +13142,46 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
             .expect("bonded receive commits");
 
         assert!(report.committed, "bonded receive must commit: {report:?}");
-        assert_eq!(report.bytes_received, payload.len() as u64);
-        assert_eq!(report.files, 1);
+        let expected_bytes = payload.len() as u64;
+        #[cfg(unix)]
+        let expected_bytes = if reconstruct_opted_in_topology {
+            expected_bytes.saturating_add(sparse_len)
+        } else {
+            expected_bytes
+        };
+        assert_eq!(report.bytes_received, expected_bytes);
+        assert_eq!(
+            report.files,
+            if reconstruct_opted_in_topology { 3 } else { 1 }
+        );
         assert_eq!(report.enrolled_donors, 2);
-        let received = fs::read(dst_dir.join("payload.bin")).expect("read committed file");
+        let committed_root = dst_dir.join("project");
+        let received = fs::read(committed_root.join("payload.bin")).expect("read committed file");
         assert_eq!(received, payload, "commit must be byte-identical");
+        #[cfg(unix)]
+        if reconstruct_opted_in_topology {
+            let mut expected_sparse = vec![0u8; usize::try_from(sparse_len).expect("sparse size")];
+            expected_sparse[..sparse_marker.len()].copy_from_slice(sparse_marker);
+            let committed_sparse = committed_root.join("sparse.bin");
+            assert_eq!(
+                fs::read(&committed_sparse).expect("read committed sparse file"),
+                expected_sparse,
+                "sparse logical bytes must be exact"
+            );
+            let committed_sparse_metadata =
+                fs::metadata(&committed_sparse).expect("committed sparse metadata");
+            assert!(
+                committed_sparse_metadata.blocks().saturating_mul(512) < sparse_len / 2,
+                "--sparse-files must reconstruct long zero runs as holes"
+            );
+            assert!(
+                fs::symlink_metadata(committed_root.join("events.pipe"))
+                    .expect("committed FIFO metadata")
+                    .file_type()
+                    .is_fifo(),
+                "--allow-special-files must materialize the bonded FIFO"
+            );
+        }
 
         // BOTH donors enrolled with distinct receiver-assigned identities and
         // contributed accepted (novel, post-dedup) symbols.
