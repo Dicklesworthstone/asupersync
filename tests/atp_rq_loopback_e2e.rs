@@ -550,6 +550,7 @@ fn authenticated_directory_roundtrip_preserves_nested_and_multiple_empty_directo
 fn authenticated_topology_roundtrip_spans_datagram_and_control_source_paths() {
     use nix::sys::stat::Mode;
     use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _, PermissionsExt as _, symlink};
+    use std::time::{Duration, UNIX_EPOCH};
 
     let root = unique_tmp("auth_topology");
     let src_dir = root.join("src");
@@ -565,6 +566,22 @@ fn authenticated_topology_roundtrip_spans_datagram_and_control_source_paths() {
     let xattr_value = b"rq-metadata\0binary-value";
     let xattr_supported = xattr::set(&primary, xattr_name, xattr_value).is_ok();
     std::fs::hard_link(&primary, tree.join("b-hardlink.bin")).expect("create hardlink alias");
+    std::fs::set_permissions(&primary, std::fs::Permissions::from_mode(0o764))
+        .expect("set exact source primary mode");
+    let requested_primary_mtime = UNIX_EPOCH
+        .checked_add(Duration::new(1_700_000_123, 456_789_123))
+        .expect("representable source primary mtime");
+    std::fs::File::open(&primary)
+        .expect("open source primary for timestamp")
+        .set_times(std::fs::FileTimes::new().set_modified(requested_primary_mtime))
+        .expect("set source primary timestamp");
+    let source_primary_metadata = std::fs::metadata(&primary).expect("source primary metadata");
+    let expected_primary_mode = source_primary_metadata.permissions().mode() & 0o7777;
+    let expected_primary_mtime = (
+        source_primary_metadata.mtime(),
+        source_primary_metadata.mtime_nsec(),
+    );
+    assert_eq!(expected_primary_mode, 0o764);
     symlink("a-primary.bin", tree.join("c-relative-link")).expect("create relative symlink");
     symlink("missing-target", tree.join("d-dangling-link")).expect("create dangling symlink");
     let fifo = tree.join("e-pipe");
@@ -582,6 +599,7 @@ fn authenticated_topology_roundtrip_spans_datagram_and_control_source_paths() {
             auth_test_config()
         };
         receiver_config.metadata_policy.preserve_extended_attributes = true;
+        receiver_config.metadata_policy.preserve_timestamps = true;
         receiver_config.preserve_hardlinks = true;
         let sender_config = receiver_config.clone();
         let options = RqReceiveOptions::new().with_allow_special_files(true);
@@ -642,6 +660,26 @@ fn authenticated_topology_roundtrip_spans_datagram_and_control_source_paths() {
             std::fs::metadata(&received_primary).expect("received primary metadata");
         let hardlink_metadata =
             std::fs::metadata(&received_hardlink).expect("received hardlink metadata");
+        assert_eq!(
+            primary_metadata.permissions().mode() & 0o7777,
+            expected_primary_mode,
+            "{label} primary mode"
+        );
+        assert_eq!(
+            (primary_metadata.mtime(), primary_metadata.mtime_nsec()),
+            expected_primary_mtime,
+            "{label} primary subsecond mtime"
+        );
+        assert_eq!(
+            hardlink_metadata.permissions().mode() & 0o7777,
+            expected_primary_mode,
+            "{label} hardlink mode"
+        );
+        assert_eq!(
+            (hardlink_metadata.mtime(), hardlink_metadata.mtime_nsec()),
+            expected_primary_mtime,
+            "{label} hardlink subsecond mtime"
+        );
         assert_eq!(
             primary_metadata.dev(),
             hardlink_metadata.dev(),

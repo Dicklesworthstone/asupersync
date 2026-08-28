@@ -96,10 +96,14 @@ use crate::net::atp::protocol::frames::{Frame, FrameType, MAX_FRAME_SIZE, Protoc
 use crate::net::atp::protocol::session::TransferNonce;
 use crate::net::atp::protocol::varint::VarInt;
 use crate::net::atp::transport_common::delta::ATP_DELTA_CHUNK_MANIFEST_SCHEMA;
+#[cfg(not(unix))]
+use crate::net::atp::transport_common::metadata::apply_entry_metadata;
+#[cfg(unix)]
+use crate::net::atp::transport_common::metadata::apply_entry_metadata_sync;
 use crate::net::atp::transport_common::metadata::{
     DirectoryMetadataEntry, DirectoryMetadataManifest, EntryMetadata, FileKind, HardlinkIdentity,
-    MetadataApplyReport, PathLinkKind, apply_entry_metadata, capture_directory_metadata_manifest,
-    classify_path_link, classify_path_link_sync, commit_hardlink_transactionally,
+    MetadataApplyReport, PathLinkKind, capture_directory_metadata_manifest, classify_path_link,
+    classify_path_link_sync, commit_hardlink_transactionally,
     commit_staged_regular_file_transactionally, commit_symlink_transactionally,
     inode_key_if_regular_sync, metadata_commitment, path_is_link_or_reparse,
     read_entry_metadata_sync, validate_entry_metadata_for_receive, write_sparse_zero_runs,
@@ -13254,9 +13258,34 @@ async fn apply_rq_entry_metadata(
     if metadata.is_bare() {
         return Ok(MetadataApplyReport::default());
     }
+    #[cfg(unix)]
+    let observed = {
+        let out_path = out_path.to_path_buf();
+        let metadata = metadata.clone();
+        let verification_policy = MetadataPolicy {
+            preserve_unix_permissions: metadata.unix_mode.is_some(),
+            preserve_timestamps: metadata.mtime_unix_secs.is_some(),
+            ..MetadataPolicy::portable()
+        };
+        let verify_exact = matches!(metadata.file_kind, FileKind::Regular)
+            && (metadata.unix_mode.is_some() || metadata.mtime_unix_secs.is_some());
+        let (report, observed) = crate::runtime::spawn_blocking(move || {
+            let report = apply_entry_metadata_sync(&out_path, &metadata)?;
+            let observed = verify_exact
+                .then(|| read_entry_metadata_sync(&out_path, &verification_policy))
+                .transpose()?;
+            Ok::<_, StreamingError>((report, observed))
+        })
+        .await
+        .map_err(|error| RqError::Source(error.into_message()))?;
+        (report, observed)
+    };
+    #[cfg(not(unix))]
     let report = apply_entry_metadata(out_path, metadata)
         .await
         .map_err(|error| RqError::Source(error.into_message()))?;
+    #[cfg(unix)]
+    let (report, observed) = observed;
     for (field, reason) in &report.skipped {
         rqtrace!(
             "receiver: metadata field {field} skipped for {}: {reason}",
@@ -13288,7 +13317,49 @@ async fn apply_rq_entry_metadata(
             )));
         }
     }
+    #[cfg(unix)]
+    if let Some(observed) = &observed {
+        verify_rq_required_unix_metadata(out_path, metadata, observed)?;
+    }
     Ok(report)
+}
+
+#[cfg(unix)]
+fn verify_rq_required_unix_metadata(
+    out_path: &Path,
+    expected: &EntryMetadata,
+    observed: &EntryMetadata,
+) -> Result<(), RqError> {
+    if !matches!(expected.file_kind, FileKind::Regular) {
+        return Ok(());
+    }
+    if let Some(expected_mode) = expected.unix_mode
+        && observed.unix_mode != Some(expected_mode)
+    {
+        let observed_mode = observed
+            .unix_mode
+            .map_or_else(|| "missing".to_string(), |mode| format!("{mode:#06o}"));
+        return Err(RqError::Source(format!(
+            "{}: required metadata field mode was applied but not materialized exactly: expected {expected_mode:#06o}, observed {observed_mode}",
+            out_path.display()
+        )));
+    }
+    if !expected.file_kind.is_special()
+        && let Some(expected_seconds) = expected.mtime_unix_secs
+    {
+        let expected_nanos = expected.mtime_nanos.unwrap_or(0);
+        if observed.mtime_unix_secs != Some(expected_seconds)
+            || observed.mtime_nanos.unwrap_or(0) != expected_nanos
+        {
+            return Err(RqError::Source(format!(
+                "{}: required metadata field mtime was applied but not materialized exactly: expected ({expected_seconds}, {expected_nanos}), observed ({:?}, {:?})",
+                out_path.display(),
+                observed.mtime_unix_secs,
+                observed.mtime_nanos
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn split_rq_metadata_for_commit(

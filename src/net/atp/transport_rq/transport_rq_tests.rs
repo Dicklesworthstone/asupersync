@@ -3131,27 +3131,69 @@ fn rq_receiver_accepts_and_reports_unsupported_unix_metadata() {
 
 #[cfg(unix)]
 #[test]
-fn rq_metadata_application_reports_and_sets_unix_mode() {
-    use std::os::unix::fs::PermissionsExt;
+fn rq_exact_unix_metadata_application_reports_and_sets_mode_and_mtime() {
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+    use std::time::{Duration, UNIX_EPOCH};
 
     let root = tempfile::tempdir().expect("temporary directory");
+    let reference = root.path().join("reference");
+    std::fs::write(&reference, b"reference").expect("write timestamp reference");
+    let requested_mtime = UNIX_EPOCH
+        .checked_add(Duration::new(1_700_000_000, 123_400_000))
+        .expect("representable timestamp reference");
+    std::fs::File::open(&reference)
+        .expect("open timestamp reference")
+        .set_times(std::fs::FileTimes::new().set_modified(requested_mtime))
+        .expect("set timestamp reference");
+    let reference_metadata = std::fs::metadata(&reference).expect("stat timestamp reference");
+    let expected_mtime = (reference_metadata.mtime(), reference_metadata.mtime_nsec());
+
     let path = root.path().join("payload");
     std::fs::write(&path, b"payload").expect("write payload");
     let metadata = EntryMetadata {
         unix_mode: Some(0o640),
+        mtime_unix_secs: Some(expected_mtime.0),
+        mtime_nanos: u32::try_from(expected_mtime.1).ok(),
         ..EntryMetadata::default()
     };
     let report = futures_lite::future::block_on(apply_rq_entry_metadata(&path, &metadata))
         .expect("apply RQ metadata");
     assert!(report.applied.contains(&"mode"), "{report:?}");
-    assert_eq!(
-        std::fs::metadata(&path)
-            .expect("stat payload")
-            .permissions()
-            .mode()
-            & 0o7777,
-        0o640
-    );
+    assert!(report.applied.contains(&"mtime"), "{report:?}");
+    let observed = std::fs::metadata(&path).expect("stat payload");
+    assert_eq!(observed.permissions().mode() & 0o7777, 0o640);
+    assert_eq!((observed.mtime(), observed.mtime_nsec()), expected_mtime);
+}
+
+#[cfg(unix)]
+#[test]
+fn rq_exact_unix_metadata_verifier_rejects_mode_and_subsecond_mtime_drift() {
+    let expected = EntryMetadata {
+        unix_mode: Some(0o640),
+        mtime_unix_secs: Some(1_700_000_000),
+        mtime_nanos: Some(123_400_000),
+        ..EntryMetadata::default()
+    };
+    verify_rq_required_unix_metadata(std::path::Path::new("payload"), &expected, &expected)
+        .expect("exact metadata must pass");
+
+    let mut mode_drift = expected.clone();
+    mode_drift.unix_mode = Some(0o600);
+    let mode_error =
+        verify_rq_required_unix_metadata(std::path::Path::new("payload"), &expected, &mode_drift)
+            .expect_err("mode drift must fail closed");
+    assert!(mode_error.to_string().contains("field mode"));
+    assert!(mode_error.to_string().contains("0o0640"));
+    assert!(mode_error.to_string().contains("0o0600"));
+
+    let mut mtime_drift = expected.clone();
+    mtime_drift.mtime_nanos = Some(123_400_001);
+    let mtime_error =
+        verify_rq_required_unix_metadata(std::path::Path::new("payload"), &expected, &mtime_drift)
+            .expect_err("subsecond mtime drift must fail closed");
+    assert!(mtime_error.to_string().contains("field mtime"));
+    assert!(mtime_error.to_string().contains("123400000"));
+    assert!(mtime_error.to_string().contains("123400001"));
 }
 
 #[cfg(windows)]
