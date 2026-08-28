@@ -34,6 +34,52 @@ fn unique_tmp(label: &str) -> PathBuf {
     std::env::temp_dir().join(format!("atp_rq_e2e_{label}_{}_{nanos}", std::process::id()))
 }
 
+#[cfg(unix)]
+fn write_sparse_fixture(path: &Path, logical_size: usize, marker: &[u8]) -> Vec<u8> {
+    use std::io::Seek as _;
+
+    let mut file = std::fs::File::create(path).expect("create sparse fixture");
+    file.set_len(logical_size as u64)
+        .expect("pre-size sparse fixture");
+    file.write_all(marker).expect("write sparse prefix");
+    let tail_offset = logical_size
+        .checked_sub(marker.len())
+        .expect("sparse fixture exceeds marker");
+    file.seek(std::io::SeekFrom::Start(tail_offset as u64))
+        .expect("seek sparse tail");
+    file.write_all(marker).expect("write sparse suffix");
+    file.sync_all().expect("sync sparse fixture");
+
+    let mut expected = vec![0u8; logical_size];
+    expected[..marker.len()].copy_from_slice(marker);
+    expected[tail_offset..].copy_from_slice(marker);
+    expected
+}
+
+#[cfg(unix)]
+fn assert_sparse_fixture(
+    path: &Path,
+    expected: &[u8],
+    context: &str,
+    sparse_allocation_observable: bool,
+) {
+    use std::os::unix::fs::MetadataExt as _;
+
+    assert_eq!(
+        std::fs::read(path).expect("read sparse fixture"),
+        expected,
+        "{context} logical bytes"
+    );
+    let metadata = std::fs::metadata(path).expect("sparse fixture metadata");
+    assert_eq!(metadata.len(), expected.len() as u64, "{context} length");
+    if sparse_allocation_observable {
+        assert!(
+            metadata.blocks().saturating_mul(512) < metadata.len() / 2,
+            "{context} must allocate less than half its logical size"
+        );
+    }
+}
+
 /// Test transport config with a SMALL source-block size. These tests run in a
 /// debug (unoptimized) build, where RaptorQ encode/decode of a large source
 /// block (a K×K GF(256) matrix solve) is extremely slow. A 64 KiB block caps K
@@ -623,6 +669,84 @@ fn authenticated_topology_roundtrip_spans_datagram_and_control_source_paths() {
             fifo_metadata.permissions().mode() & 0o7777,
             0o640,
             "{label} FIFO mode"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn authenticated_sparse_roundtrip_spans_datagram_and_control_source_paths() {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let root = unique_tmp("auth_sparse");
+    let tree = root.join("src/sparse-tree");
+    std::fs::create_dir_all(&tree).expect("create sparse source tree");
+
+    let regular_source = tree.join("regular.bin");
+    let packed_a_source = tree.join("packed-a.bin");
+    let packed_b_source = tree.join("packed-b.bin");
+    let regular_expected = write_sparse_fixture(&regular_source, 1_310_720, b"rq-regular-sparse");
+    let packed_a_expected = write_sparse_fixture(&packed_a_source, 262_144, b"rq-packed-a");
+    let packed_b_expected = write_sparse_fixture(&packed_b_source, 262_144, b"rq-packed-b");
+    let sparse_allocation_observable = [&regular_source, &packed_a_source, &packed_b_source]
+        .into_iter()
+        .all(|source| {
+            let metadata = std::fs::metadata(source).expect("source sparse fixture metadata");
+            metadata.blocks().saturating_mul(512) < metadata.len() / 2
+        });
+
+    for (label, datagram_path) in [("datagram", true), ("control-source", false)] {
+        let dst_dir = root.join(format!("dst-{label}"));
+        std::fs::create_dir_all(&dst_dir).expect("create sparse destination root");
+        let receiver_config = if datagram_path {
+            auth_datagram_test_config()
+        } else {
+            auth_test_config()
+        };
+        let sender_config = receiver_config.clone();
+        let options = RqReceiveOptions::new().with_sparse_files(true);
+        let (addr, recv_handle) =
+            spawn_receiver_with_options(dst_dir.clone(), receiver_config, options);
+        let send = run_sender(addr, tree.clone(), sender_config)
+            .unwrap_or_else(|error| panic!("{label} sparse send failed: {error}"));
+        let recv = recv_handle
+            .join()
+            .expect("sparse receiver thread")
+            .unwrap_or_else(|error| panic!("{label} sparse receive failed: {error}"));
+
+        assert!(send.receipt.committed, "{label} sender receipt");
+        assert!(send.receipt.sha_ok, "{label} sender SHA receipt");
+        assert!(send.receipt.merkle_ok, "{label} sender Merkle receipt");
+        assert!(recv.committed, "{label} receiver commit");
+        if datagram_path {
+            assert!(send.symbols_sent > 0, "datagram path must spray symbols");
+            assert!(
+                recv.symbols_accepted > 0,
+                "datagram path must accept symbols"
+            );
+        } else {
+            assert_eq!(send.symbols_sent, 0, "control-source sender symbols");
+            assert_eq!(recv.symbols_accepted, 0, "control-source receiver symbols");
+        }
+
+        let base = dst_dir.join("sparse-tree");
+        assert_sparse_fixture(
+            &base.join("regular.bin"),
+            &regular_expected,
+            &format!("{label} regular sparse file"),
+            sparse_allocation_observable,
+        );
+        assert_sparse_fixture(
+            &base.join("packed-a.bin"),
+            &packed_a_expected,
+            &format!("{label} packed sparse file A"),
+            sparse_allocation_observable,
+        );
+        assert_sparse_fixture(
+            &base.join("packed-b.bin"),
+            &packed_b_expected,
+            &format!("{label} packed sparse file B"),
+            sparse_allocation_observable,
         );
     }
 }

@@ -8237,6 +8237,7 @@ fn verify_and_commit_renames_contiguous_single_file_fragment_staging() {
 #[cfg(unix)]
 #[test]
 fn verify_and_commit_sparse_reconstructs_contiguous_fragment_staging() {
+    use std::io::{Seek as _, Write as _};
     use std::os::unix::fs::MetadataExt as _;
 
     let dest = canon_tempdir();
@@ -8254,6 +8255,28 @@ fn verify_and_commit_sparse_reconstructs_contiguous_fragment_staging() {
     whole.extend_from_slice(&b);
     let staging_path = fragment_dir.join("0");
     std::fs::write(&staging_path, &whole).expect("write dense contiguous fragment staging");
+    let sparse_probe_path = receive_staging_dir.join("sparse-allocation-probe");
+    let mut sparse_probe =
+        std::fs::File::create(&sparse_probe_path).expect("create sparse allocation probe");
+    sparse_probe
+        .set_len(whole.len() as u64)
+        .expect("pre-size sparse allocation probe");
+    sparse_probe
+        .write_all(b"p")
+        .expect("write sparse allocation probe prefix");
+    sparse_probe
+        .seek(std::io::SeekFrom::End(-1))
+        .expect("seek sparse allocation probe tail");
+    sparse_probe
+        .write_all(b"p")
+        .expect("write sparse allocation probe suffix");
+    sparse_probe
+        .sync_all()
+        .expect("sync sparse allocation probe");
+    let sparse_probe_metadata =
+        std::fs::metadata(&sparse_probe_path).expect("sparse allocation probe metadata");
+    let sparse_allocation_observable =
+        sparse_probe_metadata.blocks().saturating_mul(512) < sparse_probe_metadata.len() / 2;
 
     let manifest = two_fragment_manifest(&a, &b);
     let mut decoders = shared_fragment_decoders(&manifest, &staging_path, true, true);
@@ -8277,10 +8300,12 @@ fn verify_and_commit_sparse_reconstructs_contiguous_fragment_staging() {
     assert_eq!(std::fs::read(&out_path).expect("read sparse output"), whole);
     let metadata = std::fs::metadata(&out_path).expect("sparse output metadata");
     assert_eq!(metadata.len(), whole.len() as u64);
-    assert!(
-        metadata.blocks().saturating_mul(512) < metadata.len() / 2,
-        "sparse fragment output must allocate less than half its logical size"
-    );
+    if sparse_allocation_observable {
+        assert!(
+            metadata.blocks().saturating_mul(512) < metadata.len() / 2,
+            "sparse fragment output must allocate less than half its logical size"
+        );
+    }
     assert_ne!(
         inode_for(&out_path),
         staging_inode,

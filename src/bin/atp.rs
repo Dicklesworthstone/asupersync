@@ -8840,8 +8840,7 @@ fn run_recv(mut args: RecvArgs, persistent: bool) -> Result<(), String> {
             cfg.metadata_policy = selected_cli_opt_in_metadata_policy(args.preserve_xattrs);
             cfg.enable_delta = !args.no_delta;
             cfg.accept_timeout = recv_listen_timeout(&args)?;
-            let receive_options =
-                rq_receive_options(args.allow_special_files, args.sparse_files);
+            let receive_options = rq_receive_options(args.allow_special_files, args.sparse_files);
             let chosen_fanout = cfg.udp_fanout.max(1);
             runtime.block_on(runtime.handle().spawn(async move {
                 let cx = Cx::current().expect("receiver cx");

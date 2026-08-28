@@ -13353,13 +13353,7 @@ async fn write_packed_member_batch(
         let batch = members.to_vec();
         let staging_display = staging_path.display().to_string();
         return crate::runtime::spawn_blocking_io(move || {
-            write_packed_member_batch_oneshot(
-                staging,
-                batch,
-                span_start,
-                span_len,
-                sparse_files,
-            )
+            write_packed_member_batch_oneshot(staging, batch, span_start, span_len, sparse_files)
         })
         .await
         .map_err(|e| RqError::Source(format!("{staging_display}: {e}")));
@@ -13476,7 +13470,9 @@ async fn write_large_object_fragments(
 ) -> Result<(), RqError> {
     let mut out = crate::fs::File::create(out_path).await?;
     if sparse_files {
-        let logical_len = shards.first().map_or(0, |shard| shard.fragment.logical_size);
+        let logical_len = shards
+            .first()
+            .map_or(0, |shard| shard.fragment.logical_size);
         out.set_len(logical_len).await?;
     }
     for shard in shards {
