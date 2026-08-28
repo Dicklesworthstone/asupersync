@@ -389,8 +389,8 @@ struct SendArgs {
     /// This does not enable QUIC delta without a shared authentication key.
     #[arg(long)]
     rq_allow_unauthenticated_lab: bool,
-    /// Capture extended attributes over QUIC. The receiver must also opt in;
-    /// SSH bootstrap forwards this option. Disabled by default.
+    /// Capture extended attributes over RQ or QUIC. The receiver must also opt
+    /// in; SSH bootstrap forwards this option. Disabled by default.
     #[arg(long)]
     preserve_xattrs: bool,
     /// Authorize RQ or QUIC FIFO recreation on the receiver. SSH bootstrap
@@ -505,8 +505,8 @@ struct RecvArgs {
     /// Explicitly disable RQ symbol authentication for loopback/lab-only runs.
     #[arg(long)]
     rq_allow_unauthenticated_lab: bool,
-    /// Accept and apply extended attributes over QUIC. The sender must also opt
-    /// in. Disabled by default.
+    /// Accept and apply extended attributes over RQ or QUIC. The sender must
+    /// also opt in. Disabled by default.
     #[arg(long)]
     preserve_xattrs: bool,
     /// Allow RQ or QUIC FIFO recreation in the destination. Sockets and device
@@ -861,7 +861,7 @@ fn selected_cli_metadata_policy() -> MetadataPolicy {
     }
 }
 
-fn selected_cli_quic_metadata_policy(preserve_xattrs: bool) -> MetadataPolicy {
+fn selected_cli_opt_in_metadata_policy(preserve_xattrs: bool) -> MetadataPolicy {
     MetadataPolicy {
         preserve_extended_attributes: preserve_xattrs,
         ..selected_cli_metadata_policy()
@@ -874,8 +874,8 @@ fn validate_transport_metadata_options(
     allow_special_files: bool,
     sparse_files: bool,
 ) -> Result<(), String> {
-    if preserve_xattrs && transport != Transport::Quic {
-        return Err("--preserve-xattrs requires --transport quic".to_string());
+    if preserve_xattrs && !matches!(transport, Transport::Rq | Transport::Quic) {
+        return Err("--preserve-xattrs requires --transport rq or quic".to_string());
     }
     if allow_special_files && !matches!(transport, Transport::Rq | Transport::Quic) {
         return Err("--allow-special-files requires --transport rq or quic".to_string());
@@ -995,6 +995,7 @@ fn rq_send_config_with_auth(args: &SendArgs, auth: &RqAuthChoice) -> Result<RqCo
         args.rq_round0_loss_pct,
         args.rq_tail_drain_ms,
     )?;
+    config.metadata_policy = selected_cli_opt_in_metadata_policy(args.preserve_xattrs);
     config.enable_delta = !args.no_delta;
     Ok(config_with_rq_auth(config, auth))
 }
@@ -1326,7 +1327,7 @@ fn quic_config_send(
         enable_delta: cli_quic_delta_enabled(args.no_delta),
         bwlimit_bps: normalize_bwlimit_bps(args.bwlimit_bps)?,
         handshake_timeout: Duration::from_millis(args.quic_handshake_timeout_ms),
-        metadata_policy: selected_cli_quic_metadata_policy(args.preserve_xattrs),
+        metadata_policy: selected_cli_opt_in_metadata_policy(args.preserve_xattrs),
         allow_special_files: args.allow_special_files,
         preserve_hardlinks: true,
         ..QuicConfig::default()
@@ -1377,7 +1378,7 @@ fn quic_config_recv(
         enable_delta: cli_quic_delta_enabled(args.no_delta),
         accept_timeout: recv_listen_timeout(args)?,
         handshake_timeout: Duration::from_millis(args.quic_handshake_timeout_ms),
-        metadata_policy: selected_cli_quic_metadata_policy(args.preserve_xattrs),
+        metadata_policy: selected_cli_opt_in_metadata_policy(args.preserve_xattrs),
         allow_special_files: args.allow_special_files,
         preserve_hardlinks: true,
         ..QuicConfig::default()
@@ -1841,7 +1842,7 @@ fn run_send_dry_run(args: &SendArgs) -> Result<(), String> {
     // as the real send. Chunking, symlink/dir/special handling, and hardlink
     // dedup otherwise remain identical.
     let mut cfg = tcp_config(args.max_bytes, false);
-    cfg.metadata_policy = selected_cli_quic_metadata_policy(args.preserve_xattrs);
+    cfg.metadata_policy = selected_cli_opt_in_metadata_policy(args.preserve_xattrs);
     let rq_cfg = (args.transport == Transport::Rq)
         .then(|| rq_send_config(args))
         .transpose()?;
@@ -6912,13 +6913,15 @@ fn probe_remote_tailscale_ipv4(
 }
 
 fn append_remote_receiver_options(args: &SendArgs, argv: &mut Vec<String>) {
-    if matches!(args.transport, Transport::Rq | Transport::Quic) && args.allow_special_files {
-        argv.push("--allow-special-files".to_string());
-    }
-    if args.transport == Transport::Quic {
+    if matches!(args.transport, Transport::Rq | Transport::Quic) {
+        if args.allow_special_files {
+            argv.push("--allow-special-files".to_string());
+        }
         if args.preserve_xattrs {
             argv.push("--preserve-xattrs".to_string());
         }
+    }
+    if args.transport == Transport::Quic {
         if args.sparse_files {
             argv.push("--sparse-files".to_string());
         }
@@ -8831,6 +8834,7 @@ fn run_recv(mut args: RecvArgs, persistent: bool) -> Result<(), String> {
                 .expect("RQ auth resolved before transport dispatch");
             let mut cfg = config_with_rq_auth(cfg, &auth);
             drop(auth);
+            cfg.metadata_policy = selected_cli_opt_in_metadata_policy(args.preserve_xattrs);
             cfg.enable_delta = !args.no_delta;
             cfg.accept_timeout = recv_listen_timeout(&args)?;
             let receive_options = rq_receive_options(args.allow_special_files);
@@ -9338,7 +9342,7 @@ mod tests {
     }
 
     #[test]
-    fn rq_special_file_and_quic_metadata_cli_flags_are_opt_in_and_transport_scoped() {
+    fn rq_and_quic_metadata_cli_flags_are_opt_in_and_transport_scoped() {
         let send = Cli::try_parse_from([
             "atp",
             "send",
@@ -9401,15 +9405,16 @@ mod tests {
                 "destination",
                 "--transport",
                 "rq",
+                "--preserve-xattrs",
                 "--allow-special-files",
             ])
-            .expect("parse RQ special-file receive flag");
+            .expect("parse RQ metadata receive flags");
             let rq = match rq.command {
                 Command::Recv(args) | Command::Serve(args) => args,
                 _ => panic!("expected receive command"),
             };
             assert!(rq.allow_special_files);
-            assert!(!rq.preserve_xattrs);
+            assert!(rq.preserve_xattrs);
             assert!(!rq.sparse_files);
         }
 
@@ -9442,31 +9447,25 @@ mod tests {
             assert!(!defaults.sparse_files);
         }
 
-        let policy = selected_cli_quic_metadata_policy(true);
+        let policy = selected_cli_opt_in_metadata_policy(true);
         assert!(policy.preserve_timestamps);
         assert!(policy.preserve_extended_attributes);
-        assert!(!selected_cli_quic_metadata_policy(false).preserve_extended_attributes);
+        assert!(!selected_cli_opt_in_metadata_policy(false).preserve_extended_attributes);
         validate_transport_metadata_options(Transport::Quic, true, true, true)
             .expect("QUIC accepts explicit metadata options");
-        validate_transport_metadata_options(Transport::Rq, false, true, false)
-            .expect("RQ accepts explicit special-file policy");
+        validate_transport_metadata_options(Transport::Rq, true, true, false)
+            .expect("RQ accepts explicit xattr and special-file policies");
         assert!(rq_receive_options(true).allow_special_files());
         assert!(!rq_receive_options(false).allow_special_files());
-        for (preserve_xattrs, sparse_files, rejected_flag) in [
-            (true, false, "--preserve-xattrs"),
-            (false, true, "--sparse-files"),
-        ] {
-            let error = validate_transport_metadata_options(
-                Transport::Rq,
-                preserve_xattrs,
-                false,
-                sparse_files,
-            )
-            .expect_err("RQ must reject QUIC-only metadata fidelity flags");
-            assert!(error.contains(rejected_flag));
-            assert!(error.contains("requires --transport quic"));
-        }
+        let error = validate_transport_metadata_options(Transport::Rq, true, false, true)
+            .expect_err("RQ must still reject QUIC-only sparse allocation");
+        assert!(error.contains("--sparse-files"));
+        assert!(error.contains("requires --transport quic"));
         for transport in [Transport::Tcp, Transport::Auto] {
+            let error = validate_transport_metadata_options(transport, true, false, false)
+                .expect_err("transport must reject unsupported xattr policy");
+            assert!(error.contains("--preserve-xattrs"));
+            assert!(error.contains("requires --transport rq or quic"));
             let error = validate_transport_metadata_options(transport, false, true, false)
                 .expect_err("transport must reject unsupported special-file policy");
             assert!(error.contains("--allow-special-files"));
@@ -9492,12 +9491,23 @@ mod tests {
             "user@receiver:/destination",
             "--transport",
             "rq",
+            "--preserve-xattrs",
             "--allow-special-files",
+            "--rq-auth-key-hex",
+            VALID_KEY_HEX,
         ])
-        .expect("parse RQ SSH special-file receiver option");
+        .expect("parse RQ SSH metadata receiver options");
+        let rq_send_config = rq_send_config(&rq_ssh_send).expect("map RQ xattr sender policy");
+        assert!(rq_send_config.metadata_policy.preserve_extended_attributes);
         let mut rq_remote_argv = Vec::new();
         append_remote_receiver_options(&rq_ssh_send, &mut rq_remote_argv);
-        assert_eq!(rq_remote_argv, vec!["--allow-special-files".to_string()]);
+        assert_eq!(
+            rq_remote_argv,
+            vec![
+                "--allow-special-files".to_string(),
+                "--preserve-xattrs".to_string()
+            ]
+        );
         validate_send_sparse_delivery(true, true).expect("SSH forwards sparse receiver option");
         let error = validate_send_sparse_delivery(true, false)
             .expect_err("direct sender cannot configure receiver allocation");
@@ -9533,11 +9543,12 @@ mod tests {
             "17",
             "--rq-auth-key-hex",
             VALID_KEY_HEX,
+            "--preserve-xattrs",
         ])
         .expect("parse RQ send args");
 
         let from_args = rq_send_config(&args).expect("effective RQ send config");
-        let direct = rq_config(
+        let mut direct = rq_config(
             999_999,
             1024,
             3,
@@ -9549,6 +9560,7 @@ mod tests {
             false,
         )
         .expect("direct RQ config");
+        direct.metadata_policy = selected_cli_opt_in_metadata_policy(true);
 
         assert_eq!(from_args.symbol_size, direct.symbol_size);
         assert_eq!(from_args.max_block_size, direct.max_block_size);
@@ -9558,6 +9570,7 @@ mod tests {
         assert_eq!(from_args.round0_loss_target, direct.round0_loss_target);
         assert_eq!(from_args.round_tail_drain, direct.round_tail_drain);
         assert_eq!(from_args.metadata_policy, direct.metadata_policy);
+        assert!(from_args.metadata_policy.preserve_extended_attributes);
         assert_eq!(from_args.preserve_hardlinks, direct.preserve_hardlinks);
         assert_eq!(from_args.symbol_auth_mode(), direct.symbol_auth_mode());
     }

@@ -515,6 +515,9 @@ fn authenticated_topology_roundtrip_spans_datagram_and_control_source_paths() {
         .collect();
     let primary = tree.join("a-primary.bin");
     std::fs::write(&primary, &payload).expect("write topology primary");
+    let xattr_name = "user.asupersync.rq-topology-e2e";
+    let xattr_value = b"rq-metadata\0binary-value";
+    let xattr_supported = xattr::set(&primary, xattr_name, xattr_value).is_ok();
     std::fs::hard_link(&primary, tree.join("b-hardlink.bin")).expect("create hardlink alias");
     symlink("a-primary.bin", tree.join("c-relative-link")).expect("create relative symlink");
     symlink("missing-target", tree.join("d-dangling-link")).expect("create dangling symlink");
@@ -532,6 +535,7 @@ fn authenticated_topology_roundtrip_spans_datagram_and_control_source_paths() {
         } else {
             auth_test_config()
         };
+        receiver_config.metadata_policy.preserve_extended_attributes = true;
         receiver_config.preserve_hardlinks = true;
         let sender_config = receiver_config.clone();
         let options = RqReceiveOptions::new().with_allow_special_files(true);
@@ -581,6 +585,13 @@ fn authenticated_topology_roundtrip_spans_datagram_and_control_source_paths() {
             payload,
             "{label} hardlink bytes"
         );
+        if xattr_supported {
+            assert_eq!(
+                xattr::get(&received_primary, xattr_name).expect("read received primary xattr"),
+                Some(xattr_value.to_vec()),
+                "{label} primary xattr"
+            );
+        }
         let primary_metadata =
             std::fs::metadata(&received_primary).expect("received primary metadata");
         let hardlink_metadata =
