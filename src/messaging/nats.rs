@@ -5025,8 +5025,11 @@ mod tests {
                 .await
                 .expect("TLS NATS handshake should succeed");
             assert!(
-                client.tls_required_on_connect,
-                "TLS requirement must be preserved for reconnect downgrade defense"
+                matches!(
+                    &client.mode,
+                    NatsClientMode::Direct(connection) if connection.tls_required_on_connect
+                ),
+                "TLS requirement must be preserved on the direct connection for reconnect downgrade defense"
             );
         });
 
