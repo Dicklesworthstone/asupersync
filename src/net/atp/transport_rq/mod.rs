@@ -503,6 +503,7 @@ macro_rules! bondtrace {
 mod bonded;
 pub use bonded::{
     ATP_RQ_BONDED_PROTOCOL, BondedDonateReport, BondedReceiveReport, donate_bonded, receive_bonded,
+    receive_bonded_with_options,
 };
 
 /// Transport tuning knobs.
@@ -13766,6 +13767,7 @@ async fn remove_failed_fragment_staging_file(path: &Path) -> Result<(), RqError>
 /// object) are written into place. The merkle root is rebuilt over the LOGICAL
 /// files (members flattened), matching the sender's logical root. Verification is
 /// fully separated from commit so a sha/merkle mismatch writes NOTHING.
+#[cfg(test)]
 async fn verify_and_commit(
     manifest: &TransferManifest,
     decoders: &mut [EntryDecoder],

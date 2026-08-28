@@ -950,10 +950,45 @@ pub async fn receive_bonded(
     control_listener: &TcpListener,
     udp_bind_ip: &str,
     expected_donors: u32,
-    mut config: RqConfig,
+    config: RqConfig,
     peer_id: &str,
     progress: Option<mpsc::Sender<BondedTransferProgress>>,
 ) -> Result<BondedReceiveReport, RqError> {
+    receive_bonded_with_options(
+        cx,
+        descriptor,
+        dest_dir,
+        control_listener,
+        udp_bind_ip,
+        expected_donors,
+        config,
+        peer_id,
+        progress,
+        RqReceiveOptions::default(),
+    )
+    .await
+}
+
+/// [`receive_bonded`] with explicit receiver-only filesystem options.
+///
+/// Options are validated before the UDP symbol plane is bound or destination
+/// staging is created. The validated bonded descriptor still determines
+/// the committed topology; these options only authorize supported receiver
+/// reconstruction policies such as FIFO materialization.
+#[allow(clippy::too_many_arguments)]
+pub async fn receive_bonded_with_options(
+    cx: &Cx,
+    descriptor: &BondTransferDescriptor,
+    dest_dir: &Path,
+    control_listener: &TcpListener,
+    udp_bind_ip: &str,
+    expected_donors: u32,
+    mut config: RqConfig,
+    peer_id: &str,
+    progress: Option<mpsc::Sender<BondedTransferProgress>>,
+    options: RqReceiveOptions,
+) -> Result<BondedReceiveReport, RqError> {
+    options.validate()?;
     cx.checkpoint().map_err(|_| RqError::Cancelled)?;
     descriptor
         .validate()
@@ -1171,7 +1206,7 @@ pub async fn receive_bonded(
             // aborted after the last decode round still unwinds here and
             // commits nothing (the module's cancel-correctness contract).
             cx.checkpoint().map_err(|_| RqError::Cancelled)?;
-            let receipt = verify_and_commit(
+            let receipt = verify_and_commit_with_options(
                 &manifest,
                 &mut decoders,
                 dest_dir,
@@ -1179,6 +1214,7 @@ pub async fn receive_bonded(
                 feedback_rounds,
                 &BTreeMap::new(),
                 &CompletionDigestIndex::default(),
+                options,
             )
             .await?;
             let proof = json_frame(FrameType::Proof, &receipt)?;

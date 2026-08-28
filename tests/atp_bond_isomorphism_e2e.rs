@@ -42,8 +42,8 @@ use asupersync::cx::Cx;
 use asupersync::net::TcpListener;
 use asupersync::net::atp::bonding::{BondTransferDescriptor, derive_bonded_descriptor};
 use asupersync::net::atp::transport_rq::{
-    BondedDonateReport, BondedReceiveReport, ReceiveReport, RqConfig, RqError, SendReport,
-    donate_bonded, receive_bonded, receive_once, send_path,
+    BondedDonateReport, BondedReceiveReport, ReceiveReport, RqConfig, RqError, RqReceiveOptions,
+    SendReport, donate_bonded, receive_bonded_with_options, receive_once, send_path,
 };
 use asupersync::runtime::RuntimeBuilder;
 
@@ -173,6 +173,25 @@ fn spawn_bonded_receiver(
     SocketAddr,
     thread::JoinHandle<Result<BondedReceiveReport, RqError>>,
 ) {
+    spawn_bonded_receiver_with_options(
+        descriptor,
+        dest_dir,
+        expected_donors,
+        config,
+        RqReceiveOptions::default(),
+    )
+}
+
+fn spawn_bonded_receiver_with_options(
+    descriptor: BondTransferDescriptor,
+    dest_dir: PathBuf,
+    expected_donors: u32,
+    config: RqConfig,
+    options: RqReceiveOptions,
+) -> (
+    SocketAddr,
+    thread::JoinHandle<Result<BondedReceiveReport, RqError>>,
+) {
     let (addr_tx, addr_rx) = mpsc::channel::<SocketAddr>();
     let handle = thread::spawn(move || {
         let runtime = RuntimeBuilder::multi_thread()
@@ -185,7 +204,7 @@ fn spawn_bonded_receiver(
             let listener = TcpListener::bind("127.0.0.1:0").await?;
             let addr = listener.local_addr()?;
             addr_tx.send(addr).expect("send bonded addr");
-            receive_bonded(
+            receive_bonded_with_options(
                 &cx,
                 &descriptor,
                 &dest_dir,
@@ -195,6 +214,7 @@ fn spawn_bonded_receiver(
                 config,
                 "bonded-receiver",
                 None,
+                options,
             )
             .await
         }))
@@ -291,6 +311,146 @@ fn bond_donor_count_one_commits_identically_to_single_source() {
     assert_eq!(
         from_bonded, from_single,
         "bonded donor_count=1 commit must be byte-identical to the single-source commit"
+    );
+}
+
+/// Public bonded N=1 path: validated zero-content topology must survive
+/// donor holding proof and the shared terminal commit without being mistaken
+/// for RaptorQ source geometry.
+///
+/// NO-CLAIM BOUNDARY: this Unix fixture covers regular bytes, one hardlink,
+/// relative and dangling symlinks, and FIFO recreation. It does not cover
+/// sockets/devices, Windows, exact metadata, sparse extents, multiple donors,
+/// cross-host behavior, performance, or broad workspace/release health.
+#[cfg(unix)]
+#[test]
+fn bonded_receiver_options_commit_portable_topology() {
+    use asupersync::net::atp::transport_common::FileKind;
+    use nix::sys::stat::Mode;
+    use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _, symlink};
+
+    let root = unique_tmp("portable_topology");
+    let src_dir = root.join("src");
+    let tree = src_dir.join("project");
+    let dst_dir = root.join("dst");
+    std::fs::create_dir_all(&tree).expect("create topology source tree");
+    std::fs::create_dir_all(&dst_dir).expect("create topology destination root");
+
+    let bytes = payload(96_007);
+    let primary = tree.join("a-primary.bin");
+    std::fs::write(&primary, &bytes).expect("write topology primary");
+    std::fs::hard_link(&primary, tree.join("b-hardlink.bin")).expect("create hardlink alias");
+    symlink("a-primary.bin", tree.join("c-relative-link")).expect("create relative symlink");
+    symlink("missing-target", tree.join("d-dangling-link")).expect("create dangling symlink");
+    nix::unistd::mkfifo(&tree.join("e-pipe"), Mode::from_bits_truncate(0o640))
+        .expect("create source FIFO");
+
+    let mut config = shared_config();
+    config.metadata_policy.preserve_symlinks = true;
+    let descriptor = derive_descriptor(&tree, &config);
+    assert!(descriptor.is_directory);
+    assert_eq!(descriptor.total_bytes, bytes.len() as u64);
+
+    let primary_entry = descriptor
+        .entries
+        .iter()
+        .find(|entry| entry.rel_path == "a-primary.bin")
+        .expect("primary descriptor entry");
+    let primary_blocks = descriptor
+        .entry_source_block_count(primary_entry.index)
+        .expect("primary source-block count");
+    assert!(primary_blocks > 0, "primary must own source geometry");
+
+    for rel_path in [
+        "b-hardlink.bin",
+        "c-relative-link",
+        "d-dangling-link",
+        "e-pipe",
+    ] {
+        let entry = descriptor
+            .entries
+            .iter()
+            .find(|entry| entry.rel_path == rel_path)
+            .unwrap_or_else(|| panic!("missing topology descriptor entry: {rel_path}"));
+        assert_eq!(
+            entry.size, 0,
+            "topology entry must carry no content: {rel_path}"
+        );
+        assert_eq!(
+            descriptor.entry_source_block_count(entry.index),
+            Some(0),
+            "topology entry must carry no RaptorQ geometry: {rel_path}"
+        );
+    }
+    let fifo_metadata = descriptor
+        .metadata
+        .as_ref()
+        .expect("bonded topology metadata")
+        .entries
+        .iter()
+        .find(|entry| entry.rel_path == "e-pipe")
+        .expect("FIFO metadata row");
+    assert_eq!(fifo_metadata.metadata.file_kind, FileKind::Fifo);
+
+    let (addr, recv_handle) = spawn_bonded_receiver_with_options(
+        descriptor.clone(),
+        dst_dir.clone(),
+        1,
+        config.clone(),
+        RqReceiveOptions::new().with_allow_special_files(true),
+    );
+    let donor = spawn_bonded_donor(descriptor.clone(), addr, tree, config)
+        .join()
+        .expect("bonded topology donor thread")
+        .expect("bonded topology donation succeeds");
+    let received = recv_handle
+        .join()
+        .expect("bonded topology receiver thread")
+        .expect("bonded topology receive succeeds");
+
+    assert!(
+        donor.receipt.committed,
+        "donor must observe committed proof"
+    );
+    assert!(donor.receipt.sha_ok && donor.receipt.merkle_ok);
+    assert_eq!(donor.spray.entries, descriptor.entries.len());
+    assert_eq!(donor.spray.blocks, usize::from(primary_blocks));
+    assert!(donor.spray.source_symbols_sent > 0);
+    assert!(received.committed);
+    assert_eq!(received.enrolled_donors, 1);
+    assert_eq!(received.bytes_received, bytes.len() as u64);
+    assert!(received.symbols_accepted > 0);
+
+    let base = dst_dir.join("project");
+    let committed_primary = base.join("a-primary.bin");
+    let committed_hardlink = base.join("b-hardlink.bin");
+    assert_eq!(
+        std::fs::read(&committed_primary).expect("read primary"),
+        bytes
+    );
+    assert_eq!(
+        std::fs::metadata(&committed_primary)
+            .expect("primary metadata")
+            .ino(),
+        std::fs::metadata(&committed_hardlink)
+            .expect("hardlink metadata")
+            .ino(),
+        "hardlink must share the committed inode"
+    );
+    assert_eq!(
+        std::fs::read_link(base.join("c-relative-link")).expect("relative symlink target"),
+        PathBuf::from("a-primary.bin")
+    );
+    assert_eq!(
+        std::fs::read_link(base.join("d-dangling-link")).expect("dangling symlink target"),
+        PathBuf::from("missing-target")
+    );
+    assert!(
+        std::fs::symlink_metadata(base.join("e-pipe"))
+            .expect("committed FIFO metadata")
+            .file_type()
+            .is_fifo(),
+        "bonded receive options must materialize the FIFO"
     );
 }
 
