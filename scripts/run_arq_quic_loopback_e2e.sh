@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
-# Run a retained, self-validating ARQ/QUIC loopback E2E artifact pack.
+# Run a retained, self-validating ATP metadata-fidelity loopback artifact pack.
 #
-# Normal mode builds or uses the standalone `atp` binary, runs a real
-# `atp recv --transport quic --once` plus `atp send --transport quic` over
-# loopback UDP, and writes:
+# Normal mode builds or uses the standalone `atp` binary, runs a real receiver
+# plus sender over the selected RQ or QUIC transport, and writes:
 #   - events.ndjson: ordered script-stage events
 #   - summary.json: machine-readable transfer summary
 #   - sender.json / receiver.json: raw atp JSON reports
@@ -20,6 +19,7 @@ PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 TIMESTAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 OUTPUT_DIR="${ARQ_QUIC_OUTPUT_DIR:-$PROJECT_ROOT/artifacts/arq_quic_e2e/$TIMESTAMP}"
 ATP_BIN="${ATP_BIN:-}"
+ATP_TRANSPORT="${ATP_TRANSPORT:-quic}"
 AUTH_KEY_HEX="${ARQ_QUIC_AUTH_KEY_HEX:-000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f}"
 PAYLOAD_BYTES="${ARQ_QUIC_PAYLOAD_BYTES:-8192}"
 SERVER_NAME="${ARQ_QUIC_SERVER_NAME:-localhost}"
@@ -33,6 +33,7 @@ Usage:
 
 Environment:
   ATP_BIN                  Existing atp binary. If unset, cargo builds one.
+  ATP_TRANSPORT            Transport to exercise: quic (default) or rq.
   CARGO_TARGET_DIR         Target dir for the optional cargo build.
   ARQ_QUIC_OUTPUT_DIR      Artifact output dir (default artifacts/arq_quic_e2e/<UTC timestamp>).
   ARQ_QUIC_PAYLOAD_BYTES   Deterministic payload size (default 8192).
@@ -61,6 +62,14 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+case "$ATP_TRANSPORT" in
+    quic|rq) ;;
+    *)
+        echo "unsupported ATP_TRANSPORT: $ATP_TRANSPORT (expected quic or rq)" >&2
+        exit 2
+        ;;
+esac
+
 require_cmd() {
     command -v "$1" >/dev/null 2>&1 || {
         echo "missing required command: $1" >&2
@@ -70,7 +79,9 @@ require_cmd() {
 
 require_cmd jq
 require_cmd python3
-require_cmd openssl
+if [[ -z "$FROM_OUTPUT" && "$ATP_TRANSPORT" == "quic" ]]; then
+    require_cmd openssl
+fi
 require_cmd sha256sum
 require_cmd awk
 require_cmd cmp
@@ -301,17 +312,17 @@ validate_output() {
     jq -e '
       .schema_version == "arq-quic-loopback-e2e-summary-v1" and
       .status == "passed" and
-      .transport == "quic" and
+      (.transport == "quic" or .transport == "rq") and
       .sha256_match == true and
       (.bytes_sent | type == "number") and
       (.bytes_received | type == "number") and
       .bytes_sent == .bytes_received and
       .bytes_sent > 0 and
       .sender.event == "atp_send" and
-      .sender.transport == "quic" and
+      .sender.transport == .transport and
       .sender.committed == true and
       .receiver.event == "atp_receive" and
-      .receiver.transport == "quic" and
+      .receiver.transport == .transport and
       .receiver.committed == true and
       .metadata_fidelity.status == "passed" and
       .metadata_fidelity.entries_verified == 9 and
@@ -345,7 +356,11 @@ validate_output() {
       (.metrics.goodput_bytes_per_second | type == "number" and . >= 0) and
       (.metrics.goodput_bits_per_second | type == "number" and . >= 0) and
       (.metrics.feedback_rounds_total | type == "number" and . >= 0) and
-      (.metrics.decode_time_per_block_micros | type == "number" and . >= 0) and
+      (if .transport == "quic" then
+        (.metrics.decode_time_per_block_micros | type == "number" and . >= 0)
+      else
+        .metrics.decode_time_per_block_micros == null
+      end) and
       (.transport_counters as $c |
         $c.symbols_sent_available == true and
         ($c.symbols_sent | type == "number" and . >= 0) and
@@ -367,10 +382,17 @@ validate_output() {
       .transport_counters.feedback_rounds_available == true and
       (.transport_counters.feedback_rounds_sender | type == "number" and . >= 0) and
       (.transport_counters.feedback_rounds_receiver | type == "number" and . >= 0) and
-      .transport_counters.decode_count_available == true and
-      (.transport_counters.decode_count | type == "number" and . >= 0) and
-      .transport_counters.decode_micros_available == true and
-      (.transport_counters.decode_micros | type == "number" and . >= 0) and
+      (if .transport == "quic" then
+        .transport_counters.decode_count_available == true and
+        (.transport_counters.decode_count | type == "number" and . >= 0) and
+        .transport_counters.decode_micros_available == true and
+        (.transport_counters.decode_micros | type == "number" and . >= 0)
+      else
+        .transport_counters.decode_count_available == false and
+        .transport_counters.decode_count == null and
+        .transport_counters.decode_micros_available == false and
+        .transport_counters.decode_micros == null
+      end) and
       (.transport_counters.no_claim | type == "string") and
       (.artifacts.events_ndjson | type == "string")
     ' "$summary" >/dev/null
@@ -408,15 +430,17 @@ if [[ -z "$ATP_BIN" ]]; then
     # documents for the ATP bench binary.
     (
         cd "$PROJECT_ROOT"
-        "${RCH_BIN:-rch}" exec -- env CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
-            cargo build -p asupersync --bin atp --features atp-cli,tls
+        RCH_REQUIRE_REMOTE=1 "${RCH_BIN:-rch}" exec -- env CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
+            cargo build --locked -j 1 -p asupersync --bin atp --features atp-cli,tls
     )
     ATP_BIN="$CARGO_TARGET_DIR/debug/atp"
 fi
 [[ -x "$ATP_BIN" ]] || { emit_event "build_atp" "failed" "atp binary missing or not executable"; echo "atp binary missing: $ATP_BIN" >&2; exit 1; }
 emit_event "build_atp" "passed" "using atp binary $ATP_BIN"
 
-"$SCRIPT_DIR/atp_bench_gen_certs.sh" "$OUTPUT_DIR/tls" 127.0.0.1 > "$OUTPUT_DIR/certs.log" 2>&1
+if [[ "$ATP_TRANSPORT" == "quic" ]]; then
+    "$SCRIPT_DIR/atp_bench_gen_certs.sh" "$OUTPUT_DIR/tls" 127.0.0.1 > "$OUTPUT_DIR/certs.log" 2>&1
+fi
 
 SOURCE_TREE="$OUTPUT_DIR/source/metadata-tree"
 PAYLOAD="$SOURCE_TREE/payload.bin"
@@ -472,31 +496,50 @@ SENDER_JSON="$OUTPUT_DIR/sender.json"
 SENDER_STDERR="$OUTPUT_DIR/sender.stderr"
 SENDER_TIME="$OUTPUT_DIR/sender.time.txt"
 
-/usr/bin/time -v -o "$RECEIVER_TIME" "$ATP_BIN" recv "$OUTPUT_DIR/dest" \
-    --listen 127.0.0.1:0 \
-    --transport quic \
-    --once \
-    --server-cert "$OUTPUT_DIR/tls/leaf.pem" \
-    --server-key "$OUTPUT_DIR/tls/leaf.key" \
-    --preserve-xattrs \
-    --allow-special-files \
-    --sparse-files \
-    --rq-auth-key-hex "$AUTH_KEY_HEX" \
+RECEIVER_ARGS=(
+    recv "$OUTPUT_DIR/dest"
+    --listen 127.0.0.1:0
+    --transport "$ATP_TRANSPORT"
+    --once
+    --preserve-xattrs
+    --allow-special-files
+    --sparse-files
+    --rq-auth-key-hex "$AUTH_KEY_HEX"
+)
+if [[ "$ATP_TRANSPORT" == "quic" ]]; then
+    RECEIVER_ARGS+=(
+        --server-cert "$OUTPUT_DIR/tls/leaf.pem"
+        --server-key "$OUTPUT_DIR/tls/leaf.key"
+    )
+fi
+/usr/bin/time -v -o "$RECEIVER_TIME" "$ATP_BIN" "${RECEIVER_ARGS[@]}" \
     > "$RECEIVER_JSON" 2> "$RECEIVER_STDERR" &
 RECEIVER_PID=$!
 
 LISTEN_ADDR=""
+if [[ "$ATP_TRANSPORT" == "quic" ]]; then
+    READY_PATTERN="atp: quic listening on "
+else
+    READY_PATTERN="atp: rq control listening on "
+fi
 for _ in $(seq 1 100); do
     if ! kill -0 "$RECEIVER_PID" 2>/dev/null; then
         emit_event "receiver_ready" "failed" "receiver exited before readiness"
         cat "$RECEIVER_STDERR" >&2 || true
         exit 1
     fi
-    if grep -q "atp: quic listening on " "$RECEIVER_STDERR" 2>/dev/null; then
-        LISTEN_ADDR="$(
-            sed -n 's/^atp: quic listening on \([^,]*\), dest .*/\1/p' "$RECEIVER_STDERR" \
-                | tail -n1
-        )"
+    if grep -Fq "$READY_PATTERN" "$RECEIVER_STDERR" 2>/dev/null; then
+        if [[ "$ATP_TRANSPORT" == "quic" ]]; then
+            LISTEN_ADDR="$(
+                sed -n 's/^atp: quic listening on \([^,]*\), dest .*/\1/p' "$RECEIVER_STDERR" \
+                    | tail -n1
+            )"
+        else
+            LISTEN_ADDR="$(
+                sed -n 's/^atp: rq control listening on \([^ ]*\) (udp on .*/\1/p' "$RECEIVER_STDERR" \
+                    | tail -n1
+            )"
+        fi
         break
     fi
     sleep 0.1
@@ -504,14 +547,23 @@ done
 [[ -n "$LISTEN_ADDR" ]] || { emit_event "receiver_ready" "failed" "receiver did not print readiness"; cat "$RECEIVER_STDERR" >&2 || true; exit 1; }
 emit_event "receiver_ready" "passed" "receiver listening on $LISTEN_ADDR"
 
-emit_event "sender_transfer" "started" "running atp send --transport quic"
-if /usr/bin/time -v -o "$SENDER_TIME" "$ATP_BIN" send "$SOURCE_TREE" "$LISTEN_ADDR" \
-    --transport quic \
-    --ca "$OUTPUT_DIR/tls/ca.pem" \
-    --server-name "$SERVER_NAME" \
-    --preserve-xattrs \
-    --allow-special-files \
-    --rq-auth-key-hex "$AUTH_KEY_HEX" \
+SENDER_ARGS=(
+    send "$SOURCE_TREE" "$LISTEN_ADDR"
+    --transport "$ATP_TRANSPORT"
+    --preserve-xattrs
+    --allow-special-files
+    --rq-auth-key-hex "$AUTH_KEY_HEX"
+)
+if [[ "$ATP_TRANSPORT" == "quic" ]]; then
+    SENDER_ARGS+=(
+        --ca "$OUTPUT_DIR/tls/ca.pem"
+        --server-name "$SERVER_NAME"
+    )
+else
+    SENDER_ARGS+=(--streams 4)
+fi
+emit_event "sender_transfer" "started" "running atp send --transport $ATP_TRANSPORT"
+if /usr/bin/time -v -o "$SENDER_TIME" "$ATP_BIN" "${SENDER_ARGS[@]}" \
     > "$SENDER_JSON" 2> "$SENDER_STDERR"; then
     emit_event "sender_transfer" "passed" "sender completed"
 else
@@ -546,10 +598,12 @@ if ! METADATA_ERROR="$(verify_metadata_fidelity "$SOURCE_TREE" "$DEST_TREE" "$SO
     printf '%s\n' "$METADATA_ERROR" >&2
     exit 1
 fi
+METADATA_NO_CLAIM="This real-binary loopback result proves only the retained $ATP_TRANSPORT metadata-fidelity fixture on this Unix filesystem. A single-transport receipt does not prove cross-transport parity, cross-host behavior, exact hole extents, privileged uid/gid restoration, broad workspace health, performance, or release readiness."
 METADATA_FIDELITY_JSON="$(jq -cn \
     --arg source_tree "$SOURCE_TREE" \
     --arg received_tree "$DEST_TREE" \
     --argjson xattr_supported "$SOURCE_XATTR_SUPPORTED" \
+    --arg no_claim "$METADATA_NO_CLAIM" \
     '{
       status:"passed",
       source_tree:$source_tree,
@@ -572,7 +626,7 @@ METADATA_FIDELITY_JSON="$(jq -cn \
       regular_sparse_content:true,
       regular_sparse_allocation:true,
       staging_clean:true,
-      no_claim:"This real-binary loopback result proves only the retained QUIC metadata-fidelity fixture on this Unix filesystem. It does not prove RQ parity, cross-host behavior, exact hole extents, privileged uid/gid restoration, broad workspace health, performance, or release readiness."
+      no_claim:$no_claim
     }')"
 emit_event "metadata_fidelity" "passed" "heterogeneous metadata tree committed faithfully" "$METADATA_FIDELITY_JSON"
 
@@ -603,6 +657,7 @@ jq -n \
     --arg receiver_stderr "$RECEIVER_STDERR" \
     --arg sender_time "$SENDER_TIME" \
     --arg receiver_time "$RECEIVER_TIME" \
+    --arg transport "$ATP_TRANSPORT" \
     --arg sender_elapsed_raw "$SENDER_ELAPSED_RAW" \
     --arg receiver_elapsed_raw "$RECEIVER_ELAPSED_RAW" \
     --argjson sender_elapsed_seconds "$SENDER_ELAPSED_SECONDS" \
@@ -622,7 +677,7 @@ jq -n \
     {
       schema_version: "arq-quic-loopback-e2e-summary-v1",
       status: "passed",
-      transport: "quic",
+      transport: $transport,
       output_dir: $output_dir,
       payload_path: $payload,
       received_path: $received,
@@ -666,9 +721,12 @@ jq -n \
           (if (($feedback_rounds_receiver | type) == "number") then $feedback_rounds_receiver else 0 end)
         ),
         decode_time_per_block_micros: (
-          if (($decode_count | type) == "number" and $decode_count > 0 and (($decode_micros | type) == "number"))
-          then ($decode_micros / $decode_count)
-          else 0
+          if (($decode_count | type) == "number")
+          then (if ($decode_count > 0 and (($decode_micros | type) == "number"))
+            then ($decode_micros / $decode_count)
+            else 0
+            end)
+          else null
           end
         )
       },
@@ -685,7 +743,7 @@ jq -n \
         feedback_rounds_available: ((($feedback_rounds_sender | type) == "number") and (($feedback_rounds_receiver | type) == "number")),
         decode_count_available: (($decode_count | type) == "number"),
         decode_micros_available: (($decode_micros | type) == "number"),
-        no_claim: "Loopback summary derives goodput from retained time/CLI artifacts and exposes sender/receiver peak RSS plus receiver decode block count/time. Symbol loss is numeric only when RaptorQ symbols were attempted; zero-symbol source-stream transfers report it as null and not applicable. Any numeric loss rate remains a loopback artifact metric, not a fleet/network-loss proof. H2 still does not claim metrics-provider emission, fanout/per-path stats, avg RSS, optional-metrics off-overhead, or fleet proof."
+        no_claim: "Loopback summary derives goodput from retained time/CLI artifacts and exposes sender/receiver peak RSS. Receiver decode block count/time are retained only when the selected transport CLI emits them; unavailable counters remain null with explicit false availability. Symbol loss is numeric only when RaptorQ symbols were attempted; zero-symbol source-stream transfers report it as null and not applicable. Any numeric loss rate remains a loopback artifact metric, not a fleet/network-loss proof. H2 still does not claim metrics-provider emission, fanout/per-path stats, avg RSS, optional-metrics off-overhead, or fleet proof."
       },
       artifacts: {
         events_ndjson: $events,

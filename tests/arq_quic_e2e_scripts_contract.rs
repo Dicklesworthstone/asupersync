@@ -47,6 +47,16 @@ fn write_file(path: &Path, contents: &str) {
 }
 
 fn write_fixture(dir: &Path, sha_match: bool) {
+    write_fixture_for_transport(dir, sha_match, "quic");
+}
+
+fn write_fixture_for_transport(dir: &Path, sha_match: bool, transport: &str) {
+    let (decode_count, decode_micros, decode_available, decode_time_per_block_micros) =
+        match transport {
+            "quic" => ("1", "25", "true", "25.0"),
+            "rq" => ("null", "null", "false", "null"),
+            other => panic!("unsupported fixture transport: {other}"),
+        };
     let event_lines = [
         r#"{"schema_version":"arq-quic-e2e-event-v1","ts":"2026-06-17T00:00:00Z","stage":"setup","status":"started","message":"fixture"}"#,
         r#"{"schema_version":"arq-quic-e2e-event-v1","ts":"2026-06-17T00:00:01Z","stage":"receiver_ready","status":"passed","message":"fixture"}"#,
@@ -65,11 +75,11 @@ fn write_fixture(dir: &Path, sha_match: bool) {
         r#"{{
   "schema_version": "arq-quic-loopback-e2e-summary-v1",
   "status": "passed",
-  "transport": "quic",
+  "transport": "{transport}",
   "bytes_sent": 8192,
   "bytes_received": 8192,
-  "sender": {{"event":"atp_send","transport":"quic","committed":true,"bytes_sent":8192}},
-  "receiver": {{"event":"atp_receive","transport":"quic","committed":true,"bytes_received":8192}},
+  "sender": {{"event":"atp_send","transport":"{transport}","committed":true,"bytes_sent":8192}},
+  "receiver": {{"event":"atp_receive","transport":"{transport}","committed":true,"bytes_received":8192}},
   "sha256_match": {sha_match},
   "metadata_fidelity": {{
     "status": "passed",
@@ -108,7 +118,7 @@ fn write_fixture(dir: &Path, sha_match: bool) {
     "symbol_loss_rate_available": false,
     "symbol_loss_rate_mode": "not-applicable-no-symbols",
     "feedback_rounds_total": 0,
-    "decode_time_per_block_micros": 25.0
+    "decode_time_per_block_micros": {decode_time_per_block_micros}
   }},
   "transport_counters": {{
     "source":"atp-cli-json",
@@ -116,13 +126,13 @@ fn write_fixture(dir: &Path, sha_match: bool) {
     "symbols_accepted": 0,
     "feedback_rounds_sender": 0,
     "feedback_rounds_receiver": 0,
-    "decode_count": 1,
-    "decode_micros": 25,
+    "decode_count": {decode_count},
+    "decode_micros": {decode_micros},
     "symbols_sent_available": true,
     "symbols_accepted_available": true,
     "feedback_rounds_available": true,
-    "decode_count_available": true,
-    "decode_micros_available": true,
+    "decode_count_available": {decode_available},
+    "decode_micros_available": {decode_available},
     "no_claim": "fixture decode metrics no-claim"
   }},
   "artifacts": {{"events_ndjson":"events.ndjson"}}
@@ -166,6 +176,53 @@ fn loopback_from_output_accepts_valid_retained_artifacts() {
     assert!(
         output.status.success(),
         "validator rejected valid fixture; stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn loopback_from_output_accepts_valid_rq_retained_artifacts() {
+    let root = unique_tmp("valid_rq");
+    write_fixture_for_transport(&root, true, "rq");
+
+    let output = Command::new(repo_root().join("scripts/run_arq_quic_loopback_e2e.sh"))
+        .args(["--from-output", root.to_str().unwrap()])
+        .output()
+        .expect("run RQ loopback from-output validator");
+
+    assert!(
+        output.status.success(),
+        "validator rejected valid RQ fixture; stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn loopback_from_output_rejects_transport_mismatch() {
+    let root = unique_tmp("transport_mismatch");
+    write_fixture_for_transport(&root, true, "rq");
+
+    let summary_path = root.join("summary.json");
+    let summary = std::fs::read_to_string(&summary_path).expect("read summary fixture");
+    write_file(
+        &summary_path,
+        &summary.replacen(
+            r#""sender": {"event":"atp_send","transport":"rq""#,
+            r#""sender": {"event":"atp_send","transport":"quic""#,
+            1,
+        ),
+    );
+
+    let output = Command::new(repo_root().join("scripts/run_arq_quic_loopback_e2e.sh"))
+        .args(["--from-output", root.to_str().unwrap()])
+        .output()
+        .expect("run mismatched-transport validator");
+
+    assert!(
+        !output.status.success(),
+        "validator accepted transport mismatch; stdout: {}; stderr: {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
@@ -2049,16 +2106,15 @@ fn atp_bench_resource_guard_is_first_class_report_artifact() {
     }
 }
 
-#[test]
-#[ignore = "runs the real atp QUIC loopback; invoke explicitly through RCH"]
-fn loopback_script_runs_real_atp_binary() {
+fn run_real_atp_metadata_loopback(transport: &str, artifact_label: &str) {
     let atp_bin = std::env::var_os("CARGO_BIN_EXE_atp")
         .map(PathBuf::from)
         .expect("CARGO_BIN_EXE_atp must be available; run with --features atp-cli,tls");
-    let root = unique_artifact_dir("h5_loopback");
+    let root = unique_artifact_dir(artifact_label);
 
     let output = Command::new(repo_root().join("scripts/run_arq_quic_loopback_e2e.sh"))
         .env("ATP_BIN", &atp_bin)
+        .env("ATP_TRANSPORT", transport)
         .env("ARQ_QUIC_OUTPUT_DIR", &root)
         .env("ARQ_QUIC_PAYLOAD_BYTES", "8192")
         .output()
@@ -2074,6 +2130,7 @@ fn loopback_script_runs_real_atp_binary() {
     );
 
     let validate = Command::new(repo_root().join("scripts/run_arq_quic_loopback_e2e.sh"))
+        .env("ATP_TRANSPORT", transport)
         .args(["--from-output", root.to_str().unwrap()])
         .output()
         .expect("validate retained real loopback artifacts");
@@ -2090,7 +2147,7 @@ fn loopback_script_runs_real_atp_binary() {
     let events = std::fs::read_to_string(root.join("events.ndjson")).expect("read events");
 
     assert!(summary.contains(r#""schema_version": "arq-quic-loopback-e2e-summary-v1""#));
-    assert!(summary.contains(r#""transport": "quic""#));
+    assert!(summary.contains(&format!(r#""transport": "{transport}""#)));
     assert!(summary.contains(r#""sha256_match": true"#));
     assert!(summary.contains(r#""metadata_fidelity": {"#));
     assert!(summary.contains(r#""entries_verified": 9"#));
@@ -2106,10 +2163,30 @@ fn loopback_script_runs_real_atp_binary() {
     assert!(summary.contains(r#""symbols_sent_available": true"#));
     assert!(summary.contains(r#""symbols_accepted_available": true"#));
     assert!(summary.contains(r#""feedback_rounds_available": true"#));
-    assert!(summary.contains(r#""decode_count_available": true"#));
-    assert!(summary.contains(r#""decode_micros_available": true"#));
+    if transport == "quic" {
+        assert!(summary.contains(r#""decode_count_available": true"#));
+        assert!(summary.contains(r#""decode_micros_available": true"#));
+    } else {
+        assert!(summary.contains(r#""decode_count": null"#));
+        assert!(summary.contains(r#""decode_micros": null"#));
+        assert!(summary.contains(r#""decode_count_available": false"#));
+        assert!(summary.contains(r#""decode_micros_available": false"#));
+        assert!(summary.contains(r#""decode_time_per_block_micros": null"#));
+    }
     assert!(events.contains(r#""stage":"receiver_ready","status":"passed""#));
     assert!(events.contains(r#""stage":"sender_transfer","status":"passed""#));
     assert!(events.contains(r#""stage":"sha256_verify","status":"passed""#));
     assert!(events.contains(r#""stage":"metadata_fidelity","status":"passed""#));
+}
+
+#[test]
+#[ignore = "runs the real atp QUIC loopback; invoke explicitly through RCH"]
+fn loopback_script_runs_real_atp_binary() {
+    run_real_atp_metadata_loopback("quic", "h5_loopback");
+}
+
+#[test]
+#[ignore = "runs the real atp RQ loopback; invoke explicitly through RCH"]
+fn loopback_script_runs_real_atp_rq_binary() {
+    run_real_atp_metadata_loopback("rq", "g8_rq_metadata_loopback");
 }
