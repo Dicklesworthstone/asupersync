@@ -85,7 +85,7 @@ emit_event() {
     local stage="$1"
     local status="$2"
     local message="$3"
-    local details="${4:-{}}"
+    local details="${4:-}"
     mkdir -p "$OUTPUT_DIR"
     jq -cn \
         --arg schema_version "arq-quic-e2e-event-v1" \

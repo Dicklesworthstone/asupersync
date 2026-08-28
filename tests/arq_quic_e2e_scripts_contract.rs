@@ -218,6 +218,31 @@ fn loopback_from_output_rejects_missing_metadata_fidelity_proof() {
 }
 
 #[test]
+fn loopback_from_output_rejects_metadata_event_without_details() {
+    let root = unique_tmp("metadata_event_without_details");
+    write_fixture(&root, true);
+
+    let events_path = root.join("events.ndjson");
+    let events = std::fs::read_to_string(&events_path).expect("read events fixture");
+    write_file(
+        &events_path,
+        &events.replace(r#","details":{"status":"passed"}}"#, r#"}"#),
+    );
+
+    let output = Command::new(repo_root().join("scripts/run_arq_quic_loopback_e2e.sh"))
+        .args(["--from-output", root.to_str().unwrap()])
+        .output()
+        .expect("run loopback from-output validator");
+
+    assert!(
+        !output.status.success(),
+        "validator accepted metadata event without details; stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn loopback_from_output_rejects_missing_counter_values_even_when_flags_claim_available() {
     let root = unique_tmp("missing_counter");
     write_fixture(&root, true);
