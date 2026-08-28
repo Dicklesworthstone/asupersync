@@ -119,9 +119,8 @@ use crate::net::atp::transport_common::metadata::{
 use crate::net::atp::transport_common::streaming::collect_entries_with_policy;
 use crate::net::atp::transport_common::{
     DeltaChunkWire, DeltaManifestWire, EntryDigest, EntryMetadata, FileKind, MetadataApplyReport,
-    StreamingError, apply_entry_metadata, capture_directory_metadata_manifest,
-    flat_merkle_root_from_digests, flat_merkle_root_from_slices, hash_file_streaming, hex_encode,
-    metadata_commitment,
+    StreamingError, capture_directory_metadata_manifest, flat_merkle_root_from_digests,
+    flat_merkle_root_from_slices, hash_file_streaming, hex_encode, metadata_commitment,
 };
 #[cfg(any(feature = "tls", test))]
 use crate::net::atp::transport_common::{DeltaObjectRequest, DeltaWireMode};
@@ -9459,6 +9458,89 @@ fn trace_quic_metadata_skips(cx: &Cx, out_path: &Path, report: &MetadataApplyRep
     }
 }
 
+#[cfg(unix)]
+fn verify_quic_required_unix_regular_metadata(
+    out_path: &Path,
+    expected: &EntryMetadata,
+    observed: &EntryMetadata,
+) -> Result<(), String> {
+    if !matches!(expected.file_kind, FileKind::Regular) {
+        return Ok(());
+    }
+    if let Some(expected_mode) = expected.unix_mode
+        && observed.unix_mode != Some(expected_mode)
+    {
+        let observed_mode = observed
+            .unix_mode
+            .map_or_else(|| "missing".to_string(), |mode| format!("{mode:#06o}"));
+        return Err(format!(
+            "{}: required QUIC metadata field mode did not materialize exactly: expected {expected_mode:#06o}, observed {observed_mode}",
+            out_path.display()
+        ));
+    }
+    if let Some(expected_seconds) = expected.mtime_unix_secs {
+        let expected_nanos = expected.mtime_nanos.unwrap_or(0);
+        if observed.mtime_unix_secs != Some(expected_seconds)
+            || observed.mtime_nanos.unwrap_or(0) != expected_nanos
+        {
+            return Err(format!(
+                "{}: required QUIC metadata field mtime did not materialize exactly: expected ({expected_seconds}, {expected_nanos}), observed ({:?}, {:?})",
+                out_path.display(),
+                observed.mtime_unix_secs,
+                observed.mtime_nanos
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn verify_quic_required_unix_regular_metadata_sync(
+    out_path: &Path,
+    metadata: &EntryMetadata,
+) -> Result<(), StreamingError> {
+    #[cfg(unix)]
+    if matches!(metadata.file_kind, FileKind::Regular)
+        && (metadata.unix_mode.is_some() || metadata.mtime_unix_secs.is_some())
+    {
+        let policy = MetadataPolicy {
+            preserve_unix_permissions: metadata.unix_mode.is_some(),
+            preserve_timestamps: metadata.mtime_unix_secs.is_some(),
+            ..MetadataPolicy::portable()
+        };
+        let observed = crate::net::atp::transport_common::metadata::read_entry_metadata_sync(
+            out_path, &policy,
+        )?;
+        verify_quic_required_unix_regular_metadata(out_path, metadata, &observed)
+            .map_err(StreamingError::new)?;
+    }
+    #[cfg(not(unix))]
+    let _ = (out_path, metadata);
+    Ok(())
+}
+
+fn apply_quic_entry_metadata_sync_verified(
+    out_path: &Path,
+    metadata: &EntryMetadata,
+) -> Result<MetadataApplyReport, StreamingError> {
+    let report =
+        crate::net::atp::transport_common::metadata::apply_entry_metadata_sync(out_path, metadata)?;
+    verify_quic_required_unix_regular_metadata_sync(out_path, metadata)?;
+    Ok(report)
+}
+
+async fn apply_quic_metadata_verified(
+    out_path: &Path,
+    metadata: &EntryMetadata,
+) -> Result<MetadataApplyReport, QuicTransportError> {
+    let out_path = out_path.to_path_buf();
+    let metadata = metadata.clone();
+    crate::runtime::spawn_blocking(move || {
+        apply_quic_entry_metadata_sync_verified(&out_path, &metadata)
+    })
+    .await
+    .map_err(QuicTransportError::from)
+}
+
 #[cfg(feature = "tls")]
 async fn apply_quic_entry_metadata(
     cx: &Cx,
@@ -9466,7 +9548,7 @@ async fn apply_quic_entry_metadata(
     entry: &ManifestEntry,
 ) -> Result<(), QuicTransportError> {
     if let Some(metadata) = &entry.metadata {
-        let report = apply_entry_metadata(out_path, metadata).await?;
+        let report = apply_quic_metadata_verified(out_path, metadata).await?;
         trace_quic_metadata_skips(cx, out_path, &report);
     }
     Ok(())
@@ -9509,7 +9591,7 @@ async fn apply_quic_directory_metadata(
         reject_quic_destination_symlink_prefix(base, &path).await?;
         crate::fs::create_dir_all(&path).await?;
         reject_quic_destination_symlink_prefix(base, &path).await?;
-        let report = apply_entry_metadata(&path, metadata).await?;
+        let report = apply_quic_metadata_verified(&path, metadata).await?;
         trace_quic_metadata_skips(cx, &path, &report);
     }
     if let Some(root) = manifest
@@ -9520,7 +9602,7 @@ async fn apply_quic_directory_metadata(
         reject_quic_destination_symlink_prefix(base, base).await?;
         crate::fs::create_dir_all(base).await?;
         reject_quic_destination_symlink_prefix(base, base).await?;
-        let report = apply_entry_metadata(base, root).await?;
+        let report = apply_quic_metadata_verified(base, root).await?;
         trace_quic_metadata_skips(cx, base, &report);
     }
     Ok(())
@@ -9533,7 +9615,7 @@ async fn apply_quic_member_metadata(
     member: &PackedMember,
 ) -> Result<(), QuicTransportError> {
     if let Some(metadata) = &member.metadata {
-        let report = apply_entry_metadata(out_path, metadata).await?;
+        let report = apply_quic_metadata_verified(out_path, metadata).await?;
         trace_quic_metadata_skips(cx, out_path, &report);
     }
     Ok(())
@@ -9585,7 +9667,7 @@ async fn commit_quic_metadata_entry(
                 let mode = metadata.unix_mode.unwrap_or(0o644);
                 let _ = crate::fs::remove_file(out_path).await;
                 crate::net::atp::transport_common::metadata::recreate_fifo(out_path, mode).await?;
-                let report = apply_entry_metadata(out_path, metadata).await?;
+                let report = apply_quic_metadata_verified(out_path, metadata).await?;
                 trace_quic_metadata_skips(cx, out_path, &report);
                 return Ok(QuicMetadataCommit::Committed);
             }
@@ -9709,21 +9791,14 @@ async fn commit_decoded_entries_with_options(
                         member.rel_path
                     ))
                 })?;
-                let report = if options.sparse_files() {
-                    crate::net::atp::transport_common::metadata::commit_regular_bytes_sparse_with_metadata_transactionally(
-                        &member_path,
-                        slice,
-                        member.metadata.as_ref(),
-                    )
-                    .await?
-                } else {
-                    crate::net::atp::transport_common::metadata::commit_regular_bytes_with_metadata_transactionally(
-                        &member_path,
-                        slice,
-                        member.metadata.as_ref(),
-                    )
-                    .await?
-                };
+                let report = crate::net::atp::transport_common::metadata::commit_regular_bytes_with_metadata_verified_transactionally(
+                    &member_path,
+                    slice,
+                    member.metadata.as_ref(),
+                    options.sparse_files(),
+                    verify_quic_required_unix_regular_metadata_sync,
+                )
+                .await?;
                 trace_quic_metadata_skips(cx, &member_path, &report);
                 committed_paths.push(member_path);
             }
@@ -9747,21 +9822,14 @@ async fn commit_decoded_entries_with_options(
             crate::fs::create_dir_all(parent).await?;
         }
         reject_quic_destination_symlink_prefix(&base, &out_path).await?;
-        let report = if options.sparse_files() {
-            crate::net::atp::transport_common::metadata::commit_regular_bytes_sparse_with_metadata_transactionally(
-                &out_path,
-                &decoder.data,
-                entry.metadata.as_ref(),
-            )
-            .await?
-        } else {
-            crate::net::atp::transport_common::metadata::commit_regular_bytes_with_metadata_transactionally(
-                &out_path,
-                &decoder.data,
-                entry.metadata.as_ref(),
-            )
-            .await?
-        };
+        let report = crate::net::atp::transport_common::metadata::commit_regular_bytes_with_metadata_verified_transactionally(
+            &out_path,
+            &decoder.data,
+            entry.metadata.as_ref(),
+            options.sparse_files(),
+            verify_quic_required_unix_regular_metadata_sync,
+        )
+        .await?;
         trace_quic_metadata_skips(cx, &out_path, &report);
         committed_paths.push(out_path);
     }
@@ -10455,6 +10523,57 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn required_unix_regular_metadata_rejects_mode_and_subsecond_mtime_drift() {
+        let expected = EntryMetadata {
+            file_kind: FileKind::Regular,
+            unix_mode: Some(0o640),
+            mtime_unix_secs: Some(1_600_000_123),
+            mtime_nanos: Some(456_789_123),
+            ..EntryMetadata::default()
+        };
+        verify_quic_required_unix_regular_metadata(Path::new("payload.bin"), &expected, &expected)
+            .expect("exact Unix regular-file metadata must pass");
+
+        let mut mode_drift = expected.clone();
+        mode_drift.unix_mode = Some(0o600);
+        let mode_error = verify_quic_required_unix_regular_metadata(
+            Path::new("payload.bin"),
+            &expected,
+            &mode_drift,
+        )
+        .expect_err("mode drift must fail closed");
+        assert!(mode_error.contains("field mode"), "{mode_error}");
+
+        let mut mtime_drift = expected.clone();
+        mtime_drift.mtime_nanos = Some(456_789_122);
+        let mtime_error = verify_quic_required_unix_regular_metadata(
+            Path::new("payload.bin"),
+            &expected,
+            &mtime_drift,
+        )
+        .expect_err("subsecond mtime drift must fail closed");
+        assert!(mtime_error.contains("field mtime"), "{mtime_error}");
+
+        let unrequired = EntryMetadata::default();
+        verify_quic_required_unix_regular_metadata(
+            Path::new("portable.bin"),
+            &unrequired,
+            &mode_drift,
+        )
+        .expect("omitted fidelity fields impose no exact requirement");
+
+        let mut directory = expected.clone();
+        directory.file_kind = FileKind::Directory;
+        verify_quic_required_unix_regular_metadata(
+            Path::new("directory"),
+            &directory,
+            &EntryMetadata::default(),
+        )
+        .expect("regular-file verifier must not widen to directories");
+    }
 
     #[test]
     fn quic_receive_options_are_default_off_and_traced_within_field_budget() {
@@ -14209,7 +14328,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn quic_decoded_sparse_commit_covers_regular_and_packed_members() {
-        use std::os::unix::fs::MetadataExt as _;
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 
         let sparse_bytes = |len: usize, marker: &[u8]| {
             let mut bytes = vec![0u8; len];
@@ -14239,6 +14358,34 @@ mod tests {
                 ],
             ),
         ];
+        let dest = canon_tempdir();
+        let metadata_probe = dest.path().join("metadata-probe");
+        std::fs::write(&metadata_probe, b"probe").expect("write metadata probe");
+        std::fs::set_permissions(&metadata_probe, std::fs::Permissions::from_mode(0o640))
+            .expect("set metadata probe mode");
+        std::fs::File::open(&metadata_probe)
+            .expect("open metadata probe")
+            .set_times(
+                std::fs::FileTimes::new().set_modified(
+                    std::time::UNIX_EPOCH + Duration::new(1_600_000_321, 654_321_987),
+                ),
+            )
+            .expect("set metadata probe mtime");
+        let observed_probe = std::fs::metadata(&metadata_probe).expect("metadata probe");
+        let required_metadata = EntryMetadata {
+            file_kind: FileKind::Regular,
+            unix_mode: Some(observed_probe.permissions().mode() & 0o7777),
+            mtime_unix_secs: Some(observed_probe.mtime()),
+            mtime_nanos: Some(
+                u32::try_from(observed_probe.mtime_nsec()).expect("probe nanos are canonical"),
+            ),
+            ..EntryMetadata::default()
+        };
+        manifest.entries[0].metadata = Some(required_metadata.clone());
+        for member in &mut manifest.entries[1].members {
+            member.metadata = Some(required_metadata.clone());
+        }
+        manifest.metadata_root_hex = manifest_metadata_commitment(&manifest);
 
         let mut packed = packed_a.clone();
         packed.extend_from_slice(&packed_b);
@@ -14264,7 +14411,6 @@ mod tests {
         ];
 
         let cx = Cx::for_testing();
-        let dest = canon_tempdir();
         let (receipt, committed_paths) = block_on(commit_decoded_entries_with_options(
             &cx,
             dest.path(),
@@ -14313,6 +14459,18 @@ mod tests {
             assert!(
                 metadata.blocks().saturating_mul(512) < metadata.len() / 2,
                 "decoded sparse commit must allocate below half its logical size for {name}"
+            );
+            assert_eq!(
+                metadata.permissions().mode() & 0o7777,
+                required_metadata.unix_mode.expect("required mode")
+            );
+            assert_eq!(
+                (metadata.mtime(), metadata.mtime_nsec()),
+                (
+                    required_metadata.mtime_unix_secs.expect("required mtime"),
+                    i64::from(required_metadata.mtime_nanos.expect("required nanos"))
+                ),
+                "managed QUIC commit must preserve exact mode and subsecond mtime for {name}"
             );
         }
     }

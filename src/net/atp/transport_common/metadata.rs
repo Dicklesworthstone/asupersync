@@ -1015,22 +1015,33 @@ pub async fn commit_regular_bytes_with_metadata_transactionally(
     contents: &[u8],
     metadata: Option<&EntryMetadata>,
 ) -> Result<MetadataApplyReport, StreamingError> {
-    commit_regular_bytes_with_metadata_transactionally_inner(out_path, contents, metadata, false)
-        .await
+    commit_regular_bytes_with_metadata_transactionally_inner(
+        out_path, contents, metadata, false, None,
+    )
+    .await
 }
 
-/// Sparse-reconstruct logical bytes in an owned sibling before atomically
-/// replacing the destination.
+/// Write bytes, apply metadata, and run a caller-supplied read-back verifier
+/// against the owned staging leaf before atomically replacing the destination.
 ///
-/// This preserves content while representing long zero runs as holes. It does
-/// not reproduce the sender's exact filesystem extent map.
-pub(crate) async fn commit_regular_bytes_sparse_with_metadata_transactionally(
+/// Apply and verify run together in one blocking-pool task. A refusal leaves
+/// the existing destination unchanged and the staging guard reclaims the
+/// rejected leaf.
+pub(crate) async fn commit_regular_bytes_with_metadata_verified_transactionally(
     out_path: &Path,
     contents: &[u8],
     metadata: Option<&EntryMetadata>,
+    sparse_files: bool,
+    verifier: fn(&Path, &EntryMetadata) -> Result<(), StreamingError>,
 ) -> Result<MetadataApplyReport, StreamingError> {
-    commit_regular_bytes_with_metadata_transactionally_inner(out_path, contents, metadata, true)
-        .await
+    commit_regular_bytes_with_metadata_transactionally_inner(
+        out_path,
+        contents,
+        metadata,
+        sparse_files,
+        Some(verifier),
+    )
+    .await
 }
 
 async fn commit_regular_bytes_with_metadata_transactionally_inner(
@@ -1038,6 +1049,7 @@ async fn commit_regular_bytes_with_metadata_transactionally_inner(
     contents: &[u8],
     metadata: Option<&EntryMetadata>,
     sparse_files: bool,
+    verifier: Option<fn(&Path, &EntryMetadata) -> Result<(), StreamingError>>,
 ) -> Result<MetadataApplyReport, StreamingError> {
     let mut staged = None;
     for _ in 0..32 {
@@ -1063,9 +1075,19 @@ async fn commit_regular_bytes_with_metadata_transactionally_inner(
         ))
     })?;
     let staged = staged_guard.path.clone();
-    let report = match metadata {
-        Some(metadata) => apply_entry_metadata(&staged, metadata).await?,
-        None => MetadataApplyReport::default(),
+    let report = match (metadata, verifier) {
+        (Some(metadata), Some(verifier)) => {
+            let staged = staged.clone();
+            let metadata = metadata.clone();
+            crate::runtime::spawn_blocking(move || {
+                let report = apply_entry_metadata_sync(&staged, &metadata)?;
+                verifier(&staged, &metadata)?;
+                Ok::<_, StreamingError>(report)
+            })
+            .await?
+        }
+        (Some(metadata), None) => apply_entry_metadata(&staged, metadata).await?,
+        (None, _) => MetadataApplyReport::default(),
     };
     commit_staged_regular_file_transactionally(&staged, out_path).await?;
     staged_guard.disarm();
@@ -3205,6 +3227,53 @@ mod tests {
                     .file_name()
                     .to_string_lossy()
                     .starts_with(".atp-sym-backup-"))
+        );
+    }
+
+    #[test]
+    fn transactional_regular_metadata_verifier_refuses_before_publication() {
+        fn planted_refusal(
+            _staging_path: &Path,
+            _metadata: &EntryMetadata,
+        ) -> Result<(), StreamingError> {
+            Err(StreamingError::new("planted metadata read-back refusal"))
+        }
+
+        let root = tempfile::tempdir().expect("temporary directory");
+        let destination = root.path().join("destination");
+        std::fs::write(&destination, b"old destination").expect("write old destination");
+        let metadata = EntryMetadata::default();
+
+        let error = futures_lite::future::block_on(
+            commit_regular_bytes_with_metadata_verified_transactionally(
+                &destination,
+                b"rejected replacement",
+                Some(&metadata),
+                false,
+                planted_refusal,
+            ),
+        )
+        .expect_err("planted metadata refusal must fail the transaction");
+
+        assert!(
+            error
+                .to_string()
+                .contains("planted metadata read-back refusal")
+        );
+        assert_eq!(
+            std::fs::read(&destination).expect("read preserved destination"),
+            b"old destination",
+            "verifier refusal must happen before final rename"
+        );
+        assert!(
+            std::fs::read_dir(root.path())
+                .expect("read root")
+                .all(|entry| !entry
+                    .expect("entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".atp-sym-file-new-")),
+            "rejected staging leaf must be reclaimed"
         );
     }
 

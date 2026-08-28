@@ -1268,11 +1268,18 @@ fn real_udp_quic_transfer_metadata_fidelity_authenticated() {
     std::fs::write(&payload, b"quic metadata fidelity\n").expect("write payload");
     std::fs::set_permissions(&payload, std::fs::Permissions::from_mode(0o640))
         .expect("set payload mode");
-    let fixed_mtime = std::time::UNIX_EPOCH + Duration::from_secs(1_600_000_123);
+    let fixed_mtime = std::time::UNIX_EPOCH + Duration::new(1_600_000_123, 456_789_123);
     std::fs::File::open(&payload)
         .expect("open payload for timestamp")
         .set_times(std::fs::FileTimes::new().set_modified(fixed_mtime))
         .expect("set payload mtime");
+    let source_payload_metadata = std::fs::metadata(&payload).expect("source payload metadata");
+    let expected_payload_mode = source_payload_metadata.permissions().mode() & 0o7777;
+    let expected_payload_mtime = (
+        source_payload_metadata.mtime(),
+        source_payload_metadata.mtime_nsec(),
+    );
+    assert_eq!(expected_payload_mode, 0o640);
     let xattr_name = "user.asupersync.quic-metadata-e2e";
     let xattr_value = b"metadata-value\0with-binary";
     let xattr_supported = xattr::set(&payload, xattr_name, xattr_value).is_ok();
@@ -1298,6 +1305,21 @@ fn real_udp_quic_transfer_metadata_fidelity_authenticated() {
     let regular_sparse = root.join("regular-sparse.bin");
     let regular_sparse_expected =
         write_sparse_fixture(&regular_sparse, 2 * 1024 * 1024, b"regular-sparse");
+    std::fs::set_permissions(&regular_sparse, std::fs::Permissions::from_mode(0o604))
+        .expect("set direct regular sparse mode");
+    let regular_sparse_mtime = std::time::UNIX_EPOCH + Duration::new(1_600_000_456, 987_654_321);
+    std::fs::File::open(&regular_sparse)
+        .expect("open direct regular sparse for timestamp")
+        .set_times(std::fs::FileTimes::new().set_modified(regular_sparse_mtime))
+        .expect("set direct regular sparse mtime");
+    let source_regular_sparse_metadata =
+        std::fs::metadata(&regular_sparse).expect("source direct regular sparse metadata");
+    let expected_regular_sparse_mode = source_regular_sparse_metadata.permissions().mode() & 0o7777;
+    let expected_regular_sparse_mtime = (
+        source_regular_sparse_metadata.mtime(),
+        source_regular_sparse_metadata.mtime_nsec(),
+    );
+    assert_eq!(expected_regular_sparse_mode, 0o604);
     for sparse_source in [&packed_sparse, &regular_sparse] {
         let metadata = std::fs::metadata(sparse_source).expect("source sparse metadata");
         assert!(
@@ -1349,15 +1371,14 @@ fn real_udp_quic_transfer_metadata_fidelity_authenticated() {
         b"quic metadata fidelity\n"
     );
     let payload_metadata = std::fs::metadata(out.join("payload.bin")).expect("payload metadata");
-    assert_eq!(payload_metadata.permissions().mode() & 0o7777, 0o640);
     assert_eq!(
-        payload_metadata
-            .modified()
-            .expect("payload mtime")
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("payload mtime after epoch")
-            .as_secs(),
-        1_600_000_123
+        payload_metadata.permissions().mode() & 0o7777,
+        expected_payload_mode
+    );
+    assert_eq!(
+        (payload_metadata.mtime(), payload_metadata.mtime_nsec()),
+        expected_payload_mtime,
+        "regular-file mtime seconds and nanoseconds must round-trip exactly"
     );
     if xattr_supported {
         assert_eq!(
@@ -1431,6 +1452,20 @@ fn real_udp_quic_transfer_metadata_fidelity_authenticated() {
         let committed = out.join(name);
         assert_sparse_fixture(&committed, &expected, name);
     }
+    let committed_regular_sparse_metadata = std::fs::metadata(out.join("regular-sparse.bin"))
+        .expect("committed direct regular metadata");
+    assert_eq!(
+        committed_regular_sparse_metadata.permissions().mode() & 0o7777,
+        expected_regular_sparse_mode
+    );
+    assert_eq!(
+        (
+            committed_regular_sparse_metadata.mtime(),
+            committed_regular_sparse_metadata.mtime_nsec()
+        ),
+        expected_regular_sparse_mtime,
+        "direct regular-file mtime seconds and nanoseconds must round-trip exactly"
+    );
     assert_no_staging_residue(dst.path());
 }
 

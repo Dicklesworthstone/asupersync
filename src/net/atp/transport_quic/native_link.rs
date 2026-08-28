@@ -74,8 +74,8 @@ use crate::net::atp::protocol::frames::{Frame, FrameType};
 use crate::net::atp::protocol::quic_frames::QuicFrame;
 use crate::net::atp::quic::packet_protection::{AtpPacketProtection, AtpPacketProtectionConfig};
 use crate::net::atp::transport_common::{
-    EntryDigest, EntryMetadata, MetadataApplyReport, apply_entry_metadata_sync,
-    flat_merkle_root_from_digests, hash_file_streaming, hex_encode,
+    EntryDigest, EntryMetadata, MetadataApplyReport, flat_merkle_root_from_digests,
+    hash_file_streaming, hex_encode,
 };
 use crate::net::quic_core::ConnectionId;
 use crate::net::quic_native::handshake_driver::{
@@ -8429,8 +8429,9 @@ fn write_quic_packed_member_batch_oneshot(
             if let Some(metadata) = &member.metadata
                 && !deferred
             {
-                let report = apply_entry_metadata_sync(&member.staging_path, metadata)
-                    .map_err(|err| std::io::Error::other(err.into_message()))?;
+                let report =
+                    super::apply_quic_entry_metadata_sync_verified(&member.staging_path, metadata)
+                        .map_err(|err| std::io::Error::other(err.into_message()))?;
                 reports.push((member.out_path.clone(), report));
             }
             metadata_deferred.push(deferred);
@@ -8517,8 +8518,9 @@ fn write_quic_packed_member_batch_streaming(
             if let Some(metadata) = &member.metadata
                 && !deferred
             {
-                let report = apply_entry_metadata_sync(&member.staging_path, metadata)
-                    .map_err(|err| std::io::Error::other(err.into_message()))?;
+                let report =
+                    super::apply_quic_entry_metadata_sync_verified(&member.staging_path, metadata)
+                        .map_err(|err| std::io::Error::other(err.into_message()))?;
                 reports.push((member.out_path.clone(), report));
             }
             metadata_deferred.push(deferred);
