@@ -15,6 +15,9 @@
 //!   - Unaligned buffers (offset 0..16) to flush out `unsafe` pointer math.
 //!   - Odd-length tails (lengths that straddle SIMD/scalar boundaries).
 //!   - Dual-slice `slices2` fused paths with asymmetric lengths.
+//!   - `ConstraintMatrix::solve` elimination through the production
+//!     `systematic.rs` addmul-slice path, checked by an independent bytewise
+//!     reconstruction of `A * C`.
 //!
 //! Metamorphic relations (additive to the byte-by-byte scalar oracle):
 //!   * MR-MUL-COMPOSE: `mul_slice(mul_slice(buf, c1), c2)` ≡ `mul_slice(buf, c1 · c2)`.
@@ -30,6 +33,7 @@ use asupersync::raptorq::gf256::{
     Gf256, Gf256Kernel, active_kernel, gf256_add_slice, gf256_add_slices2, gf256_addmul_slice,
     gf256_addmul_slices2, gf256_mul_slice, gf256_mul_slices2,
 };
+use asupersync::raptorq::systematic::ConstraintMatrix;
 use libfuzzer_sys::fuzz_target;
 
 const MAX_LEN: usize = 4096;
@@ -43,9 +47,10 @@ fuzz_target!(|data: &[u8]| {
     observe_active_kernel();
 
     let mut cursor = Cursor::new(data);
+    let mut systematic_checked = false;
     for _ in 0..MAX_OPS {
         let Some(op) = cursor.take(1) else { return };
-        match op[0] % 10 {
+        match op[0] % 11 {
             0 => run_add_slice(&mut cursor),
             1 => run_mul_slice(&mut cursor),
             2 => run_addmul_slice(&mut cursor),
@@ -56,6 +61,12 @@ fuzz_target!(|data: &[u8]| {
             7 => run_mr_addmul_involution(&mut cursor),
             8 => run_mul_slice_focus(&mut cursor),
             9 => run_mul_slices2_focus(&mut cursor),
+            10 => {
+                if !systematic_checked {
+                    run_constraint_matrix_solve(&mut cursor);
+                    systematic_checked = true;
+                }
+            }
             _ => unreachable!(),
         }
     }
@@ -286,6 +297,62 @@ fn run_mr_addmul_involution(c: &mut Cursor) {
         "MR-ADDMUL-XOR-INVOLUTION failed: c={scalar} len={}",
         dst0.len()
     );
+}
+
+/// Drive the exact addmul-slice elimination seam used by
+/// `ConstraintMatrix::solve`, then validate the solution without reusing any
+/// slice kernel from the solver.
+///
+/// The matrix and RHS use the same LDPC/HDPC/LT structure and source/padding
+/// layout as `SystematicEncoder::new`. The oracle reconstructs `A * C` one
+/// byte and one field multiply at a time with `Gf256::mul_field`, keeping SIMD
+/// dispatch out of the comparison side. This operation is capped at once per
+/// fuzz input because even the bounded RFC matrix solve is cubic in K.
+fn run_constraint_matrix_solve(c: &mut Cursor) {
+    const K_CASES: [usize; 9] = [16, 17, 18, 19, 20, 25, 26, 31, 32];
+    const SYMBOL_SIZE_CASES: [usize; 4] = [31, 32, 33, 64];
+
+    let k = K_CASES[usize::from(c.next_u8()) % K_CASES.len()];
+    let symbol_size = SYMBOL_SIZE_CASES[usize::from(c.next_u8()) % SYMBOL_SIZE_CASES.len()];
+    let seed = c.xorshift();
+    let params =
+        asupersync::raptorq::systematic::SystematicParams::for_source_block(k, symbol_size);
+    let matrix = ConstraintMatrix::build(&params, seed);
+    let mut rhs = vec![vec![0u8; symbol_size]; matrix.rows];
+    for source_index in 0..k {
+        rhs[params.s + params.h + source_index] = c.fill(symbol_size);
+    }
+
+    let solution = matrix.solve(&rhs).unwrap_or_else(|| {
+        panic!(
+            "systematic constraint matrix is singular: kernel={:?} K={k} T={symbol_size} seed={seed}",
+            active_kernel()
+        )
+    });
+    assert_eq!(solution.len(), matrix.cols, "constraint solution row count");
+    assert!(
+        solution.iter().all(|row| row.len() == symbol_size),
+        "constraint solution symbol width"
+    );
+
+    for (row, expected_rhs) in rhs.iter().enumerate() {
+        let mut reconstructed = vec![0u8; symbol_size];
+        for (col, solution_row) in solution.iter().enumerate() {
+            let coefficient = matrix.get(row, col);
+            if coefficient.is_zero() {
+                continue;
+            }
+            for (actual, &source) in reconstructed.iter_mut().zip(solution_row) {
+                *actual ^= Gf256::new(source).mul_field(coefficient).raw();
+            }
+        }
+        assert_eq!(
+            reconstructed.as_slice(),
+            expected_rhs.as_slice(),
+            "ConstraintMatrix::solve diverged from independent bytewise A*C oracle: kernel={:?} K={k} T={symbol_size} seed={seed} row={row}",
+            active_kernel()
+        );
+    }
 }
 
 fn scalar_addmul_ref(dst: &[u8], src: &[u8], c: u8) -> Vec<u8> {
