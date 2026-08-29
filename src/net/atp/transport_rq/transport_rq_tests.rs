@@ -1,4 +1,7 @@
 use super::*;
+use std::sync::Arc;
+
+type TestEncodeTaskHandle = crate::runtime::TaskHandle<Result<Vec<Symbol>, String>>;
 
 /// Test scratch dir whose path has no symlinked ancestors.
 ///
@@ -7376,6 +7379,147 @@ fn parallel_block_encode_pool_and_inline_are_byte_identical() {
             .all(|thread| thread.contains("-blocking-")),
         "configured encode pool must execute every block on blocking workers: {pooled_threads:?}"
     );
+}
+
+#[test]
+fn parallel_encode_region_error_drains_claimed_and_queued_pool_work() {
+    let runtime = crate::runtime::RuntimeBuilder::new()
+        .worker_threads(1)
+        .blocking_threads(1, 1)
+        .build()
+        .expect("parallel-encode cancellation test runtime");
+    let pool = runtime
+        .blocking_handle()
+        .expect("test runtime has a blocking pool");
+    let observed_pool = pool.clone();
+    let (claimed_started_tx, claimed_started_rx) = std::sync::mpsc::channel();
+    let claimed_cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let claimed_cancelled_in_task = Arc::clone(&claimed_cancelled);
+    let task_handles = Arc::new(std::sync::Mutex::new(
+        None::<(TestEncodeTaskHandle, TestEncodeTaskHandle)>,
+    ));
+    let stored_task_handles = Arc::clone(&task_handles);
+    let config = crate::config::EncodingConfig {
+        repair_overhead: 1.0,
+        max_block_size: 1024,
+        symbol_size: 64,
+        encoding_parallelism: 1,
+        decoding_parallelism: 1,
+    };
+    let object_id = ObjectId::new_for_test(0xF208);
+    let queued_bytes = vec![0xA5u8; 1024];
+
+    let (body_error, mut claimed, mut queued) =
+        runtime.block_on(runtime.handle().spawn(async move {
+            let cx = Cx::current().expect("runtime task context");
+            let observed_pool_in_body = observed_pool.clone();
+            let body_result =
+                run_in_parallel_encode_region(&cx, |encode_cx, encode_tracker| async move {
+                    let claimed = encode_tracker
+                        .spawn_blocking(&encode_cx, move |child| {
+                            claimed_started_tx
+                                .send(())
+                                .expect("claimed encode publishes its readiness witness");
+                            while child.checkpoint().is_ok() {
+                                std::thread::park_timeout(std::time::Duration::from_millis(1));
+                            }
+                            claimed_cancelled_in_task
+                                .store(true, std::sync::atomic::Ordering::Release);
+                            Err::<Vec<Symbol>, String>(
+                                "claimed encode observed operation-region cancellation".to_string(),
+                            )
+                        })
+                        .expect("claimed block encode spawns through the production tracker");
+                    let queued = spawn_parallel_encode_block(
+                        &encode_cx,
+                        &encode_tracker,
+                        config,
+                        object_id,
+                        1,
+                        queued_bytes,
+                        3,
+                    )
+                    .expect("queued block encode spawns through production helper");
+                    *stored_task_handles
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                        Some((claimed, queued));
+
+                    claimed_started_rx
+                        .recv_timeout(std::time::Duration::from_secs(10))
+                        .expect("the claimed encode starts before the planted failure");
+                    assert_eq!(
+                        observed_pool_in_body.busy_threads(),
+                        1,
+                        "one encode is running"
+                    );
+                    assert_eq!(
+                        observed_pool_in_body.pending_count(),
+                        1,
+                        "one encode is queued"
+                    );
+                    Err::<(), RqError>(RqError::Coding(
+                        "planted parallel encode window failure".to_string(),
+                    ))
+                })
+                .await;
+
+            for _ in 0..10_000 {
+                if observed_pool.pending_count() == 0 && observed_pool.busy_threads() == 0 {
+                    break;
+                }
+                crate::runtime::yield_now().await;
+            }
+            assert_eq!(
+                observed_pool.pending_count(),
+                0,
+                "operation-region cleanup must drain queued encode work"
+            );
+            assert_eq!(
+                observed_pool.busy_threads(),
+                0,
+                "operation-region cleanup must drain the claimed encode closure"
+            );
+            let (claimed, queued) = task_handles
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+                .expect("test stored both encode handles before the planted failure");
+            (
+                body_result.expect_err("planted body failure propagates"),
+                claimed,
+                queued,
+            )
+        }));
+
+    assert!(
+        body_error
+            .to_string()
+            .contains("planted parallel encode window failure"),
+        "cleanup must preserve the primary encode error: {body_error}"
+    );
+    assert!(
+        claimed_cancelled.load(std::sync::atomic::Ordering::Acquire),
+        "the claimed closure must acknowledge its child-region cancellation"
+    );
+
+    assert!(
+        matches!(
+            claimed.try_join(),
+            Err(crate::runtime::task_handle::JoinError::Cancelled(_))
+        ),
+        "claimed encode wrapper must retain cancellation attribution"
+    );
+    assert!(
+        matches!(
+            queued.try_join(),
+            Err(crate::runtime::task_handle::JoinError::Cancelled(_))
+        ),
+        "queued encode wrapper must retain cancellation attribution"
+    );
+    assert_eq!(pool.pending_count(), 0, "pool queue remains drained");
+    assert_eq!(pool.busy_threads(), 0, "pool has no orphaned encode work");
+    assert!(runtime.is_quiescent(), "runtime returns to quiescence");
 }
 
 #[test]
