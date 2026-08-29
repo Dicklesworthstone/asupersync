@@ -7445,19 +7445,26 @@ fn parallel_encode_region_error_drains_claimed_and_queued_pool_work() {
                         .unwrap_or_else(std::sync::PoisonError::into_inner) =
                         Some((claimed, queued));
 
-                    claimed_started_rx
-                        .recv_timeout(std::time::Duration::from_secs(10))
-                        .expect("the claimed encode starts before the planted failure");
-                    assert_eq!(
-                        observed_pool_in_body.busy_threads(),
-                        1,
-                        "one encode is running"
-                    );
-                    assert_eq!(
-                        observed_pool_in_body.pending_count(),
-                        1,
-                        "one encode is queued"
-                    );
+                    let readiness_deadline =
+                        std::time::Instant::now() + std::time::Duration::from_secs(10);
+                    let mut claimed_started = false;
+                    while !claimed_started
+                        || observed_pool_in_body.busy_threads() != 1
+                        || observed_pool_in_body.pending_count() != 1
+                    {
+                        match claimed_started_rx.try_recv() {
+                            Ok(()) => claimed_started = true,
+                            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                                panic!("claimed encode readiness channel disconnected")
+                            }
+                        }
+                        assert!(
+                            std::time::Instant::now() < readiness_deadline,
+                            "claimed and queued encodes did not reach the planted failure window"
+                        );
+                        crate::runtime::yield_now().await;
+                    }
                     Err::<(), RqError>(RqError::Coding(
                         "planted parallel encode window failure".to_string(),
                     ))

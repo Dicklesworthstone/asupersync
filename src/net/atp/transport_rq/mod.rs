@@ -9279,10 +9279,11 @@ where
         .close()
         .await
         .map_err(|error| RqError::Coding(format!("parallel encode region close failed: {error}")));
-    // `Cx::spawn_blocking` cancellation is deliberately soft: child-region close cancels the
-    // wrapper and its underlying BlockingTaskHandle, but an already-claimed CPU closure finishes
-    // cooperatively. Wait for every closure to finish or be dropped from the pool queue before
-    // returning, so an encode error cannot leave pool work running behind the transfer.
+    // `Cx::spawn_blocking` cancellation is deliberately soft. Child-region close resolves the
+    // region-owned wrappers, while the pool may either finish a claimed CPU closure or drop/run a
+    // queued closure according to the wrapper/pool race. Wait for every tracked closure to finish
+    // or be dropped before returning, so an encode error cannot leave encode code running behind
+    // the transfer. Pool-handle terminal bookkeeping is observed separately by the regression.
     tracker.drain().await;
     match (body_result, close_result) {
         (Ok(value), Ok(())) => Ok(value),
