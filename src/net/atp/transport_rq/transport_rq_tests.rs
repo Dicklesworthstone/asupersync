@@ -6896,6 +6896,62 @@ fn collect_m1_source_symbols(
     symbols
 }
 
+fn collect_runtime_block_symbols(
+    object_id: ObjectId,
+    bytes: &[u8],
+    config: &RqConfig,
+    repair_count: usize,
+    blocking_threads: usize,
+) -> (Vec<(u8, u32, SymbolKind, Vec<u8>)>, BTreeSet<String>) {
+    let runtime = crate::runtime::RuntimeBuilder::new()
+        .worker_threads(1)
+        .blocking_threads(blocking_threads, blocking_threads)
+        .build()
+        .expect("parallel-encode test runtime");
+    let blocks = encode_ahead_blocks(bytes.len(), config).expect("block plan");
+    let cfg = m1_test_encoding_config(config);
+    let bytes = bytes.to_vec();
+
+    runtime.block_on(runtime.handle().spawn(async move {
+        let cx: Cx = Cx::current().expect("runtime task context");
+        let mut handles = Vec::with_capacity(blocks.len());
+        for block in blocks {
+            let block_bytes = bytes[block.start..block.start + block.len].to_vec();
+            let cfg = cfg.clone();
+            let handle = cx
+                .spawn_blocking(move |_child| {
+                    let thread_name = std::thread::current()
+                        .name()
+                        .unwrap_or("unnamed")
+                        .to_string();
+                    encode_block_symbols(&cfg, object_id, block.sbn, &block_bytes, repair_count)
+                        .map(|symbols| (thread_name, symbols))
+                })
+                .expect("runtime-backed context admits block encode");
+            handles.push((block.sbn, handle));
+        }
+
+        let mut symbols = Vec::new();
+        let mut execution_threads = BTreeSet::new();
+        for (expected_sbn, mut handle) in handles {
+            let (thread_name, encoded) = handle
+                .join(&cx)
+                .await
+                .expect("block encode task joins")
+                .expect("block encode succeeds");
+            execution_threads.insert(thread_name);
+            assert!(
+                encoded
+                    .iter()
+                    .all(|symbol| symbol.id().sbn() == expected_sbn),
+                "pool task must preserve its assigned source block number"
+            );
+            symbols.extend(encoded.iter().map(symbol_fingerprint));
+        }
+        (symbols, execution_threads)
+    }))
+}
+
 fn collect_source_only_block_symbols(
     object_id: ObjectId,
     bytes: &[u8],
@@ -7283,6 +7339,103 @@ fn m1_encode_ahead_source_and_initial_repair_is_byte_identical() {
         collect_m1_source_symbols(object_id, bytes, &config, 2),
         collect_monolithic_symbols(object_id, bytes, &config, 2)
     );
+}
+
+#[test]
+fn parallel_block_encode_pool_and_inline_are_byte_identical() {
+    let config = RqConfig {
+        symbol_size: 64,
+        max_block_size: 1024,
+        repair_overhead: 1.0,
+        ..RqConfig::default()
+    };
+    let object_id = ObjectId::new_for_test(0xF206);
+    let bytes = (0..2500)
+        .map(|index| (index as u8).wrapping_mul(17).wrapping_add(3))
+        .collect::<Vec<_>>();
+    let expected = collect_monolithic_symbols(object_id, &bytes, &config, 3);
+
+    let (inline, inline_threads) = collect_runtime_block_symbols(object_id, &bytes, &config, 3, 0);
+    let (pooled, pooled_threads) = collect_runtime_block_symbols(object_id, &bytes, &config, 3, 2);
+
+    assert_eq!(inline, expected, "no-pool ATP encode must remain canonical");
+    assert_eq!(
+        pooled, expected,
+        "pool-backed ATP encode must remain canonical"
+    );
+    assert_eq!(pooled, inline, "pool presence must not change wire bytes");
+    assert!(
+        inline_threads
+            .iter()
+            .all(|thread| !thread.contains("-blocking-")),
+        "no-pool encode must run inline on a runtime worker: {inline_threads:?}"
+    );
+    assert!(
+        pooled_threads
+            .iter()
+            .all(|thread| thread.contains("-blocking-")),
+        "configured encode pool must execute every block on blocking workers: {pooled_threads:?}"
+    );
+}
+
+#[test]
+fn pooled_block_encode_representative_k_sweep_preserves_bytes_and_esi_order() {
+    let object_id = ObjectId::new_for_test(0xF207);
+
+    for k in [16, 32, 64, 128, 256, 512, 1024, 2048, 4096] {
+        let config = RqConfig {
+            symbol_size: 1,
+            max_block_size: k,
+            repair_overhead: 1.0,
+            ..RqConfig::default()
+        };
+        let bytes = (0..k)
+            .map(|index| (index as u8).wrapping_mul(29).wrapping_add(11))
+            .collect::<Vec<_>>();
+        // Keep the largest K cases source-only so this correctness sweep does
+        // not turn into an accidental quadratic performance test. Smaller
+        // cases still exercise repair generation and its per-block cursor.
+        let repair_count = usize::from(k <= 512) * 3;
+        let (actual, execution_threads) =
+            collect_runtime_block_symbols(object_id, &bytes, &config, repair_count, 2);
+        let expected = collect_monolithic_symbols(object_id, &bytes, &config, repair_count);
+        assert_eq!(actual, expected, "wire mismatch at K={k}");
+        assert!(
+            execution_threads
+                .iter()
+                .all(|thread| thread.contains("-blocking-")),
+            "K={k} must execute through the configured pool: {execution_threads:?}"
+        );
+
+        let source_esis = actual
+            .iter()
+            .filter(|(_, _, kind, _)| *kind == SymbolKind::Source)
+            .map(|(_, esi, _, _)| *esi)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            source_esis,
+            (0..u32::try_from(k).expect("test K fits u32")).collect::<Vec<_>>(),
+            "each source ESI must be minted exactly once at K={k}"
+        );
+
+        let repair_esis = actual
+            .iter()
+            .filter(|(_, _, kind, _)| *kind == SymbolKind::Repair)
+            .map(|(_, esi, _, _)| *esi)
+            .collect::<Vec<_>>();
+        assert_eq!(repair_esis.len(), repair_count, "repair count at K={k}");
+        if repair_count != 0 {
+            assert_eq!(
+                repair_esis.first(),
+                Some(&u32::try_from(k).expect("test K fits u32")),
+                "the first repair ESI must start exactly at K={k}"
+            );
+            assert!(
+                repair_esis.windows(2).all(|pair| pair[1] == pair[0] + 1),
+                "repair ESIs must remain contiguous at K={k}: {repair_esis:?}"
+            );
+        }
+    }
 }
 
 #[test]
