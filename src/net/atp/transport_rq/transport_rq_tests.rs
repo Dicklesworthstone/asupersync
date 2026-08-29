@@ -1,7 +1,7 @@
 use super::*;
 use std::sync::Arc;
 
-type TestEncodeTaskHandle = crate::runtime::TaskHandle<Result<Vec<Symbol>, String>>;
+type TestEncodeTaskHandle = crate::runtime::TaskHandle<Result<ParallelEncodedBlock, String>>;
 
 /// Test scratch dir whose path has no symlinked ancestors.
 ///
@@ -6955,6 +6955,182 @@ fn collect_runtime_block_symbols(
     }))
 }
 
+fn collect_parallel_encode_logs(
+    object_id: ObjectId,
+    bytes: &[u8],
+    config: &RqConfig,
+    repair_count: usize,
+    blocking_threads: usize,
+) -> Vec<crate::observability::LogEntry> {
+    let runtime = crate::runtime::RuntimeBuilder::new()
+        .worker_threads(1)
+        .blocking_threads(blocking_threads, blocking_threads)
+        .build()
+        .expect("parallel-encode logging test runtime");
+    let blocks = encode_ahead_blocks(bytes.len(), config).expect("block plan");
+    let cfg = m1_test_encoding_config(config);
+    let bytes = bytes.to_vec();
+
+    runtime.block_on(runtime.handle().spawn(async move {
+        let cx: Cx = Cx::current().expect("runtime task context");
+        let collector = crate::observability::LogCollector::new(blocks.len() + 4)
+            .with_min_level(crate::observability::LogLevel::Trace);
+        cx.set_log_collector(collector.clone());
+        let tracker = ParallelEncodeTracker::default();
+        let pool = cx.blocking_pool_handle();
+        let inline_fallback = pool.is_none();
+        let effective_m = pool.as_ref().map_or(1, |pool| {
+            pool.current_max_threads().min(blocks.len()).max(1)
+        });
+        let ring_capacity = blocks.len().min(effective_m.saturating_mul(2));
+
+        for window in blocks.chunks(effective_m) {
+            let mut handles = Vec::with_capacity(window.len());
+            for block in window {
+                let block_bytes = bytes[block.start..block.start + block.len].to_vec();
+                let handle = spawn_parallel_encode_block(
+                    &cx,
+                    &tracker,
+                    cfg.clone(),
+                    object_id,
+                    block.sbn,
+                    block_bytes,
+                    repair_count,
+                )
+                .expect("production block encode helper spawns");
+                handles.push((block.sbn, block.k, handle));
+            }
+            let mut ring_occupancy = handles.len();
+            for (sbn, source_k, mut handle) in handles {
+                let encoded = handle
+                    .join(&cx)
+                    .await
+                    .expect("observed block encode task joins")
+                    .expect("observed block encode succeeds");
+                trace_parallel_encode_block(
+                    &cx,
+                    sbn,
+                    ParallelEncodeTrace {
+                        entry: 7,
+                        source_k,
+                        repair_symbols: repair_count,
+                        effective_m,
+                        ring_occupancy,
+                        ring_capacity,
+                        inline_fallback,
+                    },
+                    &encoded,
+                );
+                ring_occupancy = ring_occupancy.saturating_sub(1);
+            }
+        }
+        tracker.drain().await;
+        collector.peek()
+    }))
+}
+
+fn assert_parallel_encode_logs(
+    entries: &[crate::observability::LogEntry],
+    bytes_len: usize,
+    config: &RqConfig,
+    repair_count: usize,
+    effective_m: usize,
+    inline_fallback: bool,
+) {
+    let blocks = encode_ahead_blocks(bytes_len, config).expect("expected block plan");
+    let encode_entries = entries
+        .iter()
+        .filter(|entry| entry.message() == "atp_rq.encode.block")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        encode_entries.len(),
+        blocks.len(),
+        "every successfully encoded block must emit exactly one structured event"
+    );
+
+    let mut observed_sbn = BTreeSet::new();
+    for entry in encode_entries {
+        assert_eq!(entry.level(), crate::observability::LogLevel::Trace);
+        assert_eq!(entry.get_field("entry"), Some("7"));
+        let sbn = entry
+            .get_field("sbn")
+            .expect("sbn field")
+            .parse::<u8>()
+            .expect("parseable sbn");
+        assert!(
+            observed_sbn.insert(sbn),
+            "duplicate block event for SBN {sbn}"
+        );
+        let block = blocks
+            .iter()
+            .find(|block| block.sbn == sbn)
+            .expect("logged SBN belongs to the block plan");
+        assert_eq!(
+            entry
+                .get_field("source_k")
+                .expect("source_k field")
+                .parse::<usize>()
+                .expect("parseable source_k"),
+            block.k
+        );
+        assert_eq!(
+            entry.get_field("repair_symbols"),
+            Some(repair_count.to_string().as_str())
+        );
+        assert_eq!(
+            entry.get_field("effective_m"),
+            Some(effective_m.to_string().as_str())
+        );
+        assert!(
+            parallel_encode_runtime_fields_are_valid(entry, effective_m, inline_fallback),
+            "invalid parallel encode runtime fields: {entry:?}"
+        );
+    }
+    assert_eq!(observed_sbn.len(), blocks.len());
+}
+
+fn parallel_encode_runtime_fields_are_valid(
+    entry: &crate::observability::LogEntry,
+    effective_m: usize,
+    inline_fallback: bool,
+) -> bool {
+    let Some(occupancy) = entry
+        .get_field("ring_occupancy")
+        .and_then(|value| value.parse::<usize>().ok())
+    else {
+        return false;
+    };
+    let Some(capacity) = entry
+        .get_field("ring_capacity")
+        .and_then(|value| value.parse::<usize>().ok())
+    else {
+        return false;
+    };
+    let kernel_is_valid = matches!(
+        (
+            entry.get_field("kernel_path"),
+            entry.get_field("kernel_family"),
+        ),
+        (Some("scalar"), Some("scalar"))
+            | (Some("simd"), Some("x86_avx2"))
+            | (Some("simd"), Some("aarch64_neon"))
+    );
+    occupancy > 0
+        && occupancy <= capacity
+        && entry
+            .get_field("encode_micros")
+            .is_some_and(|value| value.parse::<u64>().is_ok())
+        && entry
+            .get_field("effective_m")
+            .and_then(|value| value.parse::<usize>().ok())
+            == Some(effective_m)
+        && entry
+            .get_field("inline_fallback")
+            .and_then(|value| value.parse::<bool>().ok())
+            == Some(inline_fallback)
+        && kernel_is_valid
+}
+
 fn collect_source_only_block_symbols(
     object_id: ObjectId,
     bytes: &[u8],
@@ -7379,6 +7555,43 @@ fn parallel_block_encode_pool_and_inline_are_byte_identical() {
             .all(|thread| thread.contains("-blocking-")),
         "configured encode pool must execute every block on blocking workers: {pooled_threads:?}"
     );
+
+    let inline_logs = collect_parallel_encode_logs(object_id, &bytes, &config, 3, 0);
+    let pooled_logs = collect_parallel_encode_logs(object_id, &bytes, &config, 3, 2);
+    assert_parallel_encode_logs(&inline_logs, bytes.len(), &config, 3, 1, true);
+    assert_parallel_encode_logs(&pooled_logs, bytes.len(), &config, 3, 2, false);
+
+    let inline_event = inline_logs
+        .iter()
+        .find(|entry| entry.message() == "atp_rq.encode.block")
+        .expect("real inline encode event");
+    let flipped_inline = inline_event.clone().with_field("inline_fallback", "false");
+    assert!(
+        !parallel_encode_runtime_fields_are_valid(&flipped_inline, 1, true),
+        "the contract must reject a flipped inline-fallback witness"
+    );
+
+    let pooled_event = pooled_logs
+        .iter()
+        .find(|entry| entry.message() == "atp_rq.encode.block")
+        .expect("real pooled encode event");
+    let capacity = pooled_event
+        .get_field("ring_capacity")
+        .expect("real ring capacity")
+        .parse::<usize>()
+        .expect("parseable real ring capacity");
+    let invalid_occupancy = pooled_event
+        .clone()
+        .with_field("ring_occupancy", capacity.saturating_add(1).to_string());
+    assert!(
+        !parallel_encode_runtime_fields_are_valid(&invalid_occupancy, 2, false),
+        "the contract must reject ring occupancy above capacity"
+    );
+    let invalid_kernel = pooled_event.clone().with_field("kernel_family", "bogus");
+    assert!(
+        !parallel_encode_runtime_fields_are_valid(&invalid_kernel, 2, false),
+        "the contract must reject an unknown GF256 kernel family"
+    );
 }
 
 #[test]
@@ -7425,7 +7638,7 @@ fn parallel_encode_region_error_drains_claimed_and_queued_pool_work() {
                             }
                             claimed_cancelled_in_task
                                 .store(true, std::sync::atomic::Ordering::Release);
-                            Err::<Vec<Symbol>, String>(
+                            Err::<ParallelEncodedBlock, String>(
                                 "claimed encode observed operation-region cancellation".to_string(),
                             )
                         })

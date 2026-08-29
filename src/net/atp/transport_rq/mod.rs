@@ -9197,6 +9197,70 @@ fn encode_block_symbols(
     Ok(out)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ParallelEncodeTrace {
+    entry: u32,
+    source_k: usize,
+    repair_symbols: usize,
+    effective_m: usize,
+    ring_occupancy: usize,
+    ring_capacity: usize,
+    inline_fallback: bool,
+}
+
+struct ParallelEncodedBlock {
+    symbols: Vec<Symbol>,
+    encode_micros: u64,
+    kernel: crate::raptorq::gf256::Gf256Kernel,
+}
+
+fn gf256_kernel_fields(kernel: crate::raptorq::gf256::Gf256Kernel) -> (&'static str, &'static str) {
+    match kernel {
+        crate::raptorq::gf256::Gf256Kernel::Scalar => ("scalar", "scalar"),
+        #[cfg(all(
+            feature = "simd-intrinsics",
+            any(target_arch = "x86", target_arch = "x86_64")
+        ))]
+        crate::raptorq::gf256::Gf256Kernel::X86Avx2 => ("simd", "x86_avx2"),
+        #[cfg(all(feature = "simd-intrinsics", target_arch = "aarch64"))]
+        crate::raptorq::gf256::Gf256Kernel::Aarch64Neon => ("simd", "aarch64_neon"),
+    }
+}
+
+fn trace_parallel_encode_block(
+    cx: &Cx,
+    sbn: u8,
+    trace: ParallelEncodeTrace,
+    encoded: &ParallelEncodedBlock,
+) {
+    let (kernel_path, kernel_family) = gf256_kernel_fields(encoded.kernel);
+    let entry = trace.entry.to_string();
+    let sbn = sbn.to_string();
+    let source_k = trace.source_k.to_string();
+    let repair_symbols = trace.repair_symbols.to_string();
+    let effective_m = trace.effective_m.to_string();
+    let ring_occupancy = trace.ring_occupancy.to_string();
+    let ring_capacity = trace.ring_capacity.to_string();
+    let encode_micros = encoded.encode_micros.to_string();
+    let inline_fallback = trace.inline_fallback.to_string();
+    cx.trace_with_fields(
+        "atp_rq.encode.block",
+        &[
+            ("entry", entry.as_str()),
+            ("sbn", sbn.as_str()),
+            ("source_k", source_k.as_str()),
+            ("repair_symbols", repair_symbols.as_str()),
+            ("effective_m", effective_m.as_str()),
+            ("ring_occupancy", ring_occupancy.as_str()),
+            ("ring_capacity", ring_capacity.as_str()),
+            ("encode_micros", encode_micros.as_str()),
+            ("kernel_path", kernel_path),
+            ("kernel_family", kernel_family),
+            ("inline_fallback", inline_fallback.as_str()),
+        ],
+    );
+}
+
 #[derive(Clone, Default)]
 struct ParallelEncodeTracker {
     completions: Arc<Mutex<Vec<Arc<AtomicBool>>>>,
@@ -9257,9 +9321,16 @@ fn spawn_parallel_encode_block(
     sbn: u8,
     data: Vec<u8>,
     repair_count: usize,
-) -> Result<crate::runtime::TaskHandle<Result<Vec<Symbol>, String>>, RqError> {
+) -> Result<crate::runtime::TaskHandle<Result<ParallelEncodedBlock, String>>, RqError> {
     tracker.spawn_blocking(cx, move |_child| {
-        encode_block_symbols(&cfg, object_id, sbn, &data, repair_count)
+        let started = Instant::now();
+        let symbols = encode_block_symbols(&cfg, object_id, sbn, &data, repair_count)?;
+        let encode_micros = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
+        Ok(ParallelEncodedBlock {
+            symbols,
+            encode_micros,
+            kernel: crate::raptorq::gf256::active_kernel(),
+        })
     })
 }
 
@@ -9470,6 +9541,15 @@ where
             let par_batch = parallel_encode_window_blocks(
                 parallel_encode_plan.expect("parallel encode plan checked above"),
             );
+            let blocking_pool = cx.blocking_pool_handle();
+            let inline_encode_fallback = blocking_pool.is_none();
+            let effective_encode_m = blocking_pool.as_ref().map_or(1, |pool| {
+                pool.current_max_threads()
+                    .min(par_batch)
+                    .min(blocks.len())
+                    .max(1)
+            });
+            let encode_ring_capacity = blocks.len().min(par_batch.saturating_mul(2));
             // Move only iteration-scoped reborrows into the operation future. The caller-owned
             // transfer state remains available for later entries after this branch completes.
             let control = &mut *control;
@@ -9502,7 +9582,7 @@ where
                         usize,
                         usize,
                         usize,
-                        crate::runtime::TaskHandle<Result<Vec<Symbol>, String>>,
+                        crate::runtime::TaskHandle<Result<ParallelEncodedBlock, String>>,
                     )> = Vec::new();
                     for window_start in (0..blocks.len()).step_by(par_batch) {
                         if cx.checkpoint().is_err() {
@@ -9544,11 +9624,12 @@ where
                             )?;
                             spawned.push((block_index, block.k, repair, handle));
                         }
+                        let mut ring_occupancy = pending.len().saturating_add(spawned.len());
                         for (block_index, source_symbols, target_repair, mut handle) in
                             pending.drain(..)
                         {
-                            let syms = match handle.join(&encode_cx).await {
-                                Ok(Ok(syms)) => syms,
+                            let encoded = match handle.join(&encode_cx).await {
+                                Ok(Ok(encoded)) => encoded,
                                 Ok(Err(e)) => return Err(RqError::Coding(e)),
                                 Err(join_err) => {
                                     return Err(RqError::Coding(format!(
@@ -9556,6 +9637,20 @@ where
                                     )));
                                 }
                             };
+                            trace_parallel_encode_block(
+                                cx,
+                                blocks[block_index].sbn,
+                                ParallelEncodeTrace {
+                                    entry: enc.index,
+                                    source_k: source_symbols,
+                                    repair_symbols: target_repair,
+                                    effective_m: effective_encode_m,
+                                    ring_occupancy,
+                                    ring_capacity: encode_ring_capacity,
+                                    inline_fallback: inline_encode_fallback,
+                                },
+                                &encoded,
+                            );
                             send_symbol_datagrams(
                                 cx,
                                 control,
@@ -9566,13 +9661,14 @@ where
                                 dropper,
                                 tag,
                                 enc.index,
-                                &syms,
+                                &encoded.symbols,
                                 config,
                                 pacer,
                                 symbol_auth,
                                 udp_send_acceleration,
                             )
                             .await?;
+                            ring_occupancy = ring_occupancy.saturating_sub(1);
                             *parallel_round0_blocks = parallel_round0_blocks.saturating_add(1);
                             *parallel_round0_source_symbols =
                                 parallel_round0_source_symbols.saturating_add(source_symbols);
@@ -9582,9 +9678,10 @@ where
                         }
                         pending = spawned;
                     }
+                    let mut ring_occupancy = pending.len();
                     for (block_index, source_symbols, target_repair, mut handle) in pending {
-                        let syms = match handle.join(&encode_cx).await {
-                            Ok(Ok(syms)) => syms,
+                        let encoded = match handle.join(&encode_cx).await {
+                            Ok(Ok(encoded)) => encoded,
                             Ok(Err(e)) => return Err(RqError::Coding(e)),
                             Err(join_err) => {
                                 return Err(RqError::Coding(format!(
@@ -9592,6 +9689,20 @@ where
                                 )));
                             }
                         };
+                        trace_parallel_encode_block(
+                            cx,
+                            blocks[block_index].sbn,
+                            ParallelEncodeTrace {
+                                entry: enc.index,
+                                source_k: source_symbols,
+                                repair_symbols: target_repair,
+                                effective_m: effective_encode_m,
+                                ring_occupancy,
+                                ring_capacity: encode_ring_capacity,
+                                inline_fallback: inline_encode_fallback,
+                            },
+                            &encoded,
+                        );
                         send_symbol_datagrams(
                             cx,
                             control,
@@ -9602,13 +9713,14 @@ where
                             dropper,
                             tag,
                             enc.index,
-                            &syms,
+                            &encoded.symbols,
                             config,
                             pacer,
                             symbol_auth,
                             udp_send_acceleration,
                         )
                         .await?;
+                        ring_occupancy = ring_occupancy.saturating_sub(1);
                         *parallel_round0_blocks = parallel_round0_blocks.saturating_add(1);
                         *parallel_round0_source_symbols =
                             parallel_round0_source_symbols.saturating_add(source_symbols);
