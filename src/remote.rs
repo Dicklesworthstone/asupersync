@@ -30,8 +30,11 @@
 //! expose a structured TCP listener that owns accepted connections through a
 //! child region and drains them explicitly. Protocol V2 listeners additionally
 //! reserve idempotency keys per authenticated peer and replay retained terminal
-//! outcomes before a retry can execute again. Lease enforcement remains a
-//! separate lifecycle layer.
+//! outcomes before a retry can execute again. The native client bounds connect,
+//! handshake, exchange, and backoff, retries only failures proven to precede
+//! request delivery, and fails closed on every ambiguous delivery because the
+//! listener's retained idempotency state is process-local. Lease enforcement
+//! remains a separate lifecycle layer.
 
 use crate::channel::oneshot;
 #[cfg(feature = "tls")]
@@ -54,10 +57,10 @@ use crate::util::det_hash::DetHashMap;
 use crate::{bytes::BytesMut, io::AsyncRead, io::AsyncWrite, stream::StreamExt};
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
 use crate::{
-    net::TcpListener,
+    net::{TcpListener, TcpStreamBuilder},
     runtime::SpawnError,
     server::{ConnectionManager, ShutdownPhase, ShutdownSignal, ShutdownStats},
-    tls::{TlsAcceptor, TlsError},
+    tls::{TlsAcceptor, TlsConnector, TlsError},
 };
 #[cfg(feature = "tls")]
 use parking_lot::Mutex;
@@ -3684,6 +3687,610 @@ where
     let mut framed = remote_service_framed(stream, limits)?;
     write_remote_service_frame(cx, &mut framed, request, limits.max_frame_bytes()).await?;
     read_remote_service_frame(cx, &mut framed).await
+}
+
+/// Bounded connection and retry policy for [`RemoteComputationClient`].
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RemoteComputationClientConfig {
+    wire_limits: RemoteServiceWireLimits,
+    connect_timeout: Duration,
+    attempt_timeout: Duration,
+    max_attempts: usize,
+    initial_backoff: Duration,
+    max_backoff: Duration,
+    full_jitter: bool,
+    tcp_nodelay: bool,
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+impl RemoteComputationClientConfig {
+    /// Creates a production-oriented bounded client policy.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            wire_limits: RemoteServiceWireLimits::new(DEFAULT_REMOTE_SERVICE_MAX_FRAME_BYTES),
+            connect_timeout: Duration::from_secs(5),
+            attempt_timeout: Duration::from_secs(30),
+            max_attempts: 3,
+            initial_backoff: Duration::from_millis(50),
+            max_backoff: Duration::from_secs(1),
+            full_jitter: true,
+            tcp_nodelay: true,
+        }
+    }
+
+    /// Sets the maximum encoded request and response frame size.
+    #[must_use]
+    pub const fn with_wire_limits(mut self, wire_limits: RemoteServiceWireLimits) -> Self {
+        self.wire_limits = wire_limits;
+        self
+    }
+
+    /// Sets the timeout for each TCP connection attempt.
+    #[must_use]
+    pub const fn with_connect_timeout(mut self, connect_timeout: Duration) -> Self {
+        self.connect_timeout = connect_timeout;
+        self
+    }
+
+    /// Sets the total timeout for one connect, handshake, and exchange attempt.
+    #[must_use]
+    pub const fn with_attempt_timeout(mut self, attempt_timeout: Duration) -> Self {
+        self.attempt_timeout = attempt_timeout;
+        self
+    }
+
+    /// Sets the total attempt cap, including the first attempt.
+    #[must_use]
+    pub const fn with_max_attempts(mut self, max_attempts: usize) -> Self {
+        self.max_attempts = max_attempts;
+        self
+    }
+
+    /// Sets the initial and maximum exponential retry delay.
+    #[must_use]
+    pub const fn with_backoff(mut self, initial: Duration, maximum: Duration) -> Self {
+        self.initial_backoff = initial;
+        self.max_backoff = maximum;
+        self
+    }
+
+    /// Enables or disables deterministic-context full jitter.
+    #[must_use]
+    pub const fn with_full_jitter(mut self, enabled: bool) -> Self {
+        self.full_jitter = enabled;
+        self
+    }
+
+    /// Enables or disables TCP_NODELAY on successful connections.
+    #[must_use]
+    pub const fn with_tcp_nodelay(mut self, enabled: bool) -> Self {
+        self.tcp_nodelay = enabled;
+        self
+    }
+
+    /// Encoded-frame policy applied to every attempt.
+    #[must_use]
+    pub const fn wire_limits(self) -> RemoteServiceWireLimits {
+        self.wire_limits
+    }
+
+    /// Timeout for each TCP connection attempt.
+    #[must_use]
+    pub const fn connect_timeout(self) -> Duration {
+        self.connect_timeout
+    }
+
+    /// Total timeout for one connect, handshake, and exchange attempt.
+    #[must_use]
+    pub const fn attempt_timeout(self) -> Duration {
+        self.attempt_timeout
+    }
+
+    /// Total attempt cap, including the first attempt.
+    #[must_use]
+    pub const fn max_attempts(self) -> usize {
+        self.max_attempts
+    }
+
+    /// Initial exponential retry delay.
+    #[must_use]
+    pub const fn initial_backoff(self) -> Duration {
+        self.initial_backoff
+    }
+
+    /// Maximum exponential retry delay.
+    #[must_use]
+    pub const fn max_backoff(self) -> Duration {
+        self.max_backoff
+    }
+
+    /// Whether retry delays use deterministic-context full jitter.
+    #[must_use]
+    pub const fn full_jitter(self) -> bool {
+        self.full_jitter
+    }
+
+    /// Whether successful sockets enable TCP_NODELAY.
+    #[must_use]
+    pub const fn tcp_nodelay(self) -> bool {
+        self.tcp_nodelay
+    }
+
+    fn validate(self) -> Result<(), RemoteComputationClientError> {
+        if self.wire_limits.max_frame_bytes() == 0 {
+            return Err(RemoteComputationClientError::InvalidConfig(
+                "remote client frame limit must be nonzero",
+            ));
+        }
+        if self.connect_timeout.is_zero() {
+            return Err(RemoteComputationClientError::InvalidConfig(
+                "remote client connect timeout must be nonzero",
+            ));
+        }
+        if self.attempt_timeout.is_zero() {
+            return Err(RemoteComputationClientError::InvalidConfig(
+                "remote client attempt timeout must be nonzero",
+            ));
+        }
+        if self.max_attempts == 0 {
+            return Err(RemoteComputationClientError::InvalidConfig(
+                "remote client max attempts must be nonzero",
+            ));
+        }
+        if self.initial_backoff > self.max_backoff {
+            return Err(RemoteComputationClientError::InvalidConfig(
+                "remote client initial backoff exceeds maximum backoff",
+            ));
+        }
+        Ok(())
+    }
+
+    fn retry_delay(self, cx: &Cx, completed_attempts: usize) -> Duration {
+        let exponent = u32::try_from(completed_attempts.saturating_sub(1).min(31))
+            .expect("retry exponent is capped at 31");
+        let multiplier = 1_u32 << exponent;
+        let capped = self
+            .initial_backoff
+            .saturating_mul(multiplier)
+            .min(self.max_backoff);
+        if !self.full_jitter || capped.is_zero() {
+            return capped;
+        }
+        let inclusive_max = u64::try_from(capped.as_nanos()).unwrap_or(u64::MAX);
+        let nanos = if inclusive_max == u64::MAX {
+            cx.random_u64()
+        } else {
+            cx.random_u64() % inclusive_max.saturating_add(1)
+        };
+        Duration::from_nanos(nanos)
+    }
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+impl Default for RemoteComputationClientConfig {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Terminal local failure from a native remote-computation client call.
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum RemoteComputationClientError {
+    /// Static client configuration cannot safely execute a call.
+    InvalidConfig(&'static str),
+    /// The supplied TLS server name is invalid.
+    InvalidServerName(TlsError),
+    /// The caller context cancelled before another attempt could start.
+    Cancelled {
+        /// Number of attempts started.
+        attempts: usize,
+    },
+    /// Caller cancellation interrupted an attempt after delivery became uncertain.
+    CancelledDuringAttempt {
+        /// Number of attempts started.
+        attempts: usize,
+    },
+    /// TCP connection attempts ended without a usable socket.
+    Connect {
+        /// Number of attempts started.
+        attempts: usize,
+        /// Last TCP failure.
+        source: io::Error,
+    },
+    /// TLS handshake attempts ended without an authenticated stream.
+    Tls {
+        /// Number of attempts started.
+        attempts: usize,
+        /// Last TLS failure.
+        source: TlsError,
+    },
+    /// An attempt timed out after work may have reached the authenticated peer.
+    ///
+    /// All protocol versions stop here because process-local deduplication
+    /// cannot make a fresh-connection replay safe across restart or eviction.
+    AttemptTimeout {
+        /// Number of attempts started.
+        attempts: usize,
+        /// Bound applied to the final attempt.
+        timeout: Duration,
+    },
+    /// The authenticated exchange lost transport after delivery became ambiguous.
+    ///
+    /// All protocol versions surface the first such failure. Process-local
+    /// deduplication cannot make a replay safe across restart or eviction.
+    AmbiguousExchange {
+        /// Number of attempts started.
+        attempts: usize,
+        /// Final transport loss.
+        source: RemoteComputationServiceError,
+    },
+    /// An authenticated response carried the wrong request correlation ID.
+    ResponseTaskMismatch {
+        /// Number of attempts started.
+        attempts: usize,
+        /// Correlation ID from the request.
+        expected: u64,
+        /// Correlation ID from the response.
+        actual: u64,
+    },
+    /// A request exchange failed after TLS authentication.
+    Exchange {
+        /// Number of attempts started.
+        attempts: usize,
+        /// Last framing, serialization, or transport failure.
+        source: RemoteComputationServiceError,
+    },
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+impl RemoteComputationClientError {
+    /// Number of network attempts started before this failure.
+    #[must_use]
+    pub const fn attempts(&self) -> usize {
+        match self {
+            Self::InvalidConfig(_) | Self::InvalidServerName(_) => 0,
+            Self::Cancelled { attempts }
+            | Self::CancelledDuringAttempt { attempts }
+            | Self::Connect { attempts, .. }
+            | Self::Tls { attempts, .. }
+            | Self::AttemptTimeout { attempts, .. }
+            | Self::AmbiguousExchange { attempts, .. }
+            | Self::ResponseTaskMismatch { attempts, .. }
+            | Self::Exchange { attempts, .. } => *attempts,
+        }
+    }
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+impl fmt::Display for RemoteComputationClientError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidConfig(diagnostic) => f.write_str(diagnostic),
+            Self::InvalidServerName(error) => write!(f, "remote client server name: {error}"),
+            Self::Cancelled { attempts } => {
+                write!(f, "remote client cancelled after {attempts} attempt(s)")
+            }
+            Self::CancelledDuringAttempt { attempts } => write!(
+                f,
+                "remote client cancelled during attempt {attempts}; request delivery is uncertain"
+            ),
+            Self::Connect { attempts, source } => {
+                write!(
+                    f,
+                    "remote client TCP failed after {attempts} attempt(s): {source}"
+                )
+            }
+            Self::Tls { attempts, source } => {
+                write!(
+                    f,
+                    "remote client TLS failed after {attempts} attempt(s): {source}"
+                )
+            }
+            Self::AttemptTimeout { attempts, timeout } => write!(
+                f,
+                "remote client attempt timed out after {attempts} attempt(s) at {timeout:?}; request delivery is uncertain"
+            ),
+            Self::AmbiguousExchange { attempts, source } => write!(
+                f,
+                "remote client transport was lost after {attempts} exchange attempt(s); request delivery is uncertain: {source}"
+            ),
+            Self::ResponseTaskMismatch {
+                attempts,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "remote client response task mismatch after {attempts} attempt(s): expected {expected}, got {actual}"
+            ),
+            Self::Exchange { attempts, source } => write!(
+                f,
+                "remote client exchange failed after {attempts} attempt(s): {source}"
+            ),
+        }
+    }
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+impl std::error::Error for RemoteComputationClientError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::InvalidServerName(error) => Some(error),
+            Self::Connect { source, .. } => Some(source),
+            Self::Tls { source, .. } => Some(source),
+            Self::AmbiguousExchange { source, .. } => Some(source),
+            Self::Exchange { source, .. } => Some(source),
+            Self::InvalidConfig(_)
+            | Self::Cancelled { .. }
+            | Self::CancelledDuringAttempt { .. }
+            | Self::AttemptTimeout { .. }
+            | Self::ResponseTaskMismatch { .. } => None,
+        }
+    }
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+enum RemoteComputationClientAttemptError {
+    Connect(io::Error),
+    Tls(TlsError),
+    Timeout(Duration),
+    Exchange(RemoteComputationServiceError),
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+impl RemoteComputationClientAttemptError {
+    fn is_retryable(&self) -> bool {
+        match self {
+            Self::Connect(error) => remote_client_io_error_is_transient(error),
+            Self::Tls(TlsError::Io(error)) => remote_client_io_error_is_transient(error),
+            Self::Tls(TlsError::Timeout(_)) => true,
+            Self::Tls(_) => false,
+            Self::Timeout(_) | Self::Exchange(_) => false,
+        }
+    }
+
+    fn into_public(self, attempts: usize) -> RemoteComputationClientError {
+        match self {
+            Self::Connect(source) => RemoteComputationClientError::Connect { attempts, source },
+            Self::Tls(source) => RemoteComputationClientError::Tls { attempts, source },
+            Self::Timeout(timeout) => {
+                RemoteComputationClientError::AttemptTimeout { attempts, timeout }
+            }
+            Self::Exchange(source) => {
+                RemoteComputationClientError::AmbiguousExchange { attempts, source }
+            }
+        }
+    }
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+fn remote_client_io_error_is_transient(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::ConnectionRefused
+            | io::ErrorKind::ConnectionReset
+            | io::ErrorKind::ConnectionAborted
+            | io::ErrorKind::NotConnected
+            | io::ErrorKind::TimedOut
+            | io::ErrorKind::Interrupted
+            | io::ErrorKind::WouldBlock
+            | io::ErrorKind::AddrNotAvailable
+    )
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+enum RemoteClientCancelRace<T> {
+    Completed(T),
+    Cancelled,
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+async fn remote_client_wait_for_cancellation(cx: &Cx) {
+    if cx.checkpoint().is_err() {
+        return;
+    }
+    let (sender, mut receiver) = oneshot::channel::<()>();
+    let _ = receiver.recv(cx).await;
+    drop(sender);
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+async fn remote_client_race_cancellation<F>(cx: &Cx, future: F) -> RemoteClientCancelRace<F::Output>
+where
+    F: Future,
+{
+    futures_lite::future::race(
+        async { RemoteClientCancelRace::Completed(future.await) },
+        async {
+            remote_client_wait_for_cancellation(cx).await;
+            RemoteClientCancelRace::Cancelled
+        },
+    )
+    .await
+}
+
+/// Native TCP+mTLS client for the authenticated remote-computation service.
+///
+/// Every protocol version retries only failures proven to precede request
+/// delivery. Delivery-ambiguous timeout, framing, or transport loss fails closed,
+/// as does a typed V2 in-flight response: listener deduplication is process-local
+/// and cannot make a fresh-connection replay safe across restart or eviction.
+/// The attempt cap and backoff are finite, and caller cancellation wakes both an
+/// active attempt and its retry delay.
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+#[derive(Clone)]
+pub struct RemoteComputationClient {
+    endpoint: SocketAddr,
+    server_name: String,
+    tls_connector: TlsConnector,
+    config: RemoteComputationClientConfig,
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+impl fmt::Debug for RemoteComputationClient {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RemoteComputationClient")
+            .field("endpoint", &self.endpoint)
+            .field("server_name", &self.server_name)
+            .field("config", &self.config)
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+impl RemoteComputationClient {
+    /// Creates a native remote client after validating its static policy.
+    pub fn new(
+        endpoint: SocketAddr,
+        server_name: impl Into<String>,
+        tls_connector: TlsConnector,
+        config: RemoteComputationClientConfig,
+    ) -> Result<Self, RemoteComputationClientError> {
+        config.validate()?;
+        let server_name = server_name.into();
+        TlsConnector::validate_domain(&server_name)
+            .map_err(RemoteComputationClientError::InvalidServerName)?;
+        Ok(Self {
+            endpoint,
+            server_name,
+            tls_connector,
+            config,
+        })
+    }
+
+    /// Destination socket used by each connection attempt.
+    #[must_use]
+    pub const fn endpoint(&self) -> SocketAddr {
+        self.endpoint
+    }
+
+    /// TLS SNI/server-certificate name.
+    #[must_use]
+    pub fn server_name(&self) -> &str {
+        &self.server_name
+    }
+
+    /// Bounded connection and retry policy.
+    #[must_use]
+    pub const fn config(&self) -> RemoteComputationClientConfig {
+        self.config
+    }
+
+    /// Connects, authenticates, and executes one bounded request.
+    pub async fn call(
+        &self,
+        cx: &Cx,
+        request: &RemoteServiceWireRequest,
+    ) -> Result<RemoteServiceWireResponse, RemoteComputationClientError> {
+        if let Err(source) =
+            encode_remote_service_frame(request, self.config.wire_limits.max_frame_bytes())
+        {
+            return Err(RemoteComputationClientError::Exchange {
+                attempts: 0,
+                source,
+            });
+        }
+        let mut attempts = 0_usize;
+        loop {
+            if cx.checkpoint().is_err() {
+                return Err(RemoteComputationClientError::Cancelled { attempts });
+            }
+            attempts = attempts.saturating_add(1);
+            let attempt = match remote_client_race_cancellation(
+                cx,
+                crate::time::timeout(
+                    cx.now(),
+                    self.config.attempt_timeout,
+                    self.call_once(cx, request),
+                ),
+            )
+            .await
+            {
+                RemoteClientCancelRace::Completed(result) => result.unwrap_or_else(|_| {
+                    Err(RemoteComputationClientAttemptError::Timeout(
+                        self.config.attempt_timeout,
+                    ))
+                }),
+                RemoteClientCancelRace::Cancelled => {
+                    return Err(RemoteComputationClientError::CancelledDuringAttempt { attempts });
+                }
+            };
+            if cx.checkpoint().is_err() {
+                return Err(RemoteComputationClientError::CancelledDuringAttempt { attempts });
+            }
+            match attempt {
+                Ok(response) => {
+                    let expected = request.remote_task_id().raw();
+                    let actual = response.remote_task_id().raw();
+                    if actual != expected {
+                        return Err(RemoteComputationClientError::ResponseTaskMismatch {
+                            attempts,
+                            expected,
+                            actual,
+                        });
+                    }
+                    return Ok(response);
+                }
+                Err(error) if attempts < self.config.max_attempts && error.is_retryable() => {
+                    self.sleep_before_retry(cx, attempts).await?;
+                }
+                Err(error) => return Err(error.into_public(attempts)),
+            }
+        }
+    }
+
+    async fn call_once(
+        &self,
+        cx: &Cx,
+        request: &RemoteServiceWireRequest,
+    ) -> Result<RemoteServiceWireResponse, RemoteComputationClientAttemptError> {
+        let stream = TcpStreamBuilder::new(self.endpoint)
+            .connect_timeout(self.config.connect_timeout)
+            .nodelay(self.config.tcp_nodelay)
+            .connect()
+            .await
+            .map_err(RemoteComputationClientAttemptError::Connect)?;
+        let mut stream = self
+            .tls_connector
+            .connect(&self.server_name, stream)
+            .await
+            .map_err(RemoteComputationClientAttemptError::Tls)?;
+        call_tls_computation_once(cx, &mut stream, request, self.config.wire_limits)
+            .await
+            .map_err(RemoteComputationClientAttemptError::Exchange)
+    }
+
+    async fn sleep_before_retry(
+        &self,
+        cx: &Cx,
+        completed_attempts: usize,
+    ) -> Result<(), RemoteComputationClientError> {
+        if cx.checkpoint().is_err() {
+            return Err(RemoteComputationClientError::Cancelled {
+                attempts: completed_attempts,
+            });
+        }
+        let delay = self.config.retry_delay(cx, completed_attempts);
+        if !delay.is_zero() {
+            if matches!(
+                remote_client_race_cancellation(cx, crate::time::sleep(cx.now(), delay)).await,
+                RemoteClientCancelRace::Cancelled
+            ) {
+                return Err(RemoteComputationClientError::Cancelled {
+                    attempts: completed_attempts,
+                });
+            }
+        }
+        if cx.checkpoint().is_err() {
+            return Err(RemoteComputationClientError::Cancelled {
+                attempts: completed_attempts,
+            });
+        }
+        Ok(())
+    }
 }
 
 /// Fatal listener lifecycle failure for [`RemoteComputationService`].

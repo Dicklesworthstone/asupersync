@@ -424,6 +424,7 @@ pub use remote::{
 };
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
 pub use remote::{
+    RemoteComputationClient, RemoteComputationClientConfig, RemoteComputationClientError,
     RemoteComputationListenerError, RemoteComputationService, RemoteComputationServiceConfig,
     RemoteComputationServiceHandle, RemoteComputationServiceReport,
 };

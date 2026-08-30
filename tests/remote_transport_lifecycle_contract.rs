@@ -14,6 +14,7 @@ use asupersync::remote::{
 };
 #[cfg(feature = "tls")]
 use asupersync::remote::{
+    RemoteComputationClient, RemoteComputationClientConfig, RemoteComputationClientError,
     RemoteComputationService, RemoteComputationServiceConfig, RemoteComputationServiceError,
     RemoteServiceRejectionCode, RemoteServiceWireLimits, RemoteServiceWireOutcome,
     RemoteServiceWireRequest, RemoteServiceWireResponse, call_tls_computation_once,
@@ -26,7 +27,7 @@ use asupersync::server::ShutdownPhase;
 #[cfg(feature = "tls")]
 use asupersync::tls::{
     Certificate, CertificateChain, CertificatePin, CertificatePinSet, ClientAuth, PrivateKey,
-    RootCertStore, TlsAcceptorBuilder, TlsConnector, TlsConnectorBuilder,
+    RootCertStore, TlsAcceptor, TlsAcceptorBuilder, TlsConnector, TlsConnectorBuilder,
 };
 use asupersync::trace::TraceBufferHandle;
 use asupersync::trace::distributed::LogicalTime;
@@ -946,6 +947,500 @@ fn remote_service_wire_request_with(
         },
     )
     .expect("wire request identity should agree with its peer hello")
+}
+
+#[cfg(feature = "tls")]
+fn remote_client_test_mtls_pair() -> (TlsAcceptor, TlsConnector) {
+    let certificates = Certificate::from_pem(TEST_CERT_PEM).expect("TLS fixture should parse");
+    let peer_certificate = certificates
+        .first()
+        .expect("TLS fixture should contain a leaf certificate")
+        .clone();
+    let certificate_chain =
+        CertificateChain::from_pem(TEST_CERT_PEM).expect("TLS certificate chain should parse");
+    let private_key = PrivateKey::from_pem(TEST_KEY_PEM).expect("TLS private key should parse");
+    let mut client_auth_roots = RootCertStore::empty();
+    client_auth_roots
+        .add(&peer_certificate)
+        .expect("server should trust the fixture client certificate");
+    let acceptor = TlsAcceptorBuilder::new(certificate_chain.clone(), private_key.clone())
+        .client_auth(ClientAuth::Required(client_auth_roots))
+        .build()
+        .expect("mTLS acceptor should build");
+    let connector = TlsConnectorBuilder::new()
+        .add_root_certificate(&peer_certificate)
+        .identity(certificate_chain, private_key)
+        .build()
+        .expect("mTLS connector should build");
+    (acceptor, connector)
+}
+
+#[cfg(feature = "tls")]
+fn remote_client_test_request(
+    protocol: RemoteProtocolVersion,
+    task_id: u64,
+    idempotency_key: u128,
+) -> RemoteServiceWireRequest {
+    let mut schemas = ComputationSchemaRegistry::new();
+    schemas
+        .register_typed::<Vec<u8>, Vec<u8>>("proof.echo")
+        .expect("client test computation schema should register");
+    let policy = RemotePeerAdmissionPolicy::new(protocol, schemas);
+    remote_service_wire_request_with(
+        policy.hello_for(NodeId::new("native-client-peer")),
+        "proof.echo",
+        task_id,
+        idempotency_key,
+        b"native-client-payload",
+    )
+}
+
+#[cfg(feature = "tls")]
+fn run_remote_client_call(
+    client: &RemoteComputationClient,
+    request: &RemoteServiceWireRequest,
+) -> Result<RemoteServiceWireResponse, RemoteComputationClientError> {
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("native remote client runtime should build");
+    runtime.block_on(async {
+        let cx = Cx::current().expect("runtime block_on should install an ambient context");
+        client.call(&cx, request).await
+    })
+}
+
+#[cfg(feature = "tls")]
+#[test]
+fn remote_native_client_validates_policy_and_observes_preflight_cancellation() {
+    let (_, connector) = remote_client_test_mtls_pair();
+    let endpoint: SocketAddr = "127.0.0.1:9"
+        .parse()
+        .expect("discard endpoint should parse");
+
+    for invalid in [
+        RemoteComputationClientConfig::new().with_wire_limits(RemoteServiceWireLimits::new(0)),
+        RemoteComputationClientConfig::new().with_connect_timeout(Duration::ZERO),
+        RemoteComputationClientConfig::new().with_attempt_timeout(Duration::ZERO),
+        RemoteComputationClientConfig::new().with_max_attempts(0),
+        RemoteComputationClientConfig::new()
+            .with_backoff(Duration::from_millis(2), Duration::from_millis(1)),
+    ] {
+        assert!(matches!(
+            RemoteComputationClient::new(endpoint, "localhost", connector.clone(), invalid),
+            Err(RemoteComputationClientError::InvalidConfig(_))
+        ));
+    }
+    assert!(matches!(
+        RemoteComputationClient::new(
+            endpoint,
+            "invalid server name",
+            connector.clone(),
+            RemoteComputationClientConfig::new(),
+        ),
+        Err(RemoteComputationClientError::InvalidServerName(_))
+    ));
+
+    let client = RemoteComputationClient::new(
+        endpoint,
+        "localhost",
+        connector,
+        RemoteComputationClientConfig::new(),
+    )
+    .expect("valid native client policy should build");
+    let request = remote_client_test_request(RemoteProtocolVersion::V2, 7201, 0x7201);
+    let cx = Cx::for_testing();
+    cx.set_cancel_requested(true);
+    let cancelled = block_on(client.call(&cx, &request))
+        .expect_err("cancelled context must refuse before a connection attempt");
+    assert!(matches!(
+        cancelled,
+        RemoteComputationClientError::Cancelled { attempts: 0 }
+    ));
+
+    let closed_listener = std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("closed-port fixture should reserve a unique loopback endpoint");
+    let closed_endpoint = closed_listener
+        .local_addr()
+        .expect("closed-port fixture should expose its address");
+    drop(closed_listener);
+    let retry_client = RemoteComputationClient::new(
+        closed_endpoint,
+        "localhost",
+        remote_client_test_mtls_pair().1,
+        RemoteComputationClientConfig::new()
+            .with_max_attempts(3)
+            .with_backoff(Duration::ZERO, Duration::ZERO)
+            .with_full_jitter(false),
+    )
+    .expect("closed-port retry client should build");
+    let connect_error = run_remote_client_call(&retry_client, &request)
+        .expect_err("closed loopback endpoint should exhaust finite pre-delivery retries");
+    assert!(matches!(
+        connect_error,
+        RemoteComputationClientError::Connect { attempts: 3, .. }
+    ));
+
+    ProofLogRow::pass(
+        "remote_native_client_preflight",
+        0,
+        "caller_cancelled_then_closed_port",
+        "policy_validation_and_finite_pre_delivery_retry",
+        3,
+        "cancelled_zero_then_connect_three",
+        "cancelled_zero_then_connect_three",
+    )
+    .emit();
+}
+
+#[cfg(feature = "tls")]
+#[test]
+fn remote_native_client_v1_does_not_replay_ambiguous_delivery() {
+    let (acceptor, connector) = remote_client_test_mtls_pair();
+    let listener = block_on(TcpListener::bind("127.0.0.1:0"))
+        .expect("V1 ambiguity fixture should bind loopback");
+    let endpoint = listener
+        .local_addr()
+        .expect("V1 ambiguity fixture should expose its address");
+    let request = remote_client_test_request(RemoteProtocolVersion::V1, 7202, 0x7202);
+    let expected_request = request.clone();
+    let accepted_connections = Arc::new(AtomicUsize::new(0));
+    let server_connections = Arc::clone(&accepted_connections);
+    let server = thread::spawn(move || {
+        block_on(async move {
+            let (stream, _) = listener
+                .accept()
+                .await
+                .expect("V1 ambiguity fixture should accept one connection");
+            server_connections.fetch_add(1, Ordering::SeqCst);
+            let mut stream = acceptor
+                .accept(stream)
+                .await
+                .expect("V1 ambiguity fixture should authenticate the client");
+            let encoded = read_raw_frame(&mut stream)
+                .await
+                .expect("V1 ambiguity fixture should receive a complete request");
+            let received: RemoteServiceWireRequest =
+                serde_json::from_slice(&encoded).expect("V1 ambiguity request should decode");
+            assert_eq!(received, expected_request);
+        });
+    });
+
+    let client = RemoteComputationClient::new(
+        endpoint,
+        "localhost",
+        connector,
+        RemoteComputationClientConfig::new()
+            .with_max_attempts(3)
+            .with_backoff(Duration::ZERO, Duration::ZERO)
+            .with_full_jitter(false),
+    )
+    .expect("V1 ambiguity client should build");
+    let error = run_remote_client_call(&client, &request)
+        .expect_err("V1 must surface post-delivery transport loss without replay");
+    assert!(matches!(
+        error,
+        RemoteComputationClientError::AmbiguousExchange { attempts: 1, .. }
+    ));
+    server
+        .join()
+        .expect("V1 ambiguity fixture should not panic");
+    assert_eq!(
+        accepted_connections.load(Ordering::SeqCst),
+        1,
+        "V1 ambiguous delivery must never be replayed"
+    );
+
+    ProofLogRow::pass(
+        "remote_native_client_v1_ambiguity",
+        0,
+        "complete_request_then_eof",
+        "v1_no_ambiguous_replay",
+        1,
+        "typed_ambiguous_exchange",
+        "typed_ambiguous_exchange",
+    )
+    .emit();
+}
+
+#[cfg(feature = "tls")]
+#[test]
+fn remote_native_client_cancellation_wakes_stalled_exchange() {
+    let (acceptor, connector) = remote_client_test_mtls_pair();
+    let listener = block_on(TcpListener::bind("127.0.0.1:0"))
+        .expect("cancellation fixture should bind loopback");
+    let endpoint = listener
+        .local_addr()
+        .expect("cancellation fixture should expose its address");
+    let request = remote_client_test_request(RemoteProtocolVersion::V2, 7205, 0x7205);
+    let (request_seen_tx, request_seen_rx) = std::sync::mpsc::sync_channel::<()>(0);
+    let (release_tx, release_rx) = std::sync::mpsc::sync_channel::<()>(0);
+    let server = thread::spawn(move || {
+        block_on(async move {
+            let (stream, _) = listener
+                .accept()
+                .await
+                .expect("cancellation fixture should accept one connection");
+            let mut stream = acceptor
+                .accept(stream)
+                .await
+                .expect("cancellation fixture should authenticate the client");
+            let encoded = read_raw_frame(&mut stream)
+                .await
+                .expect("cancellation fixture should receive a complete request");
+            let _: RemoteServiceWireRequest = serde_json::from_slice(&encoded)
+                .expect("cancellation fixture request should decode");
+            request_seen_tx
+                .send(())
+                .expect("cancellation fixture should publish request delivery");
+            release_rx
+                .recv()
+                .expect("cancellation fixture should receive cleanup release");
+        });
+    });
+
+    let client = RemoteComputationClient::new(
+        endpoint,
+        "localhost",
+        connector,
+        RemoteComputationClientConfig::new()
+            .with_attempt_timeout(Duration::from_secs(10))
+            .with_max_attempts(3),
+    )
+    .expect("cancellation client should build");
+    let cx = Cx::for_testing();
+    let client_cx = cx.clone();
+    let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
+    let client_thread = thread::spawn(move || {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("cancellation client runtime should build");
+        let result = runtime.block_on(client.call(&client_cx, &request));
+        result_tx
+            .send(result)
+            .expect("cancellation client should publish its result");
+    });
+    request_seen_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("cancellation fixture should observe request delivery");
+    cx.set_cancel_requested(true);
+    let result_delivery = result_rx.recv_timeout(Duration::from_secs(1));
+    release_tx
+        .send(())
+        .expect("cancellation fixture should release the server stream");
+    server
+        .join()
+        .expect("cancellation fixture should not panic");
+    client_thread
+        .join()
+        .expect("cancellation client should not panic");
+    let error = result_delivery
+        .expect("cancellation should wake the stalled exchange before server release")
+        .expect_err("stalled exchange should terminate through caller cancellation");
+    assert!(matches!(
+        error,
+        RemoteComputationClientError::CancelledDuringAttempt { attempts: 1 }
+    ));
+
+    ProofLogRow::pass(
+        "remote_native_client_inflight_cancellation",
+        7205,
+        "complete_request_then_stall",
+        "caller_cancel_wakes_exchange",
+        1,
+        "typed_ambiguous_cancel_one_attempt",
+        "typed_ambiguous_cancel_one_attempt",
+    )
+    .emit();
+}
+
+#[cfg(feature = "tls")]
+#[test]
+fn remote_native_client_attempt_timeout_fails_closed_without_replay() {
+    let (acceptor, connector) = remote_client_test_mtls_pair();
+    let listener = block_on(TcpListener::bind("127.0.0.1:0"))
+        .expect("attempt-timeout fixture should bind loopback");
+    let endpoint = listener
+        .local_addr()
+        .expect("attempt-timeout fixture should expose its address");
+    let request = remote_client_test_request(RemoteProtocolVersion::V2, 7206, 0x7206);
+    let (request_seen_tx, request_seen_rx) = std::sync::mpsc::sync_channel::<()>(0);
+    let (release_tx, release_rx) = std::sync::mpsc::sync_channel::<()>(0);
+    let server = thread::spawn(move || {
+        block_on(async move {
+            let (stream, _) = listener
+                .accept()
+                .await
+                .expect("attempt-timeout fixture should accept one connection");
+            let mut stream = acceptor
+                .accept(stream)
+                .await
+                .expect("attempt-timeout fixture should authenticate the client");
+            let encoded = read_raw_frame(&mut stream)
+                .await
+                .expect("attempt-timeout fixture should receive a complete request");
+            let _: RemoteServiceWireRequest = serde_json::from_slice(&encoded)
+                .expect("attempt-timeout fixture request should decode");
+            request_seen_tx
+                .send(())
+                .expect("attempt-timeout fixture should publish request delivery");
+            release_rx
+                .recv()
+                .expect("attempt-timeout fixture should receive cleanup release");
+        });
+    });
+
+    let client = RemoteComputationClient::new(
+        endpoint,
+        "localhost",
+        connector,
+        RemoteComputationClientConfig::new()
+            .with_attempt_timeout(Duration::from_millis(100))
+            .with_max_attempts(3)
+            .with_backoff(Duration::ZERO, Duration::ZERO)
+            .with_full_jitter(false),
+    )
+    .expect("attempt-timeout client should build");
+    let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
+    let client_thread = thread::spawn(move || {
+        result_tx
+            .send(run_remote_client_call(&client, &request))
+            .expect("attempt-timeout client should publish its result");
+    });
+    request_seen_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("attempt-timeout fixture should observe request delivery");
+    let result_delivery = result_rx.recv_timeout(Duration::from_secs(2));
+    release_tx
+        .send(())
+        .expect("attempt-timeout fixture should release the server stream");
+    server
+        .join()
+        .expect("attempt-timeout fixture should not panic");
+    client_thread
+        .join()
+        .expect("attempt-timeout client should not panic");
+    let error = result_delivery
+        .expect("attempt timeout should bound a stalled response")
+        .expect_err("stalled response must terminate through attempt timeout");
+    assert!(matches!(
+        error,
+        RemoteComputationClientError::AttemptTimeout {
+            attempts: 1,
+            timeout,
+        } if timeout == Duration::from_millis(100)
+    ));
+
+    ProofLogRow::pass(
+        "remote_native_client_attempt_timeout",
+        7206,
+        "complete_request_then_stall",
+        "bounded_attempt_no_ambiguous_replay",
+        1,
+        "typed_timeout_one_attempt",
+        "typed_timeout_one_attempt",
+    )
+    .emit();
+}
+
+#[cfg(feature = "tls")]
+#[test]
+fn remote_native_client_v2_fails_closed_on_in_flight_and_wrong_task_response() {
+    let (acceptor, connector) = remote_client_test_mtls_pair();
+    let listener = block_on(TcpListener::bind("127.0.0.1:0"))
+        .expect("V2 fail-closed fixture should bind loopback");
+    let endpoint = listener
+        .local_addr()
+        .expect("V2 fail-closed fixture should expose its address");
+    let in_flight_request = remote_client_test_request(RemoteProtocolVersion::V2, 7203, 0x7203);
+    let mismatch_request = remote_client_test_request(RemoteProtocolVersion::V2, 7204, 0x7204);
+    let server = thread::spawn(move || {
+        block_on(async move {
+            let mut requests = Vec::new();
+            for attempt in 0..2 {
+                let (stream, _) = listener
+                    .accept()
+                    .await
+                    .expect("V2 fail-closed fixture should accept both calls");
+                let mut stream = acceptor
+                    .accept(stream)
+                    .await
+                    .expect("V2 fail-closed fixture should authenticate the client");
+                let encoded = read_raw_frame(&mut stream)
+                    .await
+                    .expect("V2 fail-closed fixture should receive a complete request");
+                let received: RemoteServiceWireRequest =
+                    serde_json::from_slice(&encoded).expect("V2 fail-closed request should decode");
+                let remote_task_id = received.remote_task_id().raw();
+                requests.push(received);
+                let response = if attempt == 0 {
+                    RemoteServiceWireResponse::Rejected {
+                        remote_task_id,
+                        code: RemoteServiceRejectionCode::OperationInFlight,
+                        diagnostic: "planted in-flight fail-closed boundary".to_owned(),
+                    }
+                } else {
+                    RemoteServiceWireResponse::Outcome {
+                        remote_task_id: remote_task_id + 99,
+                        outcome: RemoteServiceWireOutcome::Success(b"wrong-task".to_vec()),
+                    }
+                };
+                write_json_frame(&mut stream, &response)
+                    .await
+                    .expect("V2 fail-closed fixture should write a typed response");
+                stream
+                    .flush()
+                    .await
+                    .expect("V2 fail-closed fixture should flush its typed response");
+            }
+            requests
+        })
+    });
+
+    let client = RemoteComputationClient::new(
+        endpoint,
+        "localhost",
+        connector,
+        RemoteComputationClientConfig::new()
+            .with_max_attempts(2)
+            .with_backoff(Duration::ZERO, Duration::ZERO)
+            .with_full_jitter(false),
+    )
+    .expect("V2 fail-closed client should build");
+    let response = run_remote_client_call(&client, &in_flight_request)
+        .expect("typed in-flight refusal should remain a typed response");
+    assert!(matches!(
+        response,
+        RemoteServiceWireResponse::Rejected {
+            remote_task_id: 7203,
+            code: RemoteServiceRejectionCode::OperationInFlight,
+            ..
+        }
+    ));
+    let mismatch = run_remote_client_call(&client, &mismatch_request)
+        .expect_err("wrong-task response must fail correlation validation");
+    assert!(matches!(
+        mismatch,
+        RemoteComputationClientError::ResponseTaskMismatch {
+            attempts: 1,
+            expected: 7204,
+            actual: 7303,
+        }
+    ));
+    let requests = server
+        .join()
+        .expect("V2 fail-closed fixture should not panic");
+    assert_eq!(requests, vec![in_flight_request, mismatch_request]);
+
+    ProofLogRow::pass(
+        "remote_native_client_v2_fail_closed",
+        0,
+        "typed_in_flight_then_wrong_task",
+        "no_fresh_connection_replay_then_correlation_check",
+        2,
+        "in_flight_and_typed_mismatch",
+        "in_flight_and_typed_mismatch",
+    )
+    .emit();
 }
 
 fn spawn_test_handle(cx: &Cx) -> asupersync::remote::RemoteHandle {
