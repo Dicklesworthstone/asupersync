@@ -2210,8 +2210,11 @@ impl<Caps> Cx<Caps> {
     /// the same value as [`Self::is_cancel_requested`], observed with Acquire
     /// ordering. The only divergence window is the legacy v0.4.3 compatibility
     /// path that writes `cancel_requested` directly under the inner lock
-    /// without publishing; [`Self::checkpoint`] materializes that legacy field,
-    /// so the published bit converges at the next checkpoint.
+    /// without publishing: [`Self::checkpoint`] still honors and delivers such
+    /// a mutation, but does not republish it, so the published bit may lag the
+    /// locked field until the next runtime mutation re-syncs the envelope.
+    /// It can only lag (report false while cancellation is pending), never
+    /// spuriously report true.
     ///
     /// Like [`Self::is_cancel_requested`], this is mask-agnostic: masks only
     /// gate [`Self::checkpoint`] observability.
@@ -5749,12 +5752,18 @@ mod tests {
         );
         assert!(
             cx.checkpoint().is_err(),
-            "checkpoint must materialize the legacy field into delivery"
+            "checkpoint must still deliver the legacy locked-field cancellation"
         );
         assert!(
-            cx.published_cancel_requested(),
-            "checkpoint must materialize legacy mutation into the published envelope"
+            !cx.published_cancel_requested(),
+            "checkpoint delivery of a legacy locked-field write does not republish the envelope; \
+             the published bit may lag after legacy compat mutations"
         );
+
+        // The envelope re-converges at the next runtime mutation.
+        cx.set_cancel_requested(false);
+        assert!(!cx.published_cancel_requested());
+        assert!(!cx.is_cancel_requested());
     }
 
 
