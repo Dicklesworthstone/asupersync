@@ -420,6 +420,11 @@ pub use remote::{
     ResultDelivery, Saga, SagaState, SagaStepError, SpawnAck, SpawnAckStatus, SpawnRejectReason,
     SpawnRequest, spawn_remote,
 };
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+pub use remote::{
+    RemoteComputationListenerError, RemoteComputationService, RemoteComputationServiceConfig,
+    RemoteComputationServiceHandle, RemoteComputationServiceReport,
+};
 #[cfg(feature = "tls")]
 pub use remote::{call_tls_computation_once, serve_tls_computation_once};
 pub use types::{

@@ -26,13 +26,19 @@
 //! [`RemoteTransport`], so deterministic lab harnesses and real transports share
 //! the same protocol rules. With the `tls` feature, this module also exposes a
 //! bounded one-shot service adapter for executing one authenticated named
-//! computation over an already-established TLS stream. That adapter does not
-//! yet provide retry deduplication, lease enforcement, or listener lifecycle.
+//! computation over an already-established TLS stream. Native TLS builds also
+//! expose a structured TCP listener that owns accepted connections through a
+//! child region and drains them explicitly. Neither surface yet provides retry
+//! deduplication or lease enforcement.
 
 use crate::channel::oneshot;
 #[cfg(feature = "tls")]
 use crate::codec::{Framed, LengthDelimitedCodec};
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+use crate::combinator::JoinSet;
 use crate::cx::Cx;
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+use crate::cx::{ChildRegionError, ChildRegionSpec};
 use crate::distributed::membership::{LeaseAction, MembershipLeaseReactor, MembershipView};
 use crate::distributed::{
     ComputationRegistryFingerprint, ComputationSchemaRegistry, ComputationSchemaRegistryError,
@@ -44,6 +50,13 @@ use crate::types::{Budget, CancelReason, ObligationId, RegionId, TaskId, Time};
 use crate::util::det_hash::DetHashMap;
 #[cfg(feature = "tls")]
 use crate::{bytes::BytesMut, io::AsyncRead, io::AsyncWrite, stream::StreamExt};
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+use crate::{
+    net::TcpListener,
+    runtime::SpawnError,
+    server::{ConnectionManager, ShutdownPhase, ShutdownSignal, ShutdownStats},
+    tls::{TlsAcceptor, TlsError},
+};
 #[cfg(feature = "tls")]
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -52,6 +65,8 @@ use std::fmt;
 use std::future::Future;
 use std::io;
 use std::marker::PhantomData;
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -3267,6 +3282,608 @@ where
     let mut framed = remote_service_framed(stream, limits)?;
     write_remote_service_frame(cx, &mut framed, request, limits.max_frame_bytes()).await?;
     read_remote_service_frame(cx, &mut framed).await
+}
+
+/// Fatal listener lifecycle failure for [`RemoteComputationService`].
+///
+/// Connection-scoped TLS, framing, and handler failures are retained in the
+/// terminal [`RemoteComputationServiceReport`] instead of terminating the
+/// listener.
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+#[derive(Debug)]
+pub enum RemoteComputationListenerError {
+    /// A zero-byte frame limit cannot admit any encoded request.
+    InvalidFrameLimit,
+    /// The listening socket failed to bind or accept.
+    Transport(io::Error),
+    /// Runtime refused a structured connection-task spawn.
+    Spawn(SpawnError),
+    /// Service child-region creation or quiescent close failed.
+    ChildRegion(ChildRegionError),
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+impl fmt::Display for RemoteComputationListenerError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidFrameLimit => write!(f, "remote listener frame limit must be nonzero"),
+            Self::Transport(error) => write!(f, "remote listener transport error: {error}"),
+            Self::Spawn(error) => write!(f, "remote listener connection spawn failed: {error}"),
+            Self::ChildRegion(error) => write!(f, "remote listener child region failed: {error}"),
+        }
+    }
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+impl std::error::Error for RemoteComputationListenerError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Transport(error) => Some(error),
+            Self::Spawn(error) => Some(error),
+            Self::ChildRegion(error) => Some(error),
+            Self::InvalidFrameLimit => None,
+        }
+    }
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+#[derive(Debug)]
+enum RemoteComputationConnectionError {
+    Tls(TlsError),
+    Service(RemoteComputationServiceError),
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+impl fmt::Display for RemoteComputationConnectionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Tls(error) => write!(f, "remote service TLS error: {error}"),
+            Self::Service(error) => error.fmt(f),
+        }
+    }
+}
+
+/// Runtime-owned listener configuration for authenticated remote computations.
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RemoteComputationServiceConfig {
+    wire_limits: RemoteServiceWireLimits,
+    max_connections: Option<usize>,
+    drain_timeout: Duration,
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+impl RemoteComputationServiceConfig {
+    /// Creates a production-oriented listener configuration.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            wire_limits: RemoteServiceWireLimits::new(DEFAULT_REMOTE_SERVICE_MAX_FRAME_BYTES),
+            max_connections: Some(256),
+            drain_timeout: Duration::from_secs(30),
+        }
+    }
+
+    /// Sets the maximum encoded request and response frame size.
+    #[must_use]
+    pub const fn with_wire_limits(mut self, wire_limits: RemoteServiceWireLimits) -> Self {
+        self.wire_limits = wire_limits;
+        self
+    }
+
+    /// Sets the listener-wide connection cap; `None` means unbounded.
+    #[must_use]
+    pub const fn with_max_connections(mut self, max_connections: Option<usize>) -> Self {
+        self.max_connections = max_connections;
+        self
+    }
+
+    /// Sets the graceful-drain interval before active connections are interrupted.
+    #[must_use]
+    pub const fn with_drain_timeout(mut self, drain_timeout: Duration) -> Self {
+        self.drain_timeout = drain_timeout;
+        self
+    }
+
+    /// Encoded-frame policy used by every accepted connection.
+    #[must_use]
+    pub const fn wire_limits(self) -> RemoteServiceWireLimits {
+        self.wire_limits
+    }
+
+    /// Listener-wide connection cap.
+    #[must_use]
+    pub const fn max_connections(self) -> Option<usize> {
+        self.max_connections
+    }
+
+    /// Graceful-drain interval before force-close.
+    #[must_use]
+    pub const fn drain_timeout(self) -> Duration {
+        self.drain_timeout
+    }
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+impl Default for RemoteComputationServiceConfig {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Cloneable control plane for a running [`RemoteComputationService`].
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+#[derive(Clone)]
+pub struct RemoteComputationServiceHandle {
+    shutdown_signal: ShutdownSignal,
+    connections: ConnectionManager,
+    drain_timeout: Duration,
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+impl fmt::Debug for RemoteComputationServiceHandle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RemoteComputationServiceHandle")
+            .field("shutdown_phase", &self.shutdown_signal.phase())
+            .field("active_connections", &self.connections.active_count())
+            .field("drain_timeout", &self.drain_timeout)
+            .finish()
+    }
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+impl RemoteComputationServiceHandle {
+    /// Stops admission and begins graceful connection drain.
+    #[must_use]
+    pub fn begin_drain(&self) -> bool {
+        self.connections.begin_drain(self.drain_timeout)
+    }
+
+    /// Stops admission and immediately interrupts active connection work.
+    pub fn force_close(&self) {
+        let _ = self.connections.begin_drain(Duration::ZERO);
+        self.shutdown_signal.trigger_immediate();
+    }
+
+    /// Shared phase signal for operator observation.
+    #[must_use]
+    pub fn shutdown_signal(&self) -> ShutdownSignal {
+        self.shutdown_signal.clone()
+    }
+
+    /// Number of accepted connections whose structured tasks are still live.
+    #[must_use]
+    pub fn active_connections(&self) -> usize {
+        self.connections.active_count()
+    }
+}
+
+/// Terminal accounting for one structured remote-computation listener run.
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+#[derive(Clone, Debug)]
+pub struct RemoteComputationServiceReport {
+    accepted_connections: u64,
+    capacity_rejections: u64,
+    completed_connections: u64,
+    interrupted_connections: u64,
+    failed_connections: u64,
+    panicked_connections: u64,
+    first_connection_failure: Option<String>,
+    shutdown: ShutdownStats,
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+impl RemoteComputationServiceReport {
+    /// Connections accepted from the operating-system listener.
+    #[must_use]
+    pub const fn accepted_connections(&self) -> u64 {
+        self.accepted_connections
+    }
+
+    /// Accepted sockets refused by the listener-wide capacity/drain gate.
+    #[must_use]
+    pub const fn capacity_rejections(&self) -> u64 {
+        self.capacity_rejections
+    }
+
+    /// Connections that completed one fully flushed service exchange.
+    #[must_use]
+    pub const fn completed_connections(&self) -> u64 {
+        self.completed_connections
+    }
+
+    /// Connections interrupted by cancellation or force-close.
+    #[must_use]
+    pub const fn interrupted_connections(&self) -> u64 {
+        self.interrupted_connections
+    }
+
+    /// Connections that terminated with a transport, TLS, or protocol error.
+    #[must_use]
+    pub const fn failed_connections(&self) -> u64 {
+        self.failed_connections
+    }
+
+    /// Connection tasks that crossed a panic boundary.
+    #[must_use]
+    pub const fn panicked_connections(&self) -> u64 {
+        self.panicked_connections
+    }
+
+    /// First connection-scoped failure retained for bounded diagnostics.
+    #[must_use]
+    pub fn first_connection_failure(&self) -> Option<&str> {
+        self.first_connection_failure.as_deref()
+    }
+
+    /// Connection-level graceful-drain accounting.
+    #[must_use]
+    pub const fn shutdown(&self) -> &ShutdownStats {
+        &self.shutdown
+    }
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RemoteConnectionCompletion {
+    Completed,
+    Interrupted,
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+#[derive(Default)]
+struct RemoteConnectionOutcomeCounts {
+    completed: u64,
+    interrupted: u64,
+    failed: u64,
+    panicked: u64,
+    first_failure: Option<String>,
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+impl RemoteConnectionOutcomeCounts {
+    fn record(
+        &mut self,
+        outcome: Outcome<RemoteConnectionCompletion, RemoteComputationConnectionError>,
+    ) {
+        match outcome {
+            Outcome::Ok(RemoteConnectionCompletion::Completed) => {
+                self.completed = self.completed.saturating_add(1);
+            }
+            Outcome::Ok(RemoteConnectionCompletion::Interrupted) | Outcome::Cancelled(_) => {
+                self.interrupted = self.interrupted.saturating_add(1);
+            }
+            Outcome::Err(error) => {
+                self.failed = self.failed.saturating_add(1);
+                if self.first_failure.is_none() {
+                    self.first_failure = Some(error.to_string());
+                }
+            }
+            Outcome::Panicked(_) => {
+                self.panicked = self.panicked.saturating_add(1);
+                if self.first_failure.is_none() {
+                    self.first_failure =
+                        Some("remote computation connection task panicked".to_owned());
+                }
+            }
+        }
+    }
+}
+
+/// TCP+mTLS listener that owns every connection through a child region.
+///
+/// `run` opens one child region, admits every connection through a region-owned
+/// [`JoinSet`], stops acceptance before drain, races handshake/request/flush
+/// against force-close and task cancellation, joins every connection outcome,
+/// and closes the child region only after quiescence. Each connection still
+/// performs exactly one request; peer-scoped idempotency and lifecycle message
+/// multiplexing remain a separate layer.
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+pub struct RemoteComputationService {
+    tcp_listener: TcpListener,
+    tls_acceptor: Arc<TlsAcceptor>,
+    policy: Arc<RemotePeerAdmissionPolicy>,
+    computations: Arc<RemoteComputationRegistry>,
+    config: RemoteComputationServiceConfig,
+    shutdown_signal: ShutdownSignal,
+    connections: ConnectionManager,
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+impl fmt::Debug for RemoteComputationService {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RemoteComputationService")
+            .field("local_addr", &self.tcp_listener.local_addr().ok())
+            .field("config", &self.config)
+            .field("shutdown_phase", &self.shutdown_signal.phase())
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+impl RemoteComputationService {
+    /// Binds a structured authenticated computation listener.
+    pub async fn bind<A>(
+        addr: A,
+        tls_acceptor: TlsAcceptor,
+        policy: RemotePeerAdmissionPolicy,
+        computations: RemoteComputationRegistry,
+        config: RemoteComputationServiceConfig,
+    ) -> Result<Self, RemoteComputationListenerError>
+    where
+        A: ToSocketAddrs + Send + 'static,
+    {
+        if config.wire_limits.max_frame_bytes() == 0 {
+            return Err(RemoteComputationListenerError::InvalidFrameLimit);
+        }
+        let tcp_listener = TcpListener::bind(addr)
+            .await
+            .map_err(RemoteComputationListenerError::Transport)?;
+        Self::from_listener(tcp_listener, tls_acceptor, policy, computations, config)
+    }
+
+    /// Constructs the service around an already-bound listener.
+    pub fn from_listener(
+        tcp_listener: TcpListener,
+        tls_acceptor: TlsAcceptor,
+        policy: RemotePeerAdmissionPolicy,
+        computations: RemoteComputationRegistry,
+        config: RemoteComputationServiceConfig,
+    ) -> Result<Self, RemoteComputationListenerError> {
+        if config.wire_limits.max_frame_bytes() == 0 {
+            return Err(RemoteComputationListenerError::InvalidFrameLimit);
+        }
+        let shutdown_signal = ShutdownSignal::new();
+        let connections = ConnectionManager::new(config.max_connections, shutdown_signal.clone());
+        Ok(Self {
+            tcp_listener,
+            tls_acceptor: Arc::new(tls_acceptor),
+            policy: Arc::new(policy),
+            computations: Arc::new(computations),
+            config,
+            shutdown_signal,
+            connections,
+        })
+    }
+
+    /// Cloneable drain/force-close handle for operator ownership.
+    #[must_use]
+    pub fn handle(&self) -> RemoteComputationServiceHandle {
+        RemoteComputationServiceHandle {
+            shutdown_signal: self.shutdown_signal.clone(),
+            connections: self.connections.clone(),
+            drain_timeout: self.config.drain_timeout,
+        }
+    }
+
+    /// Local address selected by the bound listener.
+    pub fn local_addr(&self) -> io::Result<SocketAddr> {
+        self.tcp_listener.local_addr()
+    }
+
+    /// Runs until drain, parent cancellation, or a fatal listener error.
+    ///
+    /// Connection-scoped TLS/protocol failures are counted in the returned
+    /// report and never kill the accept loop. Fatal listener/spawn failures
+    /// first drain all admitted connection tasks and close their child region,
+    /// then return the typed error.
+    pub async fn run(
+        self,
+        cx: &Cx,
+    ) -> Result<RemoteComputationServiceReport, RemoteComputationListenerError> {
+        let child_region = cx
+            .open_child_region(ChildRegionSpec::inherit())
+            .await
+            .map_err(RemoteComputationListenerError::ChildRegion)?;
+        let service_cx = child_region.cx().clone();
+        let mut connection_tasks = JoinSet::in_cx(&service_cx);
+        let mut shutdown_rx = self.shutdown_signal.subscribe();
+        let mut accepted_connections = 0_u64;
+        let mut capacity_rejections = 0_u64;
+        let mut connection_outcomes = RemoteConnectionOutcomeCounts::default();
+        let mut fatal_error = None;
+
+        loop {
+            if self.shutdown_signal.is_shutting_down() || cx.checkpoint().is_err() {
+                break;
+            }
+            while let Some(outcome) = connection_tasks.try_join_next() {
+                connection_outcomes.record(outcome);
+            }
+
+            let accepted = remote_service_accept_or_shutdown(
+                cx,
+                &self.tcp_listener,
+                &self.shutdown_signal,
+                &mut shutdown_rx,
+            )
+            .await;
+            let accepted = match accepted {
+                RemoteServiceAccept::Shutdown => break,
+                RemoteServiceAccept::Accepted(result) => result,
+            };
+            let (stream, peer_addr) = match accepted {
+                Ok(connection) => connection,
+                Err(error)
+                    if error.kind() == io::ErrorKind::Interrupted
+                        && (cx.is_cancel_requested()
+                            || self.shutdown_signal.is_shutting_down()) =>
+                {
+                    break;
+                }
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::WouldBlock
+                            | io::ErrorKind::Interrupted
+                            | io::ErrorKind::ConnectionAborted
+                            | io::ErrorKind::ConnectionReset
+                    ) =>
+                {
+                    continue;
+                }
+                Err(error) => {
+                    fatal_error = Some(RemoteComputationListenerError::Transport(error));
+                    break;
+                }
+            };
+            accepted_connections = accepted_connections.saturating_add(1);
+
+            let Some(guard) = self.connections.register(peer_addr) else {
+                capacity_rejections = capacity_rejections.saturating_add(1);
+                drop(stream);
+                continue;
+            };
+
+            let tls_acceptor = Arc::clone(&self.tls_acceptor);
+            let policy = Arc::clone(&self.policy);
+            let computations = Arc::clone(&self.computations);
+            let shutdown_signal = self.shutdown_signal.clone();
+            let wire_limits = self.config.wire_limits;
+            if let Err(error) =
+                connection_tasks.spawn(&service_cx, move |connection_cx| async move {
+                    let _guard = guard;
+                    let exchange = async {
+                        let mut stream = tls_acceptor
+                            .accept(stream)
+                            .await
+                            .map_err(RemoteComputationConnectionError::Tls)?;
+                        serve_tls_computation_once(
+                            &connection_cx,
+                            &mut stream,
+                            &policy,
+                            &computations,
+                            wire_limits,
+                        )
+                        .await
+                        .map_err(RemoteComputationConnectionError::Service)?;
+                        Ok::<_, RemoteComputationConnectionError>(
+                            RemoteConnectionCompletion::Completed,
+                        )
+                    };
+                    Ok(
+                        match race_remote_service_termination(
+                            &connection_cx,
+                            &shutdown_signal,
+                            exchange,
+                        )
+                        .await
+                        {
+                            Some(result) => return result,
+                            None => RemoteConnectionCompletion::Interrupted,
+                        },
+                    )
+                })
+            {
+                fatal_error = Some(RemoteComputationListenerError::Spawn(error));
+                break;
+            }
+        }
+
+        // Close the admission surface before waiting for existing connection
+        // tasks. Otherwise new peers can complete the TCP handshake into the
+        // kernel backlog after the service has committed to drain.
+        drop(self.tcp_listener);
+
+        if self.shutdown_signal.phase() == ShutdownPhase::Running {
+            let _ = self.connections.begin_drain(self.config.drain_timeout);
+        }
+        let mut shutdown = self.connections.drain_with_stats().await;
+        let was_force_closing = self.shutdown_signal.phase() == ShutdownPhase::ForceClosing;
+        let outcomes = connection_tasks.join_all(&service_cx).await;
+
+        for outcome in outcomes {
+            connection_outcomes.record(outcome);
+        }
+
+        let close_result = child_region
+            .close()
+            .await
+            .map_err(RemoteComputationListenerError::ChildRegion);
+        if self.connections.is_empty() {
+            self.shutdown_signal.mark_stopped();
+            if was_force_closing {
+                let drain_report = shutdown.drain_report.take();
+                shutdown = self
+                    .shutdown_signal
+                    .collect_stats(shutdown.drained, shutdown.force_closed);
+                shutdown.drain_report = drain_report;
+            }
+        }
+
+        let report = RemoteComputationServiceReport {
+            accepted_connections,
+            capacity_rejections,
+            completed_connections: connection_outcomes.completed,
+            interrupted_connections: connection_outcomes.interrupted,
+            failed_connections: connection_outcomes.failed,
+            panicked_connections: connection_outcomes.panicked,
+            first_connection_failure: connection_outcomes.first_failure,
+            shutdown,
+        };
+
+        if let Some(error) = fatal_error {
+            return Err(error);
+        }
+        close_result?;
+        Ok(report)
+    }
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+enum RemoteServiceAccept {
+    Accepted(io::Result<(crate::net::TcpStream, SocketAddr)>),
+    Shutdown,
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+async fn remote_service_accept_or_shutdown(
+    cx: &Cx,
+    listener: &TcpListener,
+    shutdown_signal: &ShutdownSignal,
+    shutdown_rx: &mut crate::signal::ShutdownReceiver,
+) -> RemoteServiceAccept {
+    let mut accept = core::pin::pin!(listener.accept());
+    let mut shutdown = core::pin::pin!(shutdown_rx.wait());
+    std::future::poll_fn(|task_cx| {
+        if cx.checkpoint().is_err() || shutdown_signal.is_shutting_down() {
+            return std::task::Poll::Ready(RemoteServiceAccept::Shutdown);
+        }
+        if shutdown.as_mut().poll(task_cx).is_ready() {
+            return std::task::Poll::Ready(RemoteServiceAccept::Shutdown);
+        }
+        accept
+            .as_mut()
+            .poll(task_cx)
+            .map(RemoteServiceAccept::Accepted)
+    })
+    .await
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+async fn race_remote_service_termination<F>(
+    cx: &Cx,
+    shutdown_signal: &ShutdownSignal,
+    future: F,
+) -> Option<F::Output>
+where
+    F: Future,
+{
+    let mut future = core::pin::pin!(future);
+    let mut force_close =
+        core::pin::pin!(shutdown_signal.wait_for_phase(ShutdownPhase::ForceClosing));
+    std::future::poll_fn(|task_cx| {
+        if cx.checkpoint().is_err()
+            || shutdown_signal.phase() as u8 >= ShutdownPhase::ForceClosing as u8
+        {
+            return std::task::Poll::Ready(None);
+        }
+        if force_close.as_mut().poll(task_cx).is_ready() {
+            return std::task::Poll::Ready(None);
+        }
+        future.as_mut().poll(task_cx).map(Some)
+    })
+    .await
 }
 
 /// Envelope for protocol messages with logical time metadata.

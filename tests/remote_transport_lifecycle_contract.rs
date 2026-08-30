@@ -14,10 +14,15 @@ use asupersync::remote::{
 };
 #[cfg(feature = "tls")]
 use asupersync::remote::{
-    RemoteComputationServiceError, RemoteServiceRejectionCode, RemoteServiceWireLimits,
-    RemoteServiceWireOutcome, RemoteServiceWireRequest, RemoteServiceWireResponse,
-    call_tls_computation_once, serve_tls_computation_once,
+    RemoteComputationService, RemoteComputationServiceConfig, RemoteComputationServiceError,
+    RemoteServiceRejectionCode, RemoteServiceWireLimits, RemoteServiceWireOutcome,
+    RemoteServiceWireRequest, RemoteServiceWireResponse, call_tls_computation_once,
+    serve_tls_computation_once,
 };
+#[cfg(feature = "tls")]
+use asupersync::runtime::RuntimeBuilder;
+#[cfg(feature = "tls")]
+use asupersync::server::ShutdownPhase;
 #[cfg(feature = "tls")]
 use asupersync::tls::{
     Certificate, CertificateChain, CertificatePin, CertificatePinSet, ClientAuth, PrivateKey,
@@ -25,6 +30,8 @@ use asupersync::tls::{
 };
 use asupersync::trace::TraceBufferHandle;
 use asupersync::trace::distributed::LogicalTime;
+#[cfg(feature = "tls")]
+use asupersync::types::CancelKind;
 use asupersync::types::CancelReason;
 use futures_lite::future::block_on;
 use parking_lot::Mutex;
@@ -1519,6 +1526,273 @@ fn remote_tls_service_executes_only_certificate_bound_authorized_computation() {
         7,
         "one_certificate_bound_dispatch",
         "one_certificate_bound_dispatch",
+    )
+    .emit();
+}
+
+#[cfg(feature = "tls")]
+#[test]
+fn remote_tls_listener_drains_stalled_connection_without_orphaning_tasks() {
+    let certificates = Certificate::from_pem(TEST_CERT_PEM).expect("TLS fixture should parse");
+    let peer_certificate = certificates
+        .first()
+        .expect("TLS fixture should contain a leaf certificate")
+        .clone();
+    let certificate_chain =
+        CertificateChain::from_pem(TEST_CERT_PEM).expect("TLS certificate chain should parse");
+    let private_key = PrivateKey::from_pem(TEST_KEY_PEM).expect("TLS private key should parse");
+
+    let dispatch_count = Arc::new(AtomicUsize::new(0));
+    let handler_dispatch_count = Arc::clone(&dispatch_count);
+    let mut computations = RemoteComputationRegistry::new();
+    computations
+        .register::<Vec<u8>, Vec<u8>, _, _>("proof.echo", move |_cx, invocation| {
+            let handler_dispatch_count = Arc::clone(&handler_dispatch_count);
+            async move {
+                handler_dispatch_count.fetch_add(1, Ordering::SeqCst);
+                Ok(RemoteOutcome::Success(
+                    invocation.into_request().input.into_data(),
+                ))
+            }
+        })
+        .expect("listener proof.echo handler should register");
+
+    let origin = NodeId::new(ORIGIN_NODE);
+    let mut peer_pins = CertificatePinSet::new();
+    peer_pins.add(
+        CertificatePin::compute_spki_sha256(&peer_certificate)
+            .expect("fixture certificate should produce an SPKI pin"),
+    );
+    let mut policy = RemotePeerAdmissionPolicy::new(
+        RemoteProtocolVersion::V1,
+        computations.schema_registry().clone(),
+    );
+    policy
+        .grant_tls_peer(origin.clone(), peer_pins, ["proof.echo"])
+        .expect("listener certificate-bound grant should be valid");
+    let request = remote_service_wire_request(policy.hello_for(origin), "proof.echo", 7101);
+
+    let mut client_auth_roots = RootCertStore::empty();
+    client_auth_roots
+        .add(&peer_certificate)
+        .expect("server should trust the fixture client certificate");
+    let acceptor = TlsAcceptorBuilder::new(certificate_chain.clone(), private_key.clone())
+        .client_auth(ClientAuth::Required(client_auth_roots))
+        .build()
+        .expect("structured mTLS acceptor should build");
+    let connector = TlsConnectorBuilder::new()
+        .add_root_certificate(&peer_certificate)
+        .identity(certificate_chain, private_key)
+        .build()
+        .expect("structured mTLS connector should build");
+
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("structured remote service runtime should build");
+    let service = runtime
+        .block_on(RemoteComputationService::bind(
+            "127.0.0.1:0",
+            acceptor,
+            policy,
+            computations,
+            RemoteComputationServiceConfig::new()
+                .with_max_connections(Some(8))
+                .with_drain_timeout(Duration::from_millis(25)),
+        ))
+        .expect("structured remote service should bind");
+    let endpoint = service
+        .local_addr()
+        .expect("structured remote service should expose its address");
+    let operator = service.handle();
+    let client_operator = operator.clone();
+
+    let client = thread::spawn(move || {
+        let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let accepted = call_tls_remote_service(endpoint, &connector, &request);
+            assert!(matches!(
+                accepted,
+                RemoteServiceWireResponse::Outcome {
+                    remote_task_id: 7101,
+                    outcome: RemoteServiceWireOutcome::Success(ref payload),
+                } if payload == b"executed-over-mtls"
+            ));
+
+            block_on(async {
+                let stream = TcpStream::connect(endpoint)
+                    .await
+                    .expect("stalled service client should connect");
+                let mut stream = connector
+                    .connect("localhost", stream)
+                    .await
+                    .expect("stalled service client should complete mutual TLS");
+                stream
+                    .write_all(&100_u32.to_be_bytes())
+                    .await
+                    .expect("stalled service client should write a bounded prefix");
+                stream
+                    .write_all(b"{")
+                    .await
+                    .expect("stalled service client should write a partial frame");
+                stream
+                    .flush()
+                    .await
+                    .expect("stalled service client should flush its partial frame");
+
+                let deadline = std::time::Instant::now() + Duration::from_secs(2);
+                while client_operator.active_connections() == 0 {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "stalled connection should become service-owned"
+                    );
+                    thread::sleep(Duration::from_millis(1));
+                }
+                assert!(client_operator.begin_drain());
+                thread::sleep(Duration::from_millis(100));
+                drop(stream);
+            });
+        }));
+        if attempt.is_err() {
+            client_operator.force_close();
+        }
+        attempt.expect("structured remote service client should complete");
+    });
+
+    let report = runtime
+        .block_on(async move {
+            let cx = Cx::current().expect("runtime should install a service context");
+            service.run(&cx).await
+        })
+        .expect("structured remote service should drain cleanly");
+    client
+        .join()
+        .expect("structured remote service client should not panic");
+
+    assert_eq!(report.accepted_connections(), 2);
+    assert_eq!(report.capacity_rejections(), 0);
+    assert_eq!(report.completed_connections(), 1);
+    assert_eq!(report.interrupted_connections(), 1);
+    assert_eq!(report.failed_connections(), 0);
+    assert_eq!(report.panicked_connections(), 0);
+    assert_eq!(report.first_connection_failure(), None);
+    assert_eq!(report.shutdown().drained, 0);
+    assert_eq!(report.shutdown().force_closed, 1);
+    assert_eq!(operator.active_connections(), 0);
+    assert_eq!(operator.shutdown_signal().phase(), ShutdownPhase::Stopped);
+    assert_eq!(dispatch_count.load(Ordering::SeqCst), 1);
+
+    ProofLogRow::pass(
+        "structured_remote_service_listener_drain",
+        0,
+        "none",
+        "mtls_accept_then_force_close_stalled_frame",
+        2,
+        "one_completed_one_interrupted_zero_live",
+        "one_completed_one_interrupted_zero_live",
+    )
+    .emit();
+}
+
+#[cfg(feature = "tls")]
+#[test]
+fn remote_tls_listener_parent_cancellation_interrupts_stalled_handshake() {
+    let certificates = Certificate::from_pem(TEST_CERT_PEM).expect("TLS fixture should parse");
+    let peer_certificate = certificates
+        .first()
+        .expect("TLS fixture should contain a leaf certificate")
+        .clone();
+    let certificate_chain =
+        CertificateChain::from_pem(TEST_CERT_PEM).expect("TLS certificate chain should parse");
+    let private_key = PrivateKey::from_pem(TEST_KEY_PEM).expect("TLS private key should parse");
+
+    let computations = RemoteComputationRegistry::new();
+    let policy = RemotePeerAdmissionPolicy::new(
+        RemoteProtocolVersion::V1,
+        computations.schema_registry().clone(),
+    );
+    let mut client_auth_roots = RootCertStore::empty();
+    client_auth_roots
+        .add(&peer_certificate)
+        .expect("server should trust the fixture client certificate");
+    let acceptor = TlsAcceptorBuilder::new(certificate_chain, private_key)
+        .client_auth(ClientAuth::Required(client_auth_roots))
+        .build()
+        .expect("structured mTLS acceptor should build");
+
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("structured remote service runtime should build");
+    let service = runtime
+        .block_on(RemoteComputationService::bind(
+            "127.0.0.1:0",
+            acceptor,
+            policy,
+            computations,
+            RemoteComputationServiceConfig::new()
+                .with_max_connections(Some(8))
+                .with_drain_timeout(Duration::from_millis(25)),
+        ))
+        .expect("structured remote service should bind");
+    let endpoint = service
+        .local_addr()
+        .expect("structured remote service should expose its address");
+    let operator = service.handle();
+    let client_operator = operator.clone();
+    let (parent_cx_tx, parent_cx_rx) = std::sync::mpsc::sync_channel::<Cx>(1);
+
+    let client = thread::spawn(move || {
+        let stream = block_on(TcpStream::connect(endpoint))
+            .expect("stalled handshake client should connect");
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while client_operator.active_connections() == 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "stalled handshake should become service-owned"
+            );
+            thread::sleep(Duration::from_millis(1));
+        }
+        let parent_cx = parent_cx_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("service should publish its parent context to the canceller");
+        parent_cx.cancel_fast(CancelKind::User);
+        thread::sleep(Duration::from_millis(100));
+        drop(stream);
+    });
+
+    let report = runtime
+        .block_on(async move {
+            let cx = Cx::current().expect("runtime should install a service context");
+            parent_cx_tx
+                .send(cx.clone())
+                .expect("canceller should remain available");
+            service.run(&cx).await
+        })
+        .expect("parent cancellation should quiesce the remote service");
+    client
+        .join()
+        .expect("parent-cancellation client should not panic");
+
+    assert_eq!(report.accepted_connections(), 1);
+    assert_eq!(report.capacity_rejections(), 0);
+    assert_eq!(report.completed_connections(), 0);
+    assert_eq!(report.interrupted_connections(), 1);
+    assert_eq!(report.failed_connections(), 0);
+    assert_eq!(report.panicked_connections(), 0);
+    assert_eq!(report.first_connection_failure(), None);
+    assert_eq!(
+        report.shutdown().drained + report.shutdown().force_closed,
+        1
+    );
+    assert_eq!(operator.active_connections(), 0);
+    assert_eq!(operator.shutdown_signal().phase(), ShutdownPhase::Stopped);
+
+    ProofLogRow::pass(
+        "structured_remote_service_parent_cancellation",
+        0,
+        "none",
+        "parent_cancel_during_tls_handshake",
+        1,
+        "one_interrupted_zero_live_stopped",
+        "one_interrupted_zero_live_stopped",
     )
     .emit();
 }
