@@ -43,8 +43,8 @@ pub use bridge::{
     LocalToDistributed, RegionBridge, RegionMode, SyncMode, SyncResult, SyncState, UpgradeResult,
 };
 pub use computation_schema::{
-    ComputationSchemaRegistry, ComputationSchemaRegistryError, HasSchema,
-    RegisteredComputationSchema, SchemaDescriptor, SchemaFingerprint, SchemaMismatch,
+    ComputationRegistryFingerprint, ComputationSchemaRegistry, ComputationSchemaRegistryError,
+    HasSchema, RegisteredComputationSchema, SchemaDescriptor, SchemaFingerprint, SchemaMismatch,
     SchemaMismatchKind,
 };
 pub use consensus::{

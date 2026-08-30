@@ -412,8 +412,9 @@ pub use remote::{
     IdempotencyRecord, IdempotencyRequestFingerprint, IdempotencyStore, Lease, LeaseError,
     LeaseRenewal, LeaseState, NodeId, Phase0RemoteFailure, Phase0RetryPolicy,
     Phase0SimulationConfig, RemoteCap, RemoteError, RemoteHandle, RemoteMessage, RemoteOutcome,
-    RemoteTaskId, ResultDelivery, Saga, SagaState, SagaStepError, SpawnAck, SpawnAckStatus,
-    SpawnRejectReason, SpawnRequest, spawn_remote,
+    RemotePeerAdmissionError, RemotePeerAdmissionPolicy, RemotePeerHello, RemotePeerSession,
+    RemoteProtocolVersion, RemoteTaskId, ResultDelivery, Saga, SagaState, SagaStepError, SpawnAck,
+    SpawnAckStatus, SpawnRejectReason, SpawnRequest, spawn_remote,
 };
 pub use types::{
     Budget, CancelKind, CancelReason, CapabilityBudget, CapabilityBudgetDimension,

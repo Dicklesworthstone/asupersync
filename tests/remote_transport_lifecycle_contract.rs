@@ -3,12 +3,13 @@
 
 use asupersync::Cx;
 use asupersync::channel::oneshot;
+use asupersync::distributed::ComputationSchemaRegistry;
 use asupersync::io::{AsyncReadExt, AsyncWriteExt};
 use asupersync::net::{TcpListener, TcpStream};
 use asupersync::remote::{
     ComputationName, MessageEnvelope, NodeId, RemoteError, RemoteInput, RemoteMessage,
-    RemoteOutcome, RemoteRuntime, RemoteTaskId, RemoteTaskState, RemoteTransport,
-    SpawnRejectReason, spawn_remote,
+    RemoteOutcome, RemotePeerAdmissionPolicy, RemotePeerHello, RemoteProtocolVersion,
+    RemoteRuntime, RemoteTaskId, RemoteTaskState, RemoteTransport, SpawnRejectReason, spawn_remote,
 };
 use asupersync::trace::TraceBufferHandle;
 use asupersync::trace::distributed::LogicalTime;
@@ -24,6 +25,7 @@ use std::net::{Shutdown, SocketAddr};
 use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -726,6 +728,77 @@ fn runtime_context(endpoint: SocketAddr) -> (Arc<TcpLoopbackRemoteRuntime>, Cx, 
     (runtime, cx, trace)
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct PeerAdmissionProbe {
+    hello: RemotePeerHello,
+    computation: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct PeerAdmissionReply {
+    accepted: bool,
+    diagnostic: String,
+}
+
+async fn serve_peer_admission_endpoint(
+    listener: TcpListener,
+    policy: RemotePeerAdmissionPolicy,
+    dispatch_count: Arc<AtomicUsize>,
+    expected_connections: usize,
+) -> io::Result<()> {
+    for _ in 0..expected_connections {
+        let (mut stream, _) = listener.accept().await?;
+        let probe: PeerAdmissionProbe = serde_json::from_slice(&read_raw_frame(&mut stream).await?)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        let decision = policy.admit(&probe.hello).and_then(|session| {
+            session.authorize_computation(&ComputationName::new(&probe.computation))
+        });
+        let reply = match decision {
+            Ok(()) => {
+                dispatch_count.fetch_add(1, Ordering::SeqCst);
+                PeerAdmissionReply {
+                    accepted: true,
+                    diagnostic: format!("dispatched named computation {}", probe.computation),
+                }
+            }
+            Err(error) => PeerAdmissionReply {
+                accepted: false,
+                diagnostic: error.to_string(),
+            },
+        };
+        write_json_frame(&mut stream, &reply).await?;
+    }
+    Ok(())
+}
+
+fn send_peer_admission_probe(
+    endpoint: SocketAddr,
+    hello: RemotePeerHello,
+    computation: &str,
+) -> PeerAdmissionReply {
+    block_on(async {
+        let mut stream = TcpStream::connect(endpoint)
+            .await
+            .expect("peer admission probe should connect");
+        write_json_frame(
+            &mut stream,
+            &PeerAdmissionProbe {
+                hello,
+                computation: computation.to_owned(),
+            },
+        )
+        .await
+        .expect("peer admission probe should write");
+        stream
+            .shutdown(Shutdown::Write)
+            .expect("peer admission probe should half-close");
+        let response = read_raw_frame(&mut stream)
+            .await
+            .expect("peer admission probe should receive a response");
+        serde_json::from_slice(&response).expect("peer admission response should decode")
+    })
+}
+
 fn spawn_test_handle(cx: &Cx) -> asupersync::remote::RemoteHandle {
     spawn_remote(
         cx,
@@ -896,6 +969,147 @@ fn remote_transport_wire_codec_preserves_protocol_fields() {
         1,
         "Completed",
         "Completed",
+    )
+    .emit();
+}
+
+#[test]
+fn remote_peer_admission_negotiates_registry_and_gates_dispatch_over_tcp() {
+    let mut registry = ComputationSchemaRegistry::new();
+    registry
+        .register_typed::<Vec<u8>, Vec<u8>>("proof.echo")
+        .expect("proof.echo schema should register");
+    registry
+        .register_typed::<Vec<u8>, u64>("proof.hash")
+        .expect("proof.hash schema should register");
+
+    let mut reverse_order_registry = ComputationSchemaRegistry::new();
+    reverse_order_registry
+        .register_typed::<Vec<u8>, u64>("proof.hash")
+        .expect("proof.hash schema should register in reverse order");
+    reverse_order_registry
+        .register_typed::<Vec<u8>, Vec<u8>>("proof.echo")
+        .expect("proof.echo schema should register in reverse order");
+    assert_eq!(
+        registry.fingerprint(),
+        reverse_order_registry.fingerprint(),
+        "complete registry identity must not depend on registration order"
+    );
+
+    let origin = NodeId::new(ORIGIN_NODE);
+    let mut policy = RemotePeerAdmissionPolicy::new(RemoteProtocolVersion::V1, registry.clone());
+    policy
+        .grant_peer(origin.clone(), ["proof.echo"])
+        .expect("explicit proof.echo grant should be valid");
+    let compatible_hello = policy.hello_for(origin.clone());
+
+    let listener = block_on(TcpListener::bind("127.0.0.1:0"))
+        .expect("peer admission endpoint should bind loopback");
+    let endpoint = listener
+        .local_addr()
+        .expect("peer admission endpoint should expose its address");
+    let dispatch_count = Arc::new(AtomicUsize::new(0));
+    let server_dispatch_count = Arc::clone(&dispatch_count);
+    let server = thread::spawn(move || {
+        block_on(serve_peer_admission_endpoint(
+            listener,
+            policy,
+            server_dispatch_count,
+            5,
+        ))
+    });
+
+    let accepted = send_peer_admission_probe(endpoint, compatible_hello.clone(), "proof.echo");
+    assert!(accepted.accepted, "diagnostic: {}", accepted.diagnostic);
+    assert!(accepted.diagnostic.contains("dispatched named computation"));
+
+    let unauthorized_computation =
+        send_peer_admission_probe(endpoint, compatible_hello.clone(), "proof.hash");
+    assert!(!unauthorized_computation.accepted);
+    assert!(
+        unauthorized_computation
+            .diagnostic
+            .contains("not capability-authorized"),
+        "diagnostic: {}",
+        unauthorized_computation.diagnostic
+    );
+
+    let unauthorized_peer = send_peer_admission_probe(
+        endpoint,
+        RemotePeerHello::new(
+            NodeId::new("untrusted-origin"),
+            compatible_hello.protocol_version(),
+            compatible_hello.registry_fingerprint(),
+        ),
+        "proof.echo",
+    );
+    assert!(!unauthorized_peer.accepted);
+    assert!(
+        unauthorized_peer
+            .diagnostic
+            .contains("peer is not capability-authorized"),
+        "diagnostic: {}",
+        unauthorized_peer.diagnostic
+    );
+
+    let version_mismatch = send_peer_admission_probe(
+        endpoint,
+        RemotePeerHello::new(
+            origin.clone(),
+            RemoteProtocolVersion::new(2, 0),
+            compatible_hello.registry_fingerprint(),
+        ),
+        "proof.echo",
+    );
+    assert!(!version_mismatch.accepted);
+    assert!(
+        version_mismatch
+            .diagnostic
+            .contains("protocol version mismatch"),
+        "diagnostic: {}",
+        version_mismatch.diagnostic
+    );
+
+    let mut incompatible_registry = registry;
+    incompatible_registry
+        .register_typed::<u64, u64>("proof.extra")
+        .expect("extra schema should register");
+    let registry_mismatch = send_peer_admission_probe(
+        endpoint,
+        RemotePeerHello::new(
+            origin,
+            RemoteProtocolVersion::V1,
+            incompatible_registry.fingerprint(),
+        ),
+        "proof.echo",
+    );
+    assert!(!registry_mismatch.accepted);
+    assert!(
+        registry_mismatch
+            .diagnostic
+            .contains("computation registry mismatch"),
+        "diagnostic: {}",
+        registry_mismatch.diagnostic
+    );
+
+    server
+        .join()
+        .expect("peer admission endpoint should not panic")
+        .expect("peer admission endpoint should serve all probes");
+    assert_eq!(
+        dispatch_count.load(Ordering::SeqCst),
+        1,
+        "only the compatible, explicitly granted request may reach dispatch"
+    );
+
+    ProofLogRow::pass(
+        "peer_admission_registry_and_capability_gate",
+        0,
+        "none",
+        "peer_hello_then_named_dispatch",
+        5,
+        "one_authorized_dispatch",
+        "one_authorized_dispatch",
     )
     .emit();
 }

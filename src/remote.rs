@@ -29,11 +29,13 @@
 use crate::channel::oneshot;
 use crate::cx::Cx;
 use crate::distributed::membership::{LeaseAction, MembershipLeaseReactor, MembershipView};
+use crate::distributed::{ComputationRegistryFingerprint, ComputationSchemaRegistry};
 use crate::trace::distributed::{LogicalClockHandle, LogicalTime};
 use crate::types::outcome::Outcome;
 use crate::types::{Budget, CancelReason, ObligationId, RegionId, TaskId, Time};
 use crate::util::det_hash::DetHashMap;
 use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -2111,6 +2113,321 @@ impl fmt::Display for IdempotencyKey {
 // ---------------------------------------------------------------------------
 // Protocol messages
 // ---------------------------------------------------------------------------
+
+/// Stable version identifier for the remote-service wire protocol.
+///
+/// Admission currently requires an exact version match. A future compatible
+/// range can be introduced deliberately without silently accepting a peer that
+/// may interpret lifecycle messages differently.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct RemoteProtocolVersion {
+    major: u16,
+    minor: u16,
+}
+
+impl RemoteProtocolVersion {
+    /// Initial version of the named-computation remote-service protocol.
+    pub const V1: Self = Self::new(1, 0);
+
+    /// Creates a protocol version.
+    #[must_use]
+    pub const fn new(major: u16, minor: u16) -> Self {
+        Self { major, minor }
+    }
+
+    /// Returns the major version.
+    #[must_use]
+    pub const fn major(self) -> u16 {
+        self.major
+    }
+
+    /// Returns the minor version.
+    #[must_use]
+    pub const fn minor(self) -> u16 {
+        self.minor
+    }
+}
+
+impl fmt::Display for RemoteProtocolVersion {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}.{}", self.major, self.minor)
+    }
+}
+
+/// Peer metadata presented before remote protocol messages are dispatched.
+///
+/// The `peer_node` value is an asserted logical identity. A production network
+/// adapter must bind it to an authenticated transport identity (for example, a
+/// verified TLS certificate); this structure alone is not authentication.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemotePeerHello {
+    peer_node: NodeId,
+    protocol_version: RemoteProtocolVersion,
+    registry_fingerprint: ComputationRegistryFingerprint,
+}
+
+impl RemotePeerHello {
+    /// Creates peer negotiation metadata.
+    #[must_use]
+    pub const fn new(
+        peer_node: NodeId,
+        protocol_version: RemoteProtocolVersion,
+        registry_fingerprint: ComputationRegistryFingerprint,
+    ) -> Self {
+        Self {
+            peer_node,
+            protocol_version,
+            registry_fingerprint,
+        }
+    }
+
+    /// Asserted logical identity of the connecting peer.
+    #[must_use]
+    pub const fn peer_node(&self) -> &NodeId {
+        &self.peer_node
+    }
+
+    /// Protocol version offered by the peer.
+    #[must_use]
+    pub const fn protocol_version(&self) -> RemoteProtocolVersion {
+        self.protocol_version
+    }
+
+    /// Complete named-computation registry identity offered by the peer.
+    #[must_use]
+    pub const fn registry_fingerprint(&self) -> ComputationRegistryFingerprint {
+        self.registry_fingerprint
+    }
+}
+
+/// Fail-closed peer negotiation and dispatch diagnostics.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RemotePeerAdmissionError {
+    /// The transport-authenticated peer has no capability grant.
+    UnauthorizedPeer {
+        /// Presented peer identity.
+        peer: NodeId,
+    },
+    /// A configured grant names a computation absent from the registry.
+    UnknownGrantedComputation {
+        /// Name rejected while constructing the policy.
+        computation: String,
+    },
+    /// The peer speaks a different remote-service protocol version.
+    ProtocolVersionMismatch {
+        /// Version accepted by this endpoint.
+        accepted: RemoteProtocolVersion,
+        /// Version presented by the peer.
+        presented: RemoteProtocolVersion,
+    },
+    /// The peer advertises a different complete computation registry.
+    RegistryFingerprintMismatch {
+        /// Registry identity required by this endpoint.
+        expected: ComputationRegistryFingerprint,
+        /// Registry identity presented by the peer.
+        presented: ComputationRegistryFingerprint,
+    },
+    /// The admitted peer lacks a capability grant for this computation.
+    ComputationNotAuthorized {
+        /// Admitted peer identity.
+        peer: NodeId,
+        /// Requested computation name.
+        computation: String,
+    },
+}
+
+impl fmt::Display for RemotePeerAdmissionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnauthorizedPeer { peer } => {
+                write!(f, "remote peer is not capability-authorized: {peer}")
+            }
+            Self::UnknownGrantedComputation { computation } => write!(
+                f,
+                "remote peer grant names an unregistered computation: {computation}"
+            ),
+            Self::ProtocolVersionMismatch {
+                accepted,
+                presented,
+            } => write!(
+                f,
+                "remote protocol version mismatch: accepted {accepted}, presented {presented}"
+            ),
+            Self::RegistryFingerprintMismatch {
+                expected,
+                presented,
+            } => write!(
+                f,
+                "remote computation registry mismatch: expected {expected}, presented {presented}"
+            ),
+            Self::ComputationNotAuthorized { peer, computation } => write!(
+                f,
+                "remote computation is not capability-authorized for {peer}: {computation}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for RemotePeerAdmissionError {}
+
+/// Capability policy applied after a network adapter authenticates a peer.
+///
+/// A policy starts with no grants. Each authorized peer receives an explicit
+/// set of registered computation names. Admission additionally requires an
+/// exact protocol version and complete registry fingerprint match.
+#[derive(Clone, Debug)]
+pub struct RemotePeerAdmissionPolicy {
+    protocol_version: RemoteProtocolVersion,
+    registry: ComputationSchemaRegistry,
+    grants: BTreeMap<NodeId, BTreeSet<String>>,
+}
+
+impl RemotePeerAdmissionPolicy {
+    /// Creates a fail-closed policy with no authorized peers.
+    #[must_use]
+    pub fn new(
+        protocol_version: RemoteProtocolVersion,
+        registry: ComputationSchemaRegistry,
+    ) -> Self {
+        Self {
+            protocol_version,
+            registry,
+            grants: BTreeMap::new(),
+        }
+    }
+
+    /// Grants one peer access to an explicit set of registered computations.
+    ///
+    /// Re-granting a peer replaces its prior set atomically. Unknown names are
+    /// rejected before the policy is mutated.
+    pub fn grant_peer<I, S>(
+        &mut self,
+        peer: NodeId,
+        computations: I,
+    ) -> Result<(), RemotePeerAdmissionError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let mut granted = BTreeSet::new();
+        for computation in computations {
+            let computation = computation.as_ref();
+            if !self.registry.contains(computation) {
+                return Err(RemotePeerAdmissionError::UnknownGrantedComputation {
+                    computation: computation.to_owned(),
+                });
+            }
+            granted.insert(computation.to_owned());
+        }
+        self.grants.insert(peer, granted);
+        Ok(())
+    }
+
+    /// Builds the hello metadata for a node using this policy's wire contract.
+    #[must_use]
+    pub fn hello_for(&self, peer_node: NodeId) -> RemotePeerHello {
+        RemotePeerHello::new(
+            peer_node,
+            self.protocol_version,
+            self.registry.fingerprint(),
+        )
+    }
+
+    /// Admits a peer and freezes its granted computation set for the session.
+    pub fn admit(
+        &self,
+        hello: &RemotePeerHello,
+    ) -> Result<RemotePeerSession, RemotePeerAdmissionError> {
+        let Some(granted_computations) = self.grants.get(hello.peer_node()) else {
+            return Err(RemotePeerAdmissionError::UnauthorizedPeer {
+                peer: hello.peer_node().clone(),
+            });
+        };
+        if hello.protocol_version() != self.protocol_version {
+            return Err(RemotePeerAdmissionError::ProtocolVersionMismatch {
+                accepted: self.protocol_version,
+                presented: hello.protocol_version(),
+            });
+        }
+        let expected_registry = self.registry.fingerprint();
+        if hello.registry_fingerprint() != expected_registry {
+            return Err(RemotePeerAdmissionError::RegistryFingerprintMismatch {
+                expected: expected_registry,
+                presented: hello.registry_fingerprint(),
+            });
+        }
+        Ok(RemotePeerSession {
+            peer_node: hello.peer_node().clone(),
+            protocol_version: self.protocol_version,
+            registry_fingerprint: expected_registry,
+            granted_computations: granted_computations.clone(),
+        })
+    }
+}
+
+/// Immutable capability grant produced by successful peer admission.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RemotePeerSession {
+    peer_node: NodeId,
+    protocol_version: RemoteProtocolVersion,
+    registry_fingerprint: ComputationRegistryFingerprint,
+    granted_computations: BTreeSet<String>,
+}
+
+impl RemotePeerSession {
+    /// Authenticated logical peer identity bound by the network adapter.
+    #[must_use]
+    pub const fn peer_node(&self) -> &NodeId {
+        &self.peer_node
+    }
+
+    /// Negotiated protocol version.
+    #[must_use]
+    pub const fn protocol_version(&self) -> RemoteProtocolVersion {
+        self.protocol_version
+    }
+
+    /// Negotiated complete computation-registry identity.
+    #[must_use]
+    pub const fn registry_fingerprint(&self) -> ComputationRegistryFingerprint {
+        self.registry_fingerprint
+    }
+
+    /// Checks a named computation against this session's frozen capability set.
+    pub fn authorize_computation(
+        &self,
+        computation: &ComputationName,
+    ) -> Result<(), RemotePeerAdmissionError> {
+        if self.granted_computations.contains(computation.as_str()) {
+            Ok(())
+        } else {
+            Err(RemotePeerAdmissionError::ComputationNotAuthorized {
+                peer: self.peer_node.clone(),
+                computation: computation.as_str().to_owned(),
+            })
+        }
+    }
+
+    /// Applies the session capability to a protocol message before dispatch.
+    ///
+    /// Only spawn requests select code. Lifecycle messages are correlated to a
+    /// task created under an already-authorized spawn and remain governed by
+    /// the remote task state machine.
+    pub fn authorize_message(
+        &self,
+        message: &RemoteMessage,
+    ) -> Result<(), RemotePeerAdmissionError> {
+        match message {
+            RemoteMessage::SpawnRequest(request) => {
+                self.authorize_computation(&request.computation)
+            }
+            RemoteMessage::SpawnAck(_)
+            | RemoteMessage::CancelRequest(_)
+            | RemoteMessage::ResultDelivery(_)
+            | RemoteMessage::LeaseRenewal(_) => Ok(()),
+        }
+    }
+}
 
 /// Envelope for protocol messages with logical time metadata.
 ///

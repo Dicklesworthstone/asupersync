@@ -26,6 +26,8 @@
 //! the `#[remote_computation]` derive (which will auto-generate
 //! [`HasSchema`] impls) build on top of it in sibling slices of the bead.
 
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, fmt};
 
 /// Canonical, declaration-order structural description of a value's wire schema.
@@ -356,7 +358,7 @@ fn diff_named(
 ///
 /// Stable across compiler versions and independently-built nodes (it is a fixed
 /// hash over the canonical structural encoding, never `TypeId`/layout).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct SchemaFingerprint(u64);
 
 impl SchemaFingerprint {
@@ -378,6 +380,44 @@ impl SchemaFingerprint {
 impl fmt::Display for SchemaFingerprint {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{:016x}", self.0)
+    }
+}
+
+/// Content fingerprint of a complete named-computation registry.
+///
+/// The digest covers every registered computation name plus the full canonical
+/// input and output schemas in deterministic name order. It is suitable for
+/// fail-closed peer negotiation: two nodes only agree when their complete
+/// dispatch schemas agree, not merely when they happen to share one name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct ComputationRegistryFingerprint([u8; 32]);
+
+impl ComputationRegistryFingerprint {
+    /// Creates a fingerprint from its stable wire representation.
+    #[must_use]
+    pub const fn from_bytes(value: [u8; 32]) -> Self {
+        Self(value)
+    }
+
+    /// Borrows the stable 256-bit wire representation.
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
+    /// Returns the stable 256-bit wire representation.
+    #[must_use]
+    pub const fn into_bytes(self) -> [u8; 32] {
+        self.0
+    }
+}
+
+impl fmt::Display for ComputationRegistryFingerprint {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for byte in self.0 {
+            write!(f, "{byte:02x}")?;
+        }
+        Ok(())
     }
 }
 
@@ -690,6 +730,25 @@ impl ComputationSchemaRegistry {
         self.entries.values()
     }
 
+    /// Returns a deterministic fingerprint of the complete registry.
+    ///
+    /// The canonical encoding is domain-separated and length-delimited. Entry
+    /// order is stable because the registry is backed by a [`BTreeMap`].
+    #[must_use]
+    pub fn fingerprint(&self) -> ComputationRegistryFingerprint {
+        let mut canonical = Vec::new();
+        encode_str("asupersync.computation-registry.v1", &mut canonical);
+        encode_len(self.entries.len(), &mut canonical);
+        for entry in self.entries.values() {
+            encode_str(entry.name(), &mut canonical);
+            canonical.push(0);
+            entry.input_schema().canonical_encode(&mut canonical);
+            canonical.push(1);
+            entry.output_schema().canonical_encode(&mut canonical);
+        }
+        ComputationRegistryFingerprint(Sha256::digest(&canonical).into())
+    }
+
     /// Number of registered computations.
     #[must_use]
     pub fn len(&self) -> usize {
@@ -890,5 +949,41 @@ mod tests {
         let work = registry.get("work").unwrap();
         assert_eq!(work.input_fingerprint(), u64::schema_fingerprint());
         assert_eq!(work.output_fingerprint(), u64::schema_fingerprint());
+    }
+
+    #[test]
+    fn computation_registry_fingerprint_is_order_independent_and_fail_closed() {
+        let mut first = ComputationSchemaRegistry::new();
+        first.register_typed::<u64, String>("zeta.encode").unwrap();
+        first
+            .register_typed::<(u64, String), Vec<u8>>("alpha.decode")
+            .unwrap();
+
+        let mut second = ComputationSchemaRegistry::new();
+        second
+            .register_typed::<(u64, String), Vec<u8>>("alpha.decode")
+            .unwrap();
+        second.register_typed::<u64, String>("zeta.encode").unwrap();
+
+        assert_eq!(first.fingerprint(), second.fingerprint());
+        assert_eq!(
+            ComputationRegistryFingerprint::from_bytes(first.fingerprint().into_bytes()),
+            first.fingerprint()
+        );
+
+        let mut changed_schema = ComputationSchemaRegistry::new();
+        changed_schema
+            .register_typed::<(u32, String), Vec<u8>>("alpha.decode")
+            .unwrap();
+        changed_schema
+            .register_typed::<u64, String>("zeta.encode")
+            .unwrap();
+        assert_ne!(first.fingerprint(), changed_schema.fingerprint());
+
+        let mut missing_entry = ComputationSchemaRegistry::new();
+        missing_entry
+            .register_typed::<(u64, String), Vec<u8>>("alpha.decode")
+            .unwrap();
+        assert_ne!(first.fingerprint(), missing_entry.fingerprint());
     }
 }
