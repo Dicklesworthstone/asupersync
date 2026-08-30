@@ -7,16 +7,17 @@
   "inputs": {
     "issues_path": ".beads/issues.jsonl",
     "inventory_doc_path": "docs/tokio_ecosystem_capability_inventory.md",
-    "issues_sha256": "d8c471c4e0447be2ff06c6107f87558b3f7ca39b33814c2759e51ff7afff6b00",
+    "issues_sha256": "9cfc6c94e34b219f7b59da760f442a1758f648bb07a9ab352bfb0171d82df521",
+    "issues_digest_scope": "tokio-program-id-title-status-blocking-dependencies-v1",
     "inventory_sha256": "86d037191db3716fa640c62b5dd89b7667696b762e9b0fd3052547f37e985b7c"
   },
   "summary": {
     "program_id": "asupersync-2oh2u",
-    "program_issue_count": 125,
+    "program_issue_count": 126,
     "status_counts": {
       "open": 0,
       "in_progress": 0,
-      "closed": 125,
+      "closed": 126,
       "other": 0
     },
     "track_count": 9,
@@ -36,8 +37,8 @@
       "root_bead_id": "asupersync-2oh2u.1",
       "root_status": "closed",
       "root_title": "[TOKIO-REPLACE][T1] Replacement Definition-of-Done and Gap Baseline",
-      "children_total": 20,
-      "children_closed": 20,
+      "children_total": 21,
+      "children_closed": 21,
       "children_in_progress": 0,
       "children_open": 0,
       "completion_ratio": 1.0,
@@ -115,7 +116,7 @@
           {
             "path": "docs/tokio_io_parity_audit.md",
             "exists": true,
-            "sha256": "31f4e33755203019fbbb6e23aa5749483737a61cecc1ec07ceb35200c6c907ed"
+            "sha256": "22030576ff2f12ced98b89b4218a86bbdb054ebac67c000b37e6cc0068c2d489"
           },
           {
             "path": "tests/tokio_io_parity_audit.rs",
@@ -146,17 +147,17 @@
           {
             "path": "docs/tokio_fs_process_signal_parity_matrix.md",
             "exists": true,
-            "sha256": "f872e1f41ec71fd92d7835f6684be1a6e41fdad0c5cf04e10c2d54f874b1c468"
+            "sha256": "31aa2024a73aa7a443f699c01b1c7036fc2d2d88d6ce55fc1c6233e0c9182bd2"
           },
           {
             "path": "docs/tokio_fs_process_signal_parity_matrix.json",
             "exists": true,
-            "sha256": "923dad8cfaeb4190ea4a7deb50890cf488d4086f0b270a5a2f0143c48a49336a"
+            "sha256": "40d58240496d7610fbe19e618ca823cba21f4b78c4ab0121c5054513337a7f65"
           },
           {
             "path": "tests/tokio_fs_process_signal_parity_matrix.rs",
             "exists": true,
-            "sha256": "6e778b8e1ffbebf81e5b34ac6102b0bddcb230b9a027f0dd44edb1f49da0b440"
+            "sha256": "fcc798f2d21f3225702948c79c0df2d2c58ce720bd9e221da3c158476b2ed533"
           }
         ]
       },

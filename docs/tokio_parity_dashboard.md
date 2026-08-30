@@ -7,8 +7,8 @@
 
 ## 1. Executive Summary
 
-- Program issues: **125**
-- Status counts: open=0, in_progress=0, closed=125, other=0
+- Program issues: **126**
+- Status counts: open=0, in_progress=0, closed=126, other=0
 - Tracks: **9**
 - Capability families: **28** (parity states: {'complete': 8, 'active': 16, 'partial': 3, 'adapter': 1})
 - Unresolved blocker chains: **0**
@@ -17,7 +17,7 @@
 
 | Track | Root Bead | Root Status | Child Progress | Evidence | Unresolved Blockers |
 |---|---|---|---|---|---|
-| T1 | `asupersync-2oh2u.1` | `closed` | 20/20 (100.0%) | 9/9 (100.0%) | 0 |
+| T1 | `asupersync-2oh2u.1` | `closed` | 21/21 (100.0%) | 9/9 (100.0%) | 0 |
 | T2 | `asupersync-2oh2u.2` | `closed` | 10/10 (100.0%) | 2/2 (100.0%) | 0 |
 | T3 | `asupersync-2oh2u.3` | `closed` | 10/10 (100.0%) | 3/3 (100.0%) | 0 |
 | T4 | `asupersync-2oh2u.4` | `closed` | 11/11 (100.0%) | 0/0 (100.0%) | 0 |
