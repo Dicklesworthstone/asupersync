@@ -4,12 +4,17 @@
 use asupersync::Cx;
 use asupersync::channel::oneshot;
 use asupersync::distributed::ComputationSchemaRegistry;
-use asupersync::io::{AsyncReadExt, AsyncWriteExt};
+use asupersync::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use asupersync::net::{TcpListener, TcpStream};
 use asupersync::remote::{
     ComputationName, MessageEnvelope, NodeId, RemoteError, RemoteInput, RemoteMessage,
     RemoteOutcome, RemotePeerAdmissionPolicy, RemotePeerHello, RemoteProtocolVersion,
     RemoteRuntime, RemoteTaskId, RemoteTaskState, RemoteTransport, SpawnRejectReason, spawn_remote,
+};
+#[cfg(feature = "tls")]
+use asupersync::tls::{
+    Certificate, CertificateChain, CertificatePin, CertificatePinSet, ClientAuth, PrivateKey,
+    RootCertStore, TlsAcceptorBuilder, TlsConnector, TlsConnectorBuilder,
 };
 use asupersync::trace::TraceBufferHandle;
 use asupersync::trace::distributed::LogicalTime;
@@ -35,6 +40,10 @@ const REMOTE_NODE: &str = "remote-prod-loopback";
 const TRANSPORT_KIND: &str = "asupersync_tcp_loopback";
 const MAX_FRAME_BYTES: usize = 64 * 1024;
 const RUNNER_PATH: &str = "scripts/run_remote_transport_lifecycle_evidence.sh";
+#[cfg(feature = "tls")]
+const TEST_CERT_PEM: &[u8] = include_bytes!("fixtures/tls/server.crt");
+#[cfg(feature = "tls")]
+const TEST_KEY_PEM: &[u8] = include_bytes!("fixtures/tls/server.key");
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
@@ -657,22 +666,22 @@ fn send_wire_command(
     })
 }
 
-async fn write_json_frame<T: Serialize + Sync>(
-    stream: &mut TcpStream,
+async fn write_json_frame<S: AsyncWrite + Unpin, T: Serialize + Sync>(
+    stream: &mut S,
     value: &T,
 ) -> io::Result<()> {
     let encoded = serde_json::to_vec(value).map_err(io::Error::other)?;
     write_raw_frame(stream, &encoded).await
 }
 
-async fn write_raw_frame(stream: &mut TcpStream, bytes: &[u8]) -> io::Result<()> {
+async fn write_raw_frame<S: AsyncWrite + Unpin>(stream: &mut S, bytes: &[u8]) -> io::Result<()> {
     let len = u32::try_from(bytes.len())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "frame too large"))?;
     stream.write_all(&len.to_be_bytes()).await?;
     stream.write_all(bytes).await
 }
 
-async fn read_raw_frame(stream: &mut TcpStream) -> io::Result<Vec<u8>> {
+async fn read_raw_frame<S: AsyncRead + Unpin>(stream: &mut S) -> io::Result<Vec<u8>> {
     let mut len_bytes = [0_u8; 4];
     stream.read_exact(&mut len_bytes).await?;
     let len = u32::from_be_bytes(len_bytes) as usize;
@@ -796,6 +805,41 @@ fn send_peer_admission_probe(
             .await
             .expect("peer admission probe should receive a response");
         serde_json::from_slice(&response).expect("peer admission response should decode")
+    })
+}
+
+#[cfg(feature = "tls")]
+fn send_tls_peer_admission_probe(
+    endpoint: SocketAddr,
+    connector: &TlsConnector,
+    hello: RemotePeerHello,
+    computation: &str,
+) -> PeerAdmissionReply {
+    block_on(async {
+        let stream = TcpStream::connect(endpoint)
+            .await
+            .expect("TLS peer admission probe should connect");
+        let mut stream = connector
+            .connect("localhost", stream)
+            .await
+            .expect("TLS peer admission probe should authenticate server");
+        assert!(
+            stream.peer_leaf_certificate_der().is_some(),
+            "client should retain the authenticated server certificate"
+        );
+        write_json_frame(
+            &mut stream,
+            &PeerAdmissionProbe {
+                hello,
+                computation: computation.to_owned(),
+            },
+        )
+        .await
+        .expect("TLS peer admission probe should write");
+        let response = read_raw_frame(&mut stream)
+            .await
+            .expect("TLS peer admission probe should receive a response");
+        serde_json::from_slice(&response).expect("TLS peer admission response should decode")
     })
 }
 
@@ -1110,6 +1154,157 @@ fn remote_peer_admission_negotiates_registry_and_gates_dispatch_over_tcp() {
         5,
         "one_authorized_dispatch",
         "one_authorized_dispatch",
+    )
+    .emit();
+}
+
+#[cfg(feature = "tls")]
+#[test]
+fn remote_peer_admission_binds_asserted_node_to_mtls_certificate_over_tcp() {
+    let certificates = Certificate::from_pem(TEST_CERT_PEM).expect("TLS fixture should parse");
+    let peer_certificate = certificates
+        .first()
+        .expect("TLS fixture should contain a leaf certificate")
+        .clone();
+    let certificate_chain =
+        CertificateChain::from_pem(TEST_CERT_PEM).expect("TLS certificate chain should parse");
+    let private_key = PrivateKey::from_pem(TEST_KEY_PEM).expect("TLS private key should parse");
+
+    let mut registry = ComputationSchemaRegistry::new();
+    registry
+        .register_typed::<Vec<u8>, Vec<u8>>("proof.echo")
+        .expect("proof.echo schema should register");
+    let origin = NodeId::new(ORIGIN_NODE);
+    let mut peer_pins = CertificatePinSet::new();
+    peer_pins.add(
+        CertificatePin::compute_spki_sha256(&peer_certificate)
+            .expect("fixture certificate should produce an SPKI pin"),
+    );
+    let mut policy = RemotePeerAdmissionPolicy::new(RemoteProtocolVersion::V1, registry);
+    policy
+        .grant_tls_peer(origin.clone(), peer_pins, ["proof.echo"])
+        .expect("certificate-bound proof.echo grant should be valid");
+    let hello = policy.hello_for(origin.clone());
+
+    let unbound_error = policy
+        .admit(&hello)
+        .expect_err("asserted NodeId must not bypass a certificate-bound grant");
+    assert!(
+        unbound_error
+            .to_string()
+            .contains("requires certificate-bound TLS admission"),
+        "diagnostic: {unbound_error}"
+    );
+
+    let mut mismatched_pins = CertificatePinSet::new();
+    mismatched_pins.add(
+        CertificatePin::spki_sha256(vec![0_u8; 32])
+            .expect("32-byte mismatch pin should be valid configuration"),
+    );
+    let mut mismatched_policy = policy.clone();
+    mismatched_policy
+        .grant_tls_peer(origin, mismatched_pins, ["proof.echo"])
+        .expect("mismatched certificate grant should be valid configuration");
+
+    let mut client_auth_roots = RootCertStore::empty();
+    client_auth_roots
+        .add(&peer_certificate)
+        .expect("server should trust the fixture client certificate");
+    let acceptor = TlsAcceptorBuilder::new(certificate_chain.clone(), private_key.clone())
+        .client_auth(ClientAuth::Required(client_auth_roots))
+        .build()
+        .expect("mTLS acceptor should build");
+    let connector = TlsConnectorBuilder::new()
+        .add_root_certificate(&peer_certificate)
+        .identity(certificate_chain, private_key)
+        .build()
+        .expect("mTLS connector should build");
+
+    let listener = block_on(TcpListener::bind("127.0.0.1:0"))
+        .expect("mTLS peer admission endpoint should bind loopback");
+    let endpoint = listener
+        .local_addr()
+        .expect("mTLS peer admission endpoint should expose its address");
+    let dispatch_count = Arc::new(AtomicUsize::new(0));
+    let server_dispatch_count = Arc::clone(&dispatch_count);
+    let server = thread::spawn(move || {
+        block_on(async move {
+            for admission_policy in [policy, mismatched_policy] {
+                let (stream, _) = listener
+                    .accept()
+                    .await
+                    .expect("mTLS peer admission endpoint should accept TCP");
+                let mut stream = acceptor
+                    .accept(stream)
+                    .await
+                    .expect("mTLS endpoint should authenticate the client certificate");
+                assert!(
+                    stream.peer_leaf_certificate_der().is_some(),
+                    "server should retain the authenticated client certificate"
+                );
+                let probe: PeerAdmissionProbe = serde_json::from_slice(
+                    &read_raw_frame(&mut stream)
+                        .await
+                        .expect("mTLS endpoint should read an admission probe"),
+                )
+                .expect("mTLS admission probe should decode");
+                let decision = admission_policy
+                    .admit_tls_peer(&probe.hello, &stream)
+                    .and_then(|session| {
+                        session.authorize_computation(&ComputationName::new(&probe.computation))
+                    });
+                let reply = match decision {
+                    Ok(()) => {
+                        server_dispatch_count.fetch_add(1, Ordering::SeqCst);
+                        PeerAdmissionReply {
+                            accepted: true,
+                            diagnostic: "mTLS identity bound and computation dispatched".to_owned(),
+                        }
+                    }
+                    Err(error) => PeerAdmissionReply {
+                        accepted: false,
+                        diagnostic: error.to_string(),
+                    },
+                };
+                write_json_frame(&mut stream, &reply)
+                    .await
+                    .expect("mTLS endpoint should write its admission decision");
+            }
+        });
+    });
+
+    let accepted = send_tls_peer_admission_probe(endpoint, &connector, hello.clone(), "proof.echo");
+    assert!(accepted.accepted, "diagnostic: {}", accepted.diagnostic);
+    assert!(accepted.diagnostic.contains("mTLS identity bound"));
+
+    let certificate_mismatch =
+        send_tls_peer_admission_probe(endpoint, &connector, hello, "proof.echo");
+    assert!(!certificate_mismatch.accepted);
+    assert!(
+        certificate_mismatch
+            .diagnostic
+            .contains("TLS peer certificate was rejected"),
+        "diagnostic: {}",
+        certificate_mismatch.diagnostic
+    );
+
+    server
+        .join()
+        .expect("mTLS peer admission endpoint should not panic");
+    assert_eq!(
+        dispatch_count.load(Ordering::SeqCst),
+        1,
+        "only the connection with a matching authenticated certificate may dispatch"
+    );
+
+    ProofLogRow::pass(
+        "peer_admission_mtls_certificate_binding",
+        0,
+        "none",
+        "mtls_peer_hello_then_named_dispatch",
+        2,
+        "one_certificate_bound_dispatch",
+        "one_certificate_bound_dispatch",
     )
     .emit();
 }

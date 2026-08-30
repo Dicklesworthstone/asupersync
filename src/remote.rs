@@ -2208,6 +2208,33 @@ pub enum RemotePeerAdmissionError {
         /// Presented peer identity.
         peer: NodeId,
     },
+    /// A certificate-bound peer was presented without a verified TLS stream.
+    TlsAuthenticationRequired {
+        /// Presented peer identity.
+        peer: NodeId,
+    },
+    /// TLS admission was requested for a peer whose grant has no certificate pins.
+    TlsIdentityNotConfigured {
+        /// Presented peer identity.
+        peer: NodeId,
+    },
+    /// The verified TLS session did not present a peer certificate.
+    TlsPeerCertificateMissing {
+        /// Presented peer identity.
+        peer: NodeId,
+    },
+    /// The verified TLS peer certificate did not match the configured pin set.
+    TlsPeerCertificateRejected {
+        /// Presented peer identity.
+        peer: NodeId,
+        /// Pin-validation diagnostic.
+        detail: String,
+    },
+    /// A TLS peer grant used an empty or report-only pin set.
+    InvalidTlsPeerPinSet {
+        /// Peer whose grant was rejected.
+        peer: NodeId,
+    },
     /// A configured grant names a computation absent from the registry.
     UnknownGrantedComputation {
         /// Name rejected while constructing the policy.
@@ -2242,6 +2269,24 @@ impl fmt::Display for RemotePeerAdmissionError {
             Self::UnauthorizedPeer { peer } => {
                 write!(f, "remote peer is not capability-authorized: {peer}")
             }
+            Self::TlsAuthenticationRequired { peer } => write!(
+                f,
+                "remote peer requires certificate-bound TLS admission: {peer}"
+            ),
+            Self::TlsIdentityNotConfigured { peer } => {
+                write!(f, "remote peer has no certificate-bound TLS grant: {peer}")
+            }
+            Self::TlsPeerCertificateMissing { peer } => {
+                write!(f, "remote TLS peer presented no certificate: {peer}")
+            }
+            Self::TlsPeerCertificateRejected { peer, detail } => write!(
+                f,
+                "remote TLS peer certificate was rejected for {peer}: {detail}"
+            ),
+            Self::InvalidTlsPeerPinSet { peer } => write!(
+                f,
+                "remote TLS peer grant requires a non-empty enforcing pin set: {peer}"
+            ),
             Self::UnknownGrantedComputation { computation } => write!(
                 f,
                 "remote peer grant names an unregistered computation: {computation}"
@@ -2279,7 +2324,14 @@ impl std::error::Error for RemotePeerAdmissionError {}
 pub struct RemotePeerAdmissionPolicy {
     protocol_version: RemoteProtocolVersion,
     registry: ComputationSchemaRegistry,
-    grants: BTreeMap<NodeId, BTreeSet<String>>,
+    grants: BTreeMap<NodeId, RemotePeerGrant>,
+}
+
+#[derive(Clone, Debug)]
+struct RemotePeerGrant {
+    computations: BTreeSet<String>,
+    #[cfg(feature = "tls")]
+    tls_certificate_pins: Option<crate::tls::CertificatePinSet>,
 }
 
 impl RemotePeerAdmissionPolicy {
@@ -2309,17 +2361,47 @@ impl RemotePeerAdmissionPolicy {
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
-        let mut granted = BTreeSet::new();
-        for computation in computations {
-            let computation = computation.as_ref();
-            if !self.registry.contains(computation) {
-                return Err(RemotePeerAdmissionError::UnknownGrantedComputation {
-                    computation: computation.to_owned(),
-                });
-            }
-            granted.insert(computation.to_owned());
+        let computations = self.validate_computations(computations)?;
+        self.grants.insert(
+            peer,
+            RemotePeerGrant {
+                computations,
+                #[cfg(feature = "tls")]
+                tls_certificate_pins: None,
+            },
+        );
+        Ok(())
+    }
+
+    /// Grants one peer certificate-bound access to registered computations.
+    ///
+    /// The pin set must be non-empty and enforcing. Admission is then possible
+    /// only through [`Self::admit_tls_peer`], which obtains the presented leaf
+    /// certificate from a successfully handshaken [`crate::tls::TlsStream`].
+    /// Calling [`Self::admit`] for this peer fails closed, so an asserted
+    /// [`RemotePeerHello::peer_node`] cannot bypass the transport binding.
+    #[cfg(feature = "tls")]
+    pub fn grant_tls_peer<I, S>(
+        &mut self,
+        peer: NodeId,
+        certificate_pins: crate::tls::CertificatePinSet,
+        computations: I,
+    ) -> Result<(), RemotePeerAdmissionError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        if certificate_pins.is_empty() || !certificate_pins.is_enforcing() {
+            return Err(RemotePeerAdmissionError::InvalidTlsPeerPinSet { peer });
         }
-        self.grants.insert(peer, granted);
+        let computations = self.validate_computations(computations)?;
+        self.grants.insert(
+            peer,
+            RemotePeerGrant {
+                computations,
+                tls_certificate_pins: Some(certificate_pins),
+            },
+        );
         Ok(())
     }
 
@@ -2338,11 +2420,86 @@ impl RemotePeerAdmissionPolicy {
         &self,
         hello: &RemotePeerHello,
     ) -> Result<RemotePeerSession, RemotePeerAdmissionError> {
-        let Some(granted_computations) = self.grants.get(hello.peer_node()) else {
+        let grant = self.grant_for(hello)?;
+        #[cfg(feature = "tls")]
+        if grant.tls_certificate_pins.is_some() {
+            return Err(RemotePeerAdmissionError::TlsAuthenticationRequired {
+                peer: hello.peer_node().clone(),
+            });
+        }
+        self.admit_grant(hello, grant)
+    }
+
+    /// Admits a certificate-bound peer from an established TLS session.
+    ///
+    /// The TLS acceptor must have completed certificate verification before
+    /// this method is called. For inbound peers that means configuring mutual
+    /// TLS; a server-only TLS session has no client certificate and is refused.
+    #[cfg(feature = "tls")]
+    pub fn admit_tls_peer<IO>(
+        &self,
+        hello: &RemotePeerHello,
+        tls_stream: &crate::tls::TlsStream<IO>,
+    ) -> Result<RemotePeerSession, RemotePeerAdmissionError> {
+        let grant = self.grant_for(hello)?;
+        let certificate_pins = grant.tls_certificate_pins.as_ref().ok_or_else(|| {
+            RemotePeerAdmissionError::TlsIdentityNotConfigured {
+                peer: hello.peer_node().clone(),
+            }
+        })?;
+        let certificate_der = tls_stream.peer_leaf_certificate_der().ok_or_else(|| {
+            RemotePeerAdmissionError::TlsPeerCertificateMissing {
+                peer: hello.peer_node().clone(),
+            }
+        })?;
+        let certificate = crate::tls::Certificate::from_der(certificate_der);
+        certificate_pins.validate(&certificate).map_err(|error| {
+            RemotePeerAdmissionError::TlsPeerCertificateRejected {
+                peer: hello.peer_node().clone(),
+                detail: error.to_string(),
+            }
+        })?;
+        self.admit_grant(hello, grant)
+    }
+
+    fn validate_computations<I, S>(
+        &self,
+        computations: I,
+    ) -> Result<BTreeSet<String>, RemotePeerAdmissionError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let mut granted = BTreeSet::new();
+        for computation in computations {
+            let computation = computation.as_ref();
+            if !self.registry.contains(computation) {
+                return Err(RemotePeerAdmissionError::UnknownGrantedComputation {
+                    computation: computation.to_owned(),
+                });
+            }
+            granted.insert(computation.to_owned());
+        }
+        Ok(granted)
+    }
+
+    fn grant_for(
+        &self,
+        hello: &RemotePeerHello,
+    ) -> Result<&RemotePeerGrant, RemotePeerAdmissionError> {
+        let Some(grant) = self.grants.get(hello.peer_node()) else {
             return Err(RemotePeerAdmissionError::UnauthorizedPeer {
                 peer: hello.peer_node().clone(),
             });
         };
+        Ok(grant)
+    }
+
+    fn admit_grant(
+        &self,
+        hello: &RemotePeerHello,
+        grant: &RemotePeerGrant,
+    ) -> Result<RemotePeerSession, RemotePeerAdmissionError> {
         if hello.protocol_version() != self.protocol_version {
             return Err(RemotePeerAdmissionError::ProtocolVersionMismatch {
                 accepted: self.protocol_version,
@@ -2360,7 +2517,7 @@ impl RemotePeerAdmissionPolicy {
             peer_node: hello.peer_node().clone(),
             protocol_version: self.protocol_version,
             registry_fingerprint: expected_registry,
-            granted_computations: granted_computations.clone(),
+            granted_computations: grant.computations.clone(),
         })
     }
 }
