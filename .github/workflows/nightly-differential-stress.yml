@@ -56,6 +56,11 @@ jobs:
         run: |
           cargo test -p asupersync --test dependency_oracle_policy_contract -- --nocapture
 
+      - name: Reject expired proof-status evidence
+        # This is a local cadence/drift check, not remote-required RCH proof.
+        run: |
+          cargo test -p asupersync --test proof_status_snapshot_contract fresh_claim_evidence_has_a_bounded_structured_date -- --exact --nocapture
+
       - name: Run nightly differential stress lane
         id: run_nightly
         shell: bash

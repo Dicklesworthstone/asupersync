@@ -3,11 +3,13 @@
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const AGENTS_PATH: &str = "AGENTS.md";
 const DURABLE_RECEIPT_FIXTURE_ROOT: &str = "tests/fixtures/durable_rch_proof_receipt";
 const FRONTIER_PATH: &str = "artifacts/validation_frontier_ledger_schema_v1.json";
 const MANIFEST_PATH: &str = "artifacts/proof_lane_manifest_v1.json";
+const NIGHTLY_WORKFLOW_PATH: &str = ".github/workflows/nightly-differential-stress.yml";
 const README_PATH: &str = "README.md";
 const SNAPSHOT_PATH: &str = "artifacts/proof_status_snapshot_v1.json";
 
@@ -72,6 +74,111 @@ fn bool_field(value: &Value, key: &str) -> bool {
         .get(key)
         .and_then(Value::as_bool)
         .unwrap_or_else(|| panic!("{key} must be a boolean"))
+}
+
+fn u64_field(value: &Value, key: &str) -> u64 {
+    value
+        .get(key)
+        .and_then(Value::as_u64)
+        .unwrap_or_else(|| panic!("{key} must be an unsigned integer"))
+}
+
+fn parse_iso_date_epoch_day(text: &str) -> Result<i64, String> {
+    let mut parts = text.split('-');
+    let year = parts
+        .next()
+        .ok_or_else(|| format!("invalid ISO date {text:?}"))?
+        .parse::<i64>()
+        .map_err(|_| format!("invalid ISO date {text:?}"))?;
+    let month = parts
+        .next()
+        .ok_or_else(|| format!("invalid ISO date {text:?}"))?
+        .parse::<u32>()
+        .map_err(|_| format!("invalid ISO date {text:?}"))?;
+    let day = parts
+        .next()
+        .ok_or_else(|| format!("invalid ISO date {text:?}"))?
+        .parse::<u32>()
+        .map_err(|_| format!("invalid ISO date {text:?}"))?;
+    if parts.next().is_some() || text.len() != 10 || !(1970..=9999).contains(&year) {
+        return Err(format!("invalid ISO date {text:?}"));
+    }
+
+    let leap_year = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let days_in_month = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap_year => 29,
+        2 => 28,
+        _ => return Err(format!("invalid ISO date {text:?}")),
+    };
+    if day == 0 || day > days_in_month {
+        return Err(format!("invalid ISO date {text:?}"));
+    }
+
+    // Gregorian civil date to days since 1970-01-01. This keeps the checker
+    // dependency-free and makes fixed as-of-date fixtures deterministic.
+    let adjusted_year = year - if month <= 2 { 1 } else { 0 };
+    let era = adjusted_year.div_euclid(400);
+    let year_of_era = adjusted_year - era * 400;
+    let adjusted_month = i64::from(month) + if month > 2 { -3 } else { 9 };
+    let day_of_year = (153 * adjusted_month + 2) / 5 + i64::from(day) - 1;
+    let day_of_era =
+        year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    Ok(era * 146_097 + day_of_era - 719_468)
+}
+
+fn freshness_as_of_epoch_day(policy: &Value) -> Result<i64, String> {
+    let override_env = string(policy, "as_of_override_env");
+    if let Some(value) = std::env::var_os(override_env) {
+        let value = value
+            .to_str()
+            .ok_or_else(|| format!("{override_env} must contain UTF-8"))?;
+        return parse_iso_date_epoch_day(value);
+    }
+
+    let elapsed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| format!("system clock predates Unix epoch: {error}"))?;
+    Ok(i64::try_from(elapsed.as_secs() / 86_400)
+        .expect("current epoch day must fit in i64"))
+}
+
+fn validate_claim_freshness(
+    row: &Value,
+    fresh_status: &str,
+    evidence_date_field: &str,
+    maximum_age_days: u64,
+    as_of_epoch_day: i64,
+) -> Result<(), String> {
+    let claim_id = string(row, "claim_id");
+    if string(row, "proof_evidence_status") != fresh_status {
+        return Ok(());
+    }
+
+    let evidence_date = row
+        .get(evidence_date_field)
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            format!(
+                "{claim_id}: {fresh_status} requires string field {evidence_date_field}"
+            )
+        })?;
+    let evidence_epoch_day = parse_iso_date_epoch_day(evidence_date)
+        .map_err(|error| format!("{claim_id}: {error}"))?;
+    let age_days = as_of_epoch_day - evidence_epoch_day;
+    if age_days < 0 {
+        return Err(format!(
+            "{claim_id}: fresh evidence date {evidence_date} is in the future"
+        ));
+    }
+    if age_days > i64::try_from(maximum_age_days).expect("maximum age must fit in i64") {
+        return Err(format!(
+            "{claim_id}: fresh evidence date {evidence_date} is {age_days} days old, exceeding the {maximum_age_days}-day limit; rerun the lane or demote the row"
+        ));
+    }
+
+    Ok(())
 }
 
 fn manifest_lanes(manifest: &Value) -> BTreeMap<String, Value> {
@@ -747,6 +854,97 @@ fn statuses_are_known_and_include_live_green_and_frontier_rows() {
             string(entry, "claim_id")
         );
     }
+}
+
+#[test]
+fn fresh_claim_evidence_has_a_bounded_structured_date() {
+    let snapshot = json(SNAPSHOT_PATH);
+    let policy = snapshot
+        .get("freshness_policy")
+        .expect("snapshot must declare freshness_policy");
+    assert_eq!(string(policy, "scope"), "claim_categories");
+    assert_eq!(
+        string(policy, "created_date_role"),
+        "contract-inception-not-dashboard-refresh"
+    );
+    assert_eq!(
+        string(policy, "over_age_behavior"),
+        "fail-contract-until-rerun-or-demoted"
+    );
+    assert!(!bool_field(policy, "mapped_green_is_fresh_proof"));
+    assert!(!bool_field(policy, "automatic_status_promotion"));
+
+    let fresh_status = string(policy, "fresh_status");
+    let evidence_date_field = string(policy, "evidence_date_field");
+    let maximum_age_days = u64_field(policy, "maximum_age_days");
+    assert_eq!(maximum_age_days, 30);
+    let as_of_epoch_day = freshness_as_of_epoch_day(policy)
+        .unwrap_or_else(|error| panic!("resolve freshness as-of date: {error}"));
+
+    let fresh_rows = array(&snapshot, "claim_categories")
+        .iter()
+        .filter(|row| string(row, "proof_evidence_status") == fresh_status)
+        .collect::<Vec<_>>();
+    assert!(!fresh_rows.is_empty(), "snapshot needs at least one fresh row");
+    for row in fresh_rows {
+        validate_claim_freshness(
+            row,
+            fresh_status,
+            evidence_date_field,
+            maximum_age_days,
+            as_of_epoch_day,
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+    }
+}
+
+#[test]
+fn freshness_checker_rejects_missing_invalid_expired_and_future_dates() {
+    let as_of = parse_iso_date_epoch_day("2026-08-31").expect("fixed as-of date");
+    let fresh_row = |evidence_date: Option<&str>| {
+        let mut row = serde_json::json!({
+            "claim_id": "freshness-fixture",
+            "proof_evidence_status": "fresh-rch-pass"
+        });
+        if let Some(date) = evidence_date {
+            row["evidence_date"] = Value::String(date.to_string());
+        }
+        row
+    };
+    let validate = |row: &Value| {
+        validate_claim_freshness(row, "fresh-rch-pass", "evidence_date", 30, as_of)
+    };
+
+    validate(&fresh_row(Some("2026-08-01"))).expect("30-day boundary must remain fresh");
+    assert!(validate(&fresh_row(None)).unwrap_err().contains("requires"));
+    assert!(
+        validate(&fresh_row(Some("2026-02-29")))
+            .unwrap_err()
+            .contains("invalid ISO date")
+    );
+    assert!(
+        validate(&fresh_row(Some("2026-07-31")))
+            .unwrap_err()
+            .contains("31 days old")
+    );
+    assert!(
+        validate(&fresh_row(Some("2026-09-01")))
+            .unwrap_err()
+            .contains("future")
+    );
+}
+
+#[test]
+fn nightly_workflow_runs_the_bounded_freshness_check_without_overclaiming_proof() {
+    let workflow = read_repo_file(NIGHTLY_WORKFLOW_PATH);
+    assert!(workflow.contains("schedule:"));
+    assert!(workflow.contains("Reject expired proof-status evidence"));
+    assert!(workflow.contains(
+        "cargo test -p asupersync --test proof_status_snapshot_contract fresh_claim_evidence_has_a_bounded_structured_date -- --exact --nocapture"
+    ));
+    assert!(workflow.contains(
+        "This is a local cadence/drift check, not remote-required RCH proof."
+    ));
 }
 
 #[test]

@@ -13,6 +13,17 @@
     "readme": "README.md",
     "agent_instructions": "AGENTS.md"
   },
+  "freshness_policy": {
+    "scope": "claim_categories",
+    "created_date_role": "contract-inception-not-dashboard-refresh",
+    "fresh_status": "fresh-rch-pass",
+    "evidence_date_field": "evidence_date",
+    "maximum_age_days": 30,
+    "as_of_override_env": "ASUPERSYNC_PROOF_STATUS_AS_OF_DATE",
+    "over_age_behavior": "fail-contract-until-rerun-or-demoted",
+    "mapped_green_is_fresh_proof": false,
+    "automatic_status_promotion": false
+  },
   "status_catalog": [
     {
       "status": "green",
@@ -226,6 +237,7 @@
       "category": "native parked-task cancellation contract",
       "status": "green",
       "proof_evidence_status": "fresh-rch-pass",
+      "evidence_date": "2026-08-12",
       "doc_claim_markers": {
         "README.md": [
           "native parked-task cancellation contract"
@@ -1163,6 +1175,7 @@
       "category": "dependency budget contract",
       "status": "green",
       "proof_evidence_status": "fresh-rch-pass",
+      "evidence_date": "2026-08-23",
       "doc_claim_markers": {
         "README.md": [
           "Dependency budget contract",
@@ -1190,6 +1203,7 @@
       "category": "dependency CI provenance final signoff",
       "status": "green",
       "proof_evidence_status": "fresh-rch-pass",
+      "evidence_date": "2026-08-23",
       "doc_claim_markers": {
         "README.md": [
           "Dependency CI/provenance final signoff",
