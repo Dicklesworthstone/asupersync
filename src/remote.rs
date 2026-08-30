@@ -33,8 +33,10 @@
 //! outcomes before a retry can execute again. The native client bounds connect,
 //! handshake, exchange, and backoff, retries only failures proven to precede
 //! request delivery, and fails closed on every ambiguous delivery because the
-//! listener's retained idempotency state is process-local. Lease enforcement
-//! remains a separate lifecycle layer.
+//! listener's retained idempotency state is process-local. The structured
+//! listener also executes each admitted computation in a lease-bounded child
+//! region and returns only after expiry cancellation has drained to quiescence.
+//! The current one-request/one-response protocol does not support renewal.
 
 use crate::channel::oneshot;
 #[cfg(feature = "tls")]
@@ -3456,6 +3458,25 @@ impl RemoteServiceResponseExt for RemoteServiceWireResponse {
     }
 }
 
+#[cfg(feature = "tls")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RemoteServiceExecutionMode {
+    Inline,
+    #[cfg(not(target_arch = "wasm32"))]
+    LeaseBound,
+}
+
+#[cfg(feature = "tls")]
+impl RemoteServiceExecutionMode {
+    const fn enforces_request_lease(self) -> bool {
+        match self {
+            Self::Inline => false,
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::LeaseBound => true,
+        }
+    }
+}
+
 /// Executes one bounded authenticated named computation over established TLS.
 ///
 /// The caller owns the TLS handshake and the connection lifetime. This adapter
@@ -3477,8 +3498,16 @@ pub async fn serve_tls_computation_once<IO>(
 where
     IO: AsyncRead + AsyncWrite + Unpin,
 {
-    serve_tls_computation_once_with_idempotency(cx, stream, policy, computations, limits, None)
-        .await
+    serve_tls_computation_once_with_idempotency(
+        cx,
+        stream,
+        policy,
+        computations,
+        limits,
+        None,
+        RemoteServiceExecutionMode::Inline,
+    )
+    .await
 }
 
 #[cfg(feature = "tls")]
@@ -3489,6 +3518,7 @@ async fn serve_tls_computation_once_with_idempotency<IO>(
     computations: &RemoteComputationRegistry,
     limits: RemoteServiceWireLimits,
     idempotency: Option<&RemoteServiceIdempotency>,
+    execution_mode: RemoteServiceExecutionMode,
 ) -> Result<RemoteServiceWireResponse, RemoteComputationServiceError>
 where
     IO: AsyncRead + AsyncWrite + Unpin,
@@ -3529,6 +3559,7 @@ where
                     computations,
                     request,
                     idempotency,
+                    execution_mode,
                 )
                 .await
             }
@@ -3554,6 +3585,7 @@ async fn remote_service_dispatch_with_idempotency(
     computations: &RemoteComputationRegistry,
     request: SpawnRequest,
     idempotency: Option<&RemoteServiceIdempotency>,
+    execution_mode: RemoteServiceExecutionMode,
 ) -> (
     RemoteServiceWireResponse,
     Option<RemoteServiceTerminalCommit>,
@@ -3564,6 +3596,14 @@ async fn remote_service_dispatch_with_idempotency(
             remote_task_id: remote_task_id.raw(),
             code: RemoteServiceRejectionCode::ComputationDenied,
             diagnostic: error.to_string(),
+        }
+        .with_no_commit();
+    }
+    if execution_mode.enforces_request_lease() && request.lease.is_zero() {
+        return RemoteServiceWireResponse::Rejected {
+            remote_task_id: remote_task_id.raw(),
+            code: RemoteServiceRejectionCode::MalformedRequest,
+            diagnostic: "remote computation lease must be nonzero".to_owned(),
         }
         .with_no_commit();
     }
@@ -3627,7 +3667,15 @@ async fn remote_service_dispatch_with_idempotency(
         Some(RemoteServiceIdempotencyAdmission::Execute) | None => {}
     }
 
-    let terminal = computations.dispatch(cx, session, request.clone()).await;
+    let terminal = match execution_mode {
+        RemoteServiceExecutionMode::Inline => {
+            computations.dispatch(cx, session, request.clone()).await
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        RemoteServiceExecutionMode::LeaseBound => {
+            remote_service_dispatch_with_lease(cx, session, computations, request.clone()).await
+        }
+    };
     match terminal {
         Ok(outcome) => {
             let response = RemoteServiceWireResponse::Outcome {
@@ -3666,6 +3714,125 @@ async fn remote_service_dispatch_with_idempotency(
             (response, commit)
         }
     }
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+async fn remote_service_dispatch_with_lease(
+    cx: &Cx,
+    session: &RemotePeerSession,
+    computations: &RemoteComputationRegistry,
+    request: SpawnRequest,
+) -> Result<RemoteOutcome, RemoteComputationDispatchError> {
+    let accepted_at = cx.now();
+    let expires_at = accepted_at + request.lease;
+    let child_budget = cx.budget().tightened_by_timeout(accepted_at, request.lease);
+    let child = cx
+        .open_child_region(ChildRegionSpec::inherit().with_budget(child_budget))
+        .await
+        .map_err(|error| remote_service_execution_lifecycle_error("create child region", error))?;
+    let child_region_id = child.region_id();
+
+    if remote_service_lease_expired(cx.now(), expires_at) {
+        return remote_service_expire_child(cx, child, child_region_id).await;
+    }
+
+    let owned_computations = computations.clone();
+    let owned_session = session.clone();
+    let mut task = match child.cx().spawn(move |task_cx| async move {
+        owned_computations
+            .dispatch(&task_cx, &owned_session, request)
+            .await
+    }) {
+        Ok(task) => task,
+        Err(error) => {
+            let close_result = child.close().await;
+            let diagnostic = match close_result {
+                Ok(()) => format!("spawn leased computation: {error}"),
+                Err(close_error) => {
+                    format!("spawn leased computation: {error}; close child region: {close_error}")
+                }
+            };
+            return Err(RemoteComputationDispatchError::Execution(
+                RemoteError::TransportError(diagnostic),
+            ));
+        }
+    };
+    let mut deadline = Box::pin(crate::time::sleep_until(expires_at));
+
+    enum LeaseRace<T> {
+        Completed(T),
+        Expired,
+    }
+
+    let raced = std::future::poll_fn(|task_cx| {
+        if remote_service_lease_expired(cx.now(), expires_at) {
+            return std::task::Poll::Ready(LeaseRace::Expired);
+        }
+        if deadline.as_mut().poll(task_cx).is_ready() {
+            return std::task::Poll::Ready(LeaseRace::Expired);
+        }
+        task.poll_join(task_cx).map(LeaseRace::Completed)
+    })
+    .await;
+
+    match raced {
+        LeaseRace::Expired => remote_service_expire_child(cx, child, child_region_id).await,
+        LeaseRace::Completed(joined) => {
+            child.close().await.map_err(|error| {
+                remote_service_execution_lifecycle_error("close child region", error)
+            })?;
+            match joined {
+                Ok(terminal) => terminal,
+                Err(crate::runtime::JoinError::Cancelled(reason)) => {
+                    Ok(RemoteOutcome::Cancelled(reason))
+                }
+                Err(crate::runtime::JoinError::Panicked(payload)) => {
+                    Ok(RemoteOutcome::Panicked(payload.message().to_owned()))
+                }
+                Err(crate::runtime::JoinError::PolledAfterCompletion) => Err(
+                    RemoteComputationDispatchError::Execution(RemoteError::TransportError(
+                        "leased computation join handle was polled after completion".to_owned(),
+                    )),
+                ),
+            }
+        }
+    }
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+fn remote_service_lease_expired(now: Time, expires_at: Time) -> bool {
+    now >= expires_at
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+async fn remote_service_expire_child(
+    cx: &Cx,
+    child: crate::cx::ChildRegion,
+    child_region_id: RegionId,
+) -> Result<RemoteOutcome, RemoteComputationDispatchError> {
+    let reason = CancelReason::with_origin(
+        crate::types::CancelKind::Deadline,
+        child_region_id,
+        cx.now(),
+    )
+    .with_message("remote computation lease expired");
+    child.cancel(reason.clone()).map_err(|error| {
+        remote_service_execution_lifecycle_error("cancel expired child region", error)
+    })?;
+    child.close().await.map_err(|error| {
+        remote_service_execution_lifecycle_error("close expired child region", error)
+    })?;
+    Ok(RemoteOutcome::Cancelled(reason))
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+fn remote_service_execution_lifecycle_error(
+    operation: &str,
+    error: impl fmt::Display,
+) -> RemoteComputationDispatchError {
+    RemoteComputationDispatchError::Execution(RemoteError::TransportError(format!(
+        "remote computation lifecycle could not {operation}: {error}"
+    )))
 }
 
 /// Sends one bounded request and awaits its fully decoded TLS response.
@@ -4830,6 +4997,7 @@ impl RemoteComputationService {
                             &computations,
                             wire_limits,
                             Some(&idempotency),
+                            RemoteServiceExecutionMode::LeaseBound,
                         )
                         .await
                         .map_err(RemoteComputationConnectionError::Service)?;
@@ -5729,6 +5897,21 @@ mod tests {
 
     fn test_request_fingerprint(name: &str) -> IdempotencyRequestFingerprint {
         IdempotencyRequestFingerprint::new(ComputationName::new(name), RemoteInput::empty())
+    }
+
+    #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+    #[test]
+    fn remote_service_lease_expiry_wins_at_exact_boundary() {
+        let expires_at = Time::from_nanos(50);
+        assert!(!remote_service_lease_expired(
+            Time::from_nanos(49),
+            expires_at
+        ));
+        assert!(remote_service_lease_expired(expires_at, expires_at));
+        assert!(remote_service_lease_expired(
+            Time::from_nanos(51),
+            expires_at
+        ));
     }
 
     #[test]

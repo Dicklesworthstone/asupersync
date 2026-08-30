@@ -45,7 +45,7 @@ use std::net::{Shutdown, SocketAddr};
 use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -931,6 +931,25 @@ fn remote_service_wire_request_with(
     idempotency_key: u128,
     input: &[u8],
 ) -> RemoteServiceWireRequest {
+    remote_service_wire_request_with_lease(
+        hello,
+        computation,
+        remote_task_id,
+        idempotency_key,
+        input,
+        Duration::from_secs(30),
+    )
+}
+
+#[cfg(feature = "tls")]
+fn remote_service_wire_request_with_lease(
+    hello: RemotePeerHello,
+    computation: &str,
+    remote_task_id: u64,
+    idempotency_key: u128,
+    input: &[u8],
+    lease: Duration,
+) -> RemoteServiceWireRequest {
     let cx = Cx::for_testing();
     RemoteServiceWireRequest::from_spawn_request(
         hello.clone(),
@@ -938,7 +957,7 @@ fn remote_service_wire_request_with(
             remote_task_id: RemoteTaskId::from_raw(remote_task_id),
             computation: ComputationName::new(computation),
             input: RemoteInput::new(input.to_vec()),
-            lease: Duration::from_secs(30),
+            lease,
             idempotency_key: IdempotencyKey::from_raw(idempotency_key),
             budget: None,
             origin_node: hello.peer_node().clone(),
@@ -947,6 +966,191 @@ fn remote_service_wire_request_with(
         },
     )
     .expect("wire request identity should agree with its peer hello")
+}
+
+#[cfg(feature = "tls")]
+#[test]
+fn remote_tls_listener_enforces_lease_then_caches_cancelled_outcome() {
+    let certificates = Certificate::from_pem(TEST_CERT_PEM).expect("TLS fixture should parse");
+    let peer_certificate = certificates
+        .first()
+        .expect("TLS fixture should contain a leaf certificate")
+        .clone();
+    let certificate_chain =
+        CertificateChain::from_pem(TEST_CERT_PEM).expect("TLS certificate chain should parse");
+    let private_key = PrivateKey::from_pem(TEST_KEY_PEM).expect("TLS private key should parse");
+
+    let dispatch_count = Arc::new(AtomicUsize::new(0));
+    let cleanup_complete = Arc::new(AtomicBool::new(false));
+    let (park_tx, park_rx) = oneshot::channel::<()>();
+    let park_receiver = Arc::new(Mutex::new(Some(park_rx)));
+    let mut computations = RemoteComputationRegistry::new();
+    let handler_dispatch_count = Arc::clone(&dispatch_count);
+    let handler_cleanup_complete = Arc::clone(&cleanup_complete);
+    let handler_park_receiver = Arc::clone(&park_receiver);
+    computations
+        .register::<Vec<u8>, Vec<u8>, _, _>("proof.lease", move |cx, invocation| {
+            let handler_dispatch_count = Arc::clone(&handler_dispatch_count);
+            let handler_cleanup_complete = Arc::clone(&handler_cleanup_complete);
+            let mut receiver = handler_park_receiver
+                .lock()
+                .take()
+                .expect("canonical leased request should execute exactly once");
+            async move {
+                handler_dispatch_count.fetch_add(1, Ordering::SeqCst);
+                let received = receiver.recv(&cx).await;
+                handler_cleanup_complete.store(true, Ordering::SeqCst);
+                received.map_err(|error| {
+                    RemoteError::TransportError(format!(
+                        "proof.lease parking operation ended: {error}"
+                    ))
+                })?;
+                Ok(RemoteOutcome::Success(
+                    invocation.into_request().input.into_data(),
+                ))
+            }
+        })
+        .expect("listener proof.lease handler should register");
+
+    let origin = NodeId::new("origin-lease-loopback");
+    let mut peer_pins = CertificatePinSet::new();
+    peer_pins.add(
+        CertificatePin::compute_spki_sha256(&peer_certificate)
+            .expect("fixture certificate should produce an SPKI pin"),
+    );
+    let mut policy = RemotePeerAdmissionPolicy::new(
+        RemoteProtocolVersion::V2,
+        computations.schema_registry().clone(),
+    );
+    policy
+        .grant_tls_peer(origin.clone(), peer_pins, ["proof.lease"])
+        .expect("lease test certificate-bound grant should be valid");
+    let hello = policy.hello_for(origin);
+    let canonical = remote_service_wire_request_with_lease(
+        hello.clone(),
+        "proof.lease",
+        7201,
+        0x1ea5e,
+        b"leased-input",
+        Duration::from_millis(250),
+    );
+    let cached = remote_service_wire_request_with_lease(
+        hello.clone(),
+        "proof.lease",
+        7202,
+        0x1ea5e,
+        b"leased-input",
+        Duration::from_millis(250),
+    );
+    let zero_lease = remote_service_wire_request_with_lease(
+        hello,
+        "proof.lease",
+        7203,
+        0,
+        b"must-not-dispatch",
+        Duration::ZERO,
+    );
+
+    let mut client_auth_roots = RootCertStore::empty();
+    client_auth_roots
+        .add(&peer_certificate)
+        .expect("server should trust the fixture client certificate");
+    let acceptor = TlsAcceptorBuilder::new(certificate_chain.clone(), private_key.clone())
+        .client_auth(ClientAuth::Required(client_auth_roots))
+        .build()
+        .expect("lease test mTLS acceptor should build");
+    let connector = TlsConnectorBuilder::new()
+        .add_root_certificate(&peer_certificate)
+        .identity(certificate_chain, private_key)
+        .build()
+        .expect("lease test mTLS connector should build");
+
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("lease test runtime should build");
+    let service = runtime
+        .block_on(RemoteComputationService::bind(
+            "127.0.0.1:0",
+            acceptor,
+            policy,
+            computations,
+            RemoteComputationServiceConfig::new()
+                .with_max_connections(Some(4))
+                .with_drain_timeout(Duration::from_secs(1)),
+        ))
+        .expect("lease test service should bind");
+    let endpoint = service
+        .local_addr()
+        .expect("lease test service should expose its address");
+    let operator = service.handle();
+    let client_operator = operator.clone();
+    let client_cleanup_complete = Arc::clone(&cleanup_complete);
+    let connector = Arc::new(connector);
+
+    let client = thread::spawn(move || {
+        let cancelled = call_tls_remote_service(endpoint, &connector, &canonical);
+        assert!(matches!(
+            cancelled,
+            RemoteServiceWireResponse::Outcome {
+                remote_task_id: 7201,
+                outcome: RemoteServiceWireOutcome::Cancelled(ref reason),
+            } if reason.kind == CancelKind::Deadline
+                && reason.message.as_deref() == Some("remote computation lease expired")
+        ));
+        assert!(
+            client_cleanup_complete.load(Ordering::SeqCst),
+            "lease cancellation must drain handler cleanup before replying"
+        );
+
+        let replayed = call_tls_remote_service(endpoint, &connector, &cached);
+        assert!(matches!(
+            replayed,
+            RemoteServiceWireResponse::Outcome {
+                remote_task_id: 7202,
+                outcome: RemoteServiceWireOutcome::Cancelled(ref reason),
+            } if reason.kind == CancelKind::Deadline
+        ));
+
+        let refused = call_tls_remote_service(endpoint, &connector, &zero_lease);
+        assert!(matches!(
+            refused,
+            RemoteServiceWireResponse::Rejected {
+                remote_task_id: 7203,
+                code: RemoteServiceRejectionCode::MalformedRequest,
+                ref diagnostic,
+            } if diagnostic.contains("lease must be nonzero")
+        ));
+        assert!(client_operator.begin_drain());
+    });
+
+    let report = runtime
+        .block_on(async move {
+            let cx = Cx::current().expect("runtime should install a lease test service context");
+            service.run(&cx).await
+        })
+        .expect("lease test service should drain cleanly");
+    client.join().expect("lease test client should not panic");
+    drop(park_tx);
+
+    assert_eq!(report.accepted_connections(), 3);
+    assert_eq!(report.completed_connections(), 3);
+    assert_eq!(report.failed_connections(), 0);
+    assert_eq!(report.interrupted_connections(), 0);
+    assert_eq!(dispatch_count.load(Ordering::SeqCst), 1);
+    assert!(cleanup_complete.load(Ordering::SeqCst));
+    assert_eq!(operator.active_connections(), 0);
+    assert_eq!(operator.shutdown_signal().phase(), ShutdownPhase::Stopped);
+
+    ProofLogRow::pass(
+        "structured_remote_service_request_lease",
+        0,
+        "none",
+        "mtls_v2_expire_drain_cache_then_zero_lease_refusal",
+        3,
+        "one_dispatch_one_cleanup_two_cancelled_views_zero_live",
+        "one_dispatch_one_cleanup_two_cancelled_views_zero_live",
+    )
+    .emit();
 }
 
 #[cfg(feature = "tls")]
