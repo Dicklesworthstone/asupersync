@@ -8050,13 +8050,17 @@ proptest::proptest! {
         proptest::prop_assert_eq!(
             &actual,
             &expected,
-            "pooled encode diverged from canonical bytes at K={k}, repairs={repair_count}"
+            "pooled encode diverged from canonical bytes at K={}, repairs={}",
+            k,
+            repair_count
         );
         proptest::prop_assert!(
             execution_threads
                 .iter()
                 .all(|thread| thread.contains("-blocking-")),
-            "K={k} must execute through the configured pool: {execution_threads:?}"
+            "K={} must execute through the configured pool: {:?}",
+            k,
+            execution_threads
         );
     }
 }
