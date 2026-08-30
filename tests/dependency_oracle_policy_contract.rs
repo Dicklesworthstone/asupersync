@@ -2254,7 +2254,7 @@ fn validate_aggregate_signoff(policy: &Value) -> Vec<String> {
         ),
         (
             "root-focused-dev",
-            395,
+            394,
             all_active_package_ids.clone(),
             root_semantic_ids,
             all_active_package_ids
@@ -3199,7 +3199,7 @@ fn manifest_reconciliation_metadata_and_required_fields_are_exact() {
         "CAP-VERIFICATION-PROFILES"
     );
     assert_eq!(string(reconciliation, "as_of_release"), "0.4.9");
-    assert_eq!(string(reconciliation, "as_of_date_utc"), "2026-08-21");
+    assert_eq!(string(reconciliation, "as_of_date_utc"), "2026-08-30");
     assert_eq!(
         reconciliation
             .get("cutover_authorized")

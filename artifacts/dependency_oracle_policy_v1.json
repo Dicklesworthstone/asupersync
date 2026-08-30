@@ -23,21 +23,21 @@
     "bead_id": "asupersync-mnotoo.4.1",
     "capability_id": "CAP-VERIFICATION-PROFILES",
     "as_of_release": "0.4.9",
-    "as_of_date_utc": "2026-08-21",
+    "as_of_date_utc": "2026-08-30",
     "scope_rule": "Every root workspace member, explicitly excluded Rust harness, standalone conformance Cargo project and Cargo.lock is pinned. A pin drift is an unregistered state until this registry is reconciled. Synthetic manifests under tests/fixtures are contract inputs rather than installed oracle edges and are excluded.",
     "unknown_state": "fail-closed",
     "cutover_authorized": false,
     "source_pins": [
       {
         "path": "Cargo.toml",
-        "sha256": "541ed6be1f748cd2897f18ba2679c6d34ff84a57d480db5a11c40ff007f1f1c7",
-        "line_count": 1064,
+        "sha256": "0f02e4fefedf5e9013054df794ece6f8fb259134fdbd95376e61d486c043fde3",
+        "line_count": 1074,
         "scope": "root-package-and-workspace"
       },
       {
         "path": "Cargo.lock",
-        "sha256": "95d3aaec0e58be196f08e4b30792f90129213af86ae8e34d2c5862b9feb15880",
-        "line_count": 4665,
+        "sha256": "513cfba8f8671e69aab32317e042bd00737b9bfb30e2234012d6605f320f7a6a",
+        "line_count": 4664,
         "scope": "resolved-package-version-source-and-checksum"
       },
       {
@@ -96,13 +96,13 @@
       },
       {
         "path": "fuzz/Cargo.toml",
-        "sha256": "857925379ab7068f3faf94435e44b87adfc96c2d716f19b5c1cfdffbbfbd580d",
-        "line_count": 6233,
+        "sha256": "e27d7e616b079f2102a2d179907709a7e484fad4f77ea13ccb8a9e9ab56b9385",
+        "line_count": 6234,
         "scope": "explicitly-excluded-fuzz-workspace"
       },
       {
         "path": "fuzz/conformance/Cargo.toml",
-        "sha256": "9f1881aa1450853b2ab5a84ca18a889c56ffe998c32405f2abb049899c20ef8b",
+        "sha256": "0b2f13450fd2c8b7f5376912160cf1fd1f2b5b5d92bae0703cd683805b1c274f",
         "line_count": 50,
         "scope": "fuzz-conformance-member"
       },
@@ -655,13 +655,13 @@
       {
         "oracle_id": "active-h2-reference",
         "package_name": "h2",
-        "package_id": "registry+https://github.com/rust-lang/crates.io-index#h2@0.4.15",
+        "package_id": "registry+https://github.com/rust-lang/crates.io-index#h2@0.4.18",
         "requested_versions": [
           "0.4"
         ],
-        "resolved_version": "0.4.15",
+        "resolved_version": "0.4.18",
         "lock_source": "registry+https://github.com/rust-lang/crates.io-index",
-        "lock_checksum": "6cb093c84e8bd9b188d4c4a8cb6579fc016968d14c99882163cd3ff402a4f155",
+        "lock_checksum": "839c0e8a181239723652be9062bb56ca5bf5f64011f73b623f6f4fc59086a228",
         "oracle_class": "PURE_RUST_IN_WORKSPACE_ORACLE",
         "lifecycle_state": "active",
         "graph_class": "dev",
@@ -1046,7 +1046,7 @@
       "bead_id": "asupersync-mnotoo.4.2",
       "capability_id": "CAP-VERIFICATION-PROFILES",
       "as_of_release": "0.4.9",
-      "as_of_date_utc": "2026-08-21",
+      "as_of_date_utc": "2026-08-30",
       "unknown_active_native_state": "block-green",
       "external_process_authorization": "none; these reproducible Cargo/RCH commands are evidence recipes and do not authorize brokers, system package managers, service mutation, or non-Cargo build tooling",
       "detection_contract": {
@@ -1419,7 +1419,7 @@
       "bead_id": "asupersync-mnotoo.4.3",
       "capability_id": "CAP-VERIFICATION-PROFILES",
       "as_of_release": "0.4.9",
-      "as_of_date_utc": "2026-08-21",
+      "as_of_date_utc": "2026-08-30",
       "decision_policy": "A due oracle is retired only when repository-owned independent evidence preserves every retained invariant without resolving the incumbent. Otherwise the renewal authority may approve one bounded extension with concrete missing evidence and a next action.",
       "owner_approval": {
         "status": "approved",
@@ -1443,7 +1443,7 @@
           "oracle_id": "active-httparse-http1-reference",
           "disposition": "renewed",
           "reviewed_release": "0.4.9",
-          "reviewed_date_utc": "2026-08-21",
+          "reviewed_date_utc": "2026-08-30",
           "previous_expiry_release": "0.3.11",
           "previous_expiry_date_utc": "2026-10-24",
           "new_expiry_release": "0.4.11",
@@ -1463,7 +1463,7 @@
           "oracle_id": "active-tokio-util-codec-reference",
           "disposition": "renewed",
           "reviewed_release": "0.4.9",
-          "reviewed_date_utc": "2026-08-21",
+          "reviewed_date_utc": "2026-08-30",
           "previous_expiry_release": "0.3.11",
           "previous_expiry_date_utc": "2026-10-24",
           "new_expiry_release": "0.4.11",
@@ -1483,7 +1483,7 @@
           "oracle_id": "active-sqlx-mysql-reference",
           "disposition": "renewed",
           "reviewed_release": "0.4.9",
-          "reviewed_date_utc": "2026-08-21",
+          "reviewed_date_utc": "2026-08-30",
           "previous_expiry_release": "0.3.11",
           "previous_expiry_date_utc": "2026-10-24",
           "new_expiry_release": "0.4.11",
@@ -1503,7 +1503,7 @@
           "oracle_id": "active-redis-rs-reference",
           "disposition": "renewed",
           "reviewed_release": "0.4.9",
-          "reviewed_date_utc": "2026-08-21",
+          "reviewed_date_utc": "2026-08-30",
           "previous_expiry_release": "0.3.11",
           "previous_expiry_date_utc": "2026-10-24",
           "new_expiry_release": "0.4.11",
@@ -1523,7 +1523,7 @@
           "oracle_id": "active-raptorq-rs-reference",
           "disposition": "renewed",
           "reviewed_release": "0.4.9",
-          "reviewed_date_utc": "2026-08-21",
+          "reviewed_date_utc": "2026-08-30",
           "previous_expiry_release": "0.3.11",
           "previous_expiry_date_utc": "2026-10-24",
           "new_expiry_release": "0.4.11",
@@ -1543,7 +1543,7 @@
           "oracle_id": "active-tokio-semaphore-reference",
           "disposition": "renewed",
           "reviewed_release": "0.4.9",
-          "reviewed_date_utc": "2026-08-21",
+          "reviewed_date_utc": "2026-08-30",
           "previous_expiry_release": "0.3.11",
           "previous_expiry_date_utc": "2026-10-24",
           "new_expiry_release": "0.4.11",
@@ -1564,7 +1564,7 @@
           "oracle_id": "active-h2-reference",
           "disposition": "renewed",
           "reviewed_release": "0.4.9",
-          "reviewed_date_utc": "2026-08-21",
+          "reviewed_date_utc": "2026-08-30",
           "previous_expiry_release": "0.3.11",
           "previous_expiry_date_utc": "2026-10-24",
           "new_expiry_release": "0.4.11",
@@ -1585,7 +1585,7 @@
           "oracle_id": "active-prometheus-client-reference",
           "disposition": "renewed",
           "reviewed_release": "0.4.9",
-          "reviewed_date_utc": "2026-08-21",
+          "reviewed_date_utc": "2026-08-30",
           "previous_expiry_release": "0.3.11",
           "previous_expiry_date_utc": "2026-10-24",
           "new_expiry_release": "0.4.11",
@@ -1605,7 +1605,7 @@
           "oracle_id": "active-opentelemetry-sdk-reference",
           "disposition": "renewed",
           "reviewed_release": "0.4.9",
-          "reviewed_date_utc": "2026-08-21",
+          "reviewed_date_utc": "2026-08-30",
           "previous_expiry_release": "0.3.11",
           "previous_expiry_date_utc": "2026-10-24",
           "new_expiry_release": "0.4.11",
@@ -1627,7 +1627,7 @@
           "oracle_id": "active-opentelemetry-proto-reference",
           "disposition": "renewed",
           "reviewed_release": "0.4.9",
-          "reviewed_date_utc": "2026-08-21",
+          "reviewed_date_utc": "2026-08-30",
           "previous_expiry_release": "0.3.11",
           "previous_expiry_date_utc": "2026-10-24",
           "new_expiry_release": "0.4.11",
@@ -1658,7 +1658,7 @@
       "bead_id": "asupersync-mnotoo.4.4",
       "capability_id": "CAP-VERIFICATION-PROFILES",
       "as_of_release": "0.4.9",
-      "as_of_date_utc": "2026-08-21",
+      "as_of_date_utc": "2026-08-30",
       "verdict": "PASS_SCOPED_ORACLE_GOVERNANCE",
       "unknown_state": "block-green",
       "cutover_authorized": false,
@@ -1726,10 +1726,10 @@
           "semantic_oracle_ids": [],
           "support_only_registered_package_ids": [],
           "observed_status": "PASS",
-          "observed_worker": "ovh-a",
+          "observed_worker": "hz4",
           "observed_exit_code": 0,
           "observed_unit_count": 197,
-          "observed_at_utc": "2026-08-21",
+          "observed_at_utc": "2026-08-30",
           "no_claim_boundary": "This excludes the ten active oracle packages from the root default Linux normal/build graph only."
         },
         {
@@ -1742,10 +1742,10 @@
           "semantic_oracle_ids": [],
           "support_only_registered_package_ids": [],
           "observed_status": "PASS",
-          "observed_worker": "hz2",
+          "observed_worker": "hz4",
           "observed_exit_code": 0,
           "observed_unit_count": 197,
-          "observed_at_utc": "2026-08-21",
+          "observed_at_utc": "2026-08-30",
           "no_claim_boundary": "Release mode changes code generation but does not broaden the root default feature graph."
         },
         {
@@ -1755,7 +1755,7 @@
           "host_triple": "x86_64-unknown-linux-gnu",
           "exact_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_oracle_o4_root_focused_dev\" CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo check --locked -p asupersync --test dependency_oracle_policy_contract --target x86_64-unknown-linux-gnu -Z unstable-options --unit-graph",
           "resolved_governed_package_ids": [
-            "registry+https://github.com/rust-lang/crates.io-index#h2@0.4.15",
+            "registry+https://github.com/rust-lang/crates.io-index#h2@0.4.18",
             "registry+https://github.com/rust-lang/crates.io-index#httparse@1.10.1",
             "registry+https://github.com/rust-lang/crates.io-index#opentelemetry-proto@0.32.0",
             "registry+https://github.com/rust-lang/crates.io-index#opentelemetry_sdk@0.32.1",
@@ -1777,14 +1777,14 @@
             "active-tokio-util-codec-reference"
           ],
           "support_only_registered_package_ids": [
-            "registry+https://github.com/rust-lang/crates.io-index#h2@0.4.15",
+            "registry+https://github.com/rust-lang/crates.io-index#h2@0.4.18",
             "registry+https://github.com/rust-lang/crates.io-index#prometheus-client@0.25.0"
           ],
           "observed_status": "PASS",
-          "observed_worker": "vmi1293453",
+          "observed_worker": "hz4",
           "observed_exit_code": 0,
-          "observed_unit_count": 395,
-          "observed_at_utc": "2026-08-21",
+          "observed_unit_count": 394,
+          "observed_at_utc": "2026-08-30",
           "no_claim_boundary": "Package resolution does not make every resolved package a semantic oracle in this test; only the registered root manifest edges own oracle evidence."
         },
         {
@@ -1794,7 +1794,7 @@
           "host_triple": "x86_64-unknown-linux-gnu",
           "exact_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_oracle_o4_conformance_focused\" CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo check --locked -p asupersync-conformance --bin h2_continuation_conformance --target x86_64-unknown-linux-gnu -Z unstable-options --unit-graph",
           "resolved_governed_package_ids": [
-            "registry+https://github.com/rust-lang/crates.io-index#h2@0.4.15",
+            "registry+https://github.com/rust-lang/crates.io-index#h2@0.4.18",
             "registry+https://github.com/rust-lang/crates.io-index#httparse@1.10.1",
             "registry+https://github.com/rust-lang/crates.io-index#opentelemetry-proto@0.32.0",
             "registry+https://github.com/rust-lang/crates.io-index#opentelemetry_sdk@0.32.1",
@@ -1814,10 +1814,10 @@
             "registry+https://github.com/rust-lang/crates.io-index#tokio@1.53.1"
           ],
           "observed_status": "PASS",
-          "observed_worker": "vmi1149989",
+          "observed_worker": "hz3",
           "observed_exit_code": 0,
           "observed_unit_count": 277,
-          "observed_at_utc": "2026-08-21",
+          "observed_at_utc": "2026-08-30",
           "no_claim_boundary": "Resolved transitive support packages are not promoted to semantic oracle evidence; only the four registered conformance rows are admitted."
         }
       ],

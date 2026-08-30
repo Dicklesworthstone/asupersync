@@ -98,7 +98,7 @@ current H2-only sources do not import. The H2 edge in that excluded member is
 differential skeleton similarly has no RaptorQ or asupersync package edge and
 remains blocked.
 
-The reconciliation snapshot is current at release `0.4.9` on `2026-08-21`.
+The reconciliation snapshot is current at release `0.4.9` on `2026-08-30`.
 Renewal belongs to `asupersync-mnotoo.4` and requires a new expiry, owner
 receipt, corpus status, production-exclusion evidence, and one decision for
 every due active row. Removal and the initial retirement sweep belong to
