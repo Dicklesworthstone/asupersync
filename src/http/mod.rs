@@ -43,8 +43,13 @@ pub mod h3 {
         qpack_plan_to_header_fields, qpack_static_plan_for_request, qpack_static_plan_for_response,
         validate_request_pseudo_headers, validate_response_pseudo_headers,
     };
+    pub use super::h3_quic::{
+        H3_REQUEST_CANCELLED, NativeH3Event, NativeH3Session, NativeH3SessionError,
+    };
 }
 pub mod h3_native;
+#[cfg(feature = "http3")]
+pub mod h3_quic;
 pub mod pool;
 
 /// High-level pooled [`Client`] facade.

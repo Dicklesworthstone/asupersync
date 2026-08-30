@@ -10904,6 +10904,7 @@ mod tests {
                 &payload,
                 now_micros,
             )?;
+            from.on_generated_frames_delivered(&frames)?;
             total = total.saturating_add(frames.len());
         }
         Err(QuicTransportError::Quic(

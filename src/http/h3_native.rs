@@ -2279,6 +2279,12 @@ impl QpackInstructionStreamState {
 
     /// Construct QPACK instruction-stream state from peer HTTP/3 SETTINGS.
     pub fn from_settings(mode: H3QpackMode, settings: &H3Settings) -> Result<Self, H3NativeError> {
+        if mode == H3QpackMode::StaticOnly {
+            // Peer capacity is permission, not a requirement. A static-only
+            // encoder remains interoperable by declining to use the dynamic
+            // table even when the peer advertises non-zero capacity.
+            return Self::new(mode, 0, 0);
+        }
         Self::new(
             mode,
             settings.qpack_max_table_capacity.unwrap_or(0),
@@ -3120,6 +3126,30 @@ pub fn qpack_decode_response_field_section(
     qpack_decode_response_field_section_with_limit(input, mode, qpack_context, None)
 }
 
+/// Decode and validate an HTTP/3 trailer field section.
+///
+/// Trailers use ordinary HTTP fields only: every pseudo-header is forbidden,
+/// while the normal lowercase-name, connection-specific-field, and value
+/// safety rules remain enforced.
+pub fn qpack_decode_trailer_field_section(
+    input: &[u8],
+    mode: H3QpackMode,
+    qpack_context: Option<&QpackContext>,
+) -> Result<Vec<(String, String)>, H3NativeError> {
+    let plan = qpack_decode_field_section_with_context(input, mode, qpack_context)?;
+    let fields = qpack_plan_to_header_fields(&plan, qpack_context)?;
+    for (name, value) in &fields {
+        validate_header_name(name)?;
+        validate_header_value(value)?;
+        if name.starts_with(':') {
+            return Err(H3NativeError::InvalidFrame(
+                "pseudo header forbidden in HTTP/3 trailers",
+            ));
+        }
+    }
+    Ok(fields)
+}
+
 /// Decode a wire-level response field section with optional size limit enforcement.
 ///
 /// This applies QPACK decode rules for the configured mode and then enforces
@@ -3873,6 +3903,20 @@ impl H3RequestStreamState {
         }
     }
 
+    fn on_informational_response_headers(&mut self) -> Result<(), H3NativeError> {
+        if self.end_stream {
+            return Err(H3NativeError::ControlProtocol(
+                "request stream already finished",
+            ));
+        }
+        if self.header_blocks_seen != 0 || self.saw_data {
+            return Err(H3NativeError::ControlProtocol(
+                "informational response HEADERS must precede final response HEADERS",
+            ));
+        }
+        Ok(())
+    }
+
     /// Mark end-of-stream.
     pub fn mark_end_stream(&mut self) -> Result<(), H3NativeError> {
         if self.header_blocks_seen == 0 {
@@ -3961,9 +4005,6 @@ impl H3ConnectionState {
 
     /// Process a control-stream frame.
     pub fn on_control_frame(&mut self, frame: &H3Frame) -> Result<(), H3NativeError> {
-        if let H3Frame::Settings(settings) = frame {
-            self.validate_qpack_settings(settings)?;
-        }
         self.control.on_remote_control_frame(frame)?;
         if self.config.endpoint_role == H3EndpointRole::Client
             && matches!(frame, H3Frame::MaxPushId(_))
@@ -4045,6 +4086,63 @@ impl H3ConnectionState {
         Ok(())
     }
 
+    /// Register one 1xx response HEADERS block without advancing the final
+    /// response/trailers state machine.
+    ///
+    /// HTTP/3 clients may receive zero or more informational responses before
+    /// the final response. The decoded status is supplied by the mapping layer;
+    /// raw request-stream framing alone cannot distinguish that sequence from
+    /// request trailers.
+    pub fn on_informational_response_headers(
+        &mut self,
+        stream_id: u64,
+    ) -> Result<(), H3NativeError> {
+        if self.config.endpoint_role != H3EndpointRole::Client {
+            return Err(H3NativeError::ControlProtocol(
+                "informational response HEADERS are client-side only",
+            ));
+        }
+        if !is_client_initiated_bidirectional_stream_id(stream_id) {
+            return Err(H3NativeError::StreamProtocol(
+                "request stream id must be client-initiated bidirectional",
+            ));
+        }
+        if self.uni_stream_types.contains_key(&stream_id) {
+            return Err(H3NativeError::StreamProtocol(
+                "request stream id is registered as unidirectional",
+            ));
+        }
+        if self.is_request_stream_finished(stream_id) {
+            return Err(H3NativeError::ControlProtocol(
+                "request stream already finished",
+            ));
+        }
+        if let Some(goaway_id) = self.goaway_id
+            && stream_id >= goaway_id
+        {
+            return Err(H3NativeError::ControlProtocol(
+                "request stream id rejected after GOAWAY",
+            ));
+        }
+        let request_stream_exists = self.request_streams.contains_key(&stream_id);
+        if let Some(limit) = self.config.max_concurrent_request_streams
+            && !request_stream_exists
+            && self.request_streams.len() as u64 >= limit
+        {
+            return Err(H3NativeError::ConcurrentStreamLimitExceeded {
+                active: self.request_streams.len() as u64,
+                limit,
+            });
+        }
+        if let Some(state) = self.request_streams.get_mut(&stream_id) {
+            return state.on_informational_response_headers();
+        }
+        let mut state = H3RequestStreamState::new();
+        state.on_informational_response_headers()?;
+        self.request_streams.insert(stream_id, state);
+        Ok(())
+    }
+
     /// Number of currently live (non-finished) request streams. Use this with
     /// `H3ConnectionConfig::max_concurrent_request_streams` to surface "near
     /// limit" observability to the transport layer.
@@ -4080,6 +4178,36 @@ impl H3ConnectionState {
         // Drop detailed state but retain the finished stream id so late frames
         // on the same QUIC stream are still rejected as protocol violations.
         self.request_streams.remove(&stream_id);
+        self.record_terminal_request_stream(stream_id);
+
+        Ok(())
+    }
+
+    /// Abort a request stream after transport RESET_STREAM.
+    ///
+    /// A reset can race ahead of buffered HEADERS, so an otherwise unknown
+    /// request stream is still recorded terminally. The return value reports
+    /// whether a live HTTP/3 request state was retired.
+    pub fn abort_request_stream(&mut self, stream_id: u64) -> Result<bool, H3NativeError> {
+        if !is_client_initiated_bidirectional_stream_id(stream_id) {
+            return Err(H3NativeError::StreamProtocol(
+                "request stream id must be client-initiated bidirectional",
+            ));
+        }
+        if self.uni_stream_types.contains_key(&stream_id) {
+            return Err(H3NativeError::StreamProtocol(
+                "request stream id is registered as unidirectional",
+            ));
+        }
+        if self.is_request_stream_finished(stream_id) {
+            return Ok(false);
+        }
+        let retired_live_state = self.request_streams.remove(&stream_id).is_some();
+        self.record_terminal_request_stream(stream_id);
+        Ok(retired_live_state)
+    }
+
+    fn record_terminal_request_stream(&mut self, stream_id: u64) {
         self.finished_request_streams.insert(stream_id);
 
         // Compact finished streams to avoid unbounded memory growth.
@@ -4091,8 +4219,6 @@ impl H3ConnectionState {
             self.max_contiguous_finished_request_stream_id = Some(next_expected);
             next_expected += 4;
         }
-
-        Ok(())
     }
 
     /// Process the required push-stream header carrying the promised push ID.
@@ -4276,23 +4402,6 @@ impl H3ConnectionState {
             ))?;
         qpack.ensure_stream_registered(stream_id, kind)?;
         qpack.feed_instruction_stream_bytes(stream_id, kind, bytes)
-    }
-
-    fn validate_qpack_settings(&self, settings: &H3Settings) -> Result<(), H3NativeError> {
-        if self.config.qpack_mode == H3QpackMode::DynamicTableAllowed {
-            return Ok(());
-        }
-        if settings.qpack_max_table_capacity.unwrap_or(0) > 0 {
-            return Err(H3NativeError::QpackPolicy(
-                "dynamic qpack table disabled by policy",
-            ));
-        }
-        if settings.qpack_blocked_streams.unwrap_or(0) > 0 {
-            return Err(H3NativeError::QpackPolicy(
-                "qpack blocked streams must be zero in static-only mode",
-            ));
-        }
-        Ok(())
     }
 
     /// Current GOAWAY stream identifier, if any.
@@ -5495,19 +5604,18 @@ mod tests {
     }
 
     #[test]
-    fn static_only_qpack_policy_rejects_dynamic_settings() {
+    fn native_h3_adapter_static_only_accepts_peer_dynamic_qpack_permission() {
         let mut c = H3ConnectionState::new();
         let settings = H3Settings {
             qpack_max_table_capacity: Some(1024),
+            qpack_blocked_streams: Some(8),
             ..H3Settings::default()
         };
-        let err = c
-            .on_control_frame(&H3Frame::Settings(settings))
-            .expect_err("must fail");
-        assert_eq!(
-            err,
-            H3NativeError::QpackPolicy("dynamic qpack table disabled by policy")
-        );
+        c.on_control_frame(&H3Frame::Settings(settings.clone()))
+            .expect("peer capacity is optional permission for a static encoder");
+        let qpack = QpackInstructionStreamState::from_settings(H3QpackMode::StaticOnly, &settings)
+            .expect("static instruction state declines peer dynamic capacity");
+        assert_eq!(qpack.context().dynamic_table().capacity(), 0);
     }
 
     #[test]
@@ -6338,6 +6446,26 @@ mod tests {
     }
 
     #[test]
+    fn native_h3_adapter_abort_request_releases_concurrency_and_stays_terminal() {
+        let mut c = H3ConnectionState::with_config(H3ConnectionConfig {
+            max_concurrent_request_streams: Some(1),
+            ..H3ConnectionConfig::default()
+        });
+        c.on_request_stream_frame(0, &H3Frame::Headers(vec![0x80]))
+            .expect("open first request");
+        assert_eq!(c.active_request_stream_count(), 1);
+        assert!(c.abort_request_stream(0).expect("abort live request"));
+        assert_eq!(c.active_request_stream_count(), 0);
+        assert!(!c.abort_request_stream(0).expect("abort is idempotent"));
+        let late = c
+            .on_request_stream_frame(0, &H3Frame::Data(vec![1]))
+            .expect_err("late frame on aborted stream must fail");
+        assert!(matches!(late, H3NativeError::ControlProtocol(_)));
+        c.on_request_stream_frame(4, &H3Frame::Headers(vec![0x80]))
+            .expect("successor fits released concurrency slot");
+    }
+
+    #[test]
     fn duplicate_qpack_encoder_stream_error() {
         let mut c = H3ConnectionState::new();
         c.on_remote_uni_stream_type(3, H3_STREAM_TYPE_QPACK_ENCODER)
@@ -6638,6 +6766,29 @@ mod tests {
         let decoded = qpack_decode_response_field_section(&wire, H3QpackMode::StaticOnly, None)
             .expect("decode");
         assert_eq!(decoded, response);
+    }
+
+    #[test]
+    fn native_h3_adapter_qpack_trailers_accept_fields_and_reject_pseudo_headers() {
+        let trailers = vec![QpackFieldPlan::Literal {
+            name: "x-checksum".to_string(),
+            value: "abc123".to_string(),
+        }];
+        let wire = qpack_encode_field_section(&trailers).expect("encode trailers");
+        assert_eq!(
+            qpack_decode_trailer_field_section(&wire, H3QpackMode::StaticOnly, None)
+                .expect("decode trailers"),
+            vec![("x-checksum".to_string(), "abc123".to_string())]
+        );
+
+        let pseudo = qpack_encode_field_section(&[QpackFieldPlan::StaticIndex(17)])
+            .expect("encode pseudo trailer");
+        let err = qpack_decode_trailer_field_section(&pseudo, H3QpackMode::StaticOnly, None)
+            .expect_err("trailers must reject pseudo headers");
+        assert_eq!(
+            err,
+            H3NativeError::InvalidFrame("pseudo header forbidden in HTTP/3 trailers")
+        );
     }
 
     #[test]

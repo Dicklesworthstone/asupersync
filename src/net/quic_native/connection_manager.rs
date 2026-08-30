@@ -8,6 +8,7 @@
 #![allow(dead_code)]
 
 use crate::cx::Cx;
+use crate::net::atp::protocol::quic_frames::QuicFrame;
 use crate::net::atp::quic::AtpPacketProtection;
 use crate::net::quic_core::{
     ConnectionId, LongPacketType, PacketHeader, QuicCoreError, ShortHeader,
@@ -839,18 +840,32 @@ async fn drain_connection_frames(
                     connection_id,
                     &mut handle.connection,
                     packet_protection,
+                    &frames,
                     payload.as_ref(),
                     now_micros,
                     frames.iter().any(is_ack_eliciting),
                 )
-                .await?
+                .await
             }
-            None => {
-                return Err(ConnectionRouterError::PacketProtectionUnavailable { connection_id });
-            }
+            None => Err(ConnectionRouterError::PacketProtectionUnavailable { connection_id }),
         }
     } else {
-        payload.to_vec()
+        Ok(payload.to_vec())
+    };
+    let data = match data {
+        Ok(data) => data,
+        Err(error) => {
+            handle
+                .connection
+                .on_generated_frames_dropped(&frames)
+                .map_err(|recovery_error| ConnectionRouterError::PacketProcessingFailed {
+                    connection_id,
+                    reason: format!(
+                        "packet assembly failed ({error}); reliable-frame requeue failed: {recovery_error}"
+                    ),
+                })?;
+            return Err(error);
+        }
     };
 
     Ok(vec![OutgoingPacket {
@@ -865,6 +880,7 @@ async fn assemble_protected_1rtt_packet(
     connection_id: ConnectionId,
     connection: &mut NativeQuicConnection,
     packet_protection: &mut ConnectionPacketProtection,
+    frames: &[QuicFrame],
     payload: &[u8],
     now_micros: u64,
     ack_eliciting: bool,
@@ -879,14 +895,7 @@ async fn assemble_protected_1rtt_packet(
         });
     }
     let packet_number = connection
-        .on_packet_sent(
-            cx,
-            PacketNumberSpace::ApplicationData,
-            packet_len as u64,
-            ack_eliciting,
-            true,
-            now_micros,
-        )
+        .next_packet_number_for_protection(PacketNumberSpace::ApplicationData)
         .map_err(|err| ConnectionRouterError::PacketProcessingFailed {
             connection_id,
             reason: err.to_string(),
@@ -935,6 +944,22 @@ async fn assemble_protected_1rtt_packet(
             });
         }
     };
+
+    let committed_packet_number = connection
+        .on_packet_sent_with_frames(
+            cx,
+            PacketNumberSpace::ApplicationData,
+            packet_len as u64,
+            ack_eliciting,
+            true,
+            now_micros,
+            frames,
+        )
+        .map_err(|err| ConnectionRouterError::PacketProcessingFailed {
+            connection_id,
+            reason: err.to_string(),
+        })?;
+    debug_assert_eq!(committed_packet_number, packet_number);
 
     let mut packet =
         Vec::with_capacity(header_bytes.len() + protected.ciphertext.len() + protected.tag.len());

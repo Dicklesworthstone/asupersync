@@ -60,7 +60,7 @@ use std::task::{Context as TaskContext, Poll};
 use super::connection::{
     NativeQuicConnection, NativeQuicConnectionConfig, NativeQuicConnectionError,
 };
-use super::streams::{StreamId, StreamRole};
+use super::streams::{StreamId, StreamReadiness, StreamRole};
 use super::transport::{PacketNumberSpace, QuicConnectionState};
 
 /// Opt-in stderr tracing for the high-level QUIC API, gated by `ATP_QUIC_TRACE`
@@ -334,13 +334,23 @@ impl QuicConnection {
     /// connection is not in a data-transfer state, or the local stream limit is
     /// exhausted.
     pub fn open_control_stream(&mut self, cx: &Cx) -> Result<StreamId, NativeQuicConnectionError> {
-        let id = self.inner.open_local_bidi(cx)?;
+        let id = self.open_bidi_stream(cx)?;
         apitrace!(
             "event=control_stream_open role={:?} stream={}",
             self.role,
             id.0
         );
         Ok(id)
+    }
+
+    /// Open a locally initiated bidirectional application stream.
+    pub fn open_bidi_stream(&mut self, cx: &Cx) -> Result<StreamId, NativeQuicConnectionError> {
+        self.inner.open_local_bidi(cx)
+    }
+
+    /// Open a locally initiated unidirectional application stream.
+    pub fn open_uni_stream(&mut self, cx: &Cx) -> Result<StreamId, NativeQuicConnectionError> {
+        self.inner.open_local_uni(cx)
     }
 
     /// Queue reliable, ordered bytes (and an optional FIN) on a control stream.
@@ -350,6 +360,17 @@ impl QuicConnection {
     /// connection is not in a data-transfer state, the stream is unknown, or the
     /// flow-control window is exhausted (a `STREAM_DATA_BLOCKED` is queued).
     pub fn write_control(
+        &mut self,
+        cx: &Cx,
+        stream: StreamId,
+        data: Bytes,
+        fin: bool,
+    ) -> Result<(), NativeQuicConnectionError> {
+        self.inner.write_stream_bytes(cx, stream, data, fin)
+    }
+
+    /// Queue reliable ordered bytes on any locally writable stream.
+    pub fn write_stream(
         &mut self,
         cx: &Cx,
         stream: StreamId,
@@ -376,12 +397,80 @@ impl QuicConnection {
         self.inner.read_stream_bytes(cx, stream, max)
     }
 
+    /// Read contiguous bytes from any readable stream.
+    pub fn read_stream(
+        &mut self,
+        cx: &Cx,
+        stream: StreamId,
+        max: usize,
+    ) -> Result<Bytes, NativeQuicConnectionError> {
+        self.inner.read_stream_bytes(cx, stream, max)
+    }
+
+    /// Consume the next deterministic stream-readiness edge, if one exists.
+    pub fn next_readable_stream(
+        &mut self,
+        cx: &Cx,
+    ) -> Result<Option<StreamReadiness>, NativeQuicConnectionError> {
+        self.inner.next_readable_stream(cx)
+    }
+
+    /// Poll for the next stream-readiness edge without busy-polling.
+    pub fn poll_next_readable_stream(
+        &mut self,
+        cx: &Cx,
+        task_cx: &mut TaskContext<'_>,
+    ) -> Poll<Result<StreamReadiness, NativeQuicConnectionError>> {
+        self.inner.poll_next_readable_stream(cx, task_cx)
+    }
+
+    /// Queue a local RESET_STREAM for one stream send side.
+    pub fn reset_stream(
+        &mut self,
+        cx: &Cx,
+        stream: StreamId,
+        app_error_code: u64,
+    ) -> Result<(), NativeQuicConnectionError> {
+        let final_size = self
+            .inner
+            .streams()
+            .stream(stream)
+            .map_err(NativeQuicConnectionError::from)?
+            .send_offset;
+        self.inner
+            .reset_stream_send(cx, stream, app_error_code, final_size)
+    }
+
+    /// Queue a local STOP_SENDING for one stream receive side.
+    pub fn stop_stream_receiving(
+        &mut self,
+        cx: &Cx,
+        stream: StreamId,
+        app_error_code: u64,
+    ) -> Result<(), NativeQuicConnectionError> {
+        self.inner.stop_receiving(cx, stream, app_error_code)
+    }
+
     /// Whether the application has consumed a control stream through its FIN.
     ///
     /// # Errors
     /// Returns a [`NativeQuicConnectionError`] if the stream is unknown.
     pub fn is_control_eof(&self, stream: StreamId) -> Result<bool, NativeQuicConnectionError> {
         self.inner.is_stream_read_eof(stream)
+    }
+
+    /// Whether the application has consumed a stream through peer FIN.
+    pub fn is_stream_eof(&self, stream: StreamId) -> Result<bool, NativeQuicConnectionError> {
+        self.inner.is_stream_read_eof(stream)
+    }
+
+    /// Bounded stream prefix retained when peer RESET_STREAM discarded
+    /// receive data before an application protocol classified the stream.
+    pub fn reset_stream_buffered_prefix(
+        &self,
+        stream: StreamId,
+    ) -> Result<Bytes, NativeQuicConnectionError> {
+        self.inner.reset_stream_buffered_prefix(stream)
     }
 
     // -- path stats (Phase C) ------------------------------------------------
@@ -498,18 +587,49 @@ pub fn pump_app_data(
     }
     let packet_number = from.next_app_pn;
     from.next_app_pn = from.next_app_pn.saturating_add(1);
-    to.inner.process_packet_payload(
+    let delivery = to.inner.process_packet_payload(
         cx,
         PacketNumberSpace::ApplicationData,
         packet_number,
         &payload,
         now_micros,
-    )?;
+    );
+    match delivery {
+        Ok(()) => from.inner.on_generated_frames_delivered(&frames)?,
+        Err(error) => {
+            from.inner.on_generated_frames_dropped(&frames)?;
+            return Err(error);
+        }
+    }
     apitrace!(
         "event=pump frames={} bytes={} pn={packet_number}",
         frames.len(),
         payload.len()
     );
+    Ok(frames.len())
+}
+
+/// Deterministically drop one generated application packet and requeue every
+/// reliable frame it carried through the same recovery ledger used by the
+/// production native connection.
+///
+/// DATAGRAM frames remain intentionally lost. The helper exists for causal lab
+/// and integration tests of STREAM/RESET_STREAM/STOP_SENDING recovery without
+/// sockets, sleeps, or probabilistic loss injection.
+#[cfg(any(test, feature = "test-internals"))]
+pub fn drop_app_data_packet(
+    cx: &Cx,
+    from: &mut QuicConnection,
+    max_packet_bytes: usize,
+) -> Result<usize, NativeQuicConnectionError> {
+    let frames =
+        from.inner
+            .generate_frames(cx, PacketNumberSpace::ApplicationData, max_packet_bytes)?;
+    if frames.is_empty() {
+        return Ok(0);
+    }
+    from.next_app_pn = from.next_app_pn.saturating_add(1);
+    from.inner.on_generated_frames_dropped(&frames)?;
     Ok(frames.len())
 }
 

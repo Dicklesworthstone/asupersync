@@ -313,6 +313,30 @@ pub struct StreamFramePayload {
     pub retransmit: bool,
 }
 
+/// One edge-triggered notification that a QUIC stream can make receive-side
+/// progress.
+///
+/// Notifications are ordered by [`StreamId`] for deterministic consumers. A
+/// notification is consumed when returned by
+/// [`StreamTable::take_next_readable_stream`]; callers should then drain the
+/// reported stream with [`StreamTable::read_stream_bytes`]. If contiguous
+/// bytes remain after a partial read, the table queues a fresh notification;
+/// terminal FIN/RESET/receive-stop state is reported only on its original
+/// edge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StreamReadiness {
+    /// Stream whose receive side changed.
+    pub stream_id: StreamId,
+    /// Contiguous bytes currently available from the application read offset.
+    pub readable_bytes: u64,
+    /// Whether a peer FIN has established the stream final size.
+    pub fin_received: bool,
+    /// Peer RESET_STREAM state `(application error code, final size)`.
+    pub reset: Option<(u64, u64)>,
+    /// Local STOP_RECEIVING application error code, when present.
+    pub receive_stopped: Option<u64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct QueuedStreamFrame {
     offset: u64,
@@ -348,6 +372,10 @@ pub struct QuicStream {
     pub receive_stopped_error_code: Option<u64>,
     /// Optional peer reset state `(error_code, final_size)`.
     pub recv_reset: Option<(u64, u64)>,
+    /// Up to one QUIC-varint prefix retained across RESET_STREAM so an
+    /// application protocol can classify an already-buffered unidirectional
+    /// stream before treating a critical-stream reset as fatal.
+    reset_buffered_prefix: Bytes,
     /// Buffered receive ranges keyed by start offset, value = exclusive end.
     recv_ranges: BTreeMap<u64, u64>,
     /// Buffered receive bytes keyed by absolute stream offset.
@@ -382,6 +410,7 @@ impl QuicStream {
             stop_sending_error_code: None,
             receive_stopped_error_code: None,
             recv_reset: None,
+            reset_buffered_prefix: Bytes::new(),
             recv_ranges: BTreeMap::new(),
             recv_chunks: BTreeMap::new(),
             recv_window_bytes: None,
@@ -548,7 +577,20 @@ impl QuicStream {
     /// Whether this stream has reached application EOF.
     #[must_use]
     pub fn is_read_eof(&self) -> bool {
-        self.final_size == Some(self.read_offset)
+        self.recv_reset.is_none() && self.final_size == Some(self.read_offset)
+    }
+
+    /// Contiguous payload bytes actually buffered at the application read offset.
+    #[must_use]
+    fn readable_bytes(&self) -> u64 {
+        let mut cursor = self.read_offset;
+        for (&offset, chunk) in self.recv_chunks.range(self.read_offset..) {
+            if offset != cursor {
+                break;
+            }
+            cursor = cursor.saturating_add(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
+        }
+        cursor.saturating_sub(self.read_offset)
     }
 
     /// Whether packet assembly has STREAM frames waiting for this stream.
@@ -692,6 +734,13 @@ impl QuicStream {
         let Some(frame) = self.sent_stream_frames.get(&offset).cloned() else {
             return Ok(());
         };
+        if self
+            .pending_send_frames
+            .iter()
+            .any(|pending| pending.retransmit && pending.offset == offset)
+        {
+            return Ok(());
+        }
         self.pending_send_frames.push_front(QueuedStreamFrame {
             retransmit: true,
             ..frame
@@ -706,6 +755,22 @@ impl QuicStream {
     /// Unknown offsets are ignored (duplicate ACKs, already-released frames).
     pub fn release_sent_stream_frame(&mut self, offset: u64) {
         self.sent_stream_frames.remove(&offset);
+    }
+
+    /// Release a retained copy only when it still represents the exact wire
+    /// frame being acknowledged.
+    ///
+    /// A retransmission may coalesce more bytes at the same starting offset.
+    /// A late ACK for the older, shorter frame must not release that newer
+    /// superset or its unacknowledged tail would become unrecoverable.
+    fn release_sent_stream_frame_if_matches(&mut self, offset: u64, data_len: usize, fin: bool) {
+        let matches = self
+            .sent_stream_frames
+            .get(&offset)
+            .is_some_and(|frame| frame.data.len() == data_len && frame.fin == fin);
+        if matches {
+            self.sent_stream_frames.remove(&offset);
+        }
     }
 
     /// Set final size from FIN/RESET.
@@ -758,10 +823,29 @@ impl QuicStream {
             self.recv_credit.release(flow_delta);
             return Err(err);
         }
+        if self.recv_reset.is_none() {
+            let mut prefix = BytesMut::with_capacity(8);
+            let mut cursor = self.read_offset;
+            for (&offset, chunk) in self.recv_chunks.range(self.read_offset..) {
+                if offset != cursor || prefix.len() == 8 {
+                    break;
+                }
+                let take = chunk.len().min(8usize.saturating_sub(prefix.len()));
+                prefix.extend_from_slice(&chunk[..take]);
+                cursor = cursor.saturating_add(u64::try_from(take).unwrap_or(u64::MAX));
+            }
+            self.reset_buffered_prefix = prefix.freeze();
+        }
         self.recv_reset.get_or_insert((error_code, final_size));
         self.recv_ranges.clear();
         self.recv_chunks.clear();
         Ok(flow_delta)
+    }
+
+    /// Buffered prefix retained when peer RESET_STREAM discarded receive data.
+    #[must_use]
+    pub fn reset_buffered_prefix(&self) -> Bytes {
+        self.reset_buffered_prefix.clone()
     }
 
     /// Locally reset the send side (`RESET_STREAM`).
@@ -781,6 +865,12 @@ impl QuicStream {
             });
         }
         self.send_reset = Some((error_code, final_size));
+        // RFC 9000 section 3.1: once RESET_STREAM is issued, the endpoint MUST
+        // NOT send further STREAM frames for this send side. Drop both queued
+        // first-transmission bytes and retained retransmission copies so the
+        // packet assembler cannot emit data after the reset control frame.
+        self.pending_send_frames.clear();
+        self.sent_stream_frames.clear();
         Ok(())
     }
 
@@ -984,6 +1074,8 @@ pub struct StreamTable {
     send_connection_credit: FlowCredit,
     recv_connection_credit: FlowCredit,
     rr_cursor: Option<StreamId>,
+    readable_streams: std::collections::BTreeSet<StreamId>,
+    readable_stream_waker: Option<Waker>,
     read_wakers: BTreeMap<StreamId, Waker>,
     write_wakers: BTreeMap<StreamId, Waker>,
 }
@@ -1037,6 +1129,8 @@ impl StreamTable {
             send_connection_credit: FlowCredit::new(connection_send_limit),
             recv_connection_credit: FlowCredit::new(connection_recv_limit),
             rr_cursor: None,
+            readable_streams: std::collections::BTreeSet::new(),
+            readable_stream_waker: None,
             read_wakers: BTreeMap::new(),
             write_wakers: BTreeMap::new(),
         }
@@ -1323,8 +1417,12 @@ impl StreamTable {
         self.recv_connection_credit
             .consume(flow_delta)
             .map_err(|err| StreamTableError::Stream(QuicStreamError::Flow(err)))?;
-        if len > 0 || is_fin {
-            self.wake_reader(id);
+        // This API records flow-control/range accounting only; it deliberately
+        // stores no payload bytes. Advertising byte-readiness here makes a
+        // consumer observe `readable_bytes > 0` followed by an empty read and
+        // can create a permanent poll loop. FIN remains a real terminal edge.
+        if is_fin {
+            self.mark_stream_readable(id);
         }
         Ok(())
     }
@@ -1397,7 +1495,7 @@ impl StreamTable {
             .consume(flow_delta)
             .map_err(|err| StreamTableError::Stream(QuicStreamError::Flow(err)))?;
         if len > 0 || is_fin {
-            self.wake_reader(id);
+            self.mark_stream_readable(id);
         }
         Ok(())
     }
@@ -1411,24 +1509,81 @@ impl StreamTable {
         if id.direction() == StreamDirection::Unidirectional && id.is_local_for(self.role) {
             return Err(StreamTableError::StreamNotReadable(id));
         }
-        let stream = self.stream_mut(id)?;
-        if let Some((code, final_size)) = stream.recv_reset {
-            return Err(StreamTableError::Stream(QuicStreamError::ReceiveReset {
-                code,
-                final_size,
-            }));
+        let bytes = {
+            let stream = self.stream_mut(id)?;
+            if let Some((code, final_size)) = stream.recv_reset {
+                return Err(StreamTableError::Stream(QuicStreamError::ReceiveReset {
+                    code,
+                    final_size,
+                }));
+            }
+            if let Some(code) = stream.receive_stopped_error_code {
+                return Err(StreamTableError::Stream(QuicStreamError::ReceiveStopped {
+                    code,
+                }));
+            }
+            stream.read_bytes(max_len)
+        };
+        // Requeue only when a partial application read left actual contiguous
+        // bytes buffered. FIN, RESET_STREAM, and local receive-stop are
+        // one-shot edges; repeatedly requeueing EOF makes readiness spin.
+        if self.stream_readiness(id)?.readable_bytes > 0 {
+            self.mark_stream_readable(id);
         }
-        if let Some(code) = stream.receive_stopped_error_code {
-            return Err(StreamTableError::Stream(QuicStreamError::ReceiveStopped {
-                code,
-            }));
+        Ok(bytes)
+    }
+
+    /// Consume the lowest-id pending receive-side readiness notification.
+    ///
+    /// The notification is edge-triggered. Callers should read or otherwise
+    /// disposition the stream before requesting another notification. A
+    /// partial read automatically requeues the stream while contiguous bytes
+    /// remain observable; terminal state is a one-shot edge.
+    pub fn take_next_readable_stream(&mut self) -> Option<StreamReadiness> {
+        let stream_id = self.readable_streams.pop_first()?;
+        self.stream_readiness(stream_id).ok()
+    }
+
+    /// Poll for the next deterministic receive-side stream notification.
+    ///
+    /// When no stream is ready, the task waker is retained until bytes, FIN,
+    /// RESET_STREAM, or a local receive stop changes a stream.
+    pub fn poll_next_readable_stream(
+        &mut self,
+        task_cx: &mut Context<'_>,
+    ) -> Poll<StreamReadiness> {
+        if let Some(readiness) = self.take_next_readable_stream() {
+            return Poll::Ready(readiness);
         }
-        Ok(stream.read_bytes(max_len))
+        let should_replace = self
+            .readable_stream_waker
+            .as_ref()
+            .is_none_or(|waker| !waker.will_wake(task_cx.waker()));
+        if should_replace {
+            self.readable_stream_waker = Some(task_cx.waker().clone());
+        }
+        Poll::Pending
+    }
+
+    fn stream_readiness(&self, id: StreamId) -> Result<StreamReadiness, StreamTableError> {
+        let stream = self.stream(id)?;
+        Ok(StreamReadiness {
+            stream_id: id,
+            readable_bytes: stream.readable_bytes(),
+            fin_received: stream.final_size.is_some() && stream.recv_reset.is_none(),
+            reset: stream.recv_reset,
+            receive_stopped: stream.receive_stopped_error_code,
+        })
     }
 
     /// Whether a stream has reached application EOF.
     pub fn is_stream_read_eof(&self, id: StreamId) -> Result<bool, StreamTableError> {
         Ok(self.stream(id)?.is_read_eof())
+    }
+
+    /// Return the bounded buffered prefix retained across peer RESET_STREAM.
+    pub fn reset_stream_buffered_prefix(&self, id: StreamId) -> Result<Bytes, StreamTableError> {
+        Ok(self.stream(id)?.reset_buffered_prefix())
     }
 
     /// Current stream-level send limit.
@@ -1453,6 +1608,20 @@ impl StreamTable {
         offset: u64,
     ) -> Result<(), StreamTableError> {
         self.stream_mut(id)?.release_sent_stream_frame(offset);
+        Ok(())
+    }
+
+    /// Release a retained STREAM copy only if its current extent still
+    /// matches the acknowledged wire frame.
+    pub(crate) fn release_sent_stream_frame_if_matches(
+        &mut self,
+        id: StreamId,
+        offset: u64,
+        data_len: usize,
+        fin: bool,
+    ) -> Result<(), StreamTableError> {
+        self.stream_mut(id)?
+            .release_sent_stream_frame_if_matches(offset, data_len, fin);
         Ok(())
     }
 
@@ -1572,7 +1741,7 @@ impl StreamTable {
         error_code: u64,
     ) -> Result<(), StreamTableError> {
         self.stream_mut(id)?.stop_receiving(error_code);
-        self.wake_reader(id);
+        self.mark_stream_readable(id);
         Ok(())
     }
 
@@ -1592,7 +1761,7 @@ impl StreamTable {
         self.recv_connection_credit
             .consume(flow_delta)
             .map_err(|err| StreamTableError::Stream(QuicStreamError::Flow(err)))?;
-        self.wake_reader(id);
+        self.mark_stream_readable(id);
         Ok(())
     }
 
@@ -1615,7 +1784,7 @@ impl StreamTable {
         final_size: u64,
     ) -> Result<(), StreamTableError> {
         self.stream_mut(id)?.set_final_size(final_size)?;
-        self.wake_reader(id);
+        self.mark_stream_readable(id);
         Ok(())
     }
 
@@ -1770,6 +1939,14 @@ impl StreamTable {
 
     fn wake_reader(&mut self, id: StreamId) {
         if let Some(waker) = self.read_wakers.remove(&id) {
+            waker.wake();
+        }
+    }
+
+    fn mark_stream_readable(&mut self, id: StreamId) {
+        self.readable_streams.insert(id);
+        self.wake_reader(id);
+        if let Some(waker) = self.readable_stream_waker.take() {
             waker.wake();
         }
     }
@@ -2101,6 +2278,72 @@ mod tests {
                 final_size: 8
             })
         );
+    }
+
+    #[test]
+    fn native_h3_adapter_stream_readiness_is_edge_triggered_for_bytes_fin_and_reset() {
+        let mut tbl = StreamTable::new(StreamRole::Server, 0, 0, 100, 100);
+        let id = StreamId::local(StreamRole::Client, StreamDirection::Bidirectional, 0);
+        tbl.accept_remote_stream(id).expect("accept");
+        tbl.receive_stream_bytes(id, 0, Bytes::from_static(b"abcd"), true)
+            .expect("receive bytes and FIN");
+
+        let first = tbl.take_next_readable_stream().expect("initial edge");
+        assert_eq!(first.readable_bytes, 4);
+        assert!(first.fin_received);
+        assert_eq!(first.reset, None);
+        assert_eq!(
+            tbl.read_stream_bytes(id, 2).expect("partial read"),
+            b"ab"[..]
+        );
+
+        let partial = tbl.take_next_readable_stream().expect("partial-read edge");
+        assert_eq!(partial.readable_bytes, 2);
+        assert!(partial.fin_received);
+        assert_eq!(tbl.read_stream_bytes(id, 8).expect("final read"), b"cd"[..]);
+        assert!(tbl.is_stream_read_eof(id).expect("EOF"));
+        assert!(
+            tbl.take_next_readable_stream().is_none(),
+            "consumed FIN must not requeue forever"
+        );
+        assert!(tbl.read_stream_bytes(id, 8).expect("EOF read").is_empty());
+        assert!(tbl.take_next_readable_stream().is_none());
+
+        let reset_id = StreamId::local(StreamRole::Client, StreamDirection::Bidirectional, 1);
+        tbl.accept_remote_stream(reset_id)
+            .expect("accept reset stream");
+        tbl.receive_stream_bytes(reset_id, 0, Bytes::from_static(b"prefix"), false)
+            .expect("receive reset prefix");
+        tbl.reset_stream_receive(reset_id, 7, 6).expect("reset");
+        let reset = tbl.take_next_readable_stream().expect("reset edge");
+        assert_eq!(reset.stream_id, reset_id);
+        assert_eq!(reset.readable_bytes, 0);
+        assert!(!reset.fin_received, "RESET_STREAM is not FIN");
+        assert_eq!(reset.reset, Some((7, 6)));
+        assert_eq!(
+            tbl.reset_stream_buffered_prefix(reset_id)
+                .expect("retained reset prefix"),
+            b"prefix"[..]
+        );
+        assert!(
+            tbl.take_next_readable_stream().is_none(),
+            "consumed reset edge must be one-shot"
+        );
+    }
+
+    #[test]
+    fn native_h3_adapter_accounting_only_receive_does_not_advertise_unreadable_bytes() {
+        let mut tbl = StreamTable::new(StreamRole::Server, 0, 0, 100, 100);
+        let id = StreamId::local(StreamRole::Client, StreamDirection::Bidirectional, 0);
+        tbl.accept_remote_stream(id).expect("accept");
+        tbl.receive_stream_segment(id, 0, 8, false)
+            .expect("account receive range");
+        assert!(
+            tbl.take_next_readable_stream().is_none(),
+            "range accounting stores no application bytes"
+        );
+        assert!(tbl.read_stream_bytes(id, 8).expect("empty read").is_empty());
+        assert!(tbl.take_next_readable_stream().is_none());
     }
 
     #[test]
@@ -2877,6 +3120,50 @@ mod tests {
             table.pop_next_stream_frame(8192).is_none(),
             "no residual retransmit fragments"
         );
+    }
+
+    #[test]
+    fn native_h3_adapter_late_ack_does_not_release_newer_coalesced_stream_copy() {
+        let mut stream = QuicStream::new(StreamId(0), 64, 64);
+        stream
+            .write_bytes(Bytes::from_static(b"abcdef"), false)
+            .expect("queue bytes");
+
+        let first = stream.pop_pending_stream_frame(3).expect("first frame");
+        let second = stream.pop_pending_stream_frame(3).expect("second frame");
+        assert_eq!((first.offset, first.data.len()), (0, 3));
+        assert_eq!((second.offset, second.data.len()), (3, 3));
+
+        // Loss requeues the original wire extents. Recovery then coalesces
+        // both copies into a newer six-byte frame retained at offset zero.
+        stream
+            .requeue_sent_stream_frame(second.offset)
+            .expect("requeue tail");
+        stream
+            .requeue_sent_stream_frame(first.offset)
+            .expect("requeue head");
+        let coalesced = stream
+            .pop_pending_stream_frame(6)
+            .expect("coalesced retransmit");
+        assert_eq!((coalesced.offset, coalesced.data.len()), (0, 6));
+        assert!(coalesced.retransmit);
+
+        // A late ACK for the old three-byte packet must not discard the
+        // retained six-byte superset and make its tail unrecoverable.
+        stream.release_sent_stream_frame_if_matches(0, 3, false);
+        stream
+            .requeue_sent_stream_frame(0)
+            .expect("newer retained copy remains recoverable");
+        let recovered = stream
+            .pop_pending_stream_frame(6)
+            .expect("newer retained copy requeues");
+        assert_eq!(recovered.data, Bytes::from_static(b"abcdef"));
+
+        stream.release_sent_stream_frame_if_matches(0, 6, false);
+        stream
+            .requeue_sent_stream_frame(0)
+            .expect("acknowledged copy is already released");
+        assert!(stream.pop_pending_stream_frame(6).is_none());
     }
 
     #[test]

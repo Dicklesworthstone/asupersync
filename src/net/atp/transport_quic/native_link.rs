@@ -5423,6 +5423,9 @@ fn link_from_handshake(
         ..NativeQuicConnectionConfig::default()
     };
     let mut conn = NativeQuicConnection::new(conn_config);
+    // ATP already owns reliable STREAM ACK/loss recovery through
+    // `in_flight_stream_frames`; keep exactly one retransmission authority.
+    conn.set_internal_retransmission_tracking(false)?;
     conn.begin_handshake(cx)?;
     conn.on_handshake_keys_available(cx)?;
     conn.on_1rtt_keys_available(cx)?;

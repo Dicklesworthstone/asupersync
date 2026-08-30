@@ -8,6 +8,8 @@
 //! All tests are synchronous (no tokio, no async) and use DetRng for
 //! reproducible deterministic seeds.
 
+#[cfg(feature = "http3")]
+use asupersync::bytes::Bytes;
 use asupersync::cx::Cx;
 use asupersync::http::h3_native::{
     H3ConnectionConfig, H3ConnectionState, H3ControlState, H3Frame, H3NativeError, H3PseudoHeaders,
@@ -15,10 +17,22 @@ use asupersync::http::h3_native::{
     qpack_decode_field_section, qpack_encode_field_section, qpack_plan_to_header_fields,
     qpack_static_plan_for_request, qpack_static_plan_for_response,
 };
+#[cfg(feature = "http3")]
+use asupersync::http::h3_native::{
+    qpack_encode_request_field_section, qpack_encode_response_field_section,
+};
+#[cfg(feature = "http3")]
+use asupersync::http::h3_quic::{
+    H3_REQUEST_CANCELLED, NativeH3Event, NativeH3Session, NativeH3SessionError,
+};
+#[cfg(all(feature = "http3", feature = "test-internals"))]
+use asupersync::net::quic_native::drop_app_data_packet;
 use asupersync::net::quic_native::{
     NativeQuicConnection, NativeQuicConnectionConfig, QuicConnectionState, StreamDirection,
     StreamRole,
 };
+#[cfg(feature = "http3")]
+use asupersync::net::quic_native::{QuicConnection, establish_loopback, pump_app_data};
 use asupersync::types::Time;
 use asupersync::util::DetRng;
 use serde_json::Value;
@@ -642,19 +656,16 @@ fn control_stream_settings_exchange() {
         H3NativeError::ControlProtocol("SETTINGS already sent on local control stream")
     );
 
-    // Verify static-only QPACK policy rejects dynamic table.
+    // Peer QPACK capacity is permission; a static-only encoder accepts it and
+    // simply declines to emit dynamic references.
     let mut strict_h3 = H3ConnectionState::new();
     let dynamic_settings = H3Settings {
         qpack_max_table_capacity: Some(4096),
         ..H3Settings::default()
     };
-    let err = strict_h3
+    strict_h3
         .on_control_frame(&H3Frame::Settings(dynamic_settings))
-        .expect_err("should reject dynamic table");
-    assert_eq!(
-        err,
-        H3NativeError::QpackPolicy("dynamic qpack table disabled by policy")
-    );
+        .expect("static encoder accepts peer dynamic-table capacity");
 
     // Verify DynamicTableAllowed mode accepts nonzero capacity.
     let config = H3ConnectionConfig {
@@ -1563,8 +1574,539 @@ fn full_h3_lifecycle_over_quic_streams() {
     );
 }
 
+#[cfg(feature = "http3")]
+fn pump_h3_events(
+    cx: &Cx,
+    from: &mut QuicConnection,
+    to: &mut QuicConnection,
+    receiver: &mut NativeH3Session,
+) -> (Vec<NativeH3Event>, usize) {
+    let mut events = Vec::new();
+    let mut rounds = 0usize;
+    loop {
+        let moved = pump_app_data(cx, from, to, 40, rounds as u64)
+            .expect("native QUIC application-data pump");
+        if moved > 0 {
+            rounds += 1;
+        }
+        while let Some(event) = receiver
+            .next_event(cx, to)
+            .expect("decode HTTP/3 event from native QUIC stream")
+        {
+            events.push(event);
+        }
+        if moved == 0 {
+            return (events, rounds);
+        }
+    }
+}
+
 // ===========================================================================
-// Test 13: Wire-level QPACK field section roundtrip + header projection
+// Test 13: Native H3 frames traverse native QUIC stream bytes
+// ===========================================================================
+
+#[test]
+#[cfg(feature = "http3")]
+fn native_h3_session_routes_real_stream_bytes_and_survives_reset() {
+    let cx = test_cx();
+    let config = NativeQuicConnectionConfig {
+        max_local_bidi: 16,
+        max_local_uni: 8,
+        send_window: 1 << 18,
+        recv_window: 1 << 18,
+        connection_send_limit: 4 << 20,
+        connection_recv_limit: 4 << 20,
+        ..NativeQuicConnectionConfig::default()
+    };
+    let mut client = QuicConnection::client(config);
+    let mut server = QuicConnection::server(config);
+    client.record_verified_server_identity();
+    establish_loopback(&cx, &mut client, &mut server).expect("establish native QUIC pair");
+
+    let mut client_h3 = NativeH3Session::client();
+    let mut server_h3 = NativeH3Session::server();
+    client_h3
+        .initialize(&cx, &mut client, H3Settings::default())
+        .expect("initialize client H3 control stream");
+    server_h3
+        .initialize(&cx, &mut server, H3Settings::default())
+        .expect("initialize server H3 control stream");
+
+    let (server_control, _) = pump_h3_events(&cx, &mut client, &mut server, &mut server_h3);
+    assert_eq!(
+        server_control,
+        vec![NativeH3Event::Settings(H3Settings::default())],
+        "server must decode SETTINGS from bytes delivered on the peer control stream"
+    );
+    let (client_control, _) = pump_h3_events(&cx, &mut server, &mut client, &mut client_h3);
+    assert_eq!(
+        client_control,
+        vec![NativeH3Event::Settings(H3Settings::default())],
+        "client must decode SETTINGS from bytes delivered on the peer control stream"
+    );
+
+    let first_request = H3RequestHead::new(
+        H3PseudoHeaders {
+            method: Some("POST".to_string()),
+            scheme: Some("https".to_string()),
+            authority: Some("api.example.test".to_string()),
+            path: Some("/upload?q=wire".to_string()),
+            ..H3PseudoHeaders::default()
+        },
+        vec![(
+            "content-type".to_string(),
+            "application/octet-stream".to_string(),
+        )],
+    )
+    .expect("valid first request");
+    let first_body = Bytes::from_static(b"body split across multiple native QUIC STREAM frames");
+    let first_stream = client_h3
+        .send_request(&cx, &mut client, &first_request, first_body.clone())
+        .expect("send first H3 request");
+    let (first_server_events, request_pump_rounds) =
+        pump_h3_events(&cx, &mut client, &mut server, &mut server_h3);
+    assert!(
+        request_pump_rounds > 1,
+        "40-byte packet budget must exercise incremental frame reassembly"
+    );
+    assert!(
+        first_server_events.iter().any(|event| matches!(
+            event,
+            NativeH3Event::RequestHeaders { stream_id, head }
+                if *stream_id == first_stream && head == &first_request
+        )),
+        "server must decode the exact request HEADERS: {first_server_events:?}"
+    );
+    assert!(
+        first_server_events.iter().any(|event| matches!(
+            event,
+            NativeH3Event::Data { stream_id, bytes }
+                if *stream_id == first_stream && bytes == &first_body
+        )),
+        "server must decode the exact request DATA: {first_server_events:?}"
+    );
+    assert!(
+        first_server_events.iter().any(|event| matches!(
+            event,
+            NativeH3Event::Finished { stream_id } if *stream_id == first_stream
+        )),
+        "server must observe request FIN: {first_server_events:?}"
+    );
+
+    let first_response = H3ResponseHead::new(
+        201,
+        vec![("x-transport".to_string(), "native-quic".to_string())],
+    )
+    .expect("valid first response");
+    let first_response_body = Bytes::from_static(b"created over h3");
+    server_h3
+        .send_response(
+            &cx,
+            &mut server,
+            first_stream,
+            &first_response,
+            first_response_body.clone(),
+        )
+        .expect("send first H3 response");
+    let (first_client_events, _) = pump_h3_events(&cx, &mut server, &mut client, &mut client_h3);
+    assert!(
+        first_client_events.iter().any(|event| matches!(
+            event,
+            NativeH3Event::ResponseHeaders { stream_id, head }
+                if *stream_id == first_stream && head == &first_response
+        )),
+        "client must decode the exact response HEADERS: {first_client_events:?}"
+    );
+    assert!(
+        first_client_events.iter().any(|event| matches!(
+            event,
+            NativeH3Event::Data { stream_id, bytes }
+                if *stream_id == first_stream && bytes == &first_response_body
+        )),
+        "client must decode the exact response DATA: {first_client_events:?}"
+    );
+
+    let cancelled_request = H3RequestHead::new(
+        H3PseudoHeaders {
+            method: Some("GET".to_string()),
+            scheme: Some("https".to_string()),
+            authority: Some("api.example.test".to_string()),
+            path: Some("/cancel-me".to_string()),
+            ..H3PseudoHeaders::default()
+        },
+        vec![],
+    )
+    .expect("valid cancelled request");
+    let cancelled_stream = client_h3
+        .send_request(&cx, &mut client, &cancelled_request, Bytes::new())
+        .expect("queue request before cancellation");
+    client_h3
+        .cancel_request(&cx, &mut client, cancelled_stream)
+        .expect("queue H3 request cancellation");
+    let (cancel_events, _) = pump_h3_events(&cx, &mut client, &mut server, &mut server_h3);
+    assert_eq!(
+        cancel_events,
+        vec![NativeH3Event::StreamReset {
+            stream_id: cancelled_stream,
+            error_code: H3_REQUEST_CANCELLED,
+            final_size: client
+                .inner()
+                .streams()
+                .stream(cancelled_stream)
+                .expect("cancelled client stream")
+                .send_offset,
+        }],
+        "reset must cross the native QUIC frame path without dispatching HEADERS"
+    );
+
+    let survivor_request = H3RequestHead::new(
+        H3PseudoHeaders {
+            method: Some("GET".to_string()),
+            scheme: Some("https".to_string()),
+            authority: Some("api.example.test".to_string()),
+            path: Some("/after-cancel".to_string()),
+            ..H3PseudoHeaders::default()
+        },
+        vec![],
+    )
+    .expect("valid survivor request");
+    let survivor_stream = client_h3
+        .send_request(&cx, &mut client, &survivor_request, Bytes::new())
+        .expect("connection accepts a request after stream reset");
+    let (survivor_server_events, _) = pump_h3_events(&cx, &mut client, &mut server, &mut server_h3);
+    assert!(
+        survivor_server_events.iter().any(|event| matches!(
+            event,
+            NativeH3Event::RequestHeaders { stream_id, head }
+                if *stream_id == survivor_stream && head == &survivor_request
+        )),
+        "next request must survive the prior stream reset: {survivor_server_events:?}"
+    );
+    assert!(
+        survivor_server_events.iter().any(|event| matches!(
+            event,
+            NativeH3Event::Finished { stream_id } if *stream_id == survivor_stream
+        )),
+        "survivor request must reach FIN: {survivor_server_events:?}"
+    );
+
+    let survivor_response = H3ResponseHead::new(200, vec![]).expect("valid survivor response");
+    server_h3
+        .send_response(
+            &cx,
+            &mut server,
+            survivor_stream,
+            &survivor_response,
+            Bytes::from_static(b"still alive"),
+        )
+        .expect("respond after prior stream reset");
+    let (survivor_client_events, _) = pump_h3_events(&cx, &mut server, &mut client, &mut client_h3);
+    assert!(
+        survivor_client_events.iter().any(|event| matches!(
+            event,
+            NativeH3Event::ResponseHeaders { stream_id, head }
+                if *stream_id == survivor_stream && head == &survivor_response
+        )),
+        "client must receive response after prior reset: {survivor_client_events:?}"
+    );
+
+    let invalid_goaway = server_h3
+        .graceful_close(&cx, &mut server, survivor_stream.0 + 1)
+        .expect_err("server must reject a non-client-bidirectional GOAWAY id");
+    assert!(matches!(
+        invalid_goaway,
+        NativeH3SessionError::InvalidState(_)
+    ));
+    server_h3
+        .graceful_close(&cx, &mut server, survivor_stream.0 + 4)
+        .expect("queue H3 GOAWAY");
+    let (goaway_events, _) = pump_h3_events(&cx, &mut server, &mut client, &mut client_h3);
+    assert!(
+        goaway_events
+            .iter()
+            .any(|event| *event == NativeH3Event::Goaway(survivor_stream.0 + 4)),
+        "GOAWAY must cross the peer control stream: {goaway_events:?}"
+    );
+    let after_goaway = client_h3
+        .send_request(&cx, &mut client, &survivor_request, Bytes::new())
+        .expect_err("peer GOAWAY must reject the next request before opening a stream");
+    assert!(matches!(
+        after_goaway,
+        NativeH3SessionError::InvalidState(_)
+    ));
+}
+
+#[test]
+#[cfg(all(feature = "http3", feature = "test-internals"))]
+fn native_h3_reliable_frames_recover_after_deliberate_loss_and_cancel_both_directions() {
+    let cx = test_cx();
+    let config = NativeQuicConnectionConfig {
+        max_local_bidi: 16,
+        max_local_uni: 8,
+        send_window: 1 << 18,
+        recv_window: 1 << 18,
+        connection_send_limit: 4 << 20,
+        connection_recv_limit: 4 << 20,
+        ..NativeQuicConnectionConfig::default()
+    };
+    let mut client = QuicConnection::client(config);
+    let mut server = QuicConnection::server(config);
+    client.record_verified_server_identity();
+    establish_loopback(&cx, &mut client, &mut server).expect("establish native QUIC pair");
+    let mut client_h3 = NativeH3Session::client();
+    let mut server_h3 = NativeH3Session::server();
+    client_h3
+        .initialize(&cx, &mut client, H3Settings::default())
+        .expect("initialize client H3");
+    server_h3
+        .initialize(&cx, &mut server, H3Settings::default())
+        .expect("initialize server H3");
+    let _ = pump_h3_events(&cx, &mut client, &mut server, &mut server_h3);
+    let _ = pump_h3_events(&cx, &mut server, &mut client, &mut client_h3);
+
+    let head = H3RequestHead::new(
+        H3PseudoHeaders {
+            method: Some("POST".to_string()),
+            scheme: Some("https".to_string()),
+            authority: Some("loss.example.test".to_string()),
+            path: Some("/retransmit".to_string()),
+            ..H3PseudoHeaders::default()
+        },
+        vec![],
+    )
+    .expect("valid request");
+    let body = Bytes::from_static(b"reliable HTTP/3 bytes survive a dropped first packet");
+    let stream = client_h3
+        .send_request(&cx, &mut client, &head, body.clone())
+        .expect("queue request");
+    assert!(drop_app_data_packet(&cx, &mut client, 40).expect("drop first request packet") > 0);
+    let (events, _) = pump_h3_events(&cx, &mut client, &mut server, &mut server_h3);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        NativeH3Event::RequestHeaders { stream_id, head: received }
+            if *stream_id == stream && received == &head
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        NativeH3Event::Data { stream_id, bytes }
+            if *stream_id == stream && bytes == &body
+    )));
+    assert!(events.iter().any(
+        |event| matches!(event, NativeH3Event::Finished { stream_id } if *stream_id == stream)
+    ));
+
+    let client_cancelled = client_h3
+        .send_request(&cx, &mut client, &head, Bytes::new())
+        .expect("queue client-cancelled request");
+    client_h3
+        .cancel_request(&cx, &mut client, client_cancelled)
+        .expect("cancel request from client role");
+    assert!(
+        drop_app_data_packet(&cx, &mut client, 1200).expect("drop first cancellation packet") > 0
+    );
+    let (server_cancel_events, _) = pump_h3_events(&cx, &mut client, &mut server, &mut server_h3);
+    assert!(server_cancel_events.iter().any(|event| matches!(
+        event,
+        NativeH3Event::StreamReset { stream_id, error_code, .. }
+            if *stream_id == client_cancelled && *error_code == H3_REQUEST_CANCELLED
+    )));
+    let _ = pump_h3_events(&cx, &mut server, &mut client, &mut client_h3);
+    assert_eq!(
+        client
+            .inner()
+            .streams()
+            .stream(client_cancelled)
+            .expect("client-cancelled stream")
+            .recv_reset
+            .map(|(code, _)| code),
+        Some(H3_REQUEST_CANCELLED),
+        "peer must answer STOP_SENDING with RESET_STREAM"
+    );
+
+    let server_cancelled = client_h3
+        .send_request(&cx, &mut client, &head, Bytes::new())
+        .expect("queue server-cancelled request");
+    let _ = pump_h3_events(&cx, &mut client, &mut server, &mut server_h3);
+    server_h3
+        .cancel_request(&cx, &mut server, server_cancelled)
+        .expect("cancel request from server role");
+    let (client_cancel_events, _) = pump_h3_events(&cx, &mut server, &mut client, &mut client_h3);
+    assert!(client_cancel_events.iter().any(|event| matches!(
+        event,
+        NativeH3Event::StreamReset { stream_id, error_code, .. }
+            if *stream_id == server_cancelled && *error_code == H3_REQUEST_CANCELLED
+    )));
+    let _ = pump_h3_events(&cx, &mut client, &mut server, &mut server_h3);
+    assert_eq!(
+        server
+            .inner()
+            .streams()
+            .stream(server_cancelled)
+            .expect("server-cancelled stream")
+            .recv_reset
+            .map(|(code, _)| code),
+        Some(H3_REQUEST_CANCELLED),
+        "client must answer server STOP_SENDING with RESET_STREAM"
+    );
+}
+
+#[test]
+#[cfg(feature = "http3")]
+fn native_h3_critical_reset_is_fatal_even_before_poll() {
+    let cx = test_cx();
+    let config = NativeQuicConnectionConfig::default();
+    let mut client = QuicConnection::client(config);
+    let mut server = QuicConnection::server(config);
+    client.record_verified_server_identity();
+    establish_loopback(&cx, &mut client, &mut server).expect("establish native QUIC pair");
+    let mut client_h3 = NativeH3Session::client();
+    let mut server_h3 = NativeH3Session::server();
+    let client_control = client_h3
+        .initialize(&cx, &mut client, H3Settings::default())
+        .expect("initialize client H3 control stream");
+    server_h3
+        .initialize(&cx, &mut server, H3Settings::default())
+        .expect("initialize server H3");
+
+    assert!(
+        pump_app_data(&cx, &mut client, &mut server, 1200, 0)
+            .expect("deliver control bytes without polling H3")
+            > 0
+    );
+    client
+        .reset_stream(&cx, client_control, H3_REQUEST_CANCELLED)
+        .expect("reset already-delivered control stream");
+    assert!(
+        pump_app_data(&cx, &mut client, &mut server, 1200, 1).expect("deliver control reset") > 0
+    );
+    let error = server_h3
+        .next_event(&cx, &mut server)
+        .expect_err("control-stream reset must fail the H3 connection");
+    assert_eq!(
+        error,
+        NativeH3SessionError::CriticalStreamClosed {
+            stream_id: client_control,
+            stream_type: asupersync::http::h3_native::H3UniStreamType::Control,
+        }
+    );
+}
+
+#[test]
+#[cfg(feature = "http3")]
+fn native_h3_reset_retires_request_state_and_trailers_decode_on_successor() {
+    let cx = test_cx();
+    let config = NativeQuicConnectionConfig {
+        max_local_bidi: 8,
+        max_local_uni: 8,
+        ..NativeQuicConnectionConfig::default()
+    };
+    let mut client = QuicConnection::client(config);
+    let mut server = QuicConnection::server(config);
+    client.record_verified_server_identity();
+    establish_loopback(&cx, &mut client, &mut server).expect("establish native QUIC pair");
+    let mut client_h3 = NativeH3Session::client();
+    let mut server_h3 = NativeH3Session::with_config(H3ConnectionConfig {
+        endpoint_role: asupersync::http::h3_native::H3EndpointRole::Server,
+        max_concurrent_request_streams: Some(1),
+        ..H3ConnectionConfig::default()
+    });
+    client_h3
+        .initialize(&cx, &mut client, H3Settings::default())
+        .expect("initialize client H3");
+    server_h3
+        .initialize(&cx, &mut server, H3Settings::default())
+        .expect("initialize server H3");
+    let _ = pump_h3_events(&cx, &mut client, &mut server, &mut server_h3);
+
+    let head = H3RequestHead::new(
+        H3PseudoHeaders {
+            method: Some("GET".to_string()),
+            scheme: Some("https".to_string()),
+            authority: Some("state.example.test".to_string()),
+            path: Some("/first".to_string()),
+            ..H3PseudoHeaders::default()
+        },
+        vec![],
+    )
+    .expect("valid request");
+    let first = client
+        .open_bidi_stream(&cx)
+        .expect("open first raw request");
+    let mut first_wire = Vec::new();
+    H3Frame::Headers(qpack_encode_request_field_section(&head).expect("encode request"))
+        .encode(&mut first_wire)
+        .expect("encode HEADERS frame");
+    client
+        .write_stream(&cx, first, Bytes::from(first_wire), false)
+        .expect("write unterminated request HEADERS");
+    let (first_events, _) = pump_h3_events(&cx, &mut client, &mut server, &mut server_h3);
+    assert!(first_events.iter().any(|event| matches!(
+        event,
+        NativeH3Event::RequestHeaders { stream_id, .. } if *stream_id == first
+    )));
+
+    client
+        .reset_stream(&cx, first, H3_REQUEST_CANCELLED)
+        .expect("reset first request mid-message");
+    let (reset_events, _) = pump_h3_events(&cx, &mut client, &mut server, &mut server_h3);
+    assert!(reset_events.iter().any(|event| matches!(
+        event,
+        NativeH3Event::StreamReset { stream_id, .. } if *stream_id == first
+    )));
+
+    let successor = client
+        .open_bidi_stream(&cx)
+        .expect("open successor request after reset");
+    let successor_head = H3RequestHead::new(
+        H3PseudoHeaders {
+            path: Some("/successor".to_string()),
+            ..head.pseudo.clone()
+        },
+        vec![],
+    )
+    .expect("valid successor request");
+    let trailer_fields = vec![("x-checksum".to_string(), "abc123".to_string())];
+    let trailer_plan = trailer_fields
+        .iter()
+        .map(|(name, value)| QpackFieldPlan::Literal {
+            name: name.clone(),
+            value: value.clone(),
+        })
+        .collect::<Vec<_>>();
+    let mut successor_wire = Vec::new();
+    H3Frame::Headers(
+        qpack_encode_request_field_section(&successor_head).expect("encode successor request"),
+    )
+    .encode(&mut successor_wire)
+    .expect("encode successor HEADERS");
+    H3Frame::Data(b"payload".to_vec())
+        .encode(&mut successor_wire)
+        .expect("encode successor DATA");
+    H3Frame::Headers(qpack_encode_field_section(&trailer_plan).expect("encode trailers"))
+        .encode(&mut successor_wire)
+        .expect("encode trailer HEADERS");
+    client
+        .write_stream(&cx, successor, Bytes::from(successor_wire), true)
+        .expect("write successor with trailers");
+    let (successor_events, _) = pump_h3_events(&cx, &mut client, &mut server, &mut server_h3);
+    assert!(successor_events.iter().any(|event| matches!(
+        event,
+        NativeH3Event::RequestHeaders { stream_id, head }
+            if *stream_id == successor && head == &successor_head
+    )));
+    assert!(successor_events.iter().any(|event| matches!(
+        event,
+        NativeH3Event::Trailers { stream_id, fields }
+            if *stream_id == successor && fields == &trailer_fields
+    )));
+    assert!(successor_events.iter().any(|event| matches!(
+        event,
+        NativeH3Event::Finished { stream_id } if *stream_id == successor
+    )));
+}
+
+// ===========================================================================
+// Test 14: Wire-level QPACK field section roundtrip + header projection
 // ===========================================================================
 
 #[test]
@@ -1599,7 +2141,7 @@ fn qpack_wire_field_section_roundtrip_and_header_projection() {
 }
 
 // ===========================================================================
-// Test 14: Interop capture corpus fixtures (black-box) validate decode policy
+// Test 15: Interop capture corpus fixtures (black-box) validate decode policy
 // ===========================================================================
 
 #[test]
@@ -1814,4 +2356,190 @@ fn h3_fault_schedule_operation_order_is_deterministic() {
     let schedule = build_fault_schedule(&base, &[], &[0], &[(0, 2)]);
     let origins: Vec<usize> = schedule.iter().map(|event| event.origin).collect();
     assert_eq!(origins, vec![2, 1, 0, 0]);
+}
+
+#[test]
+#[cfg(feature = "http3")]
+fn native_h3_static_encoder_accepts_peer_capacity_but_advertises_zero_decoder_limits() {
+    let cx = test_cx();
+    let config = NativeQuicConnectionConfig::default();
+    let mut client = QuicConnection::client(config);
+    let mut server = QuicConnection::server(config);
+    client.record_verified_server_identity();
+    establish_loopback(&cx, &mut client, &mut server).expect("establish native QUIC pair");
+    let mut client_h3 = NativeH3Session::client();
+    let mut server_h3 = NativeH3Session::server();
+    client_h3
+        .initialize(
+            &cx,
+            &mut client,
+            H3Settings {
+                qpack_max_table_capacity: Some(4096),
+                qpack_blocked_streams: Some(16),
+                max_field_section_size: Some(8192),
+                ..H3Settings::default()
+            },
+        )
+        .expect("initialize static client H3");
+    server_h3
+        .initialize(&cx, &mut server, H3Settings::default())
+        .expect("initialize static server H3");
+
+    let (events, _) = pump_h3_events(&cx, &mut client, &mut server, &mut server_h3);
+    assert_eq!(
+        events,
+        vec![NativeH3Event::Settings(H3Settings {
+            qpack_max_table_capacity: Some(0),
+            qpack_blocked_streams: Some(0),
+            max_field_section_size: Some(8192),
+            ..H3Settings::default()
+        })]
+    );
+
+    // The converse is interoperable too: non-zero peer limits are permission
+    // that this static encoder declines, not a connection error.
+    let peer_settings = H3Frame::Settings(H3Settings {
+        qpack_max_table_capacity: Some(2048),
+        qpack_blocked_streams: Some(8),
+        ..H3Settings::default()
+    });
+    let mut client_mapping = H3ConnectionState::new_client();
+    client_mapping
+        .on_control_frame(&peer_settings)
+        .expect("static encoder accepts peer dynamic-table permission");
+
+    let qpack_encoder = client
+        .open_uni_stream(&cx)
+        .expect("open peer QPACK encoder stream");
+    client
+        .write_stream(&cx, qpack_encoder, Bytes::from_static(&[0x02, 0x20]), false)
+        .expect("queue QPACK encoder type and capacity-zero instruction");
+    let (qpack_events, _) = pump_h3_events(&cx, &mut client, &mut server, &mut server_h3);
+    assert!(
+        qpack_events.is_empty(),
+        "SetDynamicTableCapacity(0) is a legal no-op, not an H3 event"
+    );
+
+    client
+        .write_stream(&cx, qpack_encoder, Bytes::from_static(&[0x00]), false)
+        .expect("queue forbidden duplicate instruction");
+    assert!(
+        pump_app_data(&cx, &mut client, &mut server, 1200, 1)
+            .expect("deliver forbidden QPACK instruction")
+            > 0
+    );
+    let error = server_h3
+        .next_event(&cx, &mut server)
+        .expect_err("static adapter must reject dynamic-table mutation");
+    assert_eq!(
+        error,
+        NativeH3SessionError::Protocol(H3NativeError::QpackPolicy(
+            "static QPACK forbids dynamic encoder instructions"
+        ))
+    );
+}
+
+#[test]
+#[cfg(feature = "http3")]
+fn native_h3_client_accepts_informational_then_final_response_and_trailers() {
+    let cx = test_cx();
+    let config = NativeQuicConnectionConfig {
+        max_local_bidi: 8,
+        max_local_uni: 8,
+        ..NativeQuicConnectionConfig::default()
+    };
+    let mut client = QuicConnection::client(config);
+    let mut server = QuicConnection::server(config);
+    client.record_verified_server_identity();
+    establish_loopback(&cx, &mut client, &mut server).expect("establish native QUIC pair");
+    let mut client_h3 = NativeH3Session::client();
+    let mut server_h3 = NativeH3Session::server();
+    client_h3
+        .initialize(&cx, &mut client, H3Settings::default())
+        .expect("initialize client H3");
+    server_h3
+        .initialize(&cx, &mut server, H3Settings::default())
+        .expect("initialize server H3");
+    let _ = pump_h3_events(&cx, &mut client, &mut server, &mut server_h3);
+    let _ = pump_h3_events(&cx, &mut server, &mut client, &mut client_h3);
+
+    let request = H3RequestHead::new(
+        H3PseudoHeaders {
+            method: Some("GET".to_string()),
+            scheme: Some("https".to_string()),
+            authority: Some("info.example.test".to_string()),
+            path: Some("/early-hints".to_string()),
+            ..H3PseudoHeaders::default()
+        },
+        vec![],
+    )
+    .expect("valid request");
+    let stream = client_h3
+        .send_request(&cx, &mut client, &request, Bytes::new())
+        .expect("send request");
+    let _ = pump_h3_events(&cx, &mut client, &mut server, &mut server_h3);
+
+    let informational = H3ResponseHead::new(
+        103,
+        vec![("link".to_string(), "</style.css>; rel=preload".to_string())],
+    )
+    .expect("valid informational response");
+    let final_response = H3ResponseHead::new(
+        200,
+        vec![("content-type".to_string(), "text/plain".to_string())],
+    )
+    .expect("valid final response");
+    let trailer_plan = vec![QpackFieldPlan::Literal {
+        name: "x-checksum".to_string(),
+        value: "abc123".to_string(),
+    }];
+    let wrong_api = server_h3
+        .send_response(&cx, &mut server, stream, &informational, Bytes::new())
+        .expect_err("complete-response API must not FIN an informational response");
+    assert!(matches!(
+        wrong_api,
+        NativeH3SessionError::InvalidState(
+            "informational responses require send_informational_response"
+        )
+    ));
+    server_h3
+        .send_informational_response(&cx, &mut server, stream, &informational)
+        .expect("queue informational response without FIN");
+    let mut wire = Vec::new();
+    for frame in [
+        H3Frame::Headers(
+            qpack_encode_response_field_section(&final_response).expect("encode final"),
+        ),
+        H3Frame::Data(b"ready".to_vec()),
+        H3Frame::Headers(qpack_encode_field_section(&trailer_plan).expect("encode trailers")),
+    ] {
+        frame.encode(&mut wire).expect("encode H3 frame");
+    }
+    server
+        .write_stream(&cx, stream, Bytes::from(wire), true)
+        .expect("queue final response and trailers");
+
+    let (events, _) = pump_h3_events(&cx, &mut server, &mut client, &mut client_h3);
+    assert_eq!(
+        events,
+        vec![
+            NativeH3Event::ResponseHeaders {
+                stream_id: stream,
+                head: informational,
+            },
+            NativeH3Event::ResponseHeaders {
+                stream_id: stream,
+                head: final_response,
+            },
+            NativeH3Event::Data {
+                stream_id: stream,
+                bytes: Bytes::from_static(b"ready"),
+            },
+            NativeH3Event::Trailers {
+                stream_id: stream,
+                fields: vec![("x-checksum".to_string(), "abc123".to_string())],
+            },
+            NativeH3Event::Finished { stream_id: stream },
+        ]
+    );
 }

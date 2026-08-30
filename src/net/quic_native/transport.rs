@@ -199,6 +199,7 @@ pub enum QuicConnectionState {
 #[derive(Debug, Clone)]
 struct LossRecovery {
     sent_packets: VecDeque<SentPacketMeta>,
+    newly_lost_packet_numbers: [Vec<u64>; 3],
     largest_acked: [Option<u64>; 3],
     bytes_in_flight: u64,
     packets_acked_total: u64,
@@ -218,6 +219,7 @@ impl Default for LossRecovery {
     fn default() -> Self {
         Self {
             sent_packets: VecDeque::new(),
+            newly_lost_packet_numbers: std::array::from_fn(|_| Vec::new()),
             largest_acked: [None, None, None],
             bytes_in_flight: 0,
             packets_acked_total: 0,
@@ -236,6 +238,9 @@ impl Default for LossRecovery {
 impl LossRecovery {
     fn clear(&mut self) {
         self.sent_packets.clear();
+        for lost in &mut self.newly_lost_packet_numbers {
+            lost.clear();
+        }
         self.largest_acked = [None, None, None];
         self.bytes_in_flight = 0;
         self.packets_acked_total = 0;
@@ -245,6 +250,7 @@ impl LossRecovery {
     }
 
     pub fn discard_space(&mut self, space: PacketNumberSpace) {
+        self.newly_lost_packet_numbers[space.idx()].clear();
         let mut retained = VecDeque::with_capacity(self.sent_packets.len());
         while let Some(pkt) = self.sent_packets.pop_front() {
             if pkt.space == space {
@@ -283,6 +289,7 @@ impl LossRecovery {
         ack_delay_micros: u64,
         now_micros: u64,
     ) -> AckEvent {
+        self.newly_lost_packet_numbers[space.idx()].clear();
         if ack_ranges.is_empty() {
             return AckEvent::empty();
         }
@@ -372,6 +379,7 @@ impl LossRecovery {
             let lost = packet_threshold_lost || time_threshold_lost;
             if lost {
                 event.lost_packets += 1;
+                self.newly_lost_packet_numbers[space.idx()].push(pkt.packet_number);
                 newest_lost_packet_sent_micros = Some(
                     newest_lost_packet_sent_micros
                         .map_or(pkt.time_sent_micros, |seen| seen.max(pkt.time_sent_micros)),
@@ -475,6 +483,7 @@ impl LossRecovery {
     }
 
     fn on_loss_timeout_expired(&mut self, space: PacketNumberSpace, now_micros: u64) -> AckEvent {
+        self.newly_lost_packet_numbers[space.idx()].clear();
         let mut event = AckEvent::empty();
         let mut newest_lost_packet_sent_micros: Option<u64> = None;
         let mut retained = VecDeque::with_capacity(self.sent_packets.len());
@@ -483,6 +492,7 @@ impl LossRecovery {
             let lost = pkt.space == space && pkt.in_flight && pkt.ack_eliciting;
             if lost {
                 event.lost_packets += 1;
+                self.newly_lost_packet_numbers[space.idx()].push(pkt.packet_number);
                 event.lost_bytes = event.lost_bytes.saturating_add(pkt.bytes);
                 self.bytes_in_flight = self.bytes_in_flight.saturating_sub(pkt.bytes);
                 newest_lost_packet_sent_micros = Some(
@@ -507,6 +517,10 @@ impl LossRecovery {
         }
 
         event
+    }
+
+    fn take_newly_lost_packet_numbers(&mut self, space: PacketNumberSpace) -> Vec<u64> {
+        std::mem::take(&mut self.newly_lost_packet_numbers[space.idx()])
     }
 }
 
@@ -755,6 +769,13 @@ impl QuicTransportMachine {
         now_micros: u64,
     ) -> AckEvent {
         self.recovery.on_loss_timeout_expired(space, now_micros)
+    }
+
+    /// Take the exact packet numbers removed by the most recent loss event in
+    /// `space`. This keeps higher-layer reliable-frame ledgers aligned with the
+    /// recovery machine without widening the stable [`AckEvent`] summary.
+    pub(crate) fn take_newly_lost_packet_numbers(&mut self, space: PacketNumberSpace) -> Vec<u64> {
+        self.recovery.take_newly_lost_packet_numbers(space)
     }
 
     /// Current RTT estimator snapshot.

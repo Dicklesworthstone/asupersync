@@ -12,13 +12,13 @@ use crate::cx::Cx;
 use crate::net::atp::protocol::quic_frames::{QuicFrame, QuicFrameError};
 use crate::net::atp::protocol::varint::{VARINT_MAX, VarInt};
 use crate::net::quic_core::TransportParameters;
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
 use std::task::{Context as TaskContext, Poll, Waker};
 
 use super::streams::{
-    FlowControlError, QuicStreamError, QuicStreamIo, StreamId, StreamRole, StreamTable,
-    StreamTableError,
+    FlowControlError, QuicStreamError, QuicStreamIo, StreamDirection, StreamId, StreamReadiness,
+    StreamRole, StreamTable, StreamTableError,
 };
 use super::tls::{CryptoLevel, KeyUpdateEvent, QuicTlsError, QuicTlsMachine};
 #[cfg(feature = "tls")]
@@ -179,6 +179,86 @@ pub struct NativeQuicConnectionConfig {
     pub drain_timeout_micros: u64,
 }
 
+/// Reliable frame identity retained until one carrying packet is acknowledged.
+///
+/// STREAM payload bytes themselves remain in `StreamTable`; this ledger only
+/// remembers the stream/offset key needed to release or requeue that copy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RetransmittableFrameRef {
+    Stream {
+        stream_id: StreamId,
+        offset: u64,
+        data_len: usize,
+        fin: bool,
+    },
+    ResetStream {
+        stream_id: StreamId,
+        error_code: u64,
+        final_size: u64,
+    },
+    StopSending {
+        stream_id: StreamId,
+        error_code: u64,
+    },
+}
+
+impl RetransmittableFrameRef {
+    fn from_frame(frame: &QuicFrame) -> Option<Self> {
+        match frame {
+            QuicFrame::Stream {
+                stream_id,
+                offset,
+                data,
+                fin,
+            } => Some(Self::Stream {
+                stream_id: StreamId(stream_id.value()),
+                offset: offset.map_or(0, VarInt::value),
+                data_len: data.len(),
+                fin: *fin,
+            }),
+            QuicFrame::ResetStream {
+                stream_id,
+                error_code,
+                final_size,
+            } => Some(Self::ResetStream {
+                stream_id: StreamId(stream_id.value()),
+                error_code: error_code.value(),
+                final_size: final_size.value(),
+            }),
+            QuicFrame::StopSending {
+                stream_id,
+                error_code,
+            } => Some(Self::StopSending {
+                stream_id: StreamId(stream_id.value()),
+                error_code: error_code.value(),
+            }),
+            _ => None,
+        }
+    }
+
+    fn control_frame(&self) -> Option<QuicFrame> {
+        match *self {
+            Self::Stream { .. } => None,
+            Self::ResetStream {
+                stream_id,
+                error_code,
+                final_size,
+            } => Some(QuicFrame::ResetStream {
+                stream_id: VarInt::from_u64_unchecked(stream_id.0),
+                error_code: VarInt::from_u64_unchecked(error_code),
+                final_size: VarInt::from_u64_unchecked(final_size),
+            }),
+            Self::StopSending {
+                stream_id,
+                error_code,
+            } => Some(QuicFrame::StopSending {
+                stream_id: VarInt::from_u64_unchecked(stream_id.0),
+                error_code: VarInt::from_u64_unchecked(error_code),
+            }),
+        }
+    }
+}
+
 impl Default for NativeQuicConnectionConfig {
     fn default() -> Self {
         Self {
@@ -217,6 +297,12 @@ pub struct NativeQuicConnection {
     anti_amplification_bytes_received: u64,
     anti_amplification_bytes_sent: u64,
     pending_control_frames: VecDeque<QuicFrame>,
+    /// Whether this connection owns reliable frame ACK/loss recovery. ATP
+    /// disables this because its native link has an external packet/frame
+    /// ledger with pacing-aware recovery.
+    internal_retransmission_tracking: bool,
+    /// Reliable frame references retained per packet-number space and packet.
+    in_flight_retransmittable_frames: [BTreeMap<u64, Vec<RetransmittableFrameRef>>; 3],
     /// Bounded inbound queue of decoded DATAGRAM payloads awaiting the
     /// application's `recv_datagram` (RFC 9221). The receive side never evicts
     /// buffered payloads: once full, newly-arrived DATAGRAMs are counted as
@@ -361,6 +447,8 @@ impl NativeQuicConnection {
             anti_amplification_bytes_received: 0,
             anti_amplification_bytes_sent: 0,
             pending_control_frames: VecDeque::new(),
+            internal_retransmission_tracking: true,
+            in_flight_retransmittable_frames: std::array::from_fn(|_| BTreeMap::new()),
             inbound_datagrams: VecDeque::new(),
             datagrams_received: 0,
             datagrams_dropped_on_receive: 0,
@@ -370,6 +458,32 @@ impl NativeQuicConnection {
             datagrams_dropped_on_send: 0,
             max_datagram_frame_size: config.max_datagram_frame_size,
         }
+    }
+
+    /// Select the owner of reliable STREAM/RESET_STREAM/STOP_SENDING recovery.
+    ///
+    /// The generic native connection owns this by default. A composed transport
+    /// that already retains the same frame identities (currently ATP's native
+    /// link) must disable it before generating application packets so ACK/loss
+    /// processing has exactly one recovery authority.
+    pub fn set_internal_retransmission_tracking(
+        &mut self,
+        enabled: bool,
+    ) -> Result<(), NativeQuicConnectionError> {
+        if enabled == self.internal_retransmission_tracking {
+            return Ok(());
+        }
+        if self
+            .in_flight_retransmittable_frames
+            .iter()
+            .any(|ledger| !ledger.is_empty())
+        {
+            return Err(NativeQuicConnectionError::InvalidState(
+                "retransmission ownership must be selected before packet generation",
+            ));
+        }
+        self.internal_retransmission_tracking = enabled;
+        Ok(())
     }
 
     /// Current transport state.
@@ -600,6 +714,12 @@ impl NativeQuicConnection {
             });
     }
 
+    fn queue_control_frame_once(&mut self, frame: QuicFrame) {
+        if !self.pending_control_frames.contains(&frame) {
+            self.pending_control_frames.push_back(frame);
+        }
+    }
+
     /// Whether any STREAM frames remain queued for packet assembly.
     #[must_use]
     pub fn has_pending_stream_frames(&self) -> bool {
@@ -738,6 +858,38 @@ impl NativeQuicConnection {
             .map_err(map_stream_table_error)
     }
 
+    /// Consume the next deterministic receive-side stream notification.
+    ///
+    /// Notifications cover contiguous bytes, FIN, peer RESET_STREAM, and a
+    /// local receive stop. They are edge-triggered: callers should drain or
+    /// disposition the reported stream before requesting another notification.
+    pub fn next_readable_stream(
+        &mut self,
+        cx: &Cx,
+    ) -> Result<Option<StreamReadiness>, NativeQuicConnectionError> {
+        checkpoint(cx)?;
+        self.ensure_stream_active_state()?;
+        Ok(self.streams.take_next_readable_stream())
+    }
+
+    /// Poll for the next receive-side stream notification without busy-polling.
+    pub fn poll_next_readable_stream(
+        &mut self,
+        cx: &Cx,
+        task_cx: &mut TaskContext<'_>,
+    ) -> Poll<Result<StreamReadiness, NativeQuicConnectionError>> {
+        if let Err(err) = checkpoint(cx) {
+            return Poll::Ready(Err(err));
+        }
+        if let Err(err) = self.ensure_stream_active_state() {
+            return Poll::Ready(Err(err));
+        }
+        match self.streams.poll_next_readable_stream(task_cx) {
+            Poll::Ready(readiness) => Poll::Ready(Ok(readiness)),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+
     /// Remaining send credit for one stream (0 for unknown streams).
     #[must_use]
     pub fn stream_send_credit_remaining(&self, id: StreamId) -> u64 {
@@ -767,6 +919,17 @@ impl NativeQuicConnection {
     pub fn is_stream_read_eof(&self, id: StreamId) -> Result<bool, NativeQuicConnectionError> {
         self.streams
             .is_stream_read_eof(id)
+            .map_err(map_stream_table_error)
+    }
+
+    /// Bounded payload prefix retained when peer RESET_STREAM discarded a
+    /// stream's receive buffer.
+    pub fn reset_stream_buffered_prefix(
+        &self,
+        id: StreamId,
+    ) -> Result<Bytes, NativeQuicConnectionError> {
+        self.streams
+            .reset_stream_buffered_prefix(id)
             .map_err(map_stream_table_error)
     }
 
@@ -880,9 +1043,36 @@ impl NativeQuicConnection {
     ) -> Result<(), NativeQuicConnectionError> {
         checkpoint(cx)?;
         self.ensure_stream_active_state()?;
+        if error_code > VARINT_MAX {
+            return Err(NativeQuicConnectionError::InvalidState(
+                "STOP_SENDING error code must fit a QUIC varint",
+            ));
+        }
+        if id.direction() == StreamDirection::Unidirectional && !id.is_local_for(self.role) {
+            return Err(NativeQuicConnectionError::InvalidState(
+                "STOP_SENDING is invalid for a receive-only stream",
+            ));
+        }
+        let should_reset = self
+            .streams
+            .stream(id)
+            .map_err(map_stream_table_error)?
+            .send_reset
+            .is_none();
         self.streams
             .on_stop_sending(id, error_code)
             .map_err(map_stream_table_error)?;
+        // RFC 9000 section 3.5: receiving STOP_SENDING requires terminating
+        // an unfinished send side with RESET_STREAM. Reuse the peer's
+        // application code and the already-committed send offset.
+        if should_reset {
+            let final_size = self
+                .streams
+                .stream(id)
+                .map_err(map_stream_table_error)?
+                .send_offset;
+            self.reset_stream_send(cx, id, error_code, final_size)?;
+        }
         Ok(())
     }
 
@@ -895,9 +1085,26 @@ impl NativeQuicConnection {
     ) -> Result<(), NativeQuicConnectionError> {
         checkpoint(cx)?;
         self.ensure_stream_active_state()?;
+        if error_code > VARINT_MAX {
+            return Err(NativeQuicConnectionError::InvalidState(
+                "STOP_SENDING error code must fit a QUIC varint",
+            ));
+        }
+        let already_stopped = self
+            .streams
+            .stream(id)
+            .map_err(map_stream_table_error)?
+            .receive_stopped_error_code
+            .is_some();
         self.streams
             .stop_receiving(id, error_code)
             .map_err(map_stream_table_error)?;
+        if !already_stopped {
+            self.queue_control_frame_once(QuicFrame::StopSending {
+                stream_id: VarInt::from_u64_unchecked(id.0),
+                error_code: VarInt::from_u64_unchecked(error_code),
+            });
+        }
         Ok(())
     }
 
@@ -927,9 +1134,20 @@ impl NativeQuicConnection {
     ) -> Result<(), NativeQuicConnectionError> {
         checkpoint(cx)?;
         self.ensure_stream_active_state()?;
+        if error_code > VARINT_MAX || final_size > VARINT_MAX {
+            return Err(NativeQuicConnectionError::InvalidState(
+                "RESET_STREAM values must fit QUIC varints",
+            ));
+        }
         self.streams
             .reset_stream_send(id, error_code, final_size)
             .map_err(map_stream_table_error)?;
+        self.discard_retransmittable_stream_refs(id);
+        self.queue_control_frame_once(QuicFrame::ResetStream {
+            stream_id: VarInt::from_u64_unchecked(id.0),
+            error_code: VarInt::from_u64_unchecked(error_code),
+            final_size: VarInt::from_u64_unchecked(final_size),
+        });
         Ok(())
     }
 
@@ -1076,7 +1294,13 @@ impl NativeQuicConnection {
         Ok(self.migration_events)
     }
 
-    /// Track a sent packet and return assigned packet number.
+    /// Track transport metadata for a sent packet and return its assigned packet
+    /// number.
+    ///
+    /// This method has no frame slice and therefore cannot bind reliable
+    /// STREAM/RESET_STREAM/STOP_SENDING recovery. Native packet assemblers that
+    /// send frames returned by [`Self::generate_frames`] should call
+    /// [`Self::on_packet_sent_with_frames`] instead.
     pub fn on_packet_sent(
         &mut self,
         cx: &Cx,
@@ -1133,6 +1357,36 @@ impl NativeQuicConnection {
         Ok(pn)
     }
 
+    /// Record a sent packet and bind its exact reliable frames to the assigned
+    /// packet number for ACK/loss recovery.
+    ///
+    /// Packet assembly is deliberately stateless: callers pass the frames that
+    /// were actually committed to this packet, so skipped handshake output,
+    /// send admission refusal, and packet-protection failure cannot shift a
+    /// hidden generation queue and associate recovery state with the wrong
+    /// packet.
+    pub fn on_packet_sent_with_frames(
+        &mut self,
+        cx: &Cx,
+        space: PacketNumberSpace,
+        bytes: u64,
+        ack_eliciting: bool,
+        in_flight: bool,
+        time_sent_micros: u64,
+        frames: &[QuicFrame],
+    ) -> Result<u64, NativeQuicConnectionError> {
+        let packet_number =
+            self.on_packet_sent(cx, space, bytes, ack_eliciting, in_flight, time_sent_micros)?;
+        if self.internal_retransmission_tracking {
+            let refs = retransmittable_frame_refs(frames);
+            if !refs.is_empty() {
+                self.in_flight_retransmittable_frames[packet_number_space_idx(space)]
+                    .insert(packet_number, refs);
+            }
+        }
+        Ok(packet_number)
+    }
+
     /// Process ACK.
     pub fn on_ack_received(
         &mut self,
@@ -1149,6 +1403,11 @@ impl NativeQuicConnection {
             ack_delay_micros,
             now_micros,
         );
+        self.acknowledge_retransmittable_packets(space, |packet_number| {
+            acked_packet_numbers.contains(&packet_number)
+        })?;
+        let lost_packet_numbers = self.transport.take_newly_lost_packet_numbers(space);
+        self.requeue_lost_retransmittable_packets(space, &lost_packet_numbers)?;
         Ok(event)
     }
 
@@ -1162,9 +1421,17 @@ impl NativeQuicConnection {
         now_micros: u64,
     ) -> Result<AckEvent, NativeQuicConnectionError> {
         checkpoint(cx)?;
-        Ok(self
+        let event = self
             .transport
-            .on_ack_ranges(space, ack_ranges, ack_delay_micros, now_micros))
+            .on_ack_ranges(space, ack_ranges, ack_delay_micros, now_micros);
+        self.acknowledge_retransmittable_packets(space, |packet_number| {
+            ack_ranges
+                .iter()
+                .any(|range| packet_number >= range.smallest && packet_number <= range.largest)
+        })?;
+        let lost_packet_numbers = self.transport.take_newly_lost_packet_numbers(space);
+        self.requeue_lost_retransmittable_packets(space, &lost_packet_numbers)?;
+        Ok(event)
     }
 
     /// Compute PTO deadline.
@@ -1192,13 +1459,175 @@ impl NativeQuicConnection {
         now_micros: u64,
     ) -> Result<AckEvent, NativeQuicConnectionError> {
         checkpoint(cx)?;
-        Ok(self.transport.on_loss_timeout_expired(space, now_micros))
+        let event = self.transport.on_loss_timeout_expired(space, now_micros);
+        let lost_packet_numbers = self.transport.take_newly_lost_packet_numbers(space);
+        self.requeue_lost_retransmittable_packets(space, &lost_packet_numbers)?;
+        Ok(event)
     }
 
     /// Record a PTO firing and queue an ack-eliciting probe frame.
     pub fn on_probe_timeout(&mut self, cx: &Cx) -> Result<(), NativeQuicConnectionError> {
         self.on_pto_expired(cx)?;
+        for space in [
+            PacketNumberSpace::Initial,
+            PacketNumberSpace::Handshake,
+            PacketNumberSpace::ApplicationData,
+        ] {
+            self.requeue_in_flight_retransmittable_frames(space)?;
+        }
         self.pending_control_frames.push_back(QuicFrame::Ping);
+        Ok(())
+    }
+
+    /// Record successful delivery by a deterministic/in-memory transport that
+    /// deliberately bypasses packet-number loss recovery.
+    pub(crate) fn on_generated_frames_delivered(
+        &mut self,
+        frames: &[QuicFrame],
+    ) -> Result<(), NativeQuicConnectionError> {
+        let delivered = retransmittable_frame_refs(frames);
+        self.release_retransmittable_refs(&delivered)
+    }
+
+    /// Requeue a generated packet deliberately dropped by a deterministic
+    /// transport before it was associated with loss recovery.
+    pub(crate) fn on_generated_frames_dropped(
+        &mut self,
+        frames: &[QuicFrame],
+    ) -> Result<(), NativeQuicConnectionError> {
+        let dropped = retransmittable_frame_refs(frames);
+        self.requeue_retransmittable_refs(&dropped)
+    }
+
+    fn acknowledge_retransmittable_packets(
+        &mut self,
+        space: PacketNumberSpace,
+        mut is_acked: impl FnMut(u64) -> bool,
+    ) -> Result<(), NativeQuicConnectionError> {
+        if !self.internal_retransmission_tracking {
+            return Ok(());
+        }
+        let ledger = &mut self.in_flight_retransmittable_frames[packet_number_space_idx(space)];
+        let acked_packet_numbers = ledger
+            .keys()
+            .copied()
+            .filter(|packet_number| is_acked(*packet_number))
+            .collect::<Vec<_>>();
+        let mut acknowledged = Vec::new();
+        for packet_number in acked_packet_numbers {
+            if let Some(mut refs) = ledger.remove(&packet_number) {
+                acknowledged.append(&mut refs);
+            }
+        }
+        self.release_retransmittable_refs(&acknowledged)
+    }
+
+    fn release_retransmittable_refs(
+        &mut self,
+        acknowledged: &[RetransmittableFrameRef],
+    ) -> Result<(), NativeQuicConnectionError> {
+        for frame_ref in acknowledged {
+            if let RetransmittableFrameRef::Stream {
+                stream_id,
+                offset,
+                data_len,
+                fin,
+            } = frame_ref
+            {
+                self.streams
+                    .release_sent_stream_frame_if_matches(*stream_id, *offset, *data_len, *fin)
+                    .map_err(map_stream_table_error)?;
+            }
+            for ledger in &mut self.in_flight_retransmittable_frames {
+                ledger.retain(|_, refs| {
+                    refs.retain(|candidate| candidate != frame_ref);
+                    !refs.is_empty()
+                });
+            }
+            if let Some(control) = frame_ref.control_frame() {
+                self.pending_control_frames
+                    .retain(|candidate| candidate != &control);
+            }
+        }
+        Ok(())
+    }
+
+    fn discard_retransmittable_stream_refs(&mut self, stream_id: StreamId) {
+        for ledger in &mut self.in_flight_retransmittable_frames {
+            ledger.retain(|_, refs| {
+                refs.retain(|frame_ref| {
+                    !matches!(
+                        frame_ref,
+                        RetransmittableFrameRef::Stream {
+                            stream_id: candidate,
+                            ..
+                        } if *candidate == stream_id
+                    )
+                });
+                !refs.is_empty()
+            });
+        }
+    }
+
+    fn requeue_in_flight_retransmittable_frames(
+        &mut self,
+        space: PacketNumberSpace,
+    ) -> Result<(), NativeQuicConnectionError> {
+        if !self.internal_retransmission_tracking {
+            return Ok(());
+        }
+        let refs = self.in_flight_retransmittable_frames[packet_number_space_idx(space)]
+            .values()
+            .flatten()
+            .cloned()
+            .collect::<Vec<_>>();
+        self.requeue_retransmittable_refs(&refs)
+    }
+
+    fn requeue_lost_retransmittable_packets(
+        &mut self,
+        space: PacketNumberSpace,
+        lost_packet_numbers: &[u64],
+    ) -> Result<(), NativeQuicConnectionError> {
+        if !self.internal_retransmission_tracking || lost_packet_numbers.is_empty() {
+            return Ok(());
+        }
+        let ledger = &mut self.in_flight_retransmittable_frames[packet_number_space_idx(space)];
+        let mut lost_refs = Vec::new();
+        for packet_number in lost_packet_numbers {
+            if let Some(mut refs) = ledger.remove(packet_number) {
+                lost_refs.append(&mut refs);
+            }
+        }
+        self.requeue_retransmittable_refs(&lost_refs)
+    }
+
+    fn requeue_retransmittable_refs(
+        &mut self,
+        refs: &[RetransmittableFrameRef],
+    ) -> Result<(), NativeQuicConnectionError> {
+        // Requeue at the front in reverse traversal so the next packet keeps
+        // the original wire order (notably RESET_STREAM before a paired
+        // STOP_SENDING emitted by HTTP/3 cancellation).
+        for frame_ref in refs.iter().rev() {
+            match frame_ref {
+                RetransmittableFrameRef::Stream {
+                    stream_id, offset, ..
+                } => {
+                    self.streams
+                        .requeue_sent_stream_frame(*stream_id, *offset)
+                        .map_err(map_stream_table_error)?;
+                }
+                _ => {
+                    let control = frame_ref
+                        .control_frame()
+                        .expect("non-STREAM retransmittable frame has a wire form");
+                    if !self.pending_control_frames.contains(&control) {
+                        self.pending_control_frames.push_front(control);
+                    }
+                }
+            }
+        }
         Ok(())
     }
 
@@ -1313,12 +1742,20 @@ impl NativeQuicConnection {
         &mut self,
         space: PacketNumberSpace,
     ) -> Result<u64, NativeQuicConnectionError> {
-        let idx = match space {
-            PacketNumberSpace::Initial => 0,
-            PacketNumberSpace::Handshake => 1,
-            PacketNumberSpace::ApplicationData => 2,
-        };
-        let out = self.next_packet_numbers[idx];
+        let idx = packet_number_space_idx(space);
+        let out = self.next_packet_number_for_protection(space)?;
+        self.next_packet_numbers[idx] = out + 1;
+        Ok(out)
+    }
+
+    /// Read the packet number that packet protection must bind without
+    /// advancing transport state. The caller commits that exact number through
+    /// `on_packet_sent_with_frames` only after protection succeeds.
+    pub(crate) fn next_packet_number_for_protection(
+        &self,
+        space: PacketNumberSpace,
+    ) -> Result<u64, NativeQuicConnectionError> {
+        let out = self.next_packet_numbers[packet_number_space_idx(space)];
         // RFC 9000 §17.1: packet numbers are integers in [0, 2^62-1] inclusive.
         // The exhaustion guard rejects when `out` is already past the last
         // valid packet number, not when it equals the last valid one.
@@ -1327,7 +1764,6 @@ impl NativeQuicConnection {
                 "packet number limit reached; connection must be closed",
             ));
         }
-        self.next_packet_numbers[idx] = out + 1;
         Ok(out)
     }
 
@@ -1499,7 +1935,11 @@ impl NativeQuicConnection {
                 stream_id,
                 error_code,
             } => {
-                self.on_stop_sending(cx, StreamId(stream_id.value()), error_code.value())?;
+                let id = StreamId(stream_id.value());
+                if self.streams.stream(id).is_err() {
+                    self.accept_remote_stream(cx, id)?;
+                }
+                self.on_stop_sending(cx, id, error_code.value())?;
                 Ok(())
             }
             QuicFrame::MaxData { maximum_data } => {
@@ -2362,6 +2802,13 @@ fn packet_number_space_idx(space: PacketNumberSpace) -> usize {
     }
 }
 
+fn retransmittable_frame_refs(frames: &[QuicFrame]) -> Vec<RetransmittableFrameRef> {
+    frames
+        .iter()
+        .filter_map(RetransmittableFrameRef::from_frame)
+        .collect()
+}
+
 fn frame_is_ack_eliciting(frame: &QuicFrame) -> bool {
     // RFC 9000 §13.2.1: all frames other than ACK, PADDING, and CONNECTION_CLOSE
     // are ack-eliciting. CONNECTION_CLOSE must not be treated as ack-eliciting,
@@ -3101,6 +3548,140 @@ mod tests {
             out.extend_from_slice(&chunk);
         }
         assert_eq!(out, payload.as_ref());
+    }
+
+    #[test]
+    fn native_h3_adapter_reset_purges_in_flight_stream_recovery_refs() {
+        let cx = test_cx();
+        let mut conn = established_conn();
+        let stream = conn.open_local_bidi(&cx).expect("open");
+        conn.write_stream_bytes(&cx, stream, Bytes::from_static(b"cancel-me"), false)
+            .expect("queue stream bytes");
+        let frames = conn
+            .generate_frames(&cx, PacketNumberSpace::ApplicationData, 128)
+            .expect("generate stream packet");
+        conn.on_packet_sent_with_frames(
+            &cx,
+            PacketNumberSpace::ApplicationData,
+            128,
+            true,
+            true,
+            10_000,
+            &frames,
+        )
+        .expect("commit stream packet");
+        assert!(
+            conn.in_flight_retransmittable_frames[2]
+                .values()
+                .flatten()
+                .any(|frame_ref| matches!(
+                    frame_ref,
+                    RetransmittableFrameRef::Stream {
+                        stream_id,
+                        ..
+                    } if *stream_id == stream
+                ))
+        );
+
+        conn.reset_stream_send(&cx, stream, 0x10c, 9)
+            .expect("reset stream send side");
+        assert!(
+            conn.in_flight_retransmittable_frames
+                .iter()
+                .flat_map(|ledger| ledger.values())
+                .flatten()
+                .all(|frame_ref| !matches!(
+                    frame_ref,
+                    RetransmittableFrameRef::Stream {
+                        stream_id,
+                        ..
+                    } if *stream_id == stream
+                )),
+            "terminal reset must not leave permanently unacknowledgeable STREAM refs"
+        );
+    }
+
+    #[test]
+    fn native_h3_adapter_lost_extents_coalesce_and_ack_without_recovery_leak() {
+        let cx = test_cx();
+        let mut conn = established_conn();
+        let stream = conn.open_local_bidi(&cx).expect("open");
+        conn.write_stream_bytes(&cx, stream, Bytes::from_static(b"abcdef"), false)
+            .expect("queue stream bytes");
+
+        for sent_at in [10_000, 10_100] {
+            let frames = conn
+                .generate_frames(&cx, PacketNumberSpace::ApplicationData, 35)
+                .expect("generate three-byte STREAM extent");
+            assert_eq!(
+                frames.iter().find_map(|frame| match frame {
+                    QuicFrame::Stream { data, .. } => Some(data.len()),
+                    _ => None,
+                }),
+                Some(3)
+            );
+            conn.on_packet_sent_with_frames(
+                &cx,
+                PacketNumberSpace::ApplicationData,
+                35,
+                true,
+                true,
+                sent_at,
+                &frames,
+            )
+            .expect("commit small STREAM packet");
+        }
+        for sent_at in [10_200, 10_300, 10_400] {
+            conn.on_packet_sent(
+                &cx,
+                PacketNumberSpace::ApplicationData,
+                1,
+                true,
+                true,
+                sent_at,
+            )
+            .expect("commit packet-threshold marker");
+        }
+
+        let loss = conn
+            .on_ack_received(&cx, PacketNumberSpace::ApplicationData, &[4], 0, 10_500)
+            .expect("ACK declares packets zero and one lost");
+        assert_eq!(loss.lost_packets, 2);
+        assert!(conn.in_flight_retransmittable_frames[2].is_empty());
+
+        let retransmit = conn
+            .generate_frames(&cx, PacketNumberSpace::ApplicationData, 64)
+            .expect("generate coalesced retransmit");
+        assert!(retransmit.iter().any(|frame| matches!(
+            frame,
+            QuicFrame::Stream { offset, data, .. }
+                if offset.map_or(0, VarInt::value) == 0 && data.len() == 6
+        )));
+        let retransmit_packet = conn
+            .on_packet_sent_with_frames(
+                &cx,
+                PacketNumberSpace::ApplicationData,
+                64,
+                true,
+                true,
+                10_600,
+                &retransmit,
+            )
+            .expect("commit coalesced retransmit");
+        conn.on_ack_received(
+            &cx,
+            PacketNumberSpace::ApplicationData,
+            &[retransmit_packet],
+            0,
+            10_700,
+        )
+        .expect("ACK coalesced retransmit");
+        assert!(
+            conn.in_flight_retransmittable_frames
+                .iter()
+                .all(BTreeMap::is_empty),
+            "lost packet refs must be removed before coalesced recovery is tracked"
+        );
     }
 
     #[test]

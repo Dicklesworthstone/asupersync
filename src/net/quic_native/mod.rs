@@ -35,6 +35,8 @@ pub use endpoint::{
     BatchResult, EndpointMetrics, OutgoingPacket, QuicUdpEndpoint, QuicUdpEndpointConfig,
     QuicUdpEndpointError, ReceivedPacket,
 };
+#[cfg(any(test, feature = "test-internals"))]
+pub use endpoint_api::drop_app_data_packet;
 pub use endpoint_api::{
     DEFAULT_MAX_PACKET_BYTES, QuicConnection, QuicPathStats, establish_loopback, pump_app_data,
     pump_until_idle,
@@ -42,7 +44,7 @@ pub use endpoint_api::{
 pub use managed_endpoint::{ManagedEndpointConfig, ManagedEndpointError, ManagedQuicEndpoint};
 pub use streams::{
     FlowControlError, FlowCredit, QuicStream, QuicStreamError, StreamDirection, StreamId,
-    StreamRole, StreamTable, StreamTableError,
+    StreamReadiness, StreamRole, StreamTable, StreamTableError,
 };
 #[cfg(any(test, feature = "test-internals"))]
 pub use tls::DeterministicQuicCryptoProvider;
