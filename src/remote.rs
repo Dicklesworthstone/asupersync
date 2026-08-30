@@ -29,7 +29,10 @@
 use crate::channel::oneshot;
 use crate::cx::Cx;
 use crate::distributed::membership::{LeaseAction, MembershipLeaseReactor, MembershipView};
-use crate::distributed::{ComputationRegistryFingerprint, ComputationSchemaRegistry};
+use crate::distributed::{
+    ComputationRegistryFingerprint, ComputationSchemaRegistry, ComputationSchemaRegistryError,
+    HasSchema,
+};
 use crate::trace::distributed::{LogicalClockHandle, LogicalTime};
 use crate::types::outcome::Outcome;
 use crate::types::{Budget, CancelReason, ObligationId, RegionId, TaskId, Time};
@@ -37,7 +40,9 @@ use crate::util::det_hash::DetHashMap;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::future::Future;
 use std::marker::PhantomData;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -2583,6 +2588,178 @@ impl RemotePeerSession {
             | RemoteMessage::ResultDelivery(_)
             | RemoteMessage::LeaseRenewal(_) => Ok(()),
         }
+    }
+}
+
+/// Caller-owned future produced by a registered remote computation.
+///
+/// The registry never spawns this future. The service connection or scope that
+/// awaits [`RemoteComputationRegistry::dispatch`] therefore remains its
+/// structured owner, and dropping that owner drops the computation future.
+pub type RemoteComputationFuture =
+    Pin<Box<dyn Future<Output = Result<RemoteOutcome, RemoteError>> + Send + 'static>>;
+
+type RemoteComputationHandler =
+    Arc<dyn Fn(Cx, RemoteComputationInvocation) -> RemoteComputationFuture + Send + Sync>;
+
+/// Authenticated invocation passed to executable named-computation handlers.
+///
+/// `peer_node` comes from the admitted session, not from the request payload.
+/// Handlers can therefore use it for authorization-aware diagnostics without
+/// trusting a caller-controlled `origin_node` field.
+#[derive(Clone, Debug)]
+pub struct RemoteComputationInvocation {
+    peer_node: NodeId,
+    request: SpawnRequest,
+}
+
+impl RemoteComputationInvocation {
+    /// Transport-authenticated peer that requested the computation.
+    #[must_use]
+    pub const fn peer_node(&self) -> &NodeId {
+        &self.peer_node
+    }
+
+    /// Admitted spawn request.
+    #[must_use]
+    pub const fn request(&self) -> &SpawnRequest {
+        &self.request
+    }
+
+    /// Consumes the invocation and returns its spawn request.
+    #[must_use]
+    pub fn into_request(self) -> SpawnRequest {
+        self.request
+    }
+}
+
+/// Failure returned before or during executable named-computation dispatch.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RemoteComputationDispatchError {
+    /// The admitted peer session did not authorize the requested computation.
+    Admission(RemotePeerAdmissionError),
+    /// The registered handler failed while executing the computation.
+    Execution(RemoteError),
+}
+
+impl fmt::Display for RemoteComputationDispatchError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Admission(error) => write!(f, "remote computation admission failed: {error}"),
+            Self::Execution(error) => write!(f, "remote computation execution failed: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for RemoteComputationDispatchError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Admission(error) => Some(error),
+            Self::Execution(error) => Some(error),
+        }
+    }
+}
+
+/// Executable, schema-identified registry for remote named computations.
+///
+/// Registration couples every handler to an input/output schema pair, so the
+/// same complete registry fingerprint used during peer negotiation describes
+/// the code-selection surface that can actually run. Dispatch requires an
+/// immutable admitted session and supplies an explicit [`Cx`] clone to the
+/// handler. The registry does not spawn tasks or provide ambient authority.
+#[derive(Clone, Default)]
+pub struct RemoteComputationRegistry {
+    schemas: ComputationSchemaRegistry,
+    handlers: BTreeMap<String, RemoteComputationHandler>,
+}
+
+impl fmt::Debug for RemoteComputationRegistry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RemoteComputationRegistry")
+            .field("schemas", &self.schemas)
+            .field("handler_names", &self.handlers.keys().collect::<Vec<_>>())
+            .finish()
+    }
+}
+
+impl RemoteComputationRegistry {
+    /// Creates an empty executable registry.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Registers a `Cx`-threaded asynchronous named computation.
+    ///
+    /// `I` and `O` define the stable wire schemas advertised during peer
+    /// negotiation. The handler receives the raw admitted invocation so the
+    /// application remains explicit about its chosen serialization codec.
+    pub fn register<I, O, F, Fut>(
+        &mut self,
+        name: impl Into<String>,
+        handler: F,
+    ) -> Result<(), ComputationSchemaRegistryError>
+    where
+        I: HasSchema,
+        O: HasSchema,
+        F: Fn(Cx, RemoteComputationInvocation) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<RemoteOutcome, RemoteError>> + Send + 'static,
+    {
+        let name = name.into();
+        self.schemas.register_typed::<I, O>(name.clone())?;
+        let erased = move |cx: Cx,
+                           invocation: RemoteComputationInvocation|
+              -> RemoteComputationFuture { Box::pin(handler(cx, invocation)) };
+        self.handlers.insert(name, Arc::new(erased));
+        Ok(())
+    }
+
+    /// Schema registry that must be used to build the peer-admission policy.
+    #[must_use]
+    pub const fn schema_registry(&self) -> &ComputationSchemaRegistry {
+        &self.schemas
+    }
+
+    /// Number of executable named computations.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.handlers.len()
+    }
+
+    /// Returns true when no executable computation is registered.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.handlers.is_empty()
+    }
+
+    /// Authorizes and executes one named-computation request.
+    ///
+    /// No handler is invoked until the session capability accepts the name.
+    /// The returned future is awaited inline and is never detached.
+    pub async fn dispatch(
+        &self,
+        cx: &Cx,
+        session: &RemotePeerSession,
+        request: SpawnRequest,
+    ) -> Result<RemoteOutcome, RemoteComputationDispatchError> {
+        session
+            .authorize_computation(&request.computation)
+            .map_err(RemoteComputationDispatchError::Admission)?;
+        let handler = self
+            .handlers
+            .get(request.computation.as_str())
+            .ok_or_else(|| {
+                RemoteComputationDispatchError::Execution(RemoteError::UnknownComputation(
+                    request.computation.as_str().to_owned(),
+                ))
+            })?;
+        let invocation = RemoteComputationInvocation {
+            peer_node: session.peer_node().clone(),
+            request,
+        };
+        handler(cx.clone(), invocation)
+            .await
+            .map_err(RemoteComputationDispatchError::Execution)
     }
 }
 

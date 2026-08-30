@@ -411,10 +411,12 @@ pub use remote::{
     CancelRequest, CompensationResult, ComputationName, DedupDecision, IdempotencyKey,
     IdempotencyRecord, IdempotencyRequestFingerprint, IdempotencyStore, Lease, LeaseError,
     LeaseRenewal, LeaseState, NodeId, Phase0RemoteFailure, Phase0RetryPolicy,
-    Phase0SimulationConfig, RemoteCap, RemoteError, RemoteHandle, RemoteMessage, RemoteOutcome,
-    RemotePeerAdmissionError, RemotePeerAdmissionPolicy, RemotePeerHello, RemotePeerSession,
-    RemoteProtocolVersion, RemoteTaskId, ResultDelivery, Saga, SagaState, SagaStepError, SpawnAck,
-    SpawnAckStatus, SpawnRejectReason, SpawnRequest, spawn_remote,
+    Phase0SimulationConfig, RemoteCap, RemoteComputationDispatchError, RemoteComputationFuture,
+    RemoteComputationInvocation, RemoteComputationRegistry, RemoteError, RemoteHandle,
+    RemoteMessage, RemoteOutcome, RemotePeerAdmissionError, RemotePeerAdmissionPolicy,
+    RemotePeerHello, RemotePeerSession, RemoteProtocolVersion, RemoteTaskId, ResultDelivery, Saga,
+    SagaState, SagaStepError, SpawnAck, SpawnAckStatus, SpawnRejectReason, SpawnRequest,
+    spawn_remote,
 };
 pub use types::{
     Budget, CancelKind, CancelReason, CapabilityBudget, CapabilityBudgetDimension,

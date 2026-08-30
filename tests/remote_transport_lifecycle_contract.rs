@@ -7,9 +7,10 @@ use asupersync::distributed::ComputationSchemaRegistry;
 use asupersync::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use asupersync::net::{TcpListener, TcpStream};
 use asupersync::remote::{
-    ComputationName, MessageEnvelope, NodeId, RemoteError, RemoteInput, RemoteMessage,
-    RemoteOutcome, RemotePeerAdmissionPolicy, RemotePeerHello, RemoteProtocolVersion,
-    RemoteRuntime, RemoteTaskId, RemoteTaskState, RemoteTransport, SpawnRejectReason, spawn_remote,
+    ComputationName, IdempotencyKey, MessageEnvelope, NodeId, RemoteComputationRegistry,
+    RemoteError, RemoteInput, RemoteMessage, RemoteOutcome, RemotePeerAdmissionPolicy,
+    RemotePeerHello, RemoteProtocolVersion, RemoteRuntime, RemoteTaskId, RemoteTaskState,
+    RemoteTransport, SpawnRejectReason, SpawnRequest, spawn_remote,
 };
 #[cfg(feature = "tls")]
 use asupersync::tls::{
@@ -1170,17 +1171,44 @@ fn remote_peer_admission_binds_asserted_node_to_mtls_certificate_over_tcp() {
         CertificateChain::from_pem(TEST_CERT_PEM).expect("TLS certificate chain should parse");
     let private_key = PrivateKey::from_pem(TEST_KEY_PEM).expect("TLS private key should parse");
 
-    let mut registry = ComputationSchemaRegistry::new();
-    registry
-        .register_typed::<Vec<u8>, Vec<u8>>("proof.echo")
-        .expect("proof.echo schema should register");
+    let dispatch_count = Arc::new(AtomicUsize::new(0));
+    let handler_dispatch_count = Arc::clone(&dispatch_count);
+    let unauthorized_handler_count = Arc::new(AtomicUsize::new(0));
+    let denied_handler_count = Arc::clone(&unauthorized_handler_count);
+    let mut computations = RemoteComputationRegistry::new();
+    computations
+        .register::<Vec<u8>, Vec<u8>, _, _>("proof.echo", move |_cx, invocation| {
+            let handler_dispatch_count = Arc::clone(&handler_dispatch_count);
+            async move {
+                assert_eq!(invocation.peer_node().as_str(), ORIGIN_NODE);
+                assert_eq!(invocation.request().computation.as_str(), "proof.echo");
+                handler_dispatch_count.fetch_add(1, Ordering::SeqCst);
+                Ok(RemoteOutcome::Success(
+                    invocation.into_request().input.into_data(),
+                ))
+            }
+        })
+        .expect("proof.echo executable handler should register");
+    computations
+        .register::<Vec<u8>, u64, _, _>("proof.hash", move |_cx, _invocation| {
+            let denied_handler_count = Arc::clone(&denied_handler_count);
+            async move {
+                denied_handler_count.fetch_add(1, Ordering::SeqCst);
+                Ok(RemoteOutcome::Success(42_u64.to_be_bytes().to_vec()))
+            }
+        })
+        .expect("proof.hash executable handler should register");
+    assert_eq!(computations.len(), 2);
     let origin = NodeId::new(ORIGIN_NODE);
     let mut peer_pins = CertificatePinSet::new();
     peer_pins.add(
         CertificatePin::compute_spki_sha256(&peer_certificate)
             .expect("fixture certificate should produce an SPKI pin"),
     );
-    let mut policy = RemotePeerAdmissionPolicy::new(RemoteProtocolVersion::V1, registry);
+    let mut policy = RemotePeerAdmissionPolicy::new(
+        RemoteProtocolVersion::V1,
+        computations.schema_registry().clone(),
+    );
     policy
         .grant_tls_peer(origin.clone(), peer_pins, ["proof.echo"])
         .expect("certificate-bound proof.echo grant should be valid");
@@ -1202,6 +1230,7 @@ fn remote_peer_admission_binds_asserted_node_to_mtls_certificate_over_tcp() {
             .expect("32-byte mismatch pin should be valid configuration"),
     );
     let mut mismatched_policy = policy.clone();
+    let capability_denial_policy = policy.clone();
     mismatched_policy
         .grant_tls_peer(origin, mismatched_pins, ["proof.echo"])
         .expect("mismatched certificate grant should be valid configuration");
@@ -1225,11 +1254,9 @@ fn remote_peer_admission_binds_asserted_node_to_mtls_certificate_over_tcp() {
     let endpoint = listener
         .local_addr()
         .expect("mTLS peer admission endpoint should expose its address");
-    let dispatch_count = Arc::new(AtomicUsize::new(0));
-    let server_dispatch_count = Arc::clone(&dispatch_count);
     let server = thread::spawn(move || {
         block_on(async move {
-            for admission_policy in [policy, mismatched_policy] {
+            for admission_policy in [policy, capability_denial_policy, mismatched_policy] {
                 let (stream, _) = listener
                     .accept()
                     .await
@@ -1248,22 +1275,45 @@ fn remote_peer_admission_binds_asserted_node_to_mtls_certificate_over_tcp() {
                         .expect("mTLS endpoint should read an admission probe"),
                 )
                 .expect("mTLS admission probe should decode");
-                let decision = admission_policy
-                    .admit_tls_peer(&probe.hello, &stream)
-                    .and_then(|session| {
-                        session.authorize_computation(&ComputationName::new(&probe.computation))
-                    });
+                let dispatch_cx = Cx::for_testing();
+                let decision = match admission_policy.admit_tls_peer(&probe.hello, &stream) {
+                    Ok(session) => computations
+                        .dispatch(
+                            &dispatch_cx,
+                            &session,
+                            SpawnRequest {
+                                remote_task_id: RemoteTaskId::from_raw(7001),
+                                computation: ComputationName::new(&probe.computation),
+                                input: RemoteInput::new(b"executed-over-mtls".to_vec()),
+                                lease: Duration::from_secs(30),
+                                idempotency_key: IdempotencyKey::from_raw(7001),
+                                budget: None,
+                                origin_node: probe.hello.peer_node().clone(),
+                                origin_region: dispatch_cx.region_id(),
+                                origin_task: dispatch_cx.task_id(),
+                            },
+                        )
+                        .await
+                        .map_err(|error| error.to_string()),
+                    Err(error) => Err(error.to_string()),
+                };
                 let reply = match decision {
-                    Ok(()) => {
-                        server_dispatch_count.fetch_add(1, Ordering::SeqCst);
-                        PeerAdmissionReply {
-                            accepted: true,
-                            diagnostic: "mTLS identity bound and computation dispatched".to_owned(),
-                        }
-                    }
-                    Err(error) => PeerAdmissionReply {
+                    Ok(RemoteOutcome::Success(payload)) => PeerAdmissionReply {
+                        accepted: true,
+                        diagnostic: format!(
+                            "mTLS identity bound and named handler returned {} bytes",
+                            payload.len()
+                        ),
+                    },
+                    Ok(other) => PeerAdmissionReply {
                         accepted: false,
-                        diagnostic: error.to_string(),
+                        diagnostic: format!(
+                            "named handler returned non-success outcome: {other:?}"
+                        ),
+                    },
+                    Err(diagnostic) => PeerAdmissionReply {
+                        accepted: false,
+                        diagnostic,
                     },
                 };
                 write_json_frame(&mut stream, &reply)
@@ -1275,7 +1325,22 @@ fn remote_peer_admission_binds_asserted_node_to_mtls_certificate_over_tcp() {
 
     let accepted = send_tls_peer_admission_probe(endpoint, &connector, hello.clone(), "proof.echo");
     assert!(accepted.accepted, "diagnostic: {}", accepted.diagnostic);
-    assert!(accepted.diagnostic.contains("mTLS identity bound"));
+    assert!(
+        accepted
+            .diagnostic
+            .contains("named handler returned 18 bytes")
+    );
+
+    let unauthorized_computation =
+        send_tls_peer_admission_probe(endpoint, &connector, hello.clone(), "proof.hash");
+    assert!(!unauthorized_computation.accepted);
+    assert!(
+        unauthorized_computation
+            .diagnostic
+            .contains("not capability-authorized"),
+        "diagnostic: {}",
+        unauthorized_computation.diagnostic
+    );
 
     let certificate_mismatch =
         send_tls_peer_admission_probe(endpoint, &connector, hello, "proof.echo");
@@ -1296,13 +1361,18 @@ fn remote_peer_admission_binds_asserted_node_to_mtls_certificate_over_tcp() {
         1,
         "only the connection with a matching authenticated certificate may dispatch"
     );
+    assert_eq!(
+        unauthorized_handler_count.load(Ordering::SeqCst),
+        0,
+        "registered but ungranted computation must be refused before handler invocation"
+    );
 
     ProofLogRow::pass(
         "peer_admission_mtls_certificate_binding",
         0,
         "none",
         "mtls_peer_hello_then_named_dispatch",
-        2,
+        3,
         "one_certificate_bound_dispatch",
         "one_certificate_bound_dispatch",
     )
