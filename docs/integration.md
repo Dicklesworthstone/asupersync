@@ -1813,6 +1813,19 @@ attach their own `RemoteRuntime` / `RemoteTransport`, use the native V3 route,
 or exercise the deterministic no-runtime fallback. All remote operations
 require `RemoteCap` from `Cx`; the protocol never ships closures.
 
+For a fixed deployment topology,
+`RemoteComputationClient::from_bootstrap_endpoints` accepts an ordered, unique,
+nonempty static endpoint set. The existing `new` constructor remains the
+single-endpoint shorthand and `endpoint()` continues to return the primary.
+The client rotates endpoints only after transient TCP or TLS establishment
+failures that precede request publication, within the existing finite
+attempt/backoff policy. Cancellation, attempt timeout, server-name or
+certificate-pin rejection, authenticated framing/session errors, EOF, and
+delivery-ambiguous outcomes never advance to another endpoint. A
+`NativeRemoteRuntime` route uses the same policy because it owns the configured
+client. This is pre-delivery static bootstrap failover; it does not provide
+active discovery, health-based balancing, durable route storage, or WAN policy.
+
 Unix builds also expose a supported static process boundary behind the
 additive `remote-service` feature:
 
@@ -1875,6 +1888,10 @@ and verifies forced terminal quiescence. This is localhost cross-process evidenc
 multi-host/WAN evidence, Windows service control, arbitrary application
 registry hosting, or restart-durable idempotency. V3 retry/deduplication state
 is process-local; ambiguous delivery must remain fail-closed across restart.
+Focused lifecycle cases additionally prove ordered static failover from a
+refused primary to one authenticated secondary dispatch through both the
+direct call path and `NativeRemoteRuntime` V3, plus exact exhaustion,
+cancellation-before-next-dial, and enforced pin-mismatch non-fallthrough.
 
 ---
 

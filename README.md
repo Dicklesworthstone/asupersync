@@ -983,6 +983,16 @@ certificate-pinned peer grants. Discovery, multi-host/WAN policy, arbitrary
 application registries, and restart-durable idempotency remain open deployment
 concerns rather than blanket core-runtime claims.
 
+`RemoteComputationClient::from_bootstrap_endpoints` accepts an ordered, unique,
+nonempty static endpoint set while the existing `new` and `endpoint` APIs retain
+their single-primary behavior. The finite attempt budget rotates that set only
+for transient TCP or TLS establishment failures before request publication.
+Cancellation, attempt timeout, certificate/name/pin rejection, authenticated
+framing/session failure, EOF, and any delivery-ambiguous result fail closed on
+the current endpoint. `NativeRemoteRuntime` inherits this behavior from its
+configured route client. This is static bootstrap failover, not active health
+checking, service discovery, load balancing, or multi-host/WAN evidence.
+
 | Primitive | Location | Runtime Behavior |
 |-----------|----------|------------------|
 | Named remote spawn | `src/remote.rs` | `spawn_remote` creates a region-owned `RemoteHandle`; attached runtimes send protocol messages, while missing runtimes fail closed to an explicit deterministic fallback |
@@ -991,7 +1001,7 @@ concerns rather than blanket core-runtime claims.
 | Session-typed protocol | `src/remote.rs` | Origin/remote state machines validate legal spawn/ack/cancel/result/renewal transitions |
 | Logical-time envelopes | `src/remote.rs` | Protocol messages carry logical clock metadata for causal correlation |
 | Saga compensations | `src/remote.rs` | Forward steps and compensations are tracked as a structured rollback flow for distributed workflows |
-| Native V3 runtime | `src/remote.rs` | `NativeRemoteRuntime` maps region-owned remote handles onto bounded TCP+mTLS sessions, propagates cancel/lease traffic, and drains owned operations during close |
+| Native V3 runtime | `src/remote.rs` | `NativeRemoteRuntime` maps region-owned remote handles onto bounded TCP+mTLS sessions, can use ordered static pre-delivery bootstrap failover, propagates cancel/lease traffic, and drains owned operations during close |
 | Static service process | `asupersync --config ... remote serve` | Unix `remote-service` feature; strict TOML, mutual TLS, certificate-bound grants, flushed readiness/terminal records, SIGINT/SIGTERM drain, and second-signal force-close |
 
 The transport surface is deliberately separated from protocol state machines,
@@ -1001,6 +1011,10 @@ so message semantics can be tested independently of network backend details.
 cancellation while running, lease renewal, lease expiry, idempotency replay,
 send failure, receive EOF, malformed envelope cleanup, delayed ack ordering,
 capability denial, and deterministic no-runtime fallback behavior.
+The same contract causally verifies a refused primary followed by one
+authenticated secondary dispatch for both direct V1 calls and the V3 native
+runtime, finite multi-endpoint exhaustion, cancellation before a later dial,
+and enforced pin mismatch without endpoint fallthrough.
 
 ### Running the authenticated static service
 

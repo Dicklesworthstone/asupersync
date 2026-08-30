@@ -3253,6 +3253,24 @@ fn remote_native_client_validates_policy_and_observes_preflight_cancellation() {
         ),
         Err(RemoteComputationClientError::InvalidServerName(_))
     ));
+    assert!(matches!(
+        RemoteComputationClient::from_bootstrap_endpoints(
+            [],
+            "localhost",
+            connector.clone(),
+            RemoteComputationClientConfig::new(),
+        ),
+        Err(RemoteComputationClientError::InvalidConfig(_))
+    ));
+    assert!(matches!(
+        RemoteComputationClient::from_bootstrap_endpoints(
+            [endpoint, endpoint],
+            "localhost",
+            connector.clone(),
+            RemoteComputationClientConfig::new(),
+        ),
+        Err(RemoteComputationClientError::InvalidConfig(_))
+    ));
 
     let client = RemoteComputationClient::new(
         endpoint,
@@ -3277,8 +3295,14 @@ fn remote_native_client_validates_policy_and_observes_preflight_cancellation() {
         .local_addr()
         .expect("closed-port fixture should expose its address");
     drop(closed_listener);
-    let retry_client = RemoteComputationClient::new(
-        closed_endpoint,
+    let second_closed_listener = std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("second closed-port fixture should reserve a loopback endpoint");
+    let second_closed_endpoint = second_closed_listener
+        .local_addr()
+        .expect("second closed-port fixture should expose its address");
+    drop(second_closed_listener);
+    let retry_client = RemoteComputationClient::from_bootstrap_endpoints(
+        [closed_endpoint, second_closed_endpoint],
         "localhost",
         remote_client_test_mtls_pair().1,
         RemoteComputationClientConfig::new()
@@ -3287,6 +3311,11 @@ fn remote_native_client_validates_policy_and_observes_preflight_cancellation() {
             .with_full_jitter(false),
     )
     .expect("closed-port retry client should build");
+    assert_eq!(retry_client.endpoint(), closed_endpoint);
+    assert_eq!(
+        retry_client.bootstrap_endpoints(),
+        &[closed_endpoint, second_closed_endpoint]
+    );
     let connect_error = run_remote_client_call(&retry_client, &request)
         .expect_err("closed loopback endpoint should exhaust finite pre-delivery retries");
     assert!(matches!(
@@ -3302,6 +3331,426 @@ fn remote_native_client_validates_policy_and_observes_preflight_cancellation() {
         3,
         "cancelled_zero_then_connect_three",
         "cancelled_zero_then_connect_three",
+    )
+    .emit();
+}
+
+#[cfg(feature = "tls")]
+#[test]
+fn remote_native_client_fails_over_static_bootstrap_before_delivery() {
+    let certificates = Certificate::from_pem(TEST_CERT_PEM).expect("TLS fixture should parse");
+    let peer_certificate = certificates
+        .first()
+        .expect("TLS fixture should contain a leaf certificate")
+        .clone();
+    let dispatch_count = Arc::new(AtomicUsize::new(0));
+    let handler_dispatch_count = Arc::clone(&dispatch_count);
+    let mut computations = RemoteComputationRegistry::new();
+    computations
+        .register::<Vec<u8>, Vec<u8>, _, _>("proof.bootstrap", move |_cx, invocation| {
+            let handler_dispatch_count = Arc::clone(&handler_dispatch_count);
+            async move {
+                handler_dispatch_count.fetch_add(1, Ordering::SeqCst);
+                let mut output = b"bootstrap:".to_vec();
+                output.extend_from_slice(&invocation.into_request().input.into_data());
+                Ok(RemoteOutcome::Success(output))
+            }
+        })
+        .expect("bootstrap handler should register");
+
+    let origin = NodeId::new("origin-static-bootstrap-call");
+    let mut peer_pins = CertificatePinSet::new();
+    peer_pins.add(
+        CertificatePin::compute_spki_sha256(&peer_certificate)
+            .expect("fixture certificate should produce an SPKI pin"),
+    );
+    let mut policy = RemotePeerAdmissionPolicy::new(
+        RemoteProtocolVersion::V1,
+        computations.schema_registry().clone(),
+    );
+    policy
+        .grant_tls_peer(origin.clone(), peer_pins, ["proof.bootstrap"])
+        .expect("bootstrap certificate-bound grant should be valid");
+    let request = remote_service_wire_request_with(
+        policy.hello_for(origin),
+        "proof.bootstrap",
+        7210,
+        0x7210,
+        b"payload",
+    );
+    let (acceptor, connector) = remote_client_test_mtls_pair();
+    let listener =
+        block_on(TcpListener::bind("127.0.0.1:0")).expect("bootstrap service should bind loopback");
+    let live_endpoint = listener
+        .local_addr()
+        .expect("bootstrap service should expose its address");
+    let server = thread::spawn(move || {
+        block_on(async move {
+            let (stream, _) = listener
+                .accept()
+                .await
+                .expect("bootstrap service should accept one connection");
+            let mut stream = acceptor
+                .accept(stream)
+                .await
+                .expect("bootstrap service should authenticate the client");
+            serve_tls_computation_once(
+                &Cx::for_testing(),
+                &mut stream,
+                &policy,
+                &computations,
+                RemoteServiceWireLimits::default(),
+            )
+            .await
+            .expect("bootstrap service should flush one response")
+        })
+    });
+
+    let closed_listener = std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("bootstrap test should reserve a closed primary endpoint");
+    let closed_endpoint = closed_listener
+        .local_addr()
+        .expect("closed primary endpoint should expose its address");
+    drop(closed_listener);
+    let client = RemoteComputationClient::from_bootstrap_endpoints(
+        [closed_endpoint, live_endpoint],
+        "localhost",
+        connector,
+        RemoteComputationClientConfig::new()
+            .with_max_attempts(2)
+            .with_backoff(Duration::ZERO, Duration::ZERO)
+            .with_full_jitter(false),
+    )
+    .expect("ordered bootstrap client should validate");
+    let response = run_remote_client_call(&client, &request)
+        .expect("second bootstrap endpoint should complete the request");
+    assert!(
+        matches!(
+            response,
+            RemoteServiceWireResponse::Outcome {
+                remote_task_id: 7210,
+                outcome: RemoteServiceWireOutcome::Success(ref payload),
+            } if payload == b"bootstrap:payload"
+        ),
+        "unexpected bootstrap response: {response:?}"
+    );
+    let server_response = server.join().expect("bootstrap service should not panic");
+    assert!(
+        matches!(
+            server_response,
+            RemoteServiceWireResponse::Outcome {
+                remote_task_id: 7210,
+                outcome: RemoteServiceWireOutcome::Success(ref payload),
+            } if payload == b"bootstrap:payload"
+        ),
+        "unexpected server-side bootstrap response: {server_response:?}"
+    );
+    assert_eq!(dispatch_count.load(Ordering::SeqCst), 1);
+
+    ProofLogRow::pass(
+        "remote_native_client_static_bootstrap",
+        7210,
+        "primary_refused_then_secondary_authenticated",
+        "pre_delivery_endpoint_failover",
+        2,
+        "one_handler_dispatch",
+        "one_handler_dispatch",
+    )
+    .emit();
+}
+
+#[cfg(feature = "tls")]
+#[test]
+fn native_remote_runtime_uses_static_bootstrap_failover_for_v3() {
+    let certificates = Certificate::from_pem(TEST_CERT_PEM).expect("TLS fixture should parse");
+    let peer_certificate = certificates
+        .first()
+        .expect("TLS fixture should contain a leaf certificate")
+        .clone();
+    let dispatch_count = Arc::new(AtomicUsize::new(0));
+    let handler_dispatch_count = Arc::clone(&dispatch_count);
+    let mut computations = RemoteComputationRegistry::new();
+    computations
+        .register::<Vec<u8>, Vec<u8>, _, _>("proof.bootstrap-v3", move |_cx, invocation| {
+            let handler_dispatch_count = Arc::clone(&handler_dispatch_count);
+            async move {
+                handler_dispatch_count.fetch_add(1, Ordering::SeqCst);
+                Ok(RemoteOutcome::Success(
+                    invocation.into_request().input.into_data(),
+                ))
+            }
+        })
+        .expect("V3 bootstrap handler should register");
+
+    let origin = NodeId::new("origin-static-bootstrap-v3");
+    let destination = NodeId::new("destination-static-bootstrap-v3");
+    let mut peer_pins = CertificatePinSet::new();
+    peer_pins.add(
+        CertificatePin::compute_spki_sha256(&peer_certificate)
+            .expect("fixture certificate should produce an SPKI pin"),
+    );
+    let mut policy = RemotePeerAdmissionPolicy::new(
+        RemoteProtocolVersion::V3,
+        computations.schema_registry().clone(),
+    );
+    policy
+        .grant_tls_peer(origin.clone(), peer_pins, ["proof.bootstrap-v3"])
+        .expect("V3 bootstrap certificate-bound grant should be valid");
+    let hello = policy.hello_for(origin.clone());
+    let (acceptor, connector) = remote_client_test_mtls_pair();
+    let (live_endpoint, operator, service) =
+        spawn_native_route_service("bootstrap-v3", acceptor, policy, computations);
+
+    let closed_listener = std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("V3 bootstrap test should reserve a closed primary endpoint");
+    let closed_endpoint = closed_listener
+        .local_addr()
+        .expect("V3 closed primary endpoint should expose its address");
+    drop(closed_listener);
+    let client = RemoteComputationClient::from_bootstrap_endpoints(
+        [closed_endpoint, live_endpoint],
+        "localhost",
+        connector,
+        RemoteComputationClientConfig::new()
+            .with_max_attempts(2)
+            .with_attempt_timeout(Duration::from_secs(2))
+            .with_backoff(Duration::ZERO, Duration::ZERO)
+            .with_full_jitter(false),
+    )
+    .expect("V3 ordered bootstrap client should validate");
+
+    let runtime = RuntimeBuilder::new()
+        .worker_threads(2)
+        .build()
+        .expect("V3 bootstrap driver runtime should build");
+    let native = Arc::new(
+        NativeRemoteRuntime::new(
+            runtime.handle(),
+            origin.clone(),
+            [NativeRemoteRoute::new(destination.clone(), hello, client)],
+        )
+        .expect("V3 bootstrap route should validate"),
+    );
+    let cap = asupersync::remote::RemoteCap::new()
+        .with_local_node(origin)
+        .with_default_lease(Duration::from_secs(5))
+        .with_runtime(native.clone());
+    let cx = runtime
+        .request_cx_with_budget(Budget::INFINITE)
+        .with_remote_cap(cap);
+    let mut task = spawn_remote(
+        &cx,
+        destination,
+        ComputationName::new("proof.bootstrap-v3"),
+        RemoteInput::new(b"native-bootstrap-v3".to_vec()),
+    )
+    .expect("V3 bootstrap task should publish");
+    let outcome = runtime
+        .block_on(task.join(&cx))
+        .expect("V3 bootstrap task should reach a terminal outcome");
+    assert!(matches!(
+        outcome,
+        RemoteOutcome::Success(ref payload) if payload == b"native-bootstrap-v3"
+    ));
+    assert_eq!(dispatch_count.load(Ordering::SeqCst), 1);
+    assert_eq!(native.active_operations(), 0);
+    assert!(runtime.block_on(native.close(&cx)));
+    drop(cx);
+    drop(native);
+    assert!(runtime.shutdown_timeout(Duration::from_secs(2)));
+
+    assert!(operator.begin_drain());
+    let report = service
+        .join()
+        .expect("V3 bootstrap service should not panic");
+    assert_eq!(report.accepted_connections(), 1);
+    assert_eq!(report.completed_connections(), 1);
+    assert_eq!(report.failed_connections(), 0);
+    assert_eq!(operator.active_connections(), 0);
+
+    ProofLogRow::pass(
+        "native_remote_runtime_static_bootstrap",
+        task.remote_task_id().raw(),
+        "primary_refused_then_secondary_v3_authenticated",
+        "native_runtime_pre_delivery_endpoint_failover",
+        2,
+        "one_handler_dispatch_and_quiescent_close",
+        "one_handler_dispatch_and_quiescent_close",
+    )
+    .emit();
+}
+
+#[cfg(feature = "tls")]
+#[test]
+fn remote_native_client_pin_mismatch_does_not_fall_through() {
+    let certificates = Certificate::from_pem(TEST_CERT_PEM).expect("TLS fixture should parse");
+    let peer_certificate = certificates
+        .first()
+        .expect("TLS fixture should contain a leaf certificate")
+        .clone();
+    let certificate_chain =
+        CertificateChain::from_pem(TEST_CERT_PEM).expect("TLS certificate chain should parse");
+    let private_key = PrivateKey::from_pem(TEST_KEY_PEM).expect("TLS private key should parse");
+    let (acceptor, _) = remote_client_test_mtls_pair();
+    let primary = block_on(TcpListener::bind("127.0.0.1:0"))
+        .expect("pin-mismatch primary should bind loopback");
+    let primary_endpoint = primary
+        .local_addr()
+        .expect("pin-mismatch primary should expose its address");
+    let primary_server = thread::spawn(move || {
+        block_on(async move {
+            let (stream, _) = primary
+                .accept()
+                .await
+                .expect("pin-mismatch primary should accept one connection");
+            let _ = acceptor.accept(stream).await;
+        });
+    });
+
+    let secondary = std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("pin-mismatch secondary probe should bind loopback");
+    let secondary_endpoint = secondary
+        .local_addr()
+        .expect("pin-mismatch secondary should expose its address");
+    secondary
+        .set_nonblocking(true)
+        .expect("pin-mismatch secondary probe should be nonblocking");
+    let wrong_pin = CertificatePin::spki_sha256(vec![0xA5; 32])
+        .expect("fixed-size wrong SPKI pin should validate structurally");
+    let connector = TlsConnectorBuilder::new()
+        .add_root_certificate(&peer_certificate)
+        .identity(certificate_chain, private_key)
+        .with_certificate_pins(CertificatePinSet::new().with_pin(wrong_pin))
+        .build()
+        .expect("pin-mismatch connector should build");
+    let client = RemoteComputationClient::from_bootstrap_endpoints(
+        [primary_endpoint, secondary_endpoint],
+        "localhost",
+        connector,
+        RemoteComputationClientConfig::new()
+            .with_max_attempts(2)
+            .with_attempt_timeout(Duration::from_secs(2))
+            .with_backoff(Duration::ZERO, Duration::ZERO)
+            .with_full_jitter(false),
+    )
+    .expect("pin-mismatch bootstrap client should validate");
+    let request = remote_client_test_request(RemoteProtocolVersion::V1, 7211, 0x7211);
+    let error = run_remote_client_call(&client, &request)
+        .expect_err("enforced pin mismatch must fail closed before request delivery");
+    assert!(matches!(
+        error,
+        RemoteComputationClientError::Tls {
+            attempts: 1,
+            source: asupersync::tls::TlsError::PinMismatch { .. },
+        }
+    ));
+    primary_server
+        .join()
+        .expect("pin-mismatch primary should not panic");
+    assert!(matches!(
+        secondary.accept(),
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock
+    ));
+
+    ProofLogRow::pass(
+        "remote_native_client_pin_mismatch",
+        7211,
+        "authenticated_primary_wrong_pin",
+        "fail_closed_without_secondary_dial",
+        1,
+        "typed_tls_error_secondary_unused",
+        "typed_tls_error_secondary_unused",
+    )
+    .emit();
+}
+
+#[cfg(feature = "tls")]
+#[test]
+fn remote_native_client_cancellation_prevents_later_bootstrap_dial() {
+    let primary = std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("cancellation primary should bind loopback");
+    let primary_endpoint = primary
+        .local_addr()
+        .expect("cancellation primary should expose its address");
+    let secondary = std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("cancellation secondary probe should bind loopback");
+    let secondary_endpoint = secondary
+        .local_addr()
+        .expect("cancellation secondary should expose its address");
+    secondary
+        .set_nonblocking(true)
+        .expect("cancellation secondary probe should be nonblocking");
+    let (accepted_tx, accepted_rx) = std::sync::mpsc::sync_channel::<()>(0);
+    let (release_tx, release_rx) = std::sync::mpsc::sync_channel::<()>(0);
+    let primary_server = thread::spawn(move || {
+        let (_stream, _) = primary
+            .accept()
+            .expect("cancellation primary should accept one TCP connection");
+        accepted_tx
+            .send(())
+            .expect("cancellation primary should publish connection acceptance");
+        release_rx
+            .recv()
+            .expect("cancellation primary should receive fixture release");
+    });
+
+    let client = RemoteComputationClient::from_bootstrap_endpoints(
+        [primary_endpoint, secondary_endpoint],
+        "localhost",
+        remote_client_test_mtls_pair().1,
+        RemoteComputationClientConfig::new()
+            .with_max_attempts(2)
+            .with_attempt_timeout(Duration::from_secs(5))
+            .with_backoff(Duration::ZERO, Duration::ZERO)
+            .with_full_jitter(false),
+    )
+    .expect("cancellation bootstrap client should validate");
+    let request = remote_client_test_request(RemoteProtocolVersion::V1, 7212, 0x7212);
+    let cx = Cx::for_testing();
+    let client_cx = cx.clone();
+    let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
+    let client_thread = thread::spawn(move || {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("cancellation bootstrap runtime should build");
+        result_tx
+            .send(runtime.block_on(client.call(&client_cx, &request)))
+            .expect("cancellation bootstrap client should publish its result");
+    });
+    accepted_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("cancellation primary should observe the first dial");
+    cx.set_cancel_requested(true);
+    let error = result_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("cancellation should wake the first TLS attempt")
+        .expect_err("cancelled first attempt must not dial the secondary");
+    assert!(matches!(
+        error,
+        RemoteComputationClientError::CancelledDuringAttempt { attempts: 1 }
+    ));
+    assert!(matches!(
+        secondary.accept(),
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock
+    ));
+    release_tx
+        .send(())
+        .expect("cancellation primary should receive fixture release");
+    primary_server
+        .join()
+        .expect("cancellation primary should not panic");
+    client_thread
+        .join()
+        .expect("cancellation bootstrap client should not panic");
+
+    ProofLogRow::pass(
+        "remote_native_client_bootstrap_cancellation",
+        7212,
+        "cancel_during_primary_tls_handshake",
+        "no_later_endpoint_dial",
+        1,
+        "typed_cancel_secondary_unused",
+        "typed_cancel_secondary_unused",
     )
     .emit();
 }

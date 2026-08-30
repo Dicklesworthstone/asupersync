@@ -5586,6 +5586,7 @@ enum RemoteComputationClientAttemptError {
     Tls(TlsError),
     Timeout(Duration),
     Exchange(RemoteComputationServiceError),
+    Session(RemoteServiceSessionError),
 }
 
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
@@ -5596,7 +5597,7 @@ impl RemoteComputationClientAttemptError {
             Self::Tls(TlsError::Io(error)) => remote_client_io_error_is_transient(error),
             Self::Tls(TlsError::Timeout(_)) => true,
             Self::Tls(_) => false,
-            Self::Timeout(_) | Self::Exchange(_) => false,
+            Self::Timeout(_) | Self::Exchange(_) | Self::Session(_) => false,
         }
     }
 
@@ -5610,6 +5611,7 @@ impl RemoteComputationClientAttemptError {
             Self::Exchange(source) => {
                 RemoteComputationClientError::AmbiguousExchange { attempts, source }
             }
+            Self::Session(source) => RemoteComputationClientError::Session { attempts, source },
         }
     }
 }
@@ -5672,6 +5674,7 @@ where
 #[derive(Clone)]
 pub struct RemoteComputationClient {
     endpoint: SocketAddr,
+    bootstrap_endpoints: Arc<[SocketAddr]>,
     server_name: String,
     tls_connector: TlsConnector,
     config: RemoteComputationClientConfig,
@@ -5682,6 +5685,7 @@ impl fmt::Debug for RemoteComputationClient {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RemoteComputationClient")
             .field("endpoint", &self.endpoint)
+            .field("bootstrap_endpoints", &self.bootstrap_endpoints)
             .field("server_name", &self.server_name)
             .field("config", &self.config)
             .finish_non_exhaustive()
@@ -5697,22 +5701,60 @@ impl RemoteComputationClient {
         tls_connector: TlsConnector,
         config: RemoteComputationClientConfig,
     ) -> Result<Self, RemoteComputationClientError> {
+        Self::from_bootstrap_endpoints([endpoint], server_name, tls_connector, config)
+    }
+
+    /// Creates a native remote client from an ordered static bootstrap set.
+    ///
+    /// The first endpoint remains the primary endpoint returned by
+    /// [`Self::endpoint`]. Later endpoints are tried in order, wrapping only
+    /// when the configured attempt cap exceeds the set length. Failover is
+    /// restricted to transient TCP or TLS failures that occur before request
+    /// publication; delivery-ambiguous failures never advance the set.
+    pub fn from_bootstrap_endpoints(
+        endpoints: impl IntoIterator<Item = SocketAddr>,
+        server_name: impl Into<String>,
+        tls_connector: TlsConnector,
+        config: RemoteComputationClientConfig,
+    ) -> Result<Self, RemoteComputationClientError> {
         config.validate()?;
         let server_name = server_name.into();
         TlsConnector::validate_domain(&server_name)
             .map_err(RemoteComputationClientError::InvalidServerName)?;
+        let bootstrap_endpoints = endpoints.into_iter().collect::<Vec<_>>();
+        let Some(&endpoint) = bootstrap_endpoints.first() else {
+            return Err(RemoteComputationClientError::InvalidConfig(
+                "remote client bootstrap endpoints must be nonempty",
+            ));
+        };
+        if bootstrap_endpoints
+            .iter()
+            .enumerate()
+            .any(|(index, endpoint)| bootstrap_endpoints[..index].contains(endpoint))
+        {
+            return Err(RemoteComputationClientError::InvalidConfig(
+                "remote client bootstrap endpoints must be unique",
+            ));
+        }
         Ok(Self {
             endpoint,
+            bootstrap_endpoints: Arc::from(bootstrap_endpoints.into_boxed_slice()),
             server_name,
             tls_connector,
             config,
         })
     }
 
-    /// Destination socket used by each connection attempt.
+    /// Primary destination socket, retained for single-endpoint API compatibility.
     #[must_use]
     pub const fn endpoint(&self) -> SocketAddr {
         self.endpoint
+    }
+
+    /// Ordered static endpoints eligible for pre-delivery failover.
+    #[must_use]
+    pub fn bootstrap_endpoints(&self) -> &[SocketAddr] {
+        &self.bootstrap_endpoints
     }
 
     /// TLS SNI/server-certificate name.
@@ -5727,14 +5769,19 @@ impl RemoteComputationClient {
         self.config
     }
 
+    fn endpoint_for_attempt(&self, attempt: usize) -> SocketAddr {
+        debug_assert!(attempt > 0, "remote client attempts are one-based");
+        self.bootstrap_endpoints[(attempt.saturating_sub(1)) % self.bootstrap_endpoints.len()]
+    }
+
     /// Connects, authenticates, and starts one same-connection V3 operation.
     ///
     /// The configured attempt timeout bounds TCP, TLS, request delivery, and
     /// the initial accepted/terminal event only. Once returned, the session's
     /// request lease and caller context govern operation lifetime. This method
-    /// never retries because failure after the request write is ambiguous; a
-    /// dropped authenticated stream causes the V3 listener to cancel and drain
-    /// its connection-owned child.
+    /// retries only transient TCP or TLS establishment failures that precede
+    /// the request write. A dropped authenticated stream causes the V3 listener
+    /// to cancel and drain its connection-owned child and is never replayed.
     pub async fn start_session(
         &self,
         cx: &Cx,
@@ -5762,28 +5809,41 @@ impl RemoteComputationClient {
             });
         }
 
-        let started = remote_client_race_cancellation(
-            cx,
-            crate::time::timeout(
-                cx.now(),
-                self.config.attempt_timeout,
-                self.start_session_once(cx, request),
-            ),
-        )
-        .await;
-        if cx.checkpoint().is_err() {
-            return Err(RemoteComputationClientError::CancelledDuringAttempt { attempts: 1 });
-        }
-        match started {
-            RemoteClientCancelRace::Completed(Ok(result)) => result,
-            RemoteClientCancelRace::Completed(Err(_)) => {
-                Err(RemoteComputationClientError::AttemptTimeout {
-                    attempts: 1,
-                    timeout: self.config.attempt_timeout,
-                })
+        let mut attempts = 0_usize;
+        loop {
+            if cx.checkpoint().is_err() {
+                return Err(RemoteComputationClientError::Cancelled { attempts });
             }
-            RemoteClientCancelRace::Cancelled => {
-                Err(RemoteComputationClientError::CancelledDuringAttempt { attempts: 1 })
+            attempts = attempts.saturating_add(1);
+            let endpoint = self.endpoint_for_attempt(attempts);
+            let attempt = match remote_client_race_cancellation(
+                cx,
+                crate::time::timeout(
+                    cx.now(),
+                    self.config.attempt_timeout,
+                    self.start_session_once(endpoint, cx, request),
+                ),
+            )
+            .await
+            {
+                RemoteClientCancelRace::Completed(result) => result.unwrap_or_else(|_| {
+                    Err(RemoteComputationClientAttemptError::Timeout(
+                        self.config.attempt_timeout,
+                    ))
+                }),
+                RemoteClientCancelRace::Cancelled => {
+                    return Err(RemoteComputationClientError::CancelledDuringAttempt { attempts });
+                }
+            };
+            if cx.checkpoint().is_err() {
+                return Err(RemoteComputationClientError::CancelledDuringAttempt { attempts });
+            }
+            match attempt {
+                Ok(started) => return Ok(started),
+                Err(error) if attempts < self.config.max_attempts && error.is_retryable() => {
+                    self.sleep_before_retry(cx, attempts).await?;
+                }
+                Err(error) => return Err(error.into_public(attempts)),
             }
         }
     }
@@ -5811,12 +5871,13 @@ impl RemoteComputationClient {
                 return Err(RemoteComputationClientError::Cancelled { attempts });
             }
             attempts = attempts.saturating_add(1);
+            let endpoint = self.endpoint_for_attempt(attempts);
             let attempt = match remote_client_race_cancellation(
                 cx,
                 crate::time::timeout(
                     cx.now(),
                     self.config.attempt_timeout,
-                    self.call_once(cx, request),
+                    self.call_once(endpoint, cx, request),
                 ),
             )
             .await
@@ -5856,10 +5917,11 @@ impl RemoteComputationClient {
 
     async fn call_once(
         &self,
+        endpoint: SocketAddr,
         cx: &Cx,
         request: &RemoteServiceWireRequest,
     ) -> Result<RemoteServiceWireResponse, RemoteComputationClientAttemptError> {
-        let stream = TcpStreamBuilder::new(self.endpoint)
+        let stream = TcpStreamBuilder::new(endpoint)
             .connect_timeout(self.config.connect_timeout)
             .nodelay(self.config.tcp_nodelay)
             .connect()
@@ -5877,35 +5939,27 @@ impl RemoteComputationClient {
 
     async fn start_session_once(
         &self,
+        endpoint: SocketAddr,
         cx: &Cx,
         request: &RemoteServiceWireRequest,
     ) -> Result<
         RemoteComputationSessionStart<crate::tls::TlsStream<TcpStream>>,
-        RemoteComputationClientError,
+        RemoteComputationClientAttemptError,
     > {
-        let stream = TcpStreamBuilder::new(self.endpoint)
+        let stream = TcpStreamBuilder::new(endpoint)
             .connect_timeout(self.config.connect_timeout)
             .nodelay(self.config.tcp_nodelay)
             .connect()
             .await
-            .map_err(|source| RemoteComputationClientError::Connect {
-                attempts: 1,
-                source,
-            })?;
+            .map_err(RemoteComputationClientAttemptError::Connect)?;
         let stream = self
             .tls_connector
             .connect(&self.server_name, stream)
             .await
-            .map_err(|source| RemoteComputationClientError::Tls {
-                attempts: 1,
-                source,
-            })?;
+            .map_err(RemoteComputationClientAttemptError::Tls)?;
         RemoteComputationSession::start(cx, stream, request, self.config.wire_limits)
             .await
-            .map_err(|source| RemoteComputationClientError::Session {
-                attempts: 1,
-                source,
-            })
+            .map_err(RemoteComputationClientAttemptError::Session)
     }
 
     async fn sleep_before_retry(
@@ -5945,7 +5999,8 @@ pub const DEFAULT_NATIVE_REMOTE_MAX_IN_FLIGHT: usize = 256;
 /// Static destination route for [`NativeRemoteRuntime`].
 ///
 /// Discovery remains an outer concern: this value deliberately binds one
-/// logical destination to one validated client endpoint and one V3 peer hello.
+/// logical destination to one validated client/bootstrap policy and one V3
+/// peer hello.
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
 #[derive(Clone, Debug)]
 pub struct NativeRemoteRoute {
