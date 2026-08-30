@@ -464,6 +464,35 @@ fn publish_workflow_and_strategy_doc_align_on_npm_artifact_contract() {
             .contains("No npm package manifests found under packages/*; skipping npm publish."),
         "publish workflow must not silently skip npm publish when required packages are missing"
     );
+
+    let missing_authority_start = workflow
+        .find("if [[ -z \"${NODE_AUTH_TOKEN}\" ]]; then")
+        .expect("publish workflow must check npm publication authority");
+    let missing_authority = &workflow[missing_authority_start..];
+    let missing_authority_end = missing_authority
+        .find("          fi\n\n          : > artifacts/npm/published_packages.txt")
+        .expect("npm authority check must end before live publication");
+    let missing_authority = &missing_authority[..missing_authority_end];
+    for expected in [
+        "npm publication was requested, but NPM_TOKEN is not configured",
+        "\"status\": \"blocked_missing_publish_authority\"",
+        "\"publish_requested\": true",
+        "\"reason_code\": \"npm_publish_authority_missing\"",
+        "exit 1",
+    ] {
+        assert!(
+            missing_authority.contains(expected),
+            "missing npm authority path must fail closed with {expected:?}"
+        );
+    }
+    assert!(
+        !missing_authority.contains("skipping npm publish"),
+        "requested npm publication must not report a successful skip"
+    );
+    assert!(
+        strategy.contains("Missing npm publication authority is a hard release-blocking failure"),
+        "strategy doc must make missing npm publication authority fail closed"
+    );
 }
 
 #[test]

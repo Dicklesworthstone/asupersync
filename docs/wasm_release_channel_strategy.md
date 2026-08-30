@@ -384,20 +384,26 @@ Policy wiring expectations:
    - publish outcome artifact: `artifacts/npm/publish_outcome.json`
    - aggregate package integrity gate artifact: `artifacts/browser_package_integrity_gate_v1.json`
    - rollback outcome artifact (when rollback mode is used): `artifacts/npm/rollback_outcome.json`
-4. Missing package manifests are a hard release-blocking failure. Missing package manifests or missing built package outputs are hard release-blocking failures. The exact required package set from
+4. Missing npm publication authority is a hard release-blocking failure when
+   `publish_npm=true`. The workflow must emit
+   `status=blocked_missing_publish_authority` and
+   `reason_code=npm_publish_authority_missing` in
+   `artifacts/npm/publish_outcome.json`, then exit non-zero; a requested release
+   must never turn a missing `NPM_TOKEN` into a successful no-publication skip.
+5. Missing package manifests are a hard release-blocking failure. Missing package manifests or missing built package outputs are hard release-blocking failures. The exact required package set from
    `.github/wasm_typescript_package_policy.json` must be discovered, built via
    `corepack pnpm run build`, validated with
    `bash scripts/validate_package_build.sh`, and pack-smoke checked with
    `bash scripts/validate_npm_pack_smoke.sh`, and evidenced with
    `npm pack --json --dry-run` before any npm publish can proceed.
-5. Consumer-build and behavioral evidence are artifactized alongside the
+6. Consumer-build and behavioral evidence are artifactized alongside the
    package-release bundle:
    - `artifacts/onboarding/vanilla.summary.json`
    - `artifacts/onboarding/react.summary.json`
    - `artifacts/onboarding/next.summary.json`
    - `target/wasm-qa-evidence-smoke/<run>/<scenario>/bundle_manifest.json`
    - `target/e2e-results/wasm_qa_evidence_smoke/run_<timestamp>/summary.json`
-6. Rollback mode requires both target version and operator reason; the executed
+7. Rollback mode requires both target version and operator reason; the executed
    dist-tag commands must be captured in release artifacts.
 
 Incident response and rollback operational requirements are defined in:

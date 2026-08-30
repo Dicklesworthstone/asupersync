@@ -1009,15 +1009,18 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           if [[ -z "${NODE_AUTH_TOKEN}" ]]; then
-            echo "NPM_TOKEN is not configured; skipping npm publish."
+            echo "::error::npm publication was requested, but NPM_TOKEN is not configured."
             cat > artifacts/npm/publish_outcome.json <<'EOF'
             {
               "schema_version": "npm-publish-outcome-v1",
+              "status": "blocked_missing_publish_authority",
               "published": false,
+              "publish_requested": true,
+              "reason_code": "npm_publish_authority_missing",
               "reason": "NPM_TOKEN missing"
             }
-            EOF
-            exit 0
+          EOF
+            exit 1
           fi
 
           : > artifacts/npm/published_packages.txt
