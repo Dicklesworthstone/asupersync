@@ -13,6 +13,12 @@ use asupersync::remote::{
     RemoteTransport, SpawnRejectReason, SpawnRequest, spawn_remote,
 };
 #[cfg(feature = "tls")]
+use asupersync::remote::{
+    RemoteComputationServiceError, RemoteServiceRejectionCode, RemoteServiceWireLimits,
+    RemoteServiceWireOutcome, RemoteServiceWireRequest, RemoteServiceWireResponse,
+    call_tls_computation_once, serve_tls_computation_once,
+};
+#[cfg(feature = "tls")]
 use asupersync::tls::{
     Certificate, CertificateChain, CertificatePin, CertificatePinSet, ClientAuth, PrivateKey,
     RootCertStore, TlsAcceptorBuilder, TlsConnector, TlsConnectorBuilder,
@@ -810,38 +816,112 @@ fn send_peer_admission_probe(
 }
 
 #[cfg(feature = "tls")]
-fn send_tls_peer_admission_probe(
+fn call_tls_remote_service(
     endpoint: SocketAddr,
     connector: &TlsConnector,
-    hello: RemotePeerHello,
-    computation: &str,
-) -> PeerAdmissionReply {
+    request: &RemoteServiceWireRequest,
+) -> RemoteServiceWireResponse {
+    call_tls_remote_service_result(endpoint, connector, request)
+        .expect("TLS remote service exchange should complete")
+}
+
+#[cfg(feature = "tls")]
+fn call_tls_remote_service_result(
+    endpoint: SocketAddr,
+    connector: &TlsConnector,
+    request: &RemoteServiceWireRequest,
+) -> Result<RemoteServiceWireResponse, RemoteComputationServiceError> {
     block_on(async {
         let stream = TcpStream::connect(endpoint)
             .await
-            .expect("TLS peer admission probe should connect");
+            .expect("TLS remote service client should connect");
         let mut stream = connector
             .connect("localhost", stream)
             .await
-            .expect("TLS peer admission probe should authenticate server");
+            .expect("TLS remote service client should authenticate server");
         assert!(
             stream.peer_leaf_certificate_der().is_some(),
             "client should retain the authenticated server certificate"
         );
-        write_json_frame(
+        call_tls_computation_once(
+            &Cx::for_testing(),
             &mut stream,
-            &PeerAdmissionProbe {
-                hello,
-                computation: computation.to_owned(),
-            },
+            request,
+            RemoteServiceWireLimits::default(),
         )
         .await
-        .expect("TLS peer admission probe should write");
-        let response = read_raw_frame(&mut stream)
-            .await
-            .expect("TLS peer admission probe should receive a response");
-        serde_json::from_slice(&response).expect("TLS peer admission response should decode")
     })
+}
+
+#[cfg(feature = "tls")]
+fn send_tls_malformed_remote_service_frame(
+    endpoint: SocketAddr,
+    connector: &TlsConnector,
+    frame: &[u8],
+) {
+    block_on(async {
+        let stream = TcpStream::connect(endpoint)
+            .await
+            .expect("malformed-frame client should connect");
+        let mut stream = connector
+            .connect("localhost", stream)
+            .await
+            .expect("malformed-frame client should authenticate server");
+        write_raw_frame(&mut stream, frame)
+            .await
+            .expect("malformed-frame client should write bounded frame");
+        stream
+            .flush()
+            .await
+            .expect("malformed-frame client should flush TLS bytes");
+    });
+}
+
+#[cfg(feature = "tls")]
+fn send_tls_oversized_remote_service_prefix(endpoint: SocketAddr, connector: &TlsConnector) {
+    block_on(async {
+        let stream = TcpStream::connect(endpoint)
+            .await
+            .expect("oversized-frame client should connect");
+        let mut stream = connector
+            .connect("localhost", stream)
+            .await
+            .expect("oversized-frame client should authenticate server");
+        let oversized = u32::try_from(RemoteServiceWireLimits::default().max_frame_bytes() + 1)
+            .expect("default remote service frame cap should fit u32");
+        stream
+            .write_all(&oversized.to_be_bytes())
+            .await
+            .expect("oversized-frame client should write length prefix");
+        stream
+            .flush()
+            .await
+            .expect("oversized-frame client should flush TLS bytes");
+    });
+}
+
+#[cfg(feature = "tls")]
+fn remote_service_wire_request(
+    hello: RemotePeerHello,
+    computation: &str,
+    remote_task_id: u64,
+) -> RemoteServiceWireRequest {
+    let cx = Cx::for_testing();
+    RemoteServiceWireRequest::from_spawn_request(
+        hello.clone(),
+        &SpawnRequest {
+            remote_task_id: RemoteTaskId::from_raw(remote_task_id),
+            computation: ComputationName::new(computation),
+            input: RemoteInput::new(b"executed-over-mtls".to_vec()),
+            lease: Duration::from_secs(30),
+            idempotency_key: IdempotencyKey::from_raw(u128::from(remote_task_id)),
+            budget: None,
+            origin_node: hello.peer_node().clone(),
+            origin_region: cx.region_id(),
+            origin_task: cx.task_id(),
+        },
+    )
+    .expect("wire request identity should agree with its peer hello")
 }
 
 fn spawn_test_handle(cx: &Cx) -> asupersync::remote::RemoteHandle {
@@ -1161,7 +1241,7 @@ fn remote_peer_admission_negotiates_registry_and_gates_dispatch_over_tcp() {
 
 #[cfg(feature = "tls")]
 #[test]
-fn remote_peer_admission_binds_asserted_node_to_mtls_certificate_over_tcp() {
+fn remote_tls_service_executes_only_certificate_bound_authorized_computation() {
     let certificates = Certificate::from_pem(TEST_CERT_PEM).expect("TLS fixture should parse");
     let peer_certificate = certificates
         .first()
@@ -1175,6 +1255,8 @@ fn remote_peer_admission_binds_asserted_node_to_mtls_certificate_over_tcp() {
     let handler_dispatch_count = Arc::clone(&dispatch_count);
     let unauthorized_handler_count = Arc::new(AtomicUsize::new(0));
     let denied_handler_count = Arc::clone(&unauthorized_handler_count);
+    let oversized_handler_count = Arc::new(AtomicUsize::new(0));
+    let large_handler_count = Arc::clone(&oversized_handler_count);
     let mut computations = RemoteComputationRegistry::new();
     computations
         .register::<Vec<u8>, Vec<u8>, _, _>("proof.echo", move |_cx, invocation| {
@@ -1198,7 +1280,20 @@ fn remote_peer_admission_binds_asserted_node_to_mtls_certificate_over_tcp() {
             }
         })
         .expect("proof.hash executable handler should register");
-    assert_eq!(computations.len(), 2);
+    computations
+        .register::<Vec<u8>, Vec<u8>, _, _>("proof.large", move |_cx, _invocation| {
+            let large_handler_count = Arc::clone(&large_handler_count);
+            async move {
+                large_handler_count.fetch_add(1, Ordering::SeqCst);
+                Ok(RemoteOutcome::Success(vec![
+                    b'x';
+                    RemoteServiceWireLimits::default()
+                        .max_frame_bytes()
+                ]))
+            }
+        })
+        .expect("proof.large executable handler should register");
+    assert_eq!(computations.len(), 3);
     let origin = NodeId::new(ORIGIN_NODE);
     let mut peer_pins = CertificatePinSet::new();
     peer_pins.add(
@@ -1210,9 +1305,24 @@ fn remote_peer_admission_binds_asserted_node_to_mtls_certificate_over_tcp() {
         computations.schema_registry().clone(),
     );
     policy
-        .grant_tls_peer(origin.clone(), peer_pins, ["proof.echo"])
-        .expect("certificate-bound proof.echo grant should be valid");
+        .grant_tls_peer(
+            origin.clone(),
+            peer_pins.clone(),
+            ["proof.echo", "proof.large"],
+        )
+        .expect("certificate-bound service grants should be valid");
     let hello = policy.hello_for(origin.clone());
+
+    let mut drift_registry = ComputationSchemaRegistry::new();
+    drift_registry
+        .register_typed::<Vec<u8>, Vec<u8>>("proof.echo")
+        .expect("drift policy proof.echo schema should register");
+    let mut drift_policy =
+        RemotePeerAdmissionPolicy::new(RemoteProtocolVersion::V1, drift_registry);
+    drift_policy
+        .grant_tls_peer(origin.clone(), peer_pins, ["proof.echo"])
+        .expect("drift policy certificate-bound grant should be valid");
+    let drift_hello = drift_policy.hello_for(origin.clone());
 
     let unbound_error = policy
         .admit(&hello)
@@ -1231,6 +1341,9 @@ fn remote_peer_admission_binds_asserted_node_to_mtls_certificate_over_tcp() {
     );
     let mut mismatched_policy = policy.clone();
     let capability_denial_policy = policy.clone();
+    let oversized_response_policy = policy.clone();
+    let malformed_frame_policy = policy.clone();
+    let oversized_frame_policy = policy.clone();
     mismatched_policy
         .grant_tls_peer(origin, mismatched_pins, ["proof.echo"])
         .expect("mismatched certificate grant should be valid configuration");
@@ -1256,7 +1369,19 @@ fn remote_peer_admission_binds_asserted_node_to_mtls_certificate_over_tcp() {
         .expect("mTLS peer admission endpoint should expose its address");
     let server = thread::spawn(move || {
         block_on(async move {
-            for admission_policy in [policy, capability_denial_policy, mismatched_policy] {
+            let mut framing_errors = Vec::new();
+            for (connection_index, admission_policy) in [
+                policy,
+                capability_denial_policy,
+                mismatched_policy,
+                drift_policy,
+                oversized_response_policy,
+                malformed_frame_policy,
+                oversized_frame_policy,
+            ]
+            .into_iter()
+            .enumerate()
+            {
                 let (stream, _) = listener
                     .accept()
                     .await
@@ -1269,93 +1394,107 @@ fn remote_peer_admission_binds_asserted_node_to_mtls_certificate_over_tcp() {
                     stream.peer_leaf_certificate_der().is_some(),
                     "server should retain the authenticated client certificate"
                 );
-                let probe: PeerAdmissionProbe = serde_json::from_slice(
-                    &read_raw_frame(&mut stream)
-                        .await
-                        .expect("mTLS endpoint should read an admission probe"),
+                let result = serve_tls_computation_once(
+                    &Cx::for_testing(),
+                    &mut stream,
+                    &admission_policy,
+                    &computations,
+                    RemoteServiceWireLimits::default(),
                 )
-                .expect("mTLS admission probe should decode");
-                let dispatch_cx = Cx::for_testing();
-                let decision = match admission_policy.admit_tls_peer(&probe.hello, &stream) {
-                    Ok(session) => computations
-                        .dispatch(
-                            &dispatch_cx,
-                            &session,
-                            SpawnRequest {
-                                remote_task_id: RemoteTaskId::from_raw(7001),
-                                computation: ComputationName::new(&probe.computation),
-                                input: RemoteInput::new(b"executed-over-mtls".to_vec()),
-                                lease: Duration::from_secs(30),
-                                idempotency_key: IdempotencyKey::from_raw(7001),
-                                budget: None,
-                                origin_node: probe.hello.peer_node().clone(),
-                                origin_region: dispatch_cx.region_id(),
-                                origin_task: dispatch_cx.task_id(),
-                            },
-                        )
-                        .await
-                        .map_err(|error| error.to_string()),
-                    Err(error) => Err(error.to_string()),
-                };
-                let reply = match decision {
-                    Ok(RemoteOutcome::Success(payload)) => PeerAdmissionReply {
-                        accepted: true,
-                        diagnostic: format!(
-                            "mTLS identity bound and named handler returned {} bytes",
-                            payload.len()
-                        ),
-                    },
-                    Ok(other) => PeerAdmissionReply {
-                        accepted: false,
-                        diagnostic: format!(
-                            "named handler returned non-success outcome: {other:?}"
-                        ),
-                    },
-                    Err(diagnostic) => PeerAdmissionReply {
-                        accepted: false,
-                        diagnostic,
-                    },
-                };
-                write_json_frame(&mut stream, &reply)
-                    .await
-                    .expect("mTLS endpoint should write its admission decision");
+                .await;
+                if connection_index < 4 {
+                    result.expect("mTLS endpoint should flush one typed service response");
+                } else {
+                    framing_errors.push(
+                        result
+                            .expect_err("malformed or oversized frame must fail closed")
+                            .to_string(),
+                    );
+                }
             }
-        });
+            framing_errors
+        })
     });
 
-    let accepted = send_tls_peer_admission_probe(endpoint, &connector, hello.clone(), "proof.echo");
-    assert!(accepted.accepted, "diagnostic: {}", accepted.diagnostic);
-    assert!(
-        accepted
-            .diagnostic
-            .contains("named handler returned 18 bytes")
-    );
+    let accepted_request = remote_service_wire_request(hello.clone(), "proof.echo", 7001);
+    let accepted = call_tls_remote_service(endpoint, &connector, &accepted_request);
+    assert!(matches!(
+        accepted,
+        RemoteServiceWireResponse::Outcome {
+            remote_task_id: 7001,
+            outcome: RemoteServiceWireOutcome::Success(ref payload),
+        } if payload == b"executed-over-mtls"
+    ));
 
+    let unauthorized_request = remote_service_wire_request(hello.clone(), "proof.hash", 7002);
     let unauthorized_computation =
-        send_tls_peer_admission_probe(endpoint, &connector, hello.clone(), "proof.hash");
-    assert!(!unauthorized_computation.accepted);
+        call_tls_remote_service(endpoint, &connector, &unauthorized_request);
+    assert!(matches!(
+        unauthorized_computation,
+        RemoteServiceWireResponse::Rejected {
+            remote_task_id: 7002,
+            code: RemoteServiceRejectionCode::ComputationDenied,
+            ref diagnostic,
+        } if diagnostic.contains("not capability-authorized")
+    ));
+
+    let mismatched_request = remote_service_wire_request(hello.clone(), "proof.echo", 7003);
+    let certificate_mismatch = call_tls_remote_service(endpoint, &connector, &mismatched_request);
+    assert!(matches!(
+        certificate_mismatch,
+        RemoteServiceWireResponse::Rejected {
+            remote_task_id: 7003,
+            code: RemoteServiceRejectionCode::AdmissionDenied,
+            ref diagnostic,
+        } if diagnostic.contains("TLS peer certificate was rejected")
+    ));
+
+    let drift_request = remote_service_wire_request(drift_hello, "proof.echo", 7004);
+    let executable_registry_drift = call_tls_remote_service(endpoint, &connector, &drift_request);
+    assert!(matches!(
+        executable_registry_drift,
+        RemoteServiceWireResponse::Rejected {
+            remote_task_id: 7004,
+            code: RemoteServiceRejectionCode::ExecutableRegistryDrift,
+            ref diagnostic,
+        } if diagnostic.contains("differs from executable registry")
+    ));
+
+    let oversized_response_request = remote_service_wire_request(hello, "proof.large", 7005);
+    let oversized_response_error =
+        call_tls_remote_service_result(endpoint, &connector, &oversized_response_request)
+            .expect_err("oversized encoded response must close without a partial frame");
     assert!(
-        unauthorized_computation
-            .diagnostic
-            .contains("not capability-authorized"),
-        "diagnostic: {}",
-        unauthorized_computation.diagnostic
+        matches!(
+            oversized_response_error,
+            RemoteComputationServiceError::UnexpectedEof
+                | RemoteComputationServiceError::Transport(_)
+        ),
+        "diagnostic: {oversized_response_error}"
     );
 
-    let certificate_mismatch =
-        send_tls_peer_admission_probe(endpoint, &connector, hello, "proof.echo");
-    assert!(!certificate_mismatch.accepted);
-    assert!(
-        certificate_mismatch
-            .diagnostic
-            .contains("TLS peer certificate was rejected"),
-        "diagnostic: {}",
-        certificate_mismatch.diagnostic
-    );
+    send_tls_malformed_remote_service_frame(endpoint, &connector, b"{not-json");
+    send_tls_oversized_remote_service_prefix(endpoint, &connector);
 
-    server
+    let framing_errors = server
         .join()
         .expect("mTLS peer admission endpoint should not panic");
+    assert_eq!(framing_errors.len(), 3);
+    assert!(
+        framing_errors[0].contains("encoded frame exceeds"),
+        "diagnostic: {}",
+        framing_errors[0]
+    );
+    assert!(
+        framing_errors[1].contains("serialization error"),
+        "diagnostic: {}",
+        framing_errors[1]
+    );
+    assert!(
+        framing_errors[2].contains("frame length exceeds max_frame_length"),
+        "diagnostic: {}",
+        framing_errors[2]
+    );
     assert_eq!(
         dispatch_count.load(Ordering::SeqCst),
         1,
@@ -1366,13 +1505,18 @@ fn remote_peer_admission_binds_asserted_node_to_mtls_certificate_over_tcp() {
         0,
         "registered but ungranted computation must be refused before handler invocation"
     );
+    assert_eq!(
+        oversized_handler_count.load(Ordering::SeqCst),
+        1,
+        "authorized oversized output should execute once but never allocate an oversized frame"
+    );
 
     ProofLogRow::pass(
         "peer_admission_mtls_certificate_binding",
         0,
         "none",
-        "mtls_peer_hello_then_named_dispatch",
-        3,
+        "mtls_wire_request_then_typed_outcome",
+        7,
         "one_certificate_bound_dispatch",
         "one_certificate_bound_dispatch",
     )

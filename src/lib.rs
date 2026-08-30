@@ -408,16 +408,20 @@ pub use error::{
 };
 pub use lab::{LabConfig, LabRuntime};
 pub use remote::{
-    CancelRequest, CompensationResult, ComputationName, DedupDecision, IdempotencyKey,
-    IdempotencyRecord, IdempotencyRequestFingerprint, IdempotencyStore, Lease, LeaseError,
-    LeaseRenewal, LeaseState, NodeId, Phase0RemoteFailure, Phase0RetryPolicy,
-    Phase0SimulationConfig, RemoteCap, RemoteComputationDispatchError, RemoteComputationFuture,
-    RemoteComputationInvocation, RemoteComputationRegistry, RemoteError, RemoteHandle,
-    RemoteMessage, RemoteOutcome, RemotePeerAdmissionError, RemotePeerAdmissionPolicy,
-    RemotePeerHello, RemotePeerSession, RemoteProtocolVersion, RemoteTaskId, ResultDelivery, Saga,
-    SagaState, SagaStepError, SpawnAck, SpawnAckStatus, SpawnRejectReason, SpawnRequest,
-    spawn_remote,
+    CancelRequest, CompensationResult, ComputationName, DEFAULT_REMOTE_SERVICE_MAX_FRAME_BYTES,
+    DedupDecision, IdempotencyKey, IdempotencyRecord, IdempotencyRequestFingerprint,
+    IdempotencyStore, Lease, LeaseError, LeaseRenewal, LeaseState, NodeId, Phase0RemoteFailure,
+    Phase0RetryPolicy, Phase0SimulationConfig, RemoteCap, RemoteComputationDispatchError,
+    RemoteComputationFuture, RemoteComputationInvocation, RemoteComputationRegistry,
+    RemoteComputationServiceError, RemoteError, RemoteHandle, RemoteMessage, RemoteOutcome,
+    RemotePeerAdmissionError, RemotePeerAdmissionPolicy, RemotePeerHello, RemotePeerSession,
+    RemoteProtocolVersion, RemoteServiceRejectionCode, RemoteServiceWireLimits,
+    RemoteServiceWireOutcome, RemoteServiceWireRequest, RemoteServiceWireResponse, RemoteTaskId,
+    ResultDelivery, Saga, SagaState, SagaStepError, SpawnAck, SpawnAckStatus, SpawnRejectReason,
+    SpawnRequest, spawn_remote,
 };
+#[cfg(feature = "tls")]
+pub use remote::{call_tls_computation_once, serve_tls_computation_once};
 pub use types::{
     Budget, CancelKind, CancelReason, CapabilityBudget, CapabilityBudgetDimension,
     CapabilityBudgetRefusal, CapabilityBudgetRequirements, DeserializationError, Deserializer,

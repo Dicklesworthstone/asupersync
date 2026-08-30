@@ -22,11 +22,16 @@
 //! - the capability, region-ownership, and idempotency rules for remote work
 //! - the deterministic no-runtime fallback used when no [`RemoteRuntime`] is attached
 //!
-//! The core crate does not embed a production network backend here. Transport is
-//! injected through [`RemoteRuntime`] / [`RemoteTransport`], so deterministic lab
-//! harnesses and later real transports share the same protocol and lifecycle rules.
+//! Outbound lifecycle integration remains injected through [`RemoteRuntime`] /
+//! [`RemoteTransport`], so deterministic lab harnesses and real transports share
+//! the same protocol rules. With the `tls` feature, this module also exposes a
+//! bounded one-shot service adapter for executing one authenticated named
+//! computation over an already-established TLS stream. That adapter does not
+//! yet provide retry deduplication, lease enforcement, or listener lifecycle.
 
 use crate::channel::oneshot;
+#[cfg(feature = "tls")]
+use crate::codec::{Framed, LengthDelimitedCodec};
 use crate::cx::Cx;
 use crate::distributed::membership::{LeaseAction, MembershipLeaseReactor, MembershipView};
 use crate::distributed::{
@@ -37,10 +42,15 @@ use crate::trace::distributed::{LogicalClockHandle, LogicalTime};
 use crate::types::outcome::Outcome;
 use crate::types::{Budget, CancelReason, ObligationId, RegionId, TaskId, Time};
 use crate::util::det_hash::DetHashMap;
+#[cfg(feature = "tls")]
+use crate::{bytes::BytesMut, io::AsyncRead, io::AsyncWrite, stream::StreamExt};
+#[cfg(feature = "tls")]
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::future::Future;
+use std::io;
 use std::marker::PhantomData;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -2662,11 +2672,14 @@ impl std::error::Error for RemoteComputationDispatchError {
 
 /// Executable, schema-identified registry for remote named computations.
 ///
-/// Registration couples every handler to an input/output schema pair, so the
-/// same complete registry fingerprint used during peer negotiation describes
-/// the code-selection surface that can actually run. Dispatch requires an
-/// immutable admitted session and supplies an explicit [`Cx`] clone to the
-/// handler. The registry does not spawn tasks or provide ambient authority.
+/// Registration couples every handler name to a declared input/output schema
+/// pair, so the complete registry fingerprint used during peer negotiation
+/// describes the code-selection surface that can actually run. The handler is
+/// still responsible for enforcing those declared schemas when it decodes and
+/// encodes its raw bytes; registration does not silently choose a codec.
+/// Dispatch requires an immutable admitted session and supplies an explicit
+/// [`Cx`] clone to the handler. The registry does not spawn tasks or provide
+/// ambient authority.
 #[derive(Clone, Default)]
 pub struct RemoteComputationRegistry {
     schemas: ComputationSchemaRegistry,
@@ -2761,6 +2774,499 @@ impl RemoteComputationRegistry {
             .await
             .map_err(RemoteComputationDispatchError::Execution)
     }
+}
+
+/// Default maximum encoded request or response frame for the remote service.
+pub const DEFAULT_REMOTE_SERVICE_MAX_FRAME_BYTES: usize = 64 * 1024;
+
+/// Bounded framing policy for one authenticated remote-service exchange.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RemoteServiceWireLimits {
+    max_frame_bytes: usize,
+}
+
+impl RemoteServiceWireLimits {
+    /// Creates a framing policy with the supplied encoded-frame limit.
+    #[must_use]
+    pub const fn new(max_frame_bytes: usize) -> Self {
+        Self { max_frame_bytes }
+    }
+
+    /// Maximum encoded request or response bytes, excluding the length prefix.
+    #[must_use]
+    pub const fn max_frame_bytes(self) -> usize {
+        self.max_frame_bytes
+    }
+}
+
+impl Default for RemoteServiceWireLimits {
+    fn default() -> Self {
+        Self::new(DEFAULT_REMOTE_SERVICE_MAX_FRAME_BYTES)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct RemoteServiceWireBudget {
+    deadline_nanos: Option<u64>,
+    poll_quota: u32,
+    cost_quota: Option<u64>,
+    priority: u8,
+}
+
+impl From<Budget> for RemoteServiceWireBudget {
+    fn from(budget: Budget) -> Self {
+        Self {
+            deadline_nanos: budget.deadline.map(Time::as_nanos),
+            poll_quota: budget.poll_quota,
+            cost_quota: budget.cost_quota,
+            priority: budget.priority,
+        }
+    }
+}
+
+impl From<RemoteServiceWireBudget> for Budget {
+    fn from(budget: RemoteServiceWireBudget) -> Self {
+        Self {
+            deadline: budget.deadline_nanos.map(Time::from_nanos),
+            poll_quota: budget.poll_quota,
+            cost_quota: budget.cost_quota,
+            priority: budget.priority,
+        }
+    }
+}
+
+/// Stable wire request for one authenticated named computation.
+///
+/// The authenticated origin is carried only in `hello`; the service rebuilds
+/// [`SpawnRequest::origin_node`] from the admitted session instead of trusting
+/// a second caller-controlled identity field. Runtime-local region and task IDs
+/// retain their type-tagged serde representation.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteServiceWireRequest {
+    hello: RemotePeerHello,
+    remote_task_id: u64,
+    computation: String,
+    input: Vec<u8>,
+    lease_secs: u64,
+    lease_subsec_nanos: u32,
+    idempotency_key_high: u64,
+    idempotency_key_low: u64,
+    budget: Option<RemoteServiceWireBudget>,
+    origin_region: RegionId,
+    origin_task: TaskId,
+}
+
+impl RemoteServiceWireRequest {
+    /// Builds a wire request after checking the asserted hello identity agrees
+    /// with the local spawn request.
+    pub fn from_spawn_request(
+        hello: RemotePeerHello,
+        request: &SpawnRequest,
+    ) -> Result<Self, RemoteComputationServiceError> {
+        if hello.peer_node() != &request.origin_node {
+            return Err(RemoteComputationServiceError::OriginIdentityMismatch {
+                hello_peer: hello.peer_node().clone(),
+                request_origin: request.origin_node.clone(),
+            });
+        }
+        let idempotency_key = request.idempotency_key.raw();
+        let idempotency_key_high = u64::try_from(idempotency_key >> 64)
+            .expect("right-shifted u128 idempotency key fits u64");
+        let idempotency_key_low = u64::try_from(idempotency_key & u128::from(u64::MAX))
+            .expect("masked u128 idempotency key fits u64");
+        Ok(Self {
+            hello,
+            remote_task_id: request.remote_task_id.raw(),
+            computation: request.computation.as_str().to_owned(),
+            input: request.input.data().to_vec(),
+            lease_secs: request.lease.as_secs(),
+            lease_subsec_nanos: request.lease.subsec_nanos(),
+            idempotency_key_high,
+            idempotency_key_low,
+            budget: request.budget.map(Into::into),
+            origin_region: request.origin_region,
+            origin_task: request.origin_task,
+        })
+    }
+
+    /// Peer negotiation metadata presented on the authenticated stream.
+    #[must_use]
+    pub const fn hello(&self) -> &RemotePeerHello {
+        &self.hello
+    }
+
+    /// Correlation ID supplied by this delivery attempt.
+    #[must_use]
+    pub const fn remote_task_id(&self) -> RemoteTaskId {
+        RemoteTaskId::from_raw(self.remote_task_id)
+    }
+
+    #[cfg(feature = "tls")]
+    fn into_spawn_request(self) -> Result<SpawnRequest, String> {
+        if self.lease_subsec_nanos >= 1_000_000_000 {
+            return Err(format!(
+                "remote service lease nanoseconds must be below 1000000000, got {}",
+                self.lease_subsec_nanos
+            ));
+        }
+        let origin_node = self.hello.peer_node().clone();
+        let idempotency_key =
+            (u128::from(self.idempotency_key_high) << 64) | u128::from(self.idempotency_key_low);
+        Ok(SpawnRequest {
+            remote_task_id: RemoteTaskId::from_raw(self.remote_task_id),
+            computation: ComputationName::new(self.computation),
+            input: RemoteInput::new(self.input),
+            lease: Duration::new(self.lease_secs, self.lease_subsec_nanos),
+            idempotency_key: IdempotencyKey::from_raw(idempotency_key),
+            budget: self.budget.map(Into::into),
+            origin_node,
+            origin_region: self.origin_region,
+            origin_task: self.origin_task,
+        })
+    }
+}
+
+/// Stable terminal-outcome representation used by the remote-service adapter.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "outcome", content = "value", rename_all = "snake_case")]
+pub enum RemoteServiceWireOutcome {
+    /// Handler returned serialized output bytes.
+    Success(Vec<u8>),
+    /// Handler returned an application failure.
+    Failed(String),
+    /// Handler completed through cancellation.
+    Cancelled(CancelReason),
+    /// Handler reported a panic boundary.
+    Panicked(String),
+}
+
+impl From<RemoteOutcome> for RemoteServiceWireOutcome {
+    fn from(outcome: RemoteOutcome) -> Self {
+        match outcome {
+            RemoteOutcome::Success(payload) => Self::Success(payload),
+            RemoteOutcome::Failed(message) => Self::Failed(message),
+            RemoteOutcome::Cancelled(reason) => Self::Cancelled(reason),
+            RemoteOutcome::Panicked(message) => Self::Panicked(message),
+        }
+    }
+}
+
+impl From<RemoteServiceWireOutcome> for RemoteOutcome {
+    fn from(outcome: RemoteServiceWireOutcome) -> Self {
+        match outcome {
+            RemoteServiceWireOutcome::Success(payload) => Self::Success(payload),
+            RemoteServiceWireOutcome::Failed(message) => Self::Failed(message),
+            RemoteServiceWireOutcome::Cancelled(reason) => Self::Cancelled(reason),
+            RemoteServiceWireOutcome::Panicked(message) => Self::Panicked(message),
+        }
+    }
+}
+
+/// Machine-readable refusal category returned before a handler result exists.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteServiceRejectionCode {
+    /// TLS identity, protocol version, registry identity, or peer grant failed.
+    AdmissionDenied,
+    /// The admission policy and executable handler registry do not match.
+    ExecutableRegistryDrift,
+    /// The admitted peer lacks capability for the requested computation.
+    ComputationDenied,
+    /// A decoded request contained invalid protocol field values.
+    MalformedRequest,
+    /// The selected handler returned a runtime execution error.
+    ExecutionFailed,
+}
+
+/// One fully flushed outcome or fail-closed refusal from the remote service.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "response", rename_all = "snake_case")]
+pub enum RemoteServiceWireResponse {
+    /// Authorized handler reached a terminal outcome.
+    Outcome {
+        /// Correlation ID supplied by the request.
+        remote_task_id: u64,
+        /// Serialized terminal outcome.
+        outcome: RemoteServiceWireOutcome,
+    },
+    /// Request was refused before a terminal handler outcome existed.
+    Rejected {
+        /// Correlation ID supplied by the request.
+        remote_task_id: u64,
+        /// Stable rejection category.
+        code: RemoteServiceRejectionCode,
+        /// Human-readable diagnostic; callers must branch on `code`.
+        diagnostic: String,
+    },
+}
+
+impl RemoteServiceWireResponse {
+    /// Correlation ID supplied by the request.
+    #[must_use]
+    pub const fn remote_task_id(&self) -> RemoteTaskId {
+        let raw = match self {
+            Self::Outcome { remote_task_id, .. } | Self::Rejected { remote_task_id, .. } => {
+                *remote_task_id
+            }
+        };
+        RemoteTaskId::from_raw(raw)
+    }
+}
+
+/// Local failure while constructing or transporting a remote-service exchange.
+#[derive(Debug)]
+pub enum RemoteComputationServiceError {
+    /// A zero-byte frame limit cannot admit any encoded request.
+    InvalidFrameLimit,
+    /// Client hello and spawn metadata asserted different logical origins.
+    OriginIdentityMismatch {
+        /// Origin asserted by the peer hello.
+        hello_peer: NodeId,
+        /// Origin carried by the spawn request.
+        request_origin: NodeId,
+    },
+    /// Established transport failed while reading or fully flushing a frame.
+    Transport(io::Error),
+    /// Tagged request or response could not be serialized or decoded.
+    Serialization(serde_json::Error),
+    /// An encoded outbound frame exceeded the configured byte limit.
+    FrameTooLarge {
+        /// Maximum encoded bytes permitted for this exchange.
+        max_frame_bytes: usize,
+    },
+    /// Peer closed the stream before one complete frame arrived.
+    UnexpectedEof,
+}
+
+impl fmt::Display for RemoteComputationServiceError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidFrameLimit => write!(f, "remote service frame limit must be nonzero"),
+            Self::OriginIdentityMismatch {
+                hello_peer,
+                request_origin,
+            } => write!(
+                f,
+                "remote service origin mismatch: hello {hello_peer}, request {request_origin}"
+            ),
+            Self::Transport(error) => write!(f, "remote service transport error: {error}"),
+            Self::Serialization(error) => {
+                write!(f, "remote service serialization error: {error}")
+            }
+            Self::FrameTooLarge { max_frame_bytes } => write!(
+                f,
+                "remote service encoded frame exceeds {max_frame_bytes}-byte limit"
+            ),
+            Self::UnexpectedEof => write!(f, "remote service peer closed before a complete frame"),
+        }
+    }
+}
+
+impl std::error::Error for RemoteComputationServiceError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Transport(error) => Some(error),
+            Self::Serialization(error) => Some(error),
+            Self::InvalidFrameLimit
+            | Self::OriginIdentityMismatch { .. }
+            | Self::FrameTooLarge { .. }
+            | Self::UnexpectedEof => None,
+        }
+    }
+}
+
+#[cfg(feature = "tls")]
+struct RemoteServiceFrameWriter {
+    encoded: Vec<u8>,
+    max_frame_bytes: usize,
+    exceeded: bool,
+}
+
+#[cfg(feature = "tls")]
+impl RemoteServiceFrameWriter {
+    fn new(max_frame_bytes: usize) -> Self {
+        Self {
+            encoded: Vec::new(),
+            max_frame_bytes,
+            exceeded: false,
+        }
+    }
+
+    fn into_encoded(self) -> Vec<u8> {
+        self.encoded
+    }
+}
+
+#[cfg(feature = "tls")]
+impl io::Write for RemoteServiceFrameWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if bytes.len() > self.max_frame_bytes.saturating_sub(self.encoded.len()) {
+            self.exceeded = true;
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "remote service encoded frame exceeds configured limit",
+            ));
+        }
+        self.encoded.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+#[cfg(feature = "tls")]
+fn remote_service_framed<'a, IO>(
+    stream: &'a mut crate::tls::TlsStream<IO>,
+    limits: RemoteServiceWireLimits,
+) -> Result<
+    Framed<&'a mut crate::tls::TlsStream<IO>, LengthDelimitedCodec>,
+    RemoteComputationServiceError,
+> {
+    if limits.max_frame_bytes == 0 {
+        return Err(RemoteComputationServiceError::InvalidFrameLimit);
+    }
+    let codec = LengthDelimitedCodec::builder()
+        .max_frame_length(limits.max_frame_bytes)
+        .big_endian()
+        .new_codec();
+    Ok(Framed::new(stream, codec).with_max_buffer_len(limits.max_frame_bytes.saturating_add(4)))
+}
+
+#[cfg(feature = "tls")]
+async fn read_remote_service_frame<T, IO>(
+    _cx: &Cx,
+    framed: &mut Framed<&mut crate::tls::TlsStream<IO>, LengthDelimitedCodec>,
+) -> Result<T, RemoteComputationServiceError>
+where
+    IO: AsyncRead + AsyncWrite + Unpin,
+    T: DeserializeOwned,
+{
+    let frame = framed
+        .next()
+        .await
+        .ok_or(RemoteComputationServiceError::UnexpectedEof)?
+        .map_err(RemoteComputationServiceError::Transport)?;
+    serde_json::from_slice(&frame).map_err(RemoteComputationServiceError::Serialization)
+}
+
+#[cfg(feature = "tls")]
+async fn write_remote_service_frame<T, IO>(
+    _cx: &Cx,
+    framed: &mut Framed<&mut crate::tls::TlsStream<IO>, LengthDelimitedCodec>,
+    value: &T,
+    max_frame_bytes: usize,
+) -> Result<(), RemoteComputationServiceError>
+where
+    IO: AsyncRead + AsyncWrite + Unpin,
+    T: Serialize + ?Sized,
+{
+    let mut writer = RemoteServiceFrameWriter::new(max_frame_bytes);
+    if let Err(error) = serde_json::to_writer(&mut writer, value) {
+        if writer.exceeded {
+            return Err(RemoteComputationServiceError::FrameTooLarge { max_frame_bytes });
+        }
+        return Err(RemoteComputationServiceError::Serialization(error));
+    }
+    let encoded = writer.into_encoded();
+    framed
+        .send(BytesMut::from(encoded.as_slice()))
+        .map_err(RemoteComputationServiceError::Transport)?;
+    std::future::poll_fn(|task_cx| framed.poll_flush(task_cx))
+        .await
+        .map_err(RemoteComputationServiceError::Transport)
+}
+
+/// Executes one bounded authenticated named computation over established TLS.
+///
+/// The caller owns the TLS handshake and the connection lifetime. This adapter
+/// reads exactly one length-delimited tagged request, binds its hello to the
+/// verified peer certificate, refuses policy/handler-registry drift, awaits the
+/// selected handler inline under `cx`, and returns only after its tagged response
+/// is fully flushed. It never spawns or detaches work. This one-shot adapter
+/// deliberately does not consume the request's idempotency, lease, or budget
+/// metadata; callers must not retry it as an exactly-once lifecycle service.
+#[cfg(feature = "tls")]
+pub async fn serve_tls_computation_once<IO>(
+    cx: &Cx,
+    stream: &mut crate::tls::TlsStream<IO>,
+    policy: &RemotePeerAdmissionPolicy,
+    computations: &RemoteComputationRegistry,
+    limits: RemoteServiceWireLimits,
+) -> Result<RemoteServiceWireResponse, RemoteComputationServiceError>
+where
+    IO: AsyncRead + AsyncWrite + Unpin,
+{
+    let mut framed = remote_service_framed(stream, limits)?;
+    let wire_request: RemoteServiceWireRequest = read_remote_service_frame(cx, &mut framed).await?;
+    let remote_task_id = wire_request.remote_task_id;
+    let response = match policy.admit_tls_peer(wire_request.hello(), &**framed.get_ref()) {
+        Err(error) => RemoteServiceWireResponse::Rejected {
+            remote_task_id,
+            code: RemoteServiceRejectionCode::AdmissionDenied,
+            diagnostic: error.to_string(),
+        },
+        Ok(session)
+            if session.registry_fingerprint() != computations.schema_registry().fingerprint() =>
+        {
+            RemoteServiceWireResponse::Rejected {
+                remote_task_id,
+                code: RemoteServiceRejectionCode::ExecutableRegistryDrift,
+                diagnostic: "admission policy registry differs from executable registry".to_owned(),
+            }
+        }
+        Ok(session) => match wire_request.into_spawn_request() {
+            Err(diagnostic) => RemoteServiceWireResponse::Rejected {
+                remote_task_id,
+                code: RemoteServiceRejectionCode::MalformedRequest,
+                diagnostic,
+            },
+            Ok(request) => match computations.dispatch(cx, &session, request).await {
+                Ok(outcome) => RemoteServiceWireResponse::Outcome {
+                    remote_task_id,
+                    outcome: outcome.into(),
+                },
+                Err(RemoteComputationDispatchError::Admission(error)) => {
+                    RemoteServiceWireResponse::Rejected {
+                        remote_task_id,
+                        code: RemoteServiceRejectionCode::ComputationDenied,
+                        diagnostic: error.to_string(),
+                    }
+                }
+                Err(RemoteComputationDispatchError::Execution(error)) => {
+                    RemoteServiceWireResponse::Rejected {
+                        remote_task_id,
+                        code: RemoteServiceRejectionCode::ExecutionFailed,
+                        diagnostic: error.to_string(),
+                    }
+                }
+            },
+        },
+    };
+    write_remote_service_frame(cx, &mut framed, &response, limits.max_frame_bytes()).await?;
+    Ok(response)
+}
+
+/// Sends one bounded request and awaits its fully decoded TLS response.
+///
+/// This is the client half of [`serve_tls_computation_once`]. The caller owns
+/// handshake, timeout, and connection reuse policy. Retrying after an ambiguous
+/// delivery can execute the handler again until the lifecycle service adds
+/// peer-scoped idempotency.
+#[cfg(feature = "tls")]
+pub async fn call_tls_computation_once<IO>(
+    cx: &Cx,
+    stream: &mut crate::tls::TlsStream<IO>,
+    request: &RemoteServiceWireRequest,
+    limits: RemoteServiceWireLimits,
+) -> Result<RemoteServiceWireResponse, RemoteComputationServiceError>
+where
+    IO: AsyncRead + AsyncWrite + Unpin,
+{
+    let mut framed = remote_service_framed(stream, limits)?;
+    write_remote_service_frame(cx, &mut framed, request, limits.max_frame_bytes()).await?;
+    read_remote_service_frame(cx, &mut framed).await
 }
 
 /// Envelope for protocol messages with logical time metadata.
