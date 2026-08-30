@@ -45,7 +45,7 @@ pub(super) const PROVENANCE: OracleProvenance = OracleProvenance {
     official_go_commit: "c1eebf38bd8b1b1021b45b5f8f403052ac042dc5",
     official_go_license_spdx: "Apache-2.0",
     license_blob_git_sha: "261eeb9e9f8b2b4b0d119366dda99c6fd7d35c64",
-    normative_artifact_sha256: "e8c800a2b71bde796fc1371e98e30bed355cec64e9b01cc3058b9519ebdfdb98",
+    normative_artifact_sha256: "564d13e8c12297344fe9736d29f8a90282c21d7cce50f36ffe799edabd8bbe09",
     independent_rows_sha256: "5e6026c0aa5e2f833c3cbc5cb2cd2e12c50cb9f2797324a8e3f18411f3b8f726",
     private_rows_sha256: "8ecb645e10141193cef4fd2a6f9877b3949df4e8c4d70057853e61f0ff24d868",
     official_rows_sha256: "bc0d8a282b54779e0de7e4c9b387ce468a3915305fbcc2a17a24485443da6296",

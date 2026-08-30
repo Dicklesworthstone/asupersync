@@ -1052,11 +1052,11 @@
   "source_pins": [
     {
       "path": "Cargo.toml",
-      "sha256": "914cb85f3b3ef24c06e41f332cb21c2361163c99c186d4a8234b237323792b2b"
+      "sha256": "0f02e4fefedf5e9013054df794ece6f8fb259134fdbd95376e61d486c043fde3"
     },
     {
       "path": "Cargo.lock",
-      "sha256": "dc66ff7b4e6d1e75fac66fad2f90f528019a4da55e6012714160e158cc63d236"
+      "sha256": "513cfba8f8671e69aab32317e042bd00737b9bfb30e2234012d6605f320f7a6a"
     },
     {
       "path": "src/types/mod.rs",
@@ -1200,7 +1200,7 @@
     },
     {
       "path": "scripts/run_dependency_sovereignty_e2e.sh",
-      "sha256": "c2c112d25a005800549df4ed4e5d32b6e8a2c05c4e9045557b074e5740d170d9"
+      "sha256": "b2d7894ca7412f96602389a591186acf665698416aeebf4989c53f281300f72b"
     },
     {
       "path": "tests/raptorq_journal_kill_recover_replay_e2e.rs",
@@ -1240,7 +1240,7 @@
     },
     {
       "path": "artifacts/dependency_api_adr_registry_v1.json",
-      "sha256": "4765bb6d17b676fd63529ee75047477656851474300601e05cbc5492b32f9dbc"
+      "sha256": "aba29040cbbcc6daba7166bbe0a3eacca1483b4c4522125bd5d93f6c0091d3d1"
     }
   ],
   "unknown_blockers": [],
