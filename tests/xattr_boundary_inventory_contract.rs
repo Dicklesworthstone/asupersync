@@ -495,6 +495,14 @@ fn marginal_graph_proves_xattr_is_not_the_last_rustix_parent() {
 #[test]
 fn source_topology_matches_the_exact_call_and_policy_inventory() {
     let metadata = read_repo_file(METADATA_SOURCE_PATH);
+    // Count production call sites only: the in-file `#[cfg(test)]` module
+    // legitimately exercises xattr APIs in test fixtures (for example the
+    // FIFO symlink-swap assertion at the end of the file), and the artifact
+    // census tracks those under test scope rather than as production calls.
+    let production = metadata
+        .split("#[cfg(test)]")
+        .next()
+        .expect("production prefix before the test module");
     for (marker, count) in [
         ("xattr::list_deref(", 1),
         ("xattr::list(", 1),
@@ -503,7 +511,7 @@ fn source_topology_matches_the_exact_call_and_policy_inventory() {
         ("xattr::set(", 1),
     ] {
         assert_eq!(
-            metadata.matches(marker).count(),
+            production.matches(marker).count(),
             count,
             "production call count drifted for {marker}"
         );
