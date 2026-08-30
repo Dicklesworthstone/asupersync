@@ -1827,8 +1827,8 @@
       },
       {
         "path": "scripts/run_dependency_sovereignty_e2e.sh",
-        "sha256": "c2c112d25a005800549df4ed4e5d32b6e8a2c05c4e9045557b074e5740d170d9",
-        "line_count": 1350
+        "sha256": "b2d7894ca7412f96602389a591186acf665698416aeebf4989c53f281300f72b",
+        "line_count": 1869
       }
     ],
     "aggregate_matrix": {
