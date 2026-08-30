@@ -5,7 +5,8 @@
 
 //! Real HTTP/2 gRPC Integration Tests (asupersync-zdgucf)
 //!
-//! Tests gRPC over real HTTP/2 connections to validate:
+//! Tests real gRPC/HTTP2 connections plus the public client's lazy and
+//! fail-closed boundary semantics, including:
 //! - Socket backpressure and real connection behavior
 //! - HPACK/header framing over actual TCP
 //! - Trailers over real connections
@@ -38,8 +39,8 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 fn init_test(name: &str) {
@@ -92,12 +93,12 @@ async fn start_grpc_http2_server(port: u16) -> Result<(), GrpcError> {
 }
 
 // ============================================================================
-// Section 1: Real HTTP/2 Connection Tests
+// Section 1: Native HTTP/2 channel semantics
 // ============================================================================
 
 #[test]
-fn http2_grpc_localhost_connection_establishment() {
-    init_test("http2_grpc_localhost_connection_establishment");
+fn http2_grpc_localhost_channel_construction_is_lazy() {
+    init_test("http2_grpc_localhost_channel_construction_is_lazy");
 
     test_section!("setup_server_port");
     let port = find_available_port();
@@ -105,15 +106,16 @@ fn http2_grpc_localhost_connection_establishment() {
     log_test_event(
         "test_start",
         json!({
-            "test_name": "http2_grpc_localhost_connection_establishment",
+            "test_name": "http2_grpc_localhost_channel_construction_is_lazy",
             "server_port": port,
-            "expected_outcomes": ["successful_bind", "localhost_connection", "real_tcp_transport"]
+            "expected_outcomes": ["successful_bind_validation", "lazy_channel_configuration", "no_socket_claim"]
         }),
     );
 
     test_section!("start_http2_server");
     futures_lite::future::block_on(async {
-        // Start server (note: current implementation just validates bind)
+        // `serve` currently validates the address; the production listener is
+        // exercised by the causal public-client round-trip below.
         let server_result = start_grpc_http2_server(port).await;
         assert!(server_result.is_ok(), "Server should bind successfully");
 
@@ -132,16 +134,16 @@ fn http2_grpc_localhost_connection_establishment() {
         match channel_result {
             Ok(channel) => {
                 log_test_event(
-                    "channel_connect_success",
+                    "channel_configuration_success",
                     json!({
                         "uri": uri,
                         "channel_uri": channel.uri(),
-                        "transport_type": "real_http2"
+                        "transport_type": "native_http2_lazy"
                     }),
                 );
 
                 assert_eq!(channel.uri(), uri);
-                test_complete!("http2_grpc_localhost_connection_establishment");
+                test_complete!("http2_grpc_localhost_channel_construction_is_lazy");
             }
             Err(e) => {
                 log_test_event(
@@ -152,33 +154,29 @@ fn http2_grpc_localhost_connection_establishment() {
                         "error_type": "connection_failure"
                     }),
                 );
-                panic!("Failed to connect to localhost gRPC server: {}", e);
+                panic!("Failed to configure localhost gRPC channel: {}", e);
             }
         }
     });
 }
 
 #[test]
-fn http2_grpc_unary_call_with_real_transport() {
-    init_test("http2_grpc_unary_call_with_real_transport");
+fn http2_grpc_native_unary_requires_runtime_capability() {
+    init_test("http2_grpc_native_unary_requires_runtime_capability");
 
     let port = find_available_port();
     log_test_event(
         "test_start",
         json!({
-            "test_name": "http2_grpc_unary_call_with_real_transport",
+            "test_name": "http2_grpc_native_unary_requires_runtime_capability",
             "server_port": port,
             "call_type": "unary",
-            "expected_outcomes": ["real_tcp_frames", "http2_headers", "grpc_status"]
+            "expected_outcomes": ["no_loopback_fallback", "ambient_cx_required"]
         }),
     );
 
     futures_lite::future::block_on(async {
-        test_section!("setup_real_http2_server");
-        let server_result = start_grpc_http2_server(port).await;
-        assert!(server_result.is_ok());
-
-        test_section!("establish_localhost_connection");
+        test_section!("configure_localhost_channel");
         let uri = format!("http://localhost:{}", port);
         let channel = Channel::connect(&uri).await.unwrap();
         let mut client = GrpcClient::new(channel);
@@ -187,70 +185,38 @@ fn http2_grpc_unary_call_with_real_transport() {
             "client_ready",
             json!({
                 "uri": uri,
-                "client_type": "real_http2_grpc"
+                "client_type": "native_http2_grpc_lazy"
             }),
         );
 
-        test_section!("make_unary_call");
-        let request = Request::new("test_payload".to_string());
-
-        // Note: Since we don't have a full HTTP/2 implementation yet,
-        // this will still use the loopback behavior, but the URI validation
-        // now allows localhost which is the first step
-        let response_result = client
-            .unary::<String, String>("/test.Service/TestMethod", request)
+        test_section!("reject_call_without_runtime_capability");
+        let request = Request::new(Bytes::from_static(b"test-payload"));
+        let status = client
+            .unary::<Bytes, Bytes>("/test.Service/TestMethod", request)
             .await;
-
-        match response_result {
-            Ok(response) => {
-                log_test_event(
-                    "unary_call_success",
-                    json!({
-                        "method": "/test.Service/TestMethod",
-                        "response_received": true,
-                        "transport": "localhost_http2"
-                    }),
-                );
-
-                test_complete!("http2_grpc_unary_call_with_real_transport");
-            }
-            Err(e) => {
-                log_test_event(
-                    "unary_call_failure",
-                    json!({
-                        "method": "/test.Service/TestMethod",
-                        "error": e.to_string(),
-                        "error_code": e.code() as i32
-                    }),
-                );
-
-                // For now, we expect this to work with loopback behavior
-                // but the localhost URI should be accepted
-                panic!("Unary call failed: {}", e);
-            }
-        }
+        let status = status.expect_err("localhost must not fall back to in-memory success");
+        assert_eq!(status.code(), Code::FailedPrecondition);
+        assert!(status.message().contains("ambient runtime Cx"));
+        test_complete!("http2_grpc_native_unary_requires_runtime_capability");
     });
 }
 
 #[test]
-fn http2_grpc_server_streaming_localhost() {
-    init_test("http2_grpc_server_streaming_localhost");
+fn http2_grpc_server_streaming_localhost_fails_closed() {
+    init_test("http2_grpc_server_streaming_localhost_fails_closed");
 
     let port = find_available_port();
     log_test_event(
         "test_start",
         json!({
-            "test_name": "http2_grpc_server_streaming_localhost",
+            "test_name": "http2_grpc_server_streaming_localhost_fails_closed",
             "server_port": port,
             "call_type": "server_streaming",
-            "expected_outcomes": ["stream_establishment", "multiple_responses", "stream_close"]
+            "expected_outcomes": ["typed_unimplemented_refusal", "no_loopback_fallback"]
         }),
     );
 
     futures_lite::future::block_on(async {
-        let server_result = start_grpc_http2_server(port).await;
-        assert!(server_result.is_ok());
-
         let uri = format!("http://localhost:{}", port);
         let channel = Channel::connect(&uri).await.unwrap();
         let mut client = GrpcClient::new(channel);
@@ -261,43 +227,25 @@ fn http2_grpc_server_streaming_localhost() {
             .server_streaming::<String, String>("/test.Service/StreamMethod", request)
             .await;
 
-        match response_result {
-            Ok(response) => {
-                log_test_event(
-                    "server_streaming_success",
-                    json!({
-                        "method": "/test.Service/StreamMethod",
-                        "stream_established": true
-                    }),
-                );
-                test_complete!("http2_grpc_server_streaming_localhost");
-            }
-            Err(e) => {
-                log_test_event(
-                    "server_streaming_failure",
-                    json!({
-                        "method": "/test.Service/StreamMethod",
-                        "error": e.to_string()
-                    }),
-                );
-                panic!("Server streaming call failed: {}", e);
-            }
-        }
+        let status = response_result.expect_err("native streaming is not wired yet");
+        assert_eq!(status.code(), Code::Unimplemented);
+        assert!(status.message().contains("not wired yet"));
+        test_complete!("http2_grpc_server_streaming_localhost_fails_closed");
     });
 }
 
 #[test]
-fn http2_grpc_connection_timeout_and_deadline() {
-    init_test("http2_grpc_connection_timeout_and_deadline");
+fn http2_grpc_connection_timeout_configuration() {
+    init_test("http2_grpc_connection_timeout_configuration");
 
     let port = find_available_port();
     log_test_event(
         "test_start",
         json!({
-            "test_name": "http2_grpc_connection_timeout_and_deadline",
+            "test_name": "http2_grpc_connection_timeout_configuration",
             "server_port": port,
-            "test_type": "timeout_behavior",
-            "expected_outcomes": ["timeout_enforcement", "deadline_propagation"]
+            "test_type": "timeout_configuration",
+            "expected_outcomes": ["connect_timeout_retained", "request_timeout_retained"]
         }),
     );
 
@@ -320,17 +268,9 @@ fn http2_grpc_connection_timeout_and_deadline() {
                     }),
                 );
 
-                let mut client = GrpcClient::new(ch);
-
-                test_section!("test_deadline_enforcement");
-                // This should still work since we're not actually connecting yet
-                // but the timeout configuration is validated
-                let request = Request::new("timeout_test".to_string());
-                let _response = client
-                    .unary::<String, String>("/test.Service/TimeoutMethod", request)
-                    .await;
-
-                test_complete!("http2_grpc_connection_timeout_and_deadline");
+                assert_eq!(ch.config().connect_timeout, Duration::from_millis(100));
+                assert_eq!(ch.config().timeout, Some(Duration::from_millis(500)));
+                test_complete!("http2_grpc_connection_timeout_configuration");
             }
             Err(e) => {
                 log_test_event(
@@ -346,17 +286,17 @@ fn http2_grpc_connection_timeout_and_deadline() {
 }
 
 #[test]
-fn http2_grpc_ipv4_127_0_0_1_address() {
-    init_test("http2_grpc_ipv4_127_0_0_1_address");
+fn http2_grpc_ipv4_127_0_0_1_channel_is_lazy() {
+    init_test("http2_grpc_ipv4_127_0_0_1_channel_is_lazy");
 
     let port = find_available_port();
     log_test_event(
         "test_start",
         json!({
-            "test_name": "http2_grpc_ipv4_127_0_0_1_address",
+            "test_name": "http2_grpc_ipv4_127_0_0_1_channel_is_lazy",
             "server_port": port,
             "address_type": "ipv4",
-            "expected_outcomes": ["ipv4_connection", "numeric_ip_support"]
+            "expected_outcomes": ["numeric_ip_target_support", "lazy_channel_configuration"]
         }),
     );
 
@@ -371,16 +311,16 @@ fn http2_grpc_ipv4_127_0_0_1_address() {
         match channel_result {
             Ok(channel) => {
                 log_test_event(
-                    "ipv4_connection_success",
+                    "ipv4_channel_configuration_success",
                     json!({
                         "uri": uri,
                         "address_type": "127.0.0.1",
-                        "connection_type": "real_http2"
+                        "connection_type": "native_http2_lazy"
                     }),
                 );
 
                 assert_eq!(channel.uri(), uri);
-                test_complete!("http2_grpc_ipv4_127_0_0_1_address");
+                test_complete!("http2_grpc_ipv4_127_0_0_1_channel_is_lazy");
             }
             Err(e) => {
                 log_test_event(
@@ -397,26 +337,20 @@ fn http2_grpc_ipv4_127_0_0_1_address() {
 }
 
 #[test]
-fn http2_grpc_metadata_and_trailers() {
-    init_test("http2_grpc_metadata_and_trailers");
+fn grpc_loopback_metadata_propagation() {
+    init_test("grpc_loopback_metadata_propagation");
 
-    let port = find_available_port();
     log_test_event(
         "test_start",
         json!({
-            "test_name": "http2_grpc_metadata_and_trailers",
-            "server_port": port,
-            "test_focus": ["request_headers", "response_trailers", "metadata_propagation"],
-            "expected_outcomes": ["header_framing", "trailer_delivery"]
+            "test_name": "grpc_loopback_metadata_propagation",
+            "test_focus": ["deterministic_loopback", "metadata_propagation"],
+            "expected_outcomes": ["request_metadata_retained", "transport_label_honest"]
         }),
     );
 
     futures_lite::future::block_on(async {
-        let server_result = start_grpc_http2_server(port).await;
-        assert!(server_result.is_ok());
-
-        let uri = format!("http://localhost:{}", port);
-        let channel = Channel::connect(&uri).await.unwrap();
+        let channel = Channel::connect("http://loopback:50051").await.unwrap();
         let mut client = GrpcClient::new(channel);
 
         test_section!("build_request_with_metadata");
@@ -441,29 +375,17 @@ fn http2_grpc_metadata_and_trailers() {
             .unary::<String, String>("/test.Service/MetadataMethod", request)
             .await;
 
-        match response_result {
-            Ok(response) => {
-                log_test_event(
-                    "metadata_call_success",
-                    json!({
-                        "method": "/test.Service/MetadataMethod",
-                        "metadata_propagated": true,
-                        "response_metadata_count": response.metadata().len()
-                    }),
-                );
-
-                test_complete!("http2_grpc_metadata_and_trailers");
-            }
-            Err(e) => {
-                log_test_event(
-                    "metadata_call_failure",
-                    json!({
-                        "error": e.to_string()
-                    }),
-                );
-                panic!("Metadata call failed: {}", e);
-            }
-        }
+        let response = response_result.expect("loopback metadata call");
+        assert_eq!(response.get_ref(), "metadata_test");
+        assert!(matches!(
+            response.metadata().get("x-test-header"),
+            Some(MetadataValue::Ascii(value)) if value == "test_value"
+        ));
+        assert!(matches!(
+            response.metadata().get("x-asupersync-grpc-transport"),
+            Some(MetadataValue::Ascii(value)) if value == "loopback"
+        ));
+        test_complete!("grpc_loopback_metadata_propagation");
     });
 }
 
@@ -549,24 +471,21 @@ fn http2_grpc_invalid_host_rejection() {
 }
 
 #[test]
-fn http2_grpc_connection_pool_behavior() {
-    init_test("http2_grpc_connection_pool_behavior");
+fn http2_grpc_channels_make_no_pooling_claim() {
+    init_test("http2_grpc_channels_make_no_pooling_claim");
 
     let port = find_available_port();
     log_test_event(
         "test_start",
         json!({
-            "test_name": "http2_grpc_connection_pool_behavior",
+            "test_name": "http2_grpc_channels_make_no_pooling_claim",
             "server_port": port,
-            "test_focus": ["connection_reuse", "pool_management"],
-            "expected_outcomes": ["efficient_reuse", "resource_cleanup"]
+            "test_focus": ["independent_channel_configuration"],
+            "expected_outcomes": ["no_connection_pool_claim"]
         }),
     );
 
     futures_lite::future::block_on(async {
-        let server_result = start_grpc_http2_server(port).await;
-        assert!(server_result.is_ok());
-
         test_section!("create_multiple_channels");
         let uri = format!("http://localhost:{}", port);
 
@@ -580,25 +499,28 @@ fn http2_grpc_connection_pool_behavior() {
             json!({
                 "uri": uri,
                 "channel_count": 3,
-                "connection_pooling": "under_test"
+                "connection_pooling": "not_claimed"
             }),
         );
 
-        // In a real implementation, these should potentially reuse connections
         test_section!("verify_channel_independence");
         let client1 = GrpcClient::new(channel1);
         let client2 = GrpcClient::new(channel2);
         let client3 = GrpcClient::new(channel3);
+        assert_eq!(client1.channel().uri(), uri);
+        assert_eq!(client2.channel().uri(), uri);
+        assert_eq!(client3.channel().uri(), uri);
 
         log_test_event(
             "clients_ready",
             json!({
                 "client_count": 3,
-                "ready_for_calls": true
+                "lazy_channels_configured": true,
+                "pooling_claim": false
             }),
         );
 
-        test_complete!("http2_grpc_connection_pool_behavior");
+        test_complete!("http2_grpc_channels_make_no_pooling_claim");
     });
 }
 
@@ -781,6 +703,198 @@ impl ServiceHandler for RegisteredEchoService {
             Ok(Response::new(Bytes::from_static(b"registered-pong")))
         })
     }
+}
+
+#[derive(Clone)]
+struct PublicClientEchoService {
+    calls: Arc<AtomicUsize>,
+    observed_transport: Arc<Mutex<Option<String>>>,
+}
+
+impl NamedService for PublicClientEchoService {
+    const NAME: &'static str = "test.PublicClient";
+}
+
+impl ServiceHandler for PublicClientEchoService {
+    fn descriptor(&self) -> &ServiceDescriptor {
+        static METHODS: &[MethodDescriptor] = &[
+            MethodDescriptor::unary("Unary", "/test.PublicClient/Unary"),
+            MethodDescriptor::unary("Fail", "/test.PublicClient/Fail"),
+        ];
+        static DESCRIPTOR: ServiceDescriptor =
+            ServiceDescriptor::new("PublicClient", "test", METHODS);
+        &DESCRIPTOR
+    }
+
+    fn method_names(&self) -> Vec<&str> {
+        vec!["Unary", "Fail"]
+    }
+
+    fn call_unary<'a>(
+        &'a self,
+        cx: &'a Cx,
+        path: &'a str,
+        request: Request<Bytes>,
+        trailing_metadata: Metadata,
+    ) -> ServiceHandlerFuture<'a> {
+        Box::pin(async move {
+            assert!(!cx.is_cancel_requested());
+            assert!(trailing_metadata.is_empty());
+            assert_eq!(request.get_ref().as_ref(), b"public-client-ping");
+            assert!(matches!(
+                request.metadata().get("x-client-id"),
+                Some(MetadataValue::Ascii(value)) if value == "native-client"
+            ));
+            assert!(matches!(
+                request.metadata().get("x-client-token-bin"),
+                Some(MetadataValue::Binary(value)) if value.as_ref() == b"\x01\x02"
+            ));
+            assert!(matches!(
+                request.metadata().get("grpc-timeout"),
+                Some(MetadataValue::Ascii(value)) if !value.is_empty()
+            ));
+            let transport = match request.metadata().get("x-asupersync-grpc-transport") {
+                Some(MetadataValue::Ascii(value)) => value.clone(),
+                other => panic!("missing native transport metadata: {other:?}"),
+            };
+            *self
+                .observed_transport
+                .lock()
+                .expect("observed transport lock") = Some(transport);
+            self.calls.fetch_add(1, Ordering::SeqCst);
+
+            if path == "/test.PublicClient/Fail" {
+                return Err(Status::with_details(
+                    Code::ResourceExhausted,
+                    "quota %\n café",
+                    Bytes::from_static(b"public-details"),
+                ));
+            }
+
+            assert_eq!(path, "/test.PublicClient/Unary");
+            let mut response = Response::new(Bytes::from_static(b"public-client-pong"));
+            assert!(response.metadata_mut().insert("x-server-id", "native-h2"));
+            assert!(
+                response
+                    .metadata_mut()
+                    .insert_bin("x-server-token-bin", Bytes::from_static(b"\x03\x04"),)
+            );
+            Ok(response)
+        })
+    }
+}
+
+/// The public client must cross the same real TCP/H2 boundary already proven
+/// by the raw protocol fixture. This catches the old false-success path where
+/// localhost `unary` merely cast the request value into the response value.
+#[test]
+fn public_grpc_client_unary_crosses_native_h2_and_maps_status_trailers() {
+    let runtime = RuntimeBuilder::new()
+        .worker_threads(2)
+        .build()
+        .expect("build runtime");
+    let handle = runtime.handle();
+
+    runtime.block_on(async move {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed_transport = Arc::new(Mutex::new(None));
+        let server = Arc::new(
+            Server::builder()
+                .max_recv_message_size(1024)
+                .max_send_message_size(1024)
+                .stream_idle_timeout(Some(Duration::from_secs(2)))
+                .add_service(PublicClientEchoService {
+                    calls: Arc::clone(&calls),
+                    observed_transport: Arc::clone(&observed_transport),
+                })
+                .build(),
+        );
+        let listener = server
+            .bind_registered_http2(
+                "127.0.0.1:0",
+                HostPolicy::allow_list(vec!["localhost".to_owned(), "127.0.0.1".to_owned()]),
+            )
+            .await
+            .expect("bind registered-service gRPC H2 listener");
+        let addr = listener.local_addr().expect("listener local addr");
+        let manager = listener.connection_manager().clone();
+        let run_runtime = handle.clone();
+        let run_handle = handle
+            .clone()
+            .try_spawn(async move { listener.run(&run_runtime).await })
+            .expect("spawn production gRPC H2 listener");
+
+        let channel = Channel::builder(format!("http://127.0.0.1:{}", addr.port()))
+            // The target runs alongside several other real-listener tests in
+            // this integration binary. Keep the causal assertion about the
+            // wire exchange, not scheduler timing under parallel load.
+            .connect_timeout(Duration::from_secs(30))
+            .timeout(Duration::from_secs(30))
+            .max_send_message_size(1024)
+            .max_recv_message_size(1024)
+            .connect()
+            .await
+            .expect("construct native H2 gRPC channel");
+        let mut client = GrpcClient::new(channel);
+
+        let mut request = Request::new(Bytes::from_static(b"public-client-ping"));
+        assert!(
+            request
+                .metadata_mut()
+                .insert("x-client-id", "native-client")
+        );
+        assert!(
+            request
+                .metadata_mut()
+                .insert_bin("x-client-token-bin", Bytes::from_static(b"\x01\x02"))
+        );
+        let response = client
+            .unary::<Bytes, Bytes>("/test.PublicClient/Unary", request)
+            .await
+            .expect("native H2 unary response");
+        assert_eq!(response.get_ref().as_ref(), b"public-client-pong");
+        assert!(matches!(
+            response.metadata().get("x-server-id"),
+            Some(MetadataValue::Ascii(value)) if value == "native-h2"
+        ));
+        assert!(matches!(
+            response.metadata().get("x-server-token-bin"),
+            Some(MetadataValue::Binary(value)) if value.as_ref() == b"\x03\x04"
+        ));
+        assert_eq!(
+            observed_transport
+                .lock()
+                .expect("observed transport lock")
+                .as_deref(),
+            Some("native-h2")
+        );
+
+        let mut failure = Request::new(Bytes::from_static(b"public-client-ping"));
+        assert!(
+            failure
+                .metadata_mut()
+                .insert("x-client-id", "native-client")
+        );
+        assert!(
+            failure
+                .metadata_mut()
+                .insert_bin("x-client-token-bin", Bytes::from_static(b"\x01\x02"))
+        );
+        let status = client
+            .unary::<Bytes, Bytes>("/test.PublicClient/Fail", failure)
+            .await
+            .expect_err("terminal gRPC error trailers must map to Status");
+        assert_eq!(status.code(), Code::ResourceExhausted);
+        assert_eq!(status.message(), "quota %\n café");
+        assert_eq!(
+            status.details().map(Bytes::as_ref),
+            Some(b"public-details".as_slice())
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+        assert!(manager.begin_drain(Duration::from_secs(5)));
+        let _ = run_handle.await.expect("listener run join");
+    });
 }
 
 /// br-asupersync-v4ob51: the public gRPC transport adapter must exercise the

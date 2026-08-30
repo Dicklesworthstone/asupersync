@@ -11,11 +11,28 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
-use crate::bytes::Bytes;
+use crate::bytes::{Bytes, BytesMut};
+
+#[cfg(not(target_arch = "wasm32"))]
+use std::io::{Read, Write};
+#[cfg(not(target_arch = "wasm32"))]
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpStream};
+
+#[cfg(not(target_arch = "wasm32"))]
+use base64::Engine as _;
+
+#[cfg(not(target_arch = "wasm32"))]
+use crate::codec::Decoder as _;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::http::h2::connection::{CLIENT_PREFACE, ReceivedFrame};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::http::h2::{Connection, FrameCodec, Header, SettingsBuilder};
 
 use super::codec::{Codec, FramedCodec, IdentityCodec};
-use super::status::{GrpcError, Status, TransportErrorKind};
-use super::streaming::{MAX_STREAM_BUFFERED, Metadata, Request, Response, Streaming};
+use super::status::{Code, GrpcError, Status, TransportErrorKind};
+use super::streaming::{
+    MAX_STREAM_BUFFERED, Metadata, MetadataValue, Request, Response, Streaming,
+};
 
 /// Supported gRPC message compression encodings for channel negotiation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -156,7 +173,7 @@ impl Default for ChannelConfig {
     }
 }
 
-/// Builder for creating a loopback gRPC channel.
+/// Builder for creating a gRPC channel.
 #[derive(Debug)]
 pub struct ChannelBuilder {
     /// The target URI.
@@ -168,8 +185,10 @@ pub struct ChannelBuilder {
 impl ChannelBuilder {
     /// Create a new channel builder for the given URI.
     ///
-    /// The current client transport accepts only in-memory loopback and
-    /// localhost targets.
+    /// The client accepts deterministic in-memory `loopback` targets and
+    /// native HTTP/2 `localhost` / `127.0.0.1` targets. Network I/O is lazy:
+    /// [`ChannelBuilder::connect`] validates and stores the target, while an
+    /// RPC method establishes its transport.
     #[must_use]
     pub fn new(uri: impl Into<String>) -> Self {
         Self {
@@ -261,9 +280,9 @@ impl ChannelBuilder {
 
     /// Require a TLS-backed gRPC transport.
     ///
-    /// The current gRPC client transport is loopback/localhost-only and does
-    /// not negotiate TLS, so [`ChannelBuilder::connect`] fails closed when this
-    /// flag is set.
+    /// The current network-backed client transport is cleartext HTTP/2 on
+    /// localhost only and does not negotiate TLS, so
+    /// [`ChannelBuilder::connect`] fails closed when this flag is set.
     #[must_use]
     pub fn tls(mut self) -> Self {
         self.config.use_tls = true;
@@ -277,6 +296,10 @@ impl ChannelBuilder {
 }
 
 /// A gRPC channel representing the current localhost-bounded client transport.
+///
+/// `loopback` selects deterministic in-memory behavior. `localhost` and
+/// `127.0.0.1` select native HTTP/2 over TCP. The channel is intentionally
+/// lazy: constructing it performs validation but does not open a socket.
 #[derive(Debug, Clone)]
 pub struct Channel {
     /// The target URI.
@@ -296,6 +319,7 @@ impl Channel {
     ///
     /// Supports both in-memory loopback transport (host: `loopback`) and real
     /// HTTP/2 connections to localhost (host: `localhost` or `127.0.0.1`).
+    /// The first network-backed RPC performs the TCP connection.
     pub async fn connect(uri: impl Into<String>) -> Result<Self, GrpcError> {
         Self::connect_with_config(&uri.into(), ChannelConfig::default()).await
     }
@@ -304,6 +328,7 @@ impl Channel {
     ///
     /// Supports both in-memory loopback transport (host: `loopback`) and real
     /// HTTP/2 connections to localhost (host: `localhost` or `127.0.0.1`).
+    /// The first network-backed RPC performs the TCP connection.
     #[allow(clippy::unused_async)]
     pub async fn connect_with_config(uri: &str, config: ChannelConfig) -> Result<Self, GrpcError> {
         validate_channel_uri(uri)?;
@@ -430,7 +455,12 @@ impl<C: Codec> GrpcClient<C> {
 
         let mut metadata = metadata_request.metadata().clone();
         let _ = metadata.insert("x-asupersync-grpc-path", path);
-        let _ = metadata.insert("x-asupersync-grpc-transport", "loopback");
+        let transport = if channel_target_is_loopback(self.channel.uri()) {
+            "loopback"
+        } else {
+            "native-h2"
+        };
+        let _ = metadata.insert("x-asupersync-grpc-transport", transport);
         Ok(metadata)
     }
 
@@ -541,7 +571,6 @@ impl<C: Codec> GrpcClient<C> {
     }
 
     /// Make a unary RPC call.
-    #[allow(clippy::unused_async)]
     pub async fn unary<Req, Resp>(
         &mut self,
         path: &str,
@@ -555,8 +584,53 @@ impl<C: Codec> GrpcClient<C> {
         enforce_deadline_budget(self.channel.config.timeout)?;
 
         let metadata = self.build_outbound_metadata(&request, path)?;
-        let payload = convert_message::<Req, Resp>(request.into_inner(), "unary call")?;
-        Ok(Response::with_metadata(payload, metadata))
+        if channel_target_is_loopback(self.channel.uri()) {
+            let payload = convert_message::<Req, Resp>(request.into_inner(), "unary call")?;
+            return Ok(Response::with_metadata(payload, metadata));
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = request;
+            return Err(Status::unimplemented(
+                "native HTTP/2 gRPC client transport is unavailable on wasm32",
+            ));
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let typed_request = downcast_boxed_message::<C::Encode>(
+                Box::new(request.into_inner()),
+                "native HTTP/2 unary request encoding",
+            )?;
+            let mut framed_request = BytesMut::new();
+            self.codec
+                .encode_message(&typed_request, &mut framed_request)
+                .map_err(GrpcError::into_status)?;
+
+            let wire_response =
+                native_h2_unary(&self.channel, path, metadata, framed_request.freeze()).await?;
+
+            let mut framed_response = BytesMut::from(wire_response.body.as_ref());
+            let decoded = self
+                .codec
+                .decode_message_with_encoding(
+                    &mut framed_response,
+                    wire_response.grpc_encoding.as_deref(),
+                )
+                .map_err(GrpcError::into_status)?
+                .ok_or_else(|| Status::internal("gRPC unary response contained no message"))?;
+            if !framed_response.is_empty() {
+                return Err(Status::internal(
+                    "gRPC unary response contained multiple or trailing message bytes",
+                ));
+            }
+            let payload = downcast_boxed_message::<Resp>(
+                Box::new(decoded),
+                "native HTTP/2 unary response decoding",
+            )?;
+            Ok(Response::with_metadata(payload, wire_response.metadata))
+        }
     }
 
     /// Start a server streaming RPC call.
@@ -572,6 +646,12 @@ impl<C: Codec> GrpcClient<C> {
     {
         validate_rpc_path(path)?;
         enforce_deadline_budget(self.channel.config.timeout)?;
+
+        if !channel_target_is_loopback(self.channel.uri()) {
+            return Err(Status::unimplemented(
+                "native HTTP/2 server-streaming client transport is not wired yet",
+            ));
+        }
 
         let metadata = self.build_outbound_metadata(&request, path)?;
         let mut stream = ResponseStream::open();
@@ -594,6 +674,12 @@ impl<C: Codec> GrpcClient<C> {
     {
         validate_rpc_path(path)?;
         enforce_deadline_budget(self.channel.config.timeout)?;
+
+        if !channel_target_is_loopback(self.channel.uri()) {
+            return Err(Status::unimplemented(
+                "native HTTP/2 client-streaming client transport is not wired yet",
+            ));
+        }
 
         let request = Request::new(Bytes::new());
         let metadata = self.build_outbound_metadata(&request, path)?;
@@ -630,6 +716,12 @@ impl<C: Codec> GrpcClient<C> {
         validate_rpc_path(path)?;
         enforce_deadline_budget(self.channel.config.timeout)?;
 
+        if !channel_target_is_loopback(self.channel.uri()) {
+            return Err(Status::unimplemented(
+                "native HTTP/2 bidirectional-streaming client transport is not wired yet",
+            ));
+        }
+
         let request = Request::new(Bytes::new());
         let _metadata = self.build_outbound_metadata(&request, path)?;
         let request_state = Arc::new(Mutex::new(RequestSinkState::new()));
@@ -664,6 +756,460 @@ impl<C: Codec> GrpcClient<C> {
     }
 }
 
+fn channel_target_is_loopback(uri: &str) -> bool {
+    let Some((_, remainder)) = uri.split_once("://") else {
+        return false;
+    };
+    let authority = remainder.split(['/', '?', '#']).next().unwrap_or_default();
+    let host_port = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, value)| value);
+    let host = host_port
+        .split_once(':')
+        .map_or(host_port, |(value, _)| value);
+    host.eq_ignore_ascii_case("loopback")
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug)]
+struct NativeH2Target {
+    authority: String,
+    address: SocketAddr,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl NativeH2Target {
+    fn parse(uri: &str) -> Result<Self, Status> {
+        let (_, remainder) = uri
+            .split_once("://")
+            .ok_or_else(|| Status::unavailable("channel URI is missing a scheme separator"))?;
+        let authority = remainder
+            .split(['/', '?', '#'])
+            .next()
+            .ok_or_else(|| Status::unavailable("channel URI is missing an authority"))?;
+        if authority.contains('@') {
+            return Err(Status::unavailable(
+                "userinfo is not supported by the native HTTP/2 gRPC client",
+            ));
+        }
+        let (host, port) = match authority.rsplit_once(':') {
+            Some((host, port)) => {
+                let port = port.parse::<u16>().map_err(|_| {
+                    Status::unavailable("channel URI port must be an unsigned 16-bit integer")
+                })?;
+                (host, port)
+            }
+            None => (authority, 80),
+        };
+        let address = if host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" {
+            SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port))
+        } else {
+            return Err(Status::unavailable(
+                "native HTTP/2 gRPC transport is restricted to localhost",
+            ));
+        };
+        Ok(Self {
+            authority: authority.to_ascii_lowercase(),
+            address,
+        })
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug)]
+struct NativeUnaryWireResponse {
+    body: Bytes,
+    metadata: Metadata,
+    grpc_encoding: Option<String>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn native_h2_unary(
+    channel: &Channel,
+    path: &str,
+    metadata: Metadata,
+    body: Bytes,
+) -> Result<NativeUnaryWireResponse, Status> {
+    let cx = crate::cx::Cx::current().ok_or_else(|| {
+        Status::failed_precondition(
+            "native HTTP/2 gRPC calls require an ambient runtime Cx capability",
+        )
+    })?;
+    let target = NativeH2Target::parse(channel.uri())?;
+    let config = channel.config().clone();
+    let path = path.to_owned();
+    let timeout = effective_native_call_timeout(&config);
+    let mut task = cx
+        .spawn_blocking(move |_child| {
+            native_h2_unary_blocking(target, config, timeout, &path, &metadata, body)
+        })
+        .map_err(|error| {
+            Status::unavailable(format!(
+                "native HTTP/2 gRPC transport admission failed: {error:?}"
+            ))
+        })?;
+    task.join(&cx).await.map_err(|error| match error {
+        crate::runtime::task_handle::JoinError::Cancelled(reason) => {
+            Status::cancelled(format!("native HTTP/2 gRPC call cancelled: {reason}"))
+        }
+        crate::runtime::task_handle::JoinError::Panicked(payload) => {
+            Status::internal(format!("native HTTP/2 gRPC transport panicked: {payload}"))
+        }
+        crate::runtime::task_handle::JoinError::PolledAfterCompletion => {
+            Status::internal("native HTTP/2 gRPC transport handle was polled after completion")
+        }
+    })?
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn effective_native_call_timeout(config: &ChannelConfig) -> Duration {
+    let configured = config.timeout.unwrap_or(config.connect_timeout);
+    ambient_remaining_budget().map_or(configured, |remaining| configured.min(remaining))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn native_h2_unary_blocking(
+    target: NativeH2Target,
+    config: ChannelConfig,
+    timeout: Duration,
+    path: &str,
+    metadata: &Metadata,
+    request_body: Bytes,
+) -> Result<NativeUnaryWireResponse, Status> {
+    let mut stream = TcpStream::connect_timeout(&target.address, config.connect_timeout)
+        .map_err(|error| transport_status("connect", error))?;
+    stream
+        .set_read_timeout(Some(timeout))
+        .map_err(|error| transport_status("set read timeout", error))?;
+    stream
+        .set_write_timeout(Some(timeout))
+        .map_err(|error| transport_status("set write timeout", error))?;
+
+    let settings = SettingsBuilder::client()
+        .initial_window_size(config.initial_stream_window_size)
+        .build();
+    let mut connection = Connection::client(settings);
+    // RFC 9113 requires the connection preface's first frame to be SETTINGS.
+    // Queue it before expanding the connection receive window, because the
+    // latter emits WINDOW_UPDATE when the configured window exceeds 65,535.
+    connection.queue_initial_settings();
+    connection
+        .set_initial_connection_recv_window(config.initial_connection_window_size)
+        .map_err(|error| Status::internal(format!("invalid HTTP/2 receive window: {error}")))?;
+    let headers = native_h2_request_headers(&target.authority, path, metadata)?;
+    let stream_id = connection
+        .open_stream(headers, false)
+        .map_err(|error| Status::internal(format!("open HTTP/2 request stream: {error}")))?;
+    connection
+        .send_data(stream_id, request_body, true)
+        .map_err(|error| Status::internal(format!("queue HTTP/2 request body: {error}")))?;
+
+    stream
+        .write_all(CLIENT_PREFACE)
+        .map_err(|error| transport_status("write HTTP/2 client preface", error))?;
+    flush_native_h2_frames(&mut connection, &mut stream)?;
+
+    let mut codec = FrameCodec::new();
+    let mut inbound = BytesMut::new();
+    let mut accumulator = NativeUnaryAccumulator::new(config.max_recv_message_size);
+    let mut chunk = [0_u8; 16 * 1024];
+    loop {
+        while let Some(frame) = codec
+            .decode(&mut inbound)
+            .map_err(|error| Status::internal(format!("decode HTTP/2 frame: {error}")))?
+        {
+            let received = connection
+                .process_frame(frame)
+                .map_err(|error| Status::internal(format!("process HTTP/2 frame: {error}")))?;
+            if let Some(received) = received {
+                accumulator.observe(stream_id, received)?;
+            }
+            flush_native_h2_frames(&mut connection, &mut stream)?;
+            if accumulator.is_complete() {
+                return accumulator.finish();
+            }
+        }
+
+        let read = stream
+            .read(&mut chunk)
+            .map_err(|error| transport_status("read HTTP/2 response", error))?;
+        if read == 0 {
+            return Err(Status::unavailable(
+                "HTTP/2 peer closed before the unary gRPC response completed",
+            ));
+        }
+        inbound.extend_from_slice(&chunk[..read]);
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn native_h2_request_headers(
+    authority: &str,
+    path: &str,
+    metadata: &Metadata,
+) -> Result<Vec<Header>, Status> {
+    let mut headers = vec![
+        Header::new(":method", "POST"),
+        Header::new(":scheme", "http"),
+        Header::new(":path", path),
+        Header::new(":authority", authority),
+        Header::new("content-type", "application/grpc"),
+        Header::new("te", "trailers"),
+    ];
+    for (name, value) in metadata.iter() {
+        if name.starts_with(':')
+            || [
+                "content-type",
+                "te",
+                "host",
+                "grpc-status",
+                "grpc-message",
+                "grpc-status-details-bin",
+            ]
+            .iter()
+            .any(|reserved| name.eq_ignore_ascii_case(reserved))
+        {
+            return Err(Status::invalid_argument(format!(
+                "outbound metadata uses transport-reserved key '{name}'"
+            )));
+        }
+        let value = match value {
+            MetadataValue::Ascii(value) => value.clone(),
+            MetadataValue::Binary(value) => {
+                base64::engine::general_purpose::STANDARD_NO_PAD.encode(value)
+            }
+        };
+        headers.push(Header::new(name, value));
+    }
+    Ok(headers)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn flush_native_h2_frames(
+    connection: &mut Connection,
+    stream: &mut TcpStream,
+) -> Result<(), Status> {
+    let mut outbound = BytesMut::new();
+    while let Some(frame) = connection.next_frame() {
+        frame
+            .encode(&mut outbound)
+            .map_err(|error| Status::internal(format!("encode HTTP/2 frame: {error}")))?;
+    }
+    if !outbound.is_empty() {
+        stream
+            .write_all(&outbound)
+            .map_err(|error| transport_status("write HTTP/2 frames", error))?;
+        stream
+            .flush()
+            .map_err(|error| transport_status("flush HTTP/2 frames", error))?;
+    }
+    Ok(())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn transport_status(context: &str, error: std::io::Error) -> Status {
+    let kind = TransportErrorKind::from_io_error_kind(error.kind());
+    GrpcError::transport_kind(kind, format!("{context}: {error}")).into_status()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+struct NativeUnaryAccumulator {
+    max_body_bytes: usize,
+    body: BytesMut,
+    metadata: Metadata,
+    http_status: Option<u16>,
+    content_type_valid: bool,
+    grpc_encoding: Option<String>,
+    grpc_status: Option<Code>,
+    grpc_message: Option<String>,
+    grpc_details: Option<Bytes>,
+    stream_ended: bool,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl NativeUnaryAccumulator {
+    fn new(max_message_size: usize) -> Self {
+        Self {
+            max_body_bytes: max_message_size.saturating_add(5),
+            body: BytesMut::new(),
+            metadata: Metadata::new(),
+            http_status: None,
+            content_type_valid: false,
+            grpc_encoding: None,
+            grpc_status: None,
+            grpc_message: None,
+            grpc_details: None,
+            stream_ended: false,
+        }
+    }
+
+    fn observe(&mut self, stream_id: u32, frame: ReceivedFrame) -> Result<(), Status> {
+        match frame {
+            ReceivedFrame::Headers {
+                stream_id: received_stream,
+                headers,
+                end_stream,
+            } if received_stream == stream_id => {
+                self.observe_headers(headers)?;
+                self.stream_ended |= end_stream;
+            }
+            ReceivedFrame::Data {
+                stream_id: received_stream,
+                data,
+                end_stream,
+            } if received_stream == stream_id => {
+                if self.body.len().saturating_add(data.len()) > self.max_body_bytes {
+                    return Err(Status::resource_exhausted(
+                        "gRPC unary response exceeds configured receive-message limit",
+                    ));
+                }
+                self.body.extend_from_slice(&data);
+                self.stream_ended |= end_stream;
+            }
+            ReceivedFrame::Reset {
+                stream_id: received_stream,
+                error_code,
+            } if received_stream == stream_id => {
+                return Err(Status::from_h2_rst_stream_code(error_code));
+            }
+            ReceivedFrame::GoAway {
+                last_stream_id,
+                error_code,
+                ..
+            } if error_code != crate::http::h2::ErrorCode::NoError
+                || last_stream_id < stream_id =>
+            {
+                return Err(Status::unavailable(format!(
+                    "HTTP/2 peer sent GOAWAY before unary response completion: {error_code}"
+                )));
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn observe_headers(&mut self, headers: Vec<Header>) -> Result<(), Status> {
+        for Header { name, value } in headers {
+            if name == ":status" {
+                let status = value
+                    .parse::<u16>()
+                    .map_err(|_| Status::internal("HTTP/2 response has malformed :status"))?;
+                if status >= 200 {
+                    if self.http_status.replace(status).is_some() {
+                        return Err(Status::internal(
+                            "HTTP/2 response contains duplicate final :status",
+                        ));
+                    }
+                }
+                continue;
+            }
+            if name.eq_ignore_ascii_case("content-type") {
+                self.content_type_valid =
+                    value.to_ascii_lowercase().starts_with("application/grpc");
+                continue;
+            }
+            if name.eq_ignore_ascii_case("grpc-encoding") {
+                self.grpc_encoding = Some(value);
+                continue;
+            }
+            if name.eq_ignore_ascii_case("grpc-status") {
+                if self.grpc_status.is_some() {
+                    return Err(Status::internal(
+                        "gRPC response contains duplicate grpc-status",
+                    ));
+                }
+                let raw = value
+                    .parse::<i32>()
+                    .map_err(|_| Status::internal("gRPC response has malformed grpc-status"))?;
+                if !(0..=16).contains(&raw) {
+                    return Err(Status::internal("gRPC response has unknown grpc-status"));
+                }
+                self.grpc_status = Some(Code::from_i32(raw));
+                continue;
+            }
+            if name.eq_ignore_ascii_case("grpc-message") {
+                if self.grpc_message.is_some() {
+                    return Err(Status::internal(
+                        "gRPC response contains duplicate grpc-message",
+                    ));
+                }
+                self.grpc_message = Some(
+                    super::status::percent_decode_grpc_message(&value)
+                        .map_err(GrpcError::into_status)?,
+                );
+                continue;
+            }
+            if name.eq_ignore_ascii_case("grpc-status-details-bin") {
+                if self.grpc_details.is_some() {
+                    return Err(Status::internal(
+                        "gRPC response contains duplicate grpc-status-details-bin",
+                    ));
+                }
+                let details = base64::engine::general_purpose::STANDARD
+                    .decode(&value)
+                    .or_else(|_| base64::engine::general_purpose::STANDARD_NO_PAD.decode(&value))
+                    .map_err(|_| Status::internal("gRPC response details are not valid base64"))?;
+                self.grpc_details = Some(Bytes::from(details));
+                continue;
+            }
+            if name.starts_with(':') || name.eq_ignore_ascii_case("te") {
+                continue;
+            }
+            let inserted = if name.ends_with("-bin") {
+                let decoded = base64::engine::general_purpose::STANDARD
+                    .decode(&value)
+                    .or_else(|_| base64::engine::general_purpose::STANDARD_NO_PAD.decode(&value))
+                    .map_err(|_| {
+                        Status::internal(format!(
+                            "binary response metadata '{name}' is not valid base64"
+                        ))
+                    })?;
+                self.metadata.insert_bin(name, Bytes::from(decoded))
+            } else {
+                self.metadata.insert(name, value)
+            };
+            if !inserted {
+                return Err(Status::internal("gRPC response contains invalid metadata"));
+            }
+        }
+        Ok(())
+    }
+
+    fn is_complete(&self) -> bool {
+        self.stream_ended && self.grpc_status.is_some()
+    }
+
+    fn finish(self) -> Result<NativeUnaryWireResponse, Status> {
+        if self.http_status != Some(200) {
+            return Err(Status::unavailable(format!(
+                "gRPC server returned HTTP status {}",
+                self.http_status
+                    .map_or_else(|| "missing".to_owned(), |status| status.to_string())
+            )));
+        }
+        if !self.content_type_valid {
+            return Err(Status::internal(
+                "gRPC response is missing a valid application/grpc content-type",
+            ));
+        }
+        let status = self
+            .grpc_status
+            .ok_or_else(|| Status::internal("gRPC response is missing grpc-status"))?;
+        if status != Code::Ok {
+            let message = self.grpc_message.unwrap_or_default();
+            return Err(match self.grpc_details {
+                Some(details) => Status::with_details(status, message, details),
+                None => Status::new(status, message),
+            });
+        }
+        Ok(NativeUnaryWireResponse {
+            body: self.body.freeze(),
+            metadata: self.metadata,
+            grpc_encoding: self.grpc_encoding,
+        })
+    }
+}
+
 fn validate_channel_uri(uri: &str) -> Result<(), GrpcError> {
     if uri.is_empty() {
         return Err(GrpcError::transport("channel URI cannot be empty"));
@@ -691,9 +1237,9 @@ fn validate_channel_uri(uri: &str) -> Result<(), GrpcError> {
     // Strip userinfo (RFC 3986 §3.2: authority = [userinfo "@"] host [":" port])
     // before extracting the host, so "loopback:pw@evil.com" doesn't pass.
     let host_port = authority.rsplit_once('@').map_or(authority, |(_, hp)| hp);
-    let host = host_port
-        .split_once(':')
-        .map_or(host_port, |(host, _)| host);
+    let (host, port) = host_port
+        .rsplit_once(':')
+        .map_or((host_port, None), |(host, port)| (host, Some(port)));
     if host.is_empty() {
         return Err(GrpcError::transport("channel URI is missing a host"));
     }
@@ -703,6 +1249,14 @@ fn validate_channel_uri(uri: &str) -> Result<(), GrpcError> {
     {
         return Err(GrpcError::transport(
             "gRPC client transport supports loopback and localhost only; use a URI with host `loopback`, `localhost`, or `127.0.0.1`",
+        ));
+    }
+    if let Some(port) = port
+        && port.parse::<u16>().is_err()
+    {
+        return Err(GrpcError::transport_kind(
+            TransportErrorKind::ConnectFailed,
+            "channel URI port must be an unsigned 16-bit integer",
         ));
     }
     Ok(())
