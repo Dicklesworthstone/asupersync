@@ -1,7 +1,6 @@
 #![cfg(feature = "test-internals")]
 //! Production-transport-backed proof for the RemoteRuntime lifecycle contract.
 
-use asupersync::Cx;
 use asupersync::channel::oneshot;
 use asupersync::distributed::ComputationSchemaRegistry;
 use asupersync::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -16,7 +15,8 @@ use asupersync::remote::{
 use asupersync::remote::{
     RemoteComputationClient, RemoteComputationClientConfig, RemoteComputationClientError,
     RemoteComputationService, RemoteComputationServiceConfig, RemoteComputationServiceError,
-    RemoteServiceRejectionCode, RemoteServiceWireLimits, RemoteServiceWireOutcome,
+    RemoteComputationSessionStart, RemoteServiceRejectionCode, RemoteServiceSessionError,
+    RemoteServiceSessionEvent, RemoteServiceWireLimits, RemoteServiceWireOutcome,
     RemoteServiceWireRequest, RemoteServiceWireResponse, call_tls_computation_once,
     serve_tls_computation_once,
 };
@@ -34,6 +34,7 @@ use asupersync::trace::distributed::LogicalTime;
 #[cfg(feature = "tls")]
 use asupersync::types::CancelKind;
 use asupersync::types::CancelReason;
+use asupersync::{Budget, Cx};
 use futures_lite::future::block_on;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -1151,6 +1152,685 @@ fn remote_tls_listener_enforces_lease_then_caches_cancelled_outcome() {
         "one_dispatch_one_cleanup_two_cancelled_views_zero_live",
     )
     .emit();
+}
+
+#[cfg(feature = "tls")]
+#[test]
+fn remote_tls_v3_session_renews_then_cancels_and_drains_one_child() {
+    let certificates = Certificate::from_pem(TEST_CERT_PEM).expect("TLS fixture should parse");
+    let peer_certificate = certificates
+        .first()
+        .expect("TLS fixture should contain a leaf certificate")
+        .clone();
+    let certificate_chain =
+        CertificateChain::from_pem(TEST_CERT_PEM).expect("TLS certificate chain should parse");
+    let private_key = PrivateKey::from_pem(TEST_KEY_PEM).expect("TLS private key should parse");
+
+    let dispatch_count = Arc::new(AtomicUsize::new(0));
+    let cleanup_complete = Arc::new(AtomicBool::new(false));
+    let observed_remote_budget = Arc::new(Mutex::new(None));
+    let (park_tx, park_rx) = oneshot::channel::<()>();
+    let park_receiver = Arc::new(Mutex::new(Some(park_rx)));
+    let mut computations = RemoteComputationRegistry::new();
+    let handler_dispatch_count = Arc::clone(&dispatch_count);
+    let handler_cleanup_complete = Arc::clone(&cleanup_complete);
+    let handler_observed_remote_budget = Arc::clone(&observed_remote_budget);
+    let handler_park_receiver = Arc::clone(&park_receiver);
+    computations
+        .register::<Vec<u8>, Vec<u8>, _, _>("proof.v3-lifecycle", move |cx, invocation| {
+            let handler_dispatch_count = Arc::clone(&handler_dispatch_count);
+            let handler_cleanup_complete = Arc::clone(&handler_cleanup_complete);
+            let handler_observed_remote_budget = Arc::clone(&handler_observed_remote_budget);
+            let mut receiver = handler_park_receiver
+                .lock()
+                .take()
+                .expect("V3 lifecycle request should execute exactly once");
+            async move {
+                handler_dispatch_count.fetch_add(1, Ordering::SeqCst);
+                handler_observed_remote_budget.lock().replace(cx.budget());
+                let received = receiver.recv(&cx).await;
+                handler_cleanup_complete.store(true, Ordering::SeqCst);
+                received.map_err(|error| {
+                    RemoteError::TransportError(format!(
+                        "proof.v3-lifecycle parking operation ended: {error}"
+                    ))
+                })?;
+                Ok(RemoteOutcome::Success(
+                    invocation.into_request().input.into_data(),
+                ))
+            }
+        })
+        .expect("V3 lifecycle handler should register");
+
+    let origin = NodeId::new("origin-v3-loopback");
+    let mut peer_pins = CertificatePinSet::new();
+    peer_pins.add(
+        CertificatePin::compute_spki_sha256(&peer_certificate)
+            .expect("fixture certificate should produce an SPKI pin"),
+    );
+    let mut policy = RemotePeerAdmissionPolicy::new(
+        RemoteProtocolVersion::V3,
+        computations.schema_registry().clone(),
+    );
+    policy
+        .grant_tls_peer(origin.clone(), peer_pins, ["proof.v3-lifecycle"])
+        .expect("V3 certificate-bound grant should be valid");
+    let hello = policy.hello_for(origin);
+    let request_cx = Cx::for_testing();
+    let requested_budget = Budget::INFINITE.with_poll_quota(10_000);
+    let request = RemoteServiceWireRequest::from_spawn_request(
+        hello.clone(),
+        &SpawnRequest {
+            remote_task_id: RemoteTaskId::from_raw(7301),
+            computation: ComputationName::new("proof.v3-lifecycle"),
+            input: RemoteInput::new(b"v3-lifecycle-input".to_vec()),
+            lease: Duration::from_secs(1),
+            idempotency_key: IdempotencyKey::from_raw(0x7301),
+            budget: Some(requested_budget),
+            origin_node: hello.peer_node().clone(),
+            origin_region: request_cx.region_id(),
+            origin_task: request_cx.task_id(),
+        },
+    )
+    .expect("V3 budgeted request identity should agree with its peer hello");
+
+    let mut client_auth_roots = RootCertStore::empty();
+    client_auth_roots
+        .add(&peer_certificate)
+        .expect("server should trust the fixture client certificate");
+    let acceptor = TlsAcceptorBuilder::new(certificate_chain.clone(), private_key.clone())
+        .client_auth(ClientAuth::Required(client_auth_roots))
+        .build()
+        .expect("V3 mTLS acceptor should build");
+    let connector = TlsConnectorBuilder::new()
+        .add_root_certificate(&peer_certificate)
+        .identity(certificate_chain, private_key)
+        .build()
+        .expect("V3 mTLS connector should build");
+
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("V3 service runtime should build");
+    let service = runtime
+        .block_on(RemoteComputationService::bind(
+            "127.0.0.1:0",
+            acceptor,
+            policy,
+            computations,
+            RemoteComputationServiceConfig::new()
+                .with_max_connections(Some(2))
+                .with_drain_timeout(Duration::from_secs(1)),
+        ))
+        .expect("V3 structured service should bind");
+    let endpoint = service
+        .local_addr()
+        .expect("V3 structured service should expose its address");
+    let operator = service.handle();
+    let client_operator = operator.clone();
+    let client_dispatch_count = Arc::clone(&dispatch_count);
+    let client_cleanup_complete = Arc::clone(&cleanup_complete);
+    let session_client = RemoteComputationClient::new(
+        endpoint,
+        "localhost",
+        connector,
+        RemoteComputationClientConfig::new()
+            .with_max_attempts(1)
+            .with_attempt_timeout(Duration::from_secs(5)),
+    )
+    .expect("V3 native client should accept its static configuration");
+
+    let client = thread::spawn(move || {
+        let start = block_on(session_client.start_session(&Cx::for_testing(), &request))
+            .expect("V3 native client should connect and receive an accepted event");
+        let mut session = match start {
+            RemoteComputationSessionStart::Running(session) => session,
+            RemoteComputationSessionStart::Terminal(response) => {
+                panic!("V3 request unexpectedly terminated at admission: {response:?}")
+            }
+            _ => panic!("V3 start returned an unknown future variant"),
+        };
+
+        let dispatch_deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while client_dispatch_count.load(Ordering::SeqCst) == 0 {
+            assert!(
+                std::time::Instant::now() < dispatch_deadline,
+                "V3 accepted request should reach its handler"
+            );
+            thread::sleep(Duration::from_millis(1));
+        }
+
+        let renewed = block_on(session.renew_lease(&Cx::for_testing(), Duration::from_secs(2)))
+            .expect("V3 lease renewal should be acknowledged");
+        assert!(matches!(
+            renewed,
+            RemoteServiceSessionEvent::LeaseRenewed {
+                remote_task_id: 7301,
+                renewal_id: 1,
+                lease_secs: 2,
+                lease_subsec_nanos: 0,
+            }
+        ));
+        thread::sleep(Duration::from_millis(1_200));
+        assert!(
+            !client_cleanup_complete.load(Ordering::SeqCst),
+            "V3 renewal must keep the child live beyond its original lease"
+        );
+
+        let reason = CancelReason::user("V3 explicit user cancel");
+        let cancelled = block_on(session.cancel(&Cx::for_testing(), reason.clone()))
+            .expect("V3 cancel should return a drained terminal response");
+        assert!(matches!(
+            cancelled,
+            RemoteServiceWireResponse::Outcome {
+                remote_task_id: 7301,
+                outcome: RemoteServiceWireOutcome::Cancelled(ref actual),
+            } if actual == &reason
+        ));
+        assert!(
+            client_cleanup_complete.load(Ordering::SeqCst),
+            "V3 terminal cancellation must follow handler cleanup"
+        );
+        assert!(client_operator.begin_drain());
+    });
+
+    let report = runtime
+        .block_on(async move {
+            let cx = Cx::current().expect("runtime should install a V3 service context");
+            service.run(&cx).await
+        })
+        .expect("V3 service should drain cleanly");
+    client.join().expect("V3 lifecycle client should not panic");
+    drop(park_tx);
+
+    assert_eq!(report.accepted_connections(), 1);
+    assert_eq!(report.completed_connections(), 1);
+    assert_eq!(report.failed_connections(), 0);
+    assert_eq!(report.interrupted_connections(), 0);
+    assert_eq!(dispatch_count.load(Ordering::SeqCst), 1);
+    assert!(cleanup_complete.load(Ordering::SeqCst));
+    let observed_budget = observed_remote_budget
+        .lock()
+        .as_ref()
+        .copied()
+        .expect("V3 handler should observe its request budget");
+    assert!(
+        observed_budget.poll_quota <= requested_budget.poll_quota,
+        "V3 child must not loosen the explicit remote budget ceiling"
+    );
+    assert_eq!(operator.active_connections(), 0);
+    assert_eq!(operator.shutdown_signal().phase(), ShutdownPhase::Stopped);
+
+    ProofLogRow::pass(
+        "structured_remote_service_v3_session",
+        0,
+        "none",
+        "mtls_same_connection_renew_then_user_cancel",
+        1,
+        "one_dispatch_renewed_past_original_deadline_cancelled_after_cleanup",
+        "one_dispatch_renewed_past_original_deadline_cancelled_after_cleanup",
+    )
+    .emit();
+}
+
+#[cfg(feature = "tls")]
+#[test]
+fn remote_tls_v3_wait_receives_terminal_after_expiry_cleanup_drains() {
+    let certificates = Certificate::from_pem(TEST_CERT_PEM).expect("TLS fixture should parse");
+    let peer_certificate = certificates
+        .first()
+        .expect("TLS fixture should contain a leaf certificate")
+        .clone();
+    let dispatch_count = Arc::new(AtomicUsize::new(0));
+    let cleanup_complete = Arc::new(AtomicBool::new(false));
+    let (_park_tx, park_rx) = oneshot::channel::<()>();
+    let park_receiver = Arc::new(Mutex::new(Some(park_rx)));
+    let mut computations = RemoteComputationRegistry::new();
+    let handler_dispatch_count = Arc::clone(&dispatch_count);
+    let handler_cleanup_complete = Arc::clone(&cleanup_complete);
+    let handler_park_receiver = Arc::clone(&park_receiver);
+    computations
+        .register::<Vec<u8>, Vec<u8>, _, _>("proof.v3-expiry-drain", move |cx, _invocation| {
+            let handler_dispatch_count = Arc::clone(&handler_dispatch_count);
+            let handler_cleanup_complete = Arc::clone(&handler_cleanup_complete);
+            let mut receiver = handler_park_receiver
+                .lock()
+                .take()
+                .expect("V3 expiry handler should execute exactly once");
+            async move {
+                handler_dispatch_count.fetch_add(1, Ordering::SeqCst);
+                let received = receiver.recv(&cx).await;
+                thread::sleep(Duration::from_millis(40));
+                handler_cleanup_complete.store(true, Ordering::SeqCst);
+                received.map_err(|error| {
+                    RemoteError::TransportError(format!(
+                        "proof.v3-expiry-drain parking operation ended: {error}"
+                    ))
+                })?;
+                Ok(RemoteOutcome::Success(Vec::new()))
+            }
+        })
+        .expect("V3 expiry handler should register");
+
+    let origin = NodeId::new("origin-v3-expiry-drain");
+    let mut peer_pins = CertificatePinSet::new();
+    peer_pins.add(
+        CertificatePin::compute_spki_sha256(&peer_certificate)
+            .expect("fixture certificate should produce an SPKI pin"),
+    );
+    let mut policy = RemotePeerAdmissionPolicy::new(
+        RemoteProtocolVersion::V3,
+        computations.schema_registry().clone(),
+    );
+    policy
+        .grant_tls_peer(origin.clone(), peer_pins, ["proof.v3-expiry-drain"])
+        .expect("V3 expiry grant should be valid");
+    let request = remote_service_wire_request_with_lease(
+        policy.hello_for(origin),
+        "proof.v3-expiry-drain",
+        7306,
+        0x7306,
+        b"expiry-drain-input",
+        Duration::from_millis(100),
+    );
+    let (acceptor, connector) = remote_client_test_mtls_pair();
+
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("V3 expiry service runtime should build");
+    let service = runtime
+        .block_on(RemoteComputationService::bind(
+            "127.0.0.1:0",
+            acceptor,
+            policy,
+            computations,
+            RemoteComputationServiceConfig::new()
+                .with_max_connections(Some(1))
+                .with_drain_timeout(Duration::from_secs(1)),
+        ))
+        .expect("V3 expiry service should bind");
+    let endpoint = service
+        .local_addr()
+        .expect("V3 expiry service should expose its address");
+    let operator = service.handle();
+    let client_operator = operator.clone();
+    let client_cleanup_complete = Arc::clone(&cleanup_complete);
+    let client = RemoteComputationClient::new(
+        endpoint,
+        "localhost",
+        connector,
+        RemoteComputationClientConfig::new()
+            .with_max_attempts(1)
+            .with_attempt_timeout(Duration::from_secs(5)),
+    )
+    .expect("V3 expiry client should build");
+
+    let client_thread = thread::spawn(move || {
+        let start = block_on(client.start_session(&Cx::for_testing(), &request))
+            .expect("V3 expiry request should be accepted");
+        let session = match start {
+            RemoteComputationSessionStart::Running(session) => session,
+            RemoteComputationSessionStart::Terminal(response) => {
+                panic!("V3 expiry request terminated at admission: {response:?}")
+            }
+            _ => panic!("V3 expiry start returned an unknown future variant"),
+        };
+        let terminal = block_on(session.wait(&Cx::for_testing()))
+            .expect("V3 client should wait through server expiry cleanup");
+        assert!(matches!(
+            terminal,
+            RemoteServiceWireResponse::Outcome {
+                remote_task_id: 7306,
+                outcome: RemoteServiceWireOutcome::Cancelled(_),
+            }
+        ));
+        assert!(
+            client_cleanup_complete.load(Ordering::SeqCst),
+            "V3 expiry terminal must follow child cleanup"
+        );
+        assert!(client_operator.begin_drain());
+    });
+
+    let report = runtime
+        .block_on(async move {
+            let cx = Cx::current().expect("runtime should install a V3 expiry context");
+            service.run(&cx).await
+        })
+        .expect("V3 expiry service should drain cleanly");
+    client_thread
+        .join()
+        .expect("V3 expiry client should not panic");
+
+    assert_eq!(report.accepted_connections(), 1);
+    assert_eq!(dispatch_count.load(Ordering::SeqCst), 1);
+    assert!(cleanup_complete.load(Ordering::SeqCst));
+    assert_eq!(operator.active_connections(), 0);
+}
+
+#[cfg(feature = "tls")]
+#[test]
+fn remote_tls_v3_start_decodes_admission_rejection_as_terminal() {
+    let (acceptor, connector) = remote_client_test_mtls_pair();
+    let computations = RemoteComputationRegistry::new();
+    let policy = RemotePeerAdmissionPolicy::new(
+        RemoteProtocolVersion::V3,
+        computations.schema_registry().clone(),
+    );
+    let request = remote_service_wire_request_with_lease(
+        policy.hello_for(NodeId::new("ungranted-v3-peer")),
+        "proof.denied",
+        7302,
+        0x7302,
+        b"must-not-dispatch",
+        Duration::from_secs(5),
+    );
+
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("V3 admission service runtime should build");
+    let service = runtime
+        .block_on(RemoteComputationService::bind(
+            "127.0.0.1:0",
+            acceptor,
+            policy,
+            computations,
+            RemoteComputationServiceConfig::new().with_max_connections(Some(1)),
+        ))
+        .expect("V3 admission service should bind");
+    let endpoint = service
+        .local_addr()
+        .expect("V3 admission service should expose its address");
+    let operator = service.handle();
+    let client_operator = operator.clone();
+    let client = RemoteComputationClient::new(
+        endpoint,
+        "localhost",
+        connector,
+        RemoteComputationClientConfig::new()
+            .with_max_attempts(1)
+            .with_attempt_timeout(Duration::from_secs(5)),
+    )
+    .expect("V3 admission client should build");
+
+    let client_thread = thread::spawn(move || {
+        let start = block_on(client.start_session(&Cx::for_testing(), &request))
+            .expect("V3 admission refusal should decode as a session event");
+        match start {
+            RemoteComputationSessionStart::Terminal(RemoteServiceWireResponse::Rejected {
+                remote_task_id: 7302,
+                code: RemoteServiceRejectionCode::AdmissionDenied,
+                ..
+            }) => {}
+            RemoteComputationSessionStart::Terminal(other) => {
+                panic!("unexpected V3 admission terminal response: {other:?}")
+            }
+            RemoteComputationSessionStart::Running(_) => {
+                panic!("ungranted V3 peer must not start a handler")
+            }
+            _ => panic!("V3 admission returned an unknown future variant"),
+        }
+        assert!(client_operator.begin_drain());
+    });
+
+    let report = runtime
+        .block_on(async move {
+            let cx = Cx::current().expect("runtime should install a V3 admission context");
+            service.run(&cx).await
+        })
+        .expect("V3 admission service should drain cleanly");
+    client_thread
+        .join()
+        .expect("V3 admission client should not panic");
+
+    assert_eq!(report.accepted_connections(), 1);
+    assert_eq!(report.completed_connections(), 1);
+    assert_eq!(operator.active_connections(), 0);
+}
+
+#[cfg(feature = "tls")]
+#[test]
+fn remote_tls_v3_disconnect_cancels_drains_and_replays_without_redispatch() {
+    let certificates = Certificate::from_pem(TEST_CERT_PEM).expect("TLS fixture should parse");
+    let peer_certificate = certificates
+        .first()
+        .expect("TLS fixture should contain a leaf certificate")
+        .clone();
+    let dispatch_count = Arc::new(AtomicUsize::new(0));
+    let cleanup_complete = Arc::new(AtomicBool::new(false));
+    let (_park_tx, park_rx) = oneshot::channel::<()>();
+    let park_receiver = Arc::new(Mutex::new(Some(park_rx)));
+    let mut computations = RemoteComputationRegistry::new();
+    let handler_dispatch_count = Arc::clone(&dispatch_count);
+    let handler_cleanup_complete = Arc::clone(&cleanup_complete);
+    let handler_park_receiver = Arc::clone(&park_receiver);
+    computations
+        .register::<Vec<u8>, Vec<u8>, _, _>("proof.v3-disconnect", move |cx, _invocation| {
+            let handler_dispatch_count = Arc::clone(&handler_dispatch_count);
+            let handler_cleanup_complete = Arc::clone(&handler_cleanup_complete);
+            let mut receiver = handler_park_receiver
+                .lock()
+                .take()
+                .expect("V3 disconnect handler should execute exactly once");
+            async move {
+                handler_dispatch_count.fetch_add(1, Ordering::SeqCst);
+                let received = receiver.recv(&cx).await;
+                handler_cleanup_complete.store(true, Ordering::SeqCst);
+                received.map_err(|error| {
+                    RemoteError::TransportError(format!(
+                        "proof.v3-disconnect parking operation ended: {error}"
+                    ))
+                })?;
+                Ok(RemoteOutcome::Success(Vec::new()))
+            }
+        })
+        .expect("V3 disconnect handler should register");
+
+    let origin = NodeId::new("origin-v3-disconnect");
+    let mut peer_pins = CertificatePinSet::new();
+    peer_pins.add(
+        CertificatePin::compute_spki_sha256(&peer_certificate)
+            .expect("fixture certificate should produce an SPKI pin"),
+    );
+    let mut policy = RemotePeerAdmissionPolicy::new(
+        RemoteProtocolVersion::V3,
+        computations.schema_registry().clone(),
+    );
+    policy
+        .grant_tls_peer(origin.clone(), peer_pins, ["proof.v3-disconnect"])
+        .expect("V3 disconnect grant should be valid");
+    let hello = policy.hello_for(origin);
+    let first_request = remote_service_wire_request_with_lease(
+        hello.clone(),
+        "proof.v3-disconnect",
+        7303,
+        0x7303,
+        b"disconnect-input",
+        Duration::from_secs(10),
+    );
+    let replay_request = remote_service_wire_request_with_lease(
+        hello,
+        "proof.v3-disconnect",
+        7304,
+        0x7303,
+        b"disconnect-input",
+        Duration::from_secs(10),
+    );
+    let (acceptor, connector) = remote_client_test_mtls_pair();
+
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("V3 disconnect service runtime should build");
+    let service = runtime
+        .block_on(RemoteComputationService::bind(
+            "127.0.0.1:0",
+            acceptor,
+            policy,
+            computations,
+            RemoteComputationServiceConfig::new()
+                .with_max_connections(Some(2))
+                .with_drain_timeout(Duration::from_secs(1)),
+        ))
+        .expect("V3 disconnect service should bind");
+    let endpoint = service
+        .local_addr()
+        .expect("V3 disconnect service should expose its address");
+    let operator = service.handle();
+    let client_operator = operator.clone();
+    let client_cleanup_complete = Arc::clone(&cleanup_complete);
+    let client = RemoteComputationClient::new(
+        endpoint,
+        "localhost",
+        connector,
+        RemoteComputationClientConfig::new()
+            .with_max_attempts(1)
+            .with_attempt_timeout(Duration::from_secs(5)),
+    )
+    .expect("V3 disconnect client should build");
+
+    let client_thread = thread::spawn(move || {
+        let first = block_on(client.start_session(&Cx::for_testing(), &first_request))
+            .expect("first V3 disconnect request should be accepted");
+        let session = match first {
+            RemoteComputationSessionStart::Running(session) => session,
+            RemoteComputationSessionStart::Terminal(response) => {
+                panic!("first V3 disconnect request terminated early: {response:?}")
+            }
+            _ => panic!("first V3 disconnect start returned an unknown future variant"),
+        };
+        drop(session);
+
+        let cleanup_deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while !client_cleanup_complete.load(Ordering::SeqCst) {
+            assert!(
+                std::time::Instant::now() < cleanup_deadline,
+                "transport loss should cancel and drain the V3 child"
+            );
+            thread::sleep(Duration::from_millis(1));
+        }
+
+        let replay = block_on(client.start_session(&Cx::for_testing(), &replay_request))
+            .expect("V3 disconnect retry should decode its cached terminal event");
+        match replay {
+            RemoteComputationSessionStart::Terminal(RemoteServiceWireResponse::Outcome {
+                remote_task_id: 7304,
+                outcome: RemoteServiceWireOutcome::Cancelled(_),
+            }) => {}
+            RemoteComputationSessionStart::Terminal(other) => {
+                panic!("unexpected V3 disconnect replay response: {other:?}")
+            }
+            RemoteComputationSessionStart::Running(_) => {
+                panic!("cached V3 disconnect retry must not redispatch")
+            }
+            _ => panic!("V3 disconnect replay returned an unknown future variant"),
+        }
+        assert!(client_operator.begin_drain());
+    });
+
+    let report = runtime
+        .block_on(async move {
+            let cx = Cx::current().expect("runtime should install a V3 disconnect context");
+            service.run(&cx).await
+        })
+        .expect("V3 disconnect service should drain cleanly");
+    client_thread
+        .join()
+        .expect("V3 disconnect client should not panic");
+
+    assert_eq!(report.accepted_connections(), 2);
+    assert_eq!(dispatch_count.load(Ordering::SeqCst), 1);
+    assert!(cleanup_complete.load(Ordering::SeqCst));
+    assert_eq!(operator.active_connections(), 0);
+}
+
+#[cfg(feature = "tls")]
+#[test]
+fn remote_tls_v3_session_cancellation_wakes_stalled_wait() {
+    let (acceptor, connector) = remote_client_test_mtls_pair();
+    let listener = block_on(TcpListener::bind("127.0.0.1:0"))
+        .expect("V3 cancellation fixture should bind loopback");
+    let endpoint = listener
+        .local_addr()
+        .expect("V3 cancellation fixture should expose its address");
+    let request = remote_client_test_request(RemoteProtocolVersion::V3, 7305, 0x7305);
+    let (accepted_tx, accepted_rx) = std::sync::mpsc::sync_channel::<()>(0);
+    let (release_tx, release_rx) = std::sync::mpsc::sync_channel::<()>(0);
+    let server = thread::spawn(move || {
+        block_on(async move {
+            let (stream, _) = listener
+                .accept()
+                .await
+                .expect("V3 cancellation fixture should accept one connection");
+            let mut stream = acceptor
+                .accept(stream)
+                .await
+                .expect("V3 cancellation fixture should authenticate the client");
+            let encoded = read_raw_frame(&mut stream)
+                .await
+                .expect("V3 cancellation fixture should receive a complete request");
+            let received: RemoteServiceWireRequest = serde_json::from_slice(&encoded)
+                .expect("V3 cancellation fixture request should decode");
+            let accepted = RemoteServiceSessionEvent::Accepted {
+                remote_task_id: received.remote_task_id().raw(),
+            };
+            let encoded = serde_json::to_vec(&accepted)
+                .expect("V3 cancellation accepted event should encode");
+            write_raw_frame(&mut stream, &encoded)
+                .await
+                .expect("V3 cancellation accepted event should flush");
+            accepted_tx
+                .send(())
+                .expect("V3 cancellation fixture should publish acceptance");
+            release_rx
+                .recv()
+                .expect("V3 cancellation fixture should receive cleanup release");
+        });
+    });
+
+    let client = RemoteComputationClient::new(
+        endpoint,
+        "localhost",
+        connector,
+        RemoteComputationClientConfig::new()
+            .with_max_attempts(1)
+            .with_attempt_timeout(Duration::from_secs(5)),
+    )
+    .expect("V3 cancellation client should build");
+    let start = block_on(client.start_session(&Cx::for_testing(), &request))
+        .expect("V3 cancellation session should start");
+    let session = match start {
+        RemoteComputationSessionStart::Running(session) => session,
+        RemoteComputationSessionStart::Terminal(response) => {
+            panic!("V3 cancellation fixture terminated early: {response:?}")
+        }
+        _ => panic!("V3 cancellation start returned an unknown future variant"),
+    };
+    accepted_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("V3 cancellation fixture should confirm acceptance");
+
+    let cx = Cx::for_testing();
+    let client_cx = cx.clone();
+    let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
+    let client_thread = thread::spawn(move || {
+        let result = block_on(session.wait(&client_cx));
+        result_tx
+            .send(result)
+            .expect("V3 cancellation client should publish its result");
+    });
+    cx.set_cancel_requested(true);
+    let result = result_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("caller cancellation should wake a stalled V3 wait");
+    assert!(matches!(result, Err(RemoteServiceSessionError::Cancelled)));
+
+    release_tx
+        .send(())
+        .expect("V3 cancellation fixture should release its server stream");
+    client_thread
+        .join()
+        .expect("V3 cancellation client should not panic");
+    server
+        .join()
+        .expect("V3 cancellation fixture should not panic");
 }
 
 #[cfg(feature = "tls")]
@@ -2402,7 +3082,7 @@ fn remote_tls_listener_v2_deduplicates_by_peer_and_drains_without_orphans() {
         0xbad,
         b"oversized-input",
     );
-    let ambiguous_oversized_retry = remote_service_wire_request_with(
+    let cached_oversized_retry = remote_service_wire_request_with(
         hello.clone(),
         "proof.large",
         7124,
@@ -2557,25 +3237,25 @@ fn remote_tls_listener_v2_deduplicates_by_peer_and_drains_without_orphans() {
                 } if diagnostic == &canonical_failure_diagnostic
             ));
 
-            let oversized_error =
-                call_tls_remote_service_result(endpoint, &connector, &canonical_oversized)
-                    .expect_err(
-                        "oversized V2 terminal response must not be committed before encoding",
-                    );
+            let canonical_oversized_response =
+                call_tls_remote_service(endpoint, &connector, &canonical_oversized);
+            let oversized_diagnostic = match canonical_oversized_response {
+                RemoteServiceWireResponse::Rejected {
+                    remote_task_id: 7123,
+                    code: RemoteServiceRejectionCode::ExecutionFailed,
+                    diagnostic,
+                } => diagnostic,
+                other => panic!("unexpected oversized terminal fallback: {other:?}"),
+            };
+            let cached_oversized =
+                call_tls_remote_service(endpoint, &connector, &cached_oversized_retry);
             assert!(matches!(
-                oversized_error,
-                RemoteComputationServiceError::UnexpectedEof
-                    | RemoteComputationServiceError::Transport(_)
-            ));
-            let ambiguous_oversized =
-                call_tls_remote_service(endpoint, &connector, &ambiguous_oversized_retry);
-            assert!(matches!(
-                ambiguous_oversized,
+                cached_oversized,
                 RemoteServiceWireResponse::Rejected {
                     remote_task_id: 7124,
-                    code: RemoteServiceRejectionCode::OperationInFlight,
-                    ..
-                }
+                    code: RemoteServiceRejectionCode::ExecutionFailed,
+                    ref diagnostic,
+                } if diagnostic == &oversized_diagnostic
             ));
 
             let capacity = call_tls_remote_service(endpoint, &connector, &capacity_request);
@@ -2649,15 +3329,11 @@ fn remote_tls_listener_v2_deduplicates_by_peer_and_drains_without_orphans() {
 
     assert_eq!(report.accepted_connections(), 14);
     assert_eq!(report.capacity_rejections(), 0);
-    assert_eq!(report.completed_connections(), 12);
+    assert_eq!(report.completed_connections(), 13);
     assert_eq!(report.interrupted_connections(), 1);
-    assert_eq!(report.failed_connections(), 1);
+    assert_eq!(report.failed_connections(), 0);
     assert_eq!(report.panicked_connections(), 0);
-    assert!(
-        report
-            .first_connection_failure()
-            .is_some_and(|failure| failure.contains("encoded frame exceeds"))
-    );
+    assert_eq!(report.first_connection_failure(), None);
     assert_eq!(report.shutdown().drained, 0);
     assert_eq!(report.shutdown().force_closed, 1);
     assert_eq!(operator.active_connections(), 0);
@@ -2673,8 +3349,8 @@ fn remote_tls_listener_v2_deduplicates_by_peer_and_drains_without_orphans() {
         "none",
         "mtls_v2_peer_dedup_then_force_close_stalled_frame",
         14,
-        "twelve_completed_one_failed_one_interrupted_five_dispatches_zero_live",
-        "twelve_completed_one_failed_one_interrupted_five_dispatches_zero_live",
+        "thirteen_completed_zero_failed_one_interrupted_five_dispatches_zero_live",
+        "thirteen_completed_zero_failed_one_interrupted_five_dispatches_zero_live",
     )
     .emit();
 }

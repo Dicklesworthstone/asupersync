@@ -30,13 +30,16 @@
 //! expose a structured TCP listener that owns accepted connections through a
 //! child region and drains them explicitly. Protocol V2 listeners additionally
 //! reserve idempotency keys per authenticated peer and replay retained terminal
-//! outcomes before a retry can execute again. The native client bounds connect,
-//! handshake, exchange, and backoff, retries only failures proven to precede
-//! request delivery, and fails closed on every ambiguous delivery because the
-//! listener's retained idempotency state is process-local. The structured
-//! listener also executes each admitted computation in a lease-bounded child
-//! region and returns only after expiry cancellation has drained to quiescence.
-//! The current one-request/one-response protocol does not support renewal.
+//! outcomes before a retry can execute again. Protocol V3 retains that scoped
+//! idempotency and owns cancellation plus renewable leases on the same mTLS
+//! connection. The native client bounds connect, handshake, exchange, and
+//! backoff, retries only failures proven to precede request delivery, and fails
+//! closed on every ambiguous delivery because the listener's retained state is
+//! process-local. V1/V2 computations remain one-request/one-response; V3 owns a
+//! child region until handler completion, expiry, explicit cancellation, or
+//! transport loss has drained to quiescence. A production [`RemoteRuntime`]
+//! driver that maps the synchronous transport trait onto these async V3
+//! sessions remains a separate composition layer.
 
 use crate::channel::oneshot;
 #[cfg(feature = "tls")]
@@ -56,10 +59,15 @@ use crate::types::outcome::Outcome;
 use crate::types::{Budget, CancelReason, ObligationId, RegionId, TaskId, Time};
 use crate::util::det_hash::DetHashMap;
 #[cfg(feature = "tls")]
-use crate::{bytes::BytesMut, io::AsyncRead, io::AsyncWrite, stream::StreamExt};
+use crate::{
+    bytes::BytesMut,
+    io::AsyncRead,
+    io::AsyncWrite,
+    stream::{Stream, StreamExt},
+};
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
 use crate::{
-    net::{TcpListener, TcpStreamBuilder},
+    net::{TcpListener, TcpStream, TcpStreamBuilder},
     runtime::SpawnError,
     server::{ConnectionManager, ShutdownPhase, ShutdownSignal, ShutdownStats},
     tls::{TlsAcceptor, TlsConnector, TlsError},
@@ -2173,6 +2181,12 @@ impl RemoteProtocolVersion {
     /// outcomes for bounded replay, and refuses ambiguous in-flight retries.
     /// The guarantee is process-local and does not survive service restart.
     pub const V2: Self = Self::new(2, 0);
+    /// Listener protocol with same-connection lifecycle controls.
+    ///
+    /// V3 retains V2's authenticated-peer-scoped idempotency contract and adds
+    /// connection-owned cancellation and lease renewal. A V3 request must be
+    /// handled by the session driver; it must never fall back to V1 execution.
+    pub const V3: Self = Self::new(3, 0);
 
     /// Creates a protocol version.
     #[must_use]
@@ -2808,9 +2822,9 @@ impl RemoteComputationRegistry {
 
 /// Default maximum encoded request or response frame for the remote service.
 pub const DEFAULT_REMOTE_SERVICE_MAX_FRAME_BYTES: usize = 64 * 1024;
-/// Default V2 terminal-outcome retention window for retry replay.
+/// Default V2/V3 terminal-outcome retention window for retry replay.
 pub const DEFAULT_REMOTE_SERVICE_IDEMPOTENCY_RETENTION: Duration = Duration::from_secs(300);
-/// Default V2 retained/in-flight key cap per authenticated peer.
+/// Default V2/V3 retained/in-flight key cap per authenticated peer.
 pub const DEFAULT_REMOTE_SERVICE_MAX_IDEMPOTENCY_RECORDS_PER_PEER: usize = 4096;
 
 /// Bounded framing policy for one authenticated remote-service exchange.
@@ -2936,6 +2950,13 @@ impl RemoteServiceWireRequest {
     }
 
     #[cfg(feature = "tls")]
+    fn session_lease(&self) -> Option<Duration> {
+        (self.lease_subsec_nanos < 1_000_000_000)
+            .then(|| Duration::new(self.lease_secs, self.lease_subsec_nanos))
+            .filter(|lease| !lease.is_zero())
+    }
+
+    #[cfg(feature = "tls")]
     fn into_spawn_request(self) -> Result<SpawnRequest, String> {
         if self.lease_subsec_nanos >= 1_000_000_000 {
             return Err(format!(
@@ -3011,7 +3032,7 @@ pub enum RemoteServiceRejectionCode {
     MalformedRequest,
     /// The selected handler returned a runtime execution error.
     ExecutionFailed,
-    /// V2 semantics were requested from a non-lifecycle one-shot adapter.
+    /// V2/V3 semantics were requested from an adapter lacking required lifecycle state.
     LifecycleUnavailable,
     /// Matching authenticated-peer request is still executing ambiguously.
     OperationInFlight,
@@ -3053,6 +3074,103 @@ impl RemoteServiceWireResponse {
             }
         };
         RemoteTaskId::from_raw(raw)
+    }
+}
+
+/// Authenticated lifecycle command for one protocol V3 computation session.
+///
+/// Commands intentionally omit peer identity and idempotency data: the initial
+/// request and its mutually authenticated TLS connection are the authority.
+#[cfg(feature = "tls")]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "command", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum RemoteServiceSessionCommand {
+    /// Cancel the active computation with an attributed reason.
+    Cancel {
+        /// Active task correlation ID.
+        remote_task_id: u64,
+        /// Caller-supplied cancellation reason.
+        reason: CancelReason,
+    },
+    /// Replace the active lease with a duration measured from receipt.
+    RenewLease {
+        /// Active task correlation ID.
+        remote_task_id: u64,
+        /// Strictly increasing command sequence number.
+        renewal_id: u64,
+        /// Whole seconds in the requested lease.
+        lease_secs: u64,
+        /// Subsecond nanoseconds in the requested lease.
+        lease_subsec_nanos: u32,
+    },
+}
+
+#[cfg(feature = "tls")]
+impl RemoteServiceSessionCommand {
+    /// Correlation ID for the active computation.
+    #[must_use]
+    pub const fn remote_task_id(&self) -> RemoteTaskId {
+        let raw = match self {
+            Self::Cancel { remote_task_id, .. } | Self::RenewLease { remote_task_id, .. } => {
+                *remote_task_id
+            }
+        };
+        RemoteTaskId::from_raw(raw)
+    }
+}
+
+/// Server event emitted by a protocol V3 computation session.
+#[cfg(feature = "tls")]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "event", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum RemoteServiceSessionEvent {
+    /// The operation is admitted and its child task is session-owned.
+    Accepted {
+        /// Active task correlation ID.
+        remote_task_id: u64,
+    },
+    /// A numbered lease renewal became the active deadline.
+    LeaseRenewed {
+        /// Active task correlation ID.
+        remote_task_id: u64,
+        /// Command sequence number being acknowledged.
+        renewal_id: u64,
+        /// Whole seconds in the granted lease.
+        lease_secs: u64,
+        /// Subsecond nanoseconds in the granted lease.
+        lease_subsec_nanos: u32,
+    },
+    /// A control frame was refused without mutating the active computation.
+    CommandRejected {
+        /// Correlation ID presented by the refused command.
+        remote_task_id: u64,
+        /// Renewal sequence number, when the command was a renewal.
+        renewal_id: Option<u64>,
+        /// Stable human-readable refusal diagnostic.
+        diagnostic: String,
+    },
+    /// The operation reached its only terminal response.
+    Terminal {
+        /// Existing V1/V2 terminal representation, kept byte-stable itself.
+        response: RemoteServiceWireResponse,
+    },
+}
+
+#[cfg(feature = "tls")]
+impl RemoteServiceSessionEvent {
+    /// Correlation ID for the active computation.
+    #[must_use]
+    pub const fn remote_task_id(&self) -> RemoteTaskId {
+        match self {
+            Self::Accepted { remote_task_id }
+            | Self::LeaseRenewed { remote_task_id, .. }
+            | Self::CommandRejected { remote_task_id, .. } => {
+                RemoteTaskId::from_raw(*remote_task_id)
+            }
+            Self::Terminal { response } => response.remote_task_id(),
+        }
     }
 }
 
@@ -3237,7 +3355,7 @@ pub enum RemoteComputationServiceError {
     },
     /// Peer closed the stream before one complete frame arrived.
     UnexpectedEof,
-    /// Listener-owned V2 state disappeared before terminal publication.
+    /// Listener-owned V2/V3 state disappeared before terminal publication.
     IdempotencyStateLost,
 }
 
@@ -3324,13 +3442,13 @@ impl io::Write for RemoteServiceFrameWriter {
 }
 
 #[cfg(feature = "tls")]
-fn remote_service_framed<'a, IO>(
-    stream: &'a mut crate::tls::TlsStream<IO>,
+fn remote_service_framed<IO>(
+    stream: IO,
     limits: RemoteServiceWireLimits,
-) -> Result<
-    Framed<&'a mut crate::tls::TlsStream<IO>, LengthDelimitedCodec>,
-    RemoteComputationServiceError,
-> {
+) -> Result<Framed<IO, LengthDelimitedCodec>, RemoteComputationServiceError>
+where
+    IO: AsyncRead + AsyncWrite + Unpin,
+{
     if limits.max_frame_bytes == 0 {
         return Err(RemoteComputationServiceError::InvalidFrameLimit);
     }
@@ -3344,7 +3462,7 @@ fn remote_service_framed<'a, IO>(
 #[cfg(feature = "tls")]
 async fn read_remote_service_frame<T, IO>(
     _cx: &Cx,
-    framed: &mut Framed<&mut crate::tls::TlsStream<IO>, LengthDelimitedCodec>,
+    framed: &mut Framed<IO, LengthDelimitedCodec>,
 ) -> Result<T, RemoteComputationServiceError>
 where
     IO: AsyncRead + AsyncWrite + Unpin,
@@ -3379,7 +3497,7 @@ where
 #[cfg(feature = "tls")]
 async fn send_remote_service_frame<IO>(
     _cx: &Cx,
-    framed: &mut Framed<&mut crate::tls::TlsStream<IO>, LengthDelimitedCodec>,
+    framed: &mut Framed<IO, LengthDelimitedCodec>,
     encoded: &[u8],
 ) -> Result<(), RemoteComputationServiceError>
 where
@@ -3396,7 +3514,7 @@ where
 #[cfg(feature = "tls")]
 async fn write_remote_service_frame<T, IO>(
     cx: &Cx,
-    framed: &mut Framed<&mut crate::tls::TlsStream<IO>, LengthDelimitedCodec>,
+    framed: &mut Framed<IO, LengthDelimitedCodec>,
     value: &T,
     max_frame_bytes: usize,
 ) -> Result<(), RemoteComputationServiceError>
@@ -3406,6 +3524,408 @@ where
 {
     let encoded = encode_remote_service_frame(value, max_frame_bytes)?;
     send_remote_service_frame(cx, framed, &encoded).await
+}
+
+/// Protocol or transport failure while driving one V3 computation session.
+#[cfg(feature = "tls")]
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum RemoteServiceSessionError {
+    /// A session was started with a request that did not negotiate V3.
+    WrongProtocol {
+        /// Protocol version supplied by the request.
+        presented: RemoteProtocolVersion,
+    },
+    /// A renewal duration was zero or otherwise not representable on the wire.
+    InvalidLease,
+    /// The peer emitted an event that is invalid at the current session phase.
+    UnexpectedEvent {
+        /// Event kind required by the current operation.
+        expected: &'static str,
+    },
+    /// A command or event referred to a different task on the authenticated stream.
+    TaskMismatch {
+        /// Active task ID.
+        expected: u64,
+        /// Received task ID.
+        actual: u64,
+    },
+    /// A renewal acknowledgement did not match the outstanding command.
+    RenewalMismatch {
+        /// Outstanding renewal sequence number.
+        expected: u64,
+        /// Received renewal sequence number.
+        actual: u64,
+    },
+    /// A renewal acknowledgement changed the requested lease duration.
+    RenewalLeaseMismatch {
+        /// Duration sent by the client.
+        expected: Duration,
+        /// Duration echoed by the server.
+        actual: Duration,
+    },
+    /// Every strictly increasing renewal sequence number has been used.
+    RenewalSequenceExhausted,
+    /// The caller context was cancelled while session I/O was pending.
+    Cancelled,
+    /// A prior terminal error already closed the session transport.
+    SessionEnded,
+    /// Framing, serialization, or transport failed.
+    Service(RemoteComputationServiceError),
+}
+
+#[cfg(feature = "tls")]
+impl fmt::Display for RemoteServiceSessionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::WrongProtocol { presented } => {
+                write!(
+                    f,
+                    "remote computation session requires protocol V3, got {presented}"
+                )
+            }
+            Self::InvalidLease => write!(f, "remote computation session lease must be nonzero"),
+            Self::UnexpectedEvent { expected } => {
+                write!(f, "remote computation session expected {expected}")
+            }
+            Self::TaskMismatch { expected, actual } => write!(
+                f,
+                "remote computation session task mismatch: expected {expected}, got {actual}"
+            ),
+            Self::RenewalMismatch { expected, actual } => write!(
+                f,
+                "remote computation session renewal mismatch: expected {expected}, got {actual}"
+            ),
+            Self::RenewalLeaseMismatch { expected, actual } => write!(
+                f,
+                "remote computation session renewal lease mismatch: expected {expected:?}, got {actual:?}"
+            ),
+            Self::RenewalSequenceExhausted => {
+                write!(
+                    f,
+                    "remote computation session renewal sequence is exhausted"
+                )
+            }
+            Self::Cancelled => write!(f, "remote computation session caller was cancelled"),
+            Self::SessionEnded => write!(f, "remote computation session already ended"),
+            Self::Service(error) => write!(f, "remote computation session I/O failed: {error}"),
+        }
+    }
+}
+
+#[cfg(feature = "tls")]
+impl std::error::Error for RemoteServiceSessionError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Service(error) => Some(error),
+            Self::WrongProtocol { .. }
+            | Self::InvalidLease
+            | Self::UnexpectedEvent { .. }
+            | Self::TaskMismatch { .. }
+            | Self::RenewalMismatch { .. }
+            | Self::RenewalLeaseMismatch { .. }
+            | Self::RenewalSequenceExhausted
+            | Self::Cancelled
+            | Self::SessionEnded => None,
+        }
+    }
+}
+
+#[cfg(feature = "tls")]
+impl From<RemoteComputationServiceError> for RemoteServiceSessionError {
+    fn from(error: RemoteComputationServiceError) -> Self {
+        Self::Service(error)
+    }
+}
+
+/// Result of starting one V3 computation on an authenticated stream.
+#[cfg(feature = "tls")]
+#[non_exhaustive]
+pub enum RemoteComputationSessionStart<IO> {
+    /// The server admitted the request and now owns its running child task.
+    Running(RemoteComputationSession<IO>),
+    /// The request reached a terminal response without starting a live session.
+    Terminal(RemoteServiceWireResponse),
+}
+
+#[cfg(feature = "tls")]
+enum RemoteSessionIoRace<T> {
+    Completed(T),
+    Cancelled,
+}
+
+#[cfg(feature = "tls")]
+async fn remote_session_wait_for_cancellation(cx: &Cx) {
+    if cx.checkpoint().is_err() {
+        return;
+    }
+    let (sender, mut receiver) = oneshot::channel::<()>();
+    let _ = receiver.recv(cx).await;
+    drop(sender);
+}
+
+#[cfg(feature = "tls")]
+async fn remote_session_race_io<F>(cx: &Cx, future: F) -> RemoteSessionIoRace<F::Output>
+where
+    F: Future,
+{
+    futures_lite::future::race(
+        async { RemoteSessionIoRace::Completed(future.await) },
+        async {
+            remote_session_wait_for_cancellation(cx).await;
+            RemoteSessionIoRace::Cancelled
+        },
+    )
+    .await
+}
+
+/// One active V3 remote computation bound to one authenticated transport.
+///
+/// The value owns its framed transport, preventing two operations from sharing
+/// a connection or losing decoder-buffered bytes between lifecycle messages.
+/// Session I/O remains pending through server-side lease-expiry cleanup so the
+/// caller can receive the canonical drained terminal; caller-context
+/// cancellation is the explicit transport bound and drops the connection.
+#[cfg(feature = "tls")]
+pub struct RemoteComputationSession<IO> {
+    framed: Option<Framed<IO, LengthDelimitedCodec>>,
+    remote_task_id: RemoteTaskId,
+    max_frame_bytes: usize,
+    next_renewal_id: Option<u64>,
+}
+
+#[cfg(feature = "tls")]
+impl<IO> fmt::Debug for RemoteComputationSession<IO> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RemoteComputationSession")
+            .field("remote_task_id", &self.remote_task_id)
+            .field("max_frame_bytes", &self.max_frame_bytes)
+            .field("next_renewal_id", &self.next_renewal_id)
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(feature = "tls")]
+impl<IO> RemoteComputationSession<IO>
+where
+    IO: AsyncRead + AsyncWrite + Unpin,
+{
+    /// Starts one V3 operation over an already-authenticated transport.
+    pub async fn start(
+        cx: &Cx,
+        transport: IO,
+        request: &RemoteServiceWireRequest,
+        limits: RemoteServiceWireLimits,
+    ) -> Result<RemoteComputationSessionStart<IO>, RemoteServiceSessionError> {
+        let presented = request.hello().protocol_version();
+        if presented != RemoteProtocolVersion::V3 {
+            return Err(RemoteServiceSessionError::WrongProtocol { presented });
+        }
+        if request.session_lease().is_none() {
+            return Err(RemoteServiceSessionError::InvalidLease);
+        }
+        let remote_task_id = request.remote_task_id();
+        let mut framed = remote_service_framed(transport, limits)?;
+        let exchange = remote_session_race_io(cx, async {
+            write_remote_service_frame(cx, &mut framed, request, limits.max_frame_bytes()).await?;
+            read_remote_service_frame(cx, &mut framed).await
+        })
+        .await;
+        let event: RemoteServiceSessionEvent = match exchange {
+            RemoteSessionIoRace::Completed(result) => result?,
+            RemoteSessionIoRace::Cancelled => return Err(RemoteServiceSessionError::Cancelled),
+        };
+        Self::validate_task(remote_task_id, &event)?;
+        match event {
+            RemoteServiceSessionEvent::Accepted { .. } => {
+                Ok(RemoteComputationSessionStart::Running(Self {
+                    framed: Some(framed),
+                    remote_task_id,
+                    max_frame_bytes: limits.max_frame_bytes(),
+                    next_renewal_id: Some(1),
+                }))
+            }
+            RemoteServiceSessionEvent::Terminal { response } => {
+                Ok(RemoteComputationSessionStart::Terminal(response))
+            }
+            RemoteServiceSessionEvent::LeaseRenewed { .. } => {
+                Err(RemoteServiceSessionError::UnexpectedEvent {
+                    expected: "accepted or terminal event",
+                })
+            }
+            RemoteServiceSessionEvent::CommandRejected { .. } => {
+                Err(RemoteServiceSessionError::UnexpectedEvent {
+                    expected: "accepted or terminal event",
+                })
+            }
+        }
+    }
+
+    /// Active task correlation ID.
+    #[must_use]
+    pub const fn remote_task_id(&self) -> RemoteTaskId {
+        self.remote_task_id
+    }
+
+    /// Renews the lease relative to server receipt time.
+    ///
+    /// A terminal event means completion or expiry won the race before the
+    /// renewal was applied. The returned event is always task-correlated.
+    pub async fn renew_lease(
+        &mut self,
+        cx: &Cx,
+        lease: Duration,
+    ) -> Result<RemoteServiceSessionEvent, RemoteServiceSessionError> {
+        if lease.is_zero() {
+            return Err(RemoteServiceSessionError::InvalidLease);
+        }
+        let renewal_id = self
+            .next_renewal_id
+            .ok_or(RemoteServiceSessionError::RenewalSequenceExhausted)?;
+        let command = RemoteServiceSessionCommand::RenewLease {
+            remote_task_id: self.remote_task_id.raw(),
+            renewal_id,
+            lease_secs: lease.as_secs(),
+            lease_subsec_nanos: lease.subsec_nanos(),
+        };
+        let event = self.exchange_event(cx, Some(&command)).await?;
+        if let Err(error) = Self::validate_task(self.remote_task_id, &event) {
+            self.framed.take();
+            return Err(error);
+        }
+        match &event {
+            RemoteServiceSessionEvent::LeaseRenewed {
+                renewal_id: actual, ..
+            } if *actual != renewal_id => {
+                self.framed.take();
+                return Err(RemoteServiceSessionError::RenewalMismatch {
+                    expected: renewal_id,
+                    actual: *actual,
+                });
+            }
+            RemoteServiceSessionEvent::LeaseRenewed {
+                lease_secs,
+                lease_subsec_nanos,
+                ..
+            } => {
+                if *lease_subsec_nanos >= 1_000_000_000 {
+                    self.framed.take();
+                    return Err(RemoteServiceSessionError::UnexpectedEvent {
+                        expected: "lease-renewed event with valid nanoseconds",
+                    });
+                }
+                let actual = Duration::new(*lease_secs, *lease_subsec_nanos);
+                if actual != lease {
+                    self.framed.take();
+                    return Err(RemoteServiceSessionError::RenewalLeaseMismatch {
+                        expected: lease,
+                        actual,
+                    });
+                }
+                self.next_renewal_id = renewal_id.checked_add(1);
+            }
+            RemoteServiceSessionEvent::Terminal { .. } => {
+                self.framed.take();
+            }
+            RemoteServiceSessionEvent::CommandRejected { .. } => {}
+            RemoteServiceSessionEvent::Accepted { .. } => {
+                self.framed.take();
+                return Err(RemoteServiceSessionError::UnexpectedEvent {
+                    expected: "lease-renewed, command-rejected, or terminal event",
+                });
+            }
+        }
+        Ok(event)
+    }
+
+    /// Cancels the active task and waits for its drained terminal response.
+    pub async fn cancel(
+        mut self,
+        cx: &Cx,
+        reason: CancelReason,
+    ) -> Result<RemoteServiceWireResponse, RemoteServiceSessionError> {
+        let command = RemoteServiceSessionCommand::Cancel {
+            remote_task_id: self.remote_task_id.raw(),
+            reason,
+        };
+        let event = self.exchange_event(cx, Some(&command)).await?;
+        self.into_terminal(event)
+    }
+
+    /// Waits for handler completion or lease expiry.
+    pub async fn wait(
+        mut self,
+        cx: &Cx,
+    ) -> Result<RemoteServiceWireResponse, RemoteServiceSessionError> {
+        let event = self
+            .exchange_event::<RemoteServiceSessionCommand>(cx, None)
+            .await?;
+        self.into_terminal(event)
+    }
+
+    async fn exchange_event<T>(
+        &mut self,
+        cx: &Cx,
+        command: Option<&T>,
+    ) -> Result<RemoteServiceSessionEvent, RemoteServiceSessionError>
+    where
+        T: Serialize + ?Sized,
+    {
+        let framed = self
+            .framed
+            .as_mut()
+            .ok_or(RemoteServiceSessionError::SessionEnded)?;
+        let exchange = remote_session_race_io(cx, async {
+            if let Some(command) = command {
+                write_remote_service_frame(cx, framed, command, self.max_frame_bytes).await?;
+            }
+            read_remote_service_frame(cx, framed).await
+        })
+        .await;
+        match exchange {
+            RemoteSessionIoRace::Completed(Ok(event)) => Ok(event),
+            RemoteSessionIoRace::Completed(Err(error)) => {
+                self.framed.take();
+                Err(RemoteServiceSessionError::Service(error))
+            }
+            RemoteSessionIoRace::Cancelled => {
+                self.framed.take();
+                Err(RemoteServiceSessionError::Cancelled)
+            }
+        }
+    }
+
+    fn into_terminal(
+        mut self,
+        event: RemoteServiceSessionEvent,
+    ) -> Result<RemoteServiceWireResponse, RemoteServiceSessionError> {
+        Self::validate_task(self.remote_task_id, &event)?;
+        self.framed.take();
+        match event {
+            RemoteServiceSessionEvent::Terminal { response } => Ok(response),
+            RemoteServiceSessionEvent::Accepted { .. }
+            | RemoteServiceSessionEvent::LeaseRenewed { .. }
+            | RemoteServiceSessionEvent::CommandRejected { .. } => {
+                Err(RemoteServiceSessionError::UnexpectedEvent {
+                    expected: "terminal event",
+                })
+            }
+        }
+    }
+
+    fn validate_task(
+        expected: RemoteTaskId,
+        event: &RemoteServiceSessionEvent,
+    ) -> Result<(), RemoteServiceSessionError> {
+        let actual = event.remote_task_id();
+        if actual != expected {
+            return Err(RemoteServiceSessionError::TaskMismatch {
+                expected: expected.raw(),
+                actual: actual.raw(),
+            });
+        }
+        Ok(())
+    }
 }
 
 #[cfg(feature = "tls")]
@@ -3442,6 +3962,69 @@ impl RemoteServiceTerminalCommit {
             } => state.complete_execution_rejection(&peer, key, canonical_task_id, diagnostic, now),
         }
     }
+
+    fn into_encoding_rejection(self, diagnostic: String) -> Self {
+        let (peer, key, canonical_task_id) = match self {
+            Self::Outcome {
+                peer,
+                key,
+                canonical_task_id,
+                ..
+            }
+            | Self::ExecutionRejection {
+                peer,
+                key,
+                canonical_task_id,
+                ..
+            } => (peer, key, canonical_task_id),
+        };
+        Self::ExecutionRejection {
+            peer,
+            key,
+            canonical_task_id,
+            diagnostic,
+        }
+    }
+}
+
+#[cfg(feature = "tls")]
+fn remote_service_prepare_terminal_encoding(
+    mut response: RemoteServiceWireResponse,
+    mut commit: Option<RemoteServiceTerminalCommit>,
+    max_frame_bytes: usize,
+    session_envelope: bool,
+) -> (
+    RemoteServiceWireResponse,
+    Option<RemoteServiceTerminalCommit>,
+    Result<Vec<u8>, RemoteComputationServiceError>,
+) {
+    let encode = |response: &RemoteServiceWireResponse| {
+        if session_envelope {
+            encode_remote_service_frame(
+                &RemoteServiceSessionEvent::Terminal {
+                    response: response.clone(),
+                },
+                max_frame_bytes,
+            )
+        } else {
+            encode_remote_service_frame(response, max_frame_bytes)
+        }
+    };
+    let mut encoded = encode(&response);
+    if encoded.is_err()
+        && let Some(pending) = commit.take()
+    {
+        let diagnostic =
+            "remote computation terminal exceeded the configured wire frame limit".to_owned();
+        response = RemoteServiceWireResponse::Rejected {
+            remote_task_id: response.remote_task_id().raw(),
+            code: RemoteServiceRejectionCode::ExecutionFailed,
+            diagnostic: diagnostic.clone(),
+        };
+        commit = Some(pending.into_encoding_rejection(diagnostic));
+        encoded = encode(&response);
+    }
+    (response, commit, encoded)
 }
 
 #[cfg(feature = "tls")]
@@ -3467,6 +4050,34 @@ enum RemoteServiceExecutionMode {
 }
 
 #[cfg(feature = "tls")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RemoteServiceProtocolKind {
+    V1OneShot,
+    V2Idempotent,
+    V3Session,
+    Unsupported,
+}
+
+#[cfg(feature = "tls")]
+const fn remote_service_protocol_kind(version: RemoteProtocolVersion) -> RemoteServiceProtocolKind {
+    if version.major == RemoteProtocolVersion::V1.major
+        && version.minor == RemoteProtocolVersion::V1.minor
+    {
+        RemoteServiceProtocolKind::V1OneShot
+    } else if version.major == RemoteProtocolVersion::V2.major
+        && version.minor == RemoteProtocolVersion::V2.minor
+    {
+        RemoteServiceProtocolKind::V2Idempotent
+    } else if version.major == RemoteProtocolVersion::V3.major
+        && version.minor == RemoteProtocolVersion::V3.minor
+    {
+        RemoteServiceProtocolKind::V3Session
+    } else {
+        RemoteServiceProtocolKind::Unsupported
+    }
+}
+
+#[cfg(feature = "tls")]
 impl RemoteServiceExecutionMode {
     const fn enforces_request_lease(self) -> bool {
         match self {
@@ -3485,7 +4096,9 @@ impl RemoteServiceExecutionMode {
 /// selected handler inline under `cx`, and returns only after its tagged response
 /// is fully flushed. It never spawns or detaches work. This one-shot adapter
 /// accepts V1 only; it refuses V2 because it does not own shared listener
-/// idempotency state. V1 callers must not retry an ambiguous delivery as an
+/// idempotency state and refuses V3 because it does not own a lifecycle
+/// session. Unknown versions also fail closed instead of inheriting V1
+/// semantics. V1 callers must not retry an ambiguous delivery as an
 /// exactly-once lifecycle service.
 #[cfg(feature = "tls")]
 pub async fn serve_tls_computation_once<IO>(
@@ -3526,6 +4139,8 @@ where
     let mut framed = remote_service_framed(stream, limits)?;
     let wire_request: RemoteServiceWireRequest = read_remote_service_frame(cx, &mut framed).await?;
     let remote_task_id = wire_request.remote_task_id;
+    let uses_v3_session_envelope = execution_mode == RemoteServiceExecutionMode::LeaseBound
+        && wire_request.hello().protocol_version() == RemoteProtocolVersion::V3;
     let (response, terminal_commit) = match policy
         .admit_tls_peer(wire_request.hello(), &**framed.get_ref())
     {
@@ -3553,6 +4168,23 @@ where
             }
             .with_no_commit(),
             Ok(request) => {
+                if remote_service_protocol_kind(session.protocol_version())
+                    == RemoteServiceProtocolKind::V3Session
+                    && execution_mode == RemoteServiceExecutionMode::LeaseBound
+                {
+                    let state =
+                        idempotency.ok_or(RemoteComputationServiceError::IdempotencyStateLost)?;
+                    return serve_tls_computation_v3_session(
+                        cx,
+                        &mut framed,
+                        &session,
+                        computations,
+                        request,
+                        state,
+                        limits.max_frame_bytes(),
+                    )
+                    .await;
+                }
                 remote_service_dispatch_with_idempotency(
                     cx,
                     &session,
@@ -3565,7 +4197,12 @@ where
             }
         },
     };
-    let encoded = encode_remote_service_frame(&response, limits.max_frame_bytes())?;
+    let (response, terminal_commit, encoded) = remote_service_prepare_terminal_encoding(
+        response,
+        terminal_commit,
+        limits.max_frame_bytes(),
+        uses_v3_session_envelope,
+    );
     if let Some(commit) = terminal_commit
         && !commit.complete(
             idempotency.ok_or(RemoteComputationServiceError::IdempotencyStateLost)?,
@@ -3574,6 +4211,7 @@ where
     {
         return Err(RemoteComputationServiceError::IdempotencyStateLost);
     }
+    let encoded = encoded?;
     send_remote_service_frame(cx, &mut framed, &encoded).await?;
     Ok(response)
 }
@@ -3608,18 +4246,39 @@ async fn remote_service_dispatch_with_idempotency(
         .with_no_commit();
     }
 
-    let admission = if session.protocol_version() == RemoteProtocolVersion::V2 {
-        let Some(state) = idempotency else {
+    let admission = match remote_service_protocol_kind(session.protocol_version()) {
+        RemoteServiceProtocolKind::V1OneShot => None,
+        RemoteServiceProtocolKind::V2Idempotent => {
+            let Some(state) = idempotency else {
+                return RemoteServiceWireResponse::Rejected {
+                    remote_task_id: remote_task_id.raw(),
+                    code: RemoteServiceRejectionCode::LifecycleUnavailable,
+                    diagnostic: "protocol V2 requires listener-owned idempotency state".to_owned(),
+                }
+                .with_no_commit();
+            };
+            Some(state.admit(session.peer_node(), &request, cx.now()))
+        }
+        RemoteServiceProtocolKind::V3Session => {
             return RemoteServiceWireResponse::Rejected {
                 remote_task_id: remote_task_id.raw(),
                 code: RemoteServiceRejectionCode::LifecycleUnavailable,
-                diagnostic: "protocol V2 requires listener-owned idempotency state".to_owned(),
+                diagnostic: "protocol V3 requires same-connection lifecycle session handling"
+                    .to_owned(),
             }
             .with_no_commit();
-        };
-        Some(state.admit(session.peer_node(), &request, cx.now()))
-    } else {
-        None
+        }
+        RemoteServiceProtocolKind::Unsupported => {
+            return RemoteServiceWireResponse::Rejected {
+                remote_task_id: remote_task_id.raw(),
+                code: RemoteServiceRejectionCode::LifecycleUnavailable,
+                diagnostic: format!(
+                    "unsupported remote service protocol version {}",
+                    session.protocol_version()
+                ),
+            }
+            .with_no_commit();
+        }
     };
     let should_commit = matches!(admission, Some(RemoteServiceIdempotencyAdmission::Execute));
 
@@ -3713,6 +4372,673 @@ async fn remote_service_dispatch_with_idempotency(
             });
             (response, commit)
         }
+    }
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+enum RemoteServiceV3Race {
+    Expired,
+    Completed(
+        Result<Result<RemoteOutcome, RemoteComputationDispatchError>, crate::runtime::JoinError>,
+    ),
+    Flushed,
+    FlushFailed(io::Error),
+    Command(Option<io::Result<BytesMut>>),
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+enum RemoteServiceV3AcceptedFlush {
+    Flushed,
+    Expired,
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+const fn remote_service_v3_next_renewal_id(last: Option<u64>) -> Option<u64> {
+    match last {
+        None => Some(1),
+        Some(last) => last.checked_add(1),
+    }
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+async fn serve_tls_computation_v3_session<IO>(
+    cx: &Cx,
+    framed: &mut Framed<&mut crate::tls::TlsStream<IO>, LengthDelimitedCodec>,
+    session: &RemotePeerSession,
+    computations: &RemoteComputationRegistry,
+    request: SpawnRequest,
+    idempotency: &RemoteServiceIdempotency,
+    max_frame_bytes: usize,
+) -> Result<RemoteServiceWireResponse, RemoteComputationServiceError>
+where
+    IO: AsyncRead + AsyncWrite + Unpin,
+{
+    let remote_task_id = request.remote_task_id;
+    if let Err(error) = session.authorize_computation(&request.computation) {
+        let response = RemoteServiceWireResponse::Rejected {
+            remote_task_id: remote_task_id.raw(),
+            code: RemoteServiceRejectionCode::ComputationDenied,
+            diagnostic: error.to_string(),
+        };
+        return remote_service_v3_send_terminal(
+            cx,
+            framed,
+            response,
+            None,
+            idempotency,
+            max_frame_bytes,
+        )
+        .await;
+    }
+    if request.lease.is_zero() {
+        let response = RemoteServiceWireResponse::Rejected {
+            remote_task_id: remote_task_id.raw(),
+            code: RemoteServiceRejectionCode::MalformedRequest,
+            diagnostic: "remote computation lease must be nonzero".to_owned(),
+        };
+        return remote_service_v3_send_terminal(
+            cx,
+            framed,
+            response,
+            None,
+            idempotency,
+            max_frame_bytes,
+        )
+        .await;
+    }
+
+    match idempotency.admit(session.peer_node(), &request, cx.now()) {
+        RemoteServiceIdempotencyAdmission::CachedOutcome(outcome) => {
+            let response = RemoteServiceWireResponse::Outcome {
+                remote_task_id: remote_task_id.raw(),
+                outcome: outcome.into(),
+            };
+            return remote_service_v3_send_terminal(
+                cx,
+                framed,
+                response,
+                None,
+                idempotency,
+                max_frame_bytes,
+            )
+            .await;
+        }
+        RemoteServiceIdempotencyAdmission::CachedExecutionRejection(diagnostic) => {
+            let response = RemoteServiceWireResponse::Rejected {
+                remote_task_id: remote_task_id.raw(),
+                code: RemoteServiceRejectionCode::ExecutionFailed,
+                diagnostic,
+            };
+            return remote_service_v3_send_terminal(
+                cx,
+                framed,
+                response,
+                None,
+                idempotency,
+                max_frame_bytes,
+            )
+            .await;
+        }
+        RemoteServiceIdempotencyAdmission::InFlight => {
+            let response = RemoteServiceWireResponse::Rejected {
+                remote_task_id: remote_task_id.raw(),
+                code: RemoteServiceRejectionCode::OperationInFlight,
+                diagnostic: "matching protocol V3 operation is still in flight".to_owned(),
+            };
+            return remote_service_v3_send_terminal(
+                cx,
+                framed,
+                response,
+                None,
+                idempotency,
+                max_frame_bytes,
+            )
+            .await;
+        }
+        RemoteServiceIdempotencyAdmission::Conflict => {
+            let response = RemoteServiceWireResponse::Rejected {
+                remote_task_id: remote_task_id.raw(),
+                code: RemoteServiceRejectionCode::IdempotencyConflict,
+                diagnostic: "idempotency key was already used for different computation input"
+                    .to_owned(),
+            };
+            return remote_service_v3_send_terminal(
+                cx,
+                framed,
+                response,
+                None,
+                idempotency,
+                max_frame_bytes,
+            )
+            .await;
+        }
+        RemoteServiceIdempotencyAdmission::Capacity => {
+            let response = RemoteServiceWireResponse::Rejected {
+                remote_task_id: remote_task_id.raw(),
+                code: RemoteServiceRejectionCode::IdempotencyCapacity,
+                diagnostic: "authenticated peer exhausted retained idempotency capacity".to_owned(),
+            };
+            return remote_service_v3_send_terminal(
+                cx,
+                framed,
+                response,
+                None,
+                idempotency,
+                max_frame_bytes,
+            )
+            .await;
+        }
+        RemoteServiceIdempotencyAdmission::Execute => {}
+    }
+
+    let accepted_at = cx.now();
+    let mut expires_at = accepted_at + request.lease;
+    let child_spec = request
+        .budget
+        .map_or_else(ChildRegionSpec::inherit, |budget| {
+            ChildRegionSpec::inherit().with_budget(budget)
+        });
+    let child = match cx.open_child_region(child_spec).await {
+        Ok(child) => child,
+        Err(error) => {
+            let diagnostic =
+                format!("remote computation lifecycle could not create child region: {error}");
+            let response = RemoteServiceWireResponse::Rejected {
+                remote_task_id: remote_task_id.raw(),
+                code: RemoteServiceRejectionCode::ExecutionFailed,
+                diagnostic: diagnostic.clone(),
+            };
+            let commit = RemoteServiceTerminalCommit::ExecutionRejection {
+                peer: session.peer_node().clone(),
+                key: request.idempotency_key,
+                canonical_task_id: remote_task_id,
+                diagnostic,
+            };
+            return remote_service_v3_send_terminal(
+                cx,
+                framed,
+                response,
+                Some(commit),
+                idempotency,
+                max_frame_bytes,
+            )
+            .await;
+        }
+    };
+    let child_region_id = child.region_id();
+
+    let accepted = RemoteServiceSessionEvent::Accepted {
+        remote_task_id: remote_task_id.raw(),
+    };
+    match remote_service_v3_flush_accepted(cx, framed, &accepted, max_frame_bytes, expires_at).await
+    {
+        Ok(RemoteServiceV3AcceptedFlush::Flushed) => {}
+        Ok(RemoteServiceV3AcceptedFlush::Expired) => {
+            let terminal = remote_service_expire_child(cx, child, child_region_id).await;
+            let (response, commit) =
+                remote_service_v3_terminal_response(session, &request, terminal);
+            return remote_service_v3_send_terminal(
+                cx,
+                framed,
+                response,
+                commit,
+                idempotency,
+                max_frame_bytes,
+            )
+            .await;
+        }
+        Err(error) => {
+            return Err(remote_service_v3_abort_after_transport(
+                cx,
+                child,
+                child_region_id,
+                session,
+                &request,
+                idempotency,
+                error,
+            )
+            .await);
+        }
+    }
+
+    let owned_computations = computations.clone();
+    let owned_session = session.clone();
+    let retained_request = request.clone();
+    let mut task = match child.cx().spawn(move |task_cx| async move {
+        owned_computations
+            .dispatch(&task_cx, &owned_session, retained_request)
+            .await
+    }) {
+        Ok(task) => task,
+        Err(error) => {
+            let close_result = child.close().await;
+            let diagnostic = match close_result {
+                Ok(()) => format!("spawn V3 computation: {error}"),
+                Err(close_error) => {
+                    format!("spawn V3 computation: {error}; close child region: {close_error}")
+                }
+            };
+            let response = RemoteServiceWireResponse::Rejected {
+                remote_task_id: remote_task_id.raw(),
+                code: RemoteServiceRejectionCode::ExecutionFailed,
+                diagnostic: diagnostic.clone(),
+            };
+            let commit = RemoteServiceTerminalCommit::ExecutionRejection {
+                peer: session.peer_node().clone(),
+                key: request.idempotency_key,
+                canonical_task_id: remote_task_id,
+                diagnostic,
+            };
+            return remote_service_v3_send_terminal(
+                cx,
+                framed,
+                response,
+                Some(commit),
+                idempotency,
+                max_frame_bytes,
+            )
+            .await;
+        }
+    };
+
+    let mut last_renewal: Option<(u64, Duration)> = None;
+    let mut flush_pending = false;
+    let terminal = loop {
+        let mut deadline = Box::pin(crate::time::sleep_until(expires_at));
+        let raced = std::future::poll_fn(|task_cx| {
+            if remote_service_lease_expired(cx.now(), expires_at) {
+                return std::task::Poll::Ready(RemoteServiceV3Race::Expired);
+            }
+            if deadline.as_mut().poll(task_cx).is_ready() {
+                return std::task::Poll::Ready(RemoteServiceV3Race::Expired);
+            }
+            if let std::task::Poll::Ready(joined) = task.poll_join(task_cx) {
+                return std::task::Poll::Ready(RemoteServiceV3Race::Completed(joined));
+            }
+            if flush_pending {
+                return match framed.poll_flush(task_cx) {
+                    std::task::Poll::Ready(Ok(())) => {
+                        std::task::Poll::Ready(RemoteServiceV3Race::Flushed)
+                    }
+                    std::task::Poll::Ready(Err(error)) => {
+                        std::task::Poll::Ready(RemoteServiceV3Race::FlushFailed(error))
+                    }
+                    std::task::Poll::Pending => std::task::Poll::Pending,
+                };
+            }
+            Pin::new(&mut *framed)
+                .poll_next(task_cx)
+                .map(RemoteServiceV3Race::Command)
+        })
+        .await;
+
+        match raced {
+            RemoteServiceV3Race::Expired => {
+                break remote_service_expire_child(cx, child, child_region_id).await;
+            }
+            RemoteServiceV3Race::Completed(joined) => {
+                child.close().await.map_err(|error| {
+                    RemoteComputationServiceError::Transport(io::Error::other(format!(
+                        "remote computation lifecycle could not close V3 child region: {error}"
+                    )))
+                })?;
+                break remote_service_joined_outcome(joined);
+            }
+            RemoteServiceV3Race::Flushed => {
+                flush_pending = false;
+            }
+            RemoteServiceV3Race::FlushFailed(error) => {
+                let error = RemoteComputationServiceError::Transport(error);
+                return Err(remote_service_v3_abort_after_transport(
+                    cx,
+                    child,
+                    child_region_id,
+                    session,
+                    &request,
+                    idempotency,
+                    error,
+                )
+                .await);
+            }
+            RemoteServiceV3Race::Command(None) => {
+                let error = RemoteComputationServiceError::UnexpectedEof;
+                return Err(remote_service_v3_abort_after_transport(
+                    cx,
+                    child,
+                    child_region_id,
+                    session,
+                    &request,
+                    idempotency,
+                    error,
+                )
+                .await);
+            }
+            RemoteServiceV3Race::Command(Some(Err(error))) => {
+                let error = RemoteComputationServiceError::Transport(error);
+                return Err(remote_service_v3_abort_after_transport(
+                    cx,
+                    child,
+                    child_region_id,
+                    session,
+                    &request,
+                    idempotency,
+                    error,
+                )
+                .await);
+            }
+            RemoteServiceV3Race::Command(Some(Ok(frame))) => {
+                let command: RemoteServiceSessionCommand = match serde_json::from_slice(&frame) {
+                    Ok(command) => command,
+                    Err(error) => {
+                        let error = RemoteComputationServiceError::Serialization(error);
+                        return Err(remote_service_v3_abort_after_transport(
+                            cx,
+                            child,
+                            child_region_id,
+                            session,
+                            &request,
+                            idempotency,
+                            error,
+                        )
+                        .await);
+                    }
+                };
+                let presented_task_id = command.remote_task_id();
+                if presented_task_id != remote_task_id {
+                    let rejected = RemoteServiceSessionEvent::CommandRejected {
+                        remote_task_id: presented_task_id.raw(),
+                        renewal_id: match command {
+                            RemoteServiceSessionCommand::RenewLease { renewal_id, .. } => {
+                                Some(renewal_id)
+                            }
+                            RemoteServiceSessionCommand::Cancel { .. } => None,
+                        },
+                        diagnostic: format!(
+                            "session controls task {remote_task_id}, not {presented_task_id}"
+                        ),
+                    };
+                    if let Err(error) =
+                        remote_service_v3_queue_event(framed, &rejected, max_frame_bytes)
+                    {
+                        return Err(remote_service_v3_abort_after_transport(
+                            cx,
+                            child,
+                            child_region_id,
+                            session,
+                            &request,
+                            idempotency,
+                            error,
+                        )
+                        .await);
+                    }
+                    flush_pending = true;
+                    continue;
+                }
+                match command {
+                    RemoteServiceSessionCommand::Cancel { reason, .. } => {
+                        break remote_service_cancel_child(cx, child, child_region_id, reason)
+                            .await;
+                    }
+                    RemoteServiceSessionCommand::RenewLease {
+                        renewal_id,
+                        lease_secs,
+                        lease_subsec_nanos,
+                        ..
+                    } => {
+                        if remote_service_lease_expired(cx.now(), expires_at) {
+                            break remote_service_expire_child(cx, child, child_region_id).await;
+                        }
+                        let lease = (lease_subsec_nanos < 1_000_000_000)
+                            .then(|| Duration::new(lease_secs, lease_subsec_nanos));
+                        let expected_renewal_id = remote_service_v3_next_renewal_id(
+                            last_renewal.map(|(last_id, _)| last_id),
+                        );
+                        let is_replay = last_renewal == lease.map(|lease| (renewal_id, lease));
+                        if lease.is_none()
+                            || lease.is_some_and(|duration| duration.is_zero())
+                            || (!is_replay && expected_renewal_id != Some(renewal_id))
+                        {
+                            let expected = expected_renewal_id.map_or_else(
+                                || "no further renewal ID after u64::MAX".to_owned(),
+                                |expected| expected.to_string(),
+                            );
+                            let rejected = RemoteServiceSessionEvent::CommandRejected {
+                                remote_task_id: remote_task_id.raw(),
+                                renewal_id: Some(renewal_id),
+                                diagnostic: format!(
+                                    "invalid V3 lease renewal {renewal_id}; expected {expected} with a nonzero duration"
+                                ),
+                            };
+                            if let Err(error) =
+                                remote_service_v3_queue_event(framed, &rejected, max_frame_bytes)
+                            {
+                                return Err(remote_service_v3_abort_after_transport(
+                                    cx,
+                                    child,
+                                    child_region_id,
+                                    session,
+                                    &request,
+                                    idempotency,
+                                    error,
+                                )
+                                .await);
+                            }
+                            flush_pending = true;
+                            continue;
+                        }
+                        let lease = lease.expect("validated V3 renewal lease");
+                        if !is_replay {
+                            expires_at = cx.now() + lease;
+                            last_renewal = Some((renewal_id, lease));
+                        }
+                        let renewed = RemoteServiceSessionEvent::LeaseRenewed {
+                            remote_task_id: remote_task_id.raw(),
+                            renewal_id,
+                            lease_secs: lease.as_secs(),
+                            lease_subsec_nanos: lease.subsec_nanos(),
+                        };
+                        if let Err(error) =
+                            remote_service_v3_queue_event(framed, &renewed, max_frame_bytes)
+                        {
+                            return Err(remote_service_v3_abort_after_transport(
+                                cx,
+                                child,
+                                child_region_id,
+                                session,
+                                &request,
+                                idempotency,
+                                error,
+                            )
+                            .await);
+                        }
+                        flush_pending = true;
+                    }
+                }
+            }
+        }
+    };
+
+    let (response, commit) = remote_service_v3_terminal_response(session, &request, terminal);
+    remote_service_v3_send_terminal(cx, framed, response, commit, idempotency, max_frame_bytes)
+        .await
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+fn remote_service_v3_queue_event<IO>(
+    framed: &mut Framed<&mut crate::tls::TlsStream<IO>, LengthDelimitedCodec>,
+    event: &RemoteServiceSessionEvent,
+    max_frame_bytes: usize,
+) -> Result<(), RemoteComputationServiceError>
+where
+    IO: AsyncRead + AsyncWrite + Unpin,
+{
+    let encoded = encode_remote_service_frame(event, max_frame_bytes)?;
+    framed
+        .send(BytesMut::from(encoded.as_slice()))
+        .map_err(RemoteComputationServiceError::Transport)
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+async fn remote_service_v3_flush_accepted<IO>(
+    cx: &Cx,
+    framed: &mut Framed<&mut crate::tls::TlsStream<IO>, LengthDelimitedCodec>,
+    event: &RemoteServiceSessionEvent,
+    max_frame_bytes: usize,
+    expires_at: Time,
+) -> Result<RemoteServiceV3AcceptedFlush, RemoteComputationServiceError>
+where
+    IO: AsyncRead + AsyncWrite + Unpin,
+{
+    remote_service_v3_queue_event(framed, event, max_frame_bytes)?;
+    let mut deadline = Box::pin(crate::time::sleep_until(expires_at));
+    std::future::poll_fn(|task_cx| {
+        if remote_service_lease_expired(cx.now(), expires_at) {
+            return std::task::Poll::Ready(Ok(RemoteServiceV3AcceptedFlush::Expired));
+        }
+        if deadline.as_mut().poll(task_cx).is_ready() {
+            return std::task::Poll::Ready(Ok(RemoteServiceV3AcceptedFlush::Expired));
+        }
+        match framed.poll_flush(task_cx) {
+            std::task::Poll::Ready(Ok(())) => {
+                std::task::Poll::Ready(Ok(RemoteServiceV3AcceptedFlush::Flushed))
+            }
+            std::task::Poll::Ready(Err(error)) => {
+                std::task::Poll::Ready(Err(RemoteComputationServiceError::Transport(error)))
+            }
+            std::task::Poll::Pending => std::task::Poll::Pending,
+        }
+    })
+    .await
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+async fn remote_service_v3_send_terminal<IO>(
+    cx: &Cx,
+    framed: &mut Framed<&mut crate::tls::TlsStream<IO>, LengthDelimitedCodec>,
+    response: RemoteServiceWireResponse,
+    commit: Option<RemoteServiceTerminalCommit>,
+    idempotency: &RemoteServiceIdempotency,
+    max_frame_bytes: usize,
+) -> Result<RemoteServiceWireResponse, RemoteComputationServiceError>
+where
+    IO: AsyncRead + AsyncWrite + Unpin,
+{
+    let (response, commit, encoded) =
+        remote_service_prepare_terminal_encoding(response, commit, max_frame_bytes, true);
+    if let Some(commit) = commit
+        && !commit.complete(idempotency, cx.now())
+    {
+        return Err(RemoteComputationServiceError::IdempotencyStateLost);
+    }
+    let encoded = encoded?;
+    send_remote_service_frame(cx, framed, &encoded).await?;
+    Ok(response)
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+fn remote_service_v3_terminal_response(
+    session: &RemotePeerSession,
+    request: &SpawnRequest,
+    terminal: Result<RemoteOutcome, RemoteComputationDispatchError>,
+) -> (
+    RemoteServiceWireResponse,
+    Option<RemoteServiceTerminalCommit>,
+) {
+    let remote_task_id = request.remote_task_id;
+    match terminal {
+        Ok(outcome) => (
+            RemoteServiceWireResponse::Outcome {
+                remote_task_id: remote_task_id.raw(),
+                outcome: outcome.clone().into(),
+            },
+            Some(RemoteServiceTerminalCommit::Outcome {
+                peer: session.peer_node().clone(),
+                key: request.idempotency_key,
+                canonical_task_id: remote_task_id,
+                outcome,
+            }),
+        ),
+        Err(RemoteComputationDispatchError::Admission(error)) => (
+            RemoteServiceWireResponse::Rejected {
+                remote_task_id: remote_task_id.raw(),
+                code: RemoteServiceRejectionCode::ComputationDenied,
+                diagnostic: error.to_string(),
+            },
+            None,
+        ),
+        Err(RemoteComputationDispatchError::Execution(error)) => {
+            let diagnostic = error.to_string();
+            (
+                RemoteServiceWireResponse::Rejected {
+                    remote_task_id: remote_task_id.raw(),
+                    code: RemoteServiceRejectionCode::ExecutionFailed,
+                    diagnostic: diagnostic.clone(),
+                },
+                Some(RemoteServiceTerminalCommit::ExecutionRejection {
+                    peer: session.peer_node().clone(),
+                    key: request.idempotency_key,
+                    canonical_task_id: remote_task_id,
+                    diagnostic,
+                }),
+            )
+        }
+    }
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+fn remote_service_joined_outcome(
+    joined: Result<
+        Result<RemoteOutcome, RemoteComputationDispatchError>,
+        crate::runtime::JoinError,
+    >,
+) -> Result<RemoteOutcome, RemoteComputationDispatchError> {
+    match joined {
+        Ok(terminal) => terminal,
+        Err(crate::runtime::JoinError::Cancelled(reason)) => Ok(RemoteOutcome::Cancelled(reason)),
+        Err(crate::runtime::JoinError::Panicked(payload)) => {
+            Ok(RemoteOutcome::Panicked(payload.message().to_owned()))
+        }
+        Err(crate::runtime::JoinError::PolledAfterCompletion) => Err(
+            RemoteComputationDispatchError::Execution(RemoteError::TransportError(
+                "V3 computation join handle was polled after completion".to_owned(),
+            )),
+        ),
+    }
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+async fn remote_service_v3_abort_after_transport(
+    cx: &Cx,
+    child: crate::cx::ChildRegion,
+    child_region_id: RegionId,
+    session: &RemotePeerSession,
+    request: &SpawnRequest,
+    idempotency: &RemoteServiceIdempotency,
+    source: RemoteComputationServiceError,
+) -> RemoteComputationServiceError {
+    let reason = CancelReason::with_origin(
+        crate::types::CancelKind::Shutdown,
+        child_region_id,
+        cx.now(),
+    )
+    .with_message("remote computation session transport closed");
+    match remote_service_cancel_child(cx, child, child_region_id, reason).await {
+        Ok(outcome) => {
+            let commit = RemoteServiceTerminalCommit::Outcome {
+                peer: session.peer_node().clone(),
+                key: request.idempotency_key,
+                canonical_task_id: request.remote_task_id,
+                outcome,
+            };
+            if commit.complete(idempotency, cx.now()) {
+                source
+            } else {
+                RemoteComputationServiceError::IdempotencyStateLost
+            }
+        }
+        Err(error) => RemoteComputationServiceError::Transport(io::Error::other(format!(
+            "{source}; V3 disconnect cleanup failed: {error}"
+        ))),
     }
 }
 
@@ -3816,11 +5142,21 @@ async fn remote_service_expire_child(
         cx.now(),
     )
     .with_message("remote computation lease expired");
-    child.cancel(reason.clone()).map_err(|error| {
-        remote_service_execution_lifecycle_error("cancel expired child region", error)
-    })?;
+    remote_service_cancel_child(cx, child, child_region_id, reason).await
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+async fn remote_service_cancel_child(
+    _cx: &Cx,
+    child: crate::cx::ChildRegion,
+    _child_region_id: RegionId,
+    reason: CancelReason,
+) -> Result<RemoteOutcome, RemoteComputationDispatchError> {
+    child
+        .cancel(reason.clone())
+        .map_err(|error| remote_service_execution_lifecycle_error("cancel child region", error))?;
     child.close().await.map_err(|error| {
-        remote_service_execution_lifecycle_error("close expired child region", error)
+        remote_service_execution_lifecycle_error("close cancelled child region", error)
     })?;
     Ok(RemoteOutcome::Cancelled(reason))
 }
@@ -4111,6 +5447,13 @@ pub enum RemoteComputationClientError {
         /// Last framing, serialization, or transport failure.
         source: RemoteComputationServiceError,
     },
+    /// A V3 session failed during admission or lifecycle framing.
+    Session {
+        /// Number of connection attempts started.
+        attempts: usize,
+        /// Typed session failure.
+        source: RemoteServiceSessionError,
+    },
 }
 
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
@@ -4127,7 +5470,8 @@ impl RemoteComputationClientError {
             | Self::AttemptTimeout { attempts, .. }
             | Self::AmbiguousExchange { attempts, .. }
             | Self::ResponseTaskMismatch { attempts, .. }
-            | Self::Exchange { attempts, .. } => *attempts,
+            | Self::Exchange { attempts, .. }
+            | Self::Session { attempts, .. } => *attempts,
         }
     }
 }
@@ -4177,6 +5521,10 @@ impl fmt::Display for RemoteComputationClientError {
                 f,
                 "remote client exchange failed after {attempts} attempt(s): {source}"
             ),
+            Self::Session { attempts, source } => write!(
+                f,
+                "remote client V3 session failed after {attempts} attempt(s): {source}"
+            ),
         }
     }
 }
@@ -4190,6 +5538,7 @@ impl std::error::Error for RemoteComputationClientError {
             Self::Tls { source, .. } => Some(source),
             Self::AmbiguousExchange { source, .. } => Some(source),
             Self::Exchange { source, .. } => Some(source),
+            Self::Session { source, .. } => Some(source),
             Self::InvalidConfig(_)
             | Self::Cancelled { .. }
             | Self::CancelledDuringAttempt { .. }
@@ -4346,6 +5695,67 @@ impl RemoteComputationClient {
         self.config
     }
 
+    /// Connects, authenticates, and starts one same-connection V3 operation.
+    ///
+    /// The configured attempt timeout bounds TCP, TLS, request delivery, and
+    /// the initial accepted/terminal event only. Once returned, the session's
+    /// request lease and caller context govern operation lifetime. This method
+    /// never retries because failure after the request write is ambiguous; a
+    /// dropped authenticated stream causes the V3 listener to cancel and drain
+    /// its connection-owned child.
+    pub async fn start_session(
+        &self,
+        cx: &Cx,
+        request: &RemoteServiceWireRequest,
+    ) -> Result<
+        RemoteComputationSessionStart<crate::tls::TlsStream<TcpStream>>,
+        RemoteComputationClientError,
+    > {
+        if cx.checkpoint().is_err() {
+            return Err(RemoteComputationClientError::Cancelled { attempts: 0 });
+        }
+        let presented = request.hello().protocol_version();
+        if presented != RemoteProtocolVersion::V3 {
+            return Err(RemoteComputationClientError::Session {
+                attempts: 0,
+                source: RemoteServiceSessionError::WrongProtocol { presented },
+            });
+        }
+        if let Err(source) =
+            encode_remote_service_frame(request, self.config.wire_limits.max_frame_bytes())
+        {
+            return Err(RemoteComputationClientError::Session {
+                attempts: 0,
+                source: RemoteServiceSessionError::Service(source),
+            });
+        }
+
+        let started = remote_client_race_cancellation(
+            cx,
+            crate::time::timeout(
+                cx.now(),
+                self.config.attempt_timeout,
+                self.start_session_once(cx, request),
+            ),
+        )
+        .await;
+        if cx.checkpoint().is_err() {
+            return Err(RemoteComputationClientError::CancelledDuringAttempt { attempts: 1 });
+        }
+        match started {
+            RemoteClientCancelRace::Completed(Ok(result)) => result,
+            RemoteClientCancelRace::Completed(Err(_)) => {
+                Err(RemoteComputationClientError::AttemptTimeout {
+                    attempts: 1,
+                    timeout: self.config.attempt_timeout,
+                })
+            }
+            RemoteClientCancelRace::Cancelled => {
+                Err(RemoteComputationClientError::CancelledDuringAttempt { attempts: 1 })
+            }
+        }
+    }
+
     /// Connects, authenticates, and executes one bounded request.
     pub async fn call(
         &self,
@@ -4433,6 +5843,39 @@ impl RemoteComputationClient {
             .map_err(RemoteComputationClientAttemptError::Exchange)
     }
 
+    async fn start_session_once(
+        &self,
+        cx: &Cx,
+        request: &RemoteServiceWireRequest,
+    ) -> Result<
+        RemoteComputationSessionStart<crate::tls::TlsStream<TcpStream>>,
+        RemoteComputationClientError,
+    > {
+        let stream = TcpStreamBuilder::new(self.endpoint)
+            .connect_timeout(self.config.connect_timeout)
+            .nodelay(self.config.tcp_nodelay)
+            .connect()
+            .await
+            .map_err(|source| RemoteComputationClientError::Connect {
+                attempts: 1,
+                source,
+            })?;
+        let stream = self
+            .tls_connector
+            .connect(&self.server_name, stream)
+            .await
+            .map_err(|source| RemoteComputationClientError::Tls {
+                attempts: 1,
+                source,
+            })?;
+        RemoteComputationSession::start(cx, stream, request, self.config.wire_limits)
+            .await
+            .map_err(|source| RemoteComputationClientError::Session {
+                attempts: 1,
+                source,
+            })
+    }
+
     async fn sleep_before_retry(
         &self,
         cx: &Cx,
@@ -4475,7 +5918,7 @@ pub enum RemoteComputationListenerError {
     InvalidFrameLimit,
     /// A zero retention window would permit immediate duplicate execution.
     InvalidIdempotencyRetention,
-    /// A zero record cap cannot admit any V2 operation.
+    /// A zero record cap cannot admit any V2/V3 operation.
     InvalidIdempotencyCapacity,
     /// The listening socket failed to bind or accept.
     Transport(io::Error),
@@ -4581,14 +6024,14 @@ impl RemoteComputationServiceConfig {
         self
     }
 
-    /// Sets how long V2 terminal outcomes remain replayable.
+    /// Sets how long V2/V3 terminal outcomes remain replayable.
     #[must_use]
     pub const fn with_idempotency_retention(mut self, retention: Duration) -> Self {
         self.idempotency_retention = retention;
         self
     }
 
-    /// Sets the V2 retained/in-flight key cap for each authenticated peer.
+    /// Sets the V2/V3 retained/in-flight key cap for each authenticated peer.
     #[must_use]
     pub const fn with_max_idempotency_records_per_peer(mut self, max_records: usize) -> Self {
         self.max_idempotency_records_per_peer = max_records;
@@ -4613,13 +6056,13 @@ impl RemoteComputationServiceConfig {
         self.drain_timeout
     }
 
-    /// V2 terminal-outcome replay retention.
+    /// V2/V3 terminal-outcome replay retention.
     #[must_use]
     pub const fn idempotency_retention(self) -> Duration {
         self.idempotency_retention
     }
 
-    /// V2 retained/in-flight key cap per authenticated peer.
+    /// V2/V3 retained/in-flight key cap per authenticated peer.
     #[must_use]
     pub const fn max_idempotency_records_per_peer(self) -> usize {
         self.max_idempotency_records_per_peer
@@ -4797,10 +6240,11 @@ impl RemoteConnectionOutcomeCounts {
 /// `run` opens one child region, admits every connection through a region-owned
 /// [`JoinSet`], stops acceptance before drain, races handshake/request/flush
 /// against force-close and task cancellation, joins every connection outcome,
-/// and closes the child region only after quiescence. Each connection still
-/// performs exactly one request. Protocol V2 requests share this listener's
-/// authenticated-peer-scoped idempotency state; lifecycle message multiplexing
-/// and durable restart recovery remain separate layers.
+/// and closes the child region only after quiescence. V1/V2 connections perform
+/// exactly one request. A V3 connection admits one request and then owns its
+/// cancel/renew lifecycle until a terminal event. V2/V3 requests share this
+/// listener's authenticated-peer-scoped idempotency state; durable restart
+/// recovery and a production `RemoteRuntime` driver remain separate layers.
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
 pub struct RemoteComputationService {
     tcp_listener: TcpListener,
@@ -5897,6 +7341,43 @@ mod tests {
 
     fn test_request_fingerprint(name: &str) -> IdempotencyRequestFingerprint {
         IdempotencyRequestFingerprint::new(ComputationName::new(name), RemoteInput::empty())
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn remote_service_protocol_classifier_is_explicit_and_fail_closed() {
+        assert_eq!(
+            remote_service_protocol_kind(RemoteProtocolVersion::V1),
+            RemoteServiceProtocolKind::V1OneShot
+        );
+        assert_eq!(
+            remote_service_protocol_kind(RemoteProtocolVersion::V2),
+            RemoteServiceProtocolKind::V2Idempotent
+        );
+        assert_eq!(
+            remote_service_protocol_kind(RemoteProtocolVersion::V3),
+            RemoteServiceProtocolKind::V3Session
+        );
+        assert_eq!(
+            remote_service_protocol_kind(RemoteProtocolVersion::new(2, 1)),
+            RemoteServiceProtocolKind::Unsupported
+        );
+        assert_eq!(
+            remote_service_protocol_kind(RemoteProtocolVersion::new(4, 0)),
+            RemoteServiceProtocolKind::Unsupported
+        );
+    }
+
+    #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+    #[test]
+    fn remote_service_v3_renewal_sequence_never_wraps() {
+        assert_eq!(remote_service_v3_next_renewal_id(None), Some(1));
+        assert_eq!(remote_service_v3_next_renewal_id(Some(1)), Some(2));
+        assert_eq!(
+            remote_service_v3_next_renewal_id(Some(u64::MAX - 1)),
+            Some(u64::MAX)
+        );
+        assert_eq!(remote_service_v3_next_renewal_id(Some(u64::MAX)), None);
     }
 
     #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
