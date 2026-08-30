@@ -4185,6 +4185,9 @@ impl RemoteComputationClient {
         cx: &Cx,
         request: &RemoteServiceWireRequest,
     ) -> Result<RemoteServiceWireResponse, RemoteComputationClientError> {
+        if cx.checkpoint().is_err() {
+            return Err(RemoteComputationClientError::Cancelled { attempts: 0 });
+        }
         if let Err(source) =
             encode_remote_service_frame(request, self.config.wire_limits.max_frame_bytes())
         {
