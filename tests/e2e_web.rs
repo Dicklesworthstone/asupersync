@@ -6,6 +6,10 @@ use asupersync::Cx;
 use asupersync::bytes::Buf;
 use asupersync::http::body::{Body, Frame};
 use asupersync::http::h1::codec::HttpError;
+use asupersync::http::h1::types::{
+    Method as HttpMethod, Request as HttpRequest, Response as HttpResponse, Version as HttpVersion,
+};
+use asupersync::http::h2::listener::IntoHttp2Response;
 use asupersync::web::extract::{Json as JsonExtract, Path, Query, Request};
 use asupersync::web::handler::{FnHandler, FnHandler1, Handler};
 use asupersync::web::middleware::{HeaderOverwrite, MiddlewareStack};
@@ -17,6 +21,7 @@ use asupersync::web::sse::{
     StreamingSse, StreamingSseTransportStep,
 };
 use serde_json::{Value, json};
+use std::collections::HashMap;
 use std::future::Future;
 use std::io;
 use std::path::PathBuf;
@@ -1249,4 +1254,74 @@ fn e2e_error_responses() {
     assert_eq!(resp.status, StatusCode::METHOD_NOT_ALLOWED);
 
     test_complete!("e2e_error_responses");
+}
+
+#[test]
+fn e2e_router_adapter_serves_shared_h1_h2_wire_types() {
+    common::init_test_logging();
+    test_phase!("Router production-listener adapter");
+
+    fn adapted_handler(Query(query): Query<HashMap<String, String>>) -> Response {
+        let mut response = Response::new(
+            StatusCode::OK,
+            format!("q={}", query.get("q").map_or("", String::as_str)),
+        );
+        response.set_header("x-adapter", "web-router");
+        response.append_set_cookie("session=one; Path=/");
+        response.append_set_cookie("csrf=two; Path=/");
+        response
+    }
+
+    let router = Router::new().route(
+        "/search",
+        get(FnHandler1::<_, Query<HashMap<String, String>>>::new(
+            adapted_handler,
+        )),
+    );
+    let request = HttpRequest {
+        method: HttpMethod::Get,
+        uri: "https://example.test/search?q=connected".to_string(),
+        version: HttpVersion::Http2,
+        headers: vec![("host".to_string(), "example.test".to_string())],
+        body: Vec::new(),
+        trailers: Vec::new(),
+        peer_addr: None,
+    };
+
+    let response = web_block_on(router.handle_http_request_with_cx(&Cx::for_testing(), request));
+    assert_eq!(response.status, 200);
+    assert_eq!(response.body, b"q=connected");
+    assert_eq!(response.header_value("x-adapter"), Some("web-router"));
+    assert_eq!(
+        response
+            .headers
+            .iter()
+            .filter(|(name, _)| name.eq_ignore_ascii_case("set-cookie"))
+            .map(|(_, value)| value.as_str())
+            .collect::<Vec<_>>(),
+        vec!["session=one; Path=/", "csrf=two; Path=/"]
+    );
+
+    fn accepts_h1<F, Fut>(_handler: &F)
+    where
+        F: Fn(HttpRequest) -> Fut + Clone + Send + Sync + 'static,
+        Fut: Future<Output = HttpResponse> + Send + 'static,
+    {
+    }
+
+    fn accepts_h2<F, Fut, R>(_handler: &F)
+    where
+        F: Fn(HttpRequest) -> Fut + Clone + Send + Sync + 'static,
+        Fut: Future<Output = R> + Send + 'static,
+        R: IntoHttp2Response + Send + 'static,
+    {
+    }
+
+    let handler = Router::new()
+        .route("/", get(FnHandler::new(index)))
+        .into_http_handler();
+    accepts_h1(&handler);
+    accepts_h2(&handler);
+
+    test_complete!("e2e_router_listener_adapter", protocols = 2);
 }

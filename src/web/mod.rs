@@ -100,4 +100,6 @@ pub use nextjs_bootstrap::{
     NextjsBootstrapError, NextjsBootstrapSnapshot, NextjsBootstrapState,
 };
 pub use response::{Html, IntoResponse, Json, Redirect, Response, StatusCode};
-pub use router::{MethodRouter, RouteInfo, Router, delete, get, patch, post, put};
+pub use router::{
+    HttpHandlerFuture, MethodRouter, RouteInfo, Router, delete, get, patch, post, put,
+};

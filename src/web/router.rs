@@ -13,6 +13,8 @@
 //! ```
 
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 
 use smallvec::SmallVec;
 
@@ -26,6 +28,7 @@ use super::middleware::{
 };
 use super::response::{IntoResponse, Response, StatusCode};
 use crate::Cx;
+use crate::http::h1::types::{Request as HttpRequest, Response as HttpResponse};
 use crate::service::Layer;
 use crate::types::{
     Budget, Time,
@@ -457,6 +460,12 @@ pub struct Router {
     default_trace: Option<DefaultTrace>,
 }
 
+/// Boxed response future returned by [`Router::into_http_handler`].
+///
+/// The HTTP/1.1 and HTTP/2 listeners deliberately share the same wire-level
+/// request and response types, so one router adapter serves both stacks.
+pub type HttpHandlerFuture = Pin<Box<dyn Future<Output = HttpResponse> + Send + 'static>>;
+
 /// Default-on request trace configuration for [`Router`]
 /// (br-asupersync-server-stack-hardening-eeexl1.3 AC3).
 struct DefaultTrace {
@@ -662,6 +671,57 @@ impl Router {
         futures_lite::future::block_on(self.handle_with_cx(&cx, req))
     }
 
+    /// Convert this router into a production-listener handler.
+    ///
+    /// The returned cloneable handler is accepted directly by both
+    /// [`crate::http::h1::listener::Http1Listener`] and
+    /// [`crate::http::h2::listener::Http2Listener`]. The listeners install a
+    /// request-scoped [`Cx`] before polling the handler; this adapter reuses
+    /// that context so router handlers inherit the listener's deadline,
+    /// cancellation, panic-isolation, and graceful-drain semantics.
+    ///
+    /// If the handler is polled outside a listener request region, it fails
+    /// closed with `500 Internal Server Error` instead of minting a fresh
+    /// capability context.
+    ///
+    /// ```ignore
+    /// let app = Router::new().route("/health", get(health));
+    /// let listener = Http1Listener::bind("127.0.0.1:8080", app.into_http_handler()).await?;
+    /// listener.run(&runtime_handle).await?;
+    /// ```
+    #[must_use]
+    pub fn into_http_handler(
+        self,
+    ) -> impl Fn(HttpRequest) -> HttpHandlerFuture + Clone + Send + Sync + 'static {
+        let router = Arc::new(self);
+        move |request| {
+            let router = Arc::clone(&router);
+            Box::pin(async move {
+                let Some(cx) = Cx::current() else {
+                    return HttpResponse::new(
+                        500,
+                        "Internal Server Error",
+                        b"request context unavailable".to_vec(),
+                    )
+                    .with_header("content-type", "text/plain; charset=utf-8");
+                };
+                router.handle_http_request_with_cx(&cx, request).await
+            })
+        }
+    }
+
+    /// Dispatch one listener request through this router with an explicit
+    /// capability context.
+    ///
+    /// This is the non-ambient entry point for embedding the router in custom
+    /// transports. Production HTTP listeners normally use
+    /// [`Router::into_http_handler`] so their request-region `Cx` is forwarded
+    /// automatically.
+    pub async fn handle_http_request_with_cx(&self, cx: &Cx, request: HttpRequest) -> HttpResponse {
+        let request = web_request_from_http(request);
+        http_response_from_web(self.handle_with_cx(cx, request).await)
+    }
+
     /// Handle an incoming request with an explicit capability context.
     ///
     /// This is the async path used by runtime-integrated handlers and lab
@@ -826,6 +886,93 @@ fn join_route_pattern(prefix: &str, pattern: &str) -> String {
     )
 }
 
+/// Translate the completed wire request shared by the HTTP/1.1 and HTTP/2
+/// listeners into the web framework's extractor request.
+fn web_request_from_http(request: HttpRequest) -> Request {
+    let (path, query) = split_http_request_target(&request.uri);
+    let mut web_request = Request::new(request.method.as_str(), path);
+    web_request.query = query;
+    web_request.body = request.body.into();
+
+    // The web extractor surface intentionally exposes a single value per
+    // header. Preserve its existing builder semantics: when validated wire
+    // input repeats a field, the last value wins. Protocol validation (Host,
+    // Content-Length, transfer coding, etc.) remains the listener's job and
+    // runs before this adapter.
+    for (name, value) in request.headers {
+        web_request.headers.insert(name.to_ascii_lowercase(), value);
+    }
+    web_request
+}
+
+/// Translate the web framework response into the wire response shared by h1
+/// and h2. Stable sorting makes ordinary header order reproducible; Set-Cookie
+/// stays append-only and ordered because combining those fields is invalid.
+fn http_response_from_web(response: Response) -> HttpResponse {
+    let status = response.status.as_u16();
+    let mut headers = response.headers.into_iter().collect::<Vec<_>>();
+    headers.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+    headers.extend(
+        response
+            .set_cookies
+            .into_iter()
+            .map(|value| ("set-cookie".to_string(), value)),
+    );
+
+    HttpResponse::builder(status)
+        .headers(headers)
+        .body(response.body.as_ref().to_vec())
+        .build()
+}
+
+/// Split origin-form and absolute-form request targets without decoding the
+/// path. Routing stays byte-for-byte compatible with the existing web router,
+/// while query extractors receive only the portion after `?`.
+fn split_http_request_target(target: &str) -> (String, Option<String>) {
+    let target = if let Some(scheme_end) = absolute_uri_scheme_end(target) {
+        let authority_start = scheme_end + 3;
+        match target[authority_start..].find(['/', '?']) {
+            Some(relative) => {
+                let suffix = &target[authority_start + relative..];
+                if suffix.starts_with('?') {
+                    // Absolute URI with an empty path.
+                    &target[authority_start + relative..]
+                } else {
+                    suffix
+                }
+            }
+            None => "",
+        }
+    } else {
+        target
+    };
+
+    let (path, query) = match target.split_once('?') {
+        Some((path, query)) => (path, Some(query.to_string())),
+        None => (target, None),
+    };
+    let path = if path.is_empty() { "/" } else { path };
+    (path.to_string(), query)
+}
+
+/// Return the end of a leading RFC 3986 scheme when the target is an absolute
+/// URI using `://`. Origin-form paths can legally contain that byte sequence
+/// later in the path and must not be mistaken for absolute-form targets.
+fn absolute_uri_scheme_end(target: &str) -> Option<usize> {
+    let scheme_end = target.find("://")?;
+    let scheme = &target[..scheme_end];
+    let mut chars = scheme.chars();
+    if !chars
+        .next()
+        .is_some_and(|first| first.is_ascii_alphabetic())
+    {
+        return None;
+    }
+    chars
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '+' | '-' | '.'))
+        .then_some(scheme_end)
+}
+
 fn normalize_route_pattern(pattern: &str) -> String {
     if pattern.is_empty() || pattern == "/" {
         "/".to_string()
@@ -910,6 +1057,164 @@ mod tests {
 
         let resp = router.handle(Request::new("GET", "/missing"));
         assert_eq!(resp.status, StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn listener_request_conversion_preserves_consumed_fields() {
+        use crate::http::h1::types::{Method, Version};
+
+        let request = HttpRequest {
+            method: Method::Extension("PURGE".to_string()),
+            uri: "https://example.test/cache/42?tenant=blue&fresh=true".to_string(),
+            version: Version::Http2,
+            headers: vec![
+                ("X-Mode".to_string(), "first".to_string()),
+                (
+                    "Content-Type".to_string(),
+                    "application/octet-stream".to_string(),
+                ),
+                ("x-mode".to_string(), "last".to_string()),
+            ],
+            body: b"payload".to_vec(),
+            trailers: vec![("x-checksum".to_string(), "abc".to_string())],
+            peer_addr: Some("127.0.0.1:43210".parse().expect("peer address")),
+        };
+
+        let request = web_request_from_http(request);
+        assert_eq!(request.method, "PURGE");
+        assert_eq!(request.path, "/cache/42");
+        assert_eq!(request.query.as_deref(), Some("tenant=blue&fresh=true"));
+        assert_eq!(
+            request.header("content-type"),
+            Some("application/octet-stream")
+        );
+        assert_eq!(request.header("x-mode"), Some("last"));
+        assert_eq!(request.body.as_ref(), b"payload");
+    }
+
+    #[test]
+    fn listener_target_conversion_handles_origin_and_empty_absolute_paths() {
+        assert_eq!(
+            split_http_request_target("/items?q=rust"),
+            ("/items".to_string(), Some("q=rust".to_string()))
+        );
+        assert_eq!(
+            split_http_request_target("http://example.test?ready=true"),
+            ("/".to_string(), Some("ready=true".to_string()))
+        );
+        assert_eq!(
+            split_http_request_target("https://example.test"),
+            ("/".to_string(), None)
+        );
+        assert_eq!(split_http_request_target("*"), ("*".to_string(), None));
+        assert_eq!(
+            split_http_request_target("/redirect/http://upstream.test?q=kept"),
+            (
+                "/redirect/http://upstream.test".to_string(),
+                Some("q=kept".to_string())
+            )
+        );
+    }
+
+    #[test]
+    fn listener_response_conversion_preserves_ordered_set_cookie_fields() {
+        let mut response = Response::new(StatusCode::CREATED, "created");
+        response.set_header("x-zeta", "z");
+        response.set_header("content-type", "text/plain");
+        response.append_set_cookie("session=one; Path=/");
+        response.append_set_cookie("csrf=two; Path=/");
+
+        let response = http_response_from_web(response);
+        assert_eq!(response.status, 201);
+        assert_eq!(response.reason, "Created");
+        assert_eq!(response.body, b"created");
+        assert_eq!(
+            response.headers,
+            vec![
+                ("content-type".to_string(), "text/plain".to_string()),
+                ("x-zeta".to_string(), "z".to_string()),
+                ("set-cookie".to_string(), "session=one; Path=/".to_string()),
+                ("set-cookie".to_string(), "csrf=two; Path=/".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn explicit_listener_dispatch_runs_router_extractors_and_response_mapping() {
+        use crate::http::h1::types::{Method, Version};
+        use crate::web::extract::{Path, Query};
+        use crate::web::handler::FnHandler2;
+
+        fn handler(
+            Path(id): Path<String>,
+            Query(query): Query<HashMap<String, String>>,
+        ) -> Response {
+            let mut response = Response::new(
+                StatusCode::OK,
+                format!("id={id};q={}", query.get("q").map_or("", String::as_str)),
+            );
+            response.append_set_cookie("seen=true; Path=/");
+            response
+        }
+
+        let router = Router::new().route(
+            "/items/:id",
+            get(FnHandler2::<_, Path<String>, Query<HashMap<String, String>>>::new(handler)),
+        );
+        let request = HttpRequest {
+            method: Method::Get,
+            uri: "http://example.test/items/7?q=wire".to_string(),
+            version: Version::Http11,
+            headers: vec![("host".to_string(), "example.test".to_string())],
+            body: Vec::new(),
+            trailers: Vec::new(),
+            peer_addr: None,
+        };
+
+        let response = futures_lite::future::block_on(
+            router.handle_http_request_with_cx(&Cx::for_testing(), request),
+        );
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, b"id=7;q=wire");
+        assert_eq!(
+            response
+                .headers
+                .iter()
+                .filter(|(name, _)| name.eq_ignore_ascii_case("set-cookie"))
+                .map(|(_, value)| value.as_str())
+                .collect::<Vec<_>>(),
+            vec!["seen=true; Path=/"]
+        );
+    }
+
+    #[test]
+    fn listener_handler_is_shared_by_h1_and_h2_and_fails_closed_without_cx() {
+        use crate::http::h2::listener::IntoHttp2Response;
+
+        fn accepts_h1<F, Fut>(_handler: &F)
+        where
+            F: Fn(HttpRequest) -> Fut + Clone + Send + Sync + 'static,
+            Fut: Future<Output = HttpResponse> + Send + 'static,
+        {
+        }
+
+        fn accepts_h2<F, Fut, R>(_handler: &F)
+        where
+            F: Fn(HttpRequest) -> Fut + Clone + Send + Sync + 'static,
+            Fut: Future<Output = R> + Send + 'static,
+            R: IntoHttp2Response + Send + 'static,
+        {
+        }
+
+        let handler = Router::new()
+            .route("/", get(FnHandler::new(ok_handler)))
+            .into_http_handler();
+        accepts_h1(&handler);
+        accepts_h2(&handler);
+
+        let response = futures_lite::future::block_on(handler(HttpRequest::get("/").build()));
+        assert_eq!(response.status, 500);
+        assert_eq!(response.body, b"request context unavailable");
     }
 
     #[test]

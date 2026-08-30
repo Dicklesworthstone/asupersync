@@ -10,7 +10,8 @@
 //! What this first slice composes (all on the production API):
 //!   * `Http1Listener` bound with an `Http1ListenerConfig` (host policy +
 //!     request-aware graceful drain budgets).
-//!   * A request router (matched by method + path) with two endpoints:
+//!   * The high-level `web::Router`, connected directly to the production
+//!     listener through `Router::into_http_handler`, with two endpoints:
 //!       - `GET /health` — a cheap liveness probe.
 //!       - `GET /users`  — a handler that runs a real SQLite query through the
 //!         cancel-correct blocking pool, proving DB access from a handler.
@@ -37,9 +38,9 @@ use asupersync::cx::Cx;
 use asupersync::database::SqliteConnection;
 use asupersync::http::h1::listener::{Http1Listener, Http1ListenerConfig};
 use asupersync::http::h1::server::{HostPolicy, Http1Config};
-use asupersync::http::h1::types::{Method, Request, Response};
 use asupersync::runtime::RuntimeBuilder;
 use asupersync::types::Outcome;
+use asupersync::web::{AsyncCxFnHandler, FnHandler, Response, Router, StatusCode, get};
 
 /// Listener configuration for the fixture: permissive host policy (a local
 /// demo binds to an ephemeral `127.0.0.1` port; a real deployment would use
@@ -55,16 +56,19 @@ fn service_config() -> Http1ListenerConfig {
         .hard_drain_timeout(Duration::from_secs(20))
 }
 
-/// Top-level router: dispatch by method + path. Keeping the routing explicit
-/// (rather than via the extractor-based `web::Router`) keeps the fixture small
-/// and dependency-light for the e2e harness.
-async fn route(req: Request) -> Response {
-    let is_get = matches!(req.method, Method::Get);
-    match req.uri.as_str() {
-        "/health" if is_get => Response::new(200, "OK", b"ok\n".to_vec()),
-        "/users" if is_get => users_handler().await,
-        _ => Response::new(404, "Not Found", b"not found\n".to_vec()),
-    }
+fn health_handler() -> &'static str {
+    "ok\n"
+}
+
+fn not_found_handler() -> (StatusCode, &'static str) {
+    (StatusCode::NOT_FOUND, "not found\n")
+}
+
+fn service_router() -> Router {
+    Router::new()
+        .route("/health", get(FnHandler::new(health_handler)))
+        .route("/users", get(AsyncCxFnHandler::new(users_handler)))
+        .fallback(FnHandler::new(not_found_handler))
 }
 
 /// `GET /users`: open a hermetic in-memory SQLite database, seed it, and return
@@ -73,20 +77,10 @@ async fn route(req: Request) -> Response {
 ///
 /// A production service would acquire a connection from a shared, boot-seeded
 /// pool; per-request `open_in_memory` keeps this example self-contained.
-async fn users_handler() -> Response {
-    // Handlers run inside the listener task's capability context; recover it to
-    // drive Cx-aware effects (here: the SQLite blocking pool).
-    let Some(cx) = Cx::current() else {
-        return Response::new(
-            500,
-            "Internal Server Error",
-            b"no runtime context\n".to_vec(),
-        );
-    };
-
+async fn users_handler(cx: Cx) -> Response {
     let conn = match SqliteConnection::open_in_memory(&cx).await {
         Outcome::Ok(conn) => conn,
-        _ => return Response::new(500, "Internal Server Error", b"db open failed\n".to_vec()),
+        _ => return Response::new(StatusCode::INTERNAL_SERVER_ERROR, "db open failed\n"),
     };
 
     if !matches!(
@@ -98,7 +92,7 @@ async fn users_handler() -> Response {
         .await,
         Outcome::Ok(()),
     ) {
-        return Response::new(500, "Internal Server Error", b"db seed failed\n".to_vec());
+        return Response::new(StatusCode::INTERNAL_SERVER_ERROR, "db seed failed\n");
     }
 
     let rows = match conn
@@ -106,7 +100,7 @@ async fn users_handler() -> Response {
         .await
     {
         Outcome::Ok(rows) => rows,
-        _ => return Response::new(500, "Internal Server Error", b"db query failed\n".to_vec()),
+        _ => return Response::new(StatusCode::INTERNAL_SERVER_ERROR, "db query failed\n"),
     };
 
     let mut body = String::new();
@@ -115,13 +109,13 @@ async fn users_handler() -> Response {
         let name = row.get_str("name").unwrap_or_default();
         body.push_str(&format!("{id}\t{name}\n"));
     }
-    Response::new(200, "OK", body.into_bytes())
+    Response::new(StatusCode::OK, body)
 }
 
 /// Send one blocking `GET` from a std thread so the example can prove it serves
 /// requests end to end without pulling in an async client. Returns the HTTP
-/// status line the server sent back.
-fn self_probe(addr: std::net::SocketAddr, path: &str) -> std::io::Result<String> {
+/// status line and body the server sent back.
+fn self_probe(addr: std::net::SocketAddr, path: &str) -> std::io::Result<(String, String)> {
     let mut stream = std::net::TcpStream::connect(addr)?;
     stream.set_read_timeout(Some(Duration::from_secs(10)))?;
     let request = format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
@@ -129,7 +123,11 @@ fn self_probe(addr: std::net::SocketAddr, path: &str) -> std::io::Result<String>
     let mut raw = Vec::new();
     stream.read_to_end(&mut raw)?;
     let text = String::from_utf8_lossy(&raw);
-    Ok(text.lines().next().unwrap_or("<no response>").to_owned())
+    let (head, body) = text.split_once("\r\n\r\n").unwrap_or((&text, ""));
+    Ok((
+        head.lines().next().unwrap_or("<no response>").to_owned(),
+        body.to_owned(),
+    ))
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -137,9 +135,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let handle = runtime.handle();
 
     runtime.block_on(async move {
-        let listener = Http1Listener::bind_with_config("127.0.0.1:0", route, service_config())
-            .await
-            .expect("bind production service");
+        let listener = Http1Listener::bind_with_config(
+            "127.0.0.1:0",
+            service_router().into_http_handler(),
+            service_config(),
+        )
+        .await
+        .expect("bind production service");
 
         let addr = listener.local_addr().expect("local addr");
         let manager = listener.connection_manager().clone();
@@ -153,13 +155,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Prove the composed stack serves real traffic: a self-probe on a std
         // thread hits /health and /users through the full server path.
-        for path in ["/health", "/users", "/missing"] {
+        for (path, expected_status, expected_body) in [
+            ("/health", "HTTP/1.1 200 OK", "ok\n"),
+            ("/users", "HTTP/1.1 200 OK", "1\tAlice\n2\tBob\n"),
+            ("/missing", "HTTP/1.1 404 Not Found", "not found\n"),
+        ] {
             let probe_addr = addr;
             let probe_path = path.to_owned();
-            let status = std::thread::spawn(move || self_probe(probe_addr, &probe_path))
+            let (status, body) = std::thread::spawn(move || self_probe(probe_addr, &probe_path))
                 .join()
                 .expect("probe thread")
-                .unwrap_or_else(|err| format!("probe error: {err}"));
+                .expect("self-probe response");
+            assert_eq!(status, expected_status, "status for {path}");
+            assert_eq!(body, expected_body, "body for {path}");
             println!("self-probe GET {path} -> {status}");
         }
 
