@@ -1820,15 +1820,15 @@ fn tempfile_claim_time_profile_checkpoint_is_source_pinned_and_fail_closed() {
         (
             "src/net/atp/transport_quic/mod.rs",
             (
-                "d5af349eeb53b31221e5ce592fe027524b33639c1fae181dd3c0d3f6de60567f",
-                17_261_u64,
+                "137c637d6b7f1e56c08ccd712628871b64583c0b1141e8f56b9b1bd7256637c7",
+                17_857_u64,
             ),
         ),
         (
             "src/net/atp/transport_rq/mod.rs",
             (
-                "85b46af1366be022c7ebdd82bc2092fb9395a22609bbd4b7995120e6c9ad800c",
-                15_312_u64,
+                "223f07d0a4aefe51dba51f3f5fcfc9db654423fc37492a77536611dc376f67fa",
+                16_604_u64,
             ),
         ),
         (
@@ -1956,14 +1956,28 @@ fn tempfile_claim_time_profile_checkpoint_is_source_pinned_and_fail_closed() {
             .contains("builder.permissions(std::fs::Permissions::from_mode(0o700))")
     );
 
+    for test_only_path in [
+        "src/net/atp/bonding/descriptor.rs",
+        "src/net/atp/transport_common/metadata.rs",
+    ] {
+        let source = read_repo_file(test_only_path);
+        assert_eq!(
+            count_occurrences(production_before_test_module(&source), "tempfile::"),
+            0,
+            "{test_only_path} must not add a production tempfile consumer"
+        );
+    }
+
     let source_paths = rust_source_paths_with_token("tempfile::");
-    assert_eq!(source_paths.len(), 80);
+    assert_eq!(source_paths.len(), 81);
     for required in [
         "src/atp/benchmark/suite.rs",
         "src/bin/asupersync.rs",
+        "src/net/atp/bonding/descriptor.rs",
         "src/net/atp/transport_quic/mod.rs",
         "src/net/atp/transport_rq/mod.rs",
         "src/net/atp/transport_rq/transport_rq_tests.rs",
+        "src/net/atp/transport_common/metadata.rs",
         "src/test_logging.rs",
     ] {
         assert!(
@@ -1975,7 +1989,7 @@ fn tempfile_claim_time_profile_checkpoint_is_source_pinned_and_fail_closed() {
         .iter()
         .map(|path| count_occurrences(&read_repo_file(path), "tempfile::"))
         .sum::<u64>();
-    assert_eq!(source_token_count, 262);
+    assert_eq!(source_token_count, 274);
     assert_eq!(rust_paths_under_with_token("tests", "tempfile::").len(), 98);
     assert_eq!(
         rust_paths_under_with_token("benches", "tempfile::").len(),

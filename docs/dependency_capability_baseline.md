@@ -266,15 +266,17 @@ pins the following current resolution boundaries:
 | `benchmark-adapters` | `src/atp/benchmark/suite.rs` owns a `TempDir` work directory | benchmark optionalization would require `dep:tempfile` in `benchmark-adapters` |
 | `test-internals` | `src/test_logging.rs` exposes `TempDirFixture` when `test || test-internals` | test-internals optionalization would require `dep:tempfile` in `test-internals` |
 
-The current repository `src/` census contains 80 Rust files and 278 qualified
+The current repository `src/` census contains 81 Rust files and 274 qualified
 `tempfile::` tokens. This is a drift detector, not a Cargo-built profile
 classification: inline tests and dormant harnesses account for many tokens, so
-the checkpoint does not claim zero `UNKNOWN`. The current `tests/` lexical
-census contains 96 Rust files: the 94-file claim-base set, this static contract,
-and the executable `tests/temp_artifact_lifecycle.rs` fixture. This demonstrates
-why lexical presence is not dependency-resolution proof. The dev edge remains
-necessary for broad integration and inline tests, the two current benchmark
-files, and the test-only example fixture.
+the checkpoint does not claim zero `UNKNOWN`. The new source path and token
+growth in `src/net/atp/bonding/descriptor.rs`,
+`src/net/atp/transport_common/metadata.rs`, and the transport test modules are
+test-only; the pre-test production counts remain four RaptorQ and three QUIC
+references. The current `tests/` lexical census contains 98 Rust files. This
+demonstrates why lexical presence is not dependency-resolution proof. The dev
+edge remains necessary for broad integration and inline tests, the two current
+benchmark files, and the test-only example fixture.
 
 At the claim base, `Cargo.toml` still has separate normal and dev declarations
 spelled `3.25`, while `Cargo.lock` resolves `3.27.0`. Those are pinned observed
