@@ -9177,12 +9177,6 @@ struct RepairCursorPlan {
     end: usize,
 }
 
-impl RepairCursorPlan {
-    const fn count(self) -> usize {
-        self.end - self.start
-    }
-}
-
 fn plan_repair_cursor(
     repair_cursors: &[usize],
     block_index: usize,
@@ -9636,7 +9630,7 @@ where
                     let mut pending: Vec<(
                         usize,
                         usize,
-                        usize,
+                        RepairCursorPlan,
                         crate::runtime::TaskHandle<Result<ParallelEncodedBlock, String>>,
                     )> = Vec::new();
                     for window_start in (0..blocks.len()).step_by(par_batch) {
