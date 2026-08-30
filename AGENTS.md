@@ -469,9 +469,10 @@ every module behind `postgres`, `mysql`, `sqlite`, `tls`, `kafka`, `quic`,
 skipped** — it is not compiled, so it cannot fail, so it looks fine.
 
 That is not hypothetical. Two call sites of a removed `Scope::spawn` API sat
-broken on `main` for ~3 months (`br-asupersync-jwr6k0`), and
-`src/database/postgres.rs` has not compiled since 2026-07-15
-(`br-asupersync-evb4i9`), because nothing anyone routinely ran compiled them.
+broken on `main` for ~3 months (`br-asupersync-jwr6k0`), and a feature-gated
+`src/database/postgres.rs` compile break introduced on 2026-07-15 remained
+invisible to routine default-feature checks until commit `ddf226b9a` repaired
+it on 2026-07-26 (`br-asupersync-evb4i9`).
 
 Before landing anything that touches a feature-gated surface, run:
 

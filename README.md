@@ -1244,16 +1244,16 @@ The active registry covers:
 - **Security and wire-level protocol lanes**: TLS handshake / key-share / SNI / 0-RTT replay (including HelloRetryRequest coverage), QUIC retry (plus QUIC migration when enabled), DNS message parsing, Kafka offsets / record batches, and explicit MySQL AuthSwitch plus PostgreSQL extended-query / COPY / logical-replication coverage
 - **Deterministic invariant suites**: cancel DAG determinism, obligation lifecycle, race loser-drain, trace replay idempotency, broadcast, and consistent-hash regression coverage
 
-Important limitation: the repository also preserves many conformance files on
-disk that are **not** part of the live registry today. `tests/conformance/mod.rs`
-leaves explicit commented-out `pub mod` entries as known bit-rot,
-superseded-suite, or unresolved-dependency follow-ups, including older `h1_*`
-siblings, `sqlite_prepared_statements`, `grpc_deadline`, `grpc_health`,
-`grpc_status`, `h3_settings`, `quic_initial`, and `task_inspector_wire`.
-The contract artifact records each dormant suite's
-current disposition, owner bead or supersession path, and retention reason.
-Those files remain in-tree for repair work, but they do not compile or run
-until they are re-wired in `tests/conformance/mod.rs`.
+Important limitation: the repository also preserves conformance files on disk
+that are **not** part of the live registry today. `tests/conformance/mod.rs`
+leaves explicit commented-out `pub mod` entries for known bit-rot,
+superseded-suite, relocated-suite, or unresolved-dependency follow-ups. Do not
+infer dormancy from an on-disk filename or a prose list: the contract artifact
+records every current dormant module's disposition, owner bead or supersession
+path, and retention reason. Those files remain in-tree for repair work, but
+they do not compile or run through this registry until they are re-wired in
+`tests/conformance/mod.rs` (or through the explicitly recorded replacement
+lane).
 
 The separate `conformance/` workspace member still exists for standalone
 vendor/spec harnesses, but it should not be read as proof that every
