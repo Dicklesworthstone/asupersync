@@ -47,6 +47,7 @@ criterion/
 **/.beads/*.db-shm
 **/.beads/*.db-wal
 **/.beads/daemon.*
+**/.beads/.br-db-openers-*.lock
 **/.beads/last-touched
 **/.beads/.local_version
 
