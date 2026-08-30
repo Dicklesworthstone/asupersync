@@ -20,7 +20,7 @@ exclude = [
 
 [package]
 name = "asupersync"
-version = "0.4.9"
+version = "0.4.10"
 edition = "2024"
 license = "LicenseRef-MIT-OpenAI-Anthropic-Rider"
 description = "Spec-first, cancel-correct, capability-secure async runtime for Rust."

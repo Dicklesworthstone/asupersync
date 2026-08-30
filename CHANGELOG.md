@@ -77,6 +77,34 @@ is `v0.4.9`.
   remains the explicit catch-all transport seam
   ([`3c73a33`](https://github.com/Dicklesworthstone/asupersync/commit/3c73a334c02e9976bda712c19b07221360bc7f3e)).
 
+## [v0.4.10] - 2026-08-30
+
+### Runtime API and correctness
+
+- **Lock-free cancellation polling for hot loops.** New public
+  `Cx::published_cancel_requested()` observes the Release-published
+  cancellation envelope with one Acquire atomic load instead of the inner
+  `RwLock` read `Cx::is_cancel_requested` performs. Runtime cancellation
+  producers (`set_cancel_requested`, `cancel`, `cancel_with`, `cancel_fast`,
+  task-handle and checkpoint-budget producers) keep the envelope synchronized,
+  so both APIs agree everywhere except the legacy v0.4.3 direct
+  locked-field-mutation compat path, where the published bit may briefly lag
+  (it can only lag; checkpoint delivery is unchanged and the envelope
+  re-converges at the next runtime mutation). Added for per-posting
+  cancellation polls in hot scoring leaves (br-asupersync bd-tb4c4 / quill
+  cancel-poll-leaf-fastpath follow-up).
+- **Fix broken lib-test build in the RaptorQ parallel encode property test**
+  (stale inline format args under `prop_assert_eq!` since the repair-cursor
+  refactor; positional arguments now).
+
+### Notes
+
+- The v0.4.3 public compatibility floor is preserved: the locked
+  `is_cancel_requested` contract (including direct `cancel_requested`
+  observability and `fast_cancel` handle replacement semantics) is unchanged
+  and pinned by the existing compatibility tests plus the new
+  `published_cancel_requested_tracks_runtime_mutations_lock_free` test.
+
 ## [v0.4.9] - 2026-08-20
 
 ### Runtime API and correctness
@@ -2326,7 +2354,8 @@ The initial tagged milestone establishing the core async runtime with structured
 
 ---
 
-[Unreleased]: https://github.com/Dicklesworthstone/asupersync/compare/v0.4.9...HEAD
+[Unreleased]: https://github.com/Dicklesworthstone/asupersync/compare/v0.4.10...HEAD
+[v0.4.10]: https://github.com/Dicklesworthstone/asupersync/compare/v0.4.9...v0.4.10
 [v0.4.9]: https://github.com/Dicklesworthstone/asupersync/compare/v0.4.8...v0.4.9
 [v0.4.8]: https://github.com/Dicklesworthstone/asupersync/compare/v0.4.7...v0.4.8
 [v0.4.7]: https://github.com/Dicklesworthstone/asupersync/compare/v0.4.6...v0.4.7
