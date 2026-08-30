@@ -1025,10 +1025,27 @@ async fn native_h2_unary_io(
     metadata: &Metadata,
     request_body: Bytes,
 ) -> Result<NativeUnaryWireResponse, Status> {
-    let stream = TcpStream::connect_timeout(target.address, config.connect_timeout)
-        .await
-        .map_err(|error| transport_status("connect", error))?;
-    let mut stream = native_h2_transport(stream, &target, tls_connector).await?;
+    let connect_timeout = config.connect_timeout;
+    let now = crate::cx::Cx::with_current(|cx| {
+        cx.timer_driver()
+            .map_or_else(crate::time::wall_now, |timer| timer.now())
+    })
+    .unwrap_or_else(crate::time::wall_now);
+    let mut stream = match crate::time::timeout(now, connect_timeout, async {
+        let stream = TcpStream::connect_timeout(target.address, connect_timeout)
+            .await
+            .map_err(|error| transport_status("connect", error))?;
+        native_h2_transport(stream, &target, tls_connector).await
+    })
+    .await
+    {
+        Ok(result) => result?,
+        Err(_) => {
+            return Err(Status::unavailable(format!(
+                "native gRPC connection establishment exceeded its {connect_timeout:?} timeout"
+            )));
+        }
+    };
 
     let settings = SettingsBuilder::client()
         .initial_window_size(config.initial_stream_window_size)
@@ -1109,7 +1126,11 @@ async fn native_h2_transport(
         let tls = connector
             .connect(&target.server_name, stream)
             .await
-            .map_err(|error| Status::unavailable(format!("gRPC TLS handshake failed: {error}")))?;
+            .map_err(|error| {
+                ambient_cancellation_status("gRPC TLS handshake").unwrap_or_else(|| {
+                    Status::unavailable(format!("gRPC TLS handshake failed: {error}"))
+                })
+            })?;
         if tls.alpn_protocol() != Some(b"h2".as_slice()) {
             return Err(Status::unavailable(
                 "gRPC TLS peer did not negotiate the required h2 ALPN protocol",
@@ -1199,8 +1220,20 @@ where
 
 #[cfg(not(target_arch = "wasm32"))]
 fn transport_status(context: &str, error: std::io::Error) -> Status {
+    if error.kind() == std::io::ErrorKind::Interrupted
+        && let Some(status) = ambient_cancellation_status(context)
+    {
+        return status;
+    }
     let kind = TransportErrorKind::from_io_error_kind(error.kind());
     GrpcError::transport_kind(kind, format!("{context}: {error}")).into_status()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn ambient_cancellation_status(context: &str) -> Option<Status> {
+    crate::cx::Cx::with_current(|cx| cx.checkpoint().is_err())
+        .unwrap_or(false)
+        .then(|| Status::cancelled(format!("{context} cancelled by the caller")))
 }
 
 #[cfg(not(target_arch = "wasm32"))]

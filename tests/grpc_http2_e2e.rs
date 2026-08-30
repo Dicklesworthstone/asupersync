@@ -21,6 +21,8 @@ mod common;
 use common::init_test_logging;
 
 use asupersync::bytes::{Bytes, BytesMut};
+#[cfg(feature = "tls")]
+use asupersync::channel::oneshot;
 use asupersync::codec::{Decoder as _, Encoder as _};
 use asupersync::cx::Cx;
 use asupersync::grpc::{
@@ -42,6 +44,8 @@ use asupersync::tls::{
     Certificate, CertificateChain, PrivateKey, TlsAcceptor, TlsAcceptorBuilder, TlsConnector,
     TlsConnectorBuilder,
 };
+#[cfg(feature = "tls")]
+use asupersync::types::CancelReason;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -855,16 +859,40 @@ async fn serve_tls_grpc_unary(
 async fn accept_tls_probe(
     listener: TcpListener,
     acceptor: TlsAcceptor,
-) -> Result<Option<Vec<u8>>, String> {
+) -> Result<TlsProbeObservation, String> {
     let (tcp, _) = listener
         .accept()
         .await
         .map_err(|error| format!("accept TLS probe TCP: {error}"))?;
-    let stream = acceptor
+    let mut stream = acceptor
         .accept(tcp)
         .await
         .map_err(|error| format!("accept TLS probe handshake: {error}"))?;
-    Ok(stream.alpn_protocol().map(<[u8]>::to_vec))
+    let alpn = stream.alpn_protocol().map(<[u8]>::to_vec);
+    let mut application_byte = [0_u8; 1];
+    let application_bytes = match stream.read(&mut application_byte).await {
+        Ok(read) => application_byte[..read].to_vec(),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::ConnectionReset
+            ) =>
+        {
+            Vec::new()
+        }
+        Err(error) => return Err(format!("read TLS probe application byte: {error}")),
+    };
+    Ok(TlsProbeObservation {
+        alpn,
+        application_bytes,
+    })
+}
+
+#[cfg(feature = "tls")]
+#[derive(Debug, PartialEq, Eq)]
+struct TlsProbeObservation {
+    alpn: Option<Vec<u8>>,
+    application_bytes: Vec<u8>,
 }
 
 #[derive(Clone)]
@@ -1267,10 +1295,145 @@ fn public_grpc_tls_unary_fails_closed_on_authority_and_alpn_mismatch() {
             .await
             .expect_err("missing h2 ALPN must reject the gRPC TLS transport");
         assert!(status.message().contains("required h2 ALPN"));
+        let observation = server.await.expect("no-ALPN TLS handshake may complete");
+        assert_eq!(observation.alpn, None);
         assert_eq!(
-            server.await.expect("no-ALPN TLS handshake may complete"),
-            None
+            observation.application_bytes,
+            Vec::<u8>::new(),
+            "the client must not write the HTTP/2 preface before h2 ALPN succeeds"
         );
+    });
+}
+
+/// A caller abort parked inside a real TLS handshake is terminal cancellation,
+/// while the connection timeout independently bounds that handshake even when
+/// the overall RPC deadline is much longer.
+#[cfg(feature = "tls")]
+#[test]
+fn public_grpc_tls_handshake_honors_cancellation_and_connect_timeout() {
+    let runtime = RuntimeBuilder::new()
+        .worker_threads(2)
+        .build()
+        .expect("build runtime");
+
+    runtime.block_on(async move {
+        let cx = Cx::current().expect("runtime block_on installs an ambient Cx");
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind cancellation TLS stall fixture");
+        let addr = listener.local_addr().expect("cancellation fixture address");
+        let (accepted_tx, mut accepted_rx) = oneshot::channel();
+        let (release_tx, mut release_rx) = oneshot::channel();
+        let mut server = cx
+            .spawn(move |server_cx| async move {
+                let (tcp, _) = listener.accept().await.expect("accept stalled TLS TCP");
+                accepted_tx
+                    .send_blocking(())
+                    .expect("cancellation fixture receiver remains live");
+                release_rx
+                    .recv(&server_cx)
+                    .await
+                    .expect("cancellation fixture release remains live");
+                drop(tcp);
+            })
+            .expect("spawn cancellation TLS stall fixture");
+        let channel = Channel::builder(format!("https://localhost:{}", addr.port()))
+            .tls_connector(grpc_tls_connector(GRPC_TLS_CERT_PEM, true))
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(10))
+            .connect()
+            .await
+            .expect("cancellation channel construction remains lazy");
+        let mut call = cx
+            .spawn(move |_call_cx| async move {
+                GrpcClient::new(channel)
+                    .unary::<Bytes, Bytes>(
+                        "/test.PublicClient/Unary",
+                        Request::new(Bytes::from_static(b"cancel-stalled-handshake")),
+                    )
+                    .await
+            })
+            .expect("spawn cancellable TLS call");
+        accepted_rx
+            .recv(&cx)
+            .await
+            .expect("TLS peer accepts before caller cancellation");
+        call.abort_with_reason(CancelReason::user("cancel parked gRPC TLS handshake"));
+        let status = call
+            .join(&cx)
+            .await
+            .expect("cancel-aware gRPC call returns its typed result")
+            .expect_err("caller cancellation must fail the unary RPC");
+        assert_eq!(status.code(), Code::Cancelled);
+        release_tx
+            .send_blocking(())
+            .expect("release cancellation TLS stall fixture");
+        server
+            .join(&cx)
+            .await
+            .expect("cancellation TLS stall fixture drains");
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind connect-timeout TLS stall fixture");
+        let addr = listener
+            .local_addr()
+            .expect("connect-timeout fixture address");
+        let (accepted_tx, mut accepted_rx) = oneshot::channel();
+        let (release_tx, mut release_rx) = oneshot::channel();
+        let mut server = cx
+            .spawn(move |server_cx| async move {
+                let (tcp, _) = listener.accept().await.expect("accept timeout TLS TCP");
+                accepted_tx
+                    .send_blocking(())
+                    .expect("connect-timeout fixture receiver remains live");
+                release_rx
+                    .recv(&server_cx)
+                    .await
+                    .expect("connect-timeout fixture release remains live");
+                drop(tcp);
+            })
+            .expect("spawn connect-timeout TLS stall fixture");
+        let channel = Channel::builder(format!("https://localhost:{}", addr.port()))
+            .tls_connector(grpc_tls_connector(GRPC_TLS_CERT_PEM, true))
+            .connect_timeout(Duration::from_millis(100))
+            .timeout(Duration::from_secs(10))
+            .connect()
+            .await
+            .expect("connect-timeout channel construction remains lazy");
+        let mut call = cx
+            .spawn(move |_call_cx| async move {
+                GrpcClient::new(channel)
+                    .unary::<Bytes, Bytes>(
+                        "/test.PublicClient/Unary",
+                        Request::new(Bytes::from_static(b"timeout-stalled-handshake")),
+                    )
+                    .await
+            })
+            .expect("spawn connect-timeout TLS call");
+        accepted_rx
+            .recv(&cx)
+            .await
+            .expect("TLS peer accepts before the connection timeout");
+        let status = call
+            .join(&cx)
+            .await
+            .expect("timed-out gRPC call returns its typed result")
+            .expect_err("connection timeout must fail the unary RPC");
+        assert_eq!(status.code(), Code::Unavailable);
+        assert!(
+            status
+                .message()
+                .contains("connection establishment exceeded")
+        );
+        release_tx
+            .send_blocking(())
+            .expect("release connect-timeout TLS stall fixture");
+        server
+            .join(&cx)
+            .await
+            .expect("connect-timeout TLS stall fixture drains");
     });
 }
 
