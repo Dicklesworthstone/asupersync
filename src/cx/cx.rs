@@ -2196,6 +2196,43 @@ impl<Caps> Cx<Caps> {
         self.inner.read().cancel_requested
     }
 
+    /// Observes the published cancellation bit without taking any lock.
+    ///
+    /// This reads the stable Release-published cancellation envelope shared
+    /// with every [`Cx`] clone and runtime-owned cancellation producer, so it
+    /// is safe to call on every hot-loop iteration (for example, per-posting
+    /// cancellation polls inside scoring leaves) without the `RwLock` read
+    /// that [`Self::is_cancel_requested`] performs.
+    ///
+    /// For every cancellation that flows through the runtime mutation paths
+    /// ([`Self::set_cancel_requested`], [`Self::cancel`], [`Self::cancel_with`],
+    /// [`Self::cancel_fast`], task-handle and budget producers), this returns
+    /// the same value as [`Self::is_cancel_requested`], observed with Acquire
+    /// ordering. The only divergence window is the legacy v0.4.3 compatibility
+    /// path that writes `cancel_requested` directly under the inner lock
+    /// without publishing; [`Self::checkpoint`] materializes that legacy field,
+    /// so the published bit converges at the next checkpoint.
+    ///
+    /// Like [`Self::is_cancel_requested`], this is mask-agnostic: masks only
+    /// gate [`Self::checkpoint`] observability.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use asupersync::{Cx, types::CancelKind};
+    ///
+    /// let cx = Cx::for_testing();
+    /// assert!(!cx.published_cancel_requested());
+    /// cx.cancel_fast(CancelKind::RaceLost);
+    /// assert!(cx.published_cancel_requested());
+    /// ```
+    #[inline]
+    #[must_use]
+    pub fn published_cancel_requested(&self) -> bool {
+        self.cancellation
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
     /// Checks for cancellation and returns an error if cancelled.
     ///
     /// This is a checkpoint where cancellation can be observed. It combines
@@ -5665,6 +5702,61 @@ mod tests {
         assert!(!cx.inner.read().cancel_requested);
         assert!(cx.checkpoint().is_ok());
     }
+
+    #[test]
+    fn published_cancel_requested_tracks_runtime_mutations_lock_free() {
+        let cx = test_cx();
+
+        assert!(!cx.published_cancel_requested());
+
+        // Runtime mutation paths publish to the shared envelope.
+        cx.set_cancel_requested(true);
+        assert!(
+            cx.published_cancel_requested(),
+            "set_cancel_requested must publish to the lock-free envelope"
+        );
+        assert!(cx.is_cancel_requested());
+
+        // Clearing must publish false while masked, exactly like the locked read.
+        cx.masked(|| {
+            cx.set_cancel_requested(false);
+            assert!(
+                !cx.published_cancel_requested(),
+                "clearing cancellation must publish false while masked"
+            );
+            cx.set_cancel_requested(true);
+            assert!(cx.published_cancel_requested());
+        });
+
+        // cancel_fast (a direct runtime producer) publishes too.
+        cx.set_cancel_requested(false);
+        assert!(!cx.published_cancel_requested());
+        cx.cancel_fast(CancelKind::RaceLost);
+        assert!(cx.published_cancel_requested());
+
+        // The documented legacy-compat divergence: a direct locked-field write
+        // is visible to is_cancel_requested but is NOT published to the
+        // lock-free envelope until a checkpoint materializes it.
+        cx.set_cancel_requested(false);
+        {
+            let mut inner = cx.inner.write();
+            inner.cancel_requested = true;
+        }
+        assert!(cx.is_cancel_requested());
+        assert!(
+            !cx.published_cancel_requested(),
+            "legacy direct-field mutation must not publish without checkpoint materialization"
+        );
+        assert!(
+            cx.checkpoint().is_err(),
+            "checkpoint must materialize the legacy field into delivery"
+        );
+        assert!(
+            cx.published_cancel_requested(),
+            "checkpoint must materialize legacy mutation into the published envelope"
+        );
+    }
+
 
     #[test]
     fn is_cancel_requested_shares_clone_and_republishes_deadline() {
