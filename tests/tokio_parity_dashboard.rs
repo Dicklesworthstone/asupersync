@@ -33,6 +33,10 @@ fn make_temp_dir(test_name: &str) -> PathBuf {
 }
 
 fn run_generator(json_out: &Path, md_out: &Path) {
+    run_generator_with_issues(json_out, md_out, None);
+}
+
+fn run_generator_with_issues(json_out: &Path, md_out: &Path, issues_path: Option<&Path>) {
     let root = repo_root();
     let mut command = Command::new("python3");
     command
@@ -45,6 +49,9 @@ fn run_generator(json_out: &Path, md_out: &Path) {
         .arg(md_out)
         .arg("--generated-at")
         .arg(FIXED_TIMESTAMP);
+    if let Some(path) = issues_path {
+        command.arg("--issues").arg(path);
+    }
     if !root.join(".beads/issues.jsonl").exists() {
         command.env("ASUPERSYNC_TOKIO_DASHBOARD_CAPTURE_FALLBACK", "1");
     }
@@ -52,6 +59,16 @@ fn run_generator(json_out: &Path, md_out: &Path) {
         .status()
         .expect("failed to execute parity dashboard generator");
     assert!(status.success(), "generator command must exit successfully");
+}
+
+fn write_jsonl(path: &Path, records: &[Value]) {
+    let mut body = records
+        .iter()
+        .map(Value::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    body.push('\n');
+    std::fs::write(path, body).expect("must write dashboard issue fixture");
 }
 
 fn parse_json(path: &Path) -> Value {
@@ -132,6 +149,11 @@ fn json_dashboard_has_required_schema_and_identity_fields() {
         Some(FIXED_TIMESTAMP),
         "generated_at must reflect explicit override"
     );
+    assert_eq!(
+        payload["inputs"]["issues_digest_scope"].as_str(),
+        Some("tokio-program-id-title-status-blocking-dependencies-v1"),
+        "tracker digest must declare its exact consumed-field scope"
+    );
 
     let policy = payload["ci_policy"]
         .as_object()
@@ -172,6 +194,74 @@ fn json_dashboard_has_required_schema_and_identity_fields() {
         payload["drift_routing"]["alert_count"].as_u64(),
         Some(alerts.len() as u64),
         "drift_routing.alert_count must match alerts length"
+    );
+}
+
+#[test]
+fn tracker_digest_ignores_unconsumed_dirt_but_detects_parity_state_changes() {
+    let out_dir = make_temp_dir("tokio_parity_dashboard_tracker_digest");
+    let issues_path = out_dir.join("issues.jsonl");
+    let json_out = out_dir.join("tokio_parity_dashboard.json");
+    let md_out = out_dir.join("tokio_parity_dashboard.md");
+
+    let program_issue = serde_json::json!({
+        "id": "asupersync-2oh2u.1",
+        "title": "Definition-of-Done baseline",
+        "status": "open",
+        "assignee": "FirstAgent",
+        "comments": [{"text": "initial note"}],
+        "dependencies": []
+    });
+    let unrelated_issue = serde_json::json!({
+        "id": "asupersync-unrelated",
+        "title": "Unrelated runtime work",
+        "status": "open",
+        "comments": []
+    });
+    write_jsonl(
+        &issues_path,
+        &[program_issue.clone(), unrelated_issue.clone()],
+    );
+    run_generator_with_issues(&json_out, &md_out, Some(&issues_path));
+    let first_bytes = std::fs::read(&json_out).expect("must read first dashboard");
+    let first_payload = parse_json(&json_out);
+    let first_digest = first_payload["inputs"]["issues_sha256"]
+        .as_str()
+        .expect("issues digest must be a string")
+        .to_owned();
+
+    let mut unconsumed_program_edit = program_issue.clone();
+    unconsumed_program_edit["assignee"] = Value::String("SecondAgent".to_owned());
+    unconsumed_program_edit["comments"] = serde_json::json!([{"text": "new note"}]);
+    let mut unrelated_edit = unrelated_issue;
+    unrelated_edit["status"] = Value::String("closed".to_owned());
+    unrelated_edit["comments"] = serde_json::json!([{"text": "closed elsewhere"}]);
+    write_jsonl(
+        &issues_path,
+        &[unconsumed_program_edit.clone(), unrelated_edit],
+    );
+    run_generator_with_issues(&json_out, &md_out, Some(&issues_path));
+    let unconsumed_bytes = std::fs::read(&json_out).expect("must read unconsumed edit dashboard");
+    assert_eq!(
+        unconsumed_bytes, first_bytes,
+        "unconsumed tracker changes must not red the deterministic dashboard gate"
+    );
+
+    unconsumed_program_edit["status"] = Value::String("closed".to_owned());
+    write_jsonl(&issues_path, &[unconsumed_program_edit]);
+    run_generator_with_issues(&json_out, &md_out, Some(&issues_path));
+    let relevant_payload = parse_json(&json_out);
+    let relevant_digest = relevant_payload["inputs"]["issues_sha256"]
+        .as_str()
+        .expect("issues digest must be a string");
+    assert_ne!(
+        relevant_digest, first_digest,
+        "a consumed parity status change must alter the dashboard digest"
+    );
+    assert_eq!(
+        relevant_payload["tracks"][0]["root_status"].as_str(),
+        Some("closed"),
+        "the consumed parity status change must reach the emitted track row"
     );
 }
 

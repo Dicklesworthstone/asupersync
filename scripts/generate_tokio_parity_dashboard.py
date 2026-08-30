@@ -26,6 +26,7 @@ from typing import Any
 PROGRAM_ID = "asupersync-2oh2u"
 PROGRAM_BEAD = "asupersync-2oh2u.1.4.1"
 SCHEMA_VERSION = "tokio-parity-dashboard-v1"
+DASHBOARD_ISSUE_DIGEST_SCOPE = "tokio-program-id-title-status-blocking-dependencies-v1"
 CAPTURE_FALLBACK_ENV = "ASUPERSYNC_TOKIO_DASHBOARD_CAPTURE_FALLBACK"
 CONTRACT_TEST_COMMAND = (
     "rch exec -- env "
@@ -441,6 +442,50 @@ def program_issues(records: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
         if issue_id == PROGRAM_ID or issue_id.startswith(f"{PROGRAM_ID}."):
             issues[issue_id] = record
     return issues
+
+
+def dashboard_issue_sha256(issues_by_id: dict[str, dict[str, Any]]) -> str:
+    """Hash only tracker fields that can change emitted dashboard decisions."""
+    projection: list[dict[str, Any]] = []
+    for issue_id in sorted(issues_by_id):
+        issue = issues_by_id[issue_id]
+        dependencies: list[dict[str, str]] = []
+        raw_dependencies = issue.get("dependencies")
+        if isinstance(raw_dependencies, list):
+            for dependency in raw_dependencies:
+                if not isinstance(dependency, dict):
+                    continue
+                depends_on_id = dependency.get("depends_on_id")
+                dependency_type = dependency.get("type")
+                if not isinstance(depends_on_id, str) or not isinstance(
+                    dependency_type, str
+                ):
+                    continue
+                if dependency_type == "parent-child":
+                    continue
+                dependencies.append(
+                    {
+                        "depends_on_id": depends_on_id,
+                        "type": dependency_type,
+                    }
+                )
+        dependencies.sort(key=lambda row: (row["depends_on_id"], row["type"]))
+        projection.append(
+            {
+                "id": issue_id,
+                "title": issue.get("title"),
+                "status": get_status(issue),
+                "blocking_dependencies": dependencies,
+            }
+        )
+
+    encoded = json.dumps(
+        projection,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def build_summary(
@@ -874,7 +919,8 @@ def main() -> int:
         "inputs": {
             "issues_path": str(Path(args.issues)),
             "inventory_doc_path": str(Path(args.inventory_doc)),
-            "issues_sha256": file_sha256(issues_path),
+            "issues_sha256": dashboard_issue_sha256(issues_by_id),
+            "issues_digest_scope": DASHBOARD_ISSUE_DIGEST_SCOPE,
             "inventory_sha256": file_sha256(inventory_doc_path),
         },
         "summary": build_summary(issues_by_id, tracks, families, blocker_chains),
