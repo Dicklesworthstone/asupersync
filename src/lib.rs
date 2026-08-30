@@ -417,19 +417,25 @@ pub use remote::{
     RemoteComputationInvocation, RemoteComputationRegistry, RemoteComputationServiceError,
     RemoteError, RemoteHandle, RemoteMessage, RemoteOutcome, RemotePeerAdmissionError,
     RemotePeerAdmissionPolicy, RemotePeerHello, RemotePeerSession, RemoteProtocolVersion,
-    RemoteServiceRejectionCode, RemoteServiceWireLimits, RemoteServiceWireOutcome,
+    RemoteRuntime, RemoteServiceRejectionCode, RemoteServiceWireLimits, RemoteServiceWireOutcome,
     RemoteServiceWireRequest, RemoteServiceWireResponse, RemoteTaskId, ResultDelivery, Saga,
     SagaState, SagaStepError, SpawnAck, SpawnAckStatus, SpawnRejectReason, SpawnRequest,
     spawn_remote,
 };
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
 pub use remote::{
-    RemoteComputationClient, RemoteComputationClientConfig, RemoteComputationClientError,
-    RemoteComputationListenerError, RemoteComputationService, RemoteComputationServiceConfig,
-    RemoteComputationServiceHandle, RemoteComputationServiceReport,
+    DEFAULT_NATIVE_REMOTE_MAX_IN_FLIGHT, NativeRemoteRoute, NativeRemoteRuntime,
+    NativeRemoteRuntimeBuildError, NativeRemoteRuntimeConfig, RemoteComputationClient,
+    RemoteComputationClientConfig, RemoteComputationClientError, RemoteComputationListenerError,
+    RemoteComputationService, RemoteComputationServiceConfig, RemoteComputationServiceHandle,
+    RemoteComputationServiceReport,
 };
 #[cfg(feature = "tls")]
-pub use remote::{call_tls_computation_once, serve_tls_computation_once};
+pub use remote::{
+    RemoteComputationSession, RemoteComputationSessionStart, RemoteServiceSessionCommand,
+    RemoteServiceSessionError, RemoteServiceSessionEvent, call_tls_computation_once,
+    serve_tls_computation_once,
+};
 pub use types::{
     Budget, CancelKind, CancelReason, CapabilityBudget, CapabilityBudgetDimension,
     CapabilityBudgetRefusal, CapabilityBudgetRequirements, DeserializationError, Deserializer,

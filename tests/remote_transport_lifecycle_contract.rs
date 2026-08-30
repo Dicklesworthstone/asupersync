@@ -6,19 +6,19 @@ use asupersync::distributed::ComputationSchemaRegistry;
 use asupersync::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use asupersync::net::{TcpListener, TcpStream};
 use asupersync::remote::{
-    ComputationName, IdempotencyKey, MessageEnvelope, NodeId, RemoteComputationRegistry,
-    RemoteError, RemoteInput, RemoteMessage, RemoteOutcome, RemotePeerAdmissionPolicy,
-    RemotePeerHello, RemoteProtocolVersion, RemoteRuntime, RemoteTaskId, RemoteTaskState,
-    RemoteTransport, SpawnRejectReason, SpawnRequest, spawn_remote,
+    ComputationName, IdempotencyKey, LeaseRenewal, MessageEnvelope, NodeId,
+    RemoteComputationRegistry, RemoteError, RemoteInput, RemoteMessage, RemoteOutcome,
+    RemotePeerAdmissionPolicy, RemotePeerHello, RemoteProtocolVersion, RemoteRuntime, RemoteTaskId,
+    RemoteTaskState, RemoteTransport, SpawnRejectReason, SpawnRequest, spawn_remote,
 };
 #[cfg(feature = "tls")]
 use asupersync::remote::{
-    RemoteComputationClient, RemoteComputationClientConfig, RemoteComputationClientError,
-    RemoteComputationService, RemoteComputationServiceConfig, RemoteComputationServiceError,
-    RemoteComputationSessionStart, RemoteServiceRejectionCode, RemoteServiceSessionError,
-    RemoteServiceSessionEvent, RemoteServiceWireLimits, RemoteServiceWireOutcome,
-    RemoteServiceWireRequest, RemoteServiceWireResponse, call_tls_computation_once,
-    serve_tls_computation_once,
+    NativeRemoteRoute, NativeRemoteRuntime, NativeRemoteRuntimeConfig, RemoteComputationClient,
+    RemoteComputationClientConfig, RemoteComputationClientError, RemoteComputationService,
+    RemoteComputationServiceConfig, RemoteComputationServiceError, RemoteComputationSessionStart,
+    RemoteServiceRejectionCode, RemoteServiceSessionError, RemoteServiceSessionEvent,
+    RemoteServiceWireLimits, RemoteServiceWireOutcome, RemoteServiceWireRequest,
+    RemoteServiceWireResponse, call_tls_computation_once, serve_tls_computation_once,
 };
 #[cfg(feature = "tls")]
 use asupersync::runtime::RuntimeBuilder;
@@ -1831,6 +1831,510 @@ fn remote_tls_v3_session_cancellation_wakes_stalled_wait() {
     server
         .join()
         .expect("V3 cancellation fixture should not panic");
+}
+
+#[cfg(feature = "tls")]
+#[test]
+fn native_remote_runtime_drives_spawn_capacity_cancel_and_quiescent_close() {
+    let certificates = Certificate::from_pem(TEST_CERT_PEM).expect("TLS fixture should parse");
+    let peer_certificate = certificates
+        .first()
+        .expect("TLS fixture should contain a leaf certificate")
+        .clone();
+    let certificate_chain =
+        CertificateChain::from_pem(TEST_CERT_PEM).expect("TLS certificate chain should parse");
+    let private_key = PrivateKey::from_pem(TEST_KEY_PEM).expect("TLS private key should parse");
+
+    let dispatch_count = Arc::new(AtomicUsize::new(0));
+    let cleanup_complete = Arc::new(AtomicBool::new(false));
+    let (started_tx, started_rx) = std::sync::mpsc::sync_channel::<()>(1);
+    let (park_tx, park_rx) = oneshot::channel::<()>();
+    let park_receiver = Arc::new(Mutex::new(Some(park_rx)));
+    let mut computations = RemoteComputationRegistry::new();
+    let echo_dispatch_count = Arc::clone(&dispatch_count);
+    computations
+        .register::<Vec<u8>, Vec<u8>, _, _>("proof.native-echo", move |_cx, invocation| {
+            let echo_dispatch_count = Arc::clone(&echo_dispatch_count);
+            async move {
+                echo_dispatch_count.fetch_add(1, Ordering::SeqCst);
+                Ok(RemoteOutcome::Success(
+                    invocation.into_request().input.into_data(),
+                ))
+            }
+        })
+        .expect("native runtime echo handler should register");
+    let parked_dispatch_count = Arc::clone(&dispatch_count);
+    let parked_cleanup_complete = Arc::clone(&cleanup_complete);
+    let parked_receiver = Arc::clone(&park_receiver);
+    computations
+        .register::<Vec<u8>, Vec<u8>, _, _>("proof.native-park", move |cx, invocation| {
+            let parked_dispatch_count = Arc::clone(&parked_dispatch_count);
+            let parked_cleanup_complete = Arc::clone(&parked_cleanup_complete);
+            let started_tx = started_tx.clone();
+            let mut receiver = parked_receiver
+                .lock()
+                .take()
+                .expect("native runtime parked handler should dispatch once");
+            async move {
+                parked_dispatch_count.fetch_add(1, Ordering::SeqCst);
+                started_tx
+                    .send(())
+                    .expect("native runtime handler should publish its start");
+                let received = receiver.recv(&cx).await;
+                parked_cleanup_complete.store(true, Ordering::SeqCst);
+                match received {
+                    Ok(()) => Ok(RemoteOutcome::Success(
+                        invocation.into_request().input.into_data(),
+                    )),
+                    Err(_) => Ok(RemoteOutcome::Cancelled(
+                        cx.cancel_reason()
+                            .unwrap_or_else(CancelReason::parent_cancelled),
+                    )),
+                }
+            }
+        })
+        .expect("native runtime parked handler should register");
+
+    let origin = NodeId::new("origin-native-runtime-loopback");
+    let destination = NodeId::new("destination-native-runtime-loopback");
+    let mut peer_pins = CertificatePinSet::new();
+    peer_pins.add(
+        CertificatePin::compute_spki_sha256(&peer_certificate)
+            .expect("fixture certificate should produce an SPKI pin"),
+    );
+    let mut policy = RemotePeerAdmissionPolicy::new(
+        RemoteProtocolVersion::V3,
+        computations.schema_registry().clone(),
+    );
+    policy
+        .grant_tls_peer(
+            origin.clone(),
+            peer_pins,
+            ["proof.native-echo", "proof.native-park"],
+        )
+        .expect("native runtime certificate-bound grant should be valid");
+    let hello = policy.hello_for(origin.clone());
+
+    let mut client_auth_roots = RootCertStore::empty();
+    client_auth_roots
+        .add(&peer_certificate)
+        .expect("server should trust the fixture client certificate");
+    let acceptor = TlsAcceptorBuilder::new(certificate_chain.clone(), private_key.clone())
+        .client_auth(ClientAuth::Required(client_auth_roots))
+        .build()
+        .expect("native runtime mTLS acceptor should build");
+    let connector = TlsConnectorBuilder::new()
+        .add_root_certificate(&peer_certificate)
+        .identity(certificate_chain, private_key)
+        .build()
+        .expect("native runtime mTLS connector should build");
+
+    let service_runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("native runtime service runtime should build");
+    let service = service_runtime
+        .block_on(RemoteComputationService::bind(
+            "127.0.0.1:0",
+            acceptor,
+            policy,
+            computations,
+            RemoteComputationServiceConfig::new()
+                .with_max_connections(Some(4))
+                .with_drain_timeout(Duration::from_secs(1)),
+        ))
+        .expect("native runtime service should bind");
+    let endpoint = service
+        .local_addr()
+        .expect("native runtime service should expose its address");
+    let operator = service.handle();
+    let client_operator = operator.clone();
+    let client_dispatch_count = Arc::clone(&dispatch_count);
+    let client_cleanup_complete = Arc::clone(&cleanup_complete);
+
+    let client_thread = thread::spawn(move || {
+        let runtime = RuntimeBuilder::new()
+            .worker_threads(2)
+            .build()
+            .expect("native remote driver runtime should build");
+        let client = RemoteComputationClient::new(
+            endpoint,
+            "localhost",
+            connector,
+            RemoteComputationClientConfig::new()
+                .with_max_attempts(1)
+                .with_attempt_timeout(Duration::from_secs(2)),
+        )
+        .expect("native remote computation client should build");
+        let native = Arc::new(
+            NativeRemoteRuntime::with_config(
+                runtime.handle(),
+                origin.clone(),
+                [NativeRemoteRoute::new(destination.clone(), hello, client)],
+                NativeRemoteRuntimeConfig::new()
+                    .with_max_in_flight(1)
+                    .with_drain_timeout(Duration::from_secs(2)),
+            )
+            .expect("native remote runtime should validate its V3 route"),
+        );
+        let cap = asupersync::remote::RemoteCap::new()
+            .with_local_node(origin)
+            .with_default_lease(Duration::from_secs(5))
+            .with_runtime(native.clone());
+        let cx = runtime
+            .request_cx_with_budget(Budget::INFINITE)
+            .with_remote_cap(cap);
+
+        let mut echo = spawn_remote(
+            &cx,
+            destination.clone(),
+            ComputationName::new("proof.native-echo"),
+            RemoteInput::new(b"native-runtime-echo".to_vec()),
+        )
+        .expect("native runtime should publish the echo driver");
+        let echo_outcome = runtime
+            .block_on(echo.join(&cx))
+            .expect("native runtime echo should complete");
+        assert!(matches!(
+            echo_outcome,
+            RemoteOutcome::Success(ref payload) if payload == b"native-runtime-echo"
+        ));
+
+        let mut parked = spawn_remote(
+            &cx,
+            destination.clone(),
+            ComputationName::new("proof.native-park"),
+            RemoteInput::new(b"native-runtime-park".to_vec()),
+        )
+        .expect("native runtime should publish the parked driver");
+        started_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("native runtime parked handler should start");
+        let running_deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while parked.state() != RemoteTaskState::Running {
+            assert!(
+                std::time::Instant::now() < running_deadline,
+                "native runtime should publish Running after the accepted event"
+            );
+            std::thread::yield_now();
+        }
+        assert_eq!(parked.state(), RemoteTaskState::Running);
+        assert_eq!(native.active_operations(), 1);
+
+        let capacity_error = spawn_remote(
+            &cx,
+            destination,
+            ComputationName::new("proof.native-echo"),
+            RemoteInput::new(b"must-not-dispatch".to_vec()),
+        )
+        .expect_err("native runtime should enforce its one-operation cap");
+        assert_eq!(
+            capacity_error,
+            RemoteError::SpawnRejected(SpawnRejectReason::CapacityExceeded)
+        );
+        assert_eq!(client_dispatch_count.load(Ordering::SeqCst), 2);
+
+        assert!(
+            runtime.block_on(native.close(&cx)),
+            "graceful V3 cancellation should quiesce without force-close"
+        );
+        assert_eq!(native.active_operations(), 0);
+        assert!(client_cleanup_complete.load(Ordering::SeqCst));
+        let parked_outcome = runtime
+            .block_on(parked.join(&cx))
+            .expect("native runtime shutdown should publish a cancelled outcome");
+        assert!(matches!(parked_outcome, RemoteOutcome::Cancelled(_)));
+        assert!(native.observe_task_state(parked.remote_task_id()).is_none());
+        assert!(client_operator.begin_drain());
+
+        drop(cx);
+        drop(native);
+        // Joined handles remain in scope: consuming their terminal result must
+        // release the adapter's strong RuntimeHandle reference automatically.
+        assert!(runtime.shutdown_timeout(Duration::from_secs(2)));
+    });
+
+    let report = service_runtime
+        .block_on(async move {
+            let cx = Cx::current().expect("runtime should install a native service context");
+            service.run(&cx).await
+        })
+        .expect("native remote service should drain cleanly");
+    client_thread
+        .join()
+        .expect("native remote driver client should not panic");
+    drop(park_tx);
+
+    assert_eq!(report.accepted_connections(), 2);
+    assert_eq!(report.completed_connections(), 2);
+    assert_eq!(report.failed_connections(), 0);
+    assert_eq!(report.interrupted_connections(), 0);
+    assert_eq!(dispatch_count.load(Ordering::SeqCst), 2);
+    assert!(cleanup_complete.load(Ordering::SeqCst));
+    assert_eq!(operator.active_connections(), 0);
+}
+
+#[cfg(feature = "tls")]
+#[test]
+fn native_remote_runtime_drain_wakes_pending_tls_admission() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("pending-admission fixture should bind loopback");
+    let endpoint = listener
+        .local_addr()
+        .expect("pending-admission fixture should expose its address");
+    let (accepted_tx, accepted_rx) = std::sync::mpsc::sync_channel::<()>(0);
+    let (release_tx, release_rx) = std::sync::mpsc::sync_channel::<()>(0);
+    let server = thread::spawn(move || {
+        let (stream, _) = listener
+            .accept()
+            .expect("pending-admission fixture should accept one connection");
+        accepted_tx
+            .send(())
+            .expect("pending-admission fixture should publish its accepted socket");
+        release_rx
+            .recv_timeout(Duration::from_secs(3))
+            .expect("pending-admission fixture should receive cleanup release");
+        drop(stream);
+    });
+
+    let (_, connector) = remote_client_test_mtls_pair();
+    let origin = NodeId::new("origin-native-runtime-pending");
+    let destination = NodeId::new("destination-native-runtime-pending");
+    let mut schemas = ComputationSchemaRegistry::new();
+    schemas
+        .register_typed::<Vec<u8>, Vec<u8>>("proof.pending-admission")
+        .expect("pending-admission computation schema should register");
+    let hello = RemotePeerHello::new(
+        origin.clone(),
+        RemoteProtocolVersion::V3,
+        schemas.fingerprint(),
+    );
+
+    let runtime = RuntimeBuilder::new()
+        .worker_threads(2)
+        .build()
+        .expect("pending-admission driver runtime should build");
+    let client = RemoteComputationClient::new(
+        endpoint,
+        "localhost",
+        connector,
+        RemoteComputationClientConfig::new()
+            .with_max_attempts(1)
+            .with_attempt_timeout(Duration::from_secs(30)),
+    )
+    .expect("pending-admission client should build");
+    let native = Arc::new(
+        NativeRemoteRuntime::with_config(
+            runtime.handle(),
+            origin.clone(),
+            [NativeRemoteRoute::new(destination.clone(), hello, client)],
+            NativeRemoteRuntimeConfig::new().with_drain_timeout(Duration::from_millis(250)),
+        )
+        .expect("pending-admission native runtime should validate its route"),
+    );
+    let cap = asupersync::remote::RemoteCap::new()
+        .with_local_node(origin)
+        .with_runtime(native.clone());
+    let cx = runtime
+        .request_cx_with_budget(Budget::INFINITE)
+        .with_remote_cap(cap);
+    let mut handle = spawn_remote(
+        &cx,
+        destination,
+        ComputationName::new("proof.pending-admission"),
+        RemoteInput::new(b"pending-admission".to_vec()),
+    )
+    .expect("pending-admission driver should publish");
+    accepted_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("pending-admission client should connect before TLS stalls");
+    assert_eq!(handle.state(), RemoteTaskState::Pending);
+    assert_eq!(native.active_operations(), 1);
+
+    assert!(
+        runtime.block_on(native.close(&cx)),
+        "drain should wake pending TLS admission without reaching force-close"
+    );
+    assert_eq!(native.active_operations(), 0);
+    let terminal = runtime
+        .block_on(handle.join(&cx))
+        .expect_err("pending TLS admission should terminate as cancelled");
+    assert!(
+        matches!(terminal, RemoteError::Cancelled(_)),
+        "pending-admission cancellation classified as {terminal:?}"
+    );
+
+    release_tx
+        .send(())
+        .expect("pending-admission fixture should release its accepted socket");
+    server
+        .join()
+        .expect("pending-admission fixture should not panic");
+    drop(cx);
+    drop(native);
+    // The joined handle remains in scope and must no longer retain the runtime.
+    assert!(runtime.shutdown_timeout(Duration::from_secs(2)));
+}
+
+#[cfg(feature = "tls")]
+#[test]
+fn native_remote_runtime_cancel_preempts_stalled_renewal() {
+    let (acceptor, connector) = remote_client_test_mtls_pair();
+    let listener = block_on(TcpListener::bind("127.0.0.1:0"))
+        .expect("stalled-renewal fixture should bind loopback");
+    let endpoint = listener
+        .local_addr()
+        .expect("stalled-renewal fixture should expose its address");
+    let (accepted_tx, accepted_rx) = std::sync::mpsc::sync_channel::<()>(0);
+    let (renewal_tx, renewal_rx) = std::sync::mpsc::sync_channel::<()>(0);
+    let (closed_tx, closed_rx) = std::sync::mpsc::sync_channel::<()>(0);
+    let server = thread::spawn(move || {
+        block_on(async move {
+            let (stream, _) = listener
+                .accept()
+                .await
+                .expect("stalled-renewal fixture should accept one connection");
+            let mut stream = acceptor
+                .accept(stream)
+                .await
+                .expect("stalled-renewal fixture should authenticate the client");
+            let encoded = read_raw_frame(&mut stream)
+                .await
+                .expect("stalled-renewal fixture should receive the spawn request");
+            let request: RemoteServiceWireRequest = serde_json::from_slice(&encoded)
+                .expect("stalled-renewal spawn request should decode");
+            let accepted = RemoteServiceSessionEvent::Accepted {
+                remote_task_id: request.remote_task_id().raw(),
+            };
+            let encoded = serde_json::to_vec(&accepted)
+                .expect("stalled-renewal accepted event should encode");
+            write_raw_frame(&mut stream, &encoded)
+                .await
+                .expect("stalled-renewal accepted event should flush");
+            accepted_tx
+                .send(())
+                .expect("stalled-renewal fixture should publish acceptance");
+
+            let encoded = read_raw_frame(&mut stream)
+                .await
+                .expect("stalled-renewal fixture should receive the renewal command");
+            let command: asupersync::remote::RemoteServiceSessionCommand =
+                serde_json::from_slice(&encoded).expect("stalled-renewal command should decode");
+            assert!(matches!(
+                command,
+                asupersync::remote::RemoteServiceSessionCommand::RenewLease { .. }
+            ));
+            renewal_tx
+                .send(())
+                .expect("stalled-renewal fixture should publish command receipt");
+
+            assert!(
+                read_raw_frame(&mut stream).await.is_err(),
+                "cancellation should drop the transport without waiting for a renewal reply"
+            );
+            closed_tx
+                .send(())
+                .expect("stalled-renewal fixture should publish transport close");
+        });
+    });
+
+    let origin = NodeId::new("origin-native-runtime-renewal");
+    let destination = NodeId::new("destination-native-runtime-renewal");
+    let mut schemas = ComputationSchemaRegistry::new();
+    schemas
+        .register_typed::<Vec<u8>, Vec<u8>>("proof.stalled-renewal")
+        .expect("stalled-renewal computation schema should register");
+    let hello = RemotePeerHello::new(
+        origin.clone(),
+        RemoteProtocolVersion::V3,
+        schemas.fingerprint(),
+    );
+    let runtime = RuntimeBuilder::new()
+        .worker_threads(2)
+        .build()
+        .expect("stalled-renewal driver runtime should build");
+    let client = RemoteComputationClient::new(
+        endpoint,
+        "localhost",
+        connector,
+        RemoteComputationClientConfig::new()
+            .with_max_attempts(1)
+            .with_attempt_timeout(Duration::from_secs(2)),
+    )
+    .expect("stalled-renewal client should build");
+    let native = Arc::new(
+        NativeRemoteRuntime::new(
+            runtime.handle(),
+            origin.clone(),
+            [NativeRemoteRoute::new(destination.clone(), hello, client)],
+        )
+        .expect("stalled-renewal native runtime should validate its route"),
+    );
+    let cap = asupersync::remote::RemoteCap::new()
+        .with_local_node(origin.clone())
+        .with_runtime(native.clone());
+    let cx = runtime
+        .request_cx_with_budget(Budget::INFINITE)
+        .with_remote_cap(cap);
+    let mut handle = spawn_remote(
+        &cx,
+        destination.clone(),
+        ComputationName::new("proof.stalled-renewal"),
+        RemoteInput::new(b"stalled-renewal".to_vec()),
+    )
+    .expect("stalled-renewal driver should publish");
+    accepted_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("stalled-renewal session should be accepted");
+    let running_deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while handle.state() != RemoteTaskState::Running {
+        assert!(
+            std::time::Instant::now() < running_deadline,
+            "stalled-renewal handle should observe the accepted event"
+        );
+        std::thread::yield_now();
+    }
+    native
+        .send_message(
+            &destination,
+            MessageEnvelope::new(
+                origin.clone(),
+                cx.logical_tick(),
+                RemoteMessage::LeaseRenewal(LeaseRenewal {
+                    remote_task_id: handle.remote_task_id(),
+                    new_lease: Duration::from_secs(30),
+                    current_state: RemoteTaskState::Running,
+                    node: origin,
+                }),
+            ),
+        )
+        .expect("stalled-renewal command should publish");
+    renewal_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("stalled-renewal fixture should receive the renewal command");
+
+    handle.abort(&cx);
+    let terminal = runtime
+        .block_on(async {
+            asupersync::time::timeout(cx.now(), Duration::from_secs(1), handle.join(&cx))
+                .await
+                .expect("cancel should preempt a stalled renewal within the proof bound")
+        })
+        .expect_err("stalled renewal should terminate as cancelled");
+    assert!(
+        matches!(terminal, RemoteError::Cancelled(_)),
+        "stalled-renewal cancellation classified as {terminal:?}"
+    );
+    closed_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("stalled-renewal cancellation should close the transport");
+    server
+        .join()
+        .expect("stalled-renewal fixture should not panic");
+    assert_eq!(native.active_operations(), 0);
+    assert!(runtime.block_on(native.close(&cx)));
+    drop(cx);
+    drop(native);
+    assert!(runtime.shutdown_timeout(Duration::from_secs(2)));
 }
 
 #[cfg(feature = "tls")]

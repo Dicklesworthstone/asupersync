@@ -37,10 +37,13 @@
 //! closed on every ambiguous delivery because the listener's retained state is
 //! process-local. V1/V2 computations remain one-request/one-response; V3 owns a
 //! child region until handler completion, expiry, explicit cancellation, or
-//! transport loss has drained to quiescence. A production [`RemoteRuntime`]
-//! driver that maps the synchronous transport trait onto these async V3
-//! sessions remains a separate composition layer.
+//! transport loss has drained to quiescence. Native TLS builds also expose
+//! [`NativeRemoteRuntime`], which maps the synchronous [`RemoteRuntime`] trait
+//! onto runtime-owned V3 session tasks without blocking the caller or detaching
+//! network work from runtime shutdown.
 
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+use crate::channel::mpsc;
 use crate::channel::oneshot;
 #[cfg(feature = "tls")]
 use crate::codec::{Framed, LengthDelimitedCodec};
@@ -68,7 +71,7 @@ use crate::{
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
 use crate::{
     net::{TcpListener, TcpStream, TcpStreamBuilder},
-    runtime::SpawnError,
+    runtime::{RuntimeHandle, SpawnError},
     server::{ConnectionManager, ShutdownPhase, ShutdownSignal, ShutdownStats},
     tls::{TlsAcceptor, TlsConnector, TlsError},
 };
@@ -734,8 +737,8 @@ impl RemoteHandle {
     }
 
     #[inline]
-    fn clear_runtime_state(&self) {
-        if let Some(runtime) = &self.runtime {
+    fn clear_runtime_state(&mut self) {
+        if let Some(runtime) = self.runtime.take() {
             runtime.clear_task_state(self.remote_task_id);
         }
     }
@@ -5903,6 +5906,1018 @@ impl RemoteComputationClient {
             });
         }
         Ok(())
+    }
+}
+
+/// Default cap on live operations admitted by [`NativeRemoteRuntime`].
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+pub const DEFAULT_NATIVE_REMOTE_MAX_IN_FLIGHT: usize = 256;
+
+/// Static destination route for [`NativeRemoteRuntime`].
+///
+/// Discovery remains an outer concern: this value deliberately binds one
+/// logical destination to one validated client endpoint and one V3 peer hello.
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+#[derive(Clone, Debug)]
+pub struct NativeRemoteRoute {
+    destination: NodeId,
+    hello: RemotePeerHello,
+    client: RemoteComputationClient,
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+impl NativeRemoteRoute {
+    /// Creates one immutable logical-node route.
+    #[must_use]
+    pub const fn new(
+        destination: NodeId,
+        hello: RemotePeerHello,
+        client: RemoteComputationClient,
+    ) -> Self {
+        Self {
+            destination,
+            hello,
+            client,
+        }
+    }
+
+    /// Logical destination selected by [`spawn_remote`].
+    #[must_use]
+    pub const fn destination(&self) -> &NodeId {
+        &self.destination
+    }
+
+    /// V3 hello bound to the authenticated client identity.
+    #[must_use]
+    pub const fn hello(&self) -> &RemotePeerHello {
+        &self.hello
+    }
+
+    /// TCP+mTLS client used for this destination.
+    #[must_use]
+    pub const fn client(&self) -> &RemoteComputationClient {
+        &self.client
+    }
+}
+
+/// Admission and graceful-drain policy for [`NativeRemoteRuntime`].
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NativeRemoteRuntimeConfig {
+    max_in_flight: usize,
+    drain_timeout: Duration,
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+impl NativeRemoteRuntimeConfig {
+    /// Creates the production-oriented driver policy.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            max_in_flight: DEFAULT_NATIVE_REMOTE_MAX_IN_FLIGHT,
+            drain_timeout: Duration::from_secs(30),
+        }
+    }
+
+    /// Sets the maximum number of live V3 session tasks.
+    #[must_use]
+    pub const fn with_max_in_flight(mut self, max_in_flight: usize) -> Self {
+        self.max_in_flight = max_in_flight;
+        self
+    }
+
+    /// Sets the graceful-cancel interval before force-closing transports.
+    #[must_use]
+    pub const fn with_drain_timeout(mut self, drain_timeout: Duration) -> Self {
+        self.drain_timeout = drain_timeout;
+        self
+    }
+
+    /// Maximum number of live V3 session tasks.
+    #[must_use]
+    pub const fn max_in_flight(self) -> usize {
+        self.max_in_flight
+    }
+
+    /// Graceful-cancel interval before force-close.
+    #[must_use]
+    pub const fn drain_timeout(self) -> Duration {
+        self.drain_timeout
+    }
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+impl Default for NativeRemoteRuntimeConfig {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Static configuration error for [`NativeRemoteRuntime`].
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum NativeRemoteRuntimeBuildError {
+    /// A zero operation cap cannot admit remote work.
+    ZeroMaxInFlight,
+    /// The route advertised a protocol other than V3.
+    WrongProtocol {
+        /// Destination whose route was invalid.
+        destination: NodeId,
+        /// Version advertised by the route.
+        presented: RemoteProtocolVersion,
+    },
+    /// The route hello asserted a different origin identity.
+    OriginIdentityMismatch {
+        /// Destination whose route was invalid.
+        destination: NodeId,
+        /// Runtime-local origin identity.
+        expected: NodeId,
+        /// Identity asserted by the route hello.
+        presented: NodeId,
+    },
+    /// Two routes selected the same logical destination.
+    DuplicateDestination(NodeId),
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+impl fmt::Display for NativeRemoteRuntimeBuildError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ZeroMaxInFlight => {
+                f.write_str("native remote runtime max-in-flight must be nonzero")
+            }
+            Self::WrongProtocol {
+                destination,
+                presented,
+            } => write!(
+                f,
+                "native remote route {destination} must advertise protocol V3, got {presented}"
+            ),
+            Self::OriginIdentityMismatch {
+                destination,
+                expected,
+                presented,
+            } => write!(
+                f,
+                "native remote route {destination} asserts origin {presented}, expected {expected}"
+            ),
+            Self::DuplicateDestination(destination) => {
+                write!(f, "duplicate native remote route for {destination}")
+            }
+        }
+    }
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+impl std::error::Error for NativeRemoteRuntimeBuildError {}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+struct NativeRemoteControl {
+    pending_cancel: Mutex<Option<CancelReason>>,
+    pending_renewal: Mutex<Option<Duration>>,
+    wake: mpsc::Sender<()>,
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+impl fmt::Debug for NativeRemoteControl {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("NativeRemoteControl")
+            .field("cancel_pending", &self.pending_cancel.lock().is_some())
+            .field("renewal_pending", &self.pending_renewal.lock().is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+impl NativeRemoteControl {
+    fn new() -> (Arc<Self>, mpsc::Receiver<()>) {
+        let (wake, receiver) = mpsc::channel(1);
+        (
+            Arc::new(Self {
+                pending_cancel: Mutex::new(None),
+                pending_renewal: Mutex::new(None),
+                wake,
+            }),
+            receiver,
+        )
+    }
+
+    fn signal(&self) -> bool {
+        match self.wake.try_send(()) {
+            Ok(()) | Err(mpsc::SendError::Full(())) => true,
+            Err(mpsc::SendError::Disconnected(()) | mpsc::SendError::Cancelled(())) => false,
+        }
+    }
+
+    fn request_cancel(&self, reason: CancelReason) -> bool {
+        {
+            let mut pending = self.pending_cancel.lock();
+            if let Some(existing) = pending.as_mut() {
+                existing.strengthen(&reason);
+            } else {
+                *pending = Some(reason);
+            }
+        }
+        self.signal()
+    }
+
+    fn request_renewal(&self, lease: Duration) -> bool {
+        *self.pending_renewal.lock() = Some(lease);
+        self.signal()
+    }
+
+    fn take_cancel(&self) -> Option<CancelReason> {
+        self.pending_cancel.lock().take()
+    }
+
+    fn cancel_reason(&self) -> Option<CancelReason> {
+        self.pending_cancel.lock().clone()
+    }
+
+    fn take_renewal(&self) -> Option<Duration> {
+        self.pending_renewal.lock().take()
+    }
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+struct NativeRemoteTaskEntry {
+    result: Option<oneshot::Sender<Result<RemoteOutcome, RemoteError>>>,
+    state: RemoteTaskState,
+    control: Arc<NativeRemoteControl>,
+    control_receiver: Option<mpsc::Receiver<()>>,
+    driver_cx: Option<Cx>,
+    control_in_flight: bool,
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+struct NativeRemoteState {
+    closed: bool,
+    active: BTreeSet<RemoteTaskId>,
+    tasks: BTreeMap<RemoteTaskId, NativeRemoteTaskEntry>,
+    drain_waiters: Vec<oneshot::Sender<()>>,
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+impl NativeRemoteState {
+    fn new() -> Self {
+        Self {
+            closed: false,
+            active: BTreeSet::new(),
+            tasks: BTreeMap::new(),
+            drain_waiters: Vec::new(),
+        }
+    }
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+struct NativeRemoteShared {
+    max_in_flight: usize,
+    state: Mutex<NativeRemoteState>,
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+impl NativeRemoteShared {
+    fn register(
+        &self,
+        task_id: RemoteTaskId,
+        result: oneshot::Sender<Result<RemoteOutcome, RemoteError>>,
+    ) {
+        let (control, control_receiver) = NativeRemoteControl::new();
+        let mut state = self.state.lock();
+        if state.closed || state.tasks.contains_key(&task_id) {
+            drop(state);
+            let _ = result.send_blocking(Err(RemoteError::TransportError(
+                "native remote runtime is closed or task registration collided".to_owned(),
+            )));
+            return;
+        }
+        state.tasks.insert(
+            task_id,
+            NativeRemoteTaskEntry {
+                result: Some(result),
+                state: RemoteTaskState::Pending,
+                control,
+                control_receiver: Some(control_receiver),
+                driver_cx: None,
+                control_in_flight: false,
+            },
+        );
+    }
+
+    fn admit(&self, task_id: RemoteTaskId) -> Result<mpsc::Receiver<()>, RemoteError> {
+        let mut state = self.state.lock();
+        if state.closed {
+            return Err(RemoteError::TransportError(
+                "native remote runtime admission is closed".to_owned(),
+            ));
+        }
+        if state.active.len() >= self.max_in_flight {
+            return Err(RemoteError::SpawnRejected(
+                SpawnRejectReason::CapacityExceeded,
+            ));
+        }
+        let entry = state.tasks.get_mut(&task_id).ok_or_else(|| {
+            RemoteError::TransportError(format!(
+                "native remote task {task_id} was not registered before send"
+            ))
+        })?;
+        let receiver = entry.control_receiver.take().ok_or_else(|| {
+            RemoteError::TransportError(format!(
+                "native remote task {task_id} was already published"
+            ))
+        })?;
+        state.active.insert(task_id);
+        Ok(receiver)
+    }
+
+    fn attach_driver_cx(&self, task_id: RemoteTaskId, cx: Cx) {
+        let pending_cancel = {
+            let mut state = self.state.lock();
+            state.tasks.get_mut(&task_id).and_then(|entry| {
+                entry.driver_cx = Some(cx.clone());
+                (entry.state == RemoteTaskState::Pending)
+                    .then(|| entry.control.cancel_reason())
+                    .flatten()
+            })
+        };
+        if let Some(reason) = pending_cancel {
+            cx.set_cancel_reason(reason);
+        }
+    }
+
+    fn set_running(&self, task_id: RemoteTaskId) {
+        if let Some(entry) = self.state.lock().tasks.get_mut(&task_id) {
+            entry.state = RemoteTaskState::Running;
+        }
+    }
+
+    fn set_control_in_flight(&self, task_id: RemoteTaskId, in_flight: bool) {
+        if let Some(entry) = self.state.lock().tasks.get_mut(&task_id) {
+            entry.control_in_flight = in_flight;
+        }
+    }
+
+    fn roll_back_admission(&self, task_id: RemoteTaskId) {
+        let waiters = {
+            let mut state = self.state.lock();
+            state.active.remove(&task_id);
+            state.tasks.remove(&task_id);
+            if state.active.is_empty() {
+                std::mem::take(&mut state.drain_waiters)
+            } else {
+                Vec::new()
+            }
+        };
+        for waiter in waiters {
+            let _ = waiter.send_blocking(());
+        }
+    }
+
+    fn complete(&self, task_id: RemoteTaskId, result: Result<RemoteOutcome, RemoteError>) {
+        let terminal_state = RemoteHandle::terminal_state_for_result(&result);
+        let sender = {
+            let mut state = self.state.lock();
+            state.tasks.get_mut(&task_id).and_then(|entry| {
+                entry.state = terminal_state;
+                entry.driver_cx = None;
+                entry.control_in_flight = false;
+                entry.result.take()
+            })
+        };
+        let delivered = sender.is_some_and(|sender| sender.send_blocking(result).is_ok());
+        let waiters = {
+            let mut state = self.state.lock();
+            state.active.remove(&task_id);
+            if !delivered {
+                state.tasks.remove(&task_id);
+            }
+            let waiters = if state.active.is_empty() {
+                std::mem::take(&mut state.drain_waiters)
+            } else {
+                Vec::new()
+            };
+            waiters
+        };
+        for waiter in waiters {
+            let _ = waiter.send_blocking(());
+        }
+    }
+
+    fn control(&self, task_id: RemoteTaskId) -> Result<Arc<NativeRemoteControl>, RemoteError> {
+        self.state
+            .lock()
+            .tasks
+            .get(&task_id)
+            .map(|entry| Arc::clone(&entry.control))
+            .ok_or_else(|| {
+                RemoteError::TransportError(format!(
+                    "native remote task {task_id} is not active or registered"
+                ))
+            })
+    }
+
+    fn request_cancel(
+        &self,
+        task_id: RemoteTaskId,
+        reason: CancelReason,
+    ) -> Result<(), RemoteError> {
+        let (signaled, pending_driver) = {
+            let state = self.state.lock();
+            let entry = state.tasks.get(&task_id).ok_or_else(|| {
+                RemoteError::TransportError(format!(
+                    "native remote task {task_id} is not active or registered"
+                ))
+            })?;
+            let signaled = entry.control.request_cancel(reason.clone());
+            let pending_driver = (entry.state == RemoteTaskState::Pending
+                || entry.control_in_flight)
+                .then(|| entry.driver_cx.clone())
+                .flatten();
+            (signaled, pending_driver)
+        };
+        if let Some(cx) = pending_driver {
+            cx.set_cancel_reason(reason);
+        }
+        if signaled {
+            Ok(())
+        } else {
+            Err(RemoteError::TransportError(format!(
+                "native remote task {task_id} control lane is closed"
+            )))
+        }
+    }
+
+    fn begin_drain(
+        &self,
+        wait_for_quiescence: bool,
+    ) -> (bool, Vec<RemoteTaskId>, Option<oneshot::Receiver<()>>) {
+        let mut state = self.state.lock();
+        let newly_closed = !state.closed;
+        state.closed = true;
+        let task_ids = state.active.iter().copied().collect();
+        let receiver = if state.active.is_empty() || !wait_for_quiescence {
+            None
+        } else {
+            let (sender, receiver) = oneshot::channel();
+            state.drain_waiters.push(sender);
+            Some(receiver)
+        };
+        (newly_closed, task_ids, receiver)
+    }
+
+    fn force_close(&self) {
+        let (controls, contexts) = {
+            let mut state = self.state.lock();
+            state.closed = true;
+            let controls = state
+                .active
+                .iter()
+                .filter_map(|task_id| state.tasks.get(task_id))
+                .map(|entry| Arc::clone(&entry.control))
+                .collect::<Vec<_>>();
+            let contexts = state
+                .active
+                .iter()
+                .filter_map(|task_id| state.tasks.get(task_id))
+                .filter_map(|entry| entry.driver_cx.clone())
+                .collect::<Vec<_>>();
+            (controls, contexts)
+        };
+        for control in controls {
+            control.request_cancel(CancelReason::shutdown());
+        }
+        for cx in contexts {
+            cx.set_cancel_reason(CancelReason::shutdown());
+        }
+    }
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+struct NativeRemoteDriverGuard {
+    shared: Arc<NativeRemoteShared>,
+    task_id: RemoteTaskId,
+    completed: bool,
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+impl NativeRemoteDriverGuard {
+    fn new(shared: Arc<NativeRemoteShared>, task_id: RemoteTaskId) -> Self {
+        Self {
+            shared,
+            task_id,
+            completed: false,
+        }
+    }
+
+    fn finish(mut self, result: Result<RemoteOutcome, RemoteError>) {
+        self.completed = true;
+        self.shared.complete(self.task_id, result);
+    }
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+impl Drop for NativeRemoteDriverGuard {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.shared.complete(
+                self.task_id,
+                Err(RemoteError::TransportError(
+                    "native remote driver ended before terminal publication".to_owned(),
+                )),
+            );
+        }
+    }
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+enum NativeRemoteSessionRace {
+    Event(Result<RemoteServiceSessionEvent, RemoteServiceSessionError>),
+    Control(Result<(), mpsc::RecvError>),
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+async fn drive_native_remote_session(
+    cx: &Cx,
+    shared: &NativeRemoteShared,
+    task_id: RemoteTaskId,
+    client: &RemoteComputationClient,
+    request: &RemoteServiceWireRequest,
+    control: &NativeRemoteControl,
+    control_receiver: &mut mpsc::Receiver<()>,
+) -> Result<RemoteOutcome, RemoteError> {
+    let started = client
+        .start_session(cx, request)
+        .await
+        .map_err(|error| map_native_remote_client_error(cx, error))?;
+    let mut session = match started {
+        RemoteComputationSessionStart::Running(session) => {
+            shared.set_running(task_id);
+            session
+        }
+        RemoteComputationSessionStart::Terminal(response) => {
+            return map_native_remote_response(response);
+        }
+    };
+
+    loop {
+        let race = futures_lite::future::race(
+            async {
+                NativeRemoteSessionRace::Event(
+                    session
+                        .exchange_event::<RemoteServiceSessionCommand>(cx, None)
+                        .await,
+                )
+            },
+            async { NativeRemoteSessionRace::Control(control_receiver.recv(cx).await) },
+        )
+        .await;
+        match race {
+            NativeRemoteSessionRace::Event(Ok(RemoteServiceSessionEvent::Terminal {
+                response,
+            })) => return map_native_remote_response(response),
+            NativeRemoteSessionRace::Event(Ok(_)) => {
+                return Err(RemoteError::TransportError(
+                    "native remote session received an unsolicited non-terminal event".to_owned(),
+                ));
+            }
+            NativeRemoteSessionRace::Event(Err(error)) => {
+                return Err(map_native_remote_session_error(cx, control, error));
+            }
+            NativeRemoteSessionRace::Control(Ok(())) => {
+                // Mark the control exchange before inspecting coalesced state.
+                // A cancellation that races this point can then wake the
+                // driver Cx and fail closed by dropping the authenticated
+                // stream instead of waiting behind a lost renewal reply.
+                shared.set_control_in_flight(task_id, true);
+                if let Some(reason) = control.take_cancel() {
+                    let response = session
+                        .cancel(cx, reason)
+                        .await
+                        .map_err(|error| map_native_remote_session_error(cx, control, error))?;
+                    return map_native_remote_response(response);
+                }
+                if let Some(lease) = control.take_renewal() {
+                    let event = session
+                        .renew_lease(cx, lease)
+                        .await
+                        .map_err(|error| map_native_remote_session_error(cx, control, error))?;
+                    shared.set_control_in_flight(task_id, false);
+                    match event {
+                        RemoteServiceSessionEvent::LeaseRenewed { .. } => {}
+                        RemoteServiceSessionEvent::Terminal { response } => {
+                            return map_native_remote_response(response);
+                        }
+                        RemoteServiceSessionEvent::CommandRejected { diagnostic, .. } => {
+                            return Err(RemoteError::TransportError(format!(
+                                "native remote lease renewal rejected: {diagnostic}"
+                            )));
+                        }
+                        RemoteServiceSessionEvent::Accepted { .. } => {
+                            return Err(RemoteError::TransportError(
+                                "native remote renewal received an accepted event".to_owned(),
+                            ));
+                        }
+                    }
+                } else {
+                    shared.set_control_in_flight(task_id, false);
+                }
+            }
+            NativeRemoteSessionRace::Control(Err(error)) => {
+                return Err(RemoteError::TransportError(format!(
+                    "native remote control channel failed: {error}"
+                )));
+            }
+        }
+    }
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+fn map_native_remote_client_error(cx: &Cx, error: RemoteComputationClientError) -> RemoteError {
+    if let Some(reason) = cx.cancel_reason() {
+        return RemoteError::Cancelled(reason);
+    }
+    if matches!(
+        error,
+        RemoteComputationClientError::Cancelled { .. }
+            | RemoteComputationClientError::CancelledDuringAttempt { .. }
+    ) {
+        return RemoteError::Cancelled(
+            cx.cancel_reason()
+                .unwrap_or_else(CancelReason::parent_cancelled),
+        );
+    }
+    RemoteError::TransportError(error.to_string())
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+fn map_native_remote_session_error(
+    cx: &Cx,
+    control: &NativeRemoteControl,
+    error: RemoteServiceSessionError,
+) -> RemoteError {
+    if let Some(reason) = control.cancel_reason().or_else(|| cx.cancel_reason()) {
+        return RemoteError::Cancelled(reason);
+    }
+    if matches!(error, RemoteServiceSessionError::Cancelled) {
+        return RemoteError::Cancelled(
+            cx.cancel_reason()
+                .unwrap_or_else(CancelReason::parent_cancelled),
+        );
+    }
+    RemoteError::TransportError(error.to_string())
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+fn map_native_remote_response(
+    response: RemoteServiceWireResponse,
+) -> Result<RemoteOutcome, RemoteError> {
+    match response {
+        RemoteServiceWireResponse::Outcome { outcome, .. } => match outcome {
+            RemoteServiceWireOutcome::Success(payload) => Ok(RemoteOutcome::Success(payload)),
+            RemoteServiceWireOutcome::Failed(diagnostic) => Ok(RemoteOutcome::Failed(diagnostic)),
+            RemoteServiceWireOutcome::Cancelled(reason) if reason.is_time_exceeded() => {
+                Err(RemoteError::LeaseExpired)
+            }
+            RemoteServiceWireOutcome::Cancelled(reason) => Ok(RemoteOutcome::Cancelled(reason)),
+            RemoteServiceWireOutcome::Panicked(diagnostic) => {
+                Ok(RemoteOutcome::Panicked(diagnostic))
+            }
+        },
+        RemoteServiceWireResponse::Rejected {
+            code, diagnostic, ..
+        } => match code {
+            RemoteServiceRejectionCode::ComputationDenied
+            | RemoteServiceRejectionCode::ExecutableRegistryDrift => Err(
+                RemoteError::SpawnRejected(SpawnRejectReason::UnknownComputation),
+            ),
+            RemoteServiceRejectionCode::MalformedRequest => Err(RemoteError::SpawnRejected(
+                SpawnRejectReason::InvalidInput(diagnostic),
+            )),
+            RemoteServiceRejectionCode::IdempotencyConflict => Err(RemoteError::SpawnRejected(
+                SpawnRejectReason::IdempotencyConflict,
+            )),
+            RemoteServiceRejectionCode::IdempotencyCapacity => Err(RemoteError::SpawnRejected(
+                SpawnRejectReason::CapacityExceeded,
+            )),
+            _ => Err(RemoteError::TransportError(format!(
+                "native remote service rejected the request ({code:?}): {diagnostic}"
+            ))),
+        },
+    }
+}
+
+/// Production [`RemoteRuntime`] adapter backed by runtime-owned V3 sessions.
+///
+/// `send_message` performs only bounded local validation and scheduler
+/// publication; TCP, mTLS, and lifecycle I/O run in child tasks admitted by the
+/// supplied [`RuntimeHandle`]. Per-task cancellation is coalesced out of band,
+/// so a dropped [`RemoteHandle`] cannot lose its cancel request to mailbox
+/// saturation. Call [`close`](Self::close) to stop admission and prove driver
+/// quiescence before releasing the surrounding runtime.
+///
+/// The adapter retains a strong [`RuntimeHandle`], and every live
+/// [`RemoteHandle`] retains the adapter copied from its [`RemoteCap`]. Consuming
+/// a terminal result releases that reference automatically, so a joined handle
+/// does not pin the surrounding runtime.
+///
+/// This adapter uses immutable routes. It does not provide discovery, durable
+/// idempotency across service restart, or a cross-process deployment daemon.
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+pub struct NativeRemoteRuntime {
+    runtime: RuntimeHandle,
+    local_node: NodeId,
+    routes: BTreeMap<NodeId, NativeRemoteRoute>,
+    config: NativeRemoteRuntimeConfig,
+    shared: Arc<NativeRemoteShared>,
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+impl fmt::Debug for NativeRemoteRuntime {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("NativeRemoteRuntime")
+            .field("local_node", &self.local_node)
+            .field("destinations", &self.routes.keys().collect::<Vec<_>>())
+            .field("active_operations", &self.active_operations())
+            .field("config", &self.config)
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+impl NativeRemoteRuntime {
+    /// Creates an adapter with the default admission and drain policy.
+    pub fn new<I>(
+        runtime: RuntimeHandle,
+        local_node: NodeId,
+        routes: I,
+    ) -> Result<Self, NativeRemoteRuntimeBuildError>
+    where
+        I: IntoIterator<Item = NativeRemoteRoute>,
+    {
+        Self::with_config(
+            runtime,
+            local_node,
+            routes,
+            NativeRemoteRuntimeConfig::new(),
+        )
+    }
+
+    /// Creates an adapter with an explicit admission and drain policy.
+    pub fn with_config<I>(
+        runtime: RuntimeHandle,
+        local_node: NodeId,
+        routes: I,
+        config: NativeRemoteRuntimeConfig,
+    ) -> Result<Self, NativeRemoteRuntimeBuildError>
+    where
+        I: IntoIterator<Item = NativeRemoteRoute>,
+    {
+        if config.max_in_flight == 0 {
+            return Err(NativeRemoteRuntimeBuildError::ZeroMaxInFlight);
+        }
+        let mut indexed = BTreeMap::new();
+        for route in routes {
+            if route.hello.protocol_version() != RemoteProtocolVersion::V3 {
+                return Err(NativeRemoteRuntimeBuildError::WrongProtocol {
+                    destination: route.destination,
+                    presented: route.hello.protocol_version(),
+                });
+            }
+            if route.hello.peer_node() != &local_node {
+                return Err(NativeRemoteRuntimeBuildError::OriginIdentityMismatch {
+                    destination: route.destination,
+                    expected: local_node,
+                    presented: route.hello.peer_node().clone(),
+                });
+            }
+            let destination = route.destination.clone();
+            if indexed.insert(destination.clone(), route).is_some() {
+                return Err(NativeRemoteRuntimeBuildError::DuplicateDestination(
+                    destination,
+                ));
+            }
+        }
+        Ok(Self {
+            runtime,
+            local_node,
+            routes: indexed,
+            config,
+            shared: Arc::new(NativeRemoteShared {
+                max_in_flight: config.max_in_flight,
+                state: Mutex::new(NativeRemoteState::new()),
+            }),
+        })
+    }
+
+    /// Local identity every configured route must present.
+    #[must_use]
+    pub const fn local_node(&self) -> &NodeId {
+        &self.local_node
+    }
+
+    /// Immutable static route for a logical destination.
+    #[must_use]
+    pub fn route(&self, destination: &NodeId) -> Option<&NativeRemoteRoute> {
+        self.routes.get(destination)
+    }
+
+    /// Number of published driver tasks that have not reached terminal state.
+    #[must_use]
+    pub fn active_operations(&self) -> usize {
+        self.shared.state.lock().active.len()
+    }
+
+    /// Stops new admission and requests graceful cancellation of every live task.
+    ///
+    /// Returns true only for the caller that first closed admission.
+    #[must_use]
+    pub fn begin_drain(&self) -> bool {
+        let (newly_closed, task_ids, _) = self.shared.begin_drain(false);
+        for task_id in task_ids {
+            let _ = self
+                .shared
+                .request_cancel(task_id, CancelReason::shutdown());
+        }
+        newly_closed
+    }
+
+    /// Interrupts all live driver contexts, dropping their authenticated streams.
+    pub fn force_close(&self) {
+        self.shared.force_close();
+    }
+
+    /// Stops admission and waits for every driver to publish a terminal result.
+    ///
+    /// Graceful V3 cancellation is attempted first. If the configured drain
+    /// timeout elapses, active driver contexts are cancelled so transport loss
+    /// fences and drains the server-side child. The method then waits
+    /// uninterruptibly for local terminal publication and returns false to
+    /// report that force-close was required.
+    pub async fn close(&self, cx: &Cx) -> bool {
+        let (_, task_ids, mut receiver) = self.shared.begin_drain(true);
+        for task_id in task_ids {
+            let _ = self
+                .shared
+                .request_cancel(task_id, CancelReason::shutdown());
+        }
+        let Some(receiver) = receiver.as_mut() else {
+            return true;
+        };
+        if crate::time::timeout(
+            cx.now(),
+            self.config.drain_timeout,
+            receiver.recv_uninterruptible(),
+        )
+        .await
+        .is_ok()
+        {
+            return true;
+        }
+        self.shared.force_close();
+        let _ = receiver.recv_uninterruptible().await;
+        false
+    }
+
+    fn validate_sender(&self, sender: &NodeId) -> Result<(), RemoteError> {
+        if sender == &self.local_node {
+            Ok(())
+        } else {
+            Err(RemoteError::TransportError(format!(
+                "native remote envelope sender {sender} does not match local identity {}",
+                self.local_node
+            )))
+        }
+    }
+
+    fn send_spawn(
+        &self,
+        destination: &NodeId,
+        sender: &NodeId,
+        request: SpawnRequest,
+    ) -> Result<(), RemoteError> {
+        self.validate_sender(sender)?;
+        if request.origin_node != self.local_node {
+            return Err(RemoteError::TransportError(format!(
+                "native remote spawn origin {} does not match local identity {}",
+                request.origin_node, self.local_node
+            )));
+        }
+        let route = self
+            .routes
+            .get(destination)
+            .ok_or_else(|| RemoteError::NodeUnreachable(destination.as_str().to_owned()))?;
+        let wire_request =
+            RemoteServiceWireRequest::from_spawn_request(route.hello.clone(), &request)
+                .map_err(|error| RemoteError::SerializationError(error.to_string()))?;
+        let task_id = request.remote_task_id;
+        let mut control_receiver = self.shared.admit(task_id)?;
+        let shared = Arc::clone(&self.shared);
+        let driver_shared = Arc::clone(&shared);
+        let client = route.client.clone();
+        let control = shared.control(task_id)?;
+        let spawn = self.runtime.try_spawn_with_cx(move |cx| async move {
+            driver_shared.attach_driver_cx(task_id, cx.clone());
+            let guard = NativeRemoteDriverGuard::new(Arc::clone(&driver_shared), task_id);
+            let result = drive_native_remote_session(
+                &cx,
+                &driver_shared,
+                task_id,
+                &client,
+                &wire_request,
+                &control,
+                &mut control_receiver,
+            )
+            .await;
+            guard.finish(result);
+        });
+        if let Err(error) = spawn {
+            self.shared.roll_back_admission(task_id);
+            return Err(RemoteError::TransportError(format!(
+                "native remote driver publication failed: {error}"
+            )));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+impl Drop for NativeRemoteRuntime {
+    fn drop(&mut self) {
+        self.shared.force_close();
+    }
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+impl RemoteRuntime for NativeRemoteRuntime {
+    fn send_message(
+        &self,
+        destination: &NodeId,
+        envelope: MessageEnvelope<RemoteMessage>,
+    ) -> Result<(), RemoteError> {
+        match envelope.payload {
+            RemoteMessage::SpawnRequest(request) => {
+                self.send_spawn(destination, &envelope.sender, request)
+            }
+            RemoteMessage::CancelRequest(request) => {
+                self.validate_sender(&envelope.sender)?;
+                if request.origin_node != self.local_node {
+                    return Err(RemoteError::TransportError(format!(
+                        "native remote cancel origin {} does not match local identity {}",
+                        request.origin_node, self.local_node
+                    )));
+                }
+                self.shared
+                    .request_cancel(request.remote_task_id, request.reason)
+            }
+            RemoteMessage::LeaseRenewal(renewal) => {
+                self.validate_sender(&envelope.sender)?;
+                if renewal.new_lease.is_zero() {
+                    return Err(RemoteError::TransportError(
+                        "native remote lease renewal must be nonzero".to_owned(),
+                    ));
+                }
+                let control = self.shared.control(renewal.remote_task_id)?;
+                if control.request_renewal(renewal.new_lease) {
+                    Ok(())
+                } else {
+                    Err(RemoteError::TransportError(format!(
+                        "native remote task {} control lane is closed",
+                        renewal.remote_task_id
+                    )))
+                }
+            }
+            RemoteMessage::SpawnAck(_) | RemoteMessage::ResultDelivery(_) => {
+                Err(RemoteError::TransportError(
+                    "native origin runtime cannot send remote-to-origin messages".to_owned(),
+                ))
+            }
+        }
+    }
+
+    fn register_task(
+        &self,
+        task_id: RemoteTaskId,
+        tx: oneshot::Sender<Result<RemoteOutcome, RemoteError>>,
+    ) {
+        self.shared.register(task_id, tx);
+    }
+
+    fn observe_task_state(&self, task_id: RemoteTaskId) -> Option<RemoteTaskState> {
+        self.shared
+            .state
+            .lock()
+            .tasks
+            .get(&task_id)
+            .map(|entry| entry.state)
+    }
+
+    fn clear_task_state(&self, task_id: RemoteTaskId) {
+        self.shared.state.lock().tasks.remove(&task_id);
+    }
+
+    fn unregister_task(&self, task_id: RemoteTaskId) {
+        self.shared.roll_back_admission(task_id);
     }
 }
 
