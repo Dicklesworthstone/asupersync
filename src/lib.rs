@@ -408,17 +408,19 @@ pub use error::{
 };
 pub use lab::{LabConfig, LabRuntime};
 pub use remote::{
-    CancelRequest, CompensationResult, ComputationName, DEFAULT_REMOTE_SERVICE_MAX_FRAME_BYTES,
-    DedupDecision, IdempotencyKey, IdempotencyRecord, IdempotencyRequestFingerprint,
-    IdempotencyStore, Lease, LeaseError, LeaseRenewal, LeaseState, NodeId, Phase0RemoteFailure,
-    Phase0RetryPolicy, Phase0SimulationConfig, RemoteCap, RemoteComputationDispatchError,
-    RemoteComputationFuture, RemoteComputationInvocation, RemoteComputationRegistry,
-    RemoteComputationServiceError, RemoteError, RemoteHandle, RemoteMessage, RemoteOutcome,
-    RemotePeerAdmissionError, RemotePeerAdmissionPolicy, RemotePeerHello, RemotePeerSession,
-    RemoteProtocolVersion, RemoteServiceRejectionCode, RemoteServiceWireLimits,
-    RemoteServiceWireOutcome, RemoteServiceWireRequest, RemoteServiceWireResponse, RemoteTaskId,
-    ResultDelivery, Saga, SagaState, SagaStepError, SpawnAck, SpawnAckStatus, SpawnRejectReason,
-    SpawnRequest, spawn_remote,
+    CancelRequest, CompensationResult, ComputationName,
+    DEFAULT_REMOTE_SERVICE_IDEMPOTENCY_RETENTION, DEFAULT_REMOTE_SERVICE_MAX_FRAME_BYTES,
+    DEFAULT_REMOTE_SERVICE_MAX_IDEMPOTENCY_RECORDS_PER_PEER, DedupDecision, IdempotencyKey,
+    IdempotencyRecord, IdempotencyRequestFingerprint, IdempotencyStore, Lease, LeaseError,
+    LeaseRenewal, LeaseState, NodeId, Phase0RemoteFailure, Phase0RetryPolicy,
+    Phase0SimulationConfig, RemoteCap, RemoteComputationDispatchError, RemoteComputationFuture,
+    RemoteComputationInvocation, RemoteComputationRegistry, RemoteComputationServiceError,
+    RemoteError, RemoteHandle, RemoteMessage, RemoteOutcome, RemotePeerAdmissionError,
+    RemotePeerAdmissionPolicy, RemotePeerHello, RemotePeerSession, RemoteProtocolVersion,
+    RemoteServiceRejectionCode, RemoteServiceWireLimits, RemoteServiceWireOutcome,
+    RemoteServiceWireRequest, RemoteServiceWireResponse, RemoteTaskId, ResultDelivery, Saga,
+    SagaState, SagaStepError, SpawnAck, SpawnAckStatus, SpawnRejectReason, SpawnRequest,
+    spawn_remote,
 };
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
 pub use remote::{

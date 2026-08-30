@@ -913,15 +913,32 @@ fn remote_service_wire_request(
     computation: &str,
     remote_task_id: u64,
 ) -> RemoteServiceWireRequest {
+    remote_service_wire_request_with(
+        hello,
+        computation,
+        remote_task_id,
+        u128::from(remote_task_id),
+        b"executed-over-mtls",
+    )
+}
+
+#[cfg(feature = "tls")]
+fn remote_service_wire_request_with(
+    hello: RemotePeerHello,
+    computation: &str,
+    remote_task_id: u64,
+    idempotency_key: u128,
+    input: &[u8],
+) -> RemoteServiceWireRequest {
     let cx = Cx::for_testing();
     RemoteServiceWireRequest::from_spawn_request(
         hello.clone(),
         &SpawnRequest {
             remote_task_id: RemoteTaskId::from_raw(remote_task_id),
             computation: ComputationName::new(computation),
-            input: RemoteInput::new(b"executed-over-mtls".to_vec()),
+            input: RemoteInput::new(input.to_vec()),
             lease: Duration::from_secs(30),
-            idempotency_key: IdempotencyKey::from_raw(u128::from(remote_task_id)),
+            idempotency_key: IdempotencyKey::from_raw(idempotency_key),
             budget: None,
             origin_node: hello.peer_node().clone(),
             origin_region: cx.region_id(),
@@ -1532,7 +1549,7 @@ fn remote_tls_service_executes_only_certificate_bound_authorized_computation() {
 
 #[cfg(feature = "tls")]
 #[test]
-fn remote_tls_listener_drains_stalled_connection_without_orphaning_tasks() {
+fn remote_tls_listener_v2_deduplicates_by_peer_and_drains_without_orphans() {
     let certificates = Certificate::from_pem(TEST_CERT_PEM).expect("TLS fixture should parse");
     let peer_certificate = certificates
         .first()
@@ -1544,6 +1561,15 @@ fn remote_tls_listener_drains_stalled_connection_without_orphaning_tasks() {
 
     let dispatch_count = Arc::new(AtomicUsize::new(0));
     let handler_dispatch_count = Arc::clone(&dispatch_count);
+    let wait_dispatch_count = Arc::new(AtomicUsize::new(0));
+    let handler_wait_dispatch_count = Arc::clone(&wait_dispatch_count);
+    let failure_dispatch_count = Arc::new(AtomicUsize::new(0));
+    let handler_failure_dispatch_count = Arc::clone(&failure_dispatch_count);
+    let oversized_dispatch_count = Arc::new(AtomicUsize::new(0));
+    let handler_oversized_dispatch_count = Arc::clone(&oversized_dispatch_count);
+    let (wait_release_tx, wait_release_rx) = oneshot::channel::<()>();
+    let wait_receiver = Arc::new(Mutex::new(Some(wait_release_rx)));
+    let handler_wait_receiver = Arc::clone(&wait_receiver);
     let mut computations = RemoteComputationRegistry::new();
     computations
         .register::<Vec<u8>, Vec<u8>, _, _>("proof.echo", move |_cx, invocation| {
@@ -1556,6 +1582,48 @@ fn remote_tls_listener_drains_stalled_connection_without_orphaning_tasks() {
             }
         })
         .expect("listener proof.echo handler should register");
+    computations
+        .register::<Vec<u8>, Vec<u8>, _, _>("proof.wait", move |cx, invocation| {
+            let handler_wait_dispatch_count = Arc::clone(&handler_wait_dispatch_count);
+            let mut receiver = handler_wait_receiver
+                .lock()
+                .take()
+                .expect("proof.wait canonical request should execute exactly once");
+            async move {
+                handler_wait_dispatch_count.fetch_add(1, Ordering::SeqCst);
+                receiver.recv(&cx).await.map_err(|error| {
+                    RemoteError::TransportError(format!("proof.wait release failed: {error}"))
+                })?;
+                Ok(RemoteOutcome::Success(
+                    invocation.into_request().input.into_data(),
+                ))
+            }
+        })
+        .expect("listener proof.wait handler should register");
+    computations
+        .register::<Vec<u8>, Vec<u8>, _, _>("proof.fail", move |_cx, _invocation| {
+            let handler_failure_dispatch_count = Arc::clone(&handler_failure_dispatch_count);
+            async move {
+                handler_failure_dispatch_count.fetch_add(1, Ordering::SeqCst);
+                Err(RemoteError::TransportError(
+                    "planted execution refusal".to_owned(),
+                ))
+            }
+        })
+        .expect("listener proof.fail handler should register");
+    computations
+        .register::<Vec<u8>, Vec<u8>, _, _>("proof.large", move |_cx, _invocation| {
+            let handler_oversized_dispatch_count = Arc::clone(&handler_oversized_dispatch_count);
+            async move {
+                handler_oversized_dispatch_count.fetch_add(1, Ordering::SeqCst);
+                Ok(RemoteOutcome::Success(vec![
+                    b'x';
+                    RemoteServiceWireLimits::default()
+                        .max_frame_bytes()
+                ]))
+            }
+        })
+        .expect("listener proof.large handler should register");
 
     let origin = NodeId::new(ORIGIN_NODE);
     let mut peer_pins = CertificatePinSet::new();
@@ -1563,14 +1631,94 @@ fn remote_tls_listener_drains_stalled_connection_without_orphaning_tasks() {
         CertificatePin::compute_spki_sha256(&peer_certificate)
             .expect("fixture certificate should produce an SPKI pin"),
     );
+    let peer_two = NodeId::new("origin-prod-loopback-two");
     let mut policy = RemotePeerAdmissionPolicy::new(
-        RemoteProtocolVersion::V1,
+        RemoteProtocolVersion::V2,
         computations.schema_registry().clone(),
     );
     policy
-        .grant_tls_peer(origin.clone(), peer_pins, ["proof.echo"])
+        .grant_tls_peer(
+            origin.clone(),
+            peer_pins.clone(),
+            ["proof.echo", "proof.wait", "proof.fail", "proof.large"],
+        )
         .expect("listener certificate-bound grant should be valid");
-    let request = remote_service_wire_request(policy.hello_for(origin), "proof.echo", 7101);
+    policy
+        .grant_tls_peer(peer_two.clone(), peer_pins, ["proof.echo"])
+        .expect("second listener certificate-bound grant should be valid");
+    let hello = policy.hello_for(origin);
+    let peer_two_hello = policy.hello_for(peer_two);
+    let canonical_echo = remote_service_wire_request_with(
+        hello.clone(),
+        "proof.echo",
+        7101,
+        0xbeef,
+        b"canonical-echo",
+    );
+    let duplicate_echo = remote_service_wire_request_with(
+        hello.clone(),
+        "proof.echo",
+        7102,
+        0xbeef,
+        b"canonical-echo",
+    );
+    let conflicting_echo = remote_service_wire_request_with(
+        hello.clone(),
+        "proof.echo",
+        7103,
+        0xbeef,
+        b"conflicting-input",
+    );
+    let peer_two_echo = remote_service_wire_request_with(
+        peer_two_hello,
+        "proof.echo",
+        7104,
+        0xbeef,
+        b"peer-two-input",
+    );
+    let canonical_wait =
+        remote_service_wire_request_with(hello.clone(), "proof.wait", 7111, 0xcafe, b"wait-result");
+    let in_flight_wait =
+        remote_service_wire_request_with(hello.clone(), "proof.wait", 7112, 0xcafe, b"wait-result");
+    let cached_wait =
+        remote_service_wire_request_with(hello.clone(), "proof.wait", 7113, 0xcafe, b"wait-result");
+    let canonical_failure = remote_service_wire_request_with(
+        hello.clone(),
+        "proof.fail",
+        7121,
+        0xdead,
+        b"failure-input",
+    );
+    let cached_failure = remote_service_wire_request_with(
+        hello.clone(),
+        "proof.fail",
+        7122,
+        0xdead,
+        b"failure-input",
+    );
+    let canonical_oversized = remote_service_wire_request_with(
+        hello.clone(),
+        "proof.large",
+        7123,
+        0xbad,
+        b"oversized-input",
+    );
+    let ambiguous_oversized_retry = remote_service_wire_request_with(
+        hello.clone(),
+        "proof.large",
+        7124,
+        0xbad,
+        b"oversized-input",
+    );
+    let capacity_request = remote_service_wire_request_with(
+        hello.clone(),
+        "proof.echo",
+        7131,
+        0xf00d,
+        b"capacity-input",
+    );
+    let cached_echo_at_capacity =
+        remote_service_wire_request_with(hello, "proof.echo", 7132, 0xbeef, b"canonical-echo");
 
     let mut client_auth_roots = RootCertStore::empty();
     client_auth_roots
@@ -1597,6 +1745,7 @@ fn remote_tls_listener_drains_stalled_connection_without_orphaning_tasks() {
             computations,
             RemoteComputationServiceConfig::new()
                 .with_max_connections(Some(8))
+                .with_max_idempotency_records_per_peer(4)
                 .with_drain_timeout(Duration::from_millis(25)),
         ))
         .expect("structured remote service should bind");
@@ -1605,16 +1754,148 @@ fn remote_tls_listener_drains_stalled_connection_without_orphaning_tasks() {
         .expect("structured remote service should expose its address");
     let operator = service.handle();
     let client_operator = operator.clone();
+    let client_wait_dispatch_count = Arc::clone(&wait_dispatch_count);
+    let connector = Arc::new(connector);
 
     let client = thread::spawn(move || {
         let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let accepted = call_tls_remote_service(endpoint, &connector, &request);
+            let accepted = call_tls_remote_service(endpoint, &connector, &canonical_echo);
             assert!(matches!(
                 accepted,
                 RemoteServiceWireResponse::Outcome {
                     remote_task_id: 7101,
                     outcome: RemoteServiceWireOutcome::Success(ref payload),
-                } if payload == b"executed-over-mtls"
+                } if payload == b"canonical-echo"
+            ));
+
+            let duplicate = call_tls_remote_service(endpoint, &connector, &duplicate_echo);
+            assert!(matches!(
+                duplicate,
+                RemoteServiceWireResponse::Outcome {
+                    remote_task_id: 7102,
+                    outcome: RemoteServiceWireOutcome::Success(ref payload),
+                } if payload == b"canonical-echo"
+            ));
+            let conflict = call_tls_remote_service(endpoint, &connector, &conflicting_echo);
+            assert!(matches!(
+                conflict,
+                RemoteServiceWireResponse::Rejected {
+                    remote_task_id: 7103,
+                    code: RemoteServiceRejectionCode::IdempotencyConflict,
+                    ..
+                }
+            ));
+            let peer_two = call_tls_remote_service(endpoint, &connector, &peer_two_echo);
+            assert!(matches!(
+                peer_two,
+                RemoteServiceWireResponse::Outcome {
+                    remote_task_id: 7104,
+                    outcome: RemoteServiceWireOutcome::Success(ref payload),
+                } if payload == b"peer-two-input"
+            ));
+
+            let canonical_wait_connector = Arc::clone(&connector);
+            let canonical_wait_thread = thread::spawn(move || {
+                call_tls_remote_service(endpoint, &canonical_wait_connector, &canonical_wait)
+            });
+            let wait_deadline = std::time::Instant::now() + Duration::from_secs(2);
+            while client_wait_dispatch_count.load(Ordering::SeqCst) == 0 {
+                assert!(
+                    std::time::Instant::now() < wait_deadline,
+                    "canonical proof.wait request should reach its handler"
+                );
+                thread::sleep(Duration::from_millis(1));
+            }
+            let in_flight = call_tls_remote_service(endpoint, &connector, &in_flight_wait);
+            assert!(matches!(
+                in_flight,
+                RemoteServiceWireResponse::Rejected {
+                    remote_task_id: 7112,
+                    code: RemoteServiceRejectionCode::OperationInFlight,
+                    ..
+                }
+            ));
+            wait_release_tx
+                .send_blocking(())
+                .expect("proof.wait canonical handler should still own its receiver");
+            let canonical_wait_response = canonical_wait_thread
+                .join()
+                .expect("canonical proof.wait client should not panic");
+            assert!(matches!(
+                canonical_wait_response,
+                RemoteServiceWireResponse::Outcome {
+                    remote_task_id: 7111,
+                    outcome: RemoteServiceWireOutcome::Success(ref payload),
+                } if payload == b"wait-result"
+            ));
+            let replayed_wait = call_tls_remote_service(endpoint, &connector, &cached_wait);
+            assert!(matches!(
+                replayed_wait,
+                RemoteServiceWireResponse::Outcome {
+                    remote_task_id: 7113,
+                    outcome: RemoteServiceWireOutcome::Success(ref payload),
+                } if payload == b"wait-result"
+            ));
+
+            let canonical_failure_response =
+                call_tls_remote_service(endpoint, &connector, &canonical_failure);
+            let canonical_failure_diagnostic = match canonical_failure_response {
+                RemoteServiceWireResponse::Rejected {
+                    remote_task_id: 7121,
+                    code: RemoteServiceRejectionCode::ExecutionFailed,
+                    diagnostic,
+                } => diagnostic,
+                other => panic!("unexpected canonical failure response: {other:?}"),
+            };
+            let cached_failure_response =
+                call_tls_remote_service(endpoint, &connector, &cached_failure);
+            assert!(matches!(
+                cached_failure_response,
+                RemoteServiceWireResponse::Rejected {
+                    remote_task_id: 7122,
+                    code: RemoteServiceRejectionCode::ExecutionFailed,
+                    ref diagnostic,
+                } if diagnostic == &canonical_failure_diagnostic
+            ));
+
+            let oversized_error =
+                call_tls_remote_service_result(endpoint, &connector, &canonical_oversized)
+                    .expect_err(
+                        "oversized V2 terminal response must not be committed before encoding",
+                    );
+            assert!(matches!(
+                oversized_error,
+                RemoteComputationServiceError::UnexpectedEof
+                    | RemoteComputationServiceError::Transport(_)
+            ));
+            let ambiguous_oversized =
+                call_tls_remote_service(endpoint, &connector, &ambiguous_oversized_retry);
+            assert!(matches!(
+                ambiguous_oversized,
+                RemoteServiceWireResponse::Rejected {
+                    remote_task_id: 7124,
+                    code: RemoteServiceRejectionCode::OperationInFlight,
+                    ..
+                }
+            ));
+
+            let capacity = call_tls_remote_service(endpoint, &connector, &capacity_request);
+            assert!(matches!(
+                capacity,
+                RemoteServiceWireResponse::Rejected {
+                    remote_task_id: 7131,
+                    code: RemoteServiceRejectionCode::IdempotencyCapacity,
+                    ..
+                }
+            ));
+            let replay_at_capacity =
+                call_tls_remote_service(endpoint, &connector, &cached_echo_at_capacity);
+            assert!(matches!(
+                replay_at_capacity,
+                RemoteServiceWireResponse::Outcome {
+                    remote_task_id: 7132,
+                    outcome: RemoteServiceWireOutcome::Success(ref payload),
+                } if payload == b"canonical-echo"
             ));
 
             block_on(async {
@@ -1667,27 +1948,34 @@ fn remote_tls_listener_drains_stalled_connection_without_orphaning_tasks() {
         .join()
         .expect("structured remote service client should not panic");
 
-    assert_eq!(report.accepted_connections(), 2);
+    assert_eq!(report.accepted_connections(), 14);
     assert_eq!(report.capacity_rejections(), 0);
-    assert_eq!(report.completed_connections(), 1);
+    assert_eq!(report.completed_connections(), 12);
     assert_eq!(report.interrupted_connections(), 1);
-    assert_eq!(report.failed_connections(), 0);
+    assert_eq!(report.failed_connections(), 1);
     assert_eq!(report.panicked_connections(), 0);
-    assert_eq!(report.first_connection_failure(), None);
+    assert!(
+        report
+            .first_connection_failure()
+            .is_some_and(|failure| failure.contains("encoded frame exceeds"))
+    );
     assert_eq!(report.shutdown().drained, 0);
     assert_eq!(report.shutdown().force_closed, 1);
     assert_eq!(operator.active_connections(), 0);
     assert_eq!(operator.shutdown_signal().phase(), ShutdownPhase::Stopped);
-    assert_eq!(dispatch_count.load(Ordering::SeqCst), 1);
+    assert_eq!(dispatch_count.load(Ordering::SeqCst), 2);
+    assert_eq!(wait_dispatch_count.load(Ordering::SeqCst), 1);
+    assert_eq!(failure_dispatch_count.load(Ordering::SeqCst), 1);
+    assert_eq!(oversized_dispatch_count.load(Ordering::SeqCst), 1);
 
     ProofLogRow::pass(
-        "structured_remote_service_listener_drain",
+        "structured_remote_service_v2_idempotency_and_drain",
         0,
         "none",
-        "mtls_accept_then_force_close_stalled_frame",
-        2,
-        "one_completed_one_interrupted_zero_live",
-        "one_completed_one_interrupted_zero_live",
+        "mtls_v2_peer_dedup_then_force_close_stalled_frame",
+        14,
+        "twelve_completed_one_failed_one_interrupted_five_dispatches_zero_live",
+        "twelve_completed_one_failed_one_interrupted_five_dispatches_zero_live",
     )
     .emit();
 }

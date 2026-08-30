@@ -28,8 +28,10 @@
 //! bounded one-shot service adapter for executing one authenticated named
 //! computation over an already-established TLS stream. Native TLS builds also
 //! expose a structured TCP listener that owns accepted connections through a
-//! child region and drains them explicitly. Neither surface yet provides retry
-//! deduplication or lease enforcement.
+//! child region and drains them explicitly. Protocol V2 listeners additionally
+//! reserve idempotency keys per authenticated peer and replay retained terminal
+//! outcomes before a retry can execute again. Lease enforcement remains a
+//! separate lifecycle layer.
 
 use crate::channel::oneshot;
 #[cfg(feature = "tls")]
@@ -57,6 +59,8 @@ use crate::{
     server::{ConnectionManager, ShutdownPhase, ShutdownSignal, ShutdownStats},
     tls::{TlsAcceptor, TlsError},
 };
+#[cfg(feature = "tls")]
+use parking_lot::Mutex;
 #[cfg(feature = "tls")]
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -2158,6 +2162,12 @@ pub struct RemoteProtocolVersion {
 impl RemoteProtocolVersion {
     /// Initial version of the named-computation remote-service protocol.
     pub const V1: Self = Self::new(1, 0);
+    /// Listener protocol with authenticated-peer-scoped idempotency.
+    ///
+    /// A V2 listener reserves a key before handler dispatch, retains terminal
+    /// outcomes for bounded replay, and refuses ambiguous in-flight retries.
+    /// The guarantee is process-local and does not survive service restart.
+    pub const V2: Self = Self::new(2, 0);
 
     /// Creates a protocol version.
     #[must_use]
@@ -2793,6 +2803,10 @@ impl RemoteComputationRegistry {
 
 /// Default maximum encoded request or response frame for the remote service.
 pub const DEFAULT_REMOTE_SERVICE_MAX_FRAME_BYTES: usize = 64 * 1024;
+/// Default V2 terminal-outcome retention window for retry replay.
+pub const DEFAULT_REMOTE_SERVICE_IDEMPOTENCY_RETENTION: Duration = Duration::from_secs(300);
+/// Default V2 retained/in-flight key cap per authenticated peer.
+pub const DEFAULT_REMOTE_SERVICE_MAX_IDEMPOTENCY_RECORDS_PER_PEER: usize = 4096;
 
 /// Bounded framing policy for one authenticated remote-service exchange.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2980,6 +2994,7 @@ impl From<RemoteServiceWireOutcome> for RemoteOutcome {
 /// Machine-readable refusal category returned before a handler result exists.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum RemoteServiceRejectionCode {
     /// TLS identity, protocol version, registry identity, or peer grant failed.
     AdmissionDenied,
@@ -2991,6 +3006,14 @@ pub enum RemoteServiceRejectionCode {
     MalformedRequest,
     /// The selected handler returned a runtime execution error.
     ExecutionFailed,
+    /// V2 semantics were requested from a non-lifecycle one-shot adapter.
+    LifecycleUnavailable,
+    /// Matching authenticated-peer request is still executing ambiguously.
+    OperationInFlight,
+    /// The authenticated peer reused a key for different computation input.
+    IdempotencyConflict,
+    /// The authenticated peer exhausted its bounded retained-key capacity.
+    IdempotencyCapacity,
 }
 
 /// One fully flushed outcome or fail-closed refusal from the remote service.
@@ -3028,6 +3051,164 @@ impl RemoteServiceWireResponse {
     }
 }
 
+#[cfg(feature = "tls")]
+#[derive(Clone, Debug)]
+struct CachedExecutionRejection {
+    canonical_task_id: RemoteTaskId,
+    diagnostic: String,
+    expires_at: Time,
+}
+
+#[cfg(feature = "tls")]
+struct RemoteServicePeerIdempotency {
+    store: IdempotencyStore,
+    execution_rejections: DetHashMap<IdempotencyKey, CachedExecutionRejection>,
+}
+
+#[cfg(feature = "tls")]
+impl RemoteServicePeerIdempotency {
+    fn new(retention: Duration) -> Self {
+        Self {
+            store: IdempotencyStore::new(retention),
+            execution_rejections: DetHashMap::default(),
+        }
+    }
+
+    fn evict_expired(&mut self, now: Time) {
+        let _ = self.store.evict_expired(now);
+        self.execution_rejections
+            .retain(|_, rejection| now < rejection.expires_at);
+    }
+}
+
+#[cfg(feature = "tls")]
+struct RemoteServiceIdempotencyInner {
+    peers: BTreeMap<NodeId, RemoteServicePeerIdempotency>,
+}
+
+#[cfg(feature = "tls")]
+struct RemoteServiceIdempotency {
+    inner: Mutex<RemoteServiceIdempotencyInner>,
+    retention: Duration,
+    max_records_per_peer: usize,
+}
+
+#[cfg(feature = "tls")]
+enum RemoteServiceIdempotencyAdmission {
+    Execute,
+    CachedOutcome(RemoteOutcome),
+    CachedExecutionRejection(String),
+    InFlight,
+    Conflict,
+    Capacity,
+}
+
+#[cfg(feature = "tls")]
+impl RemoteServiceIdempotency {
+    fn new(retention: Duration, max_records_per_peer: usize) -> Self {
+        Self {
+            inner: Mutex::new(RemoteServiceIdempotencyInner {
+                peers: BTreeMap::new(),
+            }),
+            retention,
+            max_records_per_peer,
+        }
+    }
+
+    fn admit(
+        &self,
+        peer: &NodeId,
+        request: &SpawnRequest,
+        now: Time,
+    ) -> RemoteServiceIdempotencyAdmission {
+        let mut inner = self.inner.lock();
+        let peer_state = inner
+            .peers
+            .entry(peer.clone())
+            .or_insert_with(|| RemoteServicePeerIdempotency::new(self.retention));
+        peer_state.evict_expired(now);
+
+        let key = request.idempotency_key;
+        if !peer_state.store.entries.contains_key(&key)
+            && peer_state.store.len() >= self.max_records_per_peer
+        {
+            return RemoteServiceIdempotencyAdmission::Capacity;
+        }
+
+        let remote_task_id = request.remote_task_id;
+        let fingerprint = IdempotencyRequestFingerprint::from_spawn_request(request);
+        match peer_state
+            .store
+            .check_and_record(key, remote_task_id, fingerprint, now)
+        {
+            DedupDecision::New => RemoteServiceIdempotencyAdmission::Execute,
+            DedupDecision::Conflict => RemoteServiceIdempotencyAdmission::Conflict,
+            DedupDecision::Duplicate(record) => {
+                let Some(outcome) = record.outcome else {
+                    return RemoteServiceIdempotencyAdmission::InFlight;
+                };
+                if let Some(rejection) = peer_state.execution_rejections.get(&key)
+                    && rejection.canonical_task_id == record.remote_task_id
+                    && now < rejection.expires_at
+                {
+                    return RemoteServiceIdempotencyAdmission::CachedExecutionRejection(
+                        rejection.diagnostic.clone(),
+                    );
+                }
+                RemoteServiceIdempotencyAdmission::CachedOutcome(outcome)
+            }
+        }
+    }
+
+    fn complete_outcome(
+        &self,
+        peer: &NodeId,
+        key: IdempotencyKey,
+        canonical_task_id: RemoteTaskId,
+        outcome: RemoteOutcome,
+        now: Time,
+    ) -> bool {
+        let mut inner = self.inner.lock();
+        let Some(peer_state) = inner.peers.get_mut(peer) else {
+            return false;
+        };
+        peer_state
+            .store
+            .complete(&key, canonical_task_id, outcome, now)
+    }
+
+    fn complete_execution_rejection(
+        &self,
+        peer: &NodeId,
+        key: IdempotencyKey,
+        canonical_task_id: RemoteTaskId,
+        diagnostic: String,
+        now: Time,
+    ) -> bool {
+        let mut inner = self.inner.lock();
+        let Some(peer_state) = inner.peers.get_mut(peer) else {
+            return false;
+        };
+        let completed = peer_state.store.complete(
+            &key,
+            canonical_task_id,
+            RemoteOutcome::Failed(diagnostic.clone()),
+            now,
+        );
+        if completed {
+            peer_state.execution_rejections.insert(
+                key,
+                CachedExecutionRejection {
+                    canonical_task_id,
+                    diagnostic,
+                    expires_at: now + self.retention,
+                },
+            );
+        }
+        completed
+    }
+}
+
 /// Local failure while constructing or transporting a remote-service exchange.
 #[derive(Debug)]
 pub enum RemoteComputationServiceError {
@@ -3051,6 +3232,8 @@ pub enum RemoteComputationServiceError {
     },
     /// Peer closed the stream before one complete frame arrived.
     UnexpectedEof,
+    /// Listener-owned V2 state disappeared before terminal publication.
+    IdempotencyStateLost,
 }
 
 impl fmt::Display for RemoteComputationServiceError {
@@ -3073,6 +3256,9 @@ impl fmt::Display for RemoteComputationServiceError {
                 "remote service encoded frame exceeds {max_frame_bytes}-byte limit"
             ),
             Self::UnexpectedEof => write!(f, "remote service peer closed before a complete frame"),
+            Self::IdempotencyStateLost => {
+                write!(f, "remote service idempotency state lost before completion")
+            }
         }
     }
 }
@@ -3085,7 +3271,8 @@ impl std::error::Error for RemoteComputationServiceError {
             Self::InvalidFrameLimit
             | Self::OriginIdentityMismatch { .. }
             | Self::FrameTooLarge { .. }
-            | Self::UnexpectedEof => None,
+            | Self::UnexpectedEof
+            | Self::IdempotencyStateLost => None,
         }
     }
 }
@@ -3167,14 +3354,11 @@ where
 }
 
 #[cfg(feature = "tls")]
-async fn write_remote_service_frame<T, IO>(
-    _cx: &Cx,
-    framed: &mut Framed<&mut crate::tls::TlsStream<IO>, LengthDelimitedCodec>,
+fn encode_remote_service_frame<T>(
     value: &T,
     max_frame_bytes: usize,
-) -> Result<(), RemoteComputationServiceError>
+) -> Result<Vec<u8>, RemoteComputationServiceError>
 where
-    IO: AsyncRead + AsyncWrite + Unpin,
     T: Serialize + ?Sized,
 {
     let mut writer = RemoteServiceFrameWriter::new(max_frame_bytes);
@@ -3184,13 +3368,89 @@ where
         }
         return Err(RemoteComputationServiceError::Serialization(error));
     }
-    let encoded = writer.into_encoded();
+    Ok(writer.into_encoded())
+}
+
+#[cfg(feature = "tls")]
+async fn send_remote_service_frame<IO>(
+    _cx: &Cx,
+    framed: &mut Framed<&mut crate::tls::TlsStream<IO>, LengthDelimitedCodec>,
+    encoded: &[u8],
+) -> Result<(), RemoteComputationServiceError>
+where
+    IO: AsyncRead + AsyncWrite + Unpin,
+{
     framed
-        .send(BytesMut::from(encoded.as_slice()))
+        .send(BytesMut::from(encoded))
         .map_err(RemoteComputationServiceError::Transport)?;
     std::future::poll_fn(|task_cx| framed.poll_flush(task_cx))
         .await
         .map_err(RemoteComputationServiceError::Transport)
+}
+
+#[cfg(feature = "tls")]
+async fn write_remote_service_frame<T, IO>(
+    cx: &Cx,
+    framed: &mut Framed<&mut crate::tls::TlsStream<IO>, LengthDelimitedCodec>,
+    value: &T,
+    max_frame_bytes: usize,
+) -> Result<(), RemoteComputationServiceError>
+where
+    IO: AsyncRead + AsyncWrite + Unpin,
+    T: Serialize + ?Sized,
+{
+    let encoded = encode_remote_service_frame(value, max_frame_bytes)?;
+    send_remote_service_frame(cx, framed, &encoded).await
+}
+
+#[cfg(feature = "tls")]
+enum RemoteServiceTerminalCommit {
+    Outcome {
+        peer: NodeId,
+        key: IdempotencyKey,
+        canonical_task_id: RemoteTaskId,
+        outcome: RemoteOutcome,
+    },
+    ExecutionRejection {
+        peer: NodeId,
+        key: IdempotencyKey,
+        canonical_task_id: RemoteTaskId,
+        diagnostic: String,
+    },
+}
+
+#[cfg(feature = "tls")]
+impl RemoteServiceTerminalCommit {
+    fn complete(self, state: &RemoteServiceIdempotency, now: Time) -> bool {
+        match self {
+            Self::Outcome {
+                peer,
+                key,
+                canonical_task_id,
+                outcome,
+            } => state.complete_outcome(&peer, key, canonical_task_id, outcome, now),
+            Self::ExecutionRejection {
+                peer,
+                key,
+                canonical_task_id,
+                diagnostic,
+            } => state.complete_execution_rejection(&peer, key, canonical_task_id, diagnostic, now),
+        }
+    }
+}
+
+#[cfg(feature = "tls")]
+trait RemoteServiceResponseExt {
+    fn with_no_commit(self) -> (Self, Option<RemoteServiceTerminalCommit>)
+    where
+        Self: Sized;
+}
+
+#[cfg(feature = "tls")]
+impl RemoteServiceResponseExt for RemoteServiceWireResponse {
+    fn with_no_commit(self) -> (Self, Option<RemoteServiceTerminalCommit>) {
+        (self, None)
+    }
 }
 
 /// Executes one bounded authenticated named computation over established TLS.
@@ -3200,8 +3460,9 @@ where
 /// verified peer certificate, refuses policy/handler-registry drift, awaits the
 /// selected handler inline under `cx`, and returns only after its tagged response
 /// is fully flushed. It never spawns or detaches work. This one-shot adapter
-/// deliberately does not consume the request's idempotency, lease, or budget
-/// metadata; callers must not retry it as an exactly-once lifecycle service.
+/// accepts V1 only; it refuses V2 because it does not own shared listener
+/// idempotency state. V1 callers must not retry an ambiguous delivery as an
+/// exactly-once lifecycle service.
 #[cfg(feature = "tls")]
 pub async fn serve_tls_computation_once<IO>(
     cx: &Cx,
@@ -3213,15 +3474,34 @@ pub async fn serve_tls_computation_once<IO>(
 where
     IO: AsyncRead + AsyncWrite + Unpin,
 {
+    serve_tls_computation_once_with_idempotency(cx, stream, policy, computations, limits, None)
+        .await
+}
+
+#[cfg(feature = "tls")]
+async fn serve_tls_computation_once_with_idempotency<IO>(
+    cx: &Cx,
+    stream: &mut crate::tls::TlsStream<IO>,
+    policy: &RemotePeerAdmissionPolicy,
+    computations: &RemoteComputationRegistry,
+    limits: RemoteServiceWireLimits,
+    idempotency: Option<&RemoteServiceIdempotency>,
+) -> Result<RemoteServiceWireResponse, RemoteComputationServiceError>
+where
+    IO: AsyncRead + AsyncWrite + Unpin,
+{
     let mut framed = remote_service_framed(stream, limits)?;
     let wire_request: RemoteServiceWireRequest = read_remote_service_frame(cx, &mut framed).await?;
     let remote_task_id = wire_request.remote_task_id;
-    let response = match policy.admit_tls_peer(wire_request.hello(), &**framed.get_ref()) {
+    let (response, terminal_commit) = match policy
+        .admit_tls_peer(wire_request.hello(), &**framed.get_ref())
+    {
         Err(error) => RemoteServiceWireResponse::Rejected {
             remote_task_id,
             code: RemoteServiceRejectionCode::AdmissionDenied,
             diagnostic: error.to_string(),
-        },
+        }
+        .with_no_commit(),
         Ok(session)
             if session.registry_fingerprint() != computations.schema_registry().fingerprint() =>
         {
@@ -3230,45 +3510,167 @@ where
                 code: RemoteServiceRejectionCode::ExecutableRegistryDrift,
                 diagnostic: "admission policy registry differs from executable registry".to_owned(),
             }
+            .with_no_commit()
         }
         Ok(session) => match wire_request.into_spawn_request() {
             Err(diagnostic) => RemoteServiceWireResponse::Rejected {
                 remote_task_id,
                 code: RemoteServiceRejectionCode::MalformedRequest,
                 diagnostic,
-            },
-            Ok(request) => match computations.dispatch(cx, &session, request).await {
-                Ok(outcome) => RemoteServiceWireResponse::Outcome {
-                    remote_task_id,
-                    outcome: outcome.into(),
-                },
-                Err(RemoteComputationDispatchError::Admission(error)) => {
-                    RemoteServiceWireResponse::Rejected {
-                        remote_task_id,
-                        code: RemoteServiceRejectionCode::ComputationDenied,
-                        diagnostic: error.to_string(),
-                    }
-                }
-                Err(RemoteComputationDispatchError::Execution(error)) => {
-                    RemoteServiceWireResponse::Rejected {
-                        remote_task_id,
-                        code: RemoteServiceRejectionCode::ExecutionFailed,
-                        diagnostic: error.to_string(),
-                    }
-                }
-            },
+            }
+            .with_no_commit(),
+            Ok(request) => {
+                remote_service_dispatch_with_idempotency(
+                    cx,
+                    &session,
+                    computations,
+                    request,
+                    idempotency,
+                )
+                .await
+            }
         },
     };
-    write_remote_service_frame(cx, &mut framed, &response, limits.max_frame_bytes()).await?;
+    let encoded = encode_remote_service_frame(&response, limits.max_frame_bytes())?;
+    if let Some(commit) = terminal_commit
+        && !commit.complete(
+            idempotency.ok_or(RemoteComputationServiceError::IdempotencyStateLost)?,
+            cx.now(),
+        )
+    {
+        return Err(RemoteComputationServiceError::IdempotencyStateLost);
+    }
+    send_remote_service_frame(cx, &mut framed, &encoded).await?;
     Ok(response)
+}
+
+#[cfg(feature = "tls")]
+async fn remote_service_dispatch_with_idempotency(
+    cx: &Cx,
+    session: &RemotePeerSession,
+    computations: &RemoteComputationRegistry,
+    request: SpawnRequest,
+    idempotency: Option<&RemoteServiceIdempotency>,
+) -> (
+    RemoteServiceWireResponse,
+    Option<RemoteServiceTerminalCommit>,
+) {
+    let remote_task_id = request.remote_task_id;
+    if let Err(error) = session.authorize_computation(&request.computation) {
+        return RemoteServiceWireResponse::Rejected {
+            remote_task_id: remote_task_id.raw(),
+            code: RemoteServiceRejectionCode::ComputationDenied,
+            diagnostic: error.to_string(),
+        }
+        .with_no_commit();
+    }
+
+    let admission = if session.protocol_version() == RemoteProtocolVersion::V2 {
+        let Some(state) = idempotency else {
+            return RemoteServiceWireResponse::Rejected {
+                remote_task_id: remote_task_id.raw(),
+                code: RemoteServiceRejectionCode::LifecycleUnavailable,
+                diagnostic: "protocol V2 requires listener-owned idempotency state".to_owned(),
+            }
+            .with_no_commit();
+        };
+        Some(state.admit(session.peer_node(), &request, cx.now()))
+    } else {
+        None
+    };
+    let should_commit = matches!(admission, Some(RemoteServiceIdempotencyAdmission::Execute));
+
+    match admission {
+        Some(RemoteServiceIdempotencyAdmission::CachedOutcome(outcome)) => {
+            return RemoteServiceWireResponse::Outcome {
+                remote_task_id: remote_task_id.raw(),
+                outcome: outcome.into(),
+            }
+            .with_no_commit();
+        }
+        Some(RemoteServiceIdempotencyAdmission::CachedExecutionRejection(diagnostic)) => {
+            return RemoteServiceWireResponse::Rejected {
+                remote_task_id: remote_task_id.raw(),
+                code: RemoteServiceRejectionCode::ExecutionFailed,
+                diagnostic,
+            }
+            .with_no_commit();
+        }
+        Some(RemoteServiceIdempotencyAdmission::InFlight) => {
+            return RemoteServiceWireResponse::Rejected {
+                remote_task_id: remote_task_id.raw(),
+                code: RemoteServiceRejectionCode::OperationInFlight,
+                diagnostic: "matching protocol V2 operation is still in flight".to_owned(),
+            }
+            .with_no_commit();
+        }
+        Some(RemoteServiceIdempotencyAdmission::Conflict) => {
+            return RemoteServiceWireResponse::Rejected {
+                remote_task_id: remote_task_id.raw(),
+                code: RemoteServiceRejectionCode::IdempotencyConflict,
+                diagnostic: "idempotency key was already used for different computation input"
+                    .to_owned(),
+            }
+            .with_no_commit();
+        }
+        Some(RemoteServiceIdempotencyAdmission::Capacity) => {
+            return RemoteServiceWireResponse::Rejected {
+                remote_task_id: remote_task_id.raw(),
+                code: RemoteServiceRejectionCode::IdempotencyCapacity,
+                diagnostic: "authenticated peer exhausted retained idempotency capacity".to_owned(),
+            }
+            .with_no_commit();
+        }
+        Some(RemoteServiceIdempotencyAdmission::Execute) | None => {}
+    }
+
+    let terminal = computations.dispatch(cx, session, request.clone()).await;
+    match terminal {
+        Ok(outcome) => {
+            let response = RemoteServiceWireResponse::Outcome {
+                remote_task_id: remote_task_id.raw(),
+                outcome: outcome.clone().into(),
+            };
+            let commit = should_commit.then(|| RemoteServiceTerminalCommit::Outcome {
+                peer: session.peer_node().clone(),
+                key: request.idempotency_key,
+                canonical_task_id: remote_task_id,
+                outcome,
+            });
+            (response, commit)
+        }
+        Err(RemoteComputationDispatchError::Admission(error)) => {
+            RemoteServiceWireResponse::Rejected {
+                remote_task_id: remote_task_id.raw(),
+                code: RemoteServiceRejectionCode::ComputationDenied,
+                diagnostic: error.to_string(),
+            }
+            .with_no_commit()
+        }
+        Err(RemoteComputationDispatchError::Execution(error)) => {
+            let diagnostic = error.to_string();
+            let response = RemoteServiceWireResponse::Rejected {
+                remote_task_id: remote_task_id.raw(),
+                code: RemoteServiceRejectionCode::ExecutionFailed,
+                diagnostic: diagnostic.clone(),
+            };
+            let commit = should_commit.then(|| RemoteServiceTerminalCommit::ExecutionRejection {
+                peer: session.peer_node().clone(),
+                key: request.idempotency_key,
+                canonical_task_id: remote_task_id,
+                diagnostic,
+            });
+            (response, commit)
+        }
+    }
 }
 
 /// Sends one bounded request and awaits its fully decoded TLS response.
 ///
 /// This is the client half of [`serve_tls_computation_once`]. The caller owns
-/// handshake, timeout, and connection reuse policy. Retrying after an ambiguous
-/// delivery can execute the handler again until the lifecycle service adds
-/// peer-scoped idempotency.
+/// handshake, timeout, and connection reuse policy. A V1 caller must not retry
+/// an ambiguous delivery. A V2 request can be retried with the same key and
+/// semantic fingerprint only when the server is a structured listener.
 #[cfg(feature = "tls")]
 pub async fn call_tls_computation_once<IO>(
     cx: &Cx,
@@ -3294,6 +3696,10 @@ where
 pub enum RemoteComputationListenerError {
     /// A zero-byte frame limit cannot admit any encoded request.
     InvalidFrameLimit,
+    /// A zero retention window would permit immediate duplicate execution.
+    InvalidIdempotencyRetention,
+    /// A zero record cap cannot admit any V2 operation.
+    InvalidIdempotencyCapacity,
     /// The listening socket failed to bind or accept.
     Transport(io::Error),
     /// Runtime refused a structured connection-task spawn.
@@ -3307,6 +3713,12 @@ impl fmt::Display for RemoteComputationListenerError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidFrameLimit => write!(f, "remote listener frame limit must be nonzero"),
+            Self::InvalidIdempotencyRetention => {
+                write!(f, "remote listener idempotency retention must be nonzero")
+            }
+            Self::InvalidIdempotencyCapacity => {
+                write!(f, "remote listener idempotency record cap must be nonzero")
+            }
             Self::Transport(error) => write!(f, "remote listener transport error: {error}"),
             Self::Spawn(error) => write!(f, "remote listener connection spawn failed: {error}"),
             Self::ChildRegion(error) => write!(f, "remote listener child region failed: {error}"),
@@ -3321,7 +3733,9 @@ impl std::error::Error for RemoteComputationListenerError {
             Self::Transport(error) => Some(error),
             Self::Spawn(error) => Some(error),
             Self::ChildRegion(error) => Some(error),
-            Self::InvalidFrameLimit => None,
+            Self::InvalidFrameLimit
+            | Self::InvalidIdempotencyRetention
+            | Self::InvalidIdempotencyCapacity => None,
         }
     }
 }
@@ -3350,6 +3764,8 @@ pub struct RemoteComputationServiceConfig {
     wire_limits: RemoteServiceWireLimits,
     max_connections: Option<usize>,
     drain_timeout: Duration,
+    idempotency_retention: Duration,
+    max_idempotency_records_per_peer: usize,
 }
 
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
@@ -3361,6 +3777,9 @@ impl RemoteComputationServiceConfig {
             wire_limits: RemoteServiceWireLimits::new(DEFAULT_REMOTE_SERVICE_MAX_FRAME_BYTES),
             max_connections: Some(256),
             drain_timeout: Duration::from_secs(30),
+            idempotency_retention: DEFAULT_REMOTE_SERVICE_IDEMPOTENCY_RETENTION,
+            max_idempotency_records_per_peer:
+                DEFAULT_REMOTE_SERVICE_MAX_IDEMPOTENCY_RECORDS_PER_PEER,
         }
     }
 
@@ -3385,6 +3804,20 @@ impl RemoteComputationServiceConfig {
         self
     }
 
+    /// Sets how long V2 terminal outcomes remain replayable.
+    #[must_use]
+    pub const fn with_idempotency_retention(mut self, retention: Duration) -> Self {
+        self.idempotency_retention = retention;
+        self
+    }
+
+    /// Sets the V2 retained/in-flight key cap for each authenticated peer.
+    #[must_use]
+    pub const fn with_max_idempotency_records_per_peer(mut self, max_records: usize) -> Self {
+        self.max_idempotency_records_per_peer = max_records;
+        self
+    }
+
     /// Encoded-frame policy used by every accepted connection.
     #[must_use]
     pub const fn wire_limits(self) -> RemoteServiceWireLimits {
@@ -3401,6 +3834,18 @@ impl RemoteComputationServiceConfig {
     #[must_use]
     pub const fn drain_timeout(self) -> Duration {
         self.drain_timeout
+    }
+
+    /// V2 terminal-outcome replay retention.
+    #[must_use]
+    pub const fn idempotency_retention(self) -> Duration {
+        self.idempotency_retention
+    }
+
+    /// V2 retained/in-flight key cap per authenticated peer.
+    #[must_use]
+    pub const fn max_idempotency_records_per_peer(self) -> usize {
+        self.max_idempotency_records_per_peer
     }
 }
 
@@ -3576,14 +4021,16 @@ impl RemoteConnectionOutcomeCounts {
 /// [`JoinSet`], stops acceptance before drain, races handshake/request/flush
 /// against force-close and task cancellation, joins every connection outcome,
 /// and closes the child region only after quiescence. Each connection still
-/// performs exactly one request; peer-scoped idempotency and lifecycle message
-/// multiplexing remain a separate layer.
+/// performs exactly one request. Protocol V2 requests share this listener's
+/// authenticated-peer-scoped idempotency state; lifecycle message multiplexing
+/// and durable restart recovery remain separate layers.
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
 pub struct RemoteComputationService {
     tcp_listener: TcpListener,
     tls_acceptor: Arc<TlsAcceptor>,
     policy: Arc<RemotePeerAdmissionPolicy>,
     computations: Arc<RemoteComputationRegistry>,
+    idempotency: Arc<RemoteServiceIdempotency>,
     config: RemoteComputationServiceConfig,
     shutdown_signal: ShutdownSignal,
     connections: ConnectionManager,
@@ -3616,6 +4063,12 @@ impl RemoteComputationService {
         if config.wire_limits.max_frame_bytes() == 0 {
             return Err(RemoteComputationListenerError::InvalidFrameLimit);
         }
+        if config.idempotency_retention.is_zero() {
+            return Err(RemoteComputationListenerError::InvalidIdempotencyRetention);
+        }
+        if config.max_idempotency_records_per_peer == 0 {
+            return Err(RemoteComputationListenerError::InvalidIdempotencyCapacity);
+        }
         let tcp_listener = TcpListener::bind(addr)
             .await
             .map_err(RemoteComputationListenerError::Transport)?;
@@ -3633,13 +4086,24 @@ impl RemoteComputationService {
         if config.wire_limits.max_frame_bytes() == 0 {
             return Err(RemoteComputationListenerError::InvalidFrameLimit);
         }
+        if config.idempotency_retention.is_zero() {
+            return Err(RemoteComputationListenerError::InvalidIdempotencyRetention);
+        }
+        if config.max_idempotency_records_per_peer == 0 {
+            return Err(RemoteComputationListenerError::InvalidIdempotencyCapacity);
+        }
         let shutdown_signal = ShutdownSignal::new();
         let connections = ConnectionManager::new(config.max_connections, shutdown_signal.clone());
+        let idempotency = Arc::new(RemoteServiceIdempotency::new(
+            config.idempotency_retention,
+            config.max_idempotency_records_per_peer,
+        ));
         Ok(Self {
             tcp_listener,
             tls_acceptor: Arc::new(tls_acceptor),
             policy: Arc::new(policy),
             computations: Arc::new(computations),
+            idempotency,
             config,
             shutdown_signal,
             connections,
@@ -3738,6 +4202,7 @@ impl RemoteComputationService {
             let tls_acceptor = Arc::clone(&self.tls_acceptor);
             let policy = Arc::clone(&self.policy);
             let computations = Arc::clone(&self.computations);
+            let idempotency = Arc::clone(&self.idempotency);
             let shutdown_signal = self.shutdown_signal.clone();
             let wire_limits = self.config.wire_limits;
             if let Err(error) =
@@ -3748,12 +4213,13 @@ impl RemoteComputationService {
                             .accept(stream)
                             .await
                             .map_err(RemoteComputationConnectionError::Tls)?;
-                        serve_tls_computation_once(
+                        serve_tls_computation_once_with_idempotency(
                             &connection_cx,
                             &mut stream,
                             &policy,
                             &computations,
                             wire_limits,
+                            Some(&idempotency),
                         )
                         .await
                         .map_err(RemoteComputationConnectionError::Service)?;
