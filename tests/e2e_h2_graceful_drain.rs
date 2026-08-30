@@ -6,6 +6,9 @@
 //! a raw frame-speaking std-TCP client (preface + SETTINGS + HEADERS):
 //!   - `h2_serves_request_response_round_trip`: sanity — one request, one
 //!     200 response with the response body on a DATA frame.
+//!   - `h2_router_composes_over_live_listener_with_request_cx`: a Cx-aware
+//!     Router handler and its 404 fallback both run through the same real
+//!     frame-level listener adapter (br-asupersync-server-stack-hardening-eeexl1.17).
 //!   - `h2_rejects_disallowed_host_with_421`: a request whose host is not on
 //!     the allow-list gets a per-stream 421 and the handler never runs
 //!     (br-asupersync-mfqfst M8).
@@ -29,6 +32,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+use asupersync::Cx;
 use asupersync::bytes::BytesMut;
 use asupersync::codec::Decoder as _;
 use asupersync::http::h1::server::HostPolicy;
@@ -40,6 +44,8 @@ use asupersync::http::h2::{FrameCodec, Header, HpackDecoder, HpackEncoder};
 use asupersync::runtime::RuntimeBuilder;
 use asupersync::server::shutdown::ShutdownPhase;
 use asupersync::sync::Notify;
+use asupersync::web::handler::AsyncCxFnHandler;
+use asupersync::web::router::{Router, get};
 
 fn drain_config(drain: Duration, hard: Duration) -> Http2ListenerConfig {
     Http2ListenerConfig::default()
@@ -186,6 +192,86 @@ fn h2_serves_request_response_round_trip() {
         let outcome = client.join().expect("client thread");
         assert_eq!(outcome.status.as_deref(), Some("200"), "{outcome:?}");
         assert_eq!(outcome.body, b"hello /round-trip", "{outcome:?}");
+
+        assert!(manager.begin_drain(Duration::from_secs(5)));
+        let stats = run_handle.await.expect("listener run result");
+        let report = stats.drain_report.expect("drain report");
+        assert!(report.reached_quiescence, "{report}");
+    });
+}
+
+/// The production Router adapter composes with the native H2 listener over
+/// real frames, inherits its bounded request-region Cx, and preserves 404
+/// routing.
+#[test]
+fn h2_router_composes_over_live_listener_with_request_cx() {
+    let runtime = RuntimeBuilder::new()
+        .worker_threads(2)
+        .build()
+        .expect("build runtime");
+    let handle = runtime.handle();
+
+    runtime.block_on(async move {
+        let request_timeout = Duration::from_secs(30);
+        let handler_runs = Arc::new(AtomicUsize::new(0));
+        let observed_runs = Arc::clone(&handler_runs);
+        let app = Router::new()
+            .without_default_trace()
+            .route(
+                "/router-h2",
+                get(AsyncCxFnHandler::new(move |cx: Cx| {
+                    let observed_runs = Arc::clone(&observed_runs);
+                    async move {
+                        let ambient = Cx::current()
+                            .expect("listener request Cx should remain current in router handler");
+                        assert_eq!(ambient.region_id(), cx.region_id());
+                        assert_eq!(ambient.task_id(), cx.task_id());
+                        let remaining = cx
+                            .remaining_budget()
+                            .deadline
+                            .expect("H2 listener must install its finite request deadline");
+                        assert!(
+                            remaining <= request_timeout,
+                            "request budget {remaining:?} exceeds configured {request_timeout:?}"
+                        );
+                        assert!(
+                            remaining >= Duration::from_secs(20),
+                            "request budget {remaining:?} did not originate from the fresh 30s listener timeout"
+                        );
+                        observed_runs.fetch_add(1, Ordering::SeqCst);
+                        "router-h2-cx"
+                    }
+                })),
+            )
+            .into_http_handler();
+        let listener = Http2Listener::bind_with_config(
+            "127.0.0.1:0",
+            app,
+            drain_config(Duration::from_secs(10), Duration::from_secs(20))
+                .request_timeout(Some(request_timeout)),
+        )
+        .await
+        .expect("bind Router-backed H2 listener");
+
+        let addr = listener.local_addr().expect("local addr");
+        let manager = listener.connection_manager().clone();
+        let run_handle = handle
+            .clone()
+            .try_spawn(async move { listener.run(&handle).await })
+            .expect("spawn Router-backed listener run");
+
+        let matched = h2_blocking_client(addr, "/router-h2", false)
+            .join()
+            .expect("matched client thread");
+        assert_eq!(matched.status.as_deref(), Some("200"), "{matched:?}");
+        assert_eq!(matched.body, b"router-h2-cx", "{matched:?}");
+        assert_eq!(handler_runs.load(Ordering::SeqCst), 1);
+
+        let unmatched = h2_blocking_client(addr, "/missing", false)
+            .join()
+            .expect("unmatched client thread");
+        assert_eq!(unmatched.status.as_deref(), Some("404"), "{unmatched:?}");
+        assert_eq!(handler_runs.load(Ordering::SeqCst), 1);
 
         assert!(manager.begin_drain(Duration::from_secs(5)));
         let stats = run_handle.await.expect("listener run result");
