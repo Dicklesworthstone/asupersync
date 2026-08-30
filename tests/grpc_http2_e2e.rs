@@ -33,8 +33,15 @@ use asupersync::http::h2::connection::CLIENT_PREFACE;
 use asupersync::http::h2::frame::{DataFrame, HeadersFrame, Setting, SettingsFrame};
 use asupersync::http::h2::{Connection, ConnectionState, Frame, FrameHeader, FrameType, Settings};
 use asupersync::http::h2::{FrameCodec, Header, HpackDecoder, HpackEncoder};
+#[cfg(feature = "tls")]
+use asupersync::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use asupersync::net::TcpListener;
 use asupersync::runtime::RuntimeBuilder;
+#[cfg(feature = "tls")]
+use asupersync::tls::{
+    Certificate, CertificateChain, PrivateKey, TlsAcceptor, TlsAcceptorBuilder, TlsConnector,
+    TlsConnectorBuilder,
+};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -659,6 +666,207 @@ fn production_grpc_h2_client_for_path(addr: SocketAddr, path: &str) -> Productio
     }
 }
 
+#[cfg(feature = "tls")]
+const GRPC_TLS_CERT_PEM: &[u8] = include_bytes!("fixtures/tls/server.crt");
+#[cfg(feature = "tls")]
+const GRPC_TLS_KEY_PEM: &[u8] = include_bytes!("fixtures/tls/server.key");
+#[cfg(feature = "tls")]
+const GRPC_TLS_WRONG_CA_PEM: &[u8] = include_bytes!("fixtures/x509_adversarial/ca.crt");
+
+#[cfg(feature = "tls")]
+fn grpc_tls_acceptor(require_h2: bool) -> TlsAcceptor {
+    let chain = CertificateChain::from_pem(GRPC_TLS_CERT_PEM).expect("parse gRPC TLS chain");
+    let key = PrivateKey::from_pem(GRPC_TLS_KEY_PEM).expect("parse gRPC TLS key");
+    let builder = TlsAcceptorBuilder::new(chain, key);
+    let builder = if require_h2 {
+        builder.alpn_grpc()
+    } else {
+        builder
+    };
+    builder.build().expect("build gRPC TLS acceptor")
+}
+
+#[cfg(feature = "tls")]
+fn grpc_tls_connector(root_pem: &[u8], advertise_h2: bool) -> TlsConnector {
+    let root = Certificate::from_pem(root_pem)
+        .expect("parse gRPC TLS root")
+        .into_iter()
+        .next()
+        .expect("gRPC TLS root fixture contains a certificate");
+    let builder = TlsConnectorBuilder::new().add_root_certificate(&root);
+    let builder = if advertise_h2 {
+        builder.alpn_grpc()
+    } else {
+        builder
+    };
+    builder.build().expect("build gRPC TLS connector")
+}
+
+#[cfg(feature = "tls")]
+#[derive(Debug)]
+struct TlsGrpcObservation {
+    scheme: String,
+    client_id: String,
+    request_payload: Vec<u8>,
+}
+
+#[cfg(feature = "tls")]
+async fn serve_tls_grpc_unary(
+    listener: TcpListener,
+    acceptor: TlsAcceptor,
+) -> Result<TlsGrpcObservation, String> {
+    let (tcp, _) = listener
+        .accept()
+        .await
+        .map_err(|error| format!("accept gRPC TLS TCP: {error}"))?;
+    let mut stream = acceptor
+        .accept(tcp)
+        .await
+        .map_err(|error| format!("accept gRPC TLS handshake: {error}"))?;
+    if stream.alpn_protocol() != Some(b"h2".as_slice()) {
+        return Err("gRPC TLS server did not negotiate h2".to_owned());
+    }
+
+    let mut preface = [0_u8; CLIENT_PREFACE.len()];
+    stream
+        .read_exact(&mut preface)
+        .await
+        .map_err(|error| format!("read gRPC TLS H2 preface: {error}"))?;
+    if preface != CLIENT_PREFACE {
+        return Err("gRPC TLS client sent an invalid H2 preface".to_owned());
+    }
+
+    let mut frame_codec = FrameCodec::new();
+    let mut hpack = HpackDecoder::new();
+    let mut inbound = BytesMut::new();
+    let mut chunk = [0_u8; 4096];
+    let mut scheme = None;
+    let mut client_id = None;
+    let mut request_body = BytesMut::new();
+    loop {
+        while let Some(frame) = frame_codec
+            .decode(&mut inbound)
+            .map_err(|error| format!("decode gRPC TLS request frame: {error}"))?
+        {
+            match frame {
+                Frame::Headers(headers) => {
+                    if !headers.end_headers {
+                        return Err(
+                            "gRPC TLS fixture requires one-block request headers".to_owned()
+                        );
+                    }
+                    let mut block = Bytes::from(headers.header_block.to_vec());
+                    for header in hpack
+                        .decode(&mut block)
+                        .map_err(|error| format!("decode gRPC TLS request headers: {error}"))?
+                    {
+                        if header.name == ":scheme" {
+                            scheme = Some(header.value);
+                        } else if header.name == "x-client-id" {
+                            client_id = Some(header.value);
+                        }
+                    }
+                }
+                Frame::Data(data) => {
+                    request_body.extend_from_slice(&data.data);
+                    if data.end_stream {
+                        let mut framed = request_body.clone();
+                        let request = GrpcCodec::with_max_size(1024)
+                            .decode(&mut framed)
+                            .map_err(|error| format!("decode gRPC TLS request body: {error}"))?
+                            .ok_or_else(|| "gRPC TLS request contained no message".to_owned())?;
+                        if !framed.is_empty() {
+                            return Err("gRPC TLS request contained trailing bytes".to_owned());
+                        }
+
+                        let mut response_body = BytesMut::new();
+                        GrpcCodec::with_max_size(1024)
+                            .encode(
+                                GrpcMessage::new(Bytes::from_static(b"tls-public-pong")),
+                                &mut response_body,
+                            )
+                            .map_err(|error| format!("encode gRPC TLS response body: {error}"))?;
+                        let mut response_hpack = HpackEncoder::new();
+                        let mut initial_block = BytesMut::new();
+                        response_hpack.encode(
+                            &[
+                                Header::new(":status", "200"),
+                                Header::new("content-type", "application/grpc"),
+                                Header::new("x-server-id", "native-h2-tls"),
+                                Header::new("x-server-token-bin", "AwQ"),
+                            ],
+                            &mut initial_block,
+                        );
+                        let mut trailer_block = BytesMut::new();
+                        response_hpack.encode(
+                            &[
+                                Header::new("grpc-status", "0"),
+                                Header::new("x-server-tail", "tls-complete"),
+                            ],
+                            &mut trailer_block,
+                        );
+                        let mut outbound = BytesMut::new();
+                        Frame::Settings(SettingsFrame::new(Vec::new()))
+                            .encode(&mut outbound)
+                            .map_err(|error| format!("encode gRPC TLS settings: {error}"))?;
+                        Frame::Headers(HeadersFrame::new(1, initial_block.freeze(), false, true))
+                            .encode(&mut outbound)
+                            .map_err(|error| {
+                                format!("encode gRPC TLS response headers: {error}")
+                            })?;
+                        Frame::Data(DataFrame::new(1, response_body.freeze(), false))
+                            .encode(&mut outbound)
+                            .map_err(|error| format!("encode gRPC TLS response data: {error}"))?;
+                        Frame::Headers(HeadersFrame::new(1, trailer_block.freeze(), true, true))
+                            .encode(&mut outbound)
+                            .map_err(|error| format!("encode gRPC TLS trailers: {error}"))?;
+                        stream
+                            .write_all(&outbound)
+                            .await
+                            .map_err(|error| format!("write gRPC TLS response: {error}"))?;
+                        stream
+                            .flush()
+                            .await
+                            .map_err(|error| format!("flush gRPC TLS response: {error}"))?;
+                        return Ok(TlsGrpcObservation {
+                            scheme: scheme
+                                .ok_or_else(|| "gRPC TLS request omitted :scheme".to_owned())?,
+                            client_id: client_id
+                                .ok_or_else(|| "gRPC TLS request omitted x-client-id".to_owned())?,
+                            request_payload: request.data.to_vec(),
+                        });
+                    }
+                }
+                _ => {}
+            }
+        }
+        let read = stream
+            .read(&mut chunk)
+            .await
+            .map_err(|error| format!("read gRPC TLS request: {error}"))?;
+        if read == 0 {
+            return Err("gRPC TLS client closed before request completion".to_owned());
+        }
+        inbound.extend_from_slice(&chunk[..read]);
+    }
+}
+
+#[cfg(feature = "tls")]
+async fn accept_tls_probe(
+    listener: TcpListener,
+    acceptor: TlsAcceptor,
+) -> Result<Option<Vec<u8>>, String> {
+    let (tcp, _) = listener
+        .accept()
+        .await
+        .map_err(|error| format!("accept TLS probe TCP: {error}"))?;
+    let stream = acceptor
+        .accept(tcp)
+        .await
+        .map_err(|error| format!("accept TLS probe handshake: {error}"))?;
+    Ok(stream.alpn_protocol().map(<[u8]>::to_vec))
+}
+
 #[derive(Clone)]
 struct RegisteredEchoService {
     calls: Arc<AtomicUsize>,
@@ -894,6 +1102,175 @@ fn public_grpc_client_unary_crosses_native_h2_and_maps_status_trailers() {
 
         assert!(manager.begin_drain(Duration::from_secs(5)));
         let _ = run_handle.await.expect("listener run join");
+    });
+}
+
+/// asupersync-grpc-https-unary-iqer05: the public unary client must carry the
+/// same payload and metadata over authenticated TLS, emit :scheme=https, and
+/// refuse to write the H2 preface until ALPN has selected h2.
+#[cfg(feature = "tls")]
+#[test]
+fn public_grpc_client_unary_crosses_authenticated_tls_h2() {
+    let runtime = RuntimeBuilder::new()
+        .worker_threads(2)
+        .build()
+        .expect("build runtime");
+    let handle = runtime.handle();
+
+    runtime.block_on(async move {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind gRPC TLS fixture");
+        let addr = listener.local_addr().expect("gRPC TLS fixture address");
+        let acceptor = grpc_tls_acceptor(true);
+        let server = handle
+            .clone()
+            .try_spawn(async move { serve_tls_grpc_unary(listener, acceptor).await })
+            .expect("spawn gRPC TLS fixture");
+
+        let connector = grpc_tls_connector(GRPC_TLS_CERT_PEM, true);
+        let channel = Channel::builder(format!("https://localhost:{}", addr.port()))
+            .tls_connector(connector)
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(10))
+            .max_send_message_size(1024)
+            .max_recv_message_size(1024)
+            .connect()
+            .await
+            .expect("construct authenticated gRPC TLS channel");
+        let mut client = GrpcClient::new(channel);
+        let mut request = Request::new(Bytes::from_static(b"tls-public-ping"));
+        assert!(request.metadata_mut().insert("x-client-id", "tls-client"));
+        let response = client
+            .unary::<Bytes, Bytes>("/test.PublicClient/Unary", request)
+            .await
+            .expect("authenticated gRPC TLS unary response");
+        assert_eq!(response.get_ref().as_ref(), b"tls-public-pong");
+        assert!(matches!(
+            response.metadata().get("x-server-id"),
+            Some(MetadataValue::Ascii(value)) if value == "native-h2-tls"
+        ));
+        assert!(matches!(
+            response.metadata().get("x-server-token-bin"),
+            Some(MetadataValue::Binary(value)) if value.as_ref() == b"\x03\x04"
+        ));
+        assert!(matches!(
+            response.metadata().get("x-server-tail"),
+            Some(MetadataValue::Ascii(value)) if value == "tls-complete"
+        ));
+
+        let observation = server.await.expect("gRPC TLS fixture exchange");
+        assert_eq!(observation.scheme, "https");
+        assert_eq!(observation.client_id, "tls-client");
+        assert_eq!(observation.request_payload, b"tls-public-ping");
+    });
+}
+
+/// TLS authority and protocol mismatches must fail before any gRPC success is
+/// synthesized: no connector, wrong CA, wrong certificate name, and missing
+/// h2 ALPN are all planted refusals.
+#[cfg(feature = "tls")]
+#[test]
+fn public_grpc_tls_unary_fails_closed_on_authority_and_alpn_mismatch() {
+    let runtime = RuntimeBuilder::new()
+        .worker_threads(2)
+        .build()
+        .expect("build runtime");
+    let handle = runtime.handle();
+
+    runtime.block_on(async move {
+        let missing = Channel::builder("https://localhost:443")
+            .tls()
+            .connect()
+            .await
+            .expect_err("HTTPS without a connector must fail during channel validation");
+        assert!(missing.to_string().contains("explicit TLS connector"));
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind wrong-CA TLS fixture");
+        let addr = listener.local_addr().expect("wrong-CA fixture address");
+        let acceptor = grpc_tls_acceptor(true);
+        let server = handle
+            .clone()
+            .try_spawn(async move { accept_tls_probe(listener, acceptor).await })
+            .expect("spawn wrong-CA TLS fixture");
+        let wrong_ca = grpc_tls_connector(GRPC_TLS_WRONG_CA_PEM, true);
+        let channel = Channel::builder(format!("https://localhost:{}", addr.port()))
+            .tls_connector(wrong_ca)
+            .timeout(Duration::from_secs(10))
+            .connect()
+            .await
+            .expect("wrong-CA channel construction remains lazy");
+        let status = GrpcClient::new(channel)
+            .unary::<Bytes, Bytes>(
+                "/test.PublicClient/Unary",
+                Request::new(Bytes::from_static(b"must-not-dispatch")),
+            )
+            .await
+            .expect_err("wrong CA must reject the TLS handshake");
+        assert!(status.message().contains("TLS handshake failed"));
+        assert!(
+            server.await.is_err(),
+            "wrong CA should also terminate the server handshake"
+        );
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind wrong-name TLS fixture");
+        let addr = listener.local_addr().expect("wrong-name fixture address");
+        let acceptor = grpc_tls_acceptor(true);
+        let server = handle
+            .clone()
+            .try_spawn(async move { accept_tls_probe(listener, acceptor).await })
+            .expect("spawn wrong-name TLS fixture");
+        let channel = Channel::builder(format!("https://localhost:{}", addr.port()))
+            .tls_connector(grpc_tls_connector(GRPC_TLS_CERT_PEM, true))
+            .tls_server_name("wrong.invalid")
+            .timeout(Duration::from_secs(10))
+            .connect()
+            .await
+            .expect("wrong-name channel construction remains lazy");
+        let status = GrpcClient::new(channel)
+            .unary::<Bytes, Bytes>(
+                "/test.PublicClient/Unary",
+                Request::new(Bytes::from_static(b"must-not-dispatch")),
+            )
+            .await
+            .expect_err("wrong certificate name must reject the TLS handshake");
+        assert!(status.message().contains("TLS handshake failed"));
+        assert!(
+            server.await.is_err(),
+            "wrong name should also terminate the server handshake"
+        );
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind no-ALPN TLS fixture");
+        let addr = listener.local_addr().expect("no-ALPN fixture address");
+        let acceptor = grpc_tls_acceptor(false);
+        let server = handle
+            .clone()
+            .try_spawn(async move { accept_tls_probe(listener, acceptor).await })
+            .expect("spawn no-ALPN TLS fixture");
+        let channel = Channel::builder(format!("https://localhost:{}", addr.port()))
+            .tls_connector(grpc_tls_connector(GRPC_TLS_CERT_PEM, false))
+            .timeout(Duration::from_secs(10))
+            .connect()
+            .await
+            .expect("no-ALPN channel construction remains lazy");
+        let status = GrpcClient::new(channel)
+            .unary::<Bytes, Bytes>(
+                "/test.PublicClient/Unary",
+                Request::new(Bytes::from_static(b"must-not-dispatch")),
+            )
+            .await
+            .expect_err("missing h2 ALPN must reject the gRPC TLS transport");
+        assert!(status.message().contains("required h2 ALPN"));
+        assert_eq!(
+            server.await.expect("no-ALPN TLS handshake may complete"),
+            None
+        );
     });
 }
 

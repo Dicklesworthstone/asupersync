@@ -14,9 +14,9 @@ use std::time::Duration;
 use crate::bytes::{Bytes, BytesMut};
 
 #[cfg(not(target_arch = "wasm32"))]
-use std::io::{Read, Write};
+use std::io;
 #[cfg(not(target_arch = "wasm32"))]
-use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpStream};
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 
 #[cfg(not(target_arch = "wasm32"))]
 use base64::Engine as _;
@@ -27,6 +27,13 @@ use crate::codec::Decoder as _;
 use crate::http::h2::connection::{CLIENT_PREFACE, ReceivedFrame};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::http::h2::{Connection, FrameCodec, Header, SettingsBuilder};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, ReadBuf};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::net::TcpStream;
+use crate::tls::TlsConnector;
+#[cfg(all(not(target_arch = "wasm32"), feature = "tls"))]
+use crate::tls::TlsStream;
 
 use super::codec::{Codec, FramedCodec, IdentityCodec};
 use super::status::{Code, GrpcError, Status, TransportErrorKind};
@@ -180,6 +187,10 @@ pub struct ChannelBuilder {
     uri: String,
     /// Channel configuration.
     config: ChannelConfig,
+    /// Explicit TLS authority for HTTPS channels.
+    tls_connector: Option<TlsConnector>,
+    /// Optional certificate identity when it differs from the dial authority.
+    tls_server_name: Option<String>,
 }
 
 impl ChannelBuilder {
@@ -194,6 +205,8 @@ impl ChannelBuilder {
         Self {
             uri: uri.into(),
             config: ChannelConfig::default(),
+            tls_connector: None,
+            tls_server_name: None,
         }
     }
 
@@ -280,32 +293,71 @@ impl ChannelBuilder {
 
     /// Require a TLS-backed gRPC transport.
     ///
-    /// The current network-backed client transport is cleartext HTTP/2 on
-    /// localhost only and does not negotiate TLS, so
-    /// [`ChannelBuilder::connect`] fails closed when this flag is set.
+    /// This only marks the transport requirement. Callers must also provide
+    /// an explicit [`TlsConnector`] with [`Self::tls_connector`]; channels
+    /// fail closed rather than selecting ambient trust roots.
     #[must_use]
     pub fn tls(mut self) -> Self {
         self.config.use_tls = true;
         self
     }
 
+    /// Supply the TLS connector used by HTTPS unary calls.
+    ///
+    /// The connector should advertise HTTP/2 (normally via
+    /// [`crate::tls::TlsConnectorBuilder::alpn_grpc`]). The gRPC transport
+    /// independently verifies that the peer actually negotiated `h2` before
+    /// writing the connection preface.
+    #[must_use]
+    pub fn tls_connector(mut self, connector: TlsConnector) -> Self {
+        self.config.use_tls = true;
+        self.tls_connector = Some(connector);
+        self
+    }
+
+    /// Override the DNS name authenticated by TLS while retaining the URI's
+    /// localhost dial address and HTTP/2 authority.
+    ///
+    /// This is useful for local sidecars and tests whose certificate identity
+    /// differs from the loopback socket address. It does not relax the
+    /// localhost-only network boundary.
+    #[must_use]
+    pub fn tls_server_name(mut self, server_name: impl Into<String>) -> Self {
+        self.config.use_tls = true;
+        self.tls_server_name = Some(server_name.into());
+        self
+    }
+
     /// Build the channel.
     pub async fn connect(self) -> Result<Channel, GrpcError> {
-        Channel::connect_with_config(&self.uri, self.config).await
+        Channel::connect_with_transport(
+            &self.uri,
+            self.config,
+            self.tls_connector,
+            self.tls_server_name,
+        )
+        .await
     }
 }
 
 /// A gRPC channel representing the current localhost-bounded client transport.
 ///
 /// `loopback` selects deterministic in-memory behavior. `localhost` and
-/// `127.0.0.1` select native HTTP/2 over TCP. The channel is intentionally
-/// lazy: constructing it performs validation but does not open a socket.
+/// `127.0.0.1` select native HTTP/2 over TCP, optionally protected by a
+/// caller-supplied TLS connector. The channel is intentionally lazy:
+/// constructing it performs validation but does not open a socket.
 #[derive(Debug, Clone)]
 pub struct Channel {
     /// The target URI.
     uri: String,
     /// Channel configuration.
     config: ChannelConfig,
+    /// Explicit TLS authority for HTTPS unary calls.
+    #[cfg(not(target_arch = "wasm32"))]
+    tls_connector: Option<TlsConnector>,
+    /// Optional certificate identity distinct from the dial authority.
+    #[cfg(not(target_arch = "wasm32"))]
+    tls_server_name: Option<String>,
 }
 
 impl Channel {
@@ -331,11 +383,35 @@ impl Channel {
     /// The first network-backed RPC performs the TCP connection.
     #[allow(clippy::unused_async)]
     pub async fn connect_with_config(uri: &str, config: ChannelConfig) -> Result<Self, GrpcError> {
+        Self::connect_with_transport(uri, config, None, None).await
+    }
+
+    #[allow(clippy::unused_async)]
+    async fn connect_with_transport(
+        uri: &str,
+        config: ChannelConfig,
+        tls_connector: Option<TlsConnector>,
+        tls_server_name: Option<String>,
+    ) -> Result<Self, GrpcError> {
         validate_channel_uri(uri)?;
-        validate_channel_security(uri, &config)?;
+        validate_channel_security(uri, &config, tls_connector.is_some())?;
+        if let Some(server_name) = tls_server_name.as_deref() {
+            TlsConnector::validate_domain(server_name).map_err(|error| {
+                GrpcError::transport_kind(
+                    TransportErrorKind::ProtocolViolation,
+                    format!("invalid gRPC TLS server name: {error}"),
+                )
+            })?;
+        }
+        #[cfg(target_arch = "wasm32")]
+        let _ = (&tls_connector, &tls_server_name);
         Ok(Self {
             uri: uri.to_string(),
             config,
+            #[cfg(not(target_arch = "wasm32"))]
+            tls_connector,
+            #[cfg(not(target_arch = "wasm32"))]
+            tls_server_name,
         })
     }
 
@@ -349,6 +425,16 @@ impl Channel {
     #[must_use]
     pub fn config(&self) -> &ChannelConfig {
         &self.config
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn tls_connector(&self) -> Option<&TlsConnector> {
+        self.tls_connector.as_ref()
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn tls_server_name(&self) -> Option<&str> {
+        self.tls_server_name.as_deref()
     }
 }
 
@@ -775,14 +861,18 @@ fn channel_target_is_loopback(uri: &str) -> bool {
 struct NativeH2Target {
     authority: String,
     address: SocketAddr,
+    server_name: String,
+    scheme: &'static str,
+    use_tls: bool,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 impl NativeH2Target {
-    fn parse(uri: &str) -> Result<Self, Status> {
-        let (_, remainder) = uri
+    fn parse(uri: &str, use_tls: bool, tls_server_name: Option<&str>) -> Result<Self, Status> {
+        let (uri_scheme, remainder) = uri
             .split_once("://")
             .ok_or_else(|| Status::unavailable("channel URI is missing a scheme separator"))?;
+        let use_tls = use_tls || uri_scheme.eq_ignore_ascii_case("https");
         let authority = remainder
             .split(['/', '?', '#'])
             .next()
@@ -799,7 +889,7 @@ impl NativeH2Target {
                 })?;
                 (host, port)
             }
-            None => (authority, 80),
+            None => (authority, if use_tls { 443 } else { 80 }),
         };
         let address = if host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" {
             SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port))
@@ -811,7 +901,67 @@ impl NativeH2Target {
         Ok(Self {
             authority: authority.to_ascii_lowercase(),
             address,
+            server_name: tls_server_name.map_or_else(
+                || host.to_ascii_lowercase(),
+                |name| name.to_ascii_lowercase(),
+            ),
+            scheme: if use_tls { "https" } else { "http" },
+            use_tls,
         })
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug)]
+enum NativeH2Io {
+    Plain(TcpStream),
+    #[cfg(feature = "tls")]
+    Tls(TlsStream<TcpStream>),
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl AsyncRead for NativeH2Io {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        match &mut *self {
+            Self::Plain(stream) => Pin::new(stream).poll_read(cx, buf),
+            #[cfg(feature = "tls")]
+            Self::Tls(stream) => Pin::new(stream).poll_read(cx, buf),
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl AsyncWrite for NativeH2Io {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        data: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        match &mut *self {
+            Self::Plain(stream) => Pin::new(stream).poll_write(cx, data),
+            #[cfg(feature = "tls")]
+            Self::Tls(stream) => Pin::new(stream).poll_write(cx, data),
+        }
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match &mut *self {
+            Self::Plain(stream) => Pin::new(stream).poll_flush(cx),
+            #[cfg(feature = "tls")]
+            Self::Tls(stream) => Pin::new(stream).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match &mut *self {
+            Self::Plain(stream) => Pin::new(stream).poll_shutdown(cx),
+            #[cfg(feature = "tls")]
+            Self::Tls(stream) => Pin::new(stream).poll_shutdown(cx),
+        }
     }
 }
 
@@ -835,30 +985,29 @@ async fn native_h2_unary(
             "native HTTP/2 gRPC calls require an ambient runtime Cx capability",
         )
     })?;
-    let target = NativeH2Target::parse(channel.uri())?;
+    let target = NativeH2Target::parse(
+        channel.uri(),
+        channel.config().use_tls,
+        channel.tls_server_name(),
+    )?;
     let config = channel.config().clone();
-    let path = path.to_owned();
+    let tls_connector = channel.tls_connector().cloned();
     let timeout = effective_native_call_timeout(&config);
-    let mut task = cx
-        .spawn_blocking(move |_child| {
-            native_h2_unary_blocking(target, config, timeout, &path, &metadata, body)
-        })
-        .map_err(|error| {
-            Status::unavailable(format!(
-                "native HTTP/2 gRPC transport admission failed: {error:?}"
-            ))
-        })?;
-    task.join(&cx).await.map_err(|error| match error {
-        crate::runtime::task_handle::JoinError::Cancelled(reason) => {
-            Status::cancelled(format!("native HTTP/2 gRPC call cancelled: {reason}"))
-        }
-        crate::runtime::task_handle::JoinError::Panicked(payload) => {
-            Status::internal(format!("native HTTP/2 gRPC transport panicked: {payload}"))
-        }
-        crate::runtime::task_handle::JoinError::PolledAfterCompletion => {
-            Status::internal("native HTTP/2 gRPC transport handle was polled after completion")
-        }
-    })?
+    let now = cx
+        .timer_driver()
+        .map_or_else(crate::time::wall_now, |timer| timer.now());
+    match crate::time::timeout(
+        now,
+        timeout,
+        native_h2_unary_io(target, config, tls_connector, path, &metadata, body),
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => Err(Status::deadline_exceeded(format!(
+            "native HTTP/2 gRPC call exceeded its {timeout:?} deadline"
+        ))),
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -868,22 +1017,18 @@ fn effective_native_call_timeout(config: &ChannelConfig) -> Duration {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn native_h2_unary_blocking(
+async fn native_h2_unary_io(
     target: NativeH2Target,
     config: ChannelConfig,
-    timeout: Duration,
+    tls_connector: Option<TlsConnector>,
     path: &str,
     metadata: &Metadata,
     request_body: Bytes,
 ) -> Result<NativeUnaryWireResponse, Status> {
-    let mut stream = TcpStream::connect_timeout(&target.address, config.connect_timeout)
+    let stream = TcpStream::connect_timeout(target.address, config.connect_timeout)
+        .await
         .map_err(|error| transport_status("connect", error))?;
-    stream
-        .set_read_timeout(Some(timeout))
-        .map_err(|error| transport_status("set read timeout", error))?;
-    stream
-        .set_write_timeout(Some(timeout))
-        .map_err(|error| transport_status("set write timeout", error))?;
+    let mut stream = native_h2_transport(stream, &target, tls_connector).await?;
 
     let settings = SettingsBuilder::client()
         .initial_window_size(config.initial_stream_window_size)
@@ -896,7 +1041,7 @@ fn native_h2_unary_blocking(
     connection
         .set_initial_connection_recv_window(config.initial_connection_window_size)
         .map_err(|error| Status::internal(format!("invalid HTTP/2 receive window: {error}")))?;
-    let headers = native_h2_request_headers(&target.authority, path, metadata)?;
+    let headers = native_h2_request_headers(&target.authority, target.scheme, path, metadata)?;
     let stream_id = connection
         .open_stream(headers, false)
         .map_err(|error| Status::internal(format!("open HTTP/2 request stream: {error}")))?;
@@ -906,8 +1051,9 @@ fn native_h2_unary_blocking(
 
     stream
         .write_all(CLIENT_PREFACE)
+        .await
         .map_err(|error| transport_status("write HTTP/2 client preface", error))?;
-    flush_native_h2_frames(&mut connection, &mut stream)?;
+    flush_native_h2_frames(&mut connection, &mut stream).await?;
 
     let mut codec = FrameCodec::new();
     let mut inbound = BytesMut::new();
@@ -924,7 +1070,7 @@ fn native_h2_unary_blocking(
             if let Some(received) = received {
                 accumulator.observe(stream_id, received)?;
             }
-            flush_native_h2_frames(&mut connection, &mut stream)?;
+            flush_native_h2_frames(&mut connection, &mut stream).await?;
             if accumulator.is_complete() {
                 return accumulator.finish();
             }
@@ -932,6 +1078,7 @@ fn native_h2_unary_blocking(
 
         let read = stream
             .read(&mut chunk)
+            .await
             .map_err(|error| transport_status("read HTTP/2 response", error))?;
         if read == 0 {
             return Err(Status::unavailable(
@@ -943,14 +1090,53 @@ fn native_h2_unary_blocking(
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+async fn native_h2_transport(
+    stream: TcpStream,
+    target: &NativeH2Target,
+    tls_connector: Option<TlsConnector>,
+) -> Result<NativeH2Io, Status> {
+    if !target.use_tls {
+        return Ok(NativeH2Io::Plain(stream));
+    }
+    let connector = tls_connector.ok_or_else(|| {
+        Status::failed_precondition(
+            "HTTPS gRPC transport requires an explicit caller-supplied TLS connector",
+        )
+    })?;
+
+    #[cfg(feature = "tls")]
+    {
+        let tls = connector
+            .connect(&target.server_name, stream)
+            .await
+            .map_err(|error| Status::unavailable(format!("gRPC TLS handshake failed: {error}")))?;
+        if tls.alpn_protocol() != Some(b"h2".as_slice()) {
+            return Err(Status::unavailable(
+                "gRPC TLS peer did not negotiate the required h2 ALPN protocol",
+            ));
+        }
+        Ok(NativeH2Io::Tls(tls))
+    }
+
+    #[cfg(not(feature = "tls"))]
+    {
+        let _ = (stream, connector, target.server_name.as_str());
+        Err(Status::unavailable(
+            "gRPC TLS support is disabled; rebuild with --features tls",
+        ))
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn native_h2_request_headers(
     authority: &str,
+    scheme: &str,
     path: &str,
     metadata: &Metadata,
 ) -> Result<Vec<Header>, Status> {
     let mut headers = vec![
         Header::new(":method", "POST"),
-        Header::new(":scheme", "http"),
+        Header::new(":scheme", scheme),
         Header::new(":path", path),
         Header::new(":authority", authority),
         Header::new("content-type", "application/grpc"),
@@ -985,10 +1171,13 @@ fn native_h2_request_headers(
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn flush_native_h2_frames(
+async fn flush_native_h2_frames<IO>(
     connection: &mut Connection,
-    stream: &mut TcpStream,
-) -> Result<(), Status> {
+    stream: &mut IO,
+) -> Result<(), Status>
+where
+    IO: AsyncWrite + Unpin,
+{
     let mut outbound = BytesMut::new();
     while let Some(frame) = connection.next_frame() {
         frame
@@ -998,9 +1187,11 @@ fn flush_native_h2_frames(
     if !outbound.is_empty() {
         stream
             .write_all(&outbound)
+            .await
             .map_err(|error| transport_status("write HTTP/2 frames", error))?;
         stream
             .flush()
+            .await
             .map_err(|error| transport_status("flush HTTP/2 frames", error))?;
     }
     Ok(())
@@ -1262,17 +1453,34 @@ fn validate_channel_uri(uri: &str) -> Result<(), GrpcError> {
     Ok(())
 }
 
-fn validate_channel_security(uri: &str, config: &ChannelConfig) -> Result<(), GrpcError> {
+fn validate_channel_security(
+    uri: &str,
+    config: &ChannelConfig,
+    has_tls_connector: bool,
+) -> Result<(), GrpcError> {
     let (scheme, _) = uri
         .split_once("://")
         .ok_or_else(|| GrpcError::transport("channel URI is missing a scheme separator"))?;
-    if scheme.eq_ignore_ascii_case("https") || config.use_tls {
+    let tls_requested = scheme.eq_ignore_ascii_case("https") || config.use_tls;
+    if tls_requested && channel_target_is_loopback(uri) {
         return Err(GrpcError::transport_kind(
             TransportErrorKind::ProtocolViolation,
-            "gRPC TLS channel requested, but the current gRPC client transport \
-             is loopback/localhost-only and does not negotiate TLS; use http:// \
-             loopback without ChannelBuilder::tls() until a TLS-backed gRPC \
-             transport is wired",
+            "gRPC TLS is available only on the native localhost transport; \
+             deterministic loopback channels do not negotiate TLS",
+        ));
+    }
+    if tls_requested && !has_tls_connector {
+        return Err(GrpcError::transport_kind(
+            TransportErrorKind::ProtocolViolation,
+            "gRPC TLS channel requested without an explicit TLS connector; \
+             configure ChannelBuilder::tls_connector so trust roots and ALPN \
+             policy remain caller-controlled",
+        ));
+    }
+    if has_tls_connector && !tls_requested {
+        return Err(GrpcError::transport_kind(
+            TransportErrorKind::ProtocolViolation,
+            "gRPC TLS connector supplied for a cleartext channel",
         ));
     }
     Ok(())
@@ -3205,29 +3413,18 @@ mod tests {
     }
 
     #[test]
-    fn channel_connect_rejects_tls_marked_loopback_until_tls_transport_exists() {
-        for (uri, result) in [
-            (
-                "https://LOCALHOST:50051/service",
-                futures_lite::future::block_on(Channel::connect("https://LOCALHOST:50051/service")),
-            ),
-            (
-                "HTTPS://LOCALHOST:50051/service",
-                futures_lite::future::block_on(Channel::connect("HTTPS://LOCALHOST:50051/service")),
-            ),
-            (
-                "http://loopback:50051 via .tls()",
-                futures_lite::future::block_on(
-                    Channel::builder("http://loopback:50051").tls().connect(),
-                ),
-            ),
+    fn channel_connect_requires_explicit_tls_connector() {
+        for uri in [
+            "https://LOCALHOST:50051/service",
+            "HTTPS://LOCALHOST:50051/service",
         ] {
-            let error = result.expect_err("TLS-marked gRPC channel must fail closed");
+            let error = futures_lite::future::block_on(Channel::connect(uri))
+                .expect_err("HTTPS gRPC channel without a connector must fail closed");
             match error {
                 GrpcError::Transport(TransportErrorKind::ProtocolViolation, message) => {
                     assert!(
-                        message.contains("does not negotiate TLS"),
-                        "expected TLS enforcement message for {uri}, got: {message}"
+                        message.contains("explicit TLS connector"),
+                        "expected explicit-authority message for {uri}, got: {message}"
                     );
                 }
                 other => panic!(
@@ -3235,10 +3432,16 @@ mod tests {
                 ),
             }
         }
+
+        let error = futures_lite::future::block_on(
+            Channel::builder("http://loopback:50051").tls().connect(),
+        )
+        .expect_err("deterministic loopback TLS must fail closed");
+        assert!(error.to_string().contains("loopback channels"));
     }
 
     #[test]
-    fn channel_connect_with_config_rejects_tls_until_tls_transport_exists() {
+    fn channel_connect_with_config_requires_explicit_tls_connector() {
         let config = ChannelConfig {
             use_tls: true,
             ..ChannelConfig::default()
@@ -3252,7 +3455,7 @@ mod tests {
         match error {
             GrpcError::Transport(TransportErrorKind::ProtocolViolation, message) => {
                 assert!(
-                    message.contains("does not negotiate TLS"),
+                    message.contains("explicit TLS connector"),
                     "expected TLS enforcement message, got: {message}"
                 );
             }

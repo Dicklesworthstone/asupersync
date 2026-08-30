@@ -9,8 +9,9 @@
 //! gRPC is a high-performance RPC framework that uses Protocol Buffers for
 //! serialization and typically runs over HTTP/2 transport. This implementation
 //! provides both deterministic in-memory loopback client behavior and real
-//! HTTP/2 connections to localhost, plus the surrounding framing, status,
-//! service, and interceptor surfaces:
+//! HTTP/2 connections to localhost, including HTTPS unary calls through an
+//! explicit caller-supplied [`crate::tls::TlsConnector`], plus the surrounding
+//! framing, status, service, and interceptor surfaces:
 //!
 //! - Message framing codec for gRPC over HTTP/2
 //! - All streaming patterns
@@ -28,6 +29,17 @@
 //!
 //! // Or connect to real HTTP/2 service on localhost
 //! let channel = Channel::connect("http://localhost:8080").await?;
+//!
+//! // HTTPS is explicit-authority: configure roots and mandatory gRPC ALPN,
+//! // then pass that connector to the channel builder.
+//! let connector = asupersync::tls::TlsConnector::builder()
+//!     .with_webpki_roots()
+//!     .alpn_grpc()
+//!     .build()?;
+//! let secure = Channel::builder("https://localhost:8443")
+//!     .tls_connector(connector)
+//!     .connect()
+//!     .await?;
 //!
 //! // Create a client and make a call
 //! let mut client = GrpcClient::new(channel);
