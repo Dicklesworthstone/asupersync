@@ -167,6 +167,118 @@ enum Command {
     Lab(LabArgs),
     /// Doctor tooling for deterministic workspace diagnostics
     Doctor(DoctorArgs),
+    /// Authenticated RemoteRuntime service tooling
+    #[cfg(all(feature = "remote-service", unix))]
+    Remote(RemoteArgs),
+}
+
+#[cfg(all(feature = "remote-service", unix))]
+const REMOTE_SERVICE_CONFIG_SCHEMA_VERSION: u32 = 1;
+#[cfg(all(feature = "remote-service", unix))]
+const REMOTE_SERVICE_PROTOCOL: &str = "3.0";
+#[cfg(all(feature = "remote-service", unix))]
+const REMOTE_ECHO_COMPUTATION: &str = "asupersync.remote.echo.v1";
+
+#[cfg(all(feature = "remote-service", unix))]
+#[derive(Args, Debug)]
+struct RemoteArgs {
+    #[command(subcommand)]
+    command: RemoteCommand,
+}
+
+#[cfg(all(feature = "remote-service", unix))]
+#[derive(Subcommand, Debug)]
+enum RemoteCommand {
+    /// Serve the configured static V3 computation registry over mutual TLS
+    Serve,
+}
+
+#[cfg(all(feature = "remote-service", unix))]
+#[derive(Clone, Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RemoteServiceFileConfig {
+    schema_version: u32,
+    protocol: String,
+    listen: String,
+    server_certificate_chain: PathBuf,
+    server_private_key: PathBuf,
+    client_ca_bundle: PathBuf,
+    max_frame_bytes: usize,
+    max_connections: usize,
+    tls_handshake_timeout_ms: u64,
+    initial_frame_timeout_ms: u64,
+    drain_timeout_ms: u64,
+    idempotency_retention_ms: u64,
+    max_idempotency_records_per_peer: usize,
+    peers: Vec<RemoteServicePeerConfig>,
+}
+
+#[cfg(all(feature = "remote-service", unix))]
+#[derive(Clone, Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RemoteServicePeerConfig {
+    node_id: String,
+    spki_sha256: Vec<String>,
+    computations: Vec<String>,
+}
+
+#[cfg(all(feature = "remote-service", unix))]
+#[derive(Debug, serde::Serialize)]
+struct RemoteServiceReadyOutput {
+    event: &'static str,
+    schema_version: u32,
+    protocol: &'static str,
+    listen: String,
+    registry_fingerprint: String,
+    authorized_peers: usize,
+    computations: [&'static str; 1],
+    idempotency_scope: &'static str,
+}
+
+#[cfg(all(feature = "remote-service", unix))]
+impl Outputtable for RemoteServiceReadyOutput {
+    fn human_format(&self) -> String {
+        format!(
+            "Remote computation service ready\n  Listening on: {}\n  Protocol: {}\n  Authorized peers: {}\n  Registry: {}",
+            self.listen, self.protocol, self.authorized_peers, self.registry_fingerprint
+        )
+    }
+}
+
+#[cfg(all(feature = "remote-service", unix))]
+#[derive(Debug, serde::Serialize)]
+struct RemoteServiceTerminalOutput {
+    event: &'static str,
+    phase: String,
+    active_connections: usize,
+    signals_received: usize,
+    drain_requested: bool,
+    force_close_requested: bool,
+    accepted_connections: u64,
+    capacity_rejections: u64,
+    completed_connections: u64,
+    interrupted_connections: u64,
+    failed_connections: u64,
+    panicked_connections: u64,
+    first_connection_failure: Option<String>,
+    drained_connections: usize,
+    force_closed_connections: usize,
+    shutdown_duration_ms: u64,
+}
+
+#[cfg(all(feature = "remote-service", unix))]
+impl Outputtable for RemoteServiceTerminalOutput {
+    fn human_format(&self) -> String {
+        format!(
+            "Remote computation service stopped\n  Phase: {}\n  Accepted/completed: {}/{}\n  Failed/panicked: {}/{}\n  Active connections: {}",
+            self.phase,
+            self.accepted_connections,
+            self.completed_connections,
+            self.failed_connections,
+            self.panicked_connections,
+            self.active_connections
+        )
+    }
 }
 
 #[derive(Args, Debug)]
@@ -3599,7 +3711,7 @@ fn main() {
     let color = common.color_choice();
 
     let mut output = Output::new(format).with_color(color);
-    let run_result = run(cli.command, &mut output);
+    let run_result = run(cli.command, common.config.as_deref(), &mut output);
 
     // br-asupersync-9yktkv: explicitly flush the buffered Output writer
     // before any std::process::exit path. Output is a buffered writer
@@ -3635,13 +3747,501 @@ fn main() {
     }
 }
 
-fn run(command: Command, output: &mut Output) -> Result<(), CliError> {
+fn run(command: Command, _config_path: Option<&Path>, output: &mut Output) -> Result<(), CliError> {
     match command {
         Command::Atp(args) => run_atp(args, output),
         Command::Trace(trace_args) => run_trace(trace_args, output),
         Command::Conformance(args) => run_conformance(args, output),
         Command::Lab(args) => run_lab(args, output),
         Command::Doctor(args) => run_doctor(args, output),
+        #[cfg(all(feature = "remote-service", unix))]
+        Command::Remote(args) => run_remote(args, _config_path, output),
+    }
+}
+
+#[cfg(all(feature = "remote-service", unix))]
+fn run_remote(
+    args: RemoteArgs,
+    config_path: Option<&Path>,
+    output: &mut Output,
+) -> Result<(), CliError> {
+    match args.command {
+        RemoteCommand::Serve => remote_serve(config_path, output),
+    }
+}
+
+#[cfg(all(feature = "remote-service", unix))]
+fn remote_serve(config_path: Option<&Path>, output: &mut Output) -> Result<(), CliError> {
+    use asupersync::remote::{
+        NodeId, RemoteComputationRegistry, RemoteComputationService,
+        RemoteComputationServiceConfig, RemoteOutcome, RemotePeerAdmissionPolicy,
+        RemoteProtocolVersion, RemoteServiceWireLimits,
+    };
+    use asupersync::runtime::RuntimeBuilder;
+    use asupersync::tls::{
+        Certificate, CertificateChain, CertificatePinSet, ClientAuth, PrivateKey, RootCertStore,
+        TlsAcceptorBuilder,
+    };
+    use std::net::ToSocketAddrs;
+    use std::time::Duration;
+
+    let config_path = config_path.ok_or_else(|| {
+        CliError::new(
+            "remote_service_config_required",
+            "remote serve requires --config <path>",
+        )
+        .detail("The service refuses ambient defaults; provide a versioned TOML configuration")
+        .exit_code(ExitCode::USER_ERROR)
+    })?;
+    let config = load_remote_service_config(config_path)?;
+    let listen = config
+        .listen
+        .to_socket_addrs()
+        .map_err(|err| {
+            remote_service_config_error(
+                config_path,
+                format!("listen address '{}' is invalid: {err}", config.listen),
+            )
+        })?
+        .next()
+        .ok_or_else(|| {
+            remote_service_config_error(
+                config_path,
+                format!(
+                    "listen address '{}' resolved to no endpoints",
+                    config.listen
+                ),
+            )
+        })?;
+
+    let certificate_chain = CertificateChain::from_pem_file(&config.server_certificate_chain)
+        .map_err(|err| {
+            remote_service_config_error(
+                config_path,
+                format!(
+                    "failed to load server certificate chain '{}': {err}",
+                    config.server_certificate_chain.display()
+                ),
+            )
+        })?;
+    let private_key = PrivateKey::from_pem_file(&config.server_private_key).map_err(|err| {
+        remote_service_config_error(
+            config_path,
+            format!(
+                "failed to load server private key '{}': {err}",
+                config.server_private_key.display()
+            ),
+        )
+    })?;
+    let client_ca_certificates =
+        Certificate::from_pem_file(&config.client_ca_bundle).map_err(|err| {
+            remote_service_config_error(
+                config_path,
+                format!(
+                    "failed to load client CA bundle '{}': {err}",
+                    config.client_ca_bundle.display()
+                ),
+            )
+        })?;
+    let mut client_roots = RootCertStore::empty();
+    for certificate in &client_ca_certificates {
+        client_roots.add(certificate).map_err(|err| {
+            remote_service_config_error(
+                config_path,
+                format!(
+                    "client CA bundle '{}' contains an invalid trust anchor: {err}",
+                    config.client_ca_bundle.display()
+                ),
+            )
+        })?;
+    }
+    if client_roots.is_empty() {
+        return Err(remote_service_config_error(
+            config_path,
+            "client CA bundle contains no usable trust anchors",
+        ));
+    }
+    let acceptor = TlsAcceptorBuilder::new(certificate_chain, private_key)
+        .client_auth(ClientAuth::Required(client_roots))
+        .handshake_timeout(Duration::from_millis(config.tls_handshake_timeout_ms))
+        .build()
+        .map_err(|err| {
+            remote_service_config_error(
+                config_path,
+                format!("failed to build the mutual-TLS acceptor: {err}"),
+            )
+        })?;
+
+    let mut computations = RemoteComputationRegistry::new();
+    computations
+        .register::<Vec<u8>, Vec<u8>, _, _>(REMOTE_ECHO_COMPUTATION, |_cx, invocation| async move {
+            Ok(RemoteOutcome::Success(
+                invocation.into_request().input.into_data(),
+            ))
+        })
+        .map_err(|err| {
+            CliError::new(
+                "remote_service_registry_invalid",
+                "Failed to construct the built-in remote computation registry",
+            )
+            .detail(err.to_string())
+            .exit_code(ExitCode::RUNTIME_ERROR)
+        })?;
+    let registry_fingerprint = computations.schema_registry().fingerprint().to_string();
+    let mut policy = RemotePeerAdmissionPolicy::new(
+        RemoteProtocolVersion::V3,
+        computations.schema_registry().clone(),
+    );
+    for peer in &config.peers {
+        let mut pins = CertificatePinSet::new();
+        for pin in &peer.spki_sha256 {
+            pins.add_spki_sha256_base64(pin).map_err(|err| {
+                remote_service_config_error(
+                    config_path,
+                    format!("peer '{}' has an invalid SPKI pin: {err}", peer.node_id),
+                )
+            })?;
+        }
+        policy
+            .grant_tls_peer(
+                NodeId::new(peer.node_id.clone()),
+                pins,
+                peer.computations.iter().map(String::as_str),
+            )
+            .map_err(|err| {
+                remote_service_config_error(
+                    config_path,
+                    format!("peer '{}' grant is invalid: {err}", peer.node_id),
+                )
+            })?;
+    }
+
+    let service_config = RemoteComputationServiceConfig::new()
+        .with_wire_limits(RemoteServiceWireLimits::new(config.max_frame_bytes))
+        .with_max_connections(Some(config.max_connections))
+        .with_initial_frame_timeout(Duration::from_millis(config.initial_frame_timeout_ms))
+        .with_drain_timeout(Duration::from_millis(config.drain_timeout_ms))
+        .with_idempotency_retention(Duration::from_millis(config.idempotency_retention_ms))
+        .with_max_idempotency_records_per_peer(config.max_idempotency_records_per_peer);
+    let runtime = RuntimeBuilder::multi_thread().build().map_err(|err| {
+        CliError::new(
+            "remote_service_runtime_failed",
+            "Failed to build the remote service runtime",
+        )
+        .detail(err.to_string())
+        .exit_code(ExitCode::RUNTIME_ERROR)
+    })?;
+    let service = runtime
+        .block_on(RemoteComputationService::bind(
+            listen,
+            acceptor,
+            policy,
+            computations,
+            service_config,
+        ))
+        .map_err(|err| {
+            CliError::new(
+                "remote_service_bind_failed",
+                "Failed to bind the remote computation service",
+            )
+            .detail(format!("{}: {err}", config.listen))
+            .exit_code(ExitCode::RUNTIME_ERROR)
+        })?;
+    let bound_address = service.local_addr().map_err(|err| {
+        CliError::new(
+            "remote_service_address_failed",
+            "Failed to inspect the bound remote service address",
+        )
+        .detail(err.to_string())
+        .exit_code(ExitCode::RUNTIME_ERROR)
+    })?;
+    let operator = service.handle();
+    let signals = RemoteServiceSignalThread::start(operator.clone())?;
+
+    output
+        .write(&RemoteServiceReadyOutput {
+            event: "remote_service_ready",
+            schema_version: REMOTE_SERVICE_CONFIG_SCHEMA_VERSION,
+            protocol: REMOTE_SERVICE_PROTOCOL,
+            listen: bound_address.to_string(),
+            registry_fingerprint,
+            authorized_peers: config.peers.len(),
+            computations: [REMOTE_ECHO_COMPUTATION],
+            idempotency_scope: "authenticated_peer_process_local",
+        })
+        .map_err(output_write_error("remote service readiness"))?;
+    output
+        .flush()
+        .map_err(output_write_error("remote service readiness"))?;
+
+    let service_result = runtime.block_on(async move {
+        let cx = Cx::current().expect("remote service runtime should install a root context");
+        service.run(&cx).await
+    });
+    let signals_received = signals.finish()?;
+    let report = service_result.map_err(|err| {
+        CliError::new(
+            "remote_service_failed",
+            "Remote computation service terminated with a fatal listener error",
+        )
+        .detail(err.to_string())
+        .exit_code(ExitCode::RUNTIME_ERROR)
+    })?;
+    let phase = operator.shutdown_signal().phase().to_string();
+    let active_connections = operator.active_connections();
+    let shutdown = report.shutdown();
+    let terminal = RemoteServiceTerminalOutput {
+        event: "remote_service_stopped",
+        phase,
+        active_connections,
+        signals_received,
+        drain_requested: signals_received >= 1,
+        force_close_requested: signals_received >= 2,
+        accepted_connections: report.accepted_connections(),
+        capacity_rejections: report.capacity_rejections(),
+        completed_connections: report.completed_connections(),
+        interrupted_connections: report.interrupted_connections(),
+        failed_connections: report.failed_connections(),
+        panicked_connections: report.panicked_connections(),
+        first_connection_failure: report.first_connection_failure().map(str::to_owned),
+        drained_connections: shutdown.drained,
+        force_closed_connections: shutdown.force_closed,
+        shutdown_duration_ms: u64::try_from(shutdown.duration.as_millis()).unwrap_or(u64::MAX),
+    };
+
+    if !runtime.shutdown_timeout(Duration::from_secs(5)) {
+        return Err(CliError::new(
+            "remote_service_runtime_not_quiescent",
+            "Remote service stopped but its runtime did not reach quiescence",
+        )
+        .detail("The listener and connection region stopped, but runtime shutdown exceeded 5s")
+        .exit_code(ExitCode::RUNTIME_ERROR));
+    }
+    output
+        .write(&terminal)
+        .map_err(output_write_error("remote service terminal report"))?;
+    Ok(())
+}
+
+#[cfg(all(feature = "remote-service", unix))]
+fn load_remote_service_config(path: &Path) -> Result<RemoteServiceFileConfig, CliError> {
+    let raw = fs::read_to_string(path).map_err(|err| io_error(path, &err))?;
+    let mut config: RemoteServiceFileConfig = toml::from_str(&raw)
+        .map_err(|err| remote_service_config_error(path, format!("TOML decoding failed: {err}")))?;
+    validate_remote_service_config(path, &config)?;
+    let base = path.parent().unwrap_or_else(|| Path::new("."));
+    config.server_certificate_chain = resolve_path(base, config.server_certificate_chain);
+    config.server_private_key = resolve_path(base, config.server_private_key);
+    config.client_ca_bundle = resolve_path(base, config.client_ca_bundle);
+    Ok(config)
+}
+
+#[cfg(all(feature = "remote-service", unix))]
+fn validate_remote_service_config(
+    path: &Path,
+    config: &RemoteServiceFileConfig,
+) -> Result<(), CliError> {
+    if config.schema_version != REMOTE_SERVICE_CONFIG_SCHEMA_VERSION {
+        return Err(remote_service_config_error(
+            path,
+            format!(
+                "unsupported schema_version {}; expected {}",
+                config.schema_version, REMOTE_SERVICE_CONFIG_SCHEMA_VERSION
+            ),
+        ));
+    }
+    if config.protocol != REMOTE_SERVICE_PROTOCOL {
+        return Err(remote_service_config_error(
+            path,
+            format!(
+                "unsupported protocol '{}'; expected '{}'",
+                config.protocol, REMOTE_SERVICE_PROTOCOL
+            ),
+        ));
+    }
+    if config.listen.trim().is_empty() {
+        return Err(remote_service_config_error(
+            path,
+            "listen must not be empty",
+        ));
+    }
+    for (name, value) in [
+        ("max_frame_bytes", config.max_frame_bytes),
+        ("max_connections", config.max_connections),
+        (
+            "max_idempotency_records_per_peer",
+            config.max_idempotency_records_per_peer,
+        ),
+    ] {
+        if value == 0 {
+            return Err(remote_service_config_error(
+                path,
+                format!("{name} must be nonzero"),
+            ));
+        }
+    }
+    for (name, value) in [
+        ("tls_handshake_timeout_ms", config.tls_handshake_timeout_ms),
+        ("initial_frame_timeout_ms", config.initial_frame_timeout_ms),
+        ("drain_timeout_ms", config.drain_timeout_ms),
+        ("idempotency_retention_ms", config.idempotency_retention_ms),
+    ] {
+        if value == 0 {
+            return Err(remote_service_config_error(
+                path,
+                format!("{name} must be nonzero"),
+            ));
+        }
+    }
+    if config.peers.is_empty() {
+        return Err(remote_service_config_error(
+            path,
+            "peers must contain at least one certificate-bound grant",
+        ));
+    }
+    let mut node_ids = BTreeSet::new();
+    for peer in &config.peers {
+        if peer.node_id.is_empty() || peer.node_id.trim() != peer.node_id {
+            return Err(remote_service_config_error(
+                path,
+                "peer node_id must be nonempty and contain no surrounding whitespace",
+            ));
+        }
+        if !node_ids.insert(peer.node_id.as_str()) {
+            return Err(remote_service_config_error(
+                path,
+                format!("duplicate peer node_id '{}'", peer.node_id),
+            ));
+        }
+        if peer.spki_sha256.is_empty() {
+            return Err(remote_service_config_error(
+                path,
+                format!("peer '{}' must have at least one SPKI pin", peer.node_id),
+            ));
+        }
+        if peer.computations.is_empty() {
+            return Err(remote_service_config_error(
+                path,
+                format!(
+                    "peer '{}' must authorize at least one computation",
+                    peer.node_id
+                ),
+            ));
+        }
+        let mut computation_names = BTreeSet::new();
+        for computation in &peer.computations {
+            if computation != REMOTE_ECHO_COMPUTATION {
+                return Err(remote_service_config_error(
+                    path,
+                    format!(
+                        "peer '{}' names unknown computation '{computation}'",
+                        peer.node_id
+                    ),
+                ));
+            }
+            if !computation_names.insert(computation.as_str()) {
+                return Err(remote_service_config_error(
+                    path,
+                    format!(
+                        "peer '{}' repeats computation '{computation}'",
+                        peer.node_id
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(all(feature = "remote-service", unix))]
+fn remote_service_config_error(path: &Path, detail: impl Into<String>) -> CliError {
+    CliError::new(
+        "remote_service_config_invalid",
+        "Remote service configuration is invalid",
+    )
+    .detail(detail.into())
+    .context("path", path.display().to_string())
+    .exit_code(ExitCode::USER_ERROR)
+}
+
+#[cfg(all(feature = "remote-service", unix))]
+struct RemoteServiceSignalThread {
+    handle: signal_hook::iterator::Handle,
+    join: Option<std::thread::JoinHandle<()>>,
+    received: Arc<AtomicUsize>,
+}
+
+#[cfg(all(feature = "remote-service", unix))]
+impl RemoteServiceSignalThread {
+    fn start(
+        operator: asupersync::remote::RemoteComputationServiceHandle,
+    ) -> Result<Self, CliError> {
+        let mut signals = signal_hook::iterator::Signals::new([
+            signal_hook::consts::SIGINT,
+            signal_hook::consts::SIGTERM,
+        ])
+        .map_err(|err| {
+            CliError::new(
+                "remote_service_signal_failed",
+                "Failed to install remote service signal handlers",
+            )
+            .detail(err.to_string())
+            .exit_code(ExitCode::RUNTIME_ERROR)
+        })?;
+        let handle = signals.handle();
+        let received = Arc::new(AtomicUsize::new(0));
+        let thread_received = Arc::clone(&received);
+        let join = std::thread::Builder::new()
+            .name("asupersync-remote-signals".to_string())
+            .spawn(move || {
+                for _signal in signals.forever() {
+                    let prior = thread_received.fetch_add(1, Ordering::AcqRel);
+                    if prior == 0 {
+                        let _ = operator.begin_drain();
+                    } else {
+                        operator.force_close();
+                        break;
+                    }
+                }
+            })
+            .map_err(|err| {
+                handle.close();
+                CliError::new(
+                    "remote_service_signal_failed",
+                    "Failed to start the remote service signal thread",
+                )
+                .detail(err.to_string())
+                .exit_code(ExitCode::RUNTIME_ERROR)
+            })?;
+        Ok(Self {
+            handle,
+            join: Some(join),
+            received,
+        })
+    }
+
+    fn finish(mut self) -> Result<usize, CliError> {
+        self.handle.close();
+        if let Some(join) = self.join.take() {
+            join.join().map_err(|_| {
+                CliError::new(
+                    "remote_service_signal_panicked",
+                    "Remote service signal thread panicked",
+                )
+                .exit_code(ExitCode::RUNTIME_ERROR)
+            })?;
+        }
+        Ok(self.received.load(Ordering::Acquire))
+    }
+}
+
+#[cfg(all(feature = "remote-service", unix))]
+impl Drop for RemoteServiceSignalThread {
+    fn drop(&mut self) {
+        self.handle.close();
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
     }
 }
 
@@ -12644,6 +13244,90 @@ mod tests {
             String::from_utf8(self.inner.lock().expect("lock shared write").clone())
                 .expect("shared write content should be utf8")
         }
+    }
+
+    #[cfg(all(feature = "remote-service", unix))]
+    fn valid_remote_service_file_config() -> RemoteServiceFileConfig {
+        RemoteServiceFileConfig {
+            schema_version: REMOTE_SERVICE_CONFIG_SCHEMA_VERSION,
+            protocol: REMOTE_SERVICE_PROTOCOL.to_string(),
+            listen: "127.0.0.1:0".to_string(),
+            server_certificate_chain: PathBuf::from("service.crt"),
+            server_private_key: PathBuf::from("service.key"),
+            client_ca_bundle: PathBuf::from("client-ca.crt"),
+            max_frame_bytes: 64 * 1024,
+            max_connections: 8,
+            tls_handshake_timeout_ms: 1_000,
+            initial_frame_timeout_ms: 1_000,
+            drain_timeout_ms: 1_000,
+            idempotency_retention_ms: 30_000,
+            max_idempotency_records_per_peer: 32,
+            peers: vec![RemoteServicePeerConfig {
+                node_id: "origin-a".to_string(),
+                spki_sha256: vec!["AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string()],
+                computations: vec![REMOTE_ECHO_COMPUTATION.to_string()],
+            }],
+        }
+    }
+
+    #[cfg(all(feature = "remote-service", unix))]
+    #[test]
+    fn remote_service_config_validation_fails_closed() {
+        let path = Path::new("remote-service.toml");
+        let mut config = valid_remote_service_file_config();
+        validate_remote_service_config(path, &config).expect("baseline config should validate");
+
+        config.protocol = "2.0".to_string();
+        let error = validate_remote_service_config(path, &config)
+            .expect_err("wrong protocol must fail closed");
+        assert!(error.detail.contains("unsupported protocol"));
+
+        config = valid_remote_service_file_config();
+        config.max_connections = 0;
+        let error = validate_remote_service_config(path, &config)
+            .expect_err("zero connection cap must fail closed");
+        assert!(error.detail.contains("max_connections must be nonzero"));
+
+        config = valid_remote_service_file_config();
+        config.peers.push(config.peers[0].clone());
+        let error = validate_remote_service_config(path, &config)
+            .expect_err("duplicate node IDs must fail closed");
+        assert!(error.detail.contains("duplicate peer node_id"));
+
+        config = valid_remote_service_file_config();
+        config.peers[0].computations = vec!["unregistered.operation".to_string()];
+        let error = validate_remote_service_config(path, &config)
+            .expect_err("unknown computations must fail closed");
+        assert!(error.detail.contains("unknown computation"));
+    }
+
+    #[cfg(all(feature = "remote-service", unix))]
+    #[test]
+    fn remote_service_config_rejects_unknown_toml_fields() {
+        let raw = r#"
+schema_version = 1
+protocol = "3.0"
+listen = "127.0.0.1:0"
+server_certificate_chain = "service.crt"
+server_private_key = "service.key"
+client_ca_bundle = "client-ca.crt"
+max_frame_bytes = 65536
+max_connections = 8
+tls_handshake_timeout_ms = 1000
+initial_frame_timeout_ms = 1000
+drain_timeout_ms = 1000
+idempotency_retention_ms = 30000
+max_idempotency_records_per_peer = 32
+ambient_authority = true
+
+[[peers]]
+node_id = "origin-a"
+spki_sha256 = ["AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="]
+computations = ["asupersync.remote.echo.v1"]
+"#;
+        let error = toml::from_str::<RemoteServiceFileConfig>(raw)
+            .expect_err("unknown configuration fields must be rejected");
+        assert!(error.to_string().contains("unknown field"));
     }
 
     impl Write for SharedWrite {

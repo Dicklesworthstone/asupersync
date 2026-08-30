@@ -1803,18 +1803,61 @@ never stdout/stderr.
 
 ### 5) Distributed Regions (conceptual)
 
-The distributed API is in-progress. The intent is to provide region-scoped
-fault tolerance with explicit leases and idempotency. Today there are two
-entrypoints: `distributed` for region snapshot/replication/recovery, and
-`remote` for named computations with leases and idempotency. The `remote`
-surface now has an explicit transport-agnostic contract in `src/remote.rs`:
-message schemas, origin/remote state machines, idempotency, lease handling,
-and capability gating are defined there. The core crate still separates
-transport from protocol, so callers must attach a `RemoteRuntime` /
-`RemoteTransport` implementation or use the deterministic no-runtime fallback.
-All remote operations require `RemoteCap` from `Cx` (no closure shipping).
+The distributed API provides region-scoped fault-tolerance primitives with
+explicit leases and idempotency. There are two entrypoints: `distributed` for
+region snapshot/replication/recovery, and `remote` for named computations with
+leases and idempotency. The `remote` surface defines message schemas,
+origin/remote state machines, idempotency, lease handling, capability gating,
+a native TCP+mTLS V3 client/service, and `NativeRemoteRuntime`. Callers can
+attach their own `RemoteRuntime` / `RemoteTransport`, use the native V3 route,
+or exercise the deterministic no-runtime fallback. All remote operations
+require `RemoteCap` from `Cx`; the protocol never ships closures.
 
-The shipped proof tier is protocol/state-machine plus two transport proofs.
+Unix builds also expose a supported static process boundary behind the
+additive `remote-service` feature:
+
+```bash
+asupersync --format stream-json --config /etc/asupersync/remote.toml remote serve
+```
+
+The command requires a strict `schema_version = 1`, `protocol = "3.0"` TOML
+file. It loads a server certificate/key and client CA bundle, requires mutual
+TLS, and binds each configured logical `node_id` to an enforcing set of SPKI
+SHA-256 pins plus an exact computation allowlist. The current supported process
+registry contains only `asupersync.remote.echo.v1` (`Vec<u8> -> Vec<u8>`):
+
+```toml
+schema_version = 1
+protocol = "3.0"
+listen = "127.0.0.1:7443"
+server_certificate_chain = "/run/secrets/remote-server.crt"
+server_private_key = "/run/secrets/remote-server.key"
+client_ca_bundle = "/run/secrets/client-ca.crt"
+max_frame_bytes = 1048576
+max_connections = 256
+tls_handshake_timeout_ms = 5000
+initial_frame_timeout_ms = 5000
+drain_timeout_ms = 30000
+idempotency_retention_ms = 300000
+max_idempotency_records_per_peer = 1024
+
+[[peers]]
+node_id = "origin-a"
+spki_sha256 = ["BASE64_ENCODED_32_BYTE_SPKI_SHA256"]
+computations = ["asupersync.remote.echo.v1"]
+```
+
+Unknown fields and versions, zero bounds, duplicate/empty peer grants,
+unregistered computations, invalid pins, and unusable TLS files are rejected
+before bind. The TLS-handshake and initial-frame deadlines release capacity
+held by unauthenticated or silent authenticated peers. Relative TLS paths
+resolve against the config directory. A flushed `remote_service_ready` record
+is the readiness boundary. The first SIGINT or
+SIGTERM begins graceful drain; a second signal force-closes outstanding work.
+The terminal record is emitted only after connection-region and runtime
+quiescence. Never place private-key bytes in configuration diagnostics or logs.
+
+The shipped proof tier is protocol/state-machine plus three transport tiers.
 `remote_virtual_lifecycle_proof_exercises_runtime_transport_and_protocol` keeps
 the deterministic lab baseline. `tests/remote_transport_lifecycle_contract.rs`
 adds a production-transport-backed loopback proof through
@@ -1823,9 +1866,15 @@ adds a production-transport-backed loopback proof through
 cancellation before ack, cancellation while running, lease renewal, lease
 expiry, idempotent duplicate handling, send-failure cleanup, receive EOF,
 delayed ack, malformed envelope cleanup, deterministic fallback, capability
-denial, required structured logs, and trace emission. Deployment discovery,
-TLS/authentication, WAN retry policy, and a frozen production wire format remain
-adapter-specific responsibilities, not blanket core-runtime claims.
+denial, required structured logs, and trace emission. The same contract now
+also launches the CLI as a separate OS process, waits on causal readiness,
+proves a certificate-authenticated but unauthorized NodeId is refused, proves
+an authorized echo over real mTLS, verifies both admission deadlines release
+the sole connection slot, sends two SIGTERMs around a live stalled session,
+and verifies forced terminal quiescence. This is localhost cross-process evidence, not discovery,
+multi-host/WAN evidence, Windows service control, arbitrary application
+registry hosting, or restart-durable idempotency. V3 retry/deduplication state
+is process-local; ambiguous delivery must remain fail-closed across restart.
 
 ---
 

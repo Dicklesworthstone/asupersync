@@ -170,11 +170,11 @@
         "artifacts/wave2/remote_transport_lifecycle_evidence.json"
       ],
       "proof_commands": [
-        "rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wave2_remote_transport_lifecycle cargo test -p asupersync --test remote_transport_lifecycle_contract --features test-internals -- --nocapture",
+        "rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wave2_remote_transport_lifecycle cargo test -p asupersync --test remote_transport_lifecycle_contract --features remote-service,test-internals -- --nocapture",
         "bash scripts/run_remote_transport_lifecycle_evidence.sh --run-id wave2-remote-transport --timeout-sec 180"
       ],
       "assumptions": [
-        "Deployment discovery, TLS/authentication, WAN retry policy, and stable production wire format remain adapter-scoped."
+        "Discovery, multi-host/WAN policy, arbitrary application registries, restart-durable idempotency, and frozen cross-version wire compatibility remain outside this localhost process proof."
       ],
       "missing_evidence": [],
       "missing_evidence_disposition": "none"

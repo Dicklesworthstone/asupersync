@@ -973,13 +973,15 @@ cross-compiling to `x86_64-pc-windows-gnu` also needs MinGW available because
 
 Asupersync's distributed runtime surface is designed around the same
 invariants as local execution: explicit ownership, explicit cancellation, and
-deterministic state transitions. Today the core crate ships the remote
-protocol/state-machine surface plus capability, lease, idempotency, and saga
-contracts. The shipped proof tier now includes both the deterministic
-virtual/lab baseline and a production-transport-backed loopback proof through
-`asupersync::net::TcpListener` / `TcpStream`. Broader deployment concerns such
-as discovery, TLS/authentication, WAN retry policy, and a frozen production wire
-format remain adapter-specific rather than blanket core-runtime claims.
+deterministic state transitions. The core crate ships the remote
+protocol/state-machine surface, capability, lease, idempotency, saga contracts,
+the native TCP+mTLS V3 client/service transport, and `NativeRemoteRuntime`.
+Unix builds can additionally enable `remote-service` to run a supported static
+process host. That host binds the built-in `asupersync.remote.echo.v1`
+diagnostic computation to an exact protocol/registry fingerprint and explicit
+certificate-pinned peer grants. Discovery, multi-host/WAN policy, arbitrary
+application registries, and restart-durable idempotency remain open deployment
+concerns rather than blanket core-runtime claims.
 
 | Primitive | Location | Runtime Behavior |
 |-----------|----------|------------------|
@@ -989,6 +991,8 @@ format remain adapter-specific rather than blanket core-runtime claims.
 | Session-typed protocol | `src/remote.rs` | Origin/remote state machines validate legal spawn/ack/cancel/result/renewal transitions |
 | Logical-time envelopes | `src/remote.rs` | Protocol messages carry logical clock metadata for causal correlation |
 | Saga compensations | `src/remote.rs` | Forward steps and compensations are tracked as a structured rollback flow for distributed workflows |
+| Native V3 runtime | `src/remote.rs` | `NativeRemoteRuntime` maps region-owned remote handles onto bounded TCP+mTLS sessions, propagates cancel/lease traffic, and drains owned operations during close |
+| Static service process | `asupersync --config ... remote serve` | Unix `remote-service` feature; strict TOML, mutual TLS, certificate-bound grants, flushed readiness/terminal records, SIGINT/SIGTERM drain, and second-signal force-close |
 
 The transport surface is deliberately separated from protocol state machines,
 so message semantics can be tested independently of network backend details.
@@ -997,6 +1001,50 @@ so message semantics can be tested independently of network backend details.
 cancellation while running, lease renewal, lease expiry, idempotency replay,
 send failure, receive EOF, malformed envelope cleanup, delayed ack ordering,
 capability denial, and deterministic no-runtime fallback behavior.
+
+### Running the authenticated static service
+
+Build the `asupersync` binary with the additive `remote-service` feature, then
+provide an explicit versioned TOML file. Relative certificate paths resolve
+from the configuration file's directory. Unknown fields, unsupported protocol
+or schema versions, zero resource limits, empty grants, duplicate peer IDs,
+invalid pins, unknown computations, and unreadable/empty TLS material all fail
+closed. Nonzero TLS-handshake and initial-frame deadlines prevent unauthenticated
+or silent authenticated sockets from retaining every connection slot.
+
+```toml
+schema_version = 1
+protocol = "3.0"
+listen = "127.0.0.1:7443"
+server_certificate_chain = "/run/secrets/remote-server.crt"
+server_private_key = "/run/secrets/remote-server.key"
+client_ca_bundle = "/run/secrets/client-ca.crt"
+max_frame_bytes = 1048576
+max_connections = 256
+tls_handshake_timeout_ms = 5000
+initial_frame_timeout_ms = 5000
+drain_timeout_ms = 30000
+idempotency_retention_ms = 300000
+max_idempotency_records_per_peer = 1024
+
+[[peers]]
+node_id = "origin-a"
+spki_sha256 = ["BASE64_ENCODED_32_BYTE_SPKI_SHA256"]
+computations = ["asupersync.remote.echo.v1"]
+```
+
+```bash
+asupersync --format stream-json --config /etc/asupersync/remote.toml remote serve
+```
+
+The process flushes a `remote_service_ready` record only after the listener is
+bound. The first SIGINT or SIGTERM closes admission and drains structured
+connection work; a second signal force-closes it. Successful exit follows a
+`remote_service_stopped` record with terminal connection, drain, and phase
+accounting. V3 deduplication is authenticated-peer scoped but process-local:
+after a restart, callers must not retry an operation whose delivery outcome is
+ambiguous. This host is a reference process boundary for the compiled-in echo
+operation, not dynamic plugin loading or closure shipping.
 
 ---
 
@@ -1500,6 +1548,7 @@ Asupersync is feature-light by default; the lab runtime is available without fla
 | `tls` | TLS support via rustls | No |
 | `tls-native-roots` | TLS with native root certs | No |
 | `tls-webpki-roots` | TLS with webpki root certs | No |
+| `remote-service` | Unix static RemoteRuntime V3 process host (`cli` + `tls`) | No |
 | `sqlite` | SQLite async wrapper with blocking pool bridge | No |
 | `postgres` | PostgreSQL async wire-protocol client | No |
 | `mysql` | MySQL async wire-protocol client | No |
@@ -1863,7 +1912,7 @@ JS/TS packages GA for browser main-thread and dedicated-worker consumers; Rust b
 | Database clients (SQLite, PostgreSQL, MySQL) | ✅ Implemented |
 | Actor supervision (GenServer, links, monitors) | ✅ Implemented |
 | DPOR-style race-guided seed exploration | ⚠️ Implemented as trace analysis, seed derivation, and equivalence-class telemetry; no exact-prefix backtracking or completeness claim |
-| Distributed runtime (remote tasks, sagas, leases, recovery) | Protocol/state-machine, lease, idempotency, and saga surfaces implemented; virtual/lab baseline plus production TCP loopback RemoteRuntime lifecycle proof shipped; deployment discovery, TLS/authentication, WAN retry policy, and stable production wire format remain adapter-scoped |
+| Distributed runtime (remote tasks, sagas, leases, recovery) | Protocol/state-machine, lease, idempotency, saga, native V3 TCP+mTLS runtime/service, and Unix static process host implemented; deterministic, in-process transport, and cross-process localhost proofs shipped. Discovery, multi-host/WAN proof, arbitrary registries, and restart-durable idempotency remain open. |
 | RaptorQ fountain coding for snapshot distribution | ✅ Implemented |
 | Formal methods (TLA+ export + Lean-checked model-invariant coverage) | ⚠️ Partial implementation (Lean checks six abstract-model invariants; no production-Rust refinement proof or blanket adapter/protocol proof) |
 | Browser Edition (WASM, JS/TS consumers) | ✅ Implemented for browser main-thread and dedicated-worker consumers (single-threaded, event-loop-driven) |

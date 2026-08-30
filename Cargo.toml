@@ -217,6 +217,9 @@ cli = [
     "config-file",
     "tracing-integration",
 ]
+# Supported Unix process host for the authenticated RemoteRuntime V3 service.
+# Kept additive so plain CLI consumers do not inherit TLS or daemon surfaces.
+remote-service = ["cli", "tls"]
 # Enable the small standalone `atp` file-transfer binary.
 #
 # Keep TLS bundled with the CLI feature: `--transport quic` is a first-class ATP

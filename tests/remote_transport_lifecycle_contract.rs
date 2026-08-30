@@ -14,12 +14,15 @@ use asupersync::remote::{
 #[cfg(feature = "tls")]
 use asupersync::remote::{
     NativeRemoteRoute, NativeRemoteRuntime, NativeRemoteRuntimeConfig, RemoteComputationClient,
-    RemoteComputationClientConfig, RemoteComputationClientError, RemoteComputationService,
-    RemoteComputationServiceConfig, RemoteComputationServiceError, RemoteComputationSessionStart,
-    RemoteServiceRejectionCode, RemoteServiceSessionError, RemoteServiceSessionEvent,
-    RemoteServiceWireLimits, RemoteServiceWireOutcome, RemoteServiceWireRequest,
-    RemoteServiceWireResponse, call_tls_computation_once, serve_tls_computation_once,
+    RemoteComputationClientConfig, RemoteComputationClientError, RemoteComputationListenerError,
+    RemoteComputationService, RemoteComputationServiceConfig, RemoteComputationServiceError,
+    RemoteComputationSessionStart, RemoteServiceRejectionCode, RemoteServiceSessionError,
+    RemoteServiceSessionEvent, RemoteServiceWireLimits, RemoteServiceWireOutcome,
+    RemoteServiceWireRequest, RemoteServiceWireResponse, call_tls_computation_once,
+    serve_tls_computation_once,
 };
+#[cfg(all(feature = "remote-service", unix))]
+use asupersync::runtime::Runtime;
 #[cfg(feature = "tls")]
 use asupersync::runtime::RuntimeBuilder;
 #[cfg(feature = "tls")]
@@ -2073,6 +2076,448 @@ fn native_remote_runtime_drives_spawn_capacity_cancel_and_quiescent_close() {
     assert_eq!(operator.active_connections(), 0);
 }
 
+#[cfg(all(feature = "remote-service", unix))]
+struct RemoteServiceChildGuard {
+    child: Option<std::process::Child>,
+}
+
+#[cfg(all(feature = "remote-service", unix))]
+impl RemoteServiceChildGuard {
+    fn new(child: std::process::Child) -> Self {
+        Self { child: Some(child) }
+    }
+
+    fn id(&self) -> u32 {
+        self.child
+            .as_ref()
+            .expect("remote service child should still be owned")
+            .id()
+    }
+
+    fn wait_timeout(&mut self, timeout: Duration) -> std::process::ExitStatus {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            match self
+                .child
+                .as_mut()
+                .expect("remote service child should still be owned")
+                .try_wait()
+            {
+                Ok(Some(status)) => {
+                    self.child.take();
+                    return status;
+                }
+                Ok(None) => {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "remote service child did not exit within {timeout:?}"
+                    );
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => panic!("remote service child wait failed: {error}"),
+            }
+        }
+    }
+}
+
+#[cfg(all(feature = "remote-service", unix))]
+impl Drop for RemoteServiceChildGuard {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+#[cfg(all(feature = "remote-service", unix))]
+fn recv_remote_service_event(
+    lines: &std::sync::mpsc::Receiver<Result<String, String>>,
+    expected_event: &str,
+    timeout: Duration,
+) -> serde_json::Value {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        assert!(
+            !remaining.is_zero(),
+            "remote service never emitted event '{expected_event}'"
+        );
+        let line = lines
+            .recv_timeout(remaining)
+            .unwrap_or_else(|error| {
+                panic!("remote service output ended before '{expected_event}': {error}")
+            })
+            .unwrap_or_else(|error| panic!("remote service stdout read failed: {error}"));
+        let value: serde_json::Value = serde_json::from_str(&line).unwrap_or_else(|error| {
+            panic!("remote service emitted invalid JSON '{line}': {error}")
+        });
+        if value.get("event").and_then(serde_json::Value::as_str) == Some(expected_event) {
+            return value;
+        }
+    }
+}
+
+#[cfg(all(feature = "remote-service", unix))]
+fn run_remote_service_cli_session(
+    runtime: &Runtime,
+    client: &RemoteComputationClient,
+    request: &RemoteServiceWireRequest,
+) -> Result<RemoteServiceWireResponse, String> {
+    runtime.block_on(async {
+        let cx = Cx::current().expect("remote CLI client should have a root context");
+        let started = client
+            .start_session(&cx, request)
+            .await
+            .map_err(|error| error.to_string())?;
+        match started {
+            RemoteComputationSessionStart::Running(session) => {
+                session.wait(&cx).await.map_err(|error| error.to_string())
+            }
+            RemoteComputationSessionStart::Terminal(response) => Ok(response),
+            _ => Err("remote CLI returned an unknown session-start variant".to_string()),
+        }
+    })
+}
+
+#[cfg(all(feature = "remote-service", unix))]
+#[test]
+fn remote_service_cli_hosts_mtls_v3_and_drains_cross_process() {
+    use asupersync::remote::RemoteComputationSessionStart;
+    use std::io::BufRead;
+    use std::process::Stdio;
+
+    const AUTHORIZED_NODE: &str = "remote-cli-authorized";
+    const ECHO_COMPUTATION: &str = "asupersync.remote.echo.v1";
+
+    let certificates = Certificate::from_pem(TEST_CERT_PEM).expect("TLS fixture should parse");
+    let peer_certificate = certificates
+        .first()
+        .expect("TLS fixture should contain a leaf certificate")
+        .clone();
+    let certificate_chain =
+        CertificateChain::from_pem(TEST_CERT_PEM).expect("TLS certificate chain should parse");
+    let private_key = PrivateKey::from_pem(TEST_KEY_PEM).expect("TLS private key should parse");
+    let spki_pin = CertificatePin::compute_spki_sha256(&peer_certificate)
+        .expect("TLS fixture should produce an SPKI pin")
+        .to_base64();
+
+    let temp = tempfile::tempdir().expect("remote service fixture directory should exist");
+    let certificate_path = temp.path().join("service.crt");
+    let private_key_path = temp.path().join("service.key");
+    let ca_path = temp.path().join("client-ca.crt");
+    let config_path = temp.path().join("remote-service.toml");
+    fs::write(&certificate_path, TEST_CERT_PEM).expect("service certificate should be written");
+    fs::write(&private_key_path, TEST_KEY_PEM).expect("service key should be written");
+    fs::write(&ca_path, TEST_CERT_PEM).expect("client CA should be written");
+    fs::write(
+        &config_path,
+        format!(
+            "schema_version = 1\nprotocol = \"3.0\"\nlisten = \"127.0.0.1:0\"\nserver_certificate_chain = \"{}\"\nserver_private_key = \"{}\"\nclient_ca_bundle = \"{}\"\nmax_frame_bytes = 65536\nmax_connections = 1\ntls_handshake_timeout_ms = 200\ninitial_frame_timeout_ms = 2000\ndrain_timeout_ms = 5000\nidempotency_retention_ms = 30000\nmax_idempotency_records_per_peer = 32\n\n[[peers]]\nnode_id = \"{AUTHORIZED_NODE}\"\nspki_sha256 = [\"{spki_pin}\"]\ncomputations = [\"{ECHO_COMPUTATION}\"]\n",
+            certificate_path.display(),
+            private_key_path.display(),
+            ca_path.display(),
+        ),
+    )
+    .expect("remote service config should be written");
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_asupersync"))
+        .args([
+            "--format",
+            "stream-json",
+            "--config",
+            config_path
+                .to_str()
+                .expect("temporary config path should be UTF-8"),
+            "remote",
+            "serve",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("remote service child should start");
+    let stdout = child
+        .stdout
+        .take()
+        .expect("remote service stdout should be piped");
+    let stderr = child
+        .stderr
+        .take()
+        .expect("remote service stderr should be piped");
+    let (line_tx, line_rx) = std::sync::mpsc::channel();
+    let stdout_reader = thread::spawn(move || {
+        for line in std::io::BufReader::new(stdout).lines() {
+            let line = line.map_err(|error| error.to_string());
+            if line_tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let stderr_reader = thread::spawn(move || {
+        let mut reader = std::io::BufReader::new(stderr);
+        let mut captured = String::new();
+        std::io::Read::read_to_string(&mut reader, &mut captured)
+            .expect("remote service stderr should be readable");
+        captured
+    });
+    let mut child = RemoteServiceChildGuard::new(child);
+
+    let ready =
+        recv_remote_service_event(&line_rx, "remote_service_ready", Duration::from_secs(10));
+    assert_eq!(ready["protocol"], "3.0");
+    assert_eq!(ready["authorized_peers"], 1);
+    assert_eq!(
+        ready["idempotency_scope"],
+        "authenticated_peer_process_local"
+    );
+    let endpoint: SocketAddr = ready["listen"]
+        .as_str()
+        .expect("ready event should contain its listener address")
+        .parse()
+        .expect("ready listener address should parse");
+
+    let connector = TlsConnectorBuilder::new()
+        .add_root_certificate(&peer_certificate)
+        .identity(certificate_chain, private_key)
+        .build()
+        .expect("remote CLI mTLS connector should build");
+    let stalled_connector = connector.clone();
+    let final_stalled_connector = connector.clone();
+    let client = RemoteComputationClient::new(
+        endpoint,
+        "localhost",
+        connector,
+        RemoteComputationClientConfig::new()
+            .with_max_attempts(1)
+            .with_attempt_timeout(Duration::from_secs(3)),
+    )
+    .expect("remote CLI client should validate");
+    let mut schemas = ComputationSchemaRegistry::new();
+    schemas
+        .register_typed::<Vec<u8>, Vec<u8>>(ECHO_COMPUTATION)
+        .expect("remote CLI echo schema should register");
+    let fingerprint = schemas.fingerprint();
+    let unauthorized_request = remote_service_wire_request_with(
+        RemotePeerHello::new(
+            NodeId::new("remote-cli-unauthorized"),
+            RemoteProtocolVersion::V3,
+            fingerprint,
+        ),
+        ECHO_COMPUTATION,
+        8801,
+        0x8801,
+        b"must-not-dispatch",
+    );
+    let authorized_hello = RemotePeerHello::new(
+        NodeId::new(AUTHORIZED_NODE),
+        RemoteProtocolVersion::V3,
+        fingerprint,
+    );
+    let client_runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("remote CLI client runtime should build");
+    client_runtime.block_on(async {
+        let cx = Cx::current().expect("remote CLI client should have a root context");
+        let unauthorized = client
+            .start_session(&cx, &unauthorized_request)
+            .await
+            .expect("unauthorized request should receive a typed refusal");
+        match unauthorized {
+            RemoteComputationSessionStart::Terminal(RemoteServiceWireResponse::Rejected {
+                code: RemoteServiceRejectionCode::AdmissionDenied,
+                ..
+            }) => {}
+            RemoteComputationSessionStart::Terminal(other) => {
+                panic!("unexpected unauthorized response: {other:?}")
+            }
+            RemoteComputationSessionStart::Running(_) => {
+                panic!("unauthorized peer must not start a remote computation")
+            }
+            _ => panic!("unauthorized request returned an unknown session-start variant"),
+        }
+    });
+
+    let assert_echo = |task_id: u64, expected_payload: &[u8]| {
+        let request = remote_service_wire_request_with(
+            authorized_hello.clone(),
+            ECHO_COMPUTATION,
+            task_id,
+            u128::from(task_id),
+            expected_payload,
+        );
+        let response = run_remote_service_cli_session(&client_runtime, &client, &request)
+            .unwrap_or_else(|error| panic!("authorized echo {task_id} failed: {error}"));
+        assert!(matches!(
+            response,
+            RemoteServiceWireResponse::Outcome {
+                remote_task_id,
+                outcome: RemoteServiceWireOutcome::Success(ref actual_payload),
+            } if remote_task_id == task_id && actual_payload.as_slice() == expected_payload
+        ));
+    };
+    assert_echo(8802, b"cross-process-native-echo");
+
+    // With a one-connection cap, a raw TCP peer occupies the only slot until
+    // the configured TLS handshake deadline closes it. EOF is the causal
+    // recovery signal; the next authorized exchange then proves the slot was
+    // returned rather than merely timing out the test.
+    let mut raw_stall = std::net::TcpStream::connect(endpoint)
+        .expect("raw stalled peer should complete its TCP handshake");
+    raw_stall
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .expect("raw stalled peer should set a bounded read");
+    let mut raw_byte = [0_u8; 1];
+    match std::io::Read::read(&mut raw_stall, &mut raw_byte) {
+        Ok(0) => {}
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::ConnectionAborted
+                    | io::ErrorKind::ConnectionReset
+                    | io::ErrorKind::BrokenPipe
+                    | io::ErrorKind::NotConnected
+                    | io::ErrorKind::UnexpectedEof
+            ) => {}
+        Ok(read) => panic!("raw stalled peer unexpectedly received {read} TLS bytes"),
+        Err(error) => panic!("TLS handshake deadline did not close raw stalled peer: {error}"),
+    }
+    drop(raw_stall);
+    assert_echo(8803, b"capacity-after-handshake-timeout");
+
+    // A fully authenticated peer that sends no first frame is separately
+    // bounded. Completing the TLS handshake proves this connection is the one
+    // admitted slot; EOF proves the initial-frame deadline released it.
+    let mut framed_stall = client_runtime.block_on(async {
+        let stream = TcpStream::connect(endpoint)
+            .await
+            .expect("authenticated stalled peer should connect");
+        stalled_connector
+            .connect("localhost", stream)
+            .await
+            .expect("authenticated stalled peer should complete mutual TLS")
+    });
+    let stalled_read = client_runtime.block_on(async {
+        let cx = Cx::current().expect("remote CLI client should have a root context");
+        let mut byte = [0_u8; 1];
+        asupersync::time::timeout(
+            cx.now(),
+            Duration::from_secs(3),
+            framed_stall.read(&mut byte),
+        )
+        .await
+        .expect("initial-frame deadline should close the silent peer within three seconds")
+    });
+    match stalled_read {
+        Ok(0) => {}
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::ConnectionAborted
+                    | io::ErrorKind::ConnectionReset
+                    | io::ErrorKind::BrokenPipe
+                    | io::ErrorKind::NotConnected
+                    | io::ErrorKind::UnexpectedEof
+            ) => {}
+        Ok(read) => panic!("silent authenticated peer unexpectedly received {read} bytes"),
+        Err(error) => panic!("initial-frame deadline did not close silent peer: {error}"),
+    }
+    drop(framed_stall);
+    assert_echo(8804, b"capacity-after-initial-frame-timeout");
+
+    // Hold one authenticated session before its first frame so the two-signal
+    // path is exercised against live owned work. Listener refusal after the
+    // first signal is the causal drain boundary; the second signal then forces
+    // the still-live connection task closed before its two-second frame timer.
+    let final_stall = client_runtime.block_on(async {
+        let stream = TcpStream::connect(endpoint)
+            .await
+            .expect("final stalled peer should connect");
+        final_stalled_connector
+            .connect("localhost", stream)
+            .await
+            .expect("final stalled peer should complete mutual TLS")
+    });
+
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(
+            i32::try_from(child.id()).expect("remote service child PID should fit i32"),
+        ),
+        nix::sys::signal::Signal::SIGTERM,
+    )
+    .expect("first SIGTERM should begin remote service drain");
+    let admission_close_deadline = std::time::Instant::now() + Duration::from_secs(1);
+    loop {
+        match std::net::TcpStream::connect_timeout(&endpoint, Duration::from_millis(25)) {
+            Err(error) if error.kind() == io::ErrorKind::ConnectionRefused => break,
+            Ok(stream) => drop(stream),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::TimedOut
+                        | io::ErrorKind::WouldBlock
+                        | io::ErrorKind::ConnectionReset
+                ) => {}
+            Err(error) => panic!("unexpected admission-close probe failure: {error}"),
+        }
+        assert!(
+            std::time::Instant::now() < admission_close_deadline,
+            "first SIGTERM did not close remote service admission"
+        );
+        thread::yield_now();
+    }
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(
+            i32::try_from(child.id()).expect("remote service child PID should fit i32"),
+        ),
+        nix::sys::signal::Signal::SIGTERM,
+    )
+    .expect("second SIGTERM should force-close remote service work");
+    let status = child.wait_timeout(Duration::from_secs(10));
+    assert!(
+        status.success(),
+        "remote service child exited with {status}"
+    );
+    drop(final_stall);
+    assert!(client_runtime.shutdown_timeout(Duration::from_secs(2)));
+    let terminal =
+        recv_remote_service_event(&line_rx, "remote_service_stopped", Duration::from_secs(2));
+    stdout_reader
+        .join()
+        .expect("remote service stdout reader should not panic");
+    let stderr = stderr_reader
+        .join()
+        .expect("remote service stderr reader should not panic");
+    assert!(
+        stderr.is_empty(),
+        "remote service stderr was not empty: {stderr}"
+    );
+
+    assert_eq!(terminal["phase"], "Stopped");
+    assert_eq!(terminal["active_connections"], 0);
+    assert_eq!(terminal["signals_received"], 2);
+    assert_eq!(terminal["drain_requested"], true);
+    assert_eq!(terminal["force_close_requested"], true);
+    assert!(
+        terminal["accepted_connections"].as_u64().unwrap_or(0) >= 7,
+        "every causal connection should be reflected in terminal accounting: {terminal}"
+    );
+    assert_eq!(terminal["completed_connections"], 4);
+    assert!(
+        terminal["failed_connections"].as_u64().unwrap_or(0) >= 2,
+        "both admission deadlines should be reflected as connection failures: {terminal}"
+    );
+    assert!(
+        terminal["interrupted_connections"].as_u64().unwrap_or(0) >= 1,
+        "second-signal force-close should interrupt the live stalled peer: {terminal}"
+    );
+    assert_eq!(terminal["panicked_connections"], 0);
+    assert!(
+        terminal["force_closed_connections"].as_u64().unwrap_or(0) >= 1,
+        "second-signal force-close should be retained in shutdown stats: {terminal}"
+    );
+}
+
 #[cfg(feature = "tls")]
 #[test]
 fn native_remote_runtime_drain_wakes_pending_tls_admission() {
@@ -2361,6 +2806,32 @@ fn remote_client_test_mtls_pair() -> (TlsAcceptor, TlsConnector) {
         .build()
         .expect("mTLS connector should build");
     (acceptor, connector)
+}
+
+#[cfg(feature = "tls")]
+#[test]
+fn remote_tls_listener_rejects_zero_initial_frame_timeout() {
+    let (acceptor, _) = remote_client_test_mtls_pair();
+    let computations = RemoteComputationRegistry::new();
+    let policy = RemotePeerAdmissionPolicy::new(
+        RemoteProtocolVersion::V3,
+        computations.schema_registry().clone(),
+    );
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("remote listener validation runtime should build");
+    let result = runtime.block_on(RemoteComputationService::bind(
+        "127.0.0.1:0",
+        acceptor,
+        policy,
+        computations,
+        RemoteComputationServiceConfig::new().with_initial_frame_timeout(Duration::ZERO),
+    ));
+
+    assert!(matches!(
+        result,
+        Err(RemoteComputationListenerError::InvalidInitialFrameTimeout)
+    ));
 }
 
 #[cfg(feature = "tls")]

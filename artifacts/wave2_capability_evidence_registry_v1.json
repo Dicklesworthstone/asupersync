@@ -133,15 +133,15 @@
       "promotion_state": "promoted",
       "support_class_before": "virtual-lab-proof",
       "support_class_after": "production-backed",
-      "feature_flags": ["test-internals"],
+      "feature_flags": ["remote-service", "test-internals"],
       "source_paths": ["src/remote.rs", "README.md", "docs/integration.md", "tests/remote_transport_lifecycle_contract.rs", "scripts/run_remote_transport_lifecycle_evidence.sh", "artifacts/wave2/remote_transport_lifecycle_evidence.json"],
       "unit_proof_commands": ["rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wave2_remote_transport_unit cargo test -p asupersync --test remote_transport_lifecycle_contract --features test-internals remote_transport_wire_codec_preserves_protocol_fields -- --nocapture"],
-      "e2e_proof_commands": ["rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wave2_remote_transport_lifecycle cargo test -p asupersync --test remote_transport_lifecycle_contract --features test-internals -- --nocapture", "bash scripts/run_remote_transport_lifecycle_evidence.sh --run-id wave2-remote-transport --timeout-sec 180"],
+      "e2e_proof_commands": ["rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wave2_remote_transport_lifecycle cargo test -p asupersync --test remote_transport_lifecycle_contract --features remote-service,test-internals -- --nocapture", "bash scripts/run_remote_transport_lifecycle_evidence.sh --run-id wave2-remote-transport --timeout-sec 180"],
       "artifact_paths": ["artifacts/wave2/remote_transport_lifecycle_evidence.json"],
       "planned_artifact_paths": [],
       "unsupported_reason": "",
       "fallback_target": "Injected virtual/lab RemoteRuntime lifecycle proof",
-      "residual_risks": ["loopback transport proof does not claim arbitrary WAN deployment, TLS/authentication, or a frozen production wire format"],
+      "residual_risks": ["localhost process proof does not claim discovery, multi-host/WAN deployment, arbitrary application registries, restart-durable idempotency, or frozen cross-version wire compatibility"],
       "redaction_verdict": "not_applicable"
     },
     {

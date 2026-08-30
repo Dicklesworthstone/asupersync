@@ -2825,6 +2825,8 @@ impl RemoteComputationRegistry {
 
 /// Default maximum encoded request or response frame for the remote service.
 pub const DEFAULT_REMOTE_SERVICE_MAX_FRAME_BYTES: usize = 64 * 1024;
+/// Default deadline for an authenticated peer to send its first complete frame.
+pub const DEFAULT_REMOTE_SERVICE_INITIAL_FRAME_TIMEOUT: Duration = Duration::from_secs(5);
 /// Default V2/V3 terminal-outcome retention window for retry replay.
 pub const DEFAULT_REMOTE_SERVICE_IDEMPOTENCY_RETENTION: Duration = Duration::from_secs(300);
 /// Default V2/V3 retained/in-flight key cap per authenticated peer.
@@ -3358,6 +3360,11 @@ pub enum RemoteComputationServiceError {
     },
     /// Peer closed the stream before one complete frame arrived.
     UnexpectedEof,
+    /// Authenticated peer did not send one complete initial request in time.
+    InitialFrameTimeout {
+        /// Configured bound for the first framed request.
+        timeout: Duration,
+    },
     /// Listener-owned V2/V3 state disappeared before terminal publication.
     IdempotencyStateLost,
 }
@@ -3382,6 +3389,10 @@ impl fmt::Display for RemoteComputationServiceError {
                 "remote service encoded frame exceeds {max_frame_bytes}-byte limit"
             ),
             Self::UnexpectedEof => write!(f, "remote service peer closed before a complete frame"),
+            Self::InitialFrameTimeout { timeout } => write!(
+                f,
+                "remote service peer did not send an initial frame within {timeout:?}"
+            ),
             Self::IdempotencyStateLost => {
                 write!(f, "remote service idempotency state lost before completion")
             }
@@ -3398,6 +3409,7 @@ impl std::error::Error for RemoteComputationServiceError {
             | Self::OriginIdentityMismatch { .. }
             | Self::FrameTooLarge { .. }
             | Self::UnexpectedEof
+            | Self::InitialFrameTimeout { .. }
             | Self::IdempotencyStateLost => None,
         }
     }
@@ -4122,6 +4134,7 @@ where
         limits,
         None,
         RemoteServiceExecutionMode::Inline,
+        None,
     )
     .await
 }
@@ -4135,12 +4148,26 @@ async fn serve_tls_computation_once_with_idempotency<IO>(
     limits: RemoteServiceWireLimits,
     idempotency: Option<&RemoteServiceIdempotency>,
     execution_mode: RemoteServiceExecutionMode,
+    initial_frame_timeout: Option<Duration>,
 ) -> Result<RemoteServiceWireResponse, RemoteComputationServiceError>
 where
     IO: AsyncRead + AsyncWrite + Unpin,
 {
     let mut framed = remote_service_framed(stream, limits)?;
-    let wire_request: RemoteServiceWireRequest = read_remote_service_frame(cx, &mut framed).await?;
+    let wire_request: RemoteServiceWireRequest = if let Some(timeout) = initial_frame_timeout {
+        match crate::time::timeout(
+            cx.now(),
+            timeout,
+            read_remote_service_frame(cx, &mut framed),
+        )
+        .await
+        {
+            Ok(result) => result?,
+            Err(_) => return Err(RemoteComputationServiceError::InitialFrameTimeout { timeout }),
+        }
+    } else {
+        read_remote_service_frame(cx, &mut framed).await?
+    };
     let remote_task_id = wire_request.remote_task_id;
     let uses_v3_session_envelope = execution_mode == RemoteServiceExecutionMode::LeaseBound
         && wire_request.hello().protocol_version() == RemoteProtocolVersion::V3;
@@ -6931,6 +6958,8 @@ impl RemoteRuntime for NativeRemoteRuntime {
 pub enum RemoteComputationListenerError {
     /// A zero-byte frame limit cannot admit any encoded request.
     InvalidFrameLimit,
+    /// A zero initial-frame timeout would reject every authenticated peer.
+    InvalidInitialFrameTimeout,
     /// A zero retention window would permit immediate duplicate execution.
     InvalidIdempotencyRetention,
     /// A zero record cap cannot admit any V2/V3 operation.
@@ -6948,6 +6977,9 @@ impl fmt::Display for RemoteComputationListenerError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidFrameLimit => write!(f, "remote listener frame limit must be nonzero"),
+            Self::InvalidInitialFrameTimeout => {
+                write!(f, "remote listener initial-frame timeout must be nonzero")
+            }
             Self::InvalidIdempotencyRetention => {
                 write!(f, "remote listener idempotency retention must be nonzero")
             }
@@ -6969,6 +7001,7 @@ impl std::error::Error for RemoteComputationListenerError {
             Self::Spawn(error) => Some(error),
             Self::ChildRegion(error) => Some(error),
             Self::InvalidFrameLimit
+            | Self::InvalidInitialFrameTimeout
             | Self::InvalidIdempotencyRetention
             | Self::InvalidIdempotencyCapacity => None,
         }
@@ -6998,6 +7031,7 @@ impl fmt::Display for RemoteComputationConnectionError {
 pub struct RemoteComputationServiceConfig {
     wire_limits: RemoteServiceWireLimits,
     max_connections: Option<usize>,
+    initial_frame_timeout: Duration,
     drain_timeout: Duration,
     idempotency_retention: Duration,
     max_idempotency_records_per_peer: usize,
@@ -7011,6 +7045,7 @@ impl RemoteComputationServiceConfig {
         Self {
             wire_limits: RemoteServiceWireLimits::new(DEFAULT_REMOTE_SERVICE_MAX_FRAME_BYTES),
             max_connections: Some(256),
+            initial_frame_timeout: DEFAULT_REMOTE_SERVICE_INITIAL_FRAME_TIMEOUT,
             drain_timeout: Duration::from_secs(30),
             idempotency_retention: DEFAULT_REMOTE_SERVICE_IDEMPOTENCY_RETENTION,
             max_idempotency_records_per_peer:
@@ -7029,6 +7064,13 @@ impl RemoteComputationServiceConfig {
     #[must_use]
     pub const fn with_max_connections(mut self, max_connections: Option<usize>) -> Self {
         self.max_connections = max_connections;
+        self
+    }
+
+    /// Sets the deadline for an authenticated peer to send its first complete frame.
+    #[must_use]
+    pub const fn with_initial_frame_timeout(mut self, timeout: Duration) -> Self {
+        self.initial_frame_timeout = timeout;
         self
     }
 
@@ -7063,6 +7105,12 @@ impl RemoteComputationServiceConfig {
     #[must_use]
     pub const fn max_connections(self) -> Option<usize> {
         self.max_connections
+    }
+
+    /// Deadline for an authenticated peer to send its first complete frame.
+    #[must_use]
+    pub const fn initial_frame_timeout(self) -> Duration {
+        self.initial_frame_timeout
     }
 
     /// Graceful-drain interval before force-close.
@@ -7299,6 +7347,9 @@ impl RemoteComputationService {
         if config.wire_limits.max_frame_bytes() == 0 {
             return Err(RemoteComputationListenerError::InvalidFrameLimit);
         }
+        if config.initial_frame_timeout.is_zero() {
+            return Err(RemoteComputationListenerError::InvalidInitialFrameTimeout);
+        }
         if config.idempotency_retention.is_zero() {
             return Err(RemoteComputationListenerError::InvalidIdempotencyRetention);
         }
@@ -7321,6 +7372,9 @@ impl RemoteComputationService {
     ) -> Result<Self, RemoteComputationListenerError> {
         if config.wire_limits.max_frame_bytes() == 0 {
             return Err(RemoteComputationListenerError::InvalidFrameLimit);
+        }
+        if config.initial_frame_timeout.is_zero() {
+            return Err(RemoteComputationListenerError::InvalidInitialFrameTimeout);
         }
         if config.idempotency_retention.is_zero() {
             return Err(RemoteComputationListenerError::InvalidIdempotencyRetention);
@@ -7441,6 +7495,7 @@ impl RemoteComputationService {
             let idempotency = Arc::clone(&self.idempotency);
             let shutdown_signal = self.shutdown_signal.clone();
             let wire_limits = self.config.wire_limits;
+            let initial_frame_timeout = self.config.initial_frame_timeout;
             if let Err(error) =
                 connection_tasks.spawn(&service_cx, move |connection_cx| async move {
                     let _guard = guard;
@@ -7457,6 +7512,7 @@ impl RemoteComputationService {
                             wire_limits,
                             Some(&idempotency),
                             RemoteServiceExecutionMode::LeaseBound,
+                            Some(initial_frame_timeout),
                         )
                         .await
                         .map_err(RemoteComputationConnectionError::Service)?;

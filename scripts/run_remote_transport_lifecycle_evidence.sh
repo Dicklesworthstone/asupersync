@@ -73,7 +73,7 @@ mkdir -p "${REPORT_DIR}"
 
 TEST_COMMAND=(
     env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 "RUSTFLAGS=-C debuginfo=0" "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wave2_remote_transport_lifecycle"
-    "${CARGO_BIN}" test -p asupersync --test remote_transport_lifecycle_contract --features test-internals -- --nocapture
+    "${CARGO_BIN}" test -p asupersync --test remote_transport_lifecycle_contract --features remote-service,test-internals -- --nocapture
 )
 RCH_COMMAND=("${RCH_BIN}" exec -- "${TEST_COMMAND[@]}")
 

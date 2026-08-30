@@ -284,6 +284,7 @@ tls = [...]                    # TLS support via rustls
 tls-native-roots = [...]       # Native root certificates for TLS
 tls-webpki-roots = [...]       # webpki root certificates for TLS
 cli = [...]                    # CLI tooling (trace inspection)
+remote-service = ["cli", "tls"] # Unix static RemoteRuntime V3 process host
 sqlite = [...]                 # SQLite async wrapper with blocking pool
 postgres = []                  # PostgreSQL async client with wire protocol
 mysql = []                     # MySQL async client with wire protocol
