@@ -13,13 +13,14 @@ use asupersync::remote::{
 };
 #[cfg(feature = "tls")]
 use asupersync::remote::{
-    NativeRemoteRoute, NativeRemoteRuntime, NativeRemoteRuntimeConfig, RemoteComputationClient,
-    RemoteComputationClientConfig, RemoteComputationClientError, RemoteComputationListenerError,
-    RemoteComputationService, RemoteComputationServiceConfig, RemoteComputationServiceError,
-    RemoteComputationSessionStart, RemoteServiceRejectionCode, RemoteServiceSessionError,
-    RemoteServiceSessionEvent, RemoteServiceWireLimits, RemoteServiceWireOutcome,
-    RemoteServiceWireRequest, RemoteServiceWireResponse, call_tls_computation_once,
-    serve_tls_computation_once,
+    NativeRemoteRoute, NativeRemoteRuntime, NativeRemoteRuntimeBuildError,
+    NativeRemoteRuntimeConfig, RemoteComputationClient, RemoteComputationClientConfig,
+    RemoteComputationClientError, RemoteComputationListenerError, RemoteComputationService,
+    RemoteComputationServiceConfig, RemoteComputationServiceError, RemoteComputationServiceHandle,
+    RemoteComputationServiceReport, RemoteComputationSessionStart, RemoteServiceRejectionCode,
+    RemoteServiceSessionError, RemoteServiceSessionEvent, RemoteServiceWireLimits,
+    RemoteServiceWireOutcome, RemoteServiceWireRequest, RemoteServiceWireResponse,
+    call_tls_computation_once, serve_tls_computation_once,
 };
 #[cfg(all(feature = "remote-service", unix))]
 use asupersync::runtime::Runtime;
@@ -1834,6 +1835,360 @@ fn remote_tls_v3_session_cancellation_wakes_stalled_wait() {
     server
         .join()
         .expect("V3 cancellation fixture should not panic");
+}
+
+#[cfg(feature = "tls")]
+fn spawn_native_route_service(
+    label: &'static str,
+    acceptor: TlsAcceptor,
+    policy: RemotePeerAdmissionPolicy,
+    computations: RemoteComputationRegistry,
+) -> (
+    SocketAddr,
+    RemoteComputationServiceHandle,
+    thread::JoinHandle<RemoteComputationServiceReport>,
+) {
+    let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+    let service_thread = thread::spawn(move || {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .unwrap_or_else(|error| panic!("{label} route service runtime should build: {error}"));
+        let service = runtime
+            .block_on(RemoteComputationService::bind(
+                "127.0.0.1:0",
+                acceptor,
+                policy,
+                computations,
+                RemoteComputationServiceConfig::new()
+                    .with_max_connections(Some(2))
+                    .with_drain_timeout(Duration::from_secs(1)),
+            ))
+            .unwrap_or_else(|error| panic!("{label} route service should bind: {error}"));
+        let endpoint = service.local_addr().unwrap_or_else(|error| {
+            panic!("{label} route service should expose its address: {error}")
+        });
+        ready_tx
+            .send((endpoint, service.handle()))
+            .unwrap_or_else(|_| panic!("{label} route service should publish readiness"));
+        runtime
+            .block_on(async move {
+                let cx = Cx::current()
+                    .unwrap_or_else(|| panic!("{label} route service should install a context"));
+                service.run(&cx).await
+            })
+            .unwrap_or_else(|error| panic!("{label} route service should drain cleanly: {error}"))
+    });
+    let (endpoint, operator) = ready_rx
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap_or_else(|error| panic!("{label} route service did not become ready: {error}"));
+    (endpoint, operator, service_thread)
+}
+
+#[cfg(feature = "tls")]
+#[test]
+fn native_remote_runtime_atomically_rotates_validated_routes() {
+    let certificates = Certificate::from_pem(TEST_CERT_PEM).expect("TLS fixture should parse");
+    let peer_certificate = certificates
+        .first()
+        .expect("TLS fixture should contain a leaf certificate")
+        .clone();
+    let certificate_chain =
+        CertificateChain::from_pem(TEST_CERT_PEM).expect("TLS certificate chain should parse");
+    let private_key = PrivateKey::from_pem(TEST_KEY_PEM).expect("TLS private key should parse");
+    let origin = NodeId::new("origin-native-runtime-route-rotation");
+    let destination = NodeId::new("destination-native-runtime-route-rotation");
+
+    let (started_a_tx, started_a_rx) = std::sync::mpsc::sync_channel(1);
+    let (release_a_tx, release_a_rx) = oneshot::channel();
+    let release_a_rx = Arc::new(Mutex::new(Some(release_a_rx)));
+    let build_service =
+        |prefix: &'static [u8],
+         started_tx: Option<std::sync::mpsc::SyncSender<()>>,
+         stall_receiver: Option<Arc<Mutex<Option<oneshot::Receiver<()>>>>>| {
+            let dispatch_count = Arc::new(AtomicUsize::new(0));
+            let handler_dispatch_count = Arc::clone(&dispatch_count);
+            let mut computations = RemoteComputationRegistry::new();
+            computations
+                .register::<Vec<u8>, Vec<u8>, _, _>("proof.native-route", move |cx, invocation| {
+                    let handler_dispatch_count = Arc::clone(&handler_dispatch_count);
+                    let started_tx = started_tx.clone();
+                    let stall_receiver = stall_receiver.clone();
+                    async move {
+                        handler_dispatch_count.fetch_add(1, Ordering::SeqCst);
+                        if let Some(started_tx) = started_tx {
+                            started_tx
+                                .send(())
+                                .expect("route A handler should publish its start");
+                        }
+                        if let Some(stall_receiver) = stall_receiver {
+                            let mut receiver = stall_receiver
+                                .lock()
+                                .take()
+                                .expect("route A handler should dispatch once");
+                            receiver.recv(&cx).await.map_err(|error| {
+                                RemoteError::TransportError(format!(
+                                    "route A release channel failed: {error}"
+                                ))
+                            })?;
+                        }
+                        let input = invocation.into_request().input.into_data();
+                        let mut output = Vec::with_capacity(prefix.len() + input.len());
+                        output.extend_from_slice(prefix);
+                        output.extend_from_slice(&input);
+                        Ok(RemoteOutcome::Success(output))
+                    }
+                })
+                .expect("route-rotation handler should register");
+            let mut peer_pins = CertificatePinSet::new();
+            peer_pins.add(
+                CertificatePin::compute_spki_sha256(&peer_certificate)
+                    .expect("fixture certificate should produce an SPKI pin"),
+            );
+            let mut policy = RemotePeerAdmissionPolicy::new(
+                RemoteProtocolVersion::V3,
+                computations.schema_registry().clone(),
+            );
+            policy
+                .grant_tls_peer(origin.clone(), peer_pins, ["proof.native-route"])
+                .expect("route-rotation certificate-bound grant should be valid");
+            (policy, computations, dispatch_count)
+        };
+    let (policy_a, computations_a, dispatch_count_a) =
+        build_service(b"A:", Some(started_a_tx), Some(Arc::clone(&release_a_rx)));
+    let (policy_b, computations_b, dispatch_count_b) = build_service(b"B:", None, None);
+    let fingerprint = computations_a.schema_registry().fingerprint();
+    assert_eq!(fingerprint, computations_b.schema_registry().fingerprint());
+    let hello = policy_a.hello_for(origin.clone());
+
+    let build_acceptor = || {
+        let mut client_auth_roots = RootCertStore::empty();
+        client_auth_roots
+            .add(&peer_certificate)
+            .expect("route service should trust the fixture client certificate");
+        TlsAcceptorBuilder::new(certificate_chain.clone(), private_key.clone())
+            .client_auth(ClientAuth::Required(client_auth_roots))
+            .build()
+            .expect("route service mTLS acceptor should build")
+    };
+    let connector = TlsConnectorBuilder::new()
+        .add_root_certificate(&peer_certificate)
+        .identity(certificate_chain.clone(), private_key.clone())
+        .build()
+        .expect("route-rotation mTLS connector should build");
+    let (endpoint_a, operator_a, service_a) =
+        spawn_native_route_service("A", build_acceptor(), policy_a, computations_a);
+    let (endpoint_b, operator_b, service_b) =
+        spawn_native_route_service("B", build_acceptor(), policy_b, computations_b);
+    let build_client = |endpoint| {
+        RemoteComputationClient::new(
+            endpoint,
+            "localhost",
+            connector.clone(),
+            RemoteComputationClientConfig::new()
+                .with_max_attempts(1)
+                .with_attempt_timeout(Duration::from_secs(2)),
+        )
+        .expect("route-rotation client should validate")
+    };
+    let client_a = build_client(endpoint_a);
+    let client_b = build_client(endpoint_b);
+
+    let runtime = RuntimeBuilder::new()
+        .worker_threads(2)
+        .build()
+        .expect("route-rotation driver runtime should build");
+    let native = Arc::new(
+        NativeRemoteRuntime::new(
+            runtime.handle(),
+            origin.clone(),
+            [NativeRemoteRoute::new(
+                destination.clone(),
+                hello.clone(),
+                client_a,
+            )],
+        )
+        .expect("initial native route should validate"),
+    );
+    let cap = asupersync::remote::RemoteCap::new()
+        .with_local_node(origin.clone())
+        .with_runtime(native.clone());
+    let cx = runtime
+        .request_cx_with_budget(Budget::INFINITE)
+        .with_remote_cap(cap);
+
+    assert_eq!(native.route_generation(), 0);
+    assert_eq!(
+        native
+            .route(&destination)
+            .expect("initial borrowed route should exist")
+            .client()
+            .endpoint(),
+        endpoint_a
+    );
+    let mut first = spawn_remote(
+        &cx,
+        destination.clone(),
+        ComputationName::new("proof.native-route"),
+        RemoteInput::new(b"first".to_vec()),
+    )
+    .expect("initial route should publish");
+    started_a_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("route A handler should start before replacement");
+    let running_deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while first.state() != RemoteTaskState::Running {
+        assert!(
+            std::time::Instant::now() < running_deadline,
+            "route A operation should publish Running before replacement"
+        );
+        thread::yield_now();
+    }
+    assert_eq!(native.active_operations(), 1);
+    assert_eq!(dispatch_count_a.load(Ordering::SeqCst), 1);
+    assert_eq!(dispatch_count_b.load(Ordering::SeqCst), 0);
+
+    assert_eq!(
+        native
+            .replace_routes([NativeRemoteRoute::new(
+                destination.clone(),
+                hello.clone(),
+                client_b.clone(),
+            )])
+            .expect("valid replacement should publish atomically"),
+        1
+    );
+    assert_eq!(native.route_generation(), 1);
+    assert_eq!(
+        native
+            .route(&destination)
+            .expect("borrowed compatibility route should remain initial")
+            .client()
+            .endpoint(),
+        endpoint_a
+    );
+    assert_eq!(
+        native
+            .effective_route(&destination)
+            .expect("effective replacement route should exist")
+            .client()
+            .endpoint(),
+        endpoint_b
+    );
+
+    let wrong_protocol = native
+        .replace_routes([NativeRemoteRoute::new(
+            destination.clone(),
+            RemotePeerHello::new(origin.clone(), RemoteProtocolVersion::V2, fingerprint),
+            client_b.clone(),
+        )])
+        .expect_err("non-V3 replacement must fail closed");
+    assert_eq!(
+        wrong_protocol,
+        NativeRemoteRuntimeBuildError::WrongProtocol {
+            destination: destination.clone(),
+            presented: RemoteProtocolVersion::V2,
+        }
+    );
+    let wrong_origin = NodeId::new("wrong-native-route-origin");
+    let origin_mismatch = native
+        .replace_routes([NativeRemoteRoute::new(
+            destination.clone(),
+            RemotePeerHello::new(wrong_origin.clone(), RemoteProtocolVersion::V3, fingerprint),
+            client_b.clone(),
+        )])
+        .expect_err("origin-mismatched replacement must fail closed");
+    assert_eq!(
+        origin_mismatch,
+        NativeRemoteRuntimeBuildError::OriginIdentityMismatch {
+            destination: destination.clone(),
+            expected: origin.clone(),
+            presented: wrong_origin,
+        }
+    );
+    let duplicate = native
+        .replace_routes([
+            NativeRemoteRoute::new(destination.clone(), hello.clone(), client_b.clone()),
+            NativeRemoteRoute::new(destination.clone(), hello.clone(), client_b.clone()),
+        ])
+        .expect_err("duplicate replacement must fail closed");
+    assert_eq!(
+        duplicate,
+        NativeRemoteRuntimeBuildError::DuplicateDestination(destination.clone())
+    );
+    assert_eq!(native.route_generation(), 1);
+    assert_eq!(
+        native
+            .effective_route(&destination)
+            .expect("invalid updates must retain the last-known-good route")
+            .client()
+            .endpoint(),
+        endpoint_b
+    );
+
+    let mut second = spawn_remote(
+        &cx,
+        destination.clone(),
+        ComputationName::new("proof.native-route"),
+        RemoteInput::new(b"second".to_vec()),
+    )
+    .expect("replacement route should publish");
+    let second_outcome = runtime
+        .block_on(second.join(&cx))
+        .expect("replacement route should return a terminal outcome");
+    assert!(matches!(
+        second_outcome,
+        RemoteOutcome::Success(ref payload) if payload == b"B:second"
+    ));
+    assert_eq!(dispatch_count_a.load(Ordering::SeqCst), 1);
+    assert_eq!(dispatch_count_b.load(Ordering::SeqCst), 1);
+    assert_eq!(first.state(), RemoteTaskState::Running);
+    assert_eq!(native.active_operations(), 1);
+
+    assert_eq!(
+        native
+            .replace_routes(std::iter::empty())
+            .expect("empty snapshot should remove every route"),
+        2
+    );
+    assert!(native.effective_route(&destination).is_none());
+    let unreachable = spawn_remote(
+        &cx,
+        destination.clone(),
+        ComputationName::new("proof.native-route"),
+        RemoteInput::new(b"must-not-dispatch".to_vec()),
+    )
+    .expect_err("removed route must refuse new work before publication");
+    assert_eq!(
+        unreachable,
+        RemoteError::NodeUnreachable(destination.as_str().to_owned())
+    );
+    assert_eq!(dispatch_count_b.load(Ordering::SeqCst), 1);
+    release_a_tx
+        .send(&cx, ())
+        .expect("route A operation should be released after route removal");
+    let first_outcome = runtime
+        .block_on(first.join(&cx))
+        .expect("in-flight route A operation should survive replacement and removal");
+    assert!(matches!(
+        first_outcome,
+        RemoteOutcome::Success(ref payload) if payload == b"A:first"
+    ));
+    assert_eq!(native.active_operations(), 0);
+    assert!(runtime.block_on(native.close(&cx)));
+    drop(cx);
+    drop(native);
+    assert!(runtime.shutdown_timeout(Duration::from_secs(2)));
+
+    assert!(operator_a.begin_drain());
+    let report_a = service_a.join().expect("route service A should not panic");
+    assert_eq!(report_a.accepted_connections(), 1);
+    assert_eq!(report_a.completed_connections(), 1);
+    assert_eq!(operator_a.active_connections(), 0);
+    assert!(operator_b.begin_drain());
+    let report_b = service_b.join().expect("route service B should not panic");
+    assert_eq!(report_b.accepted_connections(), 1);
+    assert_eq!(report_b.completed_connections(), 1);
+    assert_eq!(operator_b.active_connections(), 0);
 }
 
 #[cfg(feature = "tls")]

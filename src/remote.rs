@@ -77,6 +77,8 @@ use crate::{
 };
 #[cfg(feature = "tls")]
 use parking_lot::Mutex;
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+use parking_lot::RwLock;
 #[cfg(feature = "tls")]
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -6040,7 +6042,7 @@ impl Default for NativeRemoteRuntimeConfig {
     }
 }
 
-/// Static configuration error for [`NativeRemoteRuntime`].
+/// Configuration or live route-publication error for [`NativeRemoteRuntime`].
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -6065,6 +6067,8 @@ pub enum NativeRemoteRuntimeBuildError {
     },
     /// Two routes selected the same logical destination.
     DuplicateDestination(NodeId),
+    /// The live route generation counter cannot advance further.
+    RouteGenerationExhausted,
 }
 
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
@@ -6091,6 +6095,9 @@ impl fmt::Display for NativeRemoteRuntimeBuildError {
             ),
             Self::DuplicateDestination(destination) => {
                 write!(f, "duplicate native remote route for {destination}")
+            }
+            Self::RouteGenerationExhausted => {
+                f.write_str("native remote route generation is exhausted")
             }
         }
     }
@@ -6648,23 +6655,40 @@ fn map_native_remote_response(
 /// a terminal result releases that reference automatically, so a joined handle
 /// does not pin the surrounding runtime.
 ///
-/// This adapter uses immutable routes. It does not provide discovery, durable
-/// idempotency across service restart, or a cross-process deployment daemon.
+/// The constructor's routes remain available through [`Self::route`] for API
+/// compatibility. An operator or discovery control plane may atomically
+/// publish validated replacements through [`Self::replace_routes`]; each new
+/// spawn clones one route snapshot, while already-published operations retain
+/// their prior authenticated client through terminal quiescence. The adapter
+/// does not itself perform discovery, provide durable idempotency across
+/// service restart, or package a deployment daemon.
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
 pub struct NativeRemoteRuntime {
     runtime: RuntimeHandle,
     local_node: NodeId,
     routes: BTreeMap<NodeId, NativeRemoteRoute>,
+    live_routes: RwLock<NativeRemoteRouteSnapshot>,
     config: NativeRemoteRuntimeConfig,
     shared: Arc<NativeRemoteShared>,
 }
 
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+struct NativeRemoteRouteSnapshot {
+    generation: u64,
+    routes: BTreeMap<NodeId, NativeRemoteRoute>,
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
 impl fmt::Debug for NativeRemoteRuntime {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let live_routes = self.live_routes.read();
         f.debug_struct("NativeRemoteRuntime")
             .field("local_node", &self.local_node)
-            .field("destinations", &self.routes.keys().collect::<Vec<_>>())
+            .field("route_generation", &live_routes.generation)
+            .field(
+                "destinations",
+                &live_routes.routes.keys().collect::<Vec<_>>(),
+            )
             .field("active_operations", &self.active_operations())
             .field("config", &self.config)
             .finish_non_exhaustive()
@@ -6703,6 +6727,31 @@ impl NativeRemoteRuntime {
         if config.max_in_flight == 0 {
             return Err(NativeRemoteRuntimeBuildError::ZeroMaxInFlight);
         }
+        let indexed = Self::index_routes(&local_node, routes)?;
+        let live_routes = indexed.clone();
+        Ok(Self {
+            runtime,
+            local_node,
+            routes: indexed,
+            live_routes: RwLock::new(NativeRemoteRouteSnapshot {
+                generation: 0,
+                routes: live_routes,
+            }),
+            config,
+            shared: Arc::new(NativeRemoteShared {
+                max_in_flight: config.max_in_flight,
+                state: Mutex::new(NativeRemoteState::new()),
+            }),
+        })
+    }
+
+    fn index_routes<I>(
+        local_node: &NodeId,
+        routes: I,
+    ) -> Result<BTreeMap<NodeId, NativeRemoteRoute>, NativeRemoteRuntimeBuildError>
+    where
+        I: IntoIterator<Item = NativeRemoteRoute>,
+    {
         let mut indexed = BTreeMap::new();
         for route in routes {
             if route.hello.protocol_version() != RemoteProtocolVersion::V3 {
@@ -6711,10 +6760,10 @@ impl NativeRemoteRuntime {
                     presented: route.hello.protocol_version(),
                 });
             }
-            if route.hello.peer_node() != &local_node {
+            if route.hello.peer_node() != local_node {
                 return Err(NativeRemoteRuntimeBuildError::OriginIdentityMismatch {
                     destination: route.destination,
-                    expected: local_node,
+                    expected: local_node.clone(),
                     presented: route.hello.peer_node().clone(),
                 });
             }
@@ -6725,16 +6774,7 @@ impl NativeRemoteRuntime {
                 ));
             }
         }
-        Ok(Self {
-            runtime,
-            local_node,
-            routes: indexed,
-            config,
-            shared: Arc::new(NativeRemoteShared {
-                max_in_flight: config.max_in_flight,
-                state: Mutex::new(NativeRemoteState::new()),
-            }),
-        })
+        Ok(indexed)
     }
 
     /// Local identity every configured route must present.
@@ -6743,10 +6783,46 @@ impl NativeRemoteRuntime {
         &self.local_node
     }
 
-    /// Immutable static route for a logical destination.
+    /// Initial immutable route for a logical destination.
+    ///
+    /// This borrowed view intentionally preserves the original constructor API.
+    /// Use [`Self::effective_route`] to observe live replacements.
     #[must_use]
     pub fn route(&self, destination: &NodeId) -> Option<&NativeRemoteRoute> {
         self.routes.get(destination)
+    }
+
+    /// Owned route currently used to admit new work for a destination.
+    #[must_use]
+    pub fn effective_route(&self, destination: &NodeId) -> Option<NativeRemoteRoute> {
+        self.live_routes.read().routes.get(destination).cloned()
+    }
+
+    /// Generation of the effective route snapshot.
+    #[must_use]
+    pub fn route_generation(&self) -> u64 {
+        self.live_routes.read().generation
+    }
+
+    /// Atomically replaces the complete route snapshot used for new spawns.
+    ///
+    /// Every candidate route is validated before the write lock is acquired, so
+    /// an invalid update leaves the last-known-good snapshot untouched. Already
+    /// published operations retain the client cloned from their admitted route;
+    /// replacement and removal affect only later calls to [`spawn_remote`].
+    pub fn replace_routes<I>(&self, routes: I) -> Result<u64, NativeRemoteRuntimeBuildError>
+    where
+        I: IntoIterator<Item = NativeRemoteRoute>,
+    {
+        let indexed = Self::index_routes(&self.local_node, routes)?;
+        let mut live_routes = self.live_routes.write();
+        let generation = live_routes
+            .generation
+            .checked_add(1)
+            .ok_or(NativeRemoteRuntimeBuildError::RouteGenerationExhausted)?;
+        live_routes.routes = indexed;
+        live_routes.generation = generation;
+        Ok(generation)
     }
 
     /// Number of published driver tasks that have not reached terminal state.
@@ -6831,8 +6907,7 @@ impl NativeRemoteRuntime {
             )));
         }
         let route = self
-            .routes
-            .get(destination)
+            .effective_route(destination)
             .ok_or_else(|| RemoteError::NodeUnreachable(destination.as_str().to_owned()))?;
         let wire_request =
             RemoteServiceWireRequest::from_spawn_request(route.hello.clone(), &request)
