@@ -1,7 +1,50 @@
 use super::*;
+use proptest::prelude::{Just, Strategy, any};
 use std::sync::Arc;
 
 type TestEncodeTaskHandle = crate::runtime::TaskHandle<Result<ParallelEncodedBlock, String>>;
+
+struct TimedEncodeBarrier {
+    parties: usize,
+    arrived: std::sync::Mutex<usize>,
+    ready: std::sync::Condvar,
+}
+
+impl TimedEncodeBarrier {
+    fn new(parties: usize) -> Self {
+        Self {
+            parties,
+            arrived: std::sync::Mutex::new(0),
+            ready: std::sync::Condvar::new(),
+        }
+    }
+
+    fn wait(&self) -> Result<(), String> {
+        let mut arrived = self
+            .arrived
+            .lock()
+            .map_err(|_| "concurrent encode barrier mutex poisoned".to_string())?;
+        *arrived = arrived.saturating_add(1);
+        if *arrived >= self.parties {
+            self.ready.notify_all();
+            return Ok(());
+        }
+
+        let (arrived, timeout) = self
+            .ready
+            .wait_timeout_while(arrived, Duration::from_secs(10), |arrived| {
+                *arrived < self.parties
+            })
+            .map_err(|_| "concurrent encode barrier mutex poisoned while waiting".to_string())?;
+        if timeout.timed_out() && *arrived < self.parties {
+            return Err(format!(
+                "only {} of {} concurrent encode workers reached the barrier",
+                *arrived, self.parties
+            ));
+        }
+        Ok(())
+    }
+}
 
 /// Test scratch dir whose path has no symlinked ancestors.
 ///
@@ -6955,6 +6998,182 @@ fn collect_runtime_block_symbols(
     }))
 }
 
+fn collect_m1_cursor_symbols(
+    object_id: ObjectId,
+    bytes: &[u8],
+    config: &RqConfig,
+    initial_repair_count: usize,
+    followup_repair_count: usize,
+) -> Vec<(u8, u32, SymbolKind, Vec<u8>)> {
+    let mut symbols = Vec::new();
+    for block in encode_ahead_blocks(bytes.len(), config).expect("block plan") {
+        let block_bytes = &bytes[block.start..block.start + block.len];
+        let mut initial_pipeline = EncodingPipeline::new(
+            m1_test_encoding_config(config),
+            SymbolPool::new(PoolConfig::default()),
+        );
+        for encoded in initial_pipeline.encode_single_block_with_repair(
+            object_id,
+            block.sbn,
+            block_bytes,
+            initial_repair_count,
+        ) {
+            let encoded = encoded.expect("M=1 initial encode succeeds");
+            symbols.push(symbol_fingerprint(encoded.symbol()));
+        }
+
+        let mut followup_pipeline = EncodingPipeline::new(
+            m1_test_encoding_config(config),
+            SymbolPool::new(PoolConfig::default()),
+        );
+        for encoded in followup_pipeline.encode_single_block_repair_range(
+            object_id,
+            block.sbn,
+            block_bytes,
+            initial_repair_count,
+            followup_repair_count,
+        ) {
+            let encoded = encoded.expect("M=1 followup repair encode succeeds");
+            symbols.push(symbol_fingerprint(encoded.symbol()));
+        }
+    }
+    symbols
+}
+
+fn collect_concurrent_cursor_symbols(
+    object_id: ObjectId,
+    bytes: &[u8],
+    config: &RqConfig,
+    initial_repair_count: usize,
+    followup_repair_count: usize,
+) -> (Vec<(u8, u32, SymbolKind, Vec<u8>)>, BTreeSet<String>) {
+    let runtime = crate::runtime::RuntimeBuilder::new()
+        .worker_threads(1)
+        .blocking_threads(2, 2)
+        .build()
+        .expect("concurrent cursor test runtime");
+    let blocks = encode_ahead_blocks(bytes.len(), config).expect("block plan");
+    assert_eq!(
+        blocks.len(),
+        2,
+        "the barrier witness requires exactly two source blocks"
+    );
+    let barrier = Arc::new(TimedEncodeBarrier::new(blocks.len()));
+    let cfg = m1_test_encoding_config(config);
+    let bytes = bytes.to_vec();
+
+    runtime.block_on(runtime.handle().spawn(async move {
+        let cx = Cx::current().expect("runtime task context");
+        let tracker = ParallelEncodeTracker::default();
+        let mut handles = Vec::with_capacity(blocks.len());
+        for block in blocks {
+            let block_bytes = bytes[block.start..block.start + block.len].to_vec();
+            let barrier = Arc::clone(&barrier);
+            let cfg = cfg.clone();
+            let handle = tracker
+                .spawn_blocking(&cx, move |_child| {
+                    let thread_name = std::thread::current()
+                        .name()
+                        .unwrap_or("unnamed")
+                        .to_string();
+                    barrier.wait()?;
+
+                    let mut symbols = Vec::new();
+                    let mut initial_pipeline =
+                        EncodingPipeline::new(cfg.clone(), SymbolPool::new(PoolConfig::default()));
+                    for encoded in initial_pipeline.encode_single_block_with_repair(
+                        object_id,
+                        block.sbn,
+                        &block_bytes,
+                        initial_repair_count,
+                    ) {
+                        let encoded = encoded.map_err(|error| error.to_string())?;
+                        symbols.push(symbol_fingerprint(encoded.symbol()));
+                    }
+
+                    let mut followup_pipeline =
+                        EncodingPipeline::new(cfg, SymbolPool::new(PoolConfig::default()));
+                    for encoded in followup_pipeline.encode_single_block_repair_range(
+                        object_id,
+                        block.sbn,
+                        &block_bytes,
+                        initial_repair_count,
+                        followup_repair_count,
+                    ) {
+                        let encoded = encoded.map_err(|error| error.to_string())?;
+                        symbols.push(symbol_fingerprint(encoded.symbol()));
+                    }
+                    Ok::<_, String>((thread_name, symbols))
+                })
+                .expect("concurrent block cursor encode spawns");
+            handles.push(handle);
+        }
+
+        let mut symbols = Vec::new();
+        let mut execution_threads = BTreeSet::new();
+        for mut handle in handles {
+            let (thread_name, block_symbols) = handle
+                .join(&cx)
+                .await
+                .expect("concurrent block cursor task joins")
+                .expect("concurrent block cursor encode succeeds");
+            execution_threads.insert(thread_name);
+            symbols.extend(block_symbols);
+        }
+        tracker.drain().await;
+        (symbols, execution_threads)
+    }))
+}
+
+fn cursor_symbol_ranges_are_valid(
+    symbols: &[(u8, u32, SymbolKind, Vec<u8>)],
+    bytes_len: usize,
+    config: &RqConfig,
+    initial_repair_count: usize,
+    followup_repair_count: usize,
+) -> bool {
+    let Ok(blocks) = encode_ahead_blocks(bytes_len, config) else {
+        return false;
+    };
+    let total_repair_count = initial_repair_count.saturating_add(followup_repair_count);
+
+    for block in &blocks {
+        let Ok(source_k) = u32::try_from(block.k) else {
+            return false;
+        };
+        let Ok(repair_count) = u32::try_from(total_repair_count) else {
+            return false;
+        };
+        let Some(repair_end) = source_k.checked_add(repair_count) else {
+            return false;
+        };
+        let block_symbols = symbols
+            .iter()
+            .filter(|symbol| symbol.0 == block.sbn)
+            .collect::<Vec<_>>();
+        let source_esis = block_symbols
+            .iter()
+            .filter_map(|symbol| (symbol.2 == SymbolKind::Source).then_some(symbol.1))
+            .collect::<Vec<_>>();
+        let repair_esis = block_symbols
+            .iter()
+            .filter_map(|symbol| (symbol.2 == SymbolKind::Repair).then_some(symbol.1))
+            .collect::<Vec<_>>();
+
+        if source_esis != (0..source_k).collect::<Vec<_>>()
+            || repair_esis != (source_k..repair_end).collect::<Vec<_>>()
+        {
+            return false;
+        }
+    }
+
+    symbols.len()
+        == blocks
+            .iter()
+            .map(|block| block.k.saturating_add(total_repair_count))
+            .sum::<usize>()
+}
+
 fn collect_parallel_encode_logs(
     object_id: ObjectId,
     bytes: &[u8],
@@ -7800,6 +8019,122 @@ fn pooled_block_encode_representative_k_sweep_preserves_bytes_and_esi_order() {
             );
         }
     }
+}
+
+proptest::proptest! {
+    #![proptest_config(proptest::test_runner::Config::with_cases(24))]
+
+    #[test]
+    fn pooled_block_encode_property_k_16_to_4096_preserves_bytes(
+        (k, bytes) in proptest::prop_oneof![16usize..=64, 65usize..=4096].prop_flat_map(|k| {
+            (Just(k), proptest::collection::vec(any::<u8>(), k))
+        }),
+    ) {
+        let config = RqConfig {
+            symbol_size: 1,
+            max_block_size: k,
+            repair_overhead: 1.0,
+            ..RqConfig::default()
+        };
+        let object_id = ObjectId::new_for_test(0xF209);
+        // Keep half of the generated cases on the real systematic/GF256 repair
+        // path without turning unoptimized K=4096 matrix solves into an
+        // accidental multi-hour property test. The full range still exercises
+        // canonical source-symbol bytes and blocking-pool dispatch.
+        let repair_count = usize::from(k <= 64) * 2;
+        let expected =
+            collect_monolithic_symbols(object_id, &bytes, &config, repair_count);
+        let (actual, execution_threads) =
+            collect_runtime_block_symbols(object_id, &bytes, &config, repair_count, 2);
+
+        proptest::prop_assert_eq!(
+            &actual,
+            &expected,
+            "pooled encode diverged from canonical bytes at K={k}, repairs={repair_count}"
+        );
+        proptest::prop_assert!(
+            execution_threads
+                .iter()
+                .all(|thread| thread.contains("-blocking-")),
+            "K={k} must execute through the configured pool: {execution_threads:?}"
+        );
+    }
+}
+
+#[test]
+fn concurrent_block_cursor_keeps_sources_unique_and_repairs_contiguous_per_sbn() {
+    let config = RqConfig {
+        symbol_size: 8,
+        max_block_size: 256,
+        repair_overhead: 1.0,
+        ..RqConfig::default()
+    };
+    let object_id = ObjectId::new_for_test(0xF20A);
+    let bytes = (0..512)
+        .map(|index| (index as u8).wrapping_mul(37).wrapping_add(5))
+        .collect::<Vec<_>>();
+    let initial_repair_count = 2;
+    let followup_repair_count = 3;
+    let expected = collect_m1_cursor_symbols(
+        object_id,
+        &bytes,
+        &config,
+        initial_repair_count,
+        followup_repair_count,
+    );
+    let (actual, execution_threads) = collect_concurrent_cursor_symbols(
+        object_id,
+        &bytes,
+        &config,
+        initial_repair_count,
+        followup_repair_count,
+    );
+
+    assert_eq!(
+        actual, expected,
+        "two concurrently encoded blocks must preserve canonical SBN/ESI/kind/payload tuples"
+    );
+    assert_eq!(
+        execution_threads.len(),
+        2,
+        "the barrier must be satisfied by two distinct blocking workers: {execution_threads:?}"
+    );
+    assert!(
+        cursor_symbol_ranges_are_valid(
+            &actual,
+            bytes.len(),
+            &config,
+            initial_repair_count,
+            followup_repair_count,
+        ),
+        "real concurrent output must contain each source ESI once and one contiguous repair range per SBN"
+    );
+
+    let mut duplicate_repair_esi = actual.clone();
+    let first_sbn = duplicate_repair_esi
+        .first()
+        .expect("two-block encode emits symbols")
+        .0;
+    let repair_indices = duplicate_repair_esi
+        .iter()
+        .enumerate()
+        .filter_map(|(index, symbol)| {
+            (symbol.0 == first_sbn && symbol.2 == SymbolKind::Repair).then_some(index)
+        })
+        .take(2)
+        .collect::<Vec<_>>();
+    assert_eq!(repair_indices.len(), 2, "first block emits two repairs");
+    duplicate_repair_esi[repair_indices[1]].1 = duplicate_repair_esi[repair_indices[0]].1;
+    assert!(
+        !cursor_symbol_ranges_are_valid(
+            &duplicate_repair_esi,
+            bytes.len(),
+            &config,
+            initial_repair_count,
+            followup_repair_count,
+        ),
+        "the ESI contract must reject a duplicated repair cursor value"
+    );
 }
 
 #[test]

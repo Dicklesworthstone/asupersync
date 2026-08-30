@@ -9171,6 +9171,61 @@ fn should_parallel_encode_source_blocks(
     parallel_encode_plan.is_some() && block_count > 1 && block_count <= MAX_RAPTORQ_SOURCE_BLOCKS
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RepairCursorPlan {
+    start: usize,
+    end: usize,
+}
+
+impl RepairCursorPlan {
+    const fn count(self) -> usize {
+        self.end - self.start
+    }
+}
+
+fn plan_repair_cursor(
+    repair_cursors: &[usize],
+    block_index: usize,
+    target: usize,
+) -> Result<RepairCursorPlan, RqError> {
+    let current = *repair_cursors.get(block_index).ok_or_else(|| {
+        RqError::Coding(format!(
+            "repair cursor block index {block_index} is outside {} planned blocks",
+            repair_cursors.len()
+        ))
+    })?;
+    if target < current {
+        return Err(RqError::Coding(format!(
+            "repair cursor regression for block {block_index}: current={current} target={target}"
+        )));
+    }
+    Ok(RepairCursorPlan {
+        start: current,
+        end: target,
+    })
+}
+
+fn commit_repair_cursor_after_success(
+    repair_cursors: &mut [usize],
+    block_index: usize,
+    plan: RepairCursorPlan,
+) -> Result<(), RqError> {
+    let cursor_count = repair_cursors.len();
+    let cursor = repair_cursors.get_mut(block_index).ok_or_else(|| {
+        RqError::Coding(format!(
+            "repair cursor block index {block_index} is outside {cursor_count} planned blocks"
+        ))
+    })?;
+    if *cursor != plan.start {
+        return Err(RqError::Coding(format!(
+            "repair cursor changed before block {block_index} commit: expected={} actual={}",
+            plan.start, *cursor
+        )));
+    }
+    *cursor = plan.end;
+    Ok(())
+}
+
 /// Encode one RaptorQ source block (its `K` source symbols plus `repair_count` repair symbols) into
 /// an owned `Vec<Symbol>`.
 ///
@@ -9612,6 +9667,8 @@ where
                                 block.k,
                                 round_tuning.repair_overhead,
                             );
+                            let repair_plan =
+                                plan_repair_cursor(&enc.repair_cursors, block_index, repair)?;
                             let cfg = enc_cfg.clone();
                             let handle = spawn_parallel_encode_block(
                                 &encode_cx,
@@ -9622,10 +9679,10 @@ where
                                 block_bytes,
                                 repair,
                             )?;
-                            spawned.push((block_index, block.k, repair, handle));
+                            spawned.push((block_index, block.k, repair_plan, handle));
                         }
                         let mut ring_occupancy = pending.len().saturating_add(spawned.len());
-                        for (block_index, source_symbols, target_repair, mut handle) in
+                        for (block_index, source_symbols, repair_plan, mut handle) in
                             pending.drain(..)
                         {
                             let encoded = match handle.join(&encode_cx).await {
@@ -9643,7 +9700,7 @@ where
                                 ParallelEncodeTrace {
                                     entry: enc.index,
                                     source_k: source_symbols,
-                                    repair_symbols: target_repair,
+                                    repair_symbols: repair_plan.end,
                                     effective_m: effective_encode_m,
                                     ring_occupancy,
                                     ring_capacity: encode_ring_capacity,
@@ -9673,13 +9730,17 @@ where
                             *parallel_round0_source_symbols =
                                 parallel_round0_source_symbols.saturating_add(source_symbols);
                             *parallel_round0_repair_symbols =
-                                parallel_round0_repair_symbols.saturating_add(target_repair);
-                            enc.repair_cursors[block_index] = target_repair;
+                                parallel_round0_repair_symbols.saturating_add(repair_plan.end);
+                            commit_repair_cursor_after_success(
+                                &mut enc.repair_cursors,
+                                block_index,
+                                repair_plan,
+                            )?;
                         }
                         pending = spawned;
                     }
                     let mut ring_occupancy = pending.len();
-                    for (block_index, source_symbols, target_repair, mut handle) in pending {
+                    for (block_index, source_symbols, repair_plan, mut handle) in pending {
                         let encoded = match handle.join(&encode_cx).await {
                             Ok(Ok(encoded)) => encoded,
                             Ok(Err(e)) => return Err(RqError::Coding(e)),
@@ -9695,7 +9756,7 @@ where
                             ParallelEncodeTrace {
                                 entry: enc.index,
                                 source_k: source_symbols,
-                                repair_symbols: target_repair,
+                                repair_symbols: repair_plan.end,
                                 effective_m: effective_encode_m,
                                 ring_occupancy,
                                 ring_capacity: encode_ring_capacity,
@@ -9725,8 +9786,12 @@ where
                         *parallel_round0_source_symbols =
                             parallel_round0_source_symbols.saturating_add(source_symbols);
                         *parallel_round0_repair_symbols =
-                            parallel_round0_repair_symbols.saturating_add(target_repair);
-                        enc.repair_cursors[block_index] = target_repair;
+                            parallel_round0_repair_symbols.saturating_add(repair_plan.end);
+                        commit_repair_cursor_after_success(
+                            &mut enc.repair_cursors,
+                            block_index,
+                            repair_plan,
+                        )?;
                     }
                     Ok::<(), RqError>(())
                 })
