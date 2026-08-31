@@ -5745,6 +5745,40 @@ impl RemoteComputationClient {
         })
     }
 
+    /// Clones this client with a replacement ordered bootstrap endpoint set.
+    ///
+    /// Server-name validation, TLS trust and client identity, enforcing
+    /// certificate pins, frame limits, and retry/time bounds are retained from
+    /// this client. The replacement is validated before it is returned, so an
+    /// empty or duplicate endpoint set cannot become a publishable route.
+    pub fn with_bootstrap_endpoints(
+        &self,
+        endpoints: impl IntoIterator<Item = SocketAddr>,
+    ) -> Result<Self, RemoteComputationClientError> {
+        Self::from_bootstrap_endpoints(
+            endpoints,
+            self.server_name.clone(),
+            self.tls_connector.clone(),
+            self.config,
+        )
+    }
+
+    /// Clones this client against the current endpoint snapshot from discovery.
+    ///
+    /// Callers remain responsible for successfully polling the discovery
+    /// source before reading its snapshot and for publishing the returned
+    /// client or route. This method starts no polling task and reads no ambient
+    /// clock or resolver itself.
+    pub fn with_discovered_endpoints<D>(
+        &self,
+        discovery: &D,
+    ) -> Result<Self, RemoteComputationClientError>
+    where
+        D: crate::service::Discover<Key = SocketAddr> + ?Sized,
+    {
+        self.with_bootstrap_endpoints(discovery.endpoints())
+    }
+
     /// Primary destination socket, retained for single-endpoint API compatibility.
     #[must_use]
     pub const fn endpoint(&self) -> SocketAddr {
@@ -5998,9 +6032,11 @@ pub const DEFAULT_NATIVE_REMOTE_MAX_IN_FLIGHT: usize = 256;
 
 /// Static destination route for [`NativeRemoteRuntime`].
 ///
-/// Discovery remains an outer concern: this value deliberately binds one
-/// logical destination to one validated client/bootstrap policy and one V3
-/// peer hello.
+/// Automatic discovery remains an outer concern: this value deliberately binds
+/// one logical destination to one validated client/bootstrap policy and one V3
+/// peer hello. A caller that has successfully polled a [`crate::service::Discover`]
+/// source can create a replacement through [`Self::with_discovered_endpoints`]
+/// and publish it atomically through [`NativeRemoteRuntime::replace_routes`].
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
 #[derive(Clone, Debug)]
 pub struct NativeRemoteRoute {
@@ -6041,6 +6077,39 @@ impl NativeRemoteRoute {
     #[must_use]
     pub const fn client(&self) -> &RemoteComputationClient {
         &self.client
+    }
+
+    /// Clones this route with a replacement ordered bootstrap endpoint set.
+    ///
+    /// The logical destination and V3 hello are retained exactly, while the
+    /// client preserves its complete TLS and bounded-attempt policy.
+    pub fn with_bootstrap_endpoints(
+        &self,
+        endpoints: impl IntoIterator<Item = SocketAddr>,
+    ) -> Result<Self, RemoteComputationClientError> {
+        Ok(Self {
+            destination: self.destination.clone(),
+            hello: self.hello.clone(),
+            client: self.client.with_bootstrap_endpoints(endpoints)?,
+        })
+    }
+
+    /// Clones this route against the current caller-polled discovery snapshot.
+    ///
+    /// This is a synchronous snapshot conversion only. It does not poll,
+    /// schedule, retry, or publish discovery changes on the caller's behalf.
+    pub fn with_discovered_endpoints<D>(
+        &self,
+        discovery: &D,
+    ) -> Result<Self, RemoteComputationClientError>
+    where
+        D: crate::service::Discover<Key = SocketAddr> + ?Sized,
+    {
+        Ok(Self {
+            destination: self.destination.clone(),
+            hello: self.hello.clone(),
+            client: self.client.with_discovered_endpoints(discovery)?,
+        })
     }
 }
 

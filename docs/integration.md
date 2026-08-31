@@ -1826,6 +1826,19 @@ delivery-ambiguous outcomes never advance to another endpoint. A
 client. This is pre-delivery static bootstrap failover; it does not provide
 active discovery, health-based balancing, durable route storage, or WAN policy.
 
+An outer control plane can now bridge an existing
+`Discover<Key = SocketAddr>` source into this route model without rebuilding
+authentication policy. After a successful caller-owned `poll_discover`, use
+`RemoteComputationClient::with_discovered_endpoints` or
+`NativeRemoteRoute::with_discovered_endpoints` to validate the current endpoint
+snapshot, then publish the complete route set with
+`NativeRemoteRuntime::replace_routes`. The rebound client retains server name,
+trust roots, client certificate/key identity, enforcing pins, frame and timeout
+bounds, retry policy, destination, and V3 hello. Empty or duplicate endpoint
+snapshots are rejected before route publication. These methods do not poll,
+spawn, persist, or select endpoints; automatic refresh scheduling and health
+policy remain outside the runtime adapter.
+
 Unix builds also expose a supported static process boundary behind the
 additive `remote-service` feature:
 

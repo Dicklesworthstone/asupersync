@@ -29,6 +29,8 @@ use asupersync::runtime::RuntimeBuilder;
 #[cfg(feature = "tls")]
 use asupersync::server::ShutdownPhase;
 #[cfg(feature = "tls")]
+use asupersync::service::{Discover, DnsDiscoveryConfig, DnsServiceDiscovery, StaticList};
+#[cfg(feature = "tls")]
 use asupersync::tls::{
     Certificate, CertificateChain, CertificatePin, CertificatePinSet, ClientAuth, PrivateKey,
     RootCertStore, TlsAcceptor, TlsAcceptorBuilder, TlsConnector, TlsConnectorBuilder,
@@ -43,6 +45,8 @@ use futures_lite::future::block_on;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+#[cfg(feature = "tls")]
+use std::collections::HashSet;
 use std::fmt;
 use std::fs;
 use std::io;
@@ -1970,9 +1974,14 @@ fn native_remote_runtime_atomically_rotates_validated_routes() {
             .build()
             .expect("route service mTLS acceptor should build")
     };
+    let server_pins = CertificatePinSet::new().with_pin(
+        CertificatePin::compute_spki_sha256(&peer_certificate)
+            .expect("route client should derive the fixture server SPKI pin"),
+    );
     let connector = TlsConnectorBuilder::new()
         .add_root_certificate(&peer_certificate)
         .identity(certificate_chain.clone(), private_key.clone())
+        .with_certificate_pins(server_pins)
         .build()
         .expect("route-rotation mTLS connector should build");
     let (endpoint_a, operator_a, service_a) =
@@ -1990,24 +1999,43 @@ fn native_remote_runtime_atomically_rotates_validated_routes() {
         )
         .expect("route-rotation client should validate")
     };
-    let client_a = build_client(endpoint_a);
-    let client_b = build_client(endpoint_b);
+    fn fixed_discovery_time() -> asupersync::types::Time {
+        asupersync::types::Time::from_nanos(0)
+    }
+
+    let resolved_endpoints = Arc::new(Mutex::new(HashSet::from([endpoint_a])));
+    let resolver_endpoints = Arc::clone(&resolved_endpoints);
+    let discovery = DnsServiceDiscovery::new(
+        DnsDiscoveryConfig::new("native-route.test", 7443)
+            .poll_interval(Duration::ZERO)
+            .with_time_getter(fixed_discovery_time)
+            .with_resolver(move |hostname, port| {
+                assert_eq!(hostname, "native-route.test");
+                assert_eq!(port, 7443);
+                Ok(resolver_endpoints.lock().clone())
+            }),
+    );
+    assert_eq!(
+        discovery
+            .poll_discover()
+            .expect("initial deterministic DNS poll should succeed")
+            .len(),
+        1
+    );
+    assert_eq!(discovery.endpoints(), vec![endpoint_a]);
+    let client_a = build_client(endpoint_a)
+        .with_discovered_endpoints(&discovery)
+        .expect("initial discovered endpoint snapshot should validate");
+    let initial_route =
+        NativeRemoteRoute::new(destination.clone(), hello.clone(), client_a.clone());
 
     let runtime = RuntimeBuilder::new()
         .worker_threads(2)
         .build()
         .expect("route-rotation driver runtime should build");
     let native = Arc::new(
-        NativeRemoteRuntime::new(
-            runtime.handle(),
-            origin.clone(),
-            [NativeRemoteRoute::new(
-                destination.clone(),
-                hello.clone(),
-                client_a,
-            )],
-        )
-        .expect("initial native route should validate"),
+        NativeRemoteRuntime::new(runtime.handle(), origin.clone(), [initial_route.clone()])
+            .expect("initial native route should validate"),
     );
     let cap = asupersync::remote::RemoteCap::new()
         .with_local_node(origin.clone())
@@ -2047,14 +2075,29 @@ fn native_remote_runtime_atomically_rotates_validated_routes() {
     assert_eq!(dispatch_count_a.load(Ordering::SeqCst), 1);
     assert_eq!(dispatch_count_b.load(Ordering::SeqCst), 0);
 
+    *resolved_endpoints.lock() = HashSet::from([endpoint_b]);
+    discovery.invalidate();
+    assert_eq!(
+        discovery
+            .poll_discover()
+            .expect("replacement deterministic DNS poll should succeed")
+            .len(),
+        2
+    );
+    assert_eq!(discovery.endpoints(), vec![endpoint_b]);
+    let route_b = initial_route
+        .with_discovered_endpoints(&discovery)
+        .expect("discovered replacement route should preserve client policy");
+    assert_eq!(route_b.destination(), &destination);
+    assert_eq!(route_b.hello(), &hello);
+    assert_eq!(route_b.client().server_name(), client_a.server_name());
+    assert_eq!(route_b.client().config(), client_a.config());
+    assert_eq!(route_b.client().bootstrap_endpoints(), &[endpoint_b]);
+    let client_b = route_b.client().clone();
     assert_eq!(
         native
-            .replace_routes([NativeRemoteRoute::new(
-                destination.clone(),
-                hello.clone(),
-                client_b.clone(),
-            )])
-            .expect("valid replacement should publish atomically"),
+            .replace_routes([route_b.clone()])
+            .expect("valid discovered replacement should publish atomically"),
         1
     );
     assert_eq!(native.route_generation(), 1);
@@ -2070,6 +2113,51 @@ fn native_remote_runtime_atomically_rotates_validated_routes() {
         native
             .effective_route(&destination)
             .expect("effective replacement route should exist")
+            .client()
+            .endpoint(),
+        endpoint_b
+    );
+
+    struct SnapshotDiscovery(Vec<SocketAddr>);
+
+    impl Discover for SnapshotDiscovery {
+        type Key = SocketAddr;
+        type Error = std::convert::Infallible;
+
+        fn poll_discover(
+            &self,
+        ) -> Result<Vec<asupersync::service::Change<Self::Key>>, Self::Error> {
+            Ok(Vec::new())
+        }
+
+        fn endpoints(&self) -> Vec<Self::Key> {
+            self.0.clone()
+        }
+    }
+
+    let empty_refresh = route_b
+        .with_discovered_endpoints(&SnapshotDiscovery(Vec::new()))
+        .expect_err("empty discovered endpoint snapshot must fail before publication");
+    assert!(matches!(
+        empty_refresh,
+        RemoteComputationClientError::InvalidConfig(
+            "remote client bootstrap endpoints must be nonempty"
+        )
+    ));
+    let duplicate_refresh = route_b
+        .with_discovered_endpoints(&SnapshotDiscovery(vec![endpoint_b, endpoint_b]))
+        .expect_err("duplicate discovered endpoint snapshot must fail before publication");
+    assert!(matches!(
+        duplicate_refresh,
+        RemoteComputationClientError::InvalidConfig(
+            "remote client bootstrap endpoints must be unique"
+        )
+    ));
+    assert_eq!(native.route_generation(), 1);
+    assert_eq!(
+        native
+            .effective_route(&destination)
+            .expect("invalid discovery snapshots must retain the last-known-good route")
             .client()
             .endpoint(),
         endpoint_b
@@ -4131,8 +4219,14 @@ fn remote_native_client_pin_mismatch_does_not_fall_through() {
         .with_certificate_pins(CertificatePinSet::new().with_pin(wrong_pin))
         .build()
         .expect("pin-mismatch connector should build");
-    let client = RemoteComputationClient::from_bootstrap_endpoints(
-        [primary_endpoint, secondary_endpoint],
+    let seed_listener = std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("pin-mismatch rebind should reserve a seed endpoint");
+    let seed_endpoint = seed_listener
+        .local_addr()
+        .expect("pin-mismatch seed endpoint should expose its address");
+    drop(seed_listener);
+    let seed_client = RemoteComputationClient::new(
+        seed_endpoint,
         "localhost",
         connector,
         RemoteComputationClientConfig::new()
@@ -4141,7 +4235,22 @@ fn remote_native_client_pin_mismatch_does_not_fall_through() {
             .with_backoff(Duration::ZERO, Duration::ZERO)
             .with_full_jitter(false),
     )
-    .expect("pin-mismatch bootstrap client should validate");
+    .expect("pin-mismatch seed client should validate");
+    let discovery = StaticList::new(vec![primary_endpoint, secondary_endpoint]);
+    assert_eq!(
+        discovery
+            .poll_discover()
+            .expect("static pin-mismatch discovery poll should succeed")
+            .len(),
+        2
+    );
+    let client = seed_client
+        .with_discovered_endpoints(&discovery)
+        .expect("pin-mismatch discovered bootstrap set should validate");
+    assert_eq!(
+        client.bootstrap_endpoints(),
+        &[primary_endpoint, secondary_endpoint]
+    );
     let request = remote_client_test_request(RemoteProtocolVersion::V1, 7211, 0x7211);
     let error = run_remote_client_call(&client, &request)
         .expect_err("enforced pin mismatch must fail closed before request delivery");

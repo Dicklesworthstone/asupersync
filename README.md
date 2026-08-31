@@ -993,6 +993,16 @@ the current endpoint. `NativeRemoteRuntime` inherits this behavior from its
 configured route client. This is static bootstrap failover, not active health
 checking, service discovery, load balancing, or multi-host/WAN evidence.
 
+Callers that already own a `Discover<Key = SocketAddr>` source can poll it,
+check the poll result, and convert its current snapshot with
+`RemoteComputationClient::with_discovered_endpoints` or
+`NativeRemoteRoute::with_discovered_endpoints`. The returned value preserves
+the original server name, trust roots, client identity, enforcing pins, wire
+limits, retry policy, destination, and V3 hello; empty or duplicate snapshots
+fail before `NativeRemoteRuntime::replace_routes` can advance its generation.
+This is caller-driven snapshot rebinding. It does not start a polling task,
+persist routes, choose a health policy, or claim automatic discovery.
+
 | Primitive | Location | Runtime Behavior |
 |-----------|----------|------------------|
 | Named remote spawn | `src/remote.rs` | `spawn_remote` creates a region-owned `RemoteHandle`; attached runtimes send protocol messages, while missing runtimes fail closed to an explicit deterministic fallback |
