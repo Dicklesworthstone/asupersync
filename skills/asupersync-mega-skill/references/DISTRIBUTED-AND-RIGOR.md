@@ -10,6 +10,21 @@ It is built around the same principles as local execution:
 - explicit obligations,
 - deterministic evidence.
 
+## Table of Contents
+
+- [Remote Execution Model](#remote-execution-model)
+- [What That Means For Downstream Integrators](#what-that-means-for-downstream-integrators)
+- [Lease-Backed Naming Is A Design Tool](#lease-backed-naming-is-a-design-tool)
+- [Distributed Protocol Design Rules](#distributed-protocol-design-rules)
+- [Logical Clocks Are Not Academic Decoration](#logical-clocks-are-not-academic-decoration)
+- [Sagas, Not Hidden Rollbacks](#sagas-not-hidden-rollbacks)
+- [RaptorQ And Snapshot Distribution](#raptorq-and-snapshot-distribution)
+- [The Rigor Stack: What It Buys You](#the-rigor-stack-what-it-buys-you)
+- [When To Pay The Rigor Tax](#when-to-pay-the-rigor-tax)
+- [Evidence-Led Design](#evidence-led-design)
+- [Anti-Patterns](#anti-patterns)
+- [Read Next](#read-next)
+
 ## Remote Execution Model
 
 The repo's remote surface is centered on named computations, not arbitrary
@@ -58,6 +73,11 @@ Bad fits:
 - arbitrary closure capture
 - implicit global mutable state on both sides
 - retries without dedupe or lease semantics
+
+`src/distributed/` also exports consensus (including PBFT), membership,
+anti-entropy, adaptive-layout, computation-schema, recovery, and snapshot
+primitives. Treat these as building blocks with focused proofs, not a turnkey
+discovered, authenticated, production WAN cluster.
 
 ## Lease-Backed Naming Is A Design Tool
 
@@ -134,11 +154,12 @@ Use it when:
 
 The same fountain property now powers multi-donor bonded transfers (`atp
 bond-pull`, `BondedTransfer` SDK): one receiver decodes the union of disjoint
-symbol slices from N donors, with fail-closed content agreement (each side
-derives the descriptor from its own local bytes; it is never sent on the
-wire) and the same deliberate fail-closed symbol-auth posture as single-source
-RaptorQ transport. See `RAPTORQ-DISTRIBUTED.md` for details and no-claim
-boundaries.
+symbol slices from N donors, provided the received equations have sufficient
+rank. Library enrollment derives and cross-checks the descriptor from local
+bytes on every peer. The `atp bond-pull` orchestrator currently fetches the
+first donor's descriptor JSON over SSH to initialize its receiver, after which
+all donor enrollments still fail closed on locally derived agreement. See
+`RAPTORQ-DISTRIBUTED.md` for the trust boundary and other no-claim limits.
 
 ## The Rigor Stack: What It Buys You
 

@@ -2,6 +2,18 @@
 
 Asupersync's operator story is stronger than "export a few traces." Use it.
 
+## Table of Contents
+
+- [Three Layers To Understand](#three-layers-to-understand)
+- [Runtime Observability Support Classes](#runtime-observability-support-classes)
+- [Current Owned OTLP Mapping And Transport Boundary](#current-owned-otlp-mapping-and-transport-boundary)
+- [Runtime Observability Surfaces](#runtime-observability-surfaces)
+- [Progress Certificates And Drain Phases](#progress-certificates-and-drain-phases)
+- [Task And Wait-Graph Diagnostics](#task-and-wait-graph-diagnostics)
+- [Futurelock, Crashpacks, And Replay](#futurelock-crashpacks-and-replay)
+- [Evidence Ledger](#evidence-ledger)
+- [Practical Posture](#practical-posture)
+
 ## Three Layers To Understand
 
 | Layer | Purpose |
@@ -12,13 +24,78 @@ Asupersync's operator story is stronger than "export a few traces." Use it.
 
 Do not collapse these into one vague "logging" concept.
 
+## Runtime Observability Support Classes
+
+Do not describe every observability type as one uniformly available production
+export stack:
+
+| Support class | Available surface | Boundary |
+|---------------|-------------------|----------|
+| always-on core | `LogEntry`, `LogCollector`, in-process `Metrics` / `NoOpMetrics`, `TaskInspector`, `Diagnostics`, cancellation and spectral-health diagnostics | Structured capture and inspection; no claim of external collector delivery |
+| `metrics` feature | `observability::otel` SDK bridges, validated OTLP HTTP configuration/export, and finite owned metrics, trace, and log mapping | Native-only feature-gated integration; verify the chosen signal, transport, and collector lane |
+| `tracing-integration` feature | `tracing` compatibility and span/log integration | Optional compatibility layer; disabled paths compile to no-op shims |
+| explicit unsupported boundary | OTLP tail-based sampling reports `OtlpTailSamplingSupportClass::ExplicitlyUnsupported` | No production deferred trace-completion sampler yet |
+| test-only harness | `OtelTransportMode`, `OtelExporterConfig`, and `OtelMetricsExporter` inside `src/observability/metrics.rs`'s `#[cfg(test)]` module | Deterministic capture/failure simulation only; not downstream configuration or evidence of network delivery |
+
+The similarly named production exporters live under feature-gated
+`src/observability/otel.rs`; never teach the test-only `OtelTransportMode` as a
+public transport selector.
+
+### Current Owned OTLP Mapping And Transport Boundary
+
+Published v0.4.9 has an additive native OTLP path re-exported only under
+`cfg(all(feature = "metrics", not(target_arch = "wasm32")))`:
+
+- `OtlpHttpConfigBuilder::build` produces an immutable validated
+  `OtlpHttpConfig`; endpoint, retry, TLS, authentication-header, and resource
+  limits fail closed through stable `OtlpConfigError` codes, without ambient
+  environment reads inside core configuration;
+- authentication values and endpoint path/query material are redacted from
+  `Debug`, authenticated endpoints require HTTPS, and the HTTP transport never
+  follows redirects or uses a cookie store;
+- `OwnedOtlpMetrics` implements the runtime `MetricsProvider` and emits bounded
+  cumulative metrics batches with explicit timestamps and reset epochs;
+- `OwnedOtlpTraces` validates borrowed span/event/link collections, lineage,
+  identifiers, timestamps, attributes, and byte budgets before cloning or
+  sending; and
+- `OwnedOtlpLogs` does the same for finite structured log bodies and batches.
+
+`OtlpHttpExporter::{send_owned_metrics, send_owned_traces, send_owned_logs}`
+validates and encodes each complete collection before the first write, sends
+requests sequentially inside the caller's `Cx`, and does not create a detached
+exporter task. These capabilities ship in v0.4.9. The owned protobuf encoder is
+crate-private; downstream consumers use the higher-level owned types. The owned
+trace lineage guarantee is local parentage within one trace; links do not
+establish arbitrary cross-trace structured-concurrency lineage.
+
+Keep the evidence boundary exact. The ordinary executable integration lane
+uses a handwritten loopback HTTP listener and independently decodes the wire
+bytes. A pinned official OpenTelemetry Collector fixture exists, sends all
+three owned signals, and reads the Collector's file output, but its test is
+explicitly `#[ignore]` because it downloads and runs an external service.
+Therefore only terminal output from the exact `metrics,test-internals` focused
+cases proves mapper, limit, and loopback-wire behavior; default workspace totals
+may compile the file while executing none of those feature-gated cases. The
+focused cases still do not prove that the official Collector test actually ran.
+Cite collector acceptance only with terminal output from that explicit
+ignored-test lane.
+
+Tracker status is also scoped: the A2-A5 configuration, owned metrics, owned
+trace, and owned log tranches ship in v0.4.9. A6-A11 remain open: response and
+transport semantics; queue/retry/shutdown; shared privacy/cardinality policy;
+the multi-signal failure/fuzz matrix; aggregate dependency/no-Tokio and
+cutover-or-keep signoff; and maintained official SDK/provider ecosystem
+coverage. Do not turn the configuration plus three owned-signal tranche
+closures into a claim that the entire OTLP program is complete. Re-check the
+live Beads graph and release tag before repeating this status later.
+
 ## Runtime Observability Surfaces
 
 High-value user-facing surfaces include:
 
 - `ObservabilityConfig`
 - `LogCollector`
-- metrics exporters / OTLP integration
+- in-process metrics plus feature-gated exporter / OTLP integration
 - `TaskInspector`
 - `Diagnostics`
 - `CancellationExplanation`

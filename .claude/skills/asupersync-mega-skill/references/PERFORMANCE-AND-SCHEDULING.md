@@ -2,6 +2,19 @@
 
 Treat Asupersync as a runtime you can reason about, not a black-box executor.
 
+## Contents
+
+- [Core Scheduler Model](#the-core-scheduler-model)
+- [Cooperative and Hostile Workload Shapes](#what-cooperates-with-the-runtime)
+- [Runtime Presets](#runtime-presets-are-architectural-choices)
+- [Locking and Sharded State](#locking-and-sharded-state)
+- [Locality](#locality-matters)
+- [Cancellation Pressure](#cancellation-pressure-is-part-of-performance)
+- [Blocking Pool Discipline](#blocking-pool-discipline)
+- [Diagnostics and Tuning](#diagnostics-to-use-while-tuning)
+- [Workload Heuristics](#practical-workload-heuristics)
+- [Anti-Patterns](#anti-patterns)
+
 The highest leverage performance gains usually come from making your workload
 cooperate with the runtime model:
 
@@ -19,11 +32,17 @@ The runtime uses a three-lane scheduler:
 - timed lane
 - ready lane
 
-Priority is explicit:
+Normal lane priority is explicit:
 
 - cancel work outranks timed work,
 - timed work outranks ordinary ready work,
 - fairness is bounded rather than wishful.
+
+That is the ordinary local-worker ordering, not an unconditional total order.
+Fairness and starvation governors may temporarily choose another eligible lane
+to enforce bounded progress, and multi-worker stealing cannot promise a global
+priority order. Inspect the live scheduler policy and telemetry before treating
+`cancel > timed > ready` as a universal dispatch trace.
 
 What this means for downstream code:
 
@@ -78,7 +97,14 @@ The repo already exposes knobs for:
 
 - worker and blocking pool sizing
 - poll budget / scheduling batch controls
-- cancel-streak behavior and adaptive governance
+- cancel-streak behavior and adaptive governance (adaptive cancel streak is
+  on by default at HEAD and uses discounted UCB1; this is not an EXP3 or
+  no-regret performance claim)
+- sharded backing state (`with_sharded_state(true)` opt-in; default `Unified`)
+- spawn admission (`Direct` default vs lock-free `Mailbox`)
+- explicit worker cohorts and placement mode for topology-aware steal ordering
+- capacity hints and memory-tier policies (arena temperature, trace storage
+  profile) — policy-only, no scheduling-semantics change
 - root-region limits
 - deadline monitoring
 - logical clock mode
@@ -88,11 +114,22 @@ Use those knobs after you understand the workload shape, not before.
 
 ## Locking And Sharded State
 
-Asupersync's own runtime state is sharded for a reason. Copy that lesson.
+Asupersync exposes sharded runtime state as an opt-in experiment in reducing
+hot-lock contention. Copy the ownership lesson, not an unproved performance
+claim.
 
 Canonical shard order in the runtime:
 
 - `E(Config) -> D(Instrumentation) -> B(Regions) -> A(Tasks) -> C(Obligations)`
+
+The sharded shape is a public opt-in (`with_sharded_state(true)`; the default
+backing state remains `Unified`). On sharded builds, scheduler dispatch runs
+against the shard-A task table and obligation resolution targets shard C via
+wrapper-side resolution in `src/runtime/state.rs`. Region lifecycle records
+still remain embedded in the unified state and shard B is dormant pending the
+closure-accessor decision. Do not repeat the broader enum docstring as proof
+that all three shards are live, and do not claim a default flip or performance
+win without current benchmark evidence.
 
 What downstream integrators should learn from that:
 
@@ -105,7 +142,11 @@ If you must lock multiple structures, define an order and document it.
 
 ## Locality Matters
 
-The runtime distinguishes local `!Send` work and stealable `Send` work.
+The runtime distinguishes local `!Send` work and stealable `Send` work, and
+can additionally order steal victims by explicit worker cohorts
+(`worker_cohorts(...)` + `scheduler_placement_mode(...)`) for NUMA-style
+topology awareness — deterministic ordering only, with the mapping supplied
+by you, never probed from the host.
 
 Downstream implication:
 
@@ -156,6 +197,8 @@ High-value operator surfaces:
 - lock metrics via `ContendedMutex`
 - progress certificates and drain phase labels
 - fairness counters such as yield/cancel streak telemetry
+- `runtime::metrics::snapshot()` CPU/churn counters (`runtime-metrics` feature)
+- resource-monitor pressure snapshots/verdicts
 
 Use these before guessing.
 
@@ -201,7 +244,7 @@ If the architecture is wrong, builder tuning will not save it.
 
 ## Read Next
 
-- `RUNTIME-CONTROLS-DIAGNOSTICS.md`
+- `RUNTIME-CONTROLS.md`
 - `OBSERVABILITY-FORENSICS.md`
 - `TESTING-FORENSICS.md`
 - `PRIMITIVES-AND-ORCHESTRATION-CHOOSER.md`

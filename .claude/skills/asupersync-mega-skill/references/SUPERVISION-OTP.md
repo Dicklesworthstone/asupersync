@@ -4,6 +4,17 @@ If the target system has long-lived workers, stateful services, restart domains,
 or named internal components, this is where Asupersync stops looking like a
 Tokio replacement and starts looking like a stronger application model.
 
+## Table of Contents
+
+- [Promote At The Right Time](#promote-at-the-right-time)
+- [`AppSpec` Is The Real App Boundary](#appspec-is-the-real-app-boundary)
+- [Supervision Strategy And Restart Policy](#supervision-strategy-and-restart-policy)
+- [Mailbox Fairness And Extreme Backoff](#mailbox-fairness-and-extreme-backoff)
+- [Designing `GenServer` Correctly](#designing-genserver-correctly)
+- [Registry And Name Leases](#registry-and-name-leases)
+- [Deterministic Ordering Matters](#deterministic-ordering-matters)
+- [Migration Rule](#migration-rule)
+
 ## Promote At The Right Time
 
 Use this escalation path:
@@ -40,10 +51,18 @@ Important guidance:
 - Treat `AppHandle` as obligation-like. Resolve it with `stop` / `join`; do not casually drop it.
 - Put caches, control loops, pumps, and replication workers under the app tree instead of creating them from request handlers.
 
+Current lifecycle mechanics are synchronous Phase 0:
+`stop(&mut RuntimeState)` requests root-region cancellation, while
+`join(&RuntimeState)` checks terminal state but does not drive the runtime.
+Dropping an unresolved handle logs a leak only with `tracing-integration`.
+
 Relevant paths:
 
 - `src/app.rs`
 - `examples/spork_minimal_supervised_app.rs`
+- `examples/appspec_reference_journey.rs` (declarative `AppSpecV1` manifest ->
+  compile -> deterministic lab proof, with the e2e artifact runner
+  `scripts/run_appspec_reference_journey_e2e.sh`)
 
 ## Supervision Strategy And Restart Policy
 
@@ -58,12 +77,48 @@ Use restart policy to encode dependency shape:
 - `OneForAll` when siblings share critical state,
 - `RestForOne` when later children depend on earlier ones.
 
+Know the current restart boundary: `CompiledSupervisor` compiles the topology
+and computes deterministic restart plans (`restart_plan_for`), but tree-level
+live restart-on-failure is still pending -- a child crash under a
+`CompiledSupervisor` tree is not restarted automatically today. Live restart
+is per-actor via `Scope::spawn_supervised_actor` (`src/actor.rs`), where the
+mailbox persists across restarts and a restart budget bounds retries.
+
 Do not fake this with manual restart loops hidden inside children.
 
 Relevant paths:
 
 - `src/supervision.rs`
 - `docs/spork_glossary_invariants.md`
+
+## Mailbox Fairness And Extreme Backoff
+
+Published v0.4.9 closes two pathological liveness edges without changing the
+public surface:
+
+- Actor and `GenServer` receive and drain loops perform a real
+  `runtime::yield_now().await` after each batch of eight continuously ready
+  messages. Merely inspecting poll quota is not a scheduling point; a hot
+  mailbox must actually return `Pending` so peer work can run.
+- `BackoffStrategy::Exponential` sanitizes invalid multipliers and saturates
+  conversion at the configured `max`, including `Duration::MAX`, instead of
+  allowing an extreme floating-point duration to panic during conversion.
+
+Do not infer priority fairness, a wall-clock latency bound, or live
+tree-supervisor restarts from these repairs. The focused actor oracle proves a
+bounded yield point after eight ready messages; the backoff oracle proves
+non-panicking saturation.
+
+The live `asupersync-9jygqo` actor/GenServer frontier still tracks stricter
+waker-dedup oracle thresholds, GenServer keepalive behavior, buffered-message
+loss if drain panics, and DPOR backtrack coverage. Treat those as open
+validation boundaries and re-check Beads before making a completeness claim.
+
+Relevant paths:
+
+- `src/actor.rs`
+- `src/gen_server.rs`
+- `src/supervision.rs`
 
 ## Designing `GenServer` Correctly
 
@@ -104,7 +159,8 @@ Important guidance:
 
 - inject registry capability through `AppSpec` / `Cx`,
 - avoid rebuilding a global singleton service locator,
-- resolve named handles explicitly with `stop_and_release()` or `abort_lease()` semantics.
+- resolve named handles explicitly: `NamedGenServerHandle::stop()` plus
+  `release_name(...)`, or `abort_lease(...)` when the name should be dropped.
 
 Relevant paths:
 

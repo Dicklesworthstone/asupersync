@@ -2,6 +2,16 @@
 
 Once the basic migration is native, the next gains come from using Asupersync as more than a runtime replacement.
 
+## Contents
+
+- [High-Leverage Deep Dives](#start-with-the-three-high-leverage-deep-dives)
+- [Supervision, AppSpec, and Spork](#supervision-appspec-and-spork)
+- [Resilience Combinators and Plan Rewrites](#resilience-combinators-and-plan-rewrites)
+- [Remote and Distributed Surfaces](#remote--distributed-surfaces)
+- [Advanced Service-Edge Design](#advanced-service-edge-design)
+- [Protocol Breadth and Maturity](#protocol-breadth-and-maturity)
+- [Guidance for Ambitious Systems](#guidance-for-ambitious-systems)
+
 ## Start With The Three High-Leverage Deep Dives
 
 - runtime shaping and operator controls,
@@ -13,7 +23,8 @@ Those are where most "we switched runtimes but still think like Tokio" gaps show
 Read:
 
 - `LEVERAGE-PLAYBOOK.md`
-- `RUNTIME-CONTROLS-DIAGNOSTICS.md`
+- `RUNTIME-CONTROLS.md`
+- `OBSERVABILITY-FORENSICS.md`
 - `GREENFIELD-PATTERNS.md`
 
 ## Supervision, AppSpec, And Spork
@@ -71,6 +82,15 @@ Relevant sources:
 Also remember:
 
 - keep `Outcome::Cancelled` and `Outcome::Panicked` distinct at policy boundaries,
+- since v0.4.4, ordinary `Cx::spawn*` preserves a task's typed result after it
+  acknowledges cancellation (a concurrent abort no longer erases it into a
+  generic join cancellation); cancellation-dominant combinators keep their
+  separately documented semantics,
+- since v0.4.5, explicit cancellation wakes a timer-parked native task and
+  retires the timer registration; `Sleep` completes with `()` while timeout and
+  deadline combinators own their classifications,
+- for a nonzero quorum, any observed panic (including a drained loser's panic)
+  remains `QuorumError::Panicked`; enough `Ok` branches do not override it,
 - use tighter budgets for hedges, cleanup, and adapters,
 - prefer lawful orchestration surfaces over open-coded select forests.
 
@@ -120,23 +140,33 @@ This is also where capability security becomes real instead of rhetorical:
 
 ## Protocol Breadth And Maturity
 
-Broadly strong native surfaces:
+Implemented native surfaces, each still subject to its feature flag and exact
+support class:
 
 - HTTP/1.1
 - HTTP/2
 - TLS
 - WebSocket
-- database clients
+- SQLite, PostgreSQL, and MySQL clients
 - service/middleware composition
 
 Surfaces to validate before promising downstream parity:
 
-- QUIC / HTTP3
-- some messaging integrations
+- QUIC / HTTP3 (feature-gated; the native driver now does in-handshake X.509
+  verification and fails closed, but the row is still not a generic-QUIC
+  interoperability or release-readiness claim)
+- messaging integrations (Redis/NATS/Kafka are still classified early)
+- filesystem (an early blocking-backed facade, not full `tokio::fs` parity)
 - some browser/wasm adapters
 - niche distributed paths
 
-That means the skill should steer users toward native breadth confidently, but still verify the exact advanced path they need.
+That means the skill should steer users toward native breadth confidently, but still verify the exact advanced path they need against the README coverage map and `docs/platform_capability_matrix.md`.
+
+Notable v0.4.x additions on this frontier: an explicit Linux io_uring
+capability control plane (probed modes, not performance claims), first-party
+bounded Base64/hex codecs and a parked `block_on` kernel, typed redacted
+configuration models, and bounded HTTP/1 streaming-body controls
+(`Http1StreamingConfig`, v0.4.4).
 
 ## Guidance For Ambitious Systems
 

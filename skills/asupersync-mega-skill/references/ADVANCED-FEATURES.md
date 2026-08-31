@@ -2,6 +2,16 @@
 
 Once the basic migration is native, the next gains come from using Asupersync as more than a runtime replacement.
 
+## Contents
+
+- [High-Leverage Deep Dives](#start-with-the-three-high-leverage-deep-dives)
+- [Supervision, AppSpec, and Spork](#supervision-appspec-and-spork)
+- [Resilience Combinators and Plan Rewrites](#resilience-combinators-and-plan-rewrites)
+- [Remote and Distributed Surfaces](#remote--distributed-surfaces)
+- [Advanced Service-Edge Design](#advanced-service-edge-design)
+- [Protocol Breadth and Maturity](#protocol-breadth-and-maturity)
+- [Guidance for Ambitious Systems](#guidance-for-ambitious-systems)
+
 ## Start With The Three High-Leverage Deep Dives
 
 - runtime shaping and operator controls,
@@ -76,6 +86,11 @@ Also remember:
   acknowledges cancellation (a concurrent abort no longer erases it into a
   generic join cancellation); cancellation-dominant combinators keep their
   separately documented semantics,
+- since v0.4.5, explicit cancellation wakes a timer-parked native task and
+  retires the timer registration; `Sleep` completes with `()` while timeout and
+  deadline combinators own their classifications,
+- for a nonzero quorum, any observed panic (including a drained loser's panic)
+  remains `QuorumError::Panicked`; enough `Ok` branches do not override it,
 - use tighter budgets for hedges, cleanup, and adapters,
 - prefer lawful orchestration surfaces over open-coded select forests.
 
@@ -125,13 +140,14 @@ This is also where capability security becomes real instead of rhetorical:
 
 ## Protocol Breadth And Maturity
 
-Broadly strong native surfaces:
+Implemented native surfaces, each still subject to its feature flag and exact
+support class:
 
 - HTTP/1.1
 - HTTP/2
 - TLS
 - WebSocket
-- database clients
+- SQLite, PostgreSQL, and MySQL clients
 - service/middleware composition
 
 Surfaces to validate before promising downstream parity:

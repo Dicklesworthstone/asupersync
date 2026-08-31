@@ -2,6 +2,18 @@
 
 Rules from AGENTS.md for AI coding agents working in this codebase.
 
+## Contents
+
+- [Critical Rules](#critical-rules)
+- [Backwards Compatibility](#backwards-compatibility-v043-hard-gate)
+- [Editing and Compilation](#code-editing-discipline)
+- [Testing](#testing)
+- [Features and Dependencies](#feature-flags)
+- [Multi-Agent and Session Closeout](#multi-agent-environment)
+- [Documentation and Release Evidence](#key-documentation)
+- [RCH, Migration, UBS, and Beads](#rch-remote-compilation-helper)
+- [ATP Benchmark Discipline](#atp-benchmark-discipline)
+
 ## Critical Rules
 
 1. **NEVER delete files** without express written permission. Even files you created.
@@ -19,8 +31,8 @@ Rules from AGENTS.md for AI coding agents working in this codebase.
 
 ## Backwards Compatibility (v0.4.3 Hard Gate)
 
-Current workspace version is 0.4.4 (v0.4.0 -> v0.4.4 shipped 2026-08-07 ->
-2026-08-13). For every `0.4.x` release, compatibility with the public API and
+Current workspace version is 0.4.9 (v0.4.0 -> v0.4.9 shipped 2026-08-07 ->
+2026-08-20). For every `0.4.x` release, compatibility with the public API and
 documented behavior of **v0.4.3** is a hard release gate (AGENTS.md
 "Backwards Compatibility"):
 
@@ -43,6 +55,8 @@ documented behavior of **v0.4.3** is a hard release gate (AGENTS.md
   written user approval.
 - Ignore any older repo text claiming Asupersync "has no users" or need not
   preserve compatibility -- the user has explicitly overridden it.
+- The generic 0.x caveat in `src/lib.rs` is not permission for casual breaks;
+  live `AGENTS.md` and the audited v0.4.3 floor are the governing policy.
 
 ## Forbidden Crates
 
@@ -68,6 +82,11 @@ rch exec -- env CARGO_TARGET_DIR="${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target
 rch exec -- env CARGO_TARGET_DIR="${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_fmt_check" cargo fmt --check
 ```
 
+Installed RCH may reject `cargo fmt --check` because formatting is not a
+compilation command. If that happens, run the repository-accepted local,
+read-only formatter check on the touched files and report that boundary
+explicitly; do not represent the RCH refusal as formatter execution.
+
 Those three commands use the **default** feature set only. Every
 `required-features` target and every module behind `postgres`, `mysql`,
 `sqlite`, `tls`, `kafka`, `quic`, `messaging-fabric`, `cli`, `io-uring`, or
@@ -91,7 +110,8 @@ for that, use `scripts/migration_readiness_planner.py` (see below).
 
 ## Testing
 
-Every module includes inline `#[cfg(test)]` unit tests. Tests must cover:
+Many modules include inline `#[cfg(test)]` unit tests; integration, conformance,
+and contract suites cover other surfaces. Tests must cover:
 - Happy path
 - Edge cases (empty input, max values, boundary conditions)
 - Error conditions
@@ -122,6 +142,10 @@ release-blocking regression. Never publish terminal join results through a
 cancelled `Cx`; runtime `TaskHandle` producers use the capability-restricted
 `TaskResultSender` (a raw oneshot replacement is a release-blocking regression).
 
+FrankenGraphDB migrated its stale cancellation expectation, and v0.4.9 ships
+the exact-v0.4.4 canary. Stale `asupersync-yqlhh7.1` tracker status is not
+contrary evidence.
+
 ### Test Commands
 
 ```bash
@@ -144,7 +168,7 @@ rch exec -- env CARGO_TARGET_DIR="$T/rch_target_test_frankenlab" cargo test -p f
 | `runtime/` | Scheduler fairness, state management, region lifecycle |
 | `cx/` | Capability context, scope API, structured concurrency contracts |
 | `channel/` | Two-phase reserve/send, MPSC/oneshot, cancel-correctness |
-| `sync/` | Mutex, RwLock, Semaphore, Pool, Barrier, OnceLock -- cancel-awareness |
+| `sync/` | Mutex, RwLock, Semaphore, Pool, Barrier, OnceCell -- cancel-awareness |
 | `combinator/` | Join, race, timeout, bulkhead, retry -- loser drain correctness |
 | `cancel/` | Cancellation protocol, symbol cancel, drain/finalize lifecycle |
 | `obligation/` | Permit/ack/lease commit/abort, no-leak invariant |
@@ -157,18 +181,20 @@ rch exec -- env CARGO_TARGET_DIR="$T/rch_target_test_frankenlab" cargo test -p f
 
 ### E2E and Benchmarks
 
-```bash
-./scripts/run_all_e2e.sh
-NO_PREFLIGHT=1 ./scripts/run_raptorq_e2e.sh --profile fast --bundle
-cargo bench --bench scheduler_benchmark
-cargo bench --bench timer_wheel
-```
+Do not copy a bare benchmark or `NO_PREFLIGHT=1` command from this skill. Read
+live `AGENTS.md`, `TESTING_FOR_AGENTS.md`, the relevant proof-lane manifest row,
+and the benchmark runbook first. Repository proof must use the exact required
+RCH command and prerequisites. A downstream local benchmark may be useful
+smoke evidence, but it is not repository release or performance proof.
 
 ## Feature Flags
 
+This is a selected, non-exhaustive inventory. Read live `Cargo.toml` before
+making a support, dependency-graph, or release claim.
+
 | Flag | What |
 |------|------|
-| `proc-macros` | Default proc-macro surface: `scope!`, `spawn!`, `join!`, `join_all!`, `race!` |
+| `proc-macros` | Default macros and entry attributes, plus `ProtoMessage` / `ProtoOneof`; `session_protocol!` is explicit-path-only |
 | `nightly-outcome-try` | Default nightly `Outcome` ergonomics |
 | `test-internals` | Opt-in test helpers -- NOT for production |
 | `runtime-metrics` / `metrics` | Runtime counters and telemetry surfaces |
@@ -179,7 +205,7 @@ cargo bench --bench timer_wheel
 | `quic` / `http3` / `atp-cli` | Feature-gated QUIC/H3/ATP surfaces; `atp-cli` implies TLS |
 | `atpd-daemon` | Unpublished ATP daemon binary gate, outside default release checks |
 | `kafka` | Kafka client integration via rdkafka |
-| `messaging-fabric` | Native FABRIC messaging lane (module wiring not fully gated yet) |
+| `messaging-fabric` | Feature-gated native FABRIC lane; external Redis, NATS/JetStream, and Kafka clients are separate surfaces |
 | `compression` | HTTP response compression (gzip/deflate/Brotli) |
 | `io-uring` | Linux io_uring reactor |
 | `tower` | Tower Service adapter |
@@ -188,6 +214,14 @@ cargo bench --bench timer_wheel
 | `lock-metrics` | ContendedMutex tracking |
 | `loom-tests` | Loom verification |
 | `simd-intrinsics` | AVX2/NEON GF(256) for RaptorQ |
+
+Also classify `waker-profiling` and `runtime-metrics` as instrumentation;
+`dependency-ledger`, `cancel-correctness-oracle`, and `lab-stack-traces` as
+proof/internal; `fuzz` as a deliberate Tokio-carrying fuzz quarantine; and
+`tokio-compat` as a marker whose actual wrappers live in the separate compat
+crate. `metrics` is an optional native production feature and remains Tokio-free
+on its normal dependency edge. `ci-cross-platform` is an umbrella, not proof
+that every optional production surface was exercised.
 
 ## Output Style
 
@@ -232,12 +266,19 @@ claims.
 
 ## Session Completion Protocol
 
-1. File issues for remaining work
-2. Run quality gates (if code changed)
-3. Update issue status
-4. Pull/rebase, sync beads, and commit path-limited changes.
-5. Push `main`, then mirror the legacy compatibility ref with
-   `git push origin main:master` when the live repo instructions require it.
+Classification, explanation, diagnosis, and review requests are read-only:
+inspect evidence and report without changing Beads, files, Git history, or
+remotes. Use the mutation sequence below only when the user authorized changes,
+you actually own modified paths, and any relevant Bead is active.
+
+1. File issues for genuinely remaining work only when tracker mutation is in
+   scope.
+2. Run quality gates appropriate to the files that actually changed.
+3. Update only the owned issue state and evidence.
+4. Pull/rebase when required by live repository state, sync owned Beads changes,
+   and commit only path-limited owned changes.
+5. Push `main`, then follow the live repository instructions for mirroring its
+   legacy compatibility ref; do not create or work on a second branch.
 6. Release reservations and hand off context. If push/rebase is blocked by peer
    state, report the exact command and blocker.
 
@@ -264,6 +305,13 @@ claims.
 | `artifacts/migration_readiness_planner_signoff_v1.json` | Migration planner signoff and proof-status claim |
 | `artifacts/phase6_methodology_gate_enforcement_contract_v1.json` | Direct-main vs PR/release-review gate contract |
 | `artifacts/runtime_pressure_control_evidence_contract_v1.json` | Runtime pressure-control evidence contract |
+| `artifacts/unsafe_boundary_ledger_v1.json` | Audited unsafe exceptions and no-claim boundaries |
+| `artifacts/fourth_wave_governor_final_signoff_v1.json` | Scoped fourth-wave governor aggregate |
+| `artifacts/artifact_governance_final_signoff_v1.json` | Scoped artifact-governance aggregate |
+| `artifacts/memory_residency_replay_e2e_contract_v1.json` / `artifacts/memory_residency_operator_safety_contract_v1.json` | Experimental memory-residency replay and operator boundaries |
+| `artifacts/clean_overlay_proof_orchestration_v1.json` / `artifacts/proof_traffic_final_signoff_v1.json` | Clean-overlay and proof-traffic orchestration contracts |
+| `artifacts/dependency_supply_chain_policy_v1.json` / `artifacts/dependency_budget_contract_v1.json` | Dependency policy and graph-budget contracts |
+| `artifacts/browser_ga_final_signoff_v1.json` | Scoped JS/TS browser GA packet |
 | `docs/atp_bench_matrix_spec.md` | ATP benchmark acceptance contract |
 | `docs/atp_rq_beat_rsync_ledger.md` | Append-only ATP benchmark evidence ledger and refuted-hypothesis history |
 | `scripts/atp_bench/MATRIX.md` | ATP matrix operator runbook / command guide |
@@ -285,6 +333,17 @@ Add `RCH_REQUIRE_REMOTE=1` whenever the lane must fail closed on remote proof.
 If unavailable, preserve the remote-proof failure instead of quietly proving a
 different local command.
 
+Admission refusal, exit 103, worker selection, a remote PID, or an RCH job that
+never reaches terminal Cargo output proves no test result. Record it as zero
+executed tests. For a green claim require terminal output at the exact commit,
+positive named-sentinel counts, and zero failed/ignored/measured/filtered tests
+where the lane contract requires those fields.
+
+Do not key source or evidence authority to a checkout prefix. `/dp/...`,
+`/data/projects/...`, and RCH content-addressed roots vary by host. Validate
+repository identity and complete evidence, then emit a bounded blocked receipt
+for incomplete mounts instead of creating worker-lottery behavior.
+
 ## Phase 6 / Release-Gate Artifacts
 
 For hot-path, safety, release-review, or proof-policy work, read the current
@@ -296,6 +355,11 @@ run is not a substitute for a triggered artifact gate.
 Do not infer release status from `Cargo.toml` version alone. `CHANGELOG.md`
 separates published GitHub Releases from plain tags and active Unreleased work;
 verify tags, releases, Cargo/package metadata, and changelog together.
+
+Use a three-layer proof model: the manifest defines a command, guarantee,
+resource envelope, and explicit no-claims; the status snapshot records
+freshness and blockers; only a terminal execution receipt proves the command
+ran. A green structural contract proves only its declared schema/docs surface.
 
 ## Migration Readiness Planner
 
@@ -334,7 +398,18 @@ br close <id> --reason "Completed"
 br sync --flush-only  # export (no git ops)
 ```
 
-Always `br sync --flush-only && git add .beads/` before ending sessions.
+When tracker mutation was authorized and this session actually changed owned
+Beads rows, run `br sync --flush-only` and stage only the owned tracker delta.
+Do not mutate or stage `.beads/` for a read-only classification/review, and do
+not stage unrelated peer tracker changes.
+
+Beads is authoritative for tracker intent, dependencies, comments, and recorded
+acceptance evidence, but not automatically for shipped status. Corroborate an
+`open` or `in_progress` label against tagged source, release artifacts, and the
+acceptance record; current rows such as the shipped runtime-handle context work
+demonstrate that status can lag. Use CASS for prior rationale and working
+hypotheses, never as a substitute for current source when its index is stale or
+quarantined.
 
 ## ATP Benchmark Discipline
 

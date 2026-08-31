@@ -4,6 +4,22 @@ Use this reference when the target includes browser execution, React, or
 Next.js. The browser lane is real, but it is not "run the entire native runtime
 everywhere JavaScript exists."
 
+## Table of Contents
+
+- [The First Decision: Direct Runtime Or Bridge-Only?](#the-first-decision-direct-runtime-or-bridge-only)
+- [Profile Selection Is Mandatory](#profile-selection-is-mandatory)
+- [Vanilla Browser Pattern](#vanilla-browser-pattern)
+- [React Pattern](#react-pattern)
+- [Next.js Pattern](#nextjs-pattern)
+- [Browser Scheduler Semantics Matter](#browser-scheduler-semantics-matter)
+- [Worker Offload Is Policy-Governed](#worker-offload-is-policy-governed)
+- [Unsupported Runtime Failures Are Useful](#unsupported-runtime-failures-are-useful)
+- [Evidence Contract For Browser Adoption](#evidence-contract-for-browser-adoption)
+- [Browser Troubleshooting Ladder](#browser-troubleshooting-ladder)
+- [High-Value Adoption Advice](#high-value-adoption-advice)
+- [Anti-Patterns](#anti-patterns)
+- [Read Next](#read-next)
+
 ## The First Decision: Direct Runtime Or Bridge-Only?
 
 | Environment | Direct Browser Edition Runtime | Guidance |
@@ -15,14 +31,14 @@ everywhere JavaScript exists."
 | Node.js server runtime | no | bridge-only |
 | Next.js server components / route handlers | no | bridge-only (`supportClass: "bridge_only"` in Next diagnostics) |
 | edge/serverless runtimes with partial Web APIs | assume no unless explicitly validated | unsupported-runtime is the default posture |
-| external Rust consumer (`wasm32`) | preview public lane only | `RuntimeBuilder::browser()` — dispatcher-backed, fail-closed, inspect the execution ladder (`selected_lane`, `host_role`, `reason_code`, `preferred_lane`, `downgrade_order`) |
+| external Rust consumer (`wasm32`) | preview public lane only | `RuntimeBuilder::browser()` — dispatcher-backed, fail-closed; inspect with `RuntimeBuilder::new().inspect_browser_execution_ladder()` or consume a browser builder with `BrowserRuntimeBuilder::inspect_execution_ladder()` |
 
 Do not blur these boundaries.
 
 If the environment is not a supported direct-runtime lane, keep runtime
 execution in a browser boundary and communicate over explicit RPC/API seams.
 
-Package surfaces (workspace version 0.4.4; not yet published to npm — use
+Package surfaces (workspace version 0.4.9; not yet published to npm — use
 workspace-local references): `@asupersync/browser-core` (ABI/wasm),
 `@asupersync/browser` (SDK), `@asupersync/react`, `@asupersync/next`.
 

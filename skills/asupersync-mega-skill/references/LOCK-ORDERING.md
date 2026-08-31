@@ -1,18 +1,41 @@
 # Lock Ordering and Concurrency Discipline
 
-## Canonical Lock Order
+## Table of Contents
 
-When acquiring multiple locks, the strict order is:
+- [Canonical Rank Vocabulary](#canonical-rank-vocabulary)
+- [ShardedState](#shardedstate)
+- [ContendedMutex](#contendedmutex)
+- [Channel Waker Dedup](#channel-waker-dedup)
+- [Worker Wake Coordination](#worker-wake-coordination)
+- [Lost-Wakeup Prevention](#lost-wakeup-prevention)
+- [Intrusive Queue Links](#intrusive-queue-links)
+- [Atomic Counter Discipline](#atomic-counter-discipline)
+- [Steal-Path Locality](#steal-path-locality)
+- [Migration to parking_lot](#migration-to-parking_lot)
+- [Out-Of-Lock Effect Delivery](#out-of-lock-effect-delivery)
+- [Rules](#rules)
+
+## Canonical Rank Vocabulary
+
+The repository's canonical rank vocabulary is:
 
 ```
 E(Config) -> D(Instrumentation) -> B(Regions) -> A(Tasks) -> C(Obligations)
 ```
 
-Violating this order causes deadlocks. This is enforced by:
+Acquiring a lower-ranked lock while a higher-ranked lock is held can deadlock.
+The enforcement boundary is narrower than the five-symbol vocabulary:
 
-- Named `ShardGuard` constructors that always acquire in canonical order
-- `lock_order::before_lock` / `after_lock` debug assertions on every shard
-  acquisition (`LockShard` labels)
+- `ShardGuard` constructors acquire the mechanically represented table locks in
+  `B -> A -> C` order.
+- `lock_order::before_lock` / `after_lock` debug assertions cover the
+  `LockShard::{Regions, Tasks, Obligations}` acquisitions.
+- Ranked `ContendedMutex`, async `Mutex`, and `RwLock` paths also use the
+  general checks in `src/sync/lock_ordering.rs`.
+- E is immutable and requires no lock. D uses its own synchronization and is
+  convention/audit checked, not represented by `LockShard`; trace may currently
+  be emitted while a table lock is held, so the inventory records D as an
+  enforcement gap rather than a proven global order.
 - Dedicated contract/audit tests, e.g. `tests/lock_order_inventory_contract.rs`
   and `tests/runtime_no_await_while_holding_lock_audit.rs`, plus a loom lane
   (`tests/scheduler_loom.rs`, feature `loom-tests`)
@@ -23,7 +46,7 @@ Source: `src/runtime/sharded_state.rs`
 
 ## ShardedState
 
-Runtime state split into independently locked shards:
+`ShardedState` defines independently locked tables:
 
 | Shard | Label | Contents |
 |-------|-------|----------|
@@ -37,22 +60,22 @@ Runtime state split into independently locked shards:
 
 Hot-path polling proceeds without serializing every region or obligation mutation. Each shard can be locked independently when only one table is needed.
 
-Lock nature per shard: A/B/C are Arc-shared `ContendedMutex` tables (aliased
-to scheduler/lifecycle seams via `task_shard_handle` / `region_shard_handle` /
-`obligation_shard_handle`); D is internally synchronized (short-held trace
-mutex, acquired after shard locks by convention — it is not a `LockShard`);
-E is read-only config with no lock.
+Lock nature per shard: A/B/C are Arc-shared `ContendedMutex` tables with exact
+handle accessors. D is internally synchronized and is not a `LockShard`; E is
+read-only config with no lock.
 
 The sharded shape is a public opt-in: `RuntimeBuilder::with_sharded_state(true)`
-(default `RuntimeStateShape::Unified`). On sharded builds, obligation
-resolution targets shard C via wrapper-side resolution in
-`src/runtime/state.rs` (shard A then shard C, buffered effect sinks,
-post-release drain).
+(default `RuntimeStateShape::Unified`). The current public runtime route is
+hybrid: scheduler dispatch uses shard A, obligation mint/settlement uses shard C
+through wrapper-side A-then-C resolution, and region records remain embedded in
+the unified `RuntimeState`. Shard B therefore remains dormant as a lifecycle
+owner. Do not teach this opt-in as a completed A/B/C cutover. The unified shape
+preserves the v0.4.3-compatible default and observable contracts.
 
 ### Multi-Shard Operations
 
-Use `ShardGuard` to acquire multiple shards in canonical order at runtime
-(debug assertions verify the order). Named constructors: `tasks_only` (A),
+Use `ShardGuard` when operating directly on multiple `ShardedState` tables
+(debug assertions verify B-before-A-before-C). Named constructors: `tasks_only` (A),
 `regions_only` (B), `obligations_only` (C), `for_spawn` (B->A),
 `for_obligation` (B->C), `for_obligation_resolve` / `for_cancel` /
 `for_task_completed` / `all` (B->A->C).
@@ -62,11 +85,11 @@ Use `ShardGuard` to acquire multiple shards in canonical order at runtime
 Source: `src/sync/contended_mutex.rs`
 
 Wrapper around `std::sync::Mutex` (synchronous `lock()`, no `Cx`) with optional contention metrics (feature: `lock-metrics`):
-- Wait time tracking (cumulative, max, and retained percentile samples)
-- Hold time tracking (cumulative and max)
+- Wait and hold time tracking (cumulative, max, and retained p95/p999 samples)
 - Contention event counting
+- Acquisition counting
 
-Use for all shard locks in `ShardedState`.
+Use for the A/B/C table locks in `ShardedState`.
 
 ## Channel Waker Dedup
 
@@ -80,9 +103,13 @@ Prevents duplicate wakeups and reduces contention on the wake path.
 
 ## Worker Wake Coordination
 
-- `Idle -> Polling -> Notified` state machine for centralized wake dedup
-- Scheduling paths route through `wake_state.notify()`
-- Wakes during poll are coalesced (no double-enqueueing)
+- Three-state `TaskWakeState` (`Idle`, `Polling`, `Notified`) for centralized
+  wake dedup
+- Ready/timed scheduling is deduplicated through `wake_state.notify()`; cancel
+  promotion still calls it for bookkeeping but deliberately injects even when
+  the task was already notified in another lane
+- Ordinary wakes during one poll coalesce into one pending-notified bit;
+  cancel-lane promotion follows the separate rule above
 - `Waker::will_wake` guards skip redundant clones on waiter registration
 
 ## Lost-Wakeup Prevention
@@ -90,7 +117,7 @@ Prevents duplicate wakeups and reduces contention on the wake path.
 Multiple strategies used:
 - Permit-style `Parker` with queue rechecks after wakeup
 - Capacity re-checks after waiter registration (closes capacity-check/registration race)
-- Both send and receive waiters woken on channel close
+- Channel close paths wake their relevant registered send/receive waiters
 
 ## Intrusive Queue Links
 
@@ -121,11 +148,32 @@ Source: `src/runtime/scheduler/local_queue.rs`
 
 Runtime, scheduler, I/O, lab, networking, and transport internals all use `parking_lot` primitives where it improves lock-path cost. This was a deliberate, measured migration.
 
+## Out-Of-Lock Effect Delivery
+
+Treat this as a rule: never invoke a waker, metrics/tracing hook, or user/observer
+callback while a `RuntimeState` or shard lock is held. Such code can re-enter the
+runtime, acquire another lock, or panic. Complete authoritative mutation,
+cleanup/unlink, quiescence advancement, and guard state under the lock; capture
+owned effects; release every lock; then deliver each effect once, with panic
+containment where the effect can call foreign code.
+
+This is not yet a completed repository-wide property. The direct completion
+observer in `RuntimeState::task_completed` has been split into
+`TaskCompletionEffects` / `TaskCompletionObserver` for post-lock dispatch, but
+active P0 `asupersync-909482` still tracks the broader boundary: transitive
+obligation/region/finalizer callbacks, foreign-waker destruction, bounded panic
+payload handling, suppression/gauge accounting, and `panic = "abort"` behavior.
+Teach out-of-lock delivery as the required design and review rule, not as a
+guarantee already proved for every callback or destructor.
+
 ## Rules
 
-1. Always acquire in canonical order: E -> D -> B -> A -> C
+1. Follow the E -> D -> B -> A -> C rank vocabulary; for mechanically tracked
+   shard locks, acquire B -> A -> C
 2. Never hold a shard lock across an await point
 3. Use `ContendedMutex` for shard locks (enables metrics)
-4. Use `ShardGuard` for multi-shard operations
+4. Use `ShardGuard` for multi-table operations over `ShardedState`; wrapper-side
+   hybrid operations must preserve their explicit A-then-C order
 5. Prefer atomic operations over locks on hot paths
 6. Use `Waker::will_wake` to skip redundant clone operations
+7. Deliver wakers, instrumentation, and callbacks only after releasing runtime locks

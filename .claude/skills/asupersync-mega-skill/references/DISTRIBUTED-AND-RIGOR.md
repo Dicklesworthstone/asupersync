@@ -10,6 +10,21 @@ It is built around the same principles as local execution:
 - explicit obligations,
 - deterministic evidence.
 
+## Table of Contents
+
+- [Remote Execution Model](#remote-execution-model)
+- [What That Means For Downstream Integrators](#what-that-means-for-downstream-integrators)
+- [Lease-Backed Naming Is A Design Tool](#lease-backed-naming-is-a-design-tool)
+- [Distributed Protocol Design Rules](#distributed-protocol-design-rules)
+- [Logical Clocks Are Not Academic Decoration](#logical-clocks-are-not-academic-decoration)
+- [Sagas, Not Hidden Rollbacks](#sagas-not-hidden-rollbacks)
+- [RaptorQ And Snapshot Distribution](#raptorq-and-snapshot-distribution)
+- [The Rigor Stack: What It Buys You](#the-rigor-stack-what-it-buys-you)
+- [When To Pay The Rigor Tax](#when-to-pay-the-rigor-tax)
+- [Evidence-Led Design](#evidence-led-design)
+- [Anti-Patterns](#anti-patterns)
+- [Read Next](#read-next)
+
 ## Remote Execution Model
 
 The repo's remote surface is centered on named computations, not arbitrary
@@ -23,8 +38,18 @@ Key properties:
 - protocol transitions are session-typed and explicit
 - logical clock metadata travels with protocol messages
 - saga compensation is a first-class rollback model
+- a missing remote runtime fails closed to an explicit deterministic fallback
 
 This is a stronger model than "spawn some closure on another node".
+
+The shipped proof tier now includes both the deterministic virtual/lab
+baseline and a production-transport-backed loopback proof: a TCP-backed
+`RemoteRuntime` adapter (`tests/remote_transport_lifecycle_contract.rs`, over
+`asupersync::net::TcpListener`/`TcpStream`) is pinned across spawn/result,
+cancellation before ack and while running, lease renewal/expiry, idempotency
+replay, transport failures, malformed envelopes, capability denial, and the
+no-runtime fallback. No-claim boundary: discovery, TLS/authentication, WAN
+retry policy, and a frozen production wire format remain adapter-specific.
 
 ## What That Means For Downstream Integrators
 
@@ -48,6 +73,11 @@ Bad fits:
 - arbitrary closure capture
 - implicit global mutable state on both sides
 - retries without dedupe or lease semantics
+
+`src/distributed/` also exports consensus (including PBFT), membership,
+anti-entropy, adaptive-layout, computation-schema, recovery, and snapshot
+primitives. Treat these as building blocks with focused proofs, not a turnkey
+discovered, authenticated, production WAN cluster.
 
 ## Lease-Backed Naming Is A Design Tool
 
@@ -122,6 +152,15 @@ Use it when:
 - partial replica availability is normal,
 - deterministic recovery and evidence matter.
 
+The same fountain property now powers multi-donor bonded transfers (`atp
+bond-pull`, `BondedTransfer` SDK): one receiver decodes the union of disjoint
+symbol slices from N donors, provided the received equations have sufficient
+rank. Library enrollment derives and cross-checks the descriptor from local
+bytes on every peer. The `atp bond-pull` orchestrator currently fetches the
+first donor's descriptor JSON over SSH to initialize its receiver, after which
+all donor enrollments still fail closed on locally derived agreement. See
+`RAPTORQ-DISTRIBUTED.md` for the trust boundary and other no-claim limits.
+
 ## The Rigor Stack: What It Buys You
 
 Asupersync includes a lot of formal and statistical machinery. Do not treat it
@@ -136,7 +175,7 @@ as decoration; translate it into operational advantage.
 | conformal calibration | thresholds with better false-alarm behavior under drift |
 | spectral health | early warning on structural wait-graph deterioration |
 | TLA+ export | bounded model-checking bridge for high-stakes invariants |
-| Lean/formal artifacts | stronger assurance on kernel semantics |
+| Lean/formal artifacts | Lean-checked model invariants (kernel model, not a proof the production runtime refines it) |
 
 ## When To Pay The Rigor Tax
 

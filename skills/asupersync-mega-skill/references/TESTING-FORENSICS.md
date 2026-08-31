@@ -5,14 +5,39 @@ This is one of Asupersync's strongest differentiators. Build it into the develop
 Start with `TESTING_FOR_AGENTS.md` (repo root): it is the decision-tree entry
 point for choosing a test shape. `TESTING.md` holds the full contracts.
 
+## Table of Contents
+
+- [Test Ladder](#test-ladder)
+- [Domain-Specific Test Targets](#domain-specific-test-targets)
+- [Start With Deterministic Helpers](#start-with-deterministic-helpers)
+- [Reach For `LabRuntime` Early](#reach-for-labruntime-early)
+- [The Invariants That Must Become Concrete](#the-invariants-that-must-become-concrete)
+- [Use Oracles As Gates](#use-oracles-as-gates)
+- [Native Cancellation Boundaries Are A Release Gate](#native-cancellation-boundaries-are-a-release-gate)
+- [Proof Admission And External-Consumer Evidence](#proof-admission-and-external-consumer-evidence)
+- [Exact `ForcedSchedule` Workflow](#exact-forcedschedule-workflow)
+- [Chaos Presets Matter](#chaos-presets-matter)
+- [Futurelock Is A First-Class Detector](#futurelock-is-a-first-class-detector)
+- [Preserve Failure Artifacts](#preserve-failure-artifacts)
+- [Scenario-Based Testing](#scenario-based-testing)
+- [Network And Distributed Test Advice](#network-and-distributed-test-advice)
+- [Evidence-Ledger And Diagnostics Workflow](#evidence-ledger-and-diagnostics-workflow)
+- [Avoid These Failure Patterns](#avoid-these-failure-patterns)
+- [Forensics Workflow](#forensics-workflow)
+- [Escaped Defects Need Receipts](#escaped-defects-need-receipts)
+- [Practical Migration Rule](#practical-migration-rule)
+
 ## Test Ladder
 
 Use the lightest tool that still proves the invariant:
 
 1. `test_utils::run_test(...)` / `run_test_with_cx(...)` for ordinary async tests.
 2. `LabRuntime` for concurrency-sensitive behavior.
-3. Scenario-based lab runs when you need recurring chaos/failure matrices.
-4. Crashpack/replay artifacts when a failure deserves long-lived forensic value.
+3. Native runtime worker tests for real wakeup, local-lane, cross-thread, or
+   shutdown behavior that Lab cannot prove.
+4. Exact `ForcedSchedule` capture/replay for a known deterministic Lab run.
+5. Scenario-based lab runs when you need recurring chaos/failure matrices.
+6. Crashpack/replay artifacts when a failure deserves long-lived forensic value.
 
 ## Domain-Specific Test Targets
 
@@ -38,6 +63,12 @@ the production runtime; `#[lab_test]` (including
 deterministic lab runtime.
 
 These should be your default unless the test needs stronger scheduling control.
+
+They are not a local-task executor. `spawn_local` requires a scheduler-worker
+TLS lane owned by the same runtime. For a `!Send` future, enter a worker using
+`runtime.block_on(runtime.handle().spawn(async { ... }))`, obtain
+`Cx::current()` there, acquire the non-Send guard inside the local future, then
+call `spawn_local`.
 
 ## Reach For `LabRuntime` Early
 
@@ -115,6 +146,78 @@ scheduler cancellation wakeup, spawn wrappers, or cancel-aware primitives must
 run that lane; a red, zero-test, filtered, or skipped result blocks release.
 See "Do not model away a native cancellation boundary" in
 `TESTING_FOR_AGENTS.md`.
+
+The permanent regression shape is:
+
+1. enter the same execution class the consumer used (including a true local
+   worker for `!Send` tasks),
+2. prove the task reached the blocked/parked state without a timing sleep,
+3. abort/cancel through the public API,
+4. assert the exact outer join plus inner operation result,
+5. assert waiter/timer/task/region/obligation cleanup and no late work.
+
+`OwnedMutexGuard` can solve a `Send` bound, but it does not prove cancellation
+delivery. `Sleep` cancellation resolves its `()` output; timeout/deadline
+classification belongs to the surrounding combinator.
+
+## Proof Admission And External-Consumer Evidence
+
+Do not confuse proof admission with proof execution. For a remote-required
+lane, a worker assignment, PID, queue entry, admission receipt, preflight or
+resource/toolchain refusal, `exit 103`, and any local-fallback banner all mean
+zero admissible executed tests. Cite the lane only after terminal remote output
+from the exact snapshot shows a positive count for every named sentinel and
+zero failed, ignored, measured, or filtered tests.
+
+Interpret repository proof through three separate objects:
+
+1. `artifacts/proof_lane_manifest_v1.json` defines the exact command,
+   guarantee, resource envelope, and explicit no-claims.
+2. `artifacts/proof_status_snapshot_v1.json` records freshness and known
+   validation-frontier blockers.
+3. A terminal receipt from the admitted environment proves whether that command
+   actually ran and how many named cases passed.
+
+A structural artifact-contract test proves only its declared schema/docs
+surface. It cannot promote itself into broad runtime, performance, workspace,
+or release evidence.
+
+Crate-internal tests can see `cfg(test)` helpers and a dependency graph that real
+users do not. Compile the relevant public API and feature profiles through an
+actual external-consumer manifest as a separate gate. Resolve that consumer by
+manifest or explicit configuration, never by assuming checkout authority from
+`/dp`, `/data/projects`, or an RCH worker's hashed checkout path. An incomplete
+portfolio mount is a bounded external blocker, not a worker-lottery test result.
+
+For feature-wide compiler and lint frontiers, preserve `--all-targets
+--all-features --keep-going`; a fail-fast run can hide the rest of a large error
+frontier and is not an honest inventory. Narrower commands remain appropriate
+only when the live proof manifest or task scope deliberately narrows the claim.
+
+## Exact `ForcedSchedule` Workflow
+
+The public family lives under `asupersync::lab::runtime`, not entirely under the
+short `asupersync::lab` re-export path.
+
+1. Create a fresh `LabRuntime` with the intended `LabConfig`.
+2. Call `start_forced_schedule_recording(max_dispatches)` before any
+   schedule-relevant step.
+3. Drive the source run to the intended terminal/quiescent point.
+4. Call `finish_forced_schedule_recording()`; truncation fails closed instead of
+   returning a partial schedule.
+5. Persist with `to_canonical_bytes()` if needed.
+6. Decode untrusted bytes only through `try_from_canonical_bytes(bytes,
+   ForcedScheduleDecodeLimits::new(max_encoded_bytes, max_dispatches,
+   max_decoded_dispatch_bytes))` with caller-controlled bounds.
+7. Recreate the workload on a fresh compatible Lab runtime and call
+   `run_forced_schedule(&schedule,
+   ForcedScheduleLimits::new(max_dispatches, max_steps))`.
+
+There is no RNG fallback. The schedule binds task generation, worker, lane,
+step, virtual time, and terminal certificate. SHA-256 is integrity against
+corruption, not authentication. Deletion-only candidates cannot synthesize new
+choices and are minimization substrate only; their execution report does not
+prove that the original failure survives.
 
 ## Chaos Presets Matter
 
@@ -232,11 +335,14 @@ Relevant deep sources:
 
 When a concurrency bug is suspected:
 
-1. reproduce under `LabRuntime` with a fixed seed,
-2. enable trace capture and futurelock detection,
-3. inspect oracle failures and drain/quiescence behavior,
-4. preserve crashpack/replay artifacts if the issue is nontrivial,
-5. only then widen the test campaign or add heavier chaos.
+1. reproduce the consumer-visible API sequence in the same execution class,
+2. for native wakeup, parked-task, local-lane, shutdown, or cancellation
+   delivery bugs, keep a native-runtime reproducer as the authoritative test,
+3. add a fixed-seed `LabRuntime` model when it can explore the same invariant,
+4. enable trace capture and futurelock detection,
+5. inspect oracle failures and drain/quiescence behavior,
+6. preserve crashpack/replay artifacts if the issue is nontrivial,
+7. only then widen the test campaign or add heavier chaos.
 
 ## Escaped Defects Need Receipts
 
@@ -250,10 +356,14 @@ user approval.
 
 ## Practical Migration Rule
 
-Every major migrated slice should gain at least one deterministic regression test proving:
+Every major migrated slice should gain regression coverage proving:
 
 - the native replacement works,
 - cancellation is observable,
 - cleanup completes,
 - ownership is explicit,
 - the relevant oracle stays green.
+
+Use deterministic Lab coverage where the model is authoritative, and add the
+native worker/socket/runtime lane whenever the claim depends on native polling,
+wakeup, thread-local ownership, or shutdown behavior.

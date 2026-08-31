@@ -1,10 +1,28 @@
 # RaptorQ Fountain Coding and Distributed Systems
 
+## Table of Contents
+
+- [RaptorQ Overview](#raptorq-overview)
+- [Multi-Donor Bonded Transfers](#multi-donor-bonded-transfers)
+- [Distributed Primitives](#distributed-primitives)
+- [Consistent Hashing](#consistent-hashing)
+- [Distributed Snapshots](#distributed-snapshots)
+- [Security Layer](#security-layer)
+- [Testing Distributed Logic](#testing-distributed-logic)
+- [Distributed Model Summary](#distributed-model-summary)
+
 ## RaptorQ Overview
 
 Source: `src/raptorq/`
 
-RFC 6330 systematic RaptorQ codes: any K-of-N encoded symbols suffice to recover original K source symbols. In current Asupersync, treat this as a proof-carrying, fail-closed subsystem, not just an encoder/decoder API.
+RFC 6330 systematic RaptorQ codes recover K source symbols from a sufficiently
+large linearly independent set of source/repair symbols. K received symbols
+are not an unconditional guarantee: exact-rank solves can be deficient, so
+production transfer policy normally sends repair overhead and reports
+`InsufficientRank` honestly. Treat this as a proof-carrying subsystem, not just
+an encoder/decoder API. The production `transport_rq` transport is fail-closed
+by default; lower-level codec and pipeline APIs have separately configurable
+policy and do not inherit that transport claim.
 
 | Module | Purpose |
 |--------|---------|
@@ -36,23 +54,19 @@ Deterministic per-process selection. Policy snapshots for dual-lane fused operat
 
 ### Validation
 
-```bash
-# Fast smoke
-NO_PREFLIGHT=1 ./scripts/run_raptorq_e2e.sh --profile fast --bundle
-
-# Full profile
-NO_PREFLIGHT=1 ./scripts/run_raptorq_e2e.sh --profile full --bundle
-
-# Forensics (includes repair_campaign perf smoke)
-NO_PREFLIGHT=1 ./scripts/run_raptorq_e2e.sh --profile forensics --bundle
-```
+For repository proof, do not bypass preflight. Read live `AGENTS.md`,
+`TESTING_FOR_AGENTS.md`, `artifacts/proof_lane_manifest_v1.json`, and the help
+for `scripts/run_raptorq_e2e.sh`; run the exact declared lane through RCH. A
+preflight-bypassed invocation is at most an explicitly labeled downstream or
+harness smoke and cannot support repository proof.
 
 Outputs: `summary.json`, `scenarios.ndjson`, `validation_stages.ndjson`.
 
 ### Authentication Posture
 
-RaptorQ transport makes the trust boundary explicit, and is fail-closed by
-default:
+The production `transport_rq` transport makes the trust boundary explicit and
+is fail-closed by default. Lower-level RaptorQ codec and pipeline callers must
+select and validate their own authentication policy:
 
 - The production `transport_rq` transport refuses to run on a default
   `RqConfig`: symbol-auth mode resolves to `MissingAuthenticationContext`, so
@@ -97,9 +111,34 @@ ledger before claiming anything broader.
 
 ## Multi-Donor Bonded Transfers
 
-One receiver pulls a single object from N donors at once. Each donor is assigned a disjoint slice of the RaptorQ symbol stream (source + repair ESIs) and sprays it over UDP; the receiver decodes from the union. Fountain property ⇒ donors need no coordination beyond enrollment, and a dead donor's repair window is reallocated to survivors. Code: `src/net/atp/bonding/` (assignment, descriptor, handshake, receiver, `transport_select`, `derive`) + `src/net/atp/transport_rq/bonded.rs` (`receive_bonded` / `donate_bonded`).
+One receiver pulls a single object from N donors at once. Each donor is assigned
+a disjoint slice of the RaptorQ symbol stream (source + repair ESIs) and sprays
+it over UDP; the receiver decodes from the union once it has sufficient rank.
+Donors need no symbol-by-symbol coordination beyond enrollment, and a dead
+donor's repair window can be reallocated to survivors. Code:
+`src/net/atp/bonding/` (assignment, descriptor, handshake, receiver,
+`transport_select`, `derive`) plus `src/net/atp/transport_rq/bonded.rs`
+(`receive_bonded` / `donate_bonded`).
 
-**Fail-closed content agreement (the core invariant).** The descriptor (transfer-id, merkle root, per-entry object IDs, portable metadata commitment) is NEVER sent on the wire. Receiver and every donor derive it independently from their own local bytes via `bonding::derive_bonded_descriptor` (`MetadataPolicy::portable()`, `preserve_hardlinks: true`, `max_block_size` clamped ≥ `symbol_size`). Enrollment rejects on any transfer-id / merkle / metadata / symbol-size / max-block-size mismatch. A donor with drifted bytes cannot enroll ⇒ cannot corrupt the decode. Symbol-auth posture is the same deliberate fail-closed choice as single-source RaptorQ (`rq_auth_key_hex` / `--rq-allow-unauthenticated-lab`).
+**Fail-closed content agreement (the core invariant).** Library/transport
+enrollment does not send a descriptor as the agreement mechanism: receiver and
+every donor derive transfer id, merkle root, object ids, and portable metadata
+commitment independently from local bytes via
+`bonding::derive_bonded_descriptor` (`MetadataPolicy::portable()`,
+`preserve_hardlinks: true`, `max_block_size` clamped to at least
+`symbol_size`). Enrollment rejects transfer-id, merkle, metadata, symbol-size,
+or max-block-size mismatch. A drifted donor cannot enroll.
+
+The CLI orchestration boundary is different: `atp bond-pull` SSH-runs the
+hidden `__bond-descriptor` command on donor 0 and transports its descriptor
+JSON back to seed the in-process receiver. Every donating peer still derives
+its own descriptor and enrollment checks it, but the orchestrator must trust
+and authenticate that SSH bootstrap path. Do not repeat the blanket claim that
+the descriptor is "never sent on the wire." Symbol auth remains the same
+deliberate fail-closed choice as single-source RaptorQ (`rq_auth_key_hex` /
+`--rq-allow-unauthenticated-lab`).
+The protected-stdin SSH key delivery, child-environment stripping, redaction,
+and OpenSSH preflight live in `src/bin/atp.rs`, not the RaptorQ codec modules.
 
 **CLI (receiver-orchestrated):**
 ```bash
@@ -110,11 +149,28 @@ atp bond-pull <src> <dest> --donors alice@h1,bob@h2 --advertise <ctrl-addr:port>
 
 **Transport selection** (`bonding::transport_select`): `select_donor_path(pref, &ReceiverEndpoints{direct,tailnet}, donor_on_tailnet) -> Option<DonorPathChoice{transport,dial}>`. `auto` prefers shared Tailscale (CGNAT `100.64.0.0/10`, detected via `detect_local_tailnet()` shelling `tailscale status --json`/`tailscale ip -4`) else direct IP; `ip`/`tailscale` force a family; `ssh` tunnels. In `run_bond_pull` the receiver always advertises `direct = Some(control)`, so a failed tailnet probe degrades to direct, never aborts. GOTCHA: the live `ssh -L` forward is stubbed (`z01bbr.8.3 H3`) — an ssh-selected leg reports its plan and falls back to a direct dial today. `PathKind::preference_rank` (`src/atp/path.rs`) is the injective total order (Tailscale < direct < relay < mailbox).
 
-**SDK** (`asupersync::net::atp::sdk::BondedTransfer`): fluent builder mirroring the CLI flags (`expect_donors`/`listen`/`udp_bind`/`auth_key_hex`/`allow_unauthenticated_lab`/`symbol_size`/`max_block_size`/`repair_overhead`/`accept_timeout`). `receive(dest, local_src)` / `donate(src, control_addr)`. `async run(&cx) -> AtpOutcome<BondedReport>` (awaited in-task) or `spawn(&cx) -> AtpOutcome<BondedReceiveHandle>` (owned child; `control_addr()`, `next_progress() -> Option<BondedTransferProgress>`, `cancel()`, `wait_for_completion()`). Progress carries per-donor ingress, blocks_remaining, feedback_rounds, reallocated_repair_windows; `phase` reaches terminal `Completed` (success) or `Failed` (verification failure), with cancel/other errors signalled by stream-close + the join outcome. Cancel-correct: a cancelled `Cx` unwinds at the next checkpoint (one guards the instant before the irreversible commit) and commits nothing.
+**SDK** (`asupersync::net::atp::sdk::BondedTransfer`): fluent builder mirroring
+the CLI flags (`expect_donors`/`listen`/`udp_bind`/`auth_key_hex`/
+`allow_unauthenticated_lab`/`symbol_size`/`max_block_size`/
+`repair_overhead`/`accept_timeout`). Constructors are
+`receive(dest, local_src)` and `donate(src, control_addr)`.
+`run(self, &cx).await -> AtpOutcome<BondedReport>` is the in-task path;
+`spawn(self, &cx) -> AtpOutcome<BondedReceiveHandle>` creates the owned
+receiver child. Handle operations are asynchronous:
+`control_addr(&mut self).await`, `next_progress(&mut self).await`,
+`cancel(&self).await`, and consuming `wait_for_completion(self).await`.
+Progress carries per-donor ingress, blocks remaining, feedback rounds, and
+reallocated repair windows. Cancellation checks include the boundary before
+irreversible commit.
 
 ## Distributed Primitives
 
 Source: `src/remote.rs`, `src/distributed/`
+
+Besides the remote protocol below, current public distributed modules include
+PBFT/consensus, membership, anti-entropy, adaptive layout, computation schema,
+recovery, and snapshot primitives. Their public existence does not supply
+discovery, authenticated WAN transport, deployment, or a turnkey cluster.
 
 ### Named Remote Spawn
 
@@ -186,7 +242,9 @@ Used for assigning encoded symbols to replicas in snapshot distribution.
 
 ## Distributed Snapshots
 
-Region state encoded via RaptorQ, symbols assigned via consistent hashing, recovery requires quorum of symbols from surviving nodes.
+Region state is encoded via RaptorQ and symbols are assigned through consistent
+hashing. Recovery requires enough authenticated, mutually consistent symbols
+to reach decode rank—not merely a node-count quorum or exactly K arrivals.
 
 ## Security Layer
 

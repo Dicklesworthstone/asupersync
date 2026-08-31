@@ -2,17 +2,35 @@
 
 Asupersync uses mathematically rigorous machinery where it buys real correctness, determinism, and debuggability. These are implemented, not aspirational.
 
+## Table of Contents
+
+- [Core Mathematical Framework](#core-mathematical-framework)
+- [Formal Semantics](#formal-semantics)
+- [Discounted-UCB1 Adaptive Cancel Preemption](#discounted-ucb1-adaptive-cancel-preemption)
+- [Range-Bounded Drain Certificates (Freedman + Azuma)](#range-bounded-drain-certificates-freedman--azuma)
+- [Spectral Wait-Graph Early Warning](#spectral-wait-graph-early-warning)
+- [Mazurkiewicz Trace Monoid + Foata Normal Form](#mazurkiewicz-trace-monoid--foata-normal-form)
+- [Geodesic Schedule Normalization](#geodesic-schedule-normalization)
+- [DPOR Race Detection + Happens-Before](#dpor-race-detection--happens-before)
+- [Persistent Homology of Trace Commutation Complexes](#persistent-homology-of-trace-commutation-complexes)
+- [Sheaf-Theoretic Consistency Checks](#sheaf-theoretic-consistency-checks)
+- [Anytime-Valid Monitoring (E-Processes)](#anytime-valid-monitoring-e-processes)
+- [Conformal Calibration](#conformal-calibration)
+- [Algebraic Law Sheets + Rewrite Engine](#algebraic-law-sheets--rewrite-engine)
+- [TLA+ Export](#tla-export)
+- [Explainable Evidence Ledgers](#explainable-evidence-ledgers)
+
 ## Core Mathematical Framework
 
 | Concept | Math | Payoff |
 |---------|------|--------|
 | **Outcomes** | Severity lattice: `Ok < Err < Cancelled < Panicked` | Monotone aggregation, no recovery from worse states |
 | **Concurrency** | Near-semiring: `join (x)` and `race (+)` with algebraic laws | Lawful rewrites, DAG optimization |
-| **Budgets** | Tropical semiring: `(R u {inf}, min, +)` | Critical path computation, budget propagation |
+| **Budgets** | Product meet for runtime budgets (`min` deadline/quotas, `max` priority); min-plus/tropical algebra for deadline-path analysis | Safe budget tightening and critical-path reasoning without conflating the two layers |
 | **Obligations** | Linear logic: resources used exactly once | No leaks, static checking possible |
 | **Traces** | Mazurkiewicz equivalence (partial orders) | DPOR-style guided exploration (not certified-optimal DPOR), stable replay |
 | **Cancellation** | Two-player game with budgets | Scoped completeness when modeled responsiveness assumptions hold and budgets are sufficient |
-| **Adaptive scheduling** | EXP3/Hedge-style no-regret online learning (shipped as discounted UCB1) | Dynamic preemption control without fairness blind spots |
+| **Adaptive scheduling** | Deterministic discounted UCB1 for scheduler cancel preemption; seeded EXP3 for ATP transport adaptation | Dynamic policy selection without conflating distinct controllers |
 | **Drain certificates** | Signed-step range bounds + empirical phase diagnostics | Conditional, auditable drain-progress evidence |
 | **Structural diagnostics** | Spectral graph theory + conformal + e-processes | Early warning on wait-graph fragmentation |
 
@@ -36,24 +54,27 @@ combine(b1, b2) =
   priority   := max(b1.priority,   b2.priority)
 ```
 
-## Regret-Bounded Adaptive Cancel Preemption (EXP3/Hedge-Style)
+## Discounted-UCB1 Adaptive Cancel Preemption
 
 Source: `src/runtime/scheduler/three_lane.rs`
 
-The README presents this controller family as deterministic EXP3/Hedge no-regret
-learning over candidate cancel-streak limits (e.g. `{4, 8, 16, 32}`):
+The shipped scheduler policy (`AdaptiveCancelStreakPolicy`) is a deterministic
+discounted-UCB1 bandit over arms `{4, 8, 16, 32, 64}`. At each epoch it selects
+the largest deterministic UCB score from discounted reward/count state:
 ```text
-p_t(a) = (1 - gamma) * w_t(a) / sum_b w_t(b) + gamma / K
-w_{t+1}(a) = w_t(a) * exp((gamma / K) * r_hat_t(a))
+score(a) = mean_discounted_reward(a)
+           + 2 * sqrt(ln(total_discounted_count))
+               / sqrt(discounted_count(a))
 ```
-Importance-weighted reward: `r_hat_t(a_t) = r_t / p_t(a_t)`.
 
-Implementation note: the shipped policy (`AdaptiveCancelStreakPolicy`) is a
-deterministic discounted-UCB1 bandit over arms `{4, 8, 16, 32, 64}`, updated at
-epoch boundaries (`adaptive_cancel_streak_epoch_steps`, default 128; enabled by
-default) from reward blending Lyapunov decrease, fairness pressure, and deadline
-pressure. A seeded EXP3 controller also exists in ATP transport adaptation
-(`src/net/atp/transport_rq/adaptive.rs`).
+It updates at `adaptive_cancel_streak_epoch_steps` boundaries (default 128,
+enabled by default) from reward blending Lyapunov decrease, fairness pressure,
+deadline pressure, and fallback pressure. Deterministic tie-breaking preserves
+replay.
+
+A separate seeded EXP3 controller exists in ATP transport adaptation
+(`src/net/atp/transport_rq/adaptive.rs`). Keep EXP3's adversarial-regret claims
+on that transport surface; do not transfer them to the scheduler UCB1 policy.
 
 Adapts to workload regime shifts while preserving deterministic replay and bounded starvation.
 

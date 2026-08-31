@@ -22,11 +22,19 @@ These are the fastest ways to sabotage a migration.
   `select!` `else` form never drains, and calling `Cx::race` directly is
   drop-on-cancel.
 - Forgetting checkpoints in loops, retries, or long handlers.
+- Calling `spawn_local` from plain `block_on`, an entry-macro body, or
+  `run_test_with_cx` and treating ASUP-E004 as a runtime bug. Those contexts do
+  not install a worker-local lane; enter a real owning worker first.
+- Routing a local task or cancellation by numeric worker id without verifying
+  runtime/scheduler ownership.
 - Holding wide cancellation masks around normal business logic instead of short cleanup-critical sections.
 
 ## Resource / Cleanup Mistakes
 
 - Holding permits, locks, or leases across indefinite waits.
+- Expecting borrowed `MutexGuard<'_, T>` to migrate between workers. Use an
+  owned guard for movable work or acquire the borrowed guard inside a true local
+  task; do not make the guard unsafely Send.
 - Assuming drop-based cleanup is good enough.
 - Failing to verify quiescence and leak behavior after migration.
 - Dropping `AppHandle`, named-server lease handles, or other obligation-like lifecycle handles without explicit resolution.
@@ -39,6 +47,9 @@ These are the fastest ways to sabotage a migration.
 - Accepting non-deterministic flakes as normal after adopting Asupersync.
 - Only testing happy-path completion and never testing cancel/drain/finalize behavior.
 - Ignoring replay artifacts, futurelock warnings, or leak oracles because "the test usually passes."
+- Treating a Lab `ForcedSchedule` checksum as authentication, a deletion-only
+  candidate as proof that the failure persists, or exact Lab replay as a
+  substitute for a native scheduler/cancellation regression.
 
 ## API / Ergonomics Mistakes
 

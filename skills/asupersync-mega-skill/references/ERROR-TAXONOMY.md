@@ -1,5 +1,15 @@
 # Error Taxonomy and Diagnostics
 
+## Table of Contents
+
+- [Error Types](#error-types)
+- [ASUP-Exxx Error-Code Registry](#asup-exxx-error-code-registry)
+- [SQLite Diagnosed Errors](#sqlite-diagnosed-errors)
+- [Common Runtime Errors](#common-runtime-errors)
+- [Outcome Handling](#outcome-handling)
+- [Diagnostics Surfaces](#diagnostics-surfaces)
+- [Debugging Workflow](#debugging-workflow)
+
 ## Error Types
 
 Source: `src/error.rs`, `src/error/`
@@ -61,7 +71,8 @@ pub enum RecoveryAction {
 
 ## ASUP-Exxx Error-Code Registry
 
-Source: `docs/error_codes/registry.json` (canonical), `docs/error_codes/ASUP-Exxx.md` per-code pages.
+Source: `docs/error_codes/registry.json` (canonical), plus per-code pages such
+as `docs/error_codes/ASUP-E001.md`.
 
 Stable user-facing error tokens in the `ASUP-Exxx` namespace; `ErrorKind::asup_code()`
 maps kinds to codes (e.g. `ObligationLeak -> ASUP-E101`, `CancelTimeout -> ASUP-E301`,
@@ -83,24 +94,60 @@ maps kinds to codes (e.g. `ObligationLeak -> ASUP-E101`, `CancelTimeout -> ASUP-
 Each registry entry carries name, summary, probable causes, and remediation;
 treat the registry as the source of truth for the current code list.
 
+### ASUP-E004: local scheduler unavailable
+
+`Cx::spawn_local` needs the thread-local lane of an active scheduler worker and
+that lane must belong to the same runtime as the `Cx`. Ambient context alone is
+insufficient. A direct `Runtime::block_on`, `#[asupersync::main]` /
+`#[asupersync::test]` body, `run_test`, or `run_test_with_cx` can therefore
+return `SpawnError::LocalSchedulerUnavailable`.
+
+For a real `!Send` local-task test, enter a worker through
+`runtime.block_on(runtime.handle().spawn(async { ... }))`, fetch `Cx::current()`
+inside it, acquire the non-Send state inside the local future, then call
+`spawn_local`. A foreign-runtime local lane must fail closed rather than accept
+or reroute the task.
+
+## SQLite Diagnosed Errors
+
+Source: `src/database/sqlite.rs` behind the `sqlite` feature.
+
+The additive v0.4.9 `SqliteOperationError` family is distinct from the core
+`ASUP-Exxx` registry. Call a separately named `*_diagnosed` API when an operator
+needs stable operation, category, retry disposition, and SQLite primary or
+extended codes. Match the non-exhaustive `SqliteOperation` /
+`SqliteErrorCategory` / `SqliteRetryDisposition` enums with a wildcard arm.
+
+Established methods continue returning `SqliteError`. Structured cancellation
+remains `Outcome::Cancelled`, not a retryable database error. Ordinary `Debug`,
+`Display`, and `Error::source` traversal intentionally omit raw SQL, bound
+values, paths, and engine prose; `legacy_error()`, `into_legacy()`, and
+`engine_source()` are explicit disclosure boundaries.
+
 ## Common Runtime Errors
 
 ### "ObligationLeak detected"
 
-**Cause**: Task completed while holding an obligation (permit, ack, lease).
+**Cause**: A runtime-tracked obligation (permit, ack, lease, or guard) remained
+pending when its owner completed or its region finalized.
 
 ```rust
-// WRONG: permit dropped without send/abort
+// Commit the reserved channel effect.
 let permit = tx.reserve(cx).await?;
-return Outcome::ok(());  // Leak!
+permit.try_send(message)?; // or match send(message)'s Outcome to recover the value
 
-// RIGHT: always resolve obligations
+// Or abandon it explicitly.
 let permit = tx.reserve(cx).await?;
-permit.send(message);  // Resolved
+permit.abort();
 ```
 
+An MPSC `SendPermit` also aborts its slot on `Drop`; dropping that guard is
+cancel-safe and is not, by itself, an `ObligationLeak`. Diagnose ASUP-E101 from
+the runtime's obligation record and owner evidence rather than inferring a leak
+from every dropped reservation-shaped value.
+
 **Policy**: Configurable via `ObligationLeakResponse`:
-- `Panic` -- fail fast (good for lab/CI)
+- `Panic` -- shipped default; fail fast with diagnostics
 - `Log` -- practical production starting point
 - `Recover` -- abort the leaked path, continue
 - `Silent` -- rare, intentional only
@@ -138,7 +185,7 @@ permit.send(msg);
 // RIGHT: minimize hold duration
 let msg = other_thing.await;
 let permit = tx.reserve(cx).await?;
-permit.send(msg);
+permit.try_send(msg)?; // or handle send(msg)'s Outcome explicitly
 ```
 
 ### Deterministic Test Drift
@@ -175,19 +222,24 @@ match outcome {
         match reason.kind {
             CancelKind::User => { /* explicit cancel */ }
             CancelKind::Timeout => { /* deadline exceeded */ }
+            CancelKind::Deadline => { /* deadline budget exhausted */ }
+            CancelKind::PollQuota => { /* poll quota exhausted */ }
+            CancelKind::CostBudget => { /* cost budget exhausted */ }
             CancelKind::FailFast => { /* sibling failed */ }
             CancelKind::RaceLost => { /* lost a race */ }
             CancelKind::ParentCancelled => { /* parent region cancelled */ }
+            CancelKind::ResourceUnavailable => { /* required resource unavailable */ }
             CancelKind::Shutdown => { /* runtime shutdown */ }
-            // Also: Deadline, PollQuota, CostBudget (budget exhaustion)
-            // and ResourceUnavailable.
+            CancelKind::LinkedExit => { /* linked task exited abnormally */ }
         }
     }
     Outcome::Panicked(payload) => { /* task panicked */ }
 }
 ```
 
-HTTP mapping: `Ok -> 200`, `Err -> 4xx/5xx`, `Cancelled -> 499`, `Panicked -> 500`.
+One possible HTTP-edge policy is `Ok -> 200`, domain `Err -> 4xx/5xx`,
+`Cancelled -> 499`, and `Panicked -> 500`. That is application policy, not a
+universal mapping performed by `Outcome` itself.
 
 ## Diagnostics Surfaces
 
@@ -225,10 +277,13 @@ Drain phase: `warmup`, `rapid_drain`, `slow_tail`, `stalled`, `quiescent`, plus 
 
 ## Debugging Workflow
 
-1. Reproduce under `LabRuntime` with fixed seed
-2. Enable trace capture and futurelock detection
-3. Check oracle failures (quiescence, obligation leak, loser drain)
-4. Use `TaskInspector` for live task state
-5. Use `CancellationExplanation` for cancel chain
-6. Preserve crashpack and replay artifacts
-7. Use evidence ledger for subtle failures
+1. Reproduce in the consumer's execution class. Scheduler, wakeup, parked-I/O,
+   local-task, shutdown, and cancellation-delivery defects require a native
+   runtime reproducer; Lab-only evidence is insufficient.
+2. Add a fixed-seed `LabRuntime` model when deterministic exploration applies.
+3. Enable trace capture and futurelock detection.
+4. Check oracle failures (quiescence, obligation leak, loser drain).
+5. Use `TaskInspector` for live task state.
+6. Use `CancellationExplanation` for the cancel chain.
+7. Preserve crashpack/replay artifacts and old-red/new-green evidence.
+8. Use the evidence ledger for subtle failures.

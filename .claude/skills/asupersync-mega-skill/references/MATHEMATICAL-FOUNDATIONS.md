@@ -2,23 +2,48 @@
 
 Asupersync uses mathematically rigorous machinery where it buys real correctness, determinism, and debuggability. These are implemented, not aspirational.
 
+## Table of Contents
+
+- [Core Mathematical Framework](#core-mathematical-framework)
+- [Formal Semantics](#formal-semantics)
+- [Discounted-UCB1 Adaptive Cancel Preemption](#discounted-ucb1-adaptive-cancel-preemption)
+- [Range-Bounded Drain Certificates (Freedman + Azuma)](#range-bounded-drain-certificates-freedman--azuma)
+- [Spectral Wait-Graph Early Warning](#spectral-wait-graph-early-warning)
+- [Mazurkiewicz Trace Monoid + Foata Normal Form](#mazurkiewicz-trace-monoid--foata-normal-form)
+- [Geodesic Schedule Normalization](#geodesic-schedule-normalization)
+- [DPOR Race Detection + Happens-Before](#dpor-race-detection--happens-before)
+- [Persistent Homology of Trace Commutation Complexes](#persistent-homology-of-trace-commutation-complexes)
+- [Sheaf-Theoretic Consistency Checks](#sheaf-theoretic-consistency-checks)
+- [Anytime-Valid Monitoring (E-Processes)](#anytime-valid-monitoring-e-processes)
+- [Conformal Calibration](#conformal-calibration)
+- [Algebraic Law Sheets + Rewrite Engine](#algebraic-law-sheets--rewrite-engine)
+- [TLA+ Export](#tla-export)
+- [Explainable Evidence Ledgers](#explainable-evidence-ledgers)
+
 ## Core Mathematical Framework
 
 | Concept | Math | Payoff |
 |---------|------|--------|
 | **Outcomes** | Severity lattice: `Ok < Err < Cancelled < Panicked` | Monotone aggregation, no recovery from worse states |
 | **Concurrency** | Near-semiring: `join (x)` and `race (+)` with algebraic laws | Lawful rewrites, DAG optimization |
-| **Budgets** | Tropical semiring: `(R u {inf}, min, +)` | Critical path computation, budget propagation |
+| **Budgets** | Product meet for runtime budgets (`min` deadline/quotas, `max` priority); min-plus/tropical algebra for deadline-path analysis | Safe budget tightening and critical-path reasoning without conflating the two layers |
 | **Obligations** | Linear logic: resources used exactly once | No leaks, static checking possible |
-| **Traces** | Mazurkiewicz equivalence (partial orders) | Optimal DPOR, stable replay |
-| **Cancellation** | Two-player game with budgets | Completeness: sufficient budgets guarantee termination |
-| **Adaptive scheduling** | EXP3/Hedge no-regret online learning | Dynamic preemption without fairness blind spots |
-| **Drain certificates** | Martingales + Freedman/Azuma concentration | Quantified confidence that drain reaches quiescence |
+| **Traces** | Mazurkiewicz equivalence (partial orders) | DPOR-style guided exploration (not certified-optimal DPOR), stable replay |
+| **Cancellation** | Two-player game with budgets | Scoped completeness when modeled responsiveness assumptions hold and budgets are sufficient |
+| **Adaptive scheduling** | Deterministic discounted UCB1 for scheduler cancel preemption; seeded EXP3 for ATP transport adaptation | Dynamic policy selection without conflating distinct controllers |
+| **Drain certificates** | Signed-step range bounds + empirical phase diagnostics | Conditional, auditable drain-progress evidence |
 | **Structural diagnostics** | Spectral graph theory + conformal + e-processes | Early warning on wait-graph fragmentation |
 
 ## Formal Semantics
 
-Small-step operational semantics in `asupersync_v4_formal_semantics.md` with Lean mechanization scaffold (`formal/lean/Asupersync.lean`).
+Small-step operational semantics in `asupersync_v4_formal_semantics.md`. The Lean
+project (`formal/lean/Asupersync.lean`) checks six invariants of that abstract
+model (structured-concurrency single-owner, region-close quiescence, cancellation
+protocol, race loser drain, obligation no-leak, no ambient authority), recorded in
+`formal/lean/coverage/invariant_status_inventory.json`. These are Lean-checked
+**model** invariants only: the production Rust runtime has not been proved to
+refine that model, so this is not a mechanized proof of the executor, adapters,
+or transports.
 
 Budget composition is semiring-like:
 ```text
@@ -29,32 +54,67 @@ combine(b1, b2) =
   priority   := max(b1.priority,   b2.priority)
 ```
 
-## Regret-Bounded Adaptive Cancel Preemption (EXP3/Hedge)
+## Discounted-UCB1 Adaptive Cancel Preemption
 
 Source: `src/runtime/scheduler/three_lane.rs`
 
-Deterministic EXP3/Hedge over candidate cancel-streak limits {4, 8, 16, 32}:
+The shipped scheduler policy (`AdaptiveCancelStreakPolicy`) is a deterministic
+discounted-UCB1 bandit over arms `{4, 8, 16, 32, 64}`. At each epoch it selects
+the largest deterministic UCB score from discounted reward/count state:
 ```text
-p_t(a) = (1 - gamma) * w_t(a) / sum_b w_t(b) + gamma / K
-w_{t+1}(a) = w_t(a) * exp((gamma / K) * r_hat_t(a))
+score(a) = mean_discounted_reward(a)
+           + 2 * sqrt(ln(total_discounted_count))
+               / sqrt(discounted_count(a))
 ```
-Importance-weighted reward: `r_hat_t(a_t) = r_t / p_t(a_t)`.
+
+It updates at `adaptive_cancel_streak_epoch_steps` boundaries (default 128,
+enabled by default) from reward blending Lyapunov decrease, fairness pressure,
+deadline pressure, and fallback pressure. Deterministic tie-breaking preserves
+replay.
+
+A separate seeded EXP3 controller exists in ATP transport adaptation
+(`src/net/atp/transport_rq/adaptive.rs`). Keep EXP3's adversarial-regret claims
+on that transport surface; do not transfer them to the scheduler UCB1 policy.
 
 Adapts to workload regime shifts while preserving deterministic replay and bounded starvation.
 
-## Variance-Adaptive Drain Certificates (Freedman + Azuma)
+## Range-Bounded Drain Certificates (Freedman + Azuma)
 
 Source: `src/cancel/progress_certificate.rs`
 
-Cancellation drain modeled as stochastic progress process:
+Cancellation drain modeled through signed net-progress deviations:
 ```text
-P(M_t - M_0 >= x) <= exp(-x^2 / (2(V_t + c*x/3)))
+P(S_t >= x and Q_t <= q) <= exp(-x^2 / (2(q + B*x/3)))
 ```
-Where `V_t` is predictable variation and `c` bounds one-step increments.
+For `t >= 1`, `c > 0`, `x > 0`, and `q >= 0`, signed progress
+`Y_i = -Delta_i` gives cumulative centered
+shortfall `sum(E[Y_i | F_{i-1}] - Y_i)` and `Q_t` is its predictable quadratic
+variation. The absolute signed step is bounded by `c`, and `B = 2c` bounds the
+centered upper increment. The implementation uses
+`Q_t <= t*c^2`. With `B = 2c`, the raw Freedman denominator is never smaller
+than Azuma's, so the selected envelope always equals Azuma; the explicit raw
+candidate remains for auditability. Realized variance is diagnostic-only, and
+exceeding the configured range or dropping an invalid sample (non-finite or
+materially negative) disables
+concentration claims for that verdict. At the current
+same-history horizon, the plug-in mean telescopes to zero deviation, so both
+candidate tails are the trivial bound `1`.
 
 Phase classification: `warmup`, `rapid_drain`, `slow_tail`, `stalled`, `quiescent`.
 
-Freedman provides tighter variance-aware bound; Azuma is conservative baseline.
+The separate `converging` flag is an empirical trend status over the complete
+accepted finite non-negative observation history represented by running statistics. It is
+guarded by positive endpoint net progress, stall state, rebound-count and
+rebound-magnitude limits, a non-increasing latest step, and the absence of
+dropped invalid samples. The conditional calculations do not gate it, and
+it is not a future-drift, termination, or probability guarantee.
+Incomplete telemetry also suppresses the remaining-step estimate and reports
+`warmup` instead of an actionable terminal phase until reset.
+
+The resulting confidence calculation is conditional on the plug-in empirical
+net-progress rate; one trace does not prove future drift or bounded completion.
+Gross downward credit is phase bookkeeping only. Its accounted-potential total
+is pathwise nondecreasing and supplies no Ville or optional-stopping evidence.
 
 ## Spectral Wait-Graph Early Warning
 
@@ -89,7 +149,7 @@ Given dependency DAG (trace poset), constructs valid linear extension minimizing
 
 Source: `src/trace/dpor.rs`, `src/trace/independence.rs`
 
-DPOR-style race detection using minimal happens-before relation (vector clocks per task) plus resource-footprint conflicts. Systematic interleaving exploration targeting truly different behaviors.
+DPOR-style race detection using minimal happens-before relation (vector clocks per task) plus resource-footprint conflicts. Detected races feed race-guided derivation of deterministic seeds in the explorer; there is no exact-prefix backtracking, so observed equivalence-class counts are campaign metrics, not a certified-optimal-DPOR completeness guarantee.
 
 ## Persistent Homology of Trace Commutation Complexes
 

@@ -7,6 +7,20 @@ If a migration keeps `Cx` but still thinks in terms of "plain `Result`,
 ambient authority, and best-effort cleanup", it has not really adopted
 Asupersync yet.
 
+## Table of Contents
+
+- [Outcome Discipline](#outcome-discipline)
+- [Budget Discipline](#budget-discipline)
+- [Choose Deadline Constructors Deliberately](#choose-deadline-constructors-deliberately)
+- [Cancellation Severity Matters](#cancellation-severity-matters)
+- [Capabilities Are The Security Model](#capabilities-are-the-security-model)
+- [Common Capability Shapes](#common-capability-shapes)
+- [Framework Boundary Rule](#framework-boundary-rule)
+- [Masking Rule](#masking-rule)
+- [Design Patterns That Actually Pay Off](#design-patterns-that-actually-pay-off)
+- [Anti-Patterns](#anti-patterns)
+- [When To Read Next](#when-to-read-next)
+
 ## Outcome Discipline
 
 `Outcome<T, E>` is deliberately four-valued:
@@ -62,9 +76,13 @@ Key fields in the repo's model:
 
 The important algebraic rule is `meet()`:
 
-- outer budget and inner budget combine by taking the tighter constraint,
-- child work should usually inherit a stricter effective budget than the caller,
+- deadline, poll quota, and cost quota take `min`, while priority takes `max`,
+- child work must be no looser than the caller and is often deliberately tighter,
 - budget propagation is part of correctness, not only performance tuning.
+
+`Budget::INFINITE` is the identity for `meet()` and therefore has priority `0`;
+`Budget::new()` is the ordinary unconstrained scheduling budget and has default
+priority `128`. They are not identical when priority participates in a meet.
 
 Practical downstream rules:
 
@@ -96,6 +114,22 @@ Bad patterns:
   cancelled work
 - unbounded retry loops that ignore budget exhaustion
 
+## Choose Deadline Constructors Deliberately
+
+`Budget::with_deadline(Time)` sets an absolute logical instant. It does not mean
+"this duration from now." For a duration-shaped request timeout, use
+`with_timeout(cx.now(), duration)`. When an outer deadline may already exist,
+use `tightened_by_timeout(cx.now(), duration)` or
+`cx.budget_for_timeout(duration)` so the inner timeout cannot extend the
+caller's deadline.
+
+The replacement-versus-tightening distinction is a common migration bug:
+
+- `with_timeout` replaces the current deadline with `now + duration`,
+- `tightened_by_timeout` meets that candidate with the existing budget,
+- `with_deadline_at_secs` / `with_deadline_at_ns` also take absolute logical
+  instants, despite accepting numeric values.
+
 ## Cancellation Severity Matters
 
 `CancelReason` is structured, not decorative. It carries a `CancelKind`;
@@ -110,9 +144,20 @@ kinds in the repo include:
 - `Shutdown`
 - `LinkedExit` (Spork link propagation)
 
-Kinds are severity-ordered (`User < Timeout < FailFast < ParentCancelled <
-Shutdown`); strengthening keeps the max severity, and cleanup budgets scale
-inversely with severity. Use that structure.
+Kinds are severity-grouped exactly as the implementation defines them:
+
+```text
+User
+  < Timeout | Deadline
+  < PollQuota | CostBudget
+  < FailFast | RaceLost | LinkedExit
+  < ParentCancelled | ResourceUnavailable
+  < Shutdown
+```
+
+Strengthening keeps the higher group; kinds within one group have equal
+severity. Cleanup budgets scale inversely with severity. Use that structure
+instead of inventing an ordering within a group.
 
 Practical policy advice:
 
@@ -124,7 +169,8 @@ Practical policy advice:
 
 ## Capabilities Are The Security Model
 
-The capability row is type-level and compile-time enforced:
+The capability row is type-level and compile-time enforced, then intersected
+with the `Cx`'s runtime `CapMask` for ambient restriction enforcement:
 
 - `[SPAWN, TIME, RANDOM, IO, REMOTE]`
 
@@ -135,6 +181,13 @@ The core repo model in `src/cx/cap.rs` matters for downstream design:
 - `SubsetOf` encodes monotone narrowing (pointwise ordering on the row),
 - widening is compile-time rejected,
 - the row traits are sealed to prevent external capability forgery.
+
+`Cx::current()` is an ambient lookup, but it can only mirror a context already
+installed by the runtime or by code that already holds that context. It does
+not mint authority. `set_current_restricted` and `push_restriction` intersect
+the runtime mask, and `CurrentCxGuard` removes the exact frame it installed on
+the same thread. Prefer explicit `&Cx` propagation; use the ambient mirror only
+at runtime and compatibility boundaries that require it.
 
 That means least privilege is not just documentation. It can be part of the
 Rust type system.

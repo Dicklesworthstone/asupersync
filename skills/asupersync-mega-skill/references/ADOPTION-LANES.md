@@ -53,7 +53,8 @@ Exit criteria:
 
 Choose this when:
 
-- a dependency still requires `tokio::runtime::Handle`, `tokio::io`, hyper runtime traits, or similar,
+- a dependency needs one of compat's implemented Tokio I/O, hyper, Tower, or
+  explicit cancellation/context adapters,
 - replacing that crate immediately would cost too much,
 - you need an incremental migration path.
 
@@ -64,6 +65,10 @@ Default moves:
 - pass `Cx` explicitly into the boundary,
 - prefer strict cancellation modes,
 - never let Tokio become the primary runtime for the app.
+
+If the dependency requires `tokio::runtime::Handle`, retain an explicitly
+owned Tokio runtime boundary or replace the dependency. Compat installs only
+an Asupersync `Cx`; it does not provide `Handle::current()`.
 
 Exit criteria:
 

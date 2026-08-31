@@ -2,11 +2,21 @@
 
 Use this only when the target actually includes browser or WASM deployment.
 
+## Table of Contents
+
+- [Current Support Posture](#current-support-posture)
+- [Canonical Browser Profiles](#canonical-browser-profiles)
+- [Important Constraints](#important-constraints)
+- [Framework Guidance](#framework-guidance)
+- [When To Use This Lane](#when-to-use-this-lane)
+- [Browser Adoption Rules That Matter](#browser-adoption-rules-that-matter)
+- [Read Next](#read-next)
+
 ## Current Support Posture
 
 The repo's browser story is explicit and fail-closed:
 
-- JS/TS packages (`@asupersync/browser` and friends, workspace version 0.4.4)
+- JS/TS packages (`@asupersync/browser` and friends, workspace version 0.4.9)
   are GA for browser main-thread **and dedicated-worker** consumers; the
   scoped GA signoff is `artifacts/browser_ga_final_signoff_v1.json`
   (`pass_scoped_js_ts_ga`). Packages are still workspace-local, not yet
@@ -21,7 +31,9 @@ The repo's browser story is explicit and fail-closed:
 - `RuntimeBuilder::browser()` is a **preview** public Rust lane:
   dispatcher-backed, narrower than the JS/TS packages, fail-closed on
   unsupported hosts with an inspectable execution ladder
-  (`RuntimeBuilder::inspect_browser_execution_ladder()`; key fields
+  (inspect from a regular builder with
+  `RuntimeBuilder::new().inspect_browser_execution_ladder()`, or call
+  `RuntimeBuilder::browser().inspect_execution_ladder()`; key fields
   `selected_lane`, `host_role`, `reason_code`, `preferred_lane`,
   `downgrade_order`). Not a stable external Rust Browser Edition API.
 

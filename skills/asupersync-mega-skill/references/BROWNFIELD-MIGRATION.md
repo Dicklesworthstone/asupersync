@@ -2,6 +2,17 @@
 
 This is the default migration path when you want full replacement, not permanent coexistence.
 
+## Table of Contents
+
+- [Order Of Work](#order-of-work)
+- [Run The Readiness Planner First](#run-the-readiness-planner-first)
+- [Replace Bootstrap First](#replace-bootstrap-first)
+- [Thread `&Cx` Early](#thread-cx-early)
+- [Replace Task Ownership Semantics](#replace-task-ownership-semantics)
+- [Migrate By Domain](#migrate-by-domain)
+- [Compat During Migration](#compat-during-migration)
+- [Brownfield Checklist](#brownfield-checklist)
+
 ## Order Of Work
 
 1. Run the read-only migration readiness planner against the project, then inventory runtime entrypoints, spawns, select/race logic, timers, channels, networking, web stack, database stack, tests, and any Tokio-locked third-party crates.
@@ -92,9 +103,12 @@ The detailed mapping is in `TOKIO-MAPPING.md`.
 
 Use compat only when one of these is true:
 
-- the dependency still demands a Tokio handle,
 - it requires Tokio I/O traits or hyper runtime traits,
 - removing it would force a much larger redesign than the current task allows.
+
+If it demands a Tokio runtime handle, compat is insufficient: retain a small,
+owned Tokio runtime boundary or replace the dependency. Do not present that
+boundary as running on Asupersync.
 
 Rules:
 

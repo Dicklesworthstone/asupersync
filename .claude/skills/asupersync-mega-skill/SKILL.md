@@ -1,200 +1,205 @@
 ---
 name: asupersync-mega-skill
 description: >-
-  Replace Tokio Rust stacks with Asupersync. Use when migrating tokio/axum/hyper/tonic apps, designing native Cx/region-based services, or debugging Asupersync internals.
+  Build, migrate, debug, and maintain Asupersync. Use when working with Tokio
+  migration, Cx/Scope/cancellation, local tasks, Lab replay, browser/Wasm,
+  protocols, databases, OTLP, or repository proof.
 ---
 
 # Asupersync Mega Skill
 
-Asupersync is a spec-first, cancel-correct, capability-secure async runtime for Rust. Not a Tokio wrapper -- a complete replacement with stronger guarantees around structured concurrency, obligation tracking, deterministic testing, and capability security.
+Asupersync is a spec-first runtime for structured concurrency, cancel-correct
+effects, obligations, deterministic testing, and capability security—not a
+Tokio wrapper. Verify against live evidence.
 
-This skill is primarily for agents integrating Asupersync into other projects or extracting maximum architectural leverage from it in greenfield systems. It also covers repo-internal work when that is the actual task.
+For release, live-support, or open-boundary questions, start with the
+current-status card in
+[SOURCE-MAP.md](references/SOURCE-MAP.md#release-and-live-head-status).
+Otherwise load the single task lane below first. Live source, tags, registry
+state, and terminal proof receipts outrank examples or stale tracker labels.
 
-For codebase orientation, types, module map, and workspace layout see [SOURCE-MAP.md](references/SOURCE-MAP.md).
+## Table of Contents
 
-## Quick Orient
+- [Bootstrap](#bootstrap)
+- [Choose One Lane](#choose-one-lane)
+- [Non-Negotiables](#non-negotiables)
+- [Migration Workflow](#migration-workflow)
+- [Proof and Repository Rules](#proof-and-repository-rules)
+- [Skill Validation](#skill-validation)
 
-Minimal bootstrap:
+## Bootstrap
+
+Use `#[asupersync::main]` when the application does not need to own the runtime:
 
 ```rust
-use asupersync::runtime::RuntimeBuilder;
-
-fn main() -> Result<(), asupersync::Error> {
-    let rt = RuntimeBuilder::current_thread().build()?;
-    rt.block_on(async {
-        let cx = asupersync::Cx::for_request();
-        asupersync::proc_macros::scope!(cx, {
-            cx.trace("running");
-            asupersync::Outcome::ok(())
-        });
-    });
-    Ok(())
+#[asupersync::main]
+async fn main() {
+    println!("hello from asupersync");
 }
 ```
 
-This is the smallest runnable seam, not the recommended production architecture. Do not build serious services around `Cx::for_request()` plus `block_on(...)` alone; prefer runtime-managed contexts, request/call regions at service boundaries, and graduate to `AppSpec` + supervision when the topology becomes long-lived.
+Use `RuntimeBuilder` when it does. Runtime-spawned tasks receive a runtime-owned
+`Cx`; pass `&Cx` into application code. Use production request-context APIs,
+explicit spawn admission, and checked joins rather than test constructors or
+implicit authority. For handle-only request contexts and caller-owned blocking
+pools, read [RUNTIME-CONTROLS](references/RUNTIME-CONTROLS.md); attaching a pool
+does not install a scheduler or a worker-local lane.
 
-Where to focus first:
+## Choose One Lane
 
-- Lead with core runtime, `Cx`/`Scope`, cancellation, obligations, channels, sync, time, lab/DPOR, and observability
-- For ordinary services, build next on native `service`, `web`, `grpc`, database, and supervision surfaces
-- Treat Browser Edition, QUIC/H3, messaging, remote/distributed, and RaptorQ as requirement-driven lanes, not default starting points
+Load one primary reference first. Follow its links only when the task reaches
+that boundary; do not preload whole clusters.
 
-Default recommendation order for most real projects:
+| Task | Read first |
+|---|---|
+| Native greenfield service | [NATIVE-GREENFIELD](references/NATIVE-GREENFIELD.md) |
+| Brownfield Tokio migration | [BROWNFIELD-MIGRATION](references/BROWNFIELD-MIGRATION.md) |
+| Exact Tokio compatibility or quarantine boundary | [COMPAT-BOUNDARY](references/COMPAT-BOUNDARY.md) |
+| Cx-aware high-level web handler patterns | [GREENFIELD-PATTERNS](references/GREENFIELD-PATTERNS.md) |
+| Runtime, cancellation, shutdown, or local tasks | [RUNTIME-CONTROLS](references/RUNTIME-CONTROLS.md) |
+| Channels, locks, or combinators | [PRIMITIVES-AND-ORCHESTRATION-CHOOSER](references/PRIMITIVES-AND-ORCHESTRATION-CHOOSER.md) |
+| Observability, diagnostics, metrics, or OTLP | [OBSERVABILITY-FORENSICS](references/OBSERVABILITY-FORENSICS.md) |
+| HTTP, gRPC, or high-level web routing | [WEB-GRPC-HTTP](references/WEB-GRPC-HTTP.md) |
+| Database, messaging, filesystem, process, or signal work | [DB-MESSAGING-FS-PROCESS](references/DB-MESSAGING-FS-PROCESS.md) |
+| Protocol or low-level networking work | [NETWORKING-PROTOCOL-STACK](references/NETWORKING-PROTOCOL-STACK.md) |
+| Lab replay, DPOR, or escaped concurrency defect | [TESTING-FORENSICS](references/TESTING-FORENSICS.md) |
+| Supervision or OTP-style components | [SUPERVISION-OTP](references/SUPERVISION-OTP.md) |
+| Browser or Wasm integration | [BROWSER-WASM](references/BROWSER-WASM.md) |
+| Distributed execution or rigor | [DISTRIBUTED-AND-RIGOR](references/DISTRIBUTED-AND-RIGOR.md) |
+| RaptorQ or ATP security, transfer, or benchmark evidence | [RAPTORQ-DISTRIBUTED](references/RAPTORQ-DISTRIBUTED.md) |
+| Work inside Asupersync, release it, or assess API compatibility | [REPO-CONTRIBUTOR-GUIDE](references/REPO-CONTRIBUTOR-GUIDE.md) |
+| Diagnose an error or uncertain support claim | [TROUBLESHOOTING](references/TROUBLESHOOTING.md) |
 
-- core runtime + `Cx` + `Scope`
-- native `service` / `web` / `grpc` boundaries
-- native database and actor/supervision surfaces as needed
-- deterministic tests and diagnostics from the start
-
-Do **not** lead with Browser Edition, QUIC/H3, messaging, remote/distributed, or RaptorQ unless the target project explicitly needs those capabilities.
-
-Full surface guidance: [STACK-SURFACES.md](references/STACK-SURFACES.md).
-
-## Start Here
-
-Choose one lane before touching code:
-
-1. **Native greenfield**
-   Build directly on `RuntimeBuilder`, `Cx`, `Scope`, `LabRuntime`, and optional `AppSpec`.
-2. **Brownfield native migration**
-   Rewrite your app's async seams around `&Cx`, region-owned tasks, cancel-aware primitives, and deterministic tests.
-3. **Boundary interop**
-   Use `asupersync-tokio-compat` only for crates you cannot remove yet. Keep Tokio out of core business logic.
-
-Default rule:
-
-- prefer native Asupersync surfaces,
-- use compat only as a quarantine boundary,
-- plan to remove compat once the stubborn dependency is gone.
+Use browser/Wasm, QUIC/H3, messaging, distributed, or RaptorQ lanes only when
+requirements call for them.
 
 ## Non-Negotiables
 
 - Do **not** treat Asupersync as an executor swap.
 - Put `&Cx` first in async APIs you control.
 - Use `Scope` and child regions for owned work. Avoid detached background tasks.
+- Use `Cx::spawn` / `Cx::spawn_in` for ordinary region-owned task creation.
+  `Scope::spawn_registered` is a lower-level boot/test path for callers already
+  holding `&mut RuntimeState`.
 - Add `cx.checkpoint()` in loops, retry bodies, long handlers, and shutdown-sensitive code.
 - Prefer cancel-aware primitives and two-phase effects.
+- State the layered v0.4.4-v0.4.9 cancellation contract precisely: ordinary `Cx::spawn*`
+  preserves a typed result returned after cancellation acknowledgement (a
+  concurrent abort no longer erases it), but pre-first-poll cancellation and
+  cancellation-blind late values keep v0.4.3 task-level cancellation, and
+  `JoinSet`, cancellation-dominant combinators, blocking wrappers, and
+  low-level state tasks retain their separately tested policies. Neither
+  "abort always wins" nor "the value always survives" is correct. Explicit
+  cancellation wakes timer-parked native tasks; `Sleep` retires its registration
+  and completes with `()` while timeout/deadline combinators retain outcome
+  classification. Native worker tests, not Lab-only models, prove this boundary.
+- `Cx::spawn_local` requires a worker-local lane owned by the same runtime. A
+  direct `Runtime::block_on`, entry-macro body, `run_test`, or
+  `run_test_with_cx` does not by itself install that lane and may return
+  `LocalSchedulerUnavailable` (ASUP-E004). Enter a real worker with
+  `runtime.block_on(runtime.handle().spawn(async { ... }))`, obtain
+  `Cx::current()` there, then spawn the `!Send` future and prove it reached the
+  parked state before aborting it.
 - Use deterministic tests as part of normal development, not as optional polish.
-- Treat `Cx::for_testing()` as test-only. `Cx::for_request()` is a convenience seam, not your whole architecture.
+- Treat `Cx::for_testing()` and `Cx::for_request()` as test/internal harness
+  paths, not production architecture.
 - Keep Tokio and Tokio-only crates behind explicit adapter modules if you must keep them at all.
+- `asupersync-tokio-compat` adapts selected traits and context; it does not install a Tokio runtime
+  or prove `Handle::current()`-dependent frameworks.
+  Require downstream compile and runtime evidence for every bridge.
 
-## Leverage, Not Just Migration
+## Migration Workflow
 
-If the target system is doing real work, do not stop after "the code compiles on Asupersync."
+1. Inventory direct and transitive Tokio-ecosystem dependencies.
+2. Classify each as native replacement, explicit compat holdout, or deliberate
+   workaround.
+3. Use the repository's migration readiness planner when available; do not
+   confuse a `cargo tree` grep with a plan.
+4. Replace bootstrap, thread `&Cx` through owned APIs, then replace detached
+   spawning with region-owned work.
+5. Migrate time, sync, I/O, channel, web, database, and protocol slices one at
+   a time.
+6. Add deterministic and native cancellation tests during the migration.
+7. Compile actual external-consumer feature profiles; `cfg(test)` access and
+   repo-internal tests are not downstream API evidence.
+8. Remove each compat boundary when its last justified dependency is gone.
 
-- `Budget`, `Outcome`, and capability narrowing are part of the application's semantic contract, not optional polish. See [BUDGET-OUTCOME-CAPABILITIES.md](references/BUDGET-OUTCOME-CAPABILITIES.md).
-- Runtime controls are part of the architecture. See [RUNTIME-CONTROLS.md](references/RUNTIME-CONTROLS.md).
-- Long-lived state belongs in supervised structures. See [SUPERVISION-OTP.md](references/SUPERVISION-OTP.md).
-- Treat the lab runtime and operator diagnostics as part of the normal development loop. See [OBSERVABILITY-FORENSICS.md](references/OBSERVABILITY-FORENSICS.md).
-- Prefer native combinators over ad hoc `select!`-style orchestration. See [ADVANCED-FEATURES.md](references/ADVANCED-FEATURES.md).
-- Primitive choice and scheduler cooperation materially affect leverage. See [PRIMITIVES-AND-ORCHESTRATION-CHOOSER.md](references/PRIMITIVES-AND-ORCHESTRATION-CHOOSER.md) and [PERFORMANCE-AND-SCHEDULING.md](references/PERFORMANCE-AND-SCHEDULING.md).
+The planner's `summary.final_verdict`, `proof_pack.proof_commands`,
+`semantic_map.recommendations`, and `operator_report.phase_plan` are inputs to
+the decision. `scripts/audit-target.sh` is only bounded inventory; its optional
+Cargo graph probe is explicit and can touch Cargo state.
 
-## Canonical Spine
+For more-than-parity design:
+[LEVERAGE-PLAYBOOK](references/LEVERAGE-PLAYBOOK.md),
+[BUDGET-OUTCOME-CAPABILITIES](references/BUDGET-OUTCOME-CAPABILITIES.md),
+[SUPERVISION-OTP](references/SUPERVISION-OTP.md), and
+[ADVANCED-FEATURES](references/ADVANCED-FEATURES.md).
 
-- Bootstrap: `runtime::RuntimeBuilder`, `Runtime`, `RuntimeHandle`
-- App code: `Cx`, `Scope`
-- Tests: `test_utils::{run_test, run_test_with_cx}`, `LabRuntime`, `LabConfig`
-- Service boundaries: `web::request_region::{RequestRegion, RequestContext}`, `grpc::CallContext::with_cx(...)`
-- Higher-level apps: `app::AppSpec`, `actor`, `gen_server`, `supervision`, `spork`
+Other routers: [adoption](references/ADOPTION-LANES.md),
+[anti-patterns](references/ANTI-PATTERNS.md),
+[compat bridge](references/COMPAT-BRIDGE.md),
+[replacement matrix](references/TOKIO-REPLACEMENT-MATRIX.md),
+[performance](references/PERFORMANCE-AND-SCHEDULING.md),
+[browser frameworks](references/BROWSER-FRAMEWORKS.md), and
+[mathematics](references/MATHEMATICAL-FOUNDATIONS.md).
 
-Start with RuntimeBuilder + Cx + Scope. Graduate to AppSpec + supervision when you need restart policy, named workers, or explicit application topology.
+Secondary deep dives, only when a primary card routes there (except the two
+direct routes named above):
+[greenfield patterns](references/GREENFIELD-PATTERNS.md),
+[Tokio mappings](references/TOKIO-MAPPING.md),
+[compat limits](references/COMPAT-BOUNDARY.md),
+[scheduler internals](references/SCHEDULER-INTERNALS.md),
+[channel/sync internals](references/CHANNELS-SYNC-INTERNALS.md),
+[lock ordering](references/LOCK-ORDERING.md),
+[support classes](references/STACK-SURFACES.md),
+[Lab/DPOR](references/LAB-TRACE-DPOR.md), and
+[error taxonomy](references/ERROR-TAXONOMY.md).
 
-Macro guidance: `scope!` is useful. Manual APIs are still the safest authoritative path. Do not assume proc-macro surfaces are automatically the best default path for every task.
+## Proof and Repository Rules
 
-## Standard Workflow
+- Run the host formatter, compiler, linter, and tests; verify cancellation,
+  shutdown, and resource release, not compilation alone.
+- For an escaped concurrency defect, reproduce the same public API sequence on
+  the native runtime, prove the formerly failing parked/owned state, assert the
+  exact nested result and cleanup, and retain old-red/new-green evidence. A
+  Lab-only or compile-only test is not a substitute.
+- RCH pre-admission refusal, exit 103, worker assignment, a job id, a PID, or
+  local fallback means **zero admissible executed tests**. Green proof requires
+  terminal output naming the target and nonzero pass counts from the required
+  environment.
+- Do not key source or evidence authority to `/dp`, `/data/projects`, or an RCH
+  checkout prefix. Identify the repository by content and declared root.
+- Never invoke a waker, user callback, observer, or extension hook while a
+  runtime-state lock is held. Treat unresolved tracker rows as unshipped
+  boundaries, not capability claims; refresh them from the status card and live
+  tracker before reporting current state.
+- Exact `ForcedSchedule` files are bounded Lab replay evidence, not production
+  scheduler control, authenticity proof, or automatic minimization.
+- Support classes come from live implementation and proof: default production,
+  optional production, experimental/guarded, compat-only, test/fuzz-only, or
+  planned. Do not promote a class from prose alone.
 
-- Inventory all `tokio::*`, `tokio-util`, `hyper`, `axum`, `tonic`, `reqwest`, `sqlx`, `quinn`, `h3`, `rdkafka`, and related dependencies.
-- Classify each dependency as: native replacement, compat holdout, or deliberate workaround.
-- Replace runtime bootstrap first.
-- Thread `&Cx` through your own async APIs.
-- Replace detached spawning with region-owned work.
-- Replace sync/time/net/io/channel/web/db/messaging surfaces domain by domain.
-- Add deterministic tests while migrating, not after.
-- Remove compat boundaries as soon as the underlying dependency no longer needs them.
+Inside Asupersync, follow live `AGENTS.md` and `TESTING_FOR_AGENTS.md`; work on
+`main`, do not delete files without permission, and preserve the v0.4.3 public
+API and documented behavior throughout 0.4.x. Classify proof through
+`artifacts/proof_lane_manifest_v1.json` and
+`artifacts/proof_status_snapshot_v1.json`: manifest = command/claim/envelope;
+snapshot = freshness/blockers; only a terminal receipt proves execution.
+Preserve build id, target/artifact roots, and dirty-tree state. Use Beads and
+CASS for rationale, corroborated by tagged source and focused evidence.
 
-## Reference Index
+ATP performance claims require live ledger/matrix artifacts, tuned rsync,
+release `atp`, symmetric crypto, caps, and SHA/tamper checks. A cell proves only
+its scope; compilation or `sha_ok` is not a benchmark win.
 
-### Quick Router: Start Here For Your Task
+## Skill Validation
 
-| I need to... | Read (in order) |
-|---|---|
-| Migrate a Tokio HTTP/gRPC service | [BROWNFIELD-MIGRATION](references/BROWNFIELD-MIGRATION.md) → [TOKIO-MAPPING](references/TOKIO-MAPPING.md) → [WEB-GRPC-HTTP](references/WEB-GRPC-HTTP.md) |
-| Build a new service from scratch | [NATIVE-GREENFIELD](references/NATIVE-GREENFIELD.md) → [GREENFIELD-PATTERNS](references/GREENFIELD-PATTERNS.md) |
-| Get more than parity and maximize Asupersync leverage | [LEVERAGE-PLAYBOOK](references/LEVERAGE-PLAYBOOK.md) → [BUDGET-OUTCOME-CAPABILITIES](references/BUDGET-OUTCOME-CAPABILITIES.md) → [SUPERVISION-OTP](references/SUPERVISION-OTP.md) → [TESTING-FORENSICS](references/TESTING-FORENSICS.md) |
-| Design a supervised long-lived service | [SUPERVISION-OTP](references/SUPERVISION-OTP.md) → [LEVERAGE-PLAYBOOK](references/LEVERAGE-PLAYBOOK.md) |
-| Choose the right channel/sync/combinator | [PRIMITIVES-AND-ORCHESTRATION-CHOOSER](references/PRIMITIVES-AND-ORCHESTRATION-CHOOSER.md) |
-| Add deterministic tests | [TESTING-FORENSICS](references/TESTING-FORENSICS.md) → [LAB-TRACE-DPOR](references/LAB-TRACE-DPOR.md) |
-| Debug a runtime error | [ERROR-TAXONOMY](references/ERROR-TAXONOMY.md) → [TROUBLESHOOTING](references/TROUBLESHOOTING.md) |
-| Tune runtime performance | [RUNTIME-CONTROLS](references/RUNTIME-CONTROLS.md) → [SCHEDULER-INTERNALS](references/SCHEDULER-INTERNALS.md) |
-| See what to lead with vs use only when required | [STACK-SURFACES](references/STACK-SURFACES.md) → [TOKIO-REPLACEMENT-MATRIX](references/TOKIO-REPLACEMENT-MATRIX.md) |
-| Work inside the Asupersync repo | [REPO-CONTRIBUTOR-GUIDE](references/REPO-CONTRIBUTOR-GUIDE.md) → [SOURCE-MAP](references/SOURCE-MAP.md) |
+After editing this package run:
 
-### All References
+```bash
+./scripts/validate.sh
+ASUPERSYNC_SOURCE_ROOT=/path/to/asupersync ./scripts/validate.sh
+```
 
-**Integration and Migration**
-
-- Leverage playbook: [LEVERAGE-PLAYBOOK.md](references/LEVERAGE-PLAYBOOK.md)
-- Budgets, outcomes, capabilities: [BUDGET-OUTCOME-CAPABILITIES.md](references/BUDGET-OUTCOME-CAPABILITIES.md)
-- Native greenfield: [NATIVE-GREENFIELD.md](references/NATIVE-GREENFIELD.md)
-- Greenfield patterns: [GREENFIELD-PATTERNS.md](references/GREENFIELD-PATTERNS.md)
-- Brownfield migration: [BROWNFIELD-MIGRATION.md](references/BROWNFIELD-MIGRATION.md)
-- Tokio mapping: [TOKIO-MAPPING.md](references/TOKIO-MAPPING.md)
-- Tokio replacement matrix: [TOKIO-REPLACEMENT-MATRIX.md](references/TOKIO-REPLACEMENT-MATRIX.md)
-- Compat boundary rules: [COMPAT-BOUNDARY.md](references/COMPAT-BOUNDARY.md)
-- Compat bridge recipes: [COMPAT-BRIDGE.md](references/COMPAT-BRIDGE.md)
-- Adoption lanes: [ADOPTION-LANES.md](references/ADOPTION-LANES.md)
-- Anti-patterns: [ANTI-PATTERNS.md](references/ANTI-PATTERNS.md)
-
-**Architecture and Primitives**
-
-- Primitive and orchestration chooser: [PRIMITIVES-AND-ORCHESTRATION-CHOOSER.md](references/PRIMITIVES-AND-ORCHESTRATION-CHOOSER.md)
-- Channel and sync internals: [CHANNELS-SYNC-INTERNALS.md](references/CHANNELS-SYNC-INTERNALS.md)
-- Performance and scheduling: [PERFORMANCE-AND-SCHEDULING.md](references/PERFORMANCE-AND-SCHEDULING.md)
-- Scheduler internals: [SCHEDULER-INTERNALS.md](references/SCHEDULER-INTERNALS.md)
-- Lock ordering: [LOCK-ORDERING.md](references/LOCK-ORDERING.md)
-- Advanced features: [ADVANCED-FEATURES.md](references/ADVANCED-FEATURES.md)
-- Runtime controls and diagnostics: [RUNTIME-CONTROLS.md](references/RUNTIME-CONTROLS.md)
-- Supervision and OTP: [SUPERVISION-OTP.md](references/SUPERVISION-OTP.md)
-
-**Networking and Services**
-
-- Networking and protocol stack: [NETWORKING-PROTOCOL-STACK.md](references/NETWORKING-PROTOCOL-STACK.md)
-- Web and gRPC: [WEB-GRPC-HTTP.md](references/WEB-GRPC-HTTP.md)
-- Database, messaging, fs, process: [DB-MESSAGING-FS-PROCESS.md](references/DB-MESSAGING-FS-PROCESS.md)
-- Distributed execution: [DISTRIBUTED-AND-RIGOR.md](references/DISTRIBUTED-AND-RIGOR.md)
-- RaptorQ and distributed snapshots: [RAPTORQ-DISTRIBUTED.md](references/RAPTORQ-DISTRIBUTED.md)
-
-**Testing and Diagnostics**
-
-- Testing and forensics: [TESTING-FORENSICS.md](references/TESTING-FORENSICS.md)
-- Lab runtime, DPOR, traces: [LAB-TRACE-DPOR.md](references/LAB-TRACE-DPOR.md)
-- Mathematical foundations: [MATHEMATICAL-FOUNDATIONS.md](references/MATHEMATICAL-FOUNDATIONS.md)
-- Observability and forensics: [OBSERVABILITY-FORENSICS.md](references/OBSERVABILITY-FORENSICS.md)
-- Error taxonomy: [ERROR-TAXONOMY.md](references/ERROR-TAXONOMY.md)
-- Troubleshooting: [TROUBLESHOOTING.md](references/TROUBLESHOOTING.md)
-
-**Codebase Navigation**
-
-- Source map, module map, types, workspace: [SOURCE-MAP.md](references/SOURCE-MAP.md)
-- Stack surface guidance: [STACK-SURFACES.md](references/STACK-SURFACES.md)
-- Browser / WASM: [BROWSER-WASM.md](references/BROWSER-WASM.md)
-- Browser / React / Next: [BROWSER-FRAMEWORKS.md](references/BROWSER-FRAMEWORKS.md)
-- Repo contributor guide: [REPO-CONTRIBUTOR-GUIDE.md](references/REPO-CONTRIBUTOR-GUIDE.md)
-
-## Validation
-
-When changing code:
-
-- run the host project's normal formatter, compiler, lint, and test suite,
-- add deterministic integration tests for the migrated path,
-- verify cancellation, shutdown, and resource-release behavior,
-- verify that no core domain code still depends on Tokio if the goal is full native adoption.
-
-If working inside the Asupersync repo itself, see [REPO-CONTRIBUTOR-GUIDE.md](references/REPO-CONTRIBUTOR-GUIDE.md) for mandatory compiler checks and testing discipline.
-
-## Operating Rules
-
-- When forced to choose between "minimal code churn" and "native Asupersync semantics", choose the latter unless the task explicitly calls for a temporary boundary bridge.
-- **Forbidden crates** in core: `tokio`, `hyper`, `reqwest`, `axum`, `async-std`, `smol`.
-- Inside the Asupersync repo: follow AGENTS.md. Never delete files without permission. Branch is `main`, never `master`.
+The second form also validates referenced repository paths and release-sensitive
+source anchors. It does not compile Asupersync or replace RCH proof.

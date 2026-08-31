@@ -1,5 +1,26 @@
 # Greenfield Patterns
 
+## Table of Contents
+
+- [Golden Rules](#golden-rules)
+- [Choose The Right Level](#choose-the-right-level)
+- [Minimal Bootstrap](#minimal-bootstrap)
+- [Long-Lived Service Skeleton](#long-lived-service-skeleton)
+- [Runtime Shape Is Part Of The Design](#runtime-shape-is-part-of-the-design)
+- [Native Function Shape](#native-function-shape)
+- [Capability-Narrowed Edge Pattern](#capability-narrowed-edge-pattern)
+- [Owned Concurrency Pattern](#owned-concurrency-pattern)
+- [Cancellation-Safe Send Pattern](#cancellation-safe-send-pattern)
+- [Orchestration Pattern](#orchestration-pattern)
+- [Web-App Pattern](#web-app-pattern)
+- [Actor / Supervision Pattern](#actor--supervision-pattern)
+- [Pick The Right Surface](#pick-the-right-surface)
+- [Budget And Outcome Discipline](#budget-and-outcome-discipline)
+- [Capability-Boundary Pattern](#capability-boundary-pattern)
+- [Resilience Composition](#resilience-composition)
+- [Greenfield Defaults By App Type](#greenfield-defaults-by-app-type)
+- [Greenfield Upgrade Triggers](#greenfield-upgrade-triggers)
+
 ## Golden Rules
 
 1. Every effectful async function that matters should accept `&Cx`.
@@ -43,13 +64,17 @@ async fn main(cx: &Cx) -> Result<(), Error> {
 
 `#[main]` builds and drives the production runtime; the `cx: &Cx` parameter and
 `Result` return are optional, and the macro needs the default `proc-macros`
-feature. The graduated on-ramp (`docs/onramp.md`, `examples/onramp_level0..3.rs`)
+feature. The graduated on-ramp (`docs/onramp.md`, the
+`examples/onramp_level0.rs` through `examples/onramp_level3.rs` series)
 is the teaching path. For explicit runtime construction, use
 `RuntimeBuilder::current_thread().build()?` with `runtime.block_on(...)` and
 `runtime.handle().spawn(...)`. Keep `Cx::for_request()` and `Cx::for_testing()`
-in test/internal harnesses. `RuntimeHandle::spawn` is the small teaching shape;
-use `try_spawn` / `try_spawn_with_cx` when bootstrap admission failure must be
-handled without panicking.
+in test/internal harnesses. For an external production request boundary,
+current source exposes `Runtime::request_cx_with_budget(...)` and matching
+`RuntimeHandle::{request_cx_with_budget,try_request_cx_with_budget}` methods;
+the handle additions ship in v0.4.9. `RuntimeHandle::spawn` is
+the small teaching shape; use `try_spawn` / `try_spawn_with_cx` when bootstrap
+admission failure must be handled without panicking.
 
 ## Long-Lived Service Skeleton
 
@@ -75,7 +100,10 @@ Important guidance:
 
 - `AppSpec` is the right unit for long-lived service trees.
 - `AppHandle` is a real lifecycle handle; resolve it explicitly with
-  `stop` / `join` (it reports a leak on drop otherwise).
+  synchronous `stop(&mut RuntimeState)` / `join(&RuntimeState)`. Phase-0
+  `join` does not drive the runtime; it returns `RegionNotStopped` until the
+  region has actually reached terminal state. An unresolved drop emits a leak
+  report only when `tracing-integration` is enabled.
 - Put background loops and internal services under the app tree instead of
   smuggling them out through detached tasks.
 - For a full declarative-manifest walkthrough (`AppSpecV1` -> compile -> lab
@@ -145,8 +173,13 @@ structural child region must close to quiescence before you proceed.
 
 ```rust,ignore
 let permit = tx.reserve(cx).await?;
-permit.send(message)?;
+permit.try_send(message)?;
 ```
+
+Alternatively handle `permit.send(message)`'s returned `Outcome`. If the
+receiver closed after reservation,
+`Outcome::Err(SendError::Disconnected(message))` returns ownership of the
+unsent value. Reservation is cancel-safe; commit is not infallible.
 
 Do not reserve and then await unrelated work while holding the permit unless
 you fully understand the failure mode.
@@ -173,24 +206,37 @@ Why:
 Native high-level web API from `src/web/mod.rs`:
 
 ```rust,ignore
-use asupersync::web::{Router, Json, State, get, post};
+use asupersync::Cx;
+use asupersync::web::{
+    AsyncCxFnHandler1, AsyncCxFnHandler2, Json, JsonExtract, Router, State,
+    StatusCode, get,
+};
 
-async fn list_users(State(db): State<Db>) -> Json<Vec<User>> {
-    Json(db.list_users().await)
+async fn list_users(cx: Cx, State(db): State<Db>) -> Json<Vec<User>> {
+    Json(db.list_users(&cx).await)
 }
 
-async fn create_user(State(db): State<Db>, Json(input): Json<CreateUser>) -> StatusCode {
-    db.insert(input).await;
+async fn create_user(
+    cx: Cx,
+    State(db): State<Db>,
+    JsonExtract(input): JsonExtract<CreateUser>,
+) -> StatusCode {
+    db.insert(&cx, input).await;
     StatusCode::CREATED
 }
 
+let list_users = AsyncCxFnHandler1::<_, State<Db>>::new(list_users);
+let create_user =
+    AsyncCxFnHandler2::<_, State<Db>, JsonExtract<CreateUser>>::new(create_user);
 let app = Router::new()
     .route("/users", get(list_users).post(create_user))
     .with_state(db);
 ```
 
-For framework authors, prefer `Cx` wrappers instead of exposing the whole effect
-surface to handlers.
+Async handlers that receive `Cx` must be wrapped explicitly with the matching
+`AsyncCxFnHandler*` arity. `JsonExtract<T>` is the request extractor; `Json<T>`
+is the response type. Pass the handler's `Cx` into downstream effects rather
+than creating a testing or request context inside the handler.
 
 ## Actor / Supervision Pattern
 

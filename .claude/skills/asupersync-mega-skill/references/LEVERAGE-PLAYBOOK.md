@@ -4,6 +4,19 @@ Most of Asupersync's value appears only after you stop thinking in terms of
 "what replaces `tokio::spawn`?" and start thinking in terms of ownership,
 budgets, obligations, and replayable lifecycle control.
 
+## Contents
+
+- [Budget and Outcome](#1-treat-budget-and-outcome-as-design-inputs)
+- [Concurrency Surfaces](#2-choose-the-right-concurrency-surface)
+- [Promotion Triggers](#25-promotion-triggers-when-to-upgrade-your-design)
+- [Long-Lived Applications](#3-model-long-lived-apps-explicitly)
+- [Capability-Scoped Boundaries](#4-use-capability-scoped-boundaries)
+- [Native Orchestration](#5-prefer-native-orchestration-over-hand-rolled-select-forests)
+- [Obligation-Tracked Protocols](#6-use-obligation-tracked-protocol-edges)
+- [Distributed Work](#7-understand-the-distributed-model-correctly)
+- [Replay](#8-build-for-replay-not-just-success)
+- [Advanced-Surface Restraint](#9-do-not-overshoot-into-advanced-surfaces)
+
 ## 1. Treat `Budget` And `Outcome` As Design Inputs
 
 Do not treat `Budget` and `Outcome<T, E>` as decorative metadata.
@@ -47,6 +60,7 @@ Relevant paths:
 - `src/gen_server.rs`
 - `src/supervision.rs`
 - `examples/spork_minimal_supervised_app.rs`
+- `examples/appspec_reference_journey.rs`
 
 ## 2.5 Promotion Triggers: When To Upgrade Your Design
 
@@ -81,6 +95,10 @@ Design advice:
 - Put always-on workers, replication loops, sidecar observers, and control-plane services under `AppSpec`.
 - Treat `AppHandle` and named-server handles as obligation-like lifecycle handles: resolve them explicitly, do not casually drop them.
 - Use restart policy and supervision strategy to encode failure domains instead of rebuilding custom watchdog threads.
+- Know the current restart boundary: `CompiledSupervisor` computes deterministic
+  restart plans, but tree-level live restart-on-failure is still pending;
+  today's live restart is per-actor via `Scope::spawn_supervised_actor`
+  (`src/actor.rs`).
 
 Relevant paths:
 
@@ -107,7 +125,12 @@ Use:
 
 Important guidance:
 
-- `Cx::for_request()` is a convenience seam, not the center of a production architecture.
+- Production `Cx` values should come from runtime/request/call boundaries.
+  Use `Runtime::request_cx_with_budget`. Published v0.4.9 also has
+  `RuntimeHandle::try_request_cx_with_budget` when the owner retained only a
+  cloned handle and teardown can race context creation.
+  `Cx::for_request()` belongs in test/internal harnesses, not as the center of a
+  production architecture.
 - Do not pass full-capability `Cx` through every handler if most handlers only need trace/time/spawn.
 - Do not rebuild ambient registries, global service locators, or hidden runtime handles.
 
@@ -172,6 +195,10 @@ Important guidance:
 - Do not hold permits or leases across unrelated awaits.
 - Prefer `call` over `cast` when the protocol requires acknowledgement or reply ownership.
 - Use `CastOverflowPolicy` deliberately. Mailbox overflow policy is part of system semantics, not a default you should ignore.
+- Tracked session channels are capability-threaded:
+  `TrackedSender::try_reserve` takes `&Cx` and `TrackedPermit::try_send`
+  returns `CommittedProof<SendPermit>` (shipped in v0.3.10 under an incorrect
+  patch bump; v0.4.0 is the policy-correct compatibility anchor).
 
 Relevant paths:
 
@@ -245,7 +272,7 @@ Do **not** lead with these unless the target requirements justify them:
 
 For most projects, the highest-leverage path is still:
 
-- `RuntimeBuilder` + `Cx` + `Scope`
+- `#[asupersync::main]` (or `RuntimeBuilder`) + `Cx` + `Scope`
 - request/call regions
 - native `service` / `web` / `grpc`
 - native channels/sync/combinators

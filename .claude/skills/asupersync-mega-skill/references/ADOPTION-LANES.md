@@ -34,6 +34,7 @@ Choose this when:
 
 Default moves:
 
+- run the read-only planner first: `python3 scripts/migration_readiness_planner.py --project-root <proj> --output-root <out>` (see `docs/integration.md`),
 - replace runtime bootstrap first,
 - inventory every `tokio::*` and Tokio-ecosystem dependency,
 - thread `&Cx` through code you control,
@@ -45,13 +46,15 @@ Exit criteria:
 
 - Tokio is removed from core modules,
 - migrated domains use native Asupersync surfaces,
-- any remaining Tokio-only crate is isolated behind a dedicated adapter boundary.
+- any remaining Tokio-only crate is isolated behind a dedicated adapter boundary,
+- `cargo tree -e normal -i tokio` on core crates prints `warning: nothing to print.` (no-Tokio production graph).
 
 ## Lane 3: Boundary Interop
 
 Choose this when:
 
-- a dependency still requires `tokio::runtime::Handle`, `tokio::io`, hyper runtime traits, or similar,
+- a dependency needs one of compat's implemented Tokio I/O, hyper, Tower, or
+  explicit cancellation/context adapters,
 - replacing that crate immediately would cost too much,
 - you need an incremental migration path.
 
@@ -62,6 +65,10 @@ Default moves:
 - pass `Cx` explicitly into the boundary,
 - prefer strict cancellation modes,
 - never let Tokio become the primary runtime for the app.
+
+If the dependency requires `tokio::runtime::Handle`, retain an explicitly
+owned Tokio runtime boundary or replace the dependency. Compat installs only
+an Asupersync `Cx`; it does not provide `Handle::current()`.
 
 Exit criteria:
 

@@ -1,114 +1,77 @@
 ---
 name: asupersync-mega-skill
 description: >-
-  Replace Tokio stacks with Asupersync. Use when migrating Tokio/axum/hyper/tonic apps, designing Cx/region services, debugging internals, or classifying proof/ATP evidence.
+  Build, migrate, debug, and maintain Asupersync. Use when working with Tokio
+  migration, Cx/Scope/cancellation, local tasks, Lab replay, browser/Wasm,
+  protocols, databases, OTLP, or repository proof.
 ---
 
 # Asupersync Mega Skill
 
-Asupersync is a spec-first, cancel-correct, capability-secure async runtime for Rust. Not a Tokio wrapper -- a broad, support-class-scoped replacement for Tokio stacks, with stronger guarantees around structured concurrency, obligation tracking, deterministic testing, and capability security. Exact adapter, web, browser, protocol, and benchmark parity must still be checked against live docs and proof artifacts.
+Asupersync is a spec-first runtime for structured concurrency, cancel-correct
+effects, obligations, deterministic testing, and capability security—not a
+Tokio wrapper. Verify against live evidence.
 
-This skill is primarily for agents integrating Asupersync into other projects or extracting maximum architectural leverage from it in greenfield systems. It also covers repo-internal work when that is the actual task.
+For release, live-support, or open-boundary questions, start with the
+current-status card in
+[SOURCE-MAP.md](references/SOURCE-MAP.md#release-and-live-head-status).
+Otherwise load the single task lane below first. Live source, tags, registry
+state, and terminal proof receipts outrank examples or stale tracker labels.
 
-For codebase orientation, types, module map, and workspace layout see [SOURCE-MAP.md](references/SOURCE-MAP.md).
+## Table of Contents
 
-## Quick Orient
+- [Bootstrap](#bootstrap)
+- [Choose One Lane](#choose-one-lane)
+- [Non-Negotiables](#non-negotiables)
+- [Migration Workflow](#migration-workflow)
+- [Proof and Repository Rules](#proof-and-repository-rules)
+- [Skill Validation](#skill-validation)
 
-Minimal bootstrap (the blessed on-ramp entry since v0.4.x):
+## Bootstrap
+
+Use `#[asupersync::main]` when the application does not need to own the runtime:
 
 ```rust
-use asupersync::main;
-
-#[main]
+#[asupersync::main]
 async fn main() {
     println!("hello from asupersync");
 }
 ```
 
-`#[asupersync::main]` builds and drives the production runtime
-(`examples/onramp_level0.rs`); `#[asupersync::test]` and
-`#[asupersync::lab_test]` are the matching test entry attributes. Teach the
-four-level graduated on-ramp in `docs/onramp.md` before inventing bootstrap
-patterns.
+Use `RuntimeBuilder` when it does. Runtime-spawned tasks receive a runtime-owned
+`Cx`; pass `&Cx` into application code. Use production request-context APIs,
+explicit spawn admission, and checked joins rather than test constructors or
+implicit authority. For handle-only request contexts and caller-owned blocking
+pools, read [RUNTIME-CONTROLS](references/RUNTIME-CONTROLS.md); attaching a pool
+does not install a scheduler or a worker-local lane.
 
-Explicit bootstrap, when the app needs to own the runtime object:
+## Choose One Lane
 
-```rust
-use asupersync::{Cx, Error};
-use asupersync::runtime::RuntimeBuilder;
+Load one primary reference first. Follow its links only when the task reaches
+that boundary; do not preload whole clusters.
 
-async fn main_task(cx: &Cx) -> Result<(), Error> {
-    cx.trace("running");
-    cx.checkpoint()?;
-    Ok(())
-}
+| Task | Read first |
+|---|---|
+| Native greenfield service | [NATIVE-GREENFIELD](references/NATIVE-GREENFIELD.md) |
+| Brownfield Tokio migration | [BROWNFIELD-MIGRATION](references/BROWNFIELD-MIGRATION.md) |
+| Exact Tokio compatibility or quarantine boundary | [COMPAT-BOUNDARY](references/COMPAT-BOUNDARY.md) |
+| Cx-aware high-level web handler patterns | [GREENFIELD-PATTERNS](references/GREENFIELD-PATTERNS.md) |
+| Runtime, cancellation, shutdown, or local tasks | [RUNTIME-CONTROLS](references/RUNTIME-CONTROLS.md) |
+| Channels, locks, or combinators | [PRIMITIVES-AND-ORCHESTRATION-CHOOSER](references/PRIMITIVES-AND-ORCHESTRATION-CHOOSER.md) |
+| Observability, diagnostics, metrics, or OTLP | [OBSERVABILITY-FORENSICS](references/OBSERVABILITY-FORENSICS.md) |
+| HTTP, gRPC, or high-level web routing | [WEB-GRPC-HTTP](references/WEB-GRPC-HTTP.md) |
+| Database, messaging, filesystem, process, or signal work | [DB-MESSAGING-FS-PROCESS](references/DB-MESSAGING-FS-PROCESS.md) |
+| Protocol or low-level networking work | [NETWORKING-PROTOCOL-STACK](references/NETWORKING-PROTOCOL-STACK.md) |
+| Lab replay, DPOR, or escaped concurrency defect | [TESTING-FORENSICS](references/TESTING-FORENSICS.md) |
+| Supervision or OTP-style components | [SUPERVISION-OTP](references/SUPERVISION-OTP.md) |
+| Browser or Wasm integration | [BROWSER-WASM](references/BROWSER-WASM.md) |
+| Distributed execution or rigor | [DISTRIBUTED-AND-RIGOR](references/DISTRIBUTED-AND-RIGOR.md) |
+| RaptorQ or ATP security, transfer, or benchmark evidence | [RAPTORQ-DISTRIBUTED](references/RAPTORQ-DISTRIBUTED.md) |
+| Work inside Asupersync, release it, or assess API compatibility | [REPO-CONTRIBUTOR-GUIDE](references/REPO-CONTRIBUTOR-GUIDE.md) |
+| Diagnose an error or uncertain support claim | [TROUBLESHOOTING](references/TROUBLESHOOTING.md) |
 
-fn main() -> Result<(), Error> {
-    let runtime = RuntimeBuilder::current_thread().build()?;
-    let result = runtime.block_on(runtime.handle().spawn(async {
-        let cx = Cx::current().expect("runtime task Cx");
-        main_task(&cx).await
-    }));
-    result?;
-    Ok(())
-}
-```
-
-`RuntimeBuilder` creates the runtime, `block_on` installs an ambient runtime
-context, runtime-spawned tasks run with a runtime-owned `Cx`, and app code
-receives `&Cx`. `Runtime::request_cx_with_budget(budget)` is the blessed
-production ambient-free `Cx` entry; `Cx::for_request()` / `Cx::for_testing()`
-remain test/internal-harness material. For services, prefer request/call
-regions at boundaries, then graduate to `AppSpec` + supervision when the
-topology is long-lived. For admission-sensitive bootstrap, use `try_spawn` /
-`try_spawn_with_cx` and handle `SpawnError` explicitly.
-
-Where to focus first:
-
-- Lead with core runtime, `Cx`/`Scope`, cancellation, obligations, channels, sync, time, lab/DPOR, and observability
-- For ordinary services, build next on native `service`, `web`, `grpc`, database, and supervision surfaces
-- Treat Browser Edition, QUIC/H3, messaging, remote/distributed, and RaptorQ as requirement-driven lanes, not default starting points
-
-Default recommendation order for most real projects:
-
-- core runtime + `Cx` + `Scope`
-- native `service` / `web` / `grpc` boundaries
-- native database and actor/supervision surfaces as needed
-- deterministic tests and diagnostics from the start
-
-Do **not** lead with Browser Edition, QUIC/H3, messaging, remote/distributed, or RaptorQ unless the target project explicitly needs those capabilities.
-
-Full surface guidance: [STACK-SURFACES.md](references/STACK-SURFACES.md).
-
-## Start Here
-
-Choose one lane before touching code:
-
-1. **Native greenfield**
-   Build directly on `RuntimeBuilder`, `Cx`, `Scope`, `LabRuntime`, and optional `AppSpec`.
-2. **Brownfield native migration**
-   Rewrite your app's async seams around `&Cx`, region-owned tasks, cancel-aware primitives, and deterministic tests.
-   For serious migrations, run the repo's read-only migration readiness planner
-   and use its verdict, proof commands, semantic recommendations, and operator
-   phase plan as inputs rather than treating `cargo tree` grep output as a plan.
-
-   ```bash
-   python3 scripts/migration_readiness_planner.py --dry-run --scenario tokio-http-service
-   python3 scripts/migration_readiness_planner.py --execute --output-root "${TMPDIR:-/tmp}/asupersync_migration_planner_e2e"
-   python3 scripts/migration_readiness_planner.py --project-root /path/to/rust/project --output-root target/migration-readiness
-   ```
-
-   For a real project, review `summary.final_verdict`,
-   `proof_pack.proof_commands`, `semantic_map.recommendations`, and
-   `operator_report.phase_plan` before editing the target.
-3. **Boundary interop**
-   Use `asupersync-tokio-compat` only for crates you cannot remove yet. Keep Tokio out of core business logic.
-
-Default rule:
-
-- prefer native Asupersync surfaces,
-- use compat only as a quarantine boundary,
-- plan to remove compat once the stubborn dependency is gone.
+Use browser/Wasm, QUIC/H3, messaging, distributed, or RaptorQ lanes only when
+requirements call for them.
 
 ## Non-Negotiables
 
@@ -120,232 +83,123 @@ Default rule:
   holding `&mut RuntimeState`.
 - Add `cx.checkpoint()` in loops, retry bodies, long handlers, and shutdown-sensitive code.
 - Prefer cancel-aware primitives and two-phase effects.
-- State the v0.4.4 cancellation contract precisely: ordinary `Cx::spawn*`
+- State the layered v0.4.4-v0.4.9 cancellation contract precisely: ordinary `Cx::spawn*`
   preserves a typed result returned after cancellation acknowledgement (a
   concurrent abort no longer erases it), but pre-first-poll cancellation and
   cancellation-blind late values keep v0.4.3 task-level cancellation, and
   `JoinSet`, cancellation-dominant combinators, blocking wrappers, and
   low-level state tasks retain their separately tested policies. Neither
-  "abort always wins" nor "the value always survives" is correct.
+  "abort always wins" nor "the value always survives" is correct. Explicit
+  cancellation wakes timer-parked native tasks; `Sleep` retires its registration
+  and completes with `()` while timeout/deadline combinators retain outcome
+  classification. Native worker tests, not Lab-only models, prove this boundary.
+- `Cx::spawn_local` requires a worker-local lane owned by the same runtime. A
+  direct `Runtime::block_on`, entry-macro body, `run_test`, or
+  `run_test_with_cx` does not by itself install that lane and may return
+  `LocalSchedulerUnavailable` (ASUP-E004). Enter a real worker with
+  `runtime.block_on(runtime.handle().spawn(async { ... }))`, obtain
+  `Cx::current()` there, then spawn the `!Send` future and prove it reached the
+  parked state before aborting it.
 - Use deterministic tests as part of normal development, not as optional polish.
 - Treat `Cx::for_testing()` and `Cx::for_request()` as test/internal harness
   paths, not production architecture.
 - Keep Tokio and Tokio-only crates behind explicit adapter modules if you must keep them at all.
+- `asupersync-tokio-compat` adapts selected traits and context; it does not install a Tokio runtime
+  or prove `Handle::current()`-dependent frameworks.
+  Require downstream compile and runtime evidence for every bridge.
 
-## Leverage, Not Just Migration
+## Migration Workflow
 
-If the target system is doing real work, do not stop after "the code compiles on Asupersync."
+1. Inventory direct and transitive Tokio-ecosystem dependencies.
+2. Classify each as native replacement, explicit compat holdout, or deliberate
+   workaround.
+3. Use the repository's migration readiness planner when available; do not
+   confuse a `cargo tree` grep with a plan.
+4. Replace bootstrap, thread `&Cx` through owned APIs, then replace detached
+   spawning with region-owned work.
+5. Migrate time, sync, I/O, channel, web, database, and protocol slices one at
+   a time.
+6. Add deterministic and native cancellation tests during the migration.
+7. Compile actual external-consumer feature profiles; `cfg(test)` access and
+   repo-internal tests are not downstream API evidence.
+8. Remove each compat boundary when its last justified dependency is gone.
 
-- `Budget`, `Outcome`, and capability narrowing are part of the application's semantic contract, not optional polish. See [BUDGET-OUTCOME-CAPABILITIES.md](references/BUDGET-OUTCOME-CAPABILITIES.md).
-- Runtime controls are part of the architecture. See [RUNTIME-CONTROLS.md](references/RUNTIME-CONTROLS.md).
-- Long-lived state belongs in supervised structures. See [SUPERVISION-OTP.md](references/SUPERVISION-OTP.md).
-- Treat the lab runtime and operator diagnostics as part of the normal development loop. See [OBSERVABILITY-FORENSICS.md](references/OBSERVABILITY-FORENSICS.md).
-- Prefer native combinators — including the drain-correct native `select!` — over hand-rolled Tokio-style orchestration. See [ADVANCED-FEATURES.md](references/ADVANCED-FEATURES.md).
-- Primitive choice and scheduler cooperation materially affect leverage. See [PRIMITIVES-AND-ORCHESTRATION-CHOOSER.md](references/PRIMITIVES-AND-ORCHESTRATION-CHOOSER.md) and [PERFORMANCE-AND-SCHEDULING.md](references/PERFORMANCE-AND-SCHEDULING.md).
+The planner's `summary.final_verdict`, `proof_pack.proof_commands`,
+`semantic_map.recommendations`, and `operator_report.phase_plan` are inputs to
+the decision. `scripts/audit-target.sh` is only bounded inventory; its optional
+Cargo graph probe is explicit and can touch Cargo state.
 
-## Canonical Spine
+For more-than-parity design:
+[LEVERAGE-PLAYBOOK](references/LEVERAGE-PLAYBOOK.md),
+[BUDGET-OUTCOME-CAPABILITIES](references/BUDGET-OUTCOME-CAPABILITIES.md),
+[SUPERVISION-OTP](references/SUPERVISION-OTP.md), and
+[ADVANCED-FEATURES](references/ADVANCED-FEATURES.md).
 
-- Bootstrap: `#[asupersync::main]`, `runtime::RuntimeBuilder`, `Runtime`
-  (`Runtime::request_cx_with_budget` for ambient-free production `Cx`),
-  `RuntimeHandle`
-- App code: `Cx`, `Cx::spawn`, `Cx::spawn_in`, `Scope` child regions, `JoinSet`
-- Tests: `test_utils::{run_test, run_test_with_cx}`, `LabRuntime`, `LabConfig`,
-  `LabRunReport`
-- Service boundaries: `web::request_region::{RequestRegion, RequestContext}`, `grpc::CallContext::with_cx(...)`
-- Higher-level apps: `app::AppSpec`, `actor`, `gen_server`, `supervision`, `spork`
+Other routers: [adoption](references/ADOPTION-LANES.md),
+[anti-patterns](references/ANTI-PATTERNS.md),
+[compat bridge](references/COMPAT-BRIDGE.md),
+[replacement matrix](references/TOKIO-REPLACEMENT-MATRIX.md),
+[performance](references/PERFORMANCE-AND-SCHEDULING.md),
+[browser frameworks](references/BROWSER-FRAMEWORKS.md), and
+[mathematics](references/MATHEMATICAL-FOUNDATIONS.md).
 
-Start with RuntimeBuilder + Cx + Scope. Graduate to AppSpec + supervision when you need restart policy, named workers, or explicit application topology.
+Secondary deep dives, only when a primary card routes there (except the two
+direct routes named above):
+[greenfield patterns](references/GREENFIELD-PATTERNS.md),
+[Tokio mappings](references/TOKIO-MAPPING.md),
+[compat limits](references/COMPAT-BOUNDARY.md),
+[scheduler internals](references/SCHEDULER-INTERNALS.md),
+[channel/sync internals](references/CHANNELS-SYNC-INTERNALS.md),
+[lock ordering](references/LOCK-ORDERING.md),
+[support classes](references/STACK-SURFACES.md),
+[Lab/DPOR](references/LAB-TRACE-DPOR.md), and
+[error taxonomy](references/ERROR-TAXONOMY.md).
 
-Macro guidance: supported root macros are `scope!`, `spawn!`, `join!`,
-`join_all!`, `race!`, and `select!`, plus the `#[main]` / `#[test]` /
-`#[lab_test]` entry attributes. `race!` and blocking `select!` are
-drain-correct: they route through `Cx::race_drained*` / `Scope::race_all`, so
-every loser is protocol-cancelled **and drained** before return (branches must
-be `Send + 'static` with spawn authority; the `select!` `else` form polls once
-in source order and does not drain; `race!`'s `timeout:` path abandons by drop
-on elapsed). Use `Cx::race` directly for a drop-on-cancel select over
-non-`'static` inline futures. `scope!` binds the current-region scope; it does
-not create a fresh child-region boundary. `spawn!` needs runtime state. Manual
-APIs are still the safest authoritative path when semantics matter.
+## Proof and Repository Rules
 
-Current generated API-map anchors to remember:
+- Run the host formatter, compiler, linter, and tests; verify cancellation,
+  shutdown, and resource release, not compilation alone.
+- For an escaped concurrency defect, reproduce the same public API sequence on
+  the native runtime, prove the formerly failing parked/owned state, assert the
+  exact nested result and cleanup, and retain old-red/new-green evidence. A
+  Lab-only or compile-only test is not a substitute.
+- RCH pre-admission refusal, exit 103, worker assignment, a job id, a PID, or
+  local fallback means **zero admissible executed tests**. Green proof requires
+  terminal output naming the target and nonzero pass counts from the required
+  environment.
+- Do not key source or evidence authority to `/dp`, `/data/projects`, or an RCH
+  checkout prefix. Identify the repository by content and declared root.
+- Never invoke a waker, user callback, observer, or extension hook while a
+  runtime-state lock is held. Treat unresolved tracker rows as unshipped
+  boundaries, not capability claims; refresh them from the status card and live
+  tracker before reporting current state.
+- Exact `ForcedSchedule` files are bounded Lab replay evidence, not production
+  scheduler control, authenticity proof, or automatic minimization.
+- Support classes come from live implementation and proof: default production,
+  optional production, experimental/guarded, compat-only, test/fuzz-only, or
+  planned. Do not promote a class from prose alone.
 
-- outbound HTTP: `http::Client` / `http::HttpClient` fluent request builders,
-- deterministic lab: `lab::ScenarioRunner` and `lab::CancellationInjector`,
-- web metadata and middleware: `web::Router::routes`, `web::RouteInfo`,
-  `web::middleware::{CatchPanicLayer, CompressionLayer, RequestTraceLayer,
-  TimeoutLayer}`, plus `web::Router::layer`,
-- ATP/daemon, RaptorQ, observability, Spork, `runtime::RuntimeBuilder`, and
-  `Cx + Scope`,
-- dependency-sovereignty owned modules (first-party base64/hex codecs, owned
-  regex engine, protobuf wire + OTLP proto, UTC time, minimal DER, plus a
-  not-yet-wired LZ4 block codec) — prefer these over reintroducing the
-  third-party crates they replace; cutover status per module is tracked by
-  the dependency capability inventories, not assumed.
+Inside Asupersync, follow live `AGENTS.md` and `TESTING_FOR_AGENTS.md`; work on
+`main`, do not delete files without permission, and preserve the v0.4.3 public
+API and documented behavior throughout 0.4.x. Classify proof through
+`artifacts/proof_lane_manifest_v1.json` and
+`artifacts/proof_status_snapshot_v1.json`: manifest = command/claim/envelope;
+snapshot = freshness/blockers; only a terminal receipt proves execution.
+Preserve build id, target/artifact roots, and dirty-tree state. Use Beads and
+CASS for rationale, corroborated by tagged source and focused evidence.
 
-Refresh these from `/data/projects/asupersync/artifacts/api_surface_map_v1.json`
-before making precise public-surface claims.
+ATP performance claims require live ledger/matrix artifacts, tuned rsync,
+release `atp`, symmetric crypto, caps, and SHA/tamper checks. A cell proves only
+its scope; compilation or `sha_ok` is not a benchmark win.
 
-## Standard Workflow
+## Skill Validation
 
-- Inventory all `tokio::*`, `tokio-util`, `hyper`, `axum`, `tonic`, `reqwest`, `sqlx`, `quinn`, `h3`, `rdkafka`, and related dependencies.
-- Classify each dependency as: native replacement, compat holdout, or deliberate workaround.
-- Replace runtime bootstrap first.
-- Thread `&Cx` through your own async APIs.
-- Replace detached spawning with region-owned work.
-- Replace sync/time/net/io/channel/web/db/messaging surfaces domain by domain.
-- Add deterministic tests while migrating, not after.
-- Remove compat boundaries as soon as the underlying dependency no longer needs them.
+After editing this package run:
 
-## Reference Index
+```bash
+./scripts/validate.sh
+ASUPERSYNC_SOURCE_ROOT=/path/to/asupersync ./scripts/validate.sh
+```
 
-### Quick Router: Start Here For Your Task
-
-| I need to... | Read (in order) |
-|---|---|
-| Migrate a Tokio HTTP/gRPC service | [BROWNFIELD-MIGRATION](references/BROWNFIELD-MIGRATION.md) → [TOKIO-MAPPING](references/TOKIO-MAPPING.md) → [WEB-GRPC-HTTP](references/WEB-GRPC-HTTP.md) |
-| Build a new service from scratch | [NATIVE-GREENFIELD](references/NATIVE-GREENFIELD.md) → [GREENFIELD-PATTERNS](references/GREENFIELD-PATTERNS.md) |
-| Get more than parity and maximize Asupersync leverage | [LEVERAGE-PLAYBOOK](references/LEVERAGE-PLAYBOOK.md) → [BUDGET-OUTCOME-CAPABILITIES](references/BUDGET-OUTCOME-CAPABILITIES.md) → [SUPERVISION-OTP](references/SUPERVISION-OTP.md) → [TESTING-FORENSICS](references/TESTING-FORENSICS.md) |
-| Design a supervised long-lived service | [SUPERVISION-OTP](references/SUPERVISION-OTP.md) → [LEVERAGE-PLAYBOOK](references/LEVERAGE-PLAYBOOK.md) |
-| Choose the right channel/sync/combinator | [PRIMITIVES-AND-ORCHESTRATION-CHOOSER](references/PRIMITIVES-AND-ORCHESTRATION-CHOOSER.md) |
-| Add deterministic tests | [TESTING-FORENSICS](references/TESTING-FORENSICS.md) → [LAB-TRACE-DPOR](references/LAB-TRACE-DPOR.md) |
-| Assess migration readiness with the repo planner | [REPO-CONTRIBUTOR-GUIDE](references/REPO-CONTRIBUTOR-GUIDE.md) → live `scripts/migration_readiness_planner.py` output |
-| Debug a runtime error | [ERROR-TAXONOMY](references/ERROR-TAXONOMY.md) → [TROUBLESHOOTING](references/TROUBLESHOOTING.md) |
-| Tune runtime performance | [RUNTIME-CONTROLS](references/RUNTIME-CONTROLS.md) → [SCHEDULER-INTERNALS](references/SCHEDULER-INTERNALS.md) |
-| See what to lead with vs use only when required | [STACK-SURFACES](references/STACK-SURFACES.md) → [TOKIO-REPLACEMENT-MATRIX](references/TOKIO-REPLACEMENT-MATRIX.md) |
-| Work inside the Asupersync repo | [REPO-CONTRIBUTOR-GUIDE](references/REPO-CONTRIBUTOR-GUIDE.md) → [SOURCE-MAP](references/SOURCE-MAP.md) |
-| Move bulk files / pull one object from many donors (ATP bonded transfer, `atp bond-pull` + `BondedTransfer` SDK) | [RAPTORQ-DISTRIBUTED](references/RAPTORQ-DISTRIBUTED.md) → [NETWORKING-PROTOCOL-STACK](references/NETWORKING-PROTOCOL-STACK.md) |
-
-Other focused references live under `references/` for adoption lanes, compat
-bridges, anti-patterns, budgets/outcomes/capabilities, lock ordering,
-performance, supervision, networking, browser frameworks, distributed rigor,
-observability, and troubleshooting. Use [SOURCE-MAP.md](references/SOURCE-MAP.md)
-when you need the full codebase navigation map.
-
-Specialized refs: [ADOPTION-LANES](references/ADOPTION-LANES.md),
-[COMPAT-BOUNDARY](references/COMPAT-BOUNDARY.md),
-[COMPAT-BRIDGE](references/COMPAT-BRIDGE.md),
-[ANTI-PATTERNS](references/ANTI-PATTERNS.md),
-[CHANNELS-SYNC-INTERNALS](references/CHANNELS-SYNC-INTERNALS.md),
-[LOCK-ORDERING](references/LOCK-ORDERING.md),
-[NETWORKING-PROTOCOL-STACK](references/NETWORKING-PROTOCOL-STACK.md),
-[DB-MESSAGING-FS-PROCESS](references/DB-MESSAGING-FS-PROCESS.md),
-[DISTRIBUTED-AND-RIGOR](references/DISTRIBUTED-AND-RIGOR.md),
-[RAPTORQ-DISTRIBUTED](references/RAPTORQ-DISTRIBUTED.md),
-[MATHEMATICAL-FOUNDATIONS](references/MATHEMATICAL-FOUNDATIONS.md),
-[BROWSER-WASM](references/BROWSER-WASM.md), and
-[BROWSER-FRAMEWORKS](references/BROWSER-FRAMEWORKS.md).
-
-## Validation
-
-When changing code:
-
-- run the host project's normal formatter, compiler, lint, and test suite,
-- add deterministic integration tests for the migrated path,
-- verify cancellation, shutdown, and resource-release behavior,
-- verify that no core domain code still depends on Tokio if the goal is full native adoption.
-
-If working inside the Asupersync repo itself, read live `TESTING_FOR_AGENTS.md`
-before choosing proof. Use `rch exec -- env CARGO_TARGET_DIR=...` for
-remote-required lanes, preserve the RCH build id / target dir / artifact root /
-dirty-tree state in handoff, and do not turn a local fallback into green proof
-for a lane whose manifest says remote proof is required. See
-[REPO-CONTRIBUTOR-GUIDE.md](references/REPO-CONTRIBUTOR-GUIDE.md) for mandatory
-compiler checks and testing discipline.
-
-## Operating Rules
-
-- When forced to choose between "minimal code churn" and "native Asupersync semantics", choose the latter unless the task explicitly calls for a temporary boundary bridge.
-- **Forbidden crates** in runtime/core `src/`: `tokio`, `hyper`, `reqwest`,
-  `axum`, `tower` except scoped adapter feature paths, `async-std`, and `smol`.
-  Satellite, test, fuzz, benchmark, and compat carve-outs must stay documented
-  and proof-checked.
-- Inside the Asupersync repo: follow live `AGENTS.md`. Never delete files
-  without permission. Work only on `main` — no branches, no worktrees, no
-  scratch clones, ever; the "feature branch" of a bead is the bead id + a file
-  reservation + a commit referencing it. Do not introduce legacy-branch
-  references except the exact required mirror command, if still present there.
-- Backwards compatibility is a hard release gate: every `0.4.x` release must
-  preserve the `v0.4.3` public API and documented behavior (>12 production
-  consumers). Breaking anything requires the user's explicit written approval;
-  prefer additive APIs; deprecation is not removal permission. A downstream
-  escaped defect triggers the AGENTS.md escaped-defect protocol (same public
-  API sequence, proven formerly-failing state, exact result + cleanup oracle,
-  old-red/new-green receipt, permanent release-blocking lane). Note the trap:
-  `v0.3.10` shipped breaking tracked-session-channel changes under a patch
-  bump — anchor downstream compat on `v0.4.0`+; current release is `v0.4.4`.
-- Cancellation-affecting changes (Cx, TaskHandle, scheduler wakeup, spawn
-  wrappers, cancel-aware primitives) must run the release-blocking
-  `native-parked-task-cancellation` lane
-  (`cargo test --test runtime_abort_vs_cancel_semantics_audit`, remote-required;
-  first proof in `scripts/run_proof_checks.sh`). Terminal results are published
-  through the capability-restricted `TaskResultSender`, never through the
-  completed operation's cancelled `Cx`.
-- The toolchain is date-pinned (`rust-toolchain.toml`, currently
-  `nightly-2026-07-05`) so every RCH worker resolves the same nightly. Never
-  float nightly or `rustup update` as part of a lane; bumping the pin is a
-  deliberate, coordinated act.
-- Much of the tree is covered by fail-closed capability/pin inventories:
-  editing pinned source triggers transitive artifact-digest re-pins. Budget
-  for the `chore(pins)` cascade instead of treating pin-contract failures as
-  unrelated breakage.
-- Inside the Asupersync repo, trust `AGENTS.md`, `README.md`,
-  `CHANGELOG.md`, `artifacts/api_surface_map_v1.json`, proof-lane manifests,
-  proof-status snapshots, and benchmark matrix artifacts over remembered API
-  shapes.
-- Classify every repo-internal proof through
-  `artifacts/proof_lane_manifest_v1.json` and
-  `artifacts/proof_status_snapshot_v1.json` before making any "green" claim.
-  A broad `check`/`clippy` result is not enough when a Phase 6, benchmark,
-  golden, flamegraph, or proof-note artifact gate applies.
-- ATP benchmark claims require tuned-rsync, release-`atp`, crypto-symmetric,
-  rate-capped, SHA/tamper-checked evidence. A single current cell can support a
-  scoped regression claim; headline "beats rsync" claims need whole-matrix
-  evidence. Compile success or `sha_ok` alone is not a win.
-
-## Evidence-First Operator Cards
-
-Use these compact operators for volatile repo-internal claims:
-
-- **Live-doc refresh**: before any Asupersync-internal API, proof, or ATP claim,
-  read live `AGENTS.md`, `README.md`, `TESTING_FOR_AGENTS.md`, `CHANGELOG.md`,
-  the relevant source, and the relevant artifact/ledger rows. Do not rely on
-  this skill's dated examples as authority.
-- **Claim gate**: classify the evidence as `banked`, `scoped-cell-only`,
-  `parity`, `correct-but-slower`, `candidate`, `stale`, `blocked`, or
-  `failed`. Say the no-claim boundary in the same breath as the positive claim.
-- **ATP gate**: require tuned rsync, release `atp`, crypto-symmetric setup,
-  rate caps, SHA/tamper fail-closed checks, and current matrix/ledger evidence.
-  `sha_ok`, `cargo check`, or one favorable stale cell is not a benchmark win.
-- **Proof-lane classifier**: map each repo-internal proof to
-  `artifacts/proof_lane_manifest_v1.json` and
-  `artifacts/proof_status_snapshot_v1.json`; preserve RCH build id, target dir,
-  artifact path, and dirty-tree state for cited proof.
-- **Migration planner router**: for downstream migrations, run the read-only
-  migration readiness planner when deciding whether/how to migrate; treat
-  `scripts/audit-target.sh` as quick inventory only.
-
-Current ATP evidence snapshot (ledger last updated 2026-07-10 at MATRIX-235;
-refresh from `docs/atp_rq_beat_rsync_ledger.md` before citing):
-
-- Nocrypto (`atp-rq-lab` vs tuned rsyncd) is a banked board-level win:
-  `MATRIX-212` swept 56 rows (55 valid rows all sha-ok; one benign
-  port-collision exclusion) and `MATRIX-231` closed the last clean-path gaps
-  (`500M/perfect` 0.881x, `5G/perfect` win); tree/small floors stay
-  marginal, so say "every measured nocrypto cell", not "all".
-- Encrypted (`atp-quic-tls13` vs rsync-over-ssh aes128gcm) is fully measured
-  (25/25 cells, `MATRIX-216`) and the lossy sub-board is all-wins
-  (`MATRIX-221`). Remaining rsync-favored territory is clean-path large +
-  tree-perfect floors, root-caused to sender duty-cycle: ~11% link-bound
-  honest ceiling on clean-large, a separate ~1.3-1.6x bound on tree-perfect
-  (`MATRIX-232/233`).
-- `MATRIX-235` native-link pacing rework produced large matched-pair gains
-  (encrypted `500M/perfect` -19.5%, `50M/perfect` -58%) but had no
-  contemporaneous rsync bar; it is a landed improvement, not a banked flip.
-- Receiver RSS is bounded (<=18MB at every size; the 5G receiver went
-  882MB -> 12MB, `MATRIX-213/216`); the `500M/broken/nocrypto` win no longer
-  carries a correctness asterisk (`MATRIX-230` closed it as spec-expected
-  rank deficiency).
-- Refuted levers (do not re-chase): receipt-clocked flow-control credit, BBR
-  startup shapes, >2MiB window raise, receiver ACK cadence, encrypted-tree
-  wakeup reduction (`MATRIX-222..229`, `MATRIX-234`).
+The second form also validates referenced repository paths and release-sensitive
+source anchors. It does not compile Asupersync or replace RCH proof.

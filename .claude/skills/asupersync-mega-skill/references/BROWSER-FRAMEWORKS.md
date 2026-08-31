@@ -4,20 +4,43 @@ Use this reference when the target includes browser execution, React, or
 Next.js. The browser lane is real, but it is not "run the entire native runtime
 everywhere JavaScript exists."
 
+## Table of Contents
+
+- [The First Decision: Direct Runtime Or Bridge-Only?](#the-first-decision-direct-runtime-or-bridge-only)
+- [Profile Selection Is Mandatory](#profile-selection-is-mandatory)
+- [Vanilla Browser Pattern](#vanilla-browser-pattern)
+- [React Pattern](#react-pattern)
+- [Next.js Pattern](#nextjs-pattern)
+- [Browser Scheduler Semantics Matter](#browser-scheduler-semantics-matter)
+- [Worker Offload Is Policy-Governed](#worker-offload-is-policy-governed)
+- [Unsupported Runtime Failures Are Useful](#unsupported-runtime-failures-are-useful)
+- [Evidence Contract For Browser Adoption](#evidence-contract-for-browser-adoption)
+- [Browser Troubleshooting Ladder](#browser-troubleshooting-ladder)
+- [High-Value Adoption Advice](#high-value-adoption-advice)
+- [Anti-Patterns](#anti-patterns)
+- [Read Next](#read-next)
+
 ## The First Decision: Direct Runtime Or Bridge-Only?
 
 | Environment | Direct Browser Edition Runtime | Guidance |
 |------------|-------------------------------|----------|
-| browser main thread | yes | canonical direct-runtime lane |
-| browser worker | possible, validate parity and policy first | keep evidence artifacts |
+| browser main thread | yes (GA for JS/TS consumers) | canonical direct-runtime lane |
+| dedicated Web Worker | yes (GA for JS/TS consumers) | direct-runtime supported; fetch routes through `WorkerGlobalScope.fetch()` |
+| service worker | no — broker/coordinator-only, direct runtime fail-closed | bounded broker registration / durable handoff only (`detectBrowserServiceWorkerBrokerSupport()`, `BrowserServiceWorkerBrokerStore`) |
+| shared worker | no — broker/coordinator-only, direct runtime fail-closed | bounded coordinator attach / version handshake / truthful fallback only (`detectBrowserSharedWorkerCoordinatorSupport()`, `createBrowserSharedWorkerCoordinatorSelection()`) |
 | Node.js server runtime | no | bridge-only |
-| Next.js server components / route handlers | no | bridge-only |
+| Next.js server components / route handlers | no | bridge-only (`supportClass: "bridge_only"` in Next diagnostics) |
 | edge/serverless runtimes with partial Web APIs | assume no unless explicitly validated | unsupported-runtime is the default posture |
+| external Rust consumer (`wasm32`) | preview public lane only | `RuntimeBuilder::browser()` — dispatcher-backed, fail-closed; inspect with `RuntimeBuilder::new().inspect_browser_execution_ladder()` or consume a browser builder with `BrowserRuntimeBuilder::inspect_execution_ladder()` |
 
-Do not blur this boundary.
+Do not blur these boundaries.
 
 If the environment is not a supported direct-runtime lane, keep runtime
 execution in a browser boundary and communicate over explicit RPC/API seams.
+
+Package surfaces (workspace version 0.4.9; not yet published to npm — use
+workspace-local references): `@asupersync/browser-core` (ABI/wasm),
+`@asupersync/browser` (SDK), `@asupersync/react`, `@asupersync/next`.
 
 ## Profile Selection Is Mandatory
 
@@ -36,10 +59,10 @@ Rules:
 
 Use profile intent correctly:
 
-- `minimal` for contract/ABI checks
-- `dev` for local development and diagnostics
-- `prod` for production-lean envelope
-- `deterministic` for replay-oriented validation
+- `minimal` for contract/ABI checks (smallest artifact)
+- `dev` for local development and diagnostics (browser I/O)
+- `prod` for production-lean envelope (browser I/O)
+- `deterministic` for replay-oriented validation (deterministic mode + browser trace)
 
 ## Vanilla Browser Pattern
 
@@ -56,6 +79,13 @@ What to validate first:
 - browser fetch security/default-deny policy
 
 Do not start with framework glue before the vanilla browser lane is green.
+
+Browser-native application-boundary helpers (`MessageChannel` / `MessagePort`
+/ `BroadcastChannel`, WHATWG `ReadableStream` / `WritableStream` byte
+wrappers) are capability-gated: construction requires explicit
+`BrowserNativeMessagingCapability` / `BrowserNativeStreamCapability`
+authority and denies `capability_not_granted` / `degraded_mode_denied`. They
+are guarded same-browser wrappers, not asupersync channels or raw transports.
 
 ## React Pattern
 
@@ -85,9 +115,11 @@ React anti-patterns:
 
 ## Next.js Pattern
 
-The important mental model is phase-based:
+The important mental model is phase-based (`NextBootstrapPhase` in
+`@asupersync/next`):
 
-- `ServerRendered -> Hydrating -> Hydrated -> RuntimeReady`
+- `server_rendered -> hydrating -> hydrated -> runtime_ready`
+  (with `runtime_failed` as the explicit failure terminal)
 
 Use that model explicitly.
 
@@ -103,7 +135,7 @@ Rules:
 Good posture:
 
 - keep browser runtime creation in client components or browser-only modules
-- treat `ServerRendered`/`ClientSsr` runtime init failures as misuse, not a
+- treat `server_rendered`/`client_ssr` runtime init failures as misuse, not a
   flaky environment problem
 - make rebootstrap on navigation or invalidation explicit
 
@@ -128,13 +160,19 @@ Practical implication for downstream code:
 
 ## Worker Offload Is Policy-Governed
 
-If browser runtime work moves into Web Workers, treat it as a policy boundary:
+Dedicated workers are a supported direct-runtime lane; service and shared
+workers are broker/coordinator-only (direct runtime fail-closed). If browser
+runtime work moves into Web Workers, treat it as a policy boundary:
 
 - ownership remains attached to the originating region/task
 - cancellation must cross the worker boundary explicitly
 - replay metadata must follow the job
 - offload should not be used to hide scheduler bugs or unbounded main-thread
   work
+- do not try to smuggle a direct runtime into service/shared workers; use the
+  bounded broker/coordinator APIs and their maintained fixtures
+  (`scripts/validate_service_worker_broker_consumer.sh`,
+  `scripts/validate_shared_worker_consumer.sh`)
 
 ## Unsupported Runtime Failures Are Useful
 
@@ -146,12 +184,19 @@ Representative codes from the repo docs:
 - `ASUPERSYNC_BROWSER_UNSUPPORTED_RUNTIME`
 - `ASUPERSYNC_REACT_UNSUPPORTED_RUNTIME`
 - `ASUPERSYNC_NEXT_UNSUPPORTED_RUNTIME`
+- `ASUPERSYNC_BROWSER_NATIVE_MESSAGING_UNSUPPORTED` / `_OPERATION_FAILED`
+- `ASUPERSYNC_BROWSER_NATIVE_STREAM_UNSUPPORTED` / `_OPERATION_FAILED`
 
 Typical causes:
 
 - attempted init in Node or SSR
 - missing browser DOM/WebAssembly/fetch/runtime prerequisites
 - direct runtime usage in server or edge paths
+- direct runtime attempted in service/shared workers
+  (`service_worker_direct_runtime_not_shipped` /
+  `shared_worker_direct_runtime_not_shipped` — broker/coordinator-only)
+- browser-native helper construction without the required capability grant
+  (`capability_not_granted`, `degraded_mode_denied`)
 
 Correct response:
 
@@ -172,7 +217,9 @@ Capture:
 - failure excerpts and remediation hints
 
 This matters because the browser lane has explicit policy, closure, redaction,
-and replay contracts.
+and replay contracts. The checked support-class rows live in
+`artifacts/browser_edition_readiness_matrix_v1.json`; the scoped JS/TS GA
+signoff is `artifacts/browser_ga_final_signoff_v1.json`.
 
 ## Browser Troubleshooting Ladder
 
@@ -194,8 +241,11 @@ Treat missing artifacts as workflow failure.
 
 ## Anti-Patterns
 
-- trying to run Browser Edition directly in Node, SSR, or edge by default
+- trying to run Browser Edition directly in Node, SSR, edge, or
+  service/shared workers by default
 - mixing multiple canonical browser profiles in one wasm build
+- treating the preview Rust `RuntimeBuilder::browser()` lane as stable parity
+  with the shipped JS/TS packages
 - assuming browser support means native DB/TLS/process/fs/server surfaces exist
 - hiding lifecycle bugs behind retries or generic "hydration issue" language
 - treating unsupported-runtime diagnostics as optional warnings

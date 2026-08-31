@@ -1,6 +1,32 @@
 # Networking and Protocol Stack
 
-Asupersync ships a cancel-safe networking stack from raw sockets through application protocols. Every layer participates in structured concurrency.
+Asupersync ships native networking from raw sockets through application
+protocols. Cancellation behavior is operation-specific: check the concrete
+read, write, handshake, close, or drain contract instead of applying a blanket
+"cancel-safe stack" label.
+
+## Table of Contents
+
+- [Reactor and I/O](#reactor-and-io)
+- [TCP](#tcp)
+- [UDP](#udp)
+- [Unix Sockets](#unix-sockets)
+- [DNS](#dns)
+- [WebSocket](#websocket)
+- [HTTP/1.1](#http11)
+- [HTTP/2](#http2)
+- [Connection Pooling](#connection-pooling)
+- [Response Compression](#response-compression)
+- [TLS](#tls)
+- [QUIC and HTTP/3](#quic-and-http3)
+- [ATP Object Transfer](#atp-object-transfer)
+- [Transport Layer](#transport-layer)
+- [Bytes](#bytes)
+- [Codec](#codec)
+- [gRPC](#grpc)
+- [Web Framework](#web-framework)
+- [Service Layer](#service-layer)
+- [Cancellation and Security Across the Stack](#cancellation-and-security-across-the-stack)
 
 ## Reactor and I/O
 
@@ -49,13 +75,23 @@ Source: `src/net/tcp/`
 
 - `TcpStream`, `TcpListener`, split reader/writer halves
 - Registered with I/O reactor, oneshot waker semantics
-- `VirtualTcp` (`src/net/tcp/virtual_tcp.rs`): fully in-memory TCP for lab tests, same API, deterministic
+- `VirtualTcp` (`src/net/tcp/virtual_tcp.rs`): deterministic in-memory TCP
+  analogue for lab tests; it does not prove native reactor or kernel-socket
+  behavior
+- Driverless Windows embedding waits for a concrete kernel-writable event via a
+  private reactor and retains a bounded `WSAENOTCONN` settling floor. External
+  executors must not treat early `getpeername()` success as proof that Winsock
+  completed the connection.
 
 ## UDP
 
 Source: `src/net/udp.rs`
 
-Async UDP with send/receive and cancellation safety.
+Async UDP with atomic-datagram send semantics: cancelling a pending send does
+not partially send a datagram, while cancelling receive can discard a datagram
+that arrived concurrently. The public socket methods do not accept `&Cx`;
+they consult the current installed `Cx` when available, so do not describe UDP
+as an explicit-capability boundary.
 
 ## Unix Sockets
 
@@ -114,19 +150,24 @@ Source: `src/http/h2/`
 - HPACK header compression
 - Flow control
 - Stream multiplexing over single connection
-- Integration with connection pool
 
 ## Connection Pooling
 
 Source: `src/http/pool.rs`
 
-Shared connection pool for HTTP/1.1 and HTTP/2 with keep-alive management.
+The high-level pooled `http::Client` is an alias of the HTTP/1
+`h1::HttpClient`; its pool and keep-alive management are HTTP/1 client
+machinery. HTTP/2 has native frame, stream, flow-control, listener, and
+connection machinery, but the current source does not wire it into a shared
+H1/H2 high-level client pool. Do not claim pooled H2 client support without new
+source and execution evidence.
 
 ## Response Compression
 
 Source: `src/http/compress.rs`
 
-Optional response compression middleware.
+Response compression middleware. Actual gzip/deflate/Brotli encoding support
+requires the `compression` feature even though the layer type is public.
 
 ## TLS
 
@@ -140,13 +181,20 @@ Wraps `rustls` for TLS 1.2/1.3:
 | `tls-native-roots` | OS trust store |
 | `tls-webpki-roots` | Mozilla WebPKI bundle |
 
+TLS handshakes are not cancel-safe. If cancellation interrupts a handshake,
+drop the connection rather than trying to reuse it. Once the handshake
+completes, reads and writes inherit the cancellation boundaries of the
+underlying I/O operations (`src/tls/mod.rs`).
+
 ## QUIC and HTTP/3
 
 Source: `src/net/quic_core/`, `src/net/quic_native/`, `src/http/h3_native.rs`
 
-Feature-gated native surfaces are active, but still requirement-driven. Do not
-promise generic QUIC/H3 interoperability without checking the exact protocol
-need, feature set, and tests.
+The low-level native modules are public on native targets even without rollout
+features. `quic` enables the curated `net::quic` alias; `http3` implies `quic`
+and enables the curated `http::h3` alias. These are still
+requirement-driven—do not promise generic QUIC/H3 interoperability merely
+from module availability.
 
 High-value current anchors:
 
@@ -178,6 +226,19 @@ Current fail-closed boundaries to preserve:
 - unsupported transport/auth combinations should surface typed `NotImplemented`
   style errors rather than pretending to send.
 
+v0.4.7 tightened the state-mutation order and memory bounds:
+
+- handshake duplicate detection, path state, and RTT/BDP input advance only
+  after packet authentication,
+- CRYPTO and stream reassembly cap both payload bytes and disjoint range/node
+  metadata; a byte cap alone does not stop tiny-fragment amplification,
+- limit/conflict rejection occurs before mutating accepted reassembly state,
+- ATP validates FIN/final size before duplicate trimming, so a duplicate FIN
+  may establish the final offset while a contradiction fails closed.
+
+These are correctness/security properties, not blanket QUIC/H3 interoperability
+or performance evidence.
+
 ## ATP Object Transfer
 
 Source: `src/net/atp/`, `docs/atp_architecture.md`,
@@ -197,40 +258,22 @@ Known active frontiers include reliable clean-source streaming, authenticated
 control-source frames, QUIC pacing/congestion, large-object clean wins,
 delta/resync planning, and no-claim boundaries for cells that remain blocked.
 
-Current matrix evidence (ledger through `MATRIX-235`, 2026-07-10; refresh
-`docs/atp_rq_beat_rsync_ledger.md` before citing):
+Matrix cells, measurements, and conclusions are volatile. Read
+`docs/atp_rq_beat_rsync_ledger.md` and the current benchmark artifacts at the
+time of the claim. Preserve their exact scenario, date, baseline, security
+mode, validity status, and no-claim boundary. A historical win, source landing,
+`sha_ok`, or isolated matched-pair improvement is not evidence that ATP beats
+rsync across other sizes, loss regimes, tree workloads, or encryption modes.
 
-- Nocrypto (`atp-rq-lab` vs tuned rsyncd) is a banked board-level win:
-  `MATRIX-212` swept 56 rows (55 valid rows all sha-ok; one benign
-  port-collision exclusion) and `MATRIX-231` closed the last clean-path gaps
-  (`500M/perfect` 0.881x, `5G/perfect` win); tree/small floors stay
-  marginal. The `500M/broken/nocrypto` win (`MATRIX-209`,
-  564.77s vs 574.46s) no longer carries a correctness asterisk —
-  `MATRIX-230` closed the residual `InconsistentEquations` as spec-expected
-  RaptorQ rank deficiency.
-- Encrypted (`atp-quic-tls13` vs rsync-over-ssh aes128gcm) is fully measured
-  (25/25 cells, `MATRIX-216`) and the lossy sub-board is all-wins
-  (`MATRIX-221`). Remaining rsync-favored territory is clean-path large +
-  tree-perfect floors, root-caused to sender duty-cycle: ~11% link-bound
-  honest ceiling on clean-large, a separate ~1.3-1.6x bound on tree-perfect
-  (`MATRIX-232/233`).
-- Receiver RSS is bounded (<=18MB at every size; the 5G receiver went
-  882MB -> 12MB, `MATRIX-213/216`).
-- `MATRIX-235` native-link pacing rework showed large matched-pair gains
-  (encrypted `500M/perfect` -19.5%, `50M/perfect` -58%) but had no
-  contemporaneous rsync bar; it is a landed improvement, not a banked flip.
-- Refuted levers (do not re-chase): receipt-clocked flow-control credit, BBR
-  startup shapes, >2MiB window raise, receiver ACK cadence, encrypted-tree
-  wakeup reduction (`MATRIX-222..229`, `MATRIX-234`).
-
-Do not generalize board-level nocrypto/lossy wins to encrypted clean-path
-large cells or headline "beats rsync everywhere" claims; the duty-cycle
-ceiling and shared-box tree noise are documented open bounds.
-
-Since then: v0.4.1 fixed ATP progress Streams to poll with their creation
-`Cx` (preserving sender wake registration and cancellation observation); the
-July-August commits after the ledger's last entry are correctness/hardening
-landings, not new benchmark evidence.
+Two stable operator rules come from ATP acceptance work: every listen/receive
+path needs a bounded accept or idle watchdog, and RQ secrets must travel through
+protected input rather than argv, environment dumps, or logs. The watchdog bead
+`asupersync-2qas9c` remains open and unshipped. The RQ SSH secret-delivery bead
+`asupersync-dax0vn` is closed and shipped in v0.4.9: commit
+`515d96e7f` uses bounded protected stdin, removes the key environment from
+bootstrap subprocesses, redacts captured output, and fails closed on
+stdin-diverting OpenSSH configuration. The legacy `--rq-auth-key-hex` spelling
+remains supported; prefer `--rq-auth-key-stdin` for caller-provided secrets.
 
 ## Transport Layer
 
@@ -281,18 +324,23 @@ parity (see the README coverage-map paragraph for the exact boundary).
 
 Source: `src/service/`
 
-`ServiceBuilder` with middleware: timeout, load_shed, concurrency_limit, rate_limit, retry. Optional Tower adapter via `tower` feature.
+`ServiceBuilder` has convenience methods for timeout, load shed, concurrency
+limit, rate limit, and retry. Buffer, hedge, load balancing, circuit breaking,
+and reconnect exist as explicit composable native layers/services. Optional
+Tower adapter via `tower` feature.
 
-## Cancel Safety Across the Stack
+## Cancellation and Security Across the Stack
 
-All networking layers respect:
-- Region budgets for reads/writes
-- Cancellation drains connections cleanly
-- Cancel-safety is operation-specific: atomic datagram sends and covered
-  two-phase/adapter surfaces state their guarantees, while partial byte-stream
-  operations such as `read_exact`/`write_all` retain their documented
-  cancellation boundaries
-- Lab runtime substitutes virtual TCP for deterministic network testing
-- Two-phase semantics where applicable (send permits on channels)
-- Security posture is fail-closed: tampered bytes, wrong cert/hostname, replay,
-  and unauthenticated symbol paths must reject before commit.
+- Propagate region budgets and explicit `Cx` through operations that accept
+  them; do not infer a budget check where the API has none.
+- Cancellation is operation-specific. Atomic datagrams, partial byte-stream
+  reads/writes, TLS handshakes, WebSocket close, request-body drain, and QUIC
+  state transitions have different commit and cleanup boundaries.
+- A clean drain is a tested property of a concrete operation, not a universal
+  consequence of requesting cancellation.
+- Use VirtualTcp for deterministic protocol logic, but use native runtime tests
+  for reactor, kernel-socket, worker-wakeup, and real transport cancellation.
+- Apply two-phase semantics only where an API actually exposes reserve/commit.
+- Security-sensitive paths should fail closed on tampered bytes, wrong
+  certificate/hostname, replay, or missing authentication; cite the relevant
+  protocol test or threat model for the specific claim.

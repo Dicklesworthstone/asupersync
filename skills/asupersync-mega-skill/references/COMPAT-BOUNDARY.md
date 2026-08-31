@@ -1,23 +1,37 @@
 # Tokio Compat Boundary
 
-`asupersync-tokio-compat` is real and useful, but it is not the preferred architecture.
+This is the canonical compatibility reference for the skill.
+`asupersync-tokio-compat` is a separate, opt-in workspace crate containing
+specific trait adapters and cancellation wrappers. It is **not** a Tokio
+runtime, does not install a Tokio runtime handle, and does not by itself make a
+Tokio-hosted application or library runnable on Asupersync.
+
+## Table of Contents
+
+- [When To Use It](#when-to-use-it)
+- [Hard Rules](#hard-rules)
+- [What Compat Actually Provides](#what-compat-actually-provides)
+- [Recommended Boundary Shape](#recommended-boundary-shape)
+- [Cancellation Policy Guidance](#cancellation-policy-guidance)
+- [Removal Plan](#removal-plan)
 
 ## When To Use It
 
-Use compat only when a dependency still requires one of these:
+Use compat only when the remaining blocker matches an adapter that the crate
+actually implements:
 
-- `tokio::runtime::Handle::current()`
-- Tokio I/O traits
-- hyper runtime traits
-- a Tokio-hosted future that cannot be removed yet
+- Tokio `AsyncRead` / `AsyncWrite` trait compatibility,
+- hyper executor, timer, or body traits,
+- Tower `Service` conversion,
+- an explicitly wrapped future whose cancellation behavior is tested at the
+  boundary.
 
-Typical examples:
-
-- `reqwest`
-- `axum`
-- `tonic`
-- `sqlx`
-- other crates that still assume Tokio is present
+Do not infer support merely because a dependency uses one of those traits.
+Libraries such as reqwest, axum, tonic, and SQLx can also depend on Tokio
+runtime services, timers, spawning, networking, or `Handle::current()`. The
+compat crate does not satisfy those requirements generically. Keep such a
+dependency only after a representative downstream compile **and runtime** test
+proves the exact path you use.
 
 ## Hard Rules
 
@@ -28,12 +42,37 @@ Typical examples:
 
 ## What Compat Actually Provides
 
-- runtime bridge: `runtime::with_tokio_context(...)` and `AsupersyncRuntime::new(&cx).enter(...)`
-- sync context bridges for construction paths that need a Tokio handle: `with_tokio_context_sync(...)`, `blocking::with_cx_sync(...)`
+- Asupersync-context helpers: `AsupersyncRuntime::new(&cx).enter(...)`,
+  `runtime::with_tokio_context(...)`,
+  `runtime::with_tokio_context_sync(...)`, and
+  `blocking::{block_on_sync, block_with_cx, with_cx_sync}`;
+  despite the historical name, these install or preserve `Cx`, not a Tokio
+  `Handle`
 - Tokio <-> Asupersync IO adapters (`tokio-io` feature): `io::TokioIo<T>` (Asupersync stream -> Tokio/hyper traits), `io::AsupersyncIo<T>` (the reverse)
 - hyper executor/timer/body bridges (`hyper-bridge` feature): `hyper_bridge::{AsupersyncExecutor, AsupersyncTimer}`, `body_bridge`
 - tower bridge (`tower-bridge` feature): `tower_bridge::{FromTower, IntoTower}`
-- cancellation policies for wrapped Tokio futures: `AdapterConfig` with `CancellationMode::{BestEffort, Strict, TimeoutFallback}` (default is `BestEffort`)
+- cancellation primitives for explicitly wrapped futures: `CancelAware` and
+  `CancellationMode::{BestEffort, Strict, TimeoutFallback}`; `AdapterConfig`
+  stores policy, but `with_tokio_context(...)` currently constructs
+  `CancelAware` with `BestEffort` directly, so do not claim that changing
+  `AdapterConfig` changes that helper
+
+The `full` feature enables the three feature-gated adapter families above; it
+does not add a Tokio runtime.
+
+`AsupersyncExecutor::default()` / `noop()` intentionally drops submitted
+futures. Production hyper use must install an owned spawn path explicitly with
+`AsupersyncExecutor::with_spawn_fn(...)`; the default is a structural adapter,
+not a working executor. The body helpers collect complete bodies (optionally
+with a byte limit); they are not proof of an unbounded streaming-body bridge.
+`AsupersyncTimer` currently starts one background OS thread per sleep and is
+documented for moderate adapter timer counts, not a high-cardinality timer
+wheel. Treat load behavior as part of the boundary proof.
+
+The authoritative implementation is
+`asupersync-tokio-compat/src/runtime.rs`, `cancel.rs`, and the feature-gated
+adapter modules. Architecture and migration documents are useful intent, but
+source plus downstream execution evidence determines current support.
 
 ## Recommended Boundary Shape
 
@@ -48,13 +87,20 @@ Pattern:
 
 ## Cancellation Policy Guidance
 
-Compat exposes cancellation modes because Tokio-originated futures may not respect Asupersync semantics.
+Compat exposes cancellation modes because wrapped futures may not respect
+Asupersync semantics.
 
 Prefer:
 
-- strict handling when correctness matters (`Strict` returns `AdapterError::CancellationIgnored` if the future completes after cancel),
+- explicit `CancelAware` handling when correctness matters (`Strict` returns
+  `CancelResult::CancellationIgnored(value)` if the wrapped future completes
+  after cancellation),
 - explicit timeout fallback only when you understand the operational tradeoff,
-- best-effort only for low-risk glue where native semantics are impossible — note this is the crate default, so set the mode deliberately.
+- best-effort only for low-risk glue where native semantics are impossible.
+
+Test cancellation, timer behavior, task ownership, and shutdown at the real
+adapter boundary. A trait-level compile is not proof that the dependency's
+runtime assumptions have been met.
 
 ## Removal Plan
 

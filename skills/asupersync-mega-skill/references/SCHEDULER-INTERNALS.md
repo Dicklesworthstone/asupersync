@@ -1,22 +1,46 @@
 # Scheduler Internals
 
+## Table of Contents
+
+- [Three-Lane Architecture](#three-lane-architecture)
+- [Adaptive Cancel Preemption](#adaptive-cancel-preemption-default-on)
+- [Lyapunov Governor](#lyapunov-governor)
+- [Runtime State Backing](#runtime-state-backing)
+- [Worker Coordination](#worker-coordination)
+- [Local Queue Discipline](#local-queue-discipline)
+- [Global Injector](#global-injector)
+- [Region Heap](#region-heap)
+- [Blocking Pool](#blocking-pool)
+- [Timer Wheel](#timer-wheel)
+- [Runtime Builder Presets](#runtime-builder-presets)
+- [Panic Containment](#panic-containment)
+
 ## Three-Lane Architecture
 
 The scheduler (`src/runtime/scheduler/three_lane.rs`) uses three priority lanes:
 
-| Lane | Priority | Source |
-|------|----------|--------|
-| **Cancel Lane** | 200-255 (highest) | Tasks in CancelRequested/Cancelling/Finalizing states |
-| **Timed Lane** | EDF by deadline | Tasks with active deadlines, ordered earliest-deadline-first |
-| **Ready Lane** | Default priority | Normal runnable tasks |
+| Lane | Ordering within lane | Source |
+|------|----------------------|--------|
+| **Cancel Lane** | task priority `0..=255`, then FIFO tie-break | Tasks explicitly injected or promoted for cancellation |
+| **Timed Lane** | earliest deadline first, then FIFO tie-break | Due tasks with active deadlines |
+| **Ready Lane** | task priority `0..=255`, then FIFO tie-break | Normal runnable tasks |
+
+Lane membership, not a `200` priority threshold, gives cancellation its normal
+preemption. Even a low-priority cancel-lane task precedes a priority-255 ready
+task unless a fairness or governor rule temporarily selects another lane.
 
 ### Dispatch Path (Multi-Phase)
 
-1. Global lanes check
-2. Fast ready paths
-3. Single local-lane lock acquisition (cancel/timed/ready under one lock)
-4. Steal attempts from other workers
-5. Fallback cancel handling
+1. Drain handle-cancel/deferred-cancel commands, process timers, and admit
+   mailbox plus owner-local spawns.
+2. Consult the governor and fairness gates.
+3. Probe global and local cancel/timed lanes in the governor-selected order;
+   local priority lanes share one `PriorityScheduler` lock acquisition.
+4. Probe owner-pinned local-ready, stolen fast-ready, global-ready, then local
+   ready work.
+5. Steal ready work from peers.
+6. If the cancel fairness limit was reached but no other work exists, dispatch
+   one fallback cancel task.
 
 ### Cancel Preemption
 
@@ -24,9 +48,13 @@ The scheduler (`src/runtime/scheduler/three_lane.rs`) uses three priority lanes:
 - During `DrainObligations` and `DrainRegions`: effective bound widens to `2 * cancel_streak_limit`
 - Workers track `fairness_yields` and `max_cancel_streak` telemetry
 
+These are worker-local successful-dispatch bounds, not wall-clock latency or a
+global priority order. A future that monopolizes one `poll`, or cross-worker
+stealing, is outside the bound.
+
 ### Adaptive Cancel Preemption (Default-On)
 
-Deterministic no-regret online controller, **enabled by default**
+Deterministic nonstationary stochastic-bandit controller, **enabled by default**
 (`enable_adaptive_cancel_streak = true`, epoch steps default 128):
 
 - HEAD implements a discounted-UCB1 policy (`AdaptiveCancelStreakPolicy` in
@@ -36,8 +64,12 @@ Deterministic no-regret online controller, **enabled by default**
   pressure (+ fallback penalty)
 - Preserves deterministic replay semantics
 - Knobs: `enable_adaptive_cancel_streak(bool)`,
-  `adaptive_cancel_streak_epoch_steps(n)` (README still describes the earlier
-  EXP3/Hedge formulation; the shipped selector is discounted UCB1)
+  `adaptive_cancel_streak_epoch_steps(n)`
+
+Do not conflate this scheduler policy with ATP transport's separately seeded
+EXP3 controller. Scheduler cancel preemption is discounted UCB1; ATP's transport
+controller is the surface where EXP3 remains an accurate term. The scheduler
+implementation makes no adversarial or stochastic no-regret theorem claim.
 
 ### Lyapunov Governor
 
@@ -46,9 +78,10 @@ Optional governor steers lane ordering from runtime snapshots:
 - When enabled, can be modulated by decision contract with Bayesian posterior over {healthy, congested, unstable, partitioned}
 - Source: `src/runtime/scheduler/decision_contract.rs`
 
-## Sharded Runtime State
+## Runtime State Backing
 
-State split into independently locked shards (`src/runtime/sharded_state.rs`):
+`ShardedState` defines independently locked tables
+(`src/runtime/sharded_state.rs`):
 
 | Shard | Contents |
 |-------|----------|
@@ -58,19 +91,28 @@ State split into independently locked shards (`src/runtime/sharded_state.rs`):
 | D (instrumentation) | Trace and metrics surfaces |
 | E (config) | Immutable runtime config |
 
-Multi-shard operations use `ShardGuard` with canonical order: `E -> D -> B -> A -> C`.
+Multi-shard `ShardGuard` operations acquire the mechanically tracked table locks
+in `B -> A -> C` order. The wider rank vocabulary is
+`E -> D -> B -> A -> C`: E is immutable, while D uses internal synchronization
+and is not represented by `LockShard`.
 
-Shards A/B/C are Arc-shared `ContendedMutex` instances (`task_shard_handle` /
-`region_shard_handle` / `obligation_shard_handle` alias the exact shard to
-scheduler/lifecycle seams). Shard D is internally synchronized (trace mutex
-short-held, acquired after shard locks by convention); shard E is read-only.
-Optional `lock-metrics` feature measures wait/hold times.
+Shards A/B/C are Arc-shared `ContendedMutex` instances with exact-handle
+accessors. Shard D is internally synchronized (the trace handle owns a short
+mutex and metrics are thread-safe); shard E is read-only. The optional
+`lock-metrics` feature measures wait/hold times.
 
 Backing shape is `RuntimeStateShape`: default `Unified` (single-lock state);
 `RuntimeBuilder::with_sharded_state(true)` opts into `Sharded`, where workers
-dispatch against the shard-A `TaskTable` and obligation resolution targets
-shard C via wrapper-side resolution in `src/runtime/state.rs` (A-then-C guard
-order, buffered effect sinks, post-release drain).
+dispatch against shard A and obligation mint/settlement targets shard C via
+wrapper-side resolution in `src/runtime/state.rs` (A-then-C guard order,
+buffered effect sinks, post-release drain). This is currently a hybrid route:
+region records remain embedded in the unified `RuntimeState`, so shard B and
+`region_shard_handle` are not the public runtime's lifecycle owner yet. Do not
+describe `with_sharded_state(true)` as a full A/B/C cutover.
+
+`Unified` remains the v0.4.3-compatible default. Sharding is an opt-in
+implementation choice, not permission to change public signatures or
+documented cancellation behavior.
 
 ## Worker Coordination
 
@@ -84,6 +126,9 @@ order, buffered effect sinks, post-release drain).
 - Owner operations: LIFO (cache locality)
 - Thief operations: FIFO (steal older work, reduce starvation)
 - Local `!Send` tasks pinned to owner workers, routed through non-stealable queues
+- Local spawn/wake/cancel TLS fast paths verify the runtime-unique scheduler or
+  `SpawnMailbox` owner, not only the numeric worker id; a foreign-runtime
+  `Cx::spawn_local` fails with `LocalSchedulerUnavailable` before allocation
 - Steal paths explicitly reject moving pinned tasks across workers
 - Queue-tag membership checks on intrusive links (O(1) pop without allocation)
 - Local ready queue uses O(1) lazy-tombstone cancellation (`LocalReadyQueueInner`),
@@ -114,6 +159,8 @@ Source: `src/runtime/region_heap.rs`
 - Idle retirement uses atomic claim (cannot retire below `min_threads`)
 - Panicking tasks wrapped for completion signaling
 - Failed spawns roll back accounting immediately
+- The live worker cap can change within the configured min/max bounds; cohort
+  affinity is optional and does not guarantee one live worker per cohort
 
 ## Timer Wheel
 
@@ -121,9 +168,11 @@ Source: `src/runtime/region_heap.rs`
 - Generation-based O(1) cancel
 - Overflow spill for long deadlines, promoted back in range
 - Coalescing windows batch nearby wakeups with minimum-group gating
-- Benchmarked ~27x cancel-path advantage over BTreeMap at the 10K corpus
-  (release-perf profile, 2026-06-01); the wheel now also wins the mixed
-  insert/cancel/expire workload (`benches/timer_wheel.rs`)
+- A point-in-time 2026-06-01 `release-perf` run recorded a ~27x cancel-path
+  advantage over `BTreeMap` at the 10K corpus and a 2.15x mixed-workload win
+  (`benches/timer_wheel.rs`). Those host-dependent historical measurements are
+  not a current performance guarantee; rerun the benchmark's documented command
+  before citing present-day numbers.
 
 ## Runtime Builder Presets
 
@@ -140,8 +189,10 @@ Key knobs: `blocking_threads(min, max)`, `poll_budget(n)` (default 128),
 `adaptive_cancel_streak_epoch_steps(n)`, `enable_governor(bool)`,
 `governor_interval(n)`, `with_sharded_state(bool)`, `spawn_admission(mode)`
 (`Direct` default / `Mailbox` lock-free spawn mailbox), `worker_cohorts(...)`,
-`scheduler_placement_mode(...)`, `capacity_hints(...)` /
-`expected_concurrent_tasks(n)`, `arena_temperature_policy(...)`,
+`scheduler_placement_mode(...)`, `adaptive_ready_batch(...)` (disabled by
+default), `browser_ready_handoff_limit(...)`, `blocking_affinity_profile(...)`,
+`capacity_hints(...)` / `expected_concurrent_tasks(n)`,
+`arena_temperature_policy(...)`,
 `trace_storage_profile(...)`, `root_region_limits(...)`,
 `deadline_monitoring(...)`, `logical_clock_mode(...)`,
 `cancel_attribution_config(...)`, `obligation_leak_response(...)`,
@@ -158,4 +209,8 @@ the authority; the late-June spin-over-yield hypothesis was bench-refuted.
 
 ## Panic Containment
 
-Task polling guarded: panics converted to `Outcome::Panicked`, dependents/finalizers still driven, one bad task does not take down a worker lane.
+Task polling is guarded: ordinary unwinds become `Outcome::Panicked`, and the
+runtime continues dependent/finalizer cleanup instead of intentionally losing
+the worker lane. This does not cover `panic = "abort"`, a process abort, or
+every foreign callback/destructor; use the out-of-lock effect rules in
+`LOCK-ORDERING.md` for those boundaries.

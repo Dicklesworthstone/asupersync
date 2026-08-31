@@ -1,5 +1,17 @@
 # Primitive And Orchestration Chooser
 
+## Table of Contents
+
+- [First Choose The Ownership Model](#first-choose-the-ownership-model)
+- [Channel Chooser](#channel-chooser)
+- [Sync Primitive Chooser](#sync-primitive-chooser)
+- [Service Layer Vs Combinator Vs Actor](#service-layer-vs-combinator-vs-actor)
+- [Combinator Chooser](#combinator-chooser)
+- [Practical Selection Rules](#practical-selection-rules)
+- [Primitive Choice By Common Migration Problem](#primitive-choice-by-common-migration-problem)
+- [Anti-Patterns](#anti-patterns)
+- [Read Next](#read-next)
+
 One of the biggest ways to underuse Asupersync is to treat every problem as
 "spawn a task, stick a mutex around state, and maybe add a timeout."
 
@@ -33,11 +45,15 @@ just because that is what Tokio code often did.
 
 Critical Asupersync distinction:
 
-- `mpsc` and `oneshot` are async two-phase send surfaces,
-- `broadcast` also exposes a permit path, but reserve is synchronous,
-- one-call sugar exists on all of them (`tx.send(&cx, value)`, `.await` on
-  bounded mpsc) when the value is ready now; use explicit reserve/commit when
-  the send right is held across awaits,
+- bounded `mpsc` has an asynchronous capacity reservation:
+  `tx.reserve(&cx).await`,
+- `oneshot` and `broadcast` reserve synchronously:
+  `tx.reserve(&cx)?` (`oneshot` reservation consumes its sender),
+- one-call sugar preserves those shapes: bounded `mpsc`
+  `tx.send(&cx, value).await`; `oneshot` and `broadcast`
+  `tx.send(&cx, value)` without `.await`,
+- use explicit reserve/commit when the send right must be established separately
+  from value publication,
 - reserve/commit exists to keep work from being half-sent,
 - session reply handles are linear resources and should be treated that way;
   tracked session wrappers return `CommittedProof` receipts (v0.4.0 API).
@@ -63,9 +79,23 @@ Bad uses:
 | `Semaphore` | concurrency or resource permits need explicit accounting | you need a queue or lock instead of permits |
 | `Barrier` | fixed-size phase rendezvous | dynamic participant counts or loose coordination |
 | `Notify` | wake one or more waiters without storing data | you actually need data transfer or state snapshots |
-| `OnceLock` / `OnceCell` | async one-time initialization | init may need repeated refresh or hot swapping |
+| `OnceCell` | async one-time initialization | init may need repeated refresh or hot swapping |
 | `Pool` / `GenericPool` | reusable objects/resources with explicit checkout lifecycle | object ownership is ambiguous or resources are tiny |
 | `ContendedMutex` | you need lock-contention evidence or hot-path contention auditing | you do not care about contention metrics |
+
+`Notify::notified()` is drop-cancel-safe: dropping the future removes its waiter.
+`Notify::wait_until(predicate)` additionally closes the usual
+condition-check/register race. Neither accepts `&Cx`, observes context
+cancellation, or returns a typed cancelled result. If a wait must acknowledge
+`Cx` cancellation, choose a cancel-aware primitive/combinator or arrange an
+explicit wake and checkpoint; do not infer that behavior from `Notify`.
+
+Borrowed `MutexGuard` is deliberately `!Send`; use `OwnedMutexGuard` when it
+must move with a worker task. Borrowed RwLock guards are `Send` under their
+documented `T` bounds, while owned RwLock guards solve the separate problem of
+owning an `Arc`-backed lock without a borrowed lifetime. None of these guard
+choices proves cancellation delivery: the wait still needs an actual
+`&Cx`-aware path and a test that proves waiter cleanup.
 
 Practical rule:
 
@@ -105,8 +135,9 @@ semantics matter more than middleware layering.
 |-----------|----------|------------------------|
 | `timeout` | bounding one operation | explicit timeout semantics instead of ad hoc cancellation |
 | `retry` | transient failure with bounded total cost | budget-aware total retry control |
-| `hedge` | tail-latency control | explicit backup branch and loser drain |
-| `adaptive_hedge` | tail-latency control with dynamic delay | Peak-EWMA tracked hedge delay instead of a fixed one |
+| `hedge` | tail-latency control | explicit backup branch and loser outcome; standalone future drops rather than drains the loser |
+| `hedge` + `PeakEwmaHedgeController` | adaptive tail-latency control | peak-EWMA controller supplies a dynamic `HedgeConfig` |
+| `hedge` + `AdaptiveHedgePolicy` | calibrated tail-latency control | conformal sliding-window policy supplies a dynamic `HedgeConfig` |
 | `quorum` | M-of-N success requirements | policy matches consensus-style flows |
 | `bulkhead` | isolate overload domains | one bad dependency stops poisoning siblings |
 | `rate_limit` | token-bucket throughput control | explicit backpressure and retry-after data |

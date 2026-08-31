@@ -4,6 +4,19 @@ Most of Asupersync's value appears only after you stop thinking in terms of
 "what replaces `tokio::spawn`?" and start thinking in terms of ownership,
 budgets, obligations, and replayable lifecycle control.
 
+## Contents
+
+- [Budget and Outcome](#1-treat-budget-and-outcome-as-design-inputs)
+- [Concurrency Surfaces](#2-choose-the-right-concurrency-surface)
+- [Promotion Triggers](#25-promotion-triggers-when-to-upgrade-your-design)
+- [Long-Lived Applications](#3-model-long-lived-apps-explicitly)
+- [Capability-Scoped Boundaries](#4-use-capability-scoped-boundaries)
+- [Native Orchestration](#5-prefer-native-orchestration-over-hand-rolled-select-forests)
+- [Obligation-Tracked Protocols](#6-use-obligation-tracked-protocol-edges)
+- [Distributed Work](#7-understand-the-distributed-model-correctly)
+- [Replay](#8-build-for-replay-not-just-success)
+- [Advanced-Surface Restraint](#9-do-not-overshoot-into-advanced-surfaces)
+
 ## 1. Treat `Budget` And `Outcome` As Design Inputs
 
 Do not treat `Budget` and `Outcome<T, E>` as decorative metadata.
@@ -113,6 +126,9 @@ Use:
 Important guidance:
 
 - Production `Cx` values should come from runtime/request/call boundaries.
+  Use `Runtime::request_cx_with_budget`. Published v0.4.9 also has
+  `RuntimeHandle::try_request_cx_with_budget` when the owner retained only a
+  cloned handle and teardown can race context creation.
   `Cx::for_request()` belongs in test/internal harnesses, not as the center of a
   production architecture.
 - Do not pass full-capability `Cx` through every handler if most handlers only need trace/time/spawn.
