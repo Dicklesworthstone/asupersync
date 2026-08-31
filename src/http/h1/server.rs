@@ -3858,9 +3858,8 @@ mod tests {
                     .with_header("connection", "Upgrade")
                     .with_header("upgrade", "websocket")
                     .with_header("sec-websocket-accept", "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");
-                Http1Response::new(response).with_upgrade(Http1Upgrade::new(
-                    |_cx, _io, _read_ahead| async {},
-                ))
+                Http1Response::new(response)
+                    .with_upgrade(Http1Upgrade::new(|_cx, _io, _read_ahead| async {}))
             },
             localhost_server_config(),
         );
@@ -3903,9 +3902,8 @@ mod tests {
                         "sec-websocket-accept",
                         crate::net::websocket::compute_accept_key("not-base64"),
                     );
-                Http1Response::new(response).with_upgrade(Http1Upgrade::new(
-                    |_cx, _io, _read_ahead| async {},
-                ))
+                Http1Response::new(response)
+                    .with_upgrade(Http1Upgrade::new(|_cx, _io, _read_ahead| async {}))
             },
             localhost_server_config(),
         );
@@ -3919,7 +3917,9 @@ mod tests {
             Err(error) => error,
             Ok(_) => panic!("invalid WebSocket key must refuse handoff"),
         };
-        assert!(matches!(error, HttpError::Io(ref error) if error.kind() == io::ErrorKind::InvalidData));
+        assert!(
+            matches!(error, HttpError::Io(ref error) if error.kind() == io::ErrorKind::InvalidData)
+        );
         assert!(written.lock().unwrap().is_empty());
     }
 

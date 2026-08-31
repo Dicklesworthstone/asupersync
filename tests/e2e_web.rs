@@ -1571,6 +1571,102 @@ fn e2e_router_http1_listener_drain_cancels_live_websocket_session() {
 }
 
 #[test]
+fn e2e_router_http1_listener_force_closes_uncooperative_websocket_session() {
+    common::init_test_logging();
+    test_phase!("HTTP/1 listener force-closes uncooperative WebSocket session");
+
+    let runtime = RuntimeBuilder::new()
+        .worker_threads(2)
+        .build()
+        .expect("build runtime");
+    let handle = runtime.handle();
+
+    runtime.block_on(async move {
+        let callback_started = Arc::new(AtomicUsize::new(0));
+        let started_for_handler = Arc::clone(&callback_started);
+        let router = Router::new().route(
+            "/ws",
+            get(FnHandler1::<_, WebSocketUpgrade>::new(
+                move |upgrade: WebSocketUpgrade| {
+                    let callback_started = Arc::clone(&started_for_handler);
+                    upgrade
+                        .skip_origin_check()
+                        .on_upgrade(move |_cx, websocket| async move {
+                            callback_started.fetch_add(1, Ordering::AcqRel);
+                            let websocket_guard = websocket;
+                            std::future::pending::<()>().await;
+                            drop(websocket_guard);
+                        })
+                },
+            )),
+        );
+
+        let listener = Http1Listener::bind_upgradeable_with_config(
+            "127.0.0.1:0",
+            router.into_http1_handler(),
+            Http1ListenerConfig::default()
+                .http_config(Http1Config {
+                    allowed_hosts: HostPolicy::allow_list(vec!["localhost".to_owned()]),
+                    ..Http1Config::default()
+                })
+                .drain_timeout(Duration::from_millis(100))
+                .hard_drain_timeout(Duration::from_secs(2)),
+        )
+        .await
+        .expect("bind HTTP/1 listener");
+        let addr = listener.local_addr().expect("listener address");
+        let shutdown = listener.shutdown_signal();
+        let manager = listener.connection_manager().clone();
+        let in_flight = listener.in_flight_requests();
+        let run_handle = handle
+            .clone()
+            .try_spawn(async move { listener.run(&handle).await })
+            .expect("spawn HTTP/1 listener");
+
+        let mut client = TcpStream::connect(addr).await.expect("connect client");
+        client
+            .write_all(
+                b"GET /ws HTTP/1.1\r\n\
+                  Host: localhost\r\n\
+                  Upgrade: websocket\r\n\
+                  Connection: Upgrade\r\n\
+                  Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+                  Sec-WebSocket-Version: 13\r\n\
+                  \r\n",
+            )
+            .await
+            .expect("write WebSocket handshake");
+        let response_head = read_http_head(&mut client).await;
+        assert!(response_head.starts_with(b"HTTP/1.1 101"));
+
+        for _ in 0..400 {
+            if callback_started.load(Ordering::Acquire) == 1 {
+                break;
+            }
+            asupersync::time::sleep(asupersync::time::wall_now(), Duration::from_millis(5)).await;
+        }
+        assert_eq!(callback_started.load(Ordering::Acquire), 1);
+        assert_eq!(in_flight.load(Ordering::Acquire), 0);
+        assert_eq!(manager.active_count(), 1);
+
+        // Give the connection manager a long backstop so the listener's
+        // request-aware 100 ms soft budget is the deterministic escalation
+        // driver. The callback never checks its Cx, so only force-close can
+        // drop the session future and its transport.
+        assert!(manager.begin_drain(Duration::from_secs(5)));
+        let stats = run_handle.await.expect("listener result");
+        assert!(stats.force_closed > 0);
+        assert_eq!(shutdown.phase(), ShutdownPhase::Stopped);
+        assert!(manager.is_empty());
+
+        let mut byte = [0_u8; 1];
+        assert_eq!(client.read(&mut byte).await.expect("read forced EOF"), 0);
+    });
+
+    test_complete!("e2e_router_http1_listener_websocket_force_close");
+}
+
+#[test]
 fn e2e_router_drops_registered_upgrade_when_final_response_is_mutated() {
     common::init_test_logging();
 
@@ -1727,10 +1823,7 @@ fn e2e_router_rejects_forbidden_or_unbound_upgrade_response_headers() {
             response.response.status, 500,
             "mutation {header_name}: {header_value} must fail closed"
         );
-        assert_eq!(
-            response.response.header_value("connection"),
-            Some("close")
-        );
+        assert_eq!(response.response.header_value("connection"), Some("close"));
         assert_eq!(callback_count.load(Ordering::Acquire), 0);
     }
 }

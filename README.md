@@ -910,10 +910,11 @@ the byte-level RFC harness alone.
 The production HTTP/1 listener can now hand a routed upgrade directly to a
 live `ServerWebSocket`: register the session with
 `WebSocketUpgrade::on_upgrade`, pass `Router::into_http1_handler()` to
-`Http1Listener`, and keep the callback scoped to the listener-owned connection
-task. The listener flushes exactly one validated `101` before transferring the
-socket, preserves request-codec read-ahead (including a first frame coalesced
-with the handshake), and cancels the session during graceful drain. A bare
+`Http1Listener::bind_upgradeable`, and keep the callback scoped to the
+listener-owned connection task. The listener flushes exactly one validated
+`101` before transferring the socket, preserves request-codec read-ahead
+(including a first frame coalesced with the handshake), and cancels the session
+during graceful drain. A bare
 `101`, a response mutated after callback registration, a duplicate callback,
 or a selected but unimplemented extension never acquires the transport. This
 bridge is HTTP/1-only; it does not claim HTTP/2 extended CONNECT,
