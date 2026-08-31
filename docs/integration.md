@@ -1964,6 +1964,15 @@ does not add discovery, health-based balancing, arbitrary application
 registries, durable idempotency, or multi-host/WAN proof.
 
 The shipped proof tier is protocol/state-machine plus three transport tiers.
+Protocol V1, V2, and V3 service JSON is a strict compatibility boundary:
+requests, nested peer/version/budget metadata, typed runtime IDs, depth-bounded
+recursive cancellation reasons, outcomes, responses, and V3 commands/events reject
+unknown fields. Exact serialization goldens cover every shipped request
+generation and enum variant. Do not add, remove, rename,
+retype, retag, or reorder a serialized field under an existing version; mint a
+new `RemoteProtocolVersion` and add its negotiation and golden coverage. Even
+an otherwise additive same-version field is incompatible because older peers
+must refuse it rather than guess at semantics.
 `remote_virtual_lifecycle_proof_exercises_runtime_transport_and_protocol` keeps
 the deterministic lab baseline. `tests/remote_transport_lifecycle_contract.rs`
 adds a production-transport-backed loopback proof through
@@ -1981,6 +1990,8 @@ and verifies forced terminal quiescence. This is localhost cross-process evidenc
 multi-host/WAN evidence, Windows service control, arbitrary application
 registry hosting, or restart-durable idempotency. V3 retry/deduplication state
 is process-local; ambiguous delivery must remain fail-closed across restart.
+The compatibility goldens do not substitute for archived-binary interop,
+multi-host/WAN evidence, or restart-durable idempotency proof.
 Focused lifecycle cases additionally prove ordered static failover from a
 refused primary to one authenticated secondary dispatch through both the
 direct call path and `NativeRemoteRuntime` V3, plus exact exhaustion,

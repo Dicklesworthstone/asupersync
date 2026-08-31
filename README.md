@@ -1029,6 +1029,14 @@ persist routes, choose a health policy, or claim automatic discovery.
 
 The transport surface is deliberately separated from protocol state machines,
 so message semantics can be tested independently of network backend details.
+The authenticated service JSON envelopes are strict for protocol V1, V2, and
+V3: requests, nested hellos, budgets, typed runtime IDs, depth-bounded recursive
+cancellation reasons, outcomes, responses, and V3 control messages reject unknown fields.
+Exact encoder goldens in
+`tests/remote_transport_lifecycle_contract.rs` pin every shipped envelope and
+variant. A field, tag, type, or ordering change therefore requires a deliberate
+new protocol version; additive same-version fields are not silently ignored by
+older peers.
 `tests/remote_transport_lifecycle_contract.rs` proves that a TCP-backed
 `RemoteRuntime` adapter preserves spawn/result, cancellation before ack,
 cancellation while running, lease renewal, lease expiry, idempotency replay,
@@ -1038,6 +1046,9 @@ The same contract causally verifies a refused primary followed by one
 authenticated secondary dispatch for both direct V1 calls and the V3 native
 runtime, finite multi-endpoint exhaustion, cancellation before a later dial,
 and enforced pin mismatch without endpoint fallthrough.
+These goldens and refusals freeze the current process boundary, but do not by
+themselves prove interoperability between archived binary releases, durable
+idempotency across restart, or multi-host/WAN policy and operation.
 
 ### Running the authenticated static service
 

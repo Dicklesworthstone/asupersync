@@ -20,8 +20,7 @@ use asupersync::remote::{
     RemoteComputationServiceReport, RemoteComputationSessionStart, RemoteServiceRejectionCode,
     RemoteServiceSessionCommand, RemoteServiceSessionError, RemoteServiceSessionEvent,
     RemoteServiceWireLimits, RemoteServiceWireOutcome, RemoteServiceWireRequest,
-    RemoteServiceWireResponse,
-    call_tls_computation_once, serve_tls_computation_once,
+    RemoteServiceWireResponse, call_tls_computation_once, serve_tls_computation_once,
 };
 #[cfg(all(feature = "remote-service", unix))]
 use asupersync::runtime::Runtime;
@@ -46,9 +45,9 @@ use asupersync::types::{RegionId, TaskId, Time};
 use asupersync::{Budget, Cx};
 use futures_lite::future::block_on;
 use parking_lot::Mutex;
-use serde::{Deserialize, Serialize};
 #[cfg(feature = "tls")]
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 #[cfg(feature = "tls")]
 use std::collections::HashSet;
@@ -69,6 +68,8 @@ const REMOTE_NODE: &str = "remote-prod-loopback";
 const TRANSPORT_KIND: &str = "asupersync_tcp_loopback";
 const MAX_FRAME_BYTES: usize = 64 * 1024;
 const RUNNER_PATH: &str = "scripts/run_remote_transport_lifecycle_evidence.sh";
+#[cfg(feature = "tls")]
+const REMOTE_CANCEL_REASON_TEST_MAX_DEPTH: usize = 64;
 #[cfg(feature = "tls")]
 const TEST_CERT_PEM: &[u8] = include_bytes!("fixtures/tls/server.crt");
 #[cfg(feature = "tls")]
@@ -996,22 +997,25 @@ where
 }
 
 #[cfg(feature = "tls")]
-fn assert_remote_unknown_field_rejected<T>(value: serde_json::Value)
+fn assert_remote_unknown_field_rejected<T>(value: serde_json::Value, field: &str)
 where
     T: DeserializeOwned + fmt::Debug,
 {
     let error = serde_json::from_value::<T>(value)
         .expect_err("same-version remote wire envelope must reject unknown fields");
+    let diagnostic = error.to_string();
     assert!(
-        error.to_string().contains("unknown field"),
-        "diagnostic: {error}"
+        diagnostic.contains(field)
+            && (diagnostic.contains("unknown field") || diagnostic.contains("expected")),
+        "diagnostic: {diagnostic}"
     );
 }
 
 #[cfg(feature = "tls")]
 #[test]
 fn remote_service_v1_v2_v3_wire_json_is_golden_and_strict() {
-    const FINGERPRINT_JSON: &str = "[7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7]";
+    const FINGERPRINT_JSON: &str =
+        "[7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7]";
     const REQUEST_TAIL: &str = concat!(
         ",\"registry_fingerprint\":[7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,",
         "7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7]},",
@@ -1086,6 +1090,25 @@ fn remote_service_v1_v2_v3_wire_json_is_golden_and_strict() {
     ] {
         assert_remote_json_golden::<RemoteServiceWireOutcome>(golden);
     }
+    for (kind, golden) in [
+        (CancelKind::User, "\"User\""),
+        (CancelKind::Timeout, "\"Timeout\""),
+        (CancelKind::Deadline, "\"Deadline\""),
+        (CancelKind::PollQuota, "\"PollQuota\""),
+        (CancelKind::CostBudget, "\"CostBudget\""),
+        (CancelKind::FailFast, "\"FailFast\""),
+        (CancelKind::RaceLost, "\"RaceLost\""),
+        (CancelKind::ParentCancelled, "\"ParentCancelled\""),
+        (CancelKind::ResourceUnavailable, "\"ResourceUnavailable\""),
+        (CancelKind::Shutdown, "\"Shutdown\""),
+        (CancelKind::LinkedExit, "\"LinkedExit\""),
+    ] {
+        assert_eq!(
+            serde_json::to_string(&kind).expect("cancellation kind should serialize"),
+            golden,
+            "cancellation kind spelling changed without a protocol version bump"
+        );
+    }
     for golden in [
         concat!(
             "{\"response\":\"outcome\",\"remote_task_id\":7,",
@@ -1097,6 +1120,50 @@ fn remote_service_v1_v2_v3_wire_json_is_golden_and_strict() {
         ),
     ] {
         assert_remote_json_golden::<RemoteServiceWireResponse>(golden);
+    }
+    for (code, golden) in [
+        (
+            RemoteServiceRejectionCode::AdmissionDenied,
+            "\"admission_denied\"",
+        ),
+        (
+            RemoteServiceRejectionCode::ExecutableRegistryDrift,
+            "\"executable_registry_drift\"",
+        ),
+        (
+            RemoteServiceRejectionCode::ComputationDenied,
+            "\"computation_denied\"",
+        ),
+        (
+            RemoteServiceRejectionCode::MalformedRequest,
+            "\"malformed_request\"",
+        ),
+        (
+            RemoteServiceRejectionCode::ExecutionFailed,
+            "\"execution_failed\"",
+        ),
+        (
+            RemoteServiceRejectionCode::LifecycleUnavailable,
+            "\"lifecycle_unavailable\"",
+        ),
+        (
+            RemoteServiceRejectionCode::OperationInFlight,
+            "\"operation_in_flight\"",
+        ),
+        (
+            RemoteServiceRejectionCode::IdempotencyConflict,
+            "\"idempotency_conflict\"",
+        ),
+        (
+            RemoteServiceRejectionCode::IdempotencyCapacity,
+            "\"idempotency_capacity\"",
+        ),
+    ] {
+        assert_eq!(
+            serde_json::to_string(&code).expect("rejection code should serialize"),
+            golden,
+            "rejection-code spelling changed without a protocol version bump"
+        );
     }
     for golden in [
         concat!(
@@ -1130,28 +1197,32 @@ fn remote_service_v1_v2_v3_wire_json_is_golden_and_strict() {
         assert_remote_json_golden::<RemoteServiceSessionEvent>(golden);
     }
 
-    let hello = RemotePeerHello::new(NodeId::new("wire-peer"), RemoteProtocolVersion::V3, fingerprint);
+    let hello = RemotePeerHello::new(
+        NodeId::new("wire-peer"),
+        RemoteProtocolVersion::V3,
+        fingerprint,
+    );
     let request = remote_service_wire_request(hello, "proof.echo", 7);
     let mut request_value = serde_json::to_value(&request).expect("request should serialize");
     request_value
         .as_object_mut()
         .expect("request should be a JSON object")
         .insert("future_field".to_owned(), serde_json::json!(true));
-    assert_remote_unknown_field_rejected::<RemoteServiceWireRequest>(request_value);
+    assert_remote_unknown_field_rejected::<RemoteServiceWireRequest>(request_value, "future_field");
 
     let mut nested_hello = serde_json::to_value(&request).expect("request should serialize");
     nested_hello["hello"]
         .as_object_mut()
         .expect("hello should be a JSON object")
         .insert("capabilities".to_owned(), serde_json::json!([]));
-    assert_remote_unknown_field_rejected::<RemoteServiceWireRequest>(nested_hello);
+    assert_remote_unknown_field_rejected::<RemoteServiceWireRequest>(nested_hello, "capabilities");
 
     let mut nested_version = serde_json::to_value(&request).expect("request should serialize");
     nested_version["hello"]["protocol_version"]
         .as_object_mut()
         .expect("protocol version should be a JSON object")
         .insert("patch".to_owned(), serde_json::json!(1));
-    assert_remote_unknown_field_rejected::<RemoteServiceWireRequest>(nested_version);
+    assert_remote_unknown_field_rejected::<RemoteServiceWireRequest>(nested_version, "patch");
 
     let mut nested_budget = serde_json::to_value(&request).expect("request should serialize");
     nested_budget["budget"] = serde_json::json!({
@@ -1161,33 +1232,226 @@ fn remote_service_v1_v2_v3_wire_json_is_golden_and_strict() {
         "priority": 12,
         "ambient_priority": 255
     });
-    assert_remote_unknown_field_rejected::<RemoteServiceWireRequest>(nested_budget);
+    assert_remote_unknown_field_rejected::<RemoteServiceWireRequest>(
+        nested_budget,
+        "ambient_priority",
+    );
 
-    assert_remote_unknown_field_rejected::<RemoteServiceWireOutcome>(serde_json::json!({
-        "outcome": "success",
-        "value": [4, 5],
-        "future_field": true
-    }));
-    assert_remote_unknown_field_rejected::<RemoteServiceWireResponse>(serde_json::json!({
-        "response": "rejected",
+    let mut nested_region_id = serde_json::to_value(&request).expect("request should serialize");
+    nested_region_id["origin_region"]
+        .as_object_mut()
+        .expect("origin region should be a JSON object")
+        .insert("epoch".to_owned(), serde_json::json!(1));
+    assert_remote_unknown_field_rejected::<RemoteServiceWireRequest>(nested_region_id, "epoch");
+
+    let mut nested_task_id = serde_json::to_value(&request).expect("request should serialize");
+    nested_task_id["origin_task"]
+        .as_object_mut()
+        .expect("origin task should be a JSON object")
+        .insert("epoch".to_owned(), serde_json::json!(1));
+    assert_remote_unknown_field_rejected::<RemoteServiceWireRequest>(nested_task_id, "epoch");
+
+    let cancellation = CancelReason::with_origin(
+        CancelKind::User,
+        RegionId::new_for_test(1, 2),
+        Time::from_nanos(17),
+    );
+    let mut general_cancellation =
+        serde_json::to_value(&cancellation).expect("general cancel reason should serialize");
+    general_cancellation
+        .as_object_mut()
+        .expect("general cancel reason should be a JSON object")
+        .insert("application_metadata".to_owned(), serde_json::json!(true));
+    assert_eq!(
+        serde_json::from_value::<CancelReason>(general_cancellation)
+            .expect("general CancelReason serde should retain additive-field compatibility"),
+        cancellation
+    );
+
+    let general_region = RegionId::new_for_test(21, 22);
+    let mut general_region_value =
+        serde_json::to_value(general_region).expect("general region ID should serialize");
+    general_region_value
+        .as_object_mut()
+        .expect("general region ID should be a JSON object")
+        .insert("application_metadata".to_owned(), serde_json::json!(true));
+    assert_eq!(
+        serde_json::from_value::<RegionId>(general_region_value)
+            .expect("general RegionId serde should retain additive-field compatibility"),
+        general_region
+    );
+
+    let general_task = TaskId::new_for_test(23, 24);
+    let mut general_task_value =
+        serde_json::to_value(general_task).expect("general task ID should serialize");
+    general_task_value
+        .as_object_mut()
+        .expect("general task ID should be a JSON object")
+        .insert("application_metadata".to_owned(), serde_json::json!(true));
+    assert_eq!(
+        serde_json::from_value::<TaskId>(general_task_value)
+            .expect("general TaskId serde should retain additive-field compatibility"),
+        general_task
+    );
+
+    let mut cancelled_outcome =
+        serde_json::to_value(RemoteServiceWireOutcome::Cancelled(cancellation.clone()))
+            .expect("cancelled outcome should serialize");
+    cancelled_outcome["value"]
+        .as_object_mut()
+        .expect("cancelled reason should be a JSON object")
+        .insert("future_field".to_owned(), serde_json::json!(true));
+    assert_remote_unknown_field_rejected::<RemoteServiceWireOutcome>(
+        cancelled_outcome,
+        "future_field",
+    );
+
+    let mut parent_cancellation = cancellation.clone();
+    parent_cancellation.cause = Some(Box::new(cancellation.clone()));
+    let mut nested_cause =
+        serde_json::to_value(RemoteServiceWireOutcome::Cancelled(parent_cancellation))
+            .expect("nested cancellation outcome should serialize");
+    nested_cause["value"]["cause"]
+        .as_object_mut()
+        .expect("nested cancellation cause should be a JSON object")
+        .insert("future_field".to_owned(), serde_json::json!(true));
+    assert_remote_unknown_field_rejected::<RemoteServiceWireOutcome>(nested_cause, "future_field");
+
+    let cancellation_value =
+        serde_json::to_value(&cancellation).expect("cancel reason should serialize");
+    for (field, needle) in [
+        ("kind", "\"kind\":\"User\""),
+        (
+            "origin_region",
+            "\"origin_region\":{\"kind\":\"RegionId\",\"index\":1,\"generation\":2}",
+        ),
+        ("origin_task", "\"origin_task\":null"),
+        ("timestamp", "\"timestamp\":17"),
+        ("message", "\"message\":null"),
+        ("cause", "\"cause\":null"),
+        ("truncated", "\"truncated\":false"),
+        ("truncated_at_depth", "\"truncated_at_depth\":null"),
+    ] {
+        let mut missing = cancellation_value.clone();
+        missing
+            .as_object_mut()
+            .expect("cancel reason should be a JSON object")
+            .remove(field);
+        let missing_error = serde_json::from_value::<RemoteServiceWireOutcome>(
+            serde_json::json!({"outcome": "cancelled", "value": missing}),
+        )
+        .expect_err("strict remote cancellation reason must reject missing fields");
+        assert!(
+            missing_error
+                .to_string()
+                .contains(&format!("missing field `{field}`")),
+            "field {field:?} diagnostic: {missing_error}"
+        );
+
+        let duplicate = format!("{needle},{needle}");
+        let cancellation_json =
+            serde_json::to_string(&RemoteServiceWireOutcome::Cancelled(cancellation.clone()))
+                .expect("cancelled outcome should serialize");
+        let duplicate_json = cancellation_json.replacen(needle, &duplicate, 1);
+        assert_ne!(
+            duplicate_json, cancellation_json,
+            "duplicate fixture must find field {field:?}"
+        );
+        let duplicate_error = serde_json::from_str::<RemoteServiceWireOutcome>(&duplicate_json)
+            .expect_err("strict remote cancellation reason must reject duplicate fields");
+        assert!(
+            duplicate_error
+                .to_string()
+                .contains(&format!("duplicate field `{field}`")),
+            "field {field:?} diagnostic: {duplicate_error}"
+        );
+    }
+
+    let reason_with_depth = |depth: usize| {
+        let mut reason = cancellation_value.clone();
+        for _ in 1..depth {
+            let mut parent = cancellation_value.clone();
+            parent["cause"] = reason;
+            reason = parent;
+        }
+        reason
+    };
+    let max_depth = reason_with_depth(REMOTE_CANCEL_REASON_TEST_MAX_DEPTH);
+    serde_json::from_value::<RemoteServiceWireOutcome>(serde_json::json!({
+        "outcome": "cancelled",
+        "value": max_depth
+    }))
+    .expect("a cancellation chain at the exact remote depth limit should deserialize");
+
+    let over_depth = reason_with_depth(REMOTE_CANCEL_REASON_TEST_MAX_DEPTH + 1);
+    let deep_error = serde_json::from_value::<RemoteServiceWireOutcome>(serde_json::json!({
+        "outcome": "cancelled",
+        "value": over_depth
+    }))
+    .expect_err("strict remote cancellation reason must reject an over-depth cause chain");
+    assert!(
+        deep_error
+            .to_string()
+            .contains("remote cancellation cause-chain depth 65 exceeds maximum 64"),
+        "diagnostic: {deep_error}"
+    );
+    serde_json::from_value::<RemoteServiceWireOutcome>(serde_json::json!({
+        "outcome": "cancelled",
+        "value": cancellation_value
+    }))
+    .expect("a valid cancellation must still parse after an over-depth refusal");
+
+    let mut cancel_command = serde_json::json!({
+        "command": "cancel",
         "remote_task_id": 7,
-        "code": "malformed_request",
-        "diagnostic": "strict refusal",
-        "future_field": true
-    }));
-    assert_remote_unknown_field_rejected::<RemoteServiceSessionCommand>(serde_json::json!({
-        "command": "renew_lease",
-        "remote_task_id": 7,
-        "renewal_id": 8,
-        "lease_secs": 9,
-        "lease_subsec_nanos": 10,
-        "future_field": true
-    }));
-    assert_remote_unknown_field_rejected::<RemoteServiceSessionEvent>(serde_json::json!({
-        "event": "accepted",
-        "remote_task_id": 7,
-        "future_field": true
-    }));
+        "reason": serde_json::to_value(cancellation).expect("cancel reason should serialize")
+    });
+    cancel_command["reason"]
+        .as_object_mut()
+        .expect("cancel command reason should be a JSON object")
+        .insert("future_field".to_owned(), serde_json::json!(true));
+    assert_remote_unknown_field_rejected::<RemoteServiceSessionCommand>(
+        cancel_command,
+        "future_field",
+    );
+
+    assert_remote_unknown_field_rejected::<RemoteServiceWireOutcome>(
+        serde_json::json!({
+            "outcome": "success",
+            "value": [4, 5],
+            "future_field": true
+        }),
+        "future_field",
+    );
+    assert_remote_unknown_field_rejected::<RemoteServiceWireResponse>(
+        serde_json::json!({
+            "response": "rejected",
+            "remote_task_id": 7,
+            "code": "malformed_request",
+            "diagnostic": "strict refusal",
+            "future_field": true
+        }),
+        "future_field",
+    );
+    assert_remote_unknown_field_rejected::<RemoteServiceSessionCommand>(
+        serde_json::json!({
+            "command": "renew_lease",
+            "remote_task_id": 7,
+            "renewal_id": 8,
+            "lease_secs": 9,
+            "lease_subsec_nanos": 10,
+            "future_field": true
+        }),
+        "future_field",
+    );
+    assert_remote_unknown_field_rejected::<RemoteServiceSessionEvent>(
+        serde_json::json!({
+            "event": "accepted",
+            "remote_task_id": 7,
+            "future_field": true
+        }),
+        "future_field",
+    );
 }
 
 #[cfg(feature = "tls")]
@@ -5356,6 +5620,11 @@ fn remote_tls_service_executes_only_certificate_bound_authorized_computation() {
     let oversized_response_policy = policy.clone();
     let malformed_frame_policy = policy.clone();
     let oversized_frame_policy = policy.clone();
+    let unknown_request_field_policy = policy.clone();
+    let unknown_hello_field_policy = policy.clone();
+    let unknown_version_field_policy = policy.clone();
+    let unknown_budget_field_policy = policy.clone();
+    let future_version_policy = policy.clone();
     mismatched_policy
         .grant_tls_peer(origin, mismatched_pins, ["proof.echo"])
         .expect("mismatched certificate grant should be valid configuration");
@@ -5390,6 +5659,11 @@ fn remote_tls_service_executes_only_certificate_bound_authorized_computation() {
                 oversized_response_policy,
                 malformed_frame_policy,
                 oversized_frame_policy,
+                unknown_request_field_policy,
+                unknown_hello_field_policy,
+                unknown_version_field_policy,
+                unknown_budget_field_policy,
+                future_version_policy,
             ]
             .into_iter()
             .enumerate()
@@ -5414,7 +5688,7 @@ fn remote_tls_service_executes_only_certificate_bound_authorized_computation() {
                     RemoteServiceWireLimits::default(),
                 )
                 .await;
-                if connection_index < 4 {
+                if connection_index < 4 || connection_index == 11 {
                     result.expect("mTLS endpoint should flush one typed service response");
                 } else {
                     framing_errors.push(
@@ -5472,7 +5746,8 @@ fn remote_tls_service_executes_only_certificate_bound_authorized_computation() {
         } if diagnostic.contains("differs from executable registry")
     ));
 
-    let oversized_response_request = remote_service_wire_request(hello, "proof.large", 7005);
+    let oversized_response_request =
+        remote_service_wire_request(hello.clone(), "proof.large", 7005);
     let oversized_response_error =
         call_tls_remote_service_result(endpoint, &connector, &oversized_response_request)
             .expect_err("oversized encoded response must close without a partial frame");
@@ -5488,10 +5763,73 @@ fn remote_tls_service_executes_only_certificate_bound_authorized_computation() {
     send_tls_malformed_remote_service_frame(endpoint, &connector, b"{not-json");
     send_tls_oversized_remote_service_prefix(endpoint, &connector);
 
+    let strict_request = remote_service_wire_request(hello.clone(), "proof.echo", 7006);
+    let mut unknown_request_field =
+        serde_json::to_value(&strict_request).expect("strict request should serialize");
+    unknown_request_field
+        .as_object_mut()
+        .expect("strict request should be a JSON object")
+        .insert("future_field".to_owned(), serde_json::json!(true));
+    let unknown_request_bytes =
+        serde_json::to_vec(&unknown_request_field).expect("mutated request should serialize");
+    send_tls_malformed_remote_service_frame(endpoint, &connector, &unknown_request_bytes);
+
+    let mut unknown_hello_field =
+        serde_json::to_value(&strict_request).expect("strict request should serialize");
+    unknown_hello_field["hello"]
+        .as_object_mut()
+        .expect("strict hello should be a JSON object")
+        .insert("capabilities".to_owned(), serde_json::json!([]));
+    let unknown_hello_bytes =
+        serde_json::to_vec(&unknown_hello_field).expect("mutated hello should serialize");
+    send_tls_malformed_remote_service_frame(endpoint, &connector, &unknown_hello_bytes);
+
+    let mut unknown_version_field =
+        serde_json::to_value(&strict_request).expect("strict request should serialize");
+    unknown_version_field["hello"]["protocol_version"]
+        .as_object_mut()
+        .expect("strict protocol version should be a JSON object")
+        .insert("patch".to_owned(), serde_json::json!(1));
+    let unknown_version_bytes =
+        serde_json::to_vec(&unknown_version_field).expect("mutated version should serialize");
+    send_tls_malformed_remote_service_frame(endpoint, &connector, &unknown_version_bytes);
+
+    let mut unknown_budget_field =
+        serde_json::to_value(&strict_request).expect("strict request should serialize");
+    unknown_budget_field["budget"] = serde_json::json!({
+        "deadline_nanos": 9,
+        "poll_quota": 10,
+        "cost_quota": 11,
+        "priority": 12,
+        "ambient_priority": 255
+    });
+    let unknown_budget_bytes =
+        serde_json::to_vec(&unknown_budget_field).expect("mutated budget should serialize");
+    send_tls_malformed_remote_service_frame(endpoint, &connector, &unknown_budget_bytes);
+
+    let future_request = remote_service_wire_request(
+        RemotePeerHello::new(
+            NodeId::new(ORIGIN_NODE),
+            RemoteProtocolVersion::new(4, 0),
+            hello.registry_fingerprint(),
+        ),
+        "proof.echo",
+        7007,
+    );
+    let future_version = call_tls_remote_service(endpoint, &connector, &future_request);
+    assert!(matches!(
+        future_version,
+        RemoteServiceWireResponse::Rejected {
+            remote_task_id: 7007,
+            code: RemoteServiceRejectionCode::AdmissionDenied,
+            ref diagnostic,
+        } if diagnostic.contains("protocol version mismatch")
+    ));
+
     let framing_errors = server
         .join()
         .expect("mTLS peer admission endpoint should not panic");
-    assert_eq!(framing_errors.len(), 3);
+    assert_eq!(framing_errors.len(), 7);
     assert!(
         framing_errors[0].contains("encoded frame exceeds"),
         "diagnostic: {}",
@@ -5506,6 +5844,26 @@ fn remote_tls_service_executes_only_certificate_bound_authorized_computation() {
         framing_errors[2].contains("frame length exceeds max_frame_length"),
         "diagnostic: {}",
         framing_errors[2]
+    );
+    assert!(
+        framing_errors[3].contains("unknown field `future_field`"),
+        "diagnostic: {}",
+        framing_errors[3]
+    );
+    assert!(
+        framing_errors[4].contains("unknown field `capabilities`"),
+        "diagnostic: {}",
+        framing_errors[4]
+    );
+    assert!(
+        framing_errors[5].contains("unknown field `patch`"),
+        "diagnostic: {}",
+        framing_errors[5]
+    );
+    assert!(
+        framing_errors[6].contains("unknown field `ambient_priority`"),
+        "diagnostic: {}",
+        framing_errors[6]
     );
     assert_eq!(
         dispatch_count.load(Ordering::SeqCst),
@@ -5528,7 +5886,7 @@ fn remote_tls_service_executes_only_certificate_bound_authorized_computation() {
         0,
         "none",
         "mtls_wire_request_then_typed_outcome",
-        7,
+        12,
         "one_certificate_bound_dispatch",
         "one_certificate_bound_dispatch",
     )

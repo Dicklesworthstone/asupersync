@@ -59,7 +59,8 @@ use crate::distributed::{
 };
 use crate::trace::distributed::{LogicalClockHandle, LogicalTime};
 use crate::types::outcome::Outcome;
-use crate::types::{Budget, CancelReason, ObligationId, RegionId, TaskId, Time};
+use crate::types::{Budget, CancelKind, CancelReason, ObligationId, RegionId, TaskId, Time};
+use crate::util::ArenaIndex;
 use crate::util::det_hash::DetHashMap;
 #[cfg(feature = "tls")]
 use crate::{
@@ -81,6 +82,7 @@ use parking_lot::Mutex;
 use parking_lot::RwLock;
 #[cfg(feature = "tls")]
 use serde::de::DeserializeOwned;
+use serde::de::{self, DeserializeSeed, MapAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -2862,6 +2864,268 @@ impl Default for RemoteServiceWireLimits {
     }
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RemoteServiceStrictIdEnvelope {
+    kind: String,
+    index: u32,
+    generation: u32,
+}
+
+impl RemoteServiceStrictIdEnvelope {
+    fn into_region<E>(self) -> Result<RegionId, E>
+    where
+        E: de::Error,
+    {
+        if self.kind != "RegionId" {
+            return Err(E::custom(format!(
+                "remote wire ID kind mismatch: expected \"RegionId\", got {:?}",
+                self.kind
+            )));
+        }
+        Ok(RegionId::from_arena(ArenaIndex::new(
+            self.index,
+            self.generation,
+        )))
+    }
+
+    fn into_task<E>(self) -> Result<TaskId, E>
+    where
+        E: de::Error,
+    {
+        if self.kind != "TaskId" {
+            return Err(E::custom(format!(
+                "remote wire ID kind mismatch: expected \"TaskId\", got {:?}",
+                self.kind
+            )));
+        }
+        Ok(TaskId::from_arena(ArenaIndex::new(
+            self.index,
+            self.generation,
+        )))
+    }
+}
+
+fn deserialize_remote_service_region_id<'de, D>(deserializer: D) -> Result<RegionId, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    RemoteServiceStrictIdEnvelope::deserialize(deserializer)?.into_region()
+}
+
+fn deserialize_remote_service_task_id<'de, D>(deserializer: D) -> Result<TaskId, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    RemoteServiceStrictIdEnvelope::deserialize(deserializer)?.into_task()
+}
+
+const REMOTE_SERVICE_CANCEL_REASON_MAX_CAUSE_DEPTH: usize = 64;
+const REMOTE_SERVICE_CANCEL_REASON_FIELDS: &[&str] = &[
+    "kind",
+    "origin_region",
+    "origin_task",
+    "timestamp",
+    "message",
+    "cause",
+    "truncated",
+    "truncated_at_depth",
+];
+
+struct RemoteServiceCancelReasonSeed {
+    cause_depth: usize,
+}
+
+impl<'de> DeserializeSeed<'de> for RemoteServiceCancelReasonSeed {
+    type Value = CancelReason;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        if self.cause_depth > REMOTE_SERVICE_CANCEL_REASON_MAX_CAUSE_DEPTH {
+            return Err(de::Error::custom(format!(
+                "remote cancellation cause-chain depth {} exceeds maximum {}",
+                self.cause_depth, REMOTE_SERVICE_CANCEL_REASON_MAX_CAUSE_DEPTH
+            )));
+        }
+        deserializer.deserialize_map(RemoteServiceCancelReasonVisitor {
+            cause_depth: self.cause_depth,
+        })
+    }
+}
+
+struct RemoteServiceOptionalCancelReasonSeed {
+    cause_depth: usize,
+}
+
+impl<'de> DeserializeSeed<'de> for RemoteServiceOptionalCancelReasonSeed {
+    type Value = Option<Box<CancelReason>>;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_option(RemoteServiceOptionalCancelReasonVisitor {
+            cause_depth: self.cause_depth,
+        })
+    }
+}
+
+struct RemoteServiceOptionalCancelReasonVisitor {
+    cause_depth: usize,
+}
+
+impl<'de> Visitor<'de> for RemoteServiceOptionalCancelReasonVisitor {
+    type Value = Option<Box<CancelReason>>;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a null or strict remote cancellation reason")
+    }
+
+    fn visit_none<E>(self) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        Ok(None)
+    }
+
+    fn visit_unit<E>(self) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        Ok(None)
+    }
+
+    fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        RemoteServiceCancelReasonSeed {
+            cause_depth: self.cause_depth,
+        }
+        .deserialize(deserializer)
+        .map(Box::new)
+        .map(Some)
+    }
+}
+
+struct RemoteServiceCancelReasonVisitor {
+    cause_depth: usize,
+}
+
+impl<'de> Visitor<'de> for RemoteServiceCancelReasonVisitor {
+    type Value = CancelReason;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a strict remote cancellation reason")
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut kind = None;
+        let mut origin_region = None;
+        let mut origin_task = None;
+        let mut timestamp = None;
+        let mut message = None;
+        let mut cause = None;
+        let mut truncated = None;
+        let mut truncated_at_depth = None;
+
+        while let Some(field) = map.next_key::<String>()? {
+            match field.as_str() {
+                "kind" => {
+                    if kind.is_some() {
+                        return Err(de::Error::duplicate_field("kind"));
+                    }
+                    kind = Some(map.next_value::<CancelKind>()?);
+                }
+                "origin_region" => {
+                    if origin_region.is_some() {
+                        return Err(de::Error::duplicate_field("origin_region"));
+                    }
+                    origin_region = Some(
+                        map.next_value::<RemoteServiceStrictIdEnvelope>()?
+                            .into_region::<A::Error>()?,
+                    );
+                }
+                "origin_task" => {
+                    if origin_task.is_some() {
+                        return Err(de::Error::duplicate_field("origin_task"));
+                    }
+                    origin_task = Some(
+                        map.next_value::<Option<RemoteServiceStrictIdEnvelope>>()?
+                            .map(|id| id.into_task::<A::Error>())
+                            .transpose()?,
+                    );
+                }
+                "timestamp" => {
+                    if timestamp.is_some() {
+                        return Err(de::Error::duplicate_field("timestamp"));
+                    }
+                    timestamp = Some(map.next_value::<Time>()?);
+                }
+                "message" => {
+                    if message.is_some() {
+                        return Err(de::Error::duplicate_field("message"));
+                    }
+                    message = Some(map.next_value::<Option<String>>()?);
+                }
+                "cause" => {
+                    if cause.is_some() {
+                        return Err(de::Error::duplicate_field("cause"));
+                    }
+                    cause = Some(map.next_value_seed(RemoteServiceOptionalCancelReasonSeed {
+                        cause_depth: self.cause_depth.saturating_add(1),
+                    })?);
+                }
+                "truncated" => {
+                    if truncated.is_some() {
+                        return Err(de::Error::duplicate_field("truncated"));
+                    }
+                    truncated = Some(map.next_value::<bool>()?);
+                }
+                "truncated_at_depth" => {
+                    if truncated_at_depth.is_some() {
+                        return Err(de::Error::duplicate_field("truncated_at_depth"));
+                    }
+                    truncated_at_depth = Some(map.next_value::<Option<usize>>()?);
+                }
+                _ => {
+                    return Err(de::Error::unknown_field(
+                        &field,
+                        REMOTE_SERVICE_CANCEL_REASON_FIELDS,
+                    ));
+                }
+            }
+        }
+
+        Ok(CancelReason {
+            kind: kind.ok_or_else(|| de::Error::missing_field("kind"))?,
+            origin_region: origin_region
+                .ok_or_else(|| de::Error::missing_field("origin_region"))?,
+            origin_task: origin_task.ok_or_else(|| de::Error::missing_field("origin_task"))?,
+            timestamp: timestamp.ok_or_else(|| de::Error::missing_field("timestamp"))?,
+            message: message.ok_or_else(|| de::Error::missing_field("message"))?,
+            cause: cause.ok_or_else(|| de::Error::missing_field("cause"))?,
+            truncated: truncated.ok_or_else(|| de::Error::missing_field("truncated"))?,
+            truncated_at_depth: truncated_at_depth
+                .ok_or_else(|| de::Error::missing_field("truncated_at_depth"))?,
+        })
+    }
+}
+
+fn deserialize_remote_service_cancel_reason<'de, D>(
+    deserializer: D,
+) -> Result<CancelReason, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    RemoteServiceCancelReasonSeed { cause_depth: 1 }.deserialize(deserializer)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RemoteServiceWireBudget {
@@ -2911,7 +3175,9 @@ pub struct RemoteServiceWireRequest {
     idempotency_key_high: u64,
     idempotency_key_low: u64,
     budget: Option<RemoteServiceWireBudget>,
+    #[serde(deserialize_with = "deserialize_remote_service_region_id")]
     origin_region: RegionId,
+    #[serde(deserialize_with = "deserialize_remote_service_task_id")]
     origin_task: TaskId,
 }
 
@@ -3006,7 +3272,7 @@ pub enum RemoteServiceWireOutcome {
     /// Handler returned an application failure.
     Failed(String),
     /// Handler completed through cancellation.
-    Cancelled(CancelReason),
+    Cancelled(#[serde(deserialize_with = "deserialize_remote_service_cancel_reason")] CancelReason),
     /// Handler reported a panic boundary.
     Panicked(String),
 }
@@ -3107,6 +3373,7 @@ pub enum RemoteServiceSessionCommand {
         /// Active task correlation ID.
         remote_task_id: u64,
         /// Caller-supplied cancellation reason.
+        #[serde(deserialize_with = "deserialize_remote_service_cancel_reason")]
         reason: CancelReason,
     },
     /// Replace the active lease with a duration measured from receipt.
