@@ -2236,6 +2236,30 @@ impl<Caps> Cx<Caps> {
             .load(std::sync::atomic::Ordering::Acquire)
     }
 
+    /// Alias for [`Self::published_cancel_requested`] with a conventional name.
+    ///
+    /// Hot cancellation polls inside tight loops should prefer this method over
+    /// [`Self::is_cancel_requested`], which acquires the inner `RwLock` on every
+    /// call to preserve the legacy v0.4.3 direct-field-mutation path. This alias
+    /// reads only the Release/Acquire-published `AtomicBool` envelope shared by
+    /// the runtime and every clone of this context.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use asupersync::{Cx, types::CancelKind};
+    ///
+    /// let cx = Cx::for_testing();
+    /// assert!(!cx.is_cancelled());
+    /// cx.cancel_fast(CancelKind::RaceLost);
+    /// assert!(cx.is_cancelled());
+    /// ```
+    #[inline]
+    #[must_use]
+    pub fn is_cancelled(&self) -> bool {
+        self.published_cancel_requested()
+    }
+
     /// Checks for cancellation and returns an error if cancelled.
     ///
     /// This is a checkpoint where cancellation can be observed. It combines
@@ -5854,6 +5878,29 @@ mod tests {
         let cx = Cx::for_testing_with_budget(Budget::new().with_cost_quota(0));
         assert!(cx.checkpoint_with("matrix").is_err());
         assert_published(&cx, true);
+    }
+
+    #[test]
+    fn is_cancelled_matches_published_bit_and_does_not_need_lock() {
+        let cx = test_cx();
+        assert!(!cx.is_cancelled());
+        cx.cancel_fast(CancelKind::RaceLost);
+        assert!(cx.is_cancelled());
+        assert_eq!(
+            cx.is_cancelled(),
+            cx.published_cancel_requested(),
+            "is_cancelled must be the fast atomic alias for published_cancel_requested"
+        );
+
+        // Unlike is_cancel_requested, is_cancelled does not observe a raw
+        // lock-field mutation that bypasses the publication envelope, so a
+        // legacy-only cancellation is not visible through the fast path.
+        let cx = test_cx();
+        {
+            let mut inner = cx.inner.write();
+            inner.cancel_requested = true;
+        }
+        assert!(!cx.is_cancelled(), "fast path must not take the inner lock");
     }
 
     #[test]
