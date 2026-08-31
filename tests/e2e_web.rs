@@ -6,10 +6,17 @@ use asupersync::Cx;
 use asupersync::bytes::Buf;
 use asupersync::http::body::{Body, Frame};
 use asupersync::http::h1::codec::HttpError;
+use asupersync::http::h1::listener::{Http1Listener, Http1ListenerConfig};
+use asupersync::http::h1::server::{HostPolicy, Http1Config};
 use asupersync::http::h1::types::{
     Method as HttpMethod, Request as HttpRequest, Response as HttpResponse, Version as HttpVersion,
 };
 use asupersync::http::h2::listener::IntoHttp2Response;
+use asupersync::io::{AsyncReadExt, AsyncWriteExt};
+use asupersync::net::TcpStream;
+use asupersync::net::websocket::Message;
+use asupersync::runtime::RuntimeBuilder;
+use asupersync::server::shutdown::ShutdownPhase;
 use asupersync::web::extract::{Json as JsonExtract, Path, Query, Request};
 use asupersync::web::handler::{FnHandler, FnHandler1, Handler};
 use asupersync::web::middleware::{HeaderOverwrite, MiddlewareStack};
@@ -20,6 +27,7 @@ use asupersync::web::sse::{
     DEFAULT_STREAMING_SSE_H1_CHANNEL_CAPACITY, STREAMING_SSE_H1_BACKPRESSURE_POLICY, Sse, SseEvent,
     StreamingSse, StreamingSseTransportStep,
 };
+use asupersync::web::websocket::WebSocketUpgrade;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::future::Future;
@@ -31,6 +39,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::task::{Context, Poll, Waker};
+use std::time::Duration;
 #[cfg(feature = "tracing-integration")]
 use tracing::Subscriber;
 #[cfg(feature = "tracing-integration")]
@@ -1324,4 +1333,415 @@ fn e2e_router_adapter_serves_shared_h1_h2_wire_types() {
     accepts_h2(&handler);
 
     test_complete!("e2e_router_listener_adapter", protocols = 2);
+}
+
+async fn read_http_head(stream: &mut TcpStream) -> Vec<u8> {
+    let mut head = Vec::new();
+    loop {
+        let mut byte = [0_u8; 1];
+        stream
+            .read_exact(&mut byte)
+            .await
+            .expect("read HTTP/1 response head");
+        head.push(byte[0]);
+        assert!(head.len() <= 8192, "HTTP/1 response head exceeded 8 KiB");
+        if head.ends_with(b"\r\n\r\n") {
+            return head;
+        }
+    }
+}
+
+#[test]
+fn e2e_router_http1_listener_live_websocket_handoff_preserves_read_ahead() {
+    common::init_test_logging();
+    test_phase!("Router -> HTTP/1 listener -> live WebSocket handoff");
+
+    let runtime = RuntimeBuilder::new()
+        .worker_threads(2)
+        .build()
+        .expect("build runtime");
+    let handle = runtime.handle();
+
+    runtime.block_on(async move {
+        let callback_count = Arc::new(AtomicUsize::new(0));
+        let callback_count_for_handler = Arc::clone(&callback_count);
+        let router = Router::new().route(
+            "/ws",
+            get(FnHandler1::<_, WebSocketUpgrade>::new(
+                move |upgrade: WebSocketUpgrade| {
+                    let callback_count = Arc::clone(&callback_count_for_handler);
+                    upgrade
+                        .skip_origin_check()
+                        .on_upgrade(move |cx, mut ws| async move {
+                            callback_count.fetch_add(1, Ordering::AcqRel);
+                            let message = ws
+                                .recv(&cx)
+                                .await
+                                .expect("receive coalesced client frame")
+                                .expect("client sent one frame");
+                            match &message {
+                                Message::Text(text) => assert_eq!(text, "Hello"),
+                                other => panic!("expected text frame, got {other:?}"),
+                            }
+                            ws.send(&cx, message).await.expect("echo client frame");
+                        })
+                },
+            )),
+        );
+
+        let listener = Http1Listener::bind_with_config(
+            "127.0.0.1:0",
+            router.into_http1_handler(),
+            Http1ListenerConfig::default()
+                .http_config(Http1Config {
+                    allowed_hosts: HostPolicy::allow_list(vec!["localhost".to_owned()]),
+                    ..Http1Config::default()
+                })
+                .drain_timeout(Duration::from_secs(2))
+                .hard_drain_timeout(Duration::from_secs(5)),
+        )
+        .await
+        .expect("bind HTTP/1 listener");
+        let addr = listener.local_addr().expect("listener address");
+        let shutdown = listener.shutdown_signal();
+        let manager = listener.connection_manager().clone();
+        let in_flight = listener.in_flight_requests();
+        let run_handle = handle
+            .clone()
+            .try_spawn(async move { listener.run(&handle).await })
+            .expect("spawn HTTP/1 listener");
+
+        let mut client = TcpStream::connect(addr).await.expect("connect client");
+        let mut request_and_frame = b"GET /ws HTTP/1.1\r\n\
+            Host: localhost\r\n\
+            Upgrade: websocket\r\n\
+            Connection: Upgrade\r\n\
+            Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+            Sec-WebSocket-Version: 13\r\n\
+            \r\n"
+            .to_vec();
+        // FIN + text opcode, masked five-byte payload, fixed mask, then
+        // "Hello" XOR mask. Sending it in the same write as the handshake
+        // proves codec-prefetched bytes cross the ownership handoff intact.
+        request_and_frame.extend_from_slice(&[
+            0x81, 0x85, 0x37, 0xfa, 0x21, 0x3d, 0x7f, 0x9f, 0x4d, 0x51, 0x58,
+        ]);
+        client
+            .write_all(&request_and_frame)
+            .await
+            .expect("write coalesced handshake and frame");
+
+        let response_head = read_http_head(&mut client).await;
+        let response_head = std::str::from_utf8(&response_head).expect("ASCII response head");
+        assert!(
+            response_head.starts_with("HTTP/1.1 101"),
+            "listener committed the switching response: {response_head:?}"
+        );
+        assert_eq!(
+            response_head.matches("HTTP/1.1 101").count(),
+            1,
+            "the live handoff emits exactly one switching response"
+        );
+        let lower = response_head.to_ascii_lowercase();
+        assert!(lower.contains("connection: upgrade\r\n"));
+        assert!(lower.contains("upgrade: websocket\r\n"));
+        assert!(lower.contains("sec-websocket-accept: s3pplmbitxaq9kygzzhzrbk+xoo=\r\n"));
+
+        let mut echo = [0_u8; 7];
+        client
+            .read_exact(&mut echo)
+            .await
+            .expect("read echoed frame");
+        assert_eq!(echo, [0x81, 0x05, b'H', b'e', b'l', b'l', b'o']);
+        drop(client);
+
+        for _ in 0..400 {
+            if manager.is_empty() {
+                break;
+            }
+            asupersync::time::sleep(asupersync::time::wall_now(), Duration::from_millis(5)).await;
+        }
+        assert_eq!(callback_count.load(Ordering::Acquire), 1);
+        assert_eq!(in_flight.load(Ordering::Acquire), 0);
+        assert!(
+            manager.is_empty(),
+            "upgraded session released its connection guard"
+        );
+
+        assert!(manager.begin_drain(Duration::from_secs(2)));
+        let stats = run_handle.await.expect("listener result");
+        assert_eq!(shutdown.phase(), ShutdownPhase::Stopped);
+        assert_eq!(stats.force_closed, 0);
+    });
+
+    test_complete!("e2e_router_http1_listener_live_websocket_handoff");
+}
+
+#[test]
+fn e2e_router_http1_listener_drain_cancels_live_websocket_session() {
+    common::init_test_logging();
+    test_phase!("HTTP/1 listener drain cancels upgraded WebSocket session");
+
+    let runtime = RuntimeBuilder::new()
+        .worker_threads(2)
+        .build()
+        .expect("build runtime");
+    let handle = runtime.handle();
+
+    runtime.block_on(async move {
+        let callback_started = Arc::new(AtomicUsize::new(0));
+        let callback_cancelled = Arc::new(AtomicUsize::new(0));
+        let started_for_handler = Arc::clone(&callback_started);
+        let cancelled_for_handler = Arc::clone(&callback_cancelled);
+        let router = Router::new().route(
+            "/ws",
+            get(FnHandler1::<_, WebSocketUpgrade>::new(
+                move |upgrade: WebSocketUpgrade| {
+                    let callback_started = Arc::clone(&started_for_handler);
+                    let callback_cancelled = Arc::clone(&cancelled_for_handler);
+                    upgrade
+                        .skip_origin_check()
+                        .on_upgrade(move |cx, mut ws| async move {
+                            callback_started.fetch_add(1, Ordering::AcqRel);
+                            let result = ws.recv(&cx).await;
+                            if cx.is_cancel_requested() && result.is_err() {
+                                callback_cancelled.fetch_add(1, Ordering::AcqRel);
+                            }
+                        })
+                },
+            )),
+        );
+
+        let listener = Http1Listener::bind_with_config(
+            "127.0.0.1:0",
+            router.into_http1_handler(),
+            Http1ListenerConfig::default()
+                .http_config(Http1Config {
+                    allowed_hosts: HostPolicy::allow_list(vec!["localhost".to_owned()]),
+                    ..Http1Config::default()
+                })
+                .drain_timeout(Duration::from_secs(2))
+                .hard_drain_timeout(Duration::from_secs(5)),
+        )
+        .await
+        .expect("bind HTTP/1 listener");
+        let addr = listener.local_addr().expect("listener address");
+        let shutdown = listener.shutdown_signal();
+        let manager = listener.connection_manager().clone();
+        let run_handle = handle
+            .clone()
+            .try_spawn(async move { listener.run(&handle).await })
+            .expect("spawn HTTP/1 listener");
+
+        let mut client = TcpStream::connect(addr).await.expect("connect client");
+        client
+            .write_all(
+                b"GET /ws HTTP/1.1\r\n\
+                  Host: localhost\r\n\
+                  Upgrade: websocket\r\n\
+                  Connection: Upgrade\r\n\
+                  Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+                  Sec-WebSocket-Version: 13\r\n\
+                  \r\n",
+            )
+            .await
+            .expect("write WebSocket handshake");
+        let response_head = read_http_head(&mut client).await;
+        assert!(response_head.starts_with(b"HTTP/1.1 101"));
+
+        for _ in 0..400 {
+            if callback_started.load(Ordering::Acquire) == 1 {
+                break;
+            }
+            asupersync::time::sleep(asupersync::time::wall_now(), Duration::from_millis(5)).await;
+        }
+        assert_eq!(callback_started.load(Ordering::Acquire), 1);
+        assert_eq!(manager.active_count(), 1);
+
+        assert!(manager.begin_drain(Duration::from_secs(2)));
+        let stats = run_handle.await.expect("listener result");
+        assert_eq!(callback_cancelled.load(Ordering::Acquire), 1);
+        assert_eq!(shutdown.phase(), ShutdownPhase::Stopped);
+        assert_eq!(stats.force_closed, 0);
+        assert!(manager.is_empty());
+        drop(client);
+    });
+
+    test_complete!("e2e_router_http1_listener_websocket_drain");
+}
+
+#[test]
+fn e2e_router_drops_registered_upgrade_when_final_response_is_mutated() {
+    common::init_test_logging();
+
+    let callback_count = Arc::new(AtomicUsize::new(0));
+    let callback_count_for_handler = Arc::clone(&callback_count);
+    let router = Router::new().route(
+        "/ws",
+        get(FnHandler1::<_, WebSocketUpgrade>::new(
+            move |upgrade: WebSocketUpgrade| {
+                let callback_count = Arc::clone(&callback_count_for_handler);
+                let mut response = upgrade
+                    .skip_origin_check()
+                    .on_upgrade(move |_, _| async move {
+                        callback_count.fetch_add(1, Ordering::AcqRel);
+                    });
+                response.status = StatusCode::OK;
+                response
+            },
+        )),
+    );
+    let request = HttpRequest {
+        method: HttpMethod::Get,
+        uri: "/ws".to_owned(),
+        version: HttpVersion::Http11,
+        headers: vec![
+            ("host".to_owned(), "localhost".to_owned()),
+            ("upgrade".to_owned(), "websocket".to_owned()),
+            ("connection".to_owned(), "Upgrade".to_owned()),
+            ("sec-websocket-version".to_owned(), "13".to_owned()),
+            (
+                "sec-websocket-key".to_owned(),
+                "dGhlIHNhbXBsZSBub25jZQ==".to_owned(),
+            ),
+        ],
+        body: Vec::new(),
+        trailers: Vec::new(),
+        peer_addr: None,
+    };
+
+    let response = web_block_on(router.handle_http1_request_with_cx(&Cx::for_testing(), request));
+    assert_eq!(response.response.status, 500);
+    assert_eq!(response.response.header_value("connection"), Some("close"));
+    assert_eq!(callback_count.load(Ordering::Acquire), 0);
+}
+
+#[test]
+fn e2e_router_duplicate_upgrade_registration_poisons_the_request() {
+    common::init_test_logging();
+
+    let callback_count = Arc::new(AtomicUsize::new(0));
+    let callback_count_for_handler = Arc::clone(&callback_count);
+    let router = Router::new().route(
+        "/ws",
+        get(FnHandler1::<_, WebSocketUpgrade>::new(
+            move |upgrade: WebSocketUpgrade| {
+                let first_count = Arc::clone(&callback_count_for_handler);
+                let first =
+                    upgrade
+                        .clone()
+                        .skip_origin_check()
+                        .on_upgrade(move |_, _| async move {
+                            first_count.fetch_add(1, Ordering::AcqRel);
+                        });
+                let second_count = Arc::clone(&callback_count_for_handler);
+                let _duplicate = upgrade
+                    .skip_origin_check()
+                    .on_upgrade(move |_, _| async move {
+                        second_count.fetch_add(1, Ordering::AcqRel);
+                    });
+                // Even if the handler ignores the duplicate-registration 500
+                // and returns the original 101, the request slot remains
+                // poisoned and the router must refuse the handoff.
+                first
+            },
+        )),
+    );
+    let request = HttpRequest {
+        method: HttpMethod::Get,
+        uri: "/ws".to_owned(),
+        version: HttpVersion::Http11,
+        headers: vec![
+            ("host".to_owned(), "localhost".to_owned()),
+            ("upgrade".to_owned(), "websocket".to_owned()),
+            ("connection".to_owned(), "Upgrade".to_owned()),
+            ("sec-websocket-version".to_owned(), "13".to_owned()),
+            (
+                "sec-websocket-key".to_owned(),
+                "dGhlIHNhbXBsZSBub25jZQ==".to_owned(),
+            ),
+        ],
+        body: Vec::new(),
+        trailers: Vec::new(),
+        peer_addr: None,
+    };
+
+    let response = web_block_on(router.handle_http1_request_with_cx(&Cx::for_testing(), request));
+    assert_eq!(response.response.status, 500);
+    assert_eq!(response.response.header_value("connection"), Some("close"));
+    assert_eq!(callback_count.load(Ordering::Acquire), 0);
+}
+
+#[test]
+fn e2e_router_bare_switching_response_never_acquires_listener_transport() {
+    common::init_test_logging();
+
+    let runtime = RuntimeBuilder::new()
+        .worker_threads(2)
+        .build()
+        .expect("build runtime");
+    let handle = runtime.handle();
+
+    runtime.block_on(async move {
+        let router = Router::new().route(
+            "/ws",
+            get(FnHandler1::<_, WebSocketUpgrade>::new(
+                |upgrade: WebSocketUpgrade| upgrade.skip_origin_check(),
+            )),
+        );
+        let listener = Http1Listener::bind_with_config(
+            "127.0.0.1:0",
+            router.into_http1_handler(),
+            Http1ListenerConfig::default().http_config(Http1Config {
+                allowed_hosts: HostPolicy::allow_list(vec!["localhost".to_owned()]),
+                ..Http1Config::default()
+            }),
+        )
+        .await
+        .expect("bind HTTP/1 listener");
+        let addr = listener.local_addr().expect("listener address");
+        let manager = listener.connection_manager().clone();
+        let run_handle = handle
+            .clone()
+            .try_spawn(async move { listener.run(&handle).await })
+            .expect("spawn HTTP/1 listener");
+
+        let mut client = TcpStream::connect(addr).await.expect("connect client");
+        let mut request_and_frame = b"GET /ws HTTP/1.1\r\n\
+            Host: localhost\r\n\
+            Upgrade: websocket\r\n\
+            Connection: Upgrade\r\n\
+            Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+            Sec-WebSocket-Version: 13\r\n\
+            \r\n"
+            .to_vec();
+        request_and_frame.extend_from_slice(&[
+            0x81, 0x85, 0x37, 0xfa, 0x21, 0x3d, 0x7f, 0x9f, 0x4d, 0x51, 0x58,
+        ]);
+        client
+            .write_all(&request_and_frame)
+            .await
+            .expect("write bare upgrade and frame");
+
+        let response_head = read_http_head(&mut client).await;
+        assert!(response_head.starts_with(b"HTTP/1.1 101"));
+        let mut byte = [0_u8; 1];
+        assert_eq!(
+            client.read(&mut byte).await.expect("read listener close"),
+            0,
+            "a bare 101 must close instead of parsing or echoing WebSocket bytes"
+        );
+        drop(client);
+
+        for _ in 0..400 {
+            if manager.is_empty() {
+                break;
+            }
+            asupersync::time::sleep(asupersync::time::wall_now(), Duration::from_millis(5)).await;
+        }
+        assert!(manager.is_empty());
+        assert!(manager.begin_drain(Duration::from_secs(2)));
+        let stats = run_handle.await.expect("listener result");
+        assert_eq!(stats.force_closed, 0);
+    });
 }

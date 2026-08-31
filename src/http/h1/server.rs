@@ -446,6 +446,109 @@ pub struct ConnectionState {
     pub phase: ConnectionPhase,
 }
 
+/// Boxed future that owns one committed HTTP/1 upgraded connection.
+pub type Http1UpgradeFuture = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
+
+/// One-shot action executed after an HTTP/1 upgrade response is fully flushed.
+///
+/// The action is intentionally native-listener scoped: it receives the same
+/// TCP stream owned by the listener connection task plus every byte the HTTP
+/// codec read beyond the request. It must not spawn or detach its own owner.
+pub struct Http1Upgrade {
+    driver: Box<
+        dyn FnOnce(Cx, crate::net::tcp::stream::TcpStream, BytesMut) -> Http1UpgradeFuture
+            + Send
+            + 'static,
+    >,
+}
+
+impl std::fmt::Debug for Http1Upgrade {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Http1Upgrade").finish_non_exhaustive()
+    }
+}
+
+impl Http1Upgrade {
+    /// Create a one-shot native HTTP/1 upgrade action.
+    #[must_use]
+    pub fn new<F, Fut>(driver: F) -> Self
+    where
+        F: FnOnce(Cx, crate::net::tcp::stream::TcpStream, BytesMut) -> Fut + Send + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        Self {
+            driver: Box::new(move |cx, io, read_ahead| Box::pin(driver(cx, io, read_ahead))),
+        }
+    }
+
+    pub(crate) fn run(
+        self,
+        cx: Cx,
+        io: crate::net::tcp::stream::TcpStream,
+        read_ahead: BytesMut,
+    ) -> Http1UpgradeFuture {
+        (self.driver)(cx, io, read_ahead)
+    }
+}
+
+/// HTTP/1 response envelope with an optional explicit ownership handoff.
+///
+/// Plain [`Response`] handlers remain source-compatible through
+/// [`IntoHttp1Response`]. A bare `101 Switching Protocols` response never
+/// transfers the transport; ownership requires the one-shot action.
+#[derive(Debug)]
+pub struct Http1Response {
+    /// Wire response to validate and flush before any handoff.
+    pub response: Response,
+    upgrade: Option<Http1Upgrade>,
+}
+
+impl Http1Response {
+    /// Wrap an ordinary response with no ownership handoff.
+    #[must_use]
+    pub fn new(response: Response) -> Self {
+        Self {
+            response,
+            upgrade: None,
+        }
+    }
+
+    /// Attach an explicit one-shot upgrade action.
+    #[must_use]
+    pub fn with_upgrade(mut self, upgrade: Http1Upgrade) -> Self {
+        self.upgrade = Some(upgrade);
+        self
+    }
+}
+
+/// Conversion accepted by [`Http1Server`] and the production HTTP/1 listener.
+pub trait IntoHttp1Response {
+    /// Convert into the explicit HTTP/1 response envelope.
+    fn into_h1_response(self) -> Http1Response;
+}
+
+impl IntoHttp1Response for Response {
+    fn into_h1_response(self) -> Http1Response {
+        Http1Response::new(self)
+    }
+}
+
+impl IntoHttp1Response for Http1Response {
+    fn into_h1_response(self) -> Http1Response {
+        self
+    }
+}
+
+/// Terminal result from the listener-only upgrade-aware connection driver.
+pub(crate) enum Http1ServeOutcome<T> {
+    Closed(ConnectionState),
+    Upgraded {
+        io: T,
+        read_ahead: BytesMut,
+        upgrade: Http1Upgrade,
+    },
+}
+
 /// Connection lifecycle phases.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnectionPhase {
@@ -543,10 +646,11 @@ pub struct Http1Server<F> {
     in_flight_requests: Option<Arc<AtomicUsize>>,
 }
 
-impl<F, Fut> Http1Server<F>
+impl<F, Fut, R> Http1Server<F>
 where
     F: Fn(Request) -> Fut + Send + Sync,
-    Fut: Future<Output = Response> + Send,
+    Fut: Future<Output = R> + Send,
+    R: IntoHttp1Response,
 {
     /// Create a new server with the given handler function.
     pub fn new(handler: F) -> Self {
@@ -699,6 +803,39 @@ where
         io: T,
         peer_addr: Option<SocketAddr>,
     ) -> Result<ConnectionState, HttpError>
+    where
+        T: AsyncRead + AsyncWrite + Unpin + Send,
+    {
+        match self
+            .serve_connection_with_peer_addr(io, peer_addr, false)
+            .await?
+        {
+            Http1ServeOutcome::Closed(state) => Ok(state),
+            Http1ServeOutcome::Upgraded { .. } => {
+                unreachable!("the compatibility serve path never admits an ownership handoff")
+            }
+        }
+    }
+
+    pub(crate) async fn serve_upgradeable_with_peer_addr<T>(
+        self,
+        io: T,
+        peer_addr: Option<SocketAddr>,
+    ) -> Result<Http1ServeOutcome<T>, HttpError>
+    where
+        T: AsyncRead + AsyncWrite + Unpin + Send,
+    {
+        self.serve_connection_with_peer_addr(io, peer_addr, true)
+            .await
+    }
+
+    #[allow(clippy::too_many_lines)]
+    async fn serve_connection_with_peer_addr<T>(
+        self,
+        io: T,
+        peer_addr: Option<SocketAddr>,
+        admit_upgrade: bool,
+    ) -> Result<Http1ServeOutcome<T>, HttpError>
     where
         T: AsyncRead + AsyncWrite + Unpin + Send,
     {
@@ -913,8 +1050,9 @@ where
                 self.config.request_timeout_header_cap,
             );
 
+            let upgrade_request = req.clone();
             let mut forced_close = false;
-            let mut resp = match ServerRequestRegion::mint("h1", request_budget, request_now) {
+            let output = match ServerRequestRegion::mint("h1", request_budget, request_now) {
                 Some(region) => {
                     // Race the whole hop against ForceClosing so slow
                     // handlers don't block shutdown (drop is the backstop).
@@ -934,7 +1072,7 @@ where
                             state.phase = ConnectionPhase::Closing;
                             break;
                         }
-                        Some(ServerHopOutcome::Ok(resp)) => resp,
+                        Some(ServerHopOutcome::Ok(resp)) => resp.into_h1_response(),
                         Some(ServerHopOutcome::Cancelled | ServerHopOutcome::ConnectionLost) => {
                             // The connection is cancelled or the peer is
                             // gone: nothing useful can be written back.
@@ -946,16 +1084,20 @@ where
                             // Panic isolation: the server survives; this
                             // connection closes defensively after the 500.
                             forced_close = true;
-                            hop_error_response(request_version, 500, "Internal Server Error")
+                            Http1Response::new(hop_error_response(
+                                request_version,
+                                500,
+                                "Internal Server Error",
+                            ))
                         }
                         Some(ServerHopOutcome::DeadlineExceeded) => {
                             // The request was fully read and the response
                             // framing is clean, so keep-alive may continue.
-                            hop_error_response(
+                            Http1Response::new(hop_error_response(
                                 request_version,
                                 503,
                                 "request budget deadline exceeded",
-                            )
+                            ))
                         }
                     }
                 }
@@ -968,9 +1110,14 @@ where
                         state.phase = ConnectionPhase::Closing;
                         break;
                     };
-                    resp
+                    resp.into_h1_response()
                 }
             };
+
+            let Http1Response {
+                response: mut resp,
+                upgrade,
+            } = output;
 
             if request_method == Method::Head {
                 suppress_response_body_for_head(&mut resp);
@@ -987,18 +1134,44 @@ where
                 .as_ref()
                 .is_some_and(ShutdownSignal::is_shutting_down);
 
-            let close_after = finalize_response_persistence(
-                request_version,
-                &mut resp,
-                close_after || forced_close || draining,
-            );
+            let upgrade = match upgrade {
+                Some(upgrade) => {
+                    if !admit_upgrade {
+                        return Err(invalid_upgrade_error(
+                            "HTTP/1 upgrade action requires an upgrade-aware listener",
+                        ));
+                    }
+                    if draining {
+                        return Err(invalid_upgrade_error(
+                            "HTTP/1 upgrade refused after listener drain began",
+                        ));
+                    }
+                    validate_upgrade_handoff(&upgrade_request, &resp)?;
+                    Some(upgrade)
+                }
+                None => None,
+            };
+
+            // A bare 101 remains an ordinary response but closes the HTTP
+            // parser after it is flushed. Only an explicit action may acquire
+            // the transport and its read-ahead bytes.
+            let close_after = if upgrade.is_some() {
+                false
+            } else {
+                let bare_switch = resp.status == 101;
+                finalize_response_persistence(
+                    request_version,
+                    &mut resp,
+                    close_after || forced_close || draining || bare_switch,
+                )
+            };
 
             state.phase = ConnectionPhase::Writing;
 
             // Write response
             framed.send(resp)?;
             // `Framed::send` only encodes into the internal write buffer; flush to the socket.
-            poll_fn(|cx| {
+            let flush = poll_fn(|cx| {
                 if Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
                     return Poll::Ready(Err(HttpError::Io(std::io::Error::new(
                         std::io::ErrorKind::Interrupted,
@@ -1006,13 +1179,34 @@ where
                     ))));
                 }
                 framed.poll_flush(cx).map_err(HttpError::Io)
-            })
-            .await?;
+            });
+            let Some(flush_result) = race_force_close(self.shutdown_signal.as_ref(), flush).await
+            else {
+                return Err(HttpError::Io(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "connection force-closed before response flush",
+                )));
+            };
+            flush_result?;
 
             state.requests_served += 1;
             state.last_request_at = Cx::current()
                 .and_then(|cx| cx.timer_driver())
                 .map_or_else(wall_now, |timer| timer.now());
+
+            if let Some(upgrade) = upgrade {
+                let parts = framed.into_parts();
+                if !parts.write_buf.is_empty() {
+                    return Err(invalid_upgrade_error(
+                        "HTTP/1 upgrade flush left pending response bytes",
+                    ));
+                }
+                return Ok(Http1ServeOutcome::Upgraded {
+                    io: parts.inner,
+                    read_ahead: parts.read_buf,
+                    upgrade,
+                });
+            }
 
             if close_after {
                 state.phase = ConnectionPhase::Closing;
@@ -1024,7 +1218,7 @@ where
         let mut io = framed.into_inner();
         let _ = io.shutdown().await;
 
-        Ok(state)
+        Ok(Http1ServeOutcome::Closed(state))
     }
 }
 
@@ -1535,6 +1729,93 @@ fn hop_error_response(version: Version, status: u16, body: &str) -> Response {
         body: body.as_bytes().to_vec(),
         trailers: Vec::new(),
     }
+}
+
+fn invalid_upgrade_error(message: &'static str) -> HttpError {
+    HttpError::Io(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        message,
+    ))
+}
+
+fn headers_have_token(headers: &[(String, String)], name: &str, expected: &[u8]) -> bool {
+    let mut found = false;
+    for (header_name, value) in headers {
+        if !header_name.eq_ignore_ascii_case(name) {
+            continue;
+        }
+        for_each_header_value_token(value.as_bytes(), |token| {
+            if token.eq_ignore_ascii_case(expected) {
+                found = true;
+            }
+        });
+    }
+    found
+}
+
+fn single_header_value<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
+    let mut values = headers
+        .iter()
+        .filter(|(header_name, _)| header_name.eq_ignore_ascii_case(name))
+        .map(|(_, value)| value.as_str());
+    let value = values.next()?;
+    if values.next().is_some() {
+        return None;
+    }
+    Some(value)
+}
+
+fn validate_upgrade_handoff(request: &Request, response: &Response) -> Result<(), HttpError> {
+    if request.version != Version::Http11 || request.method != Method::Get {
+        return Err(invalid_upgrade_error(
+            "WebSocket handoff requires an HTTP/1.1 GET request",
+        ));
+    }
+    if !request.body.is_empty() || !request.trailers.is_empty() {
+        return Err(invalid_upgrade_error(
+            "WebSocket handoff request must not carry a body or trailers",
+        ));
+    }
+    if request
+        .headers
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case("transfer-encoding"))
+    {
+        return Err(invalid_upgrade_error(
+            "WebSocket handoff request must not use transfer encoding",
+        ));
+    }
+    if !headers_have_token(&request.headers, "connection", b"upgrade")
+        || !headers_have_token(&request.headers, "upgrade", b"websocket")
+    {
+        return Err(invalid_upgrade_error(
+            "WebSocket handoff request is missing Upgrade tokens",
+        ));
+    }
+    let Some(websocket_key) = single_header_value(&request.headers, "sec-websocket-key") else {
+        return Err(invalid_upgrade_error(
+            "WebSocket handoff request has invalid version or key headers",
+        ));
+    };
+    if single_header_value(&request.headers, "sec-websocket-version") != Some("13") {
+        return Err(invalid_upgrade_error(
+            "WebSocket handoff request has invalid version or key headers",
+        ));
+    }
+    let expected_accept = crate::net::websocket::compute_accept_key(websocket_key);
+    if response.status != 101
+        || !response.body.is_empty()
+        || !response.trailers.is_empty()
+        || !headers_have_token(&response.headers, "connection", b"upgrade")
+        || !headers_have_token(&response.headers, "upgrade", b"websocket")
+        || single_header_value(&response.headers, "sec-websocket-accept")
+            != Some(expected_accept.as_str())
+    {
+        return Err(invalid_upgrade_error(
+            "WebSocket handoff requires a complete empty 101 response",
+        ));
+    }
+    Ok(())
 }
 
 fn read_error(err: HttpError, continue_sent: bool) -> ReadOutcome {
@@ -3433,15 +3714,16 @@ mod tests {
 
     #[test]
     fn serve_handler_panic_maps_to_500_and_closes_connection() {
+        async fn panicking_handler(_request: Request) -> Response {
+            panic!("handler exploded");
+        }
+
         let written = Arc::new(Mutex::new(Vec::new()));
         let io = TestIo::new(
             b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n".to_vec(),
             Arc::clone(&written),
         );
-        let server = Http1Server::with_config(
-            |_req| async move { panic!("handler exploded") },
-            localhost_server_config(),
-        );
+        let server = Http1Server::with_config(panicking_handler, localhost_server_config());
         let runtime = RuntimeBuilder::current_thread()
             .build()
             .expect("build current-thread runtime");

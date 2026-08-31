@@ -4,8 +4,8 @@
 //! each to an [`Http1Server`] handler. Integrates with [`ConnectionManager`]
 //! for capacity limits and [`ShutdownSignal`] for graceful drain.
 
-use crate::http::h1::server::{Http1Config, Http1Server};
-use crate::http::h1::types::{Request, Response};
+use crate::http::h1::server::{Http1Config, Http1ServeOutcome, Http1Server, IntoHttp1Response};
+use crate::http::h1::types::Request;
 use crate::net::tcp::listener::TcpListener;
 use crate::runtime::{JoinHandle, RuntimeHandle, SpawnError};
 use crate::server::connection::{ConnectionGuard, ConnectionManager};
@@ -14,7 +14,10 @@ use crate::server::shutdown::{
     ShutdownStats,
 };
 use crate::tracing_compat::error;
-use crate::{cx::Cx, types::Time};
+use crate::{
+    cx::Cx,
+    types::{CancelKind, Time},
+};
 use std::future::Future;
 use std::io;
 use std::net::{SocketAddr, ToSocketAddrs};
@@ -354,10 +357,11 @@ pub struct Http1Listener<F> {
     in_flight_requests: Arc<AtomicUsize>,
 }
 
-impl<F, Fut> Http1Listener<F>
+impl<F, Fut, R> Http1Listener<F>
 where
     F: Fn(Request) -> Fut + Send + Sync + 'static,
-    Fut: Future<Output = Response> + Send + 'static,
+    Fut: Future<Output = R> + Send + 'static,
+    R: IntoHttp1Response + Send + 'static,
 {
     /// Bind to the given address with default configuration.
     pub async fn bind<A: ToSocketAddrs + Send + 'static>(addr: A, handler: F) -> io::Result<Self> {
@@ -700,7 +704,7 @@ enum AcceptOrShutdown {
 ///
 /// The connection guard is held for the lifetime of the handler,
 /// ensuring proper tracking during drain.
-fn spawn_connection<F, Fut>(
+fn spawn_connection<F, Fut, R>(
     stream: crate::net::tcp::stream::TcpStream,
     guard: ConnectionGuard,
     handler: Arc<F>,
@@ -711,17 +715,62 @@ fn spawn_connection<F, Fut>(
 ) -> Result<JoinHandle<()>, SpawnError>
 where
     F: Fn(Request) -> Fut + Send + Sync + 'static,
-    Fut: Future<Output = Response> + Send + 'static,
+    Fut: Future<Output = R> + Send + 'static,
+    R: IntoHttp1Response + Send + 'static,
 {
     let handle = runtime.try_spawn(async move {
         let _guard = guard;
         let server = Http1Server::with_config(move |req| handler(req), config)
-            .with_shutdown_signal(shutdown_signal)
+            .with_shutdown_signal(shutdown_signal.clone())
             .with_in_flight_requests(in_flight_requests);
         let peer_addr = stream.peer_addr().ok();
-        let _ = server.serve_with_peer_addr(stream, peer_addr).await;
+        if let Ok(Http1ServeOutcome::Upgraded {
+            io,
+            read_ahead,
+            upgrade,
+            ..
+        }) = server
+            .serve_upgradeable_with_peer_addr(stream, peer_addr)
+            .await
+            && let Some(session_cx) = Cx::current()
+        {
+            let session = upgrade.run(session_cx.clone(), io, read_ahead);
+            run_upgrade_session(&shutdown_signal, session_cx, session).await;
+        }
     })?;
     Ok(handle)
+}
+
+async fn run_upgrade_session<F>(shutdown: &ShutdownSignal, session_cx: Cx, session: F)
+where
+    F: Future<Output = ()>,
+{
+    let mut session = core::pin::pin!(session);
+    let mut draining = core::pin::pin!(shutdown.wait_for_phase(ShutdownPhase::Draining));
+    let mut force_closing = core::pin::pin!(shutdown.wait_for_phase(ShutdownPhase::ForceClosing));
+    let mut drain_signalled = false;
+
+    std::future::poll_fn(|task_cx| {
+        if shutdown.phase() as u8 >= ShutdownPhase::ForceClosing as u8
+            || force_closing.as_mut().poll(task_cx).is_ready()
+        {
+            return Poll::Ready(());
+        }
+
+        if !drain_signalled
+            && (shutdown.phase() as u8 >= ShutdownPhase::Draining as u8
+                || draining.as_mut().poll(task_cx).is_ready())
+        {
+            drain_signalled = true;
+            session_cx.cancel_with(
+                CancelKind::Shutdown,
+                Some("HTTP/1 upgraded session draining"),
+            );
+        }
+
+        session.as_mut().poll(task_cx)
+    })
+    .await;
 }
 
 #[derive(Default)]

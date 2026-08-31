@@ -392,6 +392,42 @@ Override via `RuntimeBuilder::obligation_leak_response(...)` or
     `websocket_rfc6455` suite for framing, masking, control-frame, close,
     error-handling, extension, and fragmentation coverage.
   - Runtime/e2e tests: `tests/e2e_websocket.rs` and `tests/e2e/websocket/`
+  - Production HTTP/1 router/listener bridge:
+
+    ```rust,ignore
+    let router = Router::new().route(
+        "/ws",
+        get(FnHandler1::<_, WebSocketUpgrade>::new(
+            |upgrade: WebSocketUpgrade| {
+                upgrade
+                    .allow_origins(["https://app.example.com"])
+                    .on_upgrade(|cx, mut websocket| async move {
+                        while let Ok(Some(message)) = websocket.recv(&cx).await {
+                            if websocket.send(&cx, message).await.is_err() {
+                                break;
+                            }
+                        }
+                    })
+            },
+        )),
+    );
+    let listener = Http1Listener::bind(
+        "127.0.0.1:8080",
+        router.into_http1_handler(),
+    ).await?;
+    let stats = listener.run(&runtime_handle).await?;
+    ```
+
+    `on_upgrade` is a request-scoped, one-shot ownership transfer. The listener
+    validates and completely flushes the final `101`, then seeds any HTTP-codec
+    read-ahead into the WebSocket decoder and runs the callback inline under the
+    connection guard. Graceful drain cancels the callback `Cx`; force-close
+    drops the callback and socket. Bare `101` responses close after flush but
+    never transfer ownership, and a registered callback whose response is
+    later mutated fails closed with `500`. The bridge is native HTTP/1 only;
+    selected extensions currently return `501` rather than falsely negotiating
+    `permessage-deflate`, and this path makes no HTTP/2 extended-CONNECT or
+    automatic keepalive claim.
 - HTTP/3: `src/http/h3_native.rs` (native frame/settings/control-stream and
   QPACK field-section primitives)
   - Default support is default static-only QPACK.

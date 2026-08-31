@@ -219,6 +219,28 @@ impl WebSocketAcceptor {
         Ok(ws)
     }
 
+    /// Finish an upgrade whose HTTP `101 Switching Protocols` response has
+    /// already been flushed by an outer HTTP/1 server.
+    ///
+    /// This is the second half of a two-phase upgrade. The caller owns the
+    /// commit point: it must validate the request, build `accept_response`, and
+    /// completely flush that response before calling this method. No HTTP bytes
+    /// are written here. Any bytes the HTTP codec read beyond the request head
+    /// must be supplied in `read_ahead`; they are seeded into the WebSocket
+    /// decoder before the transport is polled again.
+    #[must_use]
+    pub fn finish_upgrade<IO>(
+        &self,
+        io: IO,
+        accept_response: AcceptResponse,
+        read_ahead: &[u8],
+    ) -> ServerWebSocket<IO>
+    where
+        IO: AsyncRead + AsyncWrite + Unpin,
+    {
+        ServerWebSocket::from_upgraded(io, self.config.clone(), accept_response, read_ahead)
+    }
+
     /// Reject an upgrade request with the given HTTP status code.
     ///
     /// # Arguments

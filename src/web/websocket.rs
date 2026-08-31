@@ -29,13 +29,76 @@
 //!
 //! The actual bidirectional communication uses `ServerWebSocket`.
 
-use crate::net::websocket::{WebSocketAcceptor, compute_accept_key};
+use crate::net::websocket::{AcceptResponse, WebSocketAcceptor, compute_accept_key};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::{Cx, http::h1::Http1Upgrade, net::tcp::stream::TcpStream};
+#[cfg(not(target_arch = "wasm32"))]
+use std::future::Future;
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::Arc;
 
 use super::extract::{ExtractionError, FromRequest, Request};
 use super::response::{IntoResponse, Response, StatusCode};
 
 // Re-export the key types users need for WebSocket communication.
 pub use crate::net::websocket::{CloseReason, Message, ServerWebSocket};
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Default)]
+pub(crate) struct Http1UpgradeSlot {
+    state: Arc<parking_lot::Mutex<Http1UpgradeSlotState>>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Default)]
+enum Http1UpgradeSlotState {
+    #[default]
+    Empty,
+    Registered(Http1Upgrade),
+    Rejected,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl std::fmt::Debug for Http1UpgradeSlot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Http1UpgradeSlot")
+            .field(
+                "state",
+                &match &*self.state.lock() {
+                    Http1UpgradeSlotState::Empty => "empty",
+                    Http1UpgradeSlotState::Registered(_) => "registered",
+                    Http1UpgradeSlotState::Rejected => "rejected",
+                },
+            )
+            .finish()
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Http1UpgradeSlot {
+    pub(crate) fn register(&self, action: Http1Upgrade) -> Result<(), Http1Upgrade> {
+        let mut state = self.state.lock();
+        if matches!(*state, Http1UpgradeSlotState::Empty) {
+            *state = Http1UpgradeSlotState::Registered(action);
+            Ok(())
+        } else {
+            // Poison the whole request on a duplicate attempt. Otherwise a
+            // handler could ignore the second 500 and return the first 101,
+            // accidentally committing a callback after violating one-shot
+            // registration.
+            *state = Http1UpgradeSlotState::Rejected;
+            Err(action)
+        }
+    }
+
+    pub(crate) fn take(&self) -> Result<Option<Http1Upgrade>, ()> {
+        match std::mem::take(&mut *self.state.lock()) {
+            Http1UpgradeSlotState::Empty => Ok(None),
+            Http1UpgradeSlotState::Registered(action) => Ok(Some(action)),
+            Http1UpgradeSlotState::Rejected => Err(()),
+        }
+    }
+}
 
 /// WebSocket upgrade extractor.
 ///
@@ -107,6 +170,8 @@ pub struct WebSocketUpgrade {
     /// `SameOrigin` so any caller that forgets to call `.allow_origins()`
     /// or `.skip_origin_check()` still gets CSWSH defense.
     origin_policy: OriginPolicy,
+    #[cfg(not(target_arch = "wasm32"))]
+    http1_upgrade_slot: Option<Http1UpgradeSlot>,
 }
 
 impl FromRequest for WebSocketUpgrade {
@@ -196,6 +261,8 @@ impl FromRequest for WebSocketUpgrade {
         // `.skip_origin_check()` before returning the upgrade.
         let origin = req.header("origin").map(ToOwned::to_owned);
         let host = req.header("host").map(ToOwned::to_owned);
+        #[cfg(not(target_arch = "wasm32"))]
+        let http1_upgrade_slot = req.extensions.get_typed_cloned::<Http1UpgradeSlot>();
 
         Ok(Self {
             accept_key,
@@ -206,6 +273,8 @@ impl FromRequest for WebSocketUpgrade {
             origin,
             host,
             origin_policy: OriginPolicy::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            http1_upgrade_slot,
         })
     }
 }
@@ -326,6 +395,82 @@ impl WebSocketUpgrade {
         self
     }
 
+    /// Commit this handshake to a live HTTP/1 WebSocket session.
+    ///
+    /// The callback is registered in the current request's one-shot listener
+    /// slot. It runs inline in the listener connection task only after the
+    /// `101 Switching Protocols` response is completely flushed, with the
+    /// listener-owned [`Cx`] and every codec-prefetched byte preserved.
+    /// Calling this through a non-HTTP/1 router adapter fails closed with a
+    /// `500` response because no transport slot exists.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub fn on_upgrade<F, Fut>(self, callback: F) -> Response
+    where
+        F: FnOnce(Cx, ServerWebSocket<TcpStream>) -> Fut + Send + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        if let Err(reason) = self.evaluate_origin() {
+            return Self::plain_response(StatusCode::FORBIDDEN, reason);
+        }
+        if !self.selected_extensions.is_empty() {
+            return Self::plain_response(
+                StatusCode::NOT_IMPLEMENTED,
+                "selected WebSocket extensions are not implemented on the live HTTP/1 path",
+            );
+        }
+        let Some(slot) = self.http1_upgrade_slot.clone() else {
+            return Self::plain_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "HTTP/1 WebSocket upgrade transport unavailable",
+            );
+        };
+
+        let response = self.switching_protocols_response();
+        let accept_response = AcceptResponse {
+            accept_key: self.accept_key.clone(),
+            protocol: self.selected_protocol.clone(),
+            extensions: self.selected_extensions.clone(),
+        };
+        let acceptor = self.acceptor();
+        let action = Http1Upgrade::new(move |cx, io, read_ahead| async move {
+            let websocket = acceptor.finish_upgrade(io, accept_response, &read_ahead);
+            callback(cx, websocket).await;
+        });
+        if slot.register(action).is_err() {
+            return Self::plain_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "HTTP/1 WebSocket upgrade callback already registered",
+            );
+        }
+        response
+    }
+
+    fn plain_response(status: StatusCode, body: &'static str) -> Response {
+        Response::new(status, crate::bytes::Bytes::from_static(body.as_bytes()))
+            .header("content-type", "text/plain; charset=utf-8")
+    }
+
+    fn switching_protocols_response(&self) -> Response {
+        let mut response = Response::empty(StatusCode::SWITCHING_PROTOCOLS)
+            .header("upgrade", "websocket")
+            .header("connection", "Upgrade")
+            .header("sec-websocket-accept", &self.accept_key);
+
+        if let Some(ref protocol) = self.selected_protocol {
+            response = response.header("sec-websocket-protocol", protocol);
+        }
+
+        if !self.selected_extensions.is_empty() {
+            response = response.header(
+                "sec-websocket-extensions",
+                self.selected_extensions.join(", "),
+            );
+        }
+
+        response
+    }
+
     /// Evaluate the configured `OriginPolicy` against the captured
     /// `Origin` / `Host` headers. `Ok(())` means the upgrade may proceed;
     /// `Err(reason)` means the response must be a 403. Browsers always
@@ -400,30 +545,9 @@ impl IntoResponse for WebSocketUpgrade {
         // a fixed string and the rejected Origin is NOT echoed back, so
         // the response is not itself a per-request oracle.
         if let Err(reason) = self.evaluate_origin() {
-            return Response::new(
-                StatusCode::FORBIDDEN,
-                crate::bytes::Bytes::from_static(reason.as_bytes()),
-            )
-            .header("content-type", "text/plain; charset=utf-8");
+            return Self::plain_response(StatusCode::FORBIDDEN, reason);
         }
-
-        let mut resp = Response::empty(StatusCode::SWITCHING_PROTOCOLS)
-            .header("upgrade", "websocket")
-            .header("connection", "Upgrade")
-            .header("sec-websocket-accept", &self.accept_key);
-
-        if let Some(ref protocol) = self.selected_protocol {
-            resp = resp.header("sec-websocket-protocol", protocol);
-        }
-
-        if !self.selected_extensions.is_empty() {
-            resp = resp.header(
-                "sec-websocket-extensions",
-                self.selected_extensions.join(", "),
-            );
-        }
-
-        resp
+        self.switching_protocols_response()
     }
 }
 
@@ -460,6 +584,87 @@ mod tests {
         let upgrade = WebSocketUpgrade::from_request(req).unwrap();
         // RFC 6455 example: dGhlIHNhbXBsZSBub25jZQ== → s3pPLMBiTxaQ9kYGzzhZRbK+xOo=
         assert_eq!(upgrade.accept_key(), "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn on_upgrade_requires_http1_transport_slot() {
+        let response = WebSocketUpgrade::from_request(ws_request())
+            .unwrap()
+            .skip_origin_check()
+            .on_upgrade(|_, _| async {});
+
+        assert_eq!(response.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            response.body,
+            Bytes::from_static(b"HTTP/1 WebSocket upgrade transport unavailable")
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn on_upgrade_registers_exactly_one_callback() {
+        let slot = Http1UpgradeSlot::default();
+        let mut first_request = ws_request();
+        first_request.extensions.insert_typed(slot.clone());
+        let mut second_request = ws_request();
+        second_request.extensions.insert_typed(slot.clone());
+
+        let first = WebSocketUpgrade::from_request(first_request)
+            .unwrap()
+            .skip_origin_check()
+            .on_upgrade(|_, _| async {});
+        let second = WebSocketUpgrade::from_request(second_request)
+            .unwrap()
+            .skip_origin_check()
+            .on_upgrade(|_, _| async {});
+
+        assert_eq!(first.status, StatusCode::SWITCHING_PROTOCOLS);
+        assert_eq!(second.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            second.body,
+            Bytes::from_static(b"HTTP/1 WebSocket upgrade callback already registered")
+        );
+        assert!(
+            slot.take().is_err(),
+            "a duplicate attempt poisons the request instead of retaining either callback"
+        );
+        assert!(slot.take().unwrap().is_none(), "the slot resets after take");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn rejected_origin_does_not_register_upgrade_callback() {
+        let slot = Http1UpgradeSlot::default();
+        let mut request = ws_request()
+            .with_header("host", "api.example.com")
+            .with_header("origin", "https://evil.example");
+        request.extensions.insert_typed(slot.clone());
+
+        let response = WebSocketUpgrade::from_request(request)
+            .unwrap()
+            .on_upgrade(|_, _| async {});
+
+        assert_eq!(response.status, StatusCode::FORBIDDEN);
+        assert!(slot.take().unwrap().is_none());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn unimplemented_extension_does_not_register_upgrade_callback() {
+        let slot = Http1UpgradeSlot::default();
+        let mut request =
+            ws_request().with_header("sec-websocket-extensions", "permessage-deflate");
+        request.extensions.insert_typed(slot.clone());
+
+        let response = WebSocketUpgrade::from_request(request)
+            .unwrap()
+            .skip_origin_check()
+            .extensions(["permessage-deflate"])
+            .on_upgrade(|_, _| async {});
+
+        assert_eq!(response.status, StatusCode::NOT_IMPLEMENTED);
+        assert!(slot.take().unwrap().is_none());
     }
 
     // ─── CSWSH origin-validation tests (br-asupersync-o2t5gz) ─────────

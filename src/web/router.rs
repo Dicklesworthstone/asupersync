@@ -27,7 +27,11 @@ use super::middleware::{
     RequestLogSink, RequestTracePolicy, resolve_trace_id, trace_request, wall_clock_now,
 };
 use super::response::{IntoResponse, Response, StatusCode};
+#[cfg(not(target_arch = "wasm32"))]
+use super::websocket::Http1UpgradeSlot;
 use crate::Cx;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::http::h1::server::Http1Response;
 use crate::http::h1::types::{Request as HttpRequest, Response as HttpResponse};
 use crate::service::Layer;
 use crate::types::{
@@ -466,6 +470,10 @@ pub struct Router {
 /// request and response types, so one router adapter serves both stacks.
 pub type HttpHandlerFuture = Pin<Box<dyn Future<Output = HttpResponse> + Send + 'static>>;
 
+/// Boxed response future returned by [`Router::into_http1_handler`].
+#[cfg(not(target_arch = "wasm32"))]
+pub type Http1HandlerFuture = Pin<Box<dyn Future<Output = Http1Response> + Send + 'static>>;
+
 /// Default-on request trace configuration for [`Router`]
 /// (br-asupersync-server-stack-hardening-eeexl1.3 AC3).
 struct DefaultTrace {
@@ -710,6 +718,38 @@ impl Router {
         }
     }
 
+    /// Convert this router into an HTTP/1-only handler that supports live
+    /// WebSocket ownership handoff.
+    ///
+    /// Ordinary responses are byte-for-byte identical to
+    /// [`Router::into_http_handler`]. A handler that calls
+    /// [`crate::web::websocket::WebSocketUpgrade::on_upgrade`] registers a
+    /// request-scoped one-shot action; the production HTTP/1 listener commits
+    /// that action only after the final valid `101` is completely flushed.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub fn into_http1_handler(
+        self,
+    ) -> impl Fn(HttpRequest) -> Http1HandlerFuture + Clone + Send + Sync + 'static {
+        let router = Arc::new(self);
+        move |request| {
+            let router = Arc::clone(&router);
+            Box::pin(async move {
+                let Some(cx) = Cx::current() else {
+                    return Http1Response::new(
+                        HttpResponse::new(
+                            500,
+                            "Internal Server Error",
+                            b"request context unavailable".to_vec(),
+                        )
+                        .with_header("content-type", "text/plain; charset=utf-8"),
+                    );
+                };
+                router.handle_http1_request_with_cx(&cx, request).await
+            })
+        }
+    }
+
     /// Dispatch one listener request through this router with an explicit
     /// capability context.
     ///
@@ -720,6 +760,47 @@ impl Router {
     pub async fn handle_http_request_with_cx(&self, cx: &Cx, request: HttpRequest) -> HttpResponse {
         let request = web_request_from_http(request);
         http_response_from_web(self.handle_with_cx(cx, request).await)
+    }
+
+    /// Dispatch one HTTP/1 request while retaining an explicit upgrade action.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn handle_http1_request_with_cx(
+        &self,
+        cx: &Cx,
+        request: HttpRequest,
+    ) -> Http1Response {
+        let slot = Http1UpgradeSlot::default();
+        let mut request = web_request_from_http(request);
+        request.extensions.insert_typed(slot.clone());
+        let response = http_response_from_web(self.handle_with_cx(cx, request).await);
+        let upgrade = match slot.take() {
+            Ok(None) => return Http1Response::new(response),
+            Ok(Some(upgrade)) => upgrade,
+            Err(()) => {
+                return Http1Response::new(
+                    HttpResponse::new(
+                        500,
+                        "Internal Server Error",
+                        b"duplicate WebSocket upgrade callback registration".to_vec(),
+                    )
+                    .with_header("content-type", "text/plain; charset=utf-8")
+                    .with_header("connection", "close"),
+                );
+            }
+        };
+        if valid_websocket_handoff_response(&response) {
+            Http1Response::new(response).with_upgrade(upgrade)
+        } else {
+            Http1Response::new(
+                HttpResponse::new(
+                    500,
+                    "Internal Server Error",
+                    b"registered WebSocket upgrade did not produce a valid final 101".to_vec(),
+                )
+                .with_header("content-type", "text/plain; charset=utf-8")
+                .with_header("connection", "close"),
+            )
+        }
     }
 
     /// Handle an incoming request with an explicit capability context.
@@ -923,6 +1004,26 @@ fn http_response_from_web(response: Response) -> HttpResponse {
         .headers(headers)
         .body(response.body.as_ref().to_vec())
         .build()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn valid_websocket_handoff_response(response: &HttpResponse) -> bool {
+    fn has_token(response: &HttpResponse, name: &str, expected: &str) -> bool {
+        response
+            .headers
+            .iter()
+            .filter(|(header_name, _)| header_name.eq_ignore_ascii_case(name))
+            .flat_map(|(_, value)| value.split(','))
+            .map(str::trim)
+            .any(|token| token.eq_ignore_ascii_case(expected))
+    }
+
+    response.status == 101
+        && response.body.is_empty()
+        && response.trailers.is_empty()
+        && has_token(response, "connection", "upgrade")
+        && has_token(response, "upgrade", "websocket")
+        && response.header_value("sec-websocket-accept").is_some()
 }
 
 /// Split origin-form and absolute-form request targets without decoding the

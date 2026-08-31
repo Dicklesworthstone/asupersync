@@ -42,8 +42,9 @@ pub use http_client::{
 pub use listener::{Http1Listener, Http1ListenerConfig};
 #[cfg(not(target_arch = "wasm32"))]
 pub use server::{
-    ConnectionPhase, ConnectionState, Http1Config, Http1Server, Http1StreamingConfig,
-    Http1StreamingServer,
+    ConnectionPhase, ConnectionState, Http1Config, Http1Response, Http1Server,
+    Http1StreamingConfig, Http1StreamingServer, Http1Upgrade, Http1UpgradeFuture,
+    IntoHttp1Response,
 };
 pub use stream::{
     BodyKind, ChunkedEncoder, IncomingBody, IncomingBodyError, IncomingBodyWriter,
