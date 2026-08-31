@@ -3133,7 +3133,7 @@ fn remote_service_cli_hosts_mtls_v3_and_drains_cross_process() {
     fs::write(
         &config_path,
         format!(
-            "schema_version = 1\nprotocol = \"3.0\"\nlisten = \"127.0.0.1:0\"\nserver_certificate_chain = \"{}\"\nserver_private_key = \"{}\"\nclient_ca_bundle = \"{}\"\nmax_frame_bytes = 65536\nmax_connections = 1\ntls_handshake_timeout_ms = 200\ninitial_frame_timeout_ms = 2000\ndrain_timeout_ms = 5000\nidempotency_retention_ms = 30000\nmax_idempotency_records_per_peer = 32\n\n[[peers]]\nnode_id = \"{AUTHORIZED_NODE}\"\nspki_sha256 = [\"{spki_pin}\"]\ncomputations = [\"{ECHO_COMPUTATION}\"]\n",
+            "schema_version = 2\nprotocol = \"3.0\"\nlisten = \"127.0.0.1:0\"\nlisten_scope = \"loopback_only\"\nserver_certificate_chain = \"{}\"\nserver_private_key = \"{}\"\nclient_ca_bundle = \"{}\"\nmax_frame_bytes = 65536\nmax_connections = 1\ntls_handshake_timeout_ms = 200\ninitial_frame_timeout_ms = 2000\ndrain_timeout_ms = 5000\nidempotency_retention_ms = 30000\nmax_idempotency_records_per_peer = 32\n\n[[peers]]\nnode_id = \"{AUTHORIZED_NODE}\"\nspki_sha256 = [\"{spki_pin}\"]\ncomputations = [\"{ECHO_COMPUTATION}\"]\n",
             certificate_path.display(),
             private_key_path.display(),
             ca_path.display(),
@@ -3185,7 +3185,9 @@ fn remote_service_cli_hosts_mtls_v3_and_drains_cross_process() {
 
     let ready =
         recv_remote_service_event(&line_rx, "remote_service_ready", Duration::from_secs(10));
+    assert_eq!(ready["schema_version"], 2);
     assert_eq!(ready["protocol"], "3.0");
+    assert_eq!(ready["listen_scope"], "loopback_only");
     assert_eq!(ready["authorized_peers"], 1);
     assert_eq!(
         ready["idempotency_scope"],

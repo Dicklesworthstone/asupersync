@@ -116,6 +116,7 @@ pub struct ConnectionManager {
     shutdown_signal: ShutdownSignal,
     all_closed: Arc<Notify>,
     drain_initial_count: Arc<AtomicUsize>,
+    force_close_initial_count: Arc<AtomicUsize>,
 }
 
 impl ConnectionManager {
@@ -151,6 +152,7 @@ impl ConnectionManager {
             shutdown_signal,
             all_closed: Arc::new(Notify::new()),
             drain_initial_count: Arc::new(AtomicUsize::new(DRAIN_COUNT_UNSET)),
+            force_close_initial_count: Arc::new(AtomicUsize::new(DRAIN_COUNT_UNSET)),
         }
     }
 
@@ -357,6 +359,25 @@ impl ConnectionManager {
         }
     }
 
+    /// Stops admission and captures the exact number of connections present at
+    /// the force-close boundary before waking their shutdown waiters.
+    ///
+    /// The snapshot is the operator force-close boundary. It is recorded while
+    /// holding the connection registry lock, but the lock is released before
+    /// notifying shutdown waiters so a reentrant waker cannot deadlock on the
+    /// registry.
+    pub fn force_close(&self) {
+        {
+            let connections = self.state.lock();
+            self.accepting.store(false, Ordering::Release);
+            if self.force_close_initial_count.load(Ordering::Acquire) == DRAIN_COUNT_UNSET {
+                self.force_close_initial_count
+                    .store(connections.len(), Ordering::Release);
+            }
+        }
+        self.shutdown_signal.trigger_immediate();
+    }
+
     /// Returns the number of active connections.
     #[must_use]
     pub fn active_count(&self) -> usize {
@@ -423,13 +444,23 @@ impl ConnectionManager {
     fn drain_started_count(&self) -> usize {
         let recorded = self.drain_initial_count.load(Ordering::Acquire);
         if recorded == DRAIN_COUNT_UNSET {
-            self.active_count()
+            let force_closed = self.force_close_initial_count.load(Ordering::Acquire);
+            if force_closed == DRAIN_COUNT_UNSET {
+                self.active_count()
+            } else {
+                force_closed
+            }
         } else {
             recorded
         }
     }
 
     fn drain_counts(&self, started_count: usize) -> (usize, usize) {
+        let force_closed = self.force_close_initial_count.load(Ordering::Acquire);
+        if force_closed != DRAIN_COUNT_UNSET {
+            let force_closed = force_closed.min(started_count);
+            return (started_count.saturating_sub(force_closed), force_closed);
+        }
         let remaining = self.active_count();
         (started_count.saturating_sub(remaining), remaining)
     }
@@ -463,16 +494,16 @@ impl ConnectionManager {
         }
 
         loop {
-            if self.is_empty() {
-                // All connections drained gracefully
-                let drained = initial_count;
-                self.shutdown_signal.mark_stopped();
-                return self.shutdown_signal.collect_stats(drained, 0);
-            }
-
             if self.shutdown_signal.phase() as u8 >= ShutdownPhase::ForceClosing as u8 {
                 let (drained, remaining) = self.drain_counts(initial_count);
                 return self.shutdown_signal.collect_stats(drained, remaining);
+            }
+
+            if self.is_empty() {
+                // All connections drained gracefully.
+                let drained = initial_count;
+                self.shutdown_signal.mark_stopped();
+                return self.shutdown_signal.collect_stats(drained, 0);
             }
 
             // Check if drain deadline has passed
@@ -494,15 +525,15 @@ impl ConnectionManager {
             let mut force_close = std::pin::pin!(force_close);
 
             // Re-check state after registration to avoid missing close/timeout
+            if self.shutdown_signal.phase() as u8 >= ShutdownPhase::ForceClosing as u8 {
+                let (drained, remaining) = self.drain_counts(initial_count);
+                return self.shutdown_signal.collect_stats(drained, remaining);
+            }
+
             if self.is_empty() {
                 let drained = initial_count;
                 self.shutdown_signal.mark_stopped();
                 return self.shutdown_signal.collect_stats(drained, 0);
-            }
-
-            if self.shutdown_signal.phase() as u8 >= ShutdownPhase::ForceClosing as u8 {
-                let (drained, remaining) = self.drain_counts(initial_count);
-                return self.shutdown_signal.collect_stats(drained, remaining);
             }
 
             if let Some(deadline) = self.shutdown_signal.drain_deadline() {
@@ -1363,6 +1394,74 @@ mod tests {
             ShutdownPhase::ForceClosing,
             signal.phase()
         );
+    }
+
+    #[test]
+    fn drain_with_stats_retains_force_close_snapshot_after_guards_drop() {
+        init_test("drain_with_stats_retains_force_close_snapshot_after_guards_drop");
+        crate::test_utils::run_test(|| async {
+            struct ReentrantConnectionWaker {
+                manager: ConnectionManager,
+                woke: std::sync::atomic::AtomicBool,
+            }
+
+            impl std::task::Wake for ReentrantConnectionWaker {
+                fn wake(self: Arc<Self>) {
+                    self.wake_by_ref();
+                }
+
+                fn wake_by_ref(self: &Arc<Self>) {
+                    let _ = self.manager.active_count();
+                    self.woke.store(true, Ordering::Release);
+                }
+            }
+
+            let signal = ShutdownSignal::new();
+            let manager = ConnectionManager::new(None, signal.clone());
+
+            let g1 = manager.register(test_addr(1)).expect("register 1");
+            let g2 = manager.register(test_addr(2)).expect("register 2");
+            let began = manager.begin_drain(Duration::from_secs(30));
+            crate::assert_with_log!(began, "drain started", true, began);
+
+            let reentrant = Arc::new(ReentrantConnectionWaker {
+                manager: manager.clone(),
+                woke: std::sync::atomic::AtomicBool::new(false),
+            });
+            let waker = Waker::from(Arc::clone(&reentrant));
+            let mut context = Context::from_waker(&waker);
+            let mut force_close = Box::pin(signal.wait_for_phase(ShutdownPhase::ForceClosing));
+            let pending = force_close.as_mut().poll(&mut context).is_pending();
+            crate::assert_with_log!(pending, "force-close waiter registered", true, pending);
+
+            manager.force_close();
+            crate::assert_with_log!(
+                reentrant.woke.load(Ordering::Acquire),
+                "force-close wake can reenter connection manager",
+                true,
+                reentrant.woke.load(Ordering::Acquire)
+            );
+            let ready = force_close.as_mut().poll(&mut context).is_ready();
+            crate::assert_with_log!(ready, "force-close waiter observes transition", true, ready);
+            drop(g1);
+            drop(g2);
+
+            let stats = manager.drain_with_stats().await;
+            crate::assert_with_log!(stats.drained == 0, "zero drained", 0, stats.drained);
+            crate::assert_with_log!(
+                stats.force_closed == 2,
+                "force-close snapshot retained after deregistration",
+                2,
+                stats.force_closed
+            );
+            crate::assert_with_log!(
+                signal.phase() == ShutdownPhase::ForceClosing,
+                "phase force-closing",
+                ShutdownPhase::ForceClosing,
+                signal.phase()
+            );
+        });
+        crate::test_complete!("drain_with_stats_retains_force_close_snapshot_after_guards_drop");
     }
 
     #[test]

@@ -992,9 +992,12 @@ the native TCP+mTLS V3 client/service transport, and `NativeRemoteRuntime`.
 Unix builds can additionally enable `remote-service` to run a supported static
 process host. That host binds the built-in `asupersync.remote.echo.v1`
 diagnostic computation to an exact protocol/registry fingerprint and explicit
-certificate-pinned peer grants. Discovery, multi-host/WAN policy, arbitrary
-application registries, and restart-durable idempotency remain open deployment
-concerns rather than blanket core-runtime claims.
+certificate-pinned peer grants. Service schema v2 makes non-loopback exposure
+an explicit fail-closed policy, and a terminal two-worker RCH acceptance run
+has exercised the packaged service and probe across distinct hosts. Active
+discovery, arbitrary application registries, restart-durable idempotency, and
+production WAN reliability remain open deployment concerns rather than blanket
+core-runtime claims.
 
 `RemoteComputationClient::from_bootstrap_endpoints` accepts an ordered, unique,
 nonempty static endpoint set while the existing `new` and `endpoint` APIs retain
@@ -1057,13 +1060,18 @@ provide an explicit versioned TOML file. Relative certificate paths resolve
 from the configuration file's directory. Unknown fields, unsupported protocol
 or schema versions, zero resource limits, empty grants, duplicate peer IDs,
 invalid pins, unknown computations, and unreadable/empty TLS material all fail
-closed. Nonzero TLS-handshake and initial-frame deadlines prevent unauthenticated
-or silent authenticated sockets from retaining every connection slot.
+closed. Service schema v2 also requires a literal socket address and an exact
+exposure decision: `loopback_only` accepts only loopback addresses, while
+`network` accepts only non-loopback or wildcard addresses. Hostnames are
+refused so DNS cannot silently change the exposure boundary. Nonzero
+TLS-handshake and initial-frame deadlines prevent unauthenticated or silent
+authenticated sockets from retaining every connection slot.
 
 ```toml
-schema_version = 1
+schema_version = 2
 protocol = "3.0"
 listen = "127.0.0.1:7443"
+listen_scope = "loopback_only"
 server_certificate_chain = "/run/secrets/remote-server.crt"
 server_private_key = "/run/secrets/remote-server.key"
 client_ca_bundle = "/run/secrets/client-ca.crt"
@@ -1084,6 +1092,21 @@ computations = ["asupersync.remote.echo.v1"]
 ```bash
 asupersync --format stream-json --config /etc/asupersync/remote.toml remote serve
 ```
+
+For an intentional cross-host listener, use a literal private/public or
+wildcard address with `listen_scope = "network"`. That opt-in prevents an
+accidental localhost-to-network promotion; it does not configure host
+firewalls, routing, DNS, certificates, load balancing, or production WAN
+reliability. Those remain deployment-owned prerequisites.
+
+The schema-v2 acceptance run hosted the packaged service on `hz3` and the
+packaged probe on `hz4`. Mutual TLS and both SPKI policies admitted one exact
+23-byte echo with SHA-256
+`25250ce86841943e3b4f69558860a0919c455b4da4d8a6d2197d3f1b4396dc1c`;
+the service then handled SIGTERM and reported one accepted/completed connection,
+zero active/failed/interrupted/panicked connections, and a successful RCH job
+exit. This is concrete two-host fleet-path evidence, not a claim that arbitrary
+firewalls, routes, certificate deployments, or production WANs are healthy.
 
 The same feature also packages the client half as an authenticated deployment
 probe. Its configuration is separate from the service configuration: every
@@ -2003,7 +2026,7 @@ JS/TS packages GA for browser main-thread and dedicated-worker consumers; Rust b
 | Database clients (SQLite, PostgreSQL, MySQL) | ✅ Implemented |
 | Actor supervision (GenServer, links, monitors) | ✅ Implemented |
 | DPOR-style race-guided seed exploration | ⚠️ Implemented as trace analysis, seed derivation, and equivalence-class telemetry; no exact-prefix backtracking or completeness claim |
-| Distributed runtime (remote tasks, sagas, leases, recovery) | Protocol/state-machine, lease, idempotency, saga, native V3 TCP+mTLS runtime/service, and Unix static process host implemented; deterministic, in-process transport, and cross-process localhost proofs shipped. Discovery, multi-host/WAN proof, arbitrary registries, and restart-durable idempotency remain open. |
+| Distributed runtime (remote tasks, sagas, leases, recovery) | Protocol/state-machine, lease, idempotency, saga, native V3 TCP+mTLS runtime/service, and Unix static process host implemented; deterministic, in-process, cross-process localhost, and one terminal two-worker RCH mTLS proof shipped. Active discovery, arbitrary registries, restart-durable idempotency, and general production-WAN reliability remain open. |
 | RaptorQ fountain coding for snapshot distribution | ✅ Implemented |
 | Formal methods (TLA+ export + Lean-checked model-invariant coverage) | ⚠️ Partial implementation (Lean checks six abstract-model invariants; no production-Rust refinement proof or blanket adapter/protocol proof) |
 | Browser Edition (WASM, JS/TS consumers) | ✅ Implemented for browser main-thread and dedicated-worker consumers (single-threaded, event-loop-driven) |

@@ -7644,8 +7644,7 @@ impl RemoteComputationServiceHandle {
 
     /// Stops admission and immediately interrupts active connection work.
     pub fn force_close(&self) {
-        let _ = self.connections.begin_drain(Duration::ZERO);
-        self.shutdown_signal.trigger_immediate();
+        self.connections.force_close();
     }
 
     /// Shared phase signal for operator observation.

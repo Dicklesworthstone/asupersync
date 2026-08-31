@@ -1923,16 +1923,19 @@ establishment can advance through the ordered static bootstrap set; server-name
 or pin rejection and every delivery-ambiguous failure stop on the current
 endpoint.
 
-The command requires a strict `schema_version = 1`, `protocol = "3.0"` TOML
-file. It loads a server certificate/key and client CA bundle, requires mutual
-TLS, and binds each configured logical `node_id` to an enforcing set of SPKI
-SHA-256 pins plus an exact computation allowlist. The current supported process
-registry contains only `asupersync.remote.echo.v1` (`Vec<u8> -> Vec<u8>`):
+The service command requires a strict `schema_version = 2`,
+`protocol = "3.0"` TOML file. It loads a server certificate/key and client CA
+bundle, requires mutual TLS, and binds each configured logical `node_id` to an
+enforcing set of SPKI SHA-256 pins plus an exact computation allowlist. Service
+and probe schema versions are independent; the probe file above remains schema
+v1. The current supported process registry contains only
+`asupersync.remote.echo.v1` (`Vec<u8> -> Vec<u8>`):
 
 ```toml
-schema_version = 1
+schema_version = 2
 protocol = "3.0"
 listen = "127.0.0.1:7443"
+listen_scope = "loopback_only"
 server_certificate_chain = "/run/secrets/remote-server.crt"
 server_private_key = "/run/secrets/remote-server.key"
 client_ca_bundle = "/run/secrets/client-ca.crt"
@@ -1952,7 +1955,12 @@ computations = ["asupersync.remote.echo.v1"]
 
 Unknown fields and versions, zero bounds, duplicate/empty peer grants,
 unregistered computations, invalid pins, and unusable TLS files are rejected
-before bind. The TLS-handshake and initial-frame deadlines release capacity
+before bind. `listen` must be a literal socket address. `listen_scope =
+"loopback_only"` rejects non-loopback and wildcard addresses; `listen_scope =
+"network"` rejects loopback addresses and is the required explicit opt-in for
+cross-host exposure. The network setting does not configure or prove host
+firewalls, routing, DNS, load balancing, certificate deployment, or production
+WAN reliability. The TLS-handshake and initial-frame deadlines release capacity
 held by unauthenticated or silent authenticated peers. Relative TLS paths
 resolve against the config directory. A flushed `remote_service_ready` record
 is the readiness boundary. The first SIGINT or
@@ -1961,7 +1969,17 @@ The terminal record is emitted only after connection-region and runtime
 quiescence. Never place private-key bytes in configuration diagnostics or logs.
 The packaged probe remains limited to the built-in diagnostic computation. It
 does not add discovery, health-based balancing, arbitrary application
-registries, durable idempotency, or multi-host/WAN proof.
+registries, or durable idempotency.
+
+The schema-v2 acceptance run used two distinct RCH workers: `hz3` hosted the
+packaged network-scope service and `hz4` ran the packaged probe. Mutual TLS and
+both SPKI policies admitted exactly one 23-byte echo with SHA-256
+`25250ce86841943e3b4f69558860a0919c455b4da4d8a6d2197d3f1b4396dc1c`.
+The service then handled SIGTERM, exited its RCH job successfully, and reported
+one accepted/completed connection with zero active, failed, interrupted, or
+panicked connections. This proves that specific two-host fleet path; it does
+not establish discovery, health balancing, firewall or route provisioning,
+certificate rollout, load balancing, or general production-WAN reliability.
 
 The shipped proof tier is protocol/state-machine plus three transport tiers.
 Protocol V1, V2, and V3 service JSON is a strict compatibility boundary:
@@ -1986,10 +2004,12 @@ also launches the CLI as a separate OS process, waits on causal readiness,
 proves a certificate-authenticated but unauthorized NodeId is refused, proves
 an authorized echo over real mTLS, verifies both admission deadlines release
 the sole connection slot, sends two SIGTERMs around a live stalled session,
-and verifies forced terminal quiescence. This is localhost cross-process evidence, not discovery,
-multi-host/WAN evidence, Windows service control, arbitrary application
-registry hosting, or restart-durable idempotency. V3 retry/deduplication state
-is process-local; ambiguous delivery must remain fail-closed across restart.
+and verifies forced terminal quiescence. That committed test is localhost
+cross-process evidence; the separate terminal schema-v2 acceptance run above
+adds one two-worker mTLS path. Neither is discovery, Windows service control,
+arbitrary application registry hosting, restart-durable idempotency, or general
+production-WAN evidence. V3 retry/deduplication state is process-local;
+ambiguous delivery must remain fail-closed across restart.
 The compatibility goldens do not substitute for archived-binary interop,
 multi-host/WAN evidence, or restart-durable idempotency proof.
 Focused lifecycle cases additionally prove ordered static failover from a
