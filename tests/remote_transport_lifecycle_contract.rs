@@ -2632,6 +2632,214 @@ fn remote_service_cli_hosts_mtls_v3_and_drains_cross_process() {
         .parse()
         .expect("ready listener address should parse");
 
+    // Promote the native client from an in-process test helper to a second
+    // packaged process. The closed primary proves ordered pre-delivery
+    // failover; the exact echo receipt proves the live secondary completed the
+    // mutually authenticated V3 session.
+    let refused_endpoint = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")
+            .expect("remote probe refused-primary fixture should bind");
+        listener
+            .local_addr()
+            .expect("remote probe refused-primary address should be available")
+    };
+    let probe_config_path = temp.path().join("remote-probe.toml");
+    fs::write(
+        &probe_config_path,
+        format!(
+            "schema_version = 1\nprotocol = \"3.0\"\nbootstrap_endpoints = [\"{refused_endpoint}\", \"{endpoint}\"]\nserver_name = \"localhost\"\nserver_ca_bundle = \"{}\"\nclient_certificate_chain = \"{}\"\nclient_private_key = \"{}\"\nserver_spki_sha256 = [\"{spki_pin}\"]\norigin_node = \"{AUTHORIZED_NODE}\"\nmax_frame_bytes = 65536\nconnect_timeout_ms = 200\ntls_handshake_timeout_ms = 1000\nattempt_timeout_ms = 3000\ncompletion_timeout_ms = 3000\nmax_attempts = 2\ninitial_backoff_ms = 1\nmax_backoff_ms = 10\nlease_ms = 3000\nfull_jitter = false\ntcp_nodelay = true\n",
+            ca_path.display(),
+            certificate_path.display(),
+            private_key_path.display(),
+        ),
+    )
+    .expect("remote probe config should be written");
+    let probe = Command::new(env!("CARGO_BIN_EXE_asupersync"))
+        .args([
+            "--format",
+            "stream-json",
+            "--config",
+            probe_config_path
+                .to_str()
+                .expect("temporary probe config path should be UTF-8"),
+            "remote",
+            "probe",
+            "--payload",
+            "packaged-mtls-v3-probe",
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .expect("remote probe child should run");
+    assert!(
+        probe.status.success(),
+        "remote probe child failed: {}",
+        String::from_utf8_lossy(&probe.stderr)
+    );
+    assert!(
+        probe.stderr.is_empty(),
+        "successful remote probe stderr was not empty: {}",
+        String::from_utf8_lossy(&probe.stderr)
+    );
+    let probe_output: serde_json::Value = serde_json::from_slice(&probe.stdout)
+        .expect("remote probe should emit one JSON success record");
+    assert_eq!(probe_output["event"], "remote_probe_completed");
+    assert_eq!(probe_output["protocol"], "3.0");
+    assert_eq!(probe_output["computation"], ECHO_COMPUTATION);
+    assert_eq!(probe_output["origin_node"], AUTHORIZED_NODE);
+    assert_eq!(probe_output["echoed_bytes"], 22);
+    assert_eq!(
+        probe_output["echoed_sha256"],
+        "daa3990b665cc49e78df9e07da3f5a9c010992eeb5d533fea04764bf5d81d2d5"
+    );
+    assert_eq!(
+        probe_output["bootstrap_endpoints"],
+        serde_json::json!([refused_endpoint.to_string(), endpoint.to_string()])
+    );
+
+    // An authenticated primary with the wrong enforcing server pin is not a
+    // pre-delivery transient: the client must fail closed on that endpoint and
+    // never try the later bootstrap address.
+    let secondary_observer = std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("remote probe no-fallthrough observer should bind");
+    secondary_observer
+        .set_nonblocking(true)
+        .expect("remote probe no-fallthrough observer should be nonblocking");
+    let secondary_endpoint = secondary_observer
+        .local_addr()
+        .expect("remote probe no-fallthrough address should be available");
+    let wrong_pin_config_path = temp.path().join("remote-probe-wrong-pin.toml");
+    fs::write(
+        &wrong_pin_config_path,
+        format!(
+            "schema_version = 1\nprotocol = \"3.0\"\nbootstrap_endpoints = [\"{endpoint}\", \"{secondary_endpoint}\"]\nserver_name = \"localhost\"\nserver_ca_bundle = \"{}\"\nclient_certificate_chain = \"{}\"\nclient_private_key = \"{}\"\nserver_spki_sha256 = [\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"]\norigin_node = \"{AUTHORIZED_NODE}\"\nmax_frame_bytes = 65536\nconnect_timeout_ms = 200\ntls_handshake_timeout_ms = 1000\nattempt_timeout_ms = 3000\ncompletion_timeout_ms = 3000\nmax_attempts = 2\ninitial_backoff_ms = 1\nmax_backoff_ms = 10\nlease_ms = 3000\nfull_jitter = false\ntcp_nodelay = true\n",
+            ca_path.display(),
+            certificate_path.display(),
+            private_key_path.display(),
+        ),
+    )
+    .expect("wrong-pin remote probe config should be written");
+    let wrong_pin_probe = Command::new(env!("CARGO_BIN_EXE_asupersync"))
+        .args([
+            "--format",
+            "stream-json",
+            "--config",
+            wrong_pin_config_path
+                .to_str()
+                .expect("temporary wrong-pin config path should be UTF-8"),
+            "remote",
+            "probe",
+            "--payload",
+            "must-not-fall-through",
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .expect("wrong-pin remote probe child should run");
+    assert!(!wrong_pin_probe.status.success());
+    assert!(wrong_pin_probe.stdout.is_empty());
+    let wrong_pin_error: serde_json::Value = serde_json::from_slice(&wrong_pin_probe.stderr)
+        .expect("wrong-pin remote probe should emit one structured error");
+    assert_eq!(wrong_pin_error["type"], "remote_probe_tls_failed");
+    assert_eq!(wrong_pin_error["context"]["attempts"], 1);
+    match secondary_observer.accept() {
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+        Ok(_) => panic!("wrong-pin probe must not dial a later bootstrap endpoint"),
+        Err(error) => panic!("remote probe no-fallthrough observer failed: {error}"),
+    }
+
+    let hostname_secondary_observer = std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("remote probe hostname no-fallthrough observer should bind");
+    hostname_secondary_observer
+        .set_nonblocking(true)
+        .expect("remote probe hostname observer should be nonblocking");
+    let hostname_secondary_endpoint = hostname_secondary_observer
+        .local_addr()
+        .expect("remote probe hostname observer address should be available");
+    let wrong_hostname_config_path = temp.path().join("remote-probe-wrong-hostname.toml");
+    fs::write(
+        &wrong_hostname_config_path,
+        format!(
+            "schema_version = 1\nprotocol = \"3.0\"\nbootstrap_endpoints = [\"{endpoint}\", \"{hostname_secondary_endpoint}\"]\nserver_name = \"wrong.example.test\"\nserver_ca_bundle = \"{}\"\nclient_certificate_chain = \"{}\"\nclient_private_key = \"{}\"\nserver_spki_sha256 = [\"{spki_pin}\"]\norigin_node = \"{AUTHORIZED_NODE}\"\nmax_frame_bytes = 65536\nconnect_timeout_ms = 200\ntls_handshake_timeout_ms = 1000\nattempt_timeout_ms = 3000\ncompletion_timeout_ms = 3000\nmax_attempts = 2\ninitial_backoff_ms = 1\nmax_backoff_ms = 10\nlease_ms = 3000\nfull_jitter = false\ntcp_nodelay = true\n",
+            ca_path.display(),
+            certificate_path.display(),
+            private_key_path.display(),
+        ),
+    )
+    .expect("wrong-hostname remote probe config should be written");
+    let wrong_hostname_probe = Command::new(env!("CARGO_BIN_EXE_asupersync"))
+        .args([
+            "--format",
+            "stream-json",
+            "--config",
+            wrong_hostname_config_path
+                .to_str()
+                .expect("temporary wrong-hostname config path should be UTF-8"),
+            "remote",
+            "probe",
+            "--payload",
+            "must-not-fall-through-hostname",
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .expect("wrong-hostname remote probe child should run");
+    assert!(!wrong_hostname_probe.status.success());
+    assert!(wrong_hostname_probe.stdout.is_empty());
+    let wrong_hostname_error: serde_json::Value =
+        serde_json::from_slice(&wrong_hostname_probe.stderr)
+            .expect("wrong-hostname remote probe should emit one structured error");
+    assert_eq!(wrong_hostname_error["type"], "remote_probe_tls_failed");
+    assert_eq!(wrong_hostname_error["context"]["attempts"], 1);
+    match hostname_secondary_observer.accept() {
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+        Ok(_) => panic!("wrong-hostname probe must not dial a later bootstrap endpoint"),
+        Err(error) => panic!("remote probe hostname observer failed: {error}"),
+    }
+
+    let config_only_observer = std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("remote probe config-only observer should bind");
+    config_only_observer
+        .set_nonblocking(true)
+        .expect("remote probe config-only observer should be nonblocking");
+    let config_only_endpoint = config_only_observer
+        .local_addr()
+        .expect("remote probe config-only observer address should be available");
+    let unreadable_tls_config_path = temp.path().join("remote-probe-missing-ca.toml");
+    fs::write(
+        &unreadable_tls_config_path,
+        format!(
+            "schema_version = 1\nprotocol = \"3.0\"\nbootstrap_endpoints = [\"{config_only_endpoint}\"]\nserver_name = \"localhost\"\nserver_ca_bundle = \"missing-server-ca.crt\"\nclient_certificate_chain = \"{}\"\nclient_private_key = \"{}\"\nserver_spki_sha256 = [\"{spki_pin}\"]\norigin_node = \"{AUTHORIZED_NODE}\"\nmax_frame_bytes = 65536\nconnect_timeout_ms = 200\ntls_handshake_timeout_ms = 1000\nattempt_timeout_ms = 3000\ncompletion_timeout_ms = 3000\nmax_attempts = 1\ninitial_backoff_ms = 1\nmax_backoff_ms = 10\nlease_ms = 3000\nfull_jitter = false\ntcp_nodelay = true\n",
+            certificate_path.display(),
+            private_key_path.display(),
+        ),
+    )
+    .expect("missing-CA remote probe config should be written");
+    let unreadable_tls_probe = Command::new(env!("CARGO_BIN_EXE_asupersync"))
+        .args([
+            "--format",
+            "stream-json",
+            "--config",
+            unreadable_tls_config_path
+                .to_str()
+                .expect("temporary missing-CA config path should be UTF-8"),
+            "remote",
+            "probe",
+            "--payload",
+            "must-not-dial-with-missing-ca",
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .expect("missing-CA remote probe child should run");
+    assert!(!unreadable_tls_probe.status.success());
+    assert!(unreadable_tls_probe.stdout.is_empty());
+    let unreadable_tls_error: serde_json::Value =
+        serde_json::from_slice(&unreadable_tls_probe.stderr)
+            .expect("missing-CA remote probe should emit one structured error");
+    assert_eq!(unreadable_tls_error["type"], "remote_probe_config_invalid");
+    match config_only_observer.accept() {
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+        Ok(_) => panic!("unreadable TLS material must fail before any endpoint dial"),
+        Err(error) => panic!("remote probe config-only observer failed: {error}"),
+    }
+
     let connector = TlsConnectorBuilder::new()
         .add_root_certificate(&peer_certificate)
         .identity(certificate_chain, private_key)
@@ -2857,10 +3065,10 @@ fn remote_service_cli_hosts_mtls_v3_and_drains_cross_process() {
         terminal["accepted_connections"].as_u64().unwrap_or(0) >= 7,
         "every causal connection should be reflected in terminal accounting: {terminal}"
     );
-    assert_eq!(terminal["completed_connections"], 4);
+    assert_eq!(terminal["completed_connections"], 5);
     assert!(
-        terminal["failed_connections"].as_u64().unwrap_or(0) >= 2,
-        "both admission deadlines should be reflected as connection failures: {terminal}"
+        terminal["failed_connections"].as_u64().unwrap_or(0) >= 4,
+        "TLS identity refusals and both admission deadlines should be connection failures: {terminal}"
     );
     assert!(
         terminal["interrupted_connections"].as_u64().unwrap_or(0) >= 1,
@@ -2871,6 +3079,306 @@ fn remote_service_cli_hosts_mtls_v3_and_drains_cross_process() {
         terminal["force_closed_connections"].as_u64().unwrap_or(0) >= 1,
         "second-signal force-close should be retained in shutdown stats: {terminal}"
     );
+}
+
+#[cfg(all(feature = "remote-service", unix))]
+#[test]
+fn remote_probe_cli_bounds_accepted_session_and_closes_transport() {
+    use std::process::Stdio;
+
+    const AUTHORIZED_NODE: &str = "remote-probe-timeout-origin";
+    const ECHO_COMPUTATION: &str = "asupersync.remote.echo.v1";
+
+    let certificates = Certificate::from_pem(TEST_CERT_PEM).expect("TLS fixture should parse");
+    let peer_certificate = certificates
+        .first()
+        .expect("TLS fixture should contain a leaf certificate")
+        .clone();
+    let certificate_chain =
+        CertificateChain::from_pem(TEST_CERT_PEM).expect("TLS certificate chain should parse");
+    let private_key = PrivateKey::from_pem(TEST_KEY_PEM).expect("TLS private key should parse");
+    let spki_pin = CertificatePin::compute_spki_sha256(&peer_certificate)
+        .expect("TLS fixture should produce an SPKI pin")
+        .to_base64();
+
+    let mut client_roots = RootCertStore::empty();
+    client_roots
+        .add(&peer_certificate)
+        .expect("accepted-stall server should trust the fixture client certificate");
+    let acceptor = TlsAcceptorBuilder::new(certificate_chain, private_key)
+        .client_auth(ClientAuth::Required(client_roots))
+        .build()
+        .expect("accepted-stall mTLS acceptor should build");
+    let listener = block_on(TcpListener::bind("127.0.0.1:0"))
+        .expect("accepted-stall listener should bind loopback");
+    let endpoint = listener
+        .local_addr()
+        .expect("accepted-stall listener should expose its address");
+    let (accepted_tx, accepted_rx) = std::sync::mpsc::sync_channel::<()>(1);
+    let (closed_tx, closed_rx) = std::sync::mpsc::sync_channel::<()>(1);
+    let server = thread::spawn(move || {
+        block_on(async move {
+            let (stream, _) = listener
+                .accept()
+                .await
+                .expect("accepted-stall listener should accept the probe");
+            let mut stream = acceptor
+                .accept(stream)
+                .await
+                .expect("accepted-stall listener should authenticate the probe");
+            let encoded = read_raw_frame(&mut stream)
+                .await
+                .expect("accepted-stall listener should receive the probe request");
+            let request: RemoteServiceWireRequest = serde_json::from_slice(&encoded)
+                .expect("accepted-stall probe request should decode");
+            assert_eq!(request.hello().peer_node().as_str(), AUTHORIZED_NODE);
+            assert_eq!(
+                request.hello().protocol_version(),
+                RemoteProtocolVersion::V3
+            );
+            let accepted = RemoteServiceSessionEvent::Accepted {
+                remote_task_id: request.remote_task_id().raw(),
+            };
+            let encoded =
+                serde_json::to_vec(&accepted).expect("accepted-stall event should encode");
+            write_raw_frame(&mut stream, &encoded)
+                .await
+                .expect("accepted-stall event should write");
+            stream
+                .flush()
+                .await
+                .expect("accepted-stall event should flush");
+            accepted_tx
+                .send(())
+                .expect("accepted-stall server should publish acceptance");
+
+            assert!(
+                read_raw_frame(&mut stream).await.is_err(),
+                "completion timeout must close the accepted transport"
+            );
+            closed_tx
+                .send(())
+                .expect("accepted-stall server should publish transport close");
+        });
+    });
+
+    let temp = tempfile::tempdir().expect("remote probe timeout fixture should exist");
+    let certificate_path = temp.path().join("client.crt");
+    let private_key_path = temp.path().join("client.key");
+    let ca_path = temp.path().join("server-ca.crt");
+    let config_path = temp.path().join("remote-probe-timeout.toml");
+    fs::write(&certificate_path, TEST_CERT_PEM).expect("client certificate should be written");
+    fs::write(&private_key_path, TEST_KEY_PEM).expect("client key should be written");
+    fs::write(&ca_path, TEST_CERT_PEM).expect("server CA should be written");
+    fs::write(
+        &config_path,
+        format!(
+            "schema_version = 1\nprotocol = \"3.0\"\nbootstrap_endpoints = [\"{endpoint}\"]\nserver_name = \"localhost\"\nserver_ca_bundle = \"{}\"\nclient_certificate_chain = \"{}\"\nclient_private_key = \"{}\"\nserver_spki_sha256 = [\"{spki_pin}\"]\norigin_node = \"{AUTHORIZED_NODE}\"\nmax_frame_bytes = 65536\nconnect_timeout_ms = 200\ntls_handshake_timeout_ms = 1000\nattempt_timeout_ms = 2000\ncompletion_timeout_ms = 100\nmax_attempts = 1\ninitial_backoff_ms = 1\nmax_backoff_ms = 10\nlease_ms = 10000\nfull_jitter = false\ntcp_nodelay = true\n",
+            ca_path.display(),
+            certificate_path.display(),
+            private_key_path.display(),
+        ),
+    )
+    .expect("accepted-stall probe config should be written");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_asupersync"))
+        .args([
+            "--format",
+            "stream-json",
+            "--config",
+            config_path
+                .to_str()
+                .expect("temporary timeout config path should be UTF-8"),
+            "remote",
+            "probe",
+            "--payload",
+            ECHO_COMPUTATION,
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("accepted-stall probe child should start");
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(5));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("accepted-stall probe exceeded its completion deadline");
+            }
+            Err(error) => panic!("accepted-stall probe wait failed: {error}"),
+        }
+    };
+    assert!(!status.success());
+    accepted_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("accepted-stall probe must reach the post-accept phase");
+    closed_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("accepted-stall probe must close its transport after timeout");
+    let mut stdout = String::new();
+    std::io::Read::read_to_string(
+        child
+            .stdout
+            .as_mut()
+            .expect("accepted-stall probe stdout should be piped"),
+        &mut stdout,
+    )
+    .expect("accepted-stall probe stdout should be readable");
+    let mut stderr = String::new();
+    std::io::Read::read_to_string(
+        child
+            .stderr
+            .as_mut()
+            .expect("accepted-stall probe stderr should be piped"),
+        &mut stderr,
+    )
+    .expect("accepted-stall probe stderr should be readable");
+    assert!(stdout.is_empty());
+    let error: serde_json::Value =
+        serde_json::from_str(&stderr).expect("accepted-stall probe should emit structured error");
+    assert_eq!(error["type"], "remote_probe_delivery_ambiguous");
+    assert!(
+        error["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("will not be replayed")
+    );
+    server
+        .join()
+        .expect("accepted-stall server should not panic");
+}
+
+#[cfg(all(feature = "remote-service", unix))]
+#[test]
+fn remote_probe_cli_does_not_replay_when_peer_drops_before_accepted() {
+    use std::process::Stdio;
+
+    const AUTHORIZED_NODE: &str = "remote-probe-pre-accepted-origin";
+    const PAYLOAD: &str = "published-before-accepted";
+
+    let certificates = Certificate::from_pem(TEST_CERT_PEM).expect("TLS fixture should parse");
+    let peer_certificate = certificates
+        .first()
+        .expect("TLS fixture should contain a leaf certificate")
+        .clone();
+    let certificate_chain =
+        CertificateChain::from_pem(TEST_CERT_PEM).expect("TLS certificate chain should parse");
+    let private_key = PrivateKey::from_pem(TEST_KEY_PEM).expect("TLS private key should parse");
+    let spki_pin = CertificatePin::compute_spki_sha256(&peer_certificate)
+        .expect("TLS fixture should produce an SPKI pin")
+        .to_base64();
+
+    let mut client_roots = RootCertStore::empty();
+    client_roots
+        .add(&peer_certificate)
+        .expect("pre-accepted server should trust the fixture client certificate");
+    let acceptor = TlsAcceptorBuilder::new(certificate_chain, private_key)
+        .client_auth(ClientAuth::Required(client_roots))
+        .build()
+        .expect("pre-accepted mTLS acceptor should build");
+    let primary = block_on(TcpListener::bind("127.0.0.1:0"))
+        .expect("pre-accepted primary listener should bind loopback");
+    let primary_endpoint = primary
+        .local_addr()
+        .expect("pre-accepted primary listener should expose its address");
+    let secondary = std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("pre-accepted secondary observer should bind loopback");
+    let secondary_endpoint = secondary
+        .local_addr()
+        .expect("pre-accepted secondary observer should expose its address");
+    secondary
+        .set_nonblocking(true)
+        .expect("pre-accepted secondary observer should be nonblocking");
+    let server = thread::spawn(move || {
+        block_on(async move {
+            let (stream, _) = primary
+                .accept()
+                .await
+                .expect("pre-accepted primary should accept the probe");
+            let mut stream = acceptor
+                .accept(stream)
+                .await
+                .expect("pre-accepted primary should authenticate the probe");
+            let encoded = read_raw_frame(&mut stream)
+                .await
+                .expect("pre-accepted primary should receive the published request");
+            let request_json: serde_json::Value = serde_json::from_slice(&encoded)
+                .expect("pre-accepted probe request JSON should decode");
+            assert_eq!(
+                request_json["input"],
+                serde_json::to_value(PAYLOAD.as_bytes())
+                    .expect("pre-accepted expected payload should encode")
+            );
+            let request: RemoteServiceWireRequest = serde_json::from_value(request_json)
+                .expect("pre-accepted probe request should decode");
+            assert_eq!(request.hello().peer_node().as_str(), AUTHORIZED_NODE);
+            assert_eq!(
+                request.hello().protocol_version(),
+                RemoteProtocolVersion::V3
+            );
+        });
+    });
+
+    let temp = tempfile::tempdir().expect("pre-accepted probe fixture should exist");
+    let certificate_path = temp.path().join("client.crt");
+    let private_key_path = temp.path().join("client.key");
+    let ca_path = temp.path().join("server-ca.crt");
+    let config_path = temp.path().join("remote-probe-pre-accepted.toml");
+    fs::write(&certificate_path, TEST_CERT_PEM).expect("client certificate should be written");
+    fs::write(&private_key_path, TEST_KEY_PEM).expect("client key should be written");
+    fs::write(&ca_path, TEST_CERT_PEM).expect("server CA should be written");
+    fs::write(
+        &config_path,
+        format!(
+            "schema_version = 1\nprotocol = \"3.0\"\nbootstrap_endpoints = [\"{primary_endpoint}\", \"{secondary_endpoint}\"]\nserver_name = \"localhost\"\nserver_ca_bundle = \"{}\"\nclient_certificate_chain = \"{}\"\nclient_private_key = \"{}\"\nserver_spki_sha256 = [\"{spki_pin}\"]\norigin_node = \"{AUTHORIZED_NODE}\"\nmax_frame_bytes = 65536\nconnect_timeout_ms = 200\ntls_handshake_timeout_ms = 1000\nattempt_timeout_ms = 2000\ncompletion_timeout_ms = 1000\nmax_attempts = 2\ninitial_backoff_ms = 1\nmax_backoff_ms = 10\nlease_ms = 10000\nfull_jitter = false\ntcp_nodelay = true\n",
+            ca_path.display(),
+            certificate_path.display(),
+            private_key_path.display(),
+        ),
+    )
+    .expect("pre-accepted probe config should be written");
+    let output = Command::new(env!("CARGO_BIN_EXE_asupersync"))
+        .args([
+            "--format",
+            "stream-json",
+            "--config",
+            config_path
+                .to_str()
+                .expect("temporary pre-accepted config path should be UTF-8"),
+            "remote",
+            "probe",
+            "--payload",
+            PAYLOAD,
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .expect("pre-accepted probe child should run");
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).expect("probe error should be UTF-8");
+    let error: serde_json::Value =
+        serde_json::from_str(&stderr).expect("pre-accepted probe should emit structured error");
+    assert_eq!(error["type"], "remote_probe_delivery_ambiguous");
+    assert_eq!(error["context"]["attempts"], 1);
+    assert!(
+        error["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("will not be replayed")
+    );
+    server
+        .join()
+        .expect("pre-accepted primary server should not panic");
+    match secondary.accept() {
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+        Ok(_) => panic!("ambiguous pre-accepted delivery must not dial the secondary endpoint"),
+        Err(error) => panic!("unexpected secondary observer failure: {error}"),
+    }
 }
 
 #[cfg(feature = "tls")]

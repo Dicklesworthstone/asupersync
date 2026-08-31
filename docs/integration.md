@@ -1833,6 +1833,47 @@ additive `remote-service` feature:
 asupersync --format stream-json --config /etc/asupersync/remote.toml remote serve
 ```
 
+Operators can exercise that exact process boundary from a second packaged
+process with `remote probe`. The client file is also strict and versioned:
+
+```toml
+schema_version = 1
+protocol = "3.0"
+bootstrap_endpoints = ["10.0.0.11:7443", "10.0.0.12:7443"]
+server_name = "remote.internal.example"
+server_ca_bundle = "/run/secrets/remote-server-ca.crt"
+client_certificate_chain = "/run/secrets/origin-a.crt"
+client_private_key = "/run/secrets/origin-a.key"
+server_spki_sha256 = ["BASE64_ENCODED_32_BYTE_SPKI_SHA256"]
+origin_node = "origin-a"
+max_frame_bytes = 1048576
+connect_timeout_ms = 5000
+tls_handshake_timeout_ms = 5000
+attempt_timeout_ms = 30000
+completion_timeout_ms = 30000
+max_attempts = 2
+initial_backoff_ms = 50
+max_backoff_ms = 1000
+lease_ms = 30000
+full_jitter = true
+tcp_nodelay = true
+```
+
+```bash
+asupersync --format stream-json --config /etc/asupersync/remote-probe.toml \
+  remote probe --payload deployment-ready
+```
+
+Relative certificate paths resolve from the probe file's directory. The
+client requires an enforcing server SPKI pin set in addition to certificate
+trust, applies finite connect, TLS, pre-accept attempt, post-accept completion,
+retry, and lease bounds, and emits a `remote_probe_completed` record only after
+the V3 task-correlated response is an exact echo. The receipt contains the
+payload length and digest, not the payload or private-key material. Refused TCP
+establishment can advance through the ordered static bootstrap set; server-name
+or pin rejection and every delivery-ambiguous failure stop on the current
+endpoint.
+
 The command requires a strict `schema_version = 1`, `protocol = "3.0"` TOML
 file. It loads a server certificate/key and client CA bundle, requires mutual
 TLS, and binds each configured logical `node_id` to an enforcing set of SPKI
@@ -1869,6 +1910,9 @@ is the readiness boundary. The first SIGINT or
 SIGTERM begins graceful drain; a second signal force-closes outstanding work.
 The terminal record is emitted only after connection-region and runtime
 quiescence. Never place private-key bytes in configuration diagnostics or logs.
+The packaged probe remains limited to the built-in diagnostic computation. It
+does not add discovery, health-based balancing, arbitrary application
+registries, durable idempotency, or multi-host/WAN proof.
 
 The shipped proof tier is protocol/state-machine plus three transport tiers.
 `remote_virtual_lifecycle_proof_exercises_runtime_transport_and_protocol` keeps

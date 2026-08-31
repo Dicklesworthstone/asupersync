@@ -191,6 +191,16 @@ struct RemoteArgs {
 enum RemoteCommand {
     /// Serve the configured static V3 computation registry over mutual TLS
     Serve,
+    /// Probe the static service with one authenticated V3 echo computation
+    Probe(RemoteProbeArgs),
+}
+
+#[cfg(all(feature = "remote-service", unix))]
+#[derive(Args, Debug)]
+struct RemoteProbeArgs {
+    /// UTF-8 payload echoed by the built-in diagnostic computation
+    #[arg(long)]
+    payload: String,
 }
 
 #[cfg(all(feature = "remote-service", unix))]
@@ -220,6 +230,32 @@ struct RemoteServicePeerConfig {
     node_id: String,
     spki_sha256: Vec<String>,
     computations: Vec<String>,
+}
+
+#[cfg(all(feature = "remote-service", unix))]
+#[derive(Clone, Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RemoteProbeFileConfig {
+    schema_version: u32,
+    protocol: String,
+    bootstrap_endpoints: Vec<String>,
+    server_name: String,
+    server_ca_bundle: PathBuf,
+    client_certificate_chain: PathBuf,
+    client_private_key: PathBuf,
+    server_spki_sha256: Vec<String>,
+    origin_node: String,
+    max_frame_bytes: usize,
+    connect_timeout_ms: u64,
+    tls_handshake_timeout_ms: u64,
+    attempt_timeout_ms: u64,
+    completion_timeout_ms: u64,
+    max_attempts: usize,
+    initial_backoff_ms: u64,
+    max_backoff_ms: u64,
+    lease_ms: u64,
+    full_jitter: bool,
+    tcp_nodelay: bool,
 }
 
 #[cfg(all(feature = "remote-service", unix))]
@@ -277,6 +313,34 @@ impl Outputtable for RemoteServiceTerminalOutput {
             self.failed_connections,
             self.panicked_connections,
             self.active_connections
+        )
+    }
+}
+
+#[cfg(all(feature = "remote-service", unix))]
+#[derive(Debug, serde::Serialize)]
+struct RemoteProbeOutput {
+    event: &'static str,
+    schema_version: u32,
+    protocol: &'static str,
+    computation: &'static str,
+    origin_node: String,
+    bootstrap_endpoints: Vec<String>,
+    remote_task_id: u64,
+    echoed_bytes: usize,
+    echoed_sha256: String,
+}
+
+#[cfg(all(feature = "remote-service", unix))]
+impl Outputtable for RemoteProbeOutput {
+    fn human_format(&self) -> String {
+        format!(
+            "Remote computation probe succeeded\n  Protocol: {}\n  Computation: {}\n  Remote task: {}\n  Echoed bytes: {}\n  SHA-256: {}",
+            self.protocol,
+            self.computation,
+            self.remote_task_id,
+            self.echoed_bytes,
+            self.echoed_sha256
         )
     }
 }
@@ -3767,7 +3831,579 @@ fn run_remote(
 ) -> Result<(), CliError> {
     match args.command {
         RemoteCommand::Serve => remote_serve(config_path, output),
+        RemoteCommand::Probe(args) => remote_probe(args, config_path, output),
     }
+}
+
+#[cfg(all(feature = "remote-service", unix))]
+fn remote_probe(
+    args: RemoteProbeArgs,
+    config_path: Option<&Path>,
+    output: &mut Output,
+) -> Result<(), CliError> {
+    use asupersync::distributed::ComputationSchemaRegistry;
+    use asupersync::remote::{
+        ComputationName, IdempotencyKey, NodeId, RemoteComputationClient,
+        RemoteComputationClientConfig, RemoteComputationSessionStart, RemoteInput, RemotePeerHello,
+        RemoteProtocolVersion, RemoteServiceWireLimits, RemoteServiceWireOutcome,
+        RemoteServiceWireRequest, RemoteServiceWireResponse, RemoteTaskId, SpawnRequest,
+    };
+    use asupersync::runtime::RuntimeBuilder;
+    use asupersync::tls::{
+        Certificate, CertificateChain, CertificatePinSet, PrivateKey, TlsConnectorBuilder,
+    };
+    use std::net::SocketAddr;
+    use std::time::Duration;
+
+    let config_path = config_path.ok_or_else(|| {
+        CliError::new(
+            "remote_probe_config_required",
+            "remote probe requires --config <path>",
+        )
+        .detail("The probe refuses ambient trust or routing defaults; provide a versioned TOML configuration")
+        .exit_code(ExitCode::USER_ERROR)
+    })?;
+    let config = load_remote_probe_config(config_path)?;
+    let endpoints = config
+        .bootstrap_endpoints
+        .iter()
+        .map(|endpoint| {
+            endpoint.parse::<SocketAddr>().map_err(|err| {
+                remote_probe_config_error(
+                    config_path,
+                    format!("bootstrap endpoint '{endpoint}' is invalid: {err}"),
+                )
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let server_ca_certificates =
+        Certificate::from_pem_file(&config.server_ca_bundle).map_err(|err| {
+            remote_probe_config_error(
+                config_path,
+                format!(
+                    "failed to load server CA bundle '{}': {err}",
+                    config.server_ca_bundle.display()
+                ),
+            )
+        })?;
+    if server_ca_certificates.is_empty() {
+        return Err(remote_probe_config_error(
+            config_path,
+            "server CA bundle contains no usable trust anchors",
+        ));
+    }
+    let client_certificate_chain =
+        CertificateChain::from_pem_file(&config.client_certificate_chain).map_err(|err| {
+            remote_probe_config_error(
+                config_path,
+                format!(
+                    "failed to load client certificate chain '{}': {err}",
+                    config.client_certificate_chain.display()
+                ),
+            )
+        })?;
+    let client_private_key =
+        PrivateKey::from_pem_file(&config.client_private_key).map_err(|err| {
+            remote_probe_config_error(
+                config_path,
+                format!(
+                    "failed to load client private key '{}': {err}",
+                    config.client_private_key.display()
+                ),
+            )
+        })?;
+    let mut server_pins = CertificatePinSet::new();
+    for pin in &config.server_spki_sha256 {
+        server_pins.add_spki_sha256_base64(pin).map_err(|err| {
+            remote_probe_config_error(config_path, format!("invalid server SPKI pin: {err}"))
+        })?;
+    }
+    let connector = TlsConnectorBuilder::new()
+        .add_root_certificates(server_ca_certificates)
+        .identity(client_certificate_chain, client_private_key)
+        .with_certificate_pins(server_pins)
+        .handshake_timeout(Duration::from_millis(config.tls_handshake_timeout_ms))
+        .build()
+        .map_err(|err| {
+            remote_probe_config_error(
+                config_path,
+                format!("failed to build the mutual-TLS connector: {err}"),
+            )
+        })?;
+    let client_config = RemoteComputationClientConfig::new()
+        .with_wire_limits(RemoteServiceWireLimits::new(config.max_frame_bytes))
+        .with_connect_timeout(Duration::from_millis(config.connect_timeout_ms))
+        .with_attempt_timeout(Duration::from_millis(config.attempt_timeout_ms))
+        .with_max_attempts(config.max_attempts)
+        .with_backoff(
+            Duration::from_millis(config.initial_backoff_ms),
+            Duration::from_millis(config.max_backoff_ms),
+        )
+        .with_full_jitter(config.full_jitter)
+        .with_tcp_nodelay(config.tcp_nodelay);
+    let client = RemoteComputationClient::from_bootstrap_endpoints(
+        endpoints,
+        config.server_name.clone(),
+        connector,
+        client_config,
+    )
+    .map_err(remote_probe_client_error)?;
+
+    let mut schemas = ComputationSchemaRegistry::new();
+    schemas
+        .register_typed::<Vec<u8>, Vec<u8>>(REMOTE_ECHO_COMPUTATION)
+        .map_err(|err| {
+            CliError::new(
+                "remote_probe_schema_invalid",
+                "Failed to construct the built-in remote probe schema",
+            )
+            .detail(err.to_string())
+            .exit_code(ExitCode::RUNTIME_ERROR)
+        })?;
+    let payload = args.payload.into_bytes();
+    let echoed_sha256 = sha256_hex(&payload);
+    let origin_node = NodeId::new(config.origin_node.clone());
+    let hello = RemotePeerHello::new(
+        origin_node.clone(),
+        RemoteProtocolVersion::V3,
+        schemas.fingerprint(),
+    );
+    let runtime = RuntimeBuilder::current_thread().build().map_err(|err| {
+        CliError::new(
+            "remote_probe_runtime_failed",
+            "Failed to build the remote probe runtime",
+        )
+        .detail(err.to_string())
+        .exit_code(ExitCode::RUNTIME_ERROR)
+    })?;
+    let probe_result = runtime.block_on(async {
+        let cx = Cx::current().expect("remote probe runtime should install a root context");
+        let remote_task_id = RemoteTaskId::next();
+        let request = RemoteServiceWireRequest::from_spawn_request(
+            hello,
+            &SpawnRequest {
+                remote_task_id,
+                computation: ComputationName::new(REMOTE_ECHO_COMPUTATION),
+                input: RemoteInput::new(payload.clone()),
+                lease: Duration::from_millis(config.lease_ms),
+                idempotency_key: IdempotencyKey::generate(&cx),
+                budget: None,
+                origin_node,
+                origin_region: cx.region_id(),
+                origin_task: cx.task_id(),
+            },
+        )
+        .map_err(|err| {
+            CliError::new(
+                "remote_probe_request_invalid",
+                "Failed to construct the remote probe request",
+            )
+            .detail(err.to_string())
+            .exit_code(ExitCode::RUNTIME_ERROR)
+        })?;
+        let started = client
+            .start_session(&cx, &request)
+            .await
+            .map_err(remote_probe_client_error)?;
+        let response = match started {
+            RemoteComputationSessionStart::Running(session) => {
+                let completion_timeout = Duration::from_millis(config.completion_timeout_ms);
+                asupersync::time::timeout(cx.now(), completion_timeout, session.wait(&cx))
+                    .await
+                    .map_err(|_| remote_probe_completion_timeout(completion_timeout))?
+                    .map_err(|err| remote_probe_accepted_session_error(&err))?
+            }
+            RemoteComputationSessionStart::Terminal(response) => response,
+            _ => {
+                return Err(CliError::new(
+                    "remote_probe_protocol_failed",
+                    "Remote probe received an unknown session-start event",
+                )
+                .exit_code(ExitCode::RUNTIME_ERROR));
+            }
+        };
+        Ok::<_, CliError>((remote_task_id.raw(), response))
+    });
+    let runtime_quiescent = runtime.shutdown_timeout(Duration::from_secs(5));
+    let (remote_task_id, response) = probe_result?;
+    if !runtime_quiescent {
+        return Err(CliError::new(
+            "remote_probe_runtime_not_quiescent",
+            "Remote probe completed but its runtime did not reach quiescence",
+        )
+        .detail("The probe exchange terminated, but runtime shutdown exceeded 5s")
+        .exit_code(ExitCode::RUNTIME_ERROR));
+    }
+    match response {
+        RemoteServiceWireResponse::Outcome {
+            remote_task_id: response_task_id,
+            outcome: RemoteServiceWireOutcome::Success(actual),
+        } if response_task_id == remote_task_id && actual == payload => {}
+        RemoteServiceWireResponse::Rejected {
+            code, diagnostic, ..
+        } => return Err(remote_probe_rejection_error(code, diagnostic)),
+        RemoteServiceWireResponse::Outcome {
+            outcome: RemoteServiceWireOutcome::Failed(diagnostic),
+            ..
+        } => {
+            return Err(CliError::new(
+                "remote_probe_computation_failed",
+                "Remote probe computation failed",
+            )
+            .detail(diagnostic)
+            .exit_code(ExitCode::RUNTIME_ERROR));
+        }
+        RemoteServiceWireResponse::Outcome {
+            outcome: RemoteServiceWireOutcome::Cancelled(reason),
+            ..
+        } => {
+            return Err(CliError::new(
+                "remote_probe_computation_cancelled",
+                "Remote probe computation was cancelled",
+            )
+            .detail(reason.to_string())
+            .exit_code(ExitCode::RUNTIME_ERROR));
+        }
+        RemoteServiceWireResponse::Outcome {
+            outcome: RemoteServiceWireOutcome::Panicked(diagnostic),
+            ..
+        } => {
+            return Err(CliError::new(
+                "remote_probe_computation_panicked",
+                "Remote probe computation crossed a panic boundary",
+            )
+            .detail(diagnostic)
+            .exit_code(ExitCode::RUNTIME_ERROR));
+        }
+        RemoteServiceWireResponse::Outcome {
+            remote_task_id: response_task_id,
+            ..
+        } => {
+            return Err(CliError::new(
+                "remote_probe_response_mismatch",
+                "Remote probe response did not match the request",
+            )
+            .detail(format!(
+                "expected task {remote_task_id} and an exact echo, got task {response_task_id}"
+            ))
+            .exit_code(ExitCode::RUNTIME_ERROR));
+        }
+    }
+
+    output
+        .write(&RemoteProbeOutput {
+            event: "remote_probe_completed",
+            schema_version: REMOTE_SERVICE_CONFIG_SCHEMA_VERSION,
+            protocol: REMOTE_SERVICE_PROTOCOL,
+            computation: REMOTE_ECHO_COMPUTATION,
+            origin_node: config.origin_node,
+            bootstrap_endpoints: config.bootstrap_endpoints,
+            remote_task_id,
+            echoed_bytes: payload.len(),
+            echoed_sha256,
+        })
+        .map_err(output_write_error("remote probe result"))?;
+    Ok(())
+}
+
+#[cfg(all(feature = "remote-service", unix))]
+fn load_remote_probe_config(path: &Path) -> Result<RemoteProbeFileConfig, CliError> {
+    let raw = fs::read_to_string(path).map_err(|err| io_error(path, &err))?;
+    let mut config: RemoteProbeFileConfig = toml::from_str(&raw)
+        .map_err(|err| remote_probe_config_error(path, format!("TOML decoding failed: {err}")))?;
+    validate_remote_probe_config(path, &config)?;
+    let base = path.parent().unwrap_or_else(|| Path::new("."));
+    config.server_ca_bundle = resolve_path(base, config.server_ca_bundle);
+    config.client_certificate_chain = resolve_path(base, config.client_certificate_chain);
+    config.client_private_key = resolve_path(base, config.client_private_key);
+    Ok(config)
+}
+
+#[cfg(all(feature = "remote-service", unix))]
+fn validate_remote_probe_config(
+    path: &Path,
+    config: &RemoteProbeFileConfig,
+) -> Result<(), CliError> {
+    use asupersync::tls::CertificatePinSet;
+    use std::net::SocketAddr;
+
+    if config.schema_version != REMOTE_SERVICE_CONFIG_SCHEMA_VERSION {
+        return Err(remote_probe_config_error(
+            path,
+            format!(
+                "unsupported schema_version {}; expected {}",
+                config.schema_version, REMOTE_SERVICE_CONFIG_SCHEMA_VERSION
+            ),
+        ));
+    }
+    if config.protocol != REMOTE_SERVICE_PROTOCOL {
+        return Err(remote_probe_config_error(
+            path,
+            format!(
+                "unsupported protocol '{}'; expected '{}'",
+                config.protocol, REMOTE_SERVICE_PROTOCOL
+            ),
+        ));
+    }
+    if config.bootstrap_endpoints.is_empty() {
+        return Err(remote_probe_config_error(
+            path,
+            "bootstrap_endpoints must contain at least one socket address",
+        ));
+    }
+    let mut endpoints = BTreeSet::new();
+    for endpoint in &config.bootstrap_endpoints {
+        let address = endpoint.parse::<SocketAddr>().map_err(|err| {
+            remote_probe_config_error(
+                path,
+                format!("bootstrap endpoint '{endpoint}' is invalid: {err}"),
+            )
+        })?;
+        if !endpoints.insert(address) {
+            return Err(remote_probe_config_error(
+                path,
+                format!("duplicate bootstrap endpoint '{address}'"),
+            ));
+        }
+    }
+    if config.server_name.is_empty() || config.server_name.trim() != config.server_name {
+        return Err(remote_probe_config_error(
+            path,
+            "server_name must be nonempty and contain no surrounding whitespace",
+        ));
+    }
+    if config.origin_node.is_empty() || config.origin_node.trim() != config.origin_node {
+        return Err(remote_probe_config_error(
+            path,
+            "origin_node must be nonempty and contain no surrounding whitespace",
+        ));
+    }
+    if config.server_spki_sha256.is_empty() {
+        return Err(remote_probe_config_error(
+            path,
+            "server_spki_sha256 must contain at least one enforcing pin",
+        ));
+    }
+    let mut pins = BTreeSet::new();
+    let mut validated_pins = CertificatePinSet::new();
+    for pin in &config.server_spki_sha256 {
+        if !pins.insert(pin.as_str()) {
+            return Err(remote_probe_config_error(
+                path,
+                "server_spki_sha256 contains a duplicate pin",
+            ));
+        }
+        validated_pins.add_spki_sha256_base64(pin).map_err(|err| {
+            remote_probe_config_error(path, format!("invalid server SPKI pin: {err}"))
+        })?;
+    }
+    for (name, value) in [
+        ("max_frame_bytes", config.max_frame_bytes),
+        ("max_attempts", config.max_attempts),
+    ] {
+        if value == 0 {
+            return Err(remote_probe_config_error(
+                path,
+                format!("{name} must be nonzero"),
+            ));
+        }
+    }
+    for (name, value) in [
+        ("connect_timeout_ms", config.connect_timeout_ms),
+        ("tls_handshake_timeout_ms", config.tls_handshake_timeout_ms),
+        ("attempt_timeout_ms", config.attempt_timeout_ms),
+        ("completion_timeout_ms", config.completion_timeout_ms),
+        ("max_backoff_ms", config.max_backoff_ms),
+        ("lease_ms", config.lease_ms),
+    ] {
+        if value == 0 {
+            return Err(remote_probe_config_error(
+                path,
+                format!("{name} must be nonzero"),
+            ));
+        }
+    }
+    if config.connect_timeout_ms > config.attempt_timeout_ms {
+        return Err(remote_probe_config_error(
+            path,
+            "connect_timeout_ms must not exceed attempt_timeout_ms",
+        ));
+    }
+    if config.tls_handshake_timeout_ms > config.attempt_timeout_ms {
+        return Err(remote_probe_config_error(
+            path,
+            "tls_handshake_timeout_ms must not exceed attempt_timeout_ms",
+        ));
+    }
+    if config.initial_backoff_ms > config.max_backoff_ms {
+        return Err(remote_probe_config_error(
+            path,
+            "initial_backoff_ms must not exceed max_backoff_ms",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(all(feature = "remote-service", unix))]
+fn remote_probe_config_error(path: &Path, detail: impl Into<String>) -> CliError {
+    CliError::new(
+        "remote_probe_config_invalid",
+        "Remote probe configuration is invalid",
+    )
+    .detail(detail.into())
+    .context("path", path.display().to_string())
+    .exit_code(ExitCode::USER_ERROR)
+}
+
+#[cfg(all(feature = "remote-service", unix))]
+fn remote_probe_client_error(error: asupersync::remote::RemoteComputationClientError) -> CliError {
+    use asupersync::remote::RemoteComputationClientError;
+
+    let delivery_ambiguous = match &error {
+        RemoteComputationClientError::CancelledDuringAttempt { .. }
+        | RemoteComputationClientError::AttemptTimeout { .. }
+        | RemoteComputationClientError::AmbiguousExchange { .. } => true,
+        RemoteComputationClientError::Session { attempts, .. } => *attempts > 0,
+        _ => false,
+    };
+    let (error_type, title, exit_code) = match &error {
+        RemoteComputationClientError::InvalidConfig(_)
+        | RemoteComputationClientError::InvalidServerName(_) => (
+            "remote_probe_config_invalid",
+            "Remote probe client configuration is invalid",
+            ExitCode::USER_ERROR,
+        ),
+        RemoteComputationClientError::Cancelled { .. } => (
+            "remote_probe_cancelled",
+            "Remote probe was cancelled before delivery",
+            ExitCode::RUNTIME_ERROR,
+        ),
+        RemoteComputationClientError::CancelledDuringAttempt { .. }
+        | RemoteComputationClientError::AttemptTimeout { .. }
+        | RemoteComputationClientError::AmbiguousExchange { .. } => (
+            "remote_probe_delivery_ambiguous",
+            "Remote probe delivery became ambiguous",
+            ExitCode::RUNTIME_ERROR,
+        ),
+        RemoteComputationClientError::Session { attempts, .. } if *attempts > 0 => (
+            "remote_probe_delivery_ambiguous",
+            "Remote probe delivery became ambiguous",
+            ExitCode::RUNTIME_ERROR,
+        ),
+        RemoteComputationClientError::Connect { .. } => (
+            "remote_probe_connect_failed",
+            "Remote probe could not connect to a bootstrap endpoint",
+            ExitCode::RUNTIME_ERROR,
+        ),
+        RemoteComputationClientError::Tls { .. } => (
+            "remote_probe_tls_failed",
+            "Remote probe could not authenticate the service",
+            ExitCode::RUNTIME_ERROR,
+        ),
+        RemoteComputationClientError::ResponseTaskMismatch { .. } => (
+            "remote_probe_response_mismatch",
+            "Remote probe response did not match the request",
+            ExitCode::RUNTIME_ERROR,
+        ),
+        RemoteComputationClientError::Exchange { .. }
+        | RemoteComputationClientError::Session { .. } => (
+            "remote_probe_protocol_failed",
+            "Remote probe protocol exchange failed",
+            ExitCode::RUNTIME_ERROR,
+        ),
+        _ => (
+            "remote_probe_failed",
+            "Remote probe failed",
+            ExitCode::RUNTIME_ERROR,
+        ),
+    };
+    let detail = if delivery_ambiguous {
+        format!("request delivery is ambiguous and will not be replayed: {error}")
+    } else {
+        error.to_string()
+    };
+    CliError::new(error_type, title)
+        .detail(detail)
+        .context("attempts", error.attempts())
+        .exit_code(exit_code)
+}
+
+#[cfg(all(feature = "remote-service", unix))]
+fn remote_probe_accepted_session_error(
+    error: &asupersync::remote::RemoteServiceSessionError,
+) -> CliError {
+    CliError::new(
+        "remote_probe_delivery_ambiguous",
+        "Remote probe lost its accepted V3 session",
+    )
+    .detail(format!(
+        "request delivery is ambiguous and will not be replayed: {error}"
+    ))
+    .exit_code(ExitCode::RUNTIME_ERROR)
+}
+
+#[cfg(all(feature = "remote-service", unix))]
+fn remote_probe_completion_timeout(timeout: std::time::Duration) -> CliError {
+    CliError::new(
+        "remote_probe_delivery_ambiguous",
+        "Remote probe timed out after the service accepted the request",
+    )
+    .detail(format!(
+        "no terminal V3 response arrived within {timeout:?}; delivery is ambiguous and will not be replayed"
+    ))
+    .exit_code(ExitCode::RUNTIME_ERROR)
+}
+
+#[cfg(all(feature = "remote-service", unix))]
+fn remote_probe_rejection_error(
+    code: asupersync::remote::RemoteServiceRejectionCode,
+    diagnostic: String,
+) -> CliError {
+    use asupersync::remote::RemoteServiceRejectionCode;
+
+    let (error_type, title) = match code {
+        RemoteServiceRejectionCode::AdmissionDenied => (
+            "remote_probe_admission_denied",
+            "Remote service denied probe admission",
+        ),
+        RemoteServiceRejectionCode::ExecutableRegistryDrift => (
+            "remote_probe_registry_drift",
+            "Remote service registry does not match the probe",
+        ),
+        RemoteServiceRejectionCode::ComputationDenied => (
+            "remote_probe_computation_denied",
+            "Remote service denied the probe computation",
+        ),
+        RemoteServiceRejectionCode::MalformedRequest => (
+            "remote_probe_request_rejected",
+            "Remote service rejected the probe request",
+        ),
+        RemoteServiceRejectionCode::ExecutionFailed => (
+            "remote_probe_execution_failed",
+            "Remote service could not execute the probe",
+        ),
+        RemoteServiceRejectionCode::LifecycleUnavailable => (
+            "remote_probe_lifecycle_unavailable",
+            "Remote service does not provide the required V3 lifecycle",
+        ),
+        RemoteServiceRejectionCode::OperationInFlight => (
+            "remote_probe_operation_in_flight",
+            "Remote service reports the probe operation is already in flight",
+        ),
+        RemoteServiceRejectionCode::IdempotencyConflict => (
+            "remote_probe_idempotency_conflict",
+            "Remote service rejected a conflicting idempotency key",
+        ),
+        RemoteServiceRejectionCode::IdempotencyCapacity => (
+            "remote_probe_idempotency_capacity",
+            "Remote service has no idempotency capacity for the probe",
+        ),
+        _ => ("remote_probe_rejected", "Remote service rejected the probe"),
+    };
+    CliError::new(error_type, title)
+        .detail(diagnostic)
+        .exit_code(ExitCode::RUNTIME_ERROR)
 }
 
 #[cfg(all(feature = "remote-service", unix))]
@@ -13271,6 +13907,32 @@ mod tests {
     }
 
     #[cfg(all(feature = "remote-service", unix))]
+    fn valid_remote_probe_file_config() -> RemoteProbeFileConfig {
+        RemoteProbeFileConfig {
+            schema_version: REMOTE_SERVICE_CONFIG_SCHEMA_VERSION,
+            protocol: REMOTE_SERVICE_PROTOCOL.to_string(),
+            bootstrap_endpoints: vec!["127.0.0.1:7443".to_string(), "127.0.0.1:7444".to_string()],
+            server_name: "remote.example.test".to_string(),
+            server_ca_bundle: PathBuf::from("server-ca.crt"),
+            client_certificate_chain: PathBuf::from("client.crt"),
+            client_private_key: PathBuf::from("client.key"),
+            server_spki_sha256: vec!["AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string()],
+            origin_node: "origin-a".to_string(),
+            max_frame_bytes: 64 * 1024,
+            connect_timeout_ms: 1_000,
+            tls_handshake_timeout_ms: 2_000,
+            attempt_timeout_ms: 5_000,
+            completion_timeout_ms: 30_000,
+            max_attempts: 2,
+            initial_backoff_ms: 10,
+            max_backoff_ms: 100,
+            lease_ms: 30_000,
+            full_jitter: false,
+            tcp_nodelay: true,
+        }
+    }
+
+    #[cfg(all(feature = "remote-service", unix))]
     #[test]
     fn remote_service_config_validation_fails_closed() {
         let path = Path::new("remote-service.toml");
@@ -13327,6 +13989,98 @@ computations = ["asupersync.remote.echo.v1"]
 "#;
         let error = toml::from_str::<RemoteServiceFileConfig>(raw)
             .expect_err("unknown configuration fields must be rejected");
+        assert!(error.to_string().contains("unknown field"));
+    }
+
+    #[cfg(all(feature = "remote-service", unix))]
+    #[test]
+    fn remote_probe_config_validation_fails_closed() {
+        let path = Path::new("remote-probe.toml");
+        let mut config = valid_remote_probe_file_config();
+        validate_remote_probe_config(path, &config).expect("baseline probe config should validate");
+
+        config.bootstrap_endpoints.clear();
+        let error = validate_remote_probe_config(path, &config)
+            .expect_err("empty bootstrap endpoints must fail closed");
+        assert!(error.detail.contains("at least one socket address"));
+
+        config = valid_remote_probe_file_config();
+        config.bootstrap_endpoints[1] = config.bootstrap_endpoints[0].clone();
+        let error = validate_remote_probe_config(path, &config)
+            .expect_err("duplicate bootstrap endpoints must fail closed");
+        assert!(error.detail.contains("duplicate bootstrap endpoint"));
+
+        config = valid_remote_probe_file_config();
+        config.server_spki_sha256 = vec!["not-base64".to_string()];
+        let error = validate_remote_probe_config(path, &config)
+            .expect_err("invalid server pins must fail closed");
+        assert!(error.detail.contains("invalid server SPKI pin"));
+
+        config = valid_remote_probe_file_config();
+        config.lease_ms = 0;
+        let error = validate_remote_probe_config(path, &config)
+            .expect_err("zero probe lease must fail closed");
+        assert!(error.detail.contains("lease_ms must be nonzero"));
+
+        config = valid_remote_probe_file_config();
+        config.completion_timeout_ms = 0;
+        let error = validate_remote_probe_config(path, &config)
+            .expect_err("zero completion timeout must fail closed");
+        assert!(
+            error
+                .detail
+                .contains("completion_timeout_ms must be nonzero")
+        );
+
+        config = valid_remote_probe_file_config();
+        config.tls_handshake_timeout_ms = config.attempt_timeout_ms + 1;
+        let error = validate_remote_probe_config(path, &config)
+            .expect_err("unreachable TLS timeout must fail closed");
+        assert!(
+            error
+                .detail
+                .contains("tls_handshake_timeout_ms must not exceed attempt_timeout_ms")
+        );
+
+        config = valid_remote_probe_file_config();
+        config.initial_backoff_ms = config.max_backoff_ms + 1;
+        let error = validate_remote_probe_config(path, &config)
+            .expect_err("inverted backoff bounds must fail closed");
+        assert!(
+            error
+                .detail
+                .contains("initial_backoff_ms must not exceed max_backoff_ms")
+        );
+    }
+
+    #[cfg(all(feature = "remote-service", unix))]
+    #[test]
+    fn remote_probe_config_rejects_unknown_toml_fields() {
+        let raw = r#"
+schema_version = 1
+protocol = "3.0"
+bootstrap_endpoints = ["127.0.0.1:7443"]
+server_name = "remote.example.test"
+server_ca_bundle = "server-ca.crt"
+client_certificate_chain = "client.crt"
+client_private_key = "client.key"
+server_spki_sha256 = ["AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="]
+origin_node = "origin-a"
+max_frame_bytes = 65536
+connect_timeout_ms = 1000
+tls_handshake_timeout_ms = 2000
+attempt_timeout_ms = 5000
+completion_timeout_ms = 30000
+max_attempts = 2
+initial_backoff_ms = 10
+max_backoff_ms = 100
+lease_ms = 30000
+full_jitter = false
+tcp_nodelay = true
+ambient_discovery = true
+"#;
+        let error = toml::from_str::<RemoteProbeFileConfig>(raw)
+            .expect_err("unknown remote probe fields must be rejected");
         assert!(error.to_string().contains("unknown field"));
     }
 

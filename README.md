@@ -1051,6 +1051,49 @@ computations = ["asupersync.remote.echo.v1"]
 asupersync --format stream-json --config /etc/asupersync/remote.toml remote serve
 ```
 
+The same feature also packages the client half as an authenticated deployment
+probe. Its configuration is separate from the service configuration: every
+route, trust anchor, client identity, enforcing server pin, pre-accept attempt
+timeout, post-accept completion timeout, retry bound, and lease is explicit.
+Bootstrap entries are literal socket addresses and are tried in order only for
+failures proven to precede request delivery.
+
+```toml
+schema_version = 1
+protocol = "3.0"
+bootstrap_endpoints = ["10.0.0.11:7443", "10.0.0.12:7443"]
+server_name = "remote.internal.example"
+server_ca_bundle = "/run/secrets/remote-server-ca.crt"
+client_certificate_chain = "/run/secrets/origin-a.crt"
+client_private_key = "/run/secrets/origin-a.key"
+server_spki_sha256 = ["BASE64_ENCODED_32_BYTE_SPKI_SHA256"]
+origin_node = "origin-a"
+max_frame_bytes = 1048576
+connect_timeout_ms = 5000
+tls_handshake_timeout_ms = 5000
+attempt_timeout_ms = 30000
+completion_timeout_ms = 30000
+max_attempts = 2
+initial_backoff_ms = 50
+max_backoff_ms = 1000
+lease_ms = 30000
+full_jitter = true
+tcp_nodelay = true
+```
+
+```bash
+asupersync --format stream-json --config /etc/asupersync/remote-probe.toml \
+  remote probe --payload deployment-ready
+```
+
+Success emits one `remote_probe_completed` record containing the correlated
+task ID, echoed byte count, and SHA-256 digest; the payload and private-key
+material are not repeated in the receipt. TLS identity or pin failure stops on
+the current endpoint, and delivery-ambiguous timeout, cancellation, framing,
+or transport loss is never replayed against a later endpoint. The command is a
+bounded probe of the compiled-in `asupersync.remote.echo.v1` operation, not a
+generic remote-code client.
+
 The process flushes a `remote_service_ready` record only after the listener is
 bound. The first SIGINT or SIGTERM closes admission and drains structured
 connection work; a second signal force-closes it. Successful exit follows a
