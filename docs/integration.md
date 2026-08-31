@@ -2047,6 +2047,36 @@ health-based balancing, dynamic plugins/code shipping, or durable idempotency;
 configured application hosting through the library bootstrap is a separate
 statically linked composition surface.
 
+#### Operator rollback
+
+The supported deployment class is the opt-in Unix `remote-service` static
+process boundary. It does not promise hot reload, live state migration,
+restart-durable idempotency, or automatic route/certificate rollback. Preserve
+the last-known-good binary, strict service and probe files, certificate set, and
+deployment-owned route/firewall state as one versioned rollback unit.
+
+Use this rollback sequence:
+
+1. Remove the instance from upstream traffic so no new caller can begin work.
+2. Send one SIGTERM and wait through the configured drain bound for a flushed
+   `remote_service_stopped` record whose active-connection count is zero.
+3. If the drain bound expires, send a second SIGTERM to force-close the remaining
+   connections. Mark their operations delivery-ambiguous; never replay them
+   automatically because the replacement process cannot inherit the old
+   process-local idempotency table.
+4. Restore the complete last-known-good unit. Do not mix binary, configuration,
+   certificate, pin/grant, or routing generations.
+5. Start the prior binary, wait for its flushed `remote_service_ready` record,
+   then run the packaged `remote probe` with a fresh task identity through the
+   intended route before restoring upstream traffic.
+
+Process startup without readiness plus the authenticated probe is not a
+successful rollback. Do not reuse an in-flight task ID or infer whether an
+ambiguous operation committed. If terminal quiescence, prior configuration
+validation, readiness, or the probe fails, keep the instance out of service and
+escalate. Rolling back restores a known executable and policy boundary; it does
+not recover in-flight computation state.
+
 The schema-v2 acceptance run used two distinct RCH workers: `hz3` hosted the
 packaged network-scope service and `hz4` ran the packaged probe. Mutual TLS and
 both SPKI policies admitted exactly one 23-byte echo with SHA-256

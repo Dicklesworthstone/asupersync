@@ -1224,6 +1224,27 @@ echo operation; the library bootstrap supports caller-registered statically
 linked handlers, not dynamic plugin loading, closure shipping, code generation,
 service discovery, or restart-durable execution.
 
+### Rolling back the remote service
+
+Treat the opt-in Unix `remote-service` binary as a static, restart-based service;
+it has no hot-reload or live migration contract. Keep the last-known-good binary,
+strict service/probe configuration, certificate set, and routing state together
+as one deployment unit. To roll back, first remove the instance from external
+traffic, send one SIGTERM, and wait for the flushed `remote_service_stopped`
+record with zero active connections. If the configured drain deadline expires,
+a second SIGTERM force-closes remaining work; record every affected operation as
+delivery-ambiguous and do not replay it automatically.
+
+Restore the complete prior deployment unit, start the prior binary, wait for its
+flushed `remote_service_ready` record, and run `remote probe` with a new task
+identity before returning traffic. Never infer success from process startup
+alone, mix old and new certificates or route policy, reuse an in-flight task ID,
+or retry work whose pre-rollback delivery outcome is unknown. Listener
+idempotency is process-local, so rollback does not recover or deduplicate work
+from the replaced process. If either terminal quiescence or the post-rollback
+probe cannot be established, keep the instance out of service and escalate
+rather than guessing.
+
 ---
 
 ## Channels and Synchronization Primitives
