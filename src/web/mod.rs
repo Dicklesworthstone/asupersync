@@ -103,3 +103,9 @@ pub use response::{Html, IntoResponse, Json, Redirect, Response, StatusCode};
 pub use router::{
     HttpHandlerFuture, MethodRouter, RouteInfo, Router, delete, get, patch, post, put,
 };
+#[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+pub use router::{
+    NativeH3Router, NativeH3RouterConfig, NativeH3RouterDispatch, NativeH3RouterDispatchToken,
+    NativeH3RouterEvent, NativeH3RouterIngress, NativeH3RouterPreparedResponse,
+    NativeH3RouterRefusal,
+};

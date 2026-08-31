@@ -13,6 +13,8 @@
 //! ```
 
 use std::collections::HashMap;
+#[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::pin::Pin;
 
@@ -30,9 +32,15 @@ use super::response::{IntoResponse, Response, StatusCode};
 #[cfg(not(target_arch = "wasm32"))]
 use super::websocket::Http1UpgradeSlot;
 use crate::Cx;
+#[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+use crate::bytes::Bytes;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::http::h1::server::{Http1Response, Http1Upgrade};
 use crate::http::h1::types::{Request as HttpRequest, Response as HttpResponse};
+#[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+use crate::http::h3::{H3Error, H3RequestHead, H3ResponseHead, NativeH3Event, NativeH3Session};
+#[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+use crate::net::quic_native::{QuicConnection, StreamId};
 use crate::service::Layer;
 use crate::types::{
     Budget, Time,
@@ -48,6 +56,8 @@ const METHOD_DELETE: &str = "DELETE";
 const METHOD_PATCH: &str = "PATCH";
 const METHOD_HEAD: &str = "HEAD";
 const METHOD_OPTIONS: &str = "OPTIONS";
+#[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+const METHOD_CONNECT: &str = "CONNECT";
 
 /// Public route metadata returned by [`Router::routes`].
 ///
@@ -474,6 +484,785 @@ pub type HttpHandlerFuture = Pin<Box<dyn Future<Output = HttpResponse> + Send + 
 #[cfg(not(target_arch = "wasm32"))]
 pub type Http1HandlerFuture = Pin<Box<dyn Future<Output = Http1Response> + Send + 'static>>;
 
+/// Resource limits for the established-session HTTP/3 router bridge.
+///
+/// The first bridge profile assembles a complete request before dispatching it
+/// to [`Router`]. Keeping the limit here makes that buffering explicit and
+/// prevents a peer from growing application memory without bound.
+#[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct NativeH3RouterConfig {
+    /// Maximum request body bytes buffered per HTTP/3 request stream.
+    max_buffered_body_bytes: usize,
+    /// Maximum request-body bytes retained across incomplete streams and
+    /// caller-scoped handler dispatches.
+    max_total_buffered_body_bytes: usize,
+    /// Maximum request streams allowed to wait for FIN at once.
+    max_pending_requests: usize,
+    /// Maximum completed requests admitted to caller-scoped handler dispatch.
+    max_in_flight_dispatches: usize,
+}
+
+#[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+impl Default for NativeH3RouterConfig {
+    fn default() -> Self {
+        Self {
+            // Match the default per-request body limit of the h1/h2 listener
+            // surfaces, then apply an explicit aggregate ceiling below.
+            max_buffered_body_bytes: 16 * 1024 * 1024,
+            max_total_buffered_body_bytes: 64 * 1024 * 1024,
+            max_pending_requests: 128,
+            max_in_flight_dispatches: 128,
+        }
+    }
+}
+
+#[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+impl NativeH3RouterConfig {
+    /// Set the maximum buffered body size for one incomplete request.
+    #[must_use]
+    pub fn max_buffered_body_bytes(mut self, bytes: usize) -> Self {
+        self.max_buffered_body_bytes = bytes;
+        self
+    }
+
+    /// Set the aggregate retained-body budget across incomplete requests and
+    /// in-flight handler dispatches.
+    #[must_use]
+    pub fn max_total_buffered_body_bytes(mut self, bytes: usize) -> Self {
+        self.max_total_buffered_body_bytes = bytes;
+        self
+    }
+
+    /// Set the maximum number of requests that may wait for FIN concurrently.
+    #[must_use]
+    pub fn max_pending_requests(mut self, requests: usize) -> Self {
+        self.max_pending_requests = requests;
+        self
+    }
+
+    /// Set the maximum number of completed requests whose handlers may be in
+    /// flight concurrently.
+    #[must_use]
+    pub fn max_in_flight_dispatches(mut self, dispatches: usize) -> Self {
+        self.max_in_flight_dispatches = dispatches;
+        self
+    }
+}
+
+/// Why the HTTP/3 router bridge reset one request stream without dispatching
+/// or sending a response.
+#[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum NativeH3RouterRefusal {
+    /// CONNECT and extended CONNECT are not representable by this buffered
+    /// request/response adapter.
+    ConnectUnsupported,
+    /// Request trailers are outside the first bridge profile.
+    RequestTrailersUnsupported,
+    /// The accumulated request body exceeded the configured per-stream limit.
+    RequestBodyTooLarge {
+        /// Configured maximum number of buffered bytes.
+        limit: usize,
+    },
+    /// The connection-wide buffered-body budget is exhausted.
+    ConnectionBodyBudgetExhausted {
+        /// Configured maximum aggregate buffered bytes.
+        limit: usize,
+    },
+    /// Too many request streams are already waiting for FIN.
+    TooManyPendingRequests {
+        /// Configured maximum number of pending requests.
+        limit: usize,
+    },
+    /// Too many completed requests already have caller-scoped handlers in
+    /// flight.
+    TooManyInFlightDispatches {
+        /// Configured maximum number of concurrent handler dispatches.
+        limit: usize,
+    },
+    /// Content-Length was malformed, duplicated, or did not match the body.
+    InvalidContentLength,
+    /// TE contained a value other than the sole HTTP/3-permitted `trailers`.
+    InvalidTransferEncoding,
+    /// The caller cancelled an admitted handler scope before it produced a
+    /// response.
+    DispatchCancelled,
+    /// The session emitted a request event in an order the bridge cannot
+    /// safely represent.
+    InvalidRequestProgression(&'static str),
+    /// A router handler produced a response forbidden on HTTP/3, such as 101
+    /// or a connection-specific header.
+    InvalidResponse(H3Error),
+}
+
+/// Result of applying one decoded [`NativeH3Event`] to a [`NativeH3Router`].
+#[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum NativeH3RouterEvent {
+    /// A request is buffered but has not reached FIN, so no handler ran.
+    RequestBuffered {
+        /// QUIC request stream.
+        stream_id: StreamId,
+        /// Body bytes buffered so far.
+        body_bytes: usize,
+    },
+    /// The completed request was dispatched and a final response was queued
+    /// on the same stream.
+    ResponseSent {
+        /// QUIC request stream.
+        stream_id: StreamId,
+        /// Final HTTP response status.
+        status: u16,
+    },
+    /// One request stream was reset fail-closed and the connection remains
+    /// available to the caller.
+    RequestRefused {
+        /// QUIC request stream.
+        stream_id: StreamId,
+        /// Typed refusal reason.
+        reason: NativeH3RouterRefusal,
+    },
+    /// A later event for a stream that was already refused was discarded. In
+    /// particular, queued DATA/FIN cannot accidentally dispatch the handler
+    /// after an early HEADERS refusal.
+    RequestDiscarded {
+        /// QUIC request stream.
+        stream_id: StreamId,
+    },
+    /// The peer reset a request before it could be dispatched.
+    StreamReset {
+        /// QUIC request stream.
+        stream_id: StreamId,
+        /// Peer application error code.
+        error_code: u64,
+        /// Peer-declared final stream size.
+        final_size: u64,
+    },
+    /// A control or non-request event that the caller may interpret.
+    Session(NativeH3Event),
+}
+
+/// Result of ingesting one session event without awaiting an application
+/// handler or monopolizing the QUIC/H3 drivers.
+#[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum NativeH3RouterIngress {
+    /// The event was handled synchronously.
+    Event(NativeH3RouterEvent),
+    /// A completed request is ready for caller-scoped asynchronous dispatch.
+    Dispatch(NativeH3RouterDispatch),
+}
+
+/// One completed request detached from the mutable session/connection borrows.
+///
+/// Run this future in the caller's request scope, continue driving other H3
+/// streams, then pass the result to
+/// [`NativeH3Router::complete_dispatch_with_cx`]. If the scope cancels the
+/// dispatch, retain [`NativeH3RouterDispatch::cancellation_token`] and pass it
+/// to [`NativeH3Router::cancel_dispatch_with_cx`] so the request stream is
+/// terminalized explicitly.
+#[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+#[must_use = "an HTTP/3 dispatch must be run or explicitly cancelled"]
+pub struct NativeH3RouterDispatch {
+    token: NativeH3RouterDispatchToken,
+    router: Arc<Router>,
+    request: Request,
+    suppress_body_for_head: bool,
+}
+
+#[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+impl std::fmt::Debug for NativeH3RouterDispatch {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("NativeH3RouterDispatch")
+            .field("stream_id", &self.token.stream_id)
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+impl NativeH3RouterDispatch {
+    /// Request stream whose handler will run.
+    #[must_use]
+    pub fn stream_id(&self) -> StreamId {
+        self.token.stream_id
+    }
+
+    /// Produce the opaque bridge-bound token needed to terminalize this
+    /// dispatch if its caller-owned request scope is cancelled.
+    #[must_use]
+    pub fn cancellation_token(&self) -> NativeH3RouterDispatchToken {
+        self.token.clone()
+    }
+
+    /// Run the Router handler without borrowing the H3 session or QUIC
+    /// connection. The supplied context must belong to the caller's
+    /// request-task scope so cancellation and effect authority do not leak
+    /// from the connection driver.
+    pub async fn run(self, cx: &Cx) -> NativeH3RouterPreparedResponse {
+        let response = self.router.handle_with_cx(cx, self.request).await;
+        let status = response.status.as_u16();
+        NativeH3RouterPreparedResponse {
+            token: self.token,
+            response: h3_response_from_web(response, self.suppress_body_for_head)
+                .map(|(head, body)| (status, head, body)),
+        }
+    }
+}
+
+/// Opaque proof that a cancellation belongs to one specific H3 Router bridge.
+///
+/// QUIC stream IDs repeat across connections, so a bare [`StreamId`] is not a
+/// sufficient completion or cancellation capability.
+#[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+#[derive(Clone)]
+#[must_use = "retain this token until the dispatch is completed or cancelled"]
+pub struct NativeH3RouterDispatchToken {
+    bridge_identity: Arc<()>,
+    stream_id: StreamId,
+}
+
+#[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+impl std::fmt::Debug for NativeH3RouterDispatchToken {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("NativeH3RouterDispatchToken")
+            .field("stream_id", &self.stream_id)
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+impl NativeH3RouterDispatchToken {
+    /// Request stream owned by this bridge-bound token.
+    #[must_use]
+    pub fn stream_id(&self) -> StreamId {
+        self.stream_id
+    }
+}
+
+/// Handler output ready to flush through an established H3 session.
+#[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+#[must_use = "a prepared HTTP/3 response must be completed or its dispatch cancelled"]
+pub struct NativeH3RouterPreparedResponse {
+    token: NativeH3RouterDispatchToken,
+    response: Result<(u16, H3ResponseHead, Bytes), H3Error>,
+}
+
+#[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+impl NativeH3RouterPreparedResponse {
+    /// Request stream that owns this response.
+    #[must_use]
+    pub fn stream_id(&self) -> StreamId {
+        self.token.stream_id
+    }
+}
+
+#[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+struct PendingNativeH3Request {
+    head: H3RequestHead,
+    body: Vec<u8>,
+}
+
+/// Caller-driven bridge from an established native HTTP/3 session to a web
+/// [`Router`].
+///
+/// Feed events returned by [`NativeH3Session::next_event`] into
+/// [`NativeH3Router::ingest_event_with_cx`]. HEADERS and DATA are accumulated
+/// by stream. FIN produces a detached [`NativeH3RouterDispatch`] so handlers
+/// can run in caller-owned request scopes while the QUIC/H3 drivers continue
+/// serving other streams. Completed output is queued through
+/// [`NativeH3Router::complete_dispatch_with_cx`] on the originating stream. A
+/// request reset before FIN never reaches a handler.
+///
+/// Each bridge is connection-scoped: completion and cancellation methods must
+/// receive the same established `NativeH3Session`/`QuicConnection` pair that
+/// produced its events. When a [`NativeH3RouterEvent::StreamReset`] arrives for
+/// an in-flight dispatch, the event loop must cancel/drop that handler scope
+/// and acknowledge it with [`NativeH3Router::cancel_dispatch_with_cx`]; the
+/// bridge cannot own or cancel the caller's task handle itself.
+///
+/// This adapter deliberately does not own a UDP listener, TLS/ALPN handshake,
+/// QUIC event loop, streaming body/backpressure policy, trailers, CONNECT,
+/// WebSocket, or server-push surface.
+#[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+pub struct NativeH3Router {
+    identity: Arc<()>,
+    router: Arc<Router>,
+    config: NativeH3RouterConfig,
+    pending: BTreeMap<StreamId, PendingNativeH3Request>,
+    discarding: BTreeSet<StreamId>,
+    discard_order: std::collections::VecDeque<StreamId>,
+    retained_request_body_bytes: usize,
+    in_flight: BTreeMap<StreamId, usize>,
+    reset_during_dispatch: BTreeSet<StreamId>,
+}
+
+#[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+const MAX_DISCARDED_H3_STREAMS: usize = 4096;
+
+#[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+impl NativeH3Router {
+    /// Wrap a router with the default per-request buffering limit.
+    #[must_use]
+    pub fn new(router: Router) -> Self {
+        Self::with_config(router, NativeH3RouterConfig::default())
+    }
+
+    /// Wrap a router with explicit established-session bridge limits.
+    #[must_use]
+    pub fn with_config(router: Router, config: NativeH3RouterConfig) -> Self {
+        Self::with_shared_config(Arc::new(router), config)
+    }
+
+    /// Create one connection-scoped bridge over a shared route graph.
+    #[must_use]
+    pub fn from_shared(router: Arc<Router>) -> Self {
+        Self::with_shared_config(router, NativeH3RouterConfig::default())
+    }
+
+    /// Create one connection-scoped bridge over a shared route graph with
+    /// explicit buffering limits.
+    #[must_use]
+    pub fn with_shared_config(router: Arc<Router>, config: NativeH3RouterConfig) -> Self {
+        Self {
+            identity: Arc::new(()),
+            router,
+            config,
+            pending: BTreeMap::new(),
+            discarding: BTreeSet::new(),
+            discard_order: std::collections::VecDeque::new(),
+            retained_request_body_bytes: 0,
+            in_flight: BTreeMap::new(),
+            reset_during_dispatch: BTreeSet::new(),
+        }
+    }
+
+    /// Number of request streams currently waiting for FIN.
+    #[must_use]
+    pub fn pending_request_count(&self) -> usize {
+        self.pending.len()
+    }
+
+    /// Number of completed requests currently owned by caller-scoped handler
+    /// dispatches.
+    #[must_use]
+    pub fn in_flight_dispatch_count(&self) -> usize {
+        self.in_flight.len()
+    }
+
+    /// Ingest one decoded HTTP/3 session event with an explicit capability
+    /// context, without awaiting application code.
+    ///
+    /// Per-request representation failures reset only that request stream and
+    /// return [`NativeH3RouterEvent::RequestRefused`]. Transport/session
+    /// failures are returned to the caller by the underlying session API.
+    pub fn ingest_event_with_cx(
+        &mut self,
+        cx: &Cx,
+        session: &mut NativeH3Session,
+        connection: &mut QuicConnection,
+        event: NativeH3Event,
+    ) -> Result<NativeH3RouterIngress, crate::http::h3::NativeH3SessionError> {
+        match event {
+            NativeH3Event::RequestHeaders { stream_id, head } => {
+                if self.discarding.contains(&stream_id) {
+                    return Ok(NativeH3RouterIngress::Event(
+                        NativeH3RouterEvent::RequestDiscarded { stream_id },
+                    ));
+                }
+                if head.pseudo.method.as_deref() == Some(METHOD_CONNECT) {
+                    return self
+                        .refuse_request(
+                            cx,
+                            session,
+                            connection,
+                            stream_id,
+                            NativeH3RouterRefusal::ConnectUnsupported,
+                            true,
+                        )
+                        .map(NativeH3RouterIngress::Event);
+                }
+                if self.pending.contains_key(&stream_id) {
+                    return self
+                        .refuse_request(
+                            cx,
+                            session,
+                            connection,
+                            stream_id,
+                            NativeH3RouterRefusal::InvalidRequestProgression(
+                                "duplicate request HEADERS before FIN",
+                            ),
+                            true,
+                        )
+                        .map(NativeH3RouterIngress::Event);
+                }
+                if self.pending.len() >= self.config.max_pending_requests {
+                    return self
+                        .refuse_request(
+                            cx,
+                            session,
+                            connection,
+                            stream_id,
+                            NativeH3RouterRefusal::TooManyPendingRequests {
+                                limit: self.config.max_pending_requests,
+                            },
+                            true,
+                        )
+                        .map(NativeH3RouterIngress::Event);
+                }
+                self.pending.insert(
+                    stream_id,
+                    PendingNativeH3Request {
+                        head,
+                        body: Vec::new(),
+                    },
+                );
+                Ok(NativeH3RouterIngress::Event(
+                    NativeH3RouterEvent::RequestBuffered {
+                        stream_id,
+                        body_bytes: 0,
+                    },
+                ))
+            }
+            NativeH3Event::Data { stream_id, bytes } => {
+                if self.discarding.contains(&stream_id) {
+                    return Ok(NativeH3RouterIngress::Event(
+                        NativeH3RouterEvent::RequestDiscarded { stream_id },
+                    ));
+                }
+                let Some(current_len) = self
+                    .pending
+                    .get(&stream_id)
+                    .map(|request| request.body.len())
+                else {
+                    return self
+                        .refuse_request(
+                            cx,
+                            session,
+                            connection,
+                            stream_id,
+                            NativeH3RouterRefusal::InvalidRequestProgression(
+                                "request DATA arrived before HEADERS",
+                            ),
+                            true,
+                        )
+                        .map(NativeH3RouterIngress::Event);
+                };
+                let Some(new_len) = current_len.checked_add(bytes.len()) else {
+                    return self
+                        .refuse_request(
+                            cx,
+                            session,
+                            connection,
+                            stream_id,
+                            NativeH3RouterRefusal::RequestBodyTooLarge {
+                                limit: self.config.max_buffered_body_bytes,
+                            },
+                            true,
+                        )
+                        .map(NativeH3RouterIngress::Event);
+                };
+                if new_len > self.config.max_buffered_body_bytes {
+                    return self
+                        .refuse_request(
+                            cx,
+                            session,
+                            connection,
+                            stream_id,
+                            NativeH3RouterRefusal::RequestBodyTooLarge {
+                                limit: self.config.max_buffered_body_bytes,
+                            },
+                            true,
+                        )
+                        .map(NativeH3RouterIngress::Event);
+                }
+                let Some(total_len) = self.retained_request_body_bytes.checked_add(bytes.len())
+                else {
+                    return self
+                        .refuse_request(
+                            cx,
+                            session,
+                            connection,
+                            stream_id,
+                            NativeH3RouterRefusal::ConnectionBodyBudgetExhausted {
+                                limit: self.config.max_total_buffered_body_bytes,
+                            },
+                            true,
+                        )
+                        .map(NativeH3RouterIngress::Event);
+                };
+                if total_len > self.config.max_total_buffered_body_bytes {
+                    return self
+                        .refuse_request(
+                            cx,
+                            session,
+                            connection,
+                            stream_id,
+                            NativeH3RouterRefusal::ConnectionBodyBudgetExhausted {
+                                limit: self.config.max_total_buffered_body_bytes,
+                            },
+                            true,
+                        )
+                        .map(NativeH3RouterIngress::Event);
+                }
+                let request = self
+                    .pending
+                    .get_mut(&stream_id)
+                    .expect("pending request checked above");
+                request.body.extend_from_slice(bytes.as_ref());
+                self.retained_request_body_bytes = total_len;
+                Ok(NativeH3RouterIngress::Event(
+                    NativeH3RouterEvent::RequestBuffered {
+                        stream_id,
+                        body_bytes: new_len,
+                    },
+                ))
+            }
+            NativeH3Event::Trailers { stream_id, .. } => {
+                if self.discarding.contains(&stream_id) {
+                    return Ok(NativeH3RouterIngress::Event(
+                        NativeH3RouterEvent::RequestDiscarded { stream_id },
+                    ));
+                }
+                self.refuse_request(
+                    cx,
+                    session,
+                    connection,
+                    stream_id,
+                    NativeH3RouterRefusal::RequestTrailersUnsupported,
+                    true,
+                )
+                .map(NativeH3RouterIngress::Event)
+            }
+            NativeH3Event::Finished { stream_id } => {
+                if self.discarding.remove(&stream_id) {
+                    return Ok(NativeH3RouterIngress::Event(
+                        NativeH3RouterEvent::RequestDiscarded { stream_id },
+                    ));
+                }
+                let Some(request) = self.take_pending_request(stream_id) else {
+                    return self
+                        .refuse_request(
+                            cx,
+                            session,
+                            connection,
+                            stream_id,
+                            NativeH3RouterRefusal::InvalidRequestProgression(
+                                "request FIN arrived before HEADERS",
+                            ),
+                            false,
+                        )
+                        .map(NativeH3RouterIngress::Event);
+                };
+                if let Err(reason) =
+                    validate_h3_request_semantics(&request.head, request.body.len())
+                {
+                    return self
+                        .refuse_request(cx, session, connection, stream_id, reason, false)
+                        .map(NativeH3RouterIngress::Event);
+                }
+                if self.in_flight.len() >= self.config.max_in_flight_dispatches {
+                    return self
+                        .refuse_request(
+                            cx,
+                            session,
+                            connection,
+                            stream_id,
+                            NativeH3RouterRefusal::TooManyInFlightDispatches {
+                                limit: self.config.max_in_flight_dispatches,
+                            },
+                            false,
+                        )
+                        .map(NativeH3RouterIngress::Event);
+                }
+                let is_head = request.head.pseudo.method.as_deref() == Some(METHOD_HEAD);
+                let retained_body_bytes = request.body.len();
+                let request = web_request_from_h3(request.head, request.body);
+                // take_pending_request released these bytes while validating
+                // the completed request. Charge them again before handing the
+                // owned body to application code, and retain the charge until
+                // completion/reset/cancellation is acknowledged.
+                self.retained_request_body_bytes += retained_body_bytes;
+                self.in_flight.insert(stream_id, retained_body_bytes);
+                Ok(NativeH3RouterIngress::Dispatch(NativeH3RouterDispatch {
+                    token: NativeH3RouterDispatchToken {
+                        bridge_identity: Arc::clone(&self.identity),
+                        stream_id,
+                    },
+                    router: Arc::clone(&self.router),
+                    request,
+                    suppress_body_for_head: is_head,
+                }))
+            }
+            NativeH3Event::StreamReset {
+                stream_id,
+                error_code,
+                final_size,
+            } => {
+                self.take_pending_request(stream_id);
+                self.discarding.remove(&stream_id);
+                if self.in_flight.contains_key(&stream_id) {
+                    // Keep the dispatch counted until its caller-owned scope
+                    // observes the reset and acknowledges completion or
+                    // cancellation. Otherwise reset churn could bypass the
+                    // in-flight admission cap while handlers keep running.
+                    self.reset_during_dispatch.insert(stream_id);
+                }
+                Ok(NativeH3RouterIngress::Event(
+                    NativeH3RouterEvent::StreamReset {
+                        stream_id,
+                        error_code,
+                        final_size,
+                    },
+                ))
+            }
+            event => Ok(NativeH3RouterIngress::Event(NativeH3RouterEvent::Session(
+                event,
+            ))),
+        }
+    }
+
+    /// Flush a completed handler result without having held the session or
+    /// connection mutable across the handler await. `session` and `connection`
+    /// must be the originating bridge's established pair.
+    pub fn complete_dispatch_with_cx(
+        &mut self,
+        cx: &Cx,
+        session: &mut NativeH3Session,
+        connection: &mut QuicConnection,
+        prepared: &NativeH3RouterPreparedResponse,
+    ) -> Result<NativeH3RouterEvent, crate::http::h3::NativeH3SessionError> {
+        if !Arc::ptr_eq(&self.identity, &prepared.token.bridge_identity) {
+            return Err(crate::http::h3::NativeH3SessionError::InvalidState(
+                "HTTP/3 Router completion belongs to a different bridge",
+            ));
+        }
+        let stream_id = prepared.token.stream_id;
+        if self.reset_during_dispatch.remove(&stream_id) {
+            self.release_in_flight(stream_id);
+            return Ok(NativeH3RouterEvent::RequestDiscarded { stream_id });
+        }
+        if !self.in_flight.contains_key(&stream_id) {
+            return Err(crate::http::h3::NativeH3SessionError::InvalidState(
+                "HTTP/3 Router dispatch is not in flight",
+            ));
+        }
+        match &prepared.response {
+            Ok((status, head, body)) => {
+                // NativeH3Session queues the complete HEADERS/DATA/FIN wire
+                // image with one atomic transport write. Retain in-flight
+                // ownership on failure so the caller can retry this prepared
+                // response or cancel it explicitly.
+                session.send_response(cx, connection, stream_id, head, body.clone())?;
+                self.release_in_flight(stream_id);
+                Ok(NativeH3RouterEvent::ResponseSent {
+                    stream_id,
+                    status: *status,
+                })
+            }
+            Err(error) => {
+                let event = self.refuse_request(
+                    cx,
+                    session,
+                    connection,
+                    stream_id,
+                    NativeH3RouterRefusal::InvalidResponse(error.clone()),
+                    false,
+                )?;
+                self.release_in_flight(stream_id);
+                Ok(event)
+            }
+        }
+    }
+
+    /// Terminalize an admitted dispatch whose request scope was cancelled or
+    /// whose result will otherwise not be completed. `cx` must remain the live
+    /// connection-driver context; the handler scope's cancelled context may
+    /// refuse the transport reset before it is queued.
+    pub fn cancel_dispatch_with_cx(
+        &mut self,
+        cx: &Cx,
+        session: &mut NativeH3Session,
+        connection: &mut QuicConnection,
+        token: &NativeH3RouterDispatchToken,
+    ) -> Result<NativeH3RouterEvent, crate::http::h3::NativeH3SessionError> {
+        if !Arc::ptr_eq(&self.identity, &token.bridge_identity) {
+            return Err(crate::http::h3::NativeH3SessionError::InvalidState(
+                "HTTP/3 Router cancellation belongs to a different bridge",
+            ));
+        }
+        let stream_id = token.stream_id;
+        if self.reset_during_dispatch.remove(&stream_id) {
+            self.release_in_flight(stream_id);
+            return Ok(NativeH3RouterEvent::RequestDiscarded { stream_id });
+        }
+        if !self.in_flight.contains_key(&stream_id) {
+            return Err(crate::http::h3::NativeH3SessionError::InvalidState(
+                "HTTP/3 Router dispatch is not in flight",
+            ));
+        }
+        let event = self.refuse_request(
+            cx,
+            session,
+            connection,
+            stream_id,
+            NativeH3RouterRefusal::DispatchCancelled,
+            false,
+        )?;
+        self.release_in_flight(stream_id);
+        Ok(event)
+    }
+
+    fn refuse_request(
+        &mut self,
+        cx: &Cx,
+        session: &mut NativeH3Session,
+        connection: &mut QuicConnection,
+        stream_id: StreamId,
+        reason: NativeH3RouterRefusal,
+        discard_until_terminal: bool,
+    ) -> Result<NativeH3RouterEvent, crate::http::h3::NativeH3SessionError> {
+        self.take_pending_request(stream_id);
+        session.cancel_request(cx, connection, stream_id)?;
+        if discard_until_terminal {
+            self.remember_discarding(stream_id);
+        }
+        Ok(NativeH3RouterEvent::RequestRefused { stream_id, reason })
+    }
+
+    fn take_pending_request(&mut self, stream_id: StreamId) -> Option<PendingNativeH3Request> {
+        let request = self.pending.remove(&stream_id)?;
+        self.retained_request_body_bytes = self
+            .retained_request_body_bytes
+            .saturating_sub(request.body.len());
+        Some(request)
+    }
+
+    fn release_in_flight(&mut self, stream_id: StreamId) {
+        if let Some(body_bytes) = self.in_flight.remove(&stream_id) {
+            self.retained_request_body_bytes =
+                self.retained_request_body_bytes.saturating_sub(body_bytes);
+        }
+    }
+
+    fn remember_discarding(&mut self, stream_id: StreamId) {
+        if self.discarding.insert(stream_id) {
+            self.discard_order.push_back(stream_id);
+        }
+        while self.discard_order.len() > MAX_DISCARDED_H3_STREAMS {
+            if let Some(expired) = self.discard_order.pop_front() {
+                self.discarding.remove(&expired);
+            }
+        }
+    }
+}
+
 /// Default-on request trace configuration for [`Router`]
 /// (br-asupersync-server-stack-hardening-eeexl1.3 AC3).
 struct DefaultTrace {
@@ -716,6 +1505,25 @@ impl Router {
                 router.handle_http_request_with_cx(&cx, request).await
             })
         }
+    }
+
+    /// Connect this router to an established native HTTP/3 session.
+    ///
+    /// The returned caller-driven bridge consumes decoded session events and
+    /// queues final responses on the supplied native QUIC connection. It does
+    /// not create a listener, handshake TLS/ALPN, or own an event loop.
+    #[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+    #[must_use]
+    pub fn into_native_h3_router(self) -> NativeH3Router {
+        NativeH3Router::new(self)
+    }
+
+    /// Connect this router to an established native HTTP/3 session with
+    /// explicit buffering limits.
+    #[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+    #[must_use]
+    pub fn into_native_h3_router_with_config(self, config: NativeH3RouterConfig) -> NativeH3Router {
+        NativeH3Router::with_config(self, config)
     }
 
     /// Convert this router into an HTTP/1-only handler that supports live
@@ -986,6 +1794,70 @@ fn web_request_from_http(request: HttpRequest) -> Request {
     web_request
 }
 
+#[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+fn web_request_from_h3(head: H3RequestHead, body: Vec<u8>) -> Request {
+    // H3RequestHead has already passed pseudo-header and ordinary-header
+    // validation in NativeH3Session. CONNECT is rejected by the bridge before
+    // this conversion, so the remaining profile always has method and path.
+    let method = head
+        .pseudo
+        .method
+        .expect("validated non-CONNECT HTTP/3 request has :method");
+    let target = head
+        .pseudo
+        .path
+        .expect("validated non-CONNECT HTTP/3 request has :path");
+    let (path, query) = split_http_request_target(&target);
+    let mut request = Request::new(method, path);
+    request.query = query;
+    request.body = body.into();
+
+    // Match the h2 listener: expose :authority as Host only when the peer did
+    // not send an explicit Host field. The extractor surface is single-valued,
+    // so repeated ordinary fields retain the existing last-value-wins rule.
+    if let Some(authority) = head.pseudo.authority
+        && !head
+            .headers
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("host"))
+    {
+        request.headers.insert("host".to_string(), authority);
+    }
+    for (name, value) in head.headers {
+        request.headers.insert(name.to_ascii_lowercase(), value);
+    }
+    request
+}
+
+#[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+fn validate_h3_request_semantics(
+    head: &H3RequestHead,
+    body_len: usize,
+) -> Result<(), NativeH3RouterRefusal> {
+    let mut content_length = None;
+    for (name, value) in &head.headers {
+        if name == "content-length" {
+            if content_length.is_some()
+                || value.is_empty()
+                || !value.bytes().all(|byte| byte.is_ascii_digit())
+            {
+                return Err(NativeH3RouterRefusal::InvalidContentLength);
+            }
+            content_length = Some(
+                value
+                    .parse::<usize>()
+                    .map_err(|_| NativeH3RouterRefusal::InvalidContentLength)?,
+            );
+        } else if name == "te" && !value.trim().eq_ignore_ascii_case("trailers") {
+            return Err(NativeH3RouterRefusal::InvalidTransferEncoding);
+        }
+    }
+    if content_length.is_some_and(|declared| declared != body_len) {
+        return Err(NativeH3RouterRefusal::InvalidContentLength);
+    }
+    Ok(())
+}
+
 /// Translate the web framework response into the wire response shared by h1
 /// and h2. Stable sorting makes ordinary header order reproducible; Set-Cookie
 /// stays append-only and ordered because combining those fields is invalid.
@@ -1004,6 +1876,76 @@ fn http_response_from_web(response: Response) -> HttpResponse {
         .headers(headers)
         .body(response.body.as_ref().to_vec())
         .build()
+}
+
+#[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+fn h3_response_from_web(
+    mut response: Response,
+    suppress_body_for_head: bool,
+) -> Result<(H3ResponseHead, Bytes), H3Error> {
+    if (100..200).contains(&response.status.as_u16()) {
+        return Err(H3Error::InvalidResponsePseudoHeader(
+            "informational status is not a final Router response",
+        ));
+    }
+
+    if matches!(response.status.as_u16(), 204 | 205 | 304) && !response.body.is_empty() {
+        return Err(H3Error::InvalidFrame(
+            "HTTP/3 response status forbids a message body",
+        ));
+    }
+
+    let body_len = response.body.len();
+    let content_length = response.headers.get("content-length").cloned();
+    if let Some(value) = content_length.as_deref()
+        && (value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()))
+    {
+        return Err(H3Error::InvalidFrame(
+            "invalid HTTP/3 response content-length",
+        ));
+    }
+    if let Some(value) = response.headers.get("te")
+        && !value.trim().eq_ignore_ascii_case("trailers")
+    {
+        return Err(H3Error::InvalidFrame("invalid HTTP/3 response TE value"));
+    }
+    if response.status.as_u16() == 204 && content_length.is_some() {
+        return Err(H3Error::InvalidFrame(
+            "HTTP 204 response must not include content-length",
+        ));
+    }
+    if suppress_body_for_head {
+        if content_length.is_none() && body_len != 0 {
+            response
+                .headers
+                .insert("content-length".to_string(), body_len.to_string());
+        }
+        response.headers.remove("te");
+        response.headers.remove("trailer");
+        response.body = Bytes::new();
+    } else if response.status.as_u16() != 304
+        && let Some(value) = content_length
+    {
+        let declared = value
+            .parse::<usize>()
+            .map_err(|_| H3Error::InvalidFrame("invalid HTTP/3 response content-length"))?;
+        if declared != body_len {
+            return Err(H3Error::InvalidFrame(
+                "HTTP/3 response content-length does not match body length",
+            ));
+        }
+    }
+
+    let mut headers = response.headers.into_iter().collect::<Vec<_>>();
+    headers.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+    headers.extend(
+        response
+            .set_cookies
+            .into_iter()
+            .map(|value| ("set-cookie".to_string(), value)),
+    );
+    let head = H3ResponseHead::new(response.status.as_u16(), headers)?;
+    Ok((head, response.body))
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1244,6 +2186,126 @@ mod tests {
                 ("set-cookie".to_string(), "csrf=two; Path=/".to_string()),
             ]
         );
+    }
+
+    #[test]
+    #[cfg(feature = "http3")]
+    fn h3_request_semantics_reject_malformed_length_and_te_before_dispatch() {
+        use crate::http::h3::H3PseudoHeaders;
+
+        let head = |headers| {
+            H3RequestHead::new(
+                H3PseudoHeaders {
+                    method: Some("POST".to_string()),
+                    scheme: Some("https".to_string()),
+                    authority: Some("example.test".to_string()),
+                    path: Some("/".to_string()),
+                    ..H3PseudoHeaders::default()
+                },
+                headers,
+            )
+            .expect("syntactically valid H3 request")
+        };
+
+        assert_eq!(
+            validate_h3_request_semantics(
+                &head(vec![("content-length".to_string(), "4".to_string())]),
+                3,
+            ),
+            Err(NativeH3RouterRefusal::InvalidContentLength)
+        );
+        assert_eq!(
+            validate_h3_request_semantics(
+                &head(vec![
+                    ("content-length".to_string(), "3".to_string()),
+                    ("content-length".to_string(), "3".to_string()),
+                ]),
+                3,
+            ),
+            Err(NativeH3RouterRefusal::InvalidContentLength)
+        );
+        assert_eq!(
+            validate_h3_request_semantics(&head(vec![("te".to_string(), "gzip".to_string())]), 0,),
+            Err(NativeH3RouterRefusal::InvalidTransferEncoding)
+        );
+        validate_h3_request_semantics(
+            &head(vec![
+                ("content-length".to_string(), "3".to_string()),
+                ("te".to_string(), "trailers".to_string()),
+            ]),
+            3,
+        )
+        .expect("valid HTTP/3 request semantics");
+    }
+
+    #[test]
+    #[cfg(feature = "http3")]
+    fn h3_response_semantics_suppress_head_and_refuse_invalid_final_output() {
+        let response = Response::new(StatusCode::OK, "body");
+        let (head, body) = h3_response_from_web(response, true).expect("valid HEAD response");
+        assert!(body.is_empty());
+        assert_eq!(
+            head.headers,
+            vec![("content-length".to_string(), "4".to_string())]
+        );
+
+        let mut mismatch = Response::new(StatusCode::OK, "body");
+        mismatch.set_header("content-length", "3");
+        assert_eq!(
+            h3_response_from_web(mismatch, false),
+            Err(H3Error::InvalidFrame(
+                "HTTP/3 response content-length does not match body length"
+            ))
+        );
+
+        let mut invalid_te = Response::new(StatusCode::OK, "body");
+        invalid_te.set_header("te", "gzip");
+        assert_eq!(
+            h3_response_from_web(invalid_te, false),
+            Err(H3Error::InvalidFrame("invalid HTTP/3 response TE value"))
+        );
+
+        assert_eq!(
+            h3_response_from_web(
+                Response::new(StatusCode::from_u16(103), Bytes::new()),
+                false
+            ),
+            Err(H3Error::InvalidResponsePseudoHeader(
+                "informational status is not a final Router response"
+            ))
+        );
+
+        for status in [204, 205, 304] {
+            assert_eq!(
+                h3_response_from_web(
+                    Response::new(StatusCode::from_u16(status), "must-not-ship"),
+                    false,
+                ),
+                Err(H3Error::InvalidFrame(
+                    "HTTP/3 response status forbids a message body"
+                ))
+            );
+        }
+
+        let mut no_content = Response::new(StatusCode::from_u16(204), Bytes::new());
+        no_content.set_header("content-length", "0");
+        assert_eq!(
+            h3_response_from_web(no_content, false),
+            Err(H3Error::InvalidFrame(
+                "HTTP 204 response must not include content-length"
+            ))
+        );
+
+        let mut not_modified = Response::new(StatusCode::from_u16(304), Bytes::new());
+        not_modified.set_header("content-length", "123");
+        let (head, body) =
+            h3_response_from_web(not_modified, false).expect("valid 304 metadata length");
+        assert_eq!(head.status, 304);
+        assert_eq!(
+            head.headers,
+            vec![("content-length".to_string(), "123".to_string())]
+        );
+        assert!(body.is_empty());
     }
 
     #[test]

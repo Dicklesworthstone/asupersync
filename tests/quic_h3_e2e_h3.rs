@@ -1837,6 +1837,844 @@ fn native_h3_session_routes_real_stream_bytes_and_survives_reset() {
 }
 
 #[test]
+#[cfg(feature = "http3")]
+fn native_h3_router_dispatches_completed_streams_and_refuses_invalid_messages() {
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::task::{Context, Poll, Waker};
+
+    use asupersync::web::extract::Request;
+    use asupersync::web::handler::{FnHandler, Handler};
+    use asupersync::web::{
+        NativeH3Router, NativeH3RouterConfig, NativeH3RouterEvent, NativeH3RouterIngress,
+        NativeH3RouterRefusal, Response, Router, StatusCode, get, post,
+    };
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct RecordedRequest {
+        method: String,
+        path: String,
+        query: Option<String>,
+        host: Option<String>,
+        sequence: Option<String>,
+        body: Vec<u8>,
+    }
+
+    struct RecordingHandler {
+        calls: Arc<AtomicUsize>,
+        recorded: Arc<Mutex<Option<RecordedRequest>>>,
+    }
+
+    impl Handler for RecordingHandler {
+        fn call(
+            &self,
+            _cx: &Cx,
+            request: Request,
+        ) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
+            let calls = Arc::clone(&self.calls);
+            let recorded = Arc::clone(&self.recorded);
+            Box::pin(async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                *recorded.lock().expect("recorded request lock") = Some(RecordedRequest {
+                    method: request.method,
+                    path: request.path,
+                    query: request.query,
+                    host: request.headers.get("host").cloned(),
+                    sequence: request.headers.get("x-sequence").cloned(),
+                    body: request.body.to_vec(),
+                });
+                let mut response = Response::new(StatusCode::CREATED, "created-via-router");
+                response.set_header("x-zeta", "z");
+                response.set_header("x-alpha", "a");
+                response.append_set_cookie("a=1");
+                response.append_set_cookie("b=2");
+                response
+            })
+        }
+    }
+
+    struct PendingOnceHandler {
+        started: Arc<AtomicUsize>,
+        completed: Arc<AtomicUsize>,
+        observed_request_id: Arc<Mutex<Option<String>>>,
+    }
+
+    impl Handler for PendingOnceHandler {
+        fn call(
+            &self,
+            cx: &Cx,
+            _request: Request,
+        ) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
+            let started = Arc::clone(&self.started);
+            let completed = Arc::clone(&self.completed);
+            let observed_request_id = Arc::clone(&self.observed_request_id);
+            let request_id = cx.request_id();
+            let mut yielded = false;
+            Box::pin(std::future::poll_fn(move |_| {
+                if !yielded {
+                    yielded = true;
+                    started.fetch_add(1, Ordering::SeqCst);
+                    *observed_request_id
+                        .lock()
+                        .expect("observed request id lock") = request_id.clone();
+                    Poll::Pending
+                } else {
+                    completed.fetch_add(1, Ordering::SeqCst);
+                    Poll::Ready(Response::new(StatusCode::OK, "unexpected completion"))
+                }
+            }))
+        }
+    }
+
+    fn switching_protocols() -> Response {
+        Response::new(StatusCode::SWITCHING_PROTOCOLS, "must-not-ship")
+    }
+
+    fn forbidden_response_header() -> Response {
+        let mut response = Response::new(StatusCode::OK, "must-not-ship");
+        response.set_header("connection", "keep-alive");
+        response
+    }
+
+    fn drive_router_event(
+        bridge: &mut NativeH3Router,
+        cx: &Cx,
+        session: &mut NativeH3Session,
+        connection: &mut QuicConnection,
+        event: NativeH3Event,
+    ) -> NativeH3RouterEvent {
+        match bridge
+            .ingest_event_with_cx(cx, session, connection, event)
+            .expect("ingest H3 Router event")
+        {
+            NativeH3RouterIngress::Event(event) => event,
+            NativeH3RouterIngress::Dispatch(dispatch) => {
+                let prepared = futures_lite::future::block_on(dispatch.run(cx));
+                bridge
+                    .complete_dispatch_with_cx(cx, session, connection, &prepared)
+                    .expect("complete H3 Router dispatch")
+            }
+            _ => panic!("unexpected future H3 Router ingress variant"),
+        }
+    }
+
+    let cx = test_cx();
+    let config = NativeQuicConnectionConfig {
+        max_local_bidi: 32,
+        max_local_uni: 8,
+        send_window: 1 << 18,
+        recv_window: 1 << 18,
+        connection_send_limit: 4 << 20,
+        connection_recv_limit: 4 << 20,
+        ..NativeQuicConnectionConfig::default()
+    };
+    let mut client = QuicConnection::client(config);
+    let mut server = QuicConnection::server(config);
+    client.record_verified_server_identity();
+    establish_loopback(&cx, &mut client, &mut server).expect("establish native QUIC pair");
+
+    let mut client_h3 = NativeH3Session::client();
+    let mut server_h3 = NativeH3Session::server();
+    client_h3
+        .initialize(&cx, &mut client, H3Settings::default())
+        .expect("initialize client H3 control stream");
+    server_h3
+        .initialize(&cx, &mut server, H3Settings::default())
+        .expect("initialize server H3 control stream");
+    assert_eq!(
+        pump_h3_events(&cx, &mut client, &mut server, &mut server_h3).0,
+        vec![NativeH3Event::Settings(H3Settings::default())]
+    );
+    assert_eq!(
+        pump_h3_events(&cx, &mut server, &mut client, &mut client_h3).0,
+        vec![NativeH3Event::Settings(H3Settings::default())]
+    );
+
+    let matched_calls = Arc::new(AtomicUsize::new(0));
+    let cancelled_started = Arc::new(AtomicUsize::new(0));
+    let cancelled_calls = Arc::new(AtomicUsize::new(0));
+    let cancelled_scope_request_id = Arc::new(Mutex::new(None));
+    let fast_calls = Arc::new(AtomicUsize::new(0));
+    let fallback_calls = Arc::new(AtomicUsize::new(0));
+    let recorded = Arc::new(Mutex::new(None));
+    let fast_calls_for_handler = Arc::clone(&fast_calls);
+    let fallback_calls_for_handler = Arc::clone(&fallback_calls);
+    let router = Arc::new(
+        Router::new()
+            .route(
+                "/ingest",
+                post(RecordingHandler {
+                    calls: Arc::clone(&matched_calls),
+                    recorded: Arc::clone(&recorded),
+                }),
+            )
+            .route(
+                "/cancel-me",
+                post(PendingOnceHandler {
+                    started: Arc::clone(&cancelled_started),
+                    completed: Arc::clone(&cancelled_calls),
+                    observed_request_id: Arc::clone(&cancelled_scope_request_id),
+                }),
+            )
+            .route(
+                "/fast",
+                get(FnHandler::new(move || {
+                    fast_calls_for_handler.fetch_add(1, Ordering::SeqCst);
+                    Response::new(StatusCode::OK, "fast")
+                })),
+            )
+            .route("/bad-status", get(FnHandler::new(switching_protocols)))
+            .route(
+                "/bad-header",
+                get(FnHandler::new(forbidden_response_header)),
+            )
+            .fallback(FnHandler::new(move || {
+                fallback_calls_for_handler.fetch_add(1, Ordering::SeqCst);
+                StatusCode::NOT_FOUND
+            }))
+            .without_default_trace(),
+    );
+    let bridge_config = NativeH3RouterConfig::default()
+        .max_buffered_body_bytes(4096)
+        .max_total_buffered_body_bytes(4096);
+    let mut bridge = NativeH3Router::with_shared_config(Arc::clone(&router), bridge_config);
+    let mut wrong_bridge = NativeH3Router::from_shared(router);
+
+    let matched_head = H3RequestHead::new(
+        H3PseudoHeaders {
+            method: Some("POST".to_string()),
+            scheme: Some("https".to_string()),
+            authority: Some("router.example.test".to_string()),
+            path: Some("/ingest?mode=h3&n=7".to_string()),
+            ..H3PseudoHeaders::default()
+        },
+        vec![
+            (
+                "content-type".to_string(),
+                "application/octet-stream".to_string(),
+            ),
+            ("x-sequence".to_string(), "old".to_string()),
+            ("x-sequence".to_string(), "final".to_string()),
+        ],
+    )
+    .expect("valid matched request");
+    let matched_body = Bytes::from(vec![b'm'; 4096]);
+    let matched_stream = client_h3
+        .send_request(&cx, &mut client, &matched_head, matched_body.clone())
+        .expect("send matched request");
+    let mut saw_matched_headers = false;
+    for round in 0..64 {
+        assert!(
+            pump_app_data(&cx, &mut client, &mut server, 40, 100 + round)
+                .expect("deliver staged matched request packet")
+                > 0
+        );
+        while let Some(event) = server_h3
+            .next_event(&cx, &mut server)
+            .expect("decode staged matched request event")
+        {
+            match event {
+                NativeH3Event::RequestHeaders { stream_id, .. } if stream_id == matched_stream => {
+                    assert_eq!(
+                        drive_router_event(&mut bridge, &cx, &mut server_h3, &mut server, event),
+                        NativeH3RouterEvent::RequestBuffered {
+                            stream_id: matched_stream,
+                            body_bytes: 0,
+                        }
+                    );
+                    saw_matched_headers = true;
+                    break;
+                }
+                other => panic!("matched request must remain before DATA/FIN: {other:?}"),
+            }
+        }
+        if saw_matched_headers {
+            break;
+        }
+    }
+    assert!(saw_matched_headers, "request HEADERS must reach the bridge");
+    assert_eq!(matched_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(bridge.pending_request_count(), 1);
+    assert!(
+        pump_h3_events(&cx, &mut server, &mut client, &mut client_h3)
+            .0
+            .is_empty(),
+        "the bridge must not emit a response while request DATA/FIN remain undelivered"
+    );
+
+    let matched_events = pump_h3_events(&cx, &mut client, &mut server, &mut server_h3).0;
+    assert_eq!(
+        matched_events.len(),
+        2,
+        "DATA and FIN expected after staging"
+    );
+    assert_eq!(
+        drive_router_event(
+            &mut bridge,
+            &cx,
+            &mut server_h3,
+            &mut server,
+            matched_events[0].clone(),
+        ),
+        NativeH3RouterEvent::RequestBuffered {
+            stream_id: matched_stream,
+            body_bytes: matched_body.len(),
+        }
+    );
+    assert_eq!(matched_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(bridge.pending_request_count(), 1);
+    assert_eq!(
+        drive_router_event(
+            &mut bridge,
+            &cx,
+            &mut server_h3,
+            &mut server,
+            matched_events[1].clone(),
+        ),
+        NativeH3RouterEvent::ResponseSent {
+            stream_id: matched_stream,
+            status: 201,
+        }
+    );
+    assert_eq!(matched_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(bridge.pending_request_count(), 0);
+    assert_eq!(
+        recorded.lock().expect("recorded request lock").clone(),
+        Some(RecordedRequest {
+            method: "POST".to_string(),
+            path: "/ingest".to_string(),
+            query: Some("mode=h3&n=7".to_string()),
+            host: Some("router.example.test".to_string()),
+            sequence: Some("final".to_string()),
+            body: matched_body.to_vec(),
+        })
+    );
+    let matched_response = H3ResponseHead::new(
+        201,
+        vec![
+            ("x-alpha".to_string(), "a".to_string()),
+            ("x-zeta".to_string(), "z".to_string()),
+            ("set-cookie".to_string(), "a=1".to_string()),
+            ("set-cookie".to_string(), "b=2".to_string()),
+        ],
+    )
+    .expect("valid expected response");
+    assert_eq!(
+        pump_h3_events(&cx, &mut server, &mut client, &mut client_h3).0,
+        vec![
+            NativeH3Event::ResponseHeaders {
+                stream_id: matched_stream,
+                head: matched_response,
+            },
+            NativeH3Event::Data {
+                stream_id: matched_stream,
+                bytes: Bytes::from_static(b"created-via-router"),
+            },
+            NativeH3Event::Finished {
+                stream_id: matched_stream,
+            },
+        ]
+    );
+
+    let delayed_head = H3RequestHead::new(
+        H3PseudoHeaders {
+            method: Some("POST".to_string()),
+            scheme: Some("https".to_string()),
+            authority: Some("router.example.test".to_string()),
+            path: Some("/cancel-me".to_string()),
+            ..H3PseudoHeaders::default()
+        },
+        vec![],
+    )
+    .expect("valid delayed-dispatch request");
+    let delayed_stream = client_h3
+        .send_request(
+            &cx,
+            &mut client,
+            &delayed_head,
+            Bytes::from(vec![b'd'; 3072]),
+        )
+        .expect("send delayed-dispatch request");
+    let delayed_events = pump_h3_events(&cx, &mut client, &mut server, &mut server_h3).0;
+    assert_eq!(delayed_events.len(), 3, "HEADERS, DATA, and FIN expected");
+    let mut delayed_dispatch = None;
+    for event in delayed_events {
+        match bridge
+            .ingest_event_with_cx(&cx, &mut server_h3, &mut server, event)
+            .expect("ingest delayed-dispatch event")
+        {
+            NativeH3RouterIngress::Event(NativeH3RouterEvent::RequestBuffered {
+                stream_id,
+                body_bytes,
+            }) => {
+                assert_eq!(stream_id, delayed_stream);
+                assert!(body_bytes == 0 || body_bytes == 3072);
+            }
+            NativeH3RouterIngress::Dispatch(dispatch) => {
+                assert_eq!(dispatch.stream_id(), delayed_stream);
+                delayed_dispatch = Some(dispatch);
+            }
+            other => panic!("unexpected delayed-dispatch ingress: {other:?}"),
+        }
+    }
+    let delayed_dispatch = delayed_dispatch.expect("FIN must detach a Router dispatch");
+    let delayed_token = delayed_dispatch.cancellation_token();
+    assert_eq!(bridge.in_flight_dispatch_count(), 1);
+    let request_cx = test_cx();
+    request_cx.set_request_id("native-h3-request-scope");
+    let mut delayed_future = Box::pin(delayed_dispatch.run(&request_cx));
+    let mut task_context = Context::from_waker(Waker::noop());
+    assert!(
+        delayed_future.as_mut().poll(&mut task_context).is_pending(),
+        "the delayed handler must start and remain pending"
+    );
+    assert_eq!(cancelled_started.load(Ordering::SeqCst), 1);
+    assert_eq!(cancelled_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        cancelled_scope_request_id
+            .lock()
+            .expect("cancelled request id lock")
+            .as_deref(),
+        Some("native-h3-request-scope"),
+        "the handler must receive the caller-owned request-scope Cx"
+    );
+
+    let over_budget_head = H3RequestHead::new(
+        H3PseudoHeaders {
+            method: Some("POST".to_string()),
+            scheme: Some("https".to_string()),
+            authority: Some("router.example.test".to_string()),
+            path: Some("/ingest".to_string()),
+            ..H3PseudoHeaders::default()
+        },
+        vec![],
+    )
+    .expect("valid over-budget request");
+    let over_budget_stream = client_h3
+        .send_request(
+            &cx,
+            &mut client,
+            &over_budget_head,
+            Bytes::from(vec![b'b'; 2048]),
+        )
+        .expect("send request while prior body remains in-flight");
+    let over_budget_events = pump_h3_events(&cx, &mut client, &mut server, &mut server_h3).0;
+    assert_eq!(over_budget_events.len(), 3);
+    for (index, event) in over_budget_events.into_iter().enumerate() {
+        let outcome = drive_router_event(&mut bridge, &cx, &mut server_h3, &mut server, event);
+        match index {
+            0 => assert_eq!(
+                outcome,
+                NativeH3RouterEvent::RequestBuffered {
+                    stream_id: over_budget_stream,
+                    body_bytes: 0,
+                }
+            ),
+            1 => assert_eq!(
+                outcome,
+                NativeH3RouterEvent::RequestRefused {
+                    stream_id: over_budget_stream,
+                    reason: NativeH3RouterRefusal::ConnectionBodyBudgetExhausted { limit: 4096 },
+                }
+            ),
+            2 => assert_eq!(
+                outcome,
+                NativeH3RouterEvent::RequestDiscarded {
+                    stream_id: over_budget_stream,
+                }
+            ),
+            _ => unreachable!(),
+        }
+    }
+    assert_eq!(matched_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(bridge.in_flight_dispatch_count(), 1);
+    assert!(
+        pump_h3_events(&cx, &mut server, &mut client, &mut client_h3)
+            .0
+            .iter()
+            .any(|event| matches!(
+                event,
+                NativeH3Event::StreamReset {
+                    stream_id,
+                    error_code: H3_REQUEST_CANCELLED,
+                    final_size: 0,
+                } if *stream_id == over_budget_stream
+            )),
+        "in-flight body retention must fail closed before dispatching the next handler"
+    );
+    let _ = pump_h3_events(&cx, &mut client, &mut server, &mut server_h3);
+
+    let fast_head = H3RequestHead::new(
+        H3PseudoHeaders {
+            method: Some("GET".to_string()),
+            scheme: Some("https".to_string()),
+            authority: Some("router.example.test".to_string()),
+            path: Some("/fast".to_string()),
+            ..H3PseudoHeaders::default()
+        },
+        vec![],
+    )
+    .expect("valid fast request");
+    let fast_stream = client_h3
+        .send_request(&cx, &mut client, &fast_head, Bytes::new())
+        .expect("send fast request while another dispatch is held");
+    let mut fast_prepared = None;
+    for event in pump_h3_events(&cx, &mut client, &mut server, &mut server_h3).0 {
+        match bridge
+            .ingest_event_with_cx(&cx, &mut server_h3, &mut server, event)
+            .expect("ingest fast request while delayed handler is pending")
+        {
+            NativeH3RouterIngress::Event(NativeH3RouterEvent::RequestBuffered {
+                stream_id,
+                body_bytes: 0,
+            }) => assert_eq!(stream_id, fast_stream),
+            NativeH3RouterIngress::Dispatch(dispatch) => {
+                fast_prepared = Some(futures_lite::future::block_on(dispatch.run(&cx)));
+            }
+            other => panic!("unexpected fast-request ingress: {other:?}"),
+        }
+    }
+    let fast_prepared = fast_prepared.expect("fast request FIN must produce a dispatch");
+    assert_eq!(fast_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(cancelled_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(bridge.in_flight_dispatch_count(), 2);
+    assert!(matches!(
+        wrong_bridge.complete_dispatch_with_cx(&cx, &mut server_h3, &mut server, &fast_prepared,),
+        Err(NativeH3SessionError::InvalidState(
+            "HTTP/3 Router completion belongs to a different bridge"
+        ))
+    ));
+    assert_eq!(wrong_bridge.in_flight_dispatch_count(), 0);
+    assert_eq!(bridge.in_flight_dispatch_count(), 2);
+    let cancelled_connection_cx = test_cx();
+    cancelled_connection_cx.set_cancel_requested(true);
+    assert!(matches!(
+        bridge.complete_dispatch_with_cx(
+            &cancelled_connection_cx,
+            &mut server_h3,
+            &mut server,
+            &fast_prepared,
+        ),
+        Err(NativeH3SessionError::Transport(
+            asupersync::net::quic_native::NativeQuicConnectionError::Cancelled
+        ))
+    ));
+    assert_eq!(
+        bridge.in_flight_dispatch_count(),
+        2,
+        "a failed atomic transport write must retain the prepared dispatch for retry"
+    );
+    assert_eq!(
+        bridge
+            .complete_dispatch_with_cx(&cx, &mut server_h3, &mut server, &fast_prepared)
+            .expect("complete fast response through its originating bridge"),
+        NativeH3RouterEvent::ResponseSent {
+            stream_id: fast_stream,
+            status: 200,
+        }
+    );
+    assert_eq!(bridge.in_flight_dispatch_count(), 1);
+    assert_eq!(
+        pump_h3_events(&cx, &mut server, &mut client, &mut client_h3).0,
+        vec![
+            NativeH3Event::ResponseHeaders {
+                stream_id: fast_stream,
+                head: H3ResponseHead::new(200, vec![]).expect("valid fast response"),
+            },
+            NativeH3Event::Data {
+                stream_id: fast_stream,
+                bytes: Bytes::from_static(b"fast"),
+            },
+            NativeH3Event::Finished {
+                stream_id: fast_stream,
+            },
+        ]
+    );
+    assert_eq!(
+        bridge
+            .cancel_dispatch_with_cx(&cx, &mut server_h3, &mut server, &delayed_token)
+            .expect("cancel caller-scoped delayed dispatch"),
+        NativeH3RouterEvent::RequestRefused {
+            stream_id: delayed_stream,
+            reason: NativeH3RouterRefusal::DispatchCancelled,
+        }
+    );
+    drop(delayed_future);
+    assert_eq!(bridge.in_flight_dispatch_count(), 0);
+    assert_eq!(cancelled_calls.load(Ordering::SeqCst), 0);
+    assert!(
+        pump_h3_events(&cx, &mut server, &mut client, &mut client_h3)
+            .0
+            .iter()
+            .any(|event| matches!(
+                event,
+                NativeH3Event::StreamReset {
+                    stream_id,
+                    error_code: H3_REQUEST_CANCELLED,
+                    final_size: 0,
+                } if *stream_id == delayed_stream
+            )),
+        "cancelling the request scope must reset the exact request stream"
+    );
+    let _ = pump_h3_events(&cx, &mut client, &mut server, &mut server_h3);
+
+    let cancelled_head = H3RequestHead::new(
+        H3PseudoHeaders {
+            method: Some("POST".to_string()),
+            scheme: Some("https".to_string()),
+            authority: Some("router.example.test".to_string()),
+            path: Some("/cancel-me".to_string()),
+            ..H3PseudoHeaders::default()
+        },
+        vec![],
+    )
+    .expect("valid cancelled request");
+    let cancelled_stream = client_h3
+        .send_request(
+            &cx,
+            &mut client,
+            &cancelled_head,
+            Bytes::from(vec![b'x'; 4096]),
+        )
+        .expect("queue cancelled request");
+    let mut saw_cancelled_headers = false;
+    for round in 0..64 {
+        assert!(
+            pump_app_data(&cx, &mut client, &mut server, 40, round)
+                .expect("deliver staged cancelled request packet")
+                > 0
+        );
+        while let Some(event) = server_h3
+            .next_event(&cx, &mut server)
+            .expect("decode staged cancelled request event")
+        {
+            match event {
+                NativeH3Event::RequestHeaders { stream_id, .. }
+                    if stream_id == cancelled_stream =>
+                {
+                    assert_eq!(
+                        drive_router_event(&mut bridge, &cx, &mut server_h3, &mut server, event,),
+                        NativeH3RouterEvent::RequestBuffered {
+                            stream_id: cancelled_stream,
+                            body_bytes: 0,
+                        }
+                    );
+                    saw_cancelled_headers = true;
+                }
+                other => panic!("request must remain incomplete before cancellation: {other:?}"),
+            }
+        }
+        if saw_cancelled_headers {
+            break;
+        }
+    }
+    assert!(
+        saw_cancelled_headers,
+        "request HEADERS must reach the bridge"
+    );
+    assert_eq!(bridge.pending_request_count(), 1);
+    assert_eq!(cancelled_calls.load(Ordering::SeqCst), 0);
+    client_h3
+        .cancel_request(&cx, &mut client, cancelled_stream)
+        .expect("cancel after HEADERS but before request FIN");
+    let cancelled_events = pump_h3_events(&cx, &mut client, &mut server, &mut server_h3).0;
+    assert_eq!(cancelled_events.len(), 1);
+    let cancelled_event = cancelled_events.into_iter().next().expect("reset event");
+    assert!(matches!(
+        cancelled_event,
+        NativeH3Event::StreamReset {
+            stream_id,
+            error_code: H3_REQUEST_CANCELLED,
+            ..
+        } if stream_id == cancelled_stream
+    ));
+    assert!(matches!(
+        drive_router_event(
+            &mut bridge,
+            &cx,
+            &mut server_h3,
+            &mut server,
+            cancelled_event,
+        ),
+        NativeH3RouterEvent::StreamReset {
+            stream_id,
+            error_code: H3_REQUEST_CANCELLED,
+            ..
+        } if stream_id == cancelled_stream
+    ));
+    assert_eq!(bridge.pending_request_count(), 0);
+    assert_eq!(cancelled_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(matched_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(fallback_calls.load(Ordering::SeqCst), 0);
+    let _ = pump_h3_events(&cx, &mut server, &mut client, &mut client_h3);
+
+    let connect_head = H3RequestHead::new(
+        H3PseudoHeaders {
+            method: Some("CONNECT".to_string()),
+            authority: Some("router.example.test".to_string()),
+            ..H3PseudoHeaders::default()
+        },
+        vec![],
+    )
+    .expect("valid basic CONNECT request");
+    let connect_stream = client_h3
+        .send_request(&cx, &mut client, &connect_head, Bytes::new())
+        .expect("send CONNECT request");
+    let connect_events = pump_h3_events(&cx, &mut client, &mut server, &mut server_h3).0;
+    assert_eq!(connect_events.len(), 2, "CONNECT HEADERS and FIN expected");
+    for (index, event) in connect_events.into_iter().enumerate() {
+        let outcome = drive_router_event(&mut bridge, &cx, &mut server_h3, &mut server, event);
+        if index == 0 {
+            assert_eq!(
+                outcome,
+                NativeH3RouterEvent::RequestRefused {
+                    stream_id: connect_stream,
+                    reason: NativeH3RouterRefusal::ConnectUnsupported,
+                }
+            );
+        } else {
+            assert_eq!(
+                outcome,
+                NativeH3RouterEvent::RequestDiscarded {
+                    stream_id: connect_stream,
+                }
+            );
+        }
+    }
+    assert_eq!(matched_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(fallback_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(bridge.pending_request_count(), 0);
+    let connect_refusal_events = pump_h3_events(&cx, &mut server, &mut client, &mut client_h3).0;
+    assert!(connect_refusal_events.iter().any(|event| matches!(
+        event,
+        NativeH3Event::StreamReset {
+            stream_id,
+            error_code: H3_REQUEST_CANCELLED,
+            final_size: 0,
+        } if *stream_id == connect_stream
+    )));
+    let _ = pump_h3_events(&cx, &mut client, &mut server, &mut server_h3);
+
+    for (path, expected_error) in [
+        (
+            "/bad-status",
+            H3NativeError::InvalidResponsePseudoHeader(
+                "informational status is not a final Router response",
+            ),
+        ),
+        (
+            "/bad-header",
+            H3NativeError::InvalidFrame("header field name forbidden in HTTP/3 (RFC 9114 §4.2)"),
+        ),
+    ] {
+        let invalid_head = H3RequestHead::new(
+            H3PseudoHeaders {
+                method: Some("GET".to_string()),
+                scheme: Some("https".to_string()),
+                authority: Some("router.example.test".to_string()),
+                path: Some(path.to_string()),
+                ..H3PseudoHeaders::default()
+            },
+            vec![],
+        )
+        .expect("valid invalid-response request");
+        let invalid_stream = client_h3
+            .send_request(&cx, &mut client, &invalid_head, Bytes::new())
+            .expect("send invalid-response request");
+        let invalid_events = pump_h3_events(&cx, &mut client, &mut server, &mut server_h3).0;
+        assert_eq!(invalid_events.len(), 2);
+        let mut last_outcome = None;
+        for event in invalid_events {
+            last_outcome = Some(drive_router_event(
+                &mut bridge,
+                &cx,
+                &mut server_h3,
+                &mut server,
+                event,
+            ));
+        }
+        let Some(NativeH3RouterEvent::RequestRefused {
+            stream_id,
+            reason: NativeH3RouterRefusal::InvalidResponse(error),
+        }) = last_outcome
+        else {
+            panic!("expected invalid-response refusal, got {last_outcome:?}");
+        };
+        assert_eq!(stream_id, invalid_stream);
+        assert_eq!(error, expected_error);
+        let refusal_events = pump_h3_events(&cx, &mut server, &mut client, &mut client_h3).0;
+        assert!(refusal_events.iter().any(|event| matches!(
+            event,
+            NativeH3Event::StreamReset {
+                stream_id,
+                error_code: H3_REQUEST_CANCELLED,
+                final_size: 0,
+            } if *stream_id == invalid_stream
+        )));
+        assert!(!refusal_events.iter().any(|event| matches!(
+            event,
+            NativeH3Event::ResponseHeaders { stream_id, .. }
+                | NativeH3Event::Data { stream_id, .. }
+                | NativeH3Event::Finished { stream_id }
+                if *stream_id == invalid_stream
+        )));
+        let _ = pump_h3_events(&cx, &mut client, &mut server, &mut server_h3);
+    }
+
+    let survivor_head = H3RequestHead::new(
+        H3PseudoHeaders {
+            method: Some("GET".to_string()),
+            scheme: Some("https".to_string()),
+            authority: Some("router.example.test".to_string()),
+            path: Some("/does-not-exist?after=reset".to_string()),
+            ..H3PseudoHeaders::default()
+        },
+        vec![],
+    )
+    .expect("valid survivor request");
+    let survivor_stream = client_h3
+        .send_request(&cx, &mut client, &survivor_head, Bytes::new())
+        .expect("send survivor request");
+    let survivor_events = pump_h3_events(&cx, &mut client, &mut server, &mut server_h3).0;
+    assert_eq!(survivor_events.len(), 2);
+    for event in survivor_events {
+        drive_router_event(&mut bridge, &cx, &mut server_h3, &mut server, event);
+    }
+    assert_eq!(matched_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(cancelled_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(fallback_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        pump_h3_events(&cx, &mut server, &mut client, &mut client_h3).0,
+        vec![
+            NativeH3Event::ResponseHeaders {
+                stream_id: survivor_stream,
+                head: H3ResponseHead::new(404, vec![]).expect("valid 404 response"),
+            },
+            NativeH3Event::Finished {
+                stream_id: survivor_stream,
+            },
+        ]
+    );
+
+    let goaway_id = survivor_stream.0 + 4;
+    server_h3
+        .graceful_close(&cx, &mut server, goaway_id)
+        .expect("queue H3 GOAWAY");
+    assert_eq!(
+        pump_h3_events(&cx, &mut server, &mut client, &mut client_h3).0,
+        vec![NativeH3Event::Goaway(goaway_id)]
+    );
+    assert_eq!(
+        client_h3
+            .send_request(&cx, &mut client, &survivor_head, Bytes::new())
+            .expect_err("GOAWAY must reject the next request"),
+        NativeH3SessionError::InvalidState("peer GOAWAY rejects the next request stream")
+    );
+}
+
+#[test]
 #[cfg(all(feature = "http3", feature = "test-internals"))]
 fn native_h3_reliable_frames_recover_after_deliberate_loss_and_cancel_both_directions() {
     let cx = test_cx();

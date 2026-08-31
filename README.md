@@ -520,7 +520,16 @@ This map is about capability coverage, not API compatibility. Asupersync intenti
 Web framework status is deliberately bounded. `src/web/` contains a lightweight
 router, typed extractors, response conversion, local `Handler` middleware
 wrappers, request-region helpers, health/static/multipart/session/security
-utilities, and bounded `Sse` / `StreamingSse` surfaces. The SSE lane is
+utilities, and bounded `Sse` / `StreamingSse` surfaces. With `http3` enabled,
+`Router::into_native_h3_router` also supplies a caller-driven bridge for an
+already-established `NativeH3Session`: it assembles bounded request bodies,
+detaches caller-scoped handler dispatch only after FIN so other streams remain
+drivable, caps both incomplete requests and in-flight dispatches, preserves
+request/response stream identity, and resets malformed, unsupported, or
+cancelled request streams without taking down the connection. The caller still
+owns UDP, TLS/ALPN, QUIC event-loop driving, and dispatch-scope orchestration;
+the bridge does not claim streaming bodies/backpressure, trailers, CONNECT,
+WebSocket, server push, live deployment, or external interoperability. The SSE lane is
 proof-backed: `Sse` finite bounded batch responses, plus a
 `StreamingSse` pull API carrying a request-region E2E proof and an
 HTTP/1 transport drain proof (`tests/e2e_web.rs` streaming artifact rows).
@@ -2077,7 +2086,7 @@ JS/TS packages GA for browser main-thread and dedicated-worker consumers; Rust b
 | I/O reactor (Linux epoll + optional io_uring primary path; BSD/Windows reactors have narrower interest support) | ✅ Implemented |
 | TCP, HTTP/1.1, HTTP/2, TLS | ✅ Implemented |
 | WebSocket | ⚠️ Runtime surface shipped; live RFC6455 conformance coverage now wires extension negotiation plus broader framing/control/close/masking/fragmentation harnesses, with runtime e2e coverage still lane-specific |
-| HTTP/3 (default static-only QPACK; opt-in dynamic QPACK field-section and instruction-stream state machine) | ⚠️ Partial implementation: an established-connection adapter now drives control and request/response lifecycle over native QUIC stream bytes, including static-QPACK headers/trailers, informational responses, GOAWAY, cancellation, resets, and reliable STREAM/control-frame recovery. The native opt-in state machine separately supports dynamic QPACK field sections/tables, Huffman strings, instruction streams, and bounded blocked-stream scheduling. Live UDP deployment and external interop evidence remain open, so this is not a claim of `h3`/`quinn` drop-in or deployment parity. |
+| HTTP/3 (default static-only QPACK; opt-in dynamic QPACK field-section and instruction-stream state machine) | ⚠️ Partial implementation: an established-connection adapter now drives control and request/response lifecycle over native QUIC stream bytes, including static-QPACK headers/trailers, informational responses, GOAWAY, cancellation, resets, and reliable STREAM/control-frame recovery. A caller-driven `NativeH3Router` bridge now assembles bounded requests through FIN, detaches bounded caller-scoped Router dispatches so the transport can keep serving other streams, and emits validated final responses on the originating stream while isolating per-stream refusal/reset. The native opt-in state machine separately supports dynamic QPACK field sections/tables, Huffman strings, instruction streams, and bounded blocked-stream scheduling. Live UDP deployment, streaming Router bodies, CONNECT, and external interop evidence remain open, so this is not a claim of `h3`/`quinn` drop-in or deployment parity. |
 | Database clients (SQLite, PostgreSQL, MySQL) | ✅ Implemented |
 | Actor supervision (GenServer, links, monitors) | ✅ Implemented |
 | DPOR-style race-guided seed exploration | ⚠️ Implemented as trace analysis, seed derivation, and equivalence-class telemetry; no exact-prefix backtracking or completeness claim |
