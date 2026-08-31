@@ -2232,8 +2232,7 @@ impl<Caps> Cx<Caps> {
     #[inline]
     #[must_use]
     pub fn published_cancel_requested(&self) -> bool {
-        self.cancellation
-            .load(std::sync::atomic::Ordering::Acquire)
+        self.cancellation.load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// Alias for [`Self::published_cancel_requested`] with a conventional name.
@@ -5789,7 +5788,6 @@ mod tests {
         assert!(!cx.published_cancel_requested());
         assert!(!cx.is_cancel_requested());
     }
-
 
     #[test]
     fn is_cancel_requested_shares_clone_and_republishes_deadline() {
