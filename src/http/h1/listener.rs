@@ -357,19 +357,52 @@ pub struct Http1Listener<F> {
     in_flight_requests: Arc<AtomicUsize>,
 }
 
+impl<F, Fut> Http1Listener<F>
+where
+    F: Fn(Request) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = crate::http::h1::types::Response> + Send + 'static,
+{
+    /// Bind a listener whose handler returns the established plain response
+    /// type. The exact output preserves inference for existing handlers.
+    pub async fn bind<A: ToSocketAddrs + Send + 'static>(addr: A, handler: F) -> io::Result<Self> {
+        Self::bind_upgradeable(addr, handler).await
+    }
+
+    /// Bind a plain-response listener with custom configuration.
+    pub async fn bind_with_config<A: ToSocketAddrs + Send + 'static>(
+        addr: A,
+        handler: F,
+        config: Http1ListenerConfig,
+    ) -> io::Result<Self> {
+        Self::bind_upgradeable_with_config(addr, handler, config).await
+    }
+
+    /// Create a plain-response listener from an existing TCP listener.
+    pub fn from_listener(
+        tcp_listener: TcpListener,
+        handler: F,
+        config: Http1ListenerConfig,
+    ) -> Self {
+        Self::from_listener_upgradeable(tcp_listener, handler, config)
+    }
+}
+
 impl<F, Fut, R> Http1Listener<F>
 where
     F: Fn(Request) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = R> + Send + 'static,
     R: IntoHttp1Response + Send + 'static,
 {
-    /// Bind to the given address with default configuration.
-    pub async fn bind<A: ToSocketAddrs + Send + 'static>(addr: A, handler: F) -> io::Result<Self> {
-        Self::bind_with_config(addr, handler, Http1ListenerConfig::default()).await
+    /// Bind an upgrade-aware response handler with default configuration.
+    pub async fn bind_upgradeable<A: ToSocketAddrs + Send + 'static>(
+        addr: A,
+        handler: F,
+    ) -> io::Result<Self> {
+        Self::bind_upgradeable_with_config(addr, handler, Http1ListenerConfig::default()).await
     }
 
-    /// Bind with custom configuration.
-    pub async fn bind_with_config<A: ToSocketAddrs + Send + 'static>(
+    /// Bind an upgrade-aware response handler with custom configuration.
+    pub async fn bind_upgradeable_with_config<A: ToSocketAddrs + Send + 'static>(
         addr: A,
         handler: F,
         config: Http1ListenerConfig,
@@ -394,8 +427,8 @@ where
         })
     }
 
-    /// Create from an existing [`TcpListener`] with custom configuration.
-    pub fn from_listener(
+    /// Create an upgrade-aware listener from an existing [`TcpListener`].
+    pub fn from_listener_upgradeable(
         tcp_listener: TcpListener,
         handler: F,
         config: Http1ListenerConfig,
@@ -720,7 +753,7 @@ where
 {
     let handle = runtime.try_spawn(async move {
         let _guard = guard;
-        let server = Http1Server::with_config(move |req| handler(req), config)
+        let server = Http1Server::with_config_upgradeable(move |req| handler(req), config)
             .with_shutdown_signal(shutdown_signal.clone())
             .with_in_flight_requests(in_flight_requests);
         let peer_addr = stream.peer_addr().ok();

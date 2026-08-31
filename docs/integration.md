@@ -411,7 +411,7 @@ Override via `RuntimeBuilder::obligation_leak_response(...)` or
             },
         )),
     );
-    let listener = Http1Listener::bind(
+    let listener = Http1Listener::bind_upgradeable(
         "127.0.0.1:8080",
         router.into_http1_handler(),
     ).await?;

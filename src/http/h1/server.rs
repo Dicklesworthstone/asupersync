@@ -23,6 +23,7 @@ use crate::stream::Stream;
 use crate::time::{timeout, wall_now};
 use crate::types::Budget;
 use crate::web::request_region::{ServerHopOutcome, ServerRequestRegion, derive_request_budget};
+use base64::Engine as _;
 use std::future::{Future, poll_fn};
 use std::net::SocketAddr;
 use std::pin::Pin;
@@ -460,6 +461,8 @@ pub struct Http1Upgrade {
             + Send
             + 'static,
     >,
+    expected_protocol: Option<String>,
+    expected_extensions: Vec<String>,
 }
 
 impl std::fmt::Debug for Http1Upgrade {
@@ -478,7 +481,22 @@ impl Http1Upgrade {
     {
         Self {
             driver: Box::new(move |cx, io, read_ahead| Box::pin(driver(cx, io, read_ahead))),
+            expected_protocol: None,
+            expected_extensions: Vec::new(),
         }
+    }
+
+    /// Bind the callback's negotiated WebSocket metadata to the `101` that
+    /// will be committed on the wire.
+    #[must_use]
+    pub fn with_websocket_negotiation(
+        mut self,
+        protocol: Option<String>,
+        extensions: Vec<String>,
+    ) -> Self {
+        self.expected_protocol = protocol;
+        self.expected_extensions = extensions;
+        self
     }
 
     pub(crate) fn run(
@@ -488,6 +506,28 @@ impl Http1Upgrade {
         read_ahead: BytesMut,
     ) -> Http1UpgradeFuture {
         (self.driver)(cx, io, read_ahead)
+    }
+
+    pub(crate) fn websocket_negotiation_matches(&self, response: &Response) -> bool {
+        let protocols = response
+            .headers
+            .iter()
+            .filter(|(name, _)| name.eq_ignore_ascii_case("sec-websocket-protocol"))
+            .map(|(_, value)| value.as_str())
+            .collect::<Vec<_>>();
+        let has_extensions = response
+            .headers
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("sec-websocket-extensions"));
+
+        protocols.len() <= 1
+            && protocols.first().copied() == self.expected_protocol.as_deref()
+            && !has_extensions
+            && self.expected_extensions.is_empty()
+    }
+
+    pub(crate) fn expected_protocol(&self) -> Option<&str> {
+        self.expected_protocol.as_deref()
     }
 }
 
@@ -646,14 +686,32 @@ pub struct Http1Server<F> {
     in_flight_requests: Option<Arc<AtomicUsize>>,
 }
 
+impl<F, Fut> Http1Server<F>
+where
+    F: Fn(Request) -> Fut + Send + Sync,
+    Fut: Future<Output = Response> + Send,
+{
+    /// Create a server whose handler returns the established plain response
+    /// type. Keeping this exact output type preserves inference for existing
+    /// diverging and otherwise unconstrained handler futures.
+    pub fn new(handler: F) -> Self {
+        Self::new_upgradeable(handler)
+    }
+
+    /// Create a plain-response server with custom configuration.
+    pub fn with_config(handler: F, config: Http1Config) -> Self {
+        Self::with_config_upgradeable(handler, config)
+    }
+}
+
 impl<F, Fut, R> Http1Server<F>
 where
     F: Fn(Request) -> Fut + Send + Sync,
     Fut: Future<Output = R> + Send,
     R: IntoHttp1Response,
 {
-    /// Create a new server with the given handler function.
-    pub fn new(handler: F) -> Self {
+    /// Create a server that accepts an explicit [`Http1Response`] envelope.
+    pub fn new_upgradeable(handler: F) -> Self {
         Self {
             handler,
             config: Http1Config::default(),
@@ -662,8 +720,8 @@ where
         }
     }
 
-    /// Create a new server with custom configuration.
-    pub fn with_config(handler: F, config: Http1Config) -> Self {
+    /// Create an upgrade-aware response server with custom configuration.
+    pub fn with_config_upgradeable(handler: F, config: Http1Config) -> Self {
         Self {
             handler,
             config,
@@ -1146,7 +1204,7 @@ where
                             "HTTP/1 upgrade refused after listener drain began",
                         ));
                     }
-                    validate_upgrade_handoff(&upgrade_request, &resp)?;
+                    validate_upgrade_handoff(&upgrade_request, &resp, &upgrade)?;
                     Some(upgrade)
                 }
                 None => None,
@@ -1753,6 +1811,15 @@ fn headers_have_token(headers: &[(String, String)], name: &str, expected: &[u8])
     found
 }
 
+fn headers_have_exact_token(headers: &[(String, String)], name: &str, expected: &str) -> bool {
+    headers
+        .iter()
+        .filter(|(header_name, _)| header_name.eq_ignore_ascii_case(name))
+        .flat_map(|(_, value)| value.split(','))
+        .map(str::trim)
+        .any(|token| token == expected)
+}
+
 fn single_header_value<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
     let mut values = headers
         .iter()
@@ -1765,7 +1832,11 @@ fn single_header_value<'a>(headers: &'a [(String, String)], name: &str) -> Optio
     Some(value)
 }
 
-fn validate_upgrade_handoff(request: &Request, response: &Response) -> Result<(), HttpError> {
+fn validate_upgrade_handoff(
+    request: &Request,
+    response: &Response,
+    upgrade: &Http1Upgrade,
+) -> Result<(), HttpError> {
     if request.version != Version::Http11 || request.method != Method::Get {
         return Err(invalid_upgrade_error(
             "WebSocket handoff requires an HTTP/1.1 GET request",
@@ -1802,11 +1873,34 @@ fn validate_upgrade_handoff(request: &Request, response: &Response) -> Result<()
             "WebSocket handoff request has invalid version or key headers",
         ));
     }
+    let valid_key = base64::engine::general_purpose::STANDARD
+        .decode(websocket_key)
+        .is_ok_and(|decoded| decoded.len() == 16);
+    if !valid_key {
+        return Err(invalid_upgrade_error(
+            "WebSocket handoff request key must decode to exactly 16 bytes",
+        ));
+    }
     let expected_accept = crate::net::websocket::compute_accept_key(websocket_key);
+    if !upgrade.websocket_negotiation_matches(response)
+        || upgrade.expected_protocol().is_some_and(|protocol| {
+            !headers_have_exact_token(&request.headers, "sec-websocket-protocol", protocol)
+        })
+    {
+        return Err(invalid_upgrade_error(
+            "WebSocket handoff response protocol does not match the negotiated protocol",
+        ));
+    }
+    let response_has_framing = response.headers.iter().any(|(name, _)| {
+        name.eq_ignore_ascii_case("transfer-encoding")
+            || name.eq_ignore_ascii_case("content-length")
+    });
     if response.status != 101
         || !response.body.is_empty()
         || !response.trailers.is_empty()
+        || response_has_framing
         || !headers_have_token(&response.headers, "connection", b"upgrade")
+        || headers_have_token(&response.headers, "connection", b"close")
         || !headers_have_token(&response.headers, "upgrade", b"websocket")
         || single_header_value(&response.headers, "sec-websocket-accept")
             != Some(expected_accept.as_str())
@@ -3714,16 +3808,15 @@ mod tests {
 
     #[test]
     fn serve_handler_panic_maps_to_500_and_closes_connection() {
-        async fn panicking_handler(_request: Request) -> Response {
-            panic!("handler exploded");
-        }
-
         let written = Arc::new(Mutex::new(Vec::new()));
         let io = TestIo::new(
             b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n".to_vec(),
             Arc::clone(&written),
         );
-        let server = Http1Server::with_config(panicking_handler, localhost_server_config());
+        let server = Http1Server::with_config(
+            |_req| async move { panic!("handler exploded") },
+            localhost_server_config(),
+        );
         let runtime = RuntimeBuilder::current_thread()
             .build()
             .expect("build current-thread runtime");

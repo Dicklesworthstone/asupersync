@@ -1389,7 +1389,7 @@ fn e2e_router_http1_listener_live_websocket_handoff_preserves_read_ahead() {
             )),
         );
 
-        let listener = Http1Listener::bind_with_config(
+        let listener = Http1Listener::bind_upgradeable_with_config(
             "127.0.0.1:0",
             router.into_http1_handler(),
             Http1ListenerConfig::default()
@@ -1512,7 +1512,7 @@ fn e2e_router_http1_listener_drain_cancels_live_websocket_session() {
             )),
         );
 
-        let listener = Http1Listener::bind_with_config(
+        let listener = Http1Listener::bind_upgradeable_with_config(
             "127.0.0.1:0",
             router.into_http1_handler(),
             Http1ListenerConfig::default()
@@ -1673,6 +1673,69 @@ fn e2e_router_duplicate_upgrade_registration_poisons_the_request() {
 }
 
 #[test]
+fn e2e_router_rejects_forbidden_or_unbound_upgrade_response_headers() {
+    common::init_test_logging();
+
+    let mutations = [
+        ("transfer-encoding", "chunked"),
+        ("content-length", "0"),
+        ("connection", "Upgrade, close"),
+        ("sec-websocket-protocol", "chat"),
+        ("sec-websocket-extensions", "permessage-deflate"),
+    ];
+    for (header_name, header_value) in mutations {
+        let callback_count = Arc::new(AtomicUsize::new(0));
+        let callback_count_for_handler = Arc::clone(&callback_count);
+        let router = Router::new().route(
+            "/ws",
+            get(FnHandler1::<_, WebSocketUpgrade>::new(
+                move |upgrade: WebSocketUpgrade| {
+                    let callback_count = Arc::clone(&callback_count_for_handler);
+                    let mut response =
+                        upgrade
+                            .skip_origin_check()
+                            .on_upgrade(move |_, _| async move {
+                                callback_count.fetch_add(1, Ordering::AcqRel);
+                            });
+                    response.set_header(header_name, header_value);
+                    response
+                },
+            )),
+        );
+        let request = HttpRequest {
+            method: HttpMethod::Get,
+            uri: "/ws".to_owned(),
+            version: HttpVersion::Http11,
+            headers: vec![
+                ("host".to_owned(), "localhost".to_owned()),
+                ("upgrade".to_owned(), "websocket".to_owned()),
+                ("connection".to_owned(), "Upgrade".to_owned()),
+                ("sec-websocket-version".to_owned(), "13".to_owned()),
+                (
+                    "sec-websocket-key".to_owned(),
+                    "dGhlIHNhbXBsZSBub25jZQ==".to_owned(),
+                ),
+            ],
+            body: Vec::new(),
+            trailers: Vec::new(),
+            peer_addr: None,
+        };
+
+        let response =
+            web_block_on(router.handle_http1_request_with_cx(&Cx::for_testing(), request));
+        assert_eq!(
+            response.response.status, 500,
+            "mutation {header_name}: {header_value} must fail closed"
+        );
+        assert_eq!(
+            response.response.header_value("connection"),
+            Some("close")
+        );
+        assert_eq!(callback_count.load(Ordering::Acquire), 0);
+    }
+}
+
+#[test]
 fn e2e_router_bare_switching_response_never_acquires_listener_transport() {
     common::init_test_logging();
 
@@ -1689,7 +1752,7 @@ fn e2e_router_bare_switching_response_never_acquires_listener_transport() {
                 |upgrade: WebSocketUpgrade| upgrade.skip_origin_check(),
             )),
         );
-        let listener = Http1Listener::bind_with_config(
+        let listener = Http1Listener::bind_upgradeable_with_config(
             "127.0.0.1:0",
             router.into_http1_handler(),
             Http1ListenerConfig::default().http_config(Http1Config {

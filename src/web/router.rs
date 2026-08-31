@@ -31,7 +31,7 @@ use super::response::{IntoResponse, Response, StatusCode};
 use super::websocket::Http1UpgradeSlot;
 use crate::Cx;
 #[cfg(not(target_arch = "wasm32"))]
-use crate::http::h1::server::Http1Response;
+use crate::http::h1::server::{Http1Response, Http1Upgrade};
 use crate::http::h1::types::{Request as HttpRequest, Response as HttpResponse};
 use crate::service::Layer;
 use crate::types::{
@@ -788,7 +788,7 @@ impl Router {
                 );
             }
         };
-        if valid_websocket_handoff_response(&response) {
+        if valid_websocket_handoff_response(&response, &upgrade) {
             Http1Response::new(response).with_upgrade(upgrade)
         } else {
             Http1Response::new(
@@ -1007,7 +1007,7 @@ fn http_response_from_web(response: Response) -> HttpResponse {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn valid_websocket_handoff_response(response: &HttpResponse) -> bool {
+fn valid_websocket_handoff_response(response: &HttpResponse, upgrade: &Http1Upgrade) -> bool {
     fn has_token(response: &HttpResponse, name: &str, expected: &str) -> bool {
         response
             .headers
@@ -1021,9 +1021,15 @@ fn valid_websocket_handoff_response(response: &HttpResponse) -> bool {
     response.status == 101
         && response.body.is_empty()
         && response.trailers.is_empty()
+        && !response.headers.iter().any(|(name, _)| {
+            name.eq_ignore_ascii_case("transfer-encoding")
+                || name.eq_ignore_ascii_case("content-length")
+        })
         && has_token(response, "connection", "upgrade")
+        && !has_token(response, "connection", "close")
         && has_token(response, "upgrade", "websocket")
         && response.header_value("sec-websocket-accept").is_some()
+        && upgrade.websocket_negotiation_matches(response)
 }
 
 /// Split origin-form and absolute-form request targets without decoding the

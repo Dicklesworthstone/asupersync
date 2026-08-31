@@ -29,7 +29,9 @@
 //!
 //! The actual bidirectional communication uses `ServerWebSocket`.
 
-use crate::net::websocket::{AcceptResponse, WebSocketAcceptor, compute_accept_key};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::net::websocket::AcceptResponse;
+use crate::net::websocket::{WebSocketAcceptor, compute_accept_key};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::{Cx, http::h1::Http1Upgrade, net::tcp::stream::TcpStream};
 #[cfg(not(target_arch = "wasm32"))]
@@ -436,7 +438,11 @@ impl WebSocketUpgrade {
         let action = Http1Upgrade::new(move |cx, io, read_ahead| async move {
             let websocket = acceptor.finish_upgrade(io, accept_response, &read_ahead);
             callback(cx, websocket).await;
-        });
+        })
+        .with_websocket_negotiation(
+            self.selected_protocol.clone(),
+            self.selected_extensions.clone(),
+        );
         if slot.register(action).is_err() {
             return Self::plain_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
