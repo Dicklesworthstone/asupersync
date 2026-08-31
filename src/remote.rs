@@ -2172,6 +2172,7 @@ impl fmt::Display for IdempotencyKey {
 /// range can be introduced deliberately without silently accepting a peer that
 /// may interpret lifecycle messages differently.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RemoteProtocolVersion {
     major: u16,
     minor: u16,
@@ -2224,6 +2225,7 @@ impl fmt::Display for RemoteProtocolVersion {
 /// adapter must bind it to an authenticated transport identity (for example, a
 /// verified TLS certificate); this structure alone is not authentication.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RemotePeerHello {
     peer_node: NodeId,
     protocol_version: RemoteProtocolVersion,
@@ -2861,6 +2863,7 @@ impl Default for RemoteServiceWireLimits {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RemoteServiceWireBudget {
     deadline_nanos: Option<u64>,
     poll_quota: u32,
@@ -2897,6 +2900,7 @@ impl From<RemoteServiceWireBudget> for Budget {
 /// a second caller-controlled identity field. Runtime-local region and task IDs
 /// retain their type-tagged serde representation.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RemoteServiceWireRequest {
     hello: RemotePeerHello,
     remote_task_id: u64,
@@ -2990,7 +2994,12 @@ impl RemoteServiceWireRequest {
 
 /// Stable terminal-outcome representation used by the remote-service adapter.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "outcome", content = "value", rename_all = "snake_case")]
+#[serde(
+    tag = "outcome",
+    content = "value",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
 pub enum RemoteServiceWireOutcome {
     /// Handler returned serialized output bytes.
     Success(Vec<u8>),
@@ -3051,7 +3060,7 @@ pub enum RemoteServiceRejectionCode {
 
 /// One fully flushed outcome or fail-closed refusal from the remote service.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "response", rename_all = "snake_case")]
+#[serde(tag = "response", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RemoteServiceWireResponse {
     /// Authorized handler reached a terminal outcome.
     Outcome {
@@ -3090,7 +3099,7 @@ impl RemoteServiceWireResponse {
 /// request and its mutually authenticated TLS connection are the authority.
 #[cfg(feature = "tls")]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "command", rename_all = "snake_case")]
+#[serde(tag = "command", rename_all = "snake_case", deny_unknown_fields)]
 #[non_exhaustive]
 pub enum RemoteServiceSessionCommand {
     /// Cancel the active computation with an attributed reason.
@@ -3130,7 +3139,7 @@ impl RemoteServiceSessionCommand {
 /// Server event emitted by a protocol V3 computation session.
 #[cfg(feature = "tls")]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "event", rename_all = "snake_case")]
+#[serde(tag = "event", rename_all = "snake_case", deny_unknown_fields)]
 #[non_exhaustive]
 pub enum RemoteServiceSessionEvent {
     /// The operation is admitted and its child task is session-owned.

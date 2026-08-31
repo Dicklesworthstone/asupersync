@@ -2,7 +2,7 @@
 //! Production-transport-backed proof for the RemoteRuntime lifecycle contract.
 
 use asupersync::channel::oneshot;
-use asupersync::distributed::ComputationSchemaRegistry;
+use asupersync::distributed::{ComputationRegistryFingerprint, ComputationSchemaRegistry};
 use asupersync::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use asupersync::net::{TcpListener, TcpStream};
 use asupersync::remote::{
@@ -18,8 +18,9 @@ use asupersync::remote::{
     RemoteComputationClientError, RemoteComputationListenerError, RemoteComputationService,
     RemoteComputationServiceConfig, RemoteComputationServiceError, RemoteComputationServiceHandle,
     RemoteComputationServiceReport, RemoteComputationSessionStart, RemoteServiceRejectionCode,
-    RemoteServiceSessionError, RemoteServiceSessionEvent, RemoteServiceWireLimits,
-    RemoteServiceWireOutcome, RemoteServiceWireRequest, RemoteServiceWireResponse,
+    RemoteServiceSessionCommand, RemoteServiceSessionError, RemoteServiceSessionEvent,
+    RemoteServiceWireLimits, RemoteServiceWireOutcome, RemoteServiceWireRequest,
+    RemoteServiceWireResponse,
     call_tls_computation_once, serve_tls_computation_once,
 };
 #[cfg(all(feature = "remote-service", unix))]
@@ -40,10 +41,14 @@ use asupersync::trace::distributed::LogicalTime;
 #[cfg(feature = "tls")]
 use asupersync::types::CancelKind;
 use asupersync::types::CancelReason;
+#[cfg(feature = "tls")]
+use asupersync::types::{RegionId, TaskId, Time};
 use asupersync::{Budget, Cx};
 use futures_lite::future::block_on;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "tls")]
+use serde::de::DeserializeOwned;
 use std::collections::BTreeMap;
 #[cfg(feature = "tls")]
 use std::collections::HashSet;
@@ -975,6 +980,214 @@ fn remote_service_wire_request_with_lease(
         },
     )
     .expect("wire request identity should agree with its peer hello")
+}
+
+#[cfg(feature = "tls")]
+fn assert_remote_json_golden<T>(golden: &str)
+where
+    T: DeserializeOwned + Serialize + fmt::Debug + PartialEq,
+{
+    let decoded: T = serde_json::from_str(golden).expect("wire golden should deserialize");
+    let encoded = serde_json::to_string(&decoded).expect("wire golden should reserialize");
+    assert_eq!(encoded, golden, "wire JSON changed without a version bump");
+    let decoded_again: T =
+        serde_json::from_str(&encoded).expect("canonical wire JSON should deserialize");
+    assert_eq!(decoded_again, decoded);
+}
+
+#[cfg(feature = "tls")]
+fn assert_remote_unknown_field_rejected<T>(value: serde_json::Value)
+where
+    T: DeserializeOwned + fmt::Debug,
+{
+    let error = serde_json::from_value::<T>(value)
+        .expect_err("same-version remote wire envelope must reject unknown fields");
+    assert!(
+        error.to_string().contains("unknown field"),
+        "diagnostic: {error}"
+    );
+}
+
+#[cfg(feature = "tls")]
+#[test]
+fn remote_service_v1_v2_v3_wire_json_is_golden_and_strict() {
+    const FINGERPRINT_JSON: &str = "[7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7]";
+    const REQUEST_TAIL: &str = concat!(
+        ",\"registry_fingerprint\":[7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,",
+        "7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7]},",
+        "\"remote_task_id\":7,\"computation\":\"proof.echo\",\"input\":[1,2,3],",
+        "\"lease_secs\":5,\"lease_subsec_nanos\":6,",
+        "\"idempotency_key_high\":1,\"idempotency_key_low\":2,",
+        "\"budget\":{\"deadline_nanos\":9,\"poll_quota\":10,\"cost_quota\":11,\"priority\":12},",
+        "\"origin_region\":{\"kind\":\"RegionId\",\"index\":13,\"generation\":14},",
+        "\"origin_task\":{\"kind\":\"TaskId\",\"index\":15,\"generation\":16}}"
+    );
+
+    let fingerprint = ComputationRegistryFingerprint::from_bytes([7; 32]);
+    for version in [
+        RemoteProtocolVersion::V1,
+        RemoteProtocolVersion::V2,
+        RemoteProtocolVersion::V3,
+    ] {
+        let hello = RemotePeerHello::new(NodeId::new("wire-peer"), version, fingerprint);
+        let hello_golden = format!(
+            "{{\"peer_node\":\"wire-peer\",\"protocol_version\":{{\"major\":{},\"minor\":0}},\"registry_fingerprint\":{FINGERPRINT_JSON}}}",
+            version.major()
+        );
+        assert_eq!(
+            serde_json::to_string(&hello).expect("peer hello should serialize"),
+            hello_golden,
+            "peer hello JSON changed without a version bump"
+        );
+        assert_remote_json_golden::<RemotePeerHello>(&hello_golden);
+
+        let request = RemoteServiceWireRequest::from_spawn_request(
+            hello,
+            &SpawnRequest {
+                remote_task_id: RemoteTaskId::from_raw(7),
+                computation: ComputationName::new("proof.echo"),
+                input: RemoteInput::new(vec![1, 2, 3]),
+                lease: Duration::new(5, 6),
+                idempotency_key: IdempotencyKey::from_raw((u128::from(1_u64) << 64) | 2),
+                budget: Some(Budget {
+                    deadline: Some(Time::from_nanos(9)),
+                    poll_quota: 10,
+                    cost_quota: Some(11),
+                    priority: 12,
+                }),
+                origin_node: NodeId::new("wire-peer"),
+                origin_region: RegionId::new_for_test(13, 14),
+                origin_task: TaskId::new_for_test(15, 16),
+            },
+        )
+        .expect("golden request identity should match its peer hello");
+        let request_golden = format!(
+            "{{\"hello\":{{\"peer_node\":\"wire-peer\",\"protocol_version\":{{\"major\":{},\"minor\":0}}{REQUEST_TAIL}",
+            version.major()
+        );
+        assert_eq!(
+            serde_json::to_string(&request).expect("wire request should serialize"),
+            request_golden,
+            "wire request JSON changed without a version bump"
+        );
+        assert_remote_json_golden::<RemoteServiceWireRequest>(&request_golden);
+    }
+
+    for golden in [
+        "{\"outcome\":\"success\",\"value\":[4,5]}",
+        "{\"outcome\":\"failed\",\"value\":\"application failure\"}",
+        concat!(
+            "{\"outcome\":\"cancelled\",\"value\":{\"kind\":\"User\",",
+            "\"origin_region\":{\"kind\":\"RegionId\",\"index\":1,\"generation\":2},",
+            "\"origin_task\":null,\"timestamp\":17,\"message\":null,\"cause\":null,",
+            "\"truncated\":false,\"truncated_at_depth\":null}}"
+        ),
+        "{\"outcome\":\"panicked\",\"value\":\"panic boundary\"}",
+    ] {
+        assert_remote_json_golden::<RemoteServiceWireOutcome>(golden);
+    }
+    for golden in [
+        concat!(
+            "{\"response\":\"outcome\",\"remote_task_id\":7,",
+            "\"outcome\":{\"outcome\":\"success\",\"value\":[4,5]}}"
+        ),
+        concat!(
+            "{\"response\":\"rejected\",\"remote_task_id\":7,",
+            "\"code\":\"malformed_request\",\"diagnostic\":\"strict refusal\"}"
+        ),
+    ] {
+        assert_remote_json_golden::<RemoteServiceWireResponse>(golden);
+    }
+    for golden in [
+        concat!(
+            "{\"command\":\"cancel\",\"remote_task_id\":7,\"reason\":{\"kind\":\"User\",",
+            "\"origin_region\":{\"kind\":\"RegionId\",\"index\":1,\"generation\":2},",
+            "\"origin_task\":null,\"timestamp\":17,\"message\":null,\"cause\":null,",
+            "\"truncated\":false,\"truncated_at_depth\":null}}"
+        ),
+        concat!(
+            "{\"command\":\"renew_lease\",\"remote_task_id\":7,\"renewal_id\":8,",
+            "\"lease_secs\":9,\"lease_subsec_nanos\":10}"
+        ),
+    ] {
+        assert_remote_json_golden::<RemoteServiceSessionCommand>(golden);
+    }
+    for golden in [
+        "{\"event\":\"accepted\",\"remote_task_id\":7}",
+        concat!(
+            "{\"event\":\"lease_renewed\",\"remote_task_id\":7,\"renewal_id\":8,",
+            "\"lease_secs\":9,\"lease_subsec_nanos\":10}"
+        ),
+        concat!(
+            "{\"event\":\"command_rejected\",\"remote_task_id\":7,\"renewal_id\":8,",
+            "\"diagnostic\":\"strict refusal\"}"
+        ),
+        concat!(
+            "{\"event\":\"terminal\",\"response\":{\"response\":\"outcome\",",
+            "\"remote_task_id\":7,\"outcome\":{\"outcome\":\"success\",\"value\":[4,5]}}}"
+        ),
+    ] {
+        assert_remote_json_golden::<RemoteServiceSessionEvent>(golden);
+    }
+
+    let hello = RemotePeerHello::new(NodeId::new("wire-peer"), RemoteProtocolVersion::V3, fingerprint);
+    let request = remote_service_wire_request(hello, "proof.echo", 7);
+    let mut request_value = serde_json::to_value(&request).expect("request should serialize");
+    request_value
+        .as_object_mut()
+        .expect("request should be a JSON object")
+        .insert("future_field".to_owned(), serde_json::json!(true));
+    assert_remote_unknown_field_rejected::<RemoteServiceWireRequest>(request_value);
+
+    let mut nested_hello = serde_json::to_value(&request).expect("request should serialize");
+    nested_hello["hello"]
+        .as_object_mut()
+        .expect("hello should be a JSON object")
+        .insert("capabilities".to_owned(), serde_json::json!([]));
+    assert_remote_unknown_field_rejected::<RemoteServiceWireRequest>(nested_hello);
+
+    let mut nested_version = serde_json::to_value(&request).expect("request should serialize");
+    nested_version["hello"]["protocol_version"]
+        .as_object_mut()
+        .expect("protocol version should be a JSON object")
+        .insert("patch".to_owned(), serde_json::json!(1));
+    assert_remote_unknown_field_rejected::<RemoteServiceWireRequest>(nested_version);
+
+    let mut nested_budget = serde_json::to_value(&request).expect("request should serialize");
+    nested_budget["budget"] = serde_json::json!({
+        "deadline_nanos": 9,
+        "poll_quota": 10,
+        "cost_quota": 11,
+        "priority": 12,
+        "ambient_priority": 255
+    });
+    assert_remote_unknown_field_rejected::<RemoteServiceWireRequest>(nested_budget);
+
+    assert_remote_unknown_field_rejected::<RemoteServiceWireOutcome>(serde_json::json!({
+        "outcome": "success",
+        "value": [4, 5],
+        "future_field": true
+    }));
+    assert_remote_unknown_field_rejected::<RemoteServiceWireResponse>(serde_json::json!({
+        "response": "rejected",
+        "remote_task_id": 7,
+        "code": "malformed_request",
+        "diagnostic": "strict refusal",
+        "future_field": true
+    }));
+    assert_remote_unknown_field_rejected::<RemoteServiceSessionCommand>(serde_json::json!({
+        "command": "renew_lease",
+        "remote_task_id": 7,
+        "renewal_id": 8,
+        "lease_secs": 9,
+        "lease_subsec_nanos": 10,
+        "future_field": true
+    }));
+    assert_remote_unknown_field_rejected::<RemoteServiceSessionEvent>(serde_json::json!({
+        "event": "accepted",
+        "remote_task_id": 7,
+        "future_field": true
+    }));
 }
 
 #[cfg(feature = "tls")]
