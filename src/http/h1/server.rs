@@ -3837,6 +3837,93 @@ mod tests {
     }
 
     #[test]
+    fn upgradeable_server_preserves_deterministic_codec_read_ahead() {
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let frame = [
+            0x81, 0x85, 0x37, 0xfa, 0x21, 0x3d, 0x7f, 0x9f, 0x4d, 0x51, 0x58,
+        ];
+        let mut input = b"GET /ws HTTP/1.1\r\n\
+            Host: localhost\r\n\
+            Upgrade: websocket\r\n\
+            Connection: Upgrade\r\n\
+            Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+            Sec-WebSocket-Version: 13\r\n\
+            \r\n"
+            .to_vec();
+        input.extend_from_slice(&frame);
+        let io = TestIo::new(input, Arc::clone(&written));
+        let server = Http1Server::with_config_upgradeable(
+            |_request| async move {
+                let response = Response::new(101, "Switching Protocols", Vec::new())
+                    .with_header("connection", "Upgrade")
+                    .with_header("upgrade", "websocket")
+                    .with_header("sec-websocket-accept", "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");
+                Http1Response::new(response).with_upgrade(Http1Upgrade::new(
+                    |_cx, _io, _read_ahead| async {},
+                ))
+            },
+            localhost_server_config(),
+        );
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("build current-thread runtime");
+
+        let outcome = runtime
+            .block_on(async { server.serve_upgradeable_with_peer_addr(io, None).await })
+            .expect("upgrade handoff");
+        let Http1ServeOutcome::Upgraded { read_ahead, .. } = outcome else {
+            panic!("expected upgraded ownership outcome");
+        };
+        assert_eq!(&read_ahead[..], &frame);
+        let response = String::from_utf8(written.lock().unwrap().clone()).expect("response UTF-8");
+        assert_eq!(response.matches("HTTP/1.1 101").count(), 1);
+        assert!(response.ends_with("\r\n\r\n"));
+    }
+
+    #[test]
+    fn upgradeable_server_rejects_non_rfc6455_key_before_flush() {
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let io = TestIo::new(
+            b"GET /ws HTTP/1.1\r\n\
+              Host: localhost\r\n\
+              Upgrade: websocket\r\n\
+              Connection: Upgrade\r\n\
+              Sec-WebSocket-Key: not-base64\r\n\
+              Sec-WebSocket-Version: 13\r\n\
+              \r\n"
+                .to_vec(),
+            Arc::clone(&written),
+        );
+        let server = Http1Server::with_config_upgradeable(
+            |_request| async move {
+                let response = Response::new(101, "Switching Protocols", Vec::new())
+                    .with_header("connection", "Upgrade")
+                    .with_header("upgrade", "websocket")
+                    .with_header(
+                        "sec-websocket-accept",
+                        crate::net::websocket::compute_accept_key("not-base64"),
+                    );
+                Http1Response::new(response).with_upgrade(Http1Upgrade::new(
+                    |_cx, _io, _read_ahead| async {},
+                ))
+            },
+            localhost_server_config(),
+        );
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("build current-thread runtime");
+
+        let error = match runtime
+            .block_on(async { server.serve_upgradeable_with_peer_addr(io, None).await })
+        {
+            Err(error) => error,
+            Ok(_) => panic!("invalid WebSocket key must refuse handoff"),
+        };
+        assert!(matches!(error, HttpError::Io(ref error) if error.kind() == io::ErrorKind::InvalidData));
+        assert!(written.lock().unwrap().is_empty());
+    }
+
+    #[test]
     fn serve_emits_budget_trace_events_at_server_hop() {
         let written = Arc::new(Mutex::new(Vec::new()));
         let io = TestIo::new(
