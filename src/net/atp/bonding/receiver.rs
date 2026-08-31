@@ -616,6 +616,7 @@ pub struct BondedReceiverSymbolSet {
     seen: BTreeSet<BondedSymbolKey>,
     source_seen: BTreeSet<BondedSymbolKey>,
     donor_stats: BTreeMap<u32, BondedDonorIngressStats>,
+    auth_rejections_by_donor: BTreeMap<u32, u64>,
     aggregate: BondedReceiverIngressStats,
 }
 
@@ -627,6 +628,7 @@ impl BondedReceiverSymbolSet {
             seen: BTreeSet::new(),
             source_seen: BTreeSet::new(),
             donor_stats: BTreeMap::new(),
+            auth_rejections_by_donor: BTreeMap::new(),
             aggregate: BondedReceiverIngressStats {
                 symbols_received: 0,
                 symbols_accepted: 0,
@@ -795,6 +797,30 @@ impl BondedReceiverSymbolSet {
     #[must_use]
     pub fn donor_stats(&self, donor_index: u32) -> Option<BondedDonorIngressStats> {
         self.donor_stats.get(&donor_index).copied()
+    }
+
+    /// Record one symbol rejected before authenticated ingress.
+    ///
+    /// This counter is deliberately separate from `donor_stats`: a sender
+    /// that has not authenticated must not become a feedback target or inflate
+    /// received/duplicate/retention accounting. The donor index is the
+    /// receiver-owned ESI schedule attribution, not a cryptographic identity.
+    pub(in crate::net::atp) fn record_auth_rejection(&mut self, donor_index: u32) -> u64 {
+        let count = self
+            .auth_rejections_by_donor
+            .entry(donor_index)
+            .or_default();
+        *count = count.saturating_add(1);
+        *count
+    }
+
+    /// Number of pre-ingress auth failures attributed to one ESI schedule.
+    #[must_use]
+    pub(in crate::net::atp) fn auth_rejected_symbols(&self, donor_index: u32) -> u64 {
+        self.auth_rejections_by_donor
+            .get(&donor_index)
+            .copied()
+            .unwrap_or(0)
     }
 
     /// Sorted donor indexes that have contributed authenticated symbols.
@@ -1121,6 +1147,27 @@ mod tests {
         let donor1 = set.donor_stats(1).expect("donor 1 stats");
         assert_eq!(donor0.symbols_accepted, 3);
         assert_eq!(donor1.symbols_accepted, 3);
+    }
+
+    #[test]
+    fn auth_rejection_counter_is_saturating_and_separate_from_authenticated_ingress() {
+        let mut set = BondedReceiverSymbolSet::new();
+
+        assert_eq!(set.auth_rejected_symbols(7), 0);
+        assert_eq!(set.record_auth_rejection(7), 1);
+        assert_eq!(set.record_auth_rejection(7), 2);
+        assert_eq!(set.auth_rejected_symbols(7), 2);
+        assert!(set.is_empty());
+        assert_eq!(set.aggregate_stats(), BondedReceiverIngressStats::default());
+        assert_eq!(set.donor_stats(7), None);
+        assert!(set.donor_targets().is_empty());
+
+        set.auth_rejections_by_donor.insert(7, u64::MAX - 1);
+        assert_eq!(set.record_auth_rejection(7), u64::MAX);
+        assert_eq!(set.record_auth_rejection(7), u64::MAX);
+        assert_eq!(set.auth_rejected_symbols(7), u64::MAX);
+        assert_eq!(set.aggregate_stats(), BondedReceiverIngressStats::default());
+        assert!(set.donor_targets().is_empty());
     }
 
     #[test]

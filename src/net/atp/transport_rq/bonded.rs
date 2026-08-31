@@ -34,6 +34,8 @@ use crate::net::atp::bonding::{
 };
 use crate::net::atp::sdk::{BondedTransferProgress, TransferPhase};
 
+const BONDING_AUTH_REJECTION_TRACE_EVENT: &str = "atp.bonding.auth_rejection";
+
 /// Bonded control-plane protocol version carried in the donor hello.
 ///
 /// Version 3 binds the protocol-v4 metadata commitment and RaptorQ geometry
@@ -319,16 +321,14 @@ where
     let Some((parsed, payload)) = parse_symbol_datagram_payload(buf, n, tag, auth_required) else {
         return (BondedIngest::default(), None);
     };
-    let observed = BondedIngest {
-        observed: true,
-        accepted: false,
-    };
     let Some((decoder_pos, object_id)) = resolve_entry(parsed.entry) else {
-        return (observed, None);
+        return (BondedIngest::default(), None);
     };
     if payload.len() != usize::from(symbol_size) {
-        return (observed, None);
+        return (BondedIngest::default(), None);
     }
+    let donor_index =
+        bonded_attribute_donor(parsed.entry, parsed.sbn, parsed.esi, donor_count, blocks);
     // C2 auth gate: verify the bonded symbol tag BEFORE the key can enter the
     // shared set — a forged symbol must not consume dedup or retention state.
     if let Some(context) = symbol_auth {
@@ -339,11 +339,27 @@ where
         );
         match verify_bonded_symbol_tag(context, &symbol, parsed.auth_tag) {
             BondedSymbolAuthVerdict::Accepted(_) => {}
-            BondedSymbolAuthVerdict::Rejected(_) => return (observed, None),
+            BondedSymbolAuthVerdict::Rejected(reason) => {
+                let count = symbol_set.record_auth_rejection(donor_index);
+                if count.is_power_of_two() {
+                    bondtrace!(
+                        "receiver: auth_reject donor_index={} attribution=esi_schedule reason={:?} count={}",
+                        donor_index,
+                        reason,
+                        count
+                    );
+                }
+                // An unauthenticated datagram is neither decoder input nor
+                // liveness progress. Returning observed=false prevents a
+                // wrong-key spray from extending stall or round-tail timers.
+                return (BondedIngest::default(), None);
+            }
         }
     }
-    let donor_index =
-        bonded_attribute_donor(parsed.entry, parsed.sbn, parsed.esi, donor_count, blocks);
+    let observed = BondedIngest {
+        observed: true,
+        accepted: false,
+    };
     let key = BondedSymbolKey::new(object_id, parsed.sbn, parsed.esi);
     match symbol_set.record_key_with_retention(donor_index, key, parsed.kind, retention) {
         BondedSymbolDisposition::Accepted(_) => (
@@ -355,6 +371,37 @@ where
         ),
         BondedSymbolDisposition::Duplicate(_)
         | BondedSymbolDisposition::RejectedByRetention { .. } => (observed, None),
+    }
+}
+
+fn trace_bonded_auth_rejections(
+    cx: &Cx,
+    symbol_set: &BondedReceiverSymbolSet,
+    donor_count: u32,
+    phase: &str,
+) {
+    for donor_index in 0..donor_count {
+        let count = symbol_set.auth_rejected_symbols(donor_index);
+        if count == 0 {
+            continue;
+        }
+        let donor_index = donor_index.to_string();
+        let count = count.to_string();
+        cx.trace_with_fields(
+            BONDING_AUTH_REJECTION_TRACE_EVENT,
+            &[
+                ("phase", phase),
+                ("donor_index", donor_index.as_str()),
+                ("attribution", "esi_schedule"),
+                ("rejected_symbols", count.as_str()),
+            ],
+        );
+        bondtrace!(
+            "receiver: auth_reject_summary phase={} donor_index={} attribution=esi_schedule rejected_symbols={}",
+            phase,
+            donor_index,
+            count
+        );
     }
 }
 
@@ -740,6 +787,7 @@ async fn pump_bonded_round(
                 stall_sleep.reset_after(cx.now_for_observability(), stall_window);
             }
             BondedReady::Stalled => {
+                trace_bonded_auth_rejections(cx, symbol_set, donor_count, "stalled");
                 return Err(RqError::Io(std::io::Error::new(
                     std::io::ErrorKind::TimedOut,
                     format!(
@@ -1306,14 +1354,15 @@ pub async fn receive_bonded_with_options_and_advertised_ips(
             .collect();
         let metrics =
             symbol_set.live_progress_metrics(plan_blocks.iter().copied(), pending.is_empty());
-        metrics.trace_progress(
-            cx,
-            if pending.is_empty() {
-                "complete"
-            } else {
-                "round_end"
-            },
-        );
+        let progress_phase = if pending.is_empty() {
+            "complete"
+        } else {
+            "round_end"
+        };
+        metrics.trace_progress(cx, progress_phase);
+        if !pending.is_empty() {
+            trace_bonded_auth_rejections(cx, &symbol_set, donor_count, progress_phase);
+        }
 
         // Live progress snapshot at the round boundary (best-effort; never
         // blocks or fails the transfer). `blocks_remaining` is the count of
@@ -1359,6 +1408,7 @@ pub async fn receive_bonded_with_options_and_advertised_ips(
                 drain_sender_close_after_proof(cx, &mut conn.control, "bonded").await;
             }
             if !receipt.committed {
+                trace_bonded_auth_rejections(cx, &symbol_set, donor_count, "failed");
                 // Terminal failure snapshot: a progress consumer watching the
                 // phase sees `Failed` for the decoded-but-unverified case
                 // (other terminal errors/cancels are observed as the stream
@@ -1396,6 +1446,7 @@ pub async fn receive_bonded_with_options_and_advertised_ips(
                 enrolled_donors,
                 TransferPhase::Completed,
             );
+            trace_bonded_auth_rejections(cx, &symbol_set, donor_count, "completed");
             return Ok(BondedReceiveReport {
                 transfer_id: manifest.transfer_id,
                 bytes_received: receipt.bytes_received,
@@ -2195,6 +2246,75 @@ mod tests {
             ..RqConfig::default()
         }
         .with_symbol_auth(SecurityContext::for_testing(214))
+    }
+
+    #[test]
+    fn wrong_key_datagram_is_counted_without_poisoning_authenticated_admission() {
+        let verifier = SecurityContext::for_testing(214);
+        let wrong_signer = SecurityContext::for_testing(215);
+        let object_id = ObjectId::new_for_test(91);
+        let symbol = Symbol::new(
+            SymbolId::new(object_id, 0, 5),
+            vec![0x5a; 16],
+            SymbolKind::Source,
+        );
+        let tag = 0xfeed_beef_dead_cafe;
+        let wrong = wrong_signer.sign_symbol(&symbol);
+        let wrong_datagram = encode_symbol_datagram(tag, 0, &symbol, Some(wrong.tag()));
+        let blocks = BTreeMap::new();
+        let mut symbol_set = BondedReceiverSymbolSet::new();
+
+        let (rejected, admitted) = admit_bonded_datagram(
+            &wrong_datagram,
+            wrong_datagram.len(),
+            tag,
+            Some(&verifier),
+            3,
+            &blocks,
+            &mut symbol_set,
+            BondedReceiverRetentionPolicy::unbounded(),
+            16,
+            |_| Some((0, object_id)),
+        );
+
+        assert!(
+            !rejected.observed,
+            "auth rejection is not liveness progress"
+        );
+        assert!(!rejected.accepted);
+        assert!(admitted.is_none());
+        assert_eq!(symbol_set.auth_rejected_symbols(2), 1);
+        assert!(
+            symbol_set.is_empty(),
+            "rejection must not poison dedup state"
+        );
+        assert_eq!(
+            symbol_set.aggregate_stats(),
+            crate::net::atp::bonding::BondedReceiverIngressStats::default()
+        );
+        assert!(symbol_set.donor_targets().is_empty());
+
+        let correct = verifier.sign_symbol(&symbol);
+        let correct_datagram = encode_symbol_datagram(tag, 0, &symbol, Some(correct.tag()));
+        let (accepted, admitted) = admit_bonded_datagram(
+            &correct_datagram,
+            correct_datagram.len(),
+            tag,
+            Some(&verifier),
+            3,
+            &blocks,
+            &mut symbol_set,
+            BondedReceiverRetentionPolicy::unbounded(),
+            16,
+            |_| Some((0, object_id)),
+        );
+
+        assert!(accepted.observed);
+        assert!(accepted.accepted);
+        assert!(admitted.is_some());
+        assert_eq!(symbol_set.auth_rejected_symbols(2), 1);
+        assert_eq!(symbol_set.len(), 1);
+        assert_eq!(symbol_set.aggregate_stats().symbols_accepted, 1);
     }
 
     #[test]
@@ -3110,8 +3230,12 @@ mod tests {
     ) -> (
         SocketAddr,
         thread::JoinHandle<Result<BondedReceiveReport, RqError>>,
+        crate::observability::LogCollector,
     ) {
         let (addr_tx, addr_rx) = mpsc::channel::<SocketAddr>();
+        let logs = crate::observability::LogCollector::new(256)
+            .with_min_level(crate::observability::LogLevel::Trace);
+        let receiver_logs = logs.clone();
         let handle = thread::spawn(move || {
             let runtime = RuntimeBuilder::multi_thread()
                 .worker_threads(2)
@@ -3120,6 +3244,7 @@ mod tests {
                 .expect("bonded receiver runtime");
             runtime.block_on(runtime.handle().spawn(async move {
                 let cx = Cx::current().expect("bonded receiver cx");
+                cx.set_log_collector(receiver_logs);
                 let listener = TcpListener::bind("127.0.0.1:0").await?;
                 let addr = listener.local_addr()?;
                 addr_tx.send(addr).expect("send bonded control addr");
@@ -3138,7 +3263,7 @@ mod tests {
             }))
         });
         let addr = addr_rx.recv().expect("bonded receiver bound address");
-        (addr, handle)
+        (addr, handle, logs)
     }
 
     fn run_bonded_donor(
@@ -3321,7 +3446,7 @@ mod tests {
         let descriptor =
             bonded_e2e_descriptor(&src_dir, &["payload.bin"], "payload.bin", false, &config);
 
-        let (addr, recv_handle) =
+        let (addr, recv_handle, _) =
             spawn_bonded_receiver(descriptor.clone(), dst_dir.clone(), 1, config.clone());
         let donor =
             run_bonded_donor(descriptor.clone(), addr, src_dir, config).expect("donor succeeds");
@@ -3372,7 +3497,7 @@ mod tests {
         let descriptor =
             bonded_e2e_descriptor(&src_dir, &["payload.bin"], "payload.bin", false, &config);
 
-        let (addr, recv_handle) =
+        let (addr, recv_handle, _) =
             spawn_bonded_receiver(descriptor.clone(), dst_dir.clone(), 2, config.clone());
         let donor_a = {
             let descriptor = descriptor.clone();
@@ -3428,6 +3553,136 @@ mod tests {
         );
     }
 
+    /// Two authenticated donors must converge despite a third enrolled donor
+    /// spraying correctly framed symbols under the wrong key. The focused
+    /// admission test above proves those packets increment the schedule-owned
+    /// rejection counter while remaining outside decoder and ingress state;
+    /// this socket-level test proves the terminal receiver trace preserves that
+    /// evidence while honest repair reallocation completes the transfer.
+    #[test]
+    fn bonded_receive_tolerates_wrong_key_donor_and_commits_from_honest_donors() {
+        let receiver_config = bonded_auth_config();
+        let root = bonded_e2e_tmp("wrong_key_donor");
+        let src_dir = root.join("src");
+        let dst_dir = root.join("dst");
+        std::fs::create_dir_all(&src_dir).expect("create src dir");
+        std::fs::create_dir_all(&dst_dir).expect("create dst dir");
+        let payload = bonded_e2e_payload(200_003);
+        std::fs::write(src_dir.join("payload.bin"), &payload).expect("write payload");
+
+        let descriptor = bonded_e2e_descriptor(
+            &src_dir,
+            &["payload.bin"],
+            "payload.bin",
+            false,
+            &receiver_config,
+        );
+        let (addr, recv_handle, receiver_logs) = spawn_bonded_receiver(
+            descriptor.clone(),
+            dst_dir.clone(),
+            3,
+            receiver_config.clone(),
+        );
+
+        let honest_a = {
+            let descriptor = descriptor.clone();
+            let src = src_dir.clone();
+            let config = receiver_config.clone();
+            thread::spawn(move || run_bonded_donor(descriptor, addr, src, config))
+        };
+        let honest_b = {
+            let descriptor = descriptor.clone();
+            let src = src_dir.clone();
+            let config = receiver_config.clone();
+            thread::spawn(move || run_bonded_donor(descriptor, addr, src, config))
+        };
+        let wrong_key = {
+            let descriptor = descriptor.clone();
+            let src = src_dir.clone();
+            let config = RqConfig {
+                max_block_size: 64 * 1024,
+                round_tail_drain: Duration::from_millis(5),
+                accept_timeout: Duration::from_secs(30),
+                ..RqConfig::default()
+            }
+            .with_symbol_auth(SecurityContext::for_testing(215));
+            thread::spawn(move || run_bonded_donor(descriptor, addr, src, config))
+        };
+
+        let honest_a = honest_a
+            .join()
+            .expect("honest donor A thread")
+            .expect("honest donor A succeeds");
+        let honest_b = honest_b
+            .join()
+            .expect("honest donor B thread")
+            .expect("honest donor B succeeds");
+        let wrong_key = wrong_key
+            .join()
+            .expect("wrong-key donor thread")
+            .expect("wrong-key donor receives terminal proof");
+        let report = recv_handle
+            .join()
+            .expect("receiver thread")
+            .expect("honest donors must complete transfer");
+
+        assert!(report.committed);
+        assert_eq!(report.enrolled_donors, 3);
+        assert!(
+            report.feedback_rounds > 0,
+            "wrong-key holes require feedback"
+        );
+        assert_eq!(report.bytes_received, payload.len() as u64);
+        let received = std::fs::read(dst_dir.join("payload.bin")).expect("read committed file");
+        assert_eq!(received, payload, "commit must remain byte-identical");
+
+        for honest in [&honest_a, &honest_b] {
+            assert!(honest.receipt.committed);
+            assert!(
+                report.donor_ingress.iter().any(|(donor_index, stats)| {
+                    *donor_index == honest.donor_index && stats.symbols_accepted > 0
+                }),
+                "honest donor {} must contribute authenticated symbols: {:?}",
+                honest.donor_index,
+                report.donor_ingress
+            );
+        }
+        assert!(
+            wrong_key.symbols_sent > 0,
+            "malicious donor must exercise UDP auth"
+        );
+        assert!(
+            wrong_key.receipt.committed,
+            "all enrolled donors receive proof"
+        );
+        // `donor_ingress` and auth-rejection counters are attributed by the
+        // receiver-owned ESI schedule, not by socket identity. Honest repair
+        // reallocation can therefore contribute authenticated symbols to the
+        // wrong-key sender's original schedule bucket. The direct admission
+        // test above is the causal proof that rejected datagrams themselves do
+        // not enter authenticated ingress.
+        let wrong_key_donor = wrong_key.donor_index.to_string();
+        let rejection = receiver_logs
+            .peek()
+            .into_iter()
+            .find(|entry| {
+                entry.message() == BONDING_AUTH_REJECTION_TRACE_EVENT
+                    && entry.get_field("donor_index") == Some(wrong_key_donor.as_str())
+                    && entry.get_field("attribution") == Some("esi_schedule")
+                    && entry.get_field("phase") == Some("completed")
+            })
+            .expect("receiver must emit the terminal wrong-key schedule rejection summary");
+        let rejected_symbols = rejection
+            .get_field("rejected_symbols")
+            .expect("rejection count field")
+            .parse::<u64>()
+            .expect("rejection count is numeric");
+        assert!(
+            rejected_symbols > 0,
+            "receiver-side auth rejection count must be positive"
+        );
+    }
+
     /// (c) Two donors, one dies mid-transfer (after round 0 and after
     /// receiving a NeedMore it never serves): the receiver reallocates the
     /// dead donor's outstanding repair windows to the survivor
@@ -3447,7 +3702,7 @@ mod tests {
         let descriptor =
             bonded_e2e_descriptor(&src_dir, &["payload.bin"], "payload.bin", false, &config);
 
-        let (addr, recv_handle) =
+        let (addr, recv_handle, _) =
             spawn_bonded_receiver(descriptor.clone(), dst_dir.clone(), 2, config.clone());
 
         // Lossy survivor donor: HALF its datagrams are deterministically
