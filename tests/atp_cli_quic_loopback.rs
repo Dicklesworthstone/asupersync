@@ -151,6 +151,13 @@ fn parse_rq_listen_line(line: &str) -> Option<SocketAddr> {
     addr.parse().ok()
 }
 
+#[cfg(target_os = "linux")]
+fn parse_bonded_listen_line(line: &str) -> Option<SocketAddr> {
+    let rest = line.strip_prefix("atp: bonded control listening on ")?;
+    let (addr, _) = rest.split_once(" (udp on ")?;
+    addr.parse().ok()
+}
+
 #[cfg(feature = "atpd-daemon")]
 fn parse_tracing_bind_addr(line: &str, marker: &str) -> Option<SocketAddr> {
     if !line.contains(marker) {
@@ -232,6 +239,33 @@ fn wait_for_rq_listen_addr(rx: &mpsc::Receiver<String>) -> SocketAddr {
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 panic!("receiver exited before RQ readiness; stderr lines: {seen:?}");
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn wait_for_bonded_listen_addr(rx: &mpsc::Receiver<String>) -> (SocketAddr, Vec<String>) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut seen = Vec::new();
+    loop {
+        let now = Instant::now();
+        assert!(
+            now < deadline,
+            "receiver did not print bonded readiness; stderr lines: {seen:?}"
+        );
+        let wait = (deadline - now).min(Duration::from_millis(250));
+        match rx.recv_timeout(wait) {
+            Ok(line) => {
+                if let Some(addr) = parse_bonded_listen_line(&line) {
+                    seen.push(line);
+                    return (addr, seen);
+                }
+                seen.push(line);
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("receiver exited before bonded readiness; stderr lines: {seen:?}");
             }
         }
     }
@@ -379,6 +413,49 @@ fn staging_dirs(dest: &Path) -> Vec<PathBuf> {
         })
         .map(|entry| entry.path())
         .collect()
+}
+
+#[cfg(target_os = "linux")]
+fn run_linux_command(program: &str, args: &[&str], label: &str) -> Output {
+    let output = Command::new(program)
+        .args(args)
+        .output()
+        .unwrap_or_else(|error| panic!("run {label}: {error}"));
+    assert!(
+        output.status.success(),
+        "{label} failed; stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    output
+}
+
+#[cfg(target_os = "linux")]
+struct LinuxNetnsGuard {
+    namespace: String,
+    host_veth: String,
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for LinuxNetnsGuard {
+    fn drop(&mut self) {
+        let _ = Command::new("ip")
+            .args(["link", "delete", &self.host_veth])
+            .output();
+        let _ = Command::new("ip")
+            .args(["netns", "delete", &self.namespace])
+            .output();
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_interface_counter(interface: &str, counter: &str) -> u64 {
+    let path = format!("/sys/class/net/{interface}/statistics/{counter}");
+    std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("read {path}: {error}"))
+        .trim()
+        .parse()
+        .unwrap_or_else(|error| panic!("parse {path}: {error}"))
 }
 
 #[cfg(windows)]
@@ -1697,6 +1774,288 @@ fn atp_send_auto_falls_back_to_rq_after_quic_fails() {
     assert!(sender_stderr.contains("transport selection: quic unavailable"));
     assert!(sender_stderr.contains("transport selection: trying rq"));
     assert!(sender_stderr.contains("transport selection: selected rq"));
+}
+
+/// D1 direct-IP acceptance: exercise the real `atp` binary across a Linux
+/// veth boundary, not loopback. The receiver deliberately advertises both its
+/// reachable veth IP and a planted unreachable decoy. The donor must retain
+/// only the control-affine IP (with all of that IP's UDP fanout ports), move
+/// real packets across the namespace boundary, and commit exact bytes.
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "requires root plus iproute2 network-namespace and veth support"]
+fn bond_direct_ip_netns_selects_reachable_advertised_endpoint() {
+    let uid = run_linux_command("id", &["-u"], "query effective uid");
+    assert_eq!(
+        String::from_utf8_lossy(&uid.stdout).trim(),
+        "0",
+        "explicit D1 netns acceptance requires root/CAP_NET_ADMIN"
+    );
+    let _ = run_linux_command("ip", &["-Version"], "query iproute2 version");
+
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock after epoch")
+        .as_nanos() as u64;
+    let pid = std::process::id();
+    let slot = (nanos ^ u64::from(pid)) % (2 * 256 * 64);
+    let second_octet = 18 + slot / (256 * 64);
+    let remainder = slot % (256 * 64);
+    let third_octet = remainder / 64;
+    let fourth_octet = (remainder % 64) * 4;
+    let host_ip = format!("198.{second_octet}.{third_octet}.{}", fourth_octet + 1);
+    let donor_ip = format!("198.{second_octet}.{third_octet}.{}", fourth_octet + 2);
+    let decoy_ip = "192.0.2.99";
+    let suffix = format!("{:04x}{:02x}", pid % 65_536, nanos % 256);
+    let namespace = format!("atpd1-{suffix}");
+    let host_veth = format!("ad1h{suffix}");
+    let donor_veth = format!("ad1d{suffix}");
+    let _netns_guard = LinuxNetnsGuard {
+        namespace: namespace.clone(),
+        host_veth: host_veth.clone(),
+    };
+
+    run_linux_command("ip", &["netns", "add", &namespace], "create D1 namespace");
+    run_linux_command(
+        "ip",
+        &[
+            "link",
+            "add",
+            &host_veth,
+            "type",
+            "veth",
+            "peer",
+            "name",
+            &donor_veth,
+        ],
+        "create D1 veth pair",
+    );
+    run_linux_command(
+        "ip",
+        &["link", "set", &donor_veth, "netns", &namespace],
+        "move donor veth into namespace",
+    );
+    let host_cidr = format!("{host_ip}/30");
+    let donor_cidr = format!("{donor_ip}/30");
+    run_linux_command(
+        "ip",
+        &["addr", "add", &host_cidr, "dev", &host_veth],
+        "address receiver veth",
+    );
+    run_linux_command(
+        "ip",
+        &["link", "set", "dev", &host_veth, "up"],
+        "bring receiver veth up",
+    );
+    run_linux_command(
+        "ip",
+        &[
+            "-n",
+            &namespace,
+            "addr",
+            "add",
+            &donor_cidr,
+            "dev",
+            &donor_veth,
+        ],
+        "address donor veth",
+    );
+    run_linux_command(
+        "ip",
+        &["-n", &namespace, "link", "set", "lo", "up"],
+        "bring donor loopback up",
+    );
+    run_linux_command(
+        "ip",
+        &["-n", &namespace, "link", "set", "dev", &donor_veth, "up"],
+        "bring donor veth up",
+    );
+    let decoy_cidr = format!("{decoy_ip}/32");
+    run_linux_command(
+        "ip",
+        &["-n", &namespace, "route", "add", "unreachable", &decoy_cidr],
+        "plant unreachable advertised route",
+    );
+
+    let root = unique_tmp("bond-direct-ip-netns");
+    let receiver_source = root.join("receiver-source/payload.bin");
+    let donor_source = root.join("donor-source/payload.bin");
+    let dest = root.join("dest");
+    let payload = (0..(64 * 1024 + 173u32))
+        .map(|index| (index.wrapping_mul(67) % 251) as u8)
+        .collect::<Vec<_>>();
+    write_file(&receiver_source, &payload);
+    write_file(&donor_source, &payload);
+    std::fs::create_dir_all(&dest).expect("create bonded destination");
+
+    let listen = format!("{host_ip}:0");
+    let receiver = Command::new(env!("CARGO_BIN_EXE_atp"))
+        .env("ATP_BOND_TRACE", "1")
+        .arg("bond-recv")
+        .arg(&dest)
+        .arg(&receiver_source)
+        .args([
+            "--listen",
+            &listen,
+            "--expect-donors",
+            "1",
+            "--udp-bind",
+            "0.0.0.0",
+            "--udp-advertise",
+            decoy_ip,
+            "--udp-advertise",
+            &host_ip,
+            "--workers",
+            "2",
+            "--max-block-size",
+            "65536",
+            "--rq-auth-key-hex",
+            VALID_KEY_HEX,
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn direct-IP bonded receiver");
+    let mut receiver = ChildKillGuard::new(receiver);
+    let receiver_stderr = spawn_stderr_reader(receiver.child_mut());
+    let (listen_addr, mut receiver_lines) = wait_for_bonded_listen_addr(&receiver_stderr);
+    assert_eq!(
+        listen_addr.ip().to_string(),
+        host_ip,
+        "receiver must report the concrete veth control address"
+    );
+
+    let packets_before = linux_interface_counter(&host_veth, "rx_packets");
+    let donor = Command::new("ip")
+        .args(["netns", "exec", &namespace, "env", "ATP_BOND_TRACE=1"])
+        .arg(env!("CARGO_BIN_EXE_atp"))
+        .arg("bond-donate")
+        .arg(&donor_source)
+        .args([
+            "--to",
+            &listen_addr.to_string(),
+            "--workers",
+            "2",
+            "--max-block-size",
+            "65536",
+            "--rq-auth-key-hex",
+            VALID_KEY_HEX,
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn namespaced direct-IP bonded donor");
+    let donor = wait_with_timeout(donor, "namespaced direct-IP bonded donor");
+    if !donor.status.success() {
+        receiver.kill_and_wait();
+        panic!(
+            "namespaced direct-IP bonded donor failed; stdout: {}; stderr: {}",
+            String::from_utf8_lossy(&donor.stdout),
+            String::from_utf8_lossy(&donor.stderr)
+        );
+    }
+
+    let receiver = wait_with_timeout(receiver.into_inner(), "direct-IP bonded receiver");
+    receiver_lines.extend(receiver_stderr.into_iter());
+    assert!(
+        receiver.status.success(),
+        "direct-IP bonded receiver failed; stdout: {}; trace lines: {:?}",
+        String::from_utf8_lossy(&receiver.stdout),
+        receiver_lines
+    );
+
+    let donor_report = parse_cli_json(&donor, "namespaced direct-IP bonded donor");
+    let receiver_report = parse_cli_json(&receiver, "direct-IP bonded receiver");
+    assert_eq!(donor_report["committed"], serde_json::json!(true));
+    assert_eq!(receiver_report["committed"], serde_json::json!(true));
+    assert_eq!(receiver_report["enrolled_donors"], serde_json::json!(1));
+    assert!(
+        receiver_report["donor_ingress"][0]["symbols_accepted"]
+            .as_u64()
+            .is_some_and(|accepted| accepted > 0),
+        "receiver must report positive ingress from the namespaced donor: {receiver_report}"
+    );
+
+    let selected_endpoints = donor_report["receiver_endpoints"]
+        .as_array()
+        .expect("donor receiver_endpoints array")
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .expect("receiver endpoint string")
+                .parse::<SocketAddr>()
+                .expect("receiver endpoint socket address")
+        })
+        .collect::<Vec<_>>();
+    let expected_ip: std::net::IpAddr = host_ip.parse().expect("receiver veth IP");
+    assert!(
+        !selected_endpoints.is_empty(),
+        "donor must report its selected UDP fanout endpoints"
+    );
+    assert!(
+        selected_endpoints
+            .iter()
+            .all(|endpoint| endpoint.ip() == expected_ip),
+        "donor selected endpoints must stay on the control-affine veth IP: {selected_endpoints:?}"
+    );
+    assert!(
+        selected_endpoints
+            .iter()
+            .all(|endpoint| endpoint.ip().to_string() != decoy_ip),
+        "planted unreachable decoy must never become a spray endpoint: {selected_endpoints:?}"
+    );
+
+    let donor_trace = String::from_utf8_lossy(&donor.stderr);
+    assert!(
+        donor_trace.contains("endpoint_path_selected")
+            && donor_trace.contains("reason=control-path-affinity")
+            && donor_trace.contains(&host_ip)
+            && donor_trace.contains(decoy_ip),
+        "donor trace must record advertised and selected path sets: {donor_trace}"
+    );
+    let admission_line = receiver_lines
+        .iter()
+        .find(|line| line.contains("receiver: donor_admitted "))
+        .unwrap_or_else(|| panic!("receiver admission trace missing: {receiver_lines:?}"));
+    let admission_json = admission_line
+        .split_once("receiver: donor_admitted ")
+        .expect("receiver admission trace marker")
+        .1;
+    let admission: serde_json::Value =
+        serde_json::from_str(admission_json).expect("receiver admission trace JSON");
+    let advertised_endpoints = admission["receiver_udp_endpoints"]
+        .as_array()
+        .expect("admission receiver_udp_endpoints array");
+    assert!(
+        advertised_endpoints.iter().any(|endpoint| endpoint
+            .as_str()
+            .is_some_and(|value| value.starts_with(&host_ip))),
+        "receiver admission must advertise its reachable veth IP: {admission}"
+    );
+    assert!(
+        advertised_endpoints.iter().any(|endpoint| {
+            endpoint
+                .as_str()
+                .is_some_and(|value| value.starts_with(decoy_ip))
+        }),
+        "receiver admission must carry the planted decoy so donor filtering is causal: {admission}"
+    );
+
+    let packets_after = linux_interface_counter(&host_veth, "rx_packets");
+    assert!(
+        packets_after > packets_before,
+        "real control/UDP traffic must cross the receiver veth: before={packets_before}, after={packets_after}"
+    );
+    assert_eq!(
+        std::fs::read(dest.join("payload.bin")).expect("read committed direct-IP payload"),
+        payload
+    );
+    assert!(
+        staging_dirs(&dest).is_empty(),
+        "successful direct-IP bonded transfer left staging directories: {:?}",
+        staging_dirs(&dest)
+    );
 }
 
 #[cfg(windows)]

@@ -35,7 +35,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{Shutdown, SocketAddr, ToSocketAddrs};
+use std::net::{IpAddr, Shutdown, SocketAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command as ProcessCommand, ExitCode, ExitStatus, Stdio};
 use std::sync::{
@@ -602,6 +602,11 @@ struct BondRecvArgs {
     /// IP the bonded UDP symbol sockets bind on. Defaults to the --listen IP.
     #[arg(long = "udp-bind", value_name = "IP")]
     udp_bind: Option<String>,
+    /// Receiver UDP IP reachable by donors; repeat to advertise every direct
+    /// or tailnet address. Values are combined with all bound UDP fanout ports
+    /// in the enrollment handshake. No interface is guessed.
+    #[arg(long = "udp-advertise", value_name = "IP")]
+    udp_advertise: Vec<IpAddr>,
     /// This peer's advertised identity label.
     #[arg(long, default_value = "atp-bond-receiver")]
     peer_id: String,
@@ -2105,6 +2110,7 @@ fn run_bond_recv(args: BondRecvArgs) -> Result<(), String> {
         .udp_bind
         .clone()
         .unwrap_or_else(|| args.listen.ip().to_string());
+    let udp_advertise = args.udp_advertise.clone();
     let runtime = build_runtime(args.workers)?;
     let source = args.source.clone();
     let dest = args.dest.clone();
@@ -2123,6 +2129,7 @@ fn run_bond_recv(args: BondRecvArgs) -> Result<(), String> {
             &dest,
             listen,
             &udp_bind_ip,
+            &udp_advertise,
             expect_donors,
             config,
             receive_options,
@@ -2161,6 +2168,7 @@ async fn bond_recv_serve(
     dest: &Path,
     listen: SocketAddr,
     udp_bind_ip: &str,
+    advertised_udp_ips: &[IpAddr],
     expected_donors: u32,
     config: RqConfig,
     receive_options: transport_rq::RqReceiveOptions,
@@ -2179,7 +2187,7 @@ async fn bond_recv_serve(
     if let Some(ready) = on_bound {
         let _ = ready.send(bound);
     }
-    transport_rq::receive_bonded_with_options(
+    transport_rq::receive_bonded_with_options_and_advertised_ips(
         cx,
         descriptor,
         dest,
@@ -2190,6 +2198,7 @@ async fn bond_recv_serve(
         peer_id,
         None,
         receive_options,
+        advertised_udp_ips,
     )
     .await
     .map_err(|error| error.to_string())
@@ -2598,8 +2607,34 @@ fn run_bond_pull(mut args: BondPullArgs) -> Result<(), String> {
         .iter()
         .map(|host| resolve_remote_shell(args.remote_shell, &args.ssh_options, host))
         .collect::<Result<Vec<_>, _>>()?;
-    // Fail fast on an unusable control posture before any remote work.
-    bond_pull_control_advertise(args.advertise, args.listen, args.listen.port())?;
+    // Fail fast on an unusable control posture before any remote work. The IP
+    // is also the explicit direct UDP advertisement; the receiver fills in its
+    // actually-bound UDP fanout ports during enrollment. A distinct bind IP is
+    // valid operator authority for a routed or NAT-mapped advertised address.
+    let control_advertise_hint =
+        bond_pull_control_advertise(args.advertise, args.listen, args.listen.port())?;
+    let udp_bind_ip = args
+        .udp_bind
+        .clone()
+        .unwrap_or_else(|| args.listen.ip().to_string());
+    let udp_bind_addr: IpAddr = udp_bind_ip
+        .parse()
+        .map_err(|error| format!("invalid UDP bind ip '{udp_bind_ip}': {error}"))?;
+    let local_tailnet = detect_local_tailnet().filter(|identity| {
+        let tailnet_ip = IpAddr::V4(identity.ipv4);
+        let control_accepts_tailnet = args.listen.ip() == tailnet_ip
+            || (args.listen.ip().is_unspecified() && args.listen.ip().is_ipv4());
+        let udp_accepts_tailnet = udp_bind_addr == tailnet_ip
+            || (udp_bind_addr.is_unspecified() && udp_bind_addr.is_ipv4());
+        control_accepts_tailnet && udp_accepts_tailnet
+    });
+    let mut receiver_udp_advertise = vec![control_advertise_hint.ip()];
+    if let Some(identity) = &local_tailnet {
+        let tailnet_ip = IpAddr::V4(identity.ipv4);
+        if !receiver_udp_advertise.contains(&tailnet_ip) {
+            receiver_udp_advertise.push(tailnet_ip);
+        }
+    }
 
     // RQ symbol auth mirrors the `atp send` SSH bootstrap: use the configured
     // key or generate a per-transfer one, then deliver it to every donor over
@@ -2640,10 +2675,6 @@ fn run_bond_pull(mut args: BondPullArgs) -> Result<(), String> {
 
     // Start the bonded receiver in-process and wait for its bound control
     // address before any donor is launched.
-    let udp_bind_ip = args
-        .udp_bind
-        .clone()
-        .unwrap_or_else(|| args.listen.ip().to_string());
     let (ready_tx, ready_rx) = mpsc::channel::<SocketAddr>();
     let start = Instant::now();
     let receiver_thread = {
@@ -2651,6 +2682,7 @@ fn run_bond_pull(mut args: BondPullArgs) -> Result<(), String> {
         let dest = args.dest.clone();
         let listen = args.listen;
         let udp_bind_ip = udp_bind_ip.clone();
+        let receiver_udp_advertise = receiver_udp_advertise.clone();
         let config = config.clone();
         let peer_id = args.peer_id.clone();
         let workers = args.workers;
@@ -2665,6 +2697,7 @@ fn run_bond_pull(mut args: BondPullArgs) -> Result<(), String> {
                         &dest,
                         listen,
                         &udp_bind_ip,
+                        &receiver_udp_advertise,
                         expected_donors,
                         config,
                         receive_options,
@@ -2694,7 +2727,7 @@ fn run_bond_pull(mut args: BondPullArgs) -> Result<(), String> {
     // both so each donor can pick the endpoint it can actually reach.
     let endpoints = ReceiverEndpoints {
         direct: Some(control),
-        tailnet: detect_local_tailnet()
+        tailnet: local_tailnet
             .map(|identity| SocketAddr::new(identity.ipv4.into(), control.port())),
     };
 
@@ -13137,6 +13170,7 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
                             &dest,
                             "127.0.0.1:0".parse().expect("listen addr"),
                             "127.0.0.1",
+                            &[],
                             2,
                             config,
                             rq_receive_options(

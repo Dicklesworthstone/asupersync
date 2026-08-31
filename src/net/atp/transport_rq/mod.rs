@@ -504,7 +504,7 @@ macro_rules! bondtrace {
 mod bonded;
 pub use bonded::{
     ATP_RQ_BONDED_PROTOCOL, BondedDonateReport, BondedReceiveReport, donate_bonded, receive_bonded,
-    receive_bonded_with_options,
+    receive_bonded_with_options, receive_bonded_with_options_and_advertised_ips,
 };
 
 /// Transport tuning knobs.

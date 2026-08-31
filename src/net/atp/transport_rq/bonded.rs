@@ -925,6 +925,84 @@ fn emit_bonded_progress(
     let _ = sink.try_send(snapshot);
 }
 
+const MAX_BONDING_ADVERTISED_UDP_IPS: usize = 16;
+const MAX_BONDING_RECEIVER_ENDPOINTS: usize = 1024;
+
+fn validate_bonded_advertised_udp_ips(
+    bind_ip: std::net::IpAddr,
+    advertised: &[std::net::IpAddr],
+) -> Result<Vec<std::net::IpAddr>, RqError> {
+    if advertised.is_empty() {
+        return Ok(vec![bind_ip]);
+    }
+    if advertised.len() > MAX_BONDING_ADVERTISED_UDP_IPS {
+        return Err(RqError::Source(format!(
+            "bonded receiver advertised {} UDP IPs, max {MAX_BONDING_ADVERTISED_UDP_IPS}",
+            advertised.len()
+        )));
+    }
+
+    let mut unique = BTreeSet::new();
+    let mut validated = Vec::with_capacity(advertised.len());
+    for &ip in advertised {
+        if ip.is_unspecified() {
+            return Err(RqError::Source(
+                "bonded receiver UDP advertisement must not contain an unspecified IP".to_string(),
+            ));
+        }
+        if ip.is_multicast() || matches!(ip, std::net::IpAddr::V4(ipv4) if ipv4.is_broadcast()) {
+            return Err(RqError::Source(format!(
+                "bonded receiver UDP advertisement must be unicast, got {ip}"
+            )));
+        }
+        if ip.is_ipv4() != bind_ip.is_ipv4() {
+            return Err(RqError::Source(format!(
+                "bonded receiver UDP advertisement {ip} does not match bind address family {bind_ip}"
+            )));
+        }
+        if unique.insert(ip) {
+            validated.push(ip);
+        }
+    }
+    Ok(validated)
+}
+
+fn validate_bonded_receiver_udp_endpoints(endpoints: &[SocketAddr]) -> Result<(), RqError> {
+    if endpoints.is_empty() {
+        return Err(RqError::HandshakeRejected(
+            "bonded welcome advertised no receiver UDP endpoints".to_string(),
+        ));
+    }
+    if endpoints.len() > MAX_BONDING_RECEIVER_ENDPOINTS {
+        return Err(RqError::HandshakeRejected(format!(
+            "bonded welcome advertised {} receiver UDP endpoints, max {MAX_BONDING_RECEIVER_ENDPOINTS}",
+            endpoints.len()
+        )));
+    }
+
+    let mut unique = BTreeSet::new();
+    for &endpoint in endpoints {
+        if endpoint.port() == 0 {
+            return Err(RqError::HandshakeRejected(format!(
+                "bonded welcome advertised receiver UDP port zero at {endpoint}"
+            )));
+        }
+        if endpoint.ip().is_multicast()
+            || matches!(endpoint.ip(), std::net::IpAddr::V4(ip) if ip.is_broadcast())
+        {
+            return Err(RqError::HandshakeRejected(format!(
+                "bonded welcome advertised non-unicast receiver UDP endpoint {endpoint}"
+            )));
+        }
+        if !unique.insert(endpoint) {
+            return Err(RqError::HandshakeRejected(format!(
+                "bonded welcome advertised duplicate receiver UDP endpoint {endpoint}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Receive one bonded transfer from up to `expected_donors` simultaneous
 /// donors, verify it fail-closed, and commit it into `dest_dir`.
 ///
@@ -983,10 +1061,54 @@ pub async fn receive_bonded_with_options(
     control_listener: &TcpListener,
     udp_bind_ip: &str,
     expected_donors: u32,
+    config: RqConfig,
+    peer_id: &str,
+    progress: Option<mpsc::Sender<BondedTransferProgress>>,
+    options: RqReceiveOptions,
+) -> Result<BondedReceiveReport, RqError> {
+    receive_bonded_with_options_and_advertised_ips(
+        cx,
+        descriptor,
+        dest_dir,
+        control_listener,
+        udp_bind_ip,
+        expected_donors,
+        config,
+        peer_id,
+        progress,
+        options,
+        &[],
+    )
+    .await
+}
+
+/// [`receive_bonded_with_options`] with explicit receiver UDP IP
+/// advertisement.
+///
+/// Each supplied IP is combined with every actually-bound UDP fanout port and
+/// carried in the donor assignment. The list is operator authority: this
+/// function does not guess which local interfaces are reachable from a donor.
+/// An empty list preserves the compatibility behavior, advertising the bind IP
+/// (including an unspecified bind address for protocol-v3 donors, which safely
+/// replace it with the connected control IP plus the separately carried ports).
+///
+/// Explicit addresses must be unicast, non-unspecified, and in the same
+/// address family as `udp_bind_ip`. They may differ from the bind IP when an
+/// operator has configured routing or NAT that maps the advertised address to
+/// the bound socket. Validation completes before any UDP socket is bound.
+#[allow(clippy::too_many_arguments)]
+pub async fn receive_bonded_with_options_and_advertised_ips(
+    cx: &Cx,
+    descriptor: &BondTransferDescriptor,
+    dest_dir: &Path,
+    control_listener: &TcpListener,
+    udp_bind_ip: &str,
+    expected_donors: u32,
     mut config: RqConfig,
     peer_id: &str,
     progress: Option<mpsc::Sender<BondedTransferProgress>>,
     options: RqReceiveOptions,
+    advertised_udp_ips: &[std::net::IpAddr],
 ) -> Result<BondedReceiveReport, RqError> {
     options.validate()?;
     cx.checkpoint().map_err(|_| RqError::Cancelled)?;
@@ -1008,6 +1130,16 @@ pub async fn receive_bonded_with_options(
     let bind_ip: std::net::IpAddr = udp_bind_ip
         .parse()
         .map_err(|e| RqError::Source(format!("invalid UDP bind ip '{udp_bind_ip}': {e}")))?;
+    let advertised_udp_ips = validate_bonded_advertised_udp_ips(bind_ip, advertised_udp_ips)?;
+    let endpoint_count = advertised_udp_ips
+        .len()
+        .checked_mul(config.udp_fanout.max(1))
+        .ok_or_else(|| RqError::Source("bonded receiver endpoint count overflow".to_string()))?;
+    if endpoint_count > MAX_BONDING_RECEIVER_ENDPOINTS {
+        return Err(RqError::Source(format!(
+            "bonded receiver would advertise {endpoint_count} UDP endpoints, max {MAX_BONDING_RECEIVER_ENDPOINTS}"
+        )));
+    }
     let recv_buf_bytes = if manifest.total_bytes == 0 {
         16 * 1024 * 1024
     } else {
@@ -1018,10 +1150,11 @@ pub async fn receive_bonded_with_options(
     let mut udp =
         RqReceiverUdpFanout::bind(bind_ip, config.udp_fanout.max(1), recv_buf_bytes).await?;
     let udp_ports = udp.local_ports()?;
-    let receiver_udp_endpoints: Vec<SocketAddr> = udp_ports
+    let receiver_udp_endpoints: Vec<SocketAddr> = advertised_udp_ips
         .iter()
-        .map(|&port| SocketAddr::new(bind_ip, port))
+        .flat_map(|&ip| udp_ports.iter().map(move |&port| SocketAddr::new(ip, port)))
         .collect();
+    validate_bonded_receiver_udp_endpoints(&receiver_udp_endpoints)?;
 
     // C1 donor admission control plane.
     let auth_key_ref = symbol_auth_enabled.then(|| {
@@ -1599,6 +1732,77 @@ fn new_bonded_entry_decoder(
     }
 }
 
+fn select_bonded_receiver_udp_path(
+    assignment: &DonorAssignment,
+    legacy_udp_ports: &[u16],
+    control_addr: SocketAddr,
+) -> Result<Vec<SocketAddr>, RqError> {
+    assignment
+        .validate()
+        .map_err(|error| RqError::HandshakeRejected(error.to_string()))?;
+    validate_bonded_receiver_udp_endpoints(&assignment.receiver_udp_endpoints)?;
+
+    let advertised = &assignment.receiver_udp_endpoints;
+    let all_unspecified = advertised
+        .iter()
+        .all(|endpoint| endpoint.ip().is_unspecified());
+    let any_unspecified = advertised
+        .iter()
+        .any(|endpoint| endpoint.ip().is_unspecified());
+    let (selected, reason) = if all_unspecified {
+        if legacy_udp_ports.is_empty() {
+            return Err(RqError::HandshakeRejected(
+                "legacy bonded welcome advertised no receiver UDP ports".to_string(),
+            ));
+        }
+        if legacy_udp_ports.len() > MAX_BONDING_RECEIVER_ENDPOINTS {
+            return Err(RqError::HandshakeRejected(format!(
+                "legacy bonded welcome advertised {} UDP ports, max {MAX_BONDING_RECEIVER_ENDPOINTS}",
+                legacy_udp_ports.len()
+            )));
+        }
+        let mut selected = Vec::with_capacity(legacy_udp_ports.len());
+        let mut unique_ports = BTreeSet::new();
+        for &port in legacy_udp_ports {
+            if port == 0 {
+                return Err(RqError::HandshakeRejected(
+                    "legacy bonded welcome advertised UDP port zero".to_string(),
+                ));
+            }
+            if unique_ports.insert(port) {
+                selected.push(SocketAddr::new(control_addr.ip(), port));
+            }
+        }
+        (selected, "legacy-control-ip")
+    } else {
+        if any_unspecified {
+            return Err(RqError::HandshakeRejected(
+                "bonded welcome mixed unspecified and concrete receiver UDP endpoints".to_string(),
+            ));
+        }
+        let selected: Vec<SocketAddr> = advertised
+            .iter()
+            .copied()
+            .filter(|endpoint| endpoint.ip() == control_addr.ip())
+            .collect();
+        if selected.is_empty() {
+            return Err(RqError::HandshakeRejected(format!(
+                "bonded welcome advertised no receiver UDP path for connected control IP {}",
+                control_addr.ip()
+            )));
+        }
+        (selected, "control-path-affinity")
+    };
+
+    bondtrace!(
+        "donor: endpoint_path_selected donor_index={} control_ip={} reason={} advertised={advertised:?} selected={selected:?}",
+        assignment.donor_index,
+        control_addr.ip(),
+        reason,
+    );
+    Ok(selected)
+}
+
 /// Donate into a bonded transfer over the wire.
 ///
 /// Enroll on the receiver's control plane, run the [`donate_path`]
@@ -1685,16 +1889,13 @@ pub async fn donate_bonded(
     let mut assignment = welcome.assignment.ok_or_else(|| {
         RqError::Frame("bonded welcome accepted but carried no donor assignment".to_string())
     })?;
-    // The donor's authoritative view of the receiver's UDP plane is the
-    // control address it just dialed plus the advertised ports (the receiver
-    // may have bound its offer endpoints on a different interface).
-    if !welcome.udp_ports.is_empty() {
-        assignment.receiver_udp_endpoints = welcome
-            .udp_ports
-            .iter()
-            .map(|&port| SocketAddr::new(control_addr.ip(), port))
-            .collect();
-    }
+    // The unauthenticated v3 control welcome cannot redirect UDP spray to an
+    // arbitrary third party. Select only the advertised IP that matches the
+    // already-established control path, retaining all of that IP's fanout
+    // ports. Legacy wildcard assignments remain compatible via the separately
+    // carried port list plus the connected control IP.
+    assignment.receiver_udp_endpoints =
+        select_bonded_receiver_udp_path(&assignment, &welcome.udp_ports, control_addr)?;
     let primary = assignment
         .receiver_udp_endpoints
         .first()
@@ -1994,6 +2195,119 @@ mod tests {
             ..RqConfig::default()
         }
         .with_symbol_auth(SecurityContext::for_testing(214))
+    }
+
+    #[test]
+    fn bonded_receiver_advertisement_is_explicit_bounded_and_bind_compatible() {
+        let wildcard: std::net::IpAddr = "0.0.0.0".parse().expect("wildcard IP");
+        let direct: std::net::IpAddr = "198.18.0.1".parse().expect("direct IP");
+        let tailnet: std::net::IpAddr = "100.101.102.103".parse().expect("tailnet IP");
+        assert_eq!(
+            validate_bonded_advertised_udp_ips(wildcard, &[direct, tailnet, direct])
+                .expect("valid explicit advertisement"),
+            vec![direct, tailnet],
+            "receiver advertisement must retain deterministic first occurrence order"
+        );
+
+        let unspecified: std::net::IpAddr = "0.0.0.0".parse().expect("unspecified IP");
+        assert!(matches!(
+            validate_bonded_advertised_udp_ips(wildcard, &[unspecified]),
+            Err(RqError::Source(message))
+                if message.contains("must not contain an unspecified IP")
+        ));
+        assert_eq!(
+            validate_bonded_advertised_udp_ips(direct, &[tailnet])
+                .expect("operator-authorized routed or NAT advertisement"),
+            vec![tailnet]
+        );
+        let ipv6: std::net::IpAddr = "2001:db8::1".parse().expect("IPv6 address");
+        assert!(matches!(
+            validate_bonded_advertised_udp_ips(direct, &[ipv6]),
+            Err(RqError::Source(message)) if message.contains("does not match bind address family")
+        ));
+    }
+
+    #[test]
+    fn bonded_receiver_endpoint_set_is_validated_before_donor_enrollment() {
+        let duplicate: SocketAddr = "198.18.0.1:41001".parse().expect("duplicate endpoint");
+        assert!(matches!(
+            validate_bonded_receiver_udp_endpoints(&[duplicate, duplicate]),
+            Err(RqError::HandshakeRejected(message)) if message.contains("duplicate")
+        ));
+        assert!(matches!(
+            validate_bonded_receiver_udp_endpoints(&[
+                "198.18.0.1:0".parse().expect("port-zero endpoint")
+            ]),
+            Err(RqError::HandshakeRejected(message)) if message.contains("port zero")
+        ));
+        assert!(matches!(
+            validate_bonded_receiver_udp_endpoints(&[
+                "239.1.2.3:41001".parse().expect("multicast endpoint")
+            ]),
+            Err(RqError::HandshakeRejected(message)) if message.contains("non-unicast")
+        ));
+
+        let oversized = (0..=MAX_BONDING_RECEIVER_ENDPOINTS)
+            .map(|index| {
+                let port = u16::try_from(index + 1).expect("bounded test port");
+                SocketAddr::new("198.18.0.1".parse().expect("direct IP"), port)
+            })
+            .collect::<Vec<_>>();
+        assert!(matches!(
+            validate_bonded_receiver_udp_endpoints(&oversized),
+            Err(RqError::HandshakeRejected(message)) if message.contains("max 1024")
+        ));
+    }
+
+    #[test]
+    fn bonded_donor_selects_control_affine_ip_and_keeps_its_fanout_ports() {
+        let control: SocketAddr = "198.18.0.1:8473".parse().expect("control address");
+        let assignment = DonorAssignment::new_static(
+            0,
+            1,
+            vec![
+                "192.0.2.99:41001".parse().expect("decoy endpoint"),
+                "198.18.0.1:41001".parse().expect("direct endpoint one"),
+                "198.18.0.1:41002".parse().expect("direct endpoint two"),
+            ],
+            None,
+        );
+        assert_eq!(
+            select_bonded_receiver_udp_path(&assignment, &[49999], control)
+                .expect("control-affine direct path"),
+            vec![
+                "198.18.0.1:41001".parse().expect("selected endpoint one"),
+                "198.18.0.1:41002".parse().expect("selected endpoint two"),
+            ],
+            "one chosen IP path must retain all of that path's UDP fanout ports"
+        );
+
+        let no_matching_path = DonorAssignment::new_static(
+            0,
+            1,
+            vec!["192.0.2.99:41001".parse().expect("unreachable endpoint")],
+            None,
+        );
+        assert!(matches!(
+            select_bonded_receiver_udp_path(&no_matching_path, &[41001], control),
+            Err(RqError::HandshakeRejected(message))
+                if message.contains("no receiver UDP path for connected control IP")
+        ));
+
+        let legacy = DonorAssignment::new_static(
+            0,
+            1,
+            vec!["0.0.0.0:41001".parse().expect("legacy wildcard")],
+            None,
+        );
+        assert_eq!(
+            select_bonded_receiver_udp_path(&legacy, &[41001, 41002], control)
+                .expect("legacy control-IP fallback"),
+            vec![
+                "198.18.0.1:41001".parse().expect("legacy endpoint one"),
+                "198.18.0.1:41002".parse().expect("legacy endpoint two"),
+            ]
+        );
     }
 
     #[derive(Debug, Clone, Copy)]
