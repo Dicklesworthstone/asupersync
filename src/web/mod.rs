@@ -109,3 +109,4 @@ pub use router::{
     NativeH3RouterEvent, NativeH3RouterIngress, NativeH3RouterPreparedResponse,
     NativeH3RouterRefusal,
 };
+pub use sse::Http1SseResponse;

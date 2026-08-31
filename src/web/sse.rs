@@ -29,6 +29,7 @@
 
 use std::collections::VecDeque;
 use std::fmt::{self, Write};
+use std::num::NonZeroUsize;
 use std::time::Duration;
 
 use crate::bytes::Bytes;
@@ -382,6 +383,32 @@ pub struct StreamingSse<S = VecSseSource> {
     closed: bool,
 }
 
+/// A server-owned HTTP/1 response plan for one incremental SSE stream.
+///
+/// This descriptor deliberately does not expose an [`OutgoingBodySender`].
+/// [`crate::http::h1::Http1StreamingServer::serve_sse`] creates the body
+/// channel inside the server-owned request lifecycle and supervises both halves
+/// until normal EOF, producer failure, cancellation, or client disconnect.
+/// That ownership prevents a dropped producer from being mistaken for a clean
+/// chunked response terminator.
+#[derive(Debug, Clone)]
+pub struct Http1SseResponse<S = VecSseSource> {
+    stream: StreamingSse<S>,
+    frame_capacity: NonZeroUsize,
+}
+
+impl<S> Http1SseResponse<S> {
+    /// Return the bounded number of SSE frames allowed in the body channel.
+    #[must_use]
+    pub const fn frame_capacity(&self) -> NonZeroUsize {
+        self.frame_capacity
+    }
+
+    pub(crate) fn into_parts(self) -> (StreamingSse<S>, NonZeroUsize) {
+        (self.stream, self.frame_capacity)
+    }
+}
+
 impl StreamingSse<VecSseSource> {
     /// Create a streaming SSE response from a finite event list.
     #[must_use]
@@ -446,6 +473,20 @@ impl<S: StreamingSseSource> StreamingSse<S> {
         self
     }
 
+    /// Convert this source into a server-supervised live HTTP/1 SSE response.
+    ///
+    /// The capacity bounds queued frames. Each SSE event is independently
+    /// bounded by [`Self::max_event_bytes`], so this is not a claim that an
+    /// arbitrary HTTP body channel has a byte-count limit. The server owns
+    /// response framing, cancellation, and the normal-EOF terminator.
+    #[must_use]
+    pub fn into_http1_response(self, frame_capacity: NonZeroUsize) -> Http1SseResponse<S> {
+        Http1SseResponse {
+            stream: self,
+            frame_capacity,
+        }
+    }
+
     /// Return total serialized bytes produced by the chunk APIs so far.
     ///
     /// This includes both client-visible events and server-authored heartbeat
@@ -465,6 +506,12 @@ impl<S: StreamingSseSource> StreamingSse<S> {
     pub fn cancel_for_disconnect(&mut self, cx: &Cx) {
         self.cancel_source();
         cx.set_cancel_requested(true);
+    }
+
+    /// Release producer-side state when the server suppresses or abandons a
+    /// response before transport ownership begins.
+    pub(crate) fn cancel_for_server_abort(&mut self) {
+        self.cancel_source();
     }
 
     /// Build the HTTP/1 chunked response head and body sender for this stream.
@@ -658,6 +705,9 @@ impl<S: StreamingSseSource> StreamingSse<S> {
     }
 
     fn cancel_source(&mut self) {
+        if self.closed {
+            return;
+        }
         self.closed = true;
         self.pending_event_chunk = None;
         self.source.cancel();

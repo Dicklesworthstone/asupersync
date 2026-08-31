@@ -5,30 +5,37 @@
 //! framed transport. Supports keep-alive, request limits, idle timeouts,
 //! and graceful shutdown.
 
-use crate::bytes::BytesMut;
+use crate::bytes::{BytesCursor, BytesMut};
 use crate::codec::{Encoder, Framed};
 use crate::cx::Cx;
+use crate::http::body::{Body, Frame};
 use crate::http::h1::codec::{
     Http1Codec, HttpError, decode_streaming_request_head, for_each_header_value_token,
-    preview_request_head, trim_ows, trim_ows_bytes,
+    preview_request_head, require_transfer_encoding_chunked, trim_ows, trim_ows_bytes,
+    validate_header_field,
 };
 use crate::http::h1::stream::{
-    BodyKind, IncomingBodyDrainProgress, IncomingBodyError, IncomingRequestBody,
-    IncomingRequestBodyWriter, RequestHead, StreamingServerRequest,
+    BodyKind, ChunkedEncoder, IncomingBodyDrainProgress, IncomingBodyError, IncomingRequestBody,
+    IncomingRequestBodyWriter, OutgoingBody, OutgoingBodySender, RequestHead, ResponseHead,
+    StreamingServerRequest,
 };
 use crate::http::h1::types::{Method, Request, Response, Version, default_reason};
 use crate::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use crate::server::shutdown::{ShutdownPhase, ShutdownSignal};
 use crate::stream::Stream;
 use crate::time::{timeout, wall_now};
-use crate::types::Budget;
+use crate::types::{Budget, CancelKind};
 use crate::web::request_region::{ServerHopOutcome, ServerRequestRegion, derive_request_budget};
+use crate::web::sse::{
+    Http1SseResponse, StreamingSse, StreamingSseSource, StreamingSseTransportError,
+    StreamingSseTransportStep, VecSseSource,
+};
 use base64::Engine as _;
 use std::future::{Future, poll_fn};
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -1294,18 +1301,17 @@ pub struct Http1StreamingServer<F> {
     in_flight_requests: Option<Arc<AtomicUsize>>,
 }
 
-impl<F, Fut> Http1StreamingServer<F>
-where
-    F: Fn(Cx, StreamingServerRequest) -> Fut + Send + Sync,
-    Fut: Future<Output = Response> + Send,
-{
-    /// Creates a streaming HTTP/1 server with default connection limits.
-    pub fn new(handler: F) -> Self {
-        Self::with_config(handler, Http1StreamingConfig::default())
+impl<F> Http1StreamingServer<F> {
+    /// Creates an HTTP/1 server whose handler returns one live SSE response.
+    ///
+    /// This is additive to [`Self::new`]: buffered [`Response`] handlers keep
+    /// their existing API and behavior.
+    pub fn new_sse(handler: F) -> Self {
+        Self::with_config_sse(handler, Http1StreamingConfig::default())
     }
 
-    /// Creates a streaming HTTP/1 server with explicit connection limits.
-    pub fn with_config(handler: F, config: impl Into<Http1StreamingConfig>) -> Self {
+    /// Creates a live-SSE HTTP/1 server with explicit connection limits.
+    pub fn with_config_sse(handler: F, config: impl Into<Http1StreamingConfig>) -> Self {
         Self {
             handler,
             config: config.into(),
@@ -1326,6 +1332,27 @@ where
     pub fn with_in_flight_requests(mut self, counter: Arc<AtomicUsize>) -> Self {
         self.in_flight_requests = Some(counter);
         self
+    }
+}
+
+impl<F, Fut> Http1StreamingServer<F>
+where
+    F: Fn(Cx, StreamingServerRequest) -> Fut + Send + Sync,
+    Fut: Future<Output = Response> + Send,
+{
+    /// Creates a streaming HTTP/1 server with default connection limits.
+    pub fn new(handler: F) -> Self {
+        Self::with_config(handler, Http1StreamingConfig::default())
+    }
+
+    /// Creates a streaming HTTP/1 server with explicit connection limits.
+    pub fn with_config(handler: F, config: impl Into<Http1StreamingConfig>) -> Self {
+        Self {
+            handler,
+            config: config.into(),
+            shutdown_signal: None,
+            in_flight_requests: None,
+        }
     }
 
     /// Serves one streaming HTTP/1 connection under an explicit capability context.
@@ -1520,8 +1547,530 @@ where
     }
 }
 
+impl<F> Http1StreamingServer<F> {
+    /// Serves one live SSE response under an explicit capability context.
+    ///
+    /// The first live-response slice intentionally closes the connection after
+    /// the response. That fail-closed policy prevents a producer failure after
+    /// the committed head from being confused with a clean reusable HTTP/1
+    /// message boundary.
+    pub async fn serve_sse<Fut, S, T>(self, cx: &Cx, io: T) -> Result<ConnectionState, HttpError>
+    where
+        F: Fn(Cx, StreamingServerRequest) -> Fut + Send + Sync,
+        Fut: Future<Output = Http1SseResponse<S>> + Send,
+        S: StreamingSseSource + Send + 'static,
+        T: AsyncRead + AsyncWrite + Unpin + Send,
+    {
+        self.serve_sse_with_peer_addr(cx, io, None).await
+    }
+
+    /// Serves one live SSE response and records its peer address.
+    ///
+    /// Handler execution, request-body synchronization, SSE production, body
+    /// writes, and the clean terminating chunk all remain inside the same
+    /// [`ServerRequestRegion`] lifecycle. A source error, panic, cancellation,
+    /// or transport failure after the response head closes the connection
+    /// without emitting a successful chunk terminator.
+    #[allow(clippy::too_many_lines)]
+    pub async fn serve_sse_with_peer_addr<Fut, S, T>(
+        self,
+        cx: &Cx,
+        mut io: T,
+        peer_addr: Option<SocketAddr>,
+    ) -> Result<ConnectionState, HttpError>
+    where
+        F: Fn(Cx, StreamingServerRequest) -> Fut + Send + Sync,
+        Fut: Future<Output = Http1SseResponse<S>> + Send,
+        S: StreamingSseSource + Send + 'static,
+        T: AsyncRead + AsyncWrite + Unpin + Send,
+    {
+        let mut read_buffer = BytesMut::with_capacity(8192);
+        let mut state = ConnectionState::new(connection_now(cx));
+
+        if cx.checkpoint().is_err()
+            || self
+                .shutdown_signal
+                .as_ref()
+                .is_some_and(ShutdownSignal::is_shutting_down)
+            || state.exceeded_request_limit(self.config.max_requests_per_connection)
+            || state.exceeded_idle_timeout(self.config.idle_timeout, connection_now(cx))
+        {
+            state.phase = ConnectionPhase::Closing;
+            let _ = io.shutdown().await;
+            return Ok(state);
+        }
+
+        state.phase = ConnectionPhase::Reading;
+        let Some((head, body_kind)) =
+            read_streaming_request_head(cx, &mut io, &mut read_buffer, &self.config).await?
+        else {
+            state.phase = ConnectionPhase::Closing;
+            let _ = io.shutdown().await;
+            return Ok(state);
+        };
+        let _in_flight = InFlightRequestGuard::acquire(self.in_flight_requests.as_ref());
+
+        if let Err(rejected_host) = validate_host_header(&head.headers, &self.config.allowed_hosts)
+        {
+            let body = if rejected_host.is_empty() {
+                "Missing required Host header".to_owned()
+            } else {
+                format!("Host '{rejected_host}' not in allowed-hosts allow-list")
+            };
+            let response = Response {
+                status: 421,
+                reason: String::new(),
+                version: head.version,
+                headers: vec![
+                    (
+                        "content-type".to_owned(),
+                        "text/plain; charset=utf-8".to_owned(),
+                    ),
+                    ("connection".to_owned(), "close".to_owned()),
+                ],
+                body: body.into_bytes(),
+                trailers: Vec::new(),
+            };
+            state.phase = ConnectionPhase::Writing;
+            write_streaming_response(cx, &mut io, response).await?;
+            state.requests_served = 1;
+            state.phase = ConnectionPhase::Closing;
+            let _ = io.shutdown().await;
+            return Ok(state);
+        }
+
+        let expectation = classify_expectation_from_parts(head.version, &head.headers);
+        if expectation == ExpectationAction::Reject {
+            let mut response = expectation_response(head.version, expectation)
+                .expect("rejected expectation must have a response");
+            add_connection_close(&mut response);
+            state.phase = ConnectionPhase::Writing;
+            write_streaming_response(cx, &mut io, response).await?;
+            state.requests_served = 1;
+            state.phase = ConnectionPhase::Closing;
+            let _ = io.shutdown().await;
+            return Ok(state);
+        }
+        if expectation == ExpectationAction::Continue && !body_kind.is_empty() {
+            let response = expectation_response(head.version, expectation)
+                .expect("100-continue expectation must have a response");
+            state.phase = ConnectionPhase::Writing;
+            write_streaming_response(cx, &mut io, response).await?;
+        }
+
+        let request_version = head.version;
+        let request_method = head.method.clone();
+        let request_now = connection_now(cx);
+        let (request_budget, budget_source) = derive_request_budget(
+            cx.budget(),
+            request_now,
+            self.config.request_timeout,
+            parse_request_timeout_header(&head.headers),
+            self.config.request_timeout_header_cap,
+        );
+        let region =
+            ServerRequestRegion::mint_from_connection("h1-sse", request_budget, request_now, cx);
+        let request_cx = region.cx().clone();
+        let body_cx = request_cx.clone();
+        let (writer, body) = IncomingRequestBody::channel_with_limits(
+            &request_cx,
+            body_kind,
+            self.config.incoming_body_frame_capacity,
+            self.config.incoming_body_queued_bytes,
+        );
+        let request = StreamingServerRequest {
+            head,
+            peer_addr,
+            body,
+        };
+        let handler = (self.handler)(request_cx.clone(), request);
+        let guard_cx = request_cx.clone();
+        let handler = async move {
+            let (stream, capacity) = handler.await.into_parts();
+            Some((LiveSseCancelGuard::new(stream, guard_cx), capacity))
+        };
+        let head_committed = AtomicBool::new(false);
+
+        state.phase = ConnectionPhase::Processing;
+        let request_flow = async {
+            let body_driver = drive_incoming_body(
+                &body_cx,
+                &mut io,
+                &mut read_buffer,
+                writer.max_body_size(u64::try_from(self.config.max_body_size).unwrap_or(u64::MAX)),
+                &self.config,
+            );
+            let Some(((guard, capacity), writer)) =
+                join_streaming_handler_and_body(&request_cx, handler, body_driver, &self.config)
+                    .await
+            else {
+                return Err(HttpError::Io(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "request body did not reach synchronized EOF",
+                )));
+            };
+            validate_unread_drain(writer.drain_progress(), &self.config).map_err(|error| {
+                HttpError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+            })?;
+
+            if request_method != Method::Get && request_method != Method::Head {
+                let mut response =
+                    hop_error_response(request_version, 405, "live SSE requires GET or HEAD");
+                response
+                    .headers
+                    .push(("Allow".to_owned(), "GET, HEAD".to_owned()));
+                add_connection_close(&mut response);
+                head_committed.store(true, Ordering::Release);
+                return write_streaming_response(&request_cx, &mut io, response).await;
+            }
+
+            if request_version != Version::Http11 {
+                let mut response = hop_error_response(
+                    request_version,
+                    505,
+                    "live SSE requires HTTP/1.1 chunked framing",
+                );
+                add_connection_close(&mut response);
+                head_committed.store(true, Ordering::Release);
+                return write_streaming_response(&request_cx, &mut io, response).await;
+            }
+
+            if request_method == Method::Head {
+                let response = live_sse_head_only_response(request_version);
+                head_committed.store(true, Ordering::Release);
+                return write_streaming_response(&request_cx, &mut io, response).await;
+            }
+
+            drive_live_sse_response(
+                &request_cx,
+                &mut io,
+                guard,
+                capacity,
+                request_version,
+                self.config.request_drain_grace,
+                &head_committed,
+            )
+            .await
+        };
+        let hop = race_force_close(
+            self.shutdown_signal.as_ref(),
+            region.run_with_protocol_drain(
+                budget_source,
+                Some(cx.clone()),
+                self.config.request_drain_grace,
+                request_flow,
+            ),
+        )
+        .await;
+
+        state.requests_served = 1;
+        state.last_request_at = connection_now(cx);
+        state.phase = ConnectionPhase::Closing;
+        let result = match hop {
+            None | Some(ServerHopOutcome::Cancelled | ServerHopOutcome::ConnectionLost) => Ok(()),
+            Some(ServerHopOutcome::Ok(result)) => result,
+            Some(ServerHopOutcome::Panicked(_)) => {
+                if !head_committed.load(Ordering::Acquire) {
+                    let mut response =
+                        hop_error_response(request_version, 500, "Internal Server Error");
+                    add_connection_close(&mut response);
+                    write_streaming_response(cx, &mut io, response).await
+                } else {
+                    Ok(())
+                }
+            }
+            Some(ServerHopOutcome::DeadlineExceeded) => {
+                if !head_committed.load(Ordering::Acquire) {
+                    let mut response = hop_error_response(
+                        request_version,
+                        503,
+                        "request budget deadline exceeded",
+                    );
+                    add_connection_close(&mut response);
+                    write_streaming_response(cx, &mut io, response).await
+                } else {
+                    Ok(())
+                }
+            }
+        };
+        let _ = io.shutdown().await;
+        result.map(|()| state)
+    }
+}
+
 fn connection_now(cx: &Cx) -> crate::types::Time {
     cx.timer_driver().map_or_else(wall_now, |timer| timer.now())
+}
+
+fn live_sse_head_only_response(version: Version) -> Response {
+    let mut response = Response::new(200, default_reason(200), Vec::new());
+    response.version = version;
+    response.headers = StreamingSse::<VecSseSource>::headers()
+        .into_iter()
+        .filter(|(name, _)| !name.eq_ignore_ascii_case("connection"))
+        .map(|(name, value)| (name.to_owned(), value.to_owned()))
+        .collect();
+    add_connection_close(&mut response);
+    response
+}
+
+fn validate_live_sse_head(head: &mut ResponseHead, body: &OutgoingBody) -> Result<(), HttpError> {
+    if head.reason.contains('\r') || head.reason.contains('\n') {
+        return Err(HttpError::BadHeader);
+    }
+    head.version = Version::Http11;
+    head.headers
+        .retain(|(name, _)| !name.eq_ignore_ascii_case("connection"));
+    head.headers
+        .push(("Connection".to_owned(), "close".to_owned()));
+
+    let mut transfer_encoding = None;
+    for (name, value) in &head.headers {
+        validate_header_field(name, value)?;
+        if name.eq_ignore_ascii_case("content-length") {
+            return Err(HttpError::AmbiguousBodyLength);
+        }
+        if name.eq_ignore_ascii_case("transfer-encoding") {
+            if transfer_encoding.replace(value.as_str()).is_some() {
+                return Err(HttpError::DuplicateTransferEncoding);
+            }
+        }
+    }
+    let transfer_encoding = transfer_encoding.ok_or(HttpError::BadTransferEncoding)?;
+    require_transfer_encoding_chunked(trim_ows(transfer_encoding))?;
+    if body.kind() != BodyKind::Chunked {
+        return Err(HttpError::BadTransferEncoding);
+    }
+    Ok(())
+}
+
+struct LiveSseCancelGuard<S: StreamingSseSource> {
+    stream: StreamingSse<S>,
+    cx: Cx,
+    armed: bool,
+    cancel_request_on_drop: bool,
+}
+
+impl<S: StreamingSseSource> LiveSseCancelGuard<S> {
+    fn new(stream: StreamingSse<S>, cx: Cx) -> Self {
+        Self {
+            stream,
+            cx,
+            armed: true,
+            cancel_request_on_drop: false,
+        }
+    }
+
+    fn arm_transport(&mut self) {
+        self.cancel_request_on_drop = true;
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl<S: StreamingSseSource> Drop for LiveSseCancelGuard<S> {
+    fn drop(&mut self) {
+        if self.armed {
+            if self.cancel_request_on_drop {
+                self.stream.cancel_for_disconnect(&self.cx);
+            } else {
+                self.stream.cancel_for_server_abort();
+            }
+        }
+    }
+}
+
+async fn produce_live_sse<S>(
+    mut guard: LiveSseCancelGuard<S>,
+    mut sender: OutgoingBodySender,
+) -> Result<OutgoingBodySender, HttpError>
+where
+    S: StreamingSseSource,
+{
+    loop {
+        match guard
+            .stream
+            .send_next_h1_chunk(&guard.cx, &mut sender)
+            .await
+        {
+            Ok(StreamingSseTransportStep::Sent { .. }) => {}
+            Ok(StreamingSseTransportStep::Complete) => {
+                if !sender.is_finished() {
+                    return Err(HttpError::BodyChannelClosed);
+                }
+                guard.disarm();
+                return Ok(sender);
+            }
+            Err(error) => {
+                // A source-side failure must not cancel the body receiver's
+                // context before it drains frames already committed to the
+                // bounded channel. Transport-side errors have already
+                // cancelled through `handle_h1_transport_error`; source
+                // cleanup is idempotent in either case.
+                guard.stream.cancel_for_server_abort();
+                guard.disarm();
+                return Err(live_sse_transport_error(error));
+            }
+        }
+    }
+}
+
+fn live_sse_transport_error(error: StreamingSseTransportError) -> HttpError {
+    match error {
+        StreamingSseTransportError::Transport(error) => error,
+        StreamingSseTransportError::Stream(error) => HttpError::Io(std::io::Error::other(error)),
+    }
+}
+
+fn encode_live_sse_frame(
+    encoder: &mut ChunkedEncoder,
+    frame: Frame<BytesCursor>,
+    destination: &mut BytesMut,
+) -> Result<(), HttpError> {
+    if frame.is_trailers() {
+        return Err(HttpError::TrailersNotAllowed);
+    }
+    encoder.encode_frame(frame, destination);
+    Ok(())
+}
+
+async fn drain_live_sse_producer_after_write_error<P>(
+    cx: &Cx,
+    producer: Pin<&mut P>,
+    producer_result: &mut Option<Result<OutgoingBodySender, HttpError>>,
+    drain_grace: Duration,
+) where
+    P: Future<Output = Result<OutgoingBodySender, HttpError>>,
+{
+    cx.cancel_with(
+        CancelKind::ParentCancelled,
+        Some("HTTP/1 SSE client transport disconnected"),
+    );
+    if producer_result.is_none() {
+        let _ = timeout(connection_now(cx), drain_grace, producer).await;
+    }
+}
+
+async fn drive_live_sse_response<S, T>(
+    cx: &Cx,
+    io: &mut T,
+    mut guard: LiveSseCancelGuard<S>,
+    capacity: std::num::NonZeroUsize,
+    request_version: Version,
+    drain_grace: Duration,
+    head_committed: &AtomicBool,
+) -> Result<(), HttpError>
+where
+    S: StreamingSseSource,
+    T: AsyncWrite + Unpin,
+{
+    debug_assert_eq!(request_version, Version::Http11);
+    let (mut response, sender) = guard.stream.h1_chunked_response(cx, capacity.get());
+    validate_live_sse_head(&mut response.head, &response.body)?;
+    let encoded_head = response.head.serialize();
+    guard.arm_transport();
+    let mut producer = std::pin::pin!(produce_live_sse(guard, sender));
+    let mut producer_result = None;
+
+    // Once this write is attempted, a partial head may be visible. Every
+    // subsequent failure therefore closes the connection without a fallback
+    // status or a clean chunk terminator.
+    head_committed.store(true, Ordering::Release);
+    if let Err(error) = io.write_all(encoded_head.as_ref()).await {
+        drain_live_sse_producer_after_write_error(
+            cx,
+            producer.as_mut(),
+            &mut producer_result,
+            drain_grace,
+        )
+        .await;
+        return Err(HttpError::Io(error));
+    }
+    if let Err(error) = io.flush().await {
+        drain_live_sse_producer_after_write_error(
+            cx,
+            producer.as_mut(),
+            &mut producer_result,
+            drain_grace,
+        )
+        .await;
+        return Err(HttpError::Io(error));
+    }
+
+    let mut encoder = ChunkedEncoder::new();
+    loop {
+        let frame = poll_fn(|task_cx| {
+            if producer_result.is_none()
+                && let Poll::Ready(result) = producer.as_mut().poll(task_cx)
+            {
+                producer_result = Some(result);
+            }
+            Pin::new(&mut response.body).poll_frame(task_cx)
+        })
+        .await;
+        let Some(frame) = frame else {
+            let producer_result = producer_result.take().ok_or(HttpError::BodyChannelClosed)?;
+            let sender = match producer_result {
+                Ok(sender) => sender,
+                Err(error) => return Err(error),
+            };
+            if !sender.is_finished() || encoder.is_finished() {
+                return Err(HttpError::BodyChannelClosed);
+            }
+            let mut final_chunk = BytesMut::new();
+            encoder.finalize(None, &mut final_chunk);
+            io.write_all(final_chunk.as_ref())
+                .await
+                .map_err(HttpError::Io)?;
+            io.flush().await.map_err(HttpError::Io)?;
+            return Ok(());
+        };
+
+        let frame = frame?;
+        let mut encoded_frame = BytesMut::new();
+        encode_live_sse_frame(&mut encoder, frame, &mut encoded_frame)?;
+        let write_frame = async {
+            io.write_all(encoded_frame.as_ref())
+                .await
+                .map_err(HttpError::Io)?;
+            io.flush().await.map_err(HttpError::Io)
+        };
+        let mut write_frame = std::pin::pin!(write_frame);
+        let write_result = poll_fn(|task_cx| {
+            if let Poll::Ready(result) = write_frame.as_mut().poll(task_cx) {
+                return Poll::Ready(result);
+            }
+            if producer_result.is_none()
+                && let Poll::Ready(result) = producer.as_mut().poll(task_cx)
+            {
+                producer_result = Some(result);
+            }
+            Poll::Pending
+        })
+        .await;
+
+        match write_result {
+            Ok(()) => {
+                // A fast in-memory or kernel-buffered writer can otherwise
+                // keep an infinite source inside one poll forever. Yield at
+                // each committed frame so connection cancellation, request
+                // deadlines, and force-close can regain control.
+                crate::runtime::yield_now().await;
+            }
+            Err(error) => {
+                drain_live_sse_producer_after_write_error(
+                    cx,
+                    producer.as_mut(),
+                    &mut producer_result,
+                    drain_grace,
+                )
+                .await;
+                return Err(error);
+            }
+        }
+    }
 }
 
 async fn read_streaming_request_head<T>(
@@ -1631,14 +2180,14 @@ where
     }
 }
 
-async fn join_streaming_handler_and_body<H, B>(
+async fn join_streaming_handler_and_body<H, B, R>(
     cx: &Cx,
     handler: H,
     body: B,
     config: &Http1StreamingConfig,
-) -> Option<(ServerHopOutcome<Response>, IncomingRequestBodyWriter)>
+) -> Option<(R, IncomingRequestBodyWriter)>
 where
-    H: Future<Output = Option<ServerHopOutcome<Response>>>,
+    H: Future<Output = Option<R>>,
     B: Future<Output = Result<IncomingRequestBodyWriter, IncomingBodyError>>,
 {
     let mut handler = Some(Box::pin(handler));
@@ -1684,8 +2233,8 @@ where
     }
 }
 
-enum StreamingJoinFirst {
-    Handler(Option<ServerHopOutcome<Response>>),
+enum StreamingJoinFirst<R> {
+    Handler(Option<R>),
     Body(Result<IncomingRequestBodyWriter, IncomingBodyError>),
 }
 
@@ -2305,9 +2854,12 @@ mod tests {
     use crate::http::h1::types::Method;
     use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
     use crate::runtime::RuntimeBuilder;
+    use crate::web::sse::{SseEvent, StreamingSseError};
+    use std::collections::VecDeque;
     use std::io;
+    use std::num::NonZeroUsize;
     use std::pin::Pin;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::task::{Context, Poll};
 
@@ -2370,8 +2922,761 @@ mod tests {
         }
     }
 
+    #[derive(Debug, Clone)]
+    struct WriteGateObservation {
+        source_calls: usize,
+        eof_calls: usize,
+        written: Vec<u8>,
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    enum BodyWriteDisposition {
+        GateOnceBeforeObservation { after_writes: usize },
+        GateOnceAfterObservation { after_writes: usize },
+        FailAfter { after_writes: usize },
+    }
+
+    struct ScriptedWriteIo {
+        read_data: Vec<u8>,
+        written: Arc<Mutex<Vec<u8>>>,
+        source_calls: Arc<AtomicUsize>,
+        eof_calls: Arc<AtomicUsize>,
+        observation: Arc<Mutex<Option<WriteGateObservation>>>,
+        disposition: BodyWriteDisposition,
+        head_complete: bool,
+        accepted_body_writes: usize,
+        gate_stage: u8,
+    }
+
+    impl ScriptedWriteIo {
+        fn new(
+            written: Arc<Mutex<Vec<u8>>>,
+            source_calls: Arc<AtomicUsize>,
+            eof_calls: Arc<AtomicUsize>,
+            observation: Arc<Mutex<Option<WriteGateObservation>>>,
+            disposition: BodyWriteDisposition,
+        ) -> Self {
+            Self {
+                read_data: b"GET /events HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+                    .to_vec(),
+                written,
+                source_calls,
+                eof_calls,
+                observation,
+                disposition,
+                head_complete: false,
+                accepted_body_writes: 0,
+                gate_stage: 0,
+            }
+        }
+
+        fn observe_gate(&self) {
+            let observation = WriteGateObservation {
+                source_calls: self.source_calls.load(Ordering::SeqCst),
+                eof_calls: self.eof_calls.load(Ordering::SeqCst),
+                written: self.written.lock().unwrap().clone(),
+            };
+            *self.observation.lock().unwrap() = Some(observation);
+        }
+    }
+
+    impl AsyncRead for ScriptedWriteIo {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            if self.read_data.is_empty() {
+                return Poll::Ready(Ok(()));
+            }
+            let count = buf.remaining().min(self.read_data.len());
+            buf.put_slice(&self.read_data[..count]);
+            self.read_data.drain(..count);
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    impl AsyncWrite for ScriptedWriteIo {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            task_cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            if !self.head_complete {
+                self.written.lock().unwrap().extend_from_slice(buf);
+                let head_complete = self
+                    .written
+                    .lock()
+                    .unwrap()
+                    .windows(4)
+                    .any(|window| window == b"\r\n\r\n");
+                self.head_complete = head_complete;
+                return Poll::Ready(Ok(buf.len()));
+            }
+
+            let after_writes = match self.disposition {
+                BodyWriteDisposition::GateOnceBeforeObservation { after_writes }
+                | BodyWriteDisposition::GateOnceAfterObservation { after_writes }
+                | BodyWriteDisposition::FailAfter { after_writes } => after_writes,
+            };
+            if self.accepted_body_writes >= after_writes {
+                match self.disposition {
+                    BodyWriteDisposition::GateOnceBeforeObservation { .. }
+                        if self.gate_stage == 0 =>
+                    {
+                        self.observe_gate();
+                        self.gate_stage = 1;
+                        task_cx.waker().wake_by_ref();
+                        return Poll::Pending;
+                    }
+                    BodyWriteDisposition::GateOnceAfterObservation { .. }
+                        if self.gate_stage == 0 =>
+                    {
+                        self.gate_stage = 1;
+                        task_cx.waker().wake_by_ref();
+                        return Poll::Pending;
+                    }
+                    BodyWriteDisposition::GateOnceAfterObservation { .. }
+                        if self.gate_stage == 1 =>
+                    {
+                        self.observe_gate();
+                        self.gate_stage = 2;
+                        task_cx.waker().wake_by_ref();
+                        return Poll::Pending;
+                    }
+                    BodyWriteDisposition::GateOnceAfterObservation { .. }
+                        if self.gate_stage == 2 =>
+                    {
+                        let observed_calls = self
+                            .observation
+                            .lock()
+                            .unwrap()
+                            .as_ref()
+                            .expect("capacity gate observation")
+                            .source_calls;
+                        assert_eq!(
+                            self.source_calls.load(Ordering::SeqCst),
+                            observed_calls,
+                            "bounded producer progress must remain stable while the transport stays pending"
+                        );
+                        self.gate_stage = 3;
+                    }
+                    BodyWriteDisposition::GateOnceAfterObservation { .. } => {}
+                    BodyWriteDisposition::FailAfter { .. } => {
+                        if self.gate_stage == 0 {
+                            self.observe_gate();
+                            self.gate_stage = 1;
+                        }
+                        return Poll::Ready(Err(io::Error::new(
+                            io::ErrorKind::BrokenPipe,
+                            "scripted SSE client disconnect",
+                        )));
+                    }
+                    BodyWriteDisposition::GateOnceBeforeObservation { .. } => {}
+                }
+            }
+
+            self.written.lock().unwrap().extend_from_slice(buf);
+            self.accepted_body_writes += 1;
+            Poll::Ready(Ok(buf.len()))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    struct CountingSseSource {
+        events: VecDeque<SseEvent>,
+        infinite: bool,
+        fail_on_call: Option<usize>,
+        source_calls: Arc<AtomicUsize>,
+        eof_calls: Arc<AtomicUsize>,
+        cancel_calls: Arc<AtomicUsize>,
+    }
+
+    impl CountingSseSource {
+        fn finite(
+            events: impl IntoIterator<Item = &'static str>,
+            source_calls: Arc<AtomicUsize>,
+            eof_calls: Arc<AtomicUsize>,
+            cancel_calls: Arc<AtomicUsize>,
+        ) -> Self {
+            Self {
+                events: events
+                    .into_iter()
+                    .map(|data| SseEvent::default().data(data))
+                    .collect(),
+                infinite: false,
+                fail_on_call: None,
+                source_calls,
+                eof_calls,
+                cancel_calls,
+            }
+        }
+
+        fn infinite(
+            source_calls: Arc<AtomicUsize>,
+            eof_calls: Arc<AtomicUsize>,
+            cancel_calls: Arc<AtomicUsize>,
+        ) -> Self {
+            Self {
+                events: VecDeque::new(),
+                infinite: true,
+                fail_on_call: None,
+                source_calls,
+                eof_calls,
+                cancel_calls,
+            }
+        }
+
+        fn failing_after_two_events(
+            source_calls: Arc<AtomicUsize>,
+            eof_calls: Arc<AtomicUsize>,
+            cancel_calls: Arc<AtomicUsize>,
+        ) -> Self {
+            Self {
+                events: ["first", "second"]
+                    .into_iter()
+                    .map(|data| SseEvent::default().data(data))
+                    .collect(),
+                infinite: false,
+                fail_on_call: Some(3),
+                source_calls,
+                eof_calls,
+                cancel_calls,
+            }
+        }
+    }
+
+    impl StreamingSseSource for CountingSseSource {
+        fn next_event(&mut self, cx: &Cx) -> Result<Option<SseEvent>, StreamingSseError> {
+            cx.checkpoint().map_err(|_| StreamingSseError::Cancelled)?;
+            let call = self.source_calls.fetch_add(1, Ordering::SeqCst) + 1;
+            if self.fail_on_call == Some(call) {
+                return Err(StreamingSseError::Producer(
+                    "scripted producer failure".to_owned(),
+                ));
+            }
+            if let Some(event) = self.events.pop_front() {
+                return Ok(Some(event));
+            }
+            if self.infinite {
+                return Ok(Some(SseEvent::default().data(format!("event-{call}"))));
+            }
+            self.eof_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(None)
+        }
+
+        fn cancel(&mut self) {
+            self.cancel_calls.fetch_add(1, Ordering::SeqCst);
+            self.events.clear();
+        }
+    }
+
+    fn response_body_bytes(response: &[u8]) -> &[u8] {
+        let head_end = response
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .expect("response head terminator")
+            + 4;
+        &response[head_end..]
+    }
+
     fn localhost_server_config() -> Http1Config {
         Http1Config::default().host_policy(HostPolicy::AllowList(vec!["localhost".to_string()]))
+    }
+
+    #[test]
+    fn streaming_sse_server_writes_first_chunk_before_source_eof() {
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let source_calls = Arc::new(AtomicUsize::new(0));
+        let eof_calls = Arc::new(AtomicUsize::new(0));
+        let cancel_calls = Arc::new(AtomicUsize::new(0));
+        let observation = Arc::new(Mutex::new(None));
+        let source = CountingSseSource::finite(
+            ["first", "second", "third"],
+            Arc::clone(&source_calls),
+            Arc::clone(&eof_calls),
+            Arc::clone(&cancel_calls),
+        );
+        let source = Arc::new(Mutex::new(Some(source)));
+        let source_for_handler = Arc::clone(&source);
+        let server = Http1StreamingServer::with_config_sse(
+            move |_cx, _request| {
+                let source = source_for_handler
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .expect("one live SSE request");
+                async move { StreamingSse::from_source(source).into_http1_response(NonZeroUsize::MIN) }
+            },
+            localhost_server_config(),
+        );
+        let io = ScriptedWriteIo::new(
+            Arc::clone(&written),
+            Arc::clone(&source_calls),
+            Arc::clone(&eof_calls),
+            Arc::clone(&observation),
+            BodyWriteDisposition::GateOnceBeforeObservation { after_writes: 1 },
+        );
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("build current-thread runtime");
+
+        let state = runtime
+            .block_on(async {
+                let cx = Cx::current().expect("runtime connection context");
+                server.serve_sse(&cx, io).await
+            })
+            .expect("serve live SSE response");
+
+        assert_eq!(state.requests_served, 1);
+        let observed = observation
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("second body write reached causal gate");
+        assert_eq!(observed.eof_calls, 0);
+        assert!(observed.source_calls >= 2);
+        assert_eq!(
+            response_body_bytes(&observed.written),
+            ChunkedEncoder::encode_chunk(b"data:first\n\n").as_ref()
+        );
+
+        let written = written.lock().unwrap().clone();
+        let body = response_body_bytes(&written);
+        let mut expected = Vec::new();
+        for event in ["first", "second", "third"] {
+            expected.extend_from_slice(
+                ChunkedEncoder::encode_chunk(format!("data:{event}\n\n").as_bytes()).as_ref(),
+            );
+        }
+        expected.extend_from_slice(b"0\r\n\r\n");
+        assert_eq!(body, expected);
+        assert_eq!(eof_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(cancel_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn streaming_sse_server_real_tcp_delivers_multiple_chunks_before_disconnect() {
+        let source_calls = Arc::new(AtomicUsize::new(0));
+        let eof_calls = Arc::new(AtomicUsize::new(0));
+        let cancel_calls = Arc::new(AtomicUsize::new(0));
+        let source = CountingSseSource::infinite(
+            Arc::clone(&source_calls),
+            Arc::clone(&eof_calls),
+            Arc::clone(&cancel_calls),
+        );
+        let source = Arc::new(Mutex::new(Some(source)));
+        let source_for_handler = Arc::clone(&source);
+        let server = Http1StreamingServer::with_config_sse(
+            move |_cx, _request| {
+                let source = source_for_handler
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .expect("one live SSE request");
+                async move { StreamingSse::from_source(source).into_http1_response(NonZeroUsize::MIN) }
+            },
+            localhost_server_config(),
+        );
+
+        let raw_listener =
+            std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback listener");
+        let address = raw_listener
+            .local_addr()
+            .expect("loopback listener address");
+        let client = std::thread::spawn(move || {
+            use std::io::{Read as _, Write as _};
+
+            let mut client =
+                std::net::TcpStream::connect(address).expect("connect loopback client");
+            client
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("set client read timeout");
+            client
+                .write_all(b"GET /events HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                .expect("write live SSE request");
+
+            let first = ChunkedEncoder::encode_chunk(b"data:event-1\n\n");
+            let second = ChunkedEncoder::encode_chunk(b"data:event-2\n\n");
+            let mut received = Vec::new();
+            while !received
+                .windows(first.len())
+                .any(|window| window == first.as_ref())
+                || !received
+                    .windows(second.len())
+                    .any(|window| window == second.as_ref())
+            {
+                let mut buffer = [0_u8; 4096];
+                let count = client.read(&mut buffer).expect("read live SSE bytes");
+                assert_ne!(count, 0, "connection closed before two live SSE chunks");
+                received.extend_from_slice(&buffer[..count]);
+            }
+            assert!(
+                !response_body_bytes(&received)
+                    .windows(5)
+                    .any(|window| window == b"0\r\n\r\n"),
+                "an infinite live source must not publish a clean terminator"
+            );
+            received
+        });
+        let (server_raw, _) = raw_listener.accept().expect("accept loopback client");
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("build current-thread runtime");
+
+        let error = runtime
+            .block_on(async {
+                let cx = Cx::current().expect("runtime connection context");
+                let stream = crate::net::tcp::stream::TcpStream::from_std(server_raw)
+                    .expect("wrap loopback server stream");
+                server.serve_sse(&cx, stream).await
+            })
+            .expect_err("client close must terminate the infinite live source");
+        let received = client.join().expect("join loopback client");
+
+        assert!(matches!(error, HttpError::Io(_)));
+        assert!(
+            response_body_bytes(&received)
+                .starts_with(ChunkedEncoder::encode_chunk(b"data:event-1\n\n").as_ref())
+        );
+        assert_eq!(eof_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(cancel_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn streaming_sse_server_capacity_one_bounds_producer_run_ahead() {
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let source_calls = Arc::new(AtomicUsize::new(0));
+        let eof_calls = Arc::new(AtomicUsize::new(0));
+        let cancel_calls = Arc::new(AtomicUsize::new(0));
+        let observation = Arc::new(Mutex::new(None));
+        let source = CountingSseSource::finite(
+            ["one", "two", "three", "four"],
+            Arc::clone(&source_calls),
+            Arc::clone(&eof_calls),
+            Arc::clone(&cancel_calls),
+        );
+        let source = Arc::new(Mutex::new(Some(source)));
+        let source_for_handler = Arc::clone(&source);
+        let server = Http1StreamingServer::with_config_sse(
+            move |_cx, _request| {
+                let source = source_for_handler
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .expect("one live SSE request");
+                async move { StreamingSse::from_source(source).into_http1_response(NonZeroUsize::MIN) }
+            },
+            localhost_server_config(),
+        );
+        let io = ScriptedWriteIo::new(
+            Arc::clone(&written),
+            Arc::clone(&source_calls),
+            Arc::clone(&eof_calls),
+            Arc::clone(&observation),
+            BodyWriteDisposition::GateOnceAfterObservation { after_writes: 0 },
+        );
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("build current-thread runtime");
+
+        runtime
+            .block_on(async {
+                let cx = Cx::current().expect("runtime connection context");
+                server.serve_sse(&cx, io).await
+            })
+            .expect("serve capacity-one SSE response");
+
+        let observed = observation
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("blocked first body write was observed after one pending poll");
+        assert_eq!(observed.source_calls, 3);
+        assert_eq!(observed.eof_calls, 0);
+        assert!(response_body_bytes(&observed.written).is_empty());
+        assert_eq!(eof_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(cancel_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn streaming_sse_server_disconnect_cancels_source_without_terminator() {
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let source_calls = Arc::new(AtomicUsize::new(0));
+        let eof_calls = Arc::new(AtomicUsize::new(0));
+        let cancel_calls = Arc::new(AtomicUsize::new(0));
+        let observation = Arc::new(Mutex::new(None));
+        let source = CountingSseSource::infinite(
+            Arc::clone(&source_calls),
+            Arc::clone(&eof_calls),
+            Arc::clone(&cancel_calls),
+        );
+        let source = Arc::new(Mutex::new(Some(source)));
+        let source_for_handler = Arc::clone(&source);
+        let server = Http1StreamingServer::with_config_sse(
+            move |_cx, _request| {
+                let source = source_for_handler
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .expect("one live SSE request");
+                async move { StreamingSse::from_source(source).into_http1_response(NonZeroUsize::MIN) }
+            },
+            localhost_server_config(),
+        );
+        let io = ScriptedWriteIo::new(
+            Arc::clone(&written),
+            Arc::clone(&source_calls),
+            Arc::clone(&eof_calls),
+            observation,
+            BodyWriteDisposition::FailAfter { after_writes: 1 },
+        );
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("build current-thread runtime");
+
+        let error = runtime
+            .block_on(async {
+                let cx = Cx::current().expect("runtime connection context");
+                server.serve_sse(&cx, io).await
+            })
+            .expect_err("scripted disconnect must fail the live response");
+
+        assert!(
+            matches!(error, HttpError::Io(ref error) if error.kind() == io::ErrorKind::BrokenPipe)
+        );
+        assert_eq!(cancel_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(eof_calls.load(Ordering::SeqCst), 0);
+        let calls_after_return = source_calls.load(Ordering::SeqCst);
+        std::thread::yield_now();
+        assert_eq!(source_calls.load(Ordering::SeqCst), calls_after_return);
+        let written = written.lock().unwrap().clone();
+        assert_eq!(
+            response_body_bytes(&written),
+            ChunkedEncoder::encode_chunk(b"data:event-1\n\n").as_ref()
+        );
+        assert!(
+            !response_body_bytes(&written)
+                .windows(5)
+                .any(|window| window == b"0\r\n\r\n")
+        );
+    }
+
+    #[test]
+    fn streaming_sse_server_producer_error_closes_without_terminator() {
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let source_calls = Arc::new(AtomicUsize::new(0));
+        let eof_calls = Arc::new(AtomicUsize::new(0));
+        let cancel_calls = Arc::new(AtomicUsize::new(0));
+        let source = CountingSseSource::failing_after_two_events(
+            Arc::clone(&source_calls),
+            Arc::clone(&eof_calls),
+            Arc::clone(&cancel_calls),
+        );
+        let source = Arc::new(Mutex::new(Some(source)));
+        let source_for_handler = Arc::clone(&source);
+        let server = Http1StreamingServer::with_config_sse(
+            move |_cx, _request| {
+                let source = source_for_handler
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .expect("one live SSE request");
+                async move { StreamingSse::from_source(source).into_http1_response(NonZeroUsize::MIN) }
+            },
+            localhost_server_config(),
+        );
+        let io = TestIo::new(
+            b"GET /events HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n".to_vec(),
+            Arc::clone(&written),
+        );
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("build current-thread runtime");
+
+        let error = runtime
+            .block_on(async {
+                let cx = Cx::current().expect("runtime connection context");
+                server.serve_sse(&cx, io).await
+            })
+            .expect_err("producer failure must fail the live response");
+
+        assert!(
+            matches!(error, HttpError::Io(ref source) if source.to_string().contains("scripted producer failure"))
+        );
+        assert_eq!(source_calls.load(Ordering::SeqCst), 3);
+        assert_eq!(eof_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(cancel_calls.load(Ordering::SeqCst), 1);
+        let written = written.lock().unwrap().clone();
+        let mut expected = ChunkedEncoder::encode_chunk(b"data:first\n\n").into_vec();
+        expected.extend_from_slice(ChunkedEncoder::encode_chunk(b"data:second\n\n").as_ref());
+        assert_eq!(
+            response_body_bytes(&written),
+            expected,
+            "frames already committed to the body channel must drain before the producer error closes the connection"
+        );
+        assert!(
+            !response_body_bytes(&written)
+                .windows(5)
+                .any(|window| window == b"0\r\n\r\n")
+        );
+    }
+
+    #[test]
+    fn streaming_sse_server_head_never_polls_source_or_emits_chunked_body() {
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let source_calls = Arc::new(AtomicUsize::new(0));
+        let eof_calls = Arc::new(AtomicUsize::new(0));
+        let cancel_calls = Arc::new(AtomicUsize::new(0));
+        let source = CountingSseSource::finite(
+            ["must-not-run"],
+            Arc::clone(&source_calls),
+            Arc::clone(&eof_calls),
+            Arc::clone(&cancel_calls),
+        );
+        let source = Arc::new(Mutex::new(Some(source)));
+        let source_for_handler = Arc::clone(&source);
+        let server = Http1StreamingServer::with_config_sse(
+            move |_cx, _request| {
+                let source = source_for_handler
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .expect("one live SSE request");
+                async move { StreamingSse::from_source(source).into_http1_response(NonZeroUsize::MIN) }
+            },
+            localhost_server_config(),
+        );
+        let io = TestIo::new(
+            b"HEAD /events HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n".to_vec(),
+            Arc::clone(&written),
+        );
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("build current-thread runtime");
+
+        runtime
+            .block_on(async {
+                let cx = Cx::current().expect("runtime connection context");
+                server.serve_sse(&cx, io).await
+            })
+            .expect("serve SSE HEAD response");
+
+        assert_eq!(source_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(eof_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(cancel_calls.load(Ordering::SeqCst), 1);
+        let written = written.lock().unwrap().clone();
+        let head = String::from_utf8_lossy(&written);
+        assert!(head.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(head.contains("content-type: text/event-stream\r\n"));
+        assert!(!head.contains("Transfer-Encoding"));
+        assert!(response_body_bytes(&written).is_empty());
+    }
+
+    #[test]
+    fn streaming_sse_server_connect_is_rejected_before_source_poll() {
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let source_calls = Arc::new(AtomicUsize::new(0));
+        let eof_calls = Arc::new(AtomicUsize::new(0));
+        let cancel_calls = Arc::new(AtomicUsize::new(0));
+        let source = CountingSseSource::finite(
+            ["must-not-run"],
+            Arc::clone(&source_calls),
+            Arc::clone(&eof_calls),
+            Arc::clone(&cancel_calls),
+        );
+        let source = Arc::new(Mutex::new(Some(source)));
+        let source_for_handler = Arc::clone(&source);
+        let server = Http1StreamingServer::with_config_sse(
+            move |_cx, _request| {
+                let source = source_for_handler
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .expect("one live SSE request");
+                async move { StreamingSse::from_source(source).into_http1_response(NonZeroUsize::MIN) }
+            },
+            localhost_server_config(),
+        );
+        let io = TestIo::new(
+            b"CONNECT example.test:443 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+                .to_vec(),
+            Arc::clone(&written),
+        );
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("build current-thread runtime");
+
+        runtime
+            .block_on(async {
+                let cx = Cx::current().expect("runtime connection context");
+                server.serve_sse(&cx, io).await
+            })
+            .expect("reject CONNECT before live SSE framing");
+
+        assert_eq!(source_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(eof_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(cancel_calls.load(Ordering::SeqCst), 1);
+        let written = written.lock().unwrap().clone();
+        let head = String::from_utf8_lossy(&written);
+        assert!(head.starts_with("HTTP/1.1 405 Method Not Allowed\r\n"));
+        assert!(head.contains("Allow: GET, HEAD\r\n"));
+        assert!(!head.contains("Transfer-Encoding"));
+    }
+
+    #[test]
+    fn streaming_sse_server_rejects_trailers_without_clean_terminator() {
+        let mut encoder = ChunkedEncoder::new();
+        let mut destination = BytesMut::new();
+
+        let error = encode_live_sse_frame(
+            &mut encoder,
+            Frame::trailers(crate::http::body::HeaderMap::new()),
+            &mut destination,
+        )
+        .expect_err("live SSE trailers must fail closed");
+
+        assert!(matches!(error, HttpError::TrailersNotAllowed));
+        assert!(destination.is_empty());
+        assert!(!encoder.is_finished());
+    }
+
+    #[test]
+    fn streaming_sse_server_empty_source_writes_one_clean_terminator() {
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let io = TestIo::new(
+            b"GET /events HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n".to_vec(),
+            Arc::clone(&written),
+        );
+        let server = Http1StreamingServer::with_config_sse(
+            |_cx, _request| async move { StreamingSse::empty().into_http1_response(NonZeroUsize::MIN) },
+            localhost_server_config(),
+        );
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("build current-thread runtime");
+
+        let state = runtime
+            .block_on(async {
+                let cx = Cx::current().expect("runtime connection context");
+                server.serve_sse(&cx, io).await
+            })
+            .expect("serve empty SSE response");
+
+        assert_eq!(state.requests_served, 1);
+        let written = written.lock().unwrap().clone();
+        let head = String::from_utf8_lossy(&written);
+        assert!(head.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(head.contains("Transfer-Encoding: chunked\r\n"));
+        assert!(head.contains("content-type: text/event-stream\r\n"));
+        assert_eq!(response_body_bytes(&written), b"0\r\n\r\n");
     }
 
     struct GatedBodyIo {
