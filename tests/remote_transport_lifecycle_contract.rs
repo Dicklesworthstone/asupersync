@@ -23,6 +23,10 @@ use asupersync::remote::{
     RemoteServiceWireResponse, call_tls_computation_once, serve_tls_computation_once,
 };
 #[cfg(all(feature = "remote-service", unix))]
+use asupersync::remote::{
+    RemoteComputationServiceBootstrap, RemoteComputationServiceBootstrapError,
+};
+#[cfg(all(feature = "remote-service", unix))]
 use asupersync::runtime::Runtime;
 #[cfg(feature = "tls")]
 use asupersync::runtime::RuntimeBuilder;
@@ -4236,6 +4240,449 @@ fn remote_client_test_mtls_pair() -> (TlsAcceptor, TlsConnector) {
         .build()
         .expect("mTLS connector should build");
     (acceptor, connector)
+}
+
+#[cfg(all(feature = "remote-service", unix))]
+fn write_configured_remote_service_file(
+    path: &Path,
+    listen: SocketAddr,
+    certificate_path: &Path,
+    private_key_path: &Path,
+    ca_path: &Path,
+    peer_node: &str,
+    spki_pin: &str,
+    computations: &[&str],
+) {
+    let computations = computations
+        .iter()
+        .map(|name| format!("\"{name}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    fs::write(
+        path,
+        format!(
+            "schema_version = 2\nprotocol = \"3.0\"\nlisten = \"{listen}\"\nlisten_scope = \"loopback_only\"\nserver_certificate_chain = \"{}\"\nserver_private_key = \"{}\"\nclient_ca_bundle = \"{}\"\nmax_frame_bytes = 65536\nmax_connections = 8\ntls_handshake_timeout_ms = 1000\ninitial_frame_timeout_ms = 2000\ndrain_timeout_ms = 2000\nidempotency_retention_ms = 30000\nmax_idempotency_records_per_peer = 32\n\n[[peers]]\nnode_id = \"{peer_node}\"\nspki_sha256 = [\"{spki_pin}\"]\ncomputations = [{computations}]\n",
+            certificate_path.display(),
+            private_key_path.display(),
+            ca_path.display(),
+        ),
+    )
+    .expect("configured remote service file should be written");
+}
+
+#[cfg(all(feature = "remote-service", unix))]
+#[test]
+fn configured_remote_service_hosts_application_registry_over_mtls_and_drains() {
+    const PEER_NODE: &str = "configured-application-peer";
+    const ALPHA: &str = "app.alpha_prefix";
+    const DENIED: &str = "app.middle_denied";
+    const ZETA: &str = "app.zeta_reverse";
+
+    let certificates = Certificate::from_pem(TEST_CERT_PEM).expect("TLS fixture should parse");
+    let peer_certificate = certificates
+        .first()
+        .expect("TLS fixture should contain a leaf certificate");
+    let spki_pin = CertificatePin::compute_spki_sha256(peer_certificate)
+        .expect("TLS fixture should produce an SPKI pin")
+        .to_base64();
+    let temp = tempfile::tempdir().expect("configured service fixture directory should exist");
+    let certificate_path = temp.path().join("service.crt");
+    let private_key_path = temp.path().join("service.key");
+    let ca_path = temp.path().join("client-ca.crt");
+    fs::write(&certificate_path, TEST_CERT_PEM).expect("service certificate should be written");
+    fs::write(&private_key_path, TEST_KEY_PEM).expect("service key should be written");
+    fs::write(&ca_path, TEST_CERT_PEM).expect("client CA should be written");
+
+    let alpha_dispatches = Arc::new(AtomicUsize::new(0));
+    let denied_dispatches = Arc::new(AtomicUsize::new(0));
+    let zeta_dispatches = Arc::new(AtomicUsize::new(0));
+    let mut computations = RemoteComputationRegistry::new();
+    let zeta_handler_dispatches = Arc::clone(&zeta_dispatches);
+    computations
+        .register::<Vec<u8>, Vec<u8>, _, _>(ZETA, move |_cx, invocation| {
+            let zeta_handler_dispatches = Arc::clone(&zeta_handler_dispatches);
+            async move {
+                zeta_handler_dispatches.fetch_add(1, Ordering::SeqCst);
+                let mut output = invocation.into_request().input.into_data();
+                output.reverse();
+                Ok(RemoteOutcome::Success(output))
+            }
+        })
+        .expect("zeta application handler should register");
+    let alpha_handler_dispatches = Arc::clone(&alpha_dispatches);
+    computations
+        .register::<Vec<u8>, Vec<u8>, _, _>(ALPHA, move |_cx, invocation| {
+            let alpha_handler_dispatches = Arc::clone(&alpha_handler_dispatches);
+            async move {
+                alpha_handler_dispatches.fetch_add(1, Ordering::SeqCst);
+                let input = invocation.into_request().input.into_data();
+                let mut output = b"alpha:".to_vec();
+                output.extend_from_slice(&input);
+                Ok(RemoteOutcome::Success(output))
+            }
+        })
+        .expect("alpha application handler should register");
+    let denied_handler_dispatches = Arc::clone(&denied_dispatches);
+    computations
+        .register::<Vec<u8>, Vec<u8>, _, _>(DENIED, move |_cx, invocation| {
+            denied_handler_dispatches.fetch_add(1, Ordering::SeqCst);
+            async move {
+                Ok(RemoteOutcome::Success(
+                    invocation.into_request().input.into_data(),
+                ))
+            }
+        })
+        .expect("denied application handler should register");
+    let registry_fingerprint = computations.schema_registry().fingerprint();
+
+    let occupied_listener = std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("missing-handler proof should occupy a loopback address");
+    let occupied_address = occupied_listener
+        .local_addr()
+        .expect("occupied listener should expose its address");
+    let missing_config_path = temp.path().join("remote-service-missing-handler.toml");
+    write_configured_remote_service_file(
+        &missing_config_path,
+        occupied_address,
+        &certificate_path,
+        &private_key_path,
+        &ca_path,
+        PEER_NODE,
+        &spki_pin,
+        &[ALPHA, "app.absent", ZETA],
+    );
+    let missing = RemoteComputationServiceBootstrap::from_toml_file(
+        &missing_config_path,
+        computations.clone(),
+    )
+    .expect_err("configured missing handler must fail before listener bind");
+    match missing {
+        RemoteComputationServiceBootstrapError::UnknownComputation {
+            peer, computation, ..
+        } => {
+            assert_eq!(peer, NodeId::new(PEER_NODE));
+            assert_eq!(computation, "app.absent");
+        }
+        other => panic!("unexpected missing-handler refusal: {other}"),
+    }
+    assert_eq!(
+        occupied_listener
+            .local_addr()
+            .expect("validation must not disturb the occupied listener"),
+        occupied_address
+    );
+    drop(occupied_listener);
+
+    let config_path = temp.path().join("remote-service-application.toml");
+    write_configured_remote_service_file(
+        &config_path,
+        "127.0.0.1:0"
+            .parse()
+            .expect("loopback service address should parse"),
+        &certificate_path,
+        &private_key_path,
+        &ca_path,
+        PEER_NODE,
+        &spki_pin,
+        &[ALPHA, ZETA],
+    );
+    let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+    let service_thread = thread::spawn(move || {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("configured application service runtime should build");
+        let bootstrap =
+            RemoteComputationServiceBootstrap::from_toml_file(config_path, computations)
+                .expect("configured application bootstrap should validate");
+        let (service, identity) = runtime
+            .block_on(bootstrap.bind())
+            .expect("configured application service should bind");
+        let endpoint = service
+            .local_addr()
+            .expect("configured application service should expose its bound address");
+        let operator = service.handle();
+        ready_tx
+            .send((endpoint, identity, operator.clone()))
+            .expect("configured application service should publish readiness");
+        let report = runtime
+            .block_on(async move {
+                let cx = Cx::current()
+                    .expect("configured service runtime should install a root context");
+                service.run(&cx).await
+            })
+            .expect("configured application service should drain cleanly");
+        assert!(
+            runtime.shutdown_timeout(Duration::from_secs(2)),
+            "configured application service runtime should reach quiescence"
+        );
+        report
+    });
+    let (endpoint, identity, operator) = ready_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("configured application service should become ready");
+    assert_eq!(identity.registry_fingerprint(), registry_fingerprint);
+    assert_eq!(
+        identity.computations(),
+        &[ALPHA.to_owned(), DENIED.to_owned(), ZETA.to_owned()]
+    );
+    assert_eq!(identity.authorized_peers(), 1);
+    assert_eq!(identity.config_schema_version(), 2);
+    assert_eq!(identity.protocol_version(), RemoteProtocolVersion::V3);
+    assert_eq!(identity.listen_scope().as_str(), "loopback_only");
+
+    let (_, connector) = remote_client_test_mtls_pair();
+    let client = RemoteComputationClient::new(
+        endpoint,
+        "localhost",
+        connector,
+        RemoteComputationClientConfig::new()
+            .with_max_attempts(1)
+            .with_attempt_timeout(Duration::from_secs(3)),
+    )
+    .expect("configured application client should validate");
+    let hello = RemotePeerHello::new(
+        NodeId::new(PEER_NODE),
+        RemoteProtocolVersion::V3,
+        registry_fingerprint,
+    );
+    let client_runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("configured application client runtime should build");
+    let alpha = run_remote_service_cli_session(
+        &client_runtime,
+        &client,
+        &remote_service_wire_request_with(hello.clone(), ALPHA, 8_901, 0x8_901, b"payload"),
+    )
+    .expect("alpha application handler should complete");
+    assert!(matches!(
+        alpha,
+        RemoteServiceWireResponse::Outcome {
+            remote_task_id: 8_901,
+            outcome: RemoteServiceWireOutcome::Success(ref payload),
+        } if payload == b"alpha:payload"
+    ));
+    let zeta = run_remote_service_cli_session(
+        &client_runtime,
+        &client,
+        &remote_service_wire_request_with(hello.clone(), ZETA, 8_902, 0x8_902, b"stressed"),
+    )
+    .expect("zeta application handler should complete");
+    assert!(matches!(
+        zeta,
+        RemoteServiceWireResponse::Outcome {
+            remote_task_id: 8_902,
+            outcome: RemoteServiceWireOutcome::Success(ref payload),
+        } if payload == b"desserts"
+    ));
+    let denied = run_remote_service_cli_session(
+        &client_runtime,
+        &client,
+        &remote_service_wire_request_with(hello, DENIED, 8_903, 0x8_903, b"must-not-run"),
+    )
+    .expect("ungranted application handler should receive a typed refusal");
+    assert!(matches!(
+        denied,
+        RemoteServiceWireResponse::Rejected {
+            remote_task_id: 8_903,
+            code: RemoteServiceRejectionCode::ComputationDenied,
+            ref diagnostic,
+        } if diagnostic.contains("not capability-authorized")
+    ));
+    assert_eq!(alpha_dispatches.load(Ordering::SeqCst), 1);
+    assert_eq!(zeta_dispatches.load(Ordering::SeqCst), 1);
+    assert_eq!(denied_dispatches.load(Ordering::SeqCst), 0);
+
+    let connection_deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while operator.active_connections() != 0 {
+        assert!(
+            std::time::Instant::now() < connection_deadline,
+            "terminal client receipts should be followed by connection-task cleanup"
+        );
+        thread::yield_now();
+    }
+    assert!(operator.begin_drain());
+    let report = service_thread
+        .join()
+        .expect("configured application service thread should not panic");
+    assert_eq!(report.accepted_connections(), 3);
+    assert_eq!(report.completed_connections(), 3);
+    assert_eq!(report.failed_connections(), 0);
+    assert_eq!(report.interrupted_connections(), 0);
+    assert_eq!(report.panicked_connections(), 0);
+    assert_eq!(report.shutdown().drained, 0);
+    assert_eq!(report.shutdown().force_closed, 0);
+    assert_eq!(operator.active_connections(), 0);
+    assert_eq!(operator.shutdown_signal().phase(), ShutdownPhase::Stopped);
+    assert_eq!(
+        denied_dispatches.load(Ordering::SeqCst),
+        0,
+        "ungranted handler must remain undispatched through runtime quiescence"
+    );
+}
+
+#[cfg(all(feature = "remote-service", unix))]
+#[test]
+fn configured_remote_service_config_fails_closed_before_bind() {
+    const PEER_NODE: &str = "configured-validation-peer";
+    const COMPUTATION: &str = "app.validation";
+
+    let certificates = Certificate::from_pem(TEST_CERT_PEM).expect("TLS fixture should parse");
+    let peer_certificate = certificates
+        .first()
+        .expect("TLS fixture should contain a leaf certificate");
+    let spki_pin = CertificatePin::compute_spki_sha256(peer_certificate)
+        .expect("TLS fixture should produce an SPKI pin")
+        .to_base64();
+    let temp = tempfile::tempdir().expect("configured validation directory should exist");
+    let certificate_path = temp.path().join("service.crt");
+    let private_key_path = temp.path().join("service.key");
+    let ca_path = temp.path().join("client-ca.crt");
+    fs::write(&certificate_path, TEST_CERT_PEM).expect("service certificate should be written");
+    fs::write(&private_key_path, TEST_KEY_PEM).expect("service key should be written");
+    fs::write(&ca_path, TEST_CERT_PEM).expect("client CA should be written");
+    let baseline_path = temp.path().join("baseline.toml");
+    write_configured_remote_service_file(
+        &baseline_path,
+        "127.0.0.1:0"
+            .parse()
+            .expect("validation address should parse"),
+        &certificate_path,
+        &private_key_path,
+        &ca_path,
+        PEER_NODE,
+        &spki_pin,
+        &[COMPUTATION],
+    );
+    let baseline = fs::read_to_string(&baseline_path)
+        .expect("configured validation baseline should be readable");
+    let mut computations = RemoteComputationRegistry::new();
+    computations
+        .register::<Vec<u8>, Vec<u8>, _, _>(COMPUTATION, |_cx, invocation| async move {
+            Ok(RemoteOutcome::Success(
+                invocation.into_request().input.into_data(),
+            ))
+        })
+        .expect("validation computation should register");
+
+    let cases = [
+        (
+            "legacy-schema.toml",
+            baseline.replace("schema_version = 2", "schema_version = 1"),
+            "unsupported schema_version 1; expected 2",
+        ),
+        (
+            "unsupported-protocol.toml",
+            baseline.replace("protocol = \"3.0\"", "protocol = \"2.0\""),
+            "unsupported protocol '2.0'; expected '3.0'",
+        ),
+        (
+            "hostname-listen.toml",
+            baseline.replace("listen = \"127.0.0.1:0\"", "listen = \"localhost:7443\""),
+            "listen must be a literal socket address",
+        ),
+        (
+            "empty-listen.toml",
+            baseline.replace("listen = \"127.0.0.1:0\"", "listen = \"\""),
+            "listen must not be empty",
+        ),
+        (
+            "loopback-wildcard.toml",
+            baseline.replace("listen = \"127.0.0.1:0\"", "listen = \"0.0.0.0:7443\""),
+            "loopback_only refuses non-loopback",
+        ),
+        (
+            "network-loopback.toml",
+            baseline.replace(
+                "listen_scope = \"loopback_only\"",
+                "listen_scope = \"network\"",
+            ),
+            "network refuses loopback",
+        ),
+        (
+            "zero-capacity.toml",
+            baseline.replace("max_connections = 8", "max_connections = 0"),
+            "max_connections must be nonzero",
+        ),
+        (
+            "missing-scope.toml",
+            baseline.replace("listen_scope = \"loopback_only\"\n", ""),
+            "missing field `listen_scope`",
+        ),
+        (
+            "unknown-scope.toml",
+            baseline.replace(
+                "listen_scope = \"loopback_only\"",
+                "listen_scope = \"automatic\"",
+            ),
+            "unknown variant `automatic`",
+        ),
+        (
+            "unknown-field.toml",
+            baseline.replace(
+                "max_connections = 8",
+                "max_connections = 8\nambient_authority = true",
+            ),
+            "unknown field `ambient_authority`",
+        ),
+        (
+            "duplicate-computation.toml",
+            baseline.replace(
+                "computations = [\"app.validation\"]",
+                "computations = [\"app.validation\", \"app.validation\"]",
+            ),
+            "repeats computation 'app.validation'",
+        ),
+        (
+            "duplicate-peer.toml",
+            format!(
+                "{baseline}\n[[peers]]\nnode_id = \"{PEER_NODE}\"\nspki_sha256 = [\"{spki_pin}\"]\ncomputations = [\"{COMPUTATION}\"]\n"
+            ),
+            "duplicate peer node_id 'configured-validation-peer'",
+        ),
+        (
+            "invalid-spki.toml",
+            baseline.replace(&spki_pin, "not-base64"),
+            "invalid SPKI pin",
+        ),
+    ];
+    for (name, raw, expected) in cases {
+        let path = temp.path().join(name);
+        fs::write(&path, raw).expect("invalid configured-service fixture should be written");
+        let error = RemoteComputationServiceBootstrap::from_toml_file(&path, computations.clone())
+            .expect_err("invalid configured service must fail before bind");
+        assert!(
+            error.to_string().contains(expected),
+            "{name} diagnostic was: {error}"
+        );
+    }
+
+    let duplicate_pin_path = temp.path().join("duplicate-pin-compatible.toml");
+    let duplicate_pin = baseline.replace(
+        &format!("spki_sha256 = [\"{spki_pin}\"]"),
+        &format!("spki_sha256 = [\"{spki_pin}\", \"{spki_pin}\"]"),
+    );
+    fs::write(&duplicate_pin_path, duplicate_pin)
+        .expect("duplicate-pin compatibility fixture should be written");
+    RemoteComputationServiceBootstrap::from_toml_file(&duplicate_pin_path, computations.clone())
+        .expect("schema v2 duplicate pins must retain prior deduplicating behavior");
+
+    let network_path = temp.path().join("explicit-network.toml");
+    let network = baseline
+        .replace("listen = \"127.0.0.1:0\"", "listen = \"0.0.0.0:0\"")
+        .replace(
+            "listen_scope = \"loopback_only\"",
+            "listen_scope = \"network\"",
+        );
+    fs::write(&network_path, network).expect("explicit network fixture should be written");
+    let network = RemoteComputationServiceBootstrap::from_toml_file(&network_path, computations)
+        .expect("explicit network scope with a wildcard address should prepare");
+    assert_eq!(network.identity().listen_scope().as_str(), "network");
+    assert_eq!(
+        network.configured_listen(),
+        "0.0.0.0:0"
+            .parse()
+            .expect("network validation address should parse")
+    );
 }
 
 #[cfg(feature = "tls")]

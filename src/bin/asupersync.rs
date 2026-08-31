@@ -173,8 +173,6 @@ enum Command {
 }
 
 #[cfg(all(feature = "remote-service", unix))]
-const REMOTE_SERVICE_CONFIG_SCHEMA_VERSION: u32 = 2;
-#[cfg(all(feature = "remote-service", unix))]
 const REMOTE_PROBE_CONFIG_SCHEMA_VERSION: u32 = 1;
 #[cfg(all(feature = "remote-service", unix))]
 const REMOTE_SERVICE_PROTOCOL: &str = "3.0";
@@ -203,54 +201,6 @@ struct RemoteProbeArgs {
     /// UTF-8 payload echoed by the built-in diagnostic computation
     #[arg(long)]
     payload: String,
-}
-
-#[cfg(all(feature = "remote-service", unix))]
-#[derive(Clone, Debug, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RemoteServiceFileConfig {
-    schema_version: u32,
-    protocol: String,
-    listen: String,
-    listen_scope: RemoteServiceListenScope,
-    server_certificate_chain: PathBuf,
-    server_private_key: PathBuf,
-    client_ca_bundle: PathBuf,
-    max_frame_bytes: usize,
-    max_connections: usize,
-    tls_handshake_timeout_ms: u64,
-    initial_frame_timeout_ms: u64,
-    drain_timeout_ms: u64,
-    idempotency_retention_ms: u64,
-    max_idempotency_records_per_peer: usize,
-    peers: Vec<RemoteServicePeerConfig>,
-}
-
-#[cfg(all(feature = "remote-service", unix))]
-#[derive(Clone, Copy, Debug, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum RemoteServiceListenScope {
-    LoopbackOnly,
-    Network,
-}
-
-#[cfg(all(feature = "remote-service", unix))]
-impl RemoteServiceListenScope {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::LoopbackOnly => "loopback_only",
-            Self::Network => "network",
-        }
-    }
-}
-
-#[cfg(all(feature = "remote-service", unix))]
-#[derive(Clone, Debug, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RemoteServicePeerConfig {
-    node_id: String,
-    spki_sha256: Vec<String>,
-    computations: Vec<String>,
 }
 
 #[cfg(all(feature = "remote-service", unix))]
@@ -289,7 +239,7 @@ struct RemoteServiceReadyOutput {
     listen_scope: &'static str,
     registry_fingerprint: String,
     authorized_peers: usize,
-    computations: [&'static str; 1],
+    computations: Vec<String>,
     idempotency_scope: &'static str,
 }
 
@@ -4435,16 +4385,10 @@ fn remote_probe_rejection_error(
 #[cfg(all(feature = "remote-service", unix))]
 fn remote_serve(config_path: Option<&Path>, output: &mut Output) -> Result<(), CliError> {
     use asupersync::remote::{
-        NodeId, RemoteComputationRegistry, RemoteComputationService,
-        RemoteComputationServiceConfig, RemoteOutcome, RemotePeerAdmissionPolicy,
-        RemoteProtocolVersion, RemoteServiceWireLimits,
+        RemoteComputationRegistry, RemoteComputationServiceBootstrap,
+        RemoteComputationServiceBootstrapError, RemoteOutcome,
     };
     use asupersync::runtime::RuntimeBuilder;
-    use asupersync::tls::{
-        Certificate, CertificateChain, CertificatePinSet, ClientAuth, PrivateKey, RootCertStore,
-        TlsAcceptorBuilder,
-    };
-    use std::net::SocketAddr;
     use std::time::Duration;
 
     let config_path = config_path.ok_or_else(|| {
@@ -4455,74 +4399,6 @@ fn remote_serve(config_path: Option<&Path>, output: &mut Output) -> Result<(), C
         .detail("The service refuses ambient defaults; provide a versioned TOML configuration")
         .exit_code(ExitCode::USER_ERROR)
     })?;
-    let config = load_remote_service_config(config_path)?;
-    let listen = config.listen.parse::<SocketAddr>().map_err(|err| {
-        remote_service_config_error(
-            config_path,
-            format!(
-                "listen must be a literal socket address, got '{}': {err}",
-                config.listen
-            ),
-        )
-    })?;
-
-    let certificate_chain = CertificateChain::from_pem_file(&config.server_certificate_chain)
-        .map_err(|err| {
-            remote_service_config_error(
-                config_path,
-                format!(
-                    "failed to load server certificate chain '{}': {err}",
-                    config.server_certificate_chain.display()
-                ),
-            )
-        })?;
-    let private_key = PrivateKey::from_pem_file(&config.server_private_key).map_err(|err| {
-        remote_service_config_error(
-            config_path,
-            format!(
-                "failed to load server private key '{}': {err}",
-                config.server_private_key.display()
-            ),
-        )
-    })?;
-    let client_ca_certificates =
-        Certificate::from_pem_file(&config.client_ca_bundle).map_err(|err| {
-            remote_service_config_error(
-                config_path,
-                format!(
-                    "failed to load client CA bundle '{}': {err}",
-                    config.client_ca_bundle.display()
-                ),
-            )
-        })?;
-    let mut client_roots = RootCertStore::empty();
-    for certificate in &client_ca_certificates {
-        client_roots.add(certificate).map_err(|err| {
-            remote_service_config_error(
-                config_path,
-                format!(
-                    "client CA bundle '{}' contains an invalid trust anchor: {err}",
-                    config.client_ca_bundle.display()
-                ),
-            )
-        })?;
-    }
-    if client_roots.is_empty() {
-        return Err(remote_service_config_error(
-            config_path,
-            "client CA bundle contains no usable trust anchors",
-        ));
-    }
-    let acceptor = TlsAcceptorBuilder::new(certificate_chain, private_key)
-        .client_auth(ClientAuth::Required(client_roots))
-        .handshake_timeout(Duration::from_millis(config.tls_handshake_timeout_ms))
-        .build()
-        .map_err(|err| {
-            remote_service_config_error(
-                config_path,
-                format!("failed to build the mutual-TLS acceptor: {err}"),
-            )
-        })?;
 
     let mut computations = RemoteComputationRegistry::new();
     computations
@@ -4539,42 +4415,20 @@ fn remote_serve(config_path: Option<&Path>, output: &mut Output) -> Result<(), C
             .detail(err.to_string())
             .exit_code(ExitCode::RUNTIME_ERROR)
         })?;
-    let registry_fingerprint = computations.schema_registry().fingerprint().to_string();
-    let mut policy = RemotePeerAdmissionPolicy::new(
-        RemoteProtocolVersion::V3,
-        computations.schema_registry().clone(),
-    );
-    for peer in &config.peers {
-        let mut pins = CertificatePinSet::new();
-        for pin in &peer.spki_sha256 {
-            pins.add_spki_sha256_base64(pin).map_err(|err| {
-                remote_service_config_error(
-                    config_path,
-                    format!("peer '{}' has an invalid SPKI pin: {err}", peer.node_id),
-                )
-            })?;
-        }
-        policy
-            .grant_tls_peer(
-                NodeId::new(peer.node_id.clone()),
-                pins,
-                peer.computations.iter().map(String::as_str),
-            )
-            .map_err(|err| {
-                remote_service_config_error(
-                    config_path,
-                    format!("peer '{}' grant is invalid: {err}", peer.node_id),
-                )
-            })?;
-    }
-
-    let service_config = RemoteComputationServiceConfig::new()
-        .with_wire_limits(RemoteServiceWireLimits::new(config.max_frame_bytes))
-        .with_max_connections(Some(config.max_connections))
-        .with_initial_frame_timeout(Duration::from_millis(config.initial_frame_timeout_ms))
-        .with_drain_timeout(Duration::from_millis(config.drain_timeout_ms))
-        .with_idempotency_retention(Duration::from_millis(config.idempotency_retention_ms))
-        .with_max_idempotency_records_per_peer(config.max_idempotency_records_per_peer);
+    let bootstrap =
+        match RemoteComputationServiceBootstrap::from_toml_file(config_path, computations) {
+            Ok(bootstrap) => bootstrap,
+            Err(RemoteComputationServiceBootstrapError::Read { path, source }) => {
+                return Err(io_error(&path, &source));
+            }
+            Err(error) => {
+                return Err(remote_service_config_error(
+                    error.path(),
+                    error.configuration_detail(),
+                ));
+            }
+        };
+    let configured_listen = bootstrap.configured_listen();
     let runtime = RuntimeBuilder::multi_thread().build().map_err(|err| {
         CliError::new(
             "remote_service_runtime_failed",
@@ -4583,22 +4437,14 @@ fn remote_serve(config_path: Option<&Path>, output: &mut Output) -> Result<(), C
         .detail(err.to_string())
         .exit_code(ExitCode::RUNTIME_ERROR)
     })?;
-    let service = runtime
-        .block_on(RemoteComputationService::bind(
-            listen,
-            acceptor,
-            policy,
-            computations,
-            service_config,
-        ))
-        .map_err(|err| {
-            CliError::new(
-                "remote_service_bind_failed",
-                "Failed to bind the remote computation service",
-            )
-            .detail(format!("{}: {err}", config.listen))
-            .exit_code(ExitCode::RUNTIME_ERROR)
-        })?;
+    let (service, identity) = runtime.block_on(bootstrap.bind()).map_err(|err| {
+        CliError::new(
+            "remote_service_bind_failed",
+            "Failed to bind the remote computation service",
+        )
+        .detail(format!("{configured_listen}: {err}"))
+        .exit_code(ExitCode::RUNTIME_ERROR)
+    })?;
     let bound_address = service.local_addr().map_err(|err| {
         CliError::new(
             "remote_service_address_failed",
@@ -4613,14 +4459,14 @@ fn remote_serve(config_path: Option<&Path>, output: &mut Output) -> Result<(), C
     output
         .write(&RemoteServiceReadyOutput {
             event: "remote_service_ready",
-            schema_version: REMOTE_SERVICE_CONFIG_SCHEMA_VERSION,
+            schema_version: identity.config_schema_version(),
             protocol: REMOTE_SERVICE_PROTOCOL,
             listen: bound_address.to_string(),
-            listen_scope: config.listen_scope.as_str(),
-            registry_fingerprint,
-            authorized_peers: config.peers.len(),
-            computations: [REMOTE_ECHO_COMPUTATION],
-            idempotency_scope: "authenticated_peer_process_local",
+            listen_scope: identity.listen_scope().as_str(),
+            registry_fingerprint: identity.registry_fingerprint().to_string(),
+            authorized_peers: identity.authorized_peers(),
+            computations: identity.computations().to_vec(),
+            idempotency_scope: identity.idempotency_scope(),
         })
         .map_err(output_write_error("remote service readiness"))?;
     output
@@ -4673,163 +4519,6 @@ fn remote_serve(config_path: Option<&Path>, output: &mut Output) -> Result<(), C
     output
         .write(&terminal)
         .map_err(output_write_error("remote service terminal report"))?;
-    Ok(())
-}
-
-#[cfg(all(feature = "remote-service", unix))]
-fn load_remote_service_config(path: &Path) -> Result<RemoteServiceFileConfig, CliError> {
-    let raw = fs::read_to_string(path).map_err(|err| io_error(path, &err))?;
-    let mut config: RemoteServiceFileConfig = toml::from_str(&raw)
-        .map_err(|err| remote_service_config_error(path, format!("TOML decoding failed: {err}")))?;
-    validate_remote_service_config(path, &config)?;
-    let base = path.parent().unwrap_or_else(|| Path::new("."));
-    config.server_certificate_chain = resolve_path(base, config.server_certificate_chain);
-    config.server_private_key = resolve_path(base, config.server_private_key);
-    config.client_ca_bundle = resolve_path(base, config.client_ca_bundle);
-    Ok(config)
-}
-
-#[cfg(all(feature = "remote-service", unix))]
-fn validate_remote_service_config(
-    path: &Path,
-    config: &RemoteServiceFileConfig,
-) -> Result<(), CliError> {
-    if config.schema_version != REMOTE_SERVICE_CONFIG_SCHEMA_VERSION {
-        return Err(remote_service_config_error(
-            path,
-            format!(
-                "unsupported schema_version {}; expected {}",
-                config.schema_version, REMOTE_SERVICE_CONFIG_SCHEMA_VERSION
-            ),
-        ));
-    }
-    if config.protocol != REMOTE_SERVICE_PROTOCOL {
-        return Err(remote_service_config_error(
-            path,
-            format!(
-                "unsupported protocol '{}'; expected '{}'",
-                config.protocol, REMOTE_SERVICE_PROTOCOL
-            ),
-        ));
-    }
-    if config.listen.trim().is_empty() {
-        return Err(remote_service_config_error(
-            path,
-            "listen must not be empty",
-        ));
-    }
-    let listen = config
-        .listen
-        .parse::<std::net::SocketAddr>()
-        .map_err(|err| {
-            remote_service_config_error(
-                path,
-                format!(
-                    "listen must be a literal socket address, got '{}': {err}",
-                    config.listen
-                ),
-            )
-        })?;
-    match config.listen_scope {
-        RemoteServiceListenScope::LoopbackOnly if !listen.ip().is_loopback() => {
-            return Err(remote_service_config_error(
-                path,
-                format!("listen_scope loopback_only refuses non-loopback address {listen}"),
-            ));
-        }
-        RemoteServiceListenScope::Network if listen.ip().is_loopback() => {
-            return Err(remote_service_config_error(
-                path,
-                format!("listen_scope network refuses loopback address {listen}"),
-            ));
-        }
-        RemoteServiceListenScope::LoopbackOnly | RemoteServiceListenScope::Network => {}
-    }
-    for (name, value) in [
-        ("max_frame_bytes", config.max_frame_bytes),
-        ("max_connections", config.max_connections),
-        (
-            "max_idempotency_records_per_peer",
-            config.max_idempotency_records_per_peer,
-        ),
-    ] {
-        if value == 0 {
-            return Err(remote_service_config_error(
-                path,
-                format!("{name} must be nonzero"),
-            ));
-        }
-    }
-    for (name, value) in [
-        ("tls_handshake_timeout_ms", config.tls_handshake_timeout_ms),
-        ("initial_frame_timeout_ms", config.initial_frame_timeout_ms),
-        ("drain_timeout_ms", config.drain_timeout_ms),
-        ("idempotency_retention_ms", config.idempotency_retention_ms),
-    ] {
-        if value == 0 {
-            return Err(remote_service_config_error(
-                path,
-                format!("{name} must be nonzero"),
-            ));
-        }
-    }
-    if config.peers.is_empty() {
-        return Err(remote_service_config_error(
-            path,
-            "peers must contain at least one certificate-bound grant",
-        ));
-    }
-    let mut node_ids = BTreeSet::new();
-    for peer in &config.peers {
-        if peer.node_id.is_empty() || peer.node_id.trim() != peer.node_id {
-            return Err(remote_service_config_error(
-                path,
-                "peer node_id must be nonempty and contain no surrounding whitespace",
-            ));
-        }
-        if !node_ids.insert(peer.node_id.as_str()) {
-            return Err(remote_service_config_error(
-                path,
-                format!("duplicate peer node_id '{}'", peer.node_id),
-            ));
-        }
-        if peer.spki_sha256.is_empty() {
-            return Err(remote_service_config_error(
-                path,
-                format!("peer '{}' must have at least one SPKI pin", peer.node_id),
-            ));
-        }
-        if peer.computations.is_empty() {
-            return Err(remote_service_config_error(
-                path,
-                format!(
-                    "peer '{}' must authorize at least one computation",
-                    peer.node_id
-                ),
-            ));
-        }
-        let mut computation_names = BTreeSet::new();
-        for computation in &peer.computations {
-            if computation != REMOTE_ECHO_COMPUTATION {
-                return Err(remote_service_config_error(
-                    path,
-                    format!(
-                        "peer '{}' names unknown computation '{computation}'",
-                        peer.node_id
-                    ),
-                ));
-            }
-            if !computation_names.insert(computation.as_str()) {
-                return Err(remote_service_config_error(
-                    path,
-                    format!(
-                        "peer '{}' repeats computation '{computation}'",
-                        peer.node_id
-                    ),
-                ));
-            }
-        }
-    }
     Ok(())
 }
 
@@ -13927,31 +13616,6 @@ mod tests {
     }
 
     #[cfg(all(feature = "remote-service", unix))]
-    fn valid_remote_service_file_config() -> RemoteServiceFileConfig {
-        RemoteServiceFileConfig {
-            schema_version: REMOTE_SERVICE_CONFIG_SCHEMA_VERSION,
-            protocol: REMOTE_SERVICE_PROTOCOL.to_string(),
-            listen: "127.0.0.1:0".to_string(),
-            listen_scope: RemoteServiceListenScope::LoopbackOnly,
-            server_certificate_chain: PathBuf::from("service.crt"),
-            server_private_key: PathBuf::from("service.key"),
-            client_ca_bundle: PathBuf::from("client-ca.crt"),
-            max_frame_bytes: 64 * 1024,
-            max_connections: 8,
-            tls_handshake_timeout_ms: 1_000,
-            initial_frame_timeout_ms: 1_000,
-            drain_timeout_ms: 1_000,
-            idempotency_retention_ms: 30_000,
-            max_idempotency_records_per_peer: 32,
-            peers: vec![RemoteServicePeerConfig {
-                node_id: "origin-a".to_string(),
-                spki_sha256: vec!["AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string()],
-                computations: vec![REMOTE_ECHO_COMPUTATION.to_string()],
-            }],
-        }
-    }
-
-    #[cfg(all(feature = "remote-service", unix))]
     fn valid_remote_probe_file_config() -> RemoteProbeFileConfig {
         RemoteProbeFileConfig {
             schema_version: REMOTE_PROBE_CONFIG_SCHEMA_VERSION,
@@ -13975,112 +13639,6 @@ mod tests {
             full_jitter: false,
             tcp_nodelay: true,
         }
-    }
-
-    #[cfg(all(feature = "remote-service", unix))]
-    #[test]
-    fn remote_service_config_validation_fails_closed() {
-        let path = Path::new("remote-service.toml");
-        let mut config = valid_remote_service_file_config();
-        validate_remote_service_config(path, &config).expect("baseline config should validate");
-
-        config.protocol = "2.0".to_string();
-        let error = validate_remote_service_config(path, &config)
-            .expect_err("wrong protocol must fail closed");
-        assert!(error.detail.contains("unsupported protocol"));
-
-        config = valid_remote_service_file_config();
-        config.max_connections = 0;
-        let error = validate_remote_service_config(path, &config)
-            .expect_err("zero connection cap must fail closed");
-        assert!(error.detail.contains("max_connections must be nonzero"));
-
-        config = valid_remote_service_file_config();
-        config.peers.push(config.peers[0].clone());
-        let error = validate_remote_service_config(path, &config)
-            .expect_err("duplicate node IDs must fail closed");
-        assert!(error.detail.contains("duplicate peer node_id"));
-
-        config = valid_remote_service_file_config();
-        config.peers[0].computations = vec!["unregistered.operation".to_string()];
-        let error = validate_remote_service_config(path, &config)
-            .expect_err("unknown computations must fail closed");
-        assert!(error.detail.contains("unknown computation"));
-
-        config = valid_remote_service_file_config();
-        config.schema_version = 1;
-        let error = validate_remote_service_config(path, &config)
-            .expect_err("legacy service schema must fail closed");
-        assert!(error.detail.contains("expected 2"));
-
-        config = valid_remote_service_file_config();
-        config.listen = "localhost:7443".to_string();
-        let error = validate_remote_service_config(path, &config)
-            .expect_err("hostnames must not bypass literal-address exposure policy");
-        assert!(error.detail.contains("literal socket address"));
-
-        config = valid_remote_service_file_config();
-        config.listen = "0.0.0.0:7443".to_string();
-        let error = validate_remote_service_config(path, &config)
-            .expect_err("loopback-only scope must reject wildcard exposure");
-        assert!(error.detail.contains("loopback_only refuses non-loopback"));
-
-        config = valid_remote_service_file_config();
-        config.listen_scope = RemoteServiceListenScope::Network;
-        let error = validate_remote_service_config(path, &config)
-            .expect_err("network scope must reject a loopback address mismatch");
-        assert!(error.detail.contains("network refuses loopback"));
-
-        config.listen = "0.0.0.0:7443".to_string();
-        validate_remote_service_config(path, &config)
-            .expect("explicit network scope should admit a wildcard listener");
-    }
-
-    #[cfg(all(feature = "remote-service", unix))]
-    #[test]
-    fn remote_service_config_rejects_unknown_toml_fields() {
-        let raw = r#"
-schema_version = 2
-protocol = "3.0"
-listen = "127.0.0.1:0"
-listen_scope = "loopback_only"
-server_certificate_chain = "service.crt"
-server_private_key = "service.key"
-client_ca_bundle = "client-ca.crt"
-max_frame_bytes = 65536
-max_connections = 8
-tls_handshake_timeout_ms = 1000
-initial_frame_timeout_ms = 1000
-drain_timeout_ms = 1000
-idempotency_retention_ms = 30000
-max_idempotency_records_per_peer = 32
-ambient_authority = true
-
-[[peers]]
-node_id = "origin-a"
-spki_sha256 = ["AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="]
-computations = ["asupersync.remote.echo.v1"]
-"#;
-        let error = toml::from_str::<RemoteServiceFileConfig>(raw)
-            .expect_err("unknown configuration fields must be rejected");
-        assert!(error.to_string().contains("unknown field"));
-
-        let valid_raw = raw.replace("ambient_authority = true\n", "");
-        toml::from_str::<RemoteServiceFileConfig>(&valid_raw)
-            .expect("explicit loopback exposure policy should deserialize");
-
-        let missing_scope = valid_raw.replace("listen_scope = \"loopback_only\"\n", "");
-        let error = toml::from_str::<RemoteServiceFileConfig>(&missing_scope)
-            .expect_err("missing exposure policy must be rejected");
-        assert!(error.to_string().contains("missing field `listen_scope`"));
-
-        let invalid_scope = valid_raw.replace(
-            "listen_scope = \"loopback_only\"",
-            "listen_scope = \"automatic\"",
-        );
-        let error = toml::from_str::<RemoteServiceFileConfig>(&invalid_scope)
-            .expect_err("unknown exposure policy must be rejected");
-        assert!(error.to_string().contains("unknown variant `automatic`"));
     }
 
     #[cfg(all(feature = "remote-service", unix))]

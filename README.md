@@ -994,10 +994,13 @@ process host. That host binds the built-in `asupersync.remote.echo.v1`
 diagnostic computation to an exact protocol/registry fingerprint and explicit
 certificate-pinned peer grants. Service schema v2 makes non-loopback exposure
 an explicit fail-closed policy, and a terminal two-worker RCH acceptance run
-has exercised the packaged service and probe across distinct hosts. Active
-discovery, arbitrary application registries, restart-durable idempotency, and
-production WAN reliability remain open deployment concerns rather than blanket
-core-runtime claims.
+has exercised the packaged service and probe across distinct hosts. Applications
+can reuse the same strict TOML, mutual-TLS, SPKI, grant, listener, and drain
+boundary around a caller-provided statically linked `RemoteComputationRegistry`
+through `RemoteComputationServiceBootstrap`; the packaged CLI remains the echo
+diagnostic host. Active discovery, dynamic plugins or code shipping,
+restart-durable idempotency, and production WAN reliability remain open
+deployment concerns rather than blanket core-runtime claims.
 
 `RemoteComputationClient::from_bootstrap_endpoints` accepts an ordered, unique,
 nonempty static endpoint set while the existing `new` and `endpoint` APIs retain
@@ -1028,6 +1031,7 @@ persist routes, choose a health policy, or claim automatic discovery.
 | Logical-time envelopes | `src/remote.rs` | Protocol messages carry logical clock metadata for causal correlation |
 | Saga compensations | `src/remote.rs` | Forward steps and compensations are tracked as a structured rollback flow for distributed workflows |
 | Native V3 runtime | `src/remote.rs` | `NativeRemoteRuntime` maps region-owned remote handles onto bounded TCP+mTLS sessions, can use ordered static pre-delivery bootstrap failover, propagates cancel/lease traffic, and drains owned operations during close |
+| Configured application service | `src/remote.rs` | `RemoteComputationServiceBootstrap` consumes a caller registry, validates strict schema-v2 exposure/TLS/SPKI/grants before bind, then returns the existing structured service plus deterministic full-registry identity |
 | Static service process | `asupersync --config ... remote serve` | Unix `remote-service` feature; strict TOML, mutual TLS, certificate-bound grants, flushed readiness/terminal records, SIGINT/SIGTERM drain, and second-signal force-close |
 
 The transport surface is deliberately separated from protocol state machines,
@@ -1093,6 +1097,39 @@ computations = ["asupersync.remote.echo.v1"]
 asupersync --format stream-json --config /etc/asupersync/remote.toml remote serve
 ```
 
+The CLI deliberately registers only the diagnostic echo operation. An embedded
+application can host its own statically linked named computations through the
+same strict boundary without rebuilding TLS, pin, grant, listener, or drain
+plumbing:
+
+```rust,ignore
+let mut computations = RemoteComputationRegistry::new();
+computations.register::<Request, Response, _, _>(
+    "orders.reconcile.v1",
+    |_cx, invocation| async move { reconcile(invocation).await },
+)?;
+
+// Synchronous preparation validates the complete file, TLS material, pins,
+// and every configured name against this consumed executable registry. It
+// opens no socket.
+let bootstrap = RemoteComputationServiceBootstrap::from_toml_file(
+    "/etc/asupersync/remote.toml",
+    computations,
+)?;
+let (service, identity) = bootstrap.bind().await?;
+let operator = service.handle();
+let report = service.run(cx).await?;
+```
+
+`identity.computations()` is the complete registry in deterministic sorted
+order, not the union or ordering of peer grants; its fingerprint is the exact
+registry fingerprint enforced during admission. A configured name absent from
+the supplied registry returns a typed `UnknownComputation` preparation error
+before bind. A registered handler omitted from a peer's allowlist remains in
+the identity but is refused before dispatch. Applications remain responsible
+for publishing/flushing their own readiness record and for retaining the
+service handle used to drain or force-close.
+
 For an intentional cross-host listener, use a literal private/public or
 wildcard address with `listen_scope = "network"`. That opt-in prevents an
 accidental localhost-to-network promotion; it does not configure host
@@ -1157,8 +1194,10 @@ connection work; a second signal force-closes it. Successful exit follows a
 `remote_service_stopped` record with terminal connection, drain, and phase
 accounting. V3 deduplication is authenticated-peer scoped but process-local:
 after a restart, callers must not retry an operation whose delivery outcome is
-ambiguous. This host is a reference process boundary for the compiled-in echo
-operation, not dynamic plugin loading or closure shipping.
+ambiguous. The packaged host is a reference process boundary for the compiled-in
+echo operation; the library bootstrap supports caller-registered statically
+linked handlers, not dynamic plugin loading, closure shipping, code generation,
+service discovery, or restart-durable execution.
 
 ---
 
@@ -2026,7 +2065,7 @@ JS/TS packages GA for browser main-thread and dedicated-worker consumers; Rust b
 | Database clients (SQLite, PostgreSQL, MySQL) | ✅ Implemented |
 | Actor supervision (GenServer, links, monitors) | ✅ Implemented |
 | DPOR-style race-guided seed exploration | ⚠️ Implemented as trace analysis, seed derivation, and equivalence-class telemetry; no exact-prefix backtracking or completeness claim |
-| Distributed runtime (remote tasks, sagas, leases, recovery) | Protocol/state-machine, lease, idempotency, saga, native V3 TCP+mTLS runtime/service, and Unix static process host implemented; deterministic, in-process, cross-process localhost, and one terminal two-worker RCH mTLS proof shipped. Active discovery, arbitrary registries, restart-durable idempotency, and general production-WAN reliability remain open. |
+| Distributed runtime (remote tasks, sagas, leases, recovery) | Protocol/state-machine, lease, idempotency, saga, native V3 TCP+mTLS runtime/service, Unix static process host, and strict statically linked application-registry hosting implemented; deterministic, in-process, cross-process localhost, and one terminal two-worker RCH mTLS proof shipped. Active discovery, dynamic plugins/code shipping, restart-durable idempotency, and general production-WAN reliability remain open. |
 | RaptorQ fountain coding for snapshot distribution | ✅ Implemented |
 | Formal methods (TLA+ export + Lean-checked model-invariant coverage) | ⚠️ Partial implementation (Lean checks six abstract-model invariants; no production-Rust refinement proof or blanket adapter/protocol proof) |
 | Browser Edition (WASM, JS/TS consumers) | ✅ Implemented for browser main-thread and dedicated-worker consumers (single-threaded, event-loop-driven) |

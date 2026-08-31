@@ -430,6 +430,12 @@ pub use remote::{
     RemoteComputationService, RemoteComputationServiceConfig, RemoteComputationServiceHandle,
     RemoteComputationServiceReport,
 };
+#[cfg(all(feature = "remote-service", unix))]
+pub use remote::{
+    REMOTE_SERVICE_CONFIG_SCHEMA_VERSION, REMOTE_SERVICE_PROTOCOL_LABEL,
+    RemoteComputationServiceBootstrap, RemoteComputationServiceBootstrapError,
+    RemoteComputationServiceIdentity, RemoteComputationServiceListenScope,
+};
 #[cfg(feature = "tls")]
 pub use remote::{
     RemoteComputationSession, RemoteComputationSessionStart, RemoteServiceSessionCommand,

@@ -1928,7 +1928,7 @@ The service command requires a strict `schema_version = 2`,
 bundle, requires mutual TLS, and binds each configured logical `node_id` to an
 enforcing set of SPKI SHA-256 pins plus an exact computation allowlist. Service
 and probe schema versions are independent; the probe file above remains schema
-v1. The current supported process registry contains only
+v1. The packaged command's registry contains only
 `asupersync.remote.echo.v1` (`Vec<u8> -> Vec<u8>`):
 
 ```toml
@@ -1953,6 +1953,34 @@ spki_sha256 = ["BASE64_ENCODED_32_BYTE_SPKI_SHA256"]
 computations = ["asupersync.remote.echo.v1"]
 ```
 
+Application binaries built with `remote-service` can apply that exact strict
+boundary to a caller-provided, statically linked registry:
+
+```rust,ignore
+let mut computations = RemoteComputationRegistry::new();
+computations.register::<Request, Response, _, _>(
+    "orders.reconcile.v1",
+    |_cx, invocation| async move { reconcile(invocation).await },
+)?;
+let bootstrap = RemoteComputationServiceBootstrap::from_toml_file(
+    "/etc/asupersync/remote.toml",
+    computations,
+)?;
+let (service, identity) = bootstrap.bind().await?;
+let operator = service.handle();
+let report = service.run(cx).await?;
+```
+
+`from_toml_file` is synchronous by design: it consumes the executable registry
+and validates the strict schema, exposure decision, relative TLS paths, trust
+anchors, enforcing pins, duplicate grants, and every configured computation
+before a socket can be opened. `bind` is the only network-opening phase.
+`identity.computations()` lists the complete registry in deterministic sorted
+order and its fingerprint is the exact admission fingerprint. A missing
+configured handler returns typed `UnknownComputation`; a registered but
+ungranted handler remains visible in identity and is refused before dispatch.
+The embedder owns readiness publication and the service handle used for drain.
+
 Unknown fields and versions, zero bounds, duplicate/empty peer grants,
 unregistered computations, invalid pins, and unusable TLS files are rejected
 before bind. `listen` must be a literal socket address. `listen_scope =
@@ -1968,8 +1996,10 @@ SIGTERM begins graceful drain; a second signal force-closes outstanding work.
 The terminal record is emitted only after connection-region and runtime
 quiescence. Never place private-key bytes in configuration diagnostics or logs.
 The packaged probe remains limited to the built-in diagnostic computation. It
-does not add discovery, health-based balancing, arbitrary application
-registries, or durable idempotency.
+does not become a generic application client and does not add discovery,
+health-based balancing, dynamic plugins/code shipping, or durable idempotency;
+configured application hosting through the library bootstrap is a separate
+statically linked composition surface.
 
 The schema-v2 acceptance run used two distinct RCH workers: `hz3` hosted the
 packaged network-scope service and `hz4` ran the packaged probe. Mutual TLS and
@@ -2004,10 +2034,14 @@ also launches the CLI as a separate OS process, waits on causal readiness,
 proves a certificate-authenticated but unauthorized NodeId is refused, proves
 an authorized echo over real mTLS, verifies both admission deadlines release
 the sole connection slot, sends two SIGTERMs around a live stalled session,
-and verifies forced terminal quiescence. That committed test is localhost
-cross-process evidence; the separate terminal schema-v2 acceptance run above
-adds one two-worker mTLS path. Neither is discovery, Windows service control,
-arbitrary application registry hosting, restart-durable idempotency, or general
+and verifies forced terminal quiescence. The same contract also consumes a
+three-handler application registry through the configured bootstrap, executes
+two non-echo handlers over real TCP+mTLS, proves an ungranted handler is never
+dispatched, proves a missing handler fails before bind, and drains to zero live
+connections. That committed evidence is localhost/in-process application-hosting
+evidence; the separate terminal schema-v2 acceptance run above adds one
+two-worker packaged mTLS path. Neither is discovery, dynamic plugins/code
+shipping, Windows service control, restart-durable idempotency, or general
 production-WAN evidence. V3 retry/deduplication state is process-local;
 ambiguous delivery must remain fail-closed across restart.
 The compatibility goldens do not substitute for archived-binary interop,

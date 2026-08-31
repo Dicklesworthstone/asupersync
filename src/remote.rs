@@ -57,6 +57,11 @@ use crate::distributed::{
     ComputationRegistryFingerprint, ComputationSchemaRegistry, ComputationSchemaRegistryError,
     HasSchema,
 };
+#[cfg(all(feature = "remote-service", unix))]
+use crate::tls::{
+    Certificate, CertificateChain, CertificatePinSet, ClientAuth, PrivateKey, RootCertStore,
+    TlsAcceptorBuilder,
+};
 use crate::trace::distributed::{LogicalClockHandle, LogicalTime};
 use crate::types::outcome::Outcome;
 use crate::types::{Budget, CancelKind, CancelReason, ObligationId, RegionId, TaskId, Time};
@@ -91,6 +96,8 @@ use std::io;
 use std::marker::PhantomData;
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
 use std::net::{SocketAddr, ToSocketAddrs};
+#[cfg(all(feature = "remote-service", unix))]
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -7420,6 +7427,686 @@ impl RemoteRuntime for NativeRemoteRuntime {
 
     fn unregister_task(&self, task_id: RemoteTaskId) {
         self.shared.roll_back_admission(task_id);
+    }
+}
+
+/// Strict file-schema version for the configured production remote service.
+#[cfg(all(feature = "remote-service", unix))]
+pub const REMOTE_SERVICE_CONFIG_SCHEMA_VERSION: u32 = 2;
+
+/// Stable textual protocol label accepted by the configured service boundary.
+#[cfg(all(feature = "remote-service", unix))]
+pub const REMOTE_SERVICE_PROTOCOL_LABEL: &str = "3.0";
+
+/// Explicit network-exposure policy for a configured remote service listener.
+#[cfg(all(feature = "remote-service", unix))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum RemoteComputationServiceListenScope {
+    /// The configured listener must use a literal loopback address.
+    LoopbackOnly,
+    /// The configured listener must use a literal non-loopback address.
+    Network,
+}
+
+#[cfg(all(feature = "remote-service", unix))]
+impl RemoteComputationServiceListenScope {
+    /// Stable configuration/readiness spelling for this exposure policy.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::LoopbackOnly => "loopback_only",
+            Self::Network => "network",
+        }
+    }
+}
+
+#[cfg(all(feature = "remote-service", unix))]
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RemoteComputationServiceFileConfig {
+    schema_version: u32,
+    protocol: String,
+    listen: String,
+    listen_scope: RemoteComputationServiceListenScope,
+    server_certificate_chain: PathBuf,
+    server_private_key: PathBuf,
+    client_ca_bundle: PathBuf,
+    max_frame_bytes: usize,
+    max_connections: usize,
+    tls_handshake_timeout_ms: u64,
+    initial_frame_timeout_ms: u64,
+    drain_timeout_ms: u64,
+    idempotency_retention_ms: u64,
+    max_idempotency_records_per_peer: usize,
+    peers: Vec<RemoteComputationServicePeerConfig>,
+}
+
+#[cfg(all(feature = "remote-service", unix))]
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RemoteComputationServicePeerConfig {
+    node_id: String,
+    spki_sha256: Vec<String>,
+    computations: Vec<String>,
+}
+
+/// Failure while preparing the strict configured remote-service boundary.
+///
+/// Preparation is deliberately synchronous: configuration, certificate, key,
+/// trust-anchor, SPKI-pin, and computation-grant validation all finish before
+/// [`RemoteComputationServiceBootstrap::bind`] can open a listening socket.
+#[cfg(all(feature = "remote-service", unix))]
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum RemoteComputationServiceBootstrapError {
+    /// The TOML configuration could not be read.
+    Read {
+        /// Configuration path supplied by the caller.
+        path: PathBuf,
+        /// Underlying filesystem failure.
+        source: io::Error,
+    },
+    /// The strict TOML schema could not be decoded.
+    Decode {
+        /// Configuration path supplied by the caller.
+        path: PathBuf,
+        /// Strict TOML decoder failure.
+        source: toml::de::Error,
+    },
+    /// A decoded configuration invariant was violated.
+    Invalid {
+        /// Configuration path supplied by the caller.
+        path: PathBuf,
+        /// Stable operator-facing refusal detail.
+        diagnostic: String,
+    },
+    /// A configured certificate, key, trust anchor, or SPKI pin was invalid.
+    Tls {
+        /// Configuration path supplied by the caller.
+        path: PathBuf,
+        /// Operation that failed without exposing secret key material.
+        diagnostic: String,
+        /// Underlying TLS configuration failure.
+        source: TlsError,
+    },
+    /// A peer grant named no executable handler in the supplied registry.
+    UnknownComputation {
+        /// Configuration path supplied by the caller.
+        path: PathBuf,
+        /// Logical peer whose grant was invalid.
+        peer: NodeId,
+        /// Missing configured computation name.
+        computation: String,
+    },
+    /// The enforcing certificate-bound peer policy rejected a grant.
+    PeerGrant {
+        /// Configuration path supplied by the caller.
+        path: PathBuf,
+        /// Logical peer whose grant was invalid.
+        peer: NodeId,
+        /// Typed policy-construction failure.
+        source: RemotePeerAdmissionError,
+    },
+}
+
+#[cfg(all(feature = "remote-service", unix))]
+impl RemoteComputationServiceBootstrapError {
+    /// Configuration path associated with this preparation failure.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        match self {
+            Self::Read { path, .. }
+            | Self::Decode { path, .. }
+            | Self::Invalid { path, .. }
+            | Self::Tls { path, .. }
+            | Self::UnknownComputation { path, .. }
+            | Self::PeerGrant { path, .. } => path,
+        }
+    }
+
+    /// Path-free configuration detail suitable for an existing structured
+    /// error envelope that already carries the configuration path separately.
+    #[must_use]
+    pub fn configuration_detail(&self) -> String {
+        match self {
+            Self::Read { source, .. } => source.to_string(),
+            Self::Decode { source, .. } => format!("TOML decoding failed: {source}"),
+            Self::Invalid { diagnostic, .. } => diagnostic.clone(),
+            Self::Tls {
+                diagnostic, source, ..
+            } => format!("{diagnostic}: {source}"),
+            Self::UnknownComputation {
+                peer, computation, ..
+            } => format!(
+                "peer '{}' names unknown computation '{computation}'",
+                peer.as_str()
+            ),
+            Self::PeerGrant { peer, source, .. } => {
+                format!("peer '{}' grant is invalid: {source}", peer.as_str())
+            }
+        }
+    }
+}
+
+#[cfg(all(feature = "remote-service", unix))]
+impl fmt::Display for RemoteComputationServiceBootstrapError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Read { path, source } => write!(
+                f,
+                "failed to read remote service configuration '{}': {source}",
+                path.display()
+            ),
+            Self::Decode { path, source } => write!(
+                f,
+                "remote service configuration '{}' failed strict TOML decoding: {source}",
+                path.display()
+            ),
+            Self::Invalid { path, diagnostic } => write!(
+                f,
+                "remote service configuration '{}' is invalid: {diagnostic}",
+                path.display()
+            ),
+            Self::Tls {
+                path,
+                diagnostic,
+                source,
+            } => write!(
+                f,
+                "remote service configuration '{}' {diagnostic}: {source}",
+                path.display()
+            ),
+            Self::UnknownComputation {
+                path,
+                peer,
+                computation,
+            } => write!(
+                f,
+                "remote service configuration '{}' peer '{}' names unregistered computation '{computation}'",
+                path.display(),
+                peer.as_str()
+            ),
+            Self::PeerGrant { path, peer, source } => write!(
+                f,
+                "remote service configuration '{}' peer '{}' grant is invalid: {source}",
+                path.display(),
+                peer.as_str()
+            ),
+        }
+    }
+}
+
+#[cfg(all(feature = "remote-service", unix))]
+impl std::error::Error for RemoteComputationServiceBootstrapError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Read { source, .. } => Some(source),
+            Self::Decode { source, .. } => Some(source),
+            Self::Tls { source, .. } => Some(source),
+            Self::PeerGrant { source, .. } => Some(source),
+            Self::Invalid { .. } | Self::UnknownComputation { .. } => None,
+        }
+    }
+}
+
+/// Deterministic identity of the executable registry prepared for one service.
+///
+/// The computation names cover the complete caller-supplied registry in sorted
+/// order, including registered handlers that no configured peer can invoke.
+/// The identity does not claim that an embedding application published or
+/// flushed a readiness record.
+#[cfg(all(feature = "remote-service", unix))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RemoteComputationServiceIdentity {
+    listen_scope: RemoteComputationServiceListenScope,
+    registry_fingerprint: ComputationRegistryFingerprint,
+    authorized_peers: usize,
+    computations: Vec<String>,
+}
+
+#[cfg(all(feature = "remote-service", unix))]
+impl RemoteComputationServiceIdentity {
+    /// Strict configuration schema represented by this identity.
+    #[must_use]
+    pub const fn config_schema_version(&self) -> u32 {
+        REMOTE_SERVICE_CONFIG_SCHEMA_VERSION
+    }
+
+    /// Exact remote-service protocol version enforced at admission.
+    #[must_use]
+    pub const fn protocol_version(&self) -> RemoteProtocolVersion {
+        RemoteProtocolVersion::V3
+    }
+
+    /// Explicit configured listener exposure policy.
+    #[must_use]
+    pub const fn listen_scope(&self) -> RemoteComputationServiceListenScope {
+        self.listen_scope
+    }
+
+    /// Fingerprint of the complete executable computation registry.
+    #[must_use]
+    pub const fn registry_fingerprint(&self) -> ComputationRegistryFingerprint {
+        self.registry_fingerprint
+    }
+
+    /// Number of configured certificate-bound logical peers.
+    #[must_use]
+    pub const fn authorized_peers(&self) -> usize {
+        self.authorized_peers
+    }
+
+    /// Complete registered computation names in deterministic sorted order.
+    #[must_use]
+    pub fn computations(&self) -> &[String] {
+        &self.computations
+    }
+
+    /// Scope of the current listener's retained idempotency state.
+    #[must_use]
+    pub const fn idempotency_scope(&self) -> &'static str {
+        "authenticated_peer_process_local"
+    }
+}
+
+/// Opaque, fully validated configured-service bootstrap.
+///
+/// Construction consumes the executable registry so the TLS peer policy,
+/// registry fingerprint, advertised names, and handler dispatch surface cannot
+/// drift between validation and bind. It performs no network bind; callers can
+/// inspect [`Self::identity`] before choosing when to open the listener.
+#[cfg(all(feature = "remote-service", unix))]
+pub struct RemoteComputationServiceBootstrap {
+    listen: SocketAddr,
+    tls_acceptor: TlsAcceptor,
+    policy: RemotePeerAdmissionPolicy,
+    computations: RemoteComputationRegistry,
+    service_config: RemoteComputationServiceConfig,
+    identity: RemoteComputationServiceIdentity,
+}
+
+#[cfg(all(feature = "remote-service", unix))]
+impl fmt::Debug for RemoteComputationServiceBootstrap {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RemoteComputationServiceBootstrap")
+            .field("listen", &self.listen)
+            .field("identity", &self.identity)
+            .field("service_config", &self.service_config)
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(all(feature = "remote-service", unix))]
+impl RemoteComputationServiceBootstrap {
+    /// Loads and prepares a strict configured service around `computations`.
+    ///
+    /// Relative certificate/key/CA paths are resolved against the TOML file's
+    /// directory. Every peer computation is checked against the consumed
+    /// executable registry before certificate loading and before any socket is
+    /// bound. Client certificates are always required and bound to explicit
+    /// SPKI pins plus per-computation grants.
+    pub fn from_toml_file(
+        path: impl AsRef<Path>,
+        computations: RemoteComputationRegistry,
+    ) -> Result<Self, RemoteComputationServiceBootstrapError> {
+        let path = path.as_ref().to_path_buf();
+        let raw = std::fs::read_to_string(&path).map_err(|source| {
+            RemoteComputationServiceBootstrapError::Read {
+                path: path.clone(),
+                source,
+            }
+        })?;
+        let mut config: RemoteComputationServiceFileConfig =
+            toml::from_str(&raw).map_err(|source| {
+                RemoteComputationServiceBootstrapError::Decode {
+                    path: path.clone(),
+                    source,
+                }
+            })?;
+        validate_remote_computation_service_file_config(&path, &config)?;
+
+        for peer in &config.peers {
+            for computation in &peer.computations {
+                if !computations.schema_registry().contains(computation) {
+                    return Err(RemoteComputationServiceBootstrapError::UnknownComputation {
+                        path,
+                        peer: NodeId::new(peer.node_id.clone()),
+                        computation: computation.clone(),
+                    });
+                }
+            }
+        }
+
+        let base = path.parent().unwrap_or_else(|| Path::new("."));
+        config.server_certificate_chain =
+            resolve_remote_computation_service_path(base, config.server_certificate_chain);
+        config.server_private_key =
+            resolve_remote_computation_service_path(base, config.server_private_key);
+        config.client_ca_bundle =
+            resolve_remote_computation_service_path(base, config.client_ca_bundle);
+
+        let listen = config.listen.parse::<SocketAddr>().map_err(|error| {
+            remote_computation_service_config_invalid(
+                &path,
+                format!(
+                    "listen must be a literal socket address, got '{}': {error}",
+                    config.listen
+                ),
+            )
+        })?;
+        let certificate_chain = CertificateChain::from_pem_file(&config.server_certificate_chain)
+            .map_err(|source| RemoteComputationServiceBootstrapError::Tls {
+            path: path.clone(),
+            diagnostic: format!(
+                "failed to load server certificate chain '{}'",
+                config.server_certificate_chain.display()
+            ),
+            source,
+        })?;
+        let private_key =
+            PrivateKey::from_pem_file(&config.server_private_key).map_err(|source| {
+                RemoteComputationServiceBootstrapError::Tls {
+                    path: path.clone(),
+                    diagnostic: format!(
+                        "failed to load server private key '{}'",
+                        config.server_private_key.display()
+                    ),
+                    source,
+                }
+            })?;
+        let client_ca_certificates =
+            Certificate::from_pem_file(&config.client_ca_bundle).map_err(|source| {
+                RemoteComputationServiceBootstrapError::Tls {
+                    path: path.clone(),
+                    diagnostic: format!(
+                        "failed to load client CA bundle '{}'",
+                        config.client_ca_bundle.display()
+                    ),
+                    source,
+                }
+            })?;
+        let mut client_roots = RootCertStore::empty();
+        for certificate in &client_ca_certificates {
+            client_roots.add(certificate).map_err(|source| {
+                RemoteComputationServiceBootstrapError::Tls {
+                    path: path.clone(),
+                    diagnostic: format!(
+                        "client CA bundle '{}' contains an invalid trust anchor",
+                        config.client_ca_bundle.display()
+                    ),
+                    source,
+                }
+            })?;
+        }
+        if client_roots.is_empty() {
+            return Err(remote_computation_service_config_invalid(
+                &path,
+                "client CA bundle contains no usable trust anchors",
+            ));
+        }
+        let tls_acceptor = TlsAcceptorBuilder::new(certificate_chain, private_key)
+            .client_auth(ClientAuth::Required(client_roots))
+            .handshake_timeout(Duration::from_millis(config.tls_handshake_timeout_ms))
+            .build()
+            .map_err(|source| RemoteComputationServiceBootstrapError::Tls {
+                path: path.clone(),
+                diagnostic: "failed to build the mutual-TLS acceptor".to_owned(),
+                source,
+            })?;
+
+        let registry_fingerprint = computations.schema_registry().fingerprint();
+        let computation_names = computations
+            .schema_registry()
+            .iter()
+            .map(|entry| entry.name().to_owned())
+            .collect();
+        let mut policy = RemotePeerAdmissionPolicy::new(
+            RemoteProtocolVersion::V3,
+            computations.schema_registry().clone(),
+        );
+        for peer in &config.peers {
+            let peer_node = NodeId::new(peer.node_id.clone());
+            let mut pins = CertificatePinSet::new();
+            for pin in &peer.spki_sha256 {
+                pins.add_spki_sha256_base64(pin).map_err(|source| {
+                    RemoteComputationServiceBootstrapError::Tls {
+                        path: path.clone(),
+                        diagnostic: format!(
+                            "peer '{}' has an invalid SPKI pin",
+                            peer_node.as_str()
+                        ),
+                        source,
+                    }
+                })?;
+            }
+            policy
+                .grant_tls_peer(
+                    peer_node.clone(),
+                    pins,
+                    peer.computations.iter().map(String::as_str),
+                )
+                .map_err(|source| RemoteComputationServiceBootstrapError::PeerGrant {
+                    path: path.clone(),
+                    peer: peer_node,
+                    source,
+                })?;
+        }
+
+        let service_config = RemoteComputationServiceConfig::new()
+            .with_wire_limits(RemoteServiceWireLimits::new(config.max_frame_bytes))
+            .with_max_connections(Some(config.max_connections))
+            .with_initial_frame_timeout(Duration::from_millis(config.initial_frame_timeout_ms))
+            .with_drain_timeout(Duration::from_millis(config.drain_timeout_ms))
+            .with_idempotency_retention(Duration::from_millis(config.idempotency_retention_ms))
+            .with_max_idempotency_records_per_peer(config.max_idempotency_records_per_peer);
+        let identity = RemoteComputationServiceIdentity {
+            listen_scope: config.listen_scope,
+            registry_fingerprint,
+            authorized_peers: config.peers.len(),
+            computations: computation_names,
+        };
+        Ok(Self {
+            listen,
+            tls_acceptor,
+            policy,
+            computations,
+            service_config,
+            identity,
+        })
+    }
+
+    /// Deterministic identity of the consumed executable registry and grants.
+    #[must_use]
+    pub const fn identity(&self) -> &RemoteComputationServiceIdentity {
+        &self.identity
+    }
+
+    /// Literal address that will be passed to the listener bind.
+    #[must_use]
+    pub const fn configured_listen(&self) -> SocketAddr {
+        self.listen
+    }
+
+    /// Opens the configured listener after all synchronous validation succeeds.
+    pub async fn bind(
+        self,
+    ) -> Result<
+        (RemoteComputationService, RemoteComputationServiceIdentity),
+        RemoteComputationListenerError,
+    > {
+        let service = RemoteComputationService::bind(
+            self.listen,
+            self.tls_acceptor,
+            self.policy,
+            self.computations,
+            self.service_config,
+        )
+        .await?;
+        Ok((service, self.identity))
+    }
+}
+
+#[cfg(all(feature = "remote-service", unix))]
+fn validate_remote_computation_service_file_config(
+    path: &Path,
+    config: &RemoteComputationServiceFileConfig,
+) -> Result<(), RemoteComputationServiceBootstrapError> {
+    if config.schema_version != REMOTE_SERVICE_CONFIG_SCHEMA_VERSION {
+        return Err(remote_computation_service_config_invalid(
+            path,
+            format!(
+                "unsupported schema_version {}; expected {}",
+                config.schema_version, REMOTE_SERVICE_CONFIG_SCHEMA_VERSION
+            ),
+        ));
+    }
+    if config.protocol != REMOTE_SERVICE_PROTOCOL_LABEL {
+        return Err(remote_computation_service_config_invalid(
+            path,
+            format!(
+                "unsupported protocol '{}'; expected '{REMOTE_SERVICE_PROTOCOL_LABEL}'",
+                config.protocol
+            ),
+        ));
+    }
+    if config.listen.trim().is_empty() {
+        return Err(remote_computation_service_config_invalid(
+            path,
+            "listen must not be empty",
+        ));
+    }
+    let listen = config.listen.parse::<SocketAddr>().map_err(|error| {
+        remote_computation_service_config_invalid(
+            path,
+            format!(
+                "listen must be a literal socket address, got '{}': {error}",
+                config.listen
+            ),
+        )
+    })?;
+    match config.listen_scope {
+        RemoteComputationServiceListenScope::LoopbackOnly if !listen.ip().is_loopback() => {
+            return Err(remote_computation_service_config_invalid(
+                path,
+                format!("listen_scope loopback_only refuses non-loopback address {listen}"),
+            ));
+        }
+        RemoteComputationServiceListenScope::Network if listen.ip().is_loopback() => {
+            return Err(remote_computation_service_config_invalid(
+                path,
+                format!("listen_scope network refuses loopback address {listen}"),
+            ));
+        }
+        RemoteComputationServiceListenScope::LoopbackOnly
+        | RemoteComputationServiceListenScope::Network => {}
+    }
+    for (name, value) in [
+        ("max_frame_bytes", config.max_frame_bytes),
+        ("max_connections", config.max_connections),
+        (
+            "max_idempotency_records_per_peer",
+            config.max_idempotency_records_per_peer,
+        ),
+    ] {
+        if value == 0 {
+            return Err(remote_computation_service_config_invalid(
+                path,
+                format!("{name} must be nonzero"),
+            ));
+        }
+    }
+    for (name, value) in [
+        ("tls_handshake_timeout_ms", config.tls_handshake_timeout_ms),
+        ("initial_frame_timeout_ms", config.initial_frame_timeout_ms),
+        ("drain_timeout_ms", config.drain_timeout_ms),
+        ("idempotency_retention_ms", config.idempotency_retention_ms),
+    ] {
+        if value == 0 {
+            return Err(remote_computation_service_config_invalid(
+                path,
+                format!("{name} must be nonzero"),
+            ));
+        }
+    }
+    if config.peers.is_empty() {
+        return Err(remote_computation_service_config_invalid(
+            path,
+            "peers must contain at least one certificate-bound grant",
+        ));
+    }
+    let mut node_ids = BTreeSet::new();
+    for peer in &config.peers {
+        if peer.node_id.is_empty() || peer.node_id.trim() != peer.node_id {
+            return Err(remote_computation_service_config_invalid(
+                path,
+                "peer node_id must be nonempty and contain no surrounding whitespace",
+            ));
+        }
+        if !node_ids.insert(peer.node_id.as_str()) {
+            return Err(remote_computation_service_config_invalid(
+                path,
+                format!("duplicate peer node_id '{}'", peer.node_id),
+            ));
+        }
+        if peer.spki_sha256.is_empty() {
+            return Err(remote_computation_service_config_invalid(
+                path,
+                format!("peer '{}' must have at least one SPKI pin", peer.node_id),
+            ));
+        }
+        if peer.computations.is_empty() {
+            return Err(remote_computation_service_config_invalid(
+                path,
+                format!(
+                    "peer '{}' must authorize at least one computation",
+                    peer.node_id
+                ),
+            ));
+        }
+        let mut computation_names = BTreeSet::new();
+        for computation in &peer.computations {
+            if computation.is_empty() || computation.trim() != computation {
+                return Err(remote_computation_service_config_invalid(
+                    path,
+                    format!(
+                        "peer '{}' computation names must be nonempty and contain no surrounding whitespace",
+                        peer.node_id
+                    ),
+                ));
+            }
+            if !computation_names.insert(computation.as_str()) {
+                return Err(remote_computation_service_config_invalid(
+                    path,
+                    format!(
+                        "peer '{}' repeats computation '{computation}'",
+                        peer.node_id
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(all(feature = "remote-service", unix))]
+fn remote_computation_service_config_invalid(
+    path: &Path,
+    diagnostic: impl Into<String>,
+) -> RemoteComputationServiceBootstrapError {
+    RemoteComputationServiceBootstrapError::Invalid {
+        path: path.to_path_buf(),
+        diagnostic: diagnostic.into(),
+    }
+}
+
+#[cfg(all(feature = "remote-service", unix))]
+fn resolve_remote_computation_service_path(base: &Path, value: PathBuf) -> PathBuf {
+    if value.is_absolute() {
+        value
+    } else {
+        base.join(value)
     }
 }
 
