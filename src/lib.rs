@@ -424,7 +424,11 @@ pub use remote::{
 };
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
 pub use remote::{
-    DEFAULT_NATIVE_REMOTE_MAX_IN_FLIGHT, NativeRemoteRoute, NativeRemoteRuntime,
+    DEFAULT_NATIVE_REMOTE_DISCOVERY_MAX_CONSECUTIVE_FAILURES,
+    DEFAULT_NATIVE_REMOTE_DISCOVERY_POLL_INTERVAL, DEFAULT_NATIVE_REMOTE_DISCOVERY_RETRY_BACKOFF,
+    DEFAULT_NATIVE_REMOTE_MAX_IN_FLIGHT, NativeRemoteDiscoveryBuildError,
+    NativeRemoteDiscoveryConfig, NativeRemoteDiscoveryDriver, NativeRemoteDiscoveryError,
+    NativeRemoteDiscoveryReport, NativeRemoteRoute, NativeRemoteRuntime,
     NativeRemoteRuntimeBuildError, NativeRemoteRuntimeConfig, RemoteComputationClient,
     RemoteComputationClientConfig, RemoteComputationClientError, RemoteComputationListenerError,
     RemoteComputationService, RemoteComputationServiceConfig, RemoteComputationServiceHandle,

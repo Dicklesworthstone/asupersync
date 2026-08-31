@@ -1860,9 +1860,10 @@ certificate-pin rejection, authenticated framing/session errors, EOF, and
 delivery-ambiguous outcomes never advance to another endpoint. A
 `NativeRemoteRuntime` route uses the same policy because it owns the configured
 client. This is pre-delivery static bootstrap failover; it does not provide
-active discovery, health-based balancing, durable route storage, or WAN policy.
+active refresh by itself, health-based balancing, durable route storage, or WAN
+policy.
 
-An outer control plane can now bridge an existing
+An outer control plane can bridge an existing
 `Discover<Key = SocketAddr>` source into this route model without rebuilding
 authentication policy. After a successful caller-owned `poll_discover`, use
 `RemoteComputationClient::with_discovered_endpoints` or
@@ -1871,9 +1872,54 @@ snapshot, then publish the complete route set with
 `NativeRemoteRuntime::replace_routes`. The rebound client retains server name,
 trust roots, client certificate/key identity, enforcing pins, frame and timeout
 bounds, retry policy, destination, and V3 hello. Empty or duplicate endpoint
-snapshots are rejected before route publication. These methods do not poll,
-spawn, persist, or select endpoints; automatic refresh scheduling and health
-policy remain outside the runtime adapter.
+snapshots are rejected before route publication. These conversion methods do
+not poll, spawn, persist, or select endpoints.
+
+For active refresh without an ambient task, build a
+`NativeRemoteDiscoveryDriver` around an `Arc<NativeRemoteRuntime>`, exactly one
+logical destination, and an `Arc` discovery source, then await `run(&cx)` in a
+caller-owned region task:
+
+```rust,no_run
+# use std::sync::Arc;
+# use std::time::Duration;
+# use asupersync::remote::{NativeRemoteDiscoveryConfig, NativeRemoteDiscoveryDriver};
+# async fn run_driver<D>(
+#     cx: &asupersync::Cx,
+#     runtime: Arc<asupersync::remote::NativeRemoteRuntime>,
+#     destination: asupersync::remote::NodeId,
+#     discovery: Arc<D>,
+# ) -> Result<(), Box<dyn std::error::Error>>
+# where D: asupersync::service::Discover<Key = std::net::SocketAddr> + Send + Sync + 'static {
+let driver = NativeRemoteDiscoveryDriver::new(
+    runtime,
+    destination,
+    discovery,
+    NativeRemoteDiscoveryConfig::new()
+        .with_poll_interval(Duration::from_secs(30))
+        .with_retry_backoff(Duration::from_secs(5))
+        .with_max_consecutive_failures(8),
+)?;
+let report = driver.run(cx).await?;
+assert!(report.polls() >= 1);
+# Ok(())
+# }
+```
+
+The first poll is immediate. Each synchronous discovery poll runs on the
+supplied context's blocking pool and is awaited to completion; a context without
+blocking-pool authority returns `BlockingPoolUnavailable` before polling.
+Configure the owning `RuntimeBuilder` with nonzero `blocking_threads` before
+constructing the supplied context. Cancellation prevents future polls but can wait for the current source
+operation, so production sources must bound their own poll. Source errors and
+empty, duplicate, or invalid snapshots retain the last-known-good route and
+retry only after the configured nonzero backoff. A changed valid snapshot replaces only the selected
+destination under one route-snapshot write lock; unrelated destinations survive
+concurrent drivers, unchanged snapshots do not advance generation, and a
+removed destination terminates the driver instead of being resurrected. Callers
+may compose `ActiveHealthDiscovery` explicitly, but the driver does not choose a
+health algorithm, persist routes, reload configuration/certificates, or claim
+general WAN reliability.
 
 Unix builds also expose a supported static process boundary behind the
 additive `remote-service` feature:
@@ -2040,9 +2086,13 @@ two non-echo handlers over real TCP+mTLS, proves an ungranted handler is never
 dispatched, proves a missing handler fails before bind, and drains to zero live
 connections. That committed evidence is localhost/in-process application-hosting
 evidence; the separate terminal schema-v2 acceptance run above adds one
-two-worker packaged mTLS path. Neither is discovery, dynamic plugins/code
-shipping, Windows service control, restart-durable idempotency, or general
-production-WAN evidence. V3 retry/deduplication state is process-local;
+two-worker packaged mTLS path. The active-discovery lifecycle case additionally
+keeps one real mTLS operation live on route A while source and snapshot refusals
+retain A, publishes B exactly once for later work, preserves an unrelated
+destination, and terminates without resurrecting a removed route. These are not
+dynamic plugins/code shipping, route persistence, Windows service control,
+restart-durable idempotency, or general production-WAN evidence. V3
+retry/deduplication state is process-local;
 ambiguous delivery must remain fail-closed across restart.
 The compatibility goldens do not substitute for archived-binary interop,
 multi-host/WAN evidence, or restart-durable idempotency proof.

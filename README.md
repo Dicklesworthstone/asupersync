@@ -998,9 +998,12 @@ has exercised the packaged service and probe across distinct hosts. Applications
 can reuse the same strict TOML, mutual-TLS, SPKI, grant, listener, and drain
 boundary around a caller-provided statically linked `RemoteComputationRegistry`
 through `RemoteComputationServiceBootstrap`; the packaged CLI remains the echo
-diagnostic host. Active discovery, dynamic plugins or code shipping,
-restart-durable idempotency, and production WAN reliability remain open
-deployment concerns rather than blanket core-runtime claims.
+diagnostic host. A caller-owned `NativeRemoteDiscoveryDriver` can actively poll
+an existing `Discover<Key = SocketAddr>` source and refresh one authenticated
+route without detaching work or replacing unrelated destinations. Dynamic
+plugins or code shipping, route persistence, restart-durable idempotency, and
+production WAN reliability remain open deployment concerns rather than blanket
+core-runtime claims.
 
 `RemoteComputationClient::from_bootstrap_endpoints` accepts an ordered, unique,
 nonempty static endpoint set while the existing `new` and `endpoint` APIs retain
@@ -1009,18 +1012,31 @@ for transient TCP or TLS establishment failures before request publication.
 Cancellation, attempt timeout, certificate/name/pin rejection, authenticated
 framing/session failure, EOF, and any delivery-ambiguous result fail closed on
 the current endpoint. `NativeRemoteRuntime` inherits this behavior from its
-configured route client. This is static bootstrap failover, not active health
-checking, service discovery, load balancing, or multi-host/WAN evidence.
+configured route client. This constructor is static bootstrap failover; active
+refresh requires the explicit driver below and still is not a load-balancing or
+general multi-host/WAN claim.
 
-Callers that already own a `Discover<Key = SocketAddr>` source can poll it,
-check the poll result, and convert its current snapshot with
+Callers that already own a `Discover<Key = SocketAddr>` source can still poll it
+manually and convert its current snapshot with
 `RemoteComputationClient::with_discovered_endpoints` or
 `NativeRemoteRoute::with_discovered_endpoints`. The returned value preserves
 the original server name, trust roots, client identity, enforcing pins, wire
 limits, retry policy, destination, and V3 hello; empty or duplicate snapshots
 fail before `NativeRemoteRuntime::replace_routes` can advance its generation.
-This is caller-driven snapshot rebinding. It does not start a polling task,
-persist routes, choose a health policy, or claim automatic discovery.
+For structured active refresh, construct `NativeRemoteDiscoveryDriver` with an
+`Arc<NativeRemoteRuntime>`, one logical destination, an `Arc` discovery source,
+and a finite nonzero polling/retry policy, then await `run(&cx)` in a caller-owned
+region task. The first poll is immediate. Synchronous source polling runs on the
+supplied context's blocking pool and is awaited to completion; a context without
+that authority is refused before polling, so the owning `RuntimeBuilder` must
+configure nonzero `blocking_threads`. Cancellation stops future polls but
+can wait for the current source poll, so production sources must bound their own
+poll. Source errors and empty, duplicate, or invalid snapshots retain the
+last-known-good route. A changed valid snapshot atomically replaces only that
+destination, while unchanged snapshots do not advance the route generation and
+a removed destination terminates rather than being resurrected. The driver does
+not persist routes, choose a health policy, reload configuration/certificates,
+or establish general WAN reliability.
 
 | Primitive | Location | Runtime Behavior |
 |-----------|----------|------------------|
@@ -1030,7 +1046,7 @@ persist routes, choose a health policy, or claim automatic discovery.
 | Session-typed protocol | `src/remote.rs` | Origin/remote state machines validate legal spawn/ack/cancel/result/renewal transitions |
 | Logical-time envelopes | `src/remote.rs` | Protocol messages carry logical clock metadata for causal correlation |
 | Saga compensations | `src/remote.rs` | Forward steps and compensations are tracked as a structured rollback flow for distributed workflows |
-| Native V3 runtime | `src/remote.rs` | `NativeRemoteRuntime` maps region-owned remote handles onto bounded TCP+mTLS sessions, can use ordered static pre-delivery bootstrap failover, propagates cancel/lease traffic, and drains owned operations during close |
+| Native V3 runtime | `src/remote.rs` | `NativeRemoteRuntime` maps region-owned remote handles onto bounded TCP+mTLS sessions, supports ordered static pre-delivery bootstrap failover plus caller-owned single-destination discovery refresh, propagates cancel/lease traffic, and drains owned operations during close |
 | Configured application service | `src/remote.rs` | `RemoteComputationServiceBootstrap` consumes a caller registry, validates strict schema-v2 exposure/TLS/SPKI/grants before bind, then returns the existing structured service plus deterministic full-registry identity |
 | Static service process | `asupersync --config ... remote serve` | Unix `remote-service` feature; strict TOML, mutual TLS, certificate-bound grants, flushed readiness/terminal records, SIGINT/SIGTERM drain, and second-signal force-close |
 
@@ -2065,7 +2081,7 @@ JS/TS packages GA for browser main-thread and dedicated-worker consumers; Rust b
 | Database clients (SQLite, PostgreSQL, MySQL) | ✅ Implemented |
 | Actor supervision (GenServer, links, monitors) | ✅ Implemented |
 | DPOR-style race-guided seed exploration | ⚠️ Implemented as trace analysis, seed derivation, and equivalence-class telemetry; no exact-prefix backtracking or completeness claim |
-| Distributed runtime (remote tasks, sagas, leases, recovery) | Protocol/state-machine, lease, idempotency, saga, native V3 TCP+mTLS runtime/service, Unix static process host, and strict statically linked application-registry hosting implemented; deterministic, in-process, cross-process localhost, and one terminal two-worker RCH mTLS proof shipped. Active discovery, dynamic plugins/code shipping, restart-durable idempotency, and general production-WAN reliability remain open. |
+| Distributed runtime (remote tasks, sagas, leases, recovery) | Protocol/state-machine, lease, idempotency, saga, native V3 TCP+mTLS runtime/service, Unix static process host, strict statically linked application-registry hosting, and caller-owned single-destination active discovery implemented; deterministic, in-process, cross-process localhost, and one terminal two-worker RCH mTLS proof shipped. Dynamic plugins/code shipping, route persistence, restart-durable idempotency, and general production-WAN reliability remain open. |
 | RaptorQ fountain coding for snapshot distribution | ✅ Implemented |
 | Formal methods (TLA+ export + Lean-checked model-invariant coverage) | ⚠️ Partial implementation (Lean checks six abstract-model invariants; no production-Rust refinement proof or blanket adapter/protocol proof) |
 | Browser Edition (WASM, JS/TS consumers) | ✅ Implemented for browser main-thread and dedicated-worker consumers (single-threaded, event-loop-driven) |

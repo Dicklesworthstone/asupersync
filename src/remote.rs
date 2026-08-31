@@ -6315,11 +6315,12 @@ pub const DEFAULT_NATIVE_REMOTE_MAX_IN_FLIGHT: usize = 256;
 
 /// Static destination route for [`NativeRemoteRuntime`].
 ///
-/// Automatic discovery remains an outer concern: this value deliberately binds
-/// one logical destination to one validated client/bootstrap policy and one V3
-/// peer hello. A caller that has successfully polled a [`crate::service::Discover`]
-/// source can create a replacement through [`Self::with_discovered_endpoints`]
-/// and publish it atomically through [`NativeRemoteRuntime::replace_routes`].
+/// This value deliberately binds one logical destination to one validated
+/// client/bootstrap policy and one V3 peer hello. A caller can manually convert
+/// a successful [`crate::service::Discover`] snapshot through
+/// [`Self::with_discovered_endpoints`] and publish it with
+/// [`NativeRemoteRuntime::replace_routes`], or run a
+/// [`NativeRemoteDiscoveryDriver`] as a caller-owned structured task.
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
 #[derive(Clone, Debug)]
 pub struct NativeRemoteRoute {
@@ -6393,6 +6394,417 @@ impl NativeRemoteRoute {
             hello: self.hello.clone(),
             client: self.client.with_discovered_endpoints(discovery)?,
         })
+    }
+}
+
+/// Default interval between successful native remote discovery polls.
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+pub const DEFAULT_NATIVE_REMOTE_DISCOVERY_POLL_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Default delay after a refused or failed native remote discovery poll.
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+pub const DEFAULT_NATIVE_REMOTE_DISCOVERY_RETRY_BACKOFF: Duration = Duration::from_secs(5);
+
+/// Default consecutive discovery-failure budget before the driver stops.
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+pub const DEFAULT_NATIVE_REMOTE_DISCOVERY_MAX_CONSECUTIVE_FAILURES: usize = 8;
+
+/// Polling and retry policy for [`NativeRemoteDiscoveryDriver`].
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NativeRemoteDiscoveryConfig {
+    poll_interval: Duration,
+    retry_backoff: Duration,
+    max_consecutive_failures: usize,
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+impl NativeRemoteDiscoveryConfig {
+    /// Creates the production-oriented active discovery policy.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            poll_interval: DEFAULT_NATIVE_REMOTE_DISCOVERY_POLL_INTERVAL,
+            retry_backoff: DEFAULT_NATIVE_REMOTE_DISCOVERY_RETRY_BACKOFF,
+            max_consecutive_failures: DEFAULT_NATIVE_REMOTE_DISCOVERY_MAX_CONSECUTIVE_FAILURES,
+        }
+    }
+
+    /// Sets the interval after a successful or unchanged poll.
+    #[must_use]
+    pub const fn with_poll_interval(mut self, poll_interval: Duration) -> Self {
+        self.poll_interval = poll_interval;
+        self
+    }
+
+    /// Sets the bounded delay after a source or snapshot failure.
+    #[must_use]
+    pub const fn with_retry_backoff(mut self, retry_backoff: Duration) -> Self {
+        self.retry_backoff = retry_backoff;
+        self
+    }
+
+    /// Sets the consecutive failure budget before the driver terminates.
+    #[must_use]
+    pub const fn with_max_consecutive_failures(mut self, max_consecutive_failures: usize) -> Self {
+        self.max_consecutive_failures = max_consecutive_failures;
+        self
+    }
+
+    /// Interval after a successful or unchanged poll.
+    #[must_use]
+    pub const fn poll_interval(self) -> Duration {
+        self.poll_interval
+    }
+
+    /// Delay after a source or snapshot failure.
+    #[must_use]
+    pub const fn retry_backoff(self) -> Duration {
+        self.retry_backoff
+    }
+
+    /// Consecutive failure budget before terminal refusal.
+    #[must_use]
+    pub const fn max_consecutive_failures(self) -> usize {
+        self.max_consecutive_failures
+    }
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+impl Default for NativeRemoteDiscoveryConfig {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Invalid active-discovery driver configuration.
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum NativeRemoteDiscoveryBuildError {
+    /// Successful polls must not create a zero-delay loop.
+    ZeroPollInterval,
+    /// Failed polls must not create a zero-delay retry loop.
+    ZeroRetryBackoff,
+    /// A zero failure budget would prevent the initial poll.
+    ZeroMaxConsecutiveFailures,
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+impl fmt::Display for NativeRemoteDiscoveryBuildError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ZeroPollInterval => {
+                f.write_str("native remote discovery poll interval must be nonzero")
+            }
+            Self::ZeroRetryBackoff => {
+                f.write_str("native remote discovery retry backoff must be nonzero")
+            }
+            Self::ZeroMaxConsecutiveFailures => {
+                f.write_str("native remote discovery max consecutive failures must be nonzero")
+            }
+        }
+    }
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+impl std::error::Error for NativeRemoteDiscoveryBuildError {}
+
+/// Terminal accounting from one caller-owned discovery driver run.
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct NativeRemoteDiscoveryReport {
+    polls: u64,
+    route_publications: u64,
+    unchanged_snapshots: u64,
+    source_failures: u64,
+    refused_snapshots: u64,
+    final_route_generation: u64,
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+impl NativeRemoteDiscoveryReport {
+    /// Completed source polls, including failed polls.
+    #[must_use]
+    pub const fn polls(&self) -> u64 {
+        self.polls
+    }
+
+    /// Changed endpoint snapshots published to the selected destination.
+    #[must_use]
+    pub const fn route_publications(&self) -> u64 {
+        self.route_publications
+    }
+
+    /// Valid endpoint snapshots that already matched the live route.
+    #[must_use]
+    pub const fn unchanged_snapshots(&self) -> u64 {
+        self.unchanged_snapshots
+    }
+
+    /// Discovery-source poll failures.
+    #[must_use]
+    pub const fn source_failures(&self) -> u64 {
+        self.source_failures
+    }
+
+    /// Empty, duplicate, or otherwise invalid endpoint snapshots.
+    #[must_use]
+    pub const fn refused_snapshots(&self) -> u64 {
+        self.refused_snapshots
+    }
+
+    /// Route generation observed when the driver stopped.
+    #[must_use]
+    pub const fn final_route_generation(&self) -> u64 {
+        self.final_route_generation
+    }
+}
+
+/// Terminal failure from [`NativeRemoteDiscoveryDriver::run`].
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum NativeRemoteDiscoveryError {
+    /// The supplied context does not carry blocking-pool authority.
+    BlockingPoolUnavailable {
+        /// Logical destination whose discovery source was not polled.
+        destination: NodeId,
+        /// Zero-poll accounting captured at refusal.
+        report: NativeRemoteDiscoveryReport,
+    },
+    /// The selected destination was removed while the driver was active.
+    DestinationRemoved {
+        /// Logical destination that must not be resurrected.
+        destination: NodeId,
+        /// Accounting through the terminal poll.
+        report: NativeRemoteDiscoveryReport,
+    },
+    /// Consecutive source or snapshot failures exhausted the configured budget.
+    RetryExhausted {
+        /// Logical destination whose route retained its last-known-good value.
+        destination: NodeId,
+        /// Consecutive failures observed.
+        consecutive_failures: usize,
+        /// Last typed source or validation diagnostic.
+        last_failure: String,
+        /// Accounting through the terminal failure.
+        report: NativeRemoteDiscoveryReport,
+    },
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+impl NativeRemoteDiscoveryError {
+    /// Terminal accounting captured with the failure.
+    #[must_use]
+    pub const fn report(&self) -> &NativeRemoteDiscoveryReport {
+        match self {
+            Self::BlockingPoolUnavailable { report, .. }
+            | Self::DestinationRemoved { report, .. }
+            | Self::RetryExhausted { report, .. } => report,
+        }
+    }
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+impl fmt::Display for NativeRemoteDiscoveryError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::BlockingPoolUnavailable { destination, .. } => write!(
+                f,
+                "native remote discovery for {destination} requires blocking-pool authority"
+            ),
+            Self::DestinationRemoved { destination, .. } => write!(
+                f,
+                "native remote discovery destination {destination} was removed"
+            ),
+            Self::RetryExhausted {
+                destination,
+                consecutive_failures,
+                last_failure,
+                ..
+            } => write!(
+                f,
+                "native remote discovery for {destination} exhausted {consecutive_failures} consecutive failures: {last_failure}"
+            ),
+        }
+    }
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+impl std::error::Error for NativeRemoteDiscoveryError {}
+
+/// Caller-owned active discovery driver for one native remote destination.
+///
+/// The driver never spawns or detaches itself. Callers run it in an owned
+/// region task and cancel that task when refresh should stop. Synchronous
+/// discovery polling runs on the supplied context's blocking pool and is always
+/// awaited to completion, so cancellation can wait for the current source poll;
+/// production discovery sources must therefore bound their own poll operation.
+/// A context without blocking-pool authority is refused before the first poll.
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+pub struct NativeRemoteDiscoveryDriver<D> {
+    runtime: Arc<NativeRemoteRuntime>,
+    destination: NodeId,
+    discovery: Arc<D>,
+    config: NativeRemoteDiscoveryConfig,
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+impl<D> fmt::Debug for NativeRemoteDiscoveryDriver<D> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("NativeRemoteDiscoveryDriver")
+            .field("destination", &self.destination)
+            .field("config", &self.config)
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+impl<D> NativeRemoteDiscoveryDriver<D>
+where
+    D: crate::service::Discover<Key = SocketAddr> + Send + Sync + 'static,
+{
+    /// Validates and constructs a driver without starting any work.
+    pub fn new(
+        runtime: Arc<NativeRemoteRuntime>,
+        destination: NodeId,
+        discovery: Arc<D>,
+        config: NativeRemoteDiscoveryConfig,
+    ) -> Result<Self, NativeRemoteDiscoveryBuildError> {
+        if config.poll_interval.is_zero() {
+            return Err(NativeRemoteDiscoveryBuildError::ZeroPollInterval);
+        }
+        if config.retry_backoff.is_zero() {
+            return Err(NativeRemoteDiscoveryBuildError::ZeroRetryBackoff);
+        }
+        if config.max_consecutive_failures == 0 {
+            return Err(NativeRemoteDiscoveryBuildError::ZeroMaxConsecutiveFailures);
+        }
+        Ok(Self {
+            runtime,
+            destination,
+            discovery,
+            config,
+        })
+    }
+
+    /// Logical destination updated by this driver.
+    #[must_use]
+    pub const fn destination(&self) -> &NodeId {
+        &self.destination
+    }
+
+    /// Runs immediate and periodic discovery until caller cancellation.
+    ///
+    /// Cancellation is a successful structured stop and returns the terminal
+    /// report. Removing the selected destination or exhausting the bounded
+    /// failure budget returns a typed terminal error. Every invalid snapshot
+    /// retains the last-known-good route.
+    pub async fn run(
+        &self,
+        cx: &Cx,
+    ) -> Result<NativeRemoteDiscoveryReport, NativeRemoteDiscoveryError> {
+        let mut report = NativeRemoteDiscoveryReport {
+            final_route_generation: self.runtime.route_generation(),
+            ..NativeRemoteDiscoveryReport::default()
+        };
+        if cx.checkpoint().is_err() {
+            return Ok(report);
+        }
+        let Some(blocking_pool) = cx.blocking_pool_handle() else {
+            return Err(NativeRemoteDiscoveryError::BlockingPoolUnavailable {
+                destination: self.destination.clone(),
+                report,
+            });
+        };
+        let mut consecutive_failures = 0usize;
+
+        loop {
+            if cx.checkpoint().is_err() {
+                report.final_route_generation = self.runtime.route_generation();
+                return Ok(report);
+            }
+
+            let discovery = Arc::clone(&self.discovery);
+            let poll_result = crate::runtime::spawn_blocking::spawn_blocking_on_pool(
+                blocking_pool.clone(),
+                move || {
+                    let changes = discovery.poll_discover()?;
+                    Ok::<_, D::Error>((changes, discovery.endpoints()))
+                },
+            )
+            .await;
+            report.polls = report.polls.saturating_add(1);
+
+            let failure = match poll_result {
+                Ok((_changes, endpoints)) => match self
+                    .runtime
+                    .refresh_discovered_route(&self.destination, endpoints)
+                {
+                    Ok(NativeRemoteRouteRefresh::Published(generation)) => {
+                        report.route_publications = report.route_publications.saturating_add(1);
+                        report.final_route_generation = generation;
+                        consecutive_failures = 0;
+                        None
+                    }
+                    Ok(NativeRemoteRouteRefresh::Unchanged(generation)) => {
+                        report.unchanged_snapshots = report.unchanged_snapshots.saturating_add(1);
+                        report.final_route_generation = generation;
+                        consecutive_failures = 0;
+                        None
+                    }
+                    Err(NativeRemoteRouteRefreshError::DestinationRemoved) => {
+                        report.final_route_generation = self.runtime.route_generation();
+                        return Err(NativeRemoteDiscoveryError::DestinationRemoved {
+                            destination: self.destination.clone(),
+                            report,
+                        });
+                    }
+                    Err(NativeRemoteRouteRefreshError::InvalidSnapshot(error)) => {
+                        report.refused_snapshots = report.refused_snapshots.saturating_add(1);
+                        Some(error.to_string())
+                    }
+                    Err(NativeRemoteRouteRefreshError::GenerationExhausted) => {
+                        report.refused_snapshots = report.refused_snapshots.saturating_add(1);
+                        Some("native remote route generation is exhausted".to_owned())
+                    }
+                },
+                Err(error) => {
+                    report.source_failures = report.source_failures.saturating_add(1);
+                    Some(error.to_string())
+                }
+            };
+
+            if cx.checkpoint().is_err() {
+                report.final_route_generation = self.runtime.route_generation();
+                return Ok(report);
+            }
+
+            let delay = if let Some(last_failure) = failure {
+                consecutive_failures = consecutive_failures.saturating_add(1);
+                if consecutive_failures >= self.config.max_consecutive_failures {
+                    report.final_route_generation = self.runtime.route_generation();
+                    return Err(NativeRemoteDiscoveryError::RetryExhausted {
+                        destination: self.destination.clone(),
+                        consecutive_failures,
+                        last_failure,
+                        report,
+                    });
+                }
+                self.config.retry_backoff
+            } else {
+                self.config.poll_interval
+            };
+
+            if matches!(
+                remote_client_race_cancellation(cx, crate::time::sleep(cx.now(), delay)).await,
+                RemoteClientCancelRace::Cancelled
+            ) {
+                report.final_route_generation = self.runtime.route_generation();
+                return Ok(report);
+            }
+        }
     }
 }
 
@@ -7066,9 +7478,10 @@ fn map_native_remote_response(
 /// compatibility. An operator or discovery control plane may atomically
 /// publish validated replacements through [`Self::replace_routes`]; each new
 /// spawn clones one route snapshot, while already-published operations retain
-/// their prior authenticated client through terminal quiescence. The adapter
-/// does not itself perform discovery, provide durable idempotency across
-/// service restart, or package a deployment daemon.
+/// their prior authenticated client through terminal quiescence. Active polling
+/// is explicit and caller-owned through [`NativeRemoteDiscoveryDriver`]; the
+/// runtime does not start an ambient discovery task, provide durable idempotency
+/// across service restart, or package a deployment daemon.
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
 pub struct NativeRemoteRuntime {
     runtime: RuntimeHandle,
@@ -7083,6 +7496,19 @@ pub struct NativeRemoteRuntime {
 struct NativeRemoteRouteSnapshot {
     generation: u64,
     routes: BTreeMap<NodeId, NativeRemoteRoute>,
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+enum NativeRemoteRouteRefresh {
+    Published(u64),
+    Unchanged(u64),
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+enum NativeRemoteRouteRefreshError {
+    DestinationRemoved,
+    InvalidSnapshot(RemoteComputationClientError),
+    GenerationExhausted,
 }
 
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
@@ -7230,6 +7656,31 @@ impl NativeRemoteRuntime {
         live_routes.routes = indexed;
         live_routes.generation = generation;
         Ok(generation)
+    }
+
+    fn refresh_discovered_route(
+        &self,
+        destination: &NodeId,
+        endpoints: Vec<SocketAddr>,
+    ) -> Result<NativeRemoteRouteRefresh, NativeRemoteRouteRefreshError> {
+        let mut live_routes = self.live_routes.write();
+        let route = live_routes
+            .routes
+            .get(destination)
+            .ok_or(NativeRemoteRouteRefreshError::DestinationRemoved)?;
+        let replacement = route
+            .with_bootstrap_endpoints(endpoints)
+            .map_err(NativeRemoteRouteRefreshError::InvalidSnapshot)?;
+        if replacement.client().bootstrap_endpoints() == route.client().bootstrap_endpoints() {
+            return Ok(NativeRemoteRouteRefresh::Unchanged(live_routes.generation));
+        }
+        let generation = live_routes
+            .generation
+            .checked_add(1)
+            .ok_or(NativeRemoteRouteRefreshError::GenerationExhausted)?;
+        live_routes.routes.insert(destination.clone(), replacement);
+        live_routes.generation = generation;
+        Ok(NativeRemoteRouteRefresh::Published(generation))
     }
 
     /// Number of published driver tasks that have not reached terminal state.

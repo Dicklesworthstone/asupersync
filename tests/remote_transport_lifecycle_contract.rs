@@ -13,14 +13,16 @@ use asupersync::remote::{
 };
 #[cfg(feature = "tls")]
 use asupersync::remote::{
-    NativeRemoteRoute, NativeRemoteRuntime, NativeRemoteRuntimeBuildError,
-    NativeRemoteRuntimeConfig, RemoteComputationClient, RemoteComputationClientConfig,
-    RemoteComputationClientError, RemoteComputationListenerError, RemoteComputationService,
-    RemoteComputationServiceConfig, RemoteComputationServiceError, RemoteComputationServiceHandle,
-    RemoteComputationServiceReport, RemoteComputationSessionStart, RemoteServiceRejectionCode,
-    RemoteServiceSessionCommand, RemoteServiceSessionError, RemoteServiceSessionEvent,
-    RemoteServiceWireLimits, RemoteServiceWireOutcome, RemoteServiceWireRequest,
-    RemoteServiceWireResponse, call_tls_computation_once, serve_tls_computation_once,
+    NativeRemoteDiscoveryBuildError, NativeRemoteDiscoveryConfig, NativeRemoteDiscoveryDriver,
+    NativeRemoteDiscoveryError, NativeRemoteRoute, NativeRemoteRuntime,
+    NativeRemoteRuntimeBuildError, NativeRemoteRuntimeConfig, RemoteComputationClient,
+    RemoteComputationClientConfig, RemoteComputationClientError, RemoteComputationListenerError,
+    RemoteComputationService, RemoteComputationServiceConfig, RemoteComputationServiceError,
+    RemoteComputationServiceHandle, RemoteComputationServiceReport, RemoteComputationSessionStart,
+    RemoteServiceRejectionCode, RemoteServiceSessionCommand, RemoteServiceSessionError,
+    RemoteServiceSessionEvent, RemoteServiceWireLimits, RemoteServiceWireOutcome,
+    RemoteServiceWireRequest, RemoteServiceWireResponse, call_tls_computation_once,
+    serve_tls_computation_once,
 };
 #[cfg(all(feature = "remote-service", unix))]
 use asupersync::remote::{
@@ -33,7 +35,7 @@ use asupersync::runtime::RuntimeBuilder;
 #[cfg(feature = "tls")]
 use asupersync::server::ShutdownPhase;
 #[cfg(feature = "tls")]
-use asupersync::service::{Discover, DnsDiscoveryConfig, DnsServiceDiscovery, StaticList};
+use asupersync::service::{Change, Discover, DnsDiscoveryConfig, DnsServiceDiscovery, StaticList};
 #[cfg(feature = "tls")]
 use asupersync::tls::{
     Certificate, CertificateChain, CertificatePin, CertificatePinSet, ClientAuth, PrivateKey,
@@ -54,7 +56,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 #[cfg(feature = "tls")]
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::fmt;
 use std::fs;
 use std::io;
@@ -2484,6 +2486,62 @@ fn native_remote_runtime_atomically_rotates_validated_routes() {
         asupersync::types::Time::from_nanos(0)
     }
 
+    enum DiscoveryStep {
+        Error(&'static str),
+        Snapshot(Vec<SocketAddr>),
+        WaitForRelease {
+            endpoints: Vec<SocketAddr>,
+            release: std::sync::mpsc::Receiver<()>,
+        },
+    }
+
+    struct ScriptedDiscovery {
+        steps: Mutex<VecDeque<DiscoveryStep>>,
+        current: Mutex<Vec<SocketAddr>>,
+        polls: AtomicUsize,
+        poll_tx: std::sync::mpsc::SyncSender<usize>,
+        poll_threads: Mutex<Vec<String>>,
+    }
+
+    impl Discover for ScriptedDiscovery {
+        type Key = SocketAddr;
+        type Error = io::Error;
+
+        fn poll_discover(&self) -> Result<Vec<Change<Self::Key>>, Self::Error> {
+            self.poll_threads
+                .lock()
+                .push(thread::current().name().unwrap_or("<unnamed>").to_owned());
+            let poll = self.polls.fetch_add(1, Ordering::SeqCst) + 1;
+            self.poll_tx
+                .send(poll)
+                .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "poll observer closed"))?;
+            let step = self.steps.lock().pop_front().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::UnexpectedEof, "discovery script exhausted")
+            })?;
+            let endpoints = match step {
+                DiscoveryStep::Error(message) => {
+                    return Err(io::Error::other(message));
+                }
+                DiscoveryStep::Snapshot(endpoints) => endpoints,
+                DiscoveryStep::WaitForRelease { endpoints, release } => {
+                    release.recv_timeout(Duration::from_secs(2)).map_err(|_| {
+                        io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            "discovery release was not published",
+                        )
+                    })?;
+                    endpoints
+                }
+            };
+            *self.current.lock() = endpoints.clone();
+            Ok(endpoints.into_iter().map(Change::Insert).collect())
+        }
+
+        fn endpoints(&self) -> Vec<Self::Key> {
+            self.current.lock().clone()
+        }
+    }
+
     let resolved_endpoints = Arc::new(Mutex::new(HashSet::from([endpoint_a])));
     let resolver_endpoints = Arc::clone(&resolved_endpoints);
     let discovery = DnsServiceDiscovery::new(
@@ -2509,14 +2567,26 @@ fn native_remote_runtime_atomically_rotates_validated_routes() {
         .expect("initial discovered endpoint snapshot should validate");
     let initial_route =
         NativeRemoteRoute::new(destination.clone(), hello.clone(), client_a.clone());
+    let unrelated_destination = NodeId::new("destination-native-runtime-unrelated");
+    let unrelated_route = NativeRemoteRoute::new(
+        unrelated_destination.clone(),
+        hello.clone(),
+        client_a.clone(),
+    );
 
     let runtime = RuntimeBuilder::new()
         .worker_threads(2)
+        .blocking_threads(1, 2)
+        .thread_name_prefix("remote-discovery-caller")
         .build()
         .expect("route-rotation driver runtime should build");
     let native = Arc::new(
-        NativeRemoteRuntime::new(runtime.handle(), origin.clone(), [initial_route.clone()])
-            .expect("initial native route should validate"),
+        NativeRemoteRuntime::new(
+            runtime.handle(),
+            origin.clone(),
+            [initial_route.clone(), unrelated_route.clone()],
+        )
+        .expect("initial native routes should validate"),
     );
     let cap = asupersync::remote::RemoteCap::new()
         .with_local_node(origin.clone())
@@ -2556,31 +2626,202 @@ fn native_remote_runtime_atomically_rotates_validated_routes() {
     assert_eq!(dispatch_count_a.load(Ordering::SeqCst), 1);
     assert_eq!(dispatch_count_b.load(Ordering::SeqCst), 0);
 
-    *resolved_endpoints.lock() = HashSet::from([endpoint_b]);
-    discovery.invalidate();
+    let (poll_tx, poll_rx) = std::sync::mpsc::sync_channel(8);
+    let (empty_release_tx, empty_release_rx) = std::sync::mpsc::sync_channel(0);
+    let (duplicate_release_tx, duplicate_release_rx) = std::sync::mpsc::sync_channel(0);
+    let (publish_release_tx, publish_release_rx) = std::sync::mpsc::sync_channel(0);
+    let (remove_release_tx, remove_release_rx) = std::sync::mpsc::sync_channel(0);
+    let scripted_discovery = Arc::new(ScriptedDiscovery {
+        steps: Mutex::new(VecDeque::from([
+            DiscoveryStep::Error("resolver temporarily unavailable"),
+            DiscoveryStep::WaitForRelease {
+                endpoints: Vec::new(),
+                release: empty_release_rx,
+            },
+            DiscoveryStep::WaitForRelease {
+                endpoints: vec![endpoint_b, endpoint_b],
+                release: duplicate_release_rx,
+            },
+            DiscoveryStep::WaitForRelease {
+                endpoints: vec![endpoint_b],
+                release: publish_release_rx,
+            },
+            DiscoveryStep::WaitForRelease {
+                endpoints: vec![endpoint_b],
+                release: remove_release_rx,
+            },
+        ])),
+        current: Mutex::new(vec![endpoint_a]),
+        polls: AtomicUsize::new(0),
+        poll_tx,
+        poll_threads: Mutex::new(Vec::new()),
+    });
     assert_eq!(
-        discovery
-            .poll_discover()
-            .expect("replacement deterministic DNS poll should succeed")
-            .len(),
+        NativeRemoteDiscoveryDriver::new(
+            Arc::clone(&native),
+            destination.clone(),
+            Arc::clone(&scripted_discovery),
+            NativeRemoteDiscoveryConfig::new().with_poll_interval(Duration::ZERO),
+        )
+        .expect_err("zero poll interval must fail closed"),
+        NativeRemoteDiscoveryBuildError::ZeroPollInterval
+    );
+    assert_eq!(
+        NativeRemoteDiscoveryDriver::new(
+            Arc::clone(&native),
+            destination.clone(),
+            Arc::clone(&scripted_discovery),
+            NativeRemoteDiscoveryConfig::new().with_retry_backoff(Duration::ZERO),
+        )
+        .expect_err("zero retry backoff must fail closed"),
+        NativeRemoteDiscoveryBuildError::ZeroRetryBackoff
+    );
+    assert_eq!(
+        NativeRemoteDiscoveryDriver::new(
+            Arc::clone(&native),
+            destination.clone(),
+            Arc::clone(&scripted_discovery),
+            NativeRemoteDiscoveryConfig::new().with_max_consecutive_failures(0),
+        )
+        .expect_err("zero failure budget must fail closed"),
+        NativeRemoteDiscoveryBuildError::ZeroMaxConsecutiveFailures
+    );
+    let no_pool_driver = NativeRemoteDiscoveryDriver::new(
+        Arc::clone(&native),
+        destination.clone(),
+        Arc::clone(&scripted_discovery),
+        NativeRemoteDiscoveryConfig::new(),
+    )
+    .expect("no-pool refusal driver config should validate");
+    let no_pool_error = block_on(no_pool_driver.run(&Cx::for_testing()))
+        .expect_err("a context without blocking-pool authority must fail closed");
+    match no_pool_error {
+        NativeRemoteDiscoveryError::BlockingPoolUnavailable {
+            destination: ref refused_destination,
+            ref report,
+        } if refused_destination == &destination => {
+            assert_eq!(report.polls(), 0);
+            assert_eq!(report.final_route_generation(), 0);
+        }
+        other => panic!("unexpected no-pool discovery error: {other:?}"),
+    }
+    drop(no_pool_driver);
+    assert_eq!(scripted_discovery.polls.load(Ordering::SeqCst), 0);
+    let discovery_driver = NativeRemoteDiscoveryDriver::new(
+        Arc::clone(&native),
+        destination.clone(),
+        Arc::clone(&scripted_discovery),
+        NativeRemoteDiscoveryConfig::new()
+            .with_poll_interval(Duration::from_millis(1))
+            .with_retry_backoff(Duration::from_millis(1))
+            .with_max_consecutive_failures(4),
+    )
+    .expect("active discovery config should validate");
+    let driver_cx = runtime.request_cx_with_budget(Budget::INFINITE);
+    let discovery_task = thread::spawn(move || {
+        let ambient_runtime = RuntimeBuilder::new()
+            .worker_threads(1)
+            .thread_name_prefix("remote-discovery-ambient")
+            .build()
+            .expect("cross-runtime discovery executor should build");
+        let result = ambient_runtime.block_on(discovery_driver.run(&driver_cx));
+        assert!(ambient_runtime.shutdown_timeout(Duration::from_secs(2)));
+        result
+    });
+    assert_eq!(
+        poll_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("source-error discovery poll should start"),
+        1
+    );
+    assert_eq!(
+        poll_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("empty-snapshot discovery poll should start"),
         2
     );
-    assert_eq!(discovery.endpoints(), vec![endpoint_b]);
-    let route_b = initial_route
-        .with_discovered_endpoints(&discovery)
-        .expect("discovered replacement route should preserve client policy");
+    assert_eq!(native.route_generation(), 0);
+    assert_eq!(
+        native
+            .effective_route(&destination)
+            .expect("source failure must retain route A")
+            .client()
+            .endpoint(),
+        endpoint_a
+    );
+    empty_release_tx
+        .send(())
+        .expect("empty discovery poll should be released");
+    assert_eq!(
+        poll_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("duplicate-snapshot discovery poll should start"),
+        3
+    );
+    assert_eq!(native.route_generation(), 0);
+    assert_eq!(
+        native
+            .effective_route(&destination)
+            .expect("empty snapshot must retain route A")
+            .client()
+            .endpoint(),
+        endpoint_a
+    );
+    duplicate_release_tx
+        .send(())
+        .expect("duplicate discovery poll should be released");
+    assert_eq!(
+        poll_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("valid-snapshot discovery poll should start"),
+        4
+    );
+    assert_eq!(native.route_generation(), 0);
+    assert_eq!(
+        native
+            .effective_route(&destination)
+            .expect("duplicate snapshot must retain route A")
+            .client()
+            .endpoint(),
+        endpoint_a
+    );
+    assert_eq!(
+        native
+            .effective_route(&unrelated_destination)
+            .expect("refused snapshots must preserve unrelated routes")
+            .client()
+            .endpoint(),
+        endpoint_a
+    );
+    publish_release_tx
+        .send(())
+        .expect("valid discovery poll should be released");
+    let publication_deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while native.route_generation() != 1 {
+        assert!(
+            std::time::Instant::now() < publication_deadline,
+            "valid discovered route should publish after refused snapshots"
+        );
+        thread::yield_now();
+    }
+    assert!(
+        scripted_discovery
+            .poll_threads
+            .lock()
+            .iter()
+            .all(|name| name.starts_with("remote-discovery-caller-blocking-")),
+        "discovery polls must use the supplied Cx pool even when another runtime polls the driver"
+    );
+
+    let route_b = native
+        .effective_route(&destination)
+        .expect("discovered replacement route should publish");
     assert_eq!(route_b.destination(), &destination);
     assert_eq!(route_b.hello(), &hello);
     assert_eq!(route_b.client().server_name(), client_a.server_name());
     assert_eq!(route_b.client().config(), client_a.config());
     assert_eq!(route_b.client().bootstrap_endpoints(), &[endpoint_b]);
     let client_b = route_b.client().clone();
-    assert_eq!(
-        native
-            .replace_routes([route_b.clone()])
-            .expect("valid discovered replacement should publish atomically"),
-        1
-    );
     assert_eq!(native.route_generation(), 1);
     assert_eq!(
         native
@@ -2598,42 +2839,6 @@ fn native_remote_runtime_atomically_rotates_validated_routes() {
             .endpoint(),
         endpoint_b
     );
-
-    struct SnapshotDiscovery(Vec<SocketAddr>);
-
-    impl Discover for SnapshotDiscovery {
-        type Key = SocketAddr;
-        type Error = std::convert::Infallible;
-
-        fn poll_discover(
-            &self,
-        ) -> Result<Vec<asupersync::service::Change<Self::Key>>, Self::Error> {
-            Ok(Vec::new())
-        }
-
-        fn endpoints(&self) -> Vec<Self::Key> {
-            self.0.clone()
-        }
-    }
-
-    let empty_refresh = route_b
-        .with_discovered_endpoints(&SnapshotDiscovery(Vec::new()))
-        .expect_err("empty discovered endpoint snapshot must fail before publication");
-    assert!(matches!(
-        empty_refresh,
-        RemoteComputationClientError::InvalidConfig(
-            "remote client bootstrap endpoints must be nonempty"
-        )
-    ));
-    let duplicate_refresh = route_b
-        .with_discovered_endpoints(&SnapshotDiscovery(vec![endpoint_b, endpoint_b]))
-        .expect_err("duplicate discovered endpoint snapshot must fail before publication");
-    assert!(matches!(
-        duplicate_refresh,
-        RemoteComputationClientError::InvalidConfig(
-            "remote client bootstrap endpoints must be unique"
-        )
-    ));
     assert_eq!(native.route_generation(), 1);
     assert_eq!(
         native
@@ -2642,6 +2847,14 @@ fn native_remote_runtime_atomically_rotates_validated_routes() {
             .client()
             .endpoint(),
         endpoint_b
+    );
+    assert_eq!(
+        native
+            .effective_route(&unrelated_destination)
+            .expect("single-destination refresh must preserve unrelated routes")
+            .client()
+            .endpoint(),
+        endpoint_a
     );
 
     let wrong_protocol = native
@@ -2714,12 +2927,50 @@ fn native_remote_runtime_atomically_rotates_validated_routes() {
     assert_eq!(native.active_operations(), 1);
 
     assert_eq!(
+        poll_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("driver should enter the planted removal poll"),
+        5
+    );
+    assert_eq!(
         native
-            .replace_routes(std::iter::empty())
-            .expect("empty snapshot should remove every route"),
+            .replace_routes([unrelated_route.clone()])
+            .expect("selected route removal should preserve the unrelated destination"),
         2
     );
     assert!(native.effective_route(&destination).is_none());
+    assert_eq!(
+        native
+            .effective_route(&unrelated_destination)
+            .expect("unrelated destination must survive selected route removal")
+            .client()
+            .endpoint(),
+        endpoint_a
+    );
+    remove_release_tx
+        .send(())
+        .expect("removal poll should be released after route deletion");
+    let discovery_error = discovery_task
+        .join()
+        .expect("cross-runtime discovery executor should not panic")
+        .expect_err("an active driver must terminate when its destination is removed");
+    let discovery_report = match discovery_error {
+        NativeRemoteDiscoveryError::DestinationRemoved {
+            destination: ref removed_destination,
+            ref report,
+        } if removed_destination == &destination => report,
+        other => panic!("unexpected active discovery terminal error: {other:?}"),
+    };
+    assert_eq!(discovery_report.polls(), 5);
+    assert_eq!(discovery_report.route_publications(), 1);
+    assert_eq!(discovery_report.unchanged_snapshots(), 0);
+    assert_eq!(discovery_report.source_failures(), 1);
+    assert_eq!(discovery_report.refused_snapshots(), 2);
+    assert_eq!(discovery_report.final_route_generation(), 2);
+    assert!(
+        native.effective_route(&destination).is_none(),
+        "a removed destination must not be resurrected by its active driver"
+    );
     let unreachable = spawn_remote(
         &cx,
         destination.clone(),
@@ -2732,6 +2983,138 @@ fn native_remote_runtime_atomically_rotates_validated_routes() {
         RemoteError::NodeUnreachable(destination.as_str().to_owned())
     );
     assert_eq!(dispatch_count_b.load(Ordering::SeqCst), 1);
+
+    let (failure_poll_tx, failure_poll_rx) = std::sync::mpsc::sync_channel(2);
+    let failure_discovery = Arc::new(ScriptedDiscovery {
+        steps: Mutex::new(VecDeque::from([
+            DiscoveryStep::Error("first discovery outage"),
+            DiscoveryStep::Error("terminal discovery outage"),
+        ])),
+        current: Mutex::new(vec![endpoint_a]),
+        polls: AtomicUsize::new(0),
+        poll_tx: failure_poll_tx,
+        poll_threads: Mutex::new(Vec::new()),
+    });
+    let failure_driver = NativeRemoteDiscoveryDriver::new(
+        Arc::clone(&native),
+        unrelated_destination.clone(),
+        Arc::clone(&failure_discovery),
+        NativeRemoteDiscoveryConfig::new()
+            .with_retry_backoff(Duration::from_millis(1))
+            .with_max_consecutive_failures(2),
+    )
+    .expect("failure-budget discovery config should validate");
+    let failure_driver_cx = runtime.request_cx_with_budget(Budget::INFINITE);
+    let failure_task = thread::spawn(move || {
+        let ambient_runtime = RuntimeBuilder::new()
+            .worker_threads(1)
+            .thread_name_prefix("remote-discovery-failure-ambient")
+            .build()
+            .expect("failure-budget discovery executor should build");
+        let result = ambient_runtime.block_on(failure_driver.run(&failure_driver_cx));
+        assert!(ambient_runtime.shutdown_timeout(Duration::from_secs(2)));
+        result
+    });
+    for expected_poll in 1..=2 {
+        assert_eq!(
+            failure_poll_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("failure-budget discovery poll should complete"),
+            expected_poll
+        );
+    }
+    let failure_error = failure_task
+        .join()
+        .expect("failure-budget discovery executor should not panic")
+        .expect_err("the exact consecutive failure budget must terminate the driver");
+    match failure_error {
+        NativeRemoteDiscoveryError::RetryExhausted {
+            destination: ref failed_destination,
+            consecutive_failures,
+            ref last_failure,
+            ref report,
+        } if failed_destination == &unrelated_destination => {
+            assert_eq!(consecutive_failures, 2);
+            assert!(last_failure.contains("terminal discovery outage"));
+            assert_eq!(report.polls(), 2);
+            assert_eq!(report.route_publications(), 0);
+            assert_eq!(report.unchanged_snapshots(), 0);
+            assert_eq!(report.source_failures(), 2);
+            assert_eq!(report.refused_snapshots(), 0);
+            assert_eq!(report.final_route_generation(), 2);
+        }
+        other => panic!("unexpected failure-budget discovery error: {other:?}"),
+    }
+    assert_eq!(native.route_generation(), 2);
+    assert_eq!(
+        native
+            .effective_route(&unrelated_destination)
+            .expect("failure exhaustion must retain the last-known-good route")
+            .client()
+            .endpoint(),
+        endpoint_a
+    );
+    assert!(
+        failure_discovery
+            .poll_threads
+            .lock()
+            .iter()
+            .all(|name| name.starts_with("remote-discovery-caller-blocking-")),
+        "failure polls must remain bound to the supplied Cx pool"
+    );
+
+    let (cancel_poll_tx, cancel_poll_rx) = std::sync::mpsc::sync_channel(1);
+    let cancel_discovery = Arc::new(ScriptedDiscovery {
+        steps: Mutex::new(VecDeque::from([DiscoveryStep::Snapshot(vec![endpoint_a])])),
+        current: Mutex::new(vec![endpoint_a]),
+        polls: AtomicUsize::new(0),
+        poll_tx: cancel_poll_tx,
+        poll_threads: Mutex::new(Vec::new()),
+    });
+    let cancel_driver = NativeRemoteDiscoveryDriver::new(
+        Arc::clone(&native),
+        unrelated_destination.clone(),
+        Arc::clone(&cancel_discovery),
+        NativeRemoteDiscoveryConfig::new().with_poll_interval(Duration::from_secs(1)),
+    )
+    .expect("cancellation discovery config should validate");
+    let cancel_driver_cx = runtime.request_cx_with_budget(Budget::INFINITE);
+    let cancel_driver_signal = cancel_driver_cx.clone();
+    let cancel_driver_task = thread::spawn(move || {
+        let ambient_runtime = RuntimeBuilder::new()
+            .worker_threads(1)
+            .thread_name_prefix("remote-discovery-cancel-ambient")
+            .build()
+            .expect("cancellation discovery executor should build");
+        let result = ambient_runtime.block_on(cancel_driver.run(&cancel_driver_cx));
+        assert!(ambient_runtime.shutdown_timeout(Duration::from_secs(2)));
+        result
+    });
+    assert_eq!(
+        cancel_poll_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("cancellation driver should poll immediately"),
+        1
+    );
+    let cancel_started = std::time::Instant::now();
+    cancel_driver_signal.set_cancel_requested(true);
+    let cancel_report = cancel_driver_task
+        .join()
+        .expect("cancellation discovery executor should not panic")
+        .expect("caller cancellation should stop discovery successfully");
+    drop(cancel_driver_signal);
+    assert!(
+        cancel_started.elapsed() < Duration::from_millis(500),
+        "cancellation must wake the one-second poll sleep promptly"
+    );
+    assert_eq!(cancel_report.polls(), 1);
+    assert_eq!(cancel_report.route_publications(), 0);
+    assert_eq!(cancel_report.unchanged_snapshots(), 1);
+    assert_eq!(cancel_report.source_failures(), 0);
+    assert_eq!(cancel_report.refused_snapshots(), 0);
+    assert_eq!(cancel_report.final_route_generation(), 2);
+    assert_eq!(cancel_discovery.polls.load(Ordering::SeqCst), 1);
+
     release_a_tx
         .send(&cx, ())
         .expect("route A operation should be released after route removal");
