@@ -21,7 +21,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 use sha2::{Digest, Sha256};
 
 const VALID_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
@@ -311,8 +311,7 @@ fn wait_for_atpd_quic_and_diagnostics_addrs(
     }
 }
 
-fn wait_with_timeout(mut child: Child, label: &str) -> Output {
-    let deadline = Instant::now() + Duration::from_secs(20);
+fn wait_with_deadline(mut child: Child, label: &str, deadline: Instant) -> Output {
     loop {
         match child.try_wait().expect("poll child status") {
             Some(_) => return child.wait_with_output().expect("collect child output"),
@@ -330,6 +329,10 @@ fn wait_with_timeout(mut child: Child, label: &str) -> Output {
             }
         }
     }
+}
+
+fn wait_with_timeout(child: Child, label: &str) -> Output {
+    wait_with_deadline(child, label, Instant::now() + Duration::from_secs(20))
 }
 
 fn wait_for_file(path: &Path, label: &str) {
@@ -456,6 +459,28 @@ fn linux_interface_counter(interface: &str, counter: &str) -> u64 {
         .trim()
         .parse()
         .unwrap_or_else(|error| panic!("parse {path}: {error}"))
+}
+
+#[cfg(target_os = "linux")]
+fn linux_tc_dropped_packets(namespace: &str, interface: &str) -> u64 {
+    let output = run_linux_command(
+        "ip",
+        &[
+            "netns", "exec", namespace, "tc", "-s", "qdisc", "show", "dev", interface,
+        ],
+        "read netem counters",
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    stdout
+        .split("dropped ")
+        .skip(1)
+        .filter_map(|suffix| {
+            suffix
+                .split(|character: char| !character.is_ascii_digit())
+                .next()
+                .and_then(|count| count.parse::<u64>().ok())
+        })
+        .sum()
 }
 
 #[cfg(windows)]
@@ -2056,6 +2081,408 @@ fn bond_direct_ip_netns_selects_reachable_advertised_endpoint() {
         "successful direct-IP bonded transfer left staging directories: {:?}",
         staging_dirs(&dest)
     );
+}
+
+/// H2 acceptance: three independent donor namespaces feed one receiver across
+/// three veth pairs. Every donor leg has real kernel `netem` loss and delay,
+/// while the receiver advertises all three routed addresses. A successful run
+/// therefore proves that endpoint affinity, N-donor enrollment, loss recovery,
+/// and the atomic commit path compose across real sockets rather than only in
+/// the in-process loopback model.
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "requires root plus iproute2 network-namespace, veth, and netem support"]
+fn bond_three_donor_netns_commits_under_per_donor_loss() {
+    let uid = run_linux_command("id", &["-u"], "query effective uid");
+    assert_eq!(
+        String::from_utf8_lossy(&uid.stdout).trim(),
+        "0",
+        "explicit H2 netns acceptance requires root/CAP_NET_ADMIN"
+    );
+    let _ = run_linux_command("ip", &["-Version"], "query iproute2 version");
+    let _ = run_linux_command("tc", &["-Version"], "query tc version");
+
+    struct Leg {
+        namespace: String,
+        host_veth: String,
+        donor_veth: String,
+        host_ip: String,
+        donor_ip: String,
+    }
+
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock after epoch")
+        .as_nanos() as u64;
+    let pid = std::process::id();
+    let slot = (nanos ^ u64::from(pid)) % (2 * 256 * 16);
+    let second_octet = 18 + slot / (256 * 16);
+    let remainder = slot % (256 * 16);
+    let third_octet = remainder / 16;
+    let fourth_octet = (remainder % 16) * 16;
+    let suffix = format!("{:04x}{:02x}", pid % 65_536, nanos % 256);
+
+    let mut legs = Vec::new();
+    let mut netns_guards = Vec::new();
+    let loss_rates = ["5%", "7%", "9%"];
+    let delays = ["2ms", "3ms", "4ms"];
+    for index in 0..3u64 {
+        let namespace = format!("atph2{index}-{suffix}");
+        let host_veth = format!("ah2h{index}{suffix}");
+        let donor_veth = format!("ah2d{index}{suffix}");
+        let subnet_base = fourth_octet + index * 4;
+        let host_ip = format!("198.{second_octet}.{third_octet}.{}", subnet_base + 1);
+        let donor_ip = format!("198.{second_octet}.{third_octet}.{}", subnet_base + 2);
+
+        run_linux_command(
+            "ip",
+            &["netns", "add", &namespace],
+            "create H2 donor namespace",
+        );
+        netns_guards.push(LinuxNetnsGuard {
+            namespace: namespace.clone(),
+            host_veth: host_veth.clone(),
+        });
+        run_linux_command(
+            "ip",
+            &[
+                "link",
+                "add",
+                &host_veth,
+                "type",
+                "veth",
+                "peer",
+                "name",
+                &donor_veth,
+            ],
+            "create H2 veth pair",
+        );
+        run_linux_command(
+            "ip",
+            &["link", "set", &donor_veth, "netns", &namespace],
+            "move H2 donor veth into namespace",
+        );
+        let host_cidr = format!("{host_ip}/30");
+        let donor_cidr = format!("{donor_ip}/30");
+        run_linux_command(
+            "ip",
+            &["addr", "add", &host_cidr, "dev", &host_veth],
+            "address H2 receiver veth",
+        );
+        run_linux_command(
+            "ip",
+            &["link", "set", "dev", &host_veth, "up"],
+            "bring H2 receiver veth up",
+        );
+        run_linux_command(
+            "ip",
+            &[
+                "-n",
+                &namespace,
+                "addr",
+                "add",
+                &donor_cidr,
+                "dev",
+                &donor_veth,
+            ],
+            "address H2 donor veth",
+        );
+        run_linux_command(
+            "ip",
+            &["-n", &namespace, "link", "set", "lo", "up"],
+            "bring H2 donor loopback up",
+        );
+        run_linux_command(
+            "ip",
+            &["-n", &namespace, "link", "set", "dev", &donor_veth, "up"],
+            "bring H2 donor veth up",
+        );
+        run_linux_command(
+            "ip",
+            &[
+                "netns",
+                "exec",
+                &namespace,
+                "tc",
+                "qdisc",
+                "add",
+                "dev",
+                &donor_veth,
+                "root",
+                "netem",
+                "loss",
+                loss_rates[index as usize],
+                "delay",
+                delays[index as usize],
+            ],
+            "attach H2 donor-side netem",
+        );
+        run_linux_command(
+            "tc",
+            &[
+                "qdisc",
+                "add",
+                "dev",
+                &host_veth,
+                "root",
+                "netem",
+                "loss",
+                loss_rates[index as usize],
+                "delay",
+                delays[index as usize],
+            ],
+            "attach H2 receiver-side netem",
+        );
+
+        legs.push(Leg {
+            namespace,
+            host_veth,
+            donor_veth,
+            host_ip,
+            donor_ip,
+        });
+    }
+
+    let root = unique_tmp("bond-three-donor-netns");
+    let receiver_source = root.join("receiver-source/payload.bin");
+    let dest = root.join("dest");
+    let payload = (0..(1024 * 1024 + 173u32))
+        .map(|index| (index.wrapping_mul(71) % 251) as u8)
+        .collect::<Vec<_>>();
+    write_file(&receiver_source, &payload);
+    std::fs::create_dir_all(&dest).expect("create H2 bonded destination");
+    let donor_sources = (0..3)
+        .map(|index| {
+            let source = root.join(format!("donor-{index}-source/payload.bin"));
+            write_file(&source, &payload);
+            source
+        })
+        .collect::<Vec<_>>();
+
+    let mut receiver_command = Command::new(env!("CARGO_BIN_EXE_atp"));
+    receiver_command
+        .env("ATP_BOND_TRACE", "1")
+        .arg("bond-recv")
+        .arg(&dest)
+        .arg(&receiver_source)
+        .args([
+            "--listen",
+            "0.0.0.0:0",
+            "--expect-donors",
+            "3",
+            "--udp-bind",
+            "0.0.0.0",
+        ]);
+    for leg in &legs {
+        receiver_command.arg("--udp-advertise").arg(&leg.host_ip);
+    }
+    let receiver = receiver_command
+        .args([
+            "--workers",
+            "3",
+            "--max-block-size",
+            "65536",
+            "--rq-auth-key-hex",
+            VALID_KEY_HEX,
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn H2 bonded receiver");
+    let mut receiver = ChildKillGuard::new(receiver);
+    let receiver_stderr = spawn_stderr_reader(receiver.child_mut());
+    let (listen_addr, mut receiver_lines) = wait_for_bonded_listen_addr(&receiver_stderr);
+    assert!(
+        listen_addr.ip().is_unspecified(),
+        "multi-interface H2 receiver must bind wildcard control address: {listen_addr}"
+    );
+
+    let packets_before = legs
+        .iter()
+        .map(|leg| linux_interface_counter(&leg.host_veth, "rx_packets"))
+        .collect::<Vec<_>>();
+    let mut donor_guards = Vec::new();
+    for (index, leg) in legs.iter().enumerate() {
+        let control = SocketAddr::new(
+            leg.host_ip.parse().expect("H2 receiver-side veth IP"),
+            listen_addr.port(),
+        );
+        let donor = Command::new("ip")
+            .args(["netns", "exec", &leg.namespace, "env", "ATP_BOND_TRACE=1"])
+            .arg(env!("CARGO_BIN_EXE_atp"))
+            .arg("bond-donate")
+            .arg(&donor_sources[index])
+            .args([
+                "--to",
+                &control.to_string(),
+                "--workers",
+                "3",
+                "--max-block-size",
+                "65536",
+                "--rq-auth-key-hex",
+                VALID_KEY_HEX,
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap_or_else(|error| panic!("spawn H2 donor {index}: {error}"));
+        let mut donor = ChildKillGuard::new(donor);
+        let donor_stderr = spawn_stderr_reader(donor.child_mut());
+        donor_guards.push((donor, donor_stderr));
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(120);
+    let donor_outputs = donor_guards
+        .into_iter()
+        .enumerate()
+        .map(|(index, (donor, donor_stderr))| {
+            let output = wait_with_deadline(
+                donor.into_inner(),
+                &format!("H2 namespaced donor {index}"),
+                deadline,
+            );
+            let trace_lines = donor_stderr.into_iter().collect::<Vec<_>>();
+            (output, trace_lines)
+        })
+        .collect::<Vec<_>>();
+    for (index, (donor, trace_lines)) in donor_outputs.iter().enumerate() {
+        if !donor.status.success() {
+            receiver.kill_and_wait();
+            panic!(
+                "H2 namespaced donor {index} failed; stdout: {}; trace lines: {:?}",
+                String::from_utf8_lossy(&donor.stdout),
+                trace_lines
+            );
+        }
+    }
+
+    let receiver = wait_with_deadline(
+        receiver.into_inner(),
+        "H2 three-donor bonded receiver",
+        deadline,
+    );
+    receiver_lines.extend(receiver_stderr.into_iter());
+    assert!(
+        receiver.status.success(),
+        "H2 bonded receiver failed; stdout: {}; trace lines: {:?}",
+        String::from_utf8_lossy(&receiver.stdout),
+        receiver_lines
+    );
+
+    let mut assigned_indices = Vec::new();
+    for (index, (donor, trace_lines)) in donor_outputs.iter().enumerate() {
+        let report = parse_cli_json(donor, &format!("H2 namespaced donor {index}"));
+        assert_eq!(report["committed"], serde_json::json!(true));
+        assert_eq!(report["sha_ok"], serde_json::json!(true));
+        assert_eq!(report["merkle_ok"], serde_json::json!(true));
+        assert_eq!(report["donor_count"], serde_json::json!(3));
+        assert!(
+            report["symbols_sent"]
+                .as_u64()
+                .is_some_and(|symbols| symbols > 0),
+            "H2 donor {index} must send real symbols: {report}"
+        );
+        assigned_indices.push(
+            report["donor_index"]
+                .as_u64()
+                .expect("H2 donor_index report"),
+        );
+
+        let selected_endpoints = report["receiver_endpoints"]
+            .as_array()
+            .expect("H2 donor receiver_endpoints array")
+            .iter()
+            .map(|value| {
+                value
+                    .as_str()
+                    .expect("H2 receiver endpoint string")
+                    .parse::<SocketAddr>()
+                    .expect("H2 receiver endpoint socket address")
+            })
+            .collect::<Vec<_>>();
+        let expected_ip = legs[index]
+            .host_ip
+            .parse::<std::net::IpAddr>()
+            .expect("H2 expected receiver IP");
+        assert!(
+            !selected_endpoints.is_empty()
+                && selected_endpoints
+                    .iter()
+                    .all(|endpoint| endpoint.ip() == expected_ip),
+            "H2 donor {index} must retain only its control-affine path: {selected_endpoints:?}"
+        );
+
+        let donor_trace = trace_lines.join("\n");
+        assert!(
+            donor_trace.contains("endpoint_path_selected")
+                && donor_trace.contains("reason=control-path-affinity")
+                && legs.iter().all(|leg| donor_trace.contains(&leg.host_ip)),
+            "H2 donor {index} trace must show all advertised paths and its selected path: {donor_trace}"
+        );
+    }
+    assigned_indices.sort_unstable();
+    assert_eq!(assigned_indices, vec![0, 1, 2]);
+
+    let receiver_report = parse_cli_json(&receiver, "H2 three-donor bonded receiver");
+    assert_eq!(receiver_report["committed"], serde_json::json!(true));
+    assert_eq!(receiver_report["enrolled_donors"], serde_json::json!(3));
+    assert!(
+        receiver_report["symbols_accepted"]
+            .as_u64()
+            .is_some_and(|symbols| symbols > 0),
+        "H2 receiver must accept real symbols: {receiver_report}"
+    );
+    let ingress = receiver_report["donor_ingress"]
+        .as_array()
+        .expect("H2 donor_ingress array");
+    assert_eq!(ingress.len(), 3, "every H2 donor must appear in ingress");
+    let mut ingress_indices = Vec::new();
+    for row in ingress {
+        ingress_indices.push(row["donor_index"].as_u64().expect("H2 ingress donor index"));
+        assert!(
+            row["symbols_accepted"]
+                .as_u64()
+                .is_some_and(|symbols| symbols > 0),
+            "every H2 donor must contribute novel accepted symbols: {row}"
+        );
+    }
+    ingress_indices.sort_unstable();
+    assert_eq!(ingress_indices, vec![0, 1, 2]);
+
+    for (index, leg) in legs.iter().enumerate() {
+        let packets_after = linux_interface_counter(&leg.host_veth, "rx_packets");
+        assert!(
+            packets_after > packets_before[index],
+            "H2 donor {index} traffic must cross {}: before={}, after={packets_after}",
+            leg.host_veth,
+            packets_before[index]
+        );
+        let dropped = linux_tc_dropped_packets(&leg.namespace, &leg.donor_veth);
+        assert!(
+            dropped > 0,
+            "H2 donor {index} netem leg ({} -> {}, loss {}) must drop real packets",
+            leg.donor_ip,
+            leg.host_ip,
+            loss_rates[index]
+        );
+    }
+
+    let committed = std::fs::read(dest.join("payload.bin")).expect("read H2 committed payload");
+    assert_eq!(committed, payload, "H2 commit must be byte-identical");
+    assert_eq!(
+        Sha256::digest(&committed),
+        Sha256::digest(&payload),
+        "H2 committed payload SHA-256 must match the source"
+    );
+    assert!(
+        staging_dirs(&dest).is_empty(),
+        "successful H2 transfer left staging directories: {:?}",
+        staging_dirs(&dest)
+    );
+
+    // Keep the guards visibly live until every counter and qdisc assertion has
+    // completed; their Drop impl performs the only namespace cleanup.
+    assert_eq!(netns_guards.len(), 3);
 }
 
 #[cfg(windows)]
