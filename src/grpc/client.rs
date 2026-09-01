@@ -189,8 +189,11 @@ pub struct ChannelBuilder {
     config: ChannelConfig,
     /// Explicit TLS authority for HTTPS channels.
     tls_connector: Option<TlsConnector>,
-    /// Optional certificate identity when it differs from the dial authority.
+    /// Optional certificate identity when it differs from the logical URI host.
     tls_server_name: Option<String>,
+    /// Explicit native TCP destination, separate from the logical authority.
+    #[cfg(not(target_arch = "wasm32"))]
+    dial_addr: Option<SocketAddr>,
 }
 
 impl ChannelBuilder {
@@ -207,6 +210,8 @@ impl ChannelBuilder {
             config: ChannelConfig::default(),
             tls_connector: None,
             tls_server_name: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            dial_addr: None,
         }
     }
 
@@ -315,16 +320,29 @@ impl ChannelBuilder {
         self
     }
 
-    /// Override the DNS name authenticated by TLS while retaining the URI's
-    /// localhost dial address and HTTP/2 authority.
+    /// Override the DNS name authenticated by TLS.
     ///
-    /// This is useful for local sidecars and tests whose certificate identity
-    /// differs from the loopback socket address. It does not relax the
-    /// localhost-only network boundary.
+    /// This changes only certificate authentication. It never changes the URI
+    /// `:authority` or the native socket selected by the localhost default or
+    /// `Self::dial_addr`.
     #[must_use]
     pub fn tls_server_name(mut self, server_name: impl Into<String>) -> Self {
         self.config.use_tls = true;
         self.tls_server_name = Some(server_name.into());
+        self
+    }
+
+    /// Dial one explicit native TCP address while retaining the URI authority.
+    ///
+    /// This is the capability-safe alternative to ambient DNS. An explicit
+    /// address is accepted only for an HTTPS channel with a caller-supplied
+    /// [`TlsConnector`]. The URI still supplies HTTP/2 `:authority` and, unless
+    /// [`Self::tls_server_name`] overrides it, the certificate identity.
+    /// Deterministic `loopback` channels cannot use this native transport.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub fn dial_addr(mut self, address: SocketAddr) -> Self {
+        self.dial_addr = Some(address);
         self
     }
 
@@ -335,17 +353,21 @@ impl ChannelBuilder {
             self.config,
             self.tls_connector,
             self.tls_server_name,
+            #[cfg(not(target_arch = "wasm32"))]
+            self.dial_addr,
         )
         .await
     }
 }
 
-/// A gRPC channel representing the current localhost-bounded client transport.
+/// A gRPC channel representing an explicit client transport capability.
 ///
 /// `loopback` selects deterministic in-memory behavior. `localhost` and
 /// `127.0.0.1` select native HTTP/2 over TCP, optionally protected by a
-/// caller-supplied TLS connector. The channel is intentionally lazy:
-/// constructing it performs validation but does not open a socket.
+/// caller-supplied TLS connector. `ChannelBuilder::dial_addr` can instead
+/// select one explicit native socket for an authenticated HTTPS authority.
+/// The channel is intentionally lazy: constructing it performs validation but
+/// does not open a socket.
 #[derive(Debug, Clone)]
 pub struct Channel {
     /// The target URI.
@@ -355,9 +377,12 @@ pub struct Channel {
     /// Explicit TLS authority for HTTPS unary calls.
     #[cfg(not(target_arch = "wasm32"))]
     tls_connector: Option<TlsConnector>,
-    /// Optional certificate identity distinct from the dial authority.
+    /// Optional certificate identity distinct from the logical URI host.
     #[cfg(not(target_arch = "wasm32"))]
     tls_server_name: Option<String>,
+    /// Explicit native TCP destination distinct from the logical authority.
+    #[cfg(not(target_arch = "wasm32"))]
+    dial_addr: Option<SocketAddr>,
 }
 
 impl Channel {
@@ -383,7 +408,15 @@ impl Channel {
     /// The first network-backed RPC performs the TCP connection.
     #[allow(clippy::unused_async)]
     pub async fn connect_with_config(uri: &str, config: ChannelConfig) -> Result<Self, GrpcError> {
-        Self::connect_with_transport(uri, config, None, None).await
+        Self::connect_with_transport(
+            uri,
+            config,
+            None,
+            None,
+            #[cfg(not(target_arch = "wasm32"))]
+            None,
+        )
+        .await
     }
 
     #[allow(clippy::unused_async)]
@@ -392,9 +425,33 @@ impl Channel {
         config: ChannelConfig,
         tls_connector: Option<TlsConnector>,
         tls_server_name: Option<String>,
+        #[cfg(not(target_arch = "wasm32"))] dial_addr: Option<SocketAddr>,
     ) -> Result<Self, GrpcError> {
-        validate_channel_uri(uri)?;
-        validate_channel_security(uri, &config, tls_connector.is_some())?;
+        #[cfg(not(target_arch = "wasm32"))]
+        let has_explicit_dial_addr = dial_addr.is_some();
+        #[cfg(target_arch = "wasm32")]
+        let has_explicit_dial_addr = false;
+        validate_channel_uri(uri, has_explicit_dial_addr)?;
+        validate_channel_security(
+            uri,
+            &config,
+            tls_connector.is_some(),
+            has_explicit_dial_addr,
+        )?;
+        if has_explicit_dial_addr {
+            let uri_server_name = channel_uri_host(uri).ok_or_else(|| {
+                GrpcError::transport_kind(
+                    TransportErrorKind::ProtocolViolation,
+                    "explicit gRPC dial URI is missing a TLS server identity",
+                )
+            })?;
+            TlsConnector::validate_domain(uri_server_name).map_err(|error| {
+                GrpcError::transport_kind(
+                    TransportErrorKind::ProtocolViolation,
+                    format!("invalid gRPC URI host for explicit TLS dial: {error}"),
+                )
+            })?;
+        }
         if let Some(server_name) = tls_server_name.as_deref() {
             TlsConnector::validate_domain(server_name).map_err(|error| {
                 GrpcError::transport_kind(
@@ -412,6 +469,8 @@ impl Channel {
             tls_connector,
             #[cfg(not(target_arch = "wasm32"))]
             tls_server_name,
+            #[cfg(not(target_arch = "wasm32"))]
+            dial_addr,
         })
     }
 
@@ -435,6 +494,11 @@ impl Channel {
     #[cfg(not(target_arch = "wasm32"))]
     fn tls_server_name(&self) -> Option<&str> {
         self.tls_server_name.as_deref()
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn dial_addr(&self) -> Option<SocketAddr> {
+        self.dial_addr
     }
 }
 
@@ -868,7 +932,12 @@ struct NativeH2Target {
 
 #[cfg(not(target_arch = "wasm32"))]
 impl NativeH2Target {
-    fn parse(uri: &str, use_tls: bool, tls_server_name: Option<&str>) -> Result<Self, Status> {
+    fn parse(
+        uri: &str,
+        use_tls: bool,
+        tls_server_name: Option<&str>,
+        dial_addr: Option<SocketAddr>,
+    ) -> Result<Self, Status> {
         let (uri_scheme, remainder) = uri
             .split_once("://")
             .ok_or_else(|| Status::unavailable("channel URI is missing a scheme separator"))?;
@@ -891,7 +960,19 @@ impl NativeH2Target {
             }
             None => (authority, if use_tls { 443 } else { 80 }),
         };
-        let address = if host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" {
+        let address = if let Some(address) = dial_addr {
+            if host.eq_ignore_ascii_case("loopback") {
+                return Err(Status::failed_precondition(
+                    "deterministic loopback channels cannot use an explicit native dial address",
+                ));
+            }
+            if !use_tls {
+                return Err(Status::failed_precondition(
+                    "an explicit gRPC dial address requires authenticated HTTPS",
+                ));
+            }
+            address
+        } else if host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" {
             SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port))
         } else {
             return Err(Status::unavailable(
@@ -989,6 +1070,7 @@ async fn native_h2_unary(
         channel.uri(),
         channel.config().use_tls,
         channel.tls_server_name(),
+        channel.dial_addr(),
     )?;
     let config = channel.config().clone();
     let tls_connector = channel.tls_connector().cloned();
@@ -1434,7 +1516,7 @@ impl NativeUnaryAccumulator {
     }
 }
 
-fn validate_channel_uri(uri: &str) -> Result<(), GrpcError> {
+fn validate_channel_uri(uri: &str, has_explicit_dial_addr: bool) -> Result<(), GrpcError> {
     if uri.is_empty() {
         return Err(GrpcError::transport("channel URI cannot be empty"));
     }
@@ -1458,6 +1540,12 @@ fn validate_channel_uri(uri: &str) -> Result<(), GrpcError> {
             "channel URI authority cannot contain whitespace or control characters",
         ));
     }
+    if has_explicit_dial_addr && authority.contains('@') {
+        return Err(GrpcError::transport_kind(
+            TransportErrorKind::ProtocolViolation,
+            "userinfo is not supported with an explicit gRPC dial address",
+        ));
+    }
     // Strip userinfo (RFC 3986 §3.2: authority = [userinfo "@"] host [":" port])
     // before extracting the host, so "loopback:pw@evil.com" doesn't pass.
     let host_port = authority.rsplit_once('@').map_or(authority, |(_, hp)| hp);
@@ -1467,7 +1555,14 @@ fn validate_channel_uri(uri: &str) -> Result<(), GrpcError> {
     if host.is_empty() {
         return Err(GrpcError::transport("channel URI is missing a host"));
     }
-    if !host.eq_ignore_ascii_case("loopback")
+    if has_explicit_dial_addr && (host.contains(':') || host.contains('[') || host.contains(']')) {
+        return Err(GrpcError::transport_kind(
+            TransportErrorKind::ProtocolViolation,
+            "explicit gRPC dial authority must contain one DNS or IPv4 host and at most one port",
+        ));
+    }
+    if !has_explicit_dial_addr
+        && !host.eq_ignore_ascii_case("loopback")
         && !host.eq_ignore_ascii_case("localhost")
         && host != "127.0.0.1"
     {
@@ -1486,15 +1581,39 @@ fn validate_channel_uri(uri: &str) -> Result<(), GrpcError> {
     Ok(())
 }
 
+fn channel_uri_host(uri: &str) -> Option<&str> {
+    let (_, remainder) = uri.split_once("://")?;
+    let authority = remainder.split(['/', '?', '#']).next()?;
+    let host_port = authority.rsplit_once('@').map_or(authority, |(_, hp)| hp);
+    Some(
+        host_port
+            .rsplit_once(':')
+            .map_or(host_port, |(host, _)| host),
+    )
+}
+
 fn validate_channel_security(
     uri: &str,
     config: &ChannelConfig,
     has_tls_connector: bool,
+    has_explicit_dial_addr: bool,
 ) -> Result<(), GrpcError> {
     let (scheme, _) = uri
         .split_once("://")
         .ok_or_else(|| GrpcError::transport("channel URI is missing a scheme separator"))?;
     let tls_requested = scheme.eq_ignore_ascii_case("https") || config.use_tls;
+    if has_explicit_dial_addr && !scheme.eq_ignore_ascii_case("https") {
+        return Err(GrpcError::transport_kind(
+            TransportErrorKind::ProtocolViolation,
+            "an explicit gRPC dial address requires an https URI",
+        ));
+    }
+    if has_explicit_dial_addr && channel_target_is_loopback(uri) {
+        return Err(GrpcError::transport_kind(
+            TransportErrorKind::ProtocolViolation,
+            "deterministic loopback channels cannot use an explicit native dial address",
+        ));
+    }
     if tls_requested && channel_target_is_loopback(uri) {
         return Err(GrpcError::transport_kind(
             TransportErrorKind::ProtocolViolation,
@@ -3507,6 +3626,63 @@ mod tests {
                 assert!(message.contains("loopback and localhost only"));
             }
             other => panic!("expected transport error, got: {other:?}"),
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn explicit_dial_addr_requires_authenticated_native_https() {
+        let address = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 50051));
+
+        let cleartext = futures_lite::future::block_on(
+            Channel::builder("http://grpc.service.invalid:50051")
+                .dial_addr(address)
+                .connect(),
+        )
+        .expect_err("explicit cleartext dial must fail closed");
+        assert!(cleartext.to_string().contains("requires an https URI"));
+
+        let missing_tls = futures_lite::future::block_on(
+            Channel::builder("https://grpc.service.invalid:443")
+                .dial_addr(address)
+                .connect(),
+        )
+        .expect_err("explicit HTTPS dial without TLS authority must fail closed");
+        assert!(missing_tls.to_string().contains("explicit TLS connector"));
+
+        let deterministic_loopback = futures_lite::future::block_on(
+            Channel::builder("https://loopback:443")
+                .dial_addr(address)
+                .connect(),
+        )
+        .expect_err("deterministic loopback must reject a native dial capability");
+        assert!(
+            deterministic_loopback
+                .to_string()
+                .contains("cannot use an explicit native dial address")
+        );
+
+        let userinfo = futures_lite::future::block_on(
+            Channel::builder("https://user@grpc.service.invalid:443")
+                .dial_addr(address)
+                .connect(),
+        )
+        .expect_err("explicit dial must reject URI userinfo");
+        assert!(userinfo.to_string().contains("userinfo is not supported"));
+
+        for uri in [
+            "https://grpc.service.invalid:443:444",
+            "https://grpc.service.invalid:notaport",
+            "https://[grpc.service.invalid:443",
+        ] {
+            let malformed =
+                futures_lite::future::block_on(Channel::builder(uri).dial_addr(address).connect())
+                    .expect_err("ambiguous explicit-dial authority must fail closed");
+            assert!(
+                malformed.to_string().contains("at most one port")
+                    || malformed.to_string().contains("unsigned 16-bit integer"),
+                "unexpected explicit-dial authority error for {uri}: {malformed}"
+            );
         }
     }
 

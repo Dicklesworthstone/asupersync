@@ -710,6 +710,7 @@ fn grpc_tls_connector(root_pem: &[u8], advertise_h2: bool) -> TlsConnector {
 #[derive(Debug)]
 struct TlsGrpcObservation {
     scheme: String,
+    authority: String,
     client_id: String,
     request_payload: Vec<u8>,
 }
@@ -745,6 +746,7 @@ async fn serve_tls_grpc_unary(
     let mut inbound = BytesMut::new();
     let mut chunk = [0_u8; 4096];
     let mut scheme = None;
+    let mut authority = None;
     let mut client_id = None;
     let mut request_body = BytesMut::new();
     loop {
@@ -766,6 +768,8 @@ async fn serve_tls_grpc_unary(
                     {
                         if header.name == ":scheme" {
                             scheme = Some(header.value);
+                        } else if header.name == ":authority" {
+                            authority = Some(header.value);
                         } else if header.name == "x-client-id" {
                             client_id = Some(header.value);
                         }
@@ -835,6 +839,8 @@ async fn serve_tls_grpc_unary(
                         return Ok(TlsGrpcObservation {
                             scheme: scheme
                                 .ok_or_else(|| "gRPC TLS request omitted :scheme".to_owned())?,
+                            authority: authority
+                                .ok_or_else(|| "gRPC TLS request omitted :authority".to_owned())?,
                             client_id: client_id
                                 .ok_or_else(|| "gRPC TLS request omitted x-client-id".to_owned())?,
                             request_payload: request.data.to_vec(),
@@ -1189,7 +1195,81 @@ fn public_grpc_client_unary_crosses_authenticated_tls_h2() {
 
         let observation = server.await.expect("gRPC TLS fixture exchange");
         assert_eq!(observation.scheme, "https");
+        assert_eq!(observation.authority, format!("localhost:{}", addr.port()));
         assert_eq!(observation.client_id, "tls-client");
+        assert_eq!(observation.request_payload, b"tls-public-ping");
+    });
+}
+
+/// br-asupersync-server-stack-hardening-eeexl1.20: an explicit native socket
+/// is a dial capability, not authority. The logical host remains on the wire
+/// while TLS authenticates the explicitly selected server name and no DNS is
+/// consulted.
+#[cfg(feature = "tls")]
+#[test]
+fn public_grpc_client_unary_crosses_explicit_authenticated_dial_addr() {
+    let runtime = RuntimeBuilder::new()
+        .worker_threads(2)
+        .build()
+        .expect("build runtime");
+    let handle = runtime.handle();
+
+    runtime.block_on(async move {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind explicit-dial gRPC TLS fixture");
+        let addr = listener
+            .local_addr()
+            .expect("explicit-dial gRPC TLS fixture address");
+        let acceptor = grpc_tls_acceptor(true);
+        let server = handle
+            .clone()
+            .try_spawn(async move { serve_tls_grpc_unary(listener, acceptor).await })
+            .expect("spawn explicit-dial gRPC TLS fixture");
+
+        let logical_authority = "grpc.service.invalid:443";
+        let channel = Channel::builder(format!("https://{logical_authority}"))
+            .dial_addr(addr)
+            .tls_connector(grpc_tls_connector(GRPC_TLS_CERT_PEM, true))
+            .tls_server_name("localhost")
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(10))
+            .max_send_message_size(1024)
+            .max_recv_message_size(1024)
+            .connect()
+            .await
+            .expect("construct authenticated explicit-dial gRPC channel");
+        let mut client = GrpcClient::new(channel);
+        let mut request = Request::new(Bytes::from_static(b"tls-public-ping"));
+        assert!(
+            request
+                .metadata_mut()
+                .insert("x-client-id", "explicit-dial-client")
+        );
+        let response = client
+            .unary::<Bytes, Bytes>("/test.PublicClient/Unary", request)
+            .await
+            .expect("explicit-dial gRPC TLS unary response");
+        assert_eq!(response.get_ref().as_ref(), b"tls-public-pong");
+        assert!(matches!(
+            response.metadata().get("x-server-id"),
+            Some(MetadataValue::Ascii(value)) if value == "native-h2-tls"
+        ));
+        assert!(matches!(
+            response.metadata().get("x-server-token-bin"),
+            Some(MetadataValue::Binary(value)) if value.as_ref() == b"\x03\x04"
+        ));
+        assert!(matches!(
+            response.metadata().get("x-server-tail"),
+            Some(MetadataValue::Ascii(value)) if value == "tls-complete"
+        ));
+
+        let observation = server
+            .await
+            .expect("explicit-dial gRPC TLS fixture exchange");
+        assert_eq!(observation.scheme, "https");
+        assert_eq!(observation.authority, logical_authority);
+        assert_eq!(observation.client_id, "explicit-dial-client");
         assert_eq!(observation.request_payload, b"tls-public-ping");
     });
 }
@@ -1207,7 +1287,9 @@ fn public_grpc_tls_unary_fails_closed_on_authority_and_alpn_mismatch() {
     let handle = runtime.handle();
 
     runtime.block_on(async move {
-        let missing = Channel::builder("https://localhost:443")
+        let explicit_addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 443));
+        let missing = Channel::builder("https://grpc.service.invalid:443")
+            .dial_addr(explicit_addr)
             .tls()
             .connect()
             .await
@@ -1224,8 +1306,10 @@ fn public_grpc_tls_unary_fails_closed_on_authority_and_alpn_mismatch() {
             .try_spawn(async move { accept_tls_probe(listener, acceptor).await })
             .expect("spawn wrong-CA TLS fixture");
         let wrong_ca = grpc_tls_connector(GRPC_TLS_WRONG_CA_PEM, true);
-        let channel = Channel::builder(format!("https://localhost:{}", addr.port()))
+        let channel = Channel::builder("https://grpc.service.invalid:443")
+            .dial_addr(addr)
             .tls_connector(wrong_ca)
+            .tls_server_name("localhost")
             .timeout(Duration::from_secs(10))
             .connect()
             .await
@@ -1252,9 +1336,9 @@ fn public_grpc_tls_unary_fails_closed_on_authority_and_alpn_mismatch() {
             .clone()
             .try_spawn(async move { accept_tls_probe(listener, acceptor).await })
             .expect("spawn wrong-name TLS fixture");
-        let channel = Channel::builder(format!("https://localhost:{}", addr.port()))
+        let channel = Channel::builder("https://grpc.service.invalid:443")
+            .dial_addr(addr)
             .tls_connector(grpc_tls_connector(GRPC_TLS_CERT_PEM, true))
-            .tls_server_name("wrong.invalid")
             .timeout(Duration::from_secs(10))
             .connect()
             .await
@@ -1281,8 +1365,10 @@ fn public_grpc_tls_unary_fails_closed_on_authority_and_alpn_mismatch() {
             .clone()
             .try_spawn(async move { accept_tls_probe(listener, acceptor).await })
             .expect("spawn no-ALPN TLS fixture");
-        let channel = Channel::builder(format!("https://localhost:{}", addr.port()))
+        let channel = Channel::builder("https://grpc.service.invalid:443")
+            .dial_addr(addr)
             .tls_connector(grpc_tls_connector(GRPC_TLS_CERT_PEM, false))
+            .tls_server_name("localhost")
             .timeout(Duration::from_secs(10))
             .connect()
             .await
