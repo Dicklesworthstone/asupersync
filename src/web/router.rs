@@ -24,6 +24,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::extract::{Extensions, Request};
+#[cfg(not(target_arch = "wasm32"))]
+use super::extract::{StreamingRawBodyControl, insert_streaming_raw_body};
 use super::handler::Handler;
 use super::middleware::{
     RequestLogSink, RequestTracePolicy, resolve_trace_id, trace_request, wall_clock_now,
@@ -36,6 +38,8 @@ use crate::Cx;
 use crate::bytes::Bytes;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::http::h1::server::{Http1Response, Http1Upgrade};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::http::h1::stream::StreamingServerRequest;
 use crate::http::h1::types::{Request as HttpRequest, Response as HttpResponse};
 #[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
 use crate::http::h3::{H3Error, H3RequestHead, H3ResponseHead, NativeH3Event, NativeH3Session};
@@ -1558,6 +1562,31 @@ impl Router {
         }
     }
 
+    /// Convert this router into an HTTP/1 handler with live request-body ingress.
+    ///
+    /// The listener supplies the authoritative request-region [`Cx`] and
+    /// publishes the validated request head before body EOF. Handlers may take
+    /// [`crate::web::StreamingRawBody`] as their final extractor to consume the
+    /// live, bounded body queue. Existing buffered extractors deliberately fail
+    /// closed on this entry point instead of observing an empty compatibility
+    /// body.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub fn into_http1_streaming_handler(
+        self,
+    ) -> impl Fn(Cx, StreamingServerRequest) -> HttpHandlerFuture + Clone + Send + Sync + 'static
+    {
+        let router = Arc::new(self);
+        move |cx, request| {
+            let router = Arc::clone(&router);
+            Box::pin(async move {
+                router
+                    .handle_http1_streaming_request_with_cx(&cx, request)
+                    .await
+            })
+        }
+    }
+
     /// Dispatch one listener request through this router with an explicit
     /// capability context.
     ///
@@ -1609,6 +1638,30 @@ impl Router {
                 .with_header("connection", "close"),
             )
         }
+    }
+
+    /// Dispatch a live HTTP/1 request through this router with its listener Cx.
+    ///
+    /// Only the validated request head is copied into the legacy [`Request`]
+    /// fields. The live body is installed in a private one-shot extension and
+    /// remains owned by a guard for the whole dispatch, so an unclaimed body is
+    /// dropped promptly even if middleware retains a cloned request.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn handle_http1_streaming_request_with_cx(
+        &self,
+        cx: &Cx,
+        request: StreamingServerRequest,
+    ) -> HttpResponse {
+        let Some((request, _body_control)) = web_request_from_streaming_http(request) else {
+            return HttpResponse::new(
+                500,
+                "Internal Server Error",
+                b"streaming request body slot collision".to_vec(),
+            )
+            .with_header("content-type", "text/plain; charset=utf-8")
+            .with_header("connection", "close");
+        };
+        http_response_from_web(self.handle_with_cx(cx, request).await)
     }
 
     /// Handle an incoming request with an explicit capability context.
@@ -1792,6 +1845,22 @@ fn web_request_from_http(request: HttpRequest) -> Request {
         web_request.headers.insert(name.to_ascii_lowercase(), value);
     }
     web_request
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn web_request_from_streaming_http(
+    request: StreamingServerRequest,
+) -> Option<(Request, StreamingRawBodyControl)> {
+    let (path, query) = split_http_request_target(&request.head.uri);
+    let mut web_request = Request::new(request.head.method.as_str(), path);
+    web_request.query = query;
+
+    for (name, value) in request.head.headers {
+        web_request.headers.insert(name.to_ascii_lowercase(), value);
+    }
+
+    let control = insert_streaming_raw_body(&mut web_request, request.body).ok()?;
+    Some((web_request, control))
 }
 
 #[cfg(all(feature = "http3", not(target_arch = "wasm32")))]

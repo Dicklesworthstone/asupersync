@@ -8,7 +8,7 @@ use crate::http::h1::server::{
     Http1Config, Http1ServeOutcome, Http1Server, Http1StreamingServer, IntoHttp1Response,
 };
 use crate::http::h1::stream::{Http1ProducedResponse, StreamingServerRequest};
-use crate::http::h1::types::Request;
+use crate::http::h1::types::{Request, Response};
 use crate::net::tcp::listener::TcpListener;
 use crate::runtime::{JoinHandle, RuntimeHandle, SpawnError};
 use crate::server::connection::{ConnectionGuard, ConnectionManager};
@@ -460,6 +460,55 @@ where
 impl<F, Fut> Http1Listener<F>
 where
     F: Fn(Cx, StreamingServerRequest) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Response> + Send + 'static,
+{
+    /// Bind a listener that publishes each validated request head before body EOF.
+    pub async fn bind_streaming<A: ToSocketAddrs + Send + 'static>(
+        addr: A,
+        handler: F,
+    ) -> io::Result<Self> {
+        Self::bind_streaming_with_config(addr, handler, Http1ListenerConfig::default()).await
+    }
+
+    /// Bind a live request-body listener with custom connection configuration.
+    pub async fn bind_streaming_with_config<A: ToSocketAddrs + Send + 'static>(
+        addr: A,
+        handler: F,
+        config: Http1ListenerConfig,
+    ) -> io::Result<Self> {
+        let tcp_listener = TcpListener::bind(addr).await?;
+        Ok(Self::from_listener_streaming(tcp_listener, handler, config))
+    }
+
+    /// Create a live request-body listener from an existing TCP listener.
+    pub fn from_listener_streaming(
+        tcp_listener: TcpListener,
+        handler: F,
+        config: Http1ListenerConfig,
+    ) -> Self {
+        let shutdown_signal = shutdown_signal_for_time_getter(config.time_getter);
+        let connection_manager = ConnectionManager::with_time_getter(
+            config.max_connections,
+            shutdown_signal.clone(),
+            config.time_getter,
+        );
+        let stats = Arc::new(Http1ListenerStats::new(config.time_getter));
+
+        Self {
+            tcp_listener,
+            handler: Arc::new(handler),
+            config,
+            shutdown_signal,
+            connection_manager,
+            stats,
+            in_flight_requests: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+}
+
+impl<F, Fut> Http1Listener<F>
+where
+    F: Fn(Cx, StreamingServerRequest) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Http1ProducedResponse> + Send + 'static,
 {
     /// Bind a listener whose handler returns a supervised chunked response.
@@ -556,6 +605,18 @@ where
             stats,
             in_flight_requests: Arc::new(AtomicUsize::new(0)),
         }
+    }
+}
+
+impl<F, Fut> Http1Listener<F>
+where
+    F: Fn(Cx, StreamingServerRequest) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Response> + Send + 'static,
+{
+    /// Run the accept loop for a live request-body handler.
+    pub async fn run_streaming(self, runtime: &RuntimeHandle) -> io::Result<ShutdownStats> {
+        self.run_with(runtime, spawn_streaming_connection::<F, Fut>)
+            .await
     }
 }
 
@@ -931,6 +992,39 @@ where
             let session = upgrade.run(session_cx.clone(), io, read_ahead);
             run_upgrade_session(&shutdown_signal, session_cx, session).await;
         }
+    })?;
+    Ok(handle)
+}
+
+/// Spawn a connection whose request heads are dispatched before body EOF.
+fn spawn_streaming_connection<F, Fut>(
+    stream: crate::net::tcp::stream::TcpStream,
+    guard: ConnectionGuard,
+    handler: Arc<F>,
+    config: Http1Config,
+    shutdown_signal: ShutdownSignal,
+    in_flight_requests: Arc<AtomicUsize>,
+    runtime: &RuntimeHandle,
+) -> Result<JoinHandle<()>, SpawnError>
+where
+    F: Fn(Cx, StreamingServerRequest) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Response> + Send + 'static,
+{
+    let handle = runtime.try_spawn(async move {
+        let _guard = guard;
+        let server = Http1StreamingServer::with_config(
+            move |request_cx, request| handler(request_cx, request),
+            config,
+        )
+        .with_shutdown_signal(shutdown_signal)
+        .with_in_flight_requests(in_flight_requests);
+        let peer_addr = stream.peer_addr().ok();
+        let Some(connection_cx) = Cx::current() else {
+            return;
+        };
+        let _ = server
+            .serve_with_peer_addr(&connection_cx, stream, peer_addr)
+            .await;
     })?;
     Ok(handle)
 }

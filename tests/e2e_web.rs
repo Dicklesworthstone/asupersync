@@ -4,7 +4,7 @@ mod common;
 
 use asupersync::Cx;
 use asupersync::bytes::Buf;
-use asupersync::http::body::{Body, Frame};
+use asupersync::http::body::{Body, Frame, HeaderName};
 use asupersync::http::h1::codec::HttpError;
 use asupersync::http::h1::listener::{Http1Listener, Http1ListenerConfig};
 use asupersync::http::h1::server::{HostPolicy, Http1Config};
@@ -17,8 +17,13 @@ use asupersync::net::TcpStream;
 use asupersync::net::websocket::Message;
 use asupersync::runtime::RuntimeBuilder;
 use asupersync::server::shutdown::ShutdownPhase;
-use asupersync::web::extract::{Json as JsonExtract, Path, Query, Request};
-use asupersync::web::handler::{FnHandler, FnHandler1, Handler};
+use asupersync::web::extract::{
+    ExtractionError, FromRequest, FromRequestParts, Json as JsonExtract, Path, Query, Request,
+    StreamingRawBody, StreamingRawBodyCollectError,
+};
+use asupersync::web::handler::{
+    AsyncCxFnHandler1, AsyncCxFnHandler2, FnHandler, FnHandler1, Handler,
+};
 use asupersync::web::middleware::{HeaderOverwrite, MiddlewareStack};
 use asupersync::web::request_region::RequestRegion;
 use asupersync::web::response::{Html, Json, Redirect, Response, StatusCode};
@@ -162,6 +167,15 @@ trait WebHandlerSyncExt: Handler {
 }
 
 impl<T> WebHandlerSyncExt for T where T: Handler + ?Sized {}
+
+#[derive(Clone)]
+struct StreamingRequestReplay(Request);
+
+impl FromRequestParts for StreamingRequestReplay {
+    fn from_request_parts(req: &Request) -> Result<Self, ExtractionError> {
+        Ok(Self(req.clone()))
+    }
+}
 
 fn web_poll_body<B: Body + Unpin>(body: &mut B) -> Option<Result<Frame<B::Data>, B::Error>> {
     let waker = web_noop_waker();
@@ -1349,6 +1363,216 @@ async fn read_http_head(stream: &mut TcpStream) -> Vec<u8> {
             return head;
         }
     }
+}
+
+#[test]
+fn e2e_router_http1_streaming_raw_body_is_live_bounded_and_cancel_correct() {
+    common::init_test_logging();
+    test_phase!("Router -> HTTP/1 live request body ingress");
+
+    let runtime = RuntimeBuilder::new()
+        .worker_threads(2)
+        .build()
+        .expect("build runtime");
+    let handle = runtime.handle();
+
+    runtime.block_on(async move {
+        let upload_started = Arc::new(AtomicUsize::new(0));
+        let upload_started_for_handler = Arc::clone(&upload_started);
+        let disconnect_observed = Arc::new(AtomicUsize::new(0));
+        let disconnect_observed_for_handler = Arc::clone(&disconnect_observed);
+
+        let router = Router::new()
+            .route(
+                "/upload",
+                post(AsyncCxFnHandler2::<
+                    _,
+                    StreamingRequestReplay,
+                    StreamingRawBody,
+                >::new(
+                    move |cx: Cx, replay: StreamingRequestReplay, body: StreamingRawBody| {
+                        upload_started_for_handler.fetch_add(1, Ordering::AcqRel);
+                        async move {
+                            let replay_status = StreamingRawBody::from_request(replay.0)
+                                .expect_err("the live body must be a one-shot extractor")
+                                .status
+                                .as_u16();
+                            let collected = body
+                                .collect_bounded_with_cx(&cx, 64)
+                                .await
+                                .expect("collect bounded streaming request");
+                            let trailer = collected
+                                .trailers()
+                                .and_then(|trailers| {
+                                    trailers.get(&HeaderName::from_static("x-checksum"))
+                                })
+                                .and_then(|value| value.to_str().ok())
+                                .unwrap_or("missing");
+                            format!(
+                                "body={};trailer={trailer};replay={replay_status}",
+                                String::from_utf8_lossy(collected.data().as_ref())
+                            )
+                        }
+                    },
+                )),
+            )
+            .route(
+                "/too-large",
+                post(AsyncCxFnHandler1::<_, StreamingRawBody>::new(
+                    |cx: Cx, body: StreamingRawBody| async move {
+                        match body.collect_bounded_with_cx(&cx, 4).await {
+                            Err(StreamingRawBodyCollectError::LengthLimitExceeded {
+                                actual,
+                                limit,
+                            }) => (
+                                StatusCode::PAYLOAD_TOO_LARGE,
+                                format!("bounded:{actual:?}>{limit}"),
+                            ),
+                            Err(error) => (
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                format!("unexpected:{error}"),
+                            ),
+                            Ok(_) => (
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                "unexpected-success".to_owned(),
+                            ),
+                        }
+                    },
+                )),
+            )
+            .route(
+                "/disconnect",
+                post(AsyncCxFnHandler1::<_, StreamingRawBody>::new(
+                    move |cx: Cx, body: StreamingRawBody| {
+                        let disconnect_observed = Arc::clone(&disconnect_observed_for_handler);
+                        async move {
+                            if matches!(
+                                body.collect_bounded_with_cx(&cx, 64).await,
+                                Err(StreamingRawBodyCollectError::Body(_))
+                            ) {
+                                disconnect_observed.fetch_add(1, Ordering::AcqRel);
+                            }
+                            StatusCode::NO_CONTENT
+                        }
+                    },
+                )),
+            );
+
+        let listener = Http1Listener::bind_streaming_with_config(
+            "127.0.0.1:0",
+            router.into_http1_streaming_handler(),
+            Http1ListenerConfig::default()
+                .http_config(Http1Config {
+                    allowed_hosts: HostPolicy::allow_list(vec!["localhost".to_owned()]),
+                    ..Http1Config::default()
+                })
+                .drain_timeout(Duration::from_secs(2))
+                .hard_drain_timeout(Duration::from_secs(5)),
+        )
+        .await
+        .expect("bind streaming HTTP/1 listener");
+        let addr = listener.local_addr().expect("listener address");
+        let manager = listener.connection_manager().clone();
+        let in_flight = listener.in_flight_requests();
+        let run_handle = handle
+            .clone()
+            .try_spawn(async move { listener.run_streaming(&handle).await })
+            .expect("spawn streaming HTTP/1 listener");
+
+        let mut upload_client = TcpStream::connect(addr)
+            .await
+            .expect("connect upload client");
+        upload_client
+            .write_all(
+                b"POST /upload HTTP/1.1\r\n\
+                  Host: localhost\r\n\
+                  Transfer-Encoding: chunked\r\n\
+                  Trailer: X-Checksum\r\n\
+                  Connection: close\r\n\
+                  \r\n",
+            )
+            .await
+            .expect("write upload head without body");
+
+        for _ in 0..400 {
+            if upload_started.load(Ordering::Acquire) == 1 {
+                break;
+            }
+            asupersync::time::sleep(asupersync::time::wall_now(), Duration::from_millis(5)).await;
+        }
+        assert_eq!(
+            upload_started.load(Ordering::Acquire),
+            1,
+            "the Router handler must start before request-body EOF"
+        );
+
+        upload_client
+            .write_all(b"5\r\nhello\r\n6\r\n world\r\n0\r\nX-Checksum: yes\r\n\r\n")
+            .await
+            .expect("write ordered chunks and terminal trailer");
+        let mut upload_response = Vec::new();
+        upload_client
+            .read_to_end(&mut upload_response)
+            .await
+            .expect("read upload response");
+        let upload_response = std::str::from_utf8(&upload_response).expect("ASCII upload response");
+        assert!(upload_response.starts_with("HTTP/1.1 200"));
+        assert!(upload_response.contains("body=hello world;trailer=yes;replay=500"));
+
+        let mut limit_client = TcpStream::connect(addr)
+            .await
+            .expect("connect limit client");
+        limit_client
+            .write_all(
+                b"POST /too-large HTTP/1.1\r\n\
+                  Host: localhost\r\n\
+                  Content-Length: 5\r\n\
+                  Connection: close\r\n\
+                  \r\nabcde",
+            )
+            .await
+            .expect("write over-limit request");
+        let mut limit_response = Vec::new();
+        limit_client
+            .read_to_end(&mut limit_response)
+            .await
+            .expect("read over-limit response");
+        let limit_response =
+            std::str::from_utf8(&limit_response).expect("ASCII over-limit response");
+        assert!(limit_response.starts_with("HTTP/1.1 413"));
+        assert!(limit_response.contains("bounded:Some(5)>4"));
+
+        let mut disconnect_client = TcpStream::connect(addr)
+            .await
+            .expect("connect disconnect client");
+        disconnect_client
+            .write_all(
+                b"POST /disconnect HTTP/1.1\r\n\
+                  Host: localhost\r\n\
+                  Content-Length: 10\r\n\
+                  Connection: close\r\n\
+                  \r\nabc",
+            )
+            .await
+            .expect("write truncated request body");
+        drop(disconnect_client);
+
+        for _ in 0..400 {
+            if disconnect_observed.load(Ordering::Acquire) == 1 && manager.is_empty() {
+                break;
+            }
+            asupersync::time::sleep(asupersync::time::wall_now(), Duration::from_millis(5)).await;
+        }
+        assert_eq!(disconnect_observed.load(Ordering::Acquire), 1);
+        assert_eq!(in_flight.load(Ordering::Acquire), 0);
+        assert!(manager.is_empty(), "all streaming connections quiesced");
+
+        assert!(manager.begin_drain(Duration::from_secs(2)));
+        let stats = run_handle.await.expect("streaming listener result");
+        assert_eq!(stats.force_closed, 0);
+    });
+
+    test_complete!("e2e_router_http1_streaming_raw_body");
 }
 
 #[test]

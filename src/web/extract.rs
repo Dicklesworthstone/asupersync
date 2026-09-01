@@ -26,12 +26,16 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 #[cfg(not(target_arch = "wasm32"))]
-use crate::bytes::{Buf, BytesCursor};
+use crate::Cx;
 use crate::bytes::Bytes;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::bytes::{Buf, BytesCursor};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::http::body::{Body, Frame, HeaderMap, SizeHint};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::http::h1::stream::{BodyKind, IncomingBodyError, IncomingRequestBody};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::types::CancelKind;
 #[cfg(not(target_arch = "wasm32"))]
 use parking_lot::Mutex;
 use serde::de::{
@@ -1667,7 +1671,27 @@ impl StreamingRawBody {
     /// the limit drops the live consumer; the HTTP/1 driver then performs its
     /// existing bounded unread-body drain before considering connection reuse.
     pub async fn collect_bounded(
+        self,
+        max_bytes: usize,
+    ) -> Result<CollectedStreamingRawBody, StreamingRawBodyCollectError> {
+        self.collect_bounded_inner(None, max_bytes).await
+    }
+
+    /// Collect the stream while also checkpointing an explicit caller context.
+    ///
+    /// This is the preferred Router-handler form because it observes both the
+    /// body driver's request context and the handler's authoritative context.
+    pub async fn collect_bounded_with_cx(
+        self,
+        cx: &Cx,
+        max_bytes: usize,
+    ) -> Result<CollectedStreamingRawBody, StreamingRawBodyCollectError> {
+        self.collect_bounded_inner(Some(cx), max_bytes).await
+    }
+
+    async fn collect_bounded_inner(
         mut self,
+        cx: Option<&Cx>,
         max_bytes: usize,
     ) -> Result<CollectedStreamingRawBody, StreamingRawBodyCollectError> {
         let max_bytes_u64 = u64::try_from(max_bytes).unwrap_or(u64::MAX);
@@ -1682,9 +1706,22 @@ impl StreamingRawBody {
 
         let mut data = Vec::new();
         let mut trailers = None;
-        while let Some(frame) =
-            std::future::poll_fn(|poll_cx| Pin::new(&mut self).poll_frame(poll_cx)).await
-        {
+        loop {
+            if let Some(cx) = cx
+                && cx.checkpoint().is_err()
+            {
+                let kind = cx
+                    .cancel_reason()
+                    .map_or(CancelKind::User, |reason| reason.kind());
+                return Err(StreamingRawBodyCollectError::Body(
+                    IncomingBodyError::Cancelled { kind },
+                ));
+            }
+            let Some(frame) =
+                std::future::poll_fn(|poll_cx| Pin::new(&mut self).poll_frame(poll_cx)).await
+            else {
+                break;
+            };
             match frame.map_err(StreamingRawBodyCollectError::Body)? {
                 Frame::Data(chunk) => {
                     let Some(next_len) = data.len().checked_add(chunk.remaining()) else {
@@ -1791,10 +1828,7 @@ impl fmt::Display for StreamingRawBodyCollectError {
             Self::LengthLimitExceeded {
                 actual: None,
                 limit,
-            } => write!(
-                f,
-                "streaming raw body length overflowed (limit {limit})"
-            ),
+            } => write!(f, "streaming raw body length overflowed (limit {limit})"),
             Self::Body(error) => write!(f, "streaming raw body failed: {error}"),
         }
     }
@@ -1842,7 +1876,9 @@ impl StreamingRawBodySlot {
                 *state = StreamingRawBodySlotState::Taken;
                 Err("streaming request body was already extracted")
             }
-            StreamingRawBodySlotState::Closed => Err("streaming request body is no longer available"),
+            StreamingRawBodySlotState::Closed => {
+                Err("streaming request body is no longer available")
+            }
         }
     }
 
@@ -1868,10 +1904,13 @@ impl StreamingRawBodySlot {
 pub(crate) fn insert_streaming_raw_body(
     req: &mut Request,
     body: IncomingRequestBody,
-) -> StreamingRawBodyControl {
+) -> Result<StreamingRawBodyControl, IncomingRequestBody> {
+    if req.extensions.get_typed::<StreamingRawBodySlot>().is_some() {
+        return Err(body);
+    }
     let slot = StreamingRawBodySlot::new(body);
     req.extensions.insert_typed(slot.clone());
-    StreamingRawBodyControl(slot)
+    Ok(StreamingRawBodyControl(slot))
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1910,14 +1949,9 @@ impl FromRequest for StreamingRawBody {
                     "streaming request body unavailable on this transport",
                 )
             })?;
-        slot.take()
-            .map(|inner| Self { inner })
-            .map_err(|message| {
-                ExtractionError::new(
-                    super::response::StatusCode::INTERNAL_SERVER_ERROR,
-                    message,
-                )
-            })
+        slot.take().map(|inner| Self { inner }).map_err(|message| {
+            ExtractionError::new(super::response::StatusCode::INTERNAL_SERVER_ERROR, message)
+        })
     }
 }
 
