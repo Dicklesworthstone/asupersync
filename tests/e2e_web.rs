@@ -30,7 +30,7 @@ use asupersync::web::handler::{
     AsyncCxFnHandler1, AsyncCxFnHandler2, FnHandler, FnHandler1, Handler,
 };
 use asupersync::web::middleware::{HeaderOverwrite, MiddlewareStack};
-use asupersync::web::multipart::{Multipart, MultipartLimits};
+use asupersync::web::multipart::{Multipart, MultipartLimits, StreamingMultipart};
 use asupersync::web::request_region::RequestRegion;
 use asupersync::web::response::{Html, Json, Redirect, Response, StatusCode};
 use asupersync::web::router::{Router, delete, get, post};
@@ -2332,6 +2332,308 @@ fn e2e_router_http1_streaming_multipart_is_incremental_bounded_and_cancel_correc
     });
 
     test_complete!("e2e_router_http1_streamed_multipart");
+}
+
+#[test]
+fn e2e_router_http1_streaming_multipart_field_api_reaches_handler_before_eof() {
+    common::init_test_logging();
+    test_phase!("Router -> HTTP/1 live multipart field lease");
+
+    let runtime = RuntimeBuilder::new()
+        .worker_threads(2)
+        .build()
+        .expect("build runtime");
+    let handle = runtime.handle();
+
+    runtime.block_on(async move {
+        let handler_entered = Arc::new(AtomicUsize::new(0));
+        let metadata_ready = Arc::new(AtomicUsize::new(0));
+        let first_chunk_ready = Arc::new(AtomicUsize::new(0));
+        let handler_complete = Arc::new(AtomicUsize::new(0));
+        let field_dropped = Arc::new(AtomicUsize::new(0));
+        let unsynchronized_request_routed = Arc::new(AtomicUsize::new(0));
+
+        let entered_for_route = Arc::clone(&handler_entered);
+        let metadata_for_route = Arc::clone(&metadata_ready);
+        let first_chunk_for_route = Arc::clone(&first_chunk_ready);
+        let complete_for_route = Arc::clone(&handler_complete);
+        let dropped_for_route = Arc::clone(&field_dropped);
+        let routed_for_route = Arc::clone(&unsynchronized_request_routed);
+        let router = Router::new()
+            .with_state(MultipartLimits::new().max_total_size(32 * 1024))
+            .route(
+                "/stream-fields",
+                post(AsyncCxFnHandler1::<_, StreamingMultipart>::new(
+                    move |cx: Cx, mut multipart: StreamingMultipart| {
+                        entered_for_route.fetch_add(1, Ordering::AcqRel);
+                        let metadata_for_request = Arc::clone(&metadata_for_route);
+                        let first_chunk_for_request = Arc::clone(&first_chunk_for_route);
+                        let complete_for_request = Arc::clone(&complete_for_route);
+                        async move {
+                            let mut field = multipart
+                                .next_field(&cx)
+                                .await
+                                .expect("live multipart field metadata")
+                                .expect("one live multipart field");
+                            assert_eq!(field.name(), "upload");
+                            assert_eq!(field.filename(), Some("live.bin"));
+                            assert_eq!(field.content_type(), Some("application/octet-stream"));
+                            metadata_for_request.fetch_add(1, Ordering::AcqRel);
+
+                            let mut body = Vec::new();
+                            while let Some(chunk) = field
+                                .next_chunk(&cx)
+                                .await
+                                .expect("live multipart field chunk")
+                            {
+                                assert!(chunk.len() <= 4096, "chunk was {} bytes", chunk.len());
+                                if body.is_empty() {
+                                    first_chunk_for_request.fetch_add(1, Ordering::AcqRel);
+                                }
+                                body.extend_from_slice(chunk.as_ref());
+                            }
+                            drop(field);
+                            assert!(
+                                multipart
+                                    .next_field(&cx)
+                                    .await
+                                    .expect("live multipart terminal boundary")
+                                    .is_none()
+                            );
+                            complete_for_request.fetch_add(1, Ordering::AcqRel);
+                            format!(
+                                "len={};first={};last={}",
+                                body.len(),
+                                body.first().copied().unwrap_or_default(),
+                                body.last().copied().unwrap_or_default()
+                            )
+                        }
+                    },
+                )),
+            )
+            .route(
+                "/drop-field",
+                post(AsyncCxFnHandler1::<_, StreamingMultipart>::new(
+                    move |cx: Cx, mut multipart: StreamingMultipart| {
+                        let dropped_for_request = Arc::clone(&dropped_for_route);
+                        async move {
+                            let mut field = multipart
+                                .next_field(&cx)
+                                .await
+                                .expect("early-drop field metadata")
+                                .expect("early-drop field");
+                            assert!(
+                                field
+                                    .next_chunk(&cx)
+                                    .await
+                                    .expect("early-drop first chunk")
+                                    .is_some()
+                            );
+                            drop(field);
+                            drop(multipart);
+                            dropped_for_request.fetch_add(1, Ordering::AcqRel);
+                            StatusCode::NO_CONTENT
+                        }
+                    },
+                )),
+            )
+            .route(
+                "/must-not-route",
+                get(FnHandler::new(move || {
+                    routed_for_route.fetch_add(1, Ordering::AcqRel);
+                    StatusCode::OK
+                })),
+            );
+
+        let listener = Http1Listener::bind_streaming_with_config(
+            "127.0.0.1:0",
+            router.into_http1_streaming_handler(),
+            Http1ListenerConfig::default()
+                .http_config(
+                    Http1Config {
+                        allowed_hosts: HostPolicy::allow_list(vec!["localhost".to_owned()]),
+                        ..Http1Config::default()
+                    }
+                    .request_timeout(Some(Duration::from_secs(5)))
+                    .idle_timeout(Some(Duration::from_secs(5))),
+                )
+                .drain_timeout(Duration::from_secs(2))
+                .hard_drain_timeout(Duration::from_secs(5)),
+        )
+        .await
+        .expect("bind live multipart field listener");
+        let addr = listener.local_addr().expect("listener address");
+        let manager = listener.connection_manager().clone();
+        let in_flight = listener.in_flight_requests();
+        let run_handle = handle
+            .clone()
+            .try_spawn(async move { listener.run_streaming(&handle).await })
+            .expect("spawn live multipart field listener");
+
+        let mut client = TcpStream::connect(addr)
+            .await
+            .expect("connect live multipart field client");
+        client
+            .write_all(
+                b"POST /stream-fields HTTP/1.1\r\n\
+                  Host: localhost\r\n\
+                  Content-Type: multipart/form-data; boundary=LIVE\r\n\
+                  Transfer-Encoding: chunked\r\n\
+                  Connection: close\r\n\
+                  \r\n",
+            )
+            .await
+            .expect("write request headers without multipart bytes");
+
+        for _ in 0..400 {
+            if handler_entered.load(Ordering::Acquire) == 1 {
+                break;
+            }
+            asupersync::time::sleep(asupersync::time::wall_now(), Duration::from_millis(5)).await;
+        }
+        assert_eq!(handler_entered.load(Ordering::Acquire), 1);
+        assert_eq!(metadata_ready.load(Ordering::Acquire), 0);
+        assert_eq!(in_flight.load(Ordering::Acquire), 1);
+
+        let field_head = b"--LIVE\r\nContent-Disposition: form-data; name=\"upload\"; filename=\"live.bin\"\r\nContent-Type: application/octet-stream\r\n\r\n";
+        let mut head_frame = format!("{:X}\r\n", field_head.len()).into_bytes();
+        head_frame.extend_from_slice(field_head);
+        head_frame.extend_from_slice(b"\r\n");
+        client
+            .write_all(&head_frame)
+            .await
+            .expect("write field metadata without field payload");
+
+        for _ in 0..400 {
+            if metadata_ready.load(Ordering::Acquire) == 1 {
+                break;
+            }
+            asupersync::time::sleep(asupersync::time::wall_now(), Duration::from_millis(5)).await;
+        }
+        assert_eq!(metadata_ready.load(Ordering::Acquire), 1);
+        assert_eq!(first_chunk_ready.load(Ordering::Acquire), 0);
+
+        let payload = (0..10_000)
+            .map(|index| u8::try_from(index % 251).expect("payload byte"))
+            .collect::<Vec<_>>();
+        let mut payload_frame = format!("{:X}\r\n", payload.len()).into_bytes();
+        payload_frame.extend_from_slice(&payload);
+        payload_frame.extend_from_slice(b"\r\n");
+        client
+            .write_all(&payload_frame)
+            .await
+            .expect("write payload without MIME terminator");
+
+        for _ in 0..400 {
+            if first_chunk_ready.load(Ordering::Acquire) == 1 {
+                break;
+            }
+            asupersync::time::sleep(asupersync::time::wall_now(), Duration::from_millis(5)).await;
+        }
+        assert_eq!(first_chunk_ready.load(Ordering::Acquire), 1);
+        assert_eq!(handler_complete.load(Ordering::Acquire), 0);
+
+        let close = b"\r\n--LIVE--\r\nepilogue";
+        let mut close_frame = format!("{:X}\r\n", close.len()).into_bytes();
+        close_frame.extend_from_slice(close);
+        close_frame.extend_from_slice(b"\r\n");
+        client
+            .write_all(&close_frame)
+            .await
+            .expect("write MIME close without HTTP body EOF");
+        asupersync::time::sleep(asupersync::time::wall_now(), Duration::from_millis(20)).await;
+        assert_eq!(
+            handler_complete.load(Ordering::Acquire),
+            0,
+            "MIME completion is not HTTP request EOF"
+        );
+
+        client
+            .write_all(b"0\r\n\r\n")
+            .await
+            .expect("write HTTP body EOF");
+        let mut response = Vec::new();
+        client
+            .read_to_end(&mut response)
+            .await
+            .expect("read live multipart field response");
+        let response = std::str::from_utf8(&response).expect("ASCII response");
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        assert!(response.contains("len=10000;first=0;last=210"), "{response}");
+        assert_eq!(handler_complete.load(Ordering::Acquire), 1);
+
+        for _ in 0..400 {
+            if in_flight.load(Ordering::Acquire) == 0 && manager.is_empty() {
+                break;
+            }
+            asupersync::time::sleep(asupersync::time::wall_now(), Duration::from_millis(5)).await;
+        }
+        assert_eq!(in_flight.load(Ordering::Acquire), 0);
+        assert!(manager.is_empty(), "consumed multipart connection quiesced");
+
+        let mut drop_client = TcpStream::connect(addr)
+            .await
+            .expect("connect early-drop multipart client");
+        drop_client
+            .write_all(
+                b"POST /drop-field HTTP/1.1\r\n\
+                  Host: localhost\r\n\
+                  Content-Type: multipart/form-data; boundary=LIVE\r\n\
+                  Transfer-Encoding: chunked\r\n\
+                  \r\n",
+            )
+            .await
+            .expect("write early-drop request headers");
+        let mut partial =
+            b"--LIVE\r\nContent-Disposition: form-data; name=\"upload\"\r\n\r\n".to_vec();
+        partial.extend((0..6000).map(|index| u8::try_from(index % 251).expect("payload byte")));
+        let mut partial_frame = format!("{:X}\r\n", partial.len()).into_bytes();
+        partial_frame.extend_from_slice(&partial);
+        partial_frame.extend_from_slice(b"\r\n");
+        drop_client
+            .write_all(&partial_frame)
+            .await
+            .expect("write unterminated multipart field chunk");
+
+        for _ in 0..400 {
+            if field_dropped.load(Ordering::Acquire) == 1 {
+                break;
+            }
+            asupersync::time::sleep(asupersync::time::wall_now(), Duration::from_millis(5)).await;
+        }
+        assert_eq!(field_dropped.load(Ordering::Acquire), 1);
+
+        let _ = drop_client
+            .write_all(
+                b"GET /must-not-route HTTP/1.1\r\n\
+                  Host: localhost\r\n\
+                  Connection: close\r\n\
+                  \r\n",
+            )
+            .await;
+        let mut drop_response = Vec::new();
+        drop_client
+            .read_to_end(&mut drop_response)
+            .await
+            .expect("early-drop connection must reach terminal close");
+        assert_eq!(unsynchronized_request_routed.load(Ordering::Acquire), 0);
+
+        for _ in 0..400 {
+            if in_flight.load(Ordering::Acquire) == 0 && manager.is_empty() {
+                break;
+            }
+            asupersync::time::sleep(asupersync::time::wall_now(), Duration::from_millis(5)).await;
+        }
+        assert_eq!(in_flight.load(Ordering::Acquire), 0);
+        assert!(manager.is_empty(), "early-drop multipart connection quiesced");
+        assert!(manager.begin_drain(Duration::from_secs(2)));
+        let stats = run_handle
+            .await
+            .expect("live multipart field listener result");
+        assert_eq!(stats.force_closed, 0);
+    });
+
+    test_complete!("e2e_router_http1_live_multipart_fields");
 }
 
 #[test]

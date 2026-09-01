@@ -634,6 +634,28 @@
       ]
     },
     {
+      "code": "ASUP-E504",
+      "name": "streaming-multipart-rejected",
+      "area": "net-http",
+      "status": "live",
+      "summary": "The live multipart field API rejected framing, limits, media type, deadline, cancellation, transport, or field-lease lifecycle state.",
+      "probable_causes": [
+        "Multipart framing, part headers, or a declared Content-Length was malformed.",
+        "A request or part exceeded its configured size or time budget.",
+        "A live field lease was dropped or forgotten before field EOF, or the request-body source disconnected."
+      ],
+      "remediation": [
+        "Branch on StreamingMultipartError::kind and status instead of parsing the diagnostic message.",
+        "Consume each StreamingMultipartField to EOF before requesting the next field.",
+        "Send multipart/form-data with a valid boundary and keep declared lengths within the configured limits."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E504.md",
+      "since": "0.4.9",
+      "source_refs": [
+        "src/web/multipart.rs"
+      ]
+    },
+    {
       "code": "ASUP-E601",
       "name": "database-pool-acquire-timeout",
       "area": "database",

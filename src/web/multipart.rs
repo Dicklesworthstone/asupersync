@@ -21,6 +21,8 @@
 
 use std::collections::HashMap;
 #[cfg(not(target_arch = "wasm32"))]
+use std::fmt;
+#[cfg(not(target_arch = "wasm32"))]
 use std::pin::Pin;
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Duration;
@@ -35,9 +37,11 @@ use super::extract::{
 };
 use super::response::StatusCode;
 use crate::Cx;
-#[cfg(not(target_arch = "wasm32"))]
-use crate::bytes::Buf;
 use crate::bytes::Bytes;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::bytes::{Buf, BytesCursor};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::channel::oneshot;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::http::body::{Body, Frame};
 #[cfg(not(target_arch = "wasm32"))]
@@ -310,6 +314,883 @@ impl FromRequest for Multipart {
             }
 
             Self::from_request(req)
+        }
+    }
+}
+
+// ─── Streaming multipart fields ─────────────────────────────────────────────
+
+/// A live, bounded multipart request stream.
+///
+/// Unlike [`Multipart`], this extractor does not collect every field before
+/// invoking the handler. Call [`Self::next_field`] to borrow one linear field
+/// lease, then consume that field with [`StreamingMultipartField::next_chunk`].
+/// The borrow prevents advancing the parser while the field is live. Dropping
+/// an incomplete field abandons the request body so the HTTP/1 driver applies
+/// its bounded drain-or-close policy before any connection reuse.
+///
+/// This extractor is available only on the native streaming Router path.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug)]
+pub struct StreamingMultipart {
+    body: Option<StreamingRawBody>,
+    input: Option<BytesCursor>,
+    delimiter: Vec<u8>,
+    limits: MultipartLimits,
+    expected_length: Option<usize>,
+    parse_start: Time,
+    phase: StreamingMultipartPhase,
+    buffer: Vec<u8>,
+    total_received: usize,
+    work_units: usize,
+    max_work_units: usize,
+    header_scan_from: usize,
+    buffer_starts_at_line_start: bool,
+    part_count: usize,
+    current_part_bytes: usize,
+    current_part_length: Option<usize>,
+    eof: bool,
+    eof_validated: bool,
+    field_active: bool,
+    abandoned: bool,
+}
+
+/// A borrow-tied field from [`StreamingMultipart`].
+///
+/// The lease yields bounded body chunks exactly once. It must reach field EOF
+/// before the parent parser can advance. Dropping it early marks the live body
+/// abandoned, which prevents unsynchronized HTTP/1 connection reuse.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug)]
+#[must_use = "a streaming multipart field must be consumed to EOF or explicitly dropped"]
+pub struct StreamingMultipartField<'a> {
+    multipart: &'a mut StreamingMultipart,
+    name: String,
+    filename: Option<String>,
+    content_type: Option<String>,
+    headers: HashMap<String, String>,
+    complete: bool,
+}
+
+/// Stable failure category for the live multipart field API.
+///
+/// Every category is emitted with registry code `ASUP-E504`. The category and
+/// HTTP status remain machine-readable so callers do not need to inspect the
+/// human-readable message.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum StreamingMultipartErrorKind {
+    /// Malformed multipart framing, headers, or declared lengths (HTTP 400).
+    Malformed,
+    /// The request or an outstanding body read exceeded its deadline (HTTP 408).
+    Timeout,
+    /// A declared or observed body limit was exceeded (HTTP 413).
+    PayloadTooLarge,
+    /// The request media type was not `multipart/form-data` (HTTP 415).
+    UnsupportedMediaType,
+    /// The request body or handler context was cancelled (HTTP 499 or 503).
+    Cancelled,
+    /// The request-body transport disconnected or otherwise failed (HTTP 500).
+    Transport,
+    /// A prior field lease was dropped or forgotten before field EOF (HTTP 400 or 500).
+    AbandonedField,
+    /// An internal parser invariant or accounting invariant failed (HTTP 500).
+    Internal,
+}
+
+/// Registry-backed failure from [`StreamingMultipart`] or
+/// [`StreamingMultipartField`].
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone)]
+pub struct StreamingMultipartError {
+    kind: StreamingMultipartErrorKind,
+    status: StatusCode,
+    message: String,
+    cancel_kind: Option<CancelKind>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl StreamingMultipartError {
+    /// Stable diagnostic token for every streaming multipart failure.
+    pub const CODE: &'static str = "ASUP-E504";
+
+    fn new(
+        kind: StreamingMultipartErrorKind,
+        status: StatusCode,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            kind,
+            status,
+            message: message.into(),
+            cancel_kind: None,
+        }
+    }
+
+    fn cancelled(kind: CancelKind) -> Self {
+        let (status, message) = match kind {
+            CancelKind::Timeout
+            | CancelKind::Deadline
+            | CancelKind::PollQuota
+            | CancelKind::CostBudget
+            | CancelKind::ResourceUnavailable => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "multipart request body unavailable",
+            ),
+            _ => (
+                StatusCode::CLIENT_CLOSED_REQUEST,
+                "multipart request body cancelled",
+            ),
+        };
+        let mut error = Self::new(StreamingMultipartErrorKind::Cancelled, status, message);
+        error.cancel_kind = Some(kind);
+        error
+    }
+
+    fn from_body_error(error: IncomingBodyError) -> Self {
+        match error {
+            IncomingBodyError::BodyTooLarge { actual, limit } => Self::new(
+                StreamingMultipartErrorKind::PayloadTooLarge,
+                StatusCode::PAYLOAD_TOO_LARGE,
+                actual.map_or_else(
+                    || format!("multipart body too large (limit {limit})"),
+                    |actual| format!("multipart body too large: {actual} bytes (limit {limit})"),
+                ),
+            ),
+            IncomingBodyError::QueueFrameTooLarge { actual, limit } => Self::new(
+                StreamingMultipartErrorKind::PayloadTooLarge,
+                StatusCode::PAYLOAD_TOO_LARGE,
+                format!("multipart body too large: {actual} bytes (limit {limit})"),
+            ),
+            IncomingBodyError::Cancelled { kind } => Self::cancelled(kind),
+            IncomingBodyError::BadContentLength
+            | IncomingBodyError::BadChunkedEncoding
+            | IncomingBodyError::TrailersTooLarge
+            | IncomingBodyError::BadHeader
+            | IncomingBodyError::InvalidHeaderName
+            | IncomingBodyError::InvalidHeaderValue => Self::new(
+                StreamingMultipartErrorKind::Malformed,
+                StatusCode::BAD_REQUEST,
+                "invalid multipart request body",
+            ),
+            IncomingBodyError::SourceDisconnected => Self::new(
+                StreamingMultipartErrorKind::Transport,
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "multipart request body source disconnected",
+            ),
+            IncomingBodyError::ConsumerDropped => Self::abandoned(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "multipart request body consumer was dropped",
+            ),
+            IncomingBodyError::AccountingOverflow => Self::new(
+                StreamingMultipartErrorKind::Internal,
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "failed to account for multipart request body",
+            ),
+            IncomingBodyError::DrainLimitExceeded { .. }
+            | IncomingBodyError::DrainTimeout
+            | IncomingBodyError::AlreadyTerminal => Self::new(
+                StreamingMultipartErrorKind::Internal,
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "multipart request body drain failed",
+            ),
+        }
+    }
+
+    fn abandoned(status: StatusCode, message: impl Into<String>) -> Self {
+        Self::new(StreamingMultipartErrorKind::AbandonedField, status, message)
+    }
+
+    /// Machine-readable failure category.
+    #[must_use]
+    pub const fn kind(&self) -> StreamingMultipartErrorKind {
+        self.kind
+    }
+
+    /// HTTP status retained by the extractor response boundary.
+    #[must_use]
+    pub const fn status(&self) -> StatusCode {
+        self.status
+    }
+
+    /// Stable registry code without log-decoration brackets.
+    #[must_use]
+    pub const fn code(&self) -> &'static str {
+        Self::CODE
+    }
+
+    /// Human-readable context for this occurrence.
+    #[must_use]
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    /// Exact structured cancellation cause, when [`Self::kind`] is
+    /// [`StreamingMultipartErrorKind::Cancelled`].
+    #[must_use]
+    pub const fn cancel_kind(&self) -> Option<CancelKind> {
+        self.cancel_kind
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl From<ExtractionError> for StreamingMultipartError {
+    fn from(error: ExtractionError) -> Self {
+        let status = error.status;
+        let kind = if status == StatusCode::BAD_REQUEST {
+            StreamingMultipartErrorKind::Malformed
+        } else if status == StatusCode::REQUEST_TIMEOUT {
+            StreamingMultipartErrorKind::Timeout
+        } else if status == StatusCode::PAYLOAD_TOO_LARGE {
+            StreamingMultipartErrorKind::PayloadTooLarge
+        } else if status == StatusCode::UNSUPPORTED_MEDIA_TYPE {
+            StreamingMultipartErrorKind::UnsupportedMediaType
+        } else if status == StatusCode::CLIENT_CLOSED_REQUEST
+            || status == StatusCode::SERVICE_UNAVAILABLE
+        {
+            StreamingMultipartErrorKind::Cancelled
+        } else {
+            StreamingMultipartErrorKind::Internal
+        };
+        Self::new(kind, status, error.message)
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl From<StreamingMultipartError> for ExtractionError {
+    fn from(error: StreamingMultipartError) -> Self {
+        ExtractionError::new(error.status, error.to_string())
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl fmt::Display for StreamingMultipartError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "[{}] {} {}",
+            Self::CODE,
+            self.status,
+            self.message
+        )
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl std::error::Error for StreamingMultipartError {}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl super::response::IntoResponse for StreamingMultipartError {
+    fn into_response(self) -> super::response::Response {
+        super::response::IntoResponse::into_response(ExtractionError::from(self))
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl StreamingMultipart {
+    const INPUT_WINDOW: usize = 4096;
+
+    fn from_streaming_request(req: Request) -> Result<Self, ExtractionError> {
+        let limits = req
+            .extensions
+            .get_typed::<MultipartLimits>()
+            .copied()
+            .unwrap_or_default();
+        check_request_content_length_limit(&req, limits.max_total_size)?;
+        let expected_length = header_value_ci(&req, "content-length")
+            .map(parse_content_length)
+            .transpose()?;
+        let boundary = validate_multipart_content_type(&req)?;
+        let body = StreamingRawBody::from_request(req)?;
+        let delimiter = format!("--{boundary}").into_bytes();
+        let work_scale = delimiter
+            .len()
+            .checked_mul(6)
+            .and_then(|units| units.checked_add(16))
+            .ok_or_else(|| {
+                ExtractionError::new(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "multipart parser work budget overflow",
+                )
+            })?;
+        let max_work_units = limits
+            .max_total_size
+            .checked_mul(work_scale)
+            .ok_or_else(|| {
+                ExtractionError::new(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "multipart parser work budget overflow",
+                )
+            })?;
+        let now = wall_now();
+
+        Ok(Self {
+            body: Some(body),
+            input: None,
+            delimiter,
+            limits,
+            expected_length,
+            parse_start: now,
+            phase: StreamingMultipartPhase::Preamble,
+            buffer: Vec::new(),
+            total_received: 0,
+            work_units: 0,
+            max_work_units,
+            header_scan_from: 0,
+            buffer_starts_at_line_start: true,
+            part_count: 0,
+            current_part_bytes: 0,
+            current_part_length: None,
+            eof: false,
+            eof_validated: false,
+            field_active: false,
+            abandoned: false,
+        })
+    }
+
+    /// Take ownership of a native streaming request body.
+    ///
+    /// Header and media-type failures are returned before body ownership is
+    /// taken. Subsequent field operations use the same registry-backed error
+    /// type.
+    pub fn from_request(req: Request) -> Result<Self, StreamingMultipartError> {
+        Self::from_streaming_request(req).map_err(Into::into)
+    }
+
+    /// Advance to the next field.
+    ///
+    /// The returned lease mutably borrows this parser, so another field cannot
+    /// be requested until the lease is consumed or dropped. After the closing
+    /// MIME delimiter, this method still drains the bounded epilogue through
+    /// transport EOF before returning `None`; MIME completion alone is not an
+    /// HTTP message-boundary proof.
+    pub async fn next_field<'a>(
+        &'a mut self,
+        cx: &Cx,
+    ) -> Result<Option<StreamingMultipartField<'a>>, StreamingMultipartError> {
+        if self.field_active {
+            self.abandon();
+            return Err(StreamingMultipartError::abandoned(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "previous multipart field lease was forgotten",
+            ));
+        }
+        if self.abandoned {
+            return Err(StreamingMultipartError::abandoned(
+                StatusCode::BAD_REQUEST,
+                "multipart field stream was abandoned before field EOF",
+            ));
+        }
+
+        let result = self.next_field_metadata(cx).await;
+        let metadata = match result {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                self.abandon();
+                return Err(error);
+            }
+        };
+        let Some((name, filename, content_type, headers)) = metadata else {
+            return Ok(None);
+        };
+
+        self.field_active = true;
+        Ok(Some(StreamingMultipartField {
+            multipart: self,
+            name,
+            filename,
+            content_type,
+            headers,
+            complete: false,
+        }))
+    }
+
+    async fn next_field_metadata(
+        &mut self,
+        cx: &Cx,
+    ) -> Result<
+        Option<(
+            String,
+            Option<String>,
+            Option<String>,
+            HashMap<String, String>,
+        )>,
+        StreamingMultipartError,
+    > {
+        loop {
+            self.check_live(cx)?;
+            match self.phase {
+                StreamingMultipartPhase::Preamble => {
+                    let (found, examined) = find_streaming_boundary(
+                        &self.buffer,
+                        &self.delimiter,
+                        self.eof,
+                        self.buffer_starts_at_line_start,
+                    );
+                    self.charge_boundary_work(examined)?;
+                    if let Some(found) = found {
+                        self.drain_buffer_prefix(found.consumed);
+                        if found.closing {
+                            self.phase = StreamingMultipartPhase::Done;
+                        } else {
+                            self.enter_headers()?;
+                        }
+                        continue;
+                    }
+                    if self.eof {
+                        return Err(ExtractionError::bad_request(
+                            "multipart body missing initial boundary",
+                        )
+                        .into());
+                    }
+                    let keep = self.delimiter.len().saturating_add(3);
+                    if self.buffer.len() > keep {
+                        let discard = self.buffer.len() - keep;
+                        self.drain_buffer_prefix(discard);
+                    }
+                    self.read_more(cx).await?;
+                }
+                StreamingMultipartPhase::Headers => {
+                    let scan_from = self.header_scan_from.min(self.buffer.len());
+                    let terminator = find_blank_line(&self.buffer, scan_from);
+                    let examined = terminator
+                        .map_or(self.buffer.len(), |(_, body_start)| body_start)
+                        - scan_from;
+                    self.charge_work(examined)?;
+                    if let Some((headers_end, body_start)) = terminator {
+                        if headers_end > self.limits.max_part_headers {
+                            return Err(ExtractionError::bad_request(
+                                "multipart part headers too large",
+                            )
+                            .into());
+                        }
+                        let headers = parse_part_headers(&self.buffer[..headers_end])?;
+                        let disposition = headers
+                            .get("content-disposition")
+                            .cloned()
+                            .unwrap_or_default();
+                        let name =
+                            parse_disposition_param(&disposition, "name").unwrap_or_default();
+                        let filename = parse_disposition_param(&disposition, "filename");
+                        let content_type = headers.get("content-type").cloned();
+                        if content_type.as_deref().is_some_and(is_multipart_media_type) {
+                            return Err(ExtractionError::bad_request(
+                                "nested multipart parts are not supported",
+                            )
+                            .into());
+                        }
+                        let part_length = parse_part_content_length(&headers)?;
+                        self.drain_buffer_prefix(body_start);
+                        self.current_part_bytes = 0;
+                        self.current_part_length = part_length;
+                        self.header_scan_from = 0;
+                        self.phase = StreamingMultipartPhase::Body;
+                        return Ok(Some((name, filename, content_type, headers)));
+                    }
+                    if self.eof {
+                        return Err(ExtractionError::bad_request(
+                            "multipart part missing header terminator",
+                        )
+                        .into());
+                    }
+                    if self.buffer.len() > self.limits.max_part_headers.saturating_add(3) {
+                        return Err(ExtractionError::bad_request(
+                            "multipart part headers too large",
+                        )
+                        .into());
+                    }
+                    self.header_scan_from = self.buffer.len().saturating_sub(3);
+                    self.read_more(cx).await?;
+                }
+                StreamingMultipartPhase::Body => {
+                    return Err(ExtractionError::new(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "multipart parser cannot advance while a field body is live",
+                    )
+                    .into());
+                }
+                StreamingMultipartPhase::Done => {
+                    self.buffer.clear();
+                    if self.eof {
+                        self.validate_eof()?;
+                        return Ok(None);
+                    }
+                    self.read_more(cx).await?;
+                }
+            }
+        }
+    }
+
+    async fn next_field_chunk(
+        &mut self,
+        cx: &Cx,
+    ) -> Result<Option<Bytes>, StreamingMultipartError> {
+        loop {
+            self.check_live(cx)?;
+            if self.phase != StreamingMultipartPhase::Body {
+                return Ok(None);
+            }
+
+            let (found, examined) = find_streaming_boundary(
+                &self.buffer,
+                &self.delimiter,
+                self.eof,
+                self.buffer_starts_at_line_start,
+            );
+            self.charge_boundary_work(examined)?;
+            if let Some(found) = found {
+                let body_end = strip_trailing_crlf(&self.buffer, found.start);
+                if body_end > Self::INPUT_WINDOW {
+                    self.account_current_part(Self::INPUT_WINDOW)?;
+                    let chunk = Bytes::copy_from_slice(&self.buffer[..Self::INPUT_WINDOW]);
+                    self.drain_buffer_prefix(Self::INPUT_WINDOW);
+                    return Ok(Some(chunk));
+                }
+                self.account_current_part(body_end)?;
+                self.validate_current_part_length()?;
+                let chunk = Bytes::copy_from_slice(&self.buffer[..body_end]);
+                self.drain_buffer_prefix(found.consumed);
+                self.current_part_bytes = 0;
+                self.current_part_length = None;
+                if found.closing {
+                    self.phase = StreamingMultipartPhase::Done;
+                } else {
+                    self.enter_headers()?;
+                }
+                return if chunk.is_empty() {
+                    Ok(None)
+                } else {
+                    Ok(Some(chunk))
+                };
+            }
+
+            if self.eof {
+                return Err(ExtractionError::bad_request(
+                    "multipart part missing closing boundary",
+                )
+                .into());
+            }
+
+            let keep = self.delimiter.len().saturating_add(3);
+            if self.buffer.len() > keep {
+                let flush = self.buffer.len() - keep;
+                self.account_current_part(flush)?;
+                let chunk = Bytes::copy_from_slice(&self.buffer[..flush]);
+                self.drain_buffer_prefix(flush);
+                return Ok(Some(chunk));
+            }
+            self.read_more(cx).await?;
+        }
+    }
+
+    async fn read_more(&mut self, cx: &Cx) -> Result<(), StreamingMultipartError> {
+        loop {
+            self.check_live(cx)?;
+            if let Some(input) = self.input.as_mut() {
+                if input.has_remaining() {
+                    let count = input.remaining().min(Self::INPUT_WINDOW);
+                    let bytes = input.copy_to_bytes(count);
+                    self.total_received =
+                        self.total_received.checked_add(count).ok_or_else(|| {
+                            ExtractionError::new(
+                                StatusCode::PAYLOAD_TOO_LARGE,
+                                "multipart body size accounting overflow",
+                            )
+                        })?;
+                    if self.total_received > self.limits.max_total_size {
+                        return Err(ExtractionError::new(
+                            StatusCode::PAYLOAD_TOO_LARGE,
+                            format!(
+                                "multipart body too large: {} bytes (max {})",
+                                self.total_received, self.limits.max_total_size
+                            ),
+                        )
+                        .into());
+                    }
+                    self.buffer.extend_from_slice(bytes.as_ref());
+                    if !input.has_remaining() {
+                        self.input = None;
+                    }
+                    return Ok(());
+                }
+                self.input = None;
+            }
+
+            if self.eof {
+                return Ok(());
+            }
+            let deadline = self.read_deadline();
+            let body = self.body.as_mut().ok_or_else(|| {
+                ExtractionError::bad_request("multipart field stream body is unavailable")
+            })?;
+            let timed_read = crate::time::timeout_at(
+                deadline,
+                std::future::poll_fn(|poll_cx| Pin::new(&mut *body).poll_frame(poll_cx)),
+            );
+            let next = match futures_lite::future::race(
+                async { StreamingMultipartRead::Frame(timed_read.await) },
+                async {
+                    wait_for_streaming_multipart_cancellation(cx).await;
+                    StreamingMultipartRead::Cancelled
+                },
+            )
+            .await
+            {
+                StreamingMultipartRead::Frame(result) => result.map_err(|_| {
+                    StreamingMultipartError::new(
+                        StreamingMultipartErrorKind::Timeout,
+                        StatusCode::REQUEST_TIMEOUT,
+                        "multipart request body timed out",
+                    )
+                })?,
+                StreamingMultipartRead::Cancelled => {
+                    let kind = cx
+                        .cancel_reason()
+                        .map_or(CancelKind::User, |reason| reason.kind());
+                    return Err(StreamingMultipartError::cancelled(kind));
+                }
+            };
+            match next {
+                Some(Ok(Frame::Data(data))) => {
+                    if !data.has_remaining() {
+                        return Err(StreamingMultipartError::new(
+                            StreamingMultipartErrorKind::Internal,
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "multipart request body produced an empty data cursor",
+                        ));
+                    }
+                    self.input = Some(data);
+                }
+                Some(Ok(Frame::Trailers(_))) => {}
+                Some(Err(error)) => {
+                    return Err(StreamingMultipartError::from_body_error(error));
+                }
+                None => {
+                    self.eof = true;
+                    self.validate_eof()?;
+                    return Ok(());
+                }
+            }
+        }
+    }
+
+    fn check_live(&self, cx: &Cx) -> Result<(), StreamingMultipartError> {
+        const NANOS_PER_SECOND: u64 = 1_000_000_000;
+
+        if cx.checkpoint().is_err() {
+            let kind = cx
+                .cancel_reason()
+                .map_or(CancelKind::User, |reason| reason.kind());
+            return Err(StreamingMultipartError::cancelled(kind));
+        }
+        let elapsed = wall_now().duration_since(self.parse_start);
+        let timeout = self
+            .limits
+            .request_timeout_secs
+            .saturating_mul(NANOS_PER_SECOND);
+        if timeout == 0 || elapsed > timeout {
+            return Err(StreamingMultipartError::new(
+                StreamingMultipartErrorKind::Timeout,
+                StatusCode::REQUEST_TIMEOUT,
+                format!("multipart parsing timed out after {elapsed}ns (max {timeout}ns)"),
+            ));
+        }
+        Ok(())
+    }
+
+    fn read_deadline(&self) -> Time {
+        let request_deadline =
+            self.parse_start + Duration::from_secs(self.limits.request_timeout_secs);
+        let idle_deadline = wall_now() + Duration::from_secs(self.limits.idle_timeout_secs);
+        request_deadline.min(idle_deadline)
+    }
+
+    fn enter_headers(&mut self) -> Result<(), StreamingMultipartError> {
+        if self.part_count >= self.limits.max_parts {
+            return Err(ExtractionError::bad_request(format!(
+                "too many multipart parts (max {})",
+                self.limits.max_parts
+            ))
+            .into());
+        }
+        self.part_count = self.part_count.checked_add(1).ok_or_else(|| {
+            ExtractionError::bad_request("multipart part count accounting overflow")
+        })?;
+        self.header_scan_from = 0;
+        self.phase = StreamingMultipartPhase::Headers;
+        Ok(())
+    }
+
+    fn account_current_part(&mut self, bytes: usize) -> Result<(), StreamingMultipartError> {
+        self.current_part_bytes = self.current_part_bytes.checked_add(bytes).ok_or_else(|| {
+            ExtractionError::new(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "multipart part body size accounting overflow",
+            )
+        })?;
+        if self.current_part_bytes > self.limits.max_part_body_size {
+            return Err(ExtractionError::new(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "multipart part body too large",
+            )
+            .into());
+        }
+        Ok(())
+    }
+
+    fn validate_current_part_length(&self) -> Result<(), StreamingMultipartError> {
+        if let Some(declared_len) = self.current_part_length
+            && declared_len != self.current_part_bytes
+        {
+            return Err(ExtractionError::bad_request(format!(
+                "multipart part content-length mismatch: declared {declared_len} bytes but parsed {} bytes",
+                self.current_part_bytes
+            ))
+            .into());
+        }
+        Ok(())
+    }
+
+    fn validate_eof(&mut self) -> Result<(), StreamingMultipartError> {
+        if self.eof_validated {
+            return Ok(());
+        }
+        if let Some(expected) = self.expected_length
+            && expected != self.total_received
+        {
+            return Err(ExtractionError::bad_request(format!(
+                "multipart Content-Length mismatch: declared {expected} bytes, received {} bytes",
+                self.total_received
+            ))
+            .into());
+        }
+        self.eof_validated = true;
+        Ok(())
+    }
+
+    fn charge_work(&mut self, units: usize) -> Result<(), StreamingMultipartError> {
+        self.work_units = self.work_units.checked_add(units).ok_or_else(|| {
+            ExtractionError::bad_request("multipart parser work accounting overflow")
+        })?;
+        if self.work_units > self.max_work_units {
+            return Err(
+                ExtractionError::bad_request("multipart parser work limit exceeded").into(),
+            );
+        }
+        Ok(())
+    }
+
+    fn charge_boundary_work(
+        &mut self,
+        starts_examined: usize,
+    ) -> Result<(), StreamingMultipartError> {
+        let units = starts_examined
+            .checked_mul(self.delimiter.len())
+            .ok_or_else(|| {
+                ExtractionError::bad_request("multipart parser work accounting overflow")
+            })?;
+        self.charge_work(units)
+    }
+
+    fn drain_buffer_prefix(&mut self, count: usize) {
+        if count == 0 {
+            return;
+        }
+        self.buffer_starts_at_line_start = self.buffer[count - 1] == b'\n';
+        self.buffer.drain(..count);
+    }
+
+    fn abandon(&mut self) {
+        self.abandoned = true;
+        self.field_active = false;
+        self.input = None;
+        self.buffer.clear();
+        drop(self.body.take());
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+enum StreamingMultipartRead<T> {
+    Frame(T),
+    Cancelled,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn wait_for_streaming_multipart_cancellation(cx: &Cx) {
+    if cx.checkpoint().is_err() {
+        return;
+    }
+    let (sender, mut receiver) = oneshot::channel::<()>();
+    let _ = receiver.recv(cx).await;
+    drop(sender);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl FromRequest for StreamingMultipart {
+    fn from_request(req: Request) -> Result<Self, ExtractionError> {
+        Self::from_request(req).map_err(Into::into)
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl StreamingMultipartField<'_> {
+    /// The form field name from `Content-Disposition`.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// The sanitized original filename, if this is a file upload.
+    #[must_use]
+    pub fn filename(&self) -> Option<&str> {
+        self.filename.as_deref()
+    }
+
+    /// The content type of this part, if specified.
+    #[must_use]
+    pub fn content_type(&self) -> Option<&str> {
+        self.content_type.as_deref()
+    }
+
+    /// The parsed, lower-cased part headers.
+    #[must_use]
+    pub fn headers(&self) -> &HashMap<String, String> {
+        &self.headers
+    }
+
+    /// Yield the next bounded field-body chunk.
+    ///
+    /// `None` marks this field boundary, not necessarily HTTP request EOF.
+    /// Call [`StreamingMultipart::next_field`] again to advance or synchronize
+    /// the final MIME epilogue with transport EOF.
+    pub async fn next_chunk(&mut self, cx: &Cx) -> Result<Option<Bytes>, StreamingMultipartError> {
+        if self.complete {
+            return Ok(None);
+        }
+        match self.multipart.next_field_chunk(cx).await {
+            Ok(Some(chunk)) => Ok(Some(chunk)),
+            Ok(None) => {
+                self.complete = true;
+                self.multipart.field_active = false;
+                Ok(None)
+            }
+            Err(error) => {
+                self.complete = true;
+                self.multipart.abandon();
+                Err(error.into())
+            }
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for StreamingMultipartField<'_> {
+    fn drop(&mut self) {
+        if self.complete {
+            self.multipart.field_active = false;
+        } else {
+            self.multipart.abandon();
         }
     }
 }
@@ -1256,21 +2137,28 @@ fn validate_part_content_length(
     headers: &HashMap<String, String>,
     actual_len: usize,
 ) -> Result<(), ExtractionError> {
-    let Some(value) = headers.get("content-length") else {
-        return Ok(());
-    };
-
-    let declared_len = value
-        .parse::<usize>()
-        .map_err(|_| ExtractionError::bad_request("multipart part content-length is invalid"))?;
-
-    if declared_len != actual_len {
+    if let Some(declared_len) = parse_part_content_length(headers)?
+        && declared_len != actual_len
+    {
         return Err(ExtractionError::bad_request(format!(
             "multipart part content-length mismatch: declared {declared_len} bytes but parsed {actual_len} bytes"
         )));
     }
 
     Ok(())
+}
+
+fn parse_part_content_length(
+    headers: &HashMap<String, String>,
+) -> Result<Option<usize>, ExtractionError> {
+    headers
+        .get("content-length")
+        .map(|value| {
+            value.parse::<usize>().map_err(|_| {
+                ExtractionError::bad_request("multipart part content-length is invalid")
+            })
+        })
+        .transpose()
 }
 
 /// Sanitize a filename to prevent path traversal attacks.
@@ -2662,5 +3550,289 @@ mod tests {
                 kind: CancelKind::Deadline,
             })
         );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn transfer_chunk(data: &[u8]) -> Vec<u8> {
+        let mut encoded = format!("{:X}\r\n", data.len()).into_bytes();
+        encoded.extend_from_slice(data);
+        encoded.extend_from_slice(b"\r\n");
+        encoded
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn streaming_field_api_yields_metadata_and_bounded_chunks_before_transport_eof() {
+        use crate::http::h1::stream::BodyKind;
+
+        let cx = Cx::for_testing();
+        let (mut writer, req, control) =
+            streaming_multipart_request(&cx, BodyKind::Chunked, MultipartLimits::default());
+        let mut multipart = StreamingMultipart::from_request(req).expect("streaming extractor");
+
+        let head = b"--B\r\nContent-Disposition: form-data; name=\"upload\"; filename=\"../safe.bin\"\r\nContent-Type: application/octet-stream\r\nX-Part: yes\r\n\r\n";
+        multipart_block_on(writer.push_bytes(&cx, &transfer_chunk(head)))
+            .expect("publish field metadata without payload");
+
+        let mut field = multipart_block_on(multipart.next_field(&cx))
+            .expect("field metadata")
+            .expect("first field");
+        assert_eq!(field.name(), "upload");
+        assert_eq!(field.filename(), Some("safe.bin"));
+        assert_eq!(field.content_type(), Some("application/octet-stream"));
+        assert_eq!(
+            field.headers().get("x-part").map(String::as_str),
+            Some("yes")
+        );
+
+        let payload = (0..10_000)
+            .map(|index| u8::try_from(index % 251).unwrap())
+            .collect::<Vec<_>>();
+        let mut tail = payload.clone();
+        tail.extend_from_slice(b"\r\n--B--\r\nepilogue");
+        multipart_block_on(writer.push_bytes(&cx, &transfer_chunk(&tail)))
+            .expect("publish field payload and MIME close");
+
+        let mut actual = Vec::new();
+        while let Some(chunk) = multipart_block_on(field.next_chunk(&cx)).expect("field chunk") {
+            assert!(
+                chunk.len() <= StreamingMultipart::INPUT_WINDOW,
+                "field chunk retained {} bytes",
+                chunk.len()
+            );
+            actual.extend_from_slice(chunk.as_ref());
+        }
+        assert_eq!(actual, payload);
+        drop(field);
+
+        let mut terminal = std::pin::pin!(multipart.next_field(&cx));
+        let waker = std::task::Waker::noop().clone();
+        let mut task_cx = std::task::Context::from_waker(&waker);
+        assert!(matches!(
+            std::future::Future::poll(terminal.as_mut(), &mut task_cx),
+            std::task::Poll::Pending
+        ));
+        multipart_block_on(writer.push_bytes(&cx, b"0\r\n\r\n")).expect("publish HTTP body EOF");
+        assert!(matches!(
+            std::future::Future::poll(terminal.as_mut(), &mut task_cx),
+            std::task::Poll::Ready(Ok(None))
+        ));
+        drop(terminal);
+        drop(control);
+        assert!(!writer.consumer_dropped());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn streaming_field_api_is_exact_across_every_wire_split() {
+        use crate::http::h1::stream::BodyKind;
+
+        let body = b"preamble x--B--not-a-boundary\r\n--B\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\nalpha x--B--payload\r\n--B\r\nContent-Disposition: form-data; name=\"b\"; filename=\"C:\\tmp\\b.txt\"\r\nContent-Type: text/plain\r\nContent-Length: 4\r\n\r\nbeta\r\n--B--\r\nepilogue";
+
+        for split in 0..=body.len() {
+            let cx = Cx::for_testing();
+            let (mut writer, req, control) = streaming_multipart_request(
+                &cx,
+                BodyKind::ContentLength(u64::try_from(body.len()).unwrap()),
+                MultipartLimits::default(),
+            );
+            let mut multipart = StreamingMultipart::from_request(req).expect("streaming extractor");
+            multipart_block_on(writer.push_bytes(&cx, &body[..split]))
+                .unwrap_or_else(|error| panic!("split {split} prefix: {error:?}"));
+            multipart_block_on(writer.push_bytes(&cx, &body[split..]))
+                .unwrap_or_else(|error| panic!("split {split} suffix: {error:?}"));
+
+            let mut fields = Vec::new();
+            while let Some(mut field) = multipart_block_on(multipart.next_field(&cx))
+                .unwrap_or_else(|error| panic!("split {split} field: {error:?}"))
+            {
+                let metadata = (
+                    field.name().to_owned(),
+                    field.filename().map(str::to_owned),
+                    field.content_type().map(str::to_owned),
+                );
+                let mut bytes = Vec::new();
+                while let Some(chunk) = multipart_block_on(field.next_chunk(&cx))
+                    .unwrap_or_else(|error| panic!("split {split} chunk: {error:?}"))
+                {
+                    assert!(chunk.len() <= StreamingMultipart::INPUT_WINDOW);
+                    bytes.extend_from_slice(chunk.as_ref());
+                }
+                fields.push((metadata, bytes));
+            }
+
+            assert_eq!(fields.len(), 2, "split {split}");
+            assert_eq!(fields[0].0, ("a".to_owned(), None, None), "split {split}");
+            assert_eq!(fields[0].1, b"alpha x--B--payload", "split {split}");
+            assert_eq!(
+                fields[1].0,
+                (
+                    "b".to_owned(),
+                    Some("tmpb.txt".to_owned()),
+                    Some("text/plain".to_owned())
+                ),
+                "split {split}"
+            );
+            assert_eq!(fields[1].1, b"beta", "split {split}");
+            drop(control);
+            assert!(!writer.consumer_dropped(), "split {split}");
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn streaming_field_drop_and_forgotten_lease_fail_closed() {
+        use crate::http::h1::stream::BodyKind;
+
+        let cx = Cx::for_testing();
+        let (mut writer, req, control) =
+            streaming_multipart_request(&cx, BodyKind::Chunked, MultipartLimits::default());
+        let mut multipart = StreamingMultipart::from_request(req).expect("streaming extractor");
+        let mut first_chunk = b"--B\r\nContent-Disposition: form-data; name=\"f\"\r\n\r\n".to_vec();
+        first_chunk.extend(std::iter::repeat_n(b'x', 128));
+        multipart_block_on(writer.push_bytes(&cx, &transfer_chunk(&first_chunk)))
+            .expect("publish partial field");
+        let mut field = multipart_block_on(multipart.next_field(&cx))
+            .expect("field metadata")
+            .expect("first field");
+        assert!(
+            multipart_block_on(field.next_chunk(&cx))
+                .expect("first body chunk")
+                .is_some()
+        );
+        drop(field);
+        assert!(writer.consumer_dropped());
+        let error = multipart_block_on(multipart.next_field(&cx))
+            .expect_err("abandoned field must terminalize parser");
+        assert_eq!(error.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(error.kind(), StreamingMultipartErrorKind::AbandonedField);
+        drop(control);
+
+        let forgotten_cx = Cx::for_testing();
+        let (mut forgotten_writer, forgotten_req, forgotten_control) = streaming_multipart_request(
+            &forgotten_cx,
+            BodyKind::Chunked,
+            MultipartLimits::default(),
+        );
+        let mut forgotten =
+            StreamingMultipart::from_request(forgotten_req).expect("streaming extractor");
+        let metadata = b"--B\r\nContent-Disposition: form-data; name=\"f\"\r\n\r\n";
+        multipart_block_on(forgotten_writer.push_bytes(&forgotten_cx, &transfer_chunk(metadata)))
+            .expect("publish metadata");
+        let field = multipart_block_on(forgotten.next_field(&forgotten_cx))
+            .expect("field metadata")
+            .expect("first field");
+        std::mem::forget(field);
+        let error = multipart_block_on(forgotten.next_field(&forgotten_cx))
+            .expect_err("forgotten lease must fail closed");
+        assert_eq!(error.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(error.kind(), StreamingMultipartErrorKind::AbandonedField);
+        assert!(error.message().contains("forgotten"));
+        assert!(forgotten_writer.consumer_dropped());
+        drop(forgotten_control);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn streaming_field_limits_and_external_cancellation_keep_typed_statuses() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::task::{Wake, Waker};
+
+        use crate::http::h1::stream::BodyKind;
+        use crate::types::CancelKind;
+
+        let limit_cx = Cx::for_testing();
+        let body = b"--B\r\nContent-Disposition: form-data; name=\"f\"\r\n\r\n1234\r\n--B--";
+        let (mut limit_writer, limit_req, limit_control) = streaming_multipart_request(
+            &limit_cx,
+            BodyKind::ContentLength(u64::try_from(body.len()).unwrap()),
+            MultipartLimits::new().max_part_body_size(3),
+        );
+        let mut limited = StreamingMultipart::from_request(limit_req).expect("streaming extractor");
+        multipart_block_on(limit_writer.push_bytes(&limit_cx, body)).expect("publish body");
+        let mut field = multipart_block_on(limited.next_field(&limit_cx))
+            .expect("field metadata")
+            .expect("first field");
+        let error = multipart_block_on(field.next_chunk(&limit_cx))
+            .expect_err("part limit must fail during delivery");
+        assert_eq!(error.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(error.kind(), StreamingMultipartErrorKind::PayloadTooLarge);
+        assert_eq!(error.code(), "ASUP-E504");
+        drop(field);
+        drop(limit_control);
+
+        let metadata_cx = Cx::for_testing();
+        let (metadata_writer, mut req, metadata_control) = streaming_multipart_request(
+            &metadata_cx,
+            BodyKind::Chunked,
+            MultipartLimits::default(),
+        );
+        req.headers
+            .insert("content-type".to_owned(), "text/plain".to_owned());
+        let error = StreamingMultipart::from_request(req)
+            .expect_err("wrong media type must fail before body ownership");
+        assert_eq!(error.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert_eq!(
+            error.kind(),
+            StreamingMultipartErrorKind::UnsupportedMediaType
+        );
+        assert!(error.to_string().starts_with("[ASUP-E504] 415 "));
+        assert!(!metadata_writer.consumer_dropped());
+        drop(metadata_control);
+        assert!(metadata_writer.consumer_dropped());
+
+        struct CountWake(AtomicUsize);
+        impl Wake for CountWake {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+
+            fn wake_by_ref(self: &Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let body_cx = Cx::for_testing();
+        let handler_cx = Cx::for_testing();
+        let (cancel_writer, cancel_req, cancel_control) =
+            streaming_multipart_request(&body_cx, BodyKind::Chunked, MultipartLimits::default());
+        let mut cancelled =
+            StreamingMultipart::from_request(cancel_req).expect("streaming extractor");
+        let wake_count = Arc::new(CountWake(AtomicUsize::new(0)));
+        let waker = Waker::from(Arc::clone(&wake_count));
+        let mut task_cx = std::task::Context::from_waker(&waker);
+        let mut next = std::pin::pin!(cancelled.next_field(&handler_cx));
+        assert!(matches!(
+            std::future::Future::poll(next.as_mut(), &mut task_cx),
+            std::task::Poll::Pending
+        ));
+        handler_cx.cancel_fast(CancelKind::Deadline);
+        assert!(wake_count.0.load(Ordering::SeqCst) > 0);
+        let std::task::Poll::Ready(Err(error)) =
+            std::future::Future::poll(next.as_mut(), &mut task_cx)
+        else {
+            panic!("external handler cancellation must wake the pending body read");
+        };
+        assert_eq!(error.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error.kind(), StreamingMultipartErrorKind::Cancelled);
+        assert_eq!(error.cancel_kind(), Some(CancelKind::Deadline));
+        drop(next);
+        assert!(cancel_writer.consumer_dropped());
+        drop(cancel_control);
+
+        let disconnected =
+            StreamingMultipartError::from_body_error(IncomingBodyError::SourceDisconnected);
+        assert_eq!(disconnected.kind(), StreamingMultipartErrorKind::Transport);
+        assert_eq!(disconnected.cancel_kind(), None);
+        let consumer_dropped =
+            StreamingMultipartError::from_body_error(IncomingBodyError::ConsumerDropped);
+        assert_eq!(
+            consumer_dropped.kind(),
+            StreamingMultipartErrorKind::AbandonedField
+        );
+        let drain_failed =
+            StreamingMultipartError::from_body_error(IncomingBodyError::DrainTimeout);
+        assert_eq!(drain_failed.kind(), StreamingMultipartErrorKind::Internal);
     }
 }
