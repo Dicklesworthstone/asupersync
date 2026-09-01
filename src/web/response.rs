@@ -6,8 +6,23 @@
 
 use std::collections::HashMap;
 use std::fmt;
+#[cfg(not(target_arch = "wasm32"))]
+use std::future::Future;
+#[cfg(not(target_arch = "wasm32"))]
+use std::num::NonZeroUsize;
+#[cfg(not(target_arch = "wasm32"))]
+use std::pin::Pin;
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::Arc;
 
+#[cfg(not(target_arch = "wasm32"))]
+use crate::Cx;
 use crate::bytes::Bytes;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::http::h1::{Http1ProducedResponse, HttpError, OutgoingBodySender};
+
+#[cfg(not(target_arch = "wasm32"))]
+use super::extract::{ExtractionError, FromRequestParts, Request};
 
 // ─── Status Codes ────────────────────────────────────────────────────────────
 
@@ -318,6 +333,228 @@ impl Response {
     pub fn header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
         self.set_header(name, value);
         self
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+type Http1StreamProducerFuture =
+    Pin<Box<dyn Future<Output = Result<OutgoingBodySender, HttpError>> + Send + 'static>>;
+
+#[cfg(not(target_arch = "wasm32"))]
+type Http1StreamProducer =
+    Box<dyn FnOnce(Cx, OutgoingBodySender) -> Http1StreamProducerFuture + Send + 'static>;
+
+/// Deferred HTTP/1 chunked-body plan registered during web handler dispatch.
+///
+/// The plan contains no channel and starts no work. The production listener
+/// creates both channel halves from its authoritative request [`Cx`] only
+/// after routing and response-head validation complete.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) struct Http1StreamPlan {
+    capacity: NonZeroUsize,
+    producer: Http1StreamProducer,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Http1StreamPlan {
+    pub(crate) fn buffered(body: Bytes) -> Self {
+        Self {
+            capacity: NonZeroUsize::MIN,
+            producer: Box::new(move |cx, mut sender| {
+                Box::pin(async move {
+                    if !body.is_empty() {
+                        sender.send_bytes(&cx, body).await?;
+                    }
+                    sender.finish(&cx)?;
+                    Ok(sender)
+                })
+            }),
+        }
+    }
+
+    pub(crate) fn into_produced(self, response: Response) -> Http1ProducedResponse {
+        debug_assert!(
+            response.body.is_empty(),
+            "buffered bytes move into the deferred producer before head binding"
+        );
+        let status = response.status.as_u16();
+        let mut produced = Http1ProducedResponse::chunked(
+            self.capacity,
+            status,
+            crate::http::h1::types::default_reason(status),
+            move |cx, sender| (self.producer)(cx, sender),
+        );
+
+        let mut headers = response.headers.into_iter().collect::<Vec<_>>();
+        headers.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+        headers.extend(
+            response
+                .set_cookies
+                .into_iter()
+                .map(|value| ("set-cookie".to_string(), value)),
+        );
+        for (name, value) in headers {
+            produced = produced.with_header(name, value);
+        }
+        produced
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Default)]
+pub(crate) struct Http1StreamSlot {
+    state: Arc<parking_lot::Mutex<Http1StreamSlotState>>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Default)]
+enum Http1StreamSlotState {
+    #[default]
+    Empty,
+    Registered(Http1StreamPlan),
+    Rejected(&'static str),
+    Consumed,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl fmt::Debug for Http1StreamSlot {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Http1StreamSlot")
+            .field(
+                "state",
+                &match &*self.state.lock() {
+                    Http1StreamSlotState::Empty => "empty",
+                    Http1StreamSlotState::Registered(_) => "registered",
+                    Http1StreamSlotState::Rejected(_) => "rejected",
+                    Http1StreamSlotState::Consumed => "consumed",
+                },
+            )
+            .finish()
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Http1StreamSlot {
+    fn register(&self, plan: Http1StreamPlan) -> Result<(), Http1StreamPlan> {
+        let displaced = {
+            let mut state = self.state.lock();
+            if matches!(&*state, Http1StreamSlotState::Empty) {
+                *state = Http1StreamSlotState::Registered(plan);
+                return Ok(());
+            }
+            if matches!(&*state, Http1StreamSlotState::Registered(_)) {
+                // Poison the request after any duplicate attempt. A handler
+                // must not be able to ignore the second refusal and commit the
+                // first producer accidentally. Move the first plan out so its
+                // user-defined captures are dropped after releasing the lock.
+                Some(std::mem::replace(
+                    &mut *state,
+                    Http1StreamSlotState::Rejected("streamed response registered more than once"),
+                ))
+            } else {
+                None
+            }
+        };
+        drop(displaced);
+        Err(plan)
+    }
+
+    pub(crate) fn bind_response(
+        &self,
+        response: &Response,
+    ) -> Result<Option<Http1StreamPlan>, &'static str> {
+        let state = std::mem::replace(&mut *self.state.lock(), Http1StreamSlotState::Consumed);
+        let plan = match state {
+            Http1StreamSlotState::Empty => None,
+            Http1StreamSlotState::Registered(plan) => {
+                if !response.body.is_empty() {
+                    return Err("streamed response cannot also carry a buffered body");
+                }
+                Some(plan)
+            }
+            Http1StreamSlotState::Rejected(reason) => return Err(reason),
+            Http1StreamSlotState::Consumed => {
+                return Err("streamed response binding already consumed");
+            }
+        };
+
+        if matches!(response.status.as_u16(), 100..=199 | 204 | 205 | 304) {
+            return Err(
+                "current HTTP/1 produced-response transport requires a body-allowed status",
+            );
+        }
+        if response.has_header("content-length") || response.has_header("transfer-encoding") {
+            return Err("current HTTP/1 produced-response transport owns response framing");
+        }
+        Ok(plan)
+    }
+}
+
+/// Request-scoped authoring handle for a supervised HTTP/1 chunked response.
+///
+/// This extractor is available only through
+/// [`crate::web::Router::into_http1_produced_handler`]. Calling a handler that
+/// requires it through another router adapter fails closed instead of minting
+/// transport authority. Registering a producer does not create a channel,
+/// spawn a task, or poll the producer; the HTTP/1 listener performs those
+/// actions under its authoritative request [`Cx`] after dispatch completes.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug)]
+pub struct Http1StreamResponder {
+    slot: Http1StreamSlot,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl FromRequestParts for Http1StreamResponder {
+    fn from_request_parts(req: &Request) -> Result<Self, ExtractionError> {
+        let slot = req
+            .extensions
+            .get_typed_cloned::<Http1StreamSlot>()
+            .ok_or_else(|| {
+                ExtractionError::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "HTTP/1 streamed-response transport unavailable",
+                )
+            })?;
+        Ok(Self { slot })
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Http1StreamResponder {
+    /// Register one bounded chunked producer and return its middleware-visible
+    /// response head.
+    ///
+    /// The handler may add application headers to the returned [`Response`].
+    /// Its body must remain empty: mixing a buffered body with a registered
+    /// stream fails closed in the router adapter. A second registration poisons
+    /// the request even if the handler ignores the returned `500` response.
+    /// `capacity` bounds queued frames, not the size of an arbitrary frame;
+    /// producers that need a byte-memory envelope must bound each submitted
+    /// chunk as well.
+    #[must_use]
+    pub fn chunked<P, Fut>(
+        self,
+        status: StatusCode,
+        capacity: NonZeroUsize,
+        producer: P,
+    ) -> Response
+    where
+        P: FnOnce(Cx, OutgoingBodySender) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<OutgoingBodySender, HttpError>> + Send + 'static,
+    {
+        let plan = Http1StreamPlan {
+            capacity,
+            producer: Box::new(move |cx, sender| Box::pin(producer(cx, sender))),
+        };
+        if self.slot.register(plan).is_err() {
+            return Response::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Bytes::from_static(b"HTTP/1 streamed response already registered"),
+            )
+            .header("content-type", "text/plain; charset=utf-8");
+        }
+        Response::empty(status)
     }
 }
 
@@ -819,7 +1056,7 @@ const fn is_valid_header_value_byte(b: u8) -> bool {
 /// stripping them at the web layer is a defense-in-depth measure that ensures
 /// the response state is always serializable and matches the symmetric
 /// sanitization applied to header values.
-fn sanitize_header_name(name: String) -> String {
+pub(crate) fn sanitize_header_name(name: String) -> String {
     // Apply the same sanitization shape as header values for consistency.
     // RFC 9110 field names are tokens: alphanumeric bytes plus the visible
     // punctuation accepted in the match below.
@@ -850,6 +1087,58 @@ mod tests {
         clippy::future_not_send
     )]
     use super::*;
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn http1_stream_responder_requires_produced_router_adapter() {
+        let request = Request::new("GET", "/stream");
+        let error = Http1StreamResponder::from_request_parts(&request)
+            .expect_err("ordinary router requests have no produced-response authority");
+        assert_eq!(error.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            error.message,
+            "HTTP/1 streamed-response transport unavailable"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn http1_stream_responder_duplicate_registration_poisons_slot() {
+        let slot = Http1StreamSlot::default();
+        let mut request = Request::new("GET", "/stream");
+        request.extensions.insert_typed(slot.clone());
+        let first = Http1StreamResponder::from_request_parts(&request).expect("first extractor");
+        let second = Http1StreamResponder::from_request_parts(&request).expect("second extractor");
+
+        let first_response = first.chunked(
+            StatusCode::OK,
+            NonZeroUsize::MIN,
+            |_cx, sender| async move { Ok(sender) },
+        );
+        assert_eq!(first_response.status, StatusCode::OK);
+        let second_response = second.chunked(
+            StatusCode::OK,
+            NonZeroUsize::MIN,
+            |_cx, sender| async move { Ok(sender) },
+        );
+        assert_eq!(second_response.status, StatusCode::INTERNAL_SERVER_ERROR);
+        let refusal = match slot.bind_response(&first_response) {
+            Err(refusal) => refusal,
+            Ok(_) => {
+                panic!("the adapter must refuse the whole request after a duplicate registration")
+            }
+        };
+        assert_eq!(refusal, "streamed response registered more than once");
+
+        let late_plan = Http1StreamPlan {
+            capacity: NonZeroUsize::MIN,
+            producer: Box::new(|_cx, sender| Box::pin(async move { Ok(sender) })),
+        };
+        assert!(
+            slot.register(late_plan).is_err(),
+            "a consumed slot must remain terminal"
+        );
+    }
 
     #[test]
     fn status_code_into_response() {

@@ -2,7 +2,6 @@
 
 mod common;
 
-use asupersync::Cx;
 use asupersync::bytes::Buf;
 use asupersync::http::body::{Body, Frame, HeaderName};
 use asupersync::http::h1::codec::HttpError;
@@ -17,6 +16,7 @@ use asupersync::net::TcpStream;
 use asupersync::net::websocket::Message;
 use asupersync::runtime::RuntimeBuilder;
 use asupersync::server::shutdown::ShutdownPhase;
+use asupersync::sync::Notify;
 #[cfg(feature = "tls")]
 use asupersync::tls::{
     Certificate, CertificateChain, PrivateKey, TlsAcceptor, TlsAcceptorBuilder, TlsConnector,
@@ -29,20 +29,24 @@ use asupersync::web::extract::{
 use asupersync::web::handler::{
     AsyncCxFnHandler1, AsyncCxFnHandler2, FnHandler, FnHandler1, Handler,
 };
-use asupersync::web::middleware::{HeaderOverwrite, MiddlewareStack};
+use asupersync::web::middleware::{
+    HeaderOverwrite, MiddlewareStack, RequestLogRecord, RequestTracePolicy, SetResponseHeaderLayer,
+};
 use asupersync::web::multipart::{Multipart, MultipartLimits, StreamingMultipart};
 use asupersync::web::request_region::RequestRegion;
-use asupersync::web::response::{Html, Json, Redirect, Response, StatusCode};
+use asupersync::web::response::{Html, Http1StreamResponder, Json, Redirect, Response, StatusCode};
 use asupersync::web::router::{Router, delete, get, post};
 use asupersync::web::sse::{
     DEFAULT_STREAMING_SSE_H1_CHANNEL_CAPACITY, STREAMING_SSE_H1_BACKPRESSURE_POLICY, Sse, SseEvent,
     StreamingSse, StreamingSseTransportStep,
 };
 use asupersync::web::websocket::WebSocketUpgrade;
+use asupersync::{CancelKind, Cx};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::future::Future;
 use std::io;
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -1485,6 +1489,605 @@ async fn read_http_head(stream: &mut TcpStream) -> Vec<u8> {
             return head;
         }
     }
+}
+
+async fn bounded_http1_request(addr: std::net::SocketAddr, path: &str) -> String {
+    asupersync::time::timeout(
+        asupersync::time::wall_now(),
+        Duration::from_secs(5),
+        async {
+            let mut client = TcpStream::connect(addr).await.expect("connect H1 client");
+            let request =
+                format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+            client
+                .write_all(request.as_bytes())
+                .await
+                .expect("write H1 request");
+            let mut response = Vec::new();
+            client
+                .read_to_end(&mut response)
+                .await
+                .expect("read H1 response");
+            String::from_utf8(response).expect("ASCII H1 response")
+        },
+    )
+    .await
+    .expect("bounded H1 client exchange")
+}
+
+#[test]
+fn e2e_router_http1_produced_listener_streams_and_preserves_web_semantics() {
+    common::init_test_logging();
+    test_phase!("Router -> HTTP/1 produced-response listener");
+
+    let runtime = RuntimeBuilder::new()
+        .worker_threads(2)
+        .build()
+        .expect("build runtime");
+    let handle = runtime.handle();
+
+    runtime.block_on(async move {
+        let traced_status = Arc::new(AtomicUsize::new(0));
+        let traced_status_sink = Arc::clone(&traced_status);
+        let router =
+            Router::new()
+                .route(
+                    "/stream",
+                    get(AsyncCxFnHandler1::<_, Http1StreamResponder>::new(
+                        |_handler_cx: Cx, responder: Http1StreamResponder| async move {
+                            let mut response = responder
+                                .chunked(
+                                    StatusCode::OK,
+                                    NonZeroUsize::MIN,
+                                    |cx, mut sender| async move {
+                                        sender.send_chunk(&cx, b"alpha").await?;
+                                        sender.send_chunk(&cx, b"beta").await?;
+                                        sender.finish(&cx)?;
+                                        Ok(sender)
+                                    },
+                                )
+                                .header("content-type", "application/octet-stream")
+                                .header("x-route", "stream");
+                            response.append_set_cookie("first=one; Path=/");
+                            response.append_set_cookie("second=two; Path=/");
+                            response
+                        },
+                    )),
+                )
+                .route(
+                    "/plain",
+                    get(FnHandler::new(|| {
+                        let mut response = Response::new(StatusCode::OK, "plain");
+                        response.append_set_cookie("plain=one; Path=/");
+                        response
+                    })),
+                )
+                .route(
+                    "/duplicate",
+                    get(AsyncCxFnHandler2::<
+                        _,
+                        Http1StreamResponder,
+                        Http1StreamResponder,
+                    >::new(
+                        |_handler_cx: Cx,
+                         first: Http1StreamResponder,
+                         second: Http1StreamResponder| async move {
+                            let response = first.chunked(
+                                StatusCode::OK,
+                                NonZeroUsize::MIN,
+                                |_cx, sender| async move { Ok(sender) },
+                            );
+                            let _ignored_refusal = second.chunked(
+                                StatusCode::OK,
+                                NonZeroUsize::MIN,
+                                |_cx, sender| async move { Ok(sender) },
+                            );
+                            response
+                        },
+                    )),
+                )
+                .route(
+                    "/empty-status",
+                    get(FnHandler::new(|| StatusCode::NO_CONTENT)),
+                )
+                .route(
+                    "/explicit-length",
+                    get(FnHandler::new(|| {
+                        Response::new(StatusCode::OK, "framed").header("content-length", "6")
+                    })),
+                )
+                .fallback(FnHandler::new(|| {
+                    Response::new(StatusCode::NOT_FOUND, "missing")
+                }))
+                .layer(SetResponseHeaderLayer::new(
+                    "x-middleware",
+                    "present",
+                    HeaderOverwrite::Always,
+                ))
+                .with_default_trace_record_sink(Arc::new(move |record: &RequestLogRecord| {
+                    traced_status_sink.store(usize::from(record.status), Ordering::Release);
+                }));
+
+        let listener = Http1Listener::bind_produced_with_config(
+            "127.0.0.1:0",
+            router.into_http1_produced_handler(),
+            Http1ListenerConfig::default()
+                .http_config(Http1Config {
+                    allowed_hosts: HostPolicy::allow_list(vec!["localhost".to_owned()]),
+                    ..Http1Config::default()
+                })
+                .drain_timeout(Duration::from_secs(2))
+                .hard_drain_timeout(Duration::from_secs(5)),
+        )
+        .await
+        .expect("bind produced Router listener");
+        let addr = listener.local_addr().expect("produced listener address");
+        let manager = listener.connection_manager().clone();
+        let shutdown = listener.shutdown_signal();
+        let run_handle = handle
+            .clone()
+            .try_spawn(async move { listener.run_produced(&handle).await })
+            .expect("spawn produced Router listener");
+
+        let streamed = bounded_http1_request(addr, "/stream").await;
+        let streamed_lower = streamed.to_ascii_lowercase();
+        assert!(streamed.starts_with("HTTP/1.1 200 OK\r\n"), "{streamed:?}");
+        assert!(streamed_lower.contains("transfer-encoding: chunked\r\n"));
+        assert!(streamed_lower.contains("x-route: stream\r\n"));
+        assert!(streamed_lower.contains("x-middleware: present\r\n"));
+        let first_cookie = streamed_lower
+            .find("set-cookie: first=one; path=/\r\n")
+            .expect("first cookie");
+        let second_cookie = streamed_lower
+            .find("set-cookie: second=two; path=/\r\n")
+            .expect("second cookie");
+        assert!(
+            first_cookie < second_cookie,
+            "Set-Cookie order must survive"
+        );
+        assert!(
+            streamed.ends_with("5\r\nalpha\r\n4\r\nbeta\r\n0\r\n\r\n"),
+            "{streamed:?}"
+        );
+
+        let plain = bounded_http1_request(addr, "/plain").await;
+        assert!(plain.starts_with("HTTP/1.1 200 OK\r\n"), "{plain:?}");
+        assert!(plain.to_ascii_lowercase().contains("plain=one; path=/"));
+        assert!(plain.ends_with("5\r\nplain\r\n0\r\n\r\n"), "{plain:?}");
+
+        let missing = bounded_http1_request(addr, "/missing").await;
+        assert!(
+            missing.starts_with("HTTP/1.1 404 Not Found\r\n"),
+            "{missing:?}"
+        );
+        assert!(
+            missing.ends_with("7\r\nmissing\r\n0\r\n\r\n"),
+            "{missing:?}"
+        );
+
+        let duplicate = bounded_http1_request(addr, "/duplicate").await;
+        assert!(
+            duplicate.starts_with("HTTP/1.1 500 Internal Server Error\r\n"),
+            "{duplicate:?}"
+        );
+        assert!(duplicate.contains("streamed response registered more than once"));
+        assert_eq!(
+            traced_status.load(Ordering::Acquire),
+            500,
+            "the canonical Router trace must observe the final adapter refusal"
+        );
+
+        let empty_status = bounded_http1_request(addr, "/empty-status").await;
+        assert!(
+            empty_status.starts_with("HTTP/1.1 500 Internal Server Error\r\n"),
+            "{empty_status:?}"
+        );
+        assert!(empty_status.contains("requires a body-allowed status"));
+
+        let explicit_length = bounded_http1_request(addr, "/explicit-length").await;
+        assert!(
+            explicit_length.starts_with("HTTP/1.1 500 Internal Server Error\r\n"),
+            "{explicit_length:?}"
+        );
+        assert!(explicit_length.contains("transport owns response framing"));
+
+        for _ in 0..400 {
+            if manager.is_empty() {
+                break;
+            }
+            asupersync::time::sleep(asupersync::time::wall_now(), Duration::from_millis(5)).await;
+        }
+        assert!(manager.is_empty());
+        assert!(manager.begin_drain(Duration::from_secs(2)));
+        let stats = asupersync::time::timeout(
+            asupersync::time::wall_now(),
+            Duration::from_secs(8),
+            run_handle,
+        )
+        .await
+        .expect("produced listener stopped before timeout")
+        .expect("produced listener result");
+        assert_eq!(stats.force_closed, 0);
+        assert_eq!(shutdown.phase(), ShutdownPhase::Stopped);
+        assert!(manager.is_empty());
+    });
+
+    test_complete!("e2e_router_http1_produced_listener");
+}
+
+#[test]
+fn e2e_router_http1_produced_refuses_transport_owned_trace_headers() {
+    common::init_test_logging();
+    test_phase!("Router produced-response trace framing refusal");
+
+    let runtime = RuntimeBuilder::new()
+        .worker_threads(2)
+        .build()
+        .expect("build runtime");
+    let handle = runtime.handle();
+
+    runtime.block_on(async move {
+        let handler_calls = Arc::new(AtomicUsize::new(0));
+        let traced_status = Arc::new(AtomicUsize::new(0));
+        let calls_for_handler = Arc::clone(&handler_calls);
+        let status_for_sink = Arc::clone(&traced_status);
+        let router = Router::new()
+            .route(
+                "/",
+                get(FnHandler::new(move || {
+                    calls_for_handler.fetch_add(1, Ordering::AcqRel);
+                    "must not run"
+                })),
+            )
+            .with_default_trace_policy(RequestTracePolicy {
+                duration_header: Some("\rcontent-length".to_owned()),
+                trace_header: Some("transfer-\nencoding".to_owned()),
+            })
+            .with_default_trace_record_sink(Arc::new(move |record: &RequestLogRecord| {
+                status_for_sink.store(usize::from(record.status), Ordering::Release);
+            }));
+
+        let listener = Http1Listener::bind_produced_with_config(
+            "127.0.0.1:0",
+            router.into_http1_produced_handler(),
+            Http1ListenerConfig::default()
+                .http_config(Http1Config {
+                    allowed_hosts: HostPolicy::allow_list(vec!["localhost".to_owned()]),
+                    ..Http1Config::default()
+                })
+                .drain_timeout(Duration::from_secs(2))
+                .hard_drain_timeout(Duration::from_secs(5)),
+        )
+        .await
+        .expect("bind trace-refusal listener");
+        let addr = listener.local_addr().expect("trace-refusal address");
+        let manager = listener.connection_manager().clone();
+        let run_handle = handle
+            .clone()
+            .try_spawn(async move { listener.run_produced(&handle).await })
+            .expect("spawn trace-refusal listener");
+
+        let response = bounded_http1_request(addr, "/").await;
+        let response_lower = response.to_ascii_lowercase();
+        assert!(
+            response.starts_with("HTTP/1.1 500 Internal Server Error\r\n"),
+            "{response:?}"
+        );
+        assert_eq!(
+            response_lower.matches("transfer-encoding:").count(),
+            1,
+            "only the listener may inject chunked framing"
+        );
+        assert!(!response_lower.contains("\r\ncontent-length:"));
+        assert!(response.contains("trace policy uses a transport-owned header"));
+        assert_eq!(handler_calls.load(Ordering::Acquire), 0);
+        assert_eq!(traced_status.load(Ordering::Acquire), 500);
+
+        for _ in 0..400 {
+            if manager.is_empty() {
+                break;
+            }
+            asupersync::time::sleep(asupersync::time::wall_now(), Duration::from_millis(5)).await;
+        }
+        assert!(manager.is_empty());
+        assert!(manager.begin_drain(Duration::from_secs(2)));
+        let stats = asupersync::time::timeout(
+            asupersync::time::wall_now(),
+            Duration::from_secs(8),
+            run_handle,
+        )
+        .await
+        .expect("trace-refusal listener stopped before timeout")
+        .expect("trace-refusal listener result");
+        assert_eq!(stats.force_closed, 0);
+    });
+
+    test_complete!("e2e_router_http1_produced_trace_refusal");
+}
+
+#[test]
+fn e2e_router_http1_produced_disconnect_cancels_and_joins_producer() {
+    common::init_test_logging();
+    test_phase!("Router produced response disconnect cancellation");
+
+    struct ProducerDropProbe(Arc<AtomicUsize>);
+
+    impl Drop for ProducerDropProbe {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    let runtime = RuntimeBuilder::new()
+        .worker_threads(2)
+        .build()
+        .expect("build runtime");
+    let handle = runtime.handle();
+
+    runtime.block_on(async move {
+        let producer_started = Arc::new(AtomicUsize::new(0));
+        let producer_cancel_ack = Arc::new(AtomicUsize::new(0));
+        let producer_parent_cancel = Arc::new(AtomicUsize::new(0));
+        let producer_dropped = Arc::new(AtomicUsize::new(0));
+        let started_for_handler = Arc::clone(&producer_started);
+        let cancel_ack_for_handler = Arc::clone(&producer_cancel_ack);
+        let parent_cancel_for_handler = Arc::clone(&producer_parent_cancel);
+        let dropped_for_handler = Arc::clone(&producer_dropped);
+        let router = Router::new().route(
+            "/disconnect",
+            get(AsyncCxFnHandler1::<_, Http1StreamResponder>::new(
+                move |_handler_cx: Cx, responder: Http1StreamResponder| {
+                    let started = Arc::clone(&started_for_handler);
+                    let cancel_ack = Arc::clone(&cancel_ack_for_handler);
+                    let parent_cancel = Arc::clone(&parent_cancel_for_handler);
+                    let dropped = Arc::clone(&dropped_for_handler);
+                    async move {
+                        responder.chunked(
+                            StatusCode::OK,
+                            NonZeroUsize::MIN,
+                            move |cx, mut sender| async move {
+                                let _drop_probe = ProducerDropProbe(dropped);
+                                sender.send_chunk(&cx, b"first").await?;
+                                started.fetch_add(1, Ordering::AcqRel);
+                                let flood = [b'x'; 16 * 1024];
+                                loop {
+                                    match sender.send_chunk(&cx, &flood).await {
+                                        Ok(()) => {}
+                                        Err(error) => {
+                                            cancel_ack.fetch_add(1, Ordering::AcqRel);
+                                            if cx.cancel_reason().is_some_and(|reason| {
+                                                reason.kind == CancelKind::ParentCancelled
+                                            }) {
+                                                parent_cancel.fetch_add(1, Ordering::AcqRel);
+                                            }
+                                            return Err(error);
+                                        }
+                                    }
+                                }
+                            },
+                        )
+                    }
+                },
+            )),
+        );
+
+        let listener = Http1Listener::bind_produced_with_config(
+            "127.0.0.1:0",
+            router.into_http1_produced_handler(),
+            Http1ListenerConfig::default()
+                .http_config(Http1Config {
+                    allowed_hosts: HostPolicy::allow_list(vec!["localhost".to_owned()]),
+                    ..Http1Config::default()
+                })
+                .drain_timeout(Duration::from_secs(2))
+                .hard_drain_timeout(Duration::from_secs(5)),
+        )
+        .await
+        .expect("bind disconnect listener");
+        let addr = listener.local_addr().expect("disconnect listener address");
+        let manager = listener.connection_manager().clone();
+        let in_flight = listener.in_flight_requests();
+        let run_handle = handle
+            .clone()
+            .try_spawn(async move { listener.run_produced(&handle).await })
+            .expect("spawn disconnect listener");
+
+        let client = asupersync::time::timeout(
+            asupersync::time::wall_now(),
+            Duration::from_secs(5),
+            async {
+                let mut client = TcpStream::connect(addr).await.expect("connect H1 client");
+                client
+                    .write_all(
+                        b"GET /disconnect HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+                    )
+                    .await
+                    .expect("write disconnect request");
+                let head = read_http_head(&mut client).await;
+                assert!(head.starts_with(b"HTTP/1.1 200 OK\r\n"));
+                let mut first_chunk = [0_u8; 10];
+                client
+                    .read_exact(&mut first_chunk)
+                    .await
+                    .expect("read first produced chunk");
+                assert_eq!(&first_chunk, b"5\r\nfirst\r\n");
+                client
+            },
+        )
+        .await
+        .expect("bounded disconnect client exchange");
+        assert_eq!(producer_started.load(Ordering::Acquire), 1);
+        drop(client);
+
+        for _ in 0..400 {
+            if producer_cancel_ack.load(Ordering::Acquire) == 1
+                && producer_dropped.load(Ordering::Acquire) == 1
+                && manager.is_empty()
+                && in_flight.load(Ordering::Acquire) == 0
+            {
+                break;
+            }
+            asupersync::time::sleep(asupersync::time::wall_now(), Duration::from_millis(5)).await;
+        }
+        assert_eq!(producer_cancel_ack.load(Ordering::Acquire), 1);
+        assert_eq!(producer_parent_cancel.load(Ordering::Acquire), 1);
+        assert_eq!(producer_dropped.load(Ordering::Acquire), 1);
+        assert_eq!(in_flight.load(Ordering::Acquire), 0);
+        assert!(manager.is_empty());
+
+        assert!(manager.begin_drain(Duration::from_secs(2)));
+        let stats = asupersync::time::timeout(
+            asupersync::time::wall_now(),
+            Duration::from_secs(8),
+            run_handle,
+        )
+        .await
+        .expect("disconnect listener stopped before timeout")
+        .expect("disconnect listener result");
+        assert_eq!(stats.force_closed, 0);
+        assert!(manager.is_empty());
+    });
+
+    test_complete!("e2e_router_http1_produced_disconnect");
+}
+
+#[test]
+fn e2e_router_http1_produced_active_drain_completes_stream() {
+    common::init_test_logging();
+    test_phase!("Router produced-response active graceful drain");
+
+    let runtime = RuntimeBuilder::new()
+        .worker_threads(2)
+        .build()
+        .expect("build runtime");
+    let handle = runtime.handle();
+
+    runtime.block_on(async move {
+        let producer_started = Arc::new(AtomicUsize::new(0));
+        let producer_steps = Arc::new(AtomicUsize::new(0));
+        let release = Arc::new(Notify::new());
+        let started_for_handler = Arc::clone(&producer_started);
+        let steps_for_handler = Arc::clone(&producer_steps);
+        let release_for_handler = Arc::clone(&release);
+        let router = Router::new().route(
+            "/drain",
+            get(AsyncCxFnHandler1::<_, Http1StreamResponder>::new(
+                move |_handler_cx: Cx, responder: Http1StreamResponder| {
+                    let started = Arc::clone(&started_for_handler);
+                    let steps = Arc::clone(&steps_for_handler);
+                    let release = Arc::clone(&release_for_handler);
+                    async move {
+                        responder.chunked(
+                            StatusCode::OK,
+                            NonZeroUsize::MIN,
+                            move |cx, mut sender| async move {
+                                sender.send_chunk(&cx, b"alpha").await?;
+                                steps.fetch_add(1, Ordering::AcqRel);
+                                started.store(1, Ordering::Release);
+                                release.notified().await;
+                                sender.send_chunk(&cx, b"beta").await?;
+                                steps.fetch_add(1, Ordering::AcqRel);
+                                sender.finish(&cx)?;
+                                Ok(sender)
+                            },
+                        )
+                    }
+                },
+            )),
+        );
+
+        let listener = Http1Listener::bind_produced_with_config(
+            "127.0.0.1:0",
+            router.into_http1_produced_handler(),
+            Http1ListenerConfig::default()
+                .http_config(Http1Config {
+                    allowed_hosts: HostPolicy::allow_list(vec!["localhost".to_owned()]),
+                    ..Http1Config::default()
+                })
+                .drain_timeout(Duration::from_secs(2))
+                .hard_drain_timeout(Duration::from_secs(5)),
+        )
+        .await
+        .expect("bind active-drain listener");
+        let addr = listener.local_addr().expect("active-drain address");
+        let manager = listener.connection_manager().clone();
+        let in_flight = listener.in_flight_requests();
+        let shutdown = listener.shutdown_signal();
+        let listener_stats = listener.stats_handle();
+        let client_spawner = handle.clone();
+        let run_handle = handle
+            .clone()
+            .try_spawn(async move { listener.run_produced(&handle).await })
+            .expect("spawn active-drain listener");
+        let client_handle =
+            client_spawner.try_spawn(async move { bounded_http1_request(addr, "/drain").await });
+        let client_handle = client_handle.expect("spawn active-drain client");
+
+        for _ in 0..400 {
+            if producer_started.load(Ordering::Acquire) == 1
+                && in_flight.load(Ordering::Acquire) == 1
+                && !manager.is_empty()
+            {
+                break;
+            }
+            asupersync::time::sleep(asupersync::time::wall_now(), Duration::from_millis(5)).await;
+        }
+        assert_eq!(producer_started.load(Ordering::Acquire), 1);
+        assert_eq!(producer_steps.load(Ordering::Acquire), 1);
+        assert_eq!(in_flight.load(Ordering::Acquire), 1);
+        assert!(!manager.is_empty());
+
+        assert!(manager.begin_drain(Duration::from_secs(2)));
+        assert_eq!(shutdown.phase(), ShutdownPhase::Draining);
+        for _ in 0..400 {
+            let snapshot = listener_stats.snapshot();
+            if snapshot.drains_started_total == 1 && snapshot.last_drain_requests_at_start == 1 {
+                break;
+            }
+            asupersync::time::sleep(asupersync::time::wall_now(), Duration::from_millis(5)).await;
+        }
+        let drain_started = listener_stats.snapshot();
+        assert_eq!(drain_started.drains_started_total, 1);
+        assert_eq!(drain_started.last_drain_requests_at_start, 1);
+        release.notify_one();
+
+        let response = asupersync::time::timeout(
+            asupersync::time::wall_now(),
+            Duration::from_secs(8),
+            client_handle,
+        )
+        .await
+        .expect("active-drain client completed before timeout");
+        assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response:?}");
+        assert!(
+            response.ends_with("5\r\nalpha\r\n4\r\nbeta\r\n0\r\n\r\n"),
+            "{response:?}"
+        );
+        assert_eq!(producer_steps.load(Ordering::Acquire), 2);
+
+        let stats = asupersync::time::timeout(
+            asupersync::time::wall_now(),
+            Duration::from_secs(8),
+            run_handle,
+        )
+        .await
+        .expect("active-drain listener stopped before timeout")
+        .expect("active-drain listener result");
+        assert_eq!(stats.force_closed, 0);
+        let drain_report = stats
+            .drain_report
+            .expect("produced listener reports request-aware drain evidence");
+        assert_eq!(drain_report.requests_at_drain_start, 1);
+        assert_eq!(drain_report.requests_completed, 1);
+        assert_eq!(drain_report.requests_stranded, 0);
+        assert!(drain_report.reached_quiescence);
+        assert_eq!(listener_stats.snapshot().drains_quiescent_total, 1);
+        assert_eq!(shutdown.phase(), ShutdownPhase::Stopped);
+        assert_eq!(in_flight.load(Ordering::Acquire), 0);
+        assert!(manager.is_empty());
+    });
+
+    test_complete!("e2e_router_http1_produced_active_drain");
 }
 
 #[cfg(feature = "tls")]

@@ -30,6 +30,8 @@ use super::handler::Handler;
 use super::middleware::{
     RequestLogSink, RequestTracePolicy, resolve_trace_id, trace_request, wall_clock_now,
 };
+#[cfg(not(target_arch = "wasm32"))]
+use super::response::{Http1StreamPlan, Http1StreamSlot, sanitize_header_name};
 use super::response::{IntoResponse, Response, StatusCode};
 #[cfg(not(target_arch = "wasm32"))]
 use super::websocket::Http1UpgradeSlot;
@@ -39,7 +41,7 @@ use crate::bytes::Bytes;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::http::h1::server::{Http1Response, Http1Upgrade};
 #[cfg(not(target_arch = "wasm32"))]
-use crate::http::h1::stream::StreamingServerRequest;
+use crate::http::h1::stream::{Http1ProducedResponse, StreamingServerRequest};
 use crate::http::h1::types::{Request as HttpRequest, Response as HttpResponse};
 #[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
 use crate::http::h3::{H3Error, H3RequestHead, H3ResponseHead, NativeH3Event, NativeH3Session};
@@ -487,6 +489,11 @@ pub type HttpHandlerFuture = Pin<Box<dyn Future<Output = HttpResponse> + Send + 
 /// Boxed response future returned by [`Router::into_http1_handler`].
 #[cfg(not(target_arch = "wasm32"))]
 pub type Http1HandlerFuture = Pin<Box<dyn Future<Output = Http1Response> + Send + 'static>>;
+
+/// Boxed response future returned by [`Router::into_http1_produced_handler`].
+#[cfg(not(target_arch = "wasm32"))]
+pub type Http1ProducedHandlerFuture =
+    Pin<Box<dyn Future<Output = Http1ProducedResponse> + Send + 'static>>;
 
 /// Resource limits for the established-session HTTP/3 router bridge.
 ///
@@ -1587,6 +1594,44 @@ impl Router {
         }
     }
 
+    /// Convert this router into a production HTTP/1 produced-response handler.
+    ///
+    /// Existing handlers, middleware, route matching, request tracing, and
+    /// extractors remain unchanged. A route may extract
+    /// [`crate::web::Http1StreamResponder`] to register one bounded chunked
+    /// producer. Body-allowed routes that do not register a producer and do
+    /// not set framing headers are adapted as one bounded chunk containing
+    /// their buffered response body. Because the current low-level bridge is
+    /// chunked-only, `1xx`, `204`, `205`, `304`, explicit `Content-Length`,
+    /// and explicit `Transfer-Encoding` responses fail closed with `500` on
+    /// this adapter; use [`Router::into_http_handler`] when those responses are
+    /// required.
+    ///
+    /// This adapter intentionally exposes the current produced-listener
+    /// contract: HTTP/1.1 chunked framing, one request per connection, and
+    /// `Connection: close`. It does not provide HTTP/2 or HTTP/3 response
+    /// streaming, WebSocket handoff, Content-Length streaming, or full-duplex
+    /// request/response progress. The Router trace covers handler dispatch and
+    /// final response-head binding; producer lifetime remains observable
+    /// through the HTTP/1 listener/request lifecycle rather than that handler
+    /// duration record.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub fn into_http1_produced_handler(
+        self,
+    ) -> impl Fn(Cx, StreamingServerRequest) -> Http1ProducedHandlerFuture + Clone + Send + Sync + 'static
+    {
+        let router = Arc::new(self);
+        move |cx, request| {
+            let router = Arc::clone(&router);
+            Box::pin(async move {
+                router
+                    .handle_http1_produced_request_with_cx(&cx, request)
+                    .await
+            })
+        }
+    }
+
     /// Dispatch one listener request through this router with an explicit
     /// capability context.
     ///
@@ -1662,6 +1707,75 @@ impl Router {
             .with_header("connection", "close");
         };
         http_response_from_web(self.handle_with_cx(cx, request).await)
+    }
+
+    /// Dispatch a live HTTP/1 request and bind any registered web response
+    /// producer to the listener-owned request context.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn handle_http1_produced_request_with_cx(
+        &self,
+        cx: &Cx,
+        request: StreamingServerRequest,
+    ) -> Http1ProducedResponse {
+        let Some((mut request, _body_control)) = web_request_from_streaming_http(request) else {
+            return http1_produced_refusal("streaming request body slot collision");
+        };
+        let slot = Http1StreamSlot::default();
+        request.extensions.insert_typed(slot.clone());
+
+        let (mut response, binding) = self
+            .handle_http1_produced_web_response_with_cx(cx, request, &slot)
+            .await;
+        let plan = match binding {
+            Ok(Some(plan)) => plan,
+            Ok(None) | Err(_) => Http1StreamPlan::buffered(std::mem::take(&mut response.body)),
+        };
+        plan.into_produced(response)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn handle_http1_produced_web_response_with_cx(
+        &self,
+        cx: &Cx,
+        mut request: Request,
+        slot: &Http1StreamSlot,
+    ) -> (Response, Result<Option<Http1StreamPlan>, &'static str>) {
+        let binding = Arc::new(parking_lot::Mutex::new(None));
+        let response = if let Some(trace) = &self.default_trace {
+            Self::ensure_request_id(&mut request, &trace.counter);
+            let binding_for_dispatch = Arc::clone(&binding);
+            let (trace_policy, trace_policy_refusal) = http1_produced_trace_policy(&trace.policy);
+            trace_request(
+                &trace_policy,
+                trace.time_getter,
+                trace.sink.as_ref(),
+                cx,
+                request,
+                move |request| async move {
+                    let response = match trace_policy_refusal {
+                        Some(reason) => http1_stream_refusal_response(reason),
+                        None => self.handle_inner(cx, request).await,
+                    };
+                    let result = slot.bind_response(&response);
+                    let refusal = result.as_ref().err().copied();
+                    *binding_for_dispatch.lock() = Some(result);
+                    refusal.map_or(response, http1_stream_refusal_response)
+                },
+            )
+            .await
+        } else {
+            let response = self.handle_inner(cx, request).await;
+            let result = slot.bind_response(&response);
+            let refusal = result.as_ref().err().copied();
+            *binding.lock() = Some(result);
+            refusal.map_or(response, http1_stream_refusal_response)
+        };
+        let binding = Arc::try_unwrap(binding)
+            .ok()
+            .expect("produced-response dispatch releases its binding cell")
+            .into_inner()
+            .expect("produced-response dispatch always seals its request slot");
+        (response, binding)
     }
 
     /// Handle an incoming request with an explicit capability context.
@@ -1930,6 +2044,54 @@ fn validate_h3_request_semantics(
 /// Translate the web framework response into the wire response shared by h1
 /// and h2. Stable sorting makes ordinary header order reproducible; Set-Cookie
 /// stays append-only and ordered because combining those fields is invalid.
+#[cfg(not(target_arch = "wasm32"))]
+fn http1_stream_refusal_response(message: &'static str) -> Response {
+    Response::new(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        crate::bytes::Bytes::from_static(message.as_bytes()),
+    )
+    .header("content-type", "text/plain; charset=utf-8")
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn http1_produced_trace_policy(
+    policy: &RequestTracePolicy,
+) -> (RequestTracePolicy, Option<&'static str>) {
+    fn transport_owned(name: &str) -> bool {
+        let normalized = sanitize_header_name(name.to_owned());
+        [
+            "content-length",
+            "transfer-encoding",
+            "connection",
+            "trailer",
+        ]
+        .iter()
+        .any(|reserved| normalized.eq_ignore_ascii_case(reserved))
+    }
+
+    let mut safe = policy.clone();
+    let mut refused = false;
+    if safe.duration_header.as_deref().is_some_and(transport_owned) {
+        safe.duration_header = None;
+        refused = true;
+    }
+    if safe.trace_header.as_deref().is_some_and(transport_owned) {
+        safe.trace_header = None;
+        refused = true;
+    }
+    (
+        safe,
+        refused.then_some("HTTP/1 produced-response trace policy uses a transport-owned header"),
+    )
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn http1_produced_refusal(message: &'static str) -> Http1ProducedResponse {
+    let mut response = http1_stream_refusal_response(message);
+    let plan = Http1StreamPlan::buffered(std::mem::take(&mut response.body));
+    plan.into_produced(response)
+}
+
 fn http_response_from_web(response: Response) -> HttpResponse {
     let status = response.status.as_u16();
     let mut headers = response.headers.into_iter().collect::<Vec<_>>();
