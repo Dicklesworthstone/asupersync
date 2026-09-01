@@ -17,6 +17,7 @@ use crate::server::shutdown::{
     ShutdownStats,
 };
 use crate::tracing_compat::error;
+use crate::web::sse::{Http1SseResponse, StreamingSseSource};
 use crate::{
     cx::Cx,
     types::{CancelKind, Time},
@@ -508,6 +509,69 @@ where
     }
 }
 
+impl<F, Fut, S> Http1Listener<F>
+where
+    F: Fn(Cx, StreamingServerRequest) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Http1SseResponse<S>> + Send + 'static,
+    S: StreamingSseSource + Send + 'static,
+{
+    /// Bind a listener whose handler returns one supervised live SSE response.
+    pub async fn bind_sse<A: ToSocketAddrs + Send + 'static>(
+        addr: A,
+        handler: F,
+    ) -> io::Result<Self> {
+        Self::bind_sse_with_config(addr, handler, Http1ListenerConfig::default()).await
+    }
+
+    /// Bind a live-SSE listener with custom connection and drain configuration.
+    pub async fn bind_sse_with_config<A: ToSocketAddrs + Send + 'static>(
+        addr: A,
+        handler: F,
+        config: Http1ListenerConfig,
+    ) -> io::Result<Self> {
+        let tcp_listener = TcpListener::bind(addr).await?;
+        Ok(Self::from_listener_sse(tcp_listener, handler, config))
+    }
+
+    /// Create a live-SSE listener from an existing TCP listener.
+    pub fn from_listener_sse(
+        tcp_listener: TcpListener,
+        handler: F,
+        config: Http1ListenerConfig,
+    ) -> Self {
+        let shutdown_signal = shutdown_signal_for_time_getter(config.time_getter);
+        let connection_manager = ConnectionManager::with_time_getter(
+            config.max_connections,
+            shutdown_signal.clone(),
+            config.time_getter,
+        );
+        let stats = Arc::new(Http1ListenerStats::new(config.time_getter));
+
+        Self {
+            tcp_listener,
+            handler: Arc::new(handler),
+            config,
+            shutdown_signal,
+            connection_manager,
+            stats,
+            in_flight_requests: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+}
+
+impl<F, Fut, S> Http1Listener<F>
+where
+    F: Fn(Cx, StreamingServerRequest) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Http1SseResponse<S>> + Send + 'static,
+    S: StreamingSseSource + Send + 'static,
+{
+    /// Run the accept loop for a supervised live-SSE handler.
+    pub async fn run_sse(self, runtime: &RuntimeHandle) -> io::Result<ShutdownStats> {
+        self.run_with(runtime, spawn_sse_connection::<F, Fut, S>)
+            .await
+    }
+}
+
 impl<F> Http1Listener<F> {
     /// Returns a clone of the shutdown signal for external phase observation.
     #[must_use]
@@ -902,6 +966,40 @@ where
         };
         let _ = server
             .serve_produced_with_peer_addr(&connection_cx, stream, peer_addr)
+            .await;
+    })?;
+    Ok(handle)
+}
+
+/// Spawn a supervised live-SSE connection as a runtime task.
+fn spawn_sse_connection<F, Fut, S>(
+    stream: crate::net::tcp::stream::TcpStream,
+    guard: ConnectionGuard,
+    handler: Arc<F>,
+    config: Http1Config,
+    shutdown_signal: ShutdownSignal,
+    in_flight_requests: Arc<AtomicUsize>,
+    runtime: &RuntimeHandle,
+) -> Result<JoinHandle<()>, SpawnError>
+where
+    F: Fn(Cx, StreamingServerRequest) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Http1SseResponse<S>> + Send + 'static,
+    S: StreamingSseSource + Send + 'static,
+{
+    let handle = runtime.try_spawn(async move {
+        let _guard = guard;
+        let server = Http1StreamingServer::with_config_sse(
+            move |request_cx, request| handler(request_cx, request),
+            config,
+        )
+        .with_shutdown_signal(shutdown_signal)
+        .with_in_flight_requests(in_flight_requests);
+        let peer_addr = stream.peer_addr().ok();
+        let Some(connection_cx) = Cx::current() else {
+            return;
+        };
+        let _ = server
+            .serve_sse_with_peer_addr(&connection_cx, stream, peer_addr)
             .await;
     })?;
     Ok(handle)

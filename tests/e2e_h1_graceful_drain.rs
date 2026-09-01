@@ -1,13 +1,16 @@
 //! Request-aware graceful drain e2e for the HTTP/1.1 listener
 //! (br-asupersync-server-stack-hardening-eeexl1.2, D2.2b).
 //!
-//! Five scenarios against a real `Http1Listener` on a multi-thread runtime:
+//! Six scenarios against a real `Http1Listener` on a multi-thread runtime:
 //!   - `produced_listener_writes_chunks_and_terminal_trailers`: the production
 //!     listener writes multiple bounded chunks and exactly one trailer-bearing
 //!     terminator over a real TCP connection.
 //!   - `produced_listener_finishes_in_flight_body_during_drain`: a parked
 //!     produced body remains in the listener request count and finishes inside
 //!     a graceful drain without force-close.
+//!   - `sse_listener_force_close_cancels_source_without_terminator`: an
+//!     infinite SSE source is force-closed during drain, cancelled exactly
+//!     once, and never publishes a clean terminator.
 //!   - `drain_completes_in_flight_requests`: many requests are in flight when
 //!     the drain begins with a generous soft budget; every one completes with
 //!     a `200` that advertises `Connection: close`, nothing is force-closed,
@@ -39,6 +42,7 @@ use asupersync::http::{HeaderMap, HeaderName, HeaderValue};
 use asupersync::runtime::RuntimeBuilder;
 use asupersync::server::shutdown::ShutdownPhase;
 use asupersync::sync::Notify;
+use asupersync::web::sse::{SseEvent, StreamingSse, StreamingSseError, StreamingSseSource};
 
 fn localhost_config(drain: Duration, hard: Duration) -> Http1ListenerConfig {
     Http1ListenerConfig::default()
@@ -71,6 +75,80 @@ fn blocking_client(addr: SocketAddr) -> std::thread::JoinHandle<String> {
 
 fn response_body(response: &str) -> &str {
     response.split_once("\r\n\r\n").map_or("", |(_, body)| body)
+}
+
+fn has_two_sse_event_chunks(response: &[u8]) -> bool {
+    let Some(head_end) = response
+        .windows(b"\r\n\r\n".len())
+        .position(|window| window == b"\r\n\r\n")
+    else {
+        return false;
+    };
+    let head = std::str::from_utf8(&response[..head_end]).expect("SSE response head is UTF-8");
+    assert!(
+        head.split("\r\n").skip(1).any(|line| {
+            line.split_once(':').is_some_and(|(name, value)| {
+                name.eq_ignore_ascii_case("transfer-encoding")
+                    && value.trim().eq_ignore_ascii_case("chunked")
+            })
+        }),
+        "SSE response must advertise chunked transfer encoding: {head:?}"
+    );
+
+    let body = &response[head_end + b"\r\n\r\n".len()..];
+    let expected = [
+        b"data:event-1\n\n".as_slice(),
+        b"data:event-2\n\n".as_slice(),
+    ];
+    let mut cursor = 0;
+    for expected_payload in expected {
+        let Some(size_line_end) = body[cursor..]
+            .windows(b"\r\n".len())
+            .position(|window| window == b"\r\n")
+            .map(|offset| cursor + offset)
+        else {
+            return false;
+        };
+        let size_line =
+            std::str::from_utf8(&body[cursor..size_line_end]).expect("SSE chunk size is ASCII");
+        let chunk_size = usize::from_str_radix(size_line, 16).expect("valid SSE chunk size");
+        assert_ne!(chunk_size, 0, "SSE stream terminated before two events");
+
+        let payload_start = size_line_end + b"\r\n".len();
+        let payload_end = payload_start + chunk_size;
+        if body.len() < payload_end + b"\r\n".len() {
+            return false;
+        }
+        assert_eq!(
+            &body[payload_start..payload_end],
+            expected_payload,
+            "each live SSE event must occupy its own HTTP chunk"
+        );
+        assert_eq!(
+            &body[payload_end..payload_end + b"\r\n".len()],
+            b"\r\n",
+            "SSE chunk must end with CRLF"
+        );
+        cursor = payload_end + b"\r\n".len();
+    }
+    true
+}
+
+struct InfiniteSseSource {
+    source_calls: Arc<AtomicUsize>,
+    cancel_calls: Arc<AtomicUsize>,
+}
+
+impl StreamingSseSource for InfiniteSseSource {
+    fn next_event(&mut self, cx: &asupersync::Cx) -> Result<Option<SseEvent>, StreamingSseError> {
+        cx.checkpoint().map_err(|_| StreamingSseError::Cancelled)?;
+        let call = self.source_calls.fetch_add(1, Ordering::AcqRel) + 1;
+        Ok(Some(SseEvent::default().data(format!("event-{call}"))))
+    }
+
+    fn cancel(&mut self) {
+        self.cancel_calls.fetch_add(1, Ordering::AcqRel);
+    }
 }
 
 /// BODY-7C: the production listener reaches the supervised produced-response
@@ -241,6 +319,140 @@ fn produced_listener_finishes_in_flight_body_during_drain() {
         let report = stats.drain_report.expect("produced drain report");
         assert_eq!(report.requests_at_drain_start, 1);
         assert_eq!(report.requests_completed, 1);
+        assert_eq!(report.requests_stranded, 0);
+        assert!(report.reached_quiescence);
+        assert!(!report.hard_deadline_hit);
+        assert_eq!(in_flight.load(Ordering::Acquire), 0);
+        assert!(manager.is_empty());
+    });
+}
+
+/// BODY-7D: force-closing the production listener cancels an infinite live
+/// SSE source exactly once and closes without a successful chunk terminator.
+#[test]
+fn sse_listener_force_close_cancels_source_without_terminator() {
+    let runtime = RuntimeBuilder::new()
+        .worker_threads(2)
+        .build()
+        .expect("build runtime");
+    let handle = runtime.handle();
+
+    runtime.block_on(async move {
+        let source_calls = Arc::new(AtomicUsize::new(0));
+        let cancel_calls = Arc::new(AtomicUsize::new(0));
+        let handler_source_calls = Arc::clone(&source_calls);
+        let handler_cancel_calls = Arc::clone(&cancel_calls);
+        let listener = Http1Listener::bind_sse_with_config(
+            "127.0.0.1:0",
+            move |_cx, _request| {
+                let source_calls = Arc::clone(&handler_source_calls);
+                let cancel_calls = Arc::clone(&handler_cancel_calls);
+                async move {
+                    StreamingSse::from_source(InfiniteSseSource {
+                        source_calls,
+                        cancel_calls,
+                    })
+                    .into_http1_response(NonZeroUsize::MIN)
+                }
+            },
+            localhost_config(Duration::from_millis(200), Duration::from_secs(5)),
+        )
+        .await
+        .expect("bind SSE listener");
+
+        let addr = listener.local_addr().expect("local addr");
+        let shutdown = listener.shutdown_signal();
+        let manager = listener.connection_manager().clone();
+        let in_flight = listener.in_flight_requests();
+        let stats_handle = listener.stats_handle();
+        let run_handle = handle
+            .clone()
+            .try_spawn(async move { listener.run_sse(&handle).await })
+            .expect("spawn SSE listener");
+
+        let (observed_tx, observed_rx) = std::sync::mpsc::sync_channel(1);
+        let client = std::thread::spawn(move || {
+            let mut stream = std::net::TcpStream::connect(addr).expect("client connect");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .expect("set read timeout");
+            stream
+                .write_all(b"GET /events HTTP/1.1\r\nHost: localhost\r\n\r\n")
+                .expect("write SSE request");
+
+            let mut received = Vec::new();
+            while !has_two_sse_event_chunks(&received) {
+                let mut buffer = [0_u8; 4096];
+                let count = stream.read(&mut buffer).expect("read SSE bytes");
+                assert_ne!(count, 0, "SSE connection closed before two chunks");
+                received.extend_from_slice(&buffer[..count]);
+            }
+            observed_tx
+                .send(received.clone())
+                .expect("publish two-event observation");
+
+            let mut rolling_tail = received[received.len().saturating_sub(4)..].to_vec();
+            let mut saw_terminator = received.windows(5).any(|window| window == b"0\r\n\r\n");
+            loop {
+                let mut buffer = [0_u8; 4096];
+                let count = match stream.read(&mut buffer) {
+                    Ok(count) => count,
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            std::io::ErrorKind::ConnectionReset
+                                | std::io::ErrorKind::ConnectionAborted
+                                | std::io::ErrorKind::BrokenPipe
+                        ) =>
+                    {
+                        break;
+                    }
+                    Err(error) => panic!("read until force-close termination: {error}"),
+                };
+                if count == 0 {
+                    break;
+                }
+                rolling_tail.extend_from_slice(&buffer[..count]);
+                saw_terminator |= rolling_tail.windows(5).any(|window| window == b"0\r\n\r\n");
+                if rolling_tail.len() > 4 {
+                    rolling_tail.drain(..rolling_tail.len() - 4);
+                }
+            }
+            (received, saw_terminator)
+        });
+
+        let observed = observed_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("client observed two live SSE events");
+        let observed = String::from_utf8(observed).expect("SSE response is UTF-8");
+        assert!(response_body(&observed).contains("data:event-1\n\n"));
+        assert!(response_body(&observed).contains("data:event-2\n\n"));
+        assert!(!response_body(&observed).contains("0\r\n\r\n"));
+        assert_eq!(in_flight.load(Ordering::Acquire), 1);
+
+        assert!(
+            manager.begin_drain(Duration::from_secs(5)),
+            "begin drain with infinite SSE in flight"
+        );
+        for _ in 0..400 {
+            if stats_handle.snapshot().drains_started_total == 1 {
+                break;
+            }
+            asupersync::time::sleep(asupersync::time::wall_now(), Duration::from_millis(5)).await;
+        }
+
+        let stats = run_handle.await.expect("SSE listener result");
+        let (_, saw_terminator) = client.join().expect("client thread");
+        assert!(
+            !saw_terminator,
+            "force-close must not publish a clean terminator"
+        );
+        assert_eq!(cancel_calls.load(Ordering::Acquire), 1);
+        assert_eq!(shutdown.phase(), ShutdownPhase::Stopped);
+        assert!(stats.force_closed > 0);
+        let report = stats.drain_report.expect("SSE drain report");
+        assert_eq!(report.requests_at_drain_start, 1);
+        assert_eq!(report.requests_at_escalation, Some(1));
         assert_eq!(report.requests_stranded, 0);
         assert!(report.reached_quiescence);
         assert!(!report.hard_deadline_hit);
