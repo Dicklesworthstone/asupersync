@@ -1380,15 +1380,52 @@ impl BodyLimits {
 #[derive(Debug, Clone)]
 pub struct Json<T>(pub T);
 
+fn json_body_limit(req: &Request) -> usize {
+    req.extensions
+        .get_typed::<BodyLimits>()
+        .map_or(DEFAULT_MAX_JSON_BODY_SIZE, |limits| {
+            limits.max_json_body_size
+        })
+}
+
+fn validate_json_content_type(req: &Request) -> Result<(), ExtractionError> {
+    let Some(content_type) = header_value_ci(req, "content-type") else {
+        return Err(ExtractionError::new(
+            super::response::StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "Json requires Content-Type: application/json",
+        ));
+    };
+    if !matches_json_content_type(content_type) {
+        return Err(ExtractionError::new(
+            super::response::StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            format!("expected application/json, got {content_type}"),
+        ));
+    }
+    Ok(())
+}
+
+fn deserialize_json_body<T: serde::de::DeserializeOwned>(
+    body: &[u8],
+) -> Result<Json<T>, ExtractionError> {
+    // br-asupersync-y4mc96: keep serde error in server-side log only;
+    // return a generic message to the client so byte offsets, expected
+    // type names, and partial-parse context don't reach an attacker.
+    // The detailed `e` is recorded via tracing for operator forensics.
+    serde_json::from_slice(body).map(Json).map_err(|_err| {
+        crate::tracing_compat::warn!(
+            error = %_err,
+            "web/extract: Json deserialization failed"
+        );
+        ExtractionError::unprocessable("invalid JSON body")
+    })
+}
+
 impl<T: serde::de::DeserializeOwned> FromRequest for Json<T> {
     fn from_request(req: Request) -> Result<Self, ExtractionError> {
         #[cfg(not(target_arch = "wasm32"))]
         reject_buffered_extractor_on_streaming_request(&req, "Json")?;
 
-        let limit = req
-            .extensions
-            .get_typed::<BodyLimits>()
-            .map_or(DEFAULT_MAX_JSON_BODY_SIZE, |l| l.max_json_body_size);
+        let limit = json_body_limit(&req);
 
         // SECURITY: Check Content-Length header BEFORE reading body to prevent DoS
         check_content_length_limit(&req, limit)?;
@@ -1407,32 +1444,33 @@ impl<T: serde::de::DeserializeOwned> FromRequest for Json<T> {
         // Reject invalid or mismatched framing metadata before parsing body bytes.
         validate_content_length(&req)?;
 
-        let Some(ct) = header_value_ci(&req, "content-type") else {
-            return Err(ExtractionError::new(
-                super::response::StatusCode::UNSUPPORTED_MEDIA_TYPE,
-                "Json requires Content-Type: application/json",
-            ));
-        };
-        if !matches_json_content_type(ct) {
-            return Err(ExtractionError::new(
-                super::response::StatusCode::UNSUPPORTED_MEDIA_TYPE,
-                format!("expected application/json, got {ct}"),
-            ));
-        }
+        validate_json_content_type(&req)?;
+        deserialize_json_body(req.body.as_ref())
+    }
 
-        // br-asupersync-y4mc96: keep serde error in server-side log only;
-        // return a generic message to the client so byte offsets, expected
-        // type names, and partial-parse context don't reach an attacker.
-        // The detailed `e` is recorded via tracing for operator forensics.
-        serde_json::from_slice(req.body.as_ref())
-            .map(Json)
-            .map_err(|_err| {
-                crate::tracing_compat::warn!(
-                    error = %_err,
-                    "web/extract: Json deserialization failed"
-                );
-                ExtractionError::unprocessable("invalid JSON body")
-            })
+    fn from_request_with_cx<'a>(
+        cx: &'a Cx,
+        req: Request,
+    ) -> impl std::future::Future<Output = Result<Self, ExtractionError>> + Send + 'a
+    where
+        Self: Send + 'a,
+    {
+        async move {
+            #[cfg(not(target_arch = "wasm32"))]
+            if req.extensions.get_typed::<StreamingRawBodySlot>().is_some() {
+                let limit = json_body_limit(&req);
+                check_content_length_limit(&req, limit)?;
+                validate_json_content_type(&req)?;
+                let body = StreamingRawBody::take_from_request(&req)?;
+                let collected = body
+                    .collect_bounded_with_cx(cx, limit)
+                    .await
+                    .map_err(|error| streaming_extraction_error("JSON", error))?;
+                return deserialize_json_body(collected.data().as_ref());
+            }
+
+            Self::from_request(req)
+        }
     }
 }
 
@@ -1452,16 +1490,47 @@ impl<T: serde::de::DeserializeOwned> FromRequest for Json<T> {
 #[derive(Debug, Clone)]
 pub struct Form<T>(pub T);
 
+fn form_body_limit(req: &Request) -> usize {
+    req.extensions
+        .get_typed::<BodyLimits>()
+        .map_or(DEFAULT_MAX_FORM_BODY_SIZE, |limits| {
+            limits.max_form_body_size
+        })
+}
+
+fn validate_form_content_type(req: &Request) -> Result<(), ExtractionError> {
+    // br-asupersync-mxqraw: Content-Type MUST be present AND must be
+    // application/x-www-form-urlencoded. Missing Content-Type remains 415.
+    let Some(content_type) = header_value_ci(req, "content-type") else {
+        return Err(ExtractionError::new(
+            super::response::StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "Form requires Content-Type: application/x-www-form-urlencoded",
+        ));
+    };
+    if !matches_content_type_media_type(content_type, "application/x-www-form-urlencoded") {
+        return Err(ExtractionError::new(
+            super::response::StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            format!("expected application/x-www-form-urlencoded, got {content_type}"),
+        ));
+    }
+    Ok(())
+}
+
+#[allow(clippy::implicit_hasher)]
+fn deserialize_form_body<T: DeserializeOwned>(body: &[u8]) -> Result<Form<T>, ExtractionError> {
+    let body_str = std::str::from_utf8(body)
+        .map_err(|error| ExtractionError::bad_request(format!("invalid UTF-8 body: {error}")))?;
+    let parsed = parse_urlencoded_multi(body_str, "form field")?;
+    deserialize_from_multi_value_map(&parsed, "form data").map(Form)
+}
+
 #[allow(clippy::implicit_hasher)]
 impl<T: DeserializeOwned> FromRequest for Form<T> {
     fn from_request(req: Request) -> Result<Self, ExtractionError> {
         #[cfg(not(target_arch = "wasm32"))]
         reject_buffered_extractor_on_streaming_request(&req, "Form")?;
 
-        let limit = req
-            .extensions
-            .get_typed::<BodyLimits>()
-            .map_or(DEFAULT_MAX_FORM_BODY_SIZE, |l| l.max_form_body_size);
+        let limit = form_body_limit(&req);
 
         // SECURITY: Check Content-Length header BEFORE reading body to prevent DoS
         check_content_length_limit(&req, limit)?;
@@ -1480,31 +1549,33 @@ impl<T: DeserializeOwned> FromRequest for Form<T> {
         // Reject invalid or mismatched framing metadata before parsing body bytes.
         validate_content_length(&req)?;
 
-        // br-asupersync-mxqraw: Content-Type MUST be present AND must be
-        // application/x-www-form-urlencoded. Previously we accepted any
-        // body when Content-Type was absent, parsing arbitrary payloads
-        // (JSON, XML, raw bytes) as form-encoded — so an attacker could
-        // forge a Form<T> deserialisation by sending a JSON body without
-        // a Content-Type header. Default-deny: missing header is a 415.
-        let Some(ct) = header_value_ci(&req, "content-type") else {
-            return Err(ExtractionError::new(
-                super::response::StatusCode::UNSUPPORTED_MEDIA_TYPE,
-                "Form requires Content-Type: application/x-www-form-urlencoded",
-            ));
-        };
-        if !matches_content_type_media_type(ct, "application/x-www-form-urlencoded") {
-            return Err(ExtractionError::new(
-                super::response::StatusCode::UNSUPPORTED_MEDIA_TYPE,
-                format!("expected application/x-www-form-urlencoded, got {ct}"),
-            ));
+        validate_form_content_type(&req)?;
+        deserialize_form_body(req.body.as_ref())
+    }
+
+    fn from_request_with_cx<'a>(
+        cx: &'a Cx,
+        req: Request,
+    ) -> impl std::future::Future<Output = Result<Self, ExtractionError>> + Send + 'a
+    where
+        Self: Send + 'a,
+    {
+        async move {
+            #[cfg(not(target_arch = "wasm32"))]
+            if req.extensions.get_typed::<StreamingRawBodySlot>().is_some() {
+                let limit = form_body_limit(&req);
+                check_content_length_limit(&req, limit)?;
+                validate_form_content_type(&req)?;
+                let body = StreamingRawBody::take_from_request(&req)?;
+                let collected = body
+                    .collect_bounded_with_cx(cx, limit)
+                    .await
+                    .map_err(|error| streaming_extraction_error("form", error))?;
+                return deserialize_form_body(collected.data().as_ref());
+            }
+
+            Self::from_request(req)
         }
-
-        let body_str = std::str::from_utf8(req.body.as_ref())
-            .map_err(|e| ExtractionError::bad_request(format!("invalid UTF-8 body: {e}")))?;
-
-        let parsed = parse_urlencoded_multi(body_str, "form field")?;
-
-        deserialize_from_multi_value_map(&parsed, "form data").map(Self)
     }
 }
 
@@ -1662,6 +1733,21 @@ pub struct StreamingRawBody {
 
 #[cfg(not(target_arch = "wasm32"))]
 impl StreamingRawBody {
+    fn take_from_request(req: &Request) -> Result<Self, ExtractionError> {
+        let slot = req
+            .extensions
+            .get_typed::<StreamingRawBodySlot>()
+            .ok_or_else(|| {
+                ExtractionError::new(
+                    super::response::StatusCode::INTERNAL_SERVER_ERROR,
+                    "streaming request body unavailable on this transport",
+                )
+            })?;
+        slot.take().map(|inner| Self { inner }).map_err(|message| {
+            ExtractionError::new(super::response::StatusCode::INTERNAL_SERVER_ERROR, message)
+        })
+    }
+
     /// Return the framing mode declared by the validated request head.
     #[must_use]
     pub fn kind(&self) -> BodyKind {
@@ -1830,6 +1916,89 @@ pub enum StreamingRawBodyCollectError {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+fn streaming_extraction_error(
+    extractor: &str,
+    error: StreamingRawBodyCollectError,
+) -> ExtractionError {
+    use super::response::StatusCode;
+
+    let too_large = |actual: Option<u64>, limit: u64| {
+        let message = actual.map_or_else(
+            || format!("{extractor} body too large (limit {limit})"),
+            |actual| format!("{extractor} body too large: {actual} bytes (limit {limit})"),
+        );
+        ExtractionError::new(StatusCode::PAYLOAD_TOO_LARGE, message)
+    };
+
+    match error {
+        StreamingRawBodyCollectError::LengthLimitExceeded { actual, limit } => {
+            too_large(actual, u64::try_from(limit).unwrap_or(u64::MAX))
+        }
+        StreamingRawBodyCollectError::Body(IncomingBodyError::BodyTooLarge { actual, limit }) => {
+            too_large(actual, limit)
+        }
+        StreamingRawBodyCollectError::Body(IncomingBodyError::QueueFrameTooLarge {
+            actual,
+            limit,
+        }) => too_large(
+            u64::try_from(actual).ok(),
+            u64::try_from(limit).unwrap_or(u64::MAX),
+        ),
+        StreamingRawBodyCollectError::Body(IncomingBodyError::AccountingOverflow) => {
+            ExtractionError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to account for {extractor} request body"),
+            )
+        }
+        StreamingRawBodyCollectError::Body(IncomingBodyError::Cancelled {
+            kind:
+                CancelKind::Timeout
+                | CancelKind::Deadline
+                | CancelKind::PollQuota
+                | CancelKind::CostBudget
+                | CancelKind::ResourceUnavailable,
+        }) => ExtractionError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("{extractor} request body unavailable"),
+        ),
+        // `ExtractionError` is converted directly into a web `Response`, so it
+        // cannot yet carry the protocol-level "record cancellation without a
+        // response" disposition. Retain the pre-existing web 499
+        // representation for these residual kinds until the Handler boundary
+        // can propagate `ServerHopOutcome::Cancelled`.
+        StreamingRawBodyCollectError::Body(IncomingBodyError::Cancelled { .. }) => {
+            ExtractionError::new(
+                StatusCode::CLIENT_CLOSED_REQUEST,
+                format!("{extractor} request body cancelled"),
+            )
+        }
+        StreamingRawBodyCollectError::Body(
+            IncomingBodyError::BadContentLength
+            | IncomingBodyError::BadChunkedEncoding
+            | IncomingBodyError::TrailersTooLarge
+            | IncomingBodyError::BadHeader
+            | IncomingBodyError::InvalidHeaderName
+            | IncomingBodyError::InvalidHeaderValue,
+        ) => ExtractionError::bad_request(format!("invalid {extractor} request body")),
+        StreamingRawBodyCollectError::Body(IncomingBodyError::SourceDisconnected) => {
+            ExtractionError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to read {extractor} request body"),
+            )
+        }
+        StreamingRawBodyCollectError::Body(
+            IncomingBodyError::ConsumerDropped
+            | IncomingBodyError::DrainLimitExceeded { .. }
+            | IncomingBodyError::DrainTimeout
+            | IncomingBodyError::AlreadyTerminal,
+        ) => ExtractionError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to read {extractor} request body"),
+        ),
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 impl fmt::Display for StreamingRawBodyCollectError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -1955,18 +2124,7 @@ fn reject_buffered_extractor_on_streaming_request(
 #[cfg(not(target_arch = "wasm32"))]
 impl FromRequest for StreamingRawBody {
     fn from_request(req: Request) -> Result<Self, ExtractionError> {
-        let slot = req
-            .extensions
-            .get_typed::<StreamingRawBodySlot>()
-            .ok_or_else(|| {
-                ExtractionError::new(
-                    super::response::StatusCode::INTERNAL_SERVER_ERROR,
-                    "streaming request body unavailable on this transport",
-                )
-            })?;
-        slot.take().map(|inner| Self { inner }).map_err(|message| {
-            ExtractionError::new(super::response::StatusCode::INTERNAL_SERVER_ERROR, message)
-        })
+        Self::take_from_request(&req)
     }
 }
 
@@ -1992,6 +2150,44 @@ mod tests {
         clippy::future_not_send
     )]
     use super::*;
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn block_on<F: std::future::Future>(future: F) -> F::Output {
+        let waker = std::task::Waker::noop().clone();
+        let mut task_cx = Context::from_waker(&waker);
+        let mut future = std::pin::pin!(future);
+        loop {
+            match std::future::Future::poll(future.as_mut(), &mut task_cx) {
+                Poll::Ready(output) => return output,
+                Poll::Pending => std::thread::yield_now(),
+            }
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn streaming_extractor_request(
+        cx: &Cx,
+        kind: BodyKind,
+        content_type: &str,
+        limit: usize,
+    ) -> (
+        crate::http::h1::stream::IncomingRequestBodyWriter,
+        Request,
+        StreamingRawBodyControl,
+    ) {
+        let (writer, body) = IncomingRequestBody::channel(cx, kind);
+        let mut req = Request::new("POST", "/streamed").with_header("content-type", content_type);
+        if let BodyKind::ContentLength(length) = kind {
+            req = req.with_header("content-length", length.to_string());
+        }
+        req.extensions.insert_typed(
+            BodyLimits::new()
+                .max_json_body_size(limit)
+                .max_form_body_size(limit),
+        );
+        let control = insert_streaming_raw_body(&mut req, body).expect("install streaming body");
+        (writer, req, control)
+    }
 
     #[test]
     fn path_extraction() {
@@ -2097,6 +2293,261 @@ mod tests {
 
         let Json(input) = Json::<Input>::from_request(req).unwrap();
         assert_eq!(input.name, "alice");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn streaming_json_and_form_buffered_async_hook_parity() {
+        let cx = Cx::for_testing();
+
+        let json_req = Request::new("POST", "/json")
+            .with_header("content-type", "application/json")
+            .with_body(Bytes::from_static(br#"{"name":"alice"}"#));
+        let expected_json = Json::<serde_json::Value>::from_request(json_req.clone())
+            .expect("buffered JSON")
+            .0;
+        let actual_json = block_on(Json::<serde_json::Value>::from_request_with_cx(
+            &cx, json_req,
+        ))
+        .expect("async-hook buffered JSON")
+        .0;
+        assert_eq!(actual_json, expected_json);
+
+        let form_req = Request::new("POST", "/form")
+            .with_header("content-type", "application/x-www-form-urlencoded")
+            .with_body(Bytes::from_static(b"user=alice&role=admin"));
+        let expected_form = Form::<HashMap<String, String>>::from_request(form_req.clone())
+            .expect("buffered form")
+            .0;
+        let actual_form = block_on(Form::<HashMap<String, String>>::from_request_with_cx(
+            &cx, form_req,
+        ))
+        .expect("async-hook buffered form")
+        .0;
+        assert_eq!(actual_form, expected_form);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn streaming_json_and_form_enforce_declared_and_actual_limits() {
+        let cx = Cx::for_testing();
+
+        let (json_writer, json_req, json_control) =
+            streaming_extractor_request(&cx, BodyKind::ContentLength(8), "application/json", 7);
+        let error = block_on(Json::<serde_json::Value>::from_request_with_cx(
+            &cx, json_req,
+        ))
+        .expect_err("declared JSON length must fail before body polling");
+        assert_eq!(
+            error.status,
+            super::super::response::StatusCode::PAYLOAD_TOO_LARGE
+        );
+        assert!(!json_writer.consumer_dropped());
+        drop(json_control);
+        assert!(json_writer.consumer_dropped());
+
+        let (form_writer, form_req, form_control) = streaming_extractor_request(
+            &cx,
+            BodyKind::ContentLength(8),
+            "application/x-www-form-urlencoded",
+            7,
+        );
+        let error = block_on(Form::<HashMap<String, String>>::from_request_with_cx(
+            &cx, form_req,
+        ))
+        .expect_err("declared form length must fail before body polling");
+        assert_eq!(
+            error.status,
+            super::super::response::StatusCode::PAYLOAD_TOO_LARGE
+        );
+        assert!(!form_writer.consumer_dropped());
+        drop(form_control);
+        assert!(form_writer.consumer_dropped());
+
+        let (mut json_writer, json_req, json_control) =
+            streaming_extractor_request(&cx, BodyKind::Chunked, "application/json", 7);
+        block_on(json_writer.push_bytes(&cx, b"7\r\n{\"x\":1}\r\n0\r\n\r\n"))
+            .expect("publish exact-limit chunked JSON");
+        let Json(value) = block_on(Json::<serde_json::Value>::from_request_with_cx(
+            &cx, json_req,
+        ))
+        .expect("exact-limit chunked JSON");
+        assert_eq!(value["x"], 1);
+        drop(json_control);
+
+        let (mut form_writer, form_req, form_control) = streaming_extractor_request(
+            &cx,
+            BodyKind::Chunked,
+            "application/x-www-form-urlencoded",
+            7,
+        );
+        block_on(form_writer.push_bytes(&cx, b"7\r\na=12345\r\n0\r\n\r\n"))
+            .expect("publish exact-limit chunked form");
+        let Form(values) = block_on(Form::<HashMap<String, String>>::from_request_with_cx(
+            &cx, form_req,
+        ))
+        .expect("exact-limit chunked form");
+        assert_eq!(values.get("a").map(String::as_str), Some("12345"));
+        drop(form_control);
+
+        let (mut json_writer, json_req, json_control) =
+            streaming_extractor_request(&cx, BodyKind::Chunked, "application/json", 7);
+        block_on(json_writer.push_bytes(&cx, b"8\r\n{\"x\":12}\r\n0\r\n\r\n"))
+            .expect("publish over-limit chunked JSON");
+        let error = block_on(Json::<serde_json::Value>::from_request_with_cx(
+            &cx, json_req,
+        ))
+        .expect_err("actual streamed JSON length must be capped");
+        assert_eq!(
+            error.status,
+            super::super::response::StatusCode::PAYLOAD_TOO_LARGE
+        );
+        assert!(error.message.contains("8 bytes (limit 7)"));
+        drop(json_control);
+
+        let (mut form_writer, form_req, form_control) = streaming_extractor_request(
+            &cx,
+            BodyKind::Chunked,
+            "application/x-www-form-urlencoded",
+            7,
+        );
+        block_on(form_writer.push_bytes(&cx, b"8\r\na=123456\r\n0\r\n\r\n"))
+            .expect("publish over-limit chunked form");
+        let error = block_on(Form::<HashMap<String, String>>::from_request_with_cx(
+            &cx, form_req,
+        ))
+        .expect_err("actual streamed form length must be capped");
+        assert_eq!(
+            error.status,
+            super::super::response::StatusCode::PAYLOAD_TOO_LARGE
+        );
+        assert!(error.message.contains("8 bytes (limit 7)"));
+        drop(form_control);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn streaming_json_and_form_fail_closed_on_transport_errors_and_cancellation() {
+        let cx = Cx::for_testing();
+
+        let (mut json_writer, json_req, json_control) =
+            streaming_extractor_request(&cx, BodyKind::ContentLength(7), "application/json", 7);
+        block_on(json_writer.push_bytes(&cx, b"{}")).expect("publish truncated fixed JSON prefix");
+        assert_eq!(
+            json_writer.finish(&cx),
+            Err(IncomingBodyError::BadContentLength)
+        );
+        let error = block_on(Json::<serde_json::Value>::from_request_with_cx(
+            &cx, json_req,
+        ))
+        .expect_err("truncated fixed JSON must fail");
+        assert_eq!(
+            error.status,
+            super::super::response::StatusCode::BAD_REQUEST
+        );
+        assert_eq!(error.message, "invalid JSON request body");
+        drop(json_control);
+
+        let (mut form_writer, form_req, form_control) = streaming_extractor_request(
+            &cx,
+            BodyKind::Chunked,
+            "application/x-www-form-urlencoded",
+            32,
+        );
+        assert_eq!(
+            block_on(form_writer.push_bytes(&cx, b"Z\r\n")),
+            Err(IncomingBodyError::BadChunkedEncoding)
+        );
+        let error = block_on(Form::<HashMap<String, String>>::from_request_with_cx(
+            &cx, form_req,
+        ))
+        .expect_err("malformed chunked form must fail");
+        assert_eq!(
+            error.status,
+            super::super::response::StatusCode::BAD_REQUEST
+        );
+        assert_eq!(error.message, "invalid form request body");
+        drop(form_control);
+
+        let cancelled_cx = Cx::for_testing();
+        let (mut json_writer, json_req, json_control) = streaming_extractor_request(
+            &cancelled_cx,
+            BodyKind::ContentLength(1),
+            "application/json",
+            1,
+        );
+        let mut extraction = std::pin::pin!(Json::<serde_json::Value>::from_request_with_cx(
+            &cancelled_cx,
+            json_req,
+        ));
+        let waker = std::task::Waker::noop().clone();
+        let mut task_cx = Context::from_waker(&waker);
+        assert!(matches!(
+            std::future::Future::poll(extraction.as_mut(), &mut task_cx),
+            Poll::Pending
+        ));
+        cancelled_cx.cancel_fast(crate::types::CancelKind::Deadline);
+        let Poll::Ready(Err(error)) = std::future::Future::poll(extraction.as_mut(), &mut task_cx)
+        else {
+            panic!("cancelled streaming JSON extraction must terminate");
+        };
+        assert_eq!(
+            error.status,
+            super::super::response::StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(error.message, "JSON request body unavailable");
+        drop(extraction);
+        drop(json_control);
+        assert_eq!(
+            block_on(json_writer.push_bytes(&cancelled_cx, b"x")),
+            Err(IncomingBodyError::Cancelled {
+                kind: crate::types::CancelKind::Deadline,
+            })
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn streaming_json_and_form_typed_error_mapping_matches_body_contract() {
+        use super::super::response::StatusCode;
+
+        for kind in [
+            CancelKind::Timeout,
+            CancelKind::Deadline,
+            CancelKind::PollQuota,
+            CancelKind::CostBudget,
+            CancelKind::ResourceUnavailable,
+        ] {
+            let error = streaming_extraction_error(
+                "JSON",
+                StreamingRawBodyCollectError::Body(IncomingBodyError::Cancelled { kind }),
+            );
+            assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
+        }
+
+        for kind in [
+            CancelKind::User,
+            CancelKind::FailFast,
+            CancelKind::RaceLost,
+            CancelKind::ParentCancelled,
+            CancelKind::Shutdown,
+            CancelKind::LinkedExit,
+        ] {
+            let error = streaming_extraction_error(
+                "JSON",
+                StreamingRawBodyCollectError::Body(IncomingBodyError::Cancelled { kind }),
+            );
+            assert_eq!(error.status, StatusCode::CLIENT_CLOSED_REQUEST);
+        }
+
+        for incoming in [
+            IncomingBodyError::AccountingOverflow,
+            IncomingBodyError::SourceDisconnected,
+        ] {
+            let error =
+                streaming_extraction_error("form", StreamingRawBodyCollectError::Body(incoming));
+            assert_eq!(error.status, StatusCode::INTERNAL_SERVER_ERROR);
+        }
     }
 
     #[test]

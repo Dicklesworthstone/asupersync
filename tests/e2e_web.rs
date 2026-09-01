@@ -18,8 +18,8 @@ use asupersync::net::websocket::Message;
 use asupersync::runtime::RuntimeBuilder;
 use asupersync::server::shutdown::ShutdownPhase;
 use asupersync::web::extract::{
-    ExtractionError, FromRequest, FromRequestParts, Json as JsonExtract, Path, Query, Request,
-    StreamingRawBody, StreamingRawBodyCollectError,
+    BodyLimits, ExtractionError, Form as FormExtract, FromRequest, FromRequestParts,
+    Json as JsonExtract, Path, Query, Request, StreamingRawBody, StreamingRawBodyCollectError,
 };
 use asupersync::web::handler::{
     AsyncCxFnHandler1, AsyncCxFnHandler2, FnHandler, FnHandler1, Handler,
@@ -193,6 +193,45 @@ impl AsyncBodyExtractionProbe {
             extract_failed: Arc::new(AtomicUsize::new(0)),
             handler_called: Arc::new(AtomicUsize::new(0)),
         }
+    }
+}
+
+#[derive(Clone)]
+struct StreamedTypedExtractionProbe {
+    parts_started: Arc<AtomicUsize>,
+    json_handler_called: Arc<AtomicUsize>,
+    form_handler_called: Arc<AtomicUsize>,
+    over_limit_handler_called: Arc<AtomicUsize>,
+    disconnect_handler_called: Arc<AtomicUsize>,
+}
+
+impl StreamedTypedExtractionProbe {
+    fn new() -> Self {
+        Self {
+            parts_started: Arc::new(AtomicUsize::new(0)),
+            json_handler_called: Arc::new(AtomicUsize::new(0)),
+            form_handler_called: Arc::new(AtomicUsize::new(0)),
+            over_limit_handler_called: Arc::new(AtomicUsize::new(0)),
+            disconnect_handler_called: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+}
+
+struct StreamedTypedExtractionStarted;
+
+impl FromRequestParts for StreamedTypedExtractionStarted {
+    fn from_request_parts(req: &Request) -> Result<Self, ExtractionError> {
+        let probe = req
+            .extensions
+            .get_typed::<StreamedTypedExtractionProbe>()
+            .ok_or_else(|| {
+                ExtractionError::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "streamed typed extraction probe missing",
+                )
+            })?;
+        probe.parts_started.fetch_add(1, Ordering::AcqRel);
+        Ok(Self)
     }
 }
 
@@ -1677,6 +1716,250 @@ fn e2e_router_http1_streaming_raw_body_is_live_bounded_and_cancel_correct() {
     });
 
     test_complete!("e2e_router_http1_streaming_raw_body");
+}
+
+#[test]
+fn e2e_router_http1_streaming_json_and_form_are_bounded_and_cancel_correct() {
+    common::init_test_logging();
+    test_phase!("Router -> HTTP/1 streamed Json/Form extraction");
+
+    let runtime = RuntimeBuilder::new()
+        .worker_threads(2)
+        .build()
+        .expect("build runtime");
+    let handle = runtime.handle();
+
+    runtime.block_on(async move {
+        let probe = StreamedTypedExtractionProbe::new();
+        let json_handler_called = Arc::clone(&probe.json_handler_called);
+        let form_handler_called = Arc::clone(&probe.form_handler_called);
+        let over_limit_handler_called = Arc::clone(&probe.over_limit_handler_called);
+        let disconnect_handler_called = Arc::clone(&probe.disconnect_handler_called);
+
+        let router = Router::new()
+            .with_state(
+                BodyLimits::new()
+                    .max_json_body_size(7)
+                    .max_form_body_size(7),
+            )
+            .with_state(probe.clone())
+            .route(
+                "/json",
+                post(AsyncCxFnHandler2::<
+                    _,
+                    StreamedTypedExtractionStarted,
+                    JsonExtract<Value>,
+                >::new(
+                    move |_cx: Cx,
+                          _started: StreamedTypedExtractionStarted,
+                          JsonExtract(value): JsonExtract<Value>| {
+                        json_handler_called.fetch_add(1, Ordering::AcqRel);
+                        async move { format!("json={}", value["x"]) }
+                    },
+                )),
+            )
+            .route(
+                "/form",
+                post(AsyncCxFnHandler1::<
+                    _,
+                    FormExtract<HashMap<String, String>>,
+                >::new(
+                    move |_cx: Cx,
+                          FormExtract(values): FormExtract<HashMap<String, String>>| {
+                        form_handler_called.fetch_add(1, Ordering::AcqRel);
+                        async move {
+                            format!(
+                                "form={}",
+                                values.get("a").map(String::as_str).unwrap_or("missing")
+                            )
+                        }
+                    },
+                )),
+            )
+            .route(
+                "/form-over",
+                post(AsyncCxFnHandler1::<
+                    _,
+                    FormExtract<HashMap<String, String>>,
+                >::new(
+                    move |_cx: Cx,
+                          _form: FormExtract<HashMap<String, String>>| {
+                        over_limit_handler_called.fetch_add(1, Ordering::AcqRel);
+                        async { StatusCode::NO_CONTENT }
+                    },
+                )),
+            )
+            .route(
+                "/disconnect-json",
+                post(AsyncCxFnHandler2::<
+                    _,
+                    StreamedTypedExtractionStarted,
+                    JsonExtract<Value>,
+                >::new(
+                    move |_cx: Cx,
+                          _started: StreamedTypedExtractionStarted,
+                          _json: JsonExtract<Value>| {
+                        disconnect_handler_called.fetch_add(1, Ordering::AcqRel);
+                        async { StatusCode::NO_CONTENT }
+                    },
+                )),
+            );
+
+        let listener = Http1Listener::bind_streaming_with_config(
+            "127.0.0.1:0",
+            router.into_http1_streaming_handler(),
+            Http1ListenerConfig::default()
+                .http_config(
+                    Http1Config {
+                        allowed_hosts: HostPolicy::allow_list(vec!["localhost".to_owned()]),
+                        ..Http1Config::default()
+                    }
+                    .request_timeout(Some(Duration::from_secs(5)))
+                    .idle_timeout(Some(Duration::from_secs(5))),
+                )
+                .drain_timeout(Duration::from_secs(2))
+                .hard_drain_timeout(Duration::from_secs(5)),
+        )
+        .await
+        .expect("bind streamed typed extractor listener");
+        let addr = listener.local_addr().expect("listener address");
+        let manager = listener.connection_manager().clone();
+        let in_flight = listener.in_flight_requests();
+        let run_handle = handle
+            .clone()
+            .try_spawn(async move { listener.run_streaming(&handle).await })
+            .expect("spawn streamed typed extractor listener");
+
+        let mut json_client = TcpStream::connect(addr).await.expect("connect JSON client");
+        json_client
+            .write_all(
+                b"POST /json HTTP/1.1\r\n\
+                  Host: localhost\r\n\
+                  Content-Type: application/json\r\n\
+                  Transfer-Encoding: chunked\r\n\
+                  Connection: close\r\n\
+                  \r\n",
+            )
+            .await
+            .expect("write JSON request head without body");
+        for _ in 0..400 {
+            if probe.parts_started.load(Ordering::Acquire) == 1 {
+                break;
+            }
+            asupersync::time::sleep(asupersync::time::wall_now(), Duration::from_millis(5)).await;
+        }
+        assert_eq!(probe.parts_started.load(Ordering::Acquire), 1);
+        assert_eq!(probe.json_handler_called.load(Ordering::Acquire), 0);
+        assert_eq!(in_flight.load(Ordering::Acquire), 1);
+        json_client
+            .write_all(b"3\r\n{\"x\r\n4\r\n\":1}\r\n0\r\n\r\n")
+            .await
+            .expect("finish split chunked JSON body");
+        let mut json_response = Vec::new();
+        json_client
+            .read_to_end(&mut json_response)
+            .await
+            .expect("read JSON response");
+        let json_response = std::str::from_utf8(&json_response).expect("ASCII JSON response");
+        assert!(json_response.starts_with("HTTP/1.1 200"));
+        assert!(json_response.contains("json=1"));
+        assert_eq!(probe.json_handler_called.load(Ordering::Acquire), 1);
+        drop(json_client);
+
+        let mut form_client = TcpStream::connect(addr).await.expect("connect form client");
+        form_client
+            .write_all(
+                b"POST /form HTTP/1.1\r\n\
+                  Host: localhost\r\n\
+                  Content-Type: application/x-www-form-urlencoded\r\n\
+                  Transfer-Encoding: chunked\r\n\
+                  Connection: close\r\n\
+                  \r\n3\r\na=%\r\n4\r\n41xy\r\n0\r\n\r\n",
+            )
+            .await
+            .expect("write split chunked form body");
+        let mut form_response = Vec::new();
+        form_client
+            .read_to_end(&mut form_response)
+            .await
+            .expect("read form response");
+        let form_response = std::str::from_utf8(&form_response).expect("ASCII form response");
+        assert!(form_response.starts_with("HTTP/1.1 200"));
+        assert!(form_response.contains("form=Axy"));
+        assert_eq!(probe.form_handler_called.load(Ordering::Acquire), 1);
+        drop(form_client);
+
+        let mut over_client = TcpStream::connect(addr)
+            .await
+            .expect("connect over-limit form client");
+        over_client
+            .write_all(
+                b"POST /form-over HTTP/1.1\r\n\
+                  Host: localhost\r\n\
+                  Content-Type: application/x-www-form-urlencoded\r\n\
+                  Transfer-Encoding: chunked\r\n\
+                  Connection: close\r\n\
+                  \r\n8\r\na=123456\r\n0\r\n\r\n",
+            )
+            .await
+            .expect("write over-limit chunked form body");
+        let mut over_response = Vec::new();
+        over_client
+            .read_to_end(&mut over_response)
+            .await
+            .expect("read over-limit form response");
+        let over_response = std::str::from_utf8(&over_response).expect("ASCII limit response");
+        assert!(over_response.starts_with("HTTP/1.1 413"));
+        assert_eq!(probe.over_limit_handler_called.load(Ordering::Acquire), 0);
+        drop(over_client);
+
+        let mut disconnect_client = TcpStream::connect(addr)
+            .await
+            .expect("connect truncated JSON client");
+        disconnect_client
+            .write_all(
+                b"POST /disconnect-json HTTP/1.1\r\n\
+                  Host: localhost\r\n\
+                  Content-Type: application/json\r\n\
+                  Content-Length: 7\r\n\
+                  Connection: close\r\n\
+                  \r\n{\"",
+            )
+            .await
+            .expect("write truncated JSON prefix");
+        for _ in 0..400 {
+            if probe.parts_started.load(Ordering::Acquire) == 2 {
+                break;
+            }
+            asupersync::time::sleep(asupersync::time::wall_now(), Duration::from_millis(5)).await;
+        }
+        assert_eq!(probe.parts_started.load(Ordering::Acquire), 2);
+        assert_eq!(probe.disconnect_handler_called.load(Ordering::Acquire), 0);
+        assert_eq!(in_flight.load(Ordering::Acquire), 1);
+        assert!(!manager.is_empty());
+        drop(disconnect_client);
+
+        for _ in 0..400 {
+            if in_flight.load(Ordering::Acquire) == 0 && manager.is_empty() {
+                break;
+            }
+            asupersync::time::sleep(asupersync::time::wall_now(), Duration::from_millis(5)).await;
+        }
+        assert_eq!(probe.disconnect_handler_called.load(Ordering::Acquire), 0);
+        assert_eq!(in_flight.load(Ordering::Acquire), 0);
+        assert!(
+            manager.is_empty(),
+            "all streamed extractor connections quiesced"
+        );
+
+        assert!(manager.begin_drain(Duration::from_secs(2)));
+        let stats = run_handle
+            .await
+            .expect("streamed extractor listener result");
+        assert_eq!(stats.force_closed, 0);
+    });
+
+    test_complete!("e2e_router_http1_streamed_json_and_form");
 }
 
 #[test]
