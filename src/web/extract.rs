@@ -1975,6 +1975,15 @@ impl StreamingRawBody {
         self.inner.queued_bytes_peak()
     }
 
+    /// Return the producer-observed high-water mark for admitted body frames.
+    ///
+    /// This includes one frame whose send is waiting behind a full bounded
+    /// frame queue, so a capacity-`N` queue can report `N + 1`.
+    #[must_use]
+    pub fn queued_frames_peak(&self) -> usize {
+        self.inner.queued_frames_peak()
+    }
+
     /// Consume this wrapper and return the hardened HTTP/1 body.
     #[must_use]
     pub fn into_inner(self) -> IncomingRequestBody {

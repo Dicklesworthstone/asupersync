@@ -2829,6 +2829,393 @@ fn e2e_router_http1_generated_large_upload_stays_inside_streaming_envelope() {
 }
 
 #[test]
+fn e2e_router_http1_generated_large_multipart_has_bounded_logical_payload_component_peaks() {
+    common::init_test_logging();
+    test_phase!("Router -> HTTP/1 generated multipart logical payload-component peaks");
+
+    const PAYLOAD_BYTES: usize = 10 * 1024 * 1024 + 37;
+    const TOTAL_BODY_LIMIT: usize = PAYLOAD_BYTES + 4096;
+    const CLIENT_CHUNK_BYTES: usize = 8 * 1024;
+    const SERVER_READ_CHUNK_BYTES: usize = 8 * 1024;
+    const INCOMING_FRAME_CAPACITY: usize = 8;
+    const QUEUED_BYTE_LIMIT: usize = 512 * 1024;
+    const FIELD_WINDOW_BYTES: usize = 4096;
+    const BOUNDARY: &str = "BODY9-LIVE";
+    const DELIMITER_BYTES: usize = 2 + BOUNDARY.len();
+    const DELIMITER_OVERLAP_BYTES: usize = DELIMITER_BYTES + 3;
+    const CAUSAL_PREFIX_CHUNKS: usize = INCOMING_FRAME_CAPACITY + 2;
+    const CAUSAL_PREFIX_BYTES: usize = CLIENT_CHUNK_BYTES * CAUSAL_PREFIX_CHUNKS;
+    const SATURATED_QUEUE_FRAME_PEAK: usize = INCOMING_FRAME_CAPACITY + 1;
+    const MAX_QUEUE_PEAK: usize = SERVER_READ_CHUNK_BYTES * (INCOMING_FRAME_CAPACITY + 1);
+    const MAX_PARSER_BUFFER_PEAK: usize = FIELD_WINDOW_BYTES + DELIMITER_OVERLAP_BYTES;
+    const MAX_COMPONENT_HIGH_WATER_SUM: usize =
+        MAX_QUEUE_PEAK + SERVER_READ_CHUNK_BYTES + MAX_PARSER_BUFFER_PEAK + FIELD_WINDOW_BYTES;
+
+    let runtime = RuntimeBuilder::new()
+        .worker_threads(2)
+        .build()
+        .expect("build runtime");
+    let handle = runtime.handle();
+
+    runtime.block_on(async move {
+        let streaming_defaults = Http1StreamingConfig::default();
+        assert_eq!(
+            streaming_defaults.incoming_body_frame_capacity,
+            INCOMING_FRAME_CAPACITY
+        );
+        assert_eq!(
+            streaming_defaults.incoming_body_queued_bytes,
+            QUEUED_BYTE_LIMIT
+        );
+        assert_eq!(MAX_COMPONENT_HIGH_WATER_SUM, 90_127);
+
+        let received_bytes = Arc::new(AtomicU64::new(0));
+        let first_chunk_seen = Arc::new(AtomicUsize::new(0));
+        let preconsume_queue_frames_peak = Arc::new(AtomicUsize::new(0));
+        let queue_peak = Arc::new(AtomicUsize::new(0));
+        let queue_frames_peak = Arc::new(AtomicUsize::new(0));
+        let input_peak = Arc::new(AtomicUsize::new(0));
+        let parser_peak = Arc::new(AtomicUsize::new(0));
+        let yielded_peak = Arc::new(AtomicUsize::new(0));
+
+        let received_for_route = Arc::clone(&received_bytes);
+        let first_chunk_for_route = Arc::clone(&first_chunk_seen);
+        let preconsume_queue_frames_for_route = Arc::clone(&preconsume_queue_frames_peak);
+        let queue_for_route = Arc::clone(&queue_peak);
+        let queue_frames_for_route = Arc::clone(&queue_frames_peak);
+        let input_for_route = Arc::clone(&input_peak);
+        let parser_for_route = Arc::clone(&parser_peak);
+        let yielded_for_route = Arc::clone(&yielded_peak);
+        let multipart_limits = MultipartLimits::new()
+            .max_total_size(TOTAL_BODY_LIMIT)
+            .max_parts(1)
+            .max_part_body_size(PAYLOAD_BYTES)
+            .request_timeout_secs(30)
+            .idle_timeout_secs(30);
+        let router = Router::new()
+            .with_server_body_policy(
+                RequestBodyPolicy::new()
+                    .max_total_body_size(TOTAL_BODY_LIMIT)
+                    .multipart_limits(multipart_limits),
+            )
+            .with_state(multipart_limits)
+            .route(
+                "/large-multipart",
+                post(AsyncCxFnHandler1::<_, StreamingMultipart>::new(
+                    move |cx: Cx, mut multipart: StreamingMultipart| {
+                        let received_for_request = Arc::clone(&received_for_route);
+                        let first_chunk_for_request = Arc::clone(&first_chunk_for_route);
+                        let preconsume_queue_frames_for_request =
+                            Arc::clone(&preconsume_queue_frames_for_route);
+                        let queue_for_request = Arc::clone(&queue_for_route);
+                        let queue_frames_for_request = Arc::clone(&queue_frames_for_route);
+                        let input_for_request = Arc::clone(&input_for_route);
+                        let parser_for_request = Arc::clone(&parser_for_route);
+                        let yielded_for_request = Arc::clone(&yielded_for_route);
+                        async move {
+                            let mut forced_queue_frames_peak = multipart
+                                .retention_snapshot()
+                                .incoming_queue_frames_peak
+                                .expect("live parser retains the queue-frame observer");
+                            for _ in 0..2000 {
+                                if forced_queue_frames_peak >= SATURATED_QUEUE_FRAME_PEAK {
+                                    break;
+                                }
+                                asupersync::time::sleep(
+                                    asupersync::time::wall_now(),
+                                    Duration::from_millis(5),
+                                )
+                                .await;
+                                forced_queue_frames_peak = multipart
+                                    .retention_snapshot()
+                                    .incoming_queue_frames_peak
+                                    .expect("live parser retains the queue-frame observer");
+                            }
+                            assert_eq!(
+                                forced_queue_frames_peak, SATURATED_QUEUE_FRAME_PEAK,
+                                "planted slow-consumer gate must admit one frame behind the full bounded queue"
+                            );
+                            preconsume_queue_frames_for_request
+                                .store(forced_queue_frames_peak, Ordering::Release);
+
+                            let mut field = multipart
+                                .next_field(&cx)
+                                .await
+                                .expect("generated multipart field metadata")
+                                .expect("one generated multipart field");
+                            assert_eq!(field.name(), "upload");
+                            assert_eq!(field.filename(), Some("generated.bin"));
+                            assert_eq!(field.content_type(), Some("application/octet-stream"));
+
+                            let mut received = 0_usize;
+                            while let Some(chunk) = field
+                                .next_chunk(&cx)
+                                .await
+                                .expect("generated multipart field chunk")
+                            {
+                                for (offset, byte) in chunk.iter().copied().enumerate() {
+                                    let absolute = received
+                                        .checked_add(offset)
+                                        .expect("generated multipart offset");
+                                    assert_eq!(
+                                        byte,
+                                        u8::try_from(absolute % 251)
+                                            .expect("pattern byte fits u8"),
+                                        "generated multipart byte mismatch at offset {absolute}"
+                                    );
+                                }
+                                received = received
+                                    .checked_add(chunk.len())
+                                    .expect("generated multipart byte count");
+                                let _ = first_chunk_for_request.compare_exchange(
+                                    0,
+                                    chunk.len(),
+                                    Ordering::AcqRel,
+                                    Ordering::Acquire,
+                                );
+                            }
+                            drop(field);
+                            assert!(
+                                multipart
+                                    .next_field(&cx)
+                                    .await
+                                    .expect("generated multipart terminal boundary")
+                                    .is_none()
+                            );
+
+                            let snapshot = multipart.retention_snapshot();
+                            let observed_queue_peak = snapshot
+                                .incoming_queue_bytes_peak
+                                .expect("clean EOF retains the queue observer");
+                            let observed_queue_frames_peak = snapshot
+                                .incoming_queue_frames_peak
+                                .expect("clean EOF retains the queue-frame observer");
+                            received_for_request.store(
+                                u64::try_from(received).expect("received bytes fit u64"),
+                                Ordering::Release,
+                            );
+                            queue_for_request.store(observed_queue_peak, Ordering::Release);
+                            queue_frames_for_request
+                                .store(observed_queue_frames_peak, Ordering::Release);
+                            input_for_request
+                                .store(snapshot.input_frame_bytes_peak, Ordering::Release);
+                            parser_for_request
+                                .store(snapshot.parser_buffer_bytes_peak, Ordering::Release);
+                            yielded_for_request
+                                .store(snapshot.yielded_field_chunk_bytes_peak, Ordering::Release);
+                            format!(
+                                "received={received};queue={observed_queue_peak};queue_frames={observed_queue_frames_peak};input={};parser={};yielded={}",
+                                snapshot.input_frame_bytes_peak,
+                                snapshot.parser_buffer_bytes_peak,
+                                snapshot.yielded_field_chunk_bytes_peak,
+                            )
+                        }
+                    },
+                )),
+            );
+
+        let listener = Http1Listener::bind_streaming_with_config(
+            "127.0.0.1:0",
+            router.into_http1_streaming_handler(),
+            Http1ListenerConfig::default()
+                .http_config(
+                    Http1Config {
+                        allowed_hosts: HostPolicy::allow_list(vec!["localhost".to_owned()]),
+                        ..Http1Config::default()
+                    }
+                    .max_body_size(TOTAL_BODY_LIMIT)
+                    .request_timeout(Some(Duration::from_secs(30)))
+                    .idle_timeout(Some(Duration::from_secs(30))),
+                )
+                .drain_timeout(Duration::from_secs(2))
+                .hard_drain_timeout(Duration::from_secs(5)),
+        )
+        .await
+        .expect("bind generated multipart listener");
+        let addr = listener.local_addr().expect("generated multipart address");
+        let manager = listener.connection_manager().clone();
+        let in_flight = listener.in_flight_requests();
+        let run_handle = handle
+            .clone()
+            .try_spawn(async move { listener.run_streaming(&handle).await })
+            .expect("spawn generated multipart listener");
+
+        let mut client = TcpStream::connect(addr)
+            .await
+            .expect("connect generated multipart client");
+        let request_head = format!(
+            "POST /large-multipart HTTP/1.1\r\n\
+             Host: localhost\r\n\
+             Content-Type: multipart/form-data; boundary={BOUNDARY}\r\n\
+             Transfer-Encoding: chunked\r\n\
+             Connection: close\r\n\
+             \r\n"
+        );
+        client
+            .write_all(request_head.as_bytes())
+            .await
+            .expect("write generated multipart request head");
+
+        let field_head = format!(
+            "--{BOUNDARY}\r\n\
+             Content-Disposition: form-data; name=\"upload\"; filename=\"generated.bin\"\r\n\
+             Content-Type: application/octet-stream\r\n\
+             \r\n"
+        );
+        let field_head_chunk = format!("{:X}\r\n", field_head.len());
+        client
+            .write_all(field_head_chunk.as_bytes())
+            .await
+            .expect("write generated multipart field-head chunk size");
+        client
+            .write_all(field_head.as_bytes())
+            .await
+            .expect("write generated multipart field head");
+        client
+            .write_all(b"\r\n")
+            .await
+            .expect("finish generated multipart field-head chunk");
+
+        let mut sent = 0_usize;
+        let mut client_chunk = [0_u8; CLIENT_CHUNK_BYTES];
+        while sent < PAYLOAD_BYTES {
+            let chunk_len = CLIENT_CHUNK_BYTES.min(PAYLOAD_BYTES - sent);
+            for (offset, byte) in client_chunk[..chunk_len].iter_mut().enumerate() {
+                *byte = u8::try_from((sent + offset) % 251).expect("pattern byte fits u8");
+            }
+            let chunk_head = format!("{chunk_len:X}\r\n");
+            client
+                .write_all(chunk_head.as_bytes())
+                .await
+                .expect("write generated multipart payload chunk size");
+            client
+                .write_all(&client_chunk[..chunk_len])
+                .await
+                .expect("write generated multipart payload chunk");
+            client
+                .write_all(b"\r\n")
+                .await
+                .expect("finish generated multipart payload chunk");
+            sent += chunk_len;
+            if sent == CAUSAL_PREFIX_BYTES {
+                for _ in 0..2000 {
+                    if first_chunk_seen.load(Ordering::Acquire) > 0 {
+                        break;
+                    }
+                    asupersync::time::sleep(
+                        asupersync::time::wall_now(),
+                        Duration::from_millis(5),
+                    )
+                    .await;
+                }
+                assert!(
+                    first_chunk_seen.load(Ordering::Acquire) > 0,
+                    "handler must consume a field chunk before request EOF"
+                );
+                assert!(
+                    sent < PAYLOAD_BYTES,
+                    "causal prefix must be smaller than the generated field"
+                );
+            }
+        }
+
+        let field_close = format!("\r\n--{BOUNDARY}--\r\n");
+        let field_close_chunk = format!("{:X}\r\n", field_close.len());
+        client
+            .write_all(field_close_chunk.as_bytes())
+            .await
+            .expect("write generated multipart close chunk size");
+        client
+            .write_all(field_close.as_bytes())
+            .await
+            .expect("write generated multipart close");
+        client
+            .write_all(b"\r\n0\r\n\r\n")
+            .await
+            .expect("finish generated multipart HTTP body");
+
+        let mut response = Vec::new();
+        client
+            .read_to_end(&mut response)
+            .await
+            .expect("read generated multipart response");
+        let response = std::str::from_utf8(&response).expect("ASCII multipart response");
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        assert!(
+            response.contains(&format!("received={PAYLOAD_BYTES}")),
+            "{response}"
+        );
+        assert!(response.len() < 1024, "multipart response remains bounded");
+
+        assert_eq!(
+            received_bytes.load(Ordering::Acquire),
+            u64::try_from(PAYLOAD_BYTES).expect("payload size fits u64")
+        );
+        let observed_queue_peak = queue_peak.load(Ordering::Acquire);
+        let observed_queue_frames_peak = queue_frames_peak.load(Ordering::Acquire);
+        let observed_preconsume_queue_frames_peak =
+            preconsume_queue_frames_peak.load(Ordering::Acquire);
+        let observed_input_peak = input_peak.load(Ordering::Acquire);
+        let observed_parser_peak = parser_peak.load(Ordering::Acquire);
+        let observed_yielded_peak = yielded_peak.load(Ordering::Acquire);
+        assert_eq!(
+            observed_preconsume_queue_frames_peak,
+            SATURATED_QUEUE_FRAME_PEAK
+        );
+        assert_eq!(observed_queue_frames_peak, SATURATED_QUEUE_FRAME_PEAK);
+        assert!(observed_queue_peak > 0);
+        assert!(observed_queue_peak <= MAX_QUEUE_PEAK.min(QUEUED_BYTE_LIMIT));
+        assert!(observed_input_peak > 0 && observed_input_peak <= SERVER_READ_CHUNK_BYTES);
+        assert!(observed_parser_peak > 0 && observed_parser_peak <= MAX_PARSER_BUFFER_PEAK);
+        assert!(observed_yielded_peak > 0 && observed_yielded_peak <= FIELD_WINDOW_BYTES);
+        // These are independent cumulative logical payload-component maxima,
+        // not a co-temporal memory peak. The public snapshot deliberately does
+        // not claim allocator capacity, parsed multipart-header allocations,
+        // decoder/socket buffers, heap/RSS, or chunks retained by application
+        // code. This planted request carries no trailers.
+        let component_high_water_sum = observed_queue_peak
+            .checked_add(observed_input_peak)
+            .and_then(|sum| sum.checked_add(observed_parser_peak))
+            .and_then(|sum| sum.checked_add(observed_yielded_peak))
+            .expect("multipart component high-water sum fits usize");
+        assert!(component_high_water_sum <= MAX_COMPONENT_HIGH_WATER_SUM);
+        assert!(
+            PAYLOAD_BYTES > component_high_water_sum.saturating_mul(100),
+            "generated multipart payload must materially exceed the conservative sum of logical payload-component peaks"
+        );
+
+        for _ in 0..400 {
+            if in_flight.load(Ordering::Acquire) == 0 && manager.is_empty() {
+                break;
+            }
+            asupersync::time::sleep(asupersync::time::wall_now(), Duration::from_millis(5)).await;
+        }
+        assert_eq!(in_flight.load(Ordering::Acquire), 0);
+        assert!(manager.is_empty(), "generated multipart connection quiesced");
+
+        assert!(manager.begin_drain(Duration::from_secs(2)));
+        let stats = run_handle
+            .await
+            .expect("generated multipart listener result");
+        assert_eq!(stats.force_closed, 0);
+        test_complete!(
+            "e2e_router_http1_generated_large_multipart_logical_component_peaks",
+            payload_bytes = PAYLOAD_BYTES,
+            causal_prefix_bytes = CAUSAL_PREFIX_BYTES,
+            preconsume_queue_frames_peak = observed_preconsume_queue_frames_peak,
+            queue_peak = observed_queue_peak,
+            queue_frames_peak = observed_queue_frames_peak,
+            input_frame_peak = observed_input_peak,
+            parser_buffer_peak = observed_parser_peak,
+            yielded_field_chunk_peak = observed_yielded_peak,
+            logical_payload_component_high_water_sum = component_high_water_sum,
+            in_flight_requests = in_flight.load(Ordering::Acquire),
+            active_connections = manager.active_count(),
+        );
+    });
+}
+
+#[test]
 fn e2e_router_http1_streaming_json_and_form_are_bounded_and_cancel_correct() {
     common::init_test_logging();
     test_phase!("Router -> HTTP/1 streamed Json/Form extraction");

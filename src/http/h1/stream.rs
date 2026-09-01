@@ -237,6 +237,8 @@ enum IncomingConsumerTerminal {
 struct QueuedByteState {
     queued: usize,
     peak: usize,
+    queued_frames: usize,
+    frame_peak: usize,
     next_waiter_id: u64,
     waiter: Option<QueuedByteWaiter>,
 }
@@ -260,6 +262,8 @@ impl QueuedByteBudget {
             state: Mutex::new(QueuedByteState {
                 queued: 0,
                 peak: 0,
+                queued_frames: 0,
+                frame_peak: 0,
                 next_waiter_id: 0,
                 waiter: None,
             }),
@@ -295,6 +299,10 @@ impl QueuedByteBudget {
             .queued
             .checked_sub(amount)
             .expect("queued request-body byte accounting underflow");
+        state.queued_frames = state
+            .queued_frames
+            .checked_sub(1)
+            .expect("queued request-body frame accounting underflow");
         let waiter = state.waiter.take().map(|waiter| waiter.waker);
         drop(state);
         if let Some(waiter) = waiter {
@@ -414,10 +422,17 @@ impl Future for QueuedByteReserve<'_> {
                 drop(incoming_waker);
                 return self.finish_error(IncomingBodyError::AccountingOverflow);
             };
+            let Some(next_frames) = state.queued_frames.checked_add(1) else {
+                drop(state);
+                drop(incoming_waker);
+                return self.finish_error(IncomingBodyError::AccountingOverflow);
+            };
 
             if next <= budget.limit {
                 state.queued = next;
                 state.peak = state.peak.max(next);
+                state.queued_frames = next_frames;
+                state.frame_peak = state.frame_peak.max(next_frames);
                 let retired_waker = if self.waiter_id.is_some_and(|waiter_id| {
                     state
                         .waiter
@@ -711,6 +726,24 @@ impl IncomingRequestBody {
     #[must_use]
     pub fn queued_bytes_peak(&self) -> usize {
         self.shared.queued_bytes.state.lock().peak
+    }
+
+    /// Returns the number of body frames holding producer-side queue permits.
+    ///
+    /// This includes a frame whose channel send is pending behind a full frame
+    /// queue, matching the ownership boundary used by [`Self::queued_bytes`].
+    #[must_use]
+    pub fn queued_frames(&self) -> usize {
+        self.shared.queued_bytes.state.lock().queued_frames
+    }
+
+    /// Returns the maximum number of producer-admitted body frames so far.
+    ///
+    /// A capacity-`N` channel can report `N + 1` here when one producer frame
+    /// owns its queue permit while waiting for a consumer to free a slot.
+    #[must_use]
+    pub fn queued_frames_peak(&self) -> usize {
+        self.shared.queued_bytes.state.lock().frame_peak
     }
 
     /// Tighten the aggregate body limit shared with the protocol writer.
@@ -2896,6 +2929,45 @@ mod tests {
             body.queued_bytes_peak(),
             2,
             "the producer-side high-water mark survives queue drain"
+        );
+    }
+
+    #[test]
+    fn incoming_body_queue_frame_peak_includes_send_waiting_behind_full_channel() {
+        let cx = Cx::for_testing();
+        let (writer, mut body) =
+            IncomingRequestBody::channel_with_limits(&cx, BodyKind::ContentLength(4), 1, 8);
+        let mut writer = writer.max_chunk_size(2);
+        let waker = noop_waker();
+        let mut task_cx = Context::from_waker(&waker);
+
+        {
+            let mut push = std::pin::pin!(writer.push_bytes(&cx, b"data"));
+            assert!(matches!(push.as_mut().poll(&mut task_cx), Poll::Pending));
+            assert_eq!(body.queued_frames(), 2);
+            assert_eq!(body.queued_frames_peak(), 2);
+            assert_eq!(body.queued_bytes(), 4);
+
+            let first = poll_body(&mut body)
+                .expect("first frame")
+                .expect("valid first frame");
+            assert_eq!(first.into_data().expect("data").chunk(), b"da");
+            assert!(matches!(
+                push.as_mut().poll(&mut task_cx),
+                Poll::Ready(Ok(()))
+            ));
+            assert_eq!(body.queued_frames(), 1);
+        }
+
+        let second = poll_body(&mut body)
+            .expect("second frame")
+            .expect("valid second frame");
+        assert_eq!(second.into_data().expect("data").chunk(), b"ta");
+        assert_eq!(body.queued_frames(), 0);
+        assert_eq!(
+            body.queued_frames_peak(),
+            2,
+            "producer-admission frame peak survives queue drain"
         );
     }
 

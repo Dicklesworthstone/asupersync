@@ -432,6 +432,9 @@ pub struct StreamingMultipart {
     parse_start: Time,
     phase: StreamingMultipartPhase,
     buffer: Vec<u8>,
+    input_frame_bytes_peak: usize,
+    parser_buffer_bytes_peak: usize,
+    yielded_field_chunk_bytes_peak: usize,
     total_received: usize,
     work_units: usize,
     max_work_units: usize,
@@ -444,6 +447,34 @@ pub struct StreamingMultipart {
     eof_validated: bool,
     field_active: bool,
     abandoned: bool,
+}
+
+/// Read-only high-water marks for one live multipart parser.
+///
+/// These measurements describe logical request-body ownership at the parser
+/// boundary; they do not measure allocator capacity, heap/RSS, socket buffers,
+/// decoder scratch, parsed multipart-header allocations, or bytes retained by
+/// application code after a yielded chunk is returned. Queue-byte accounting
+/// includes logical trailer field bytes when trailers are present.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct StreamingMultipartRetentionSnapshot {
+    /// Peak permit-backed bytes queued or waiting to enter the incoming-body channel.
+    ///
+    /// `None` means the parser abandoned and dropped its incoming body, so the
+    /// live queue observer is no longer available.
+    pub incoming_queue_bytes_peak: Option<usize>,
+    /// Peak number of producer-admitted frames, including a send waiting on a full queue.
+    ///
+    /// `None` has the same abandonment meaning as [`Self::incoming_queue_bytes_peak`].
+    pub incoming_queue_frames_peak: Option<usize>,
+    /// Largest logical decoded DATA-frame length presented to the parser.
+    pub input_frame_bytes_peak: usize,
+    /// Largest logical `Vec` length used by the multipart parser scratch buffer.
+    pub parser_buffer_bytes_peak: usize,
+    /// Largest single field-body chunk yielded to the handler.
+    pub yielded_field_chunk_bytes_peak: usize,
 }
 
 /// A borrow-tied field from [`StreamingMultipart`].
@@ -815,6 +846,9 @@ impl StreamingMultipart {
             parse_start: now,
             phase: StreamingMultipartPhase::Preamble,
             buffer: Vec::new(),
+            input_frame_bytes_peak: 0,
+            parser_buffer_bytes_peak: 0,
+            yielded_field_chunk_bytes_peak: 0,
             total_received: 0,
             work_units: 0,
             max_work_units,
@@ -837,6 +871,25 @@ impl StreamingMultipart {
     /// type.
     pub fn from_request(req: Request) -> Result<Self, StreamingMultipartError> {
         Self::from_streaming_request(req).map_err(Into::into)
+    }
+
+    /// Return cumulative logical request-body retention high-water marks.
+    ///
+    /// Peaks persist across fields and after clean EOF. An abandoned parser
+    /// returns `None` for the incoming-queue component because abandonment
+    /// deliberately drops that live observer.
+    #[must_use]
+    pub fn retention_snapshot(&self) -> StreamingMultipartRetentionSnapshot {
+        StreamingMultipartRetentionSnapshot {
+            incoming_queue_bytes_peak: self.body.as_ref().map(StreamingRawBody::queued_bytes_peak),
+            incoming_queue_frames_peak: self
+                .body
+                .as_ref()
+                .map(StreamingRawBody::queued_frames_peak),
+            input_frame_bytes_peak: self.input_frame_bytes_peak,
+            parser_buffer_bytes_peak: self.parser_buffer_bytes_peak,
+            yielded_field_chunk_bytes_peak: self.yielded_field_chunk_bytes_peak,
+        }
     }
 
     /// Advance to the next field.
@@ -1090,6 +1143,8 @@ impl StreamingMultipart {
                         .into());
                     }
                     self.buffer.extend_from_slice(bytes.as_ref());
+                    self.parser_buffer_bytes_peak =
+                        self.parser_buffer_bytes_peak.max(self.buffer.len());
                     if !input.has_remaining() {
                         self.input = None;
                     }
@@ -1142,6 +1197,8 @@ impl StreamingMultipart {
                             "multipart request body produced an empty data cursor",
                         ));
                     }
+                    self.input_frame_bytes_peak =
+                        self.input_frame_bytes_peak.max(data.get_ref().len());
                     self.input = Some(data);
                 }
                 Some(Ok(Frame::Trailers(_))) => {}
@@ -1369,7 +1426,13 @@ impl StreamingMultipartField<'_> {
             return Ok(None);
         }
         match self.multipart.next_field_chunk(cx).await {
-            Ok(Some(chunk)) => Ok(Some(chunk)),
+            Ok(Some(chunk)) => {
+                self.multipart.yielded_field_chunk_bytes_peak = self
+                    .multipart
+                    .yielded_field_chunk_bytes_peak
+                    .max(chunk.len());
+                Ok(Some(chunk))
+            }
             Ok(None) => {
                 self.complete = true;
                 self.multipart.field_active = false;
@@ -3962,6 +4025,20 @@ mod tests {
             .expect_err("abandoned field must terminalize parser");
         assert_eq!(error.status(), StatusCode::BAD_REQUEST);
         assert_eq!(error.kind(), StreamingMultipartErrorKind::AbandonedField);
+        assert!(
+            multipart
+                .retention_snapshot()
+                .incoming_queue_bytes_peak
+                .is_none(),
+            "abandonment drops the live incoming-queue observer"
+        );
+        assert!(
+            multipart
+                .retention_snapshot()
+                .incoming_queue_frames_peak
+                .is_none(),
+            "abandonment drops the live incoming-frame observer"
+        );
         drop(control);
 
         let forgotten_cx = Cx::for_testing();
@@ -3985,6 +4062,20 @@ mod tests {
         assert_eq!(error.kind(), StreamingMultipartErrorKind::AbandonedField);
         assert!(error.message().contains("forgotten"));
         assert!(forgotten_writer.consumer_dropped());
+        assert!(
+            forgotten
+                .retention_snapshot()
+                .incoming_queue_bytes_peak
+                .is_none(),
+            "forgotten field lease drops the live incoming-queue observer"
+        );
+        assert!(
+            forgotten
+                .retention_snapshot()
+                .incoming_queue_frames_peak
+                .is_none(),
+            "forgotten field lease drops the live incoming-frame observer"
+        );
         drop(forgotten_control);
     }
 
