@@ -30,6 +30,7 @@ use asupersync::web::handler::{
     AsyncCxFnHandler1, AsyncCxFnHandler2, FnHandler, FnHandler1, Handler,
 };
 use asupersync::web::middleware::{HeaderOverwrite, MiddlewareStack};
+use asupersync::web::multipart::{Multipart, MultipartLimits};
 use asupersync::web::request_region::RequestRegion;
 use asupersync::web::response::{Html, Json, Redirect, Response, StatusCode};
 use asupersync::web::router::{Router, delete, get, post};
@@ -2135,6 +2136,202 @@ fn e2e_router_http1_streaming_json_and_form_are_bounded_and_cancel_correct() {
     });
 
     test_complete!("e2e_router_http1_streamed_json_and_form");
+}
+
+#[test]
+fn e2e_router_http1_streaming_multipart_is_incremental_bounded_and_cancel_correct() {
+    common::init_test_logging();
+    test_phase!("Router -> HTTP/1 streamed Multipart extraction");
+
+    let runtime = RuntimeBuilder::new()
+        .worker_threads(2)
+        .build()
+        .expect("build runtime");
+    let handle = runtime.handle();
+
+    runtime.block_on(async move {
+        let probe = StreamedTypedExtractionProbe::new();
+        let handler_called = Arc::new(AtomicUsize::new(0));
+        let handler_called_for_route = Arc::clone(&handler_called);
+        let disconnect_handler_called = Arc::new(AtomicUsize::new(0));
+        let disconnect_handler_called_for_route = Arc::clone(&disconnect_handler_called);
+
+        let router = Router::new()
+            .with_state(MultipartLimits::new().max_total_size(1024))
+            .with_state(probe.clone())
+            .route(
+                "/multipart",
+                post(AsyncCxFnHandler2::<
+                    _,
+                    StreamedTypedExtractionStarted,
+                    Multipart,
+                >::new(
+                    move |_cx: Cx,
+                          _started: StreamedTypedExtractionStarted,
+                          multipart: Multipart| {
+                        handler_called_for_route.fetch_add(1, Ordering::AcqRel);
+                        async move {
+                            let a = multipart
+                                .field("a")
+                                .and_then(|field| field.text().ok())
+                                .unwrap_or("missing");
+                            let b = multipart
+                                .field("b")
+                                .and_then(|field| field.text().ok())
+                                .unwrap_or("missing");
+                            format!("a={a};b={b}")
+                        }
+                    },
+                )),
+            )
+            .route(
+                "/disconnect-multipart",
+                post(AsyncCxFnHandler2::<
+                    _,
+                    StreamedTypedExtractionStarted,
+                    Multipart,
+                >::new(
+                    move |_cx: Cx,
+                          _started: StreamedTypedExtractionStarted,
+                          _multipart: Multipart| {
+                        disconnect_handler_called_for_route.fetch_add(1, Ordering::AcqRel);
+                        async { StatusCode::NO_CONTENT }
+                    },
+                )),
+            );
+
+        let listener = Http1Listener::bind_streaming_with_config(
+            "127.0.0.1:0",
+            router.into_http1_streaming_handler(),
+            Http1ListenerConfig::default()
+                .http_config(
+                    Http1Config {
+                        allowed_hosts: HostPolicy::allow_list(vec!["localhost".to_owned()]),
+                        ..Http1Config::default()
+                    }
+                    .request_timeout(Some(Duration::from_secs(5)))
+                    .idle_timeout(Some(Duration::from_secs(5))),
+                )
+                .drain_timeout(Duration::from_secs(2))
+                .hard_drain_timeout(Duration::from_secs(5)),
+        )
+        .await
+        .expect("bind streamed multipart listener");
+        let addr = listener.local_addr().expect("listener address");
+        let manager = listener.connection_manager().clone();
+        let in_flight = listener.in_flight_requests();
+        let run_handle = handle
+            .clone()
+            .try_spawn(async move { listener.run_streaming(&handle).await })
+            .expect("spawn streamed multipart listener");
+
+        let mut client = TcpStream::connect(addr)
+            .await
+            .expect("connect multipart client");
+        client
+            .write_all(
+                b"POST /multipart HTTP/1.1\r\n\
+                  Host: localhost\r\n\
+                  Content-Type: multipart/form-data; boundary=LIVE\r\n\
+                  Transfer-Encoding: chunked\r\n\
+                  Connection: close\r\n\
+                  \r\n",
+            )
+            .await
+            .expect("write multipart head without body");
+
+        for _ in 0..400 {
+            if probe.parts_started.load(Ordering::Acquire) == 1 {
+                break;
+            }
+            asupersync::time::sleep(asupersync::time::wall_now(), Duration::from_millis(5)).await;
+        }
+        assert_eq!(probe.parts_started.load(Ordering::Acquire), 1);
+        assert_eq!(handler_called.load(Ordering::Acquire), 0);
+        assert_eq!(in_flight.load(Ordering::Acquire), 1);
+
+        let pieces: &[&[u8]] = &[
+            b"--LI",
+            b"VE\r",
+            b"\nContent-Disposition: form-data; name=\"a\"\r\n\r",
+            b"\nalpha\r\n--L",
+            b"IVE\r\nContent-Disposition: form-data; name=\"b\"\r\n\r\nbe",
+            b"ta\r\n--LIVE--\r\nepilogue",
+        ];
+        for piece in pieces {
+            let mut frame = format!("{:X}\r\n", piece.len()).into_bytes();
+            frame.extend_from_slice(piece);
+            frame.extend_from_slice(b"\r\n");
+            client
+                .write_all(&frame)
+                .await
+                .expect("write split multipart transfer chunk");
+        }
+        asupersync::time::sleep(asupersync::time::wall_now(), Duration::from_millis(20)).await;
+        assert_eq!(
+            handler_called.load(Ordering::Acquire),
+            0,
+            "a closing multipart marker is not request-body EOF"
+        );
+
+        client
+            .write_all(b"0\r\n\r\n")
+            .await
+            .expect("finish chunked multipart body");
+        let mut response = Vec::new();
+        client
+            .read_to_end(&mut response)
+            .await
+            .expect("read multipart response");
+        let response = std::str::from_utf8(&response).expect("ASCII multipart response");
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        assert!(response.contains("a=alpha;b=beta"), "{response}");
+        assert_eq!(handler_called.load(Ordering::Acquire), 1);
+
+        let mut disconnect_client = TcpStream::connect(addr)
+            .await
+            .expect("connect truncated multipart client");
+        disconnect_client
+            .write_all(
+                b"POST /disconnect-multipart HTTP/1.1\r\n\
+                  Host: localhost\r\n\
+                  Content-Type: multipart/form-data; boundary=LIVE\r\n\
+                  Content-Length: 100\r\n\
+                  Connection: close\r\n\
+                  \r\n--LIVE\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\npartial",
+            )
+            .await
+            .expect("write truncated multipart prefix");
+        for _ in 0..400 {
+            if probe.parts_started.load(Ordering::Acquire) == 2 {
+                break;
+            }
+            asupersync::time::sleep(asupersync::time::wall_now(), Duration::from_millis(5)).await;
+        }
+        assert_eq!(probe.parts_started.load(Ordering::Acquire), 2);
+        assert_eq!(disconnect_handler_called.load(Ordering::Acquire), 0);
+        assert_eq!(in_flight.load(Ordering::Acquire), 1);
+        assert!(!manager.is_empty());
+        drop(disconnect_client);
+
+        for _ in 0..400 {
+            if in_flight.load(Ordering::Acquire) == 0 && manager.is_empty() {
+                break;
+            }
+            asupersync::time::sleep(asupersync::time::wall_now(), Duration::from_millis(5)).await;
+        }
+        assert_eq!(disconnect_handler_called.load(Ordering::Acquire), 0);
+        assert_eq!(in_flight.load(Ordering::Acquire), 0);
+        assert!(manager.is_empty(), "all multipart connections quiesced");
+
+        assert!(manager.begin_drain(Duration::from_secs(2)));
+        let stats = run_handle
+            .await
+            .expect("streamed multipart listener result");
+        assert_eq!(stats.force_closed, 0);
+    });
+
+    test_complete!("e2e_router_http1_streamed_multipart");
 }
 
 #[test]

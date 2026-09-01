@@ -1916,7 +1916,7 @@ pub enum StreamingRawBodyCollectError {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn streaming_extraction_error(
+pub(super) fn streaming_extraction_error(
     extractor: &str,
     error: StreamingRawBodyCollectError,
 ) -> ExtractionError {
@@ -2108,7 +2108,7 @@ impl Drop for StreamingRawBodyControl {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn reject_buffered_extractor_on_streaming_request(
+pub(super) fn reject_buffered_extractor_on_streaming_request(
     req: &Request,
     extractor: &str,
 ) -> Result<(), ExtractionError> {
