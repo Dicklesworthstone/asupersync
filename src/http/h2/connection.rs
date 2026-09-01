@@ -491,6 +491,28 @@ impl Connection {
         self.send_window
     }
 
+    /// Return DATA bytes that can be emitted immediately for `stream_id`.
+    ///
+    /// The value is the minimum of the connection send window, the stream send
+    /// window, and the peer's maximum frame size. It is zero for a missing,
+    /// reset, or non-sendable stream. Response-body drivers use this before
+    /// polling a producer, so no new DATA is pulled into transport ownership
+    /// while flow control is exhausted.
+    #[must_use]
+    pub fn available_send_capacity(&self, stream_id: u32) -> usize {
+        let Some(stream) = self.streams.get(stream_id) else {
+            return 0;
+        };
+        if stream.error_code().is_some() || !stream.state().can_send() {
+            return 0;
+        }
+        let connection = self.send_window.max(0).cast_unsigned();
+        let stream = stream.send_window().max(0).cast_unsigned();
+        connection
+            .min(stream)
+            .min(self.remote_settings.max_frame_size) as usize
+    }
+
     /// Get the connection-level receive window.
     #[must_use]
     pub fn recv_window(&self) -> i32 {

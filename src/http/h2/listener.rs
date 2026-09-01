@@ -17,7 +17,10 @@
 use crate::channel::mpsc;
 use crate::codec::Framed;
 use crate::cx::Cx;
+use crate::http::body::{Body as _, Frame as BodyFrame, HeaderMap};
+use crate::http::h1::HttpError;
 use crate::http::h1::server::{HostPolicy, parse_request_timeout_header, validate_host_header};
+use crate::http::h1::stream::{BodyKind, OutgoingBody, OutgoingBodySender};
 use crate::http::h1::types::{Method, Request, Response, Version};
 use crate::http::h2::connection::{CLIENT_PREFACE, Connection, FrameCodec, ReceivedFrame};
 use crate::http::h2::error::{ErrorCode, H2Error};
@@ -38,10 +41,11 @@ use crate::stream::Stream;
 use crate::tracing_compat::error;
 use crate::types::Time;
 use crate::web::request_region::{ServerHopOutcome, ServerRequestRegion, derive_request_budget};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::io;
 use std::net::{SocketAddr, ToSocketAddrs};
+use std::num::NonZeroUsize;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -56,6 +60,10 @@ const DRAIN_SUPERVISION_TICK: Duration = Duration::from_millis(10);
 
 /// Capacity of the per-connection handler-response funnel.
 const RESPONSE_FUNNEL_CAPACITY: usize = 64;
+
+/// Default maximum DATA bytes retained in one produced-response frame.
+/// Default maximum DATA frame accepted from a produced HTTP/2 response.
+pub const DEFAULT_H2_PRODUCED_FRAME_BYTES: usize = 16 * 1024;
 
 /// Default per-stream request-body buffering cap (mirrors the HTTP/1.1
 /// listener's `max_body_size`). HTTP/2 flow control auto-replenishes stream
@@ -494,6 +502,37 @@ fn validate_h2_response_for_queue(
     Ok(())
 }
 
+fn validate_h2_produced_head_for_queue(response: &Response) -> Result<(), H2Error> {
+    validate_h2_response_for_queue(response, false)?;
+    if !response.body.is_empty() || !response.trailers.is_empty() {
+        return Err(H2Error::connection(
+            ErrorCode::InternalError,
+            "produced h2 response head must not carry buffered body or trailers",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_h2_produced_response_for_queue(response: &Response) -> Result<(), H2Error> {
+    validate_h2_produced_head_for_queue(response)?;
+    if matches!(response.status, 100..=199 | 204 | 205 | 304) {
+        return Err(H2Error::connection(
+            ErrorCode::InternalError,
+            "produced h2 response requires a body-allowed status",
+        ));
+    }
+    if response.headers.iter().any(|(name, _)| {
+        name.eq_ignore_ascii_case("content-length")
+            || name.eq_ignore_ascii_case("transfer-encoding")
+    }) {
+        return Err(H2Error::connection(
+            ErrorCode::InternalError,
+            "produced h2 response owns message framing",
+        ));
+    }
+    Ok(())
+}
+
 fn invalid_h2_response_fallback() -> Http2Response {
     Http2Response::new(Response::new(500, "Internal Server Error", Vec::new()))
 }
@@ -593,6 +632,220 @@ impl IntoHttp2Response for Http2Response {
     fn into_h2_response(self) -> Http2Response {
         self
     }
+}
+
+type Http2ProducerFuture =
+    Pin<Box<dyn Future<Output = Result<Http2BodySender, HttpError>> + Send + 'static>>;
+type Http2ProducerFactory =
+    Box<dyn FnOnce(Cx, Http2BodySender) -> Http2ProducerFuture + Send + 'static>;
+
+/// Sender handed to a supervised HTTP/2 response-body producer.
+///
+/// The underlying channel has a fixed frame capacity. This wrapper additionally
+/// rejects any DATA frame larger than `max_frame_bytes`, so transport-owned
+/// retained DATA in the producer channel is bounded by
+/// `frame_capacity * max_frame_bytes`. One additional frame may be retained by
+/// the H2 connection after it leaves the channel, plus codec write buffering.
+/// Memory held by the application before it calls [`Self::send_bytes`] is
+/// outside that transport envelope.
+#[derive(Debug)]
+pub struct Http2BodySender {
+    inner: OutgoingBodySender,
+    max_frame_bytes: NonZeroUsize,
+    terminal: Http2ProducerTerminal,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Http2ProducerTerminal {
+    Open,
+    Finished,
+    Trailers,
+}
+
+impl Http2BodySender {
+    /// Maximum DATA bytes accepted by one send operation.
+    #[must_use]
+    pub fn max_frame_bytes(&self) -> NonZeroUsize {
+        self.max_frame_bytes
+    }
+
+    /// Total DATA bytes committed into the bounded body channel.
+    #[must_use]
+    pub fn total_bytes(&self) -> u64 {
+        self.inner.total_bytes()
+    }
+
+    /// Whether the producer has explicitly finished with EOF or trailers.
+    #[must_use]
+    pub fn is_finished(&self) -> bool {
+        self.inner.is_finished()
+    }
+
+    /// Commit one bounded DATA frame.
+    pub async fn send_bytes(
+        &mut self,
+        cx: &Cx,
+        data: crate::bytes::Bytes,
+    ) -> Result<(), HttpError> {
+        if data.len() > self.max_frame_bytes.get() {
+            return Err(HttpError::BodyTooLargeDetailed {
+                actual: u64::try_from(data.len()).unwrap_or(u64::MAX),
+                limit: u64::try_from(self.max_frame_bytes.get()).unwrap_or(u64::MAX),
+            });
+        }
+        self.inner.send_bytes(cx, data).await
+    }
+
+    /// Copy and commit one bounded DATA frame.
+    pub async fn send_chunk(&mut self, cx: &Cx, data: &[u8]) -> Result<(), HttpError> {
+        if data.len() > self.max_frame_bytes.get() {
+            return Err(HttpError::BodyTooLargeDetailed {
+                actual: u64::try_from(data.len()).unwrap_or(u64::MAX),
+                limit: u64::try_from(self.max_frame_bytes.get()).unwrap_or(u64::MAX),
+            });
+        }
+        self.inner.send_chunk(cx, data).await
+    }
+
+    /// Finish the response with a trailing HEADERS block.
+    pub async fn send_trailers(&mut self, cx: &Cx, trailers: HeaderMap) -> Result<(), HttpError> {
+        self.inner.send_trailers(cx, trailers).await?;
+        self.terminal = Http2ProducerTerminal::Trailers;
+        Ok(())
+    }
+
+    /// Finish the response without trailers.
+    pub fn finish(&mut self, cx: &Cx) -> Result<(), HttpError> {
+        if self.terminal == Http2ProducerTerminal::Trailers {
+            return Ok(());
+        }
+        self.inner.finish(cx)?;
+        self.terminal = Http2ProducerTerminal::Finished;
+        Ok(())
+    }
+}
+
+/// Source-compatible response accepted by [`Http2Listener::run_produced`].
+///
+/// Buffered responses retain the existing [`Http2Response`] path. Streaming
+/// responses defer channel creation and producer startup until the listener has
+/// validated the response head and minted a request-derived capability context.
+pub struct Http2ProducedResponse {
+    kind: Http2ProducedResponseKind,
+}
+
+enum Http2ProducedResponseKind {
+    Buffered(Http2Response),
+    Streaming {
+        response: Response,
+        frame_capacity: NonZeroUsize,
+        max_frame_bytes: NonZeroUsize,
+        producer: Http2ProducerFactory,
+    },
+}
+
+impl std::fmt::Debug for Http2ProducedResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.kind {
+            Http2ProducedResponseKind::Buffered(response) => f
+                .debug_tuple("Http2ProducedResponse::Buffered")
+                .field(response)
+                .finish(),
+            Http2ProducedResponseKind::Streaming {
+                response,
+                frame_capacity,
+                max_frame_bytes,
+                ..
+            } => f
+                .debug_struct("Http2ProducedResponse::Streaming")
+                .field("response", response)
+                .field("frame_capacity", frame_capacity)
+                .field("max_frame_bytes", max_frame_bytes)
+                .finish_non_exhaustive(),
+        }
+    }
+}
+
+impl Http2ProducedResponse {
+    /// Preserve an ordinary buffered H2 response in the produced-listener lane.
+    #[must_use]
+    pub fn buffered(response: impl IntoHttp2Response) -> Self {
+        Self {
+            kind: Http2ProducedResponseKind::Buffered(response.into_h2_response()),
+        }
+    }
+
+    /// Create a bounded, deferred HTTP/2 response producer.
+    #[must_use]
+    pub fn streaming<P, Fut>(
+        response: Response,
+        frame_capacity: NonZeroUsize,
+        max_frame_bytes: NonZeroUsize,
+        producer: P,
+    ) -> Self
+    where
+        P: FnOnce(Cx, Http2BodySender) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<Http2BodySender, HttpError>> + Send + 'static,
+    {
+        Self {
+            kind: Http2ProducedResponseKind::Streaming {
+                response,
+                frame_capacity,
+                max_frame_bytes,
+                producer: Box::new(move |cx, sender| Box::pin(producer(cx, sender))),
+            },
+        }
+    }
+
+    fn into_driver_response(self) -> H2DispatchResponse {
+        match self.kind {
+            Http2ProducedResponseKind::Buffered(response) => H2DispatchResponse::Buffered(response),
+            Http2ProducedResponseKind::Streaming {
+                response,
+                frame_capacity,
+                max_frame_bytes,
+                producer,
+            } => H2DispatchResponse::Produced(Http2ProducedPlan {
+                response,
+                frame_capacity,
+                max_frame_bytes,
+                producer,
+            }),
+        }
+    }
+}
+
+struct Http2ProducedPlan {
+    response: Response,
+    frame_capacity: NonZeroUsize,
+    max_frame_bytes: NonZeroUsize,
+    producer: Http2ProducerFactory,
+}
+
+impl Http2ProducedPlan {
+    fn into_parts(
+        self,
+        cx: &Cx,
+    ) -> (
+        Response,
+        OutgoingBody,
+        Http2BodySender,
+        Http2ProducerFactory,
+    ) {
+        let (inner, body) =
+            OutgoingBody::channel_with_capacity(cx, BodyKind::Chunked, self.frame_capacity.get());
+        let sender = Http2BodySender {
+            inner,
+            max_frame_bytes: self.max_frame_bytes,
+            terminal: Http2ProducerTerminal::Open,
+        };
+        (self.response, body, sender, self.producer)
+    }
+}
+
+enum H2DispatchResponse {
+    Buffered(Http2Response),
+    Produced(Http2ProducedPlan),
 }
 
 /// One server-push promise plus the response to send on the promised stream.
@@ -767,11 +1020,216 @@ enum FunnelItem {
         stream_id: u32,
         guard: InFlightRequestGuard,
     },
+    /// A validated produced response is ready. The driver owns the body receiver
+    /// and polls it only when the stream has usable send credit.
+    ProducedStart {
+        stream_id: u32,
+        response: Response,
+        body: OutgoingBody,
+        cancellation: ProducedCancellationGuard,
+        guard: Arc<InFlightRequestGuard>,
+    },
+    /// The supervised producer reached a terminal outcome.
+    ProducedDone {
+        stream_id: u32,
+        outcome: Http2ProducerOutcome,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Http2ProducerOutcome {
+    Finished {
+        total_bytes: u64,
+        terminal: Http2ProducerTerminal,
+    },
+    Failed,
+    Cancelled,
+}
+
+struct ActiveProducedBody {
+    body: OutgoingBody,
+    cancellation: ProducedCancellationGuard,
+    guard: Option<Arc<InFlightRequestGuard>>,
+    producer_outcome: Option<Http2ProducerOutcome>,
+    emitted_bytes: u64,
+    body_eof: bool,
+    pending_trailers: Option<HeaderMap>,
+    failure_drain_deadline: Option<Time>,
+}
+
+struct ProducedCancellationGuard {
+    producer_cx: Cx,
+    armed: bool,
+}
+
+impl ProducedCancellationGuard {
+    fn new(producer_cx: Cx) -> Self {
+        Self {
+            producer_cx,
+            armed: true,
+        }
+    }
+
+    fn cancel(&mut self, message: &'static str) {
+        if self.armed {
+            self.producer_cx
+                .cancel_with(crate::types::CancelKind::ParentCancelled, Some(message));
+            self.armed = false;
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for ProducedCancellationGuard {
+    fn drop(&mut self) {
+        self.cancel("HTTP/2 connection dropped a produced response");
+    }
+}
+
+impl ActiveProducedBody {
+    fn cancel(&mut self, message: &'static str) {
+        self.cancellation.cancel(message);
+    }
+}
+
+enum ProducedBodyEvent {
+    Frame {
+        stream_id: u32,
+        frame: Result<BodyFrame<crate::bytes::BytesCursor>, HttpError>,
+    },
+    Eof {
+        stream_id: u32,
+    },
+}
+
+fn h2_trailers_from_body_map(trailers: &HeaderMap) -> Result<Vec<Header>, H2Error> {
+    trailers
+        .iter()
+        .map(|(name, value)| {
+            let value = value.to_str().map_err(|_| {
+                H2Error::connection(ErrorCode::InternalError, "invalid h2 trailer value")
+            })?;
+            validate_h2_response_header_name(name.as_str())?;
+            validate_h2_response_header_value(value)?;
+            Ok(Header::new(name.as_str(), value))
+        })
+        .collect()
+}
+
+fn cancel_produced_body(
+    produced_bodies: &mut BTreeMap<u32, ActiveProducedBody>,
+    stream_id: u32,
+    message: &'static str,
+) {
+    if let Some(mut state) = produced_bodies.remove(&stream_id) {
+        state.cancel(message);
+    }
+}
+
+fn cancel_all_produced_bodies(
+    produced_bodies: &mut BTreeMap<u32, ActiveProducedBody>,
+    message: &'static str,
+) {
+    for (_, mut state) in std::mem::take(produced_bodies) {
+        state.cancel(message);
+    }
+}
+
+fn finalize_produced_body_if_ready(
+    conn: &mut Connection,
+    stream_id: u32,
+    produced_bodies: &mut BTreeMap<u32, ActiveProducedBody>,
+    response_guards: &mut HashMap<u32, Arc<InFlightRequestGuard>>,
+) {
+    enum FinalizeAction {
+        Wait,
+        Reset,
+        EmptyEof,
+        Trailers(Vec<Header>),
+    }
+
+    let action = {
+        let Some(state) = produced_bodies.get(&stream_id) else {
+            return;
+        };
+        match state.producer_outcome {
+            None => FinalizeAction::Wait,
+            Some(Http2ProducerOutcome::Failed | Http2ProducerOutcome::Cancelled)
+                if state.body_eof || state.pending_trailers.is_some() =>
+            {
+                FinalizeAction::Reset
+            }
+            Some(Http2ProducerOutcome::Failed | Http2ProducerOutcome::Cancelled) => {
+                FinalizeAction::Wait
+            }
+            Some(Http2ProducerOutcome::Finished {
+                total_bytes,
+                terminal: _,
+            }) if state.emitted_bytes > total_bytes
+                || (state.body_eof && state.emitted_bytes != total_bytes) =>
+            {
+                FinalizeAction::Reset
+            }
+            Some(Http2ProducerOutcome::Finished {
+                total_bytes,
+                terminal: Http2ProducerTerminal::Finished,
+            }) if state.body_eof && state.emitted_bytes == total_bytes => FinalizeAction::EmptyEof,
+            Some(Http2ProducerOutcome::Finished {
+                total_bytes,
+                terminal: Http2ProducerTerminal::Trailers,
+            }) if state.emitted_bytes == total_bytes => match state.pending_trailers.as_ref() {
+                Some(trailers) => h2_trailers_from_body_map(trailers)
+                    .map_or(FinalizeAction::Reset, FinalizeAction::Trailers),
+                None => FinalizeAction::Wait,
+            },
+            Some(Http2ProducerOutcome::Finished {
+                terminal: Http2ProducerTerminal::Open,
+                ..
+            }) => FinalizeAction::Reset,
+            Some(Http2ProducerOutcome::Finished { .. }) => FinalizeAction::Wait,
+        }
+    };
+
+    match action {
+        FinalizeAction::Wait => {}
+        FinalizeAction::Reset => {
+            conn.reset_stream(stream_id, ErrorCode::InternalError);
+            cancel_produced_body(
+                produced_bodies,
+                stream_id,
+                "HTTP/2 produced response failed before clean terminalization",
+            );
+        }
+        terminal_action @ (FinalizeAction::EmptyEof | FinalizeAction::Trailers(_)) => {
+            let mut state = produced_bodies
+                .remove(&stream_id)
+                .expect("produced body exists for terminal action");
+            let result = match terminal_action {
+                FinalizeAction::EmptyEof => {
+                    conn.send_data(stream_id, crate::bytes::Bytes::new(), true)
+                }
+                FinalizeAction::Trailers(trailers) => conn.send_headers(stream_id, trailers, true),
+                FinalizeAction::Wait | FinalizeAction::Reset => unreachable!(),
+            };
+            if result.is_ok() {
+                state.cancellation.disarm();
+                if conn.has_pending_frames_for_stream(stream_id)
+                    && let Some(guard) = state.guard.take()
+                {
+                    let previous = response_guards.insert(stream_id, guard);
+                    debug_assert!(previous.is_none());
+                }
+            }
+        }
+    }
 }
 
 fn release_flushed_response_guards(
     conn: &Connection,
-    response_guards: &mut HashMap<u32, InFlightRequestGuard>,
+    response_guards: &mut HashMap<u32, Arc<InFlightRequestGuard>>,
 ) {
     response_guards.retain(|stream_id, _| conn.has_pending_frames_for_stream(*stream_id));
 }
@@ -782,7 +1240,7 @@ fn queue_h2_response(
     response: impl IntoHttp2Response,
     guard: InFlightRequestGuard,
     suppress_response_body: bool,
-    response_guards: &mut HashMap<u32, InFlightRequestGuard>,
+    response_guards: &mut HashMap<u32, Arc<InFlightRequestGuard>>,
 ) -> Vec<Http2PushOutcome> {
     let mut response = response.into_h2_response();
     if suppress_response_body {
@@ -819,7 +1277,7 @@ fn queue_h2_response(
     }
 
     if queued_response && conn.has_pending_frames_for_stream(stream_id) {
-        let previous = response_guards.insert(stream_id, guard);
+        let previous = response_guards.insert(stream_id, Arc::new(guard));
         debug_assert!(
             previous.is_none(),
             "one response guard should be active per h2 stream"
@@ -1015,6 +1473,8 @@ enum DriverEvent {
     Frame(Option<Result<Frame, H2Error>>),
     /// A handler finished and its response is ready to encode.
     Response(FunnelItem),
+    /// One credit-admitted frame or EOF from an active produced body.
+    ProducedBody(ProducedBodyEvent),
     /// The shutdown signal entered `Draining`: begin the stage-1 GOAWAY.
     DrainRequested,
     /// One drain tick elapsed with the stage-1 warning outstanding:
@@ -1032,6 +1492,73 @@ enum DriverEvent {
     /// A partially received request stream made no progress before its
     /// inactivity deadline. Reset only that stream; keep the connection open.
     StreamIdleTimeout(u32),
+    /// A failed producer exceeded its bounded committed-frame drain grace.
+    ProducedDrainTimeout(u32),
+}
+
+fn poll_produced_body_event(
+    conn: &Connection,
+    produced_bodies: &mut BTreeMap<u32, ActiveProducedBody>,
+    poll_after: &mut Option<u32>,
+    task_cx: &mut std::task::Context<'_>,
+) -> Poll<ProducedBodyEvent> {
+    fn poll_one(
+        conn: &Connection,
+        stream_id: u32,
+        state: &mut ActiveProducedBody,
+        task_cx: &mut std::task::Context<'_>,
+    ) -> Poll<Option<ProducedBodyEvent>> {
+        if state.body_eof || state.pending_trailers.is_some() {
+            return Poll::Pending;
+        }
+        if conn.has_pending_frames_for_stream(stream_id) {
+            return Poll::Pending;
+        }
+
+        let remaining_is_terminal_only = matches!(
+            state.producer_outcome,
+            Some(Http2ProducerOutcome::Finished { total_bytes, .. })
+                if total_bytes == state.emitted_bytes
+        );
+        if conn.available_send_capacity(stream_id) == 0 && !remaining_is_terminal_only {
+            return Poll::Pending;
+        }
+
+        match Pin::new(&mut state.body).poll_frame(task_cx) {
+            Poll::Ready(Some(frame)) => {
+                Poll::Ready(Some(ProducedBodyEvent::Frame { stream_id, frame }))
+            }
+            Poll::Ready(None) => Poll::Ready(Some(ProducedBodyEvent::Eof { stream_id })),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+
+    if let Some(after) = *poll_after {
+        for (&stream_id, state) in produced_bodies
+            .range_mut((std::ops::Bound::Excluded(after), std::ops::Bound::Unbounded))
+        {
+            if let Poll::Ready(Some(event)) = poll_one(conn, stream_id, state, task_cx) {
+                *poll_after = Some(stream_id);
+                return Poll::Ready(event);
+            }
+        }
+        for (&stream_id, state) in produced_bodies
+            .range_mut((std::ops::Bound::Unbounded, std::ops::Bound::Included(after)))
+        {
+            if let Poll::Ready(Some(event)) = poll_one(conn, stream_id, state, task_cx) {
+                *poll_after = Some(stream_id);
+                return Poll::Ready(event);
+            }
+        }
+    } else {
+        for (&stream_id, state) in produced_bodies.iter_mut() {
+            if let Poll::Ready(Some(event)) = poll_one(conn, stream_id, state, task_cx) {
+                *poll_after = Some(stream_id);
+                return Poll::Ready(event);
+            }
+        }
+    }
+    Poll::Pending
 }
 
 /// Flush every frame the connection has queued onto the transport.
@@ -1061,6 +1588,9 @@ async fn pump_writes(
 async fn next_driver_event(
     framed: &mut Framed<TcpStream, FrameCodec>,
     resp_rx: &mut mpsc::Receiver<FunnelItem>,
+    conn: &Connection,
+    produced_bodies: &mut BTreeMap<u32, ActiveProducedBody>,
+    produced_poll_after: &mut Option<u32>,
     task_cx: &Cx,
     signal: &ShutdownSignal,
     watch_drain: bool,
@@ -1068,6 +1598,7 @@ async fn next_driver_event(
     idle_deadline: Option<Time>,
     continuation_deadline: Option<Time>,
     stream_idle_deadline: Option<(u32, Time)>,
+    produced_failure_deadline: Option<(u32, Time)>,
 ) -> DriverEvent {
     if watch_drain && signal.is_shutting_down() {
         return DriverEvent::DrainRequested;
@@ -1114,6 +1645,13 @@ async fn next_driver_event(
             None => std::future::pending::<()>().await,
         }
     });
+    let produced_failure_at = produced_failure_deadline.map(|(_, deadline)| deadline);
+    let mut produced_failure_fut = std::pin::pin!(async move {
+        match produced_failure_at {
+            Some(deadline) => crate::time::sleep_until(deadline).await,
+            None => std::future::pending::<()>().await,
+        }
+    });
     std::future::poll_fn(move |cx| {
         if signal.phase() as u8 >= ShutdownPhase::ForceClosing as u8
             || force_fut.as_mut().poll(cx).is_ready()
@@ -1137,10 +1675,20 @@ async fn next_driver_event(
                 return Poll::Ready(DriverEvent::StreamIdleTimeout(stream_id));
             }
         }
+        if let Some((stream_id, _)) = produced_failure_deadline {
+            if produced_failure_fut.as_mut().poll(cx).is_ready() {
+                return Poll::Ready(DriverEvent::ProducedDrainTimeout(stream_id));
+            }
+        }
         // Cancel-correct channels make dropping a partially-polled recv
         // safe: no item is consumed unless the future completes.
         if let Poll::Ready(Ok(item)) = recv_fut.as_mut().poll(cx) {
             return Poll::Ready(DriverEvent::Response(item));
+        }
+        if let Poll::Ready(item) =
+            poll_produced_body_event(conn, produced_bodies, produced_poll_after, cx)
+        {
+            return Poll::Ready(DriverEvent::ProducedBody(item));
         }
         match Pin::new(&mut *framed).poll_next(cx) {
             Poll::Ready(item) => Poll::Ready(DriverEvent::Frame(item)),
@@ -1157,7 +1705,7 @@ async fn next_driver_event(
 /// guard. Mapping failures reset the stream rather than killing the
 /// connection.
 #[allow(clippy::too_many_arguments)]
-fn dispatch_h2_request<F, Fut, R>(
+fn dispatch_h2_request<F, Fut>(
     conn: &mut Connection,
     stream_id: u32,
     headers: Vec<Header>,
@@ -1176,8 +1724,7 @@ fn dispatch_h2_request<F, Fut, R>(
     stream_idle_timeout: Option<Duration>,
 ) where
     F: Fn(Request) -> Fut + Send + Sync + 'static,
-    Fut: Future<Output = R> + Send + 'static,
-    R: IntoHttp2Response + Send + 'static,
+    Fut: Future<Output = H2DispatchResponse> + Send + 'static,
 {
     let request = match request_from_h2_parts(headers, body, trailers, peer_addr) {
         Ok(request) => request,
@@ -1249,6 +1796,7 @@ fn dispatch_h2_request<F, Fut, R>(
             request_timeout_header_cap,
         );
 
+        let producer_signal = signal.clone();
         let handler_future = async move {
             match ServerRequestRegion::mint("h2", request_budget, request_now) {
                 Some(region) => {
@@ -1266,7 +1814,7 @@ fn dispatch_h2_request<F, Fut, R>(
                     .await;
                     match hop {
                         None => None,
-                        Some(ServerHopOutcome::Ok(response)) => Some(response.into_h2_response()),
+                        Some(ServerHopOutcome::Ok(response)) => Some(response),
                         Some(ServerHopOutcome::Cancelled | ServerHopOutcome::ConnectionLost) => {
                             None
                         }
@@ -1276,19 +1824,21 @@ fn dispatch_h2_request<F, Fut, R>(
                             // of staying active forever.
                             let _ = &message;
                             error!(message = %message, "h2 handler task panicked");
-                            Some(
+                            Some(H2DispatchResponse::Buffered(
                                 Response::new(500, "Internal Server Error", Vec::new())
                                     .into_h2_response(),
-                            )
+                            ))
                         }
-                        Some(ServerHopOutcome::DeadlineExceeded) => Some(
-                            Response::new(
-                                503,
-                                "Service Unavailable",
-                                b"request budget deadline exceeded".to_vec(),
-                            )
-                            .into_h2_response(),
-                        ),
+                        Some(ServerHopOutcome::DeadlineExceeded) => {
+                            Some(H2DispatchResponse::Buffered(
+                                Response::new(
+                                    503,
+                                    "Service Unavailable",
+                                    b"request budget deadline exceeded".to_vec(),
+                                )
+                                .into_h2_response(),
+                            ))
+                        }
                     }
                 }
                 None => {
@@ -1303,7 +1853,7 @@ fn dispatch_h2_request<F, Fut, R>(
                     )
                     .await?;
                     match handler_result {
-                        Ok(response) => Some(response.into_h2_response()),
+                        Ok(response) => Some(response),
                         Err(payload) => {
                             let message = crate::cx::scope::payload_to_string(&payload);
                             let _ = &message;
@@ -1311,10 +1861,10 @@ fn dispatch_h2_request<F, Fut, R>(
                                 message = %message,
                                 "h2 handler task panicked"
                             );
-                            Some(
+                            Some(H2DispatchResponse::Buffered(
                                 Response::new(500, "Internal Server Error", Vec::new())
                                     .into_h2_response(),
-                            )
+                            ))
                         }
                     }
                 }
@@ -1338,13 +1888,102 @@ fn dispatch_h2_request<F, Fut, R>(
             drop(guard);
             return;
         };
-        if let Ok(permit) = resp_tx.reserve(&cx).await {
-            permit.send(FunnelItem::Response {
-                stream_id,
-                response,
-                guard,
-                suppress_response_body,
-            });
+        match response {
+            H2DispatchResponse::Buffered(response) => {
+                if let Ok(permit) = resp_tx.reserve(&cx).await {
+                    permit.send(FunnelItem::Response {
+                        stream_id,
+                        response,
+                        guard,
+                        suppress_response_body,
+                    });
+                }
+            }
+            H2DispatchResponse::Produced(plan) => {
+                let validation = if suppress_response_body {
+                    validate_h2_produced_head_for_queue(&plan.response)
+                } else {
+                    validate_h2_produced_response_for_queue(&plan.response)
+                };
+                if validation.is_err() {
+                    if let Ok(permit) = resp_tx.reserve(&cx).await {
+                        permit.send(FunnelItem::Response {
+                            stream_id,
+                            response: invalid_h2_response_fallback(),
+                            guard,
+                            suppress_response_body,
+                        });
+                    }
+                    return;
+                }
+                if suppress_response_body {
+                    if let Ok(permit) = resp_tx.reserve(&cx).await {
+                        permit.send(FunnelItem::Response {
+                            stream_id,
+                            response: plan.response.into_h2_response(),
+                            guard,
+                            suppress_response_body: true,
+                        });
+                    }
+                    return;
+                }
+
+                let region = ServerRequestRegion::mint_from_connection(
+                    "h2-produced",
+                    request_budget,
+                    request_now,
+                    &cx,
+                );
+                let producer_cx = region.cx().clone();
+                let (response, body, sender, producer_factory) = plan.into_parts(&producer_cx);
+                let Ok(permit) = resp_tx.reserve(&cx).await else {
+                    producer_cx.cancel_with(
+                        crate::types::CancelKind::ParentCancelled,
+                        Some("HTTP/2 response funnel closed before producer start"),
+                    );
+                    drop(guard);
+                    return;
+                };
+                let guard = Arc::new(guard);
+                let producer_guard = Arc::clone(&guard);
+                permit.send(FunnelItem::ProducedStart {
+                    stream_id,
+                    response,
+                    body,
+                    cancellation: ProducedCancellationGuard::new(producer_cx.clone()),
+                    guard,
+                });
+
+                let producer_cx_for_factory = producer_cx.clone();
+                let producer =
+                    async move { producer_factory(producer_cx_for_factory, sender).await };
+                let run = region.run_with_protocol_drain(
+                    budget_source,
+                    Some(producer_cx.clone()),
+                    request_drain_grace,
+                    producer,
+                );
+                let outcome = match race_force_close(&producer_signal, run).await {
+                    Some(ServerHopOutcome::Ok(Ok(sender))) if sender.is_finished() => {
+                        Http2ProducerOutcome::Finished {
+                            total_bytes: sender.total_bytes(),
+                            terminal: sender.terminal,
+                        }
+                    }
+                    Some(ServerHopOutcome::Ok(Ok(_)) | ServerHopOutcome::Ok(Err(_)))
+                    | Some(ServerHopOutcome::Panicked(_)) => Http2ProducerOutcome::Failed,
+                    Some(
+                        ServerHopOutcome::Cancelled
+                        | ServerHopOutcome::ConnectionLost
+                        | ServerHopOutcome::DeadlineExceeded,
+                    )
+                    | None => Http2ProducerOutcome::Cancelled,
+                };
+                if let Ok(permit) = resp_tx.reserve(&cx).await {
+                    permit.send(FunnelItem::ProducedDone { stream_id, outcome });
+                }
+                drop(producer_guard);
+            }
         }
     });
     if spawned.is_err() {
@@ -1376,7 +2015,7 @@ fn frame_codec_for(max_frame_size: u32) -> FrameCodec {
 
 #[allow(clippy::too_many_lines)]
 #[allow(clippy::too_many_arguments)]
-async fn serve_h2_connection<F, Fut, R>(
+async fn serve_h2_connection<F, Fut>(
     mut stream: TcpStream,
     peer_addr: Option<SocketAddr>,
     handler: Arc<F>,
@@ -1397,8 +2036,7 @@ async fn serve_h2_connection<F, Fut, R>(
 ) -> io::Result<()>
 where
     F: Fn(Request) -> Fut + Send + Sync + 'static,
-    Fut: Future<Output = R> + Send + 'static,
-    R: IntoHttp2Response + Send + 'static,
+    Fut: Future<Output = H2DispatchResponse> + Send + 'static,
 {
     let task_cx = Cx::current()
         .ok_or_else(|| io::Error::other("h2 connection task requires a runtime Cx"))?;
@@ -1436,7 +2074,9 @@ where
     let mut pending_stream_idle_deadlines: HashMap<u32, Time> = HashMap::new();
     // Fixed stage-2 GOAWAY deadline, armed once when stage-1 is outstanding.
     let mut finalize_at: Option<Time> = None;
-    let mut response_guards: HashMap<u32, InFlightRequestGuard> = HashMap::new();
+    let mut response_guards: HashMap<u32, Arc<InFlightRequestGuard>> = HashMap::new();
+    let mut produced_bodies: BTreeMap<u32, ActiveProducedBody> = BTreeMap::new();
+    let mut produced_poll_after = None;
     let mut associated_pushes: HashMap<u32, Vec<u32>> = HashMap::new();
     // br-asupersync-mfqfst L4: count requests dispatched to the handler on
     // this connection so it can be recycled once the configured budget is
@@ -1460,6 +2100,7 @@ where
         // WINDOW_UPDATE unblocks the data or the drain supervisor escalates
         // to force-close.
         if !conn.has_pending_frames()
+            && produced_bodies.is_empty()
             && (conn.graceful_shutdown_complete()
                 || (conn.goaway_received()
                     && conn.active_stream_count() == 0
@@ -1492,6 +2133,7 @@ where
         let connection_idle = !conn.goaway_sent()
             && conn.active_stream_count() == 0
             && pending_requests.is_empty()
+            && produced_bodies.is_empty()
             && !conn.is_awaiting_continuation()
             && !conn.has_pending_frames();
         if let Some(timeout) = idle_timeout.filter(|_| connection_idle) {
@@ -1514,9 +2156,20 @@ where
             .iter()
             .min_by_key(|(stream_id, deadline)| (**deadline, **stream_id))
             .map(|(stream_id, deadline)| (*stream_id, *deadline));
+        let produced_failure_at = produced_bodies
+            .iter()
+            .filter_map(|(stream_id, state)| {
+                state
+                    .failure_drain_deadline
+                    .map(|deadline| (*stream_id, deadline))
+            })
+            .min_by_key(|(stream_id, deadline)| (*deadline, *stream_id));
         let event = next_driver_event(
             &mut framed,
             &mut resp_rx,
+            &conn,
+            &mut produced_bodies,
+            &mut produced_poll_after,
             &task_cx,
             &shutdown_signal,
             watch_drain,
@@ -1524,6 +2177,7 @@ where
             idle_at,
             continuation_at,
             stream_idle_at,
+            produced_failure_at,
         )
         .await;
 
@@ -1532,6 +2186,7 @@ where
                 // Escalation: drop the transport; spawned handler hops are
                 // raced against ForceClosing and request-region teardown is
                 // the cancellation backstop (h1 parity).
+                cancel_all_produced_bodies(&mut produced_bodies, "HTTP/2 connection force-closed");
                 return Ok(());
             }
             DriverEvent::DrainRequested => {
@@ -1552,6 +2207,7 @@ where
                 );
                 pump_writes(&mut conn, &mut framed).await?;
                 let _ = std::future::poll_fn(|cx| framed.poll_close(cx)).await;
+                cancel_all_produced_bodies(&mut produced_bodies, "HTTP/2 connection idle timeout");
                 return Ok(());
             }
             DriverEvent::ContinuationTimeout => {
@@ -1566,22 +2222,41 @@ where
                 );
                 pump_writes(&mut conn, &mut framed).await?;
                 let _ = std::future::poll_fn(|cx| framed.poll_close(cx)).await;
+                cancel_all_produced_bodies(&mut produced_bodies, "HTTP/2 CONTINUATION timeout");
                 return Ok(());
             }
             DriverEvent::StreamIdleTimeout(stream_id) => {
                 pending_stream_idle_deadlines.remove(&stream_id);
                 pending_requests.remove(&stream_id);
                 conn.reset_stream(stream_id, ErrorCode::Cancel);
+                cancel_produced_body(
+                    &mut produced_bodies,
+                    stream_id,
+                    "HTTP/2 produced response stream idle timeout",
+                );
                 reset_associated_pushes(&mut conn, &mut associated_pushes, stream_id);
+            }
+            DriverEvent::ProducedDrainTimeout(stream_id) => {
+                conn.reset_stream(stream_id, ErrorCode::Cancel);
+                cancel_produced_body(
+                    &mut produced_bodies,
+                    stream_id,
+                    "HTTP/2 produced response exceeded failure drain grace",
+                );
             }
             DriverEvent::Frame(None) => {
                 // Peer closed the transport.
+                cancel_all_produced_bodies(
+                    &mut produced_bodies,
+                    "HTTP/2 peer closed the connection",
+                );
                 return Ok(());
             }
             DriverEvent::Frame(Some(Err(decode_error))) => {
                 conn.goaway(decode_error.code, crate::bytes::Bytes::new());
                 pump_writes(&mut conn, &mut framed).await?;
                 let _ = std::future::poll_fn(|cx| framed.poll_close(cx)).await;
+                cancel_all_produced_bodies(&mut produced_bodies, "HTTP/2 frame decode failed");
                 return Err(io::Error::other(decode_error));
             }
             DriverEvent::Frame(Some(Ok(frame))) => match conn.process_frame(frame) {
@@ -1596,11 +2271,20 @@ where
                         conn.reset_stream(stream_id, protocol_error.code);
                         pending_requests.remove(&stream_id);
                         pending_stream_idle_deadlines.remove(&stream_id);
+                        cancel_produced_body(
+                            &mut produced_bodies,
+                            stream_id,
+                            "HTTP/2 stream protocol error",
+                        );
                         reset_associated_pushes(&mut conn, &mut associated_pushes, stream_id);
                     } else {
                         conn.goaway(protocol_error.code, crate::bytes::Bytes::new());
                         pump_writes(&mut conn, &mut framed).await?;
                         let _ = std::future::poll_fn(|cx| framed.poll_close(cx)).await;
+                        cancel_all_produced_bodies(
+                            &mut produced_bodies,
+                            "HTTP/2 connection protocol error",
+                        );
                         return Err(io::Error::other(protocol_error));
                     }
                 }
@@ -1716,9 +2400,100 @@ where
                 Ok(Some(ReceivedFrame::Reset { stream_id, .. })) => {
                     pending_requests.remove(&stream_id);
                     pending_stream_idle_deadlines.remove(&stream_id);
+                    cancel_produced_body(
+                        &mut produced_bodies,
+                        stream_id,
+                        "HTTP/2 peer reset the produced response stream",
+                    );
                     reset_associated_pushes(&mut conn, &mut associated_pushes, stream_id);
                 }
                 Ok(_) => {}
+            },
+            DriverEvent::ProducedBody(event) => match event {
+                ProducedBodyEvent::Frame {
+                    stream_id,
+                    frame: Ok(BodyFrame::Data(data)),
+                } => {
+                    let data = data.into_inner();
+                    let data_len = u64::try_from(data.len()).unwrap_or(u64::MAX);
+                    let Some(state) = produced_bodies.get_mut(&stream_id) else {
+                        continue;
+                    };
+                    let Some(emitted_bytes) = state.emitted_bytes.checked_add(data_len) else {
+                        conn.reset_stream(stream_id, ErrorCode::InternalError);
+                        cancel_produced_body(
+                            &mut produced_bodies,
+                            stream_id,
+                            "HTTP/2 produced response byte count overflowed",
+                        );
+                        continue;
+                    };
+                    state.emitted_bytes = emitted_bytes;
+                    if conn.send_data(stream_id, data, false).is_err() {
+                        conn.reset_stream(stream_id, ErrorCode::InternalError);
+                        cancel_produced_body(
+                            &mut produced_bodies,
+                            stream_id,
+                            "HTTP/2 produced DATA could not be queued",
+                        );
+                    } else {
+                        finalize_produced_body_if_ready(
+                            &mut conn,
+                            stream_id,
+                            &mut produced_bodies,
+                            &mut response_guards,
+                        );
+                    }
+                }
+                ProducedBodyEvent::Frame {
+                    stream_id,
+                    frame: Ok(BodyFrame::Trailers(trailers)),
+                } => {
+                    let Some(state) = produced_bodies.get_mut(&stream_id) else {
+                        continue;
+                    };
+                    if state.pending_trailers.replace(trailers).is_some() || state.body_eof {
+                        conn.reset_stream(stream_id, ErrorCode::InternalError);
+                        cancel_produced_body(
+                            &mut produced_bodies,
+                            stream_id,
+                            "HTTP/2 produced response emitted duplicate terminal frames",
+                        );
+                    } else {
+                        finalize_produced_body_if_ready(
+                            &mut conn,
+                            stream_id,
+                            &mut produced_bodies,
+                            &mut response_guards,
+                        );
+                    }
+                }
+                ProducedBodyEvent::Frame {
+                    stream_id,
+                    frame: Err(_),
+                } => {
+                    if let Some(state) = produced_bodies.get_mut(&stream_id) {
+                        state.producer_outcome = Some(Http2ProducerOutcome::Failed);
+                        state.body_eof = true;
+                    }
+                    finalize_produced_body_if_ready(
+                        &mut conn,
+                        stream_id,
+                        &mut produced_bodies,
+                        &mut response_guards,
+                    );
+                }
+                ProducedBodyEvent::Eof { stream_id } => {
+                    if let Some(state) = produced_bodies.get_mut(&stream_id) {
+                        state.body_eof = true;
+                    }
+                    finalize_produced_body_if_ready(
+                        &mut conn,
+                        stream_id,
+                        &mut produced_bodies,
+                        &mut response_guards,
+                    );
+                }
             },
             DriverEvent::Response(item) => match item {
                 FunnelItem::Response {
@@ -1737,10 +2512,80 @@ where
                     );
                     record_promised_pushes(&mut associated_pushes, &outcomes);
                 }
+                FunnelItem::ProducedStart {
+                    stream_id,
+                    response,
+                    body,
+                    mut cancellation,
+                    guard,
+                } => {
+                    let writable = conn.stream(stream_id).is_some_and(|stream| {
+                        stream.error_code().is_none() && stream.state().can_send()
+                    });
+                    if !writable
+                        || produced_bodies.contains_key(&stream_id)
+                        || validate_h2_produced_response_for_queue(&response).is_err()
+                    {
+                        cancellation.cancel("HTTP/2 produced response could not start");
+                        conn.reset_stream(stream_id, ErrorCode::InternalError);
+                        drop(guard);
+                        continue;
+                    }
+                    let headers = h2_headers_from_response(&response)
+                        .expect("validated produced response head must encode");
+                    if conn.send_headers(stream_id, headers, false).is_err() {
+                        cancellation.cancel("HTTP/2 produced response headers could not be queued");
+                        conn.reset_stream(stream_id, ErrorCode::InternalError);
+                        drop(guard);
+                        continue;
+                    }
+                    let previous = produced_bodies.insert(
+                        stream_id,
+                        ActiveProducedBody {
+                            body,
+                            cancellation,
+                            guard: Some(guard),
+                            producer_outcome: None,
+                            emitted_bytes: 0,
+                            body_eof: false,
+                            pending_trailers: None,
+                            failure_drain_deadline: None,
+                        },
+                    );
+                    debug_assert!(previous.is_none());
+                }
+                FunnelItem::ProducedDone { stream_id, outcome } => {
+                    if let Some(state) = produced_bodies.get_mut(&stream_id) {
+                        if state.producer_outcome.replace(outcome).is_some() {
+                            conn.reset_stream(stream_id, ErrorCode::InternalError);
+                            cancel_produced_body(
+                                &mut produced_bodies,
+                                stream_id,
+                                "HTTP/2 produced response completed more than once",
+                            );
+                            continue;
+                        }
+                        if !matches!(outcome, Http2ProducerOutcome::Finished { .. }) {
+                            state.failure_drain_deadline =
+                                Some((time_getter)() + request_drain_grace);
+                        }
+                    }
+                    finalize_produced_body_if_ready(
+                        &mut conn,
+                        stream_id,
+                        &mut produced_bodies,
+                        &mut response_guards,
+                    );
+                }
                 FunnelItem::StreamIdleTimeout { stream_id, guard } => {
                     pending_stream_idle_deadlines.remove(&stream_id);
                     pending_requests.remove(&stream_id);
                     conn.reset_stream(stream_id, ErrorCode::Cancel);
+                    cancel_produced_body(
+                        &mut produced_bodies,
+                        stream_id,
+                        "HTTP/2 produced response stream idle timeout",
+                    );
                     reset_associated_pushes(&mut conn, &mut associated_pushes, stream_id);
                     drop(guard);
                 }
@@ -2040,6 +2885,57 @@ where
         Self::from_parts(tcp_listener, handler, config)
     }
 
+    /// Run the accept loop until shutdown, then drain with request-aware
+    /// supervision and return the shutdown statistics (including the
+    /// graceful-drain report).
+    pub async fn run(self, runtime: &RuntimeHandle) -> io::Result<ShutdownStats> {
+        self.run_mapped(runtime, |handler, request| async move {
+            H2DispatchResponse::Buffered(handler(request).await.into_h2_response())
+        })
+        .await
+    }
+}
+
+impl<F> Http2Listener<F> {
+    /// Bind a listener whose handler may return a deferred produced body.
+    pub async fn bind_produced<A, Fut>(addr: A, handler: F) -> io::Result<Self>
+    where
+        A: ToSocketAddrs + Send + 'static,
+        F: Fn(Request) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Http2ProducedResponse> + Send + 'static,
+    {
+        Self::bind_produced_with_config(addr, handler, Http2ListenerConfig::default()).await
+    }
+
+    /// Bind a produced-response listener with custom configuration.
+    pub async fn bind_produced_with_config<A, Fut>(
+        addr: A,
+        handler: F,
+        config: Http2ListenerConfig,
+    ) -> io::Result<Self>
+    where
+        A: ToSocketAddrs + Send + 'static,
+        F: Fn(Request) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Http2ProducedResponse> + Send + 'static,
+    {
+        let tcp_listener = TcpListener::bind(addr).await?;
+        Ok(Self::from_parts(tcp_listener, handler, config))
+    }
+
+    /// Create a produced-response listener from an existing TCP listener.
+    #[must_use]
+    pub fn from_listener_produced<Fut>(
+        tcp_listener: TcpListener,
+        handler: F,
+        config: Http2ListenerConfig,
+    ) -> Self
+    where
+        F: Fn(Request) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Http2ProducedResponse> + Send + 'static,
+    {
+        Self::from_parts(tcp_listener, handler, config)
+    }
+
     fn from_parts(tcp_listener: TcpListener, handler: F, config: Http2ListenerConfig) -> Self {
         let shutdown_signal = h2_shutdown_signal_for_time_getter(config.time_getter);
         let connection_manager = ConnectionManager::with_time_getter(
@@ -2095,11 +2991,30 @@ where
         self.tcp_listener.local_addr()
     }
 
-    /// Run the accept loop until shutdown, then drain with request-aware
-    /// supervision and return the shutdown statistics (including the
-    /// graceful-drain report).
+    /// Run the accept loop with an output type that may defer a bounded body
+    /// producer. Ordinary buffered responses remain on the existing path.
+    pub async fn run_produced<Fut>(self, runtime: &RuntimeHandle) -> io::Result<ShutdownStats>
+    where
+        F: Fn(Request) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Http2ProducedResponse> + Send + 'static,
+    {
+        self.run_mapped(runtime, |handler, request| async move {
+            handler(request).await.into_driver_response()
+        })
+        .await
+    }
+
     #[allow(clippy::too_many_lines)]
-    pub async fn run(self, runtime: &RuntimeHandle) -> io::Result<ShutdownStats> {
+    async fn run_mapped<M, MFut>(
+        self,
+        runtime: &RuntimeHandle,
+        map_response: M,
+    ) -> io::Result<ShutdownStats>
+    where
+        F: Send + Sync + 'static,
+        M: Fn(Arc<F>, Request) -> MFut + Clone + Send + Sync + 'static,
+        MFut: Future<Output = H2DispatchResponse> + Send + 'static,
+    {
         let mut tasks: Vec<JoinHandle<()>> = Vec::new();
         // Independent push counter so finished connection tasks are reaped
         // periodically instead of accumulating for the listener's lifetime
@@ -2168,7 +3083,9 @@ where
                 continue;
             };
 
-            let handler = Arc::clone(&self.handler);
+            let raw_handler = Arc::clone(&self.handler);
+            let map_response = map_response.clone();
+            let handler = Arc::new(move |request| map_response(Arc::clone(&raw_handler), request));
             let settings = self.config.settings.clone();
             let initial_connection_window_size = self.config.initial_connection_window_size;
             let shutdown_signal = self.shutdown_signal.clone();
@@ -2424,8 +3341,578 @@ mod tests {
         }
     }
 
-    async fn panicking_h2_handler(_request: Request) -> Response {
+    async fn panicking_h2_handler(_request: Request) -> H2DispatchResponse {
         panic!("handler exploded")
+    }
+
+    fn establish_h2_response_stream(conn: &mut Connection, stream_id: u32, path: &str) {
+        let request_headers = encode_hpack_test_headers(&[
+            (":method", "GET"),
+            (":scheme", "https"),
+            (":path", path),
+            (":authority", "produced.example"),
+        ]);
+        let received = conn
+            .process_frame(Frame::Headers(crate::http::h2::frame::HeadersFrame::new(
+                stream_id,
+                request_headers,
+                true,
+                true,
+            )))
+            .expect("request HEADERS accepted");
+        assert!(matches!(
+            received,
+            Some(ReceivedFrame::Headers {
+                stream_id: received_stream_id,
+                ..
+            }) if received_stream_id == stream_id
+        ));
+    }
+
+    #[test]
+    fn produced_sender_rejects_oversized_data_before_channel_commit() {
+        crate::test_utils::run_test(|| async {
+            let cx = Cx::current().expect("test runtime installs Cx");
+            let (inner, mut body) = OutgoingBody::channel_with_capacity(&cx, BodyKind::Chunked, 1);
+            let mut sender = Http2BodySender {
+                inner,
+                max_frame_bytes: NonZeroUsize::new(3).expect("non-zero limit"),
+                terminal: Http2ProducerTerminal::Open,
+            };
+
+            let error = sender
+                .send_bytes(&cx, crate::bytes::Bytes::from_static(b"four"))
+                .await
+                .expect_err("oversized DATA must fail before queueing");
+            assert!(matches!(
+                error,
+                HttpError::BodyTooLargeDetailed {
+                    actual: 4,
+                    limit: 3
+                }
+            ));
+            assert_eq!(sender.total_bytes(), 0);
+
+            std::future::poll_fn(|task_cx| {
+                assert!(matches!(
+                    Pin::new(&mut body).poll_frame(task_cx),
+                    Poll::Pending
+                ));
+                Poll::Ready(())
+            })
+            .await;
+        });
+    }
+
+    #[test]
+    fn produced_sender_finish_preserves_trailers_terminal() {
+        crate::test_utils::run_test(|| async {
+            let cx = Cx::current().expect("test runtime installs Cx");
+            let (inner, mut body) = OutgoingBody::channel_with_capacity(&cx, BodyKind::Chunked, 1);
+            let mut sender = Http2BodySender {
+                inner,
+                max_frame_bytes: NonZeroUsize::new(8).expect("non-zero limit"),
+                terminal: Http2ProducerTerminal::Open,
+            };
+            let mut trailers = HeaderMap::new();
+            trailers.insert(
+                crate::http::body::HeaderName::from_static("x-end"),
+                crate::http::body::HeaderValue::from_static("true"),
+            );
+
+            sender
+                .send_trailers(&cx, trailers)
+                .await
+                .expect("trailers finish the channel");
+            sender
+                .finish(&cx)
+                .expect("finish remains idempotent after trailers");
+            assert_eq!(sender.terminal, Http2ProducerTerminal::Trailers);
+
+            let frame = std::future::poll_fn(|task_cx| Pin::new(&mut body).poll_frame(task_cx))
+                .await
+                .expect("trailers frame")
+                .expect("valid trailers frame");
+            assert!(matches!(frame, BodyFrame::Trailers(_)));
+            assert!(
+                std::future::poll_fn(|task_cx| Pin::new(&mut body).poll_frame(task_cx))
+                    .await
+                    .is_none(),
+                "trailers must be the sole terminal frame"
+            );
+        });
+    }
+
+    #[test]
+    fn produced_cancellation_guard_cancels_when_driver_drops_ownership() {
+        let producer_cx: Cx = Cx::for_testing();
+        assert!(!producer_cx.is_cancel_requested());
+        drop(ProducedCancellationGuard::new(producer_cx.clone()));
+        assert!(producer_cx.is_cancel_requested());
+    }
+
+    #[test]
+    fn produced_cancellation_retains_in_flight_until_producer_owner_exits() {
+        let channel_cx: Cx = Cx::for_testing();
+        let producer_cx: Cx = Cx::for_testing();
+        let (_sender, body) =
+            OutgoingBody::channel_with_capacity(&channel_cx, BodyKind::Chunked, 1);
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let transport_guard = Arc::new(InFlightRequestGuard::acquire(Some(&in_flight)));
+        let producer_guard = Arc::clone(&transport_guard);
+        let mut produced_bodies = BTreeMap::from([(
+            1,
+            ActiveProducedBody {
+                body,
+                cancellation: ProducedCancellationGuard::new(producer_cx),
+                guard: Some(transport_guard),
+                producer_outcome: None,
+                emitted_bytes: 0,
+                body_eof: false,
+                pending_trailers: None,
+                failure_drain_deadline: None,
+            },
+        )]);
+        assert_eq!(in_flight.load(Ordering::Acquire), 1);
+
+        cancel_produced_body(&mut produced_bodies, 1, "test transport cancellation");
+        assert!(produced_bodies.is_empty());
+        assert_eq!(
+            in_flight.load(Ordering::Acquire),
+            1,
+            "transport cancellation cannot report quiescence while producer ownership remains"
+        );
+
+        drop(producer_guard);
+        assert_eq!(
+            in_flight.load(Ordering::Acquire),
+            0,
+            "the final producer-task owner releases in-flight accounting"
+        );
+    }
+
+    #[test]
+    fn produced_factory_panic_is_reported_after_start_instead_of_escaping() {
+        let runtime = crate::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .expect("build current-thread runtime");
+        let handle = runtime.handle();
+
+        runtime.block_on(async move {
+            let cx = Cx::current().expect("runtime installs Cx for block_on");
+            let mut conn = Connection::server(Settings::default());
+            let (resp_tx, mut resp_rx) = mpsc::channel::<FunnelItem>(RESPONSE_FUNNEL_CAPACITY);
+            let shutdown_signal = ShutdownSignal::new();
+            let in_flight = Arc::new(AtomicUsize::new(0));
+            let handler = Arc::new(|_req: Request| async move {
+                H2DispatchResponse::Produced(Http2ProducedPlan {
+                    response: Response::new(200, "OK", Vec::new()),
+                    frame_capacity: NonZeroUsize::MIN,
+                    max_frame_bytes: NonZeroUsize::new(8).expect("non-zero limit"),
+                    producer: Box::new(|_, _| panic!("producer factory exploded")),
+                })
+            });
+
+            dispatch_h2_request(
+                &mut conn,
+                1,
+                request_block(&[]),
+                Vec::new(),
+                Vec::new(),
+                None,
+                &handler,
+                &resp_tx,
+                &shutdown_signal,
+                &in_flight,
+                &handle,
+                &HostPolicy::allow_list(vec!["example.com".to_owned()]),
+                None,
+                None,
+                Duration::from_millis(500),
+                None,
+            );
+
+            let start = resp_rx
+                .recv(&cx)
+                .await
+                .expect("validated head must be funneled before producer polling");
+            assert!(matches!(
+                start,
+                FunnelItem::ProducedStart { stream_id: 1, .. }
+            ));
+            let done = resp_rx
+                .recv(&cx)
+                .await
+                .expect("factory panic must become a terminal producer outcome");
+            assert!(matches!(
+                done,
+                FunnelItem::ProducedDone {
+                    stream_id: 1,
+                    outcome: Http2ProducerOutcome::Failed,
+                }
+            ));
+            drop(start);
+        });
+    }
+
+    #[test]
+    fn produced_head_preserves_authored_status_without_starting_factory() {
+        let runtime = crate::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .expect("build current-thread runtime");
+        let handle = runtime.handle();
+
+        runtime.block_on(async move {
+            let cx = Cx::current().expect("runtime installs Cx for block_on");
+            let mut conn = Connection::server(Settings::default());
+            let (resp_tx, mut resp_rx) = mpsc::channel::<FunnelItem>(RESPONSE_FUNNEL_CAPACITY);
+            let shutdown_signal = ShutdownSignal::new();
+            let in_flight = Arc::new(AtomicUsize::new(0));
+            let factory_invoked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let factory_invoked_for_handler = Arc::clone(&factory_invoked);
+            let handler = Arc::new(move |_req: Request| {
+                let factory_invoked = Arc::clone(&factory_invoked_for_handler);
+                async move {
+                    H2DispatchResponse::Produced(Http2ProducedPlan {
+                        response: Response::new(201, "Created", Vec::new())
+                            .with_header("x-produced", "head"),
+                        frame_capacity: NonZeroUsize::MIN,
+                        max_frame_bytes: NonZeroUsize::new(8).expect("non-zero limit"),
+                        producer: Box::new(move |_producer_cx, sender| {
+                            factory_invoked.store(true, Ordering::SeqCst);
+                            Box::pin(async move { Ok(sender) })
+                        }),
+                    })
+                }
+            });
+            let headers = vec![
+                Header::new(":method", "HEAD"),
+                Header::new(":scheme", "https"),
+                Header::new(":path", "/produced-head"),
+                Header::new(":authority", "example.com"),
+            ];
+
+            dispatch_h2_request(
+                &mut conn,
+                1,
+                headers,
+                Vec::new(),
+                Vec::new(),
+                None,
+                &handler,
+                &resp_tx,
+                &shutdown_signal,
+                &in_flight,
+                &handle,
+                &HostPolicy::allow_list(vec!["example.com".to_owned()]),
+                None,
+                None,
+                Duration::from_millis(500),
+                None,
+            );
+
+            let item = resp_rx
+                .recv(&cx)
+                .await
+                .expect("HEAD response must be funneled");
+            let FunnelItem::Response {
+                response,
+                guard,
+                suppress_response_body,
+                ..
+            } = item
+            else {
+                panic!("HEAD must use the body-suppressed buffered path");
+            };
+            assert_eq!(response.response.status, 201);
+            assert!(suppress_response_body);
+            assert!(!factory_invoked.load(Ordering::SeqCst));
+            assert!(
+                resp_rx.try_recv().is_err(),
+                "HEAD must not start a producer"
+            );
+            drop(guard);
+        });
+    }
+
+    #[test]
+    fn produced_body_is_not_polled_until_stream_credit_arrives() {
+        crate::test_utils::run_test(|| async {
+            let cx = Cx::current().expect("test runtime installs Cx");
+            let mut conn = Connection::server(Settings::default());
+            conn.process_frame(Frame::Settings(crate::http::h2::frame::SettingsFrame::new(
+                vec![crate::http::h2::frame::Setting::InitialWindowSize(0)],
+            )))
+            .expect("zero initial stream window accepted");
+            expect_settings_ack(&mut conn);
+            establish_h2_response_stream(&mut conn, 1, "/credit");
+            assert_eq!(conn.available_send_capacity(1), 0);
+
+            let (inner, body) = OutgoingBody::channel_with_capacity(&cx, BodyKind::Chunked, 1);
+            let mut sender = Http2BodySender {
+                inner,
+                max_frame_bytes: NonZeroUsize::new(8).expect("non-zero limit"),
+                terminal: Http2ProducerTerminal::Open,
+            };
+            sender
+                .send_bytes(&cx, crate::bytes::Bytes::from_static(b"abc"))
+                .await
+                .expect("bounded DATA queues in producer channel");
+            sender.finish(&cx).expect("producer finishes");
+
+            let mut produced_bodies = BTreeMap::from([(
+                1,
+                ActiveProducedBody {
+                    body,
+                    cancellation: ProducedCancellationGuard::new(Cx::for_testing()),
+                    guard: Some(Arc::new(InFlightRequestGuard::acquire(None))),
+                    producer_outcome: Some(Http2ProducerOutcome::Finished {
+                        total_bytes: sender.total_bytes(),
+                        terminal: sender.terminal,
+                    }),
+                    emitted_bytes: 0,
+                    body_eof: false,
+                    pending_trailers: None,
+                    failure_drain_deadline: None,
+                },
+            )]);
+            let mut poll_after = None;
+            std::future::poll_fn(|task_cx| {
+                assert!(matches!(
+                    poll_produced_body_event(&conn, &mut produced_bodies, &mut poll_after, task_cx),
+                    Poll::Pending
+                ));
+                Poll::Ready(())
+            })
+            .await;
+
+            conn.process_frame(Frame::WindowUpdate(
+                crate::http::h2::frame::WindowUpdateFrame::new(1, 3),
+            ))
+            .expect("stream WINDOW_UPDATE accepted");
+            let event = std::future::poll_fn(|task_cx| {
+                poll_produced_body_event(&conn, &mut produced_bodies, &mut poll_after, task_cx)
+            })
+            .await;
+            let ProducedBodyEvent::Frame {
+                stream_id: 1,
+                frame: Ok(BodyFrame::Data(data)),
+            } = event
+            else {
+                panic!("expected one DATA frame after credit arrived");
+            };
+            assert_eq!(data.get_ref().as_ref(), b"abc");
+        });
+    }
+
+    #[test]
+    fn produced_body_credit_observes_connection_window_exhaustion() {
+        let mut conn = Connection::server(Settings::default());
+        conn.process_frame(Frame::Settings(crate::http::h2::frame::SettingsFrame::new(
+            vec![crate::http::h2::frame::Setting::InitialWindowSize(100_000)],
+        )))
+        .expect("larger peer stream window accepted");
+        expect_settings_ack(&mut conn);
+        establish_h2_response_stream(&mut conn, 1, "/connection-credit");
+
+        conn.send_data(1, crate::bytes::Bytes::from(vec![0_u8; 70_000]), false)
+            .expect("DATA queues beyond the connection window");
+        let mut emitted = 0_usize;
+        while let Some(frame) = conn.next_frame() {
+            let Frame::Data(data) = frame else {
+                panic!("expected only DATA while draining connection credit");
+            };
+            emitted += data.data.len();
+        }
+        assert_eq!(emitted, 65_535);
+        assert_eq!(conn.available_send_capacity(1), 0);
+
+        conn.process_frame(Frame::WindowUpdate(
+            crate::http::h2::frame::WindowUpdateFrame::new(1, 32),
+        ))
+        .expect("stream credit update accepted");
+        assert_eq!(
+            conn.available_send_capacity(1),
+            0,
+            "stream credit cannot bypass an exhausted connection window"
+        );
+
+        conn.process_frame(Frame::WindowUpdate(
+            crate::http::h2::frame::WindowUpdateFrame::new(0, 3),
+        ))
+        .expect("connection credit update accepted");
+        assert_eq!(conn.available_send_capacity(1), 3);
+    }
+
+    #[test]
+    fn produced_empty_eof_queues_one_terminal_frame_and_retains_guard() {
+        crate::test_utils::run_test(|| async {
+            let cx = Cx::current().expect("test runtime installs Cx");
+            let mut conn = Connection::server(Settings::default());
+            conn.process_frame(Frame::Settings(crate::http::h2::frame::SettingsFrame::new(
+                Vec::new(),
+            )))
+            .expect("peer settings accepted");
+            expect_settings_ack(&mut conn);
+            establish_h2_response_stream(&mut conn, 1, "/empty");
+            conn.send_headers(1, vec![Header::new(":status", "200")], false)
+                .expect("produced response head queues");
+            assert!(matches!(conn.next_frame(), Some(Frame::Headers(_))));
+
+            let (mut sender, body) = OutgoingBody::channel_with_capacity(&cx, BodyKind::Chunked, 1);
+            sender.finish(&cx).expect("empty producer finishes");
+            let in_flight = Arc::new(AtomicUsize::new(0));
+            let mut produced_bodies = BTreeMap::from([(
+                1,
+                ActiveProducedBody {
+                    body,
+                    cancellation: ProducedCancellationGuard::new(Cx::for_testing()),
+                    guard: Some(Arc::new(InFlightRequestGuard::acquire(Some(&in_flight)))),
+                    producer_outcome: Some(Http2ProducerOutcome::Finished {
+                        total_bytes: 0,
+                        terminal: Http2ProducerTerminal::Finished,
+                    }),
+                    emitted_bytes: 0,
+                    body_eof: false,
+                    pending_trailers: None,
+                    failure_drain_deadline: None,
+                },
+            )]);
+            let mut poll_after = None;
+            let event = std::future::poll_fn(|task_cx| {
+                poll_produced_body_event(&conn, &mut produced_bodies, &mut poll_after, task_cx)
+            })
+            .await;
+            assert!(matches!(event, ProducedBodyEvent::Eof { stream_id: 1 }));
+            produced_bodies
+                .get_mut(&1)
+                .expect("body remains active")
+                .body_eof = true;
+
+            let mut response_guards = HashMap::new();
+            finalize_produced_body_if_ready(
+                &mut conn,
+                1,
+                &mut produced_bodies,
+                &mut response_guards,
+            );
+            assert!(produced_bodies.is_empty());
+            assert_eq!(in_flight.load(Ordering::Acquire), 1);
+            assert!(response_guards.contains_key(&1));
+            match conn.next_frame().expect("terminal DATA queues") {
+                Frame::Data(frame) => {
+                    assert!(frame.data.is_empty());
+                    assert!(frame.end_stream);
+                }
+                other => panic!("expected terminal DATA, got {other:?}"),
+            }
+            release_flushed_response_guards(&conn, &mut response_guards);
+            assert!(response_guards.is_empty());
+            assert_eq!(in_flight.load(Ordering::Acquire), 0);
+            assert!(
+                conn.next_frame().is_none(),
+                "terminal framing is exactly once"
+            );
+        });
+    }
+
+    #[test]
+    fn produced_trailers_queue_one_terminal_headers_frame_after_body_completion() {
+        crate::test_utils::run_test(|| async {
+            let cx = Cx::current().expect("test runtime installs Cx");
+            let mut conn = Connection::server(Settings::default());
+            conn.process_frame(Frame::Settings(crate::http::h2::frame::SettingsFrame::new(
+                Vec::new(),
+            )))
+            .expect("peer settings accepted");
+            expect_settings_ack(&mut conn);
+            establish_h2_response_stream(&mut conn, 1, "/produced-trailers");
+            conn.send_headers(1, vec![Header::new(":status", "200")], false)
+                .expect("produced response head queues");
+            assert!(matches!(conn.next_frame(), Some(Frame::Headers(_))));
+
+            let (inner, body) = OutgoingBody::channel_with_capacity(&cx, BodyKind::Chunked, 1);
+            let mut sender = Http2BodySender {
+                inner,
+                max_frame_bytes: NonZeroUsize::new(64).expect("non-zero limit"),
+                terminal: Http2ProducerTerminal::Open,
+            };
+            let mut trailers = HeaderMap::new();
+            trailers.insert(
+                crate::http::body::HeaderName::from_static("x-final"),
+                crate::http::body::HeaderValue::from_static("done"),
+            );
+            sender
+                .send_trailers(&cx, trailers)
+                .await
+                .expect("trailers queue");
+            sender
+                .finish(&cx)
+                .expect("finish after trailers is idempotent");
+
+            let in_flight = Arc::new(AtomicUsize::new(0));
+            let mut produced_bodies = BTreeMap::from([(
+                1,
+                ActiveProducedBody {
+                    body,
+                    cancellation: ProducedCancellationGuard::new(Cx::for_testing()),
+                    guard: Some(Arc::new(InFlightRequestGuard::acquire(Some(&in_flight)))),
+                    producer_outcome: Some(Http2ProducerOutcome::Finished {
+                        total_bytes: 0,
+                        terminal: sender.terminal,
+                    }),
+                    emitted_bytes: 0,
+                    body_eof: false,
+                    pending_trailers: None,
+                    failure_drain_deadline: None,
+                },
+            )]);
+            let mut poll_after = None;
+            let event = std::future::poll_fn(|task_cx| {
+                poll_produced_body_event(&conn, &mut produced_bodies, &mut poll_after, task_cx)
+            })
+            .await;
+            let ProducedBodyEvent::Frame {
+                stream_id: 1,
+                frame: Ok(BodyFrame::Trailers(trailers)),
+            } = event
+            else {
+                panic!("expected the produced trailing header map");
+            };
+            produced_bodies
+                .get_mut(&1)
+                .expect("body remains active until trailers queue")
+                .pending_trailers = Some(trailers);
+
+            let mut response_guards = HashMap::new();
+            finalize_produced_body_if_ready(
+                &mut conn,
+                1,
+                &mut produced_bodies,
+                &mut response_guards,
+            );
+            assert!(produced_bodies.is_empty());
+            assert_eq!(in_flight.load(Ordering::Acquire), 1);
+            match conn.next_frame().expect("terminal trailing HEADERS queue") {
+                Frame::Headers(headers) => {
+                    assert_eq!(headers.stream_id, 1);
+                    assert!(headers.end_stream);
+                    let mut block = headers.header_block;
+                    let decoded = crate::http::h2::HpackDecoder::new()
+                        .decode(&mut block)
+                        .expect("produced trailers decode");
+                    assert_eq!(decoded, vec![Header::new("x-final", "done")]);
+                }
+                other => panic!("expected terminal trailing HEADERS, got {other:?}"),
+            }
+            release_flushed_response_guards(&conn, &mut response_guards);
+            assert!(response_guards.is_empty());
+            assert_eq!(in_flight.load(Ordering::Acquire), 0);
+            assert!(
+                conn.next_frame().is_none(),
+                "trailers terminalize exactly once"
+            );
+        });
     }
 
     #[test]
@@ -2924,7 +4411,9 @@ mod tests {
                 let invoked = Arc::clone(&invoked_for_handler);
                 async move {
                     invoked.store(true, Ordering::SeqCst);
-                    Response::new(200, "OK", Vec::new())
+                    H2DispatchResponse::Buffered(
+                        Response::new(200, "OK", Vec::new()).into_h2_response(),
+                    )
                 }
             });
 
@@ -2999,7 +4488,9 @@ mod tests {
                 let invoked = Arc::clone(&invoked_for_handler);
                 async move {
                     invoked.store(true, Ordering::SeqCst);
-                    Response::new(200, "OK", b"hi".to_vec())
+                    H2DispatchResponse::Buffered(
+                        Response::new(200, "OK", b"hi".to_vec()).into_h2_response(),
+                    )
                 }
             });
 
@@ -3058,7 +4549,7 @@ mod tests {
             let (resp_tx, mut resp_rx) = mpsc::channel::<FunnelItem>(RESPONSE_FUNNEL_CAPACITY);
             let shutdown_signal = ShutdownSignal::new();
             let in_flight = Arc::new(AtomicUsize::new(0));
-            let handler = Arc::new(|_req: Request| std::future::pending::<Response>());
+            let handler = Arc::new(|_req: Request| std::future::pending::<H2DispatchResponse>());
 
             dispatch_h2_request(
                 &mut conn,

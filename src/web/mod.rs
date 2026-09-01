@@ -101,11 +101,11 @@ pub use nextjs_bootstrap::{
     BootstrapCommand, BootstrapLogEvent, BootstrapRecoveryAction, NextjsBootstrapConfig,
     NextjsBootstrapError, NextjsBootstrapSnapshot, NextjsBootstrapState,
 };
-#[cfg(not(target_arch = "wasm32"))]
-pub use response::Http1StreamResponder;
 pub use response::{Html, IntoResponse, Json, Redirect, Response, StatusCode};
 #[cfg(not(target_arch = "wasm32"))]
-pub use router::Http1ProducedHandlerFuture;
+pub use response::{Http1StreamResponder, Http2StreamResponder};
+#[cfg(not(target_arch = "wasm32"))]
+pub use router::{Http1ProducedHandlerFuture, Http2ProducedHandlerFuture};
 pub use router::{
     HttpHandlerFuture, MethodRouter, RouteInfo, Router, delete, get, patch, post, put,
 };

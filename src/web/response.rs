@@ -20,6 +20,8 @@ use crate::Cx;
 use crate::bytes::Bytes;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::http::h1::{Http1ProducedResponse, HttpError, OutgoingBodySender};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::http::h2::listener::{Http2BodySender, Http2ProducedResponse};
 
 #[cfg(not(target_arch = "wasm32"))]
 use super::extract::{ExtractionError, FromRequestParts, Request};
@@ -551,6 +553,206 @@ impl Http1StreamResponder {
             return Response::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Bytes::from_static(b"HTTP/1 streamed response already registered"),
+            )
+            .header("content-type", "text/plain; charset=utf-8");
+        }
+        Response::empty(status)
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+type Http2StreamProducerFuture =
+    Pin<Box<dyn Future<Output = Result<Http2BodySender, HttpError>> + Send + 'static>>;
+
+#[cfg(not(target_arch = "wasm32"))]
+type Http2StreamProducer =
+    Box<dyn FnOnce(Cx, Http2BodySender) -> Http2StreamProducerFuture + Send + 'static>;
+
+/// Deferred HTTP/2 body plan registered during web handler dispatch.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) struct Http2StreamPlan {
+    capacity: NonZeroUsize,
+    max_frame_bytes: NonZeroUsize,
+    producer: Http2StreamProducer,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Http2StreamPlan {
+    pub(crate) fn into_produced(self, response: Response) -> Http2ProducedResponse {
+        debug_assert!(
+            response.body.is_empty(),
+            "a produced HTTP/2 response head cannot retain buffered bytes"
+        );
+        let status = response.status.as_u16();
+        let mut wire_response = crate::http::h1::types::Response::new(
+            status,
+            crate::http::h1::types::default_reason(status),
+            Vec::new(),
+        );
+        let mut headers = response.headers.into_iter().collect::<Vec<_>>();
+        headers.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+        headers.extend(
+            response
+                .set_cookies
+                .into_iter()
+                .map(|value| ("set-cookie".to_string(), value)),
+        );
+        for (name, value) in headers {
+            wire_response = wire_response.with_header(name, value);
+        }
+        Http2ProducedResponse::streaming(
+            wire_response,
+            self.capacity,
+            self.max_frame_bytes,
+            move |cx, sender| (self.producer)(cx, sender),
+        )
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Default)]
+pub(crate) struct Http2StreamSlot {
+    state: Arc<parking_lot::Mutex<Http2StreamSlotState>>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Default)]
+enum Http2StreamSlotState {
+    #[default]
+    Empty,
+    Registered(Http2StreamPlan),
+    Rejected(&'static str),
+    Consumed,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl fmt::Debug for Http2StreamSlot {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Http2StreamSlot")
+            .field(
+                "state",
+                &match &*self.state.lock() {
+                    Http2StreamSlotState::Empty => "empty",
+                    Http2StreamSlotState::Registered(_) => "registered",
+                    Http2StreamSlotState::Rejected(_) => "rejected",
+                    Http2StreamSlotState::Consumed => "consumed",
+                },
+            )
+            .finish()
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Http2StreamSlot {
+    fn register(&self, plan: Http2StreamPlan) -> Result<(), Http2StreamPlan> {
+        let displaced = {
+            let mut state = self.state.lock();
+            if matches!(&*state, Http2StreamSlotState::Empty) {
+                *state = Http2StreamSlotState::Registered(plan);
+                return Ok(());
+            }
+            if matches!(&*state, Http2StreamSlotState::Registered(_)) {
+                Some(std::mem::replace(
+                    &mut *state,
+                    Http2StreamSlotState::Rejected("HTTP/2 response producer registered twice"),
+                ))
+            } else {
+                None
+            }
+        };
+        drop(displaced);
+        Err(plan)
+    }
+
+    pub(crate) fn bind_response(
+        &self,
+        response: &Response,
+        suppress_response_body: bool,
+    ) -> Result<Option<Http2StreamPlan>, &'static str> {
+        let state = std::mem::replace(&mut *self.state.lock(), Http2StreamSlotState::Consumed);
+        let plan = match state {
+            Http2StreamSlotState::Empty => return Ok(None),
+            Http2StreamSlotState::Registered(plan) => plan,
+            Http2StreamSlotState::Rejected(reason) => return Err(reason),
+            Http2StreamSlotState::Consumed => {
+                return Err("HTTP/2 response producer binding already consumed");
+            }
+        };
+        if !response.body.is_empty() {
+            return Err("produced HTTP/2 response cannot also carry a buffered body");
+        }
+        if !suppress_response_body
+            && matches!(response.status.as_u16(), 100..=199 | 204 | 205 | 304)
+        {
+            return Err("produced HTTP/2 response requires a body-allowed status");
+        }
+        if response.has_header("transfer-encoding")
+            || (!suppress_response_body && response.has_header("content-length"))
+        {
+            return Err("produced HTTP/2 response owns message framing");
+        }
+        Ok(Some(plan))
+    }
+}
+
+/// Request-scoped authoring handle for a supervised HTTP/2 response body.
+///
+/// The handle is available only through
+/// [`crate::web::Router::into_http2_produced_handler`]. Registration is
+/// deferred: it creates no channel and polls no producer until the HTTP/2
+/// listener validates the final response head and supplies its request-derived
+/// [`Cx`].
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug)]
+pub struct Http2StreamResponder {
+    slot: Http2StreamSlot,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl FromRequestParts for Http2StreamResponder {
+    fn from_request_parts(req: &Request) -> Result<Self, ExtractionError> {
+        let slot = req
+            .extensions
+            .get_typed_cloned::<Http2StreamSlot>()
+            .ok_or_else(|| {
+                ExtractionError::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "HTTP/2 produced-response transport unavailable",
+                )
+            })?;
+        Ok(Self { slot })
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Http2StreamResponder {
+    /// Register one bounded DATA-frame producer and return its
+    /// middleware-visible response head.
+    ///
+    /// `capacity * max_frame_bytes` bounds bytes retained in the producer's
+    /// transport queue. The final response must keep its buffered body empty
+    /// and must not set `Content-Length` or `Transfer-Encoding`.
+    #[must_use]
+    pub fn streaming<P, Fut>(
+        self,
+        status: StatusCode,
+        capacity: NonZeroUsize,
+        max_frame_bytes: NonZeroUsize,
+        producer: P,
+    ) -> Response
+    where
+        P: FnOnce(Cx, Http2BodySender) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<Http2BodySender, HttpError>> + Send + 'static,
+    {
+        let plan = Http2StreamPlan {
+            capacity,
+            max_frame_bytes,
+            producer: Box::new(move |cx, sender| Box::pin(producer(cx, sender))),
+        };
+        if self.slot.register(plan).is_err() {
+            return Response::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Bytes::from_static(b"HTTP/2 response producer already registered"),
             )
             .header("content-type", "text/plain; charset=utf-8");
         }
@@ -1137,6 +1339,103 @@ mod tests {
         assert!(
             slot.register(late_plan).is_err(),
             "a consumed slot must remain terminal"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn http2_stream_responder_requires_produced_router_adapter() {
+        let request = Request::new("GET", "/stream");
+        let error = Http2StreamResponder::from_request_parts(&request)
+            .expect_err("ordinary router requests have no HTTP/2 producer authority");
+        assert_eq!(error.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            error.message,
+            "HTTP/2 produced-response transport unavailable"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn http2_stream_responder_duplicate_registration_poisons_slot() {
+        let slot = Http2StreamSlot::default();
+        let mut request = Request::new("GET", "/stream");
+        request.extensions.insert_typed(slot.clone());
+        let first = Http2StreamResponder::from_request_parts(&request).expect("first extractor");
+        let second = Http2StreamResponder::from_request_parts(&request).expect("second extractor");
+
+        let first_response = first.streaming(
+            StatusCode::OK,
+            NonZeroUsize::MIN,
+            NonZeroUsize::new(1024).expect("non-zero frame limit"),
+            |_cx, sender| async move { Ok(sender) },
+        );
+        assert_eq!(first_response.status, StatusCode::OK);
+        let second_response = second.streaming(
+            StatusCode::OK,
+            NonZeroUsize::MIN,
+            NonZeroUsize::new(1024).expect("non-zero frame limit"),
+            |_cx, sender| async move { Ok(sender) },
+        );
+        assert_eq!(second_response.status, StatusCode::INTERNAL_SERVER_ERROR);
+        let refusal = match slot.bind_response(&first_response, false) {
+            Err(refusal) => refusal,
+            Ok(_) => panic!("duplicate registration must poison the request"),
+        };
+        assert_eq!(refusal, "HTTP/2 response producer registered twice");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn http2_stream_binding_rejects_body_and_framing_collisions() {
+        fn registered_slot() -> Http2StreamSlot {
+            let slot = Http2StreamSlot::default();
+            assert!(
+                slot.register(Http2StreamPlan {
+                    capacity: NonZeroUsize::MIN,
+                    max_frame_bytes: NonZeroUsize::MIN,
+                    producer: Box::new(|_cx, sender| Box::pin(async move { Ok(sender) })),
+                })
+                .is_ok(),
+                "first registration succeeds"
+            );
+            slot
+        }
+
+        fn refusal(result: Result<Option<Http2StreamPlan>, &'static str>) -> &'static str {
+            match result {
+                Err(reason) => reason,
+                Ok(_) => panic!("binding should fail closed"),
+            }
+        }
+
+        assert_eq!(
+            refusal(
+                registered_slot().bind_response(&Response::new(StatusCode::OK, "buffered"), false)
+            ),
+            "produced HTTP/2 response cannot also carry a buffered body"
+        );
+        assert_eq!(
+            refusal(
+                registered_slot().bind_response(&Response::empty(StatusCode::NO_CONTENT), false)
+            ),
+            "produced HTTP/2 response requires a body-allowed status"
+        );
+        assert_eq!(
+            refusal(registered_slot().bind_response(
+                &Response::empty(StatusCode::OK).header("content-length", "0"),
+                false,
+            )),
+            "produced HTTP/2 response owns message framing"
+        );
+        assert!(
+            registered_slot()
+                .bind_response(
+                    &Response::empty(StatusCode::NO_CONTENT).header("content-length", "0"),
+                    true,
+                )
+                .expect("HEAD may preserve authored response metadata without starting a body")
+                .is_some()
         );
     }
 

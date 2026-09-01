@@ -31,7 +31,9 @@ use super::middleware::{
     RequestLogSink, RequestTracePolicy, resolve_trace_id, trace_request, wall_clock_now,
 };
 #[cfg(not(target_arch = "wasm32"))]
-use super::response::{Http1StreamPlan, Http1StreamSlot, sanitize_header_name};
+use super::response::{
+    Http1StreamPlan, Http1StreamSlot, Http2StreamPlan, Http2StreamSlot, sanitize_header_name,
+};
 use super::response::{IntoResponse, Response, StatusCode};
 #[cfg(not(target_arch = "wasm32"))]
 use super::websocket::Http1UpgradeSlot;
@@ -43,6 +45,8 @@ use crate::http::h1::server::{Http1Response, Http1Upgrade};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::http::h1::stream::{Http1ProducedResponse, StreamingServerRequest};
 use crate::http::h1::types::{Request as HttpRequest, Response as HttpResponse};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::http::h2::listener::Http2ProducedResponse;
 #[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
 use crate::http::h3::{H3Error, H3RequestHead, H3ResponseHead, NativeH3Event, NativeH3Session};
 #[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
@@ -494,6 +498,11 @@ pub type Http1HandlerFuture = Pin<Box<dyn Future<Output = Http1Response> + Send 
 #[cfg(not(target_arch = "wasm32"))]
 pub type Http1ProducedHandlerFuture =
     Pin<Box<dyn Future<Output = Http1ProducedResponse> + Send + 'static>>;
+
+/// Boxed response future returned by [`Router::into_http2_produced_handler`].
+#[cfg(not(target_arch = "wasm32"))]
+pub type Http2ProducedHandlerFuture =
+    Pin<Box<dyn Future<Output = Http2ProducedResponse> + Send + 'static>>;
 
 /// Resource limits for the established-session HTTP/3 router bridge.
 ///
@@ -1632,6 +1641,37 @@ impl Router {
         }
     }
 
+    /// Convert this router into a production HTTP/2 produced-response handler.
+    ///
+    /// Existing buffered routes retain the ordinary H2 response path. A route
+    /// may extract [`crate::web::Http2StreamResponder`] to register one bounded
+    /// body producer; the listener starts it only after the response head is
+    /// validated and polls at most one frame when that stream has send credit.
+    /// The adapter is accepted by [`crate::http::h2::listener::Http2Listener`]
+    /// through [`crate::http::h2::listener::Http2Listener::run_produced`].
+    ///
+    /// This is response-side H2 streaming only. Request bodies remain buffered,
+    /// server push authoring is unchanged, and this API makes no HTTP/3 or
+    /// full-duplex claim.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub fn into_http2_produced_handler(
+        self,
+    ) -> impl Fn(HttpRequest) -> Http2ProducedHandlerFuture + Clone + Send + Sync + 'static {
+        let router = Arc::new(self);
+        move |request| {
+            let router = Arc::clone(&router);
+            Box::pin(async move {
+                let Some(cx) = Cx::current() else {
+                    return http2_produced_refusal("request context unavailable");
+                };
+                router
+                    .handle_http2_produced_request_with_cx(&cx, request)
+                    .await
+            })
+        }
+    }
+
     /// Dispatch one listener request through this router with an explicit
     /// capability context.
     ///
@@ -1733,6 +1773,27 @@ impl Router {
         plan.into_produced(response)
     }
 
+    /// Dispatch one HTTP/2 request and bind any registered produced body to
+    /// the listener-owned request context.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn handle_http2_produced_request_with_cx(
+        &self,
+        cx: &Cx,
+        request: HttpRequest,
+    ) -> Http2ProducedResponse {
+        let mut request = web_request_from_http(request);
+        let slot = Http2StreamSlot::default();
+        request.extensions.insert_typed(slot.clone());
+
+        let (response, binding) = self
+            .handle_http2_produced_web_response_with_cx(cx, request, &slot)
+            .await;
+        match binding {
+            Ok(Some(plan)) => plan.into_produced(response),
+            Ok(None) | Err(_) => Http2ProducedResponse::buffered(http_response_from_web(response)),
+        }
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     async fn handle_http1_produced_web_response_with_cx(
         &self,
@@ -1775,6 +1836,52 @@ impl Router {
             .expect("produced-response dispatch releases its binding cell")
             .into_inner()
             .expect("produced-response dispatch always seals its request slot");
+        (response, binding)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn handle_http2_produced_web_response_with_cx(
+        &self,
+        cx: &Cx,
+        mut request: Request,
+        slot: &Http2StreamSlot,
+    ) -> (Response, Result<Option<Http2StreamPlan>, &'static str>) {
+        let suppress_response_body = request.method.eq_ignore_ascii_case("HEAD");
+        let binding = Arc::new(parking_lot::Mutex::new(None));
+        let response = if let Some(trace) = &self.default_trace {
+            Self::ensure_request_id(&mut request, &trace.counter);
+            let binding_for_dispatch = Arc::clone(&binding);
+            let (trace_policy, trace_policy_refusal) = http2_produced_trace_policy(&trace.policy);
+            trace_request(
+                &trace_policy,
+                trace.time_getter,
+                trace.sink.as_ref(),
+                cx,
+                request,
+                move |request| async move {
+                    let response = match trace_policy_refusal {
+                        Some(reason) => http1_stream_refusal_response(reason),
+                        None => self.handle_inner(cx, request).await,
+                    };
+                    let result = slot.bind_response(&response, suppress_response_body);
+                    let refusal = result.as_ref().err().copied();
+                    *binding_for_dispatch.lock() = Some(result);
+                    refusal.map_or(response, http1_stream_refusal_response)
+                },
+            )
+            .await
+        } else {
+            let response = self.handle_inner(cx, request).await;
+            let result = slot.bind_response(&response, suppress_response_body);
+            let refusal = result.as_ref().err().copied();
+            *binding.lock() = Some(result);
+            refusal.map_or(response, http1_stream_refusal_response)
+        };
+        let binding = Arc::try_unwrap(binding)
+            .ok()
+            .expect("HTTP/2 produced-response dispatch releases its binding cell")
+            .into_inner()
+            .expect("HTTP/2 produced-response dispatch seals its request slot");
         (response, binding)
     }
 
@@ -2086,10 +2193,44 @@ fn http1_produced_trace_policy(
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+fn http2_produced_trace_policy(
+    policy: &RequestTracePolicy,
+) -> (RequestTracePolicy, Option<&'static str>) {
+    fn transport_owned(name: &str) -> bool {
+        let normalized = sanitize_header_name(name.to_owned());
+        ["content-length", "transfer-encoding"]
+            .iter()
+            .any(|reserved| normalized.eq_ignore_ascii_case(reserved))
+    }
+
+    let mut safe = policy.clone();
+    let mut refused = false;
+    if safe.duration_header.as_deref().is_some_and(transport_owned) {
+        safe.duration_header = None;
+        refused = true;
+    }
+    if safe.trace_header.as_deref().is_some_and(transport_owned) {
+        safe.trace_header = None;
+        refused = true;
+    }
+    (
+        safe,
+        refused.then_some("HTTP/2 produced-response trace policy uses a framing header"),
+    )
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn http1_produced_refusal(message: &'static str) -> Http1ProducedResponse {
     let mut response = http1_stream_refusal_response(message);
     let plan = Http1StreamPlan::buffered(std::mem::take(&mut response.body));
     plan.into_produced(response)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn http2_produced_refusal(message: &'static str) -> Http2ProducedResponse {
+    Http2ProducedResponse::buffered(http_response_from_web(http1_stream_refusal_response(
+        message,
+    )))
 }
 
 fn http_response_from_web(response: Response) -> HttpResponse {
