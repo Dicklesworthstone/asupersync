@@ -2228,24 +2228,17 @@ where
                 return Ok(());
             }
         }
-        let write_frame = async {
+        // Do not poll application production while this frame is waiting for
+        // socket writability. The bounded channel may retain its already
+        // admitted frames, but producer progress resumes only after the
+        // current write and flush complete. Transport-error cleanup below is
+        // the sole exception: it polls under cancellation for a bounded drain.
+        let write_result = async {
             io.write_all(encoded_frame.as_ref())
                 .await
                 .map_err(HttpError::Io)?;
             io.flush().await.map_err(HttpError::Io)
-        };
-        let mut write_frame = std::pin::pin!(write_frame);
-        let write_result = poll_fn(|task_cx| {
-            if let Poll::Ready(result) = write_frame.as_mut().poll(task_cx) {
-                return Poll::Ready(result);
-            }
-            if producer_result.is_none()
-                && let Poll::Ready(result) = producer.as_mut().poll(task_cx)
-            {
-                producer_result = Some(normalize_producer_result(result));
-            }
-            Poll::Pending
-        })
+        }
         .await;
 
         match write_result {
@@ -3133,6 +3126,7 @@ mod tests {
     enum BodyWriteDisposition {
         GateOnceBeforeObservation { after_writes: usize },
         GateOnceAfterObservation { after_writes: usize },
+        GateFlushOnceAfterObservation { after_writes: usize },
         FailAfter { after_writes: usize },
     }
 
@@ -3217,6 +3211,7 @@ mod tests {
             let after_writes = match self.disposition {
                 BodyWriteDisposition::GateOnceBeforeObservation { after_writes }
                 | BodyWriteDisposition::GateOnceAfterObservation { after_writes }
+                | BodyWriteDisposition::GateFlushOnceAfterObservation { after_writes }
                 | BodyWriteDisposition::FailAfter { after_writes } => after_writes,
             };
             if self.accepted_body_writes >= after_writes {
@@ -3262,6 +3257,7 @@ mod tests {
                         self.gate_stage = 3;
                     }
                     BodyWriteDisposition::GateOnceAfterObservation { .. } => {}
+                    BodyWriteDisposition::GateFlushOnceAfterObservation { .. } => {}
                     BodyWriteDisposition::FailAfter { .. } => {
                         if self.gate_stage == 0 {
                             self.observe_gate();
@@ -3281,7 +3277,33 @@ mod tests {
             Poll::Ready(Ok(buf.len()))
         }
 
-        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        fn poll_flush(mut self: Pin<&mut Self>, task_cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            if let BodyWriteDisposition::GateFlushOnceAfterObservation { after_writes } =
+                self.disposition
+                && self.accepted_body_writes >= after_writes
+            {
+                if self.gate_stage == 0 {
+                    self.observe_gate();
+                    self.gate_stage = 1;
+                    task_cx.waker().wake_by_ref();
+                    return Poll::Pending;
+                }
+                if self.gate_stage == 1 {
+                    let observed_calls = self
+                        .observation
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .expect("flush gate observation")
+                        .source_calls;
+                    assert_eq!(
+                        self.source_calls.load(Ordering::SeqCst),
+                        observed_calls,
+                        "bounded producer progress must remain stable while flush stays pending"
+                    );
+                    self.gate_stage = 2;
+                }
+            }
             Poll::Ready(Ok(()))
         }
 
@@ -3551,7 +3573,7 @@ mod tests {
     }
 
     #[test]
-    fn streaming_sse_server_capacity_one_bounds_producer_run_ahead() {
+    fn produced_h1_envelope_capacity_one_does_not_poll_during_pending_write() {
         let written = Arc::new(Mutex::new(Vec::new()));
         let source_calls = Arc::new(AtomicUsize::new(0));
         let eof_calls = Arc::new(AtomicUsize::new(0));
@@ -3599,9 +3621,70 @@ mod tests {
             .unwrap()
             .clone()
             .expect("blocked first body write was observed after one pending poll");
-        assert_eq!(observed.source_calls, 3);
+        assert_eq!(
+            observed.source_calls, 2,
+            "one queued event plus one pending send is the complete bounded runahead"
+        );
         assert_eq!(observed.eof_calls, 0);
         assert!(response_body_bytes(&observed.written).is_empty());
+        assert_eq!(eof_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(cancel_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn produced_h1_envelope_capacity_one_does_not_poll_during_pending_flush() {
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let source_calls = Arc::new(AtomicUsize::new(0));
+        let eof_calls = Arc::new(AtomicUsize::new(0));
+        let cancel_calls = Arc::new(AtomicUsize::new(0));
+        let observation = Arc::new(Mutex::new(None));
+        let source = CountingSseSource::finite(
+            ["one", "two", "three", "four"],
+            Arc::clone(&source_calls),
+            Arc::clone(&eof_calls),
+            Arc::clone(&cancel_calls),
+        );
+        let source = Arc::new(Mutex::new(Some(source)));
+        let source_for_handler = Arc::clone(&source);
+        let server = Http1StreamingServer::with_config_sse(
+            move |_cx, _request| {
+                let source = source_for_handler
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .expect("one live SSE request");
+                async move { StreamingSse::from_source(source).into_http1_response(NonZeroUsize::MIN) }
+            },
+            localhost_server_config(),
+        );
+        let io = ScriptedWriteIo::new(
+            Arc::clone(&written),
+            Arc::clone(&source_calls),
+            Arc::clone(&eof_calls),
+            Arc::clone(&observation),
+            BodyWriteDisposition::GateFlushOnceAfterObservation { after_writes: 1 },
+        );
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("build current-thread runtime");
+
+        runtime
+            .block_on(async {
+                let cx = Cx::current().expect("runtime connection context");
+                server.serve_sse(&cx, io).await
+            })
+            .expect("serve capacity-one SSE response");
+
+        let observed = observation
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("blocked first body flush was observed");
+        assert_eq!(
+            response_body_bytes(&observed.written),
+            ChunkedEncoder::encode_chunk(b"data:one\n\n").as_ref()
+        );
+        assert_eq!(observed.eof_calls, 0);
         assert_eq!(eof_calls.load(Ordering::SeqCst), 1);
         assert_eq!(cancel_calls.load(Ordering::SeqCst), 0);
     }
@@ -3919,6 +4002,98 @@ mod tests {
         expected.extend_from_slice(ChunkedEncoder::encode_chunk(b"beta").as_ref());
         expected.extend_from_slice(b"0\r\n\r\n");
         assert_eq!(response_body_bytes(&written), expected);
+    }
+
+    #[test]
+    fn produced_h1_envelope_custom_limit_accepts_exact_frame() {
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let io = TestIo::new(
+            b"GET /stream HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n".to_vec(),
+            Arc::clone(&written),
+        );
+        let server = Http1StreamingServer::with_config_produced(
+            |_cx, _request| async move {
+                Http1ProducedResponse::chunked_with_max_frame_bytes(
+                    NonZeroUsize::MIN,
+                    NonZeroUsize::new(4).unwrap(),
+                    200,
+                    "OK",
+                    |producer_cx, mut sender| async move {
+                        assert_eq!(sender.max_frame_bytes(), NonZeroUsize::new(4));
+                        sender.send_chunk(&producer_cx, b"four").await?;
+                        sender.finish(&producer_cx)?;
+                        Ok(sender)
+                    },
+                )
+            },
+            localhost_server_config(),
+        );
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("build current-thread runtime");
+
+        runtime
+            .block_on(async {
+                let cx = Cx::current().expect("runtime connection context");
+                server.serve_produced(&cx, io).await
+            })
+            .expect("serve exact-boundary produced response");
+
+        let written = written.lock().unwrap().clone();
+        let mut expected = ChunkedEncoder::encode_chunk(b"four").into_vec();
+        expected.extend_from_slice(b"0\r\n\r\n");
+        assert_eq!(response_body_bytes(&written), expected);
+    }
+
+    #[test]
+    fn produced_h1_envelope_default_limit_refuses_oversize_without_data() {
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let io = TestIo::new(
+            b"GET /stream HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n".to_vec(),
+            Arc::clone(&written),
+        );
+        let server = Http1StreamingServer::with_config_produced(
+            |_cx, _request| async move {
+                Http1ProducedResponse::chunked(
+                    NonZeroUsize::MIN,
+                    200,
+                    "OK",
+                    |producer_cx, mut sender| async move {
+                        let oversized = crate::bytes::Bytes::from(vec![
+                            b'x';
+                            Http1ProducedResponse::DEFAULT_MAX_FRAME_BYTES
+                                + 1
+                        ]);
+                        sender.send_bytes(&producer_cx, oversized).await?;
+                        sender.finish(&producer_cx)?;
+                        Ok(sender)
+                    },
+                )
+            },
+            localhost_server_config(),
+        );
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("build current-thread runtime");
+
+        let error = runtime
+            .block_on(async {
+                let cx = Cx::current().expect("runtime connection context");
+                server.serve_produced(&cx, io).await
+            })
+            .expect_err("oversized produced DATA must fail closed");
+
+        assert!(matches!(
+            error,
+            HttpError::BodyTooLargeDetailed {
+                actual: 65_537,
+                limit: 65_536
+            }
+        ));
+        let written = written.lock().unwrap().clone();
+        assert!(String::from_utf8_lossy(&written).starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(response_body_bytes(&written).is_empty());
+        assert!(!response_body_bytes(&written).ends_with(b"0\r\n\r\n"));
     }
 
     #[test]

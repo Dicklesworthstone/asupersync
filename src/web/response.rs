@@ -356,14 +356,21 @@ type Http1StreamProducer =
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) struct Http1StreamPlan {
     capacity: NonZeroUsize,
+    max_frame_bytes: NonZeroUsize,
     producer: Http1StreamProducer,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 impl Http1StreamPlan {
     pub(crate) fn buffered(body: Bytes) -> Self {
+        let max_frame_bytes = NonZeroUsize::new(body.len()).unwrap_or(NonZeroUsize::MIN);
         Self {
             capacity: NonZeroUsize::MIN,
+            // A buffered response is already fully materialized before it
+            // enters this compatibility adapter, so limiting its one transfer
+            // would not bound application production and would break ordinary
+            // large buffered routes in the produced-listener lane.
+            max_frame_bytes,
             producer: Box::new(move |cx, mut sender| {
                 Box::pin(async move {
                     if !body.is_empty() {
@@ -382,8 +389,9 @@ impl Http1StreamPlan {
             "buffered bytes move into the deferred producer before head binding"
         );
         let status = response.status.as_u16();
-        let mut produced = Http1ProducedResponse::chunked(
+        let mut produced = Http1ProducedResponse::chunked_with_max_frame_bytes(
             self.capacity,
+            self.max_frame_bytes,
             status,
             crate::http::h1::types::default_reason(status),
             move |cx, sender| (self.producer)(cx, sender),
@@ -533,9 +541,10 @@ impl Http1StreamResponder {
     /// Its body must remain empty: mixing a buffered body with a registered
     /// stream fails closed in the router adapter. A second registration poisons
     /// the request even if the handler ignores the returned `500` response.
-    /// `capacity` bounds queued frames, not the size of an arbitrary frame;
-    /// producers that need a byte-memory envelope must bound each submitted
-    /// chunk as well.
+    /// `capacity` bounds queued frames and each DATA frame is limited to
+    /// [`Http1ProducedResponse::DEFAULT_MAX_FRAME_BYTES`]. Use
+    /// [`Self::chunked_with_max_frame_bytes`] to select a smaller or larger
+    /// nonzero ceiling explicitly.
     #[must_use]
     pub fn chunked<P, Fut>(
         self,
@@ -547,8 +556,36 @@ impl Http1StreamResponder {
         P: FnOnce(Cx, OutgoingBodySender) -> Fut + Send + 'static,
         Fut: Future<Output = Result<OutgoingBodySender, HttpError>> + Send + 'static,
     {
+        self.chunked_with_max_frame_bytes(
+            status,
+            capacity,
+            NonZeroUsize::new(Http1ProducedResponse::DEFAULT_MAX_FRAME_BYTES)
+                .expect("the default HTTP/1 produced frame limit is nonzero"),
+            producer,
+        )
+    }
+
+    /// Register one chunked producer with an explicit DATA-frame ceiling.
+    ///
+    /// The response transport rejects a larger DATA send before it enters the
+    /// bounded channel. For frame capacity `N` and byte ceiling `M`, the H1
+    /// path documents a conservative `(N + 2) * M` retained-DATA envelope;
+    /// application bytes held before calling the sender remain caller-owned.
+    #[must_use]
+    pub fn chunked_with_max_frame_bytes<P, Fut>(
+        self,
+        status: StatusCode,
+        capacity: NonZeroUsize,
+        max_frame_bytes: NonZeroUsize,
+        producer: P,
+    ) -> Response
+    where
+        P: FnOnce(Cx, OutgoingBodySender) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<OutgoingBodySender, HttpError>> + Send + 'static,
+    {
         let plan = Http1StreamPlan {
             capacity,
+            max_frame_bytes,
             producer: Box::new(move |cx, sender| Box::pin(producer(cx, sender))),
         };
         if self.slot.register(plan).is_err() {
@@ -1605,11 +1642,61 @@ mod tests {
 
         let late_plan = Http1StreamPlan {
             capacity: NonZeroUsize::MIN,
+            max_frame_bytes: NonZeroUsize::MIN,
             producer: Box::new(|_cx, sender| Box::pin(async move { Ok(sender) })),
         };
         assert!(
             slot.register(late_plan).is_err(),
             "a consumed slot must remain terminal"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn produced_h1_envelope_router_preserves_custom_frame_limit() {
+        let slot = Http1StreamSlot::default();
+        let mut request = Request::new("GET", "/stream");
+        request.extensions.insert_typed(slot.clone());
+        let responder =
+            Http1StreamResponder::from_request_parts(&request).expect("stream responder");
+        let limit = NonZeroUsize::new(7).unwrap();
+
+        let response = responder.chunked_with_max_frame_bytes(
+            StatusCode::OK,
+            NonZeroUsize::new(3).unwrap(),
+            limit,
+            |_cx, sender| async move { Ok(sender) },
+        );
+        let plan = slot
+            .bind_response(&response)
+            .expect("valid produced response")
+            .expect("registered stream plan");
+
+        assert_eq!(plan.capacity, NonZeroUsize::new(3).unwrap());
+        assert_eq!(plan.max_frame_bytes, limit);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn produced_h1_envelope_buffered_route_preserves_large_body() {
+        let body = Bytes::from(vec![
+            b'x';
+            Http1ProducedResponse::DEFAULT_MAX_FRAME_BYTES + 1
+        ]);
+        let body_len = body.len();
+        let plan = Http1StreamPlan::buffered(body);
+
+        assert_eq!(plan.capacity, NonZeroUsize::MIN);
+        assert_eq!(plan.max_frame_bytes, NonZeroUsize::new(body_len).unwrap());
+
+        let produced = plan.into_produced(Response::empty(StatusCode::OK));
+        assert_eq!(
+            produced.max_frame_bytes(),
+            NonZeroUsize::new(body_len).unwrap()
+        );
+        assert_eq!(
+            produced.max_retained_data_bytes(),
+            u128::try_from(body_len).unwrap() * 3
         );
     }
 

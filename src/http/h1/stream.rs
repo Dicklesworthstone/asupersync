@@ -1697,6 +1697,32 @@ impl OutgoingBody {
         kind: BodyKind,
         capacity: usize,
     ) -> (OutgoingBodySender, Self) {
+        Self::channel_with_capacity_and_frame_limit(cx, kind, capacity, None)
+    }
+
+    /// Creates a bounded outgoing body channel with custom frame capacity and
+    /// an enforced maximum DATA-frame size.
+    ///
+    /// The limit is checked before a DATA frame enters the channel. It covers
+    /// logical DATA payload bytes only: trailer allocations, shared [`Bytes`]
+    /// backing capacity, framing/control metadata, and application-owned bytes
+    /// before `send_bytes` are outside this limit.
+    #[must_use]
+    pub fn channel_with_capacity_and_max_frame_bytes(
+        cx: &Cx,
+        kind: BodyKind,
+        capacity: usize,
+        max_frame_bytes: NonZeroUsize,
+    ) -> (OutgoingBodySender, Self) {
+        Self::channel_with_capacity_and_frame_limit(cx, kind, capacity, Some(max_frame_bytes))
+    }
+
+    fn channel_with_capacity_and_frame_limit(
+        cx: &Cx,
+        kind: BodyKind,
+        capacity: usize,
+        max_frame_bytes: Option<NonZeroUsize>,
+    ) -> (OutgoingBodySender, Self) {
         let (tx, rx) = mpsc::channel(capacity);
         let body = Self {
             receiver: rx,
@@ -1705,7 +1731,7 @@ impl OutgoingBody {
             size_hint: kind.size_hint(),
             kind,
         };
-        let sender = OutgoingBodySender::new(tx, kind);
+        let sender = OutgoingBodySender::new(tx, kind, max_frame_bytes);
         (sender, body)
     }
 
@@ -1772,13 +1798,18 @@ impl Body for OutgoingBody {
 pub struct OutgoingBodySender {
     sender: Option<mpsc::Sender<Result<Frame<BytesCursor>, HttpError>>>,
     kind: BodyKind,
+    max_frame_bytes: Option<NonZeroUsize>,
     remaining: u64,
     total_bytes: u64,
     finished: bool,
 }
 
 impl OutgoingBodySender {
-    fn new(sender: mpsc::Sender<Result<Frame<BytesCursor>, HttpError>>, kind: BodyKind) -> Self {
+    fn new(
+        sender: mpsc::Sender<Result<Frame<BytesCursor>, HttpError>>,
+        kind: BodyKind,
+        max_frame_bytes: Option<NonZeroUsize>,
+    ) -> Self {
         let remaining = match kind {
             BodyKind::ContentLength(n) => n,
             _ => 0,
@@ -1787,6 +1818,7 @@ impl OutgoingBodySender {
         let mut this = Self {
             sender: Some(sender),
             kind,
+            max_frame_bytes,
             remaining,
             total_bytes: 0,
             finished,
@@ -1815,6 +1847,12 @@ impl OutgoingBodySender {
         self.total_bytes
     }
 
+    /// Returns the configured DATA-frame ceiling, when one is enforced.
+    #[must_use]
+    pub fn max_frame_bytes(&self) -> Option<NonZeroUsize> {
+        self.max_frame_bytes
+    }
+
     /// Sends a Bytes chunk.
     pub async fn send_bytes(&mut self, cx: &Cx, data: Bytes) -> Result<(), HttpError> {
         if self.finished {
@@ -1822,6 +1860,15 @@ impl OutgoingBodySender {
         }
         if data.is_empty() {
             return Ok(());
+        }
+
+        if let Some(limit) = self.max_frame_bytes
+            && data.len() > limit.get()
+        {
+            return Err(HttpError::BodyTooLargeDetailed {
+                actual: u64::try_from(data.len()).unwrap_or(u64::MAX),
+                limit: u64::try_from(limit.get()).unwrap_or(u64::MAX),
+            });
         }
 
         let len = data.len() as u64;
@@ -2141,12 +2188,19 @@ type Http1ProducedResponseFactory =
 
 /// A channel-bound HTTP/1.1 chunked response and its supervised producer.
 ///
-/// Construction records a response head, frame capacity, and producer factory.
-/// The server creates the [`StreamingResponse`] and [`OutgoingBodySender`] as
-/// one pair under the authoritative request [`Cx`], so callers cannot attach a
-/// producer to another channel or context. The producer returns its sender on
-/// clean completion; the server accepts EOF only when that sender reports
-/// [`OutgoingBodySender::is_finished`].
+/// Construction records a response head, frame capacity, DATA-frame ceiling,
+/// and producer factory. The server creates the [`StreamingResponse`] and
+/// [`OutgoingBodySender`] as one pair under the authoritative request [`Cx`],
+/// so callers cannot attach a producer to another channel or context. The
+/// producer returns its sender on clean completion; the server accepts EOF only
+/// when that sender reports [`OutgoingBodySender::is_finished`].
+///
+/// For a capacity of `N` and a frame ceiling of `M`, the supervised path keeps
+/// a conservative bound of `(N + 2) * M` logical DATA bytes across the channel,
+/// one pending send, the driver frame, and its chunk-encoding buffer. This is
+/// not a total heap or RSS bound: shared [`Bytes`] backing capacity, trailers,
+/// framing/control metadata, and application-owned bytes before `send_bytes`
+/// are excluded.
 ///
 /// This low-level response is consumed by
 /// [`crate::http::h1::Http1StreamingServer::serve_produced`]. It is additive to
@@ -2154,6 +2208,7 @@ type Http1ProducedResponseFactory =
 pub struct Http1ProducedResponse {
     head: ResponseHead,
     capacity: NonZeroUsize,
+    max_frame_bytes: NonZeroUsize,
     producer: Http1ProducedResponseFactory,
 }
 
@@ -2162,11 +2217,15 @@ impl std::fmt::Debug for Http1ProducedResponse {
         f.debug_struct("Http1ProducedResponse")
             .field("head", &self.head)
             .field("capacity", &self.capacity)
+            .field("max_frame_bytes", &self.max_frame_bytes)
             .finish_non_exhaustive()
     }
 }
 
 impl Http1ProducedResponse {
+    /// Default maximum DATA bytes accepted from one produced-response send.
+    pub const DEFAULT_MAX_FRAME_BYTES: usize = 64 * 1024;
+
     /// Create a bounded chunked response whose producer is owned by the server.
     ///
     /// The producer receives the authoritative request [`Cx`] and the sole
@@ -2186,12 +2245,65 @@ impl Http1ProducedResponse {
         P: FnOnce(Cx, OutgoingBodySender) -> Fut + Send + 'static,
         Fut: Future<Output = Result<OutgoingBodySender, HttpError>> + Send + 'static,
     {
+        Self::chunked_with_max_frame_bytes(
+            capacity,
+            NonZeroUsize::new(Self::DEFAULT_MAX_FRAME_BYTES)
+                .expect("the default HTTP/1 produced frame limit is nonzero"),
+            status,
+            reason,
+            producer,
+        )
+    }
+
+    /// Create a supervised chunked response with an explicit DATA-frame limit.
+    ///
+    /// The selected limit is enforced before a frame enters the response body
+    /// channel. Sending a larger frame fails with
+    /// [`HttpError::BodyTooLargeDetailed`] and cannot emit that DATA or a clean
+    /// chunk terminator.
+    #[must_use]
+    pub fn chunked_with_max_frame_bytes<P, Fut>(
+        capacity: NonZeroUsize,
+        max_frame_bytes: NonZeroUsize,
+        status: u16,
+        reason: impl Into<String>,
+        producer: P,
+    ) -> Self
+    where
+        P: FnOnce(Cx, OutgoingBodySender) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<OutgoingBodySender, HttpError>> + Send + 'static,
+    {
         let head = ResponseHead::new(status, reason).with_header("Transfer-Encoding", "chunked");
         Self {
             head,
             capacity,
+            max_frame_bytes,
             producer: Box::new(move |cx, sender| Box::pin(producer(cx, sender))),
         }
+    }
+
+    /// Maximum DATA bytes admitted from one producer send.
+    #[must_use]
+    pub fn max_frame_bytes(&self) -> NonZeroUsize {
+        self.max_frame_bytes
+    }
+
+    /// Maximum logical DATA payload bytes retained by this response pipeline.
+    ///
+    /// With channel capacity `N` and per-frame limit `M`, at most `N` DATA
+    /// frames are queued, one is held by the producer's pending channel send,
+    /// and one is held by the transport while its write or flush is pending.
+    /// The resulting logical-DATA envelope is `(N + 2) * M` bytes.
+    ///
+    /// This is not a total heap or RSS bound: shared [`Bytes`] backing capacity,
+    /// trailers, framing/control metadata, and application-owned bytes before
+    /// `send_bytes` are excluded.
+    #[must_use]
+    pub fn max_retained_data_bytes(&self) -> u128 {
+        let capacity = u128::try_from(self.capacity.get()).expect("usize fits in u128");
+        let max_frame_bytes =
+            u128::try_from(self.max_frame_bytes.get()).expect("usize fits in u128");
+        (capacity + 2) * max_frame_bytes
     }
 
     /// Append one response header for validation and serialization by the server.
@@ -2210,8 +2322,12 @@ impl Http1ProducedResponse {
     }
 
     pub(crate) fn into_parts(self, cx: &Cx) -> (StreamingResponse, Http1ProducedResponseFuture) {
-        let (sender, body) =
-            OutgoingBody::channel_with_capacity(cx, BodyKind::Chunked, self.capacity.get());
+        let (sender, body) = OutgoingBody::channel_with_capacity_and_max_frame_bytes(
+            cx,
+            BodyKind::Chunked,
+            self.capacity.get(),
+            self.max_frame_bytes,
+        );
         let producer = (self.producer)(cx.clone(), sender);
         (
             StreamingResponse {
@@ -2749,6 +2865,45 @@ mod tests {
         encoder.finalize(None, &mut out);
 
         assert_eq!(out.as_ref(), b"5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n");
+    }
+
+    #[test]
+    fn produced_h1_envelope_accepts_exact_frame_and_refuses_oversize() {
+        let cx: Cx = Cx::for_testing();
+        let limit = NonZeroUsize::new(4).unwrap();
+        let (mut sender, mut body) = OutgoingBody::channel_with_capacity_and_max_frame_bytes(
+            &cx,
+            BodyKind::Chunked,
+            2,
+            limit,
+        );
+
+        assert_eq!(sender.max_frame_bytes(), Some(limit));
+        block_on(sender.send_bytes(&cx, Bytes::from_static(b"four"))).unwrap();
+        let error = block_on(sender.send_bytes(&cx, Bytes::from_static(b"12345")))
+            .expect_err("max_frame_bytes + 1 must fail before channel admission");
+        assert!(matches!(
+            error,
+            HttpError::BodyTooLargeDetailed {
+                actual: 5,
+                limit: 4
+            }
+        ));
+        assert_eq!(sender.total_bytes(), 4);
+        sender.finish(&cx).unwrap();
+
+        let frame = poll_body(&mut body).expect("exact-boundary frame").unwrap();
+        assert_eq!(frame.into_data().unwrap().chunk(), b"four");
+        assert!(poll_body(&mut body).is_none());
+
+        let response = Http1ProducedResponse::chunked_with_max_frame_bytes(
+            NonZeroUsize::new(3).unwrap(),
+            NonZeroUsize::new(7).unwrap(),
+            200,
+            "OK",
+            |_cx, sender| async move { Ok(sender) },
+        );
+        assert_eq!(response.max_retained_data_bytes(), 35);
     }
 
     #[test]
