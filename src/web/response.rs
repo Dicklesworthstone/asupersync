@@ -19,9 +19,9 @@ use std::sync::Arc;
 use crate::Cx;
 use crate::bytes::Bytes;
 #[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
-use crate::http::h1::{BodyKind, OutgoingBody};
+use crate::http::h1::OutgoingBody;
 #[cfg(not(target_arch = "wasm32"))]
-use crate::http::h1::{Http1ProducedResponse, HttpError, OutgoingBodySender};
+use crate::http::h1::{BodyKind, Http1ProducedResponse, HttpError, OutgoingBodySender};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::http::h2::listener::{Http2BodySender, Http2ProducedResponse};
 
@@ -348,13 +348,14 @@ type Http1StreamProducerFuture =
 type Http1StreamProducer =
     Box<dyn FnOnce(Cx, OutgoingBodySender) -> Http1StreamProducerFuture + Send + 'static>;
 
-/// Deferred HTTP/1 chunked-body plan registered during web handler dispatch.
+/// Deferred HTTP/1 produced-body plan registered during web handler dispatch.
 ///
 /// The plan contains no channel and starts no work. The production listener
 /// creates both channel halves from its authoritative request [`Cx`] only
 /// after routing and response-head validation complete.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) struct Http1StreamPlan {
+    body_kind: BodyKind,
     capacity: NonZeroUsize,
     max_frame_bytes: NonZeroUsize,
     producer: Http1StreamProducer,
@@ -365,6 +366,7 @@ impl Http1StreamPlan {
     pub(crate) fn buffered(body: Bytes) -> Self {
         let max_frame_bytes = NonZeroUsize::new(body.len()).unwrap_or(NonZeroUsize::MIN);
         Self {
+            body_kind: BodyKind::Chunked,
             capacity: NonZeroUsize::MIN,
             // A buffered response is already fully materialized before it
             // enters this compatibility adapter, so limiting its one transfer
@@ -388,14 +390,36 @@ impl Http1StreamPlan {
             response.body.is_empty(),
             "buffered bytes move into the deferred producer before head binding"
         );
+        let Self {
+            body_kind,
+            capacity,
+            max_frame_bytes,
+            producer,
+        } = self;
         let status = response.status.as_u16();
-        let mut produced = Http1ProducedResponse::chunked_with_max_frame_bytes(
-            self.capacity,
-            self.max_frame_bytes,
-            status,
-            crate::http::h1::types::default_reason(status),
-            move |cx, sender| (self.producer)(cx, sender),
-        );
+        let reason = crate::http::h1::types::default_reason(status);
+        let mut produced = match body_kind {
+            BodyKind::Chunked => Http1ProducedResponse::chunked_with_max_frame_bytes(
+                capacity,
+                max_frame_bytes,
+                status,
+                reason,
+                move |cx, sender| producer(cx, sender),
+            ),
+            BodyKind::ContentLength(length) => {
+                Http1ProducedResponse::with_content_length_and_max_frame_bytes(
+                    capacity,
+                    max_frame_bytes,
+                    status,
+                    reason,
+                    length,
+                    move |cx, sender| producer(cx, sender),
+                )
+            }
+            BodyKind::Empty => {
+                unreachable!("HTTP/1 produced-response plans use explicit zero Content-Length")
+            }
+        };
 
         let mut headers = response.headers.into_iter().collect::<Vec<_>>();
         headers.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
@@ -495,6 +519,13 @@ impl Http1StreamSlot {
                 "current HTTP/1 produced-response transport requires a body-allowed status",
             );
         }
+        if plan
+            .as_ref()
+            .is_some_and(|plan| matches!(plan.body_kind, BodyKind::ContentLength(_)))
+            && response.has_header("trailer")
+        {
+            return Err("fixed-length HTTP/1 produced responses cannot declare trailers");
+        }
         if response.has_header("content-length") || response.has_header("transfer-encoding") {
             return Err("current HTTP/1 produced-response transport owns response framing");
         }
@@ -502,7 +533,7 @@ impl Http1StreamSlot {
     }
 }
 
-/// Request-scoped authoring handle for a supervised HTTP/1 chunked response.
+/// Request-scoped authoring handle for a supervised HTTP/1 response.
 ///
 /// This extractor is available only through
 /// [`crate::web::Router::into_http1_produced_handler`]. Calling a handler that
@@ -584,6 +615,67 @@ impl Http1StreamResponder {
         Fut: Future<Output = Result<OutgoingBodySender, HttpError>> + Send + 'static,
     {
         let plan = Http1StreamPlan {
+            body_kind: BodyKind::Chunked,
+            capacity,
+            max_frame_bytes,
+            producer: Box::new(move |cx, sender| Box::pin(producer(cx, sender))),
+        };
+        if self.slot.register(plan).is_err() {
+            return Response::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Bytes::from_static(b"HTTP/1 streamed response already registered"),
+            )
+            .header("content-type", "text/plain; charset=utf-8");
+        }
+        Response::empty(status)
+    }
+
+    /// Register one supervised response with an exact `Content-Length`.
+    ///
+    /// The listener owns the framing header, writes DATA without chunk coding,
+    /// and accepts clean completion only after exactly `length` bytes. Each
+    /// DATA send also uses the default produced-response frame ceiling.
+    /// On `HEAD`, `length` is representation metadata only: the listener never
+    /// creates or polls this producer, so exact-length enforcement is not
+    /// exercised by the HEAD response.
+    #[must_use]
+    pub fn with_content_length<P, Fut>(
+        self,
+        status: StatusCode,
+        capacity: NonZeroUsize,
+        length: u64,
+        producer: P,
+    ) -> Response
+    where
+        P: FnOnce(Cx, OutgoingBodySender) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<OutgoingBodySender, HttpError>> + Send + 'static,
+    {
+        self.with_content_length_and_max_frame_bytes(
+            status,
+            capacity,
+            NonZeroUsize::new(Http1ProducedResponse::DEFAULT_MAX_FRAME_BYTES)
+                .expect("the default HTTP/1 produced frame limit is nonzero"),
+            length,
+            producer,
+        )
+    }
+
+    /// Register an exact-length producer with an explicit DATA-frame ceiling.
+    #[must_use]
+    pub fn with_content_length_and_max_frame_bytes<P, Fut>(
+        self,
+        status: StatusCode,
+        capacity: NonZeroUsize,
+        max_frame_bytes: NonZeroUsize,
+        length: u64,
+        producer: P,
+    ) -> Response
+    where
+        P: FnOnce(Cx, OutgoingBodySender) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<OutgoingBodySender, HttpError>> + Send + 'static,
+    {
+        let plan = Http1StreamPlan {
+            body_kind: BodyKind::ContentLength(length),
             capacity,
             max_frame_bytes,
             producer: Box::new(move |cx, sender| Box::pin(producer(cx, sender))),
@@ -1641,6 +1733,7 @@ mod tests {
         assert_eq!(refusal, "streamed response registered more than once");
 
         let late_plan = Http1StreamPlan {
+            body_kind: BodyKind::Chunked,
             capacity: NonZeroUsize::MIN,
             max_frame_bytes: NonZeroUsize::MIN,
             producer: Box::new(|_cx, sender| Box::pin(async move { Ok(sender) })),
@@ -1673,7 +1766,66 @@ mod tests {
             .expect("registered stream plan");
 
         assert_eq!(plan.capacity, NonZeroUsize::new(3).unwrap());
+        assert_eq!(plan.body_kind, BodyKind::Chunked);
         assert_eq!(plan.max_frame_bytes, limit);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn produced_h1_content_length_router_preserves_exact_framing() {
+        let slot = Http1StreamSlot::default();
+        let mut request = Request::new("GET", "/fixed");
+        request.extensions.insert_typed(slot.clone());
+        let responder =
+            Http1StreamResponder::from_request_parts(&request).expect("stream responder");
+        let limit = NonZeroUsize::new(4).unwrap();
+
+        let response = responder.with_content_length_and_max_frame_bytes(
+            StatusCode::OK,
+            NonZeroUsize::new(2).unwrap(),
+            limit,
+            9,
+            |_cx, sender| async move { Ok(sender) },
+        );
+        assert!(!response.has_header("content-length"));
+        let plan = slot
+            .bind_response(&response)
+            .expect("valid fixed-length response")
+            .expect("registered fixed-length plan");
+
+        assert_eq!(plan.body_kind, BodyKind::ContentLength(9));
+        assert_eq!(plan.capacity, NonZeroUsize::new(2).unwrap());
+        assert_eq!(plan.max_frame_bytes, limit);
+
+        let produced = plan.into_produced(response);
+        assert_eq!(produced.body_kind(), BodyKind::ContentLength(9));
+        assert_eq!(produced.max_frame_bytes(), limit);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn produced_h1_content_length_router_refuses_trailer_declaration() {
+        let slot = Http1StreamSlot::default();
+        let mut request = Request::new("GET", "/fixed");
+        request.extensions.insert_typed(slot.clone());
+        let responder =
+            Http1StreamResponder::from_request_parts(&request).expect("stream responder");
+        let response = responder
+            .with_content_length(
+                StatusCode::OK,
+                NonZeroUsize::MIN,
+                7,
+                |_cx, sender| async move { Ok(sender) },
+            )
+            .header("trailer", "x-checksum");
+
+        match slot.bind_response(&response) {
+            Err(error) => assert_eq!(
+                error,
+                "fixed-length HTTP/1 produced responses cannot declare trailers"
+            ),
+            Ok(_) => panic!("fixed-length trailers must fail during Router binding"),
+        }
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -1686,6 +1838,7 @@ mod tests {
         let body_len = body.len();
         let plan = Http1StreamPlan::buffered(body);
 
+        assert_eq!(plan.body_kind, BodyKind::Chunked);
         assert_eq!(plan.capacity, NonZeroUsize::MIN);
         assert_eq!(plan.max_frame_bytes, NonZeroUsize::new(body_len).unwrap());
 

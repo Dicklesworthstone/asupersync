@@ -5,7 +5,7 @@
 //! framed transport. Supports keep-alive, request limits, idle timeouts,
 //! and graceful shutdown.
 
-use crate::bytes::BytesMut;
+use crate::bytes::{Buf, BytesMut};
 use crate::codec::{Encoder, Framed};
 use crate::cx::Cx;
 use crate::http::body::{Body, Frame};
@@ -1302,7 +1302,7 @@ pub struct Http1StreamingServer<F> {
 }
 
 impl<F> Http1StreamingServer<F> {
-    /// Creates an HTTP/1 server whose handler returns a supervised chunked response.
+    /// Creates an HTTP/1 server whose handler returns a supervised framed response.
     ///
     /// This is additive to [`Self::new`] and [`Self::new_sse`]. The server owns
     /// both the produced body and its producer until terminal framing or an
@@ -1634,7 +1634,7 @@ impl<F> Http1StreamingServer<F> {
         .await
     }
 
-    /// Serves one supervised, generic HTTP/1.1 chunked response.
+    /// Serves one supervised, generic HTTP/1.1 response.
     pub async fn serve_produced<Fut, T>(self, cx: &Cx, io: T) -> Result<ConnectionState, HttpError>
     where
         F: Fn(Cx, StreamingServerRequest) -> Fut + Send + Sync,
@@ -1644,7 +1644,7 @@ impl<F> Http1StreamingServer<F> {
         self.serve_produced_with_peer_addr(cx, io, None).await
     }
 
-    /// Serves one supervised chunked response and records its peer address.
+    /// Serves one supervised response and records its peer address.
     ///
     /// The response head, bounded body channel, and producer are driven inside
     /// the request region. A producer error drains frames already committed to
@@ -1840,7 +1840,7 @@ where
             let message = match policy {
                 ProducedResponsePolicy::Sse => "live SSE requires GET or HEAD",
                 ProducedResponsePolicy::Generic => {
-                    "generic chunked responses do not support CONNECT tunnels"
+                    "generic produced responses do not support CONNECT tunnels"
                 }
             };
             let mut response = hop_error_response(request_version, 405, message);
@@ -1858,7 +1858,7 @@ where
             let message = match policy {
                 ProducedResponsePolicy::Sse => "live SSE requires HTTP/1.1 chunked framing",
                 ProducedResponsePolicy::Generic => {
-                    "generic produced responses require HTTP/1.1 chunked framing"
+                    "generic produced responses require HTTP/1.1 framing"
                 }
             };
             let mut response = hop_error_response(request_version, 505, message);
@@ -1880,7 +1880,8 @@ where
         }
 
         let mut produced = produced;
-        validate_produced_response_head(produced.head_mut(), BodyKind::Chunked)?;
+        let body_kind = produced.body_kind();
+        validate_produced_response_head(produced.head_mut(), body_kind)?;
         let (response, producer) = produced.into_parts(&request_cx);
         drive_produced_response(
             &request_cx,
@@ -1973,29 +1974,56 @@ fn validate_produced_response_head(
     head.headers
         .push(("Connection".to_owned(), "close".to_owned()));
 
+    let mut content_length = None;
     let mut transfer_encoding = None;
+    let mut declares_trailers = false;
     for (name, value) in &head.headers {
         validate_header_field(name, value)?;
         if name.eq_ignore_ascii_case("content-length") {
-            return Err(HttpError::AmbiguousBodyLength);
+            if content_length.replace(value.as_str()).is_some() {
+                return Err(HttpError::DuplicateContentLength);
+            }
         }
         if name.eq_ignore_ascii_case("transfer-encoding") {
             if transfer_encoding.replace(value.as_str()).is_some() {
                 return Err(HttpError::DuplicateTransferEncoding);
             }
         }
+        declares_trailers |= name.eq_ignore_ascii_case("trailer");
     }
-    let transfer_encoding = transfer_encoding.ok_or(HttpError::BadTransferEncoding)?;
-    require_transfer_encoding_chunked(trim_ows(transfer_encoding))?;
-    if body_kind != BodyKind::Chunked {
-        return Err(HttpError::BadTransferEncoding);
+    if content_length.is_some() && transfer_encoding.is_some() {
+        return Err(HttpError::AmbiguousBodyLength);
+    }
+    match body_kind {
+        BodyKind::Chunked => {
+            let transfer_encoding = transfer_encoding.ok_or(HttpError::BadTransferEncoding)?;
+            require_transfer_encoding_chunked(trim_ows(transfer_encoding))?;
+        }
+        BodyKind::ContentLength(expected) => {
+            if declares_trailers {
+                return Err(HttpError::TrailersNotAllowed);
+            }
+            let content_length = content_length.ok_or(HttpError::BadContentLength)?;
+            let content_length = trim_ows(content_length);
+            if content_length.is_empty()
+                || !content_length.bytes().all(|byte| byte.is_ascii_digit())
+                || content_length
+                    .parse::<u64>()
+                    .map_err(|_| HttpError::BadContentLength)?
+                    != expected
+            {
+                return Err(HttpError::BadContentLength);
+            }
+        }
+        BodyKind::Empty => return Err(HttpError::BadContentLength),
     }
     Ok(())
 }
 
 fn produced_head_only_response(produced: Http1ProducedResponse) -> Result<Response, HttpError> {
+    let body_kind = produced.body_kind();
     let mut head = produced.into_head();
-    validate_produced_response_head(&mut head, BodyKind::Chunked)?;
+    validate_produced_response_head(&mut head, body_kind)?;
     let mut response = Response::new(head.status, head.reason, Vec::new());
     response.version = Version::Http11;
     response.headers = head
@@ -2124,9 +2152,10 @@ async fn drain_producer_after_write_error<P>(
 
 fn normalize_producer_result(
     result: Result<OutgoingBodySender, HttpError>,
+    body: &crate::http::h1::stream::OutgoingBody,
 ) -> Result<OutgoingBodySender, HttpError> {
     match result {
-        Ok(sender) if sender.is_finished() => Ok(sender),
+        Ok(sender) if sender.is_finished() && sender.is_peer_of(body) => Ok(sender),
         Ok(_unfinished_sender) => Err(HttpError::BodyChannelClosed),
         Err(error) => Err(error),
     }
@@ -2163,25 +2192,32 @@ where
         return Err(HttpError::Io(error));
     }
 
+    let body_kind = response.body.kind();
     let mut encoder = ChunkedEncoder::new();
     loop {
         let frame = poll_fn(|task_cx| {
             if producer_result.is_none()
                 && let Poll::Ready(result) = producer.as_mut().poll(task_cx)
             {
-                producer_result = Some(normalize_producer_result(result));
+                producer_result = Some(normalize_producer_result(result, &response.body));
             }
             Pin::new(&mut response.body).poll_frame(task_cx)
         })
         .await;
         let Some(frame) = frame else {
-            let producer_result = producer_result.take().ok_or(HttpError::BodyChannelClosed)?;
+            let producer_result = match producer_result.take() {
+                Some(result) => result,
+                None => normalize_producer_result(producer.as_mut().await, &response.body),
+            };
             let sender = match producer_result {
                 Ok(sender) => sender,
                 Err(error) => return Err(error),
             };
-            if !sender.is_finished() || encoder.is_finished() {
+            if !sender.is_finished() || (body_kind.is_chunked() && encoder.is_finished()) {
                 return Err(HttpError::BodyChannelClosed);
+            }
+            if !body_kind.is_chunked() {
+                return Ok(());
             }
             let mut final_chunk = BytesMut::new();
             encoder.finalize(None, &mut final_chunk);
@@ -2195,14 +2231,27 @@ where
         let frame = frame?;
         let mut encoded_frame = BytesMut::new();
         match frame {
-            Frame::Data(data) => encoder.encode_frame(Frame::Data(data), &mut encoded_frame),
+            Frame::Data(mut data) => {
+                if body_kind.is_chunked() {
+                    encoder.encode_frame(Frame::Data(data), &mut encoded_frame);
+                } else {
+                    while data.remaining() > 0 {
+                        let chunk = data.chunk();
+                        if chunk.is_empty() {
+                            break;
+                        }
+                        encoded_frame.extend_from_slice(chunk);
+                        data.advance(chunk.len());
+                    }
+                }
+            }
             Frame::Trailers(trailers) => {
-                if !allow_trailers {
+                if !allow_trailers || !body_kind.is_chunked() {
                     return Err(HttpError::TrailersNotAllowed);
                 }
                 let producer_result = match producer_result.take() {
                     Some(result) => result,
-                    None => normalize_producer_result(producer.as_mut().await),
+                    None => normalize_producer_result(producer.as_mut().await, &response.body),
                 };
                 let sender = producer_result?;
                 if encoder.is_finished() {
@@ -2243,7 +2292,7 @@ where
 
         match write_result {
             Ok(()) => {
-                if encoder.is_finished() {
+                if body_kind.is_chunked() && encoder.is_finished() {
                     return Ok(());
                 }
                 // A fast in-memory or kernel-buffered writer can otherwise
@@ -4002,6 +4051,405 @@ mod tests {
         expected.extend_from_slice(ChunkedEncoder::encode_chunk(b"beta").as_ref());
         expected.extend_from_slice(b"0\r\n\r\n");
         assert_eq!(response_body_bytes(&written), expected);
+    }
+
+    #[test]
+    fn produced_content_length_writes_raw_frames_without_chunk_terminator() {
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let io = TestIo::new(
+            b"GET /fixed HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n".to_vec(),
+            Arc::clone(&written),
+        );
+        let server = Http1StreamingServer::with_config_produced(
+            |_cx, _request| async move {
+                Http1ProducedResponse::with_content_length(
+                    NonZeroUsize::MIN,
+                    200,
+                    "OK",
+                    9,
+                    |producer_cx, mut sender| async move {
+                        sender.send_chunk(&producer_cx, b"alpha").await?;
+                        sender.send_chunk(&producer_cx, b"beta").await?;
+                        sender.finish(&producer_cx)?;
+                        Ok(sender)
+                    },
+                )
+            },
+            localhost_server_config(),
+        );
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("build current-thread runtime");
+
+        runtime
+            .block_on(async {
+                let cx = Cx::current().expect("runtime connection context");
+                server.serve_produced(&cx, io).await
+            })
+            .expect("serve exact fixed-length response");
+
+        let written = written.lock().unwrap().clone();
+        let head = String::from_utf8_lossy(&written);
+        assert!(head.contains("Content-Length: 9\r\n"));
+        assert!(!head.contains("Transfer-Encoding"));
+        assert_eq!(response_body_bytes(&written), b"alphabeta");
+    }
+
+    #[test]
+    fn produced_content_length_overrun_refuses_excess_data() {
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let io = TestIo::new(
+            b"GET /fixed HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n".to_vec(),
+            Arc::clone(&written),
+        );
+        let server = Http1StreamingServer::with_config_produced(
+            |_cx, _request| async move {
+                Http1ProducedResponse::with_content_length(
+                    NonZeroUsize::MIN,
+                    200,
+                    "OK",
+                    4,
+                    |producer_cx, mut sender| async move {
+                        sender.send_chunk(&producer_cx, b"four").await?;
+                        sender.send_chunk(&producer_cx, b"x").await?;
+                        sender.finish(&producer_cx)?;
+                        Ok(sender)
+                    },
+                )
+            },
+            localhost_server_config(),
+        );
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("build current-thread runtime");
+
+        let error = runtime
+            .block_on(async {
+                let cx = Cx::current().expect("runtime connection context");
+                server.serve_produced(&cx, io).await
+            })
+            .expect_err("fixed-length overrun must fail closed");
+
+        assert!(matches!(error, HttpError::BadContentLength));
+        let written = written.lock().unwrap().clone();
+        assert_eq!(response_body_bytes(&written), b"four");
+    }
+
+    #[test]
+    fn produced_content_length_underrun_preserves_partial_data_then_fails() {
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let io = TestIo::new(
+            b"GET /fixed HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n".to_vec(),
+            Arc::clone(&written),
+        );
+        let server = Http1StreamingServer::with_config_produced(
+            |_cx, _request| async move {
+                Http1ProducedResponse::with_content_length(
+                    NonZeroUsize::MIN,
+                    200,
+                    "OK",
+                    5,
+                    |producer_cx, mut sender| async move {
+                        sender.send_chunk(&producer_cx, b"four").await?;
+                        sender.finish(&producer_cx)?;
+                        Ok(sender)
+                    },
+                )
+            },
+            localhost_server_config(),
+        );
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("build current-thread runtime");
+
+        let error = runtime
+            .block_on(async {
+                let cx = Cx::current().expect("runtime connection context");
+                server.serve_produced(&cx, io).await
+            })
+            .expect_err("fixed-length underrun must fail closed");
+
+        assert!(matches!(error, HttpError::BadContentLength));
+        let written = written.lock().unwrap().clone();
+        assert_eq!(response_body_bytes(&written), b"four");
+    }
+
+    #[test]
+    fn produced_content_length_rejects_finished_sender_from_foreign_channel() {
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let io = TestIo::new(
+            b"GET /fixed HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n".to_vec(),
+            Arc::clone(&written),
+        );
+        let server = Http1StreamingServer::with_config_produced(
+            |_cx, _request| async move {
+                Http1ProducedResponse::with_content_length(
+                    NonZeroUsize::MIN,
+                    200,
+                    "OK",
+                    5,
+                    |producer_cx, mut sender| async move {
+                        sender.send_chunk(&producer_cx, b"four").await?;
+                        drop(sender);
+                        let (foreign_sender, _foreign_body) =
+                            crate::http::h1::stream::OutgoingBody::channel(
+                                &producer_cx,
+                                BodyKind::ContentLength(0),
+                            );
+                        assert!(foreign_sender.is_finished());
+                        Ok(foreign_sender)
+                    },
+                )
+            },
+            localhost_server_config(),
+        );
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("build current-thread runtime");
+
+        let error = runtime
+            .block_on(async {
+                let cx = Cx::current().expect("runtime connection context");
+                server.serve_produced(&cx, io).await
+            })
+            .expect_err("foreign finished sender must not authenticate a truncated response");
+
+        assert!(matches!(error, HttpError::BodyChannelClosed));
+        let written = written.lock().unwrap().clone();
+        assert_eq!(response_body_bytes(&written), b"four");
+    }
+
+    #[test]
+    fn produced_content_length_head_preserves_metadata_without_factory() {
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let factory_calls = Arc::new(AtomicUsize::new(0));
+        let calls_for_handler = Arc::clone(&factory_calls);
+        let io = TestIo::new(
+            b"HEAD /fixed HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n".to_vec(),
+            Arc::clone(&written),
+        );
+        let server = Http1StreamingServer::with_config_produced(
+            move |_cx, _request| {
+                let factory_calls = Arc::clone(&calls_for_handler);
+                async move {
+                    Http1ProducedResponse::with_content_length(
+                        NonZeroUsize::MIN,
+                        200,
+                        "OK",
+                        42,
+                        move |_producer_cx, sender| {
+                            factory_calls.fetch_add(1, Ordering::SeqCst);
+                            async move { Ok(sender) }
+                        },
+                    )
+                }
+            },
+            localhost_server_config(),
+        );
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("build current-thread runtime");
+
+        runtime
+            .block_on(async {
+                let cx = Cx::current().expect("runtime connection context");
+                server.serve_produced(&cx, io).await
+            })
+            .expect("serve fixed-length HEAD response");
+
+        assert_eq!(factory_calls.load(Ordering::SeqCst), 0);
+        let written = written.lock().unwrap().clone();
+        let head = String::from_utf8_lossy(&written);
+        assert!(head.contains("Content-Length: 42\r\n"));
+        assert!(!head.contains("Transfer-Encoding"));
+        assert!(response_body_bytes(&written).is_empty());
+    }
+
+    #[test]
+    fn produced_content_length_mismatch_fails_before_factory_and_head() {
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let factory_calls = Arc::new(AtomicUsize::new(0));
+        let calls_for_handler = Arc::clone(&factory_calls);
+        let io = TestIo::new(
+            b"GET /fixed HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n".to_vec(),
+            Arc::clone(&written),
+        );
+        let server = Http1StreamingServer::with_config_produced(
+            move |_cx, _request| {
+                let factory_calls = Arc::clone(&calls_for_handler);
+                async move {
+                    let mut response = Http1ProducedResponse::with_content_length(
+                        NonZeroUsize::MIN,
+                        200,
+                        "OK",
+                        7,
+                        move |_producer_cx, sender| {
+                            factory_calls.fetch_add(1, Ordering::SeqCst);
+                            async move { Ok(sender) }
+                        },
+                    );
+                    response
+                        .head_mut()
+                        .headers
+                        .iter_mut()
+                        .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                        .expect("constructor Content-Length")
+                        .1 = "8".to_owned();
+                    response
+                }
+            },
+            localhost_server_config(),
+        );
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("build current-thread runtime");
+
+        let error = runtime
+            .block_on(async {
+                let cx = Cx::current().expect("runtime connection context");
+                server.serve_produced(&cx, io).await
+            })
+            .expect_err("mismatched fixed-length head must fail before commit");
+
+        assert!(matches!(error, HttpError::BadContentLength));
+        assert_eq!(factory_calls.load(Ordering::SeqCst), 0);
+        assert!(written.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn produced_content_length_head_validation_rejects_invalid_framing() {
+        let validate = |headers: Vec<(&str, &str)>| {
+            let mut head = ResponseHead::new(200, "OK");
+            head.headers.extend(
+                headers
+                    .into_iter()
+                    .map(|(name, value)| (name.to_owned(), value.to_owned())),
+            );
+            validate_produced_response_head(&mut head, BodyKind::ContentLength(7))
+        };
+
+        assert!(validate(vec![("Content-Length", "7")]).is_ok());
+        assert!(matches!(
+            validate(Vec::new()),
+            Err(HttpError::BadContentLength)
+        ));
+        assert!(matches!(
+            validate(vec![("Content-Length", "+7")]),
+            Err(HttpError::BadContentLength)
+        ));
+        assert!(matches!(
+            validate(vec![("Content-Length", "8")]),
+            Err(HttpError::BadContentLength)
+        ));
+        assert!(matches!(
+            validate(vec![("Content-Length", "7"), ("content-length", "7")]),
+            Err(HttpError::DuplicateContentLength)
+        ));
+        assert!(matches!(
+            validate(vec![
+                ("Content-Length", "7"),
+                ("Transfer-Encoding", "chunked")
+            ]),
+            Err(HttpError::AmbiguousBodyLength)
+        ));
+        assert!(matches!(
+            validate(vec![("Content-Length", "7"), ("Trailer", "x-checksum")]),
+            Err(HttpError::TrailersNotAllowed)
+        ));
+    }
+
+    #[test]
+    fn produced_content_length_trailer_declaration_fails_before_factory() {
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let factory_calls = Arc::new(AtomicUsize::new(0));
+        let calls_for_handler = Arc::clone(&factory_calls);
+        let io = TestIo::new(
+            b"GET /fixed HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n".to_vec(),
+            Arc::clone(&written),
+        );
+        let server = Http1StreamingServer::with_config_produced(
+            move |_cx, _request| {
+                let factory_calls = Arc::clone(&calls_for_handler);
+                async move {
+                    Http1ProducedResponse::with_content_length(
+                        NonZeroUsize::MIN,
+                        200,
+                        "OK",
+                        7,
+                        move |_producer_cx, sender| {
+                            factory_calls.fetch_add(1, Ordering::SeqCst);
+                            async move { Ok(sender) }
+                        },
+                    )
+                    .with_header("Trailer", "x-checksum")
+                }
+            },
+            localhost_server_config(),
+        );
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("build current-thread runtime");
+
+        let error = runtime
+            .block_on(async {
+                let cx = Cx::current().expect("runtime connection context");
+                server.serve_produced(&cx, io).await
+            })
+            .expect_err("fixed-length trailer declaration must fail before commit");
+
+        assert!(matches!(error, HttpError::TrailersNotAllowed));
+        assert_eq!(factory_calls.load(Ordering::SeqCst), 0);
+        assert!(written.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn produced_content_length_zero_runs_terminal_producer_without_data() {
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let factory_calls = Arc::new(AtomicUsize::new(0));
+        let calls_for_handler = Arc::clone(&factory_calls);
+        let io = TestIo::new(
+            b"GET /empty HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n".to_vec(),
+            Arc::clone(&written),
+        );
+        let server = Http1StreamingServer::with_config_produced(
+            move |_cx, _request| {
+                let factory_calls = Arc::clone(&calls_for_handler);
+                async move {
+                    Http1ProducedResponse::with_content_length(
+                        NonZeroUsize::MIN,
+                        200,
+                        "OK",
+                        0,
+                        move |producer_cx, mut sender| {
+                            factory_calls.fetch_add(1, Ordering::SeqCst);
+                            async move {
+                                crate::runtime::yield_now().await;
+                                assert!(sender.is_finished());
+                                sender.finish(&producer_cx)?;
+                                Ok(sender)
+                            }
+                        },
+                    )
+                }
+            },
+            localhost_server_config(),
+        );
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("build current-thread runtime");
+
+        runtime
+            .block_on(async {
+                let cx = Cx::current().expect("runtime connection context");
+                server.serve_produced(&cx, io).await
+            })
+            .expect("serve zero-length produced response");
+
+        assert_eq!(factory_calls.load(Ordering::SeqCst), 1);
+        let written = written.lock().unwrap().clone();
+        let head = String::from_utf8_lossy(&written);
+        assert!(head.contains("Content-Length: 0\r\n"));
+        assert!(response_body_bytes(&written).is_empty());
     }
 
     #[test]

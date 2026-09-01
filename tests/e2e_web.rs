@@ -1491,14 +1491,18 @@ async fn read_http_head(stream: &mut TcpStream) -> Vec<u8> {
     }
 }
 
-async fn bounded_http1_request(addr: std::net::SocketAddr, path: &str) -> String {
+async fn bounded_http1_method_request(
+    addr: std::net::SocketAddr,
+    method: &str,
+    path: &str,
+) -> String {
     asupersync::time::timeout(
         asupersync::time::wall_now(),
         Duration::from_secs(5),
         async {
             let mut client = TcpStream::connect(addr).await.expect("connect H1 client");
             let request =
-                format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+                format!("{method} {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
             client
                 .write_all(request.as_bytes())
                 .await
@@ -1515,6 +1519,10 @@ async fn bounded_http1_request(addr: std::net::SocketAddr, path: &str) -> String
     .expect("bounded H1 client exchange")
 }
 
+async fn bounded_http1_request(addr: std::net::SocketAddr, path: &str) -> String {
+    bounded_http1_method_request(addr, "GET", path).await
+}
+
 #[test]
 fn e2e_router_http1_produced_listener_streams_and_preserves_web_semantics() {
     common::init_test_logging();
@@ -1529,6 +1537,8 @@ fn e2e_router_http1_produced_listener_streams_and_preserves_web_semantics() {
     runtime.block_on(async move {
         let traced_status = Arc::new(AtomicUsize::new(0));
         let traced_status_sink = Arc::clone(&traced_status);
+        let fixed_head_factory_calls = Arc::new(AtomicUsize::new(0));
+        let fixed_head_factory_calls_for_route = Arc::clone(&fixed_head_factory_calls);
         let router =
             Router::new()
                 .route(
@@ -1561,6 +1571,44 @@ fn e2e_router_http1_produced_listener_streams_and_preserves_web_semantics() {
                         response.append_set_cookie("plain=one; Path=/");
                         response
                     })),
+                )
+                .route(
+                    "/fixed",
+                    get(AsyncCxFnHandler1::<_, Http1StreamResponder>::new(
+                        |_handler_cx: Cx, responder: Http1StreamResponder| async move {
+                            responder
+                                .with_content_length(
+                                    StatusCode::OK,
+                                    NonZeroUsize::MIN,
+                                    9,
+                                    |cx, mut sender| async move {
+                                        sender.send_chunk(&cx, b"alpha").await?;
+                                        sender.send_chunk(&cx, b"beta").await?;
+                                        sender.finish(&cx)?;
+                                        Ok(sender)
+                                    },
+                                )
+                                .header("x-route", "fixed")
+                        },
+                    ))
+                    .head(AsyncCxFnHandler1::<_, Http1StreamResponder>::new(
+                        move |_handler_cx: Cx, responder: Http1StreamResponder| {
+                            let factory_calls = Arc::clone(&fixed_head_factory_calls_for_route);
+                            async move {
+                                responder
+                                    .with_content_length(
+                                        StatusCode::OK,
+                                        NonZeroUsize::MIN,
+                                        9,
+                                        move |_cx, sender| {
+                                            factory_calls.fetch_add(1, Ordering::SeqCst);
+                                            async move { Ok(sender) }
+                                        },
+                                    )
+                                    .header("x-route", "fixed-head")
+                            }
+                        },
+                    )),
                 )
                 .route(
                     "/duplicate",
@@ -1649,6 +1697,30 @@ fn e2e_router_http1_produced_listener_streams_and_preserves_web_semantics() {
             streamed.ends_with("5\r\nalpha\r\n4\r\nbeta\r\n0\r\n\r\n"),
             "{streamed:?}"
         );
+
+        let fixed = bounded_http1_request(addr, "/fixed").await;
+        let fixed_lower = fixed.to_ascii_lowercase();
+        assert!(fixed.starts_with("HTTP/1.1 200 OK\r\n"), "{fixed:?}");
+        assert!(fixed_lower.contains("content-length: 9\r\n"));
+        assert!(!fixed_lower.contains("transfer-encoding:"));
+        assert!(fixed_lower.contains("x-route: fixed\r\n"));
+        assert!(fixed.ends_with("\r\n\r\nalphabeta"), "{fixed:?}");
+
+        let fixed_head = bounded_http1_method_request(addr, "HEAD", "/fixed").await;
+        let fixed_head_lower = fixed_head.to_ascii_lowercase();
+        assert!(
+            fixed_head.starts_with("HTTP/1.1 200 OK\r\n"),
+            "{fixed_head:?}"
+        );
+        assert!(fixed_head_lower.contains("content-length: 9\r\n"));
+        assert!(!fixed_head_lower.contains("transfer-encoding:"));
+        assert!(fixed_head_lower.contains("x-route: fixed-head\r\n"));
+        assert!(fixed_head_lower.contains("x-middleware: present\r\n"));
+        let (_, fixed_head_body) = fixed_head
+            .split_once("\r\n\r\n")
+            .expect("fixed-length HEAD separator");
+        assert!(fixed_head_body.is_empty());
+        assert_eq!(fixed_head_factory_calls.load(Ordering::SeqCst), 0);
 
         let plain = bounded_http1_request(addr, "/plain").await;
         assert!(plain.starts_with("HTTP/1.1 200 OK\r\n"), "{plain:?}");

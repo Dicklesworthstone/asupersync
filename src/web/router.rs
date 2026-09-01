@@ -2599,19 +2599,20 @@ impl Router {
     ///
     /// Existing handlers, middleware, route matching, request tracing, and
     /// extractors remain unchanged. A route may extract
-    /// [`crate::web::Http1StreamResponder`] to register one bounded chunked
-    /// producer. Body-allowed routes that do not register a producer and do
-    /// not set framing headers are adapted as one bounded chunk containing
-    /// their buffered response body. Because the current low-level bridge is
-    /// chunked-only, `1xx`, `204`, `205`, `304`, explicit `Content-Length`,
+    /// [`crate::web::Http1StreamResponder`] to register one bounded chunked or
+    /// exact `Content-Length` producer. Body-allowed routes that do not
+    /// register a producer and do not set framing headers are adapted as one
+    /// bounded chunk containing their buffered response body. `1xx`, `204`,
+    /// `205`, `304`, explicit framing headers on ordinary buffered responses,
     /// and explicit `Transfer-Encoding` responses fail closed with `500` on
     /// this adapter; use [`Router::into_http_handler`] when those responses are
     /// required.
     ///
     /// This adapter intentionally exposes the current produced-listener
-    /// contract: HTTP/1.1 chunked framing, one request per connection, and
-    /// `Connection: close`. It does not provide HTTP/2 or HTTP/3 response
-    /// streaming, WebSocket handoff, Content-Length streaming, or full-duplex
+    /// contract: listener-owned HTTP/1.1 chunked or fixed-length framing, one
+    /// request per connection, and `Connection: close`. It does not provide
+    /// HTTP/2 or HTTP/3 response streaming, WebSocket handoff, implicit
+    /// fixed-length conversion for buffered routes, or full-duplex
     /// request/response progress. The Router trace covers handler dispatch and
     /// final response-head binding; producer lifetime remains observable
     /// through the HTTP/1 listener/request lifecycle rather than that handler

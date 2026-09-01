@@ -1673,11 +1673,16 @@ impl ChunkedEncoder {
     }
 }
 
+/// Private allocation identity shared by exactly one outgoing channel pair.
+#[derive(Debug)]
+struct OutgoingBodyChannelIdentity;
+
 /// Body receiver for outgoing streams.
 #[derive(Debug)]
 pub struct OutgoingBody {
     receiver: mpsc::Receiver<Result<Frame<BytesCursor>, HttpError>>,
     cx: Cx,
+    channel_identity: Arc<OutgoingBodyChannelIdentity>,
     done: bool,
     size_hint: SizeHint,
     kind: BodyKind,
@@ -1724,14 +1729,16 @@ impl OutgoingBody {
         max_frame_bytes: Option<NonZeroUsize>,
     ) -> (OutgoingBodySender, Self) {
         let (tx, rx) = mpsc::channel(capacity);
+        let channel_identity = Arc::new(OutgoingBodyChannelIdentity);
         let body = Self {
             receiver: rx,
             cx: cx.clone(),
+            channel_identity: Arc::clone(&channel_identity),
             done: kind.is_empty(),
             size_hint: kind.size_hint(),
             kind,
         };
-        let sender = OutgoingBodySender::new(tx, kind, max_frame_bytes);
+        let sender = OutgoingBodySender::new(tx, channel_identity, kind, max_frame_bytes);
         (sender, body)
     }
 
@@ -1797,6 +1804,7 @@ impl Body for OutgoingBody {
 #[derive(Debug)]
 pub struct OutgoingBodySender {
     sender: Option<mpsc::Sender<Result<Frame<BytesCursor>, HttpError>>>,
+    channel_identity: Arc<OutgoingBodyChannelIdentity>,
     kind: BodyKind,
     max_frame_bytes: Option<NonZeroUsize>,
     remaining: u64,
@@ -1807,6 +1815,7 @@ pub struct OutgoingBodySender {
 impl OutgoingBodySender {
     fn new(
         sender: mpsc::Sender<Result<Frame<BytesCursor>, HttpError>>,
+        channel_identity: Arc<OutgoingBodyChannelIdentity>,
         kind: BodyKind,
         max_frame_bytes: Option<NonZeroUsize>,
     ) -> Self {
@@ -1817,6 +1826,7 @@ impl OutgoingBodySender {
         let finished = kind.is_empty();
         let mut this = Self {
             sender: Some(sender),
+            channel_identity,
             kind,
             max_frame_bytes,
             remaining,
@@ -1839,6 +1849,11 @@ impl OutgoingBodySender {
     #[must_use]
     pub fn is_finished(&self) -> bool {
         self.finished
+    }
+
+    /// Returns whether this sender is the authoritative peer of `body`.
+    pub(crate) fn is_peer_of(&self, body: &OutgoingBody) -> bool {
+        Arc::ptr_eq(&self.channel_identity, &body.channel_identity)
     }
 
     /// Returns the total bytes sent.
@@ -2186,7 +2201,7 @@ pub(crate) type Http1ProducedResponseFuture =
 type Http1ProducedResponseFactory =
     Box<dyn FnOnce(Cx, OutgoingBodySender) -> Http1ProducedResponseFuture + Send + 'static>;
 
-/// A channel-bound HTTP/1.1 chunked response and its supervised producer.
+/// A channel-bound HTTP/1.1 response and its supervised producer.
 ///
 /// Construction records a response head, frame capacity, DATA-frame ceiling,
 /// and producer factory. The server creates the [`StreamingResponse`] and
@@ -2197,7 +2212,7 @@ type Http1ProducedResponseFactory =
 ///
 /// For a capacity of `N` and a frame ceiling of `M`, the supervised path keeps
 /// a conservative bound of `(N + 2) * M` logical DATA bytes across the channel,
-/// one pending send, the driver frame, and its chunk-encoding buffer. This is
+/// one pending send, the driver frame, and its wire-encoding buffer. This is
 /// not a total heap or RSS bound: shared [`Bytes`] backing capacity, trailers,
 /// framing/control metadata, and application-owned bytes before `send_bytes`
 /// are excluded.
@@ -2207,6 +2222,7 @@ type Http1ProducedResponseFactory =
 /// the buffered web and HTTP/1 response APIs.
 pub struct Http1ProducedResponse {
     head: ResponseHead,
+    body_kind: BodyKind,
     capacity: NonZeroUsize,
     max_frame_bytes: NonZeroUsize,
     producer: Http1ProducedResponseFactory,
@@ -2216,6 +2232,7 @@ impl std::fmt::Debug for Http1ProducedResponse {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Http1ProducedResponse")
             .field("head", &self.head)
+            .field("body_kind", &self.body_kind)
             .field("capacity", &self.capacity)
             .field("max_frame_bytes", &self.max_frame_bytes)
             .finish_non_exhaustive()
@@ -2276,10 +2293,78 @@ impl Http1ProducedResponse {
         let head = ResponseHead::new(status, reason).with_header("Transfer-Encoding", "chunked");
         Self {
             head,
+            body_kind: BodyKind::Chunked,
             capacity,
             max_frame_bytes,
             producer: Box::new(move |cx, sender| Box::pin(producer(cx, sender))),
         }
+    }
+
+    /// Create a fixed-length supervised response.
+    ///
+    /// The server owns the `Content-Length` header and writes produced DATA
+    /// without chunk coding. The sender refuses an overrun before channel
+    /// admission and refuses `finish` until exactly `length` bytes have been
+    /// admitted. Producer errors after head commit close the connection, so a
+    /// short body cannot be mistaken for a complete response.
+    ///
+    /// For a `HEAD` request, the listener preserves `Content-Length` as
+    /// metadata for the corresponding `GET` representation and drops the
+    /// factory without creating or polling the producer. A successful HEAD
+    /// therefore does not prove that `length` bytes were produced.
+    #[must_use]
+    pub fn with_content_length<P, Fut>(
+        capacity: NonZeroUsize,
+        status: u16,
+        reason: impl Into<String>,
+        length: u64,
+        producer: P,
+    ) -> Self
+    where
+        P: FnOnce(Cx, OutgoingBodySender) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<OutgoingBodySender, HttpError>> + Send + 'static,
+    {
+        Self::with_content_length_and_max_frame_bytes(
+            capacity,
+            NonZeroUsize::new(Self::DEFAULT_MAX_FRAME_BYTES)
+                .expect("the default HTTP/1 produced frame limit is nonzero"),
+            status,
+            reason,
+            length,
+            producer,
+        )
+    }
+
+    /// Create a fixed-length response with an explicit DATA-frame limit.
+    #[must_use]
+    pub fn with_content_length_and_max_frame_bytes<P, Fut>(
+        capacity: NonZeroUsize,
+        max_frame_bytes: NonZeroUsize,
+        status: u16,
+        reason: impl Into<String>,
+        length: u64,
+        producer: P,
+    ) -> Self
+    where
+        P: FnOnce(Cx, OutgoingBodySender) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<OutgoingBodySender, HttpError>> + Send + 'static,
+    {
+        let body_kind = BodyKind::ContentLength(length);
+        let head =
+            ResponseHead::new(status, reason).with_header("Content-Length", length.to_string());
+        Self {
+            head,
+            body_kind,
+            capacity,
+            max_frame_bytes,
+            producer: Box::new(move |cx, sender| Box::pin(producer(cx, sender))),
+        }
+    }
+
+    /// Framing selected for this produced body.
+    #[must_use]
+    pub fn body_kind(&self) -> BodyKind {
+        self.body_kind
     }
 
     /// Maximum DATA bytes admitted from one producer send.
@@ -2324,7 +2409,7 @@ impl Http1ProducedResponse {
     pub(crate) fn into_parts(self, cx: &Cx) -> (StreamingResponse, Http1ProducedResponseFuture) {
         let (sender, body) = OutgoingBody::channel_with_capacity_and_max_frame_bytes(
             cx,
-            BodyKind::Chunked,
+            self.body_kind,
             self.capacity.get(),
             self.max_frame_bytes,
         );
@@ -2910,6 +2995,16 @@ mod tests {
     fn outgoing_body_content_length_roundtrip() {
         let cx: Cx = Cx::for_testing();
         let (mut sender, mut body) = OutgoingBody::channel(&cx, BodyKind::ContentLength(11));
+
+        let mut trailers = HeaderMap::new();
+        trailers.append(
+            HeaderName::from_static("x-checksum"),
+            HeaderValue::from_static("forbidden"),
+        );
+        assert!(matches!(
+            block_on(sender.send_trailers(&cx, trailers)),
+            Err(HttpError::TrailersNotAllowed)
+        ));
 
         block_on(sender.send_bytes(&cx, Bytes::from_static(b"hello"))).unwrap();
         block_on(sender.send_bytes(&cx, Bytes::from_static(b" world"))).unwrap();

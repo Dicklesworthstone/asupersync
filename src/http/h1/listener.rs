@@ -515,7 +515,7 @@ where
     F: Fn(Cx, StreamingServerRequest) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Http1ProducedResponse> + Send + 'static,
 {
-    /// Bind a listener whose handler returns a supervised chunked response.
+    /// Bind a listener whose handler returns a supervised framed response.
     ///
     /// The handler receives the authoritative per-request capability context
     /// and streaming request-body handle used by [`Http1StreamingServer`].
@@ -526,7 +526,7 @@ where
         Self::bind_produced_with_config(addr, handler, Http1ListenerConfig::default()).await
     }
 
-    /// Bind a supervised chunked-response listener with custom configuration.
+    /// Bind a supervised response listener with custom configuration.
     pub async fn bind_produced_with_config<A: ToSocketAddrs + Send + 'static>(
         addr: A,
         handler: F,
@@ -536,7 +536,7 @@ where
         Ok(Self::from_listener_produced(tcp_listener, handler, config))
     }
 
-    /// Create a supervised chunked-response listener from an existing TCP listener.
+    /// Create a supervised response listener from an existing TCP listener.
     pub fn from_listener_produced(
         tcp_listener: TcpListener,
         handler: F,
@@ -744,7 +744,7 @@ where
     F: Fn(Cx, StreamingServerRequest) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Http1ProducedResponse> + Send + 'static,
 {
-    /// Run the accept loop for a supervised chunked-response handler.
+    /// Run the accept loop for a supervised response handler.
     pub async fn run_produced(self, runtime: &RuntimeHandle) -> io::Result<ShutdownStats> {
         self.run_with(runtime, spawn_produced_connection::<F, Fut>)
             .await
