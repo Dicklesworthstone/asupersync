@@ -17,7 +17,7 @@ use std::task::{Context as TaskContext, Poll};
 
 use crate::bytes::Bytes;
 use crate::cx::Cx;
-use crate::net::quic_core::{QuicCoreError, decode_varint, encode_varint};
+use crate::net::quic_core::{QUIC_VARINT_MAX, QuicCoreError, decode_varint, encode_varint};
 use crate::net::quic_native::connection::NativeQuicConnectionError;
 use crate::net::quic_native::endpoint_api::QuicConnection;
 use crate::net::quic_native::streams::{StreamDirection, StreamId, StreamReadiness, StreamRole};
@@ -28,6 +28,7 @@ use super::h3_native::{
     QpackEncoderInstruction, qpack_decode_encoder_instruction, qpack_decode_request_field_section,
     qpack_decode_response_field_section, qpack_decode_trailer_field_section,
     qpack_encode_request_field_section, qpack_encode_response_field_section,
+    qpack_encode_trailer_field_section,
 };
 
 /// RFC 9114 application error code `H3_REQUEST_CANCELLED`.
@@ -246,6 +247,233 @@ impl IncomingStream {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NativeH3ResponsePhase {
+    HeadPending,
+    Open,
+    TerminalPending,
+    Finished,
+}
+
+/// One incremental HTTP/3 response write committed to the QUIC stream queue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NativeH3WriteEvent {
+    /// Final response HEADERS were queued.
+    Head {
+        /// Whether the HEADERS write also carried QUIC FIN.
+        end_stream: bool,
+    },
+    /// One DATA frame was queued.
+    Data {
+        /// Application payload bytes carried by the frame.
+        payload_bytes: usize,
+    },
+    /// Trailing HEADERS and QUIC FIN were queued together.
+    Trailers,
+    /// A FIN-only STREAM write was queued.
+    Finished,
+}
+
+#[derive(Debug, Clone)]
+struct NativeH3PendingWrite {
+    wire: Bytes,
+    fin: bool,
+    event: NativeH3WriteEvent,
+    next_phase: NativeH3ResponsePhase,
+}
+
+/// Incremental response writer for one established HTTP/3 request stream.
+///
+/// The writer retains exactly one encoded H3 frame until both QUIC
+/// flow-control scopes admit its complete wire length. It also waits for the
+/// preceding STREAM frame to leave packet assembly, so a caller cannot build
+/// an unbounded transport-side queue by repeatedly polling a body producer.
+#[derive(Debug)]
+pub(crate) struct NativeH3ResponseWriter {
+    stream_id: StreamId,
+    phase: NativeH3ResponsePhase,
+    pending: Option<NativeH3PendingWrite>,
+    max_frame_payload_size: usize,
+}
+
+impl NativeH3ResponseWriter {
+    /// QUIC request stream carrying this response.
+    #[must_use]
+    pub fn stream_id(&self) -> StreamId {
+        self.stream_id
+    }
+
+    /// Whether an encoded H3 frame is retained awaiting QUIC admission.
+    #[must_use]
+    pub fn has_pending_write(&self) -> bool {
+        self.pending.is_some()
+    }
+
+    /// Whether the terminal frame or FIN has been queued successfully.
+    #[must_use]
+    pub fn is_finished(&self) -> bool {
+        self.phase == NativeH3ResponsePhase::Finished
+    }
+
+    #[must_use]
+    pub(crate) fn max_frame_payload_size(&self) -> usize {
+        self.max_frame_payload_size
+    }
+
+    /// Encode and retain one bounded DATA frame.
+    pub fn queue_data(&mut self, data: Bytes) -> Result<(), NativeH3SessionError> {
+        self.ensure_open_without_pending()?;
+        if data.len() > self.max_frame_payload_size {
+            return Err(NativeH3SessionError::Protocol(
+                H3NativeError::FrameTooLarge {
+                    payload_size: data.len(),
+                    max_size: self.max_frame_payload_size,
+                },
+            ));
+        }
+        let payload_bytes = data.len();
+        let wire = encode_frame(H3Frame::Data(data.to_vec()))?;
+        self.pending = Some(NativeH3PendingWrite {
+            wire,
+            fin: false,
+            event: NativeH3WriteEvent::Data { payload_bytes },
+            next_phase: NativeH3ResponsePhase::Open,
+        });
+        Ok(())
+    }
+
+    /// Encode and retain one terminal trailing HEADERS block.
+    pub fn queue_trailers(
+        &mut self,
+        fields: &[(String, String)],
+    ) -> Result<(), NativeH3SessionError> {
+        self.ensure_open_without_pending()?;
+        let field_section = qpack_encode_trailer_field_section(fields)?;
+        if field_section.len() > self.max_frame_payload_size {
+            return Err(NativeH3SessionError::Protocol(
+                H3NativeError::FrameTooLarge {
+                    payload_size: field_section.len(),
+                    max_size: self.max_frame_payload_size,
+                },
+            ));
+        }
+        self.pending = Some(NativeH3PendingWrite {
+            wire: encode_frame(H3Frame::Headers(field_section))?,
+            fin: true,
+            event: NativeH3WriteEvent::Trailers,
+            next_phase: NativeH3ResponsePhase::Finished,
+        });
+        self.phase = NativeH3ResponsePhase::TerminalPending;
+        Ok(())
+    }
+
+    /// Retain a FIN-only terminal write.
+    pub fn finish(&mut self) -> Result<(), NativeH3SessionError> {
+        if self.phase == NativeH3ResponsePhase::Finished {
+            return Ok(());
+        }
+        self.ensure_open_without_pending()?;
+        self.pending = Some(NativeH3PendingWrite {
+            wire: Bytes::new(),
+            fin: true,
+            event: NativeH3WriteEvent::Finished,
+            next_phase: NativeH3ResponsePhase::Finished,
+        });
+        self.phase = NativeH3ResponsePhase::TerminalPending;
+        Ok(())
+    }
+
+    /// Poll one retained write through exact QUIC queue and flow admission.
+    pub fn poll_flush_one(
+        &mut self,
+        cx: &Cx,
+        connection: &mut QuicConnection,
+        task_cx: &mut TaskContext<'_>,
+    ) -> Poll<Result<Option<NativeH3WriteEvent>, NativeH3SessionError>> {
+        let Some(pending) = self.pending.as_ref() else {
+            return Poll::Ready(Ok(None));
+        };
+        let required = u64::try_from(pending.wire.len()).map_err(|_| {
+            NativeH3SessionError::Protocol(H3NativeError::InvalidFrame(
+                "encoded HTTP/3 frame exceeds addressable QUIC range",
+            ))
+        });
+        let required = match required {
+            Ok(required) => required,
+            Err(error) => return Poll::Ready(Err(error)),
+        };
+        match connection.poll_stream_write_ready(cx, self.stream_id, required, task_cx) {
+            Poll::Ready(Ok(_)) => {}
+            Poll::Ready(Err(error)) => {
+                return Poll::Ready(Err(NativeH3SessionError::Transport(error)));
+            }
+            Poll::Pending => return Poll::Pending,
+        }
+
+        let pending = self.pending.as_ref().expect("checked above");
+        if let Err(error) =
+            connection.write_stream(cx, self.stream_id, pending.wire.clone(), pending.fin)
+        {
+            return Poll::Ready(Err(NativeH3SessionError::Transport(error)));
+        }
+        let pending = self.pending.take().expect("write retained until success");
+        self.phase = pending.next_phase;
+        Poll::Ready(Ok(Some(pending.event)))
+    }
+
+    fn ensure_open_without_pending(&self) -> Result<(), NativeH3SessionError> {
+        if self.phase != NativeH3ResponsePhase::Open {
+            return Err(NativeH3SessionError::InvalidState(
+                "incremental response is not open for another frame",
+            ));
+        }
+        if self.pending.is_some() {
+            return Err(NativeH3SessionError::InvalidState(
+                "incremental response already retains a pending frame",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Exact encoded H3 DATA-frame wire length for a payload size.
+pub(crate) fn h3_data_frame_wire_len(payload_len: usize) -> Result<u64, NativeH3SessionError> {
+    let payload_len = u64::try_from(payload_len).map_err(|_| {
+        NativeH3SessionError::Protocol(H3NativeError::InvalidFrame(
+            "HTTP/3 DATA payload exceeds addressable range",
+        ))
+    })?;
+    if payload_len > QUIC_VARINT_MAX {
+        return Err(NativeH3SessionError::Protocol(H3NativeError::InvalidFrame(
+            "HTTP/3 DATA payload length exceeds QUIC varint range",
+        )));
+    }
+    let length_prefix = match payload_len {
+        0..=63 => 1,
+        64..=16_383 => 2,
+        16_384..=1_073_741_823 => 4,
+        _ => 8,
+    };
+    let wire_len =
+        payload_len
+            .checked_add(1 + length_prefix)
+            .ok_or(NativeH3SessionError::Protocol(H3NativeError::InvalidFrame(
+                "encoded HTTP/3 DATA frame length overflow",
+            )))?;
+    if wire_len > QUIC_VARINT_MAX {
+        return Err(NativeH3SessionError::Protocol(H3NativeError::InvalidFrame(
+            "encoded HTTP/3 DATA frame length exceeds QUIC varint range",
+        )));
+    }
+    Ok(wire_len)
+}
+
+fn encode_frame(frame: H3Frame) -> Result<Bytes, NativeH3SessionError> {
+    let mut wire = Vec::new();
+    frame.encode(&mut wire)?;
+    Ok(Bytes::from(wire))
+}
+
 /// Static-QPACK HTTP/3 mapping over one established native QUIC connection.
 #[derive(Debug, Clone)]
 pub struct NativeH3Session {
@@ -408,6 +636,64 @@ impl NativeH3Session {
         H3Frame::Headers(qpack_encode_response_field_section(head)?).encode(&mut wire)?;
         connection.write_stream(cx, stream_id, Bytes::from(wire), false)?;
         Ok(())
+    }
+
+    /// Prepare an incremental final response writer for an existing request.
+    ///
+    /// The response head is fully validated and encoded before this returns,
+    /// but no QUIC state is mutated until the caller polls the writer. Setting
+    /// `end_stream` is intended for HEAD/body-forbidden responses: final
+    /// HEADERS and FIN are then committed atomically and no DATA producer is
+    /// started.
+    pub(crate) fn start_response_writer(
+        &self,
+        connection: &QuicConnection,
+        stream_id: StreamId,
+        head: &H3ResponseHead,
+        end_stream: bool,
+    ) -> Result<NativeH3ResponseWriter, NativeH3SessionError> {
+        self.ensure_ready_for_messages(connection)?;
+        if self.role != H3EndpointRole::Server {
+            return Err(NativeH3SessionError::InvalidState(
+                "only a server session can send responses",
+            ));
+        }
+        if !is_client_bidi(stream_id) {
+            return Err(NativeH3SessionError::InvalidState(
+                "responses require a client-initiated bidirectional stream",
+            ));
+        }
+        if (100..200).contains(&head.status) {
+            return Err(NativeH3SessionError::InvalidState(
+                "informational responses require send_informational_response",
+            ));
+        }
+
+        let field_section = qpack_encode_response_field_section(head)?;
+        if field_section.len() > self.config.max_frame_payload_size {
+            return Err(NativeH3SessionError::Protocol(
+                H3NativeError::FrameTooLarge {
+                    payload_size: field_section.len(),
+                    max_size: self.config.max_frame_payload_size,
+                },
+            ));
+        }
+        let next_phase = if end_stream {
+            NativeH3ResponsePhase::Finished
+        } else {
+            NativeH3ResponsePhase::Open
+        };
+        Ok(NativeH3ResponseWriter {
+            stream_id,
+            phase: NativeH3ResponsePhase::HeadPending,
+            pending: Some(NativeH3PendingWrite {
+                wire: encode_frame(H3Frame::Headers(field_section))?,
+                fin: end_stream,
+                event: NativeH3WriteEvent::Head { end_stream },
+                next_phase,
+            }),
+            max_frame_payload_size: self.config.max_frame_payload_size,
+        })
     }
 
     /// Queue one complete final response on an existing request stream.
@@ -1051,6 +1337,21 @@ fn is_client_bidi(stream_id: StreamId) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn produced_h3_data_wire_length_tracks_varint_boundaries_exactly() {
+        assert_eq!(h3_data_frame_wire_len(0).expect("zero"), 2);
+        assert_eq!(h3_data_frame_wire_len(63).expect("63"), 65);
+        assert_eq!(h3_data_frame_wire_len(64).expect("64"), 67);
+        assert_eq!(h3_data_frame_wire_len(16_383).expect("16383"), 16_386);
+        assert_eq!(h3_data_frame_wire_len(16_384).expect("16384"), 16_389);
+        if let Ok(max_payload) = usize::try_from(QUIC_VARINT_MAX) {
+            assert!(
+                h3_data_frame_wire_len(max_payload).is_err(),
+                "payload plus H3 framing must fit the QUIC varint credit range"
+            );
+        }
+    }
 
     #[test]
     fn native_h3_adapter_terminal_stream_tracker_compacts_contiguous_classes() {

@@ -3005,6 +3005,31 @@ pub fn qpack_encode_response_field_section(
     qpack_encode_field_section(&plan)
 }
 
+/// Encode validated ordinary trailer fields into a QPACK field section.
+///
+/// Trailers never carry pseudo-headers. This helper deliberately emits only
+/// literals so it remains valid in the static-only profile and cannot acquire
+/// dynamic-table blocking dependencies.
+pub fn qpack_encode_trailer_field_section(
+    fields: &[(String, String)],
+) -> Result<Vec<u8>, H3NativeError> {
+    let mut plan = Vec::with_capacity(fields.len());
+    for (name, value) in fields {
+        validate_header_name(name)?;
+        validate_header_value(value)?;
+        if name.starts_with(':') {
+            return Err(H3NativeError::InvalidFrame(
+                "pseudo header forbidden in HTTP/3 trailers",
+            ));
+        }
+        plan.push(QpackFieldPlan::Literal {
+            name: name.clone(),
+            value: value.clone(),
+        });
+    }
+    qpack_encode_field_section(&plan)
+}
+
 /// Expand a QPACK plan into concrete `(name, value)` header fields.
 ///
 /// Static-table references are resolved using the subset needed by the native
@@ -6770,20 +6795,15 @@ mod tests {
 
     #[test]
     fn native_h3_adapter_qpack_trailers_accept_fields_and_reject_pseudo_headers() {
-        let trailers = vec![QpackFieldPlan::Literal {
-            name: "x-checksum".to_string(),
-            value: "abc123".to_string(),
-        }];
-        let wire = qpack_encode_field_section(&trailers).expect("encode trailers");
+        let trailers = vec![("x-checksum".to_string(), "abc123".to_string())];
+        let wire = qpack_encode_trailer_field_section(&trailers).expect("encode trailers");
         assert_eq!(
             qpack_decode_trailer_field_section(&wire, H3QpackMode::StaticOnly, None)
                 .expect("decode trailers"),
-            vec![("x-checksum".to_string(), "abc123".to_string())]
+            trailers
         );
 
-        let pseudo = qpack_encode_field_section(&[QpackFieldPlan::StaticIndex(17)])
-            .expect("encode pseudo trailer");
-        let err = qpack_decode_trailer_field_section(&pseudo, H3QpackMode::StaticOnly, None)
+        let err = qpack_encode_trailer_field_section(&[(":status".to_string(), "200".to_string())])
             .expect_err("trailers must reject pseudo headers");
         assert_eq!(
             err,

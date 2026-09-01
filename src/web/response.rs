@@ -18,6 +18,8 @@ use std::sync::Arc;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::Cx;
 use crate::bytes::Bytes;
+#[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+use crate::http::h1::{BodyKind, OutgoingBody};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::http::h1::{Http1ProducedResponse, HttpError, OutgoingBodySender};
 #[cfg(not(target_arch = "wasm32"))]
@@ -760,6 +762,275 @@ impl Http2StreamResponder {
     }
 }
 
+#[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+type Http3StreamProducerFuture =
+    Pin<Box<dyn Future<Output = Result<Http3BodySender, HttpError>> + Send + 'static>>;
+
+#[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+pub(crate) type Http3StreamProducer =
+    Box<dyn FnOnce(Cx, Http3BodySender) -> Http3StreamProducerFuture + Send + 'static>;
+
+/// Sender handed to a supervised HTTP/3 response-body producer.
+///
+/// The channel has fixed frame capacity and every DATA item is bounded by
+/// `max_frame_bytes`. The established-session Router bridge pulls at most one
+/// item after the preceding QUIC STREAM frame drains and exact encoded H3 wire
+/// credit is available.
+#[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+#[derive(Debug)]
+pub struct Http3BodySender {
+    inner: OutgoingBodySender,
+    max_frame_bytes: NonZeroUsize,
+    terminal: Http3ProducerTerminal,
+}
+
+#[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Http3ProducerTerminal {
+    Open,
+    Finished,
+    Trailers,
+}
+
+#[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+impl Http3BodySender {
+    /// Maximum DATA bytes accepted by one send operation.
+    #[must_use]
+    pub fn max_frame_bytes(&self) -> NonZeroUsize {
+        self.max_frame_bytes
+    }
+
+    /// Total DATA bytes committed into the bounded body channel.
+    #[must_use]
+    pub fn total_bytes(&self) -> u64 {
+        self.inner.total_bytes()
+    }
+
+    /// Whether the producer explicitly finished with EOF or trailers.
+    #[must_use]
+    pub fn is_finished(&self) -> bool {
+        self.inner.is_finished()
+    }
+
+    #[must_use]
+    pub(crate) fn terminal(&self) -> Http3ProducerTerminal {
+        self.terminal
+    }
+
+    /// Commit one bounded DATA frame.
+    pub async fn send_bytes(&mut self, cx: &Cx, data: Bytes) -> Result<(), HttpError> {
+        if data.len() > self.max_frame_bytes.get() {
+            return Err(HttpError::BodyTooLargeDetailed {
+                actual: u64::try_from(data.len()).unwrap_or(u64::MAX),
+                limit: u64::try_from(self.max_frame_bytes.get()).unwrap_or(u64::MAX),
+            });
+        }
+        self.inner.send_bytes(cx, data).await
+    }
+
+    /// Copy and commit one bounded DATA frame.
+    pub async fn send_chunk(&mut self, cx: &Cx, data: &[u8]) -> Result<(), HttpError> {
+        if data.len() > self.max_frame_bytes.get() {
+            return Err(HttpError::BodyTooLargeDetailed {
+                actual: u64::try_from(data.len()).unwrap_or(u64::MAX),
+                limit: u64::try_from(self.max_frame_bytes.get()).unwrap_or(u64::MAX),
+            });
+        }
+        self.inner.send_chunk(cx, data).await
+    }
+
+    /// Finish the response with trailing HEADERS.
+    pub async fn send_trailers(
+        &mut self,
+        cx: &Cx,
+        trailers: crate::http::HeaderMap,
+    ) -> Result<(), HttpError> {
+        self.inner.send_trailers(cx, trailers).await?;
+        self.terminal = Http3ProducerTerminal::Trailers;
+        Ok(())
+    }
+
+    /// Finish the response without trailers.
+    pub fn finish(&mut self, cx: &Cx) -> Result<(), HttpError> {
+        if self.terminal == Http3ProducerTerminal::Trailers {
+            return Ok(());
+        }
+        self.inner.finish(cx)?;
+        self.terminal = Http3ProducerTerminal::Finished;
+        Ok(())
+    }
+}
+
+/// Deferred HTTP/3 body plan registered during Router dispatch.
+#[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+pub(crate) struct Http3StreamPlan {
+    pub(crate) capacity: NonZeroUsize,
+    pub(crate) max_frame_bytes: NonZeroUsize,
+    pub(crate) producer: Http3StreamProducer,
+}
+
+#[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+impl Http3StreamPlan {
+    pub(crate) fn into_parts(
+        self,
+        cx: &Cx,
+    ) -> (OutgoingBody, Http3BodySender, Http3StreamProducer) {
+        let (inner, body) =
+            OutgoingBody::channel_with_capacity(cx, BodyKind::Chunked, self.capacity.get());
+        let sender = Http3BodySender {
+            inner,
+            max_frame_bytes: self.max_frame_bytes,
+            terminal: Http3ProducerTerminal::Open,
+        };
+        (body, sender, self.producer)
+    }
+}
+
+#[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+#[derive(Clone, Default)]
+pub(crate) struct Http3StreamSlot {
+    state: Arc<parking_lot::Mutex<Http3StreamSlotState>>,
+}
+
+#[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+#[derive(Default)]
+enum Http3StreamSlotState {
+    #[default]
+    Empty,
+    Registered(Http3StreamPlan),
+    Rejected(&'static str),
+    Consumed,
+}
+
+#[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+impl fmt::Debug for Http3StreamSlot {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Http3StreamSlot")
+            .field(
+                "state",
+                &match &*self.state.lock() {
+                    Http3StreamSlotState::Empty => "empty",
+                    Http3StreamSlotState::Registered(_) => "registered",
+                    Http3StreamSlotState::Rejected(_) => "rejected",
+                    Http3StreamSlotState::Consumed => "consumed",
+                },
+            )
+            .finish()
+    }
+}
+
+#[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+impl Http3StreamSlot {
+    fn register(&self, plan: Http3StreamPlan) -> Result<(), Http3StreamPlan> {
+        let displaced = {
+            let mut state = self.state.lock();
+            if matches!(&*state, Http3StreamSlotState::Empty) {
+                *state = Http3StreamSlotState::Registered(plan);
+                return Ok(());
+            }
+            if matches!(&*state, Http3StreamSlotState::Registered(_)) {
+                Some(std::mem::replace(
+                    &mut *state,
+                    Http3StreamSlotState::Rejected("HTTP/3 response producer registered twice"),
+                ))
+            } else {
+                None
+            }
+        };
+        drop(displaced);
+        Err(plan)
+    }
+
+    pub(crate) fn bind_response(
+        &self,
+        response: &Response,
+        suppress_response_body: bool,
+    ) -> Result<Option<Http3StreamPlan>, &'static str> {
+        let state = std::mem::replace(&mut *self.state.lock(), Http3StreamSlotState::Consumed);
+        let plan = match state {
+            Http3StreamSlotState::Empty => return Ok(None),
+            Http3StreamSlotState::Registered(plan) => plan,
+            Http3StreamSlotState::Rejected(reason) => return Err(reason),
+            Http3StreamSlotState::Consumed => {
+                return Err("HTTP/3 response producer binding already consumed");
+            }
+        };
+        if !response.body.is_empty() {
+            return Err("produced HTTP/3 response cannot also carry a buffered body");
+        }
+        if !suppress_response_body
+            && matches!(response.status.as_u16(), 100..=199 | 204 | 205 | 304)
+        {
+            return Err("produced HTTP/3 response requires a body-allowed status");
+        }
+        if response.has_header("transfer-encoding")
+            || (!suppress_response_body && response.has_header("content-length"))
+        {
+            return Err("produced HTTP/3 response owns message framing");
+        }
+        Ok(Some(plan))
+    }
+}
+
+/// Request-scoped authoring handle for a supervised HTTP/3 response body.
+///
+/// This extractor is available only while running
+/// [`crate::web::NativeH3RouterDispatch::run_produced`]. Registration merely
+/// records a bounded plan; channel creation and producer startup remain under
+/// the established-session bridge's request capability.
+#[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+#[derive(Debug)]
+pub struct Http3StreamResponder {
+    slot: Http3StreamSlot,
+}
+
+#[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+impl FromRequestParts for Http3StreamResponder {
+    fn from_request_parts(req: &Request) -> Result<Self, ExtractionError> {
+        let slot = req
+            .extensions
+            .get_typed_cloned::<Http3StreamSlot>()
+            .ok_or_else(|| {
+                ExtractionError::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "HTTP/3 produced-response transport unavailable",
+                )
+            })?;
+        Ok(Self { slot })
+    }
+}
+
+#[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+impl Http3StreamResponder {
+    /// Register one bounded DATA-frame producer and return its authored head.
+    #[must_use]
+    pub fn streaming<P, Fut>(
+        self,
+        status: StatusCode,
+        capacity: NonZeroUsize,
+        max_frame_bytes: NonZeroUsize,
+        producer: P,
+    ) -> Response
+    where
+        P: FnOnce(Cx, Http3BodySender) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<Http3BodySender, HttpError>> + Send + 'static,
+    {
+        let plan = Http3StreamPlan {
+            capacity,
+            max_frame_bytes,
+            producer: Box::new(move |cx, sender| Box::pin(producer(cx, sender))),
+        };
+        if self.slot.register(plan).is_err() {
+            return Response::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Bytes::from_static(b"HTTP/3 response producer already registered"),
+            )
+            .header("content-type", "text/plain; charset=utf-8");
+        }
+        Response::empty(status)
+    }
+}
+
 // ─── IntoResponse Trait ──────────────────────────────────────────────────────
 
 /// Trait for types that can be converted into an HTTP response.
@@ -1427,6 +1698,103 @@ mod tests {
                 false,
             )),
             "produced HTTP/2 response owns message framing"
+        );
+        assert!(
+            registered_slot()
+                .bind_response(
+                    &Response::empty(StatusCode::NO_CONTENT).header("content-length", "0"),
+                    true,
+                )
+                .expect("HEAD may preserve authored response metadata without starting a body")
+                .is_some()
+        );
+    }
+
+    #[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+    #[test]
+    fn produced_h3_stream_responder_requires_produced_router_adapter() {
+        let request = Request::new("GET", "/stream");
+        let error = Http3StreamResponder::from_request_parts(&request)
+            .expect_err("ordinary router requests have no HTTP/3 producer authority");
+        assert_eq!(error.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            error.message,
+            "HTTP/3 produced-response transport unavailable"
+        );
+    }
+
+    #[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+    #[test]
+    fn produced_h3_stream_responder_duplicate_registration_poisons_slot() {
+        let slot = Http3StreamSlot::default();
+        let mut request = Request::new("GET", "/stream");
+        request.extensions.insert_typed(slot.clone());
+        let first = Http3StreamResponder::from_request_parts(&request).expect("first extractor");
+        let second = Http3StreamResponder::from_request_parts(&request).expect("second extractor");
+
+        let first_response = first.streaming(
+            StatusCode::OK,
+            NonZeroUsize::MIN,
+            NonZeroUsize::new(1024).expect("non-zero frame limit"),
+            |_cx, sender| async move { Ok(sender) },
+        );
+        assert_eq!(first_response.status, StatusCode::OK);
+        let second_response = second.streaming(
+            StatusCode::OK,
+            NonZeroUsize::MIN,
+            NonZeroUsize::new(1024).expect("non-zero frame limit"),
+            |_cx, sender| async move { Ok(sender) },
+        );
+        assert_eq!(second_response.status, StatusCode::INTERNAL_SERVER_ERROR);
+        let refusal = match slot.bind_response(&first_response, false) {
+            Err(refusal) => refusal,
+            Ok(_) => panic!("duplicate registration must poison the request"),
+        };
+        assert_eq!(refusal, "HTTP/3 response producer registered twice");
+    }
+
+    #[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+    #[test]
+    fn produced_h3_stream_binding_rejects_body_and_framing_collisions() {
+        fn registered_slot() -> Http3StreamSlot {
+            let slot = Http3StreamSlot::default();
+            assert!(
+                slot.register(Http3StreamPlan {
+                    capacity: NonZeroUsize::MIN,
+                    max_frame_bytes: NonZeroUsize::MIN,
+                    producer: Box::new(|_cx, sender| Box::pin(async move { Ok(sender) })),
+                })
+                .is_ok(),
+                "first registration succeeds"
+            );
+            slot
+        }
+
+        fn refusal(result: Result<Option<Http3StreamPlan>, &'static str>) -> &'static str {
+            match result {
+                Err(reason) => reason,
+                Ok(_) => panic!("binding should fail closed"),
+            }
+        }
+
+        assert_eq!(
+            refusal(
+                registered_slot().bind_response(&Response::new(StatusCode::OK, "buffered"), false)
+            ),
+            "produced HTTP/3 response cannot also carry a buffered body"
+        );
+        assert_eq!(
+            refusal(
+                registered_slot().bind_response(&Response::empty(StatusCode::NO_CONTENT), false)
+            ),
+            "produced HTTP/3 response requires a body-allowed status"
+        );
+        assert_eq!(
+            refusal(registered_slot().bind_response(
+                &Response::empty(StatusCode::OK).header("content-length", "0"),
+                false,
+            )),
+            "produced HTTP/3 response owns message framing"
         );
         assert!(
             registered_slot()

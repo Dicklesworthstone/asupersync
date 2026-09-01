@@ -104,6 +104,8 @@ pub use nextjs_bootstrap::{
 pub use response::{Html, IntoResponse, Json, Redirect, Response, StatusCode};
 #[cfg(not(target_arch = "wasm32"))]
 pub use response::{Http1StreamResponder, Http2StreamResponder};
+#[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+pub use response::{Http3BodySender, Http3StreamResponder};
 #[cfg(not(target_arch = "wasm32"))]
 pub use router::{Http1ProducedHandlerFuture, Http2ProducedHandlerFuture};
 pub use router::{
@@ -111,8 +113,9 @@ pub use router::{
 };
 #[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
 pub use router::{
-    NativeH3Router, NativeH3RouterConfig, NativeH3RouterDispatch, NativeH3RouterDispatchToken,
-    NativeH3RouterEvent, NativeH3RouterIngress, NativeH3RouterPreparedResponse,
-    NativeH3RouterRefusal,
+    NativeH3ProducedEvent, NativeH3Router, NativeH3RouterConfig, NativeH3RouterDispatch,
+    NativeH3RouterDispatchToken, NativeH3RouterEvent, NativeH3RouterIngress,
+    NativeH3RouterPreparedProducedResponse, NativeH3RouterPreparedResponse,
+    NativeH3RouterProducedDispatch, NativeH3RouterProducer, NativeH3RouterRefusal,
 };
 pub use sse::Http1SseResponse;

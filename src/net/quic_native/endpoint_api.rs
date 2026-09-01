@@ -380,6 +380,55 @@ impl QuicConnection {
         self.inner.write_stream_bytes(cx, stream, data, fin)
     }
 
+    /// Whether one stream still has bytes or FIN queued for packet assembly.
+    #[must_use]
+    pub fn has_pending_stream_frames(&self, stream: StreamId) -> bool {
+        self.inner.has_pending_stream_frames_for(stream)
+    }
+
+    /// Number of application payload bytes queued for one stream.
+    #[must_use]
+    pub fn pending_stream_data_bytes(&self, stream: StreamId) -> u64 {
+        self.inner.pending_stream_data_bytes_for(stream)
+    }
+
+    /// Poll the payload capacity available under both stream and connection
+    /// flow control.
+    pub fn poll_stream_send_capacity(
+        &mut self,
+        cx: &Cx,
+        stream: StreamId,
+        required: u64,
+        task_cx: &mut TaskContext<'_>,
+    ) -> Poll<Result<u64, NativeQuicConnectionError>> {
+        self.inner
+            .poll_stream_send_capacity(cx, stream, required, task_cx)
+    }
+
+    /// Poll until prior STREAM writes have drained and both flow-control
+    /// scopes admit `required` bytes for a new application frame.
+    pub fn poll_stream_write_ready(
+        &mut self,
+        cx: &Cx,
+        stream: StreamId,
+        required: u64,
+        task_cx: &mut TaskContext<'_>,
+    ) -> Poll<Result<u64, NativeQuicConnectionError>> {
+        self.inner
+            .poll_stream_write_ready(cx, stream, required, task_cx)
+    }
+
+    /// Poll until every queued STREAM frame for one stream leaves packet
+    /// assembly, including a zero-byte terminal FIN.
+    pub fn poll_stream_queue_drained(
+        &mut self,
+        cx: &Cx,
+        stream: StreamId,
+        task_cx: &mut TaskContext<'_>,
+    ) -> Poll<Result<(), NativeQuicConnectionError>> {
+        self.inner.poll_stream_queue_drained(cx, stream, task_cx)
+    }
+
     /// Read contiguous reassembled bytes from a control stream (up to `max`).
     ///
     /// Returns an empty buffer when no further contiguous bytes are available
@@ -405,6 +454,48 @@ impl QuicConnection {
         max: usize,
     ) -> Result<Bytes, NativeQuicConnectionError> {
         self.inner.read_stream_bytes(cx, stream, max)
+    }
+
+    /// Configure a bounded receive window and queue MAX_STREAM_DATA.
+    pub fn configure_stream_receive_window(
+        &mut self,
+        cx: &Cx,
+        stream: StreamId,
+        window: u64,
+    ) -> Result<u64, NativeQuicConnectionError> {
+        self.inner.configure_stream_recv_window(cx, stream, window)
+    }
+
+    /// Increase the connection receive limit and queue MAX_DATA.
+    pub fn advertise_connection_receive_limit(
+        &mut self,
+        cx: &Cx,
+        limit: u64,
+    ) -> Result<(), NativeQuicConnectionError> {
+        self.inner.advertise_connection_recv_limit(cx, limit)
+    }
+
+    /// Clamp one stream's send limit for a deterministic flow-control test.
+    #[cfg(any(test, feature = "test-internals"))]
+    pub fn constrain_stream_send_limit_for_testing(
+        &mut self,
+        cx: &Cx,
+        stream: StreamId,
+        limit: u64,
+    ) -> Result<u64, NativeQuicConnectionError> {
+        self.inner
+            .constrain_stream_send_limit_for_testing(cx, stream, limit)
+    }
+
+    /// Clamp connection send credit for a deterministic flow-control test.
+    #[cfg(any(test, feature = "test-internals"))]
+    pub fn constrain_connection_send_limit_for_testing(
+        &mut self,
+        cx: &Cx,
+        limit: u64,
+    ) -> Result<u64, NativeQuicConnectionError> {
+        self.inner
+            .constrain_connection_send_limit_for_testing(cx, limit)
     }
 
     /// Consume the next deterministic stream-readiness edge, if one exists.

@@ -1253,12 +1253,113 @@ impl StreamTable {
         Ok(stream.send_credit.reduce_limit_clamped(limit))
     }
 
+    /// Clamp connection send credit at or above already-consumed bytes.
+    ///
+    /// This is a deterministic test hook for planting an exact post-handshake
+    /// `MAX_DATA` stall. Production limits are negotiated by the transport.
+    #[cfg(any(test, feature = "test-internals"))]
+    pub fn constrain_connection_send_limit_for_testing(&mut self, limit: u64) -> u64 {
+        self.send_connection_credit.reduce_limit_clamped(limit)
+    }
+
     /// Remaining send credit for one stream (0 for unknown streams).
     #[must_use]
     pub fn stream_send_credit_remaining(&self, id: StreamId) -> u64 {
         self.streams
             .get(&id)
             .map_or(0, |stream| stream.send_credit.remaining())
+    }
+
+    /// Poll the exact application payload capacity available to one stream.
+    ///
+    /// Capacity is the smaller of the stream and connection send windows. A
+    /// caller waiting for `required` bytes is registered for both
+    /// `MAX_STREAM_DATA` and `MAX_DATA` wakeups. Terminal send-side states are
+    /// reported as errors rather than looking like flow-control stalls.
+    pub fn poll_stream_send_capacity(
+        &mut self,
+        id: StreamId,
+        required: u64,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<u64, StreamTableError>> {
+        let capacity = {
+            let stream = self.stream(id)?;
+            stream.ensure_can_send(0)?;
+            stream
+                .send_credit
+                .remaining()
+                .min(self.send_connection_credit.remaining())
+        };
+        if capacity >= required {
+            return Poll::Ready(Ok(capacity));
+        }
+
+        self.register_write_waker(id, cx.waker());
+
+        // Re-check after registration so future synchronization inside the
+        // table cannot create a lost-wakeup window around this operation.
+        let capacity = {
+            let stream = self.stream(id)?;
+            stream.ensure_can_send(0)?;
+            stream
+                .send_credit
+                .remaining()
+                .min(self.send_connection_credit.remaining())
+        };
+        if capacity >= required {
+            self.write_wakers.remove(&id);
+            Poll::Ready(Ok(capacity))
+        } else {
+            Poll::Pending
+        }
+    }
+
+    /// Poll until one stream can accept a new application frame.
+    ///
+    /// In addition to the flow-control admission performed by
+    /// [`Self::poll_stream_send_capacity`], this waits for every previously
+    /// queued STREAM frame (including a zero-byte FIN) to leave packet
+    /// assembly. That makes it safe for a bounded producer to dequeue at most
+    /// one higher-level frame at a time.
+    pub fn poll_stream_write_ready(
+        &mut self,
+        id: StreamId,
+        required: u64,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<u64, StreamTableError>> {
+        let pending = self.stream(id)?.has_pending_stream_frames();
+        if !pending {
+            return self.poll_stream_send_capacity(id, required, cx);
+        }
+
+        self.register_write_waker(id, cx.waker());
+        if self.stream(id)?.has_pending_stream_frames() {
+            Poll::Pending
+        } else {
+            self.poll_stream_send_capacity(id, required, cx)
+        }
+    }
+
+    /// Poll until every queued STREAM frame for one stream leaves packet
+    /// assembly.
+    ///
+    /// Unlike write readiness, this remains usable after a FIN or reset made
+    /// the send side terminal. It is the terminal-response reaping primitive.
+    pub fn poll_stream_queue_drained(
+        &mut self,
+        id: StreamId,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), StreamTableError>> {
+        if !self.stream(id)?.has_pending_stream_frames() {
+            return Poll::Ready(Ok(()));
+        }
+        self.register_write_waker(id, cx.waker());
+        if self.stream(id)?.has_pending_stream_frames() {
+            Poll::Pending
+        } else {
+            self.write_wakers.remove(&id);
+            Poll::Ready(Ok(()))
+        }
     }
 
     /// Advance bounded receive windows after application reads.
@@ -1685,9 +1786,14 @@ impl StreamTable {
         if max_data_len == 0 {
             return None;
         }
-        self.stream_mut(id)
+        let payload = self
+            .stream_mut(id)
             .ok()?
-            .pop_pending_stream_frame(max_data_len)
+            .pop_pending_stream_frame(max_data_len);
+        if payload.is_some() && !self.has_pending_stream_frames_for(id) {
+            self.wake_writer(id);
+        }
+        payload
     }
 
     /// Pop the next queued STREAM frame, splitting payload bytes to `max_data_len`.
@@ -1712,9 +1818,14 @@ impl StreamTable {
             )
             .find_map(|(id, stream)| stream.has_pending_stream_frames().then_some(*id))?;
         self.rr_cursor = Some(next_id);
-        self.stream_mut(next_id)
+        let payload = self
+            .stream_mut(next_id)
             .ok()?
-            .pop_pending_stream_frame(max_data_len)
+            .pop_pending_stream_frame(max_data_len);
+        if payload.is_some() && !self.has_pending_stream_frames_for(next_id) {
+            self.wake_writer(next_id);
+        }
+        payload
     }
 
     /// Borrow a stream as an `AsyncRead + AsyncWrite` adapter.
@@ -1857,6 +1968,12 @@ impl StreamTable {
     #[must_use]
     pub fn connection_recv_remaining(&self) -> u64 {
         self.recv_connection_credit.remaining()
+    }
+
+    /// Current connection-level receive limit.
+    #[must_use]
+    pub fn connection_recv_limit(&self) -> u64 {
+        self.recv_connection_credit.limit()
     }
 
     /// Next locally initiated stream with pending send credit (round-robin).
@@ -2983,6 +3100,83 @@ mod tests {
         let frame = table.pop_next_stream_frame(16).expect("stream frame");
         assert_eq!(frame.data.as_ref(), b"abcd");
         assert!(!frame.fin);
+    }
+
+    #[test]
+    fn produced_h3_stream_send_capacity_waits_for_both_credit_scopes_and_wakes() {
+        let mut table =
+            StreamTable::new_with_connection_limits(StreamRole::Client, 1, 0, 2, 4, 4, 4);
+        let stream = table.open_local_bidi().expect("open");
+        let (counter, waker) = counting_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        assert!(matches!(
+            table.poll_stream_send_capacity(stream, 3, &mut cx),
+            Poll::Pending
+        ));
+        assert_eq!(counter.count(), 0, "polling must not self-wake");
+
+        table
+            .increase_stream_send_limit(stream, 3)
+            .expect("increase stream window");
+        assert_eq!(counter.count(), 1, "MAX_STREAM_DATA must wake waiter");
+        assert!(matches!(
+            table.poll_stream_send_capacity(stream, 3, &mut cx),
+            Poll::Ready(Ok(3))
+        ));
+
+        table
+            .write_stream_bytes(stream, Bytes::from_static(b"abc"), false)
+            .expect("consume most connection credit");
+        assert!(matches!(
+            table.poll_stream_send_capacity(stream, 2, &mut cx),
+            Poll::Pending
+        ));
+        table
+            .increase_connection_send_limit(5)
+            .expect("increase connection window");
+        assert_eq!(counter.count(), 2, "MAX_DATA must wake waiter");
+        assert!(matches!(
+            table.poll_stream_send_capacity(stream, 2, &mut cx),
+            Poll::Pending
+        ));
+
+        table
+            .increase_stream_send_limit(stream, 5)
+            .expect("increase stream window again");
+        assert_eq!(counter.count(), 3);
+        assert!(matches!(
+            table.poll_stream_send_capacity(stream, 2, &mut cx),
+            Poll::Ready(Ok(2))
+        ));
+    }
+
+    #[test]
+    fn produced_h3_stream_write_ready_waits_for_prior_frame_to_leave_packet_queue() {
+        let mut table =
+            StreamTable::new_with_connection_limits(StreamRole::Client, 1, 0, 8, 8, 8, 8);
+        let stream = table.open_local_bidi().expect("open");
+        table
+            .write_stream_bytes(stream, Bytes::from_static(b"abc"), false)
+            .expect("queue prior frame");
+        let (counter, waker) = counting_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        assert!(matches!(
+            table.poll_stream_write_ready(stream, 1, &mut cx),
+            Poll::Pending
+        ));
+        assert_eq!(counter.count(), 0);
+
+        let frame = table
+            .pop_stream_frame_for(stream, usize::MAX)
+            .expect("drain prior frame");
+        assert_eq!(frame.data.as_ref(), b"abc");
+        assert_eq!(counter.count(), 1, "queue drain must wake producer");
+        assert!(matches!(
+            table.poll_stream_write_ready(stream, 1, &mut cx),
+            Poll::Ready(Ok(5))
+        ));
     }
 
     #[test]

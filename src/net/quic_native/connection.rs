@@ -750,6 +750,74 @@ impl NativeQuicConnection {
         self.streams.pending_stream_data_bytes_for(id)
     }
 
+    /// Poll the application payload capacity available to one stream.
+    ///
+    /// The returned capacity is bounded by both the stream and connection
+    /// send windows. `Pending` registers `task_cx` for either corresponding
+    /// flow-control update.
+    pub fn poll_stream_send_capacity(
+        &mut self,
+        cx: &Cx,
+        id: StreamId,
+        required: u64,
+        task_cx: &mut TaskContext<'_>,
+    ) -> Poll<Result<u64, NativeQuicConnectionError>> {
+        if let Err(err) = checkpoint(cx) {
+            return Poll::Ready(Err(err));
+        }
+        if let Err(err) = self.ensure_data_state() {
+            return Poll::Ready(Err(err));
+        }
+        match self
+            .streams
+            .poll_stream_send_capacity(id, required, task_cx)
+        {
+            Poll::Ready(result) => Poll::Ready(result.map_err(map_stream_table_error)),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+
+    /// Poll until one stream has no prior queued frame and enough capacity for
+    /// a new application frame.
+    pub fn poll_stream_write_ready(
+        &mut self,
+        cx: &Cx,
+        id: StreamId,
+        required: u64,
+        task_cx: &mut TaskContext<'_>,
+    ) -> Poll<Result<u64, NativeQuicConnectionError>> {
+        if let Err(err) = checkpoint(cx) {
+            return Poll::Ready(Err(err));
+        }
+        if let Err(err) = self.ensure_data_state() {
+            return Poll::Ready(Err(err));
+        }
+        match self.streams.poll_stream_write_ready(id, required, task_cx) {
+            Poll::Ready(result) => Poll::Ready(result.map_err(map_stream_table_error)),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+
+    /// Poll until one stream has no frame left in packet assembly, including
+    /// after its send side became terminal.
+    pub fn poll_stream_queue_drained(
+        &mut self,
+        cx: &Cx,
+        id: StreamId,
+        task_cx: &mut TaskContext<'_>,
+    ) -> Poll<Result<(), NativeQuicConnectionError>> {
+        if let Err(err) = checkpoint(cx) {
+            return Poll::Ready(Err(err));
+        }
+        if let Err(err) = self.ensure_stream_active_state() {
+            return Poll::Ready(Err(err));
+        }
+        match self.streams.poll_stream_queue_drained(id, task_cx) {
+            Poll::Ready(result) => Poll::Ready(result.map_err(map_stream_table_error)),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+
     /// Account bytes written to a stream.
     pub fn write_stream(
         &mut self,
@@ -843,6 +911,37 @@ impl NativeQuicConnection {
         Ok(applied)
     }
 
+    /// Increase the connection receive limit and advertise it with MAX_DATA.
+    pub fn advertise_connection_recv_limit(
+        &mut self,
+        cx: &Cx,
+        limit: u64,
+    ) -> Result<(), NativeQuicConnectionError> {
+        checkpoint(cx)?;
+        self.ensure_stream_active_state()?;
+        if limit > VARINT_MAX {
+            return Err(NativeQuicConnectionError::InvalidState(
+                "MAX_DATA limit exceeds QUIC varint range",
+            ));
+        }
+        if limit < self.streams.connection_recv_limit() {
+            return Ok(());
+        }
+        self.streams
+            .increase_connection_recv_limit(limit)
+            .map_err(QuicStreamError::Flow)?;
+        self.pending_control_frames.retain(|frame| {
+            !matches!(
+                frame,
+                QuicFrame::MaxData { maximum_data } if maximum_data.value() <= limit
+            )
+        });
+        self.pending_control_frames.push_back(QuicFrame::MaxData {
+            maximum_data: VarInt(limit),
+        });
+        Ok(())
+    }
+
     /// Lower a freshly-opened local stream's send-credit limit to mirror the
     /// bounded window the peer enforces for that stream; the limit then grows
     /// only via peer MAX_STREAM_DATA frames.
@@ -856,6 +955,37 @@ impl NativeQuicConnection {
         self.streams
             .set_fresh_stream_send_limit(id, limit)
             .map_err(map_stream_table_error)
+    }
+
+    /// Clamp one stream's send limit at or above bytes already consumed.
+    ///
+    /// This deterministic test hook plants an exact post-handshake
+    /// `MAX_STREAM_DATA` stall without constraining earlier control traffic.
+    #[cfg(any(test, feature = "test-internals"))]
+    pub fn constrain_stream_send_limit_for_testing(
+        &mut self,
+        cx: &Cx,
+        id: StreamId,
+        limit: u64,
+    ) -> Result<u64, NativeQuicConnectionError> {
+        self.set_fresh_stream_send_limit(cx, id, limit)
+    }
+
+    /// Clamp connection send credit at or above bytes already consumed.
+    ///
+    /// This deterministic test hook plants an exact post-handshake `MAX_DATA`
+    /// stall without constraining earlier control traffic.
+    #[cfg(any(test, feature = "test-internals"))]
+    pub fn constrain_connection_send_limit_for_testing(
+        &mut self,
+        cx: &Cx,
+        limit: u64,
+    ) -> Result<u64, NativeQuicConnectionError> {
+        checkpoint(cx)?;
+        self.ensure_stream_active_state()?;
+        Ok(self
+            .streams
+            .constrain_connection_send_limit_for_testing(limit))
     }
 
     /// Consume the next deterministic receive-side stream notification.

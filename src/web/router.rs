@@ -17,6 +17,10 @@ use std::collections::HashMap;
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::pin::Pin;
+#[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+use std::task::{Context as TaskContext, Poll, Waker};
+#[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+use std::time::Duration;
 
 use smallvec::SmallVec;
 
@@ -30,9 +34,15 @@ use super::handler::Handler;
 use super::middleware::{
     RequestLogSink, RequestTracePolicy, resolve_trace_id, trace_request, wall_clock_now,
 };
+#[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+use super::request_region::{RequestBudgetSource, ServerHopOutcome, ServerRequestRegion};
 #[cfg(not(target_arch = "wasm32"))]
 use super::response::{
     Http1StreamPlan, Http1StreamSlot, Http2StreamPlan, Http2StreamSlot, sanitize_header_name,
+};
+#[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+use super::response::{
+    Http3ProducerTerminal, Http3StreamPlan, Http3StreamProducer, Http3StreamSlot,
 };
 use super::response::{IntoResponse, Response, StatusCode};
 #[cfg(not(target_arch = "wasm32"))]
@@ -40,6 +50,10 @@ use super::websocket::Http1UpgradeSlot;
 use crate::Cx;
 #[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
 use crate::bytes::Bytes;
+#[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+use crate::http::body::{Body, Frame as BodyFrame};
+#[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+use crate::http::h1::OutgoingBody;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::http::h1::server::{Http1Response, Http1Upgrade};
 #[cfg(not(target_arch = "wasm32"))]
@@ -48,10 +62,15 @@ use crate::http::h1::types::{Request as HttpRequest, Response as HttpResponse};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::http::h2::listener::Http2ProducedResponse;
 #[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
-use crate::http::h3::{H3Error, H3RequestHead, H3ResponseHead, NativeH3Event, NativeH3Session};
+use crate::http::h3::{
+    H3Error, H3RequestHead, H3ResponseHead, NativeH3Event, NativeH3ResponseWriter, NativeH3Session,
+    NativeH3WriteEvent, h3_data_frame_wire_len,
+};
 #[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
-use crate::net::quic_native::{QuicConnection, StreamId};
+use crate::net::quic_native::{QuicConnection, QuicConnectionState, StreamId};
 use crate::service::Layer;
+#[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+use crate::types::CancelKind;
 use crate::types::{
     Budget, Time,
     id::{next_bootstrap_region_id, next_bootstrap_task_id},
@@ -630,6 +649,13 @@ pub enum NativeH3RouterEvent {
         /// Body bytes buffered so far.
         body_bytes: usize,
     },
+    /// A produced response was validated and installed for incremental send.
+    ResponseStarted {
+        /// QUIC request stream.
+        stream_id: StreamId,
+        /// Final HTTP response status.
+        status: u16,
+    },
     /// The completed request was dispatched and a final response was queued
     /// on the same stream.
     ResponseSent {
@@ -733,6 +759,59 @@ impl NativeH3RouterDispatch {
                 .map(|(head, body)| (status, head, body)),
         }
     }
+
+    /// Run the Router with opt-in request-scoped HTTP/3 producer authority.
+    ///
+    /// Ordinary handlers remain on the exact buffered completion path.
+    /// Registering [`crate::web::Http3StreamResponder`] returns a distinct
+    /// consuming response that must be started through
+    /// [`NativeH3Router::start_produced_dispatch_with_cx`].
+    pub async fn run_produced(self, cx: &Cx) -> NativeH3RouterProducedDispatch {
+        let Self {
+            token,
+            router,
+            mut request,
+            suppress_body_for_head,
+        } = self;
+        let slot = Http3StreamSlot::default();
+        request.extensions.insert_typed(slot.clone());
+        let response = router.handle_with_cx(cx, request).await;
+        let binding = slot.bind_response(&response, suppress_body_for_head);
+        match binding {
+            Ok(Some(plan)) => {
+                let status = response.status.as_u16();
+                NativeH3RouterProducedDispatch::Produced(NativeH3RouterPreparedProducedResponse {
+                    token,
+                    status,
+                    head: h3_response_from_web(response, suppress_body_for_head).map(
+                        |(head, body)| {
+                            debug_assert!(body.is_empty());
+                            head
+                        },
+                    ),
+                    plan,
+                    suppress_body_for_head,
+                })
+            }
+            Ok(None) => {
+                let status = response.status.as_u16();
+                NativeH3RouterProducedDispatch::Buffered(NativeH3RouterPreparedResponse {
+                    token,
+                    response: h3_response_from_web(response, suppress_body_for_head)
+                        .map(|(head, body)| (status, head, body)),
+                })
+            }
+            Err(reason) => {
+                let response = http1_stream_refusal_response(reason);
+                let status = response.status.as_u16();
+                NativeH3RouterProducedDispatch::Buffered(NativeH3RouterPreparedResponse {
+                    token,
+                    response: h3_response_from_web(response, suppress_body_for_head)
+                        .map(|(head, body)| (status, head, body)),
+                })
+            }
+        }
+    }
 }
 
 /// Opaque proof that a cancellation belongs to one specific H3 Router bridge.
@@ -783,6 +862,218 @@ impl NativeH3RouterPreparedResponse {
     }
 }
 
+/// Result of an HTTP/3 dispatch that offered produced-response authority.
+#[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+#[must_use = "complete the buffered response or start/cancel the produced response"]
+pub enum NativeH3RouterProducedDispatch {
+    /// No producer was registered; use the existing borrowed completion API.
+    Buffered(NativeH3RouterPreparedResponse),
+    /// A single bounded producer was registered; use the consuming start API.
+    Produced(NativeH3RouterPreparedProducedResponse),
+}
+
+/// Validated Router output plus a single-use HTTP/3 producer plan.
+#[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+#[must_use = "a produced HTTP/3 response must be started or its dispatch cancelled"]
+pub struct NativeH3RouterPreparedProducedResponse {
+    token: NativeH3RouterDispatchToken,
+    status: u16,
+    head: Result<H3ResponseHead, H3Error>,
+    plan: Http3StreamPlan,
+    suppress_body_for_head: bool,
+}
+
+#[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+impl NativeH3RouterPreparedProducedResponse {
+    /// Request stream that owns this response.
+    #[must_use]
+    pub fn stream_id(&self) -> StreamId {
+        self.token.stream_id
+    }
+
+    /// Opaque token for explicit cancellation before the consuming start.
+    #[must_use]
+    pub fn cancellation_token(&self) -> NativeH3RouterDispatchToken {
+        self.token.clone()
+    }
+}
+
+#[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NativeH3ProducerOutcome {
+    Finished {
+        total_bytes: u64,
+        terminal: Http3ProducerTerminal,
+    },
+    Failed,
+    Cancelled,
+}
+
+#[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+#[derive(Default)]
+struct NativeH3ProducerLifecycleState {
+    outcome: Option<NativeH3ProducerOutcome>,
+    waker: Option<Waker>,
+}
+
+#[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+#[derive(Clone, Default)]
+struct NativeH3ProducerLifecycle {
+    state: Arc<parking_lot::Mutex<NativeH3ProducerLifecycleState>>,
+}
+
+#[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+impl NativeH3ProducerLifecycle {
+    fn publish(&self, outcome: NativeH3ProducerOutcome) {
+        let waker = {
+            let mut state = self.state.lock();
+            if state.outcome.is_some() {
+                return;
+            }
+            state.outcome = Some(outcome);
+            state.waker.take()
+        };
+        if let Some(waker) = waker {
+            waker.wake();
+        }
+    }
+
+    fn poll_outcome(&self, task_cx: &mut TaskContext<'_>) -> Poll<NativeH3ProducerOutcome> {
+        let mut state = self.state.lock();
+        if let Some(outcome) = state.outcome {
+            return Poll::Ready(outcome);
+        }
+        let should_replace = state
+            .waker
+            .as_ref()
+            .is_none_or(|waker| !waker.will_wake(task_cx.waker()));
+        if should_replace {
+            state.waker = Some(task_cx.waker().clone());
+        }
+        Poll::Pending
+    }
+}
+
+/// Caller-owned supervised work item for one HTTP/3 response producer.
+///
+/// Poll or spawn this future in the request scope returned by the event loop.
+/// Dropping it requests cancellation and publishes a terminal outcome so the
+/// Router bridge can reap the stream without leaking in-flight ownership.
+#[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+#[must_use = "the HTTP/3 producer must be polled or dropped explicitly"]
+pub struct NativeH3RouterProducer {
+    inner: Pin<Box<dyn Future<Output = NativeH3ProducerOutcome> + Send + 'static>>,
+    lifecycle: NativeH3ProducerLifecycle,
+    producer_cx: Cx,
+    completed: bool,
+}
+
+#[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+impl std::fmt::Debug for NativeH3RouterProducer {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("NativeH3RouterProducer")
+            .field("completed", &self.completed)
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+impl Future for NativeH3RouterProducer {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, task_cx: &mut TaskContext<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+        match this.inner.as_mut().poll(task_cx) {
+            Poll::Ready(outcome) => {
+                this.lifecycle.publish(outcome);
+                this.completed = true;
+                Poll::Ready(())
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+#[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+impl Drop for NativeH3RouterProducer {
+    fn drop(&mut self) {
+        if self.completed {
+            return;
+        }
+        self.producer_cx.cancel_with(
+            CancelKind::ParentCancelled,
+            Some("HTTP/3 response producer future dropped"),
+        );
+        self.lifecycle.publish(NativeH3ProducerOutcome::Cancelled);
+    }
+}
+
+/// One bounded progress edge from the caller-driven produced-response driver.
+#[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+#[must_use = "run returned producer work and continue polling until terminal"]
+pub enum NativeH3ProducedEvent {
+    /// Final response HEADERS were queued; no producer exists for this HEAD.
+    HeadQueued {
+        /// Request stream.
+        stream_id: StreamId,
+        /// Final status.
+        status: u16,
+    },
+    /// Final response HEADERS were queued and the producer may now run.
+    ProducerReady {
+        /// Request stream.
+        stream_id: StreamId,
+        /// Supervised producer future owned by the caller's request scope.
+        producer: NativeH3RouterProducer,
+    },
+    /// One bounded DATA frame was queued.
+    DataQueued {
+        /// Request stream.
+        stream_id: StreamId,
+        /// Application payload bytes in the frame.
+        payload_bytes: usize,
+    },
+    /// A FIN-only or trailing HEADERS+FIN terminal write was queued.
+    TerminalQueued {
+        /// Request stream.
+        stream_id: StreamId,
+    },
+    /// The producer exited and every STREAM frame left packet assembly.
+    ResponseSent {
+        /// Request stream.
+        stream_id: StreamId,
+        /// Final status.
+        status: u16,
+    },
+    /// A cancelled or failed produced response was reset and reaped.
+    RequestReset {
+        /// Request stream.
+        stream_id: StreamId,
+    },
+}
+
+#[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+enum NativeH3BodyTerminal {
+    Eof,
+    Trailers(Vec<(String, String)>),
+}
+
+#[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+struct ActiveNativeH3ProducedResponse {
+    status: u16,
+    writer: NativeH3ResponseWriter,
+    plan: Option<Http3StreamPlan>,
+    body: Option<OutgoingBody>,
+    lifecycle: Option<NativeH3ProducerLifecycle>,
+    producer_cx: Option<Cx>,
+    max_data_wire_bytes: u64,
+    emitted_bytes: u64,
+    terminal: Option<NativeH3BodyTerminal>,
+    head_only: bool,
+    reset_queued: bool,
+}
+
 #[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
 struct PendingNativeH3Request {
     head: H3RequestHead,
@@ -807,9 +1098,10 @@ struct PendingNativeH3Request {
 /// and acknowledge it with [`NativeH3Router::cancel_dispatch_with_cx`]; the
 /// bridge cannot own or cancel the caller's task handle itself.
 ///
-/// This adapter deliberately does not own a UDP listener, TLS/ALPN handshake,
-/// QUIC event loop, streaming body/backpressure policy, trailers, CONNECT,
-/// WebSocket, or server-push surface.
+/// The opt-in produced-response path owns bounded DATA/trailer/FIN scheduling
+/// over an already-established connection. This adapter deliberately does not
+/// own a UDP listener, TLS/ALPN handshake, QUIC event loop, streaming request
+/// bodies, CONNECT, WebSocket, or server-push surface.
 #[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
 pub struct NativeH3Router {
     identity: Arc<()>,
@@ -821,6 +1113,8 @@ pub struct NativeH3Router {
     retained_request_body_bytes: usize,
     in_flight: BTreeMap<StreamId, usize>,
     reset_during_dispatch: BTreeSet<StreamId>,
+    produced: BTreeMap<StreamId, ActiveNativeH3ProducedResponse>,
+    produced_poll_after: Option<StreamId>,
 }
 
 #[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
@@ -860,6 +1154,8 @@ impl NativeH3Router {
             retained_request_body_bytes: 0,
             in_flight: BTreeMap::new(),
             reset_during_dispatch: BTreeSet::new(),
+            produced: BTreeMap::new(),
+            produced_poll_after: None,
         }
     }
 
@@ -1127,7 +1423,15 @@ impl NativeH3Router {
             } => {
                 self.take_pending_request(stream_id);
                 self.discarding.remove(&stream_id);
-                if self.in_flight.contains_key(&stream_id) {
+                if let Some(state) = self.produced.get_mut(&stream_id) {
+                    cancel_native_h3_produced(
+                        cx,
+                        session,
+                        connection,
+                        state,
+                        "peer reset HTTP/3 produced response stream",
+                    )?;
+                } else if self.in_flight.contains_key(&stream_id) {
                     // Keep the dispatch counted until its caller-owned scope
                     // observes the reset and acknowledges completion or
                     // cancellation. Otherwise reset churn could bypass the
@@ -1201,6 +1505,174 @@ impl NativeH3Router {
         }
     }
 
+    /// Consume and install one produced response without starting its factory.
+    ///
+    /// Final response validation and writer construction happen first. The
+    /// producer channel and supervised future are created only after
+    /// [`Self::poll_produced_response_with_cx`] successfully queues HEADERS.
+    pub fn start_produced_dispatch_with_cx(
+        &mut self,
+        cx: &Cx,
+        session: &mut NativeH3Session,
+        connection: &mut QuicConnection,
+        prepared: NativeH3RouterPreparedProducedResponse,
+    ) -> Result<NativeH3RouterEvent, crate::http::h3::NativeH3SessionError> {
+        let NativeH3RouterPreparedProducedResponse {
+            token,
+            status,
+            head,
+            plan,
+            suppress_body_for_head,
+        } = prepared;
+        if !Arc::ptr_eq(&self.identity, &token.bridge_identity) {
+            return Err(crate::http::h3::NativeH3SessionError::InvalidState(
+                "HTTP/3 Router produced response belongs to a different bridge",
+            ));
+        }
+        let stream_id = token.stream_id;
+        if let Some(state) = self.produced.get_mut(&stream_id) {
+            cancel_native_h3_produced(
+                cx,
+                session,
+                connection,
+                state,
+                "HTTP/3 produced response explicitly cancelled",
+            )?;
+            return Ok(NativeH3RouterEvent::RequestRefused {
+                stream_id,
+                reason: NativeH3RouterRefusal::DispatchCancelled,
+            });
+        }
+        if self.reset_during_dispatch.remove(&stream_id) {
+            self.release_in_flight(stream_id);
+            return Ok(NativeH3RouterEvent::RequestDiscarded { stream_id });
+        }
+        if !self.in_flight.contains_key(&stream_id) {
+            return Err(crate::http::h3::NativeH3SessionError::InvalidState(
+                "HTTP/3 Router dispatch is not in flight",
+            ));
+        }
+        if self.produced.contains_key(&stream_id) {
+            return Err(crate::http::h3::NativeH3SessionError::InvalidState(
+                "HTTP/3 Router produced response is already active",
+            ));
+        }
+        let head = match head {
+            Ok(head) => head,
+            Err(error) => {
+                let event = self.refuse_request(
+                    cx,
+                    session,
+                    connection,
+                    stream_id,
+                    NativeH3RouterRefusal::InvalidResponse(error),
+                    false,
+                );
+                self.release_in_flight(stream_id);
+                return event;
+            }
+        };
+        let writer = match session.start_response_writer(
+            connection,
+            stream_id,
+            &head,
+            suppress_body_for_head,
+        ) {
+            Ok(writer) => writer,
+            Err(error) => {
+                return Err(self.fail_produced_start(cx, session, connection, stream_id, error));
+            }
+        };
+        let max_data_wire_bytes = if suppress_body_for_head {
+            0
+        } else {
+            if plan.max_frame_bytes.get() > writer.max_frame_payload_size() {
+                let error =
+                    crate::http::h3::NativeH3SessionError::Protocol(H3Error::FrameTooLarge {
+                        payload_size: plan.max_frame_bytes.get(),
+                        max_size: writer.max_frame_payload_size(),
+                    });
+                return Err(self.fail_produced_start(cx, session, connection, stream_id, error));
+            }
+            match h3_data_frame_wire_len(plan.max_frame_bytes.get()) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    return Err(self.fail_produced_start(cx, session, connection, stream_id, error));
+                }
+            }
+        };
+        self.produced.insert(
+            stream_id,
+            ActiveNativeH3ProducedResponse {
+                status,
+                writer,
+                plan: (!suppress_body_for_head).then_some(plan),
+                body: None,
+                lifecycle: None,
+                producer_cx: None,
+                max_data_wire_bytes,
+                emitted_bytes: 0,
+                terminal: None,
+                head_only: suppress_body_for_head,
+                reset_queued: false,
+            },
+        );
+        Ok(NativeH3RouterEvent::ResponseStarted { stream_id, status })
+    }
+
+    /// Poll one fair, bounded progress edge across active produced responses.
+    ///
+    /// The method never polls arbitrary application producer code. Instead it
+    /// returns a caller-owned [`NativeH3RouterProducer`] after HEADERS commit;
+    /// the caller runs that future in its request scope while this method
+    /// continues to drive only bounded channel and transport state.
+    pub fn poll_produced_response_with_cx(
+        &mut self,
+        cx: &Cx,
+        session: &mut NativeH3Session,
+        connection: &mut QuicConnection,
+        task_cx: &mut TaskContext<'_>,
+    ) -> Poll<Result<NativeH3ProducedEvent, crate::http::h3::NativeH3SessionError>> {
+        if connection.state() != QuicConnectionState::Established {
+            for state in self.produced.values_mut() {
+                mark_native_h3_produced_cancelled(
+                    state,
+                    "HTTP/3 connection closed during produced response",
+                );
+            }
+        }
+        let mut stream_ids = self.produced.keys().copied().collect::<Vec<_>>();
+        if let Some(after) = self.produced_poll_after
+            && let Some(split) = stream_ids.iter().position(|stream_id| *stream_id > after)
+        {
+            stream_ids.rotate_left(split);
+        }
+        for stream_id in stream_ids {
+            let poll = {
+                let state = self
+                    .produced
+                    .get_mut(&stream_id)
+                    .expect("stream id came from active produced map");
+                poll_one_native_h3_produced(cx, session, connection, state, task_cx)
+            };
+            match poll {
+                Poll::Ready(Ok(NativeH3ProducedStep::Event(event))) => {
+                    self.produced_poll_after = Some(stream_id);
+                    return Poll::Ready(Ok(event));
+                }
+                Poll::Ready(Ok(NativeH3ProducedStep::Reap(event))) => {
+                    self.produced.remove(&stream_id);
+                    self.release_in_flight(stream_id);
+                    self.produced_poll_after = Some(stream_id);
+                    return Poll::Ready(Ok(event));
+                }
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                Poll::Pending => {}
+            }
+        }
+        Poll::Pending
+    }
+
     /// Terminalize an admitted dispatch whose request scope was cancelled or
     /// whose result will otherwise not be completed. `cx` must remain the live
     /// connection-driver context; the handler scope's cancelled context may
@@ -1226,6 +1698,19 @@ impl NativeH3Router {
             return Err(crate::http::h3::NativeH3SessionError::InvalidState(
                 "HTTP/3 Router dispatch is not in flight",
             ));
+        }
+        if let Some(state) = self.produced.get_mut(&stream_id) {
+            cancel_native_h3_produced(
+                cx,
+                session,
+                connection,
+                state,
+                "HTTP/3 produced response explicitly cancelled",
+            )?;
+            return Ok(NativeH3RouterEvent::RequestRefused {
+                stream_id,
+                reason: NativeH3RouterRefusal::DispatchCancelled,
+            });
         }
         let event = self.refuse_request(
             cx,
@@ -1271,6 +1756,19 @@ impl NativeH3Router {
         }
     }
 
+    fn fail_produced_start(
+        &mut self,
+        cx: &Cx,
+        session: &mut NativeH3Session,
+        connection: &mut QuicConnection,
+        stream_id: StreamId,
+        error: crate::http::h3::NativeH3SessionError,
+    ) -> crate::http::h3::NativeH3SessionError {
+        let reset_error = session.cancel_request(cx, connection, stream_id).err();
+        self.release_in_flight(stream_id);
+        reset_error.unwrap_or(error)
+    }
+
     fn remember_discarding(&mut self, stream_id: StreamId) {
         if self.discarding.insert(stream_id) {
             self.discard_order.push_back(stream_id);
@@ -1279,6 +1777,500 @@ impl NativeH3Router {
             if let Some(expired) = self.discard_order.pop_front() {
                 self.discarding.remove(&expired);
             }
+        }
+    }
+}
+
+#[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+impl Drop for NativeH3Router {
+    fn drop(&mut self) {
+        for state in self.produced.values() {
+            if let Some(producer_cx) = &state.producer_cx {
+                producer_cx.cancel_with(
+                    CancelKind::ParentCancelled,
+                    Some("HTTP/3 Router bridge dropped an active produced response"),
+                );
+            }
+        }
+    }
+}
+
+#[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+enum NativeH3ProducedStep {
+    Event(NativeH3ProducedEvent),
+    Reap(NativeH3ProducedEvent),
+}
+
+#[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+const H3_PRODUCER_DRAIN_GRACE: Duration = Duration::from_millis(100);
+
+#[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+fn make_native_h3_producer(
+    connection_cx: &Cx,
+    plan: Http3StreamPlan,
+) -> (
+    OutgoingBody,
+    Cx,
+    NativeH3ProducerLifecycle,
+    NativeH3RouterProducer,
+) {
+    let region = ServerRequestRegion::mint_from_connection(
+        "h3-produced",
+        connection_cx.budget(),
+        connection_cx.now(),
+        connection_cx,
+    );
+    let producer_cx = region.cx().clone();
+    let (body, sender, producer_factory): (_, _, Http3StreamProducer) =
+        plan.into_parts(&producer_cx);
+    let lifecycle = NativeH3ProducerLifecycle::default();
+    let producer_cx_for_factory = producer_cx.clone();
+    let connection_cx = connection_cx.clone();
+    let run = Box::pin(async move {
+        let producer =
+            async move { producer_factory(producer_cx_for_factory.clone(), sender).await };
+        match region
+            .run_with_protocol_drain(
+                RequestBudgetSource::Inherited,
+                Some(connection_cx),
+                H3_PRODUCER_DRAIN_GRACE,
+                producer,
+            )
+            .await
+        {
+            ServerHopOutcome::Ok(Ok(sender)) if sender.is_finished() => {
+                NativeH3ProducerOutcome::Finished {
+                    total_bytes: sender.total_bytes(),
+                    terminal: sender.terminal(),
+                }
+            }
+            ServerHopOutcome::Ok(Ok(_))
+            | ServerHopOutcome::Ok(Err(_))
+            | ServerHopOutcome::Panicked(_) => NativeH3ProducerOutcome::Failed,
+            ServerHopOutcome::Cancelled
+            | ServerHopOutcome::DeadlineExceeded
+            | ServerHopOutcome::ConnectionLost => NativeH3ProducerOutcome::Cancelled,
+        }
+    });
+    let producer = NativeH3RouterProducer {
+        inner: run,
+        lifecycle: lifecycle.clone(),
+        producer_cx: producer_cx.clone(),
+        completed: false,
+    };
+    (body, producer_cx, lifecycle, producer)
+}
+
+#[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+fn h3_trailers_from_body_map(
+    trailers: crate::http::HeaderMap,
+) -> Result<Vec<(String, String)>, crate::http::h3::NativeH3SessionError> {
+    trailers
+        .iter()
+        .map(|(name, value)| {
+            let value = value.to_str().map_err(|_| {
+                crate::http::h3::NativeH3SessionError::Protocol(H3Error::InvalidFrame(
+                    "HTTP/3 trailer value is not valid UTF-8",
+                ))
+            })?;
+            Ok((name.as_str().to_string(), value.to_string()))
+        })
+        .collect()
+}
+
+#[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+fn cancel_native_h3_produced(
+    cx: &Cx,
+    session: &mut NativeH3Session,
+    connection: &mut QuicConnection,
+    state: &mut ActiveNativeH3ProducedResponse,
+    message: &'static str,
+) -> Result<(), crate::http::h3::NativeH3SessionError> {
+    let reset = if state.reset_queued {
+        Ok(())
+    } else {
+        session.cancel_request(cx, connection, state.writer.stream_id())
+    };
+    mark_native_h3_produced_cancelled(state, message);
+    reset
+}
+
+#[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+fn fail_native_h3_produced_poll(
+    cx: &Cx,
+    session: &mut NativeH3Session,
+    connection: &mut QuicConnection,
+    state: &mut ActiveNativeH3ProducedResponse,
+    message: &'static str,
+    error: crate::http::h3::NativeH3SessionError,
+) -> crate::http::h3::NativeH3SessionError {
+    cancel_native_h3_produced(cx, session, connection, state, message)
+        .err()
+        .unwrap_or(error)
+}
+
+#[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+fn mark_native_h3_produced_cancelled(
+    state: &mut ActiveNativeH3ProducedResponse,
+    message: &'static str,
+) {
+    if let Some(producer_cx) = &state.producer_cx {
+        producer_cx.cancel_with(CancelKind::ParentCancelled, Some(message));
+    }
+    state.reset_queued = true;
+    state.plan = None;
+    state.body = None;
+    state.terminal = None;
+}
+
+#[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+fn poll_one_native_h3_produced(
+    cx: &Cx,
+    session: &mut NativeH3Session,
+    connection: &mut QuicConnection,
+    state: &mut ActiveNativeH3ProducedResponse,
+    task_cx: &mut TaskContext<'_>,
+) -> Poll<Result<NativeH3ProducedStep, crate::http::h3::NativeH3SessionError>> {
+    let stream_id = state.writer.stream_id();
+    loop {
+        if state.reset_queued {
+            let exited = state
+                .lifecycle
+                .as_ref()
+                .is_none_or(|lifecycle| lifecycle.poll_outcome(task_cx).is_ready());
+            if exited {
+                return Poll::Ready(Ok(NativeH3ProducedStep::Reap(
+                    NativeH3ProducedEvent::RequestReset { stream_id },
+                )));
+            }
+            return Poll::Pending;
+        }
+
+        if state.writer.has_pending_write() {
+            match state.writer.poll_flush_one(cx, connection, task_cx) {
+                Poll::Ready(Ok(Some(NativeH3WriteEvent::Head { .. }))) => {
+                    if state.head_only {
+                        return Poll::Ready(Ok(NativeH3ProducedStep::Event(
+                            NativeH3ProducedEvent::HeadQueued {
+                                stream_id,
+                                status: state.status,
+                            },
+                        )));
+                    }
+                    let plan = state.plan.take().ok_or(
+                        crate::http::h3::NativeH3SessionError::InvalidState(
+                            "HTTP/3 response producer plan disappeared before HEADERS commit",
+                        ),
+                    );
+                    let plan = match plan {
+                        Ok(plan) => plan,
+                        Err(error) => {
+                            return Poll::Ready(Err(fail_native_h3_produced_poll(
+                                cx,
+                                session,
+                                connection,
+                                state,
+                                "HTTP/3 response producer plan disappeared",
+                                error,
+                            )));
+                        }
+                    };
+                    let (body, producer_cx, lifecycle, producer) =
+                        make_native_h3_producer(cx, plan);
+                    state.body = Some(body);
+                    state.producer_cx = Some(producer_cx);
+                    state.lifecycle = Some(lifecycle);
+                    return Poll::Ready(Ok(NativeH3ProducedStep::Event(
+                        NativeH3ProducedEvent::ProducerReady {
+                            stream_id,
+                            producer,
+                        },
+                    )));
+                }
+                Poll::Ready(Ok(Some(NativeH3WriteEvent::Data { payload_bytes }))) => {
+                    return Poll::Ready(Ok(NativeH3ProducedStep::Event(
+                        NativeH3ProducedEvent::DataQueued {
+                            stream_id,
+                            payload_bytes,
+                        },
+                    )));
+                }
+                Poll::Ready(Ok(Some(
+                    NativeH3WriteEvent::Trailers | NativeH3WriteEvent::Finished,
+                ))) => {
+                    return Poll::Ready(Ok(NativeH3ProducedStep::Event(
+                        NativeH3ProducedEvent::TerminalQueued { stream_id },
+                    )));
+                }
+                Poll::Ready(Ok(None)) => {}
+                Poll::Ready(Err(error)) => {
+                    return Poll::Ready(Err(fail_native_h3_produced_poll(
+                        cx,
+                        session,
+                        connection,
+                        state,
+                        "HTTP/3 response transport write failed",
+                        error,
+                    )));
+                }
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+
+        if state.writer.is_finished() {
+            match connection.poll_stream_queue_drained(cx, stream_id, task_cx) {
+                Poll::Ready(Ok(())) => {
+                    return Poll::Ready(Ok(NativeH3ProducedStep::Reap(
+                        NativeH3ProducedEvent::ResponseSent {
+                            stream_id,
+                            status: state.status,
+                        },
+                    )));
+                }
+                Poll::Ready(Err(error)) => {
+                    return Poll::Ready(Err(fail_native_h3_produced_poll(
+                        cx,
+                        session,
+                        connection,
+                        state,
+                        "HTTP/3 response terminal drain failed",
+                        crate::http::h3::NativeH3SessionError::Transport(error),
+                    )));
+                }
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+
+        let producer_outcome = match state.lifecycle.as_ref() {
+            Some(lifecycle) => match lifecycle.poll_outcome(task_cx) {
+                Poll::Ready(outcome) => Some(outcome),
+                Poll::Pending => None,
+            },
+            None => {
+                let error = crate::http::h3::NativeH3SessionError::InvalidState(
+                    "HTTP/3 producer state is unavailable after HEADERS commit",
+                );
+                return Poll::Ready(Err(fail_native_h3_produced_poll(
+                    cx,
+                    session,
+                    connection,
+                    state,
+                    "HTTP/3 response producer state disappeared",
+                    error,
+                )));
+            }
+        };
+
+        if matches!(
+            producer_outcome,
+            Some(NativeH3ProducerOutcome::Failed | NativeH3ProducerOutcome::Cancelled)
+        ) {
+            if let Err(error) = cancel_native_h3_produced(
+                cx,
+                session,
+                connection,
+                state,
+                "HTTP/3 response producer failed or was cancelled",
+            ) {
+                return Poll::Ready(Err(error));
+            }
+            continue;
+        }
+
+        if let Some(terminal) = state.terminal.take() {
+            let Some(NativeH3ProducerOutcome::Finished {
+                total_bytes,
+                terminal: producer_terminal,
+            }) = producer_outcome
+            else {
+                state.terminal = Some(terminal);
+                return Poll::Pending;
+            };
+            let terminal_matches = matches!(
+                (&terminal, producer_terminal),
+                (NativeH3BodyTerminal::Eof, Http3ProducerTerminal::Finished)
+                    | (
+                        NativeH3BodyTerminal::Trailers(_),
+                        Http3ProducerTerminal::Trailers
+                    )
+            );
+            if total_bytes != state.emitted_bytes || !terminal_matches {
+                if let Err(error) = cancel_native_h3_produced(
+                    cx,
+                    session,
+                    connection,
+                    state,
+                    "HTTP/3 response producer terminal accounting mismatch",
+                ) {
+                    return Poll::Ready(Err(error));
+                }
+                continue;
+            }
+            let queued = match terminal {
+                NativeH3BodyTerminal::Eof => state.writer.finish(),
+                NativeH3BodyTerminal::Trailers(fields) => state.writer.queue_trailers(&fields),
+            };
+            if let Err(error) = queued {
+                return Poll::Ready(Err(fail_native_h3_produced_poll(
+                    cx,
+                    session,
+                    connection,
+                    state,
+                    "HTTP/3 response terminal frame was invalid",
+                    error,
+                )));
+            }
+            continue;
+        }
+
+        if let Some(NativeH3ProducerOutcome::Finished { total_bytes, .. }) = producer_outcome
+            && total_bytes < state.emitted_bytes
+        {
+            if let Err(error) = cancel_native_h3_produced(
+                cx,
+                session,
+                connection,
+                state,
+                "HTTP/3 response producer byte accounting regressed",
+            ) {
+                return Poll::Ready(Err(error));
+            }
+            continue;
+        }
+
+        let terminal_only = matches!(
+            producer_outcome,
+            Some(NativeH3ProducerOutcome::Finished { total_bytes, .. })
+                if total_bytes == state.emitted_bytes
+        );
+        let readiness = if terminal_only {
+            match connection.poll_stream_queue_drained(cx, stream_id, task_cx) {
+                Poll::Ready(Ok(())) => Poll::Ready(Ok(0)),
+                Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
+                Poll::Pending => Poll::Pending,
+            }
+        } else {
+            connection.poll_stream_write_ready(cx, stream_id, state.max_data_wire_bytes, task_cx)
+        };
+        match readiness {
+            Poll::Ready(Ok(_)) => {}
+            Poll::Ready(Err(error)) => {
+                return Poll::Ready(Err(fail_native_h3_produced_poll(
+                    cx,
+                    session,
+                    connection,
+                    state,
+                    "HTTP/3 response DATA readiness failed",
+                    crate::http::h3::NativeH3SessionError::Transport(error),
+                )));
+            }
+            Poll::Pending => return Poll::Pending,
+        }
+
+        let body = state
+            .body
+            .as_mut()
+            .ok_or(crate::http::h3::NativeH3SessionError::InvalidState(
+                "HTTP/3 response body receiver disappeared",
+            ));
+        let body = match body {
+            Ok(body) => body,
+            Err(error) => {
+                return Poll::Ready(Err(fail_native_h3_produced_poll(
+                    cx,
+                    session,
+                    connection,
+                    state,
+                    "HTTP/3 response body receiver disappeared",
+                    error,
+                )));
+            }
+        };
+        match Pin::new(body).poll_frame(task_cx) {
+            Poll::Ready(Some(Ok(BodyFrame::Data(data)))) => {
+                let bytes = data.into_inner();
+                let new_total = match state
+                    .emitted_bytes
+                    .checked_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX))
+                {
+                    Some(total) => total,
+                    None => {
+                        if let Err(error) = cancel_native_h3_produced(
+                            cx,
+                            session,
+                            connection,
+                            state,
+                            "HTTP/3 response byte accounting overflow",
+                        ) {
+                            return Poll::Ready(Err(error));
+                        }
+                        continue;
+                    }
+                };
+                if terminal_only
+                    || matches!(
+                        producer_outcome,
+                        Some(NativeH3ProducerOutcome::Finished { total_bytes, .. })
+                            if new_total > total_bytes
+                    )
+                {
+                    if let Err(error) = cancel_native_h3_produced(
+                        cx,
+                        session,
+                        connection,
+                        state,
+                        "HTTP/3 response produced bytes after terminal accounting",
+                    ) {
+                        return Poll::Ready(Err(error));
+                    }
+                    continue;
+                }
+                state.emitted_bytes = new_total;
+                if let Err(error) = state.writer.queue_data(bytes) {
+                    if let Err(reset_error) = cancel_native_h3_produced(
+                        cx,
+                        session,
+                        connection,
+                        state,
+                        "HTTP/3 response DATA frame was invalid",
+                    ) {
+                        return Poll::Ready(Err(reset_error));
+                    }
+                    if matches!(error, crate::http::h3::NativeH3SessionError::Transport(_)) {
+                        return Poll::Ready(Err(error));
+                    }
+                    continue;
+                }
+            }
+            Poll::Ready(Some(Ok(BodyFrame::Trailers(trailers)))) => {
+                match h3_trailers_from_body_map(trailers) {
+                    Ok(fields) => state.terminal = Some(NativeH3BodyTerminal::Trailers(fields)),
+                    Err(_) => {
+                        if let Err(error) = cancel_native_h3_produced(
+                            cx,
+                            session,
+                            connection,
+                            state,
+                            "HTTP/3 response trailers were invalid",
+                        ) {
+                            return Poll::Ready(Err(error));
+                        }
+                    }
+                }
+            }
+            Poll::Ready(Some(Err(_error))) => {
+                if let Err(error) = cancel_native_h3_produced(
+                    cx,
+                    session,
+                    connection,
+                    state,
+                    "HTTP/3 response body channel failed",
+                ) {
+                    return Poll::Ready(Err(error));
+                }
+            }
+            Poll::Ready(None) => state.terminal = Some(NativeH3BodyTerminal::Eof),
+            Poll::Pending => return Poll::Pending,
         }
     }
 }

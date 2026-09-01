@@ -40,11 +40,15 @@ pub mod h3 {
         H3RequestStreamState, H3ResponseHead, H3Settings, H3UniStreamType, QpackFieldPlan,
         UnknownSetting, qpack_decode_field_section, qpack_encode_field_section,
         qpack_encode_request_field_section, qpack_encode_response_field_section,
-        qpack_plan_to_header_fields, qpack_static_plan_for_request, qpack_static_plan_for_response,
+        qpack_encode_trailer_field_section, qpack_plan_to_header_fields,
+        qpack_static_plan_for_request, qpack_static_plan_for_response,
         validate_request_pseudo_headers, validate_response_pseudo_headers,
     };
     pub use super::h3_quic::{
         H3_REQUEST_CANCELLED, NativeH3Event, NativeH3Session, NativeH3SessionError,
+    };
+    pub(crate) use super::h3_quic::{
+        NativeH3ResponseWriter, NativeH3WriteEvent, h3_data_frame_wire_len,
     };
 }
 pub mod h3_native;
@@ -84,7 +88,8 @@ pub use h3_native::{
     H3RequestStreamState, H3ResponseHead, H3Settings as NativeH3Settings, H3UniStreamType,
     QpackFieldPlan, UnknownSetting, qpack_decode_field_section, qpack_encode_field_section,
     qpack_encode_request_field_section, qpack_encode_response_field_section,
-    qpack_plan_to_header_fields, qpack_static_plan_for_request, qpack_static_plan_for_response,
-    validate_request_pseudo_headers, validate_response_pseudo_headers,
+    qpack_encode_trailer_field_section, qpack_plan_to_header_fields, qpack_static_plan_for_request,
+    qpack_static_plan_for_response, validate_request_pseudo_headers,
+    validate_response_pseudo_headers,
 };
 pub use pool::{Pool, PoolConfig, PoolKey, PoolStats, PooledConnectionMeta, PooledConnectionState};
