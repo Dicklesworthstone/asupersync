@@ -82,6 +82,8 @@ include = [
     "!src/bin/dependency_marginal_ledger.rs",
     "!src/bin/dependency_verification_matrix.rs",
     "!src/bin/offline_tuner.rs",
+    "!src/bin/asupersync.rs",
+    "!src/cli/**",
     "!**/*.out",
     "!**/*.snap.new",
     "!**/.insta.pending-snap",
