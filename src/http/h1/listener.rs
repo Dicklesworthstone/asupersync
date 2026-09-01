@@ -9,6 +9,8 @@ use crate::http::h1::server::{
 };
 use crate::http::h1::stream::{Http1ProducedResponse, StreamingServerRequest};
 use crate::http::h1::types::{Request, Response};
+#[cfg(feature = "tls")]
+use crate::io::AsyncWriteExt;
 use crate::net::tcp::listener::TcpListener;
 use crate::runtime::{JoinHandle, RuntimeHandle, SpawnError};
 use crate::server::connection::{ConnectionGuard, ConnectionManager};
@@ -16,6 +18,8 @@ use crate::server::shutdown::{
     DrainStep, GracefulDrainReport, GracefulDrainSupervisor, ShutdownPhase, ShutdownSignal,
     ShutdownStats,
 };
+#[cfg(feature = "tls")]
+use crate::tls::TlsAcceptor;
 use crate::tracing_compat::error;
 use crate::web::sse::{Http1SseResponse, StreamingSseSource};
 use crate::{
@@ -691,6 +695,48 @@ where
     pub async fn run(self, runtime: &RuntimeHandle) -> io::Result<ShutdownStats> {
         self.run_with(runtime, spawn_connection::<F, Fut, R>).await
     }
+
+    /// Run the accept loop over TLS until shutdown.
+    ///
+    /// This is the HTTPS/1.1 counterpart to [`Self::run`]. The supplied
+    /// [`TlsAcceptor`] owns certificate, SNI, handshake-timeout, and TLS-level
+    /// ALPN policy. After the handshake this listener admits only HTTP/1.1:
+    /// clients that omit ALPN use the RFC-compatible HTTP/1.1 fallback, while
+    /// any negotiated protocol other than `http/1.1` is refused before request
+    /// bytes reach the handler.
+    ///
+    /// HTTP/1 transport upgrades remain fail-closed on this TLS path because
+    /// the existing public upgrade callback is intentionally typed to the raw
+    /// native [`crate::net::TcpStream`]. Ordinary responses, including Router
+    /// responses, retain the same handler contract as [`Self::run`].
+    ///
+    /// The TCP connection is registered before its handshake begins, so the
+    /// normal connection limit and drain accounting cover slow or silent TLS
+    /// peers. Force-close interrupts an in-progress handshake by dropping its
+    /// transport.
+    #[cfg(feature = "tls")]
+    pub async fn run_tls(
+        self,
+        runtime: &RuntimeHandle,
+        acceptor: TlsAcceptor,
+    ) -> io::Result<ShutdownStats> {
+        self.run_with(
+            runtime,
+            move |stream, guard, handler, config, shutdown, in_flight, runtime| {
+                spawn_tls_connection::<F, Fut, R>(
+                    stream,
+                    guard,
+                    handler,
+                    config,
+                    shutdown,
+                    in_flight,
+                    acceptor.clone(),
+                    runtime,
+                )
+            },
+        )
+        .await
+    }
 }
 
 impl<F, Fut> Http1Listener<F>
@@ -992,6 +1038,60 @@ where
             let session = upgrade.run(session_cx.clone(), io, read_ahead);
             run_upgrade_session(&shutdown_signal, session_cx, session).await;
         }
+    })?;
+    Ok(handle)
+}
+
+/// Spawn one HTTPS/1.1 connection as a runtime task.
+///
+/// The manager guard deliberately enters the task before the TLS handshake.
+/// A force-close phase wins the handshake race and drops the socket, preventing
+/// silent peers from keeping listener shutdown non-quiescent indefinitely.
+#[cfg(feature = "tls")]
+fn spawn_tls_connection<F, Fut, R>(
+    stream: crate::net::tcp::stream::TcpStream,
+    guard: ConnectionGuard,
+    handler: Arc<F>,
+    config: Http1Config,
+    shutdown_signal: ShutdownSignal,
+    in_flight_requests: Arc<AtomicUsize>,
+    acceptor: TlsAcceptor,
+    runtime: &RuntimeHandle,
+) -> Result<JoinHandle<()>, SpawnError>
+where
+    F: Fn(Request) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = R> + Send + 'static,
+    R: IntoHttp1Response + Send + 'static,
+{
+    let handle = runtime.try_spawn(async move {
+        let _guard = guard;
+        let peer_addr = stream.peer_addr().ok();
+        let mut handshake = core::pin::pin!(acceptor.accept(stream));
+        let mut force_closing =
+            core::pin::pin!(shutdown_signal.wait_for_phase(ShutdownPhase::ForceClosing));
+
+        let tls_stream = std::future::poll_fn(|task_cx| {
+            if shutdown_signal.phase() as u8 >= ShutdownPhase::ForceClosing as u8
+                || force_closing.as_mut().poll(task_cx).is_ready()
+            {
+                return Poll::Ready(None);
+            }
+            handshake.as_mut().poll(task_cx).map(Some)
+        })
+        .await;
+        let Some(Ok(mut tls_stream)) = tls_stream else {
+            return;
+        };
+
+        if !matches!(tls_stream.alpn_protocol(), None | Some(b"http/1.1")) {
+            let _ = tls_stream.shutdown().await;
+            return;
+        }
+
+        let server = Http1Server::with_config_upgradeable(move |req| handler(req), config)
+            .with_shutdown_signal(shutdown_signal.clone())
+            .with_in_flight_requests(in_flight_requests);
+        let _ = server.serve_with_peer_addr(tls_stream, peer_addr).await;
     })?;
     Ok(handle)
 }

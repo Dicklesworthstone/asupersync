@@ -17,6 +17,11 @@ use asupersync::net::TcpStream;
 use asupersync::net::websocket::Message;
 use asupersync::runtime::RuntimeBuilder;
 use asupersync::server::shutdown::ShutdownPhase;
+#[cfg(feature = "tls")]
+use asupersync::tls::{
+    Certificate, CertificateChain, PrivateKey, TlsAcceptor, TlsAcceptorBuilder, TlsConnector,
+    TlsConnectorBuilder,
+};
 use asupersync::web::extract::{
     BodyLimits, ExtractionError, Form as FormExtract, FromRequest, FromRequestParts,
     Json as JsonExtract, Path, Query, Request, StreamingRawBody, StreamingRawBodyCollectError,
@@ -1479,6 +1484,176 @@ async fn read_http_head(stream: &mut TcpStream) -> Vec<u8> {
             return head;
         }
     }
+}
+
+#[cfg(feature = "tls")]
+const HTTPS_H1_CERT_PEM: &[u8] = include_bytes!("fixtures/tls/server.crt");
+#[cfg(feature = "tls")]
+const HTTPS_H1_KEY_PEM: &[u8] = include_bytes!("fixtures/tls/server.key");
+
+#[cfg(feature = "tls")]
+fn https_h1_acceptor() -> TlsAcceptor {
+    let chain = CertificateChain::from_pem(HTTPS_H1_CERT_PEM).expect("parse HTTPS/1.1 chain");
+    let key = PrivateKey::from_pem(HTTPS_H1_KEY_PEM).expect("parse HTTPS/1.1 key");
+    TlsAcceptorBuilder::new(chain, key)
+        .alpn_protocols(vec![b"h2".to_vec(), b"http/1.1".to_vec()])
+        .build()
+        .expect("build HTTPS/1.1 acceptor")
+}
+
+#[cfg(feature = "tls")]
+fn https_h1_connector(alpn: Option<&[u8]>) -> TlsConnector {
+    let root = Certificate::from_pem(HTTPS_H1_CERT_PEM)
+        .expect("parse HTTPS/1.1 root")
+        .into_iter()
+        .next()
+        .expect("HTTPS/1.1 fixture contains a certificate");
+    let builder = TlsConnectorBuilder::new().add_root_certificate(&root);
+    let builder = match alpn {
+        Some(protocol) => builder.alpn_protocols_required(vec![protocol.to_vec()]),
+        None => builder,
+    };
+    builder.build().expect("build HTTPS/1.1 connector")
+}
+
+#[cfg(feature = "tls")]
+#[test]
+fn e2e_router_https_h1_listener_routes_and_refuses_cross_protocol_peers() {
+    common::init_test_logging();
+    test_phase!("Router -> TLS acceptor -> HTTP/1 listener");
+
+    let runtime = RuntimeBuilder::new()
+        .worker_threads(2)
+        .build()
+        .expect("build runtime");
+    let handle = runtime.handle();
+
+    runtime.block_on(async move {
+        let handler_calls = Arc::new(AtomicUsize::new(0));
+        let handler_calls_for_route = Arc::clone(&handler_calls);
+        let router = Router::new().route(
+            "/secure",
+            get(FnHandler::new(move || {
+                handler_calls_for_route.fetch_add(1, Ordering::AcqRel);
+                "secure"
+            })),
+        );
+        let listener = Http1Listener::bind_upgradeable_with_config(
+            "127.0.0.1:0",
+            router.into_http1_handler(),
+            Http1ListenerConfig::default()
+                .http_config(Http1Config {
+                    allowed_hosts: HostPolicy::allow_list(vec!["localhost".to_owned()]),
+                    ..Http1Config::default()
+                })
+                .drain_timeout(Duration::from_millis(75))
+                .hard_drain_timeout(Duration::from_secs(2)),
+        )
+        .await
+        .expect("bind HTTPS/1.1 listener");
+        let addr = listener.local_addr().expect("HTTPS/1.1 listener address");
+        let shutdown = listener.shutdown_signal();
+        let manager = listener.connection_manager().clone();
+        let run_handle = handle
+            .clone()
+            .try_spawn(async move { listener.run_tls(&handle, https_h1_acceptor()).await })
+            .expect("spawn HTTPS/1.1 listener");
+
+        for alpn in [Some(b"http/1.1".as_slice()), None] {
+            let tcp = TcpStream::connect(addr)
+                .await
+                .expect("connect HTTPS/1.1 TCP client");
+            let mut client = https_h1_connector(alpn)
+                .connect("localhost", tcp)
+                .await
+                .expect("complete HTTPS/1.1 handshake");
+            client
+                .write_all(
+                    b"GET /secure HTTP/1.1\r\n\
+                      Host: localhost\r\n\
+                      Connection: close\r\n\
+                      \r\n",
+                )
+                .await
+                .expect("write HTTPS/1.1 request");
+            let mut response = Vec::new();
+            client
+                .read_to_end(&mut response)
+                .await
+                .expect("read HTTPS/1.1 response");
+            let response = std::str::from_utf8(&response).expect("ASCII HTTPS/1.1 response");
+            assert!(response.starts_with("HTTP/1.1 200"), "{response:?}");
+            assert!(response.ends_with("secure"), "{response:?}");
+        }
+        assert_eq!(handler_calls.load(Ordering::Acquire), 2);
+
+        let h2_tcp = TcpStream::connect(addr)
+            .await
+            .expect("connect cross-protocol TLS client");
+        let mut h2_client = https_h1_connector(Some(b"h2"))
+            .connect("localhost", h2_tcp)
+            .await
+            .expect("complete h2-negotiated TLS handshake");
+        assert_eq!(h2_client.alpn_protocol(), Some(b"h2".as_slice()));
+        let mut byte = [0_u8; 1];
+        assert_eq!(
+            h2_client
+                .read(&mut byte)
+                .await
+                .expect("read cross-protocol TLS close"),
+            0,
+            "the HTTP/1 listener must cleanly close an h2-negotiated connection"
+        );
+        assert_eq!(handler_calls.load(Ordering::Acquire), 2);
+
+        let mut plaintext = TcpStream::connect(addr)
+            .await
+            .expect("connect plaintext client to TLS listener");
+        plaintext
+            .write_all(b"GET /secure HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .await
+            .expect("write plaintext bytes to TLS listener");
+        let mut refusal = Vec::new();
+        plaintext
+            .read_to_end(&mut refusal)
+            .await
+            .expect("read plaintext refusal");
+        assert!(
+            !refusal.starts_with(b"HTTP/1.1"),
+            "TLS listener must not parse plaintext as HTTP"
+        );
+        assert_eq!(handler_calls.load(Ordering::Acquire), 2);
+
+        let mut silent = TcpStream::connect(addr)
+            .await
+            .expect("connect silent TLS peer");
+        for _ in 0..400 {
+            if manager.active_count() == 1 {
+                break;
+            }
+            asupersync::time::sleep(asupersync::time::wall_now(), Duration::from_millis(5)).await;
+        }
+        assert_eq!(
+            manager.active_count(),
+            1,
+            "silent handshake is registered before TLS completion"
+        );
+        assert!(manager.begin_drain(Duration::from_millis(75)));
+        let stats = run_handle.await.expect("HTTPS/1.1 listener result");
+        assert!(
+            stats.force_closed >= 1,
+            "silent TLS peer forces bounded close"
+        );
+        assert_eq!(shutdown.phase(), ShutdownPhase::Stopped);
+        assert!(manager.is_empty());
+        assert_eq!(handler_calls.load(Ordering::Acquire), 2);
+        assert_eq!(
+            silent.read(&mut byte).await.expect("read silent peer EOF"),
+            0
+        );
+    });
+
+    test_complete!("e2e_router_https_h1_listener");
 }
 
 #[test]
