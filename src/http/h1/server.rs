@@ -5,7 +5,7 @@
 //! framed transport. Supports keep-alive, request limits, idle timeouts,
 //! and graceful shutdown.
 
-use crate::bytes::{BytesCursor, BytesMut};
+use crate::bytes::BytesMut;
 use crate::codec::{Encoder, Framed};
 use crate::cx::Cx;
 use crate::http::body::{Body, Frame};
@@ -15,9 +15,9 @@ use crate::http::h1::codec::{
     validate_header_field,
 };
 use crate::http::h1::stream::{
-    BodyKind, ChunkedEncoder, IncomingBodyDrainProgress, IncomingBodyError, IncomingRequestBody,
-    IncomingRequestBodyWriter, OutgoingBody, OutgoingBodySender, RequestHead, ResponseHead,
-    StreamingServerRequest,
+    BodyKind, ChunkedEncoder, Http1ProducedResponse, Http1ProducedResponseFuture,
+    IncomingBodyDrainProgress, IncomingBodyError, IncomingRequestBody, IncomingRequestBodyWriter,
+    OutgoingBodySender, RequestHead, ResponseHead, StreamingResponse, StreamingServerRequest,
 };
 use crate::http::h1::types::{Method, Request, Response, Version, default_reason};
 use crate::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -1302,6 +1302,25 @@ pub struct Http1StreamingServer<F> {
 }
 
 impl<F> Http1StreamingServer<F> {
+    /// Creates an HTTP/1 server whose handler returns a supervised chunked response.
+    ///
+    /// This is additive to [`Self::new`] and [`Self::new_sse`]. The server owns
+    /// both the produced body and its producer until terminal framing or an
+    /// error closes the connection.
+    pub fn new_produced(handler: F) -> Self {
+        Self::with_config_produced(handler, Http1StreamingConfig::default())
+    }
+
+    /// Creates a produced-body HTTP/1 server with explicit connection limits.
+    pub fn with_config_produced(handler: F, config: impl Into<Http1StreamingConfig>) -> Self {
+        Self {
+            handler,
+            config: config.into(),
+            shutdown_signal: None,
+            in_flight_requests: None,
+        }
+    }
+
     /// Creates an HTTP/1 server whose handler returns one live SSE response.
     ///
     /// This is additive to [`Self::new`]: buffered [`Response`] handlers keep
@@ -1575,7 +1594,7 @@ impl<F> Http1StreamingServer<F> {
     pub async fn serve_sse_with_peer_addr<Fut, S, T>(
         self,
         cx: &Cx,
-        mut io: T,
+        io: T,
         peer_addr: Option<SocketAddr>,
     ) -> Result<ConnectionState, HttpError>
     where
@@ -1584,218 +1603,342 @@ impl<F> Http1StreamingServer<F> {
         S: StreamingSseSource + Send + 'static,
         T: AsyncRead + AsyncWrite + Unpin + Send,
     {
-        let mut read_buffer = BytesMut::with_capacity(8192);
-        let mut state = ConnectionState::new(connection_now(cx));
-
-        if cx.checkpoint().is_err()
-            || self
-                .shutdown_signal
-                .as_ref()
-                .is_some_and(ShutdownSignal::is_shutting_down)
-            || state.exceeded_request_limit(self.config.max_requests_per_connection)
-            || state.exceeded_idle_timeout(self.config.idle_timeout, connection_now(cx))
-        {
-            state.phase = ConnectionPhase::Closing;
-            let _ = io.shutdown().await;
-            return Ok(state);
-        }
-
-        state.phase = ConnectionPhase::Reading;
-        let Some((head, body_kind)) =
-            read_streaming_request_head(cx, &mut io, &mut read_buffer, &self.config).await?
-        else {
-            state.phase = ConnectionPhase::Closing;
-            let _ = io.shutdown().await;
-            return Ok(state);
+        let handler = self.handler;
+        let adapted = move |request_cx: Cx, request: StreamingServerRequest| {
+            let response = handler(request_cx.clone(), request);
+            async move {
+                let (stream, capacity) = response.await.into_parts();
+                let guard = LiveSseCancelGuard::new(stream, request_cx);
+                let mut response = Http1ProducedResponse::chunked(
+                    capacity,
+                    200,
+                    default_reason(200),
+                    move |_producer_cx, sender| produce_live_sse(guard, sender),
+                );
+                for (name, value) in StreamingSse::<VecSseSource>::headers() {
+                    response = response.with_header(name, value);
+                }
+                response
+            }
         };
-        let _in_flight = InFlightRequestGuard::acquire(self.in_flight_requests.as_ref());
-
-        if let Err(rejected_host) = validate_host_header(&head.headers, &self.config.allowed_hosts)
-        {
-            let body = if rejected_host.is_empty() {
-                "Missing required Host header".to_owned()
-            } else {
-                format!("Host '{rejected_host}' not in allowed-hosts allow-list")
-            };
-            let response = Response {
-                status: 421,
-                reason: String::new(),
-                version: head.version,
-                headers: vec![
-                    (
-                        "content-type".to_owned(),
-                        "text/plain; charset=utf-8".to_owned(),
-                    ),
-                    ("connection".to_owned(), "close".to_owned()),
-                ],
-                body: body.into_bytes(),
-                trailers: Vec::new(),
-            };
-            state.phase = ConnectionPhase::Writing;
-            write_streaming_response(cx, &mut io, response).await?;
-            state.requests_served = 1;
-            state.phase = ConnectionPhase::Closing;
-            let _ = io.shutdown().await;
-            return Ok(state);
-        }
-
-        let expectation = classify_expectation_from_parts(head.version, &head.headers);
-        if expectation == ExpectationAction::Reject {
-            let mut response = expectation_response(head.version, expectation)
-                .expect("rejected expectation must have a response");
-            add_connection_close(&mut response);
-            state.phase = ConnectionPhase::Writing;
-            write_streaming_response(cx, &mut io, response).await?;
-            state.requests_served = 1;
-            state.phase = ConnectionPhase::Closing;
-            let _ = io.shutdown().await;
-            return Ok(state);
-        }
-        if expectation == ExpectationAction::Continue && !body_kind.is_empty() {
-            let response = expectation_response(head.version, expectation)
-                .expect("100-continue expectation must have a response");
-            state.phase = ConnectionPhase::Writing;
-            write_streaming_response(cx, &mut io, response).await?;
-        }
-
-        let request_version = head.version;
-        let request_method = head.method.clone();
-        let request_now = connection_now(cx);
-        let (request_budget, budget_source) = derive_request_budget(
-            cx.budget(),
-            request_now,
-            self.config.request_timeout,
-            parse_request_timeout_header(&head.headers),
-            self.config.request_timeout_header_cap,
-        );
-        let region =
-            ServerRequestRegion::mint_from_connection("h1-sse", request_budget, request_now, cx);
-        let request_cx = region.cx().clone();
-        let body_cx = request_cx.clone();
-        let (writer, body) = IncomingRequestBody::channel_with_limits(
-            &request_cx,
-            body_kind,
-            self.config.incoming_body_frame_capacity,
-            self.config.incoming_body_queued_bytes,
-        );
-        let request = StreamingServerRequest {
-            head,
+        serve_produced_connection(
+            cx,
+            io,
             peer_addr,
-            body,
-        };
-        let handler = (self.handler)(request_cx.clone(), request);
-        let guard_cx = request_cx.clone();
-        let handler = async move {
-            let (stream, capacity) = handler.await.into_parts();
-            Some((LiveSseCancelGuard::new(stream, guard_cx), capacity))
-        };
-        let head_committed = AtomicBool::new(false);
+            adapted,
+            self.config,
+            self.shutdown_signal,
+            self.in_flight_requests,
+            ProducedResponsePolicy::Sse,
+        )
+        .await
+    }
 
-        state.phase = ConnectionPhase::Processing;
-        let request_flow = async {
-            let body_driver = drive_incoming_body(
-                &body_cx,
-                &mut io,
-                &mut read_buffer,
-                writer.max_body_size(u64::try_from(self.config.max_body_size).unwrap_or(u64::MAX)),
-                &self.config,
-            );
-            let Some(((guard, capacity), writer)) =
-                join_streaming_handler_and_body(&request_cx, handler, body_driver, &self.config)
-                    .await
-            else {
-                return Err(HttpError::Io(std::io::Error::new(
-                    std::io::ErrorKind::UnexpectedEof,
-                    "request body did not reach synchronized EOF",
-                )));
+    /// Serves one supervised, generic HTTP/1.1 chunked response.
+    pub async fn serve_produced<Fut, T>(self, cx: &Cx, io: T) -> Result<ConnectionState, HttpError>
+    where
+        F: Fn(Cx, StreamingServerRequest) -> Fut + Send + Sync,
+        Fut: Future<Output = Http1ProducedResponse> + Send,
+        T: AsyncRead + AsyncWrite + Unpin + Send,
+    {
+        self.serve_produced_with_peer_addr(cx, io, None).await
+    }
+
+    /// Serves one supervised chunked response and records its peer address.
+    ///
+    /// The response head, bounded body channel, and producer are driven inside
+    /// the request region. A producer error drains frames already committed to
+    /// the channel, while a transport error cancels and boundedly drains the
+    /// producer. Generic terminal trailers are serialized exactly once.
+    pub async fn serve_produced_with_peer_addr<Fut, T>(
+        self,
+        cx: &Cx,
+        io: T,
+        peer_addr: Option<SocketAddr>,
+    ) -> Result<ConnectionState, HttpError>
+    where
+        F: Fn(Cx, StreamingServerRequest) -> Fut + Send + Sync,
+        Fut: Future<Output = Http1ProducedResponse> + Send,
+        T: AsyncRead + AsyncWrite + Unpin + Send,
+    {
+        serve_produced_connection(
+            cx,
+            io,
+            peer_addr,
+            self.handler,
+            self.config,
+            self.shutdown_signal,
+            self.in_flight_requests,
+            ProducedResponsePolicy::Generic,
+        )
+        .await
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProducedResponsePolicy {
+    Sse,
+    Generic,
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+async fn serve_produced_connection<F, Fut, T>(
+    cx: &Cx,
+    mut io: T,
+    peer_addr: Option<SocketAddr>,
+    handler: F,
+    config: Http1StreamingConfig,
+    shutdown_signal: Option<ShutdownSignal>,
+    in_flight_requests: Option<Arc<AtomicUsize>>,
+    policy: ProducedResponsePolicy,
+) -> Result<ConnectionState, HttpError>
+where
+    F: Fn(Cx, StreamingServerRequest) -> Fut + Send + Sync,
+    Fut: Future<Output = Http1ProducedResponse> + Send,
+    T: AsyncRead + AsyncWrite + Unpin + Send,
+{
+    let mut read_buffer = BytesMut::with_capacity(8192);
+    let mut state = ConnectionState::new(connection_now(cx));
+
+    if cx.checkpoint().is_err()
+        || shutdown_signal
+            .as_ref()
+            .is_some_and(ShutdownSignal::is_shutting_down)
+        || state.exceeded_request_limit(config.max_requests_per_connection)
+        || state.exceeded_idle_timeout(config.idle_timeout, connection_now(cx))
+    {
+        state.phase = ConnectionPhase::Closing;
+        let _ = io.shutdown().await;
+        return Ok(state);
+    }
+
+    state.phase = ConnectionPhase::Reading;
+    let Some((head, body_kind)) =
+        read_streaming_request_head(cx, &mut io, &mut read_buffer, &config).await?
+    else {
+        state.phase = ConnectionPhase::Closing;
+        let _ = io.shutdown().await;
+        return Ok(state);
+    };
+    let early_request_method = head.method.clone();
+    let _in_flight = InFlightRequestGuard::acquire(in_flight_requests.as_ref());
+
+    if let Err(rejected_host) = validate_host_header(&head.headers, &config.allowed_hosts) {
+        let body = if rejected_host.is_empty() {
+            "Missing required Host header".to_owned()
+        } else {
+            format!("Host '{rejected_host}' not in allowed-hosts allow-list")
+        };
+        let mut response = Response {
+            status: 421,
+            reason: String::new(),
+            version: head.version,
+            headers: vec![
+                (
+                    "content-type".to_owned(),
+                    "text/plain; charset=utf-8".to_owned(),
+                ),
+                ("connection".to_owned(), "close".to_owned()),
+            ],
+            body: body.into_bytes(),
+            trailers: Vec::new(),
+        };
+        if early_request_method == Method::Head {
+            suppress_response_body_for_head(&mut response);
+        }
+        state.phase = ConnectionPhase::Writing;
+        write_streaming_response(cx, &mut io, response).await?;
+        state.requests_served = 1;
+        state.phase = ConnectionPhase::Closing;
+        let _ = io.shutdown().await;
+        return Ok(state);
+    }
+
+    let expectation = classify_expectation_from_parts(head.version, &head.headers);
+    if expectation == ExpectationAction::Reject {
+        let mut response = expectation_response(head.version, expectation)
+            .expect("rejected expectation must have a response");
+        add_connection_close(&mut response);
+        if early_request_method == Method::Head {
+            suppress_response_body_for_head(&mut response);
+        }
+        state.phase = ConnectionPhase::Writing;
+        write_streaming_response(cx, &mut io, response).await?;
+        state.requests_served = 1;
+        state.phase = ConnectionPhase::Closing;
+        let _ = io.shutdown().await;
+        return Ok(state);
+    }
+    if expectation == ExpectationAction::Continue && !body_kind.is_empty() {
+        let response = expectation_response(head.version, expectation)
+            .expect("100-continue expectation must have a response");
+        state.phase = ConnectionPhase::Writing;
+        write_streaming_response(cx, &mut io, response).await?;
+    }
+
+    let request_version = head.version;
+    let request_method = head.method.clone();
+    let request_now = connection_now(cx);
+    let (request_budget, budget_source) = derive_request_budget(
+        cx.budget(),
+        request_now,
+        config.request_timeout,
+        parse_request_timeout_header(&head.headers),
+        config.request_timeout_header_cap,
+    );
+    let region_name = match policy {
+        ProducedResponsePolicy::Sse => "h1-sse",
+        ProducedResponsePolicy::Generic => "h1-produced",
+    };
+    let region =
+        ServerRequestRegion::mint_from_connection(region_name, request_budget, request_now, cx);
+    let request_cx = region.cx().clone();
+    let body_cx = request_cx.clone();
+    let (writer, body) = IncomingRequestBody::channel_with_limits(
+        &request_cx,
+        body_kind,
+        config.incoming_body_frame_capacity,
+        config.incoming_body_queued_bytes,
+    );
+    let request = StreamingServerRequest {
+        head,
+        peer_addr,
+        body,
+    };
+    let handler = handler(request_cx.clone(), request);
+    let handler = async move { Some(handler.await) };
+    let head_committed = AtomicBool::new(false);
+
+    state.phase = ConnectionPhase::Processing;
+    let request_flow = async {
+        let body_driver = drive_incoming_body(
+            &body_cx,
+            &mut io,
+            &mut read_buffer,
+            writer.max_body_size(u64::try_from(config.max_body_size).unwrap_or(u64::MAX)),
+            &config,
+        );
+        let Some((produced, writer)) =
+            join_streaming_handler_and_body(&request_cx, handler, body_driver, &config).await
+        else {
+            return Err(HttpError::Io(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "request body did not reach synchronized EOF",
+            )));
+        };
+        validate_unread_drain(writer.drain_progress(), &config).map_err(|error| {
+            HttpError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+        })?;
+
+        let rejected_method = match policy {
+            ProducedResponsePolicy::Sse => {
+                request_method != Method::Get && request_method != Method::Head
+            }
+            ProducedResponsePolicy::Generic => request_method == Method::Connect,
+        };
+        if rejected_method {
+            let message = match policy {
+                ProducedResponsePolicy::Sse => "live SSE requires GET or HEAD",
+                ProducedResponsePolicy::Generic => {
+                    "generic chunked responses do not support CONNECT tunnels"
+                }
             };
-            validate_unread_drain(writer.drain_progress(), &self.config).map_err(|error| {
-                HttpError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, error))
-            })?;
-
-            if request_method != Method::Get && request_method != Method::Head {
-                let mut response =
-                    hop_error_response(request_version, 405, "live SSE requires GET or HEAD");
+            let mut response = hop_error_response(request_version, 405, message);
+            if policy == ProducedResponsePolicy::Sse {
                 response
                     .headers
                     .push(("Allow".to_owned(), "GET, HEAD".to_owned()));
-                add_connection_close(&mut response);
-                head_committed.store(true, Ordering::Release);
-                return write_streaming_response(&request_cx, &mut io, response).await;
             }
+            add_connection_close(&mut response);
+            head_committed.store(true, Ordering::Release);
+            return write_streaming_response(&request_cx, &mut io, response).await;
+        }
 
-            if request_version != Version::Http11 {
-                let mut response = hop_error_response(
-                    request_version,
-                    505,
-                    "live SSE requires HTTP/1.1 chunked framing",
-                );
-                add_connection_close(&mut response);
-                head_committed.store(true, Ordering::Release);
-                return write_streaming_response(&request_cx, &mut io, response).await;
-            }
-
+        if request_version != Version::Http11 {
+            let message = match policy {
+                ProducedResponsePolicy::Sse => "live SSE requires HTTP/1.1 chunked framing",
+                ProducedResponsePolicy::Generic => {
+                    "generic produced responses require HTTP/1.1 chunked framing"
+                }
+            };
+            let mut response = hop_error_response(request_version, 505, message);
+            add_connection_close(&mut response);
             if request_method == Method::Head {
-                let response = live_sse_head_only_response(request_version);
-                head_committed.store(true, Ordering::Release);
-                return write_streaming_response(&request_cx, &mut io, response).await;
+                suppress_response_body_for_head(&mut response);
             }
+            head_committed.store(true, Ordering::Release);
+            return write_streaming_response(&request_cx, &mut io, response).await;
+        }
 
-            drive_live_sse_response(
-                &request_cx,
-                &mut io,
-                guard,
-                capacity,
-                request_version,
-                self.config.request_drain_grace,
-                &head_committed,
-            )
-            .await
-        };
-        let hop = race_force_close(
-            self.shutdown_signal.as_ref(),
-            region.run_with_protocol_drain(
-                budget_source,
-                Some(cx.clone()),
-                self.config.request_drain_grace,
-                request_flow,
-            ),
+        if request_method == Method::Head {
+            let response = match policy {
+                ProducedResponsePolicy::Sse => live_sse_head_only_response(request_version),
+                ProducedResponsePolicy::Generic => produced_head_only_response(produced)?,
+            };
+            head_committed.store(true, Ordering::Release);
+            return write_streaming_response(&request_cx, &mut io, response).await;
+        }
+
+        let mut produced = produced;
+        validate_produced_response_head(produced.head_mut(), BodyKind::Chunked)?;
+        let (response, producer) = produced.into_parts(&request_cx);
+        drive_produced_response(
+            &request_cx,
+            &mut io,
+            response,
+            producer,
+            policy == ProducedResponsePolicy::Generic,
+            config.request_drain_grace,
+            &head_committed,
         )
-        .await;
+        .await
+    };
+    let hop = race_force_close(
+        shutdown_signal.as_ref(),
+        region.run_with_protocol_drain(
+            budget_source,
+            Some(cx.clone()),
+            config.request_drain_grace,
+            request_flow,
+        ),
+    )
+    .await;
 
-        state.requests_served = 1;
-        state.last_request_at = connection_now(cx);
-        state.phase = ConnectionPhase::Closing;
-        let result = match hop {
-            None | Some(ServerHopOutcome::Cancelled | ServerHopOutcome::ConnectionLost) => Ok(()),
-            Some(ServerHopOutcome::Ok(result)) => result,
-            Some(ServerHopOutcome::Panicked(_)) => {
-                if !head_committed.load(Ordering::Acquire) {
-                    let mut response =
-                        hop_error_response(request_version, 500, "Internal Server Error");
-                    add_connection_close(&mut response);
-                    write_streaming_response(cx, &mut io, response).await
-                } else {
-                    Ok(())
+    state.requests_served = 1;
+    state.last_request_at = connection_now(cx);
+    state.phase = ConnectionPhase::Closing;
+    let result = match hop {
+        None | Some(ServerHopOutcome::Cancelled | ServerHopOutcome::ConnectionLost) => Ok(()),
+        Some(ServerHopOutcome::Ok(result)) => result,
+        Some(ServerHopOutcome::Panicked(_)) => {
+            if !head_committed.load(Ordering::Acquire) {
+                let mut response =
+                    hop_error_response(request_version, 500, "Internal Server Error");
+                add_connection_close(&mut response);
+                if request_method == Method::Head {
+                    suppress_response_body_for_head(&mut response);
                 }
+                write_streaming_response(cx, &mut io, response).await
+            } else {
+                Ok(())
             }
-            Some(ServerHopOutcome::DeadlineExceeded) => {
-                if !head_committed.load(Ordering::Acquire) {
-                    let mut response = hop_error_response(
-                        request_version,
-                        503,
-                        "request budget deadline exceeded",
-                    );
-                    add_connection_close(&mut response);
-                    write_streaming_response(cx, &mut io, response).await
-                } else {
-                    Ok(())
+        }
+        Some(ServerHopOutcome::DeadlineExceeded) => {
+            if !head_committed.load(Ordering::Acquire) {
+                let mut response =
+                    hop_error_response(request_version, 503, "request budget deadline exceeded");
+                add_connection_close(&mut response);
+                if request_method == Method::Head {
+                    suppress_response_body_for_head(&mut response);
                 }
+                write_streaming_response(cx, &mut io, response).await
+            } else {
+                Ok(())
             }
-        };
-        let _ = io.shutdown().await;
-        result.map(|()| state)
-    }
+        }
+    };
+    let _ = io.shutdown().await;
+    result.map(|()| state)
 }
 
 fn connection_now(cx: &Cx) -> crate::types::Time {
@@ -1814,7 +1957,13 @@ fn live_sse_head_only_response(version: Version) -> Response {
     response
 }
 
-fn validate_live_sse_head(head: &mut ResponseHead, body: &OutgoingBody) -> Result<(), HttpError> {
+fn validate_produced_response_head(
+    head: &mut ResponseHead,
+    body_kind: BodyKind,
+) -> Result<(), HttpError> {
+    if matches!(head.status, 100..=199 | 204 | 205 | 304) {
+        return Err(HttpError::BadTransferEncoding);
+    }
     if head.reason.contains('\r') || head.reason.contains('\n') {
         return Err(HttpError::BadHeader);
     }
@@ -1838,10 +1987,28 @@ fn validate_live_sse_head(head: &mut ResponseHead, body: &OutgoingBody) -> Resul
     }
     let transfer_encoding = transfer_encoding.ok_or(HttpError::BadTransferEncoding)?;
     require_transfer_encoding_chunked(trim_ows(transfer_encoding))?;
-    if body.kind() != BodyKind::Chunked {
+    if body_kind != BodyKind::Chunked {
         return Err(HttpError::BadTransferEncoding);
     }
     Ok(())
+}
+
+fn produced_head_only_response(produced: Http1ProducedResponse) -> Result<Response, HttpError> {
+    let mut head = produced.into_head();
+    validate_produced_response_head(&mut head, BodyKind::Chunked)?;
+    let mut response = Response::new(head.status, head.reason, Vec::new());
+    response.version = Version::Http11;
+    response.headers = head
+        .headers
+        .into_iter()
+        .filter(|(name, _)| {
+            !name.eq_ignore_ascii_case("transfer-encoding")
+                && !name.eq_ignore_ascii_case("connection")
+                && !name.eq_ignore_ascii_case("trailer")
+        })
+        .collect();
+    add_connection_close(&mut response);
+    Ok(response)
 }
 
 struct LiveSseCancelGuard<S: StreamingSseSource> {
@@ -1889,6 +2056,7 @@ async fn produce_live_sse<S>(
 where
     S: StreamingSseSource,
 {
+    guard.arm_transport();
     loop {
         match guard
             .stream
@@ -1924,9 +2092,10 @@ fn live_sse_transport_error(error: StreamingSseTransportError) -> HttpError {
     }
 }
 
+#[cfg(test)]
 fn encode_live_sse_frame(
     encoder: &mut ChunkedEncoder,
-    frame: Frame<BytesCursor>,
+    frame: Frame<crate::bytes::BytesCursor>,
     destination: &mut BytesMut,
 ) -> Result<(), HttpError> {
     if frame.is_trailers() {
@@ -1936,42 +2105,47 @@ fn encode_live_sse_frame(
     Ok(())
 }
 
-async fn drain_live_sse_producer_after_write_error<P>(
+async fn drain_producer_after_write_error<P>(
     cx: &Cx,
     producer: Pin<&mut P>,
     producer_result: &mut Option<Result<OutgoingBodySender, HttpError>>,
     drain_grace: Duration,
 ) where
-    P: Future<Output = Result<OutgoingBodySender, HttpError>>,
+    P: Future<Output = Result<OutgoingBodySender, HttpError>> + ?Sized,
 {
     cx.cancel_with(
         CancelKind::ParentCancelled,
-        Some("HTTP/1 SSE client transport disconnected"),
+        Some("HTTP/1 produced-body client transport disconnected"),
     );
     if producer_result.is_none() {
         let _ = timeout(connection_now(cx), drain_grace, producer).await;
     }
 }
 
-async fn drive_live_sse_response<S, T>(
+fn normalize_producer_result(
+    result: Result<OutgoingBodySender, HttpError>,
+) -> Result<OutgoingBodySender, HttpError> {
+    match result {
+        Ok(sender) if sender.is_finished() => Ok(sender),
+        Ok(_unfinished_sender) => Err(HttpError::BodyChannelClosed),
+        Err(error) => Err(error),
+    }
+}
+
+async fn drive_produced_response<T>(
     cx: &Cx,
     io: &mut T,
-    mut guard: LiveSseCancelGuard<S>,
-    capacity: std::num::NonZeroUsize,
-    request_version: Version,
+    mut response: StreamingResponse,
+    mut producer: Http1ProducedResponseFuture,
+    allow_trailers: bool,
     drain_grace: Duration,
     head_committed: &AtomicBool,
 ) -> Result<(), HttpError>
 where
-    S: StreamingSseSource,
     T: AsyncWrite + Unpin,
 {
-    debug_assert_eq!(request_version, Version::Http11);
-    let (mut response, sender) = guard.stream.h1_chunked_response(cx, capacity.get());
-    validate_live_sse_head(&mut response.head, &response.body)?;
+    validate_produced_response_head(&mut response.head, response.body.kind())?;
     let encoded_head = response.head.serialize();
-    guard.arm_transport();
-    let mut producer = std::pin::pin!(produce_live_sse(guard, sender));
     let mut producer_result = None;
 
     // Once this write is attempted, a partial head may be visible. Every
@@ -1979,23 +2153,13 @@ where
     // status or a clean chunk terminator.
     head_committed.store(true, Ordering::Release);
     if let Err(error) = io.write_all(encoded_head.as_ref()).await {
-        drain_live_sse_producer_after_write_error(
-            cx,
-            producer.as_mut(),
-            &mut producer_result,
-            drain_grace,
-        )
-        .await;
+        drain_producer_after_write_error(cx, producer.as_mut(), &mut producer_result, drain_grace)
+            .await;
         return Err(HttpError::Io(error));
     }
     if let Err(error) = io.flush().await {
-        drain_live_sse_producer_after_write_error(
-            cx,
-            producer.as_mut(),
-            &mut producer_result,
-            drain_grace,
-        )
-        .await;
+        drain_producer_after_write_error(cx, producer.as_mut(), &mut producer_result, drain_grace)
+            .await;
         return Err(HttpError::Io(error));
     }
 
@@ -2005,7 +2169,7 @@ where
             if producer_result.is_none()
                 && let Poll::Ready(result) = producer.as_mut().poll(task_cx)
             {
-                producer_result = Some(result);
+                producer_result = Some(normalize_producer_result(result));
             }
             Pin::new(&mut response.body).poll_frame(task_cx)
         })
@@ -2030,7 +2194,40 @@ where
 
         let frame = frame?;
         let mut encoded_frame = BytesMut::new();
-        encode_live_sse_frame(&mut encoder, frame, &mut encoded_frame)?;
+        match frame {
+            Frame::Data(data) => encoder.encode_frame(Frame::Data(data), &mut encoded_frame),
+            Frame::Trailers(trailers) => {
+                if !allow_trailers {
+                    return Err(HttpError::TrailersNotAllowed);
+                }
+                let producer_result = match producer_result.take() {
+                    Some(result) => result,
+                    None => normalize_producer_result(producer.as_mut().await),
+                };
+                let sender = producer_result?;
+                if encoder.is_finished() {
+                    return Err(HttpError::BodyChannelClosed);
+                }
+                debug_assert!(sender.is_finished());
+                encoder.finalize(Some(&trailers), &mut encoded_frame);
+
+                if let Err(error) = io.write_all(encoded_frame.as_ref()).await {
+                    cx.cancel_with(
+                        CancelKind::ParentCancelled,
+                        Some("HTTP/1 produced-body client transport disconnected"),
+                    );
+                    return Err(HttpError::Io(error));
+                }
+                if let Err(error) = io.flush().await {
+                    cx.cancel_with(
+                        CancelKind::ParentCancelled,
+                        Some("HTTP/1 produced-body client transport disconnected"),
+                    );
+                    return Err(HttpError::Io(error));
+                }
+                return Ok(());
+            }
+        }
         let write_frame = async {
             io.write_all(encoded_frame.as_ref())
                 .await
@@ -2045,7 +2242,7 @@ where
             if producer_result.is_none()
                 && let Poll::Ready(result) = producer.as_mut().poll(task_cx)
             {
-                producer_result = Some(result);
+                producer_result = Some(normalize_producer_result(result));
             }
             Poll::Pending
         })
@@ -2053,6 +2250,9 @@ where
 
         match write_result {
             Ok(()) => {
+                if encoder.is_finished() {
+                    return Ok(());
+                }
                 // A fast in-memory or kernel-buffered writer can otherwise
                 // keep an infinite source inside one poll forever. Yield at
                 // each committed frame so connection cancellation, request
@@ -2060,7 +2260,7 @@ where
                 crate::runtime::yield_now().await;
             }
             Err(error) => {
-                drain_live_sse_producer_after_write_error(
+                drain_producer_after_write_error(
                     cx,
                     producer.as_mut(),
                     &mut producer_result,
@@ -2850,7 +3050,7 @@ mod tests {
         clippy::future_not_send
     )]
     use super::*;
-    use crate::http::body::Body;
+    use crate::http::body::{Body, HeaderMap, HeaderName, HeaderValue};
     use crate::http::h1::types::Method;
     use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
     use crate::runtime::RuntimeBuilder;
@@ -3677,6 +3877,374 @@ mod tests {
         assert!(head.contains("Transfer-Encoding: chunked\r\n"));
         assert!(head.contains("content-type: text/event-stream\r\n"));
         assert_eq!(response_body_bytes(&written), b"0\r\n\r\n");
+    }
+
+    #[test]
+    fn produced_chunked_response_writes_multiple_frames_and_one_terminator() {
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let io = TestIo::new(
+            b"GET /stream HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n".to_vec(),
+            Arc::clone(&written),
+        );
+        let server = Http1StreamingServer::with_config_produced(
+            |_cx, _request| async move {
+                Http1ProducedResponse::chunked(
+                    NonZeroUsize::MIN,
+                    200,
+                    "OK",
+                    |producer_cx, mut sender| async move {
+                        sender.send_chunk(&producer_cx, b"alpha").await?;
+                        sender.send_chunk(&producer_cx, b"beta").await?;
+                        sender.finish(&producer_cx)?;
+                        Ok(sender)
+                    },
+                )
+            },
+            localhost_server_config(),
+        );
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("build current-thread runtime");
+
+        let state = runtime
+            .block_on(async {
+                let cx = Cx::current().expect("runtime connection context");
+                server.serve_produced(&cx, io).await
+            })
+            .expect("serve generic produced response");
+
+        assert_eq!(state.requests_served, 1);
+        let written = written.lock().unwrap().clone();
+        let mut expected = ChunkedEncoder::encode_chunk(b"alpha").into_vec();
+        expected.extend_from_slice(ChunkedEncoder::encode_chunk(b"beta").as_ref());
+        expected.extend_from_slice(b"0\r\n\r\n");
+        assert_eq!(response_body_bytes(&written), expected);
+    }
+
+    #[test]
+    fn produced_chunked_response_drains_committed_frames_before_producer_error() {
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let io = TestIo::new(
+            b"GET /stream HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n".to_vec(),
+            Arc::clone(&written),
+        );
+        let server = Http1StreamingServer::with_config_produced(
+            |_cx, _request| async move {
+                Http1ProducedResponse::chunked(
+                    NonZeroUsize::new(2).unwrap(),
+                    200,
+                    "OK",
+                    |producer_cx, mut sender| async move {
+                        sender.send_chunk(&producer_cx, b"first").await?;
+                        sender.send_chunk(&producer_cx, b"second").await?;
+                        Err(io::Error::other("original produced-body failure").into())
+                    },
+                )
+            },
+            localhost_server_config(),
+        );
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("build current-thread runtime");
+
+        let error = runtime
+            .block_on(async {
+                let cx = Cx::current().expect("runtime connection context");
+                server.serve_produced(&cx, io).await
+            })
+            .expect_err("producer failure must fail the response");
+
+        assert!(
+            matches!(error, HttpError::Io(ref source) if source.to_string() == "original produced-body failure")
+        );
+        let written = written.lock().unwrap().clone();
+        let mut expected = ChunkedEncoder::encode_chunk(b"first").into_vec();
+        expected.extend_from_slice(ChunkedEncoder::encode_chunk(b"second").as_ref());
+        assert_eq!(response_body_bytes(&written), expected);
+        assert!(!response_body_bytes(&written).ends_with(b"0\r\n\r\n"));
+    }
+
+    #[test]
+    fn produced_chunked_response_unfinished_success_drains_then_fails() {
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let io = TestIo::new(
+            b"GET /stream HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n".to_vec(),
+            Arc::clone(&written),
+        );
+        let server = Http1StreamingServer::with_config_produced(
+            |_cx, _request| async move {
+                Http1ProducedResponse::chunked(
+                    NonZeroUsize::MIN,
+                    200,
+                    "OK",
+                    |producer_cx, mut sender| async move {
+                        sender.send_chunk(&producer_cx, b"committed").await?;
+                        Ok(sender)
+                    },
+                )
+            },
+            localhost_server_config(),
+        );
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("build current-thread runtime");
+
+        let error = runtime
+            .block_on(async {
+                let cx = Cx::current().expect("runtime connection context");
+                server.serve_produced(&cx, io).await
+            })
+            .expect_err("unfinished successful producer must fail closed");
+
+        assert!(matches!(error, HttpError::BodyChannelClosed));
+        let written = written.lock().unwrap().clone();
+        assert_eq!(
+            response_body_bytes(&written),
+            ChunkedEncoder::encode_chunk(b"committed").as_ref()
+        );
+    }
+
+    #[test]
+    fn produced_chunked_response_writes_terminal_trailers_without_repoll() {
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let source_calls = Arc::new(AtomicUsize::new(0));
+        let eof_calls = Arc::new(AtomicUsize::new(0));
+        let observation = Arc::new(Mutex::new(None));
+        let io = ScriptedWriteIo::new(
+            Arc::clone(&written),
+            source_calls,
+            eof_calls,
+            observation,
+            BodyWriteDisposition::GateOnceBeforeObservation { after_writes: 1 },
+        );
+        let server = Http1StreamingServer::with_config_produced(
+            |_cx, _request| async move {
+                Http1ProducedResponse::chunked(
+                    NonZeroUsize::MIN,
+                    200,
+                    "OK",
+                    |producer_cx, mut sender| async move {
+                        sender.send_chunk(&producer_cx, b"payload").await?;
+                        let mut trailers = HeaderMap::new();
+                        trailers.append(
+                            HeaderName::from_static("x-checksum"),
+                            HeaderValue::from_static("verified"),
+                        );
+                        sender.send_trailers(&producer_cx, trailers).await?;
+                        Ok(sender)
+                    },
+                )
+                .with_header("Trailer", "x-checksum")
+            },
+            localhost_server_config(),
+        );
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("build current-thread runtime");
+
+        runtime
+            .block_on(async {
+                let cx = Cx::current().expect("runtime connection context");
+                server.serve_produced(&cx, io).await
+            })
+            .expect("serve produced response with terminal trailers");
+
+        let written = written.lock().unwrap().clone();
+        let mut expected = ChunkedEncoder::encode_chunk(b"payload").into_vec();
+        expected.extend_from_slice(b"0\r\nx-checksum: verified\r\n\r\n");
+        assert_eq!(response_body_bytes(&written), expected);
+    }
+
+    #[test]
+    fn produced_chunked_response_rejects_ambiguous_head_before_factory() {
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let factory_calls = Arc::new(AtomicUsize::new(0));
+        let factory_calls_for_handler = Arc::clone(&factory_calls);
+        let io = TestIo::new(
+            b"GET /stream HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n".to_vec(),
+            Arc::clone(&written),
+        );
+        let server = Http1StreamingServer::with_config_produced(
+            move |_cx, _request| {
+                let factory_calls = Arc::clone(&factory_calls_for_handler);
+                async move {
+                    Http1ProducedResponse::chunked(
+                        NonZeroUsize::MIN,
+                        200,
+                        "OK",
+                        move |_producer_cx, sender| {
+                            factory_calls.fetch_add(1, Ordering::SeqCst);
+                            async move { Ok(sender) }
+                        },
+                    )
+                    .with_header("Content-Length", "7")
+                }
+            },
+            localhost_server_config(),
+        );
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("build current-thread runtime");
+
+        let error = runtime
+            .block_on(async {
+                let cx = Cx::current().expect("runtime connection context");
+                server.serve_produced(&cx, io).await
+            })
+            .expect_err("Content-Length plus chunked must fail before head commit");
+
+        assert!(matches!(error, HttpError::AmbiguousBodyLength));
+        assert_eq!(factory_calls.load(Ordering::SeqCst), 0);
+        assert!(written.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn produced_chunked_response_head_drops_factory_without_polling_or_framing() {
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let factory_calls = Arc::new(AtomicUsize::new(0));
+        let factory_calls_for_handler = Arc::clone(&factory_calls);
+        let io = TestIo::new(
+            b"HEAD /stream HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n".to_vec(),
+            Arc::clone(&written),
+        );
+        let server = Http1StreamingServer::with_config_produced(
+            move |_cx, _request| {
+                let factory_calls = Arc::clone(&factory_calls_for_handler);
+                async move {
+                    Http1ProducedResponse::chunked(
+                        NonZeroUsize::MIN,
+                        200,
+                        "OK",
+                        move |_producer_cx, sender| {
+                            factory_calls.fetch_add(1, Ordering::SeqCst);
+                            async move { Ok(sender) }
+                        },
+                    )
+                    .with_header("Trailer", "x-checksum")
+                }
+            },
+            localhost_server_config(),
+        );
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("build current-thread runtime");
+
+        runtime
+            .block_on(async {
+                let cx = Cx::current().expect("runtime connection context");
+                server.serve_produced(&cx, io).await
+            })
+            .expect("serve produced HEAD response");
+
+        assert_eq!(factory_calls.load(Ordering::SeqCst), 0);
+        let written = written.lock().unwrap().clone();
+        let head = String::from_utf8_lossy(&written);
+        assert!(!head.contains("Transfer-Encoding"));
+        assert!(!head.contains("Trailer:"));
+        assert!(response_body_bytes(&written).is_empty());
+    }
+
+    #[test]
+    fn produced_chunked_response_rejects_body_forbidden_status_before_factory() {
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let factory_calls = Arc::new(AtomicUsize::new(0));
+        let factory_calls_for_handler = Arc::clone(&factory_calls);
+        let io = TestIo::new(
+            b"GET /stream HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n".to_vec(),
+            Arc::clone(&written),
+        );
+        let server = Http1StreamingServer::with_config_produced(
+            move |_cx, _request| {
+                let factory_calls = Arc::clone(&factory_calls_for_handler);
+                async move {
+                    Http1ProducedResponse::chunked(
+                        NonZeroUsize::MIN,
+                        204,
+                        "No Content",
+                        move |_producer_cx, sender| {
+                            factory_calls.fetch_add(1, Ordering::SeqCst);
+                            async move { Ok(sender) }
+                        },
+                    )
+                }
+            },
+            localhost_server_config(),
+        );
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("build current-thread runtime");
+
+        let error = runtime
+            .block_on(async {
+                let cx = Cx::current().expect("runtime connection context");
+                server.serve_produced(&cx, io).await
+            })
+            .expect_err("204 chunked body must fail before head commit");
+
+        assert!(matches!(error, HttpError::BadTransferEncoding));
+        assert_eq!(factory_calls.load(Ordering::SeqCst), 0);
+        assert!(written.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn produced_chunked_response_disconnect_cancels_and_drains_producer() {
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let producer_calls = Arc::new(AtomicUsize::new(0));
+        let cancellation_calls = Arc::new(AtomicUsize::new(0));
+        let observation = Arc::new(Mutex::new(None));
+        let io = ScriptedWriteIo::new(
+            Arc::clone(&written),
+            Arc::clone(&producer_calls),
+            Arc::new(AtomicUsize::new(0)),
+            observation,
+            BodyWriteDisposition::FailAfter { after_writes: 1 },
+        );
+        let producer_calls_for_handler = Arc::clone(&producer_calls);
+        let cancellation_calls_for_handler = Arc::clone(&cancellation_calls);
+        let server = Http1StreamingServer::with_config_produced(
+            move |_cx, _request| {
+                let producer_calls = Arc::clone(&producer_calls_for_handler);
+                let cancellation_calls = Arc::clone(&cancellation_calls_for_handler);
+                async move {
+                    Http1ProducedResponse::chunked(
+                        NonZeroUsize::MIN,
+                        200,
+                        "OK",
+                        move |producer_cx, mut sender| async move {
+                            loop {
+                                producer_calls.fetch_add(1, Ordering::SeqCst);
+                                if let Err(error) = sender.send_chunk(&producer_cx, b"live").await {
+                                    cancellation_calls.fetch_add(1, Ordering::SeqCst);
+                                    return Err(error);
+                                }
+                            }
+                        },
+                    )
+                }
+            },
+            localhost_server_config(),
+        );
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("build current-thread runtime");
+
+        let error = runtime
+            .block_on(async {
+                let cx = Cx::current().expect("runtime connection context");
+                server.serve_produced(&cx, io).await
+            })
+            .expect_err("scripted disconnect must fail the produced response");
+
+        assert!(
+            matches!(error, HttpError::Io(ref source) if source.kind() == io::ErrorKind::BrokenPipe)
+        );
+        assert_eq!(cancellation_calls.load(Ordering::SeqCst), 1);
+        let written = written.lock().unwrap().clone();
+        assert_eq!(
+            response_body_bytes(&written),
+            ChunkedEncoder::encode_chunk(b"live").as_ref()
+        );
+        assert!(!response_body_bytes(&written).ends_with(b"0\r\n\r\n"));
     }
 
     struct GatedBodyIo {

@@ -15,6 +15,7 @@
 //! - [`BodyKind`]: Body length determination (fixed vs chunked)
 
 use std::future::Future;
+use std::num::NonZeroUsize;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
@@ -1853,6 +1854,13 @@ impl OutgoingBodySender {
         if self.finished {
             return Err(HttpError::BodyChannelClosed);
         }
+        for (name, value) in trailers.iter() {
+            let value = value.to_str().map_err(|_| HttpError::InvalidHeaderValue)?;
+            validate_header_field(name.as_str(), value)?;
+            if is_forbidden_trailer(name.as_str()) {
+                return Err(HttpError::BadHeader);
+            }
+        }
         self.send_frame(cx, Frame::Trailers(trailers)).await?;
         self.finished = true;
         self.close_sender();
@@ -2124,6 +2132,95 @@ pub struct StreamingResponse {
     pub head: ResponseHead,
     /// Response body.
     pub body: OutgoingBody,
+}
+
+pub(crate) type Http1ProducedResponseFuture =
+    Pin<Box<dyn Future<Output = Result<OutgoingBodySender, HttpError>> + Send + 'static>>;
+type Http1ProducedResponseFactory =
+    Box<dyn FnOnce(Cx, OutgoingBodySender) -> Http1ProducedResponseFuture + Send + 'static>;
+
+/// A channel-bound HTTP/1.1 chunked response and its supervised producer.
+///
+/// Construction records a response head, frame capacity, and producer factory.
+/// The server creates the [`StreamingResponse`] and [`OutgoingBodySender`] as
+/// one pair under the authoritative request [`Cx`], so callers cannot attach a
+/// producer to another channel or context. The producer returns its sender on
+/// clean completion; the server accepts EOF only when that sender reports
+/// [`OutgoingBodySender::is_finished`].
+///
+/// This low-level response is consumed by
+/// [`crate::http::h1::Http1StreamingServer::serve_produced`]. It is additive to
+/// the buffered web and HTTP/1 response APIs.
+pub struct Http1ProducedResponse {
+    head: ResponseHead,
+    capacity: NonZeroUsize,
+    producer: Http1ProducedResponseFactory,
+}
+
+impl std::fmt::Debug for Http1ProducedResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Http1ProducedResponse")
+            .field("head", &self.head)
+            .field("capacity", &self.capacity)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Http1ProducedResponse {
+    /// Create a bounded chunked response whose producer is owned by the server.
+    ///
+    /// The producer receives the authoritative request [`Cx`] and the sole
+    /// body sender only after the server validates the request method, HTTP
+    /// version, and response head. It must call [`OutgoingBodySender::finish`] or
+    /// [`OutgoingBodySender::send_trailers`] and return the sender to establish
+    /// authoritative clean completion. Producer errors close the connection
+    /// without a successful chunk terminator.
+    #[must_use]
+    pub fn chunked<P, Fut>(
+        capacity: NonZeroUsize,
+        status: u16,
+        reason: impl Into<String>,
+        producer: P,
+    ) -> Self
+    where
+        P: FnOnce(Cx, OutgoingBodySender) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<OutgoingBodySender, HttpError>> + Send + 'static,
+    {
+        let head = ResponseHead::new(status, reason).with_header("Transfer-Encoding", "chunked");
+        Self {
+            head,
+            capacity,
+            producer: Box::new(move |cx, sender| Box::pin(producer(cx, sender))),
+        }
+    }
+
+    /// Append one response header for validation and serialization by the server.
+    #[must_use]
+    pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.head.headers.push((name.into(), value.into()));
+        self
+    }
+
+    pub(crate) fn into_head(self) -> ResponseHead {
+        self.head
+    }
+
+    pub(crate) fn head_mut(&mut self) -> &mut ResponseHead {
+        &mut self.head
+    }
+
+    pub(crate) fn into_parts(self, cx: &Cx) -> (StreamingResponse, Http1ProducedResponseFuture) {
+        let (sender, body) =
+            OutgoingBody::channel_with_capacity(cx, BodyKind::Chunked, self.capacity.get());
+        let producer = (self.producer)(cx.clone(), sender);
+        (
+            StreamingResponse {
+                head: self.head,
+                body,
+            },
+            producer,
+        )
+    }
 }
 
 impl StreamingResponse {
@@ -2762,6 +2859,44 @@ mod tests {
             poll_body(&mut body).is_none(),
             "next poll should complete stream"
         );
+    }
+
+    #[test]
+    fn outgoing_body_rejects_forbidden_trailers_without_consuming_state() {
+        let cx: Cx = Cx::for_testing();
+        let (mut sender, _body) = OutgoingBody::channel(&cx, BodyKind::Chunked);
+        let mut trailers = HeaderMap::new();
+        trailers.insert(
+            HeaderName::from_static("content-length"),
+            HeaderValue::from_static("7"),
+        );
+
+        let error = block_on(sender.send_trailers(&cx, trailers))
+            .expect_err("framing trailers must fail before enqueue");
+
+        assert!(matches!(error, HttpError::BadHeader));
+        assert!(!sender.is_finished());
+        block_on(sender.send_bytes(&cx, Bytes::from_static(b"still-open")))
+            .expect("rejected trailers must leave sender usable");
+    }
+
+    #[test]
+    fn outgoing_body_rejects_non_utf8_trailers_without_consuming_state() {
+        let cx: Cx = Cx::for_testing();
+        let (mut sender, _body) = OutgoingBody::channel(&cx, BodyKind::Chunked);
+        let mut trailers = HeaderMap::new();
+        trailers.insert(
+            HeaderName::from_static("x-binary"),
+            HeaderValue::from_bytes(&[0xff]),
+        );
+
+        let error = block_on(sender.send_trailers(&cx, trailers))
+            .expect_err("unencodable trailers must fail before enqueue");
+
+        assert!(matches!(error, HttpError::InvalidHeaderValue));
+        assert!(!sender.is_finished());
+        block_on(sender.send_bytes(&cx, Bytes::from_static(b"still-open")))
+            .expect("rejected trailers must leave sender usable");
     }
 
     #[test]

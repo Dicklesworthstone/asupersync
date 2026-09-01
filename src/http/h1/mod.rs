@@ -47,9 +47,10 @@ pub use server::{
     IntoHttp1Response,
 };
 pub use stream::{
-    BodyKind, ChunkedEncoder, IncomingBody, IncomingBodyError, IncomingBodyWriter,
-    IncomingRequestBody, IncomingRequestBodyWriter, OutgoingBody, OutgoingBodySender, RequestHead,
-    ResponseHead, StreamingRequest, StreamingResponse, StreamingServerRequest,
+    BodyKind, ChunkedEncoder, Http1ProducedResponse, IncomingBody, IncomingBodyError,
+    IncomingBodyWriter, IncomingRequestBody, IncomingRequestBodyWriter, OutgoingBody,
+    OutgoingBodySender, RequestHead, ResponseHead, StreamingRequest, StreamingResponse,
+    StreamingServerRequest,
 };
 pub use types::{
     Method, MultipartError, MultipartForm, Request, RequestBuilder, Response, ResponseBuilder,
