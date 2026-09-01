@@ -1,7 +1,13 @@
 //! Request-aware graceful drain e2e for the HTTP/1.1 listener
 //! (br-asupersync-server-stack-hardening-eeexl1.2, D2.2b).
 //!
-//! Two scenarios against a real `Http1Listener` on a multi-thread runtime:
+//! Five scenarios against a real `Http1Listener` on a multi-thread runtime:
+//!   - `produced_listener_writes_chunks_and_terminal_trailers`: the production
+//!     listener writes multiple bounded chunks and exactly one trailer-bearing
+//!     terminator over a real TCP connection.
+//!   - `produced_listener_finishes_in_flight_body_during_drain`: a parked
+//!     produced body remains in the listener request count and finishes inside
+//!     a graceful drain without force-close.
 //!   - `drain_completes_in_flight_requests`: many requests are in flight when
 //!     the drain begins with a generous soft budget; every one completes with
 //!     a `200` that advertises `Connection: close`, nothing is force-closed,
