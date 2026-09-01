@@ -40,8 +40,12 @@ use crate::server::shutdown::{
 use crate::stream::Stream;
 use crate::tracing_compat::error;
 use crate::types::Time;
-use crate::web::request_region::{ServerHopOutcome, ServerRequestRegion, derive_request_budget};
-use std::collections::{BTreeMap, HashMap};
+use crate::web::WebBodyDiagnostic;
+use crate::web::request_region::{
+    HTTP_DEADLINE_EXHAUSTED_DIAGNOSTIC, ServerHopOutcome, ServerProducerCancellation,
+    ServerRequestRegion, classify_server_producer_cancellation, derive_request_budget,
+};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::future::Future;
 use std::io;
 use std::net::{SocketAddr, ToSocketAddrs};
@@ -1043,7 +1047,36 @@ enum Http2ProducerOutcome {
         terminal: Http2ProducerTerminal,
     },
     Failed,
+    DeadlineExceeded,
+    ConnectionLost,
     Cancelled,
+}
+
+fn classify_h2_producer_hop(
+    hop: Option<ServerHopOutcome<Result<Http2BodySender, HttpError>>>,
+    producer_cx: &Cx,
+) -> Http2ProducerOutcome {
+    match hop {
+        Some(ServerHopOutcome::Ok(Ok(sender))) if sender.is_finished() => {
+            Http2ProducerOutcome::Finished {
+                total_bytes: sender.total_bytes(),
+                terminal: sender.terminal,
+            }
+        }
+        Some(ServerHopOutcome::Ok(Err(HttpError::BodyCancelled))) => {
+            match classify_server_producer_cancellation(producer_cx) {
+                ServerProducerCancellation::DeadlineExceeded => {
+                    Http2ProducerOutcome::DeadlineExceeded
+                }
+                ServerProducerCancellation::Cancelled => Http2ProducerOutcome::Cancelled,
+            }
+        }
+        Some(ServerHopOutcome::Ok(Ok(_)) | ServerHopOutcome::Ok(Err(_)))
+        | Some(ServerHopOutcome::Panicked(_)) => Http2ProducerOutcome::Failed,
+        Some(ServerHopOutcome::DeadlineExceeded) => Http2ProducerOutcome::DeadlineExceeded,
+        Some(ServerHopOutcome::ConnectionLost) => Http2ProducerOutcome::ConnectionLost,
+        Some(ServerHopOutcome::Cancelled) | None => Http2ProducerOutcome::Cancelled,
+    }
 }
 
 struct ActiveProducedBody {
@@ -1129,6 +1162,41 @@ fn cancel_produced_body(
     }
 }
 
+fn record_h2_body_diagnostic(stream_id: u32, diagnostic: WebBodyDiagnostic, cause: &'static str) {
+    record_h2_body_diagnostic_code(stream_id, diagnostic.code(), cause);
+}
+
+fn record_h2_body_diagnostic_code(stream_id: u32, diagnostic: &'static str, cause: &'static str) {
+    let _ = (stream_id, diagnostic, cause);
+    error!(
+        stream_id,
+        diagnostic,
+        cause,
+        "[{}] h2 body stream terminated without a clean response-body boundary",
+        diagnostic
+    );
+}
+
+fn h2_producer_outcome_diagnostic(
+    outcome: Http2ProducerOutcome,
+) -> Option<(&'static str, &'static str)> {
+    match outcome {
+        Http2ProducerOutcome::Failed => Some((
+            WebBodyDiagnostic::ResponseProducerFailure.code(),
+            "response producer returned an error or panicked",
+        )),
+        Http2ProducerOutcome::DeadlineExceeded => Some((
+            "ASUP-E501",
+            "response producer exhausted its request-region deadline",
+        )),
+        Http2ProducerOutcome::ConnectionLost => Some((
+            WebBodyDiagnostic::ClientAbort.code(),
+            "response producer lost its client connection",
+        )),
+        Http2ProducerOutcome::Finished { .. } | Http2ProducerOutcome::Cancelled => None,
+    }
+}
+
 fn cancel_all_produced_bodies(
     produced_bodies: &mut BTreeMap<u32, ActiveProducedBody>,
     message: &'static str,
@@ -1136,6 +1204,18 @@ fn cancel_all_produced_bodies(
     for (_, mut state) in std::mem::take(produced_bodies) {
         state.cancel(message);
     }
+}
+
+fn mark_h2_peer_reset_before_response(
+    dispatched_streams: &mut HashSet<u32>,
+    peer_reset_before_response: &mut HashSet<u32>,
+    stream_id: u32,
+) -> bool {
+    let dispatched = dispatched_streams.remove(&stream_id);
+    if dispatched {
+        peer_reset_before_response.insert(stream_id);
+    }
+    dispatched
 }
 
 fn finalize_produced_body_if_ready(
@@ -1146,7 +1226,9 @@ fn finalize_produced_body_if_ready(
 ) {
     enum FinalizeAction {
         Wait,
-        Reset,
+        Reset {
+            diagnostic: Option<(&'static str, &'static str)>,
+        },
         EmptyEof,
         Trailers(Vec<Header>),
     }
@@ -1157,21 +1239,32 @@ fn finalize_produced_body_if_ready(
         };
         match state.producer_outcome {
             None => FinalizeAction::Wait,
-            Some(Http2ProducerOutcome::Failed | Http2ProducerOutcome::Cancelled)
-                if state.body_eof || state.pending_trailers.is_some() =>
-            {
-                FinalizeAction::Reset
+            Some(
+                Http2ProducerOutcome::Failed
+                | Http2ProducerOutcome::DeadlineExceeded
+                | Http2ProducerOutcome::ConnectionLost
+                | Http2ProducerOutcome::Cancelled,
+            ) if state.body_eof || state.pending_trailers.is_some() => {
+                FinalizeAction::Reset { diagnostic: None }
             }
-            Some(Http2ProducerOutcome::Failed | Http2ProducerOutcome::Cancelled) => {
-                FinalizeAction::Wait
-            }
+            Some(
+                Http2ProducerOutcome::Failed
+                | Http2ProducerOutcome::DeadlineExceeded
+                | Http2ProducerOutcome::ConnectionLost
+                | Http2ProducerOutcome::Cancelled,
+            ) => FinalizeAction::Wait,
             Some(Http2ProducerOutcome::Finished {
                 total_bytes,
                 terminal: _,
             }) if state.emitted_bytes > total_bytes
                 || (state.body_eof && state.emitted_bytes != total_bytes) =>
             {
-                FinalizeAction::Reset
+                FinalizeAction::Reset {
+                    diagnostic: Some((
+                        WebBodyDiagnostic::ResponseProducerFailure.code(),
+                        "producer byte count did not match the emitted body terminal state",
+                    )),
+                }
             }
             Some(Http2ProducerOutcome::Finished {
                 total_bytes,
@@ -1181,21 +1274,36 @@ fn finalize_produced_body_if_ready(
                 total_bytes,
                 terminal: Http2ProducerTerminal::Trailers,
             }) if state.emitted_bytes == total_bytes => match state.pending_trailers.as_ref() {
-                Some(trailers) => h2_trailers_from_body_map(trailers)
-                    .map_or(FinalizeAction::Reset, FinalizeAction::Trailers),
+                Some(trailers) => h2_trailers_from_body_map(trailers).map_or(
+                    FinalizeAction::Reset {
+                        diagnostic: Some((
+                            WebBodyDiagnostic::ResponseProducerFailure.code(),
+                            "producer trailers could not be encoded",
+                        )),
+                    },
+                    FinalizeAction::Trailers,
+                ),
                 None => FinalizeAction::Wait,
             },
             Some(Http2ProducerOutcome::Finished {
                 terminal: Http2ProducerTerminal::Open,
                 ..
-            }) => FinalizeAction::Reset,
+            }) => FinalizeAction::Reset {
+                diagnostic: Some((
+                    WebBodyDiagnostic::ResponseProducerFailure.code(),
+                    "producer returned without a terminal body operation",
+                )),
+            },
             Some(Http2ProducerOutcome::Finished { .. }) => FinalizeAction::Wait,
         }
     };
 
     match action {
         FinalizeAction::Wait => {}
-        FinalizeAction::Reset => {
+        FinalizeAction::Reset { diagnostic } => {
+            if let Some((code, cause)) = diagnostic {
+                record_h2_body_diagnostic_code(stream_id, code, cause);
+            }
             conn.reset_stream(stream_id, ErrorCode::InternalError);
             cancel_produced_body(
                 produced_bodies,
@@ -1212,7 +1320,7 @@ fn finalize_produced_body_if_ready(
                     conn.send_data(stream_id, crate::bytes::Bytes::new(), true)
                 }
                 FinalizeAction::Trailers(trailers) => conn.send_headers(stream_id, trailers, true),
-                FinalizeAction::Wait | FinalizeAction::Reset => unreachable!(),
+                FinalizeAction::Wait | FinalizeAction::Reset { .. } => unreachable!(),
             };
             if result.is_ok() {
                 state.cancellation.disarm();
@@ -1222,6 +1330,14 @@ fn finalize_produced_body_if_ready(
                     let previous = response_guards.insert(stream_id, guard);
                     debug_assert!(previous.is_none());
                 }
+            } else {
+                record_h2_body_diagnostic(
+                    stream_id,
+                    WebBodyDiagnostic::ResponseProducerFailure,
+                    "terminal response frame could not be queued",
+                );
+                conn.reset_stream(stream_id, ErrorCode::InternalError);
+                state.cancel("HTTP/2 terminal produced response frame could not be queued");
             }
         }
     }
@@ -1566,21 +1682,100 @@ fn poll_produced_body_event(
 /// Flow-control-blocked DATA stays queued inside the connection (its
 /// `next_frame` re-queues it) and is retried after the next processed
 /// frame (e.g. a WINDOW_UPDATE) pumps again.
+#[derive(Debug)]
+enum H2PumpWriteError {
+    Transport(io::Error),
+    Encode(H2Error),
+}
+
+fn h2_pump_failure_diagnostic(error: &H2PumpWriteError) -> Option<WebBodyDiagnostic> {
+    match error {
+        H2PumpWriteError::Transport(_) => Some(WebBodyDiagnostic::ClientAbort),
+        H2PumpWriteError::Encode(error) if error.stream_id.is_some() => {
+            Some(WebBodyDiagnostic::ResponseProducerFailure)
+        }
+        H2PumpWriteError::Encode(_) => None,
+    }
+}
+
 async fn pump_writes(
     conn: &mut Connection,
     framed: &mut Framed<TcpStream, FrameCodec>,
-) -> io::Result<()> {
+) -> Result<(), H2PumpWriteError> {
     loop {
         // Respect the codec's soft buffer boundary before removing another
         // frame from Connection. This keeps a blocked transport from turning
         // the connection's pending frame queue into an unbounded BytesMut.
-        std::future::poll_fn(|cx| framed.poll_ready(cx)).await?;
+        std::future::poll_fn(|cx| framed.poll_ready(cx))
+            .await
+            .map_err(H2PumpWriteError::Transport)?;
         let Some(frame) = conn.next_frame() else {
             break;
         };
-        framed.start_send(frame).map_err(io::Error::other)?;
+        framed.start_send(frame).map_err(H2PumpWriteError::Encode)?;
     }
-    std::future::poll_fn(|cx| framed.poll_flush(cx)).await
+    std::future::poll_fn(|cx| framed.poll_flush(cx))
+        .await
+        .map_err(H2PumpWriteError::Transport)
+}
+
+async fn pump_writes_with_body_diagnostics(
+    conn: &mut Connection,
+    framed: &mut Framed<TcpStream, FrameCodec>,
+    pending_requests: &HashMap<u32, (Vec<Header>, Vec<u8>)>,
+    dispatched_streams: &HashSet<u32>,
+    produced_bodies: &mut BTreeMap<u32, ActiveProducedBody>,
+    response_guards: &HashMap<u32, Arc<InFlightRequestGuard>>,
+) -> io::Result<()> {
+    match pump_writes(conn, framed).await {
+        Ok(()) => Ok(()),
+        Err(error @ H2PumpWriteError::Transport(_)) => {
+            let mut affected_streams = HashSet::new();
+            affected_streams.extend(pending_requests.keys().copied());
+            affected_streams.extend(dispatched_streams.iter().copied());
+            affected_streams.extend(produced_bodies.keys().copied());
+            affected_streams.extend(response_guards.keys().copied());
+            let diagnostic = h2_pump_failure_diagnostic(&error)
+                .expect("transport write failure has a body diagnostic");
+            for stream_id in affected_streams {
+                record_h2_body_diagnostic(
+                    stream_id,
+                    diagnostic,
+                    "peer transport failed while flushing HTTP/2 frames",
+                );
+            }
+            cancel_all_produced_bodies(
+                produced_bodies,
+                "HTTP/2 peer transport failed while flushing frames",
+            );
+            let H2PumpWriteError::Transport(error) = error else {
+                unreachable!();
+            };
+            Err(error)
+        }
+        Err(error @ H2PumpWriteError::Encode(_)) => {
+            let diagnostic = h2_pump_failure_diagnostic(&error);
+            let H2PumpWriteError::Encode(error) = error else {
+                unreachable!();
+            };
+            if let (Some(diagnostic), Some(stream_id)) = (diagnostic, error.stream_id)
+                && (produced_bodies.contains_key(&stream_id)
+                    || response_guards.contains_key(&stream_id))
+            {
+                record_h2_body_diagnostic(
+                    stream_id,
+                    diagnostic,
+                    "locally queued HTTP/2 body frame could not be encoded",
+                );
+                cancel_produced_body(
+                    produced_bodies,
+                    stream_id,
+                    "HTTP/2 body frame encoding failed",
+                );
+            }
+            Err(io::Error::other(error))
+        }
+    }
 }
 
 /// Wait for the next driver event: incoming frame, completed handler
@@ -1722,7 +1917,8 @@ fn dispatch_h2_request<F, Fut>(
     request_timeout_header_cap: Option<Duration>,
     request_drain_grace: Duration,
     stream_idle_timeout: Option<Duration>,
-) where
+) -> bool
+where
     F: Fn(Request) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = H2DispatchResponse> + Send + 'static,
 {
@@ -1730,7 +1926,7 @@ fn dispatch_h2_request<F, Fut>(
         Ok(request) => request,
         Err(_) => {
             conn.reset_stream(stream_id, ErrorCode::ProtocolError);
-            return;
+            return false;
         }
     };
     let suppress_response_body = request.method == Method::Head;
@@ -1834,7 +2030,7 @@ fn dispatch_h2_request<F, Fut>(
                                 Response::new(
                                     503,
                                     "Service Unavailable",
-                                    b"request budget deadline exceeded".to_vec(),
+                                    HTTP_DEADLINE_EXHAUSTED_DIAGNOSTIC.as_bytes().to_vec(),
                                 )
                                 .into_h2_response(),
                             ))
@@ -1963,22 +2159,10 @@ fn dispatch_h2_request<F, Fut>(
                     request_drain_grace,
                     producer,
                 );
-                let outcome = match race_force_close(&producer_signal, run).await {
-                    Some(ServerHopOutcome::Ok(Ok(sender))) if sender.is_finished() => {
-                        Http2ProducerOutcome::Finished {
-                            total_bytes: sender.total_bytes(),
-                            terminal: sender.terminal,
-                        }
-                    }
-                    Some(ServerHopOutcome::Ok(Ok(_)) | ServerHopOutcome::Ok(Err(_)))
-                    | Some(ServerHopOutcome::Panicked(_)) => Http2ProducerOutcome::Failed,
-                    Some(
-                        ServerHopOutcome::Cancelled
-                        | ServerHopOutcome::ConnectionLost
-                        | ServerHopOutcome::DeadlineExceeded,
-                    )
-                    | None => Http2ProducerOutcome::Cancelled,
-                };
+                let outcome = classify_h2_producer_hop(
+                    race_force_close(&producer_signal, run).await,
+                    &producer_cx,
+                );
                 if let Ok(permit) = resp_tx.reserve(&cx).await {
                     permit.send(FunnelItem::ProducedDone { stream_id, outcome });
                 }
@@ -1988,6 +2172,9 @@ fn dispatch_h2_request<F, Fut>(
     });
     if spawned.is_err() {
         conn.reset_stream(stream_id, ErrorCode::InternalError);
+        false
+    } else {
+        true
     }
 }
 
@@ -2076,6 +2263,10 @@ where
     let mut finalize_at: Option<Time> = None;
     let mut response_guards: HashMap<u32, Arc<InFlightRequestGuard>> = HashMap::new();
     let mut produced_bodies: BTreeMap<u32, ActiveProducedBody> = BTreeMap::new();
+    // Complete requests remain tracked while their handler is in flight so a
+    // peer RST cannot disappear in the dispatch -> response-funnel gap.
+    let mut dispatched_streams: HashSet<u32> = HashSet::new();
+    let mut peer_reset_before_response: HashSet<u32> = HashSet::new();
     let mut produced_poll_after = None;
     let mut associated_pushes: HashMap<u32, Vec<u32>> = HashMap::new();
     // br-asupersync-mfqfst L4: count requests dispatched to the handler on
@@ -2088,7 +2279,15 @@ where
     let mut idle_at: Option<Time> = None;
 
     loop {
-        pump_writes(&mut conn, &mut framed).await?;
+        pump_writes_with_body_diagnostics(
+            &mut conn,
+            &mut framed,
+            &pending_requests,
+            &dispatched_streams,
+            &mut produced_bodies,
+            &response_guards,
+        )
+        .await?;
         release_flushed_response_guards(&conn, &mut response_guards);
 
         // Do not close the transport while frames remain queued. Flow-control
@@ -2205,7 +2404,15 @@ where
                     ErrorCode::NoError,
                     crate::bytes::Bytes::from_static(b"idle timeout"),
                 );
-                pump_writes(&mut conn, &mut framed).await?;
+                pump_writes_with_body_diagnostics(
+                    &mut conn,
+                    &mut framed,
+                    &pending_requests,
+                    &dispatched_streams,
+                    &mut produced_bodies,
+                    &response_guards,
+                )
+                .await?;
                 let _ = std::future::poll_fn(|cx| framed.poll_close(cx)).await;
                 cancel_all_produced_bodies(&mut produced_bodies, "HTTP/2 connection idle timeout");
                 return Ok(());
@@ -2220,12 +2427,25 @@ where
                     ErrorCode::ProtocolError,
                     crate::bytes::Bytes::from_static(b"CONTINUATION timeout"),
                 );
-                pump_writes(&mut conn, &mut framed).await?;
+                pump_writes_with_body_diagnostics(
+                    &mut conn,
+                    &mut framed,
+                    &pending_requests,
+                    &dispatched_streams,
+                    &mut produced_bodies,
+                    &response_guards,
+                )
+                .await?;
                 let _ = std::future::poll_fn(|cx| framed.poll_close(cx)).await;
                 cancel_all_produced_bodies(&mut produced_bodies, "HTTP/2 CONTINUATION timeout");
                 return Ok(());
             }
             DriverEvent::StreamIdleTimeout(stream_id) => {
+                record_h2_body_diagnostic_code(
+                    stream_id,
+                    WebBodyDiagnostic::Timeout.code(),
+                    "pending request body exceeded its stream idle timeout",
+                );
                 pending_stream_idle_deadlines.remove(&stream_id);
                 pending_requests.remove(&stream_id);
                 conn.reset_stream(stream_id, ErrorCode::Cancel);
@@ -2237,6 +2457,31 @@ where
                 reset_associated_pushes(&mut conn, &mut associated_pushes, stream_id);
             }
             DriverEvent::ProducedDrainTimeout(stream_id) => {
+                match produced_bodies
+                    .get(&stream_id)
+                    .and_then(|state| state.producer_outcome)
+                {
+                    Some(Http2ProducerOutcome::Failed) => record_h2_body_diagnostic(
+                        stream_id,
+                        WebBodyDiagnostic::ResponseProducerFailure,
+                        "failed producer exceeded its bounded drain grace",
+                    ),
+                    Some(Http2ProducerOutcome::DeadlineExceeded) => {
+                        record_h2_body_diagnostic_code(
+                            stream_id,
+                            "ASUP-E501",
+                            "deadline-exhausted producer exceeded its bounded drain grace",
+                        );
+                    }
+                    Some(Http2ProducerOutcome::ConnectionLost) => record_h2_body_diagnostic(
+                        stream_id,
+                        WebBodyDiagnostic::ClientAbort,
+                        "connection-lost producer exceeded its bounded drain grace",
+                    ),
+                    Some(Http2ProducerOutcome::Cancelled)
+                    | Some(Http2ProducerOutcome::Finished { .. })
+                    | None => {}
+                }
                 conn.reset_stream(stream_id, ErrorCode::Cancel);
                 cancel_produced_body(
                     &mut produced_bodies,
@@ -2246,6 +2491,27 @@ where
             }
             DriverEvent::Frame(None) => {
                 // Peer closed the transport.
+                for stream_id in pending_requests.keys().copied() {
+                    record_h2_body_diagnostic(
+                        stream_id,
+                        WebBodyDiagnostic::ClientAbort,
+                        "peer closed the HTTP/2 connection with a pending request body",
+                    );
+                }
+                for stream_id in dispatched_streams.iter().copied() {
+                    record_h2_body_diagnostic(
+                        stream_id,
+                        WebBodyDiagnostic::ClientAbort,
+                        "peer closed the HTTP/2 connection while the handler was in flight",
+                    );
+                }
+                for stream_id in produced_bodies.keys().copied() {
+                    record_h2_body_diagnostic(
+                        stream_id,
+                        WebBodyDiagnostic::ClientAbort,
+                        "peer closed the HTTP/2 connection",
+                    );
+                }
                 cancel_all_produced_bodies(
                     &mut produced_bodies,
                     "HTTP/2 peer closed the connection",
@@ -2254,7 +2520,15 @@ where
             }
             DriverEvent::Frame(Some(Err(decode_error))) => {
                 conn.goaway(decode_error.code, crate::bytes::Bytes::new());
-                pump_writes(&mut conn, &mut framed).await?;
+                pump_writes_with_body_diagnostics(
+                    &mut conn,
+                    &mut framed,
+                    &pending_requests,
+                    &dispatched_streams,
+                    &mut produced_bodies,
+                    &response_guards,
+                )
+                .await?;
                 let _ = std::future::poll_fn(|cx| framed.poll_close(cx)).await;
                 cancel_all_produced_bodies(&mut produced_bodies, "HTTP/2 frame decode failed");
                 return Err(io::Error::other(decode_error));
@@ -2279,7 +2553,15 @@ where
                         reset_associated_pushes(&mut conn, &mut associated_pushes, stream_id);
                     } else {
                         conn.goaway(protocol_error.code, crate::bytes::Bytes::new());
-                        pump_writes(&mut conn, &mut framed).await?;
+                        pump_writes_with_body_diagnostics(
+                            &mut conn,
+                            &mut framed,
+                            &pending_requests,
+                            &dispatched_streams,
+                            &mut produced_bodies,
+                            &response_guards,
+                        )
+                        .await?;
                         let _ = std::future::poll_fn(|cx| framed.poll_close(cx)).await;
                         cancel_all_produced_bodies(
                             &mut produced_bodies,
@@ -2301,7 +2583,7 @@ where
                         // END_STREAM). The buffered request is now complete;
                         // dispatch it with the trailer block kept separate on
                         // the shared Request type for protocol adapters.
-                        dispatch_h2_request(
+                        if dispatch_h2_request(
                             &mut conn,
                             stream_id,
                             req_headers,
@@ -2318,10 +2600,12 @@ where
                             request_timeout_header_cap,
                             request_drain_grace,
                             stream_idle_timeout,
-                        );
-                        requests_dispatched = requests_dispatched.saturating_add(1);
+                        ) {
+                            dispatched_streams.insert(stream_id);
+                            requests_dispatched = requests_dispatched.saturating_add(1);
+                        }
                     } else if end_stream {
-                        dispatch_h2_request(
+                        if dispatch_h2_request(
                             &mut conn,
                             stream_id,
                             headers,
@@ -2338,8 +2622,10 @@ where
                             request_timeout_header_cap,
                             request_drain_grace,
                             stream_idle_timeout,
-                        );
-                        requests_dispatched = requests_dispatched.saturating_add(1);
+                        ) {
+                            dispatched_streams.insert(stream_id);
+                            requests_dispatched = requests_dispatched.saturating_add(1);
+                        }
                     } else {
                         pending_requests.insert(stream_id, (headers, Vec::new()));
                         if let Some(timeout) = stream_idle_timeout {
@@ -2374,7 +2660,7 @@ where
                                     .remove(&stream_id)
                                     .expect("pending request present");
                                 pending_stream_idle_deadlines.remove(&stream_id);
-                                dispatch_h2_request(
+                                if dispatch_h2_request(
                                     &mut conn,
                                     stream_id,
                                     headers,
@@ -2391,13 +2677,30 @@ where
                                     request_timeout_header_cap,
                                     request_drain_grace,
                                     stream_idle_timeout,
-                                );
-                                requests_dispatched = requests_dispatched.saturating_add(1);
+                                ) {
+                                    dispatched_streams.insert(stream_id);
+                                    requests_dispatched = requests_dispatched.saturating_add(1);
+                                }
                             }
                         }
                     }
                 }
                 Ok(Some(ReceivedFrame::Reset { stream_id, .. })) => {
+                    let dispatched = mark_h2_peer_reset_before_response(
+                        &mut dispatched_streams,
+                        &mut peer_reset_before_response,
+                        stream_id,
+                    );
+                    if pending_requests.contains_key(&stream_id)
+                        || dispatched
+                        || produced_bodies.contains_key(&stream_id)
+                    {
+                        record_h2_body_diagnostic(
+                            stream_id,
+                            WebBodyDiagnostic::ClientAbort,
+                            "peer reset the request/response body stream",
+                        );
+                    }
                     pending_requests.remove(&stream_id);
                     pending_stream_idle_deadlines.remove(&stream_id);
                     cancel_produced_body(
@@ -2420,6 +2723,11 @@ where
                         continue;
                     };
                     let Some(emitted_bytes) = state.emitted_bytes.checked_add(data_len) else {
+                        record_h2_body_diagnostic(
+                            stream_id,
+                            WebBodyDiagnostic::ResponseProducerFailure,
+                            "produced response byte accounting overflowed",
+                        );
                         conn.reset_stream(stream_id, ErrorCode::InternalError);
                         cancel_produced_body(
                             &mut produced_bodies,
@@ -2430,6 +2738,11 @@ where
                     };
                     state.emitted_bytes = emitted_bytes;
                     if conn.send_data(stream_id, data, false).is_err() {
+                        record_h2_body_diagnostic(
+                            stream_id,
+                            WebBodyDiagnostic::ResponseProducerFailure,
+                            "produced DATA could not be queued",
+                        );
                         conn.reset_stream(stream_id, ErrorCode::InternalError);
                         cancel_produced_body(
                             &mut produced_bodies,
@@ -2453,6 +2766,11 @@ where
                         continue;
                     };
                     if state.pending_trailers.replace(trailers).is_some() || state.body_eof {
+                        record_h2_body_diagnostic(
+                            stream_id,
+                            WebBodyDiagnostic::ResponseProducerFailure,
+                            "produced response emitted duplicate terminal frames",
+                        );
                         conn.reset_stream(stream_id, ErrorCode::InternalError);
                         cancel_produced_body(
                             &mut produced_bodies,
@@ -2470,8 +2788,31 @@ where
                 }
                 ProducedBodyEvent::Frame {
                     stream_id,
+                    frame: Err(HttpError::BodyCancelled),
+                } => {
+                    // The authoritative producer task owns cancellation-cause
+                    // classification. Keep the stream pending until its
+                    // ProducedDone outcome arrives instead of overwriting a
+                    // deadline or peer-reset acknowledgement with E510.
+                    if let Some(state) = produced_bodies.get_mut(&stream_id) {
+                        state.body_eof = true;
+                    }
+                    finalize_produced_body_if_ready(
+                        &mut conn,
+                        stream_id,
+                        &mut produced_bodies,
+                        &mut response_guards,
+                    );
+                }
+                ProducedBodyEvent::Frame {
+                    stream_id,
                     frame: Err(_),
                 } => {
+                    record_h2_body_diagnostic(
+                        stream_id,
+                        WebBodyDiagnostic::ResponseProducerFailure,
+                        "produced response body yielded an error frame",
+                    );
                     if let Some(state) = produced_bodies.get_mut(&stream_id) {
                         state.producer_outcome = Some(Http2ProducerOutcome::Failed);
                         state.body_eof = true;
@@ -2502,6 +2843,11 @@ where
                     guard,
                     suppress_response_body,
                 } => {
+                    dispatched_streams.remove(&stream_id);
+                    if peer_reset_before_response.remove(&stream_id) {
+                        drop(guard);
+                        continue;
+                    }
                     let outcomes = queue_h2_response(
                         &mut conn,
                         stream_id,
@@ -2519,6 +2865,12 @@ where
                     mut cancellation,
                     guard,
                 } => {
+                    dispatched_streams.remove(&stream_id);
+                    if peer_reset_before_response.remove(&stream_id) {
+                        cancellation.cancel("HTTP/2 peer reset before produced response start");
+                        drop(guard);
+                        continue;
+                    }
                     let writable = conn.stream(stream_id).is_some_and(|stream| {
                         stream.error_code().is_none() && stream.state().can_send()
                     });
@@ -2526,6 +2878,11 @@ where
                         || produced_bodies.contains_key(&stream_id)
                         || validate_h2_produced_response_for_queue(&response).is_err()
                     {
+                        record_h2_body_diagnostic(
+                            stream_id,
+                            WebBodyDiagnostic::ResponseProducerFailure,
+                            "produced response could not start on a writable stream",
+                        );
                         cancellation.cancel("HTTP/2 produced response could not start");
                         conn.reset_stream(stream_id, ErrorCode::InternalError);
                         drop(guard);
@@ -2534,6 +2891,11 @@ where
                     let headers = h2_headers_from_response(&response)
                         .expect("validated produced response head must encode");
                     if conn.send_headers(stream_id, headers, false).is_err() {
+                        record_h2_body_diagnostic(
+                            stream_id,
+                            WebBodyDiagnostic::ResponseProducerFailure,
+                            "produced response headers could not be queued",
+                        );
                         cancellation.cancel("HTTP/2 produced response headers could not be queued");
                         conn.reset_stream(stream_id, ErrorCode::InternalError);
                         drop(guard);
@@ -2556,7 +2918,15 @@ where
                 }
                 FunnelItem::ProducedDone { stream_id, outcome } => {
                     if let Some(state) = produced_bodies.get_mut(&stream_id) {
+                        if let Some((code, cause)) = h2_producer_outcome_diagnostic(outcome) {
+                            record_h2_body_diagnostic_code(stream_id, code, cause);
+                        }
                         if state.producer_outcome.replace(outcome).is_some() {
+                            record_h2_body_diagnostic(
+                                stream_id,
+                                WebBodyDiagnostic::ResponseProducerFailure,
+                                "response producer completed more than once",
+                            );
                             conn.reset_stream(stream_id, ErrorCode::InternalError);
                             cancel_produced_body(
                                 &mut produced_bodies,
@@ -2578,6 +2948,13 @@ where
                     );
                 }
                 FunnelItem::StreamIdleTimeout { stream_id, guard } => {
+                    dispatched_streams.remove(&stream_id);
+                    peer_reset_before_response.remove(&stream_id);
+                    record_h2_body_diagnostic_code(
+                        stream_id,
+                        "ASUP-E501",
+                        "request handler exceeded its configured execution timeout",
+                    );
                     pending_stream_idle_deadlines.remove(&stream_id);
                     pending_requests.remove(&stream_id);
                     conn.reset_stream(stream_id, ErrorCode::Cancel);
@@ -3367,6 +3744,114 @@ mod tests {
                 ..
             }) if received_stream_id == stream_id
         ));
+    }
+
+    #[test]
+    fn body_diagnostic_h2_producer_outcomes_preserve_terminal_causes() {
+        assert_eq!(
+            h2_producer_outcome_diagnostic(Http2ProducerOutcome::Failed),
+            Some((
+                "ASUP-E510",
+                "response producer returned an error or panicked"
+            ))
+        );
+        assert_eq!(
+            h2_producer_outcome_diagnostic(Http2ProducerOutcome::DeadlineExceeded),
+            Some((
+                "ASUP-E501",
+                "response producer exhausted its request-region deadline"
+            ))
+        );
+        assert_eq!(
+            h2_producer_outcome_diagnostic(Http2ProducerOutcome::ConnectionLost),
+            Some(("ASUP-E509", "response producer lost its client connection"))
+        );
+        assert_eq!(
+            h2_producer_outcome_diagnostic(Http2ProducerOutcome::Cancelled),
+            None
+        );
+    }
+
+    #[test]
+    fn body_diagnostic_cancelled_outgoing_body_uses_authoritative_hop_cause() {
+        crate::test_utils::run_test(|| async {
+            for (kind, expected) in [
+                (
+                    crate::types::CancelKind::Timeout,
+                    Http2ProducerOutcome::DeadlineExceeded,
+                ),
+                (
+                    crate::types::CancelKind::ParentCancelled,
+                    Http2ProducerOutcome::Cancelled,
+                ),
+            ] {
+                let producer_cx = Cx::for_testing();
+                let (inner, mut body) =
+                    OutgoingBody::channel_with_capacity(&producer_cx, BodyKind::Chunked, 1);
+                let _sender = Http2BodySender {
+                    inner,
+                    max_frame_bytes: NonZeroUsize::new(8).expect("non-zero frame limit"),
+                    terminal: Http2ProducerTerminal::Open,
+                };
+                producer_cx.cancel_with(kind, Some("causal producer cancellation test"));
+
+                let error = std::future::poll_fn(|task_cx| Pin::new(&mut body).poll_frame(task_cx))
+                    .await
+                    .expect("cancelled body yields a terminal error")
+                    .expect_err("cancelled body frame is not clean EOF");
+                assert!(matches!(error, HttpError::BodyCancelled));
+                assert_eq!(
+                    classify_h2_producer_hop(Some(ServerHopOutcome::Ok(Err(error))), &producer_cx,),
+                    expected
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn body_diagnostic_peer_reset_survives_dispatch_to_produced_start_race() {
+        let mut dispatched = HashSet::from([1]);
+        let mut peer_reset_before_response = HashSet::new();
+
+        assert!(mark_h2_peer_reset_before_response(
+            &mut dispatched,
+            &mut peer_reset_before_response,
+            1,
+        ));
+        assert!(!dispatched.contains(&1));
+        assert!(peer_reset_before_response.remove(&1));
+        assert!(peer_reset_before_response.is_empty());
+        assert!(!mark_h2_peer_reset_before_response(
+            &mut dispatched,
+            &mut peer_reset_before_response,
+            1,
+        ));
+    }
+
+    #[test]
+    fn body_diagnostic_h2_write_failures_preserve_transport_vs_encoder_cause() {
+        assert_eq!(
+            h2_pump_failure_diagnostic(&H2PumpWriteError::Transport(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "peer closed",
+            ))),
+            Some(WebBodyDiagnostic::ClientAbort)
+        );
+        assert_eq!(
+            h2_pump_failure_diagnostic(&H2PumpWriteError::Encode(H2Error::stream(
+                1,
+                ErrorCode::InternalError,
+                "invalid local response frame",
+            ))),
+            Some(WebBodyDiagnostic::ResponseProducerFailure)
+        );
+        assert_eq!(
+            h2_pump_failure_diagnostic(&H2PumpWriteError::Encode(H2Error::connection(
+                ErrorCode::InternalError,
+                "invalid local connection frame",
+            ))),
+            None
+        );
     }
 
     #[test]

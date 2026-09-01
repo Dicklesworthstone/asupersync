@@ -288,6 +288,10 @@ pub struct NativeQuicConnection {
     active_path_id: u64,
     migration_events: u64,
     drain_timeout_micros: u64,
+    /// True only when the peer's CONNECTION_CLOSE frame initiated the current
+    /// draining/closed state. Local shutdown paths leave this false so upper
+    /// protocol adapters never misreport operator cleanup as a client abort.
+    peer_close_observed: bool,
     peer_address_validated: bool,
     /// Whether a verifying TLS handshake has validated the server's certificate
     /// chain against configured roots. Defaults to `false`; a client connection
@@ -442,6 +446,7 @@ impl NativeQuicConnection {
             active_path_id: 0,
             migration_events: 0,
             drain_timeout_micros: config.drain_timeout_micros,
+            peer_close_observed: false,
             peer_address_validated: config.role == StreamRole::Client,
             server_identity_verified: false,
             anti_amplification_bytes_received: 0,
@@ -490,6 +495,16 @@ impl NativeQuicConnection {
     #[must_use]
     pub fn state(&self) -> QuicConnectionState {
         self.transport.state()
+    }
+
+    /// Whether the peer's CONNECTION_CLOSE frame initiated the current close.
+    #[must_use]
+    pub fn close_was_peer_initiated(&self) -> bool {
+        self.peer_close_observed
+            && matches!(
+                self.transport.state(),
+                QuicConnectionState::Draining | QuicConnectionState::Closed
+            )
     }
 
     /// Whether application (1-RTT) data can be sent.
@@ -1289,11 +1304,18 @@ impl NativeQuicConnection {
         app_error_code: u64,
     ) -> Result<(), NativeQuicConnectionError> {
         checkpoint(cx)?;
+        let close_was_unattributed = !matches!(
+            self.transport.state(),
+            QuicConnectionState::Draining | QuicConnectionState::Closed
+        );
         self.transport.start_draining_with_code(
             now_micros,
             self.drain_timeout_micros,
             app_error_code,
         )?;
+        if close_was_unattributed {
+            self.peer_close_observed = false;
+        }
         Ok(())
     }
 
@@ -1304,6 +1326,12 @@ impl NativeQuicConnection {
         app_error_code: u64,
     ) -> Result<(), NativeQuicConnectionError> {
         checkpoint(cx)?;
+        if !matches!(
+            self.transport.state(),
+            QuicConnectionState::Draining | QuicConnectionState::Closed
+        ) {
+            self.peer_close_observed = false;
+        }
         self.transport.close_immediately(app_error_code);
         Ok(())
     }
@@ -2100,7 +2128,18 @@ impl NativeQuicConnection {
                 Ok(())
             }
             QuicFrame::ConnectionClose { error_code, .. } => {
-                self.begin_close(cx, now_micros, error_code.value())?;
+                let close_was_unattributed = !matches!(
+                    self.transport.state(),
+                    QuicConnectionState::Draining | QuicConnectionState::Closed
+                );
+                self.transport.start_draining_with_code(
+                    now_micros,
+                    self.drain_timeout_micros,
+                    error_code.value(),
+                )?;
+                if close_was_unattributed {
+                    self.peer_close_observed = true;
+                }
                 Ok(())
             }
             QuicFrame::HandshakeDone => {
@@ -4100,6 +4139,51 @@ mod tests {
         let mut conn = established_conn();
         conn.begin_close(&cx, 50_000, 0xdead).expect("close");
         assert_eq!(conn.transport().close_code(), Some(0xdead));
+        assert!(!conn.close_was_peer_initiated());
+    }
+
+    #[test]
+    fn body_diagnostic_connection_close_origin_distinguishes_peer_and_local_shutdown() {
+        let cx = test_cx();
+        let mut peer_closed = established_conn();
+        peer_closed
+            .process_frame(
+                &cx,
+                &QuicFrame::ConnectionClose {
+                    error_code: VarInt::from_u64_unchecked(0x10c),
+                    frame_type: None,
+                    reason_phrase: Bytes::from_static(b"peer shutdown"),
+                },
+                PacketNumberSpace::ApplicationData,
+            )
+            .expect("peer CONNECTION_CLOSE enters draining");
+        assert_eq!(peer_closed.state(), QuicConnectionState::Draining);
+        assert!(peer_closed.close_was_peer_initiated());
+        peer_closed
+            .begin_close(&cx, 1, 0)
+            .expect("local drain request is idempotent after peer close");
+        peer_closed
+            .close_immediately(&cx, 0)
+            .expect("local terminal cleanup preserves initiating origin");
+        assert!(peer_closed.close_was_peer_initiated());
+
+        let mut locally_closed = established_conn();
+        locally_closed
+            .begin_close(&cx, 0, 0x10c)
+            .expect("local shutdown enters draining");
+        locally_closed
+            .process_frame(
+                &cx,
+                &QuicFrame::ConnectionClose {
+                    error_code: VarInt::from_u64_unchecked(0x10c),
+                    frame_type: None,
+                    reason_phrase: Bytes::from_static(b"peer acknowledges close"),
+                },
+                PacketNumberSpace::ApplicationData,
+            )
+            .expect("peer close is idempotent after local shutdown");
+        assert_eq!(locally_closed.state(), QuicConnectionState::Draining);
+        assert!(!locally_closed.close_was_peer_initiated());
     }
 
     #[test]

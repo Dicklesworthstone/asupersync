@@ -49,8 +49,34 @@ use crate::types::{Budget, CancelKind, Time};
 use crate::web::extract::Request;
 use crate::web::response::{Response, StatusCode};
 
-const HTTP_DEADLINE_EXHAUSTED_DIAGNOSTIC: &str =
+pub(crate) const HTTP_DEADLINE_EXHAUSTED_DIAGNOSTIC: &str =
     "[ASUP-E501] server request budget deadline exceeded";
+
+/// Terminal class for a producer that returned its cancellation error during
+/// the request region's bounded drain window.
+///
+/// `ServerRequestRegion` normally reports deadline and connection loss itself
+/// when the child remains pending through the whole drain grace. A
+/// cancellation-aware producer can instead wake, observe its cancelled `Cx`,
+/// and return `HttpError::BodyCancelled` during that grace. Deadline causes
+/// remain exact here. Structural `ParentCancelled` is deliberately left as an
+/// ordinary cancellation because it also represents local resets and cleanup;
+/// the protocol transport arm that observed a peer reset/EOF/write error owns
+/// the corresponding client-abort diagnostic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ServerProducerCancellation {
+    DeadlineExceeded,
+    Cancelled,
+}
+
+pub(crate) fn classify_server_producer_cancellation(cx: &Cx) -> ServerProducerCancellation {
+    match cx.cancel_reason().map(|reason| reason.kind) {
+        Some(CancelKind::Timeout | CancelKind::Deadline) => {
+            ServerProducerCancellation::DeadlineExceeded
+        }
+        Some(_) | None => ServerProducerCancellation::Cancelled,
+    }
+}
 
 // ─── RequestRegion ──────────────────────────────────────────────────────────
 

@@ -104,6 +104,21 @@ pub mod websocket;
 /// intact. Middleware that deliberately replaces the entire public
 /// [`extract::Request::extensions`] map discards all router state, including
 /// the protected policy snapshot, and is outside that guarantee.
+///
+/// ```
+/// use asupersync::web::RequestBodyPolicy;
+/// use asupersync::web::extract::BodyLimits;
+/// use asupersync::web::multipart::MultipartLimits;
+///
+/// let server = RequestBodyPolicy::new().max_total_body_size(8 * 1024 * 1024);
+/// let route = RequestBodyPolicy::new()
+///     .body_limits(BodyLimits::new().max_json_body_size(512 * 1024))
+///     .multipart_limits(MultipartLimits::new().max_part_body_size(1024 * 1024));
+/// let effective = server.tightened_with(route);
+/// assert_eq!(effective.body_limits.max_json_body_size, 512 * 1024);
+/// assert_eq!(effective.multipart_limits.max_part_body_size, 1024 * 1024);
+/// assert_eq!(effective.max_total_body_size, 8 * 1024 * 1024);
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct RequestBodyPolicy {
@@ -113,6 +128,42 @@ pub struct RequestBodyPolicy {
     pub body_limits: extract::BodyLimits,
     /// Multipart total, field, header, count, and timeout ceilings.
     pub multipart_limits: multipart::MultipartLimits,
+}
+
+/// Stable diagnostic categories for request-body and produced-response failures.
+///
+/// The code is the compatibility surface; human-readable detail may be refined
+/// as long as client-facing text remains bounded and non-sensitive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum WebBodyDiagnostic {
+    /// A declared or observed request body exceeded the aggregate byte budget.
+    TotalBodyLimit,
+    /// A multipart field exceeded a field-local count, header, work, or byte budget.
+    MultipartFieldLimit,
+    /// Multipart media type, boundary, framing, headers, or lengths were malformed.
+    MalformedMultipart,
+    /// Request-body or multipart progress exceeded its effective time budget.
+    Timeout,
+    /// The peer disconnected or reset the body stream before synchronized EOF.
+    ClientAbort,
+    /// A supervised response-body producer failed after admission.
+    ResponseProducerFailure,
+}
+
+impl WebBodyDiagnostic {
+    /// Return the stable registry code without log-decoration brackets.
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::TotalBodyLimit => "ASUP-E505",
+            Self::MultipartFieldLimit => "ASUP-E506",
+            Self::MalformedMultipart => "ASUP-E507",
+            Self::Timeout => "ASUP-E508",
+            Self::ClientAbort => "ASUP-E509",
+            Self::ResponseProducerFailure => "ASUP-E510",
+        }
+    }
 }
 
 /// Private monotonic snapshot retained after the first explicit policy boundary.
@@ -231,3 +282,25 @@ pub use router::{
     NativeH3RouterProducedDispatch, NativeH3RouterProducer, NativeH3RouterRefusal,
 };
 pub use sse::Http1SseResponse;
+
+#[cfg(test)]
+mod body_diagnostic_tests {
+    use super::WebBodyDiagnostic;
+
+    #[test]
+    fn web_body_diagnostic_codes_are_stable_and_unique() {
+        let cases = [
+            (WebBodyDiagnostic::TotalBodyLimit, "ASUP-E505"),
+            (WebBodyDiagnostic::MultipartFieldLimit, "ASUP-E506"),
+            (WebBodyDiagnostic::MalformedMultipart, "ASUP-E507"),
+            (WebBodyDiagnostic::Timeout, "ASUP-E508"),
+            (WebBodyDiagnostic::ClientAbort, "ASUP-E509"),
+            (WebBodyDiagnostic::ResponseProducerFailure, "ASUP-E510"),
+        ];
+        let mut observed = std::collections::BTreeSet::new();
+        for (diagnostic, expected) in cases {
+            assert_eq!(diagnostic.code(), expected);
+            assert!(observed.insert(diagnostic.code()));
+        }
+    }
+}

@@ -1,7 +1,7 @@
 {
   "schema_version": "asupersync-error-code-registry-v1",
   "namespace": "ASUP-Exxx",
-  "updated": "2026-07-26",
+  "updated": "2026-09-01",
   "ranges": [
     {
       "range": "ASUP-E0xx",
@@ -588,7 +588,12 @@
       "doc_path": "docs/error_codes/ASUP-E501.md",
       "since": "0.3.4",
       "source_refs": [
-        "src/web/request_region.rs"
+        "src/web/request_region.rs",
+        "src/web/extract.rs",
+        "src/web/multipart.rs",
+        "src/web/router.rs",
+        "src/http/h1/server.rs",
+        "src/http/h2/listener.rs"
       ]
     },
     {
@@ -653,6 +658,144 @@
       "since": "0.4.9",
       "source_refs": [
         "src/web/multipart.rs"
+      ]
+    },
+    {
+      "code": "ASUP-E505",
+      "name": "web-total-body-limit-exceeded",
+      "area": "net-http",
+      "status": "live",
+      "summary": "A declared or observed request body exceeded the effective aggregate byte limit.",
+      "probable_causes": [
+        "Content-Length exceeds the monotonic server, router, route, or legacy extractor limit.",
+        "A streaming or chunked body crossed the effective limit while frames were being consumed."
+      ],
+      "remediation": [
+        "Reduce the request body or explicitly raise the narrowest owning RequestBodyPolicy limit.",
+        "Keep server, router, and route policies monotonic; a descendant policy cannot loosen an ancestor limit."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E505.md",
+      "since": "0.4.10",
+      "source_refs": [
+        "src/web/mod.rs",
+        "src/web/extract.rs",
+        "src/web/multipart.rs",
+        "src/web/router.rs",
+        "src/http/h1/server.rs"
+      ]
+    },
+    {
+      "code": "ASUP-E506",
+      "name": "multipart-field-limit-exceeded",
+      "area": "net-http",
+      "status": "live",
+      "summary": "A multipart field, part header block, part count, or bounded parser-work allowance exceeded its effective limit.",
+      "probable_causes": [
+        "A single field body or header block exceeded MultipartLimits.",
+        "The request contained too many parts or exhausted bounded parser work."
+      ],
+      "remediation": [
+        "Reduce the offending field, header block, or part count.",
+        "Raise only the required MultipartLimits value while retaining a finite aggregate request limit."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E506.md",
+      "since": "0.4.10",
+      "source_refs": [
+        "src/web/mod.rs",
+        "src/web/multipart.rs"
+      ]
+    },
+    {
+      "code": "ASUP-E507",
+      "name": "multipart-malformed",
+      "area": "net-http",
+      "status": "live",
+      "summary": "Multipart media type, boundary framing, headers, or declared part lengths were malformed or unsupported.",
+      "probable_causes": [
+        "The request is not multipart/form-data or its boundary is absent or invalid.",
+        "A part terminator, header, nested multipart declaration, or Content-Length is malformed."
+      ],
+      "remediation": [
+        "Generate multipart/form-data with a valid bounded boundary and matching declared lengths.",
+        "Flatten nested multipart input because the current extractor deliberately rejects nested parts."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E507.md",
+      "since": "0.4.10",
+      "source_refs": [
+        "src/web/mod.rs",
+        "src/web/multipart.rs"
+      ]
+    },
+    {
+      "code": "ASUP-E508",
+      "name": "web-body-timeout",
+      "area": "net-http",
+      "status": "live",
+      "summary": "Request-body reading, multipart parsing, or bounded unread-body draining exhausted its time budget.",
+      "probable_causes": [
+        "The client stopped making body progress before the idle or absolute deadline.",
+        "Unread request frames could not be drained within the configured reuse deadline."
+      ],
+      "remediation": [
+        "Make body progress within the advertised timeout or reduce request size.",
+        "Tune finite body and drain deadlines only after confirming the handler consumes or deliberately drops the body."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E508.md",
+      "since": "0.4.10",
+      "source_refs": [
+        "src/web/mod.rs",
+        "src/web/extract.rs",
+        "src/web/multipart.rs",
+        "src/http/h1/server.rs",
+        "src/http/h2/listener.rs"
+      ]
+    },
+    {
+      "code": "ASUP-E509",
+      "name": "web-client-abort",
+      "area": "net-http",
+      "status": "live",
+      "summary": "The peer transport closed or reset before the request or response body reached a synchronized terminal boundary.",
+      "probable_causes": [
+        "The client disconnected, reset an HTTP/2 stream, or abandoned a request in flight.",
+        "An intermediary closed the transport before body EOF."
+      ],
+      "remediation": [
+        "Correlate the operator diagnostic with peer and request identifiers; do not retry unsafe methods automatically.",
+        "Treat the connection or stream as non-reusable; no synthetic success or fallback response is safe after an abort."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E509.md",
+      "since": "0.4.10",
+      "source_refs": [
+        "src/web/mod.rs",
+        "src/web/extract.rs",
+        "src/web/multipart.rs",
+        "src/web/router.rs",
+        "src/http/h1/server.rs",
+        "src/http/h2/listener.rs"
+      ]
+    },
+    {
+      "code": "ASUP-E510",
+      "name": "web-response-producer-failed",
+      "area": "net-http",
+      "status": "live",
+      "summary": "A produced response body failed, panicked, or violated its one-shot terminal contract after response production began.",
+      "probable_causes": [
+        "The application producer returned an error or panicked.",
+        "The producer closed without finish, emitted an invalid terminal sequence, or disagreed with the emitted byte count."
+      ],
+      "remediation": [
+        "Inspect the producer-side error and ensure it calls finish or trailers exactly once after all committed frames.",
+        "Keep the resulting HTTP/1 connection closed or HTTP/2 stream reset; never append a fallback body after the response head was committed."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E510.md",
+      "since": "0.4.10",
+      "source_refs": [
+        "src/web/mod.rs",
+        "src/web/router.rs",
+        "src/http/h1/server.rs",
+        "src/http/h2/listener.rs"
       ]
     },
     {

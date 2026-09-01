@@ -238,6 +238,22 @@ impl ExtractionError {
         }
     }
 
+    /// Create an extraction error whose bounded client text begins with a
+    /// stable body/stream diagnostic token.
+    ///
+    /// This constructor is additive so the public two-field struct layout and
+    /// downstream struct literals remain source-compatible. Callers must pass
+    /// fixed text or bounded numeric context; request bytes and raw header
+    /// values must remain in operator-side diagnostics.
+    #[must_use]
+    pub fn coded(
+        status: super::response::StatusCode,
+        diagnostic: super::WebBodyDiagnostic,
+        safe_text: impl fmt::Display,
+    ) -> Self {
+        Self::new(status, format!("[{}] {safe_text}", diagnostic.code()))
+    }
+
     /// Create a 400 Bad Request extraction error.
     #[must_use]
     pub fn bad_request(message: impl Into<String>) -> Self {
@@ -1288,16 +1304,21 @@ fn check_content_length_limit(req: &Request, limit: usize) -> Result<(), Extract
     if let Some(cl_value) = header_value_ci(req, "content-length") {
         let declared_length = parse_content_length(cl_value)?;
         if declared_length > limit {
-            return Err(ExtractionError::new(
-                super::response::StatusCode::PAYLOAD_TOO_LARGE,
-                format!(
-                    "Content-Length {} bytes exceeds limit {} bytes",
-                    declared_length, limit
-                ),
-            ));
+            return Err(total_body_limit_error(format!(
+                "Content-Length {} bytes exceeds limit {} bytes",
+                declared_length, limit
+            )));
         }
     }
     Ok(())
+}
+
+fn total_body_limit_error(message: impl fmt::Display) -> ExtractionError {
+    ExtractionError::coded(
+        super::response::StatusCode::PAYLOAD_TOO_LARGE,
+        super::WebBodyDiagnostic::TotalBodyLimit,
+        message,
+    )
 }
 
 // ─── BodyLimits ──────────────────────────────────────────────────────────────
@@ -1320,11 +1341,29 @@ const DEFAULT_MAX_RAW_BODY_SIZE: usize = 10 * 1024 * 1024;
 ///
 /// # Example
 ///
-/// ```ignore
-/// // Server-wide: allow 50 MiB JSON bodies
+/// ```no_run
+/// use asupersync::web::extract::BodyLimits;
+/// use asupersync::web::handler::FnHandler;
+/// use asupersync::web::{RequestBodyPolicy, Router, post};
+///
+/// // The outer boundary explicitly raises both the aggregate and JSON caps.
 /// let limits = BodyLimits::new()
 ///     .max_json_body_size(50 * 1024 * 1024);
-/// // Inject via middleware into request.extensions.insert_typed(limits)
+/// let server = RequestBodyPolicy::new()
+///     .max_total_body_size(50 * 1024 * 1024)
+///     .body_limits(limits);
+/// let router = RequestBodyPolicy::new().max_total_body_size(32 * 1024 * 1024);
+/// let route = RequestBodyPolicy::new().max_total_body_size(8 * 1024 * 1024);
+///
+/// // Each lower boundary can tighten, but cannot loosen, the outer policy.
+/// let app = Router::new()
+///     .with_server_body_policy(server)
+///     .with_body_policy(router)
+///     .route(
+///         "/upload",
+///         post(FnHandler::new(|| "accepted")).with_body_policy(route),
+///     );
+/// assert_eq!(app.server_body_policy(), Some(server));
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BodyLimits {
@@ -1443,11 +1482,18 @@ fn effective_body_limits(req: &Request) -> BodyLimits {
 /// The body size limit defaults to 10 MiB but can be overridden by injecting
 /// [`BodyLimits`] into the request extensions via middleware.
 ///
-/// ```ignore
-/// async fn create_user(Json(user): Json<CreateUser>) -> StatusCode {
-///     // ...
-///     StatusCode::CREATED
-/// }
+/// ```no_run
+/// use asupersync::bytes::Bytes;
+/// use asupersync::web::extract::{BodyLimits, FromRequest, Json, Request};
+///
+/// let mut request = Request::new("POST", "/users")
+///     .with_header("content-type", "application/json")
+///     .with_body(Bytes::from_static(br#"{"name":"alice"}"#));
+/// request.extensions.insert_typed(
+///     BodyLimits::new().max_json_body_size(1024),
+/// );
+/// let Json(value) = Json::<serde_json::Value>::from_request(request)?;
+/// # Ok::<(), asupersync::web::extract::ExtractionError>(())
 /// ```
 #[derive(Debug, Clone)]
 pub struct Json<T>(pub T);
@@ -1499,14 +1545,11 @@ impl<T: serde::de::DeserializeOwned> FromRequest for Json<T> {
         check_content_length_limit(&req, limit)?;
 
         if req.body.len() > limit {
-            return Err(ExtractionError::new(
-                super::response::StatusCode::PAYLOAD_TOO_LARGE,
-                format!(
-                    "JSON body too large: {} bytes (limit {})",
-                    req.body.len(),
-                    limit
-                ),
-            ));
+            return Err(total_body_limit_error(format!(
+                "JSON body too large: {} bytes (limit {})",
+                req.body.len(),
+                limit
+            )));
         }
 
         // Reject invalid or mismatched framing metadata before parsing body bytes.
@@ -1546,14 +1589,19 @@ impl<T: serde::de::DeserializeOwned> FromRequest for Json<T> {
 
 /// Extract URL-encoded form data from the request body.
 ///
-/// ```ignore
-/// #[derive(Deserialize)]
-/// struct Login { username: String, password: String }
+/// ```no_run
+/// use asupersync::bytes::Bytes;
+/// use asupersync::web::extract::{BodyLimits, Form, FromRequest, Request};
+/// use std::collections::HashMap;
 ///
-/// async fn login(Form(data): Form<Login>) -> Redirect {
-///     // ...
-///     Redirect::to("/dashboard")
-/// }
+/// let mut request = Request::new("POST", "/login")
+///     .with_header("content-type", "application/x-www-form-urlencoded")
+///     .with_body(Bytes::from_static(b"username=alice"));
+/// request.extensions.insert_typed(
+///     BodyLimits::new().max_form_body_size(1024),
+/// );
+/// let Form(fields) = Form::<HashMap<String, String>>::from_request(request)?;
+/// # Ok::<(), asupersync::web::extract::ExtractionError>(())
 /// ```
 #[derive(Debug, Clone)]
 pub struct Form<T>(pub T);
@@ -1600,14 +1648,11 @@ impl<T: DeserializeOwned> FromRequest for Form<T> {
         check_content_length_limit(&req, limit)?;
 
         if req.body.len() > limit {
-            return Err(ExtractionError::new(
-                super::response::StatusCode::PAYLOAD_TOO_LARGE,
-                format!(
-                    "form body too large: {} bytes (limit {})",
-                    req.body.len(),
-                    limit
-                ),
-            ));
+            return Err(total_body_limit_error(format!(
+                "form body too large: {} bytes (limit {})",
+                req.body.len(),
+                limit
+            )));
         }
 
         // Reject invalid or mismatched framing metadata before parsing body bytes.
@@ -1759,14 +1804,11 @@ impl FromRequest for RawBody {
         check_content_length_limit(&req, limit)?;
 
         if req.body.len() > limit {
-            return Err(ExtractionError::new(
-                super::response::StatusCode::PAYLOAD_TOO_LARGE,
-                format!(
-                    "raw body too large: {} bytes (limit {})",
-                    req.body.len(),
-                    limit
-                ),
-            ));
+            return Err(total_body_limit_error(format!(
+                "raw body too large: {} bytes (limit {})",
+                req.body.len(),
+                limit
+            )));
         }
 
         // Reject invalid or mismatched framing metadata before exposing body bytes.
@@ -1784,6 +1826,27 @@ impl FromRequest for RawBody {
 /// path. Existing [`RawBody`] handlers retain their buffered byte contract.
 /// The body remains single-consumer and cancel-correct: dropping it before EOF
 /// tells the protocol driver to apply its bounded drain-or-close policy.
+///
+/// # Progressive consumption
+///
+/// ```no_run
+/// use asupersync::bytes::Buf;
+/// use asupersync::http::body::Body;
+/// use asupersync::http::h1::stream::IncomingBodyError;
+/// use asupersync::web::StreamingRawBody;
+/// use std::future::poll_fn;
+/// use std::pin::Pin;
+///
+/// async fn count_bytes(mut body: StreamingRawBody) -> Result<usize, IncomingBodyError> {
+///     let mut total = 0;
+///     while let Some(frame) = poll_fn(|cx| Pin::new(&mut body).poll_frame(cx)).await {
+///         if let Some(data) = frame?.data_ref() {
+///             total += data.remaining();
+///         }
+///     }
+///     Ok(total)
+/// }
+/// ```
 #[cfg(not(target_arch = "wasm32"))]
 #[pin_project::pin_project]
 #[derive(Debug)]
@@ -1913,6 +1976,19 @@ impl StreamingRawBody {
     /// Data-frame order and the terminal trailer map are preserved. Exceeding
     /// the limit drops the live consumer; the HTTP/1 driver then performs its
     /// existing bounded unread-body drain before considering connection reuse.
+    ///
+    /// ```no_run
+    /// use asupersync::Cx;
+    /// use asupersync::web::{StreamingRawBody, StreamingRawBodyCollectError};
+    ///
+    /// async fn bounded(
+    ///     cx: &Cx,
+    ///     body: StreamingRawBody,
+    /// ) -> Result<usize, StreamingRawBodyCollectError> {
+    ///     let collected = body.collect_bounded_with_cx(cx, 1024 * 1024).await?;
+    ///     Ok(collected.data().len())
+    /// }
+    /// ```
     pub async fn collect_bounded(
         self,
         max_bytes: usize,
@@ -2073,7 +2149,7 @@ pub(super) fn streaming_extraction_error(
             || format!("{extractor} body too large (limit {limit})"),
             |actual| format!("{extractor} body too large: {actual} bytes (limit {limit})"),
         );
-        ExtractionError::new(StatusCode::PAYLOAD_TOO_LARGE, message)
+        total_body_limit_error(message)
     };
 
     match error {
@@ -2097,12 +2173,16 @@ pub(super) fn streaming_extraction_error(
             )
         }
         StreamingRawBodyCollectError::Body(IncomingBodyError::Cancelled {
-            kind:
-                CancelKind::Timeout
-                | CancelKind::Deadline
-                | CancelKind::PollQuota
-                | CancelKind::CostBudget
-                | CancelKind::ResourceUnavailable,
+            kind: CancelKind::Timeout | CancelKind::Deadline,
+        }) => ExtractionError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!(
+                "{}: {extractor} request body unavailable",
+                super::request_region::HTTP_DEADLINE_EXHAUSTED_DIAGNOSTIC
+            ),
+        ),
+        StreamingRawBodyCollectError::Body(IncomingBodyError::Cancelled {
+            kind: CancelKind::PollQuota | CancelKind::CostBudget | CancelKind::ResourceUnavailable,
         }) => ExtractionError::new(
             StatusCode::SERVICE_UNAVAILABLE,
             format!("{extractor} request body unavailable"),
@@ -2126,16 +2206,29 @@ pub(super) fn streaming_extraction_error(
             | IncomingBodyError::InvalidHeaderName
             | IncomingBodyError::InvalidHeaderValue,
         ) => ExtractionError::bad_request(format!("invalid {extractor} request body")),
+        StreamingRawBodyCollectError::Body(IncomingBodyError::ClientAborted) => {
+            ExtractionError::coded(
+                StatusCode::CLIENT_CLOSED_REQUEST,
+                super::WebBodyDiagnostic::ClientAbort,
+                format!("{extractor} request body transport aborted"),
+            )
+        }
         StreamingRawBodyCollectError::Body(IncomingBodyError::SourceDisconnected) => {
             ExtractionError::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("failed to read {extractor} request body"),
+                format!("{extractor} request body producer disconnected"),
+            )
+        }
+        StreamingRawBodyCollectError::Body(IncomingBodyError::DrainTimeout) => {
+            ExtractionError::coded(
+                StatusCode::REQUEST_TIMEOUT,
+                super::WebBodyDiagnostic::Timeout,
+                format!("{extractor} request body drain timed out"),
             )
         }
         StreamingRawBodyCollectError::Body(
             IncomingBodyError::ConsumerDropped
             | IncomingBodyError::DrainLimitExceeded { .. }
-            | IncomingBodyError::DrainTimeout
             | IncomingBodyError::AlreadyTerminal,
         ) => ExtractionError::new(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -2346,6 +2439,55 @@ mod tests {
         );
         let control = insert_streaming_raw_body(&mut req, body).expect("install streaming body");
         (writer, req, control)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn body_diagnostic_extraction_errors_have_exact_leading_tokens() {
+        let total = total_body_limit_error("bounded total");
+        assert_eq!(
+            total.status,
+            super::super::response::StatusCode::PAYLOAD_TOO_LARGE
+        );
+        assert_eq!(total.message, "[ASUP-E505] bounded total");
+
+        let timeout = streaming_extraction_error(
+            "raw",
+            StreamingRawBodyCollectError::Body(IncomingBodyError::DrainTimeout),
+        );
+        assert_eq!(
+            timeout.status,
+            super::super::response::StatusCode::REQUEST_TIMEOUT
+        );
+        assert_eq!(
+            timeout.message,
+            "[ASUP-E508] raw request body drain timed out"
+        );
+
+        let aborted = streaming_extraction_error(
+            "raw",
+            StreamingRawBodyCollectError::Body(IncomingBodyError::ClientAborted),
+        );
+        assert_eq!(
+            aborted.status,
+            super::super::response::StatusCode::CLIENT_CLOSED_REQUEST
+        );
+        assert_eq!(
+            aborted.message,
+            "[ASUP-E509] raw request body transport aborted"
+        );
+
+        let deadline = streaming_extraction_error(
+            "raw",
+            StreamingRawBodyCollectError::Body(IncomingBodyError::Cancelled {
+                kind: CancelKind::Deadline,
+            }),
+        );
+        assert_eq!(
+            deadline.status,
+            super::super::response::StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert!(deadline.message.starts_with("[ASUP-E501] "));
     }
 
     #[test]
@@ -2888,7 +3030,10 @@ mod tests {
             error.status,
             super::super::response::StatusCode::SERVICE_UNAVAILABLE
         );
-        assert_eq!(error.message, "JSON request body unavailable");
+        assert_eq!(
+            error.message,
+            "[ASUP-E501] server request budget deadline exceeded: JSON request body unavailable"
+        );
         drop(extraction);
         drop(json_control);
         assert_eq!(
@@ -2904,9 +3049,16 @@ mod tests {
     fn streaming_json_and_form_typed_error_mapping_matches_body_contract() {
         use super::super::response::StatusCode;
 
+        for kind in [CancelKind::Timeout, CancelKind::Deadline] {
+            let error = streaming_extraction_error(
+                "JSON",
+                StreamingRawBodyCollectError::Body(IncomingBodyError::Cancelled { kind }),
+            );
+            assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
+            assert!(error.message.starts_with("[ASUP-E501] "));
+        }
+
         for kind in [
-            CancelKind::Timeout,
-            CancelKind::Deadline,
             CancelKind::PollQuota,
             CancelKind::CostBudget,
             CancelKind::ResourceUnavailable,
@@ -2916,6 +3068,7 @@ mod tests {
                 StreamingRawBodyCollectError::Body(IncomingBodyError::Cancelled { kind }),
             );
             assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
+            assert!(!error.message.starts_with("[ASUP-E508] "));
         }
 
         for kind in [

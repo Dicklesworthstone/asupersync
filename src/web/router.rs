@@ -27,6 +27,8 @@ use smallvec::SmallVec;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+use super::WebBodyDiagnostic;
 use super::extract::{BodyLimits, Extensions, ExtractionError, Request, parse_content_length};
 #[cfg(not(target_arch = "wasm32"))]
 use super::extract::{
@@ -37,7 +39,10 @@ use super::middleware::{
     RequestLogSink, RequestTracePolicy, resolve_trace_id, trace_request, wall_clock_now,
 };
 #[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
-use super::request_region::{RequestBudgetSource, ServerHopOutcome, ServerRequestRegion};
+use super::request_region::{
+    RequestBudgetSource, ServerHopOutcome, ServerProducerCancellation, ServerRequestRegion,
+    classify_server_producer_cancellation,
+};
 #[cfg(not(target_arch = "wasm32"))]
 use super::response::{
     Http1StreamPlan, Http1StreamSlot, Http2StreamPlan, Http2StreamSlot, sanitize_header_name,
@@ -70,8 +75,12 @@ use crate::http::h3::{
     NativeH3WriteEvent, h3_data_frame_wire_len,
 };
 #[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
-use crate::net::quic_native::{QuicConnection, QuicConnectionState, StreamId};
+use crate::net::quic_native::{
+    NativeQuicConnectionError, QuicConnection, QuicConnectionState, QuicStreamError, StreamId,
+};
 use crate::service::Layer;
+#[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+use crate::tracing_compat::error;
 #[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
 use crate::types::CancelKind;
 use crate::types::{
@@ -956,6 +965,8 @@ enum NativeH3ProducerOutcome {
     },
     Failed,
     Cancelled,
+    DeadlineExceeded,
+    ConnectionLost,
 }
 
 #[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
@@ -1470,6 +1481,16 @@ impl NativeH3Router {
                 error_code,
                 final_size,
             } => {
+                if self.pending.contains_key(&stream_id)
+                    || self.in_flight.contains_key(&stream_id)
+                    || self.produced.contains_key(&stream_id)
+                {
+                    record_native_h3_body_diagnostic(
+                        stream_id,
+                        WebBodyDiagnostic::ClientAbort,
+                        "peer reset the HTTP/3 request/response stream",
+                    );
+                }
                 self.take_pending_request(stream_id);
                 self.discarding.remove(&stream_id);
                 if let Some(state) = self.produced.get_mut(&stream_id) {
@@ -1532,7 +1553,23 @@ impl NativeH3Router {
                 // image with one atomic transport write. Retain in-flight
                 // ownership on failure so the caller can retry this prepared
                 // response or cancel it explicitly.
-                session.send_response(cx, connection, stream_id, head, body.clone())?;
+                if let Err(error) =
+                    session.send_response(cx, connection, stream_id, head, body.clone())
+                {
+                    if let Some(diagnostic) =
+                        native_h3_completion_error_diagnostic(connection, &error)
+                    {
+                        record_native_h3_body_diagnostic(
+                            stream_id,
+                            diagnostic,
+                            "buffered response could not be committed",
+                        );
+                    }
+                    if connection.state() != QuicConnectionState::Established {
+                        self.release_in_flight(stream_id);
+                    }
+                    return Err(error);
+                }
                 self.release_in_flight(stream_id);
                 Ok(NativeH3RouterEvent::ResponseSent {
                     stream_id,
@@ -1683,7 +1720,15 @@ impl NativeH3Router {
         task_cx: &mut TaskContext<'_>,
     ) -> Poll<Result<NativeH3ProducedEvent, crate::http::h3::NativeH3SessionError>> {
         if connection.state() != QuicConnectionState::Established {
-            for state in self.produced.values_mut() {
+            let peer_closed = connection.close_was_peer_initiated();
+            for (stream_id, state) in &mut self.produced {
+                if peer_closed && !state.reset_queued {
+                    record_native_h3_body_diagnostic(
+                        *stream_id,
+                        WebBodyDiagnostic::ClientAbort,
+                        "peer closed the QUIC connection during an HTTP/3 response",
+                    );
+                }
                 mark_native_h3_produced_cancelled(
                     state,
                     "HTTP/3 connection closed during produced response",
@@ -1747,6 +1792,27 @@ impl NativeH3Router {
             return Err(crate::http::h3::NativeH3SessionError::InvalidState(
                 "HTTP/3 Router dispatch is not in flight",
             ));
+        }
+        if connection.state() != QuicConnectionState::Established {
+            if let Some(diagnostic) = native_h3_closed_connection_diagnostic(connection) {
+                record_native_h3_body_diagnostic(
+                    stream_id,
+                    diagnostic,
+                    "peer closed the QUIC connection before HTTP/3 dispatch cancellation",
+                );
+            }
+            if let Some(mut state) = self.produced.remove(&stream_id) {
+                mark_native_h3_produced_cancelled(
+                    &mut state,
+                    "HTTP/3 connection closed before dispatch cancellation",
+                );
+            }
+            self.take_pending_request(stream_id);
+            self.release_in_flight(stream_id);
+            return Ok(NativeH3RouterEvent::RequestRefused {
+                stream_id,
+                reason: NativeH3RouterRefusal::DispatchCancelled,
+            });
         }
         if let Some(state) = self.produced.get_mut(&stream_id) {
             cancel_native_h3_produced(
@@ -1813,6 +1879,13 @@ impl NativeH3Router {
         stream_id: StreamId,
         error: crate::http::h3::NativeH3SessionError,
     ) -> crate::http::h3::NativeH3SessionError {
+        if let Some(diagnostic) = native_h3_completion_error_diagnostic(connection, &error) {
+            record_native_h3_body_diagnostic(
+                stream_id,
+                diagnostic,
+                "produced response could not start",
+            );
+        }
         let reset_error = session.cancel_request(cx, connection, stream_id).err();
         self.release_in_flight(stream_id);
         reset_error.unwrap_or(error)
@@ -1854,6 +1927,65 @@ enum NativeH3ProducedStep {
 const H3_PRODUCER_DRAIN_GRACE: Duration = Duration::from_millis(100);
 
 #[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+fn record_native_h3_body_diagnostic(
+    stream_id: StreamId,
+    diagnostic: WebBodyDiagnostic,
+    cause: &'static str,
+) {
+    let _ = (stream_id, diagnostic, cause);
+    error!(
+        stream_id = stream_id.0,
+        diagnostic = diagnostic.code(),
+        cause,
+        "[{}] h3 body stream terminated without a clean response-body boundary",
+        diagnostic.code()
+    );
+}
+
+#[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+fn native_h3_produced_error_diagnostic(
+    error: &crate::http::h3::NativeH3SessionError,
+) -> Option<WebBodyDiagnostic> {
+    use crate::http::h3::NativeH3SessionError;
+
+    match error {
+        NativeH3SessionError::Transport(NativeQuicConnectionError::Stream(
+            QuicStreamError::SendStopped { .. } | QuicStreamError::ReceiveReset { .. },
+        ))
+        | NativeH3SessionError::CriticalStreamClosed { .. } => Some(WebBodyDiagnostic::ClientAbort),
+        NativeH3SessionError::Protocol(_) | NativeH3SessionError::InvalidState(_) => {
+            Some(WebBodyDiagnostic::ResponseProducerFailure)
+        }
+        NativeH3SessionError::Transport(_) | NativeH3SessionError::TruncatedStream { .. } => None,
+    }
+}
+
+#[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+fn native_h3_completion_error_diagnostic(
+    connection: &QuicConnection,
+    error: &crate::http::h3::NativeH3SessionError,
+) -> Option<WebBodyDiagnostic> {
+    if connection.state() != QuicConnectionState::Established
+        && matches!(
+            error,
+            crate::http::h3::NativeH3SessionError::InvalidState(_)
+        )
+    {
+        return native_h3_closed_connection_diagnostic(connection);
+    }
+    native_h3_produced_error_diagnostic(error)
+}
+
+#[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+fn native_h3_closed_connection_diagnostic(
+    connection: &QuicConnection,
+) -> Option<WebBodyDiagnostic> {
+    (connection.state() != QuicConnectionState::Established
+        && connection.close_was_peer_initiated())
+    .then_some(WebBodyDiagnostic::ClientAbort)
+}
+
+#[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
 fn make_native_h3_producer(
     connection_cx: &Cx,
     plan: Http3StreamPlan,
@@ -1876,6 +2008,7 @@ fn make_native_h3_producer(
     let producer_cx_for_factory = producer_cx.clone();
     let connection_cx = connection_cx.clone();
     let run = Box::pin(async move {
+        let producer_outcome_cx = producer_cx_for_factory.clone();
         let producer =
             async move { producer_factory(producer_cx_for_factory.clone(), sender).await };
         match region
@@ -1893,12 +2026,20 @@ fn make_native_h3_producer(
                     terminal: sender.terminal(),
                 }
             }
+            ServerHopOutcome::Ok(Err(crate::http::h1::HttpError::BodyCancelled)) => {
+                match classify_server_producer_cancellation(&producer_outcome_cx) {
+                    ServerProducerCancellation::DeadlineExceeded => {
+                        NativeH3ProducerOutcome::DeadlineExceeded
+                    }
+                    ServerProducerCancellation::Cancelled => NativeH3ProducerOutcome::Cancelled,
+                }
+            }
             ServerHopOutcome::Ok(Ok(_))
             | ServerHopOutcome::Ok(Err(_))
             | ServerHopOutcome::Panicked(_) => NativeH3ProducerOutcome::Failed,
-            ServerHopOutcome::Cancelled
-            | ServerHopOutcome::DeadlineExceeded
-            | ServerHopOutcome::ConnectionLost => NativeH3ProducerOutcome::Cancelled,
+            ServerHopOutcome::Cancelled => NativeH3ProducerOutcome::Cancelled,
+            ServerHopOutcome::DeadlineExceeded => NativeH3ProducerOutcome::DeadlineExceeded,
+            ServerHopOutcome::ConnectionLost => NativeH3ProducerOutcome::ConnectionLost,
         }
     });
     let producer = NativeH3RouterProducer {
@@ -1953,6 +2094,9 @@ fn fail_native_h3_produced_poll(
     message: &'static str,
     error: crate::http::h3::NativeH3SessionError,
 ) -> crate::http::h3::NativeH3SessionError {
+    if let Some(diagnostic) = native_h3_produced_error_diagnostic(&error) {
+        record_native_h3_body_diagnostic(state.writer.stream_id(), diagnostic, message);
+    }
     cancel_native_h3_produced(cx, session, connection, state, message)
         .err()
         .unwrap_or(error)
@@ -2110,10 +2254,34 @@ fn poll_one_native_h3_produced(
             }
         };
 
-        if matches!(
-            producer_outcome,
-            Some(NativeH3ProducerOutcome::Failed | NativeH3ProducerOutcome::Cancelled)
-        ) {
+        if let Some(
+            outcome @ (NativeH3ProducerOutcome::Failed
+            | NativeH3ProducerOutcome::Cancelled
+            | NativeH3ProducerOutcome::DeadlineExceeded
+            | NativeH3ProducerOutcome::ConnectionLost),
+        ) = producer_outcome
+        {
+            match outcome {
+                NativeH3ProducerOutcome::Failed => record_native_h3_body_diagnostic(
+                    stream_id,
+                    WebBodyDiagnostic::ResponseProducerFailure,
+                    "response producer returned an error or panicked",
+                ),
+                NativeH3ProducerOutcome::ConnectionLost => record_native_h3_body_diagnostic(
+                    stream_id,
+                    WebBodyDiagnostic::ClientAbort,
+                    "response producer lost its client connection",
+                ),
+                NativeH3ProducerOutcome::DeadlineExceeded => {
+                    error!(
+                        stream_id = stream_id.0,
+                        diagnostic = "ASUP-E501",
+                        "[ASUP-E501] h3 response producer exceeded the request deadline"
+                    );
+                }
+                NativeH3ProducerOutcome::Cancelled => {}
+                NativeH3ProducerOutcome::Finished { .. } => unreachable!(),
+            }
             if let Err(error) = cancel_native_h3_produced(
                 cx,
                 session,
@@ -2144,6 +2312,11 @@ fn poll_one_native_h3_produced(
                     )
             );
             if total_bytes != state.emitted_bytes || !terminal_matches {
+                record_native_h3_body_diagnostic(
+                    stream_id,
+                    WebBodyDiagnostic::ResponseProducerFailure,
+                    "response producer terminal accounting mismatch",
+                );
                 if let Err(error) = cancel_native_h3_produced(
                     cx,
                     session,
@@ -2175,6 +2348,11 @@ fn poll_one_native_h3_produced(
         if let Some(NativeH3ProducerOutcome::Finished { total_bytes, .. }) = producer_outcome
             && total_bytes < state.emitted_bytes
         {
+            record_native_h3_body_diagnostic(
+                stream_id,
+                WebBodyDiagnostic::ResponseProducerFailure,
+                "response producer byte accounting regressed",
+            );
             if let Err(error) = cancel_native_h3_produced(
                 cx,
                 session,
@@ -2244,6 +2422,11 @@ fn poll_one_native_h3_produced(
                 {
                     Some(total) => total,
                     None => {
+                        record_native_h3_body_diagnostic(
+                            stream_id,
+                            WebBodyDiagnostic::ResponseProducerFailure,
+                            "response byte accounting overflowed",
+                        );
                         if let Err(error) = cancel_native_h3_produced(
                             cx,
                             session,
@@ -2263,6 +2446,11 @@ fn poll_one_native_h3_produced(
                             if new_total > total_bytes
                     )
                 {
+                    record_native_h3_body_diagnostic(
+                        stream_id,
+                        WebBodyDiagnostic::ResponseProducerFailure,
+                        "response produced bytes after terminal accounting",
+                    );
                     if let Err(error) = cancel_native_h3_produced(
                         cx,
                         session,
@@ -2276,6 +2464,13 @@ fn poll_one_native_h3_produced(
                 }
                 state.emitted_bytes = new_total;
                 if let Err(error) = state.writer.queue_data(bytes) {
+                    if let Some(diagnostic) = native_h3_produced_error_diagnostic(&error) {
+                        record_native_h3_body_diagnostic(
+                            stream_id,
+                            diagnostic,
+                            "response DATA frame could not be queued",
+                        );
+                    }
                     if let Err(reset_error) = cancel_native_h3_produced(
                         cx,
                         session,
@@ -2295,6 +2490,11 @@ fn poll_one_native_h3_produced(
                 match h3_trailers_from_body_map(trailers) {
                     Ok(fields) => state.terminal = Some(NativeH3BodyTerminal::Trailers(fields)),
                     Err(_) => {
+                        record_native_h3_body_diagnostic(
+                            stream_id,
+                            WebBodyDiagnostic::ResponseProducerFailure,
+                            "response trailers were invalid",
+                        );
                         if let Err(error) = cancel_native_h3_produced(
                             cx,
                             session,
@@ -2307,7 +2507,19 @@ fn poll_one_native_h3_produced(
                     }
                 }
             }
+            Poll::Ready(Some(Err(crate::http::h1::HttpError::BodyCancelled))) => {
+                // The lifecycle future carries the authoritative cancellation
+                // cause. It was polled above and registered this task's waker;
+                // wait for that outcome rather than mislabeling a deadline or
+                // peer reset as a producer failure.
+                return Poll::Pending;
+            }
             Poll::Ready(Some(Err(_error))) => {
+                record_native_h3_body_diagnostic(
+                    stream_id,
+                    WebBodyDiagnostic::ResponseProducerFailure,
+                    "response body channel failed",
+                );
                 if let Err(error) = cancel_native_h3_produced(
                     cx,
                     session,
@@ -3322,8 +3534,9 @@ fn override_legacy_policy_state(
 }
 
 fn request_body_policy_refusal(limit: usize) -> Response {
-    ExtractionError::new(
+    ExtractionError::coded(
         StatusCode::PAYLOAD_TOO_LARGE,
+        super::WebBodyDiagnostic::TotalBodyLimit,
         format!("request body too large (limit {limit})"),
     )
     .into_response()
@@ -4117,7 +4330,7 @@ mod tests {
     }
 
     #[test]
-    fn route_total_policy_rejects_buffered_actual_and_declared_lengths() {
+    fn body_diagnostic_route_total_policy_rejects_actual_and_declared_lengths() {
         let policy = RequestBodyPolicy::new().max_total_body_size(4);
         let router = Router::new().route(
             "/ignore",
@@ -4127,19 +4340,26 @@ mod tests {
         let actual =
             router.handle(Request::new("POST", "/ignore").with_body(Bytes::from_static(b"12345")));
         assert_eq!(actual.status, StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(
+            actual.body.as_ref(),
+            b"[ASUP-E505] request body too large (limit 4)"
+        );
 
         let declared =
             router.handle(Request::new("POST", "/ignore").with_header("content-length", "5"));
         assert_eq!(declared.status, StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(
+            declared.body.as_ref(),
+            b"[ASUP-E505] request body too large (limit 4)"
+        );
 
         let mut mixed_case = Request::new("POST", "/ignore");
         mixed_case
             .headers
             .insert("Content-Length".to_string(), "5".to_string());
-        assert_eq!(
-            router.handle(mixed_case).status,
-            StatusCode::PAYLOAD_TOO_LARGE
-        );
+        let mixed_case = router.handle(mixed_case);
+        assert_eq!(mixed_case.status, StatusCode::PAYLOAD_TOO_LARGE);
+        assert!(mixed_case.body.starts_with(b"[ASUP-E505] "));
 
         for invalid in ["5, 6", "+5", "184467440737095516160"] {
             let response = router
@@ -4296,6 +4516,217 @@ mod tests {
                 ("set-cookie".to_string(), "csrf=two; Path=/".to_string()),
             ]
         );
+    }
+
+    #[test]
+    #[cfg(feature = "http3")]
+    fn body_diagnostic_native_h3_error_classifier_is_causal() {
+        use crate::http::h3::NativeH3SessionError;
+
+        let peer_stop = NativeH3SessionError::Transport(NativeQuicConnectionError::Stream(
+            QuicStreamError::SendStopped { code: 0x10c },
+        ));
+        assert_eq!(
+            native_h3_produced_error_diagnostic(&peer_stop),
+            Some(WebBodyDiagnostic::ClientAbort)
+        );
+
+        let local_cancel = NativeH3SessionError::Transport(NativeQuicConnectionError::Cancelled);
+        assert_eq!(native_h3_produced_error_diagnostic(&local_cancel), None);
+
+        let producer_state = NativeH3SessionError::InvalidState("duplicate terminal frame");
+        assert_eq!(
+            native_h3_produced_error_diagnostic(&producer_state),
+            Some(WebBodyDiagnostic::ResponseProducerFailure)
+        );
+
+        let producer_frame = NativeH3SessionError::Protocol(H3Error::InvalidFrame(
+            "response DATA exceeds the configured frame limit",
+        ));
+        assert_eq!(
+            native_h3_produced_error_diagnostic(&producer_frame),
+            Some(WebBodyDiagnostic::ResponseProducerFailure)
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "http3")]
+    fn body_diagnostic_h3_dispatch_completion_distinguishes_peer_and_local_close() {
+        use crate::http::h3::NativeH3SessionError;
+        use crate::net::atp::protocol::quic_frames::QuicFrame;
+        use crate::net::atp::protocol::varint::VarInt;
+        use crate::net::quic_native::{NativeQuicConnectionConfig, PacketNumberSpace};
+
+        fn established_server(cx: &Cx) -> QuicConnection {
+            let mut connection = QuicConnection::server(NativeQuicConnectionConfig::default());
+            connection.begin_handshake(cx).expect("begin handshake");
+            connection
+                .mark_handshake_keys_available(cx)
+                .expect("install handshake keys");
+            connection
+                .mark_app_keys_available(cx)
+                .expect("install application keys");
+            connection.confirm_handshake(cx).expect("confirm handshake");
+            connection
+        }
+
+        let cx = Cx::for_testing();
+        let completion_error = NativeH3SessionError::InvalidState(
+            "QUIC connection is not established for HTTP/3 messages",
+        );
+
+        let mut peer_closed = established_server(&cx);
+        peer_closed
+            .inner_mut()
+            .process_frame(
+                &cx,
+                &QuicFrame::ConnectionClose {
+                    error_code: VarInt::from_u64_unchecked(0x10c),
+                    frame_type: None,
+                    reason_phrase: Bytes::from_static(b"peer shutdown"),
+                },
+                PacketNumberSpace::ApplicationData,
+            )
+            .expect("peer CONNECTION_CLOSE enters draining");
+        assert_eq!(
+            native_h3_completion_error_diagnostic(&peer_closed, &completion_error),
+            Some(WebBodyDiagnostic::ClientAbort),
+            "a peer close after dispatch but before response start is E509"
+        );
+
+        let mut locally_closed = established_server(&cx);
+        locally_closed
+            .begin_close(&cx, 0, 0x10c)
+            .expect("local shutdown enters draining");
+        assert_eq!(
+            native_h3_completion_error_diagnostic(&locally_closed, &completion_error),
+            None,
+            "a local close after dispatch must not be relabeled as a client abort"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "http3")]
+    fn body_diagnostic_h3_cancel_after_close_reaps_dispatch_ownership() {
+        use crate::http::h3::{H3Settings, NativeH3Session};
+        use crate::net::atp::protocol::quic_frames::QuicFrame;
+        use crate::net::atp::protocol::varint::VarInt;
+        use crate::net::quic_native::{
+            NativeQuicConnectionConfig, PacketNumberSpace, StreamDirection, StreamRole,
+        };
+
+        fn established_server(cx: &Cx) -> QuicConnection {
+            let mut connection = QuicConnection::server(NativeQuicConnectionConfig::default());
+            connection.begin_handshake(cx).expect("begin handshake");
+            connection
+                .mark_handshake_keys_available(cx)
+                .expect("install handshake keys");
+            connection
+                .mark_app_keys_available(cx)
+                .expect("install application keys");
+            connection.confirm_handshake(cx).expect("confirm handshake");
+            connection
+        }
+
+        let cx = Cx::for_testing();
+        let stream_id = StreamId::local(StreamRole::Client, StreamDirection::Bidirectional, 0);
+
+        let mut peer_connection = established_server(&cx);
+        let mut peer_session = NativeH3Session::server();
+        peer_session
+            .initialize(&cx, &mut peer_connection, H3Settings::default())
+            .expect("initialize peer-close session");
+        let peer_writer = peer_session
+            .start_response_writer(
+                &peer_connection,
+                stream_id,
+                &H3ResponseHead::new(200, Vec::new()).expect("valid response head"),
+                false,
+            )
+            .expect("prepare response writer");
+        let mut peer_bridge = NativeH3Router::new(Router::new());
+        peer_bridge.in_flight.insert(stream_id, 0);
+        peer_bridge.produced.insert(
+            stream_id,
+            ActiveNativeH3ProducedResponse {
+                status: 200,
+                writer: peer_writer,
+                plan: None,
+                body: None,
+                lifecycle: None,
+                producer_cx: None,
+                max_data_wire_bytes: 0,
+                emitted_bytes: 0,
+                terminal: None,
+                head_only: false,
+                reset_queued: false,
+            },
+        );
+        let peer_token = NativeH3RouterDispatchToken {
+            bridge_identity: Arc::clone(&peer_bridge.identity),
+            stream_id,
+        };
+        peer_connection
+            .inner_mut()
+            .process_frame(
+                &cx,
+                &QuicFrame::ConnectionClose {
+                    error_code: VarInt::from_u64_unchecked(0x10c),
+                    frame_type: None,
+                    reason_phrase: Bytes::from_static(b"peer shutdown"),
+                },
+                PacketNumberSpace::ApplicationData,
+            )
+            .expect("peer CONNECTION_CLOSE enters draining");
+        assert_eq!(
+            native_h3_closed_connection_diagnostic(&peer_connection),
+            Some(WebBodyDiagnostic::ClientAbort)
+        );
+        assert_eq!(
+            peer_bridge
+                .cancel_dispatch_with_cx(&cx, &mut peer_session, &mut peer_connection, &peer_token,)
+                .expect("closed peer dispatch cancellation is terminal"),
+            NativeH3RouterEvent::RequestRefused {
+                stream_id,
+                reason: NativeH3RouterRefusal::DispatchCancelled,
+            }
+        );
+        assert_eq!(peer_bridge.in_flight_dispatch_count(), 0);
+        assert!(!peer_bridge.produced.contains_key(&stream_id));
+
+        let mut local_connection = established_server(&cx);
+        let mut local_session = NativeH3Session::server();
+        local_session
+            .initialize(&cx, &mut local_connection, H3Settings::default())
+            .expect("initialize local-close session");
+        let mut local_bridge = NativeH3Router::new(Router::new());
+        local_bridge.in_flight.insert(stream_id, 0);
+        let local_token = NativeH3RouterDispatchToken {
+            bridge_identity: Arc::clone(&local_bridge.identity),
+            stream_id,
+        };
+        local_connection
+            .begin_close(&cx, 0, 0x10c)
+            .expect("local shutdown enters draining");
+        assert_eq!(
+            native_h3_closed_connection_diagnostic(&local_connection),
+            None
+        );
+        assert_eq!(
+            local_bridge
+                .cancel_dispatch_with_cx(
+                    &cx,
+                    &mut local_session,
+                    &mut local_connection,
+                    &local_token,
+                )
+                .expect("closed local dispatch cancellation is terminal"),
+            NativeH3RouterEvent::RequestRefused {
+                stream_id,
+                reason: NativeH3RouterRefusal::DispatchCancelled,
+            }
+        );
+        assert_eq!(local_bridge.in_flight_dispatch_count(), 0);
     }
 
     #[test]

@@ -6,10 +6,13 @@ Bead: `asupersync-server-stack-hardening-eeexl1.6.1`
 
 Canonical artifact: `artifacts/server_incoming_body_contract_v1.json`
 
-Status: foundation contract retained; BODY-2 H1 streaming ingress, bounded
-backpressure, and drain-or-close connection reuse are implemented through the
-public `Http1StreamingServer` entry point. H2, buffered web extraction,
-multipart, and incoming-body terminal telemetry remain follow-on work.
+Status: historical BODY-1/BODY-2 foundation retained as design evidence. The
+current implementation has since landed H1 streaming ingress, async bounded
+JSON/form/raw extraction, buffered and live multipart, streamed H1/H2
+responses, monotonic `RequestBodyPolicy`, and stable body diagnostics. H2
+request ingress remains bounded and buffered rather than incrementally
+consumed. Statements below that use “current” describe the frozen foundation
+baseline unless a later status note explicitly supersedes them.
 
 ## Purpose and authority
 
@@ -31,7 +34,7 @@ The authority boundary is intentionally narrow:
 - leave emitted ASUP error-code allocation to a later implementation change; and
 - close BODY-2 only after focused Rust contract and live H1 streaming validation.
 
-## Current architecture
+## Foundation architecture baseline
 
 The reusable abstractions and the live server path are currently separate.
 
@@ -305,11 +308,23 @@ source disconnect, consumer drop, cancellation, framing refusal, aggregate limit
 queue-frame refusal, checked-accounting overflow, drain limit/timeout, and terminal
 repoll. The legacy buffered codec retains `HttpError` for its own API.
 
-These IDs are artifact-level contract identifiers. `ASUP-E501` is an already-live
-request-deadline code; this foundation allocates no new ASUP code. Before later
-source code emits another incoming-body failure to agents or operators, that change
-must allocate an owner-reviewed `ASUP-E5xx` registry row, add its standard
-documentation page, and emit the exact leading token.
+These IDs remain artifact-level contract identifiers. The later BODY-8 source
+wiring allocated the corresponding live operator/client families in
+`docs/error_codes/registry.json`: `ASUP-E505` aggregate-body limit,
+`ASUP-E506` multipart field/part/work limit, `ASUP-E507` malformed multipart,
+`ASUP-E508` body or multipart timeout, `ASUP-E509` client abort, and
+`ASUP-E510` response-producer failure. `ASUP-E501` remains the distinct
+request-region deadline code. Existing `StreamingMultipartError::code()` keeps
+the `ASUP-E504` compatibility umbrella while `diagnostic_code()` exposes the
+more precise family.
+
+Client aborts and post-head producer failures are operator diagnostics, not
+permission to synthesize a new response: H1 closes, H2 resets the affected
+stream, and H3 either resets the request stream or reaps outstanding ownership
+when the peer already closed the connection. No fallback body is appended after
+head commitment. Safely writable pre-head limit, malformed-input, and timeout
+responses begin with the exact registered token and contain only fixed text plus
+bounded numeric context.
 
 ## Telemetry contract
 

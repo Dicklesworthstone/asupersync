@@ -393,3 +393,42 @@ fn error_code_registry_is_discoverable_from_agent_docs() {
     assert!(readme.contains(REGISTRY), "README must link {REGISTRY}");
     assert!(agents.contains(REGISTRY), "AGENTS.md must link {REGISTRY}");
 }
+
+#[test]
+fn web_body_diagnostic_family_is_live_and_documents_wire_disposition() {
+    let registry: Value = serde_json::from_str(&read(REGISTRY)).expect("registry must be JSON");
+    let registry_entries: BTreeMap<_, _> = registry["codes"]
+        .as_array()
+        .expect("registry codes must be an array")
+        .iter()
+        .map(|entry| (as_str(entry, "code"), entry))
+        .collect();
+
+    for (code, expected_name) in [
+        ("ASUP-E505", "web-total-body-limit-exceeded"),
+        ("ASUP-E506", "multipart-field-limit-exceeded"),
+        ("ASUP-E507", "multipart-malformed"),
+        ("ASUP-E508", "web-body-timeout"),
+        ("ASUP-E509", "web-client-abort"),
+        ("ASUP-E510", "web-response-producer-failed"),
+    ] {
+        let entry = registry_entries
+            .get(code)
+            .unwrap_or_else(|| panic!("{code} missing from registry"));
+        assert_eq!(as_str(entry, "name"), expected_name);
+        assert_eq!(as_str(entry, "area"), "net-http");
+        assert_eq!(as_str(entry, "status"), "live");
+        assert_eq!(as_str(entry, "since"), "0.4.10");
+        let page = read(as_str(entry, "doc_path"));
+        assert!(page.contains(&format!("`[{code}]`")));
+    }
+
+    let abort_page = read("docs/error_codes/ASUP-E509.md");
+    assert!(abort_page.contains("does not synthesize a response"));
+    assert!(abort_page.contains("HTTP/1 connection is closed"));
+    assert!(abort_page.contains("HTTP/2 stream is reset"));
+
+    let producer_page = read("docs/error_codes/ASUP-E510.md");
+    assert!(producer_page.contains("After response-head commitment"));
+    assert!(producer_page.contains("neither protocol appends a fallback body"));
+}

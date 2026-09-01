@@ -541,6 +541,24 @@ impl Http1StreamSlot {
 /// transport authority. Registering a producer does not create a channel,
 /// spawn a task, or poll the producer; the HTTP/1 listener performs those
 /// actions under its authoritative request [`Cx`] after dispatch completes.
+///
+/// ```no_run
+/// use asupersync::bytes::Bytes;
+/// use asupersync::web::{Http1StreamResponder, Response, StatusCode};
+/// use std::num::NonZeroUsize;
+///
+/// async fn streamed(responder: Http1StreamResponder) -> Response {
+///     responder.chunked(
+///         StatusCode::OK,
+///         NonZeroUsize::new(4).unwrap(),
+///         |_cx, mut sender| async move {
+///             sender.send_bytes(&_cx, Bytes::from_static(b"hello")).await?;
+///             sender.finish(&_cx)?;
+///             Ok(sender)
+///         },
+///     )
+/// }
+/// ```
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug)]
 pub struct Http1StreamResponder {
@@ -833,6 +851,25 @@ impl Http2StreamSlot {
 /// deferred: it creates no channel and polls no producer until the HTTP/2
 /// listener validates the final response head and supplies its request-derived
 /// [`Cx`].
+///
+/// ```no_run
+/// use asupersync::bytes::Bytes;
+/// use asupersync::web::{Http2StreamResponder, Response, StatusCode};
+/// use std::num::NonZeroUsize;
+///
+/// async fn streamed(responder: Http2StreamResponder) -> Response {
+///     responder.streaming(
+///         StatusCode::OK,
+///         NonZeroUsize::new(4).unwrap(),
+///         NonZeroUsize::new(16 * 1024).unwrap(),
+///         |_cx, mut sender| async move {
+///             sender.send_bytes(&_cx, Bytes::from_static(b"hello")).await?;
+///             sender.finish(&_cx)?;
+///             Ok(sender)
+///         },
+///     )
+/// }
+/// ```
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug)]
 pub struct Http2StreamResponder {

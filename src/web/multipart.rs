@@ -194,6 +194,46 @@ fn effective_multipart_limits(req: &Request) -> MultipartLimits {
     }
 }
 
+fn coded_multipart_error(
+    status: StatusCode,
+    diagnostic: super::WebBodyDiagnostic,
+    message: impl fmt::Display,
+) -> ExtractionError {
+    ExtractionError::coded(status, diagnostic, message)
+}
+
+fn multipart_total_limit_error(message: impl fmt::Display) -> ExtractionError {
+    coded_multipart_error(
+        StatusCode::PAYLOAD_TOO_LARGE,
+        super::WebBodyDiagnostic::TotalBodyLimit,
+        message,
+    )
+}
+
+fn multipart_field_limit_error(status: StatusCode, message: impl fmt::Display) -> ExtractionError {
+    coded_multipart_error(
+        status,
+        super::WebBodyDiagnostic::MultipartFieldLimit,
+        message,
+    )
+}
+
+fn malformed_multipart_error(status: StatusCode, message: impl fmt::Display) -> ExtractionError {
+    coded_multipart_error(
+        status,
+        super::WebBodyDiagnostic::MalformedMultipart,
+        message,
+    )
+}
+
+fn multipart_timeout_error(message: impl fmt::Display) -> ExtractionError {
+    coded_multipart_error(
+        StatusCode::REQUEST_TIMEOUT,
+        super::WebBodyDiagnostic::Timeout,
+        message,
+    )
+}
+
 // ─── MultipartField ─────────────────────────────────────────────────────────
 
 /// A single field/part from a multipart form.
@@ -308,14 +348,11 @@ impl FromRequest for Multipart {
 
         // Size check.
         if req.body.len() > limits.max_total_size {
-            return Err(ExtractionError::new(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                format!(
-                    "multipart body too large: {} bytes (max {})",
-                    req.body.len(),
-                    limits.max_total_size
-                ),
-            ));
+            return Err(multipart_total_limit_error(format!(
+                "multipart body too large: {} bytes (max {})",
+                req.body.len(),
+                limits.max_total_size
+            )));
         }
 
         validate_request_content_length(&req)?;
@@ -358,6 +395,32 @@ impl FromRequest for Multipart {
 /// its bounded drain-or-close policy before any connection reuse.
 ///
 /// This extractor is available only on the native streaming Router path.
+///
+/// # Linear field consumption
+///
+/// ```no_run
+/// use asupersync::Cx;
+/// use asupersync::web::multipart::{StreamingMultipart, StreamingMultipartError};
+///
+/// async fn consume(
+///     cx: &Cx,
+///     form: &mut StreamingMultipart,
+/// ) -> Result<usize, StreamingMultipartError> {
+///     let mut total = 0;
+///     while let Some(mut field) = form.next_field(cx).await? {
+///         if field.name() == "reject-me" {
+///             // Early drop deliberately abandons the whole request body.
+///             // Return from the handler; do not call `next_field` again.
+///             drop(field);
+///             return Ok(total);
+///         }
+///         while let Some(chunk) = field.next_chunk(cx).await? {
+///             total += chunk.len();
+///         }
+///     }
+///     Ok(total)
+/// }
+/// ```
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug)]
 pub struct StreamingMultipart {
@@ -402,9 +465,10 @@ pub struct StreamingMultipartField<'a> {
 
 /// Stable failure category for the live multipart field API.
 ///
-/// Every category is emitted with registry code `ASUP-E504`. The category and
-/// HTTP status remain machine-readable so callers do not need to inspect the
-/// human-readable message.
+/// [`StreamingMultipartError::code`] preserves the `ASUP-E504` compatibility
+/// umbrella. [`StreamingMultipartError::diagnostic_code`] distinguishes the
+/// more precise E501/E505-E509 cause when assigned. The category and HTTP status
+/// remain machine-readable so callers never need to parse human text.
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -419,7 +483,8 @@ pub enum StreamingMultipartErrorKind {
     UnsupportedMediaType,
     /// The request body or handler context was cancelled (HTTP 499 or 503).
     Cancelled,
-    /// The request-body transport disconnected or otherwise failed (HTTP 500).
+    /// The client/request-body transport disconnected (HTTP 499 telemetry;
+    /// the protocol listener closes or resets without synthesizing a response).
     Transport,
     /// A prior field lease was dropped or forgotten before field EOF (HTTP 400 or 500).
     AbandonedField,
@@ -436,6 +501,8 @@ pub struct StreamingMultipartError {
     status: StatusCode,
     message: String,
     cancel_kind: Option<CancelKind>,
+    diagnostic: Option<super::WebBodyDiagnostic>,
+    registry_code_override: Option<&'static str>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -453,7 +520,20 @@ impl StreamingMultipartError {
             status,
             message: message.into(),
             cancel_kind: None,
+            diagnostic: None,
+            registry_code_override: None,
         }
+    }
+
+    fn with_diagnostic(
+        kind: StreamingMultipartErrorKind,
+        status: StatusCode,
+        diagnostic: super::WebBodyDiagnostic,
+        message: impl Into<String>,
+    ) -> Self {
+        let mut error = Self::new(kind, status, message);
+        error.diagnostic = Some(diagnostic);
+        error
     }
 
     fn cancelled(kind: CancelKind) -> Self {
@@ -478,17 +558,19 @@ impl StreamingMultipartError {
 
     fn from_body_error(error: IncomingBodyError) -> Self {
         match error {
-            IncomingBodyError::BodyTooLarge { actual, limit } => Self::new(
+            IncomingBodyError::BodyTooLarge { actual, limit } => Self::with_diagnostic(
                 StreamingMultipartErrorKind::PayloadTooLarge,
                 StatusCode::PAYLOAD_TOO_LARGE,
+                super::WebBodyDiagnostic::TotalBodyLimit,
                 actual.map_or_else(
                     || format!("multipart body too large (limit {limit})"),
                     |actual| format!("multipart body too large: {actual} bytes (limit {limit})"),
                 ),
             ),
-            IncomingBodyError::QueueFrameTooLarge { actual, limit } => Self::new(
+            IncomingBodyError::QueueFrameTooLarge { actual, limit } => Self::with_diagnostic(
                 StreamingMultipartErrorKind::PayloadTooLarge,
                 StatusCode::PAYLOAD_TOO_LARGE,
+                super::WebBodyDiagnostic::TotalBodyLimit,
                 format!("multipart body too large: {actual} bytes (limit {limit})"),
             ),
             IncomingBodyError::Cancelled { kind } => Self::cancelled(kind),
@@ -497,15 +579,22 @@ impl StreamingMultipartError {
             | IncomingBodyError::TrailersTooLarge
             | IncomingBodyError::BadHeader
             | IncomingBodyError::InvalidHeaderName
-            | IncomingBodyError::InvalidHeaderValue => Self::new(
+            | IncomingBodyError::InvalidHeaderValue => Self::with_diagnostic(
                 StreamingMultipartErrorKind::Malformed,
                 StatusCode::BAD_REQUEST,
+                super::WebBodyDiagnostic::MalformedMultipart,
                 "invalid multipart request body",
             ),
-            IncomingBodyError::SourceDisconnected => Self::new(
+            IncomingBodyError::ClientAborted => Self::with_diagnostic(
                 StreamingMultipartErrorKind::Transport,
+                StatusCode::CLIENT_CLOSED_REQUEST,
+                super::WebBodyDiagnostic::ClientAbort,
+                "multipart request body transport aborted",
+            ),
+            IncomingBodyError::SourceDisconnected => Self::new(
+                StreamingMultipartErrorKind::Internal,
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "multipart request body source disconnected",
+                "multipart request body producer disconnected",
             ),
             IncomingBodyError::ConsumerDropped => Self::abandoned(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -516,13 +605,19 @@ impl StreamingMultipartError {
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "failed to account for multipart request body",
             ),
-            IncomingBodyError::DrainLimitExceeded { .. }
-            | IncomingBodyError::DrainTimeout
-            | IncomingBodyError::AlreadyTerminal => Self::new(
-                StreamingMultipartErrorKind::Internal,
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "multipart request body drain failed",
+            IncomingBodyError::DrainTimeout => Self::with_diagnostic(
+                StreamingMultipartErrorKind::Timeout,
+                StatusCode::REQUEST_TIMEOUT,
+                super::WebBodyDiagnostic::Timeout,
+                "multipart request body drain timed out",
             ),
+            IncomingBodyError::DrainLimitExceeded { .. } | IncomingBodyError::AlreadyTerminal => {
+                Self::new(
+                    StreamingMultipartErrorKind::Internal,
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "multipart request body drain failed",
+                )
+            }
         }
     }
 
@@ -548,6 +643,34 @@ impl StreamingMultipartError {
         Self::CODE
     }
 
+    /// Exact diagnostic category for this failure, when BODY-8 assigned one.
+    #[must_use]
+    pub const fn diagnostic(&self) -> Option<super::WebBodyDiagnostic> {
+        self.diagnostic
+    }
+
+    /// Exact registry code for the typed BODY-8 cause.
+    ///
+    /// [`Self::code`] remains the `ASUP-E504` streaming-multipart umbrella for
+    /// v0.4 compatibility; this accessor distinguishes the BODY-8 causes.
+    #[must_use]
+    pub const fn diagnostic_code(&self) -> &'static str {
+        if let Some(code) = self.registry_code_override {
+            return code;
+        }
+        match self.diagnostic {
+            Some(diagnostic) => diagnostic.code(),
+            None if matches!(
+                self.cancel_kind,
+                Some(CancelKind::Timeout | CancelKind::Deadline)
+            ) =>
+            {
+                "ASUP-E501"
+            }
+            None => Self::CODE,
+        }
+    }
+
     /// Human-readable context for this occurrence.
     #[must_use]
     pub fn message(&self) -> &str {
@@ -566,6 +689,13 @@ impl StreamingMultipartError {
 impl From<ExtractionError> for StreamingMultipartError {
     fn from(error: ExtractionError) -> Self {
         let status = error.status;
+        let (diagnostic, registry_code_override, message) =
+            if let Some(detail) = error.message.strip_prefix("[ASUP-E501] ") {
+                (None, Some("ASUP-E501"), detail.to_owned())
+            } else {
+                let (diagnostic, message) = decode_coded_multipart_message(error.message);
+                (diagnostic, None, message)
+            };
         let kind = if status == StatusCode::BAD_REQUEST {
             StreamingMultipartErrorKind::Malformed
         } else if status == StatusCode::REQUEST_TIMEOUT {
@@ -581,14 +711,41 @@ impl From<ExtractionError> for StreamingMultipartError {
         } else {
             StreamingMultipartErrorKind::Internal
         };
-        Self::new(kind, status, error.message)
+        let mut error = Self::new(kind, status, message);
+        error.diagnostic = diagnostic;
+        error.registry_code_override = registry_code_override;
+        error
     }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn decode_coded_multipart_message(message: String) -> (Option<super::WebBodyDiagnostic>, String) {
+    for diagnostic in [
+        super::WebBodyDiagnostic::TotalBodyLimit,
+        super::WebBodyDiagnostic::MultipartFieldLimit,
+        super::WebBodyDiagnostic::MalformedMultipart,
+        super::WebBodyDiagnostic::Timeout,
+        super::WebBodyDiagnostic::ClientAbort,
+        super::WebBodyDiagnostic::ResponseProducerFailure,
+    ] {
+        let prefix = format!("[{}] ", diagnostic.code());
+        if let Some(detail) = message.strip_prefix(&prefix) {
+            return (Some(diagnostic), detail.to_owned());
+        }
+    }
+    (None, message)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 impl From<StreamingMultipartError> for ExtractionError {
     fn from(error: StreamingMultipartError) -> Self {
-        ExtractionError::new(error.status, error.to_string())
+        let status = error.status;
+        let message = if error.diagnostic_code() == error.code() {
+            error.to_string()
+        } else {
+            format!("[{}] {}", error.diagnostic_code(), error.message)
+        };
+        ExtractionError::new(status, message)
     }
 }
 
@@ -598,7 +755,7 @@ impl fmt::Display for StreamingMultipartError {
         write!(
             formatter,
             "[{}] {} {}",
-            Self::CODE,
+            self.code(),
             self.status,
             self.message
         )
@@ -633,7 +790,7 @@ impl StreamingMultipart {
             .checked_mul(6)
             .and_then(|units| units.checked_add(16))
             .ok_or_else(|| {
-                ExtractionError::new(
+                multipart_field_limit_error(
                     StatusCode::PAYLOAD_TOO_LARGE,
                     "multipart parser work budget overflow",
                 )
@@ -642,7 +799,7 @@ impl StreamingMultipart {
             .max_total_size
             .checked_mul(work_scale)
             .ok_or_else(|| {
-                ExtractionError::new(
+                multipart_field_limit_error(
                     StatusCode::PAYLOAD_TOO_LARGE,
                     "multipart parser work budget overflow",
                 )
@@ -763,7 +920,8 @@ impl StreamingMultipart {
                         continue;
                     }
                     if self.eof {
-                        return Err(ExtractionError::bad_request(
+                        return Err(malformed_multipart_error(
+                            StatusCode::BAD_REQUEST,
                             "multipart body missing initial boundary",
                         )
                         .into());
@@ -784,7 +942,8 @@ impl StreamingMultipart {
                     self.charge_work(examined)?;
                     if let Some((headers_end, body_start)) = terminator {
                         if headers_end > self.limits.max_part_headers {
-                            return Err(ExtractionError::bad_request(
+                            return Err(multipart_field_limit_error(
+                                StatusCode::BAD_REQUEST,
                                 "multipart part headers too large",
                             )
                             .into());
@@ -799,7 +958,8 @@ impl StreamingMultipart {
                         let filename = parse_disposition_param(&disposition, "filename");
                         let content_type = headers.get("content-type").cloned();
                         if content_type.as_deref().is_some_and(is_multipart_media_type) {
-                            return Err(ExtractionError::bad_request(
+                            return Err(malformed_multipart_error(
+                                StatusCode::BAD_REQUEST,
                                 "nested multipart parts are not supported",
                             )
                             .into());
@@ -813,13 +973,15 @@ impl StreamingMultipart {
                         return Ok(Some((name, filename, content_type, headers)));
                     }
                     if self.eof {
-                        return Err(ExtractionError::bad_request(
+                        return Err(malformed_multipart_error(
+                            StatusCode::BAD_REQUEST,
                             "multipart part missing header terminator",
                         )
                         .into());
                     }
                     if self.buffer.len() > self.limits.max_part_headers.saturating_add(3) {
-                        return Err(ExtractionError::bad_request(
+                        return Err(multipart_field_limit_error(
+                            StatusCode::BAD_REQUEST,
                             "multipart part headers too large",
                         )
                         .into());
@@ -890,7 +1052,8 @@ impl StreamingMultipart {
             }
 
             if self.eof {
-                return Err(ExtractionError::bad_request(
+                return Err(malformed_multipart_error(
+                    StatusCode::BAD_REQUEST,
                     "multipart part missing closing boundary",
                 )
                 .into());
@@ -917,19 +1080,13 @@ impl StreamingMultipart {
                     let bytes = input.copy_to_bytes(count);
                     self.total_received =
                         self.total_received.checked_add(count).ok_or_else(|| {
-                            ExtractionError::new(
-                                StatusCode::PAYLOAD_TOO_LARGE,
-                                "multipart body size accounting overflow",
-                            )
+                            multipart_total_limit_error("multipart body size accounting overflow")
                         })?;
                     if self.total_received > self.limits.max_total_size {
-                        return Err(ExtractionError::new(
-                            StatusCode::PAYLOAD_TOO_LARGE,
-                            format!(
-                                "multipart body too large: {} bytes (max {})",
-                                self.total_received, self.limits.max_total_size
-                            ),
-                        )
+                        return Err(multipart_total_limit_error(format!(
+                            "multipart body too large: {} bytes (max {})",
+                            self.total_received, self.limits.max_total_size
+                        ))
                         .into());
                     }
                     self.buffer.extend_from_slice(bytes.as_ref());
@@ -962,9 +1119,10 @@ impl StreamingMultipart {
             .await
             {
                 StreamingMultipartRead::Frame(result) => result.map_err(|_| {
-                    StreamingMultipartError::new(
+                    StreamingMultipartError::with_diagnostic(
                         StreamingMultipartErrorKind::Timeout,
                         StatusCode::REQUEST_TIMEOUT,
+                        super::WebBodyDiagnostic::Timeout,
                         "multipart request body timed out",
                     )
                 })?,
@@ -1014,9 +1172,10 @@ impl StreamingMultipart {
             .request_timeout_secs
             .saturating_mul(NANOS_PER_SECOND);
         if timeout == 0 || elapsed > timeout {
-            return Err(StreamingMultipartError::new(
+            return Err(StreamingMultipartError::with_diagnostic(
                 StreamingMultipartErrorKind::Timeout,
                 StatusCode::REQUEST_TIMEOUT,
+                super::WebBodyDiagnostic::Timeout,
                 format!("multipart parsing timed out after {elapsed}ns (max {timeout}ns)"),
             ));
         }
@@ -1032,14 +1191,17 @@ impl StreamingMultipart {
 
     fn enter_headers(&mut self) -> Result<(), StreamingMultipartError> {
         if self.part_count >= self.limits.max_parts {
-            return Err(ExtractionError::bad_request(format!(
-                "too many multipart parts (max {})",
-                self.limits.max_parts
-            ))
+            return Err(multipart_field_limit_error(
+                StatusCode::BAD_REQUEST,
+                format!("too many multipart parts (max {})", self.limits.max_parts),
+            )
             .into());
         }
         self.part_count = self.part_count.checked_add(1).ok_or_else(|| {
-            ExtractionError::bad_request("multipart part count accounting overflow")
+            multipart_field_limit_error(
+                StatusCode::BAD_REQUEST,
+                "multipart part count accounting overflow",
+            )
         })?;
         self.header_scan_from = 0;
         self.phase = StreamingMultipartPhase::Headers;
@@ -1048,13 +1210,13 @@ impl StreamingMultipart {
 
     fn account_current_part(&mut self, bytes: usize) -> Result<(), StreamingMultipartError> {
         self.current_part_bytes = self.current_part_bytes.checked_add(bytes).ok_or_else(|| {
-            ExtractionError::new(
+            multipart_field_limit_error(
                 StatusCode::PAYLOAD_TOO_LARGE,
                 "multipart part body size accounting overflow",
             )
         })?;
         if self.current_part_bytes > self.limits.max_part_body_size {
-            return Err(ExtractionError::new(
+            return Err(multipart_field_limit_error(
                 StatusCode::PAYLOAD_TOO_LARGE,
                 "multipart part body too large",
             )
@@ -1067,10 +1229,13 @@ impl StreamingMultipart {
         if let Some(declared_len) = self.current_part_length
             && declared_len != self.current_part_bytes
         {
-            return Err(ExtractionError::bad_request(format!(
-                "multipart part content-length mismatch: declared {declared_len} bytes but parsed {} bytes",
-                self.current_part_bytes
-            ))
+            return Err(malformed_multipart_error(
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "multipart part content-length mismatch: declared {declared_len} bytes but parsed {} bytes",
+                    self.current_part_bytes
+                ),
+            )
             .into());
         }
         Ok(())
@@ -1083,10 +1248,13 @@ impl StreamingMultipart {
         if let Some(expected) = self.expected_length
             && expected != self.total_received
         {
-            return Err(ExtractionError::bad_request(format!(
-                "multipart Content-Length mismatch: declared {expected} bytes, received {} bytes",
-                self.total_received
-            ))
+            return Err(malformed_multipart_error(
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "multipart Content-Length mismatch: declared {expected} bytes, received {} bytes",
+                    self.total_received
+                ),
+            )
             .into());
         }
         self.eof_validated = true;
@@ -1095,12 +1263,17 @@ impl StreamingMultipart {
 
     fn charge_work(&mut self, units: usize) -> Result<(), StreamingMultipartError> {
         self.work_units = self.work_units.checked_add(units).ok_or_else(|| {
-            ExtractionError::bad_request("multipart parser work accounting overflow")
+            multipart_field_limit_error(
+                StatusCode::BAD_REQUEST,
+                "multipart parser work accounting overflow",
+            )
         })?;
         if self.work_units > self.max_work_units {
-            return Err(
-                ExtractionError::bad_request("multipart parser work limit exceeded").into(),
-            );
+            return Err(multipart_field_limit_error(
+                StatusCode::BAD_REQUEST,
+                "multipart parser work limit exceeded",
+            )
+            .into());
         }
         Ok(())
     }
@@ -1112,7 +1285,10 @@ impl StreamingMultipart {
         let units = starts_examined
             .checked_mul(self.delimiter.len())
             .ok_or_else(|| {
-                ExtractionError::bad_request("multipart parser work accounting overflow")
+                multipart_field_limit_error(
+                    StatusCode::BAD_REQUEST,
+                    "multipart parser work accounting overflow",
+                )
             })?;
         self.charge_work(units)
     }
@@ -1227,10 +1403,9 @@ fn check_request_content_length_limit(req: &Request, limit: usize) -> Result<(),
     };
     let declared_len = parse_content_length(value)?;
     if declared_len > limit {
-        return Err(ExtractionError::new(
-            StatusCode::PAYLOAD_TOO_LARGE,
-            format!("multipart Content-Length {declared_len} bytes exceeds limit {limit} bytes"),
-        ));
+        return Err(multipart_total_limit_error(format!(
+            "multipart Content-Length {declared_len} bytes exceeds limit {limit} bytes"
+        )));
     }
     Ok(())
 }
@@ -1242,7 +1417,7 @@ fn validate_request_content_length(req: &Request) -> Result<(), ExtractionError>
     let declared_len = parse_content_length(value)?;
     let actual_len = req.body.len();
     if declared_len != actual_len {
-        return Err(ExtractionError::new(
+        return Err(malformed_multipart_error(
             StatusCode::BAD_REQUEST,
             format!(
                 "multipart Content-Length mismatch: declared {declared_len} bytes, received {actual_len} bytes"
@@ -1254,21 +1429,25 @@ fn validate_request_content_length(req: &Request) -> Result<(), ExtractionError>
 
 fn validate_multipart_content_type(req: &Request) -> Result<String, ExtractionError> {
     let content_type = header_value_ci(req, "content-type").ok_or_else(|| {
-        ExtractionError::new(
+        malformed_multipart_error(
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
             "missing Content-Type header",
         )
     })?;
 
     if !is_multipart_form_data(content_type) {
-        return Err(ExtractionError::new(
+        return Err(malformed_multipart_error(
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
-            format!("expected multipart/form-data, got: {content_type}"),
+            "expected multipart/form-data Content-Type",
         ));
     }
 
-    extract_boundary(content_type)
-        .ok_or_else(|| ExtractionError::bad_request("missing or invalid boundary in Content-Type"))
+    extract_boundary(content_type).ok_or_else(|| {
+        malformed_multipart_error(
+            StatusCode::BAD_REQUEST,
+            "missing or invalid boundary in Content-Type",
+        )
+    })
 }
 
 /// Maximum multipart boundary length per RFC 2046 §5.1.1.
@@ -1403,19 +1582,15 @@ fn check_timeout(
     let idle_timeout = limits.idle_timeout_secs.saturating_mul(NANOS_PER_SECOND);
 
     if request_timeout == 0 || total_elapsed > request_timeout {
-        return Err(ExtractionError::new(
-            StatusCode::REQUEST_TIMEOUT,
-            format!(
-                "multipart parsing timed out after {total_elapsed}ns (max {request_timeout}ns)"
-            ),
-        ));
+        return Err(multipart_timeout_error(format!(
+            "multipart parsing timed out after {total_elapsed}ns (max {request_timeout}ns)"
+        )));
     }
 
     if idle_timeout == 0 || idle_elapsed > idle_timeout {
-        return Err(ExtractionError::new(
-            StatusCode::REQUEST_TIMEOUT,
-            format!("multipart parsing idle for {idle_elapsed}ns (max {idle_timeout}ns)"),
-        ));
+        return Err(multipart_timeout_error(format!(
+            "multipart parsing idle for {idle_elapsed}ns (max {idle_timeout}ns)"
+        )));
     }
 
     Ok(())
@@ -1477,7 +1652,7 @@ impl StreamingMultipartDecoder {
             .checked_mul(6)
             .and_then(|units| units.checked_add(16))
             .ok_or_else(|| {
-                ExtractionError::new(
+                multipart_field_limit_error(
                     StatusCode::PAYLOAD_TOO_LARGE,
                     "multipart parser work budget overflow",
                 )
@@ -1486,7 +1661,7 @@ impl StreamingMultipartDecoder {
             .max_total_size
             .checked_mul(work_scale)
             .ok_or_else(|| {
-                ExtractionError::new(
+                multipart_field_limit_error(
                     StatusCode::PAYLOAD_TOO_LARGE,
                     "multipart parser work budget overflow",
                 )
@@ -1514,19 +1689,13 @@ impl StreamingMultipartDecoder {
     fn feed(&mut self, data: &[u8]) -> Result<(), ExtractionError> {
         check_timeout(self.parse_start, self.last_progress, &self.limits)?;
         self.total_received = self.total_received.checked_add(data.len()).ok_or_else(|| {
-            ExtractionError::new(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "multipart body size accounting overflow",
-            )
+            multipart_total_limit_error("multipart body size accounting overflow")
         })?;
         if self.total_received > self.limits.max_total_size {
-            return Err(ExtractionError::new(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                format!(
-                    "multipart body too large: {} bytes (max {})",
-                    self.total_received, self.limits.max_total_size
-                ),
-            ));
+            return Err(multipart_total_limit_error(format!(
+                "multipart body too large: {} bytes (max {})",
+                self.total_received, self.limits.max_total_size
+            )));
         }
 
         if self.phase != StreamingMultipartPhase::Done {
@@ -1552,21 +1721,27 @@ impl StreamingMultipartDecoder {
         if let Some(expected) = self.expected_length
             && expected != self.total_received
         {
-            return Err(ExtractionError::bad_request(format!(
-                "multipart Content-Length mismatch: declared {expected} bytes, received {} bytes",
-                self.total_received
-            )));
+            return Err(malformed_multipart_error(
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "multipart Content-Length mismatch: declared {expected} bytes, received {} bytes",
+                    self.total_received
+                ),
+            ));
         }
         self.process(true)?;
         match self.phase {
             StreamingMultipartPhase::Done => Ok(self.fields),
-            StreamingMultipartPhase::Preamble => Err(ExtractionError::bad_request(
+            StreamingMultipartPhase::Preamble => Err(malformed_multipart_error(
+                StatusCode::BAD_REQUEST,
                 "multipart body missing initial boundary",
             )),
-            StreamingMultipartPhase::Headers => Err(ExtractionError::bad_request(
+            StreamingMultipartPhase::Headers => Err(malformed_multipart_error(
+                StatusCode::BAD_REQUEST,
                 "multipart part missing header terminator",
             )),
-            StreamingMultipartPhase::Body => Err(ExtractionError::bad_request(
+            StreamingMultipartPhase::Body => Err(malformed_multipart_error(
+                StatusCode::BAD_REQUEST,
                 "multipart part missing closing boundary",
             )),
         }
@@ -1639,7 +1814,8 @@ impl StreamingMultipartDecoder {
         self.charge_work(examined)?;
         if let Some((headers_end, body_start)) = terminator {
             if headers_end > self.limits.max_part_headers {
-                return Err(ExtractionError::bad_request(
+                return Err(multipart_field_limit_error(
+                    StatusCode::BAD_REQUEST,
                     "multipart part headers too large",
                 ));
             }
@@ -1653,7 +1829,8 @@ impl StreamingMultipartDecoder {
         }
 
         if self.buffer.len() > self.limits.max_part_headers.saturating_add(3) {
-            return Err(ExtractionError::bad_request(
+            return Err(multipart_field_limit_error(
+                StatusCode::BAD_REQUEST,
                 "multipart part headers too large",
             ));
         }
@@ -1695,10 +1872,10 @@ impl StreamingMultipartDecoder {
 
     fn enter_headers(&mut self) -> Result<(), ExtractionError> {
         if self.fields.len() >= self.limits.max_parts {
-            return Err(ExtractionError::bad_request(format!(
-                "too many multipart parts (max {})",
-                self.limits.max_parts
-            )));
+            return Err(multipart_field_limit_error(
+                StatusCode::BAD_REQUEST,
+                format!("too many multipart parts (max {})", self.limits.max_parts),
+            ));
         }
         self.header_scan_from = 0;
         self.phase = StreamingMultipartPhase::Headers;
@@ -1711,13 +1888,13 @@ impl StreamingMultipartDecoder {
             .len()
             .checked_add(bytes.len())
             .ok_or_else(|| {
-                ExtractionError::new(
+                multipart_field_limit_error(
                     StatusCode::PAYLOAD_TOO_LARGE,
                     "multipart part body size accounting overflow",
                 )
             })?;
         if next_len > self.limits.max_part_body_size {
-            return Err(ExtractionError::new(
+            return Err(multipart_field_limit_error(
                 StatusCode::PAYLOAD_TOO_LARGE,
                 "multipart part body too large",
             ));
@@ -1743,7 +1920,8 @@ impl StreamingMultipartDecoder {
         let filename = parse_disposition_param(&disposition, "filename");
         let content_type = headers.get("content-type").cloned();
         if content_type.as_deref().is_some_and(is_multipart_media_type) {
-            return Err(ExtractionError::bad_request(
+            return Err(malformed_multipart_error(
+                StatusCode::BAD_REQUEST,
                 "nested multipart parts are not supported",
             ));
         }
@@ -1760,10 +1938,14 @@ impl StreamingMultipartDecoder {
 
     fn charge_work(&mut self, units: usize) -> Result<(), ExtractionError> {
         self.work_units = self.work_units.checked_add(units).ok_or_else(|| {
-            ExtractionError::bad_request("multipart parser work accounting overflow")
+            multipart_field_limit_error(
+                StatusCode::BAD_REQUEST,
+                "multipart parser work accounting overflow",
+            )
         })?;
         if self.work_units > self.max_work_units {
-            return Err(ExtractionError::bad_request(
+            return Err(multipart_field_limit_error(
+                StatusCode::BAD_REQUEST,
                 "multipart parser work limit exceeded",
             ));
         }
@@ -1774,7 +1956,10 @@ impl StreamingMultipartDecoder {
         let units = starts_examined
             .checked_mul(self.delimiter.len())
             .ok_or_else(|| {
-                ExtractionError::bad_request("multipart parser work accounting overflow")
+                multipart_field_limit_error(
+                    StatusCode::BAD_REQUEST,
+                    "multipart parser work accounting overflow",
+                )
             })?;
         self.charge_work(units)
     }
@@ -1885,12 +2070,7 @@ async fn extract_streaming_multipart(cx: &Cx, req: Request) -> Result<Multipart,
             std::future::poll_fn(|poll_cx| Pin::new(&mut body).poll_frame(poll_cx)),
         )
         .await
-        .map_err(|_| {
-            ExtractionError::new(
-                StatusCode::REQUEST_TIMEOUT,
-                "multipart request body timed out",
-            )
-        })?;
+        .map_err(|_| multipart_timeout_error("multipart request body timed out"))?;
         let Some(frame) = next else {
             break;
         };
@@ -1939,7 +2119,8 @@ fn parse_multipart(
     pos = match find_multipart_delimiter(body, delimiter_bytes, pos) {
         Some(idx) => idx + delimiter_bytes.len(),
         None => {
-            return Err(ExtractionError::bad_request(
+            return Err(malformed_multipart_error(
+                StatusCode::BAD_REQUEST,
                 "multipart body missing initial boundary",
             ));
         }
@@ -1958,23 +2139,27 @@ fn parse_multipart(
         check_timeout(parse_start, last_progress, limits)?;
 
         if fields.len() >= limits.max_parts {
-            return Err(ExtractionError::bad_request(format!(
-                "too many multipart parts (max {})",
-                limits.max_parts
-            )));
+            return Err(multipart_field_limit_error(
+                StatusCode::BAD_REQUEST,
+                format!("too many multipart parts (max {})", limits.max_parts),
+            ));
         }
 
         // Check for close delimiter at current position (might have been found
         // as next delimiter in the previous iteration).
         // Find the end of this part's headers (blank line).
         let headers_end = find_blank_line(body, pos).ok_or_else(|| {
-            ExtractionError::bad_request("multipart part missing header terminator")
+            malformed_multipart_error(
+                StatusCode::BAD_REQUEST,
+                "multipart part missing header terminator",
+            )
         })?;
         last_progress = wall_now(); // Mark progress after finding headers
 
         let headers_section = &body[pos..headers_end.0];
         if headers_section.len() > limits.max_part_headers {
-            return Err(ExtractionError::bad_request(
+            return Err(multipart_field_limit_error(
+                StatusCode::BAD_REQUEST,
                 "multipart part headers too large",
             ));
         }
@@ -1988,7 +2173,10 @@ fn parse_multipart(
         check_timeout(parse_start, last_progress, limits)?;
         let next_delim =
             find_multipart_delimiter(body, delimiter_bytes, body_start).ok_or_else(|| {
-                ExtractionError::bad_request("multipart part missing closing boundary")
+                malformed_multipart_error(
+                    StatusCode::BAD_REQUEST,
+                    "multipart part missing closing boundary",
+                )
             })?;
         last_progress = wall_now(); // Mark progress after finding boundary
 
@@ -1999,7 +2187,7 @@ fn parse_multipart(
         let body_end = strip_trailing_crlf(body, next_delim).max(body_start);
 
         if body_end - body_start > limits.max_part_body_size {
-            return Err(ExtractionError::new(
+            return Err(multipart_field_limit_error(
                 StatusCode::PAYLOAD_TOO_LARGE,
                 "multipart part body too large",
             ));
@@ -2018,7 +2206,8 @@ fn parse_multipart(
         let filename = parse_disposition_param(&disposition, "filename");
         let content_type = part_headers.get("content-type").cloned();
         if content_type.as_deref().is_some_and(is_multipart_media_type) {
-            return Err(ExtractionError::bad_request(
+            return Err(malformed_multipart_error(
+                StatusCode::BAD_REQUEST,
                 "nested multipart parts are not supported",
             ));
         }
@@ -2139,7 +2328,10 @@ fn strip_trailing_crlf(data: &[u8], end: usize) -> usize {
 fn parse_part_headers(data: &[u8]) -> Result<HashMap<String, String>, ExtractionError> {
     let mut headers = HashMap::new();
     let text = std::str::from_utf8(data).map_err(|_| {
-        ExtractionError::bad_request("multipart part headers contain invalid UTF-8")
+        malformed_multipart_error(
+            StatusCode::BAD_REQUEST,
+            "multipart part headers contain invalid UTF-8",
+        )
     })?;
     for line in text.split('\n') {
         let line = line.trim_end_matches('\r');
@@ -2160,9 +2352,12 @@ fn validate_part_content_length(
     if let Some(declared_len) = parse_part_content_length(headers)?
         && declared_len != actual_len
     {
-        return Err(ExtractionError::bad_request(format!(
-            "multipart part content-length mismatch: declared {declared_len} bytes but parsed {actual_len} bytes"
-        )));
+        return Err(malformed_multipart_error(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "multipart part content-length mismatch: declared {declared_len} bytes but parsed {actual_len} bytes"
+            ),
+        ));
     }
 
     Ok(())
@@ -2175,7 +2370,10 @@ fn parse_part_content_length(
         .get("content-length")
         .map(|value| {
             value.parse::<usize>().map_err(|_| {
-                ExtractionError::bad_request("multipart part content-length is invalid")
+                malformed_multipart_error(
+                    StatusCode::BAD_REQUEST,
+                    "multipart part content-length is invalid",
+                )
             })
         })
         .transpose()
@@ -2804,7 +3002,10 @@ mod tests {
             parse_multipart(&body, "OUTER", &MultipartLimits::default(), wall_now()).unwrap_err();
 
         assert_eq!(err.status, StatusCode::BAD_REQUEST);
-        assert_eq!(err.message, "nested multipart parts are not supported");
+        assert_eq!(
+            err.message,
+            "[ASUP-E507] nested multipart parts are not supported"
+        );
     }
 
     #[test]
@@ -3061,7 +3262,7 @@ mod tests {
 
         let err = Multipart::from_request(req).unwrap_err();
         assert_eq!(err.status, StatusCode::PAYLOAD_TOO_LARGE);
-        assert_eq!(err.message, "multipart part body too large");
+        assert_eq!(err.message, "[ASUP-E506] multipart part body too large");
     }
 
     // ================================================================
@@ -3593,7 +3794,10 @@ mod tests {
             panic!("cancelled multipart extraction must terminate");
         };
         assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(error.message, "multipart request body unavailable");
+        assert_eq!(
+            error.message,
+            "[ASUP-E501] multipart request body unavailable"
+        );
         drop(extraction);
         drop(control);
         assert_eq!(
@@ -3786,7 +3990,7 @@ mod tests {
 
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
-    fn streaming_field_limits_and_external_cancellation_keep_typed_statuses() {
+    fn body_diagnostic_streaming_field_limits_and_cancellation_keep_typed_statuses() {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicUsize, Ordering};
         use std::task::{Wake, Waker};
@@ -3811,6 +4015,10 @@ mod tests {
         assert_eq!(error.status(), StatusCode::PAYLOAD_TOO_LARGE);
         assert_eq!(error.kind(), StreamingMultipartErrorKind::PayloadTooLarge);
         assert_eq!(error.code(), "ASUP-E504");
+        assert_eq!(error.diagnostic_code(), "ASUP-E506");
+        assert!(error.to_string().starts_with("[ASUP-E504] 413 "));
+        let response = crate::web::response::IntoResponse::into_response(error.clone());
+        assert!(response.body.starts_with(b"[ASUP-E506] "));
         drop(field);
         drop(limit_control);
 
@@ -3829,7 +4037,10 @@ mod tests {
             error.kind(),
             StreamingMultipartErrorKind::UnsupportedMediaType
         );
+        assert_eq!(error.diagnostic_code(), "ASUP-E507");
         assert!(error.to_string().starts_with("[ASUP-E504] 415 "));
+        let response = crate::web::response::IntoResponse::into_response(error.clone());
+        assert!(response.body.starts_with(b"[ASUP-E507] "));
         assert!(!metadata_writer.consumer_dropped());
         drop(metadata_control);
         assert!(metadata_writer.consumer_dropped());
@@ -3869,22 +4080,48 @@ mod tests {
         assert_eq!(error.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(error.kind(), StreamingMultipartErrorKind::Cancelled);
         assert_eq!(error.cancel_kind(), Some(CancelKind::Deadline));
+        assert_eq!(error.diagnostic_code(), "ASUP-E501");
+        assert!(error.to_string().starts_with("[ASUP-E504] 503 "));
+        let response = crate::web::response::IntoResponse::into_response(error.clone());
+        assert!(response.body.starts_with(b"[ASUP-E501] "));
         drop(next);
         assert!(cancel_writer.consumer_dropped());
         drop(cancel_control);
 
         let disconnected =
             StreamingMultipartError::from_body_error(IncomingBodyError::SourceDisconnected);
-        assert_eq!(disconnected.kind(), StreamingMultipartErrorKind::Transport);
+        assert_eq!(disconnected.kind(), StreamingMultipartErrorKind::Internal);
         assert_eq!(disconnected.cancel_kind(), None);
+        assert_eq!(disconnected.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(disconnected.diagnostic_code(), "ASUP-E504");
+        assert!(disconnected.to_string().starts_with("[ASUP-E504] 500 "));
+        let disconnected_response =
+            crate::web::response::IntoResponse::into_response(disconnected.clone());
+        assert_eq!(
+            disconnected_response.body.as_ref(),
+            disconnected.to_string().as_bytes()
+        );
+        let aborted = StreamingMultipartError::from_body_error(IncomingBodyError::ClientAborted);
+        assert_eq!(aborted.diagnostic_code(), "ASUP-E509");
+        assert!(aborted.to_string().starts_with("[ASUP-E504] 499 "));
+        let aborted_response = crate::web::response::IntoResponse::into_response(aborted.clone());
+        assert!(aborted_response.body.starts_with(b"[ASUP-E509] "));
         let consumer_dropped =
             StreamingMultipartError::from_body_error(IncomingBodyError::ConsumerDropped);
         assert_eq!(
             consumer_dropped.kind(),
             StreamingMultipartErrorKind::AbandonedField
         );
+        let consumer_dropped_response =
+            crate::web::response::IntoResponse::into_response(consumer_dropped.clone());
+        assert_eq!(
+            consumer_dropped_response.body.as_ref(),
+            consumer_dropped.to_string().as_bytes()
+        );
         let drain_failed =
             StreamingMultipartError::from_body_error(IncomingBodyError::DrainTimeout);
-        assert_eq!(drain_failed.kind(), StreamingMultipartErrorKind::Internal);
+        assert_eq!(drain_failed.kind(), StreamingMultipartErrorKind::Timeout);
+        assert_eq!(drain_failed.status(), StatusCode::REQUEST_TIMEOUT);
+        assert_eq!(drain_failed.diagnostic_code(), "ASUP-E508");
     }
 }

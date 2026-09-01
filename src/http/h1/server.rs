@@ -24,8 +24,13 @@ use crate::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use crate::server::shutdown::{ShutdownPhase, ShutdownSignal};
 use crate::stream::Stream;
 use crate::time::{timeout, wall_now};
+use crate::tracing_compat::error;
 use crate::types::{Budget, CancelKind};
-use crate::web::request_region::{ServerHopOutcome, ServerRequestRegion, derive_request_budget};
+use crate::web::WebBodyDiagnostic;
+use crate::web::request_region::{
+    HTTP_DEADLINE_EXHAUSTED_DIAGNOSTIC, ServerHopOutcome, ServerProducerCancellation,
+    ServerRequestRegion, classify_server_producer_cancellation, derive_request_budget,
+};
 use crate::web::sse::{
     Http1SseResponse, StreamingSse, StreamingSseSource, StreamingSseTransportError,
     StreamingSseTransportStep, VecSseSource,
@@ -1161,7 +1166,7 @@ where
                             Http1Response::new(hop_error_response(
                                 request_version,
                                 503,
-                                "request budget deadline exceeded",
+                                HTTP_DEADLINE_EXHAUSTED_DIAGNOSTIC,
                             ))
                         }
                     }
@@ -1511,12 +1516,31 @@ where
                 &self.config,
             );
 
-            let Some((hop, writer)) =
-                join_streaming_handler_and_body(cx, handler, body_driver, &self.config).await
-            else {
-                state.phase = ConnectionPhase::Closing;
-                break;
-            };
+            let (hop, writer) =
+                match join_streaming_handler_and_body(cx, handler, body_driver, &self.config).await
+                {
+                    Ok(Some(joined)) => joined,
+                    Ok(None) => {
+                        state.phase = ConnectionPhase::Closing;
+                        break;
+                    }
+                    Err(body_error) => {
+                        record_incoming_body_failure(&body_error);
+                        if let Some(mut response) =
+                            incoming_body_failure_response(request_version, &body_error)
+                        {
+                            add_connection_close(&mut response);
+                            if request_method == Method::Head {
+                                suppress_response_body_for_head(&mut response);
+                            }
+                            state.phase = ConnectionPhase::Writing;
+                            write_streaming_response(cx, &mut io, response).await?;
+                            state.requests_served += 1;
+                        }
+                        state.phase = ConnectionPhase::Closing;
+                        break;
+                    }
+                };
             if validate_unread_drain(writer.drain_progress(), &self.config).is_err() {
                 state.phase = ConnectionPhase::Closing;
                 break;
@@ -1535,7 +1559,7 @@ where
                     hop_error_response(request_version, 500, "Internal Server Error")
                 }
                 ServerHopOutcome::DeadlineExceeded => {
-                    hop_error_response(request_version, 503, "request budget deadline exceeded")
+                    hop_error_response(request_version, 503, HTTP_DEADLINE_EXHAUSTED_DIAGNOSTIC)
                 }
             };
             if request_method == Method::Head {
@@ -1818,14 +1842,34 @@ where
             writer.max_body_size(u64::try_from(config.max_body_size).unwrap_or(u64::MAX)),
             &config,
         );
-        let Some((produced, writer)) =
-            join_streaming_handler_and_body(&request_cx, handler, body_driver, &config).await
-        else {
-            return Err(HttpError::Io(std::io::Error::new(
-                std::io::ErrorKind::UnexpectedEof,
-                "request body did not reach synchronized EOF",
-            )));
-        };
+        let (produced, writer) =
+            match join_streaming_handler_and_body(&request_cx, handler, body_driver, &config).await
+            {
+                Ok(Some(joined)) => joined,
+                Ok(None) => {
+                    return Err(HttpError::Io(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "request handler ended before synchronized body EOF",
+                    )));
+                }
+                Err(body_error) => {
+                    record_incoming_body_failure(&body_error);
+                    if let Some(mut response) =
+                        incoming_body_failure_response(request_version, &body_error)
+                    {
+                        add_connection_close(&mut response);
+                        if request_method == Method::Head {
+                            suppress_response_body_for_head(&mut response);
+                        }
+                        head_committed.store(true, Ordering::Release);
+                        return write_streaming_response(&request_cx, &mut io, response).await;
+                    }
+                    return Err(HttpError::Io(std::io::Error::new(
+                        std::io::ErrorKind::ConnectionAborted,
+                        body_error,
+                    )));
+                }
+            };
         validate_unread_drain(writer.drain_progress(), &config).map_err(|error| {
             HttpError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, error))
         })?;
@@ -1909,7 +1953,14 @@ where
     state.last_request_at = connection_now(cx);
     state.phase = ConnectionPhase::Closing;
     let result = match hop {
-        None | Some(ServerHopOutcome::Cancelled | ServerHopOutcome::ConnectionLost) => Ok(()),
+        None | Some(ServerHopOutcome::Cancelled) => Ok(()),
+        Some(ServerHopOutcome::ConnectionLost) => {
+            error!(
+                diagnostic = WebBodyDiagnostic::ClientAbort.code(),
+                "[ASUP-E509] h1 produced response lost its client connection"
+            );
+            Ok(())
+        }
         Some(ServerHopOutcome::Ok(result)) => result,
         Some(ServerHopOutcome::Panicked(_)) => {
             if !head_committed.load(Ordering::Acquire) {
@@ -1921,19 +1972,27 @@ where
                 }
                 write_streaming_response(cx, &mut io, response).await
             } else {
+                error!(
+                    diagnostic = WebBodyDiagnostic::ResponseProducerFailure.code(),
+                    "[ASUP-E510] h1 response producer panicked after head commitment"
+                );
                 Ok(())
             }
         }
         Some(ServerHopOutcome::DeadlineExceeded) => {
             if !head_committed.load(Ordering::Acquire) {
                 let mut response =
-                    hop_error_response(request_version, 503, "request budget deadline exceeded");
+                    hop_error_response(request_version, 503, HTTP_DEADLINE_EXHAUSTED_DIAGNOSTIC);
                 add_connection_close(&mut response);
                 if request_method == Method::Head {
                     suppress_response_body_for_head(&mut response);
                 }
                 write_streaming_response(cx, &mut io, response).await
             } else {
+                error!(
+                    diagnostic = "ASUP-E501",
+                    "[ASUP-E501] h1 response producer exceeded its request-region deadline after head commitment"
+                );
                 Ok(())
             }
         }
@@ -2161,6 +2220,32 @@ fn normalize_producer_result(
     }
 }
 
+fn record_h1_body_diagnostic(diagnostic: WebBodyDiagnostic, cause: &'static str) {
+    let _ = (diagnostic, cause);
+    error!(
+        diagnostic = diagnostic.code(),
+        cause,
+        "[{}] h1 body stream terminated without a clean response-body boundary",
+        diagnostic.code()
+    );
+}
+
+fn record_h1_produced_error(cx: &Cx, error_value: &HttpError, cause: &'static str) {
+    if matches!(error_value, HttpError::BodyCancelled) {
+        match classify_server_producer_cancellation(cx) {
+            ServerProducerCancellation::DeadlineExceeded => {
+                error!(
+                    diagnostic = "ASUP-E501",
+                    cause, "[ASUP-E501] h1 response producer acknowledged its request deadline"
+                );
+            }
+            ServerProducerCancellation::Cancelled => {}
+        }
+        return;
+    }
+    record_h1_body_diagnostic(WebBodyDiagnostic::ResponseProducerFailure, cause);
+}
+
 async fn drive_produced_response<T>(
     cx: &Cx,
     io: &mut T,
@@ -2182,11 +2267,19 @@ where
     // status or a clean chunk terminator.
     head_committed.store(true, Ordering::Release);
     if let Err(error) = io.write_all(encoded_head.as_ref()).await {
+        record_h1_body_diagnostic(
+            WebBodyDiagnostic::ClientAbort,
+            "client transport failed while writing the response head",
+        );
         drain_producer_after_write_error(cx, producer.as_mut(), &mut producer_result, drain_grace)
             .await;
         return Err(HttpError::Io(error));
     }
     if let Err(error) = io.flush().await {
+        record_h1_body_diagnostic(
+            WebBodyDiagnostic::ClientAbort,
+            "client transport failed while flushing the response head",
+        );
         drain_producer_after_write_error(cx, producer.as_mut(), &mut producer_result, drain_grace)
             .await;
         return Err(HttpError::Io(error));
@@ -2211,9 +2304,16 @@ where
             };
             let sender = match producer_result {
                 Ok(sender) => sender,
-                Err(error) => return Err(error),
+                Err(error) => {
+                    record_h1_produced_error(cx, &error, "response producer returned an error");
+                    return Err(error);
+                }
             };
             if !sender.is_finished() || (body_kind.is_chunked() && encoder.is_finished()) {
+                record_h1_body_diagnostic(
+                    WebBodyDiagnostic::ResponseProducerFailure,
+                    "response producer did not finish exactly once",
+                );
                 return Err(HttpError::BodyChannelClosed);
             }
             if !body_kind.is_chunked() {
@@ -2221,14 +2321,30 @@ where
             }
             let mut final_chunk = BytesMut::new();
             encoder.finalize(None, &mut final_chunk);
-            io.write_all(final_chunk.as_ref())
-                .await
-                .map_err(HttpError::Io)?;
-            io.flush().await.map_err(HttpError::Io)?;
+            if let Err(error) = io.write_all(final_chunk.as_ref()).await {
+                record_h1_body_diagnostic(
+                    WebBodyDiagnostic::ClientAbort,
+                    "client transport failed while writing the terminal chunk",
+                );
+                return Err(HttpError::Io(error));
+            }
+            if let Err(error) = io.flush().await {
+                record_h1_body_diagnostic(
+                    WebBodyDiagnostic::ClientAbort,
+                    "client transport failed while flushing the terminal chunk",
+                );
+                return Err(HttpError::Io(error));
+            }
             return Ok(());
         };
 
-        let frame = frame?;
+        let frame = match frame {
+            Ok(frame) => frame,
+            Err(error) => {
+                record_h1_produced_error(cx, &error, "response body yielded an error frame");
+                return Err(error);
+            }
+        };
         let mut encoded_frame = BytesMut::new();
         match frame {
             Frame::Data(mut data) => {
@@ -2247,20 +2363,41 @@ where
             }
             Frame::Trailers(trailers) => {
                 if !allow_trailers || !body_kind.is_chunked() {
+                    record_h1_body_diagnostic(
+                        WebBodyDiagnostic::ResponseProducerFailure,
+                        "response producer emitted trailers for an incompatible body",
+                    );
                     return Err(HttpError::TrailersNotAllowed);
                 }
                 let producer_result = match producer_result.take() {
                     Some(result) => result,
                     None => normalize_producer_result(producer.as_mut().await, &response.body),
                 };
-                let sender = producer_result?;
+                let sender = match producer_result {
+                    Ok(sender) => sender,
+                    Err(error) => {
+                        record_h1_body_diagnostic(
+                            WebBodyDiagnostic::ResponseProducerFailure,
+                            "response producer failed before trailers",
+                        );
+                        return Err(error);
+                    }
+                };
                 if encoder.is_finished() {
+                    record_h1_body_diagnostic(
+                        WebBodyDiagnostic::ResponseProducerFailure,
+                        "response producer emitted a duplicate terminal frame",
+                    );
                     return Err(HttpError::BodyChannelClosed);
                 }
                 debug_assert!(sender.is_finished());
                 encoder.finalize(Some(&trailers), &mut encoded_frame);
 
                 if let Err(error) = io.write_all(encoded_frame.as_ref()).await {
+                    record_h1_body_diagnostic(
+                        WebBodyDiagnostic::ClientAbort,
+                        "client transport failed while writing response trailers",
+                    );
                     cx.cancel_with(
                         CancelKind::ParentCancelled,
                         Some("HTTP/1 produced-body client transport disconnected"),
@@ -2268,6 +2405,10 @@ where
                     return Err(HttpError::Io(error));
                 }
                 if let Err(error) = io.flush().await {
+                    record_h1_body_diagnostic(
+                        WebBodyDiagnostic::ClientAbort,
+                        "client transport failed while flushing response trailers",
+                    );
                     cx.cancel_with(
                         CancelKind::ParentCancelled,
                         Some("HTTP/1 produced-body client transport disconnected"),
@@ -2302,6 +2443,10 @@ where
                 crate::runtime::yield_now().await;
             }
             Err(error) => {
+                record_h1_body_diagnostic(
+                    WebBodyDiagnostic::ClientAbort,
+                    "client transport failed while writing a response body frame",
+                );
                 drain_producer_after_write_error(
                     cx,
                     producer.as_mut(),
@@ -2410,13 +2555,18 @@ where
         }
 
         let mut chunk = [0_u8; 8192];
-        let count = io
-            .read(&mut chunk)
-            .await
-            .map_err(|_| IncomingBodyError::SourceDisconnected)?;
+        let count = match io.read(&mut chunk).await {
+            Ok(count) => count,
+            Err(_) => {
+                let error = IncomingBodyError::ClientAborted;
+                writer.fail(error.clone());
+                return Err(error);
+            }
+        };
         if count == 0 {
-            writer.finish(cx)?;
-            continue;
+            let error = IncomingBodyError::ClientAborted;
+            writer.fail(error.clone());
+            return Err(error);
         }
         read_buffer.extend_from_slice(&chunk[..count]);
     }
@@ -2427,7 +2577,7 @@ async fn join_streaming_handler_and_body<H, B, R>(
     handler: H,
     body: B,
     config: &Http1StreamingConfig,
-) -> Option<(R, IncomingRequestBodyWriter)>
+) -> Result<Option<(R, IncomingRequestBodyWriter)>, IncomingBodyError>
 where
     H: Future<Output = Option<R>>,
     B: Future<Output = Result<IncomingRequestBodyWriter, IncomingBodyError>>,
@@ -2452,26 +2602,95 @@ where
     match first {
         StreamingJoinFirst::Body(Ok(writer)) => {
             body.take();
-            let hop = handler.take()?.await?;
-            Some((hop, writer))
+            let Some(handler) = handler.take() else {
+                return Ok(None);
+            };
+            let Some(hop) = handler.await else {
+                return Ok(None);
+            };
+            Ok(Some((hop, writer)))
         }
-        StreamingJoinFirst::Body(Err(_)) => {
+        StreamingJoinFirst::Body(Err(error)) => {
             body.take();
             if let Some(handler) = handler.take() {
                 let _ = timeout(connection_now(cx), config.request_drain_grace, handler).await;
             }
-            None
+            Err(error)
         }
         StreamingJoinFirst::Handler(Some(hop)) => {
             handler.take();
-            let body = body.take()?;
+            let Some(body) = body.take() else {
+                return Ok(None);
+            };
             let writer = timeout(connection_now(cx), config.unread_body_drain_timeout, body)
                 .await
-                .ok()?
-                .ok()?;
-            Some((hop, writer))
+                .map_err(|_| IncomingBodyError::DrainTimeout)??;
+            Ok(Some((hop, writer)))
         }
-        StreamingJoinFirst::Handler(None) => None,
+        StreamingJoinFirst::Handler(None) => Ok(None),
+    }
+}
+
+fn incoming_body_failure_response(version: Version, error: &IncomingBodyError) -> Option<Response> {
+    let (status, message) = match error {
+        IncomingBodyError::BodyTooLarge { .. } | IncomingBodyError::QueueFrameTooLarge { .. } => {
+            (413, "[ASUP-E505] request body exceeds the configured limit")
+        }
+        IncomingBodyError::AccountingOverflow => (500, "request body accounting failed"),
+        IncomingBodyError::BadContentLength
+        | IncomingBodyError::BadChunkedEncoding
+        | IncomingBodyError::TrailersTooLarge
+        | IncomingBodyError::BadHeader
+        | IncomingBodyError::InvalidHeaderName
+        | IncomingBodyError::InvalidHeaderValue => (400, "malformed request body framing"),
+        IncomingBodyError::Cancelled {
+            kind: CancelKind::Deadline | CancelKind::Timeout,
+        } => (503, HTTP_DEADLINE_EXHAUSTED_DIAGNOSTIC),
+        IncomingBodyError::DrainTimeout => (408, "[ASUP-E508] request body drain timed out"),
+        IncomingBodyError::SourceDisconnected => (500, "request body producer disconnected"),
+        IncomingBodyError::ClientAborted
+        | IncomingBodyError::DrainLimitExceeded { .. }
+        | IncomingBodyError::ConsumerDropped
+        | IncomingBodyError::Cancelled { .. }
+        | IncomingBodyError::AlreadyTerminal => return None,
+    };
+    Some(hop_error_response(version, status, message))
+}
+
+fn record_incoming_body_failure(error_value: &IncomingBodyError) {
+    let diagnostic = match error_value {
+        IncomingBodyError::BodyTooLarge { .. } | IncomingBodyError::QueueFrameTooLarge { .. } => {
+            WebBodyDiagnostic::TotalBodyLimit.code()
+        }
+        IncomingBodyError::Cancelled {
+            kind: CancelKind::Deadline | CancelKind::Timeout,
+        } => "ASUP-E501",
+        IncomingBodyError::DrainTimeout => WebBodyDiagnostic::Timeout.code(),
+        IncomingBodyError::ClientAborted => WebBodyDiagnostic::ClientAbort.code(),
+        IncomingBodyError::BadContentLength
+        | IncomingBodyError::BadChunkedEncoding
+        | IncomingBodyError::TrailersTooLarge
+        | IncomingBodyError::BadHeader
+        | IncomingBodyError::InvalidHeaderName
+        | IncomingBodyError::InvalidHeaderValue
+        | IncomingBodyError::AccountingOverflow
+        | IncomingBodyError::SourceDisconnected
+        | IncomingBodyError::DrainLimitExceeded { .. }
+        | IncomingBodyError::ConsumerDropped
+        | IncomingBodyError::Cancelled { .. }
+        | IncomingBodyError::AlreadyTerminal => "uncoded",
+    };
+    if diagnostic == "uncoded" {
+        error!(
+            error = %error_value,
+            "h1 request body terminated before synchronized EOF"
+        );
+    } else {
+        error!(
+            diagnostic,
+            error = %error_value,
+            "[{diagnostic}] h1 request body terminated before synchronized EOF"
+        );
     }
 }
 
@@ -3109,6 +3328,7 @@ mod tests {
         read_data: Vec<u8>,
         written: Arc<Mutex<Vec<u8>>>,
         read_limit: usize,
+        read_error: Option<io::ErrorKind>,
     }
 
     impl TestIo {
@@ -3117,6 +3337,7 @@ mod tests {
                 read_data,
                 written,
                 read_limit: usize::MAX,
+                read_error: None,
             }
         }
 
@@ -3124,6 +3345,75 @@ mod tests {
             self.read_limit = read_limit.max(1);
             self
         }
+
+        fn with_read_error(mut self, kind: io::ErrorKind) -> Self {
+            self.read_error = Some(kind);
+            self
+        }
+    }
+
+    #[test]
+    fn body_diagnostic_incoming_body_failures_preserve_safe_terminal_dispositions() {
+        let too_large = incoming_body_failure_response(
+            Version::Http11,
+            &IncomingBodyError::BodyTooLarge {
+                actual: Some(9),
+                limit: 8,
+            },
+        )
+        .expect("pre-head aggregate limit has a safe response");
+        assert_eq!(too_large.status, 413);
+        assert_eq!(
+            too_large.body,
+            b"[ASUP-E505] request body exceeds the configured limit"
+        );
+
+        let timeout =
+            incoming_body_failure_response(Version::Http11, &IncomingBodyError::DrainTimeout)
+                .expect("pre-head drain timeout has a safe response");
+        assert_eq!(timeout.status, 408);
+        assert_eq!(timeout.body, b"[ASUP-E508] request body drain timed out");
+
+        let deadline = incoming_body_failure_response(
+            Version::Http11,
+            &IncomingBodyError::Cancelled {
+                kind: CancelKind::Deadline,
+            },
+        )
+        .expect("pre-head request deadline retains E501");
+        assert_eq!(deadline.status, 503);
+        assert_eq!(deadline.body, HTTP_DEADLINE_EXHAUSTED_DIAGNOSTIC.as_bytes());
+
+        assert!(
+            incoming_body_failure_response(Version::Http11, &IncomingBodyError::ClientAborted,)
+                .is_none(),
+            "client abort must remain close-only"
+        );
+        let disconnected =
+            incoming_body_failure_response(Version::Http11, &IncomingBodyError::SourceDisconnected)
+                .expect("pre-head internal producer loss has a safe response");
+        assert_eq!(disconnected.status, 500);
+        assert_eq!(disconnected.body, b"request body producer disconnected");
+
+        let accounting =
+            incoming_body_failure_response(Version::Http11, &IncomingBodyError::AccountingOverflow)
+                .expect("pre-head accounting overflow is an internal response");
+        assert_eq!(accounting.status, 500);
+        assert!(!accounting.body.starts_with(b"[ASUP-E505]"));
+
+        assert!(
+            incoming_body_failure_response(
+                Version::Http11,
+                &IncomingBodyError::DrainLimitExceeded {
+                    bytes: 9,
+                    frames: 2,
+                    frame_limit: 1,
+                    byte_limit: 8,
+                },
+            )
+            .is_none(),
+            "drain-budget exhaustion must remain close-only"
+        );
     }
 
     impl AsyncRead for TestIo {
@@ -3132,6 +3422,9 @@ mod tests {
             _cx: &mut Context<'_>,
             buf: &mut ReadBuf<'_>,
         ) -> Poll<io::Result<()>> {
+            if let Some(kind) = self.read_error {
+                return Poll::Ready(Err(io::Error::from(kind)));
+            }
             if self.read_data.is_empty() {
                 return Poll::Ready(Ok(()));
             }
@@ -5619,6 +5912,90 @@ mod tests {
     }
 
     #[test]
+    fn body_diagnostic_incoming_driver_preserves_client_abort_for_consumer() {
+        let request_cx = Cx::for_testing();
+        let (writer, mut body) =
+            IncomingRequestBody::channel_with_limits(&request_cx, BodyKind::ContentLength(1), 1, 1);
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let mut io = TestIo::new(Vec::new(), written).with_read_error(io::ErrorKind::BrokenPipe);
+        let mut read_buffer = BytesMut::new();
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("build current-thread runtime");
+
+        let (driver_error, consumer_error) = runtime.block_on(async {
+            let driver_error = drive_incoming_body(
+                &request_cx,
+                &mut io,
+                &mut read_buffer,
+                writer,
+                &Http1StreamingConfig::default(),
+            )
+            .await
+            .expect_err("transport read failure must abort the request body");
+            let consumer_error =
+                std::future::poll_fn(|task_cx| Pin::new(&mut body).poll_frame(task_cx))
+                    .await
+                    .expect("failed body emits one terminal frame")
+                    .expect_err("failed body frame retains its typed cause");
+            (driver_error, consumer_error)
+        });
+
+        assert_eq!(driver_error, IncomingBodyError::ClientAborted);
+        assert_eq!(consumer_error, IncomingBodyError::ClientAborted);
+        assert!(
+            incoming_body_failure_response(Version::Http11, &consumer_error).is_none(),
+            "a live client abort must never synthesize a wire response"
+        );
+    }
+
+    #[test]
+    fn body_diagnostic_incoming_driver_classifies_unsynchronized_eof_as_client_abort() {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("build current-thread runtime");
+
+        for (body_kind, partial_wire) in [
+            (BodyKind::ContentLength(5), &b"hi"[..]),
+            (BodyKind::Chunked, &b"2\r\nhi\r\n"[..]),
+        ] {
+            let request_cx = Cx::for_testing();
+            let (writer, mut body) =
+                IncomingRequestBody::channel_with_limits(&request_cx, body_kind, 2, 64);
+            let written = Arc::new(Mutex::new(Vec::new()));
+            let mut io = TestIo::new(partial_wire.to_vec(), written);
+            let mut read_buffer = BytesMut::new();
+
+            let (driver_error, consumer_error) = runtime.block_on(async {
+                let driver_error = drive_incoming_body(
+                    &request_cx,
+                    &mut io,
+                    &mut read_buffer,
+                    writer,
+                    &Http1StreamingConfig::default(),
+                )
+                .await
+                .expect_err("premature peer EOF must abort the request body");
+                let consumer_error = loop {
+                    let frame =
+                        std::future::poll_fn(|task_cx| Pin::new(&mut body).poll_frame(task_cx))
+                            .await
+                            .expect("aborted body emits a terminal error frame");
+                    match frame {
+                        Ok(_) => continue,
+                        Err(error) => break error,
+                    }
+                };
+                (driver_error, consumer_error)
+            });
+
+            assert_eq!(driver_error, IncomingBodyError::ClientAborted);
+            assert_eq!(consumer_error, IncomingBodyError::ClientAborted);
+            assert!(incoming_body_failure_response(Version::Http11, &consumer_error).is_none());
+        }
+    }
+
+    #[test]
     fn streaming_server_drains_unread_body_before_pipeline_reuse() {
         let written = Arc::new(Mutex::new(Vec::new()));
         let io = TestIo::new(
@@ -5912,7 +6289,7 @@ mod tests {
         assert_eq!(state.phase, ConnectionPhase::Closing);
         assert_eq!(
             observed_error.lock().unwrap().as_ref(),
-            Some(&IncomingBodyError::BadContentLength)
+            Some(&IncomingBodyError::ClientAborted)
         );
     }
 

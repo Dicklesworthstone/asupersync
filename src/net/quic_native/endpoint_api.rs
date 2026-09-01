@@ -169,6 +169,13 @@ impl QuicConnection {
         self.inner.state()
     }
 
+    /// Whether the peer's CONNECTION_CLOSE frame initiated this connection's
+    /// current draining/closed state.
+    #[must_use]
+    pub fn close_was_peer_initiated(&self) -> bool {
+        self.inner.close_was_peer_initiated()
+    }
+
     /// Whether application (1-RTT) data may be sent right now (handshake is
     /// confirmed and 1-RTT keys are installed).
     #[must_use]
@@ -186,7 +193,7 @@ impl QuicConnection {
     ///
     /// This stays crate-private so application code cannot bypass the
     /// role-aware stream API or replay handshake transitions manually.
-    #[cfg(feature = "tls")]
+    #[cfg(any(test, feature = "tls"))]
     pub(crate) fn inner_mut(&mut self) -> &mut NativeQuicConnection {
         &mut self.inner
     }

@@ -530,19 +530,26 @@ cancelled request streams without taking down the connection. The caller still
 owns the explicit drive loop and dispatch-scope orchestration; the feature-gated
 `NativeQuicUdpConnection` owns the single live UDP socket, completed TLS/ALPN
 state, authenticated connection IDs, 1-RTT protection, and bounded I/O/timer
-operations. Neither layer claims a multi-connection listener, streaming Router
-bodies/backpressure, CONNECT, WebSocket, server push, deployment readiness, or
-external interoperability. The SSE lane is
-proof-backed: `Sse` finite bounded batch responses, plus a
-`StreamingSse` pull API carrying a request-region E2E proof and an
-HTTP/1 transport drain proof (`tests/e2e_web.rs` streaming artifact rows).
-It is not an
+operations. `Router::into_http1_streaming_handler` bridges validated H1 heads
+and a bounded live `StreamingRawBody`; buffered JSON/form collectors can consume
+that body asynchronously. The H1 and H2 produced-handler adapters expose
+bounded `Http1StreamResponder` / `Http2StreamResponder` response producers with
+transport-owned backpressure and terminalization. H2 request bodies remain
+buffered before dispatch, and the H3 Router bridge assembles bounded request
+bodies before handler dispatch, so none of these surfaces claims general
+full-duplex request/response progress. The native H3 path also does not claim a
+multi-connection listener, CONNECT, server push, deployment readiness, or
+external interoperability. WebSocket upgrade authoring is provided separately
+by `web::websocket::WebSocketUpgrade`. The SSE lane is proof-backed: `Sse`
+finite bounded batch responses, plus a `StreamingSse` pull API carrying a
+request-region E2E proof and an HTTP/1 transport drain proof
+(`tests/e2e_web.rs` streaming artifact rows). It is not an
 axum/warp/tower-http-compatible framework: handlers operate on Asupersync's
 lightweight `Request` / `Response` types, middleware wraps the local `Handler`
 trait rather than Tower layers, async handlers use explicit `Cx`-aware wrappers,
-and request-region support is not a full server-integrated async request
-lifecycle. Treat this as native web primitives on top of the HTTP and service
-modules, not framework parity.
+and protocol-specific ingress/egress limits remain explicit. Treat this as
+native web primitives on top of the HTTP and service modules, not framework
+parity.
 
 Filesystem status is deliberately conservative. `src/fs/` currently exposes
 `File`, buffered readers/writers, metadata, directory/path helpers,

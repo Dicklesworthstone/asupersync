@@ -73,6 +73,8 @@ pub enum IncomingBodyError {
         /// Exact cancellation classification from the request context.
         kind: CancelKind,
     },
+    /// The client transport failed before synchronized body EOF.
+    ClientAborted,
     /// The transport or producer disappeared before synchronized body EOF.
     SourceDisconnected,
     /// The sole body consumer was dropped before synchronized body EOF.
@@ -117,6 +119,7 @@ impl std::fmt::Display for IncomingBodyError {
             Self::InvalidHeaderName => write!(f, "invalid request trailer name"),
             Self::InvalidHeaderValue => write!(f, "invalid request trailer value"),
             Self::Cancelled { kind } => write!(f, "request body cancelled ({kind:?})"),
+            Self::ClientAborted => write!(f, "request body client transport aborted"),
             Self::SourceDisconnected => write!(f, "request body source disconnected"),
             Self::ConsumerDropped => write!(f, "request body consumer dropped"),
             Self::AccountingOverflow => write!(f, "request body byte accounting overflow"),
@@ -185,7 +188,8 @@ impl IncomingBodyError {
             Self::InvalidHeaderName => HttpError::InvalidHeaderName,
             Self::InvalidHeaderValue => HttpError::InvalidHeaderValue,
             Self::Cancelled { .. } => HttpError::BodyCancelled,
-            Self::SourceDisconnected
+            Self::ClientAborted
+            | Self::SourceDisconnected
             | Self::ConsumerDropped
             | Self::AlreadyTerminal
             | Self::DrainLimitExceeded { .. }
@@ -1201,6 +1205,14 @@ impl IncomingRequestBodyWriter {
         );
         self.done = true;
         self.sender.take();
+    }
+
+    /// Preserve a transport-selected terminal cause for the body consumer.
+    ///
+    /// This is crate-private because protocol drivers, rather than application
+    /// code, own the authority to classify an underlying connection failure.
+    pub(crate) fn fail(&mut self, error: IncomingBodyError) {
+        self.fail_sender(error);
     }
 
     fn checked_total_bytes(&self, additional: usize) -> Result<u64, HttpError> {

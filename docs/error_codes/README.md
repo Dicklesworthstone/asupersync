@@ -50,6 +50,12 @@ lands.
 | ASUP-E502 | live | net-http | [Web handler panic recovered](./ASUP-E502.md) |
 | ASUP-E503 | live | net-http | [Web header rejected](./ASUP-E503.md) |
 | ASUP-E504 | live | net-http | [Streaming multipart rejected](./ASUP-E504.md) |
+| ASUP-E505 | live | net-http | [Total request-body limit exceeded](./ASUP-E505.md) |
+| ASUP-E506 | live | net-http | [Multipart field limit exceeded](./ASUP-E506.md) |
+| ASUP-E507 | live | net-http | [Multipart input malformed](./ASUP-E507.md) |
+| ASUP-E508 | live | net-http | [Request-body timeout](./ASUP-E508.md) |
+| ASUP-E509 | live | net-http | [Client body stream aborted](./ASUP-E509.md) |
+| ASUP-E510 | live | net-http | [Response producer failed](./ASUP-E510.md) |
 | ASUP-E601 | live | database | [Database pool acquire timeout](./ASUP-E601.md) |
 | ASUP-E701 | live | distributed-remote | [ATP command not implemented](./ASUP-E701.md) |
 | ASUP-E702 | live | distributed-remote | [ATP transfer listener bind failed](./ASUP-E702.md) |

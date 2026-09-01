@@ -23,4 +23,5 @@ If an inbound request has 10 seconds remaining and a handler asks for a
 ## Related
 
 - `ASUP-E301`
+- `ASUP-E508`
 - `ASUP-E901`
