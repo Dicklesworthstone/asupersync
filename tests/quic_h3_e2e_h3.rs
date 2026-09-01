@@ -3917,6 +3917,840 @@ fn native_h3_router_produced_response_is_demand_driven_and_head_suppresses_facto
 }
 
 #[test]
+#[cfg(all(feature = "http3", feature = "test-internals"))]
+fn native_h3_router_produced_response_terminal_and_failure_matrix_is_stream_local() {
+    use std::future::Future;
+    use std::num::NonZeroUsize;
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::task::{Context, Poll, Waker};
+
+    use asupersync::http::h1::HttpError;
+    use asupersync::net::quic_native::StreamId;
+    use asupersync::web::{
+        AsyncCxFnHandler1, FnHandler, Http3StreamResponder, NativeH3ProducedEvent, NativeH3Router,
+        NativeH3RouterEvent, NativeH3RouterIngress, NativeH3RouterPreparedProducedResponse,
+        NativeH3RouterProducedDispatch, NativeH3RouterProducer, NativeH3RouterRefusal, Response,
+        Router, StatusCode, get,
+    };
+
+    fn request_head(path: &str) -> H3RequestHead {
+        H3RequestHead::new(
+            H3PseudoHeaders {
+                method: Some("GET".to_string()),
+                scheme: Some("https".to_string()),
+                authority: Some("produced-terminal.example.test".to_string()),
+                path: Some(path.to_string()),
+                ..H3PseudoHeaders::default()
+            },
+            vec![],
+        )
+        .expect("valid produced-response request")
+    }
+
+    fn prepare_produced(
+        bridge: &mut NativeH3Router,
+        cx: &Cx,
+        client_h3: &mut NativeH3Session,
+        server_h3: &mut NativeH3Session,
+        client: &mut QuicConnection,
+        server: &mut QuicConnection,
+        path: &str,
+    ) -> (StreamId, NativeH3RouterPreparedProducedResponse) {
+        let stream = client_h3
+            .send_request(cx, client, &request_head(path), Bytes::new())
+            .expect("send produced request");
+        let mut dispatch = None;
+        for event in pump_h3_events(cx, client, server, server_h3).0 {
+            match bridge
+                .ingest_event_with_cx(cx, server_h3, server, event)
+                .expect("ingest produced request")
+            {
+                NativeH3RouterIngress::Event(NativeH3RouterEvent::RequestBuffered {
+                    stream_id,
+                    body_bytes: 0,
+                }) => assert_eq!(stream_id, stream),
+                NativeH3RouterIngress::Dispatch(next) => dispatch = Some(next),
+                other => panic!("unexpected produced-request ingress: {other:?}"),
+            }
+        }
+        let prepared = match futures_lite::future::block_on(
+            dispatch
+                .expect("request FIN must detach a Router dispatch")
+                .run_produced(cx),
+        ) {
+            NativeH3RouterProducedDispatch::Produced(prepared) => prepared,
+            NativeH3RouterProducedDispatch::Buffered(_) => {
+                panic!("stream route must retain its authored producer plan")
+            }
+        };
+        assert_eq!(prepared.stream_id(), stream);
+        (stream, prepared)
+    }
+
+    fn start_produced(
+        bridge: &mut NativeH3Router,
+        cx: &Cx,
+        server_h3: &mut NativeH3Session,
+        server: &mut QuicConnection,
+        stream: StreamId,
+        prepared: NativeH3RouterPreparedProducedResponse,
+        task_cx: &mut Context<'_>,
+    ) -> Pin<Box<NativeH3RouterProducer>> {
+        assert_eq!(
+            bridge
+                .start_produced_dispatch_with_cx(cx, server_h3, server, prepared)
+                .expect("install produced response"),
+            NativeH3RouterEvent::ResponseStarted {
+                stream_id: stream,
+                status: 200,
+            }
+        );
+        assert_eq!(bridge.in_flight_dispatch_count(), 1);
+        match bridge.poll_produced_response_with_cx(cx, server_h3, server, task_cx) {
+            Poll::Ready(Ok(NativeH3ProducedEvent::ProducerReady {
+                stream_id,
+                producer,
+            })) => {
+                assert_eq!(stream_id, stream);
+                Box::pin(producer)
+            }
+            _ => panic!("HEADERS admission must yield the producer"),
+        }
+    }
+
+    fn assert_response_headers(
+        cx: &Cx,
+        server: &mut QuicConnection,
+        client: &mut QuicConnection,
+        client_h3: &mut NativeH3Session,
+        stream: StreamId,
+    ) {
+        assert_eq!(
+            pump_h3_events(cx, server, client, client_h3).0,
+            vec![NativeH3Event::ResponseHeaders {
+                stream_id: stream,
+                head: H3ResponseHead::new(200, vec![]).expect("valid response head"),
+            }]
+        );
+    }
+
+    fn assert_request_reset(
+        bridge: &NativeH3Router,
+        cx: &Cx,
+        server: &mut QuicConnection,
+        client: &mut QuicConnection,
+        client_h3: &mut NativeH3Session,
+        stream: StreamId,
+    ) {
+        let events = pump_h3_events(cx, server, client, client_h3).0;
+        assert_eq!(
+            events.len(),
+            1,
+            "failure must emit exactly one terminal event"
+        );
+        assert!(matches!(
+            events.as_slice(),
+            [NativeH3Event::StreamReset {
+                stream_id,
+                error_code: H3_REQUEST_CANCELLED,
+                ..
+            }] if *stream_id == stream
+        ));
+        assert_eq!(bridge.in_flight_dispatch_count(), 0);
+    }
+
+    fn drain_reset_reaction(
+        cx: &Cx,
+        client: &mut QuicConnection,
+        server: &mut QuicConnection,
+        server_h3: &mut NativeH3Session,
+        stream: StreamId,
+    ) {
+        for event in pump_h3_events(cx, client, server, server_h3).0 {
+            assert!(matches!(
+                event,
+                NativeH3Event::StreamReset {
+                    stream_id,
+                    error_code: H3_REQUEST_CANCELLED,
+                    ..
+                } if stream_id == stream
+            ));
+        }
+    }
+
+    let cx = test_cx();
+    let config = NativeQuicConnectionConfig {
+        max_local_bidi: 8,
+        max_local_uni: 4,
+        send_window: 512,
+        recv_window: 512,
+        connection_send_limit: 4096,
+        connection_recv_limit: 4096,
+        ..NativeQuicConnectionConfig::default()
+    };
+    let mut client = QuicConnection::client(config);
+    let mut server = QuicConnection::server(config);
+    client.record_verified_server_identity();
+    establish_loopback(&cx, &mut client, &mut server).expect("establish native QUIC pair");
+    let mut client_h3 = NativeH3Session::client();
+    let mut server_h3 = NativeH3Session::server();
+    client_h3
+        .initialize(&cx, &mut client, H3Settings::default())
+        .expect("initialize client H3");
+    server_h3
+        .initialize(&cx, &mut server, H3Settings::default())
+        .expect("initialize server H3");
+    let _ = pump_h3_events(&cx, &mut client, &mut server, &mut server_h3);
+    let _ = pump_h3_events(&cx, &mut server, &mut client, &mut client_h3);
+
+    let oversize_refused = Arc::new(AtomicBool::new(false));
+    let oversize_refused_for_route = Arc::clone(&oversize_refused);
+    let cancelled_admissions = Arc::new(AtomicUsize::new(0));
+    let cancelled_admissions_for_route = Arc::clone(&cancelled_admissions);
+    let cancelled_cx_observed = Arc::new(AtomicBool::new(false));
+    let cancelled_cx_observed_for_route = Arc::clone(&cancelled_cx_observed);
+    let router = Router::new()
+        .route(
+            "/empty",
+            get(AsyncCxFnHandler1::<_, Http3StreamResponder>::new(
+                |_handler_cx: Cx, responder: Http3StreamResponder| async move {
+                    responder.streaming(
+                        StatusCode::OK,
+                        NonZeroUsize::MIN,
+                        NonZeroUsize::new(3).expect("non-zero H3 frame limit"),
+                        |producer_cx, mut sender| async move {
+                            sender.finish(&producer_cx)?;
+                            Ok(sender)
+                        },
+                    )
+                },
+            )),
+        )
+        .route(
+            "/failure",
+            get(AsyncCxFnHandler1::<_, Http3StreamResponder>::new(
+                |_handler_cx: Cx, responder: Http3StreamResponder| async move {
+                    responder.streaming(
+                        StatusCode::OK,
+                        NonZeroUsize::MIN,
+                        NonZeroUsize::new(3).expect("non-zero H3 frame limit"),
+                        |producer_cx, mut sender| async move {
+                            sender.finish(&producer_cx)?;
+                            Err(HttpError::BadHeader)
+                        },
+                    )
+                },
+            )),
+        )
+        .route(
+            "/oversize",
+            get(AsyncCxFnHandler1::<_, Http3StreamResponder>::new(
+                move |_handler_cx: Cx, responder: Http3StreamResponder| {
+                    let oversize_refused = Arc::clone(&oversize_refused_for_route);
+                    async move {
+                        responder.streaming(
+                            StatusCode::OK,
+                            NonZeroUsize::MIN,
+                            NonZeroUsize::new(3).expect("non-zero H3 frame limit"),
+                            move |producer_cx, mut sender| async move {
+                                let error = sender
+                                    .send_bytes(&producer_cx, Bytes::from_static(b"four"))
+                                    .await
+                                    .expect_err("four bytes must exceed the three-byte limit");
+                                assert!(matches!(
+                                    error,
+                                    HttpError::BodyTooLargeDetailed {
+                                        actual: 4,
+                                        limit: 3,
+                                    }
+                                ));
+                                oversize_refused.store(true, Ordering::SeqCst);
+                                Err(error)
+                            },
+                        )
+                    }
+                },
+            )),
+        )
+        .route(
+            "/cancel",
+            get(AsyncCxFnHandler1::<_, Http3StreamResponder>::new(
+                move |_handler_cx: Cx, responder: Http3StreamResponder| {
+                    let admissions = Arc::clone(&cancelled_admissions_for_route);
+                    let cancel_observed = Arc::clone(&cancelled_cx_observed_for_route);
+                    async move {
+                        responder.streaming(
+                            StatusCode::OK,
+                            NonZeroUsize::MIN,
+                            NonZeroUsize::new(3).expect("non-zero H3 frame limit"),
+                            move |producer_cx, mut sender| async move {
+                                sender
+                                    .send_bytes(&producer_cx, Bytes::from_static(b"abc"))
+                                    .await?;
+                                admissions.fetch_add(1, Ordering::SeqCst);
+                                let second_send = sender
+                                    .send_bytes(&producer_cx, Bytes::from_static(b"def"))
+                                    .await;
+                                cancel_observed
+                                    .store(producer_cx.is_cancel_requested(), Ordering::SeqCst);
+                                second_send?;
+                                Ok(sender)
+                            },
+                        )
+                    }
+                },
+            )),
+        )
+        .route(
+            "/survivor",
+            get(FnHandler::new(|| Response::new(StatusCode::OK, "survived"))),
+        )
+        .without_default_trace();
+    let mut bridge = NativeH3Router::new(router);
+    let mut task_cx = Context::from_waker(Waker::noop());
+
+    let (empty_stream, empty_prepared) = prepare_produced(
+        &mut bridge,
+        &cx,
+        &mut client_h3,
+        &mut server_h3,
+        &mut client,
+        &mut server,
+        "/empty",
+    );
+    let mut empty_producer = start_produced(
+        &mut bridge,
+        &cx,
+        &mut server_h3,
+        &mut server,
+        empty_stream,
+        empty_prepared,
+        &mut task_cx,
+    );
+    assert_response_headers(&cx, &mut server, &mut client, &mut client_h3, empty_stream);
+    let empty_send_offset = server
+        .inner()
+        .streams()
+        .stream(empty_stream)
+        .expect("empty response stream")
+        .send_offset;
+    assert_eq!(
+        server
+            .constrain_stream_send_limit_for_testing(&cx, empty_stream, empty_send_offset)
+            .expect("clamp empty-response DATA credit"),
+        empty_send_offset
+    );
+    assert!(empty_producer.as_mut().poll(&mut task_cx).is_ready());
+    assert!(matches!(
+        bridge.poll_produced_response_with_cx(
+            &cx,
+            &mut server_h3,
+            &mut server,
+            &mut task_cx,
+        ),
+        Poll::Ready(Ok(NativeH3ProducedEvent::TerminalQueued { stream_id }))
+            if stream_id == empty_stream
+    ));
+    assert_eq!(
+        pump_h3_events(&cx, &mut server, &mut client, &mut client_h3).0,
+        vec![NativeH3Event::Finished {
+            stream_id: empty_stream,
+        }],
+        "empty EOF must commit only FIN after HEADERS"
+    );
+    assert!(matches!(
+        bridge.poll_produced_response_with_cx(
+            &cx,
+            &mut server_h3,
+            &mut server,
+            &mut task_cx,
+        ),
+        Poll::Ready(Ok(NativeH3ProducedEvent::ResponseSent {
+            stream_id,
+            status: 200,
+        })) if stream_id == empty_stream
+    ));
+    assert_eq!(bridge.in_flight_dispatch_count(), 0);
+
+    let (failed_stream, failed_prepared) = prepare_produced(
+        &mut bridge,
+        &cx,
+        &mut client_h3,
+        &mut server_h3,
+        &mut client,
+        &mut server,
+        "/failure",
+    );
+    let mut failed_producer = start_produced(
+        &mut bridge,
+        &cx,
+        &mut server_h3,
+        &mut server,
+        failed_stream,
+        failed_prepared,
+        &mut task_cx,
+    );
+    assert_response_headers(&cx, &mut server, &mut client, &mut client_h3, failed_stream);
+    assert!(failed_producer.as_mut().poll(&mut task_cx).is_ready());
+    assert!(matches!(
+        bridge.poll_produced_response_with_cx(
+            &cx,
+            &mut server_h3,
+            &mut server,
+            &mut task_cx,
+        ),
+        Poll::Ready(Ok(NativeH3ProducedEvent::RequestReset { stream_id }))
+            if stream_id == failed_stream
+    ));
+    assert_request_reset(
+        &bridge,
+        &cx,
+        &mut server,
+        &mut client,
+        &mut client_h3,
+        failed_stream,
+    );
+    drain_reset_reaction(&cx, &mut client, &mut server, &mut server_h3, failed_stream);
+
+    let (oversize_stream, oversize_prepared) = prepare_produced(
+        &mut bridge,
+        &cx,
+        &mut client_h3,
+        &mut server_h3,
+        &mut client,
+        &mut server,
+        "/oversize",
+    );
+    let mut oversize_producer = start_produced(
+        &mut bridge,
+        &cx,
+        &mut server_h3,
+        &mut server,
+        oversize_stream,
+        oversize_prepared,
+        &mut task_cx,
+    );
+    assert_response_headers(
+        &cx,
+        &mut server,
+        &mut client,
+        &mut client_h3,
+        oversize_stream,
+    );
+    assert!(oversize_producer.as_mut().poll(&mut task_cx).is_ready());
+    assert!(oversize_refused.load(Ordering::SeqCst));
+    assert!(matches!(
+        bridge.poll_produced_response_with_cx(
+            &cx,
+            &mut server_h3,
+            &mut server,
+            &mut task_cx,
+        ),
+        Poll::Ready(Ok(NativeH3ProducedEvent::RequestReset { stream_id }))
+            if stream_id == oversize_stream
+    ));
+    assert_request_reset(
+        &bridge,
+        &cx,
+        &mut server,
+        &mut client,
+        &mut client_h3,
+        oversize_stream,
+    );
+    drain_reset_reaction(
+        &cx,
+        &mut client,
+        &mut server,
+        &mut server_h3,
+        oversize_stream,
+    );
+
+    let (cancelled_stream, cancelled_prepared) = prepare_produced(
+        &mut bridge,
+        &cx,
+        &mut client_h3,
+        &mut server_h3,
+        &mut client,
+        &mut server,
+        "/cancel",
+    );
+    let cancelled_token = cancelled_prepared.cancellation_token();
+    let mut cancelled_producer = start_produced(
+        &mut bridge,
+        &cx,
+        &mut server_h3,
+        &mut server,
+        cancelled_stream,
+        cancelled_prepared,
+        &mut task_cx,
+    );
+    assert_response_headers(
+        &cx,
+        &mut server,
+        &mut client,
+        &mut client_h3,
+        cancelled_stream,
+    );
+    assert!(cancelled_producer.as_mut().poll(&mut task_cx).is_pending());
+    assert_eq!(cancelled_admissions.load(Ordering::SeqCst), 1);
+    let cancelled_send_offset = server
+        .inner()
+        .streams()
+        .stream(cancelled_stream)
+        .expect("active cancelled response stream")
+        .send_offset;
+    assert!(
+        !server.has_pending_stream_frames(cancelled_stream),
+        "HEADERS must drain before explicit cancellation"
+    );
+    assert_eq!(
+        bridge
+            .cancel_dispatch_with_cx(&cx, &mut server_h3, &mut server, &cancelled_token,)
+            .expect("cancel active produced dispatch"),
+        NativeH3RouterEvent::RequestRefused {
+            stream_id: cancelled_stream,
+            reason: NativeH3RouterRefusal::DispatchCancelled,
+        }
+    );
+    assert_eq!(bridge.in_flight_dispatch_count(), 1);
+    assert!(
+        bridge
+            .poll_produced_response_with_cx(&cx, &mut server_h3, &mut server, &mut task_cx,)
+            .is_pending(),
+        "cancellation must retain ownership until producer exit"
+    );
+    assert!(cancelled_producer.as_mut().poll(&mut task_cx).is_ready());
+    assert!(
+        cancelled_cx_observed.load(Ordering::SeqCst),
+        "explicit cancellation must reach the supervised producer Cx"
+    );
+    assert!(matches!(
+        bridge.poll_produced_response_with_cx(
+            &cx,
+            &mut server_h3,
+            &mut server,
+            &mut task_cx,
+        ),
+        Poll::Ready(Ok(NativeH3ProducedEvent::RequestReset { stream_id }))
+            if stream_id == cancelled_stream
+    ));
+    assert_eq!(
+        server
+            .inner()
+            .streams()
+            .stream(cancelled_stream)
+            .expect("reaped cancelled response stream")
+            .send_offset,
+        cancelled_send_offset,
+        "queued producer DATA must not enter the QUIC stream after cancellation"
+    );
+    assert!(
+        !server.has_pending_stream_frames(cancelled_stream),
+        "queued producer DATA must not remain pending after cancellation"
+    );
+    assert_request_reset(
+        &bridge,
+        &cx,
+        &mut server,
+        &mut client,
+        &mut client_h3,
+        cancelled_stream,
+    );
+    drain_reset_reaction(
+        &cx,
+        &mut client,
+        &mut server,
+        &mut server_h3,
+        cancelled_stream,
+    );
+
+    let survivor_stream = client_h3
+        .send_request(&cx, &mut client, &request_head("/survivor"), Bytes::new())
+        .expect("send survivor request after stream-local failures");
+    let mut survivor_dispatch = None;
+    for event in pump_h3_events(&cx, &mut client, &mut server, &mut server_h3).0 {
+        match bridge
+            .ingest_event_with_cx(&cx, &mut server_h3, &mut server, event)
+            .expect("ingest survivor request")
+        {
+            NativeH3RouterIngress::Event(NativeH3RouterEvent::RequestBuffered {
+                stream_id,
+                body_bytes: 0,
+            }) => assert_eq!(stream_id, survivor_stream),
+            NativeH3RouterIngress::Dispatch(dispatch) => survivor_dispatch = Some(dispatch),
+            other => panic!("unexpected survivor ingress: {other:?}"),
+        }
+    }
+    let survivor_prepared = match futures_lite::future::block_on(
+        survivor_dispatch
+            .expect("survivor dispatch")
+            .run_produced(&cx),
+    ) {
+        NativeH3RouterProducedDispatch::Buffered(prepared) => prepared,
+        NativeH3RouterProducedDispatch::Produced(_) => {
+            panic!("ordinary survivor route must remain buffered")
+        }
+    };
+    assert_eq!(
+        bridge
+            .complete_dispatch_with_cx(&cx, &mut server_h3, &mut server, &survivor_prepared)
+            .expect("complete survivor response"),
+        NativeH3RouterEvent::ResponseSent {
+            stream_id: survivor_stream,
+            status: 200,
+        }
+    );
+    assert_eq!(
+        pump_h3_events(&cx, &mut server, &mut client, &mut client_h3).0,
+        vec![
+            NativeH3Event::ResponseHeaders {
+                stream_id: survivor_stream,
+                head: H3ResponseHead::new(200, vec![]).expect("valid survivor response head"),
+            },
+            NativeH3Event::Data {
+                stream_id: survivor_stream,
+                bytes: Bytes::from_static(b"survived"),
+            },
+            NativeH3Event::Finished {
+                stream_id: survivor_stream,
+            },
+        ]
+    );
+    assert_eq!(bridge.in_flight_dispatch_count(), 0);
+}
+
+#[test]
+#[cfg(feature = "http3")]
+fn native_h3_router_produced_response_connection_close_cancels_and_reaps() {
+    use std::future::Future;
+    use std::num::NonZeroUsize;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::task::{Context, Poll, Waker};
+
+    use asupersync::web::{
+        AsyncCxFnHandler1, Http3StreamResponder, NativeH3ProducedEvent, NativeH3Router,
+        NativeH3RouterEvent, NativeH3RouterIngress, NativeH3RouterProducedDispatch, Router,
+        StatusCode, get,
+    };
+
+    fn request_head() -> H3RequestHead {
+        H3RequestHead::new(
+            H3PseudoHeaders {
+                method: Some("GET".to_string()),
+                scheme: Some("https".to_string()),
+                authority: Some("produced-close.example.test".to_string()),
+                path: Some("/close".to_string()),
+                ..H3PseudoHeaders::default()
+            },
+            vec![],
+        )
+        .expect("valid connection-close request")
+    }
+
+    let cx = test_cx();
+    let config = NativeQuicConnectionConfig {
+        max_local_bidi: 4,
+        max_local_uni: 4,
+        send_window: 512,
+        recv_window: 512,
+        connection_send_limit: 4096,
+        connection_recv_limit: 4096,
+        ..NativeQuicConnectionConfig::default()
+    };
+    let mut client = QuicConnection::client(config);
+    let mut server = QuicConnection::server(config);
+    client.record_verified_server_identity();
+    establish_loopback(&cx, &mut client, &mut server).expect("establish native QUIC pair");
+    let mut client_h3 = NativeH3Session::client();
+    let mut server_h3 = NativeH3Session::server();
+    client_h3
+        .initialize(&cx, &mut client, H3Settings::default())
+        .expect("initialize client H3");
+    server_h3
+        .initialize(&cx, &mut server, H3Settings::default())
+        .expect("initialize server H3");
+    let _ = pump_h3_events(&cx, &mut client, &mut server, &mut server_h3);
+    let _ = pump_h3_events(&cx, &mut server, &mut client, &mut client_h3);
+
+    let admitted = Arc::new(AtomicUsize::new(0));
+    let admitted_for_route = Arc::clone(&admitted);
+    let cancel_observed = Arc::new(AtomicBool::new(false));
+    let cancel_observed_for_route = Arc::clone(&cancel_observed);
+    let router = Router::new()
+        .route(
+            "/close",
+            get(AsyncCxFnHandler1::<_, Http3StreamResponder>::new(
+                move |_handler_cx: Cx, responder: Http3StreamResponder| {
+                    let admitted = Arc::clone(&admitted_for_route);
+                    let cancel_observed = Arc::clone(&cancel_observed_for_route);
+                    async move {
+                        responder.streaming(
+                            StatusCode::OK,
+                            NonZeroUsize::MIN,
+                            NonZeroUsize::new(3).expect("non-zero H3 frame limit"),
+                            move |producer_cx, mut sender| async move {
+                                sender
+                                    .send_bytes(&producer_cx, Bytes::from_static(b"abc"))
+                                    .await?;
+                                admitted.fetch_add(1, Ordering::SeqCst);
+                                let second_send = sender
+                                    .send_bytes(&producer_cx, Bytes::from_static(b"def"))
+                                    .await;
+                                cancel_observed
+                                    .store(producer_cx.is_cancel_requested(), Ordering::SeqCst);
+                                second_send?;
+                                Ok(sender)
+                            },
+                        )
+                    }
+                },
+            )),
+        )
+        .without_default_trace();
+    let mut bridge = NativeH3Router::new(router);
+
+    let stream = client_h3
+        .send_request(&cx, &mut client, &request_head(), Bytes::new())
+        .expect("send connection-close request");
+    let mut dispatch = None;
+    for event in pump_h3_events(&cx, &mut client, &mut server, &mut server_h3).0 {
+        match bridge
+            .ingest_event_with_cx(&cx, &mut server_h3, &mut server, event)
+            .expect("ingest connection-close request")
+        {
+            NativeH3RouterIngress::Event(NativeH3RouterEvent::RequestBuffered {
+                stream_id,
+                body_bytes: 0,
+            }) => assert_eq!(stream_id, stream),
+            NativeH3RouterIngress::Dispatch(next) => dispatch = Some(next),
+            other => panic!("unexpected connection-close ingress: {other:?}"),
+        }
+    }
+    let prepared = match futures_lite::future::block_on(
+        dispatch
+            .expect("request FIN must detach a Router dispatch")
+            .run_produced(&cx),
+    ) {
+        NativeH3RouterProducedDispatch::Produced(prepared) => prepared,
+        NativeH3RouterProducedDispatch::Buffered(_) => {
+            panic!("connection-close route must retain its producer plan")
+        }
+    };
+    assert_eq!(
+        bridge
+            .start_produced_dispatch_with_cx(&cx, &mut server_h3, &mut server, prepared)
+            .expect("install connection-close response"),
+        NativeH3RouterEvent::ResponseStarted {
+            stream_id: stream,
+            status: 200,
+        }
+    );
+    let mut task_cx = Context::from_waker(Waker::noop());
+    let mut producer =
+        match bridge.poll_produced_response_with_cx(&cx, &mut server_h3, &mut server, &mut task_cx)
+        {
+            Poll::Ready(Ok(NativeH3ProducedEvent::ProducerReady {
+                stream_id,
+                producer,
+            })) => {
+                assert_eq!(stream_id, stream);
+                Box::pin(producer)
+            }
+            _ => panic!("HEADERS admission must yield the producer"),
+        };
+    assert_eq!(
+        pump_h3_events(&cx, &mut server, &mut client, &mut client_h3).0,
+        vec![NativeH3Event::ResponseHeaders {
+            stream_id: stream,
+            head: H3ResponseHead::new(200, vec![]).expect("valid response head"),
+        }]
+    );
+    assert!(producer.as_mut().poll(&mut task_cx).is_pending());
+    assert_eq!(admitted.load(Ordering::SeqCst), 1);
+    let send_offset_before_close = {
+        let stream_state = server
+            .inner()
+            .streams()
+            .stream(stream)
+            .expect("active response stream");
+        assert_eq!(stream_state.send_reset, None);
+        assert_eq!(stream_state.receive_stopped_error_code, None);
+        stream_state.send_offset
+    };
+
+    server
+        .begin_close(&cx, 1_000_000, 0x0100)
+        .expect("begin graceful connection close");
+    assert_eq!(server.state(), QuicConnectionState::Draining);
+    assert!(
+        bridge
+            .poll_produced_response_with_cx(&cx, &mut server_h3, &mut server, &mut task_cx,)
+            .is_pending(),
+        "connection close must retain ownership until producer exit"
+    );
+    assert_eq!(bridge.in_flight_dispatch_count(), 1);
+    assert_eq!(
+        server
+            .inner()
+            .streams()
+            .stream(stream)
+            .expect("closing response stream")
+            .send_offset,
+        send_offset_before_close,
+        "connection-close cancellation must not enqueue more stream bytes"
+    );
+    assert!(producer.as_mut().poll(&mut task_cx).is_ready());
+    assert!(
+        cancel_observed.load(Ordering::SeqCst),
+        "connection close must reach the supervised producer Cx"
+    );
+    assert!(matches!(
+        bridge.poll_produced_response_with_cx(
+            &cx,
+            &mut server_h3,
+            &mut server,
+            &mut task_cx,
+        ),
+        Poll::Ready(Ok(NativeH3ProducedEvent::RequestReset { stream_id }))
+            if stream_id == stream
+    ));
+    assert_eq!(bridge.in_flight_dispatch_count(), 0);
+    assert_eq!(
+        server
+            .inner()
+            .streams()
+            .stream(stream)
+            .expect("reaped response stream")
+            .send_offset,
+        send_offset_before_close,
+        "reaping a closed connection must not enqueue DATA or FIN bytes"
+    );
+    assert_eq!(
+        server
+            .inner()
+            .streams()
+            .stream(stream)
+            .expect("reaped response stream")
+            .send_reset,
+        None,
+        "connection-close reaping must not attempt RESET_STREAM"
+    );
+    assert_eq!(
+        server
+            .inner()
+            .streams()
+            .stream(stream)
+            .expect("reaped response stream")
+            .receive_stopped_error_code,
+        None,
+        "connection-close reaping must not attempt STOP_SENDING"
+    );
+}
+
+#[test]
 #[cfg(feature = "http3")]
 fn native_h3_router_produced_response_resumes_after_independent_live_credit_updates() {
     use std::future::Future;
