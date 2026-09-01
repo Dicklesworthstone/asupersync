@@ -20,13 +20,16 @@
 
 use std::io::{Read, Write};
 use std::net::SocketAddr;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use asupersync::http::h1::listener::{Http1Listener, Http1ListenerConfig};
 use asupersync::http::h1::server::{HostPolicy, Http1Config};
+use asupersync::http::h1::stream::Http1ProducedResponse;
 use asupersync::http::h1::types::Response;
+use asupersync::http::{HeaderMap, HeaderName, HeaderValue};
 use asupersync::runtime::RuntimeBuilder;
 use asupersync::server::shutdown::ShutdownPhase;
 use asupersync::sync::Notify;
@@ -58,6 +61,186 @@ fn blocking_client(addr: SocketAddr) -> std::thread::JoinHandle<String> {
         let _ = stream.read_to_string(&mut response);
         response
     })
+}
+
+fn response_body(response: &str) -> &str {
+    response.split_once("\r\n\r\n").map_or("", |(_, body)| body)
+}
+
+/// BODY-7C: the production listener reaches the supervised produced-response
+/// driver over a real TCP socket, including terminal trailers.
+#[test]
+fn produced_listener_writes_chunks_and_terminal_trailers() {
+    let runtime = RuntimeBuilder::new()
+        .worker_threads(2)
+        .build()
+        .expect("build runtime");
+    let handle = runtime.handle();
+
+    runtime.block_on(async move {
+        let listener = Http1Listener::bind_produced_with_config(
+            "127.0.0.1:0",
+            |_cx, _request| async move {
+                Http1ProducedResponse::chunked(
+                    NonZeroUsize::MIN,
+                    200,
+                    "OK",
+                    |producer_cx, mut sender| async move {
+                        sender.send_chunk(&producer_cx, b"alpha").await?;
+                        sender.send_chunk(&producer_cx, b"beta").await?;
+                        let mut trailers = HeaderMap::new();
+                        trailers.append(
+                            HeaderName::from_static("x-checksum"),
+                            HeaderValue::from_static("verified"),
+                        );
+                        sender.send_trailers(&producer_cx, trailers).await?;
+                        Ok(sender)
+                    },
+                )
+                .with_header("Trailer", "x-checksum")
+            },
+            localhost_config(Duration::from_secs(10), Duration::from_secs(20)),
+        )
+        .await
+        .expect("bind produced listener");
+
+        let addr = listener.local_addr().expect("local addr");
+        let manager = listener.connection_manager().clone();
+        let run_handle = handle
+            .clone()
+            .try_spawn(async move { listener.run_produced(&handle).await })
+            .expect("spawn produced listener");
+
+        let client = blocking_client(addr);
+        let response = client.join().expect("client thread");
+        assert!(
+            response.starts_with("HTTP/1.1 200 OK\r\n"),
+            "produced listener returned a success head: {response:?}"
+        );
+        assert_eq!(
+            response_body(&response),
+            "5\r\nalpha\r\n4\r\nbeta\r\n0\r\nx-checksum: verified\r\n\r\n"
+        );
+        assert_eq!(
+            response.matches("0\r\n").count(),
+            1,
+            "terminal chunk is serialized exactly once"
+        );
+
+        assert!(
+            manager.begin_drain(Duration::from_secs(10)),
+            "stop the listener after the connection closes"
+        );
+        let stats = run_handle.await.expect("produced listener result");
+        assert_eq!(stats.force_closed, 0);
+        assert!(manager.is_empty());
+    });
+}
+
+/// BODY-7C: a produced response stays in the listener-wide request count for
+/// its complete producer lifetime and can finish inside a graceful drain.
+#[test]
+fn produced_listener_finishes_in_flight_body_during_drain() {
+    let runtime = RuntimeBuilder::new()
+        .worker_threads(2)
+        .build()
+        .expect("build runtime");
+    let handle = runtime.handle();
+
+    runtime.block_on(async move {
+        let producer_started = Arc::new(Notify::new());
+        let producer_release = Arc::new(Notify::new());
+        let released = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let handler_started = Arc::clone(&producer_started);
+        let handler_release = Arc::clone(&producer_release);
+        let handler_released = Arc::clone(&released);
+
+        let listener = Http1Listener::bind_produced_with_config(
+            "127.0.0.1:0",
+            move |_cx, _request| {
+                let producer_started = Arc::clone(&handler_started);
+                let producer_release = Arc::clone(&handler_release);
+                let released = Arc::clone(&handler_released);
+                async move {
+                    Http1ProducedResponse::chunked(
+                        NonZeroUsize::MIN,
+                        200,
+                        "OK",
+                        move |producer_cx, mut sender| async move {
+                            sender.send_chunk(&producer_cx, b"alpha").await?;
+                            producer_started.notify_one();
+                            producer_release
+                                .wait_until(|| released.load(Ordering::Acquire))
+                                .await;
+                            sender.send_chunk(&producer_cx, b"beta").await?;
+                            sender.finish(&producer_cx)?;
+                            Ok(sender)
+                        },
+                    )
+                }
+            },
+            localhost_config(Duration::from_secs(10), Duration::from_secs(20)),
+        )
+        .await
+        .expect("bind produced listener");
+
+        let addr = listener.local_addr().expect("local addr");
+        let shutdown = listener.shutdown_signal();
+        let manager = listener.connection_manager().clone();
+        let in_flight = listener.in_flight_requests();
+        let stats_handle = listener.stats_handle();
+        let run_handle = handle
+            .clone()
+            .try_spawn(async move { listener.run_produced(&handle).await })
+            .expect("spawn produced listener");
+
+        let client = blocking_client(addr);
+        producer_started.notified().await;
+        assert_eq!(
+            in_flight.load(Ordering::Acquire),
+            1,
+            "produced body remains an in-flight request while its producer is parked"
+        );
+        assert!(
+            manager.begin_drain(Duration::from_secs(10)),
+            "begin drain with the produced body in flight"
+        );
+
+        for _ in 0..400 {
+            if stats_handle.snapshot().drains_started_total == 1 {
+                break;
+            }
+            asupersync::time::sleep(asupersync::time::wall_now(), Duration::from_millis(5)).await;
+        }
+        let during_drain = stats_handle.snapshot();
+        assert_eq!(during_drain.drains_started_total, 1);
+        assert_eq!(during_drain.last_drain_requests_at_start, 1);
+        assert_eq!(in_flight.load(Ordering::Acquire), 1);
+
+        released.store(true, Ordering::Release);
+        producer_release.notify_waiters();
+
+        let stats = run_handle.await.expect("produced listener result");
+        let response = client.join().expect("client thread");
+        assert_eq!(
+            response_body(&response),
+            "5\r\nalpha\r\n4\r\nbeta\r\n0\r\n\r\n"
+        );
+        assert!(
+            response.to_lowercase().contains("connection: close"),
+            "draining produced response advertises close: {response:?}"
+        );
+        assert_eq!(shutdown.phase(), ShutdownPhase::Stopped);
+        assert_eq!(stats.force_closed, 0);
+        let report = stats.drain_report.expect("produced drain report");
+        assert_eq!(report.requests_at_drain_start, 1);
+        assert_eq!(report.requests_completed, 1);
+        assert_eq!(report.requests_stranded, 0);
+        assert!(report.reached_quiescence);
+        assert!(!report.hard_deadline_hit);
+        assert_eq!(in_flight.load(Ordering::Acquire), 0);
+        assert!(manager.is_empty());
+    });
 }
 
 /// AC1: in-flight requests at drain start complete within a generous soft

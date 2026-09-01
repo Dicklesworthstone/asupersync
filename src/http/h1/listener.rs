@@ -4,7 +4,10 @@
 //! each to an [`Http1Server`] handler. Integrates with [`ConnectionManager`]
 //! for capacity limits and [`ShutdownSignal`] for graceful drain.
 
-use crate::http::h1::server::{Http1Config, Http1ServeOutcome, Http1Server, IntoHttp1Response};
+use crate::http::h1::server::{
+    Http1Config, Http1ServeOutcome, Http1Server, Http1StreamingServer, IntoHttp1Response,
+};
+use crate::http::h1::stream::{Http1ProducedResponse, StreamingServerRequest};
 use crate::http::h1::types::Request;
 use crate::net::tcp::listener::TcpListener;
 use crate::runtime::{JoinHandle, RuntimeHandle, SpawnError};
@@ -451,7 +454,61 @@ where
             in_flight_requests: Arc::new(AtomicUsize::new(0)),
         }
     }
+}
 
+impl<F, Fut> Http1Listener<F>
+where
+    F: Fn(Cx, StreamingServerRequest) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Http1ProducedResponse> + Send + 'static,
+{
+    /// Bind a listener whose handler returns a supervised chunked response.
+    ///
+    /// The handler receives the authoritative per-request capability context
+    /// and streaming request-body handle used by [`Http1StreamingServer`].
+    pub async fn bind_produced<A: ToSocketAddrs + Send + 'static>(
+        addr: A,
+        handler: F,
+    ) -> io::Result<Self> {
+        Self::bind_produced_with_config(addr, handler, Http1ListenerConfig::default()).await
+    }
+
+    /// Bind a supervised chunked-response listener with custom configuration.
+    pub async fn bind_produced_with_config<A: ToSocketAddrs + Send + 'static>(
+        addr: A,
+        handler: F,
+        config: Http1ListenerConfig,
+    ) -> io::Result<Self> {
+        let tcp_listener = TcpListener::bind(addr).await?;
+        Ok(Self::from_listener_produced(tcp_listener, handler, config))
+    }
+
+    /// Create a supervised chunked-response listener from an existing TCP listener.
+    pub fn from_listener_produced(
+        tcp_listener: TcpListener,
+        handler: F,
+        config: Http1ListenerConfig,
+    ) -> Self {
+        let shutdown_signal = shutdown_signal_for_time_getter(config.time_getter);
+        let connection_manager = ConnectionManager::with_time_getter(
+            config.max_connections,
+            shutdown_signal.clone(),
+            config.time_getter,
+        );
+        let stats = Arc::new(Http1ListenerStats::new(config.time_getter));
+
+        Self {
+            tcp_listener,
+            handler: Arc::new(handler),
+            config,
+            shutdown_signal,
+            connection_manager,
+            stats,
+            in_flight_requests: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+}
+
+impl<F> Http1Listener<F> {
     /// Returns a clone of the shutdown signal for external phase observation.
     #[must_use]
     pub fn shutdown_signal(&self) -> ShutdownSignal {
@@ -492,7 +549,14 @@ where
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
         self.tcp_listener.local_addr()
     }
+}
 
+impl<F, Fut, R> Http1Listener<F>
+where
+    F: Fn(Request) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = R> + Send + 'static,
+    R: IntoHttp1Response + Send + 'static,
+{
     /// Run the accept loop until shutdown.
     ///
     /// Accepts connections, dispatches to handler, and on shutdown signal
@@ -500,6 +564,39 @@ where
     ///
     /// Returns shutdown statistics upon completion.
     pub async fn run(self, runtime: &RuntimeHandle) -> io::Result<ShutdownStats> {
+        self.run_with(runtime, spawn_connection::<F, Fut, R>).await
+    }
+}
+
+impl<F, Fut> Http1Listener<F>
+where
+    F: Fn(Cx, StreamingServerRequest) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Http1ProducedResponse> + Send + 'static,
+{
+    /// Run the accept loop for a supervised chunked-response handler.
+    pub async fn run_produced(self, runtime: &RuntimeHandle) -> io::Result<ShutdownStats> {
+        self.run_with(runtime, spawn_produced_connection::<F, Fut>)
+            .await
+    }
+}
+
+impl<F> Http1Listener<F> {
+    async fn run_with<Spawn>(
+        self,
+        runtime: &RuntimeHandle,
+        spawn_connection: Spawn,
+    ) -> io::Result<ShutdownStats>
+    where
+        Spawn: Fn(
+            crate::net::tcp::stream::TcpStream,
+            ConnectionGuard,
+            Arc<F>,
+            Http1Config,
+            ShutdownSignal,
+            Arc<AtomicUsize>,
+            &RuntimeHandle,
+        ) -> Result<JoinHandle<()>, SpawnError>,
+    {
         let mut tasks = ConnectionTasks::default();
         let mut shutdown_rx = self.shutdown_signal.subscribe();
         let mut transient_accept_streak: u32 = 0;
@@ -770,6 +867,42 @@ where
             let session = upgrade.run(session_cx.clone(), io, read_ahead);
             run_upgrade_session(&shutdown_signal, session_cx, session).await;
         }
+    })?;
+    Ok(handle)
+}
+
+/// Spawn a supervised produced-response connection as a runtime task.
+///
+/// The connection task owns the manager guard, and the streaming server mints
+/// each request context beneath the runtime-provided connection context.
+fn spawn_produced_connection<F, Fut>(
+    stream: crate::net::tcp::stream::TcpStream,
+    guard: ConnectionGuard,
+    handler: Arc<F>,
+    config: Http1Config,
+    shutdown_signal: ShutdownSignal,
+    in_flight_requests: Arc<AtomicUsize>,
+    runtime: &RuntimeHandle,
+) -> Result<JoinHandle<()>, SpawnError>
+where
+    F: Fn(Cx, StreamingServerRequest) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Http1ProducedResponse> + Send + 'static,
+{
+    let handle = runtime.try_spawn(async move {
+        let _guard = guard;
+        let server = Http1StreamingServer::with_config_produced(
+            move |request_cx, request| handler(request_cx, request),
+            config,
+        )
+        .with_shutdown_signal(shutdown_signal)
+        .with_in_flight_requests(in_flight_requests);
+        let peer_addr = stream.peer_addr().ok();
+        let Some(connection_cx) = Cx::current() else {
+            return;
+        };
+        let _ = server
+            .serve_produced_with_peer_addr(&connection_cx, stream, peer_addr)
+            .await;
     })?;
     Ok(handle)
 }
