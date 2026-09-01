@@ -19,26 +19,26 @@
 //!
 //! # Transport model (no-claim boundary)
 //!
-//! [`QuicConnection`] is the *production* handle: every method here is the same
-//! call shape `transport_quic` and the eventual real-UDP path will use. What is
-//! deliberately *deterministic / lab-only* is the in-memory transport that
-//! carries bytes between two handles — [`establish_loopback`] and
-//! [`pump_app_data`]. They stand in for:
+//! [`QuicConnection`] is the application-facing handle used by both production
+//! and deterministic transports. What is deliberately *deterministic /
+//! lab-only* is the in-memory transport that carries bytes between two handles
+//! — [`establish_loopback`] and [`pump_app_data`]. Production callers instead
+//! bind the same handle to [`NativeQuicUdpConnection`](super::udp_connection::NativeQuicUdpConnection),
+//! which owns:
 //!
-//! * the production [`ManagedQuicEndpoint`](super::managed_endpoint) event loop
-//!   that pumps real UDP packets and timers, and
-//! * the real wire-CRYPTO handshake driver + AEAD protect/unprotect that
-//!   `b0k8qo.1.1` ("→ protect → UDP" remainder), the `b0k8qo.1.5` handshake
-//!   driver remainder, and `b0k8qo.1.7` (real-UDP loopback e2e) still owe.
+//! * a real UDP endpoint and caller-driven bounded I/O/timer operations;
+//! * the actual local and authenticated peer connection IDs;
+//! * the completed rustls QUIC handshake, negotiated ALPN, and handshake-derived
+//!   1-RTT packet protection.
 //!
-//! Today receiving a `CRYPTO` frame only nudges `Idle → Handshaking`; the
-//! handshake keys are advanced by explicit transition calls, so the loopback
-//! helpers drive those transitions directly (matching the deterministic
-//! `tests/quic_h3_e2e.rs` harness). This is honest deterministic behavior, not a
-//! mock: the DATAGRAM and STREAM bytes really flow through
+//! The loopback helpers still drive handshake transitions directly; they are an
+//! honest deterministic transport, not a wire-security proof. Their DATAGRAM
+//! and STREAM bytes flow through
 //! [`NativeQuicConnection::generate_frames`] →
-//! [`NativeQuicConnection::process_packet_payload`]. The protect/UDP wire layer
-//! is simply not interposed yet.
+//! [`NativeQuicConnection::process_packet_payload`]. The separate live-UDP
+//! integration proof interposes the real handshake and protect/unprotect path.
+//! Neither surface claims a multi-connection listener, external QUIC/H3
+//! interoperability, migration, 0-RTT, or production deployment readiness.
 //!
 //! # Fail-closed
 //!
@@ -180,6 +180,14 @@ impl QuicConnection {
     #[must_use]
     pub fn inner(&self) -> &NativeQuicConnection {
         &self.inner
+    }
+
+    /// Mutably borrow the state machine for the crate's wire drivers.
+    ///
+    /// This stays crate-private so application code cannot bypass the
+    /// role-aware stream API or replay handshake transitions manually.
+    pub(crate) fn inner_mut(&mut self) -> &mut NativeQuicConnection {
+        &mut self.inner
     }
 
     // -- handshake -----------------------------------------------------------

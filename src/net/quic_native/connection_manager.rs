@@ -266,10 +266,14 @@ impl ConnectionRouter {
                 }
             })?;
             let plaintext_payload = if routing_info.space == PacketNumberSpace::ApplicationData {
+                let packet_protection = handle
+                    .packet_protection
+                    .as_mut()
+                    .ok_or(ConnectionRouterError::PacketProtectionUnavailable { connection_id })?;
                 unprotect_1rtt_packet(
                     cx,
                     connection_id,
-                    handle,
+                    &mut packet_protection.protection,
                     &packet.data[..routing_info.header_len],
                     payload,
                     routing_info.packet_number,
@@ -839,7 +843,7 @@ async fn drain_connection_frames(
                     cx,
                     connection_id,
                     &mut handle.connection,
-                    packet_protection,
+                    &mut packet_protection.protection,
                     &frames,
                     payload.as_ref(),
                     now_micros,
@@ -875,11 +879,11 @@ async fn drain_connection_frames(
     }])
 }
 
-async fn assemble_protected_1rtt_packet(
+pub(crate) async fn assemble_protected_1rtt_packet(
     cx: &Cx,
     connection_id: ConnectionId,
     connection: &mut NativeQuicConnection,
-    packet_protection: &mut ConnectionPacketProtection,
+    packet_protection: &mut AtpPacketProtection,
     frames: &[QuicFrame],
     payload: &[u8],
     now_micros: u64,
@@ -916,7 +920,6 @@ async fn assemble_protected_1rtt_packet(
         }
     })?;
     let protected = match packet_protection
-        .protection
         .protect_packet(
             cx,
             PacketProtectionRequest {
@@ -969,18 +972,15 @@ async fn assemble_protected_1rtt_packet(
     Ok(packet)
 }
 
-async fn unprotect_1rtt_packet(
+pub(crate) async fn unprotect_1rtt_packet(
     cx: &Cx,
     connection_id: ConnectionId,
-    handle: &mut ConnectionHandle,
+    packet_protection: &mut AtpPacketProtection,
     associated_data: &[u8],
     protected_payload: &[u8],
     packet_number: u64,
     key_phase: bool,
 ) -> Result<Vec<u8>, ConnectionRouterError> {
-    let Some(packet_protection) = handle.packet_protection.as_mut() else {
-        return Err(ConnectionRouterError::PacketProtectionUnavailable { connection_id });
-    };
     if protected_payload.len() < PROTECTED_1RTT_TAG_LEN {
         return Err(ConnectionRouterError::PacketProcessingFailed {
             connection_id,
@@ -1002,7 +1002,7 @@ async fn unprotect_1rtt_packet(
         ciphertext: protected_payload[..tag_offset].to_vec(),
         tag,
         proof: ProtectionProof {
-            provider_kind: packet_protection.protection.provider_kind(),
+            provider_kind: packet_protection.provider_kind(),
             space: PacketProtectionSpace::OneRtt,
             key_phase,
             generation: 0,
@@ -1012,7 +1012,6 @@ async fn unprotect_1rtt_packet(
     };
 
     match packet_protection
-        .protection
         .unprotect_packet(cx, &protected, associated_data)
         .await
     {
@@ -1029,18 +1028,18 @@ async fn unprotect_1rtt_packet(
     }
 }
 
-const PROTECTED_1RTT_MAX_PACKET_BYTES: usize = 1_200;
-const PROTECTED_1RTT_PACKET_NUMBER_LEN: u8 = 4;
-const PROTECTED_1RTT_TAG_LEN: usize = 16;
+pub(crate) const PROTECTED_1RTT_MAX_PACKET_BYTES: usize = 1_200;
+pub(crate) const PROTECTED_1RTT_PACKET_NUMBER_LEN: u8 = 4;
+pub(crate) const PROTECTED_1RTT_TAG_LEN: usize = 16;
 
-fn protected_1rtt_packet_len(connection_id: ConnectionId, payload_len: usize) -> usize {
+pub(crate) fn protected_1rtt_packet_len(connection_id: ConnectionId, payload_len: usize) -> usize {
     1 + connection_id.len()
         + usize::from(PROTECTED_1RTT_PACKET_NUMBER_LEN)
         + payload_len
         + PROTECTED_1RTT_TAG_LEN
 }
 
-fn is_ack_eliciting(frame: &crate::net::atp::protocol::quic_frames::QuicFrame) -> bool {
+pub(crate) fn is_ack_eliciting(frame: &crate::net::atp::protocol::quic_frames::QuicFrame) -> bool {
     !matches!(
         frame,
         crate::net::atp::protocol::quic_frames::QuicFrame::Padding { .. }

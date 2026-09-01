@@ -52,7 +52,7 @@ use crate::cx::Cx;
 use crate::net::atp::protocol::quic_frames::QuicFrame;
 use crate::net::atp::protocol::varint::VarInt;
 use crate::net::quic_core::{ConnectionId, LongHeader, LongPacketType, PacketHeader};
-use crate::net::quic_native::endpoint::{OutgoingPacket, QuicUdpEndpoint};
+use crate::net::quic_native::endpoint::{OutgoingPacket, QuicUdpEndpoint, ReceivedPacket};
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
@@ -68,6 +68,9 @@ const HANDSHAKE_RECEIVE_BATCH_SIZE: usize = 16;
 /// handshake drive loop can accept. Unlike a largest-seen watermark, exact
 /// membership permits legitimate packet reordering.
 const MAX_SEEN_HANDSHAKE_PACKETS: usize = HANDSHAKE_MAX_FLIGHTS * HANDSHAKE_RECEIVE_BATCH_SIZE;
+/// Bound authenticated-peer application packets retained while the server is
+/// still consuming the client's final handshake flight.
+const MAX_EARLY_ONE_RTT_PACKETS: usize = HANDSHAKE_MAX_FLIGHTS * HANDSHAKE_RECEIVE_BATCH_SIZE;
 /// Bound CRYPTO data held behind a gap so an unauthenticated peer cannot grow
 /// handshake memory without limit.
 const MAX_BUFFERED_HANDSHAKE_CRYPTO_BYTES: usize = 1024 * 1024;
@@ -471,6 +474,14 @@ pub struct QuicHandshakeDriver {
     write_level: HandshakeLevel,
     handshake_keys_installed: bool,
     one_rtt_keys_installed: bool,
+    /// Exact transport parameters offered to rustls for this endpoint. Kept so
+    /// the wire owner can bind its application flow-control state to the same
+    /// authenticated parameters rather than a parallel caller-only config.
+    local_transport_parameters: Vec<u8>,
+    /// Authenticated source connection ID learned from the peer's first
+    /// protected handshake packet. Kept with the TLS state so application-data
+    /// handoff cannot silently invent an unrelated post-handshake CID.
+    peer_connection_id: Option<ConnectionId>,
     /// Per-level cumulative CRYPTO send offset (indexed Initial=0/Handshake=1/OneRtt=2).
     crypto_send_offset: [u64; 3],
     /// Exact authenticated packet numbers already accepted for Initial/Handshake.
@@ -533,10 +544,15 @@ impl QuicHandshakeDriver {
         server_name: ServerName<'static>,
         transport_params: Vec<u8>,
     ) -> Result<Self, QuicTlsError> {
+        let local_transport_parameters = transport_params.clone();
         let conn = ClientConnection::new(config, Version::V1, server_name, transport_params)
             .map_err(|_| handshake_failure("client_connection_init"))?;
         let provider = RustlsQuicCryptoProvider::new_v1(RustlsQuicProviderSide::Client)?;
-        Ok(Self::new(Connection::Client(conn), provider))
+        Ok(Self::new(
+            Connection::Client(conn),
+            provider,
+            local_transport_parameters,
+        ))
     }
 
     /// Start a server handshake, advertising `transport_params`.
@@ -544,13 +560,22 @@ impl QuicHandshakeDriver {
         config: Arc<ServerConfig>,
         transport_params: Vec<u8>,
     ) -> Result<Self, QuicTlsError> {
+        let local_transport_parameters = transport_params.clone();
         let conn = ServerConnection::new(config, Version::V1, transport_params)
             .map_err(|_| handshake_failure("server_connection_init"))?;
         let provider = RustlsQuicCryptoProvider::new_v1(RustlsQuicProviderSide::Server)?;
-        Ok(Self::new(Connection::Server(conn), provider))
+        Ok(Self::new(
+            Connection::Server(conn),
+            provider,
+            local_transport_parameters,
+        ))
     }
 
-    fn new(tls: Connection, provider: RustlsQuicCryptoProvider) -> Self {
+    fn new(
+        tls: Connection,
+        provider: RustlsQuicCryptoProvider,
+        local_transport_parameters: Vec<u8>,
+    ) -> Self {
         Self {
             tls,
             provider,
@@ -558,6 +583,8 @@ impl QuicHandshakeDriver {
             write_level: HandshakeLevel::Initial,
             handshake_keys_installed: false,
             one_rtt_keys_installed: false,
+            local_transport_parameters,
+            peer_connection_id: None,
             crypto_send_offset: [0; 3],
             handshake_recv_packet_numbers: [BTreeSet::new(), BTreeSet::new()],
             handshake_crypto_reassembly: [
@@ -701,6 +728,12 @@ impl QuicHandshakeDriver {
             .unprotect_packet(&protected, header_bytes)
             .map_err(|_| handshake_failure("packet_unprotect"))?;
 
+        match self.peer_connection_id {
+            None => self.peer_connection_id = Some(peer_src_cid),
+            Some(expected) if expected == peer_src_cid => {}
+            Some(_) => return Err(handshake_failure("peer_connection_id_changed")),
+        }
+
         // A packet number is only a replay key after the packet authenticates.
         // Returning before AEAD verification would let an attacker forge the
         // cleartext long header of a previously seen packet number and have the
@@ -831,6 +864,24 @@ impl QuicHandshakeDriver {
         self.tls.quic_transport_parameters()
     }
 
+    /// This endpoint's exact TLS-authenticated QUIC transport-parameter offer.
+    #[must_use]
+    pub fn local_transport_parameters(&self) -> &[u8] {
+        &self.local_transport_parameters
+    }
+
+    /// Authenticated source connection ID learned from the peer.
+    #[must_use]
+    pub fn peer_connection_id(&self) -> Option<ConnectionId> {
+        self.peer_connection_id
+    }
+
+    /// ALPN selected by the completed TLS handshake.
+    #[must_use]
+    pub fn negotiated_alpn(&self) -> Option<&[u8]> {
+        self.tls.alpn_protocol()
+    }
+
     /// Borrow the packet-protection provider holding the installed keys.
     #[must_use]
     pub fn provider(&self) -> &RustlsQuicCryptoProvider {
@@ -959,8 +1010,11 @@ pub async fn client_handshake_over_udp(
         // the client must pump to install Handshake keys BEFORE it can unprotect
         // the server's Handshake-level flight that may arrive in the same batch.
         for packet in &received {
-            match driver.recv_handshake_packet(&packet.data) {
-                Ok(_) => {
+            let peer_dcid = match driver.recv_handshake_packet(&packet.data) {
+                Ok(peer_scid) => {
+                    // RFC 9000 section 7.2: after authenticating the server's
+                    // first flight, address subsequent client handshake packets
+                    // to the server-selected source CID, not the original DCID.
                     // Only authenticated handshake traffic may establish the
                     // path RTT used by the source-stream BDP admission cap.
                     if driver.path_rtt_estimate_micros.is_none() {
@@ -968,19 +1022,20 @@ pub async fn client_handshake_over_udp(
                             u64::try_from(flight_sent_at.elapsed().as_micros()).unwrap_or(u64::MAX),
                         );
                     }
+                    peer_scid
                 }
                 Err(err) if is_stale_handshake_packet_error(&err) => {
                     let _ = retransmit_handshake_flight(cx, endpoint, &last_flight).await?;
                     continue;
                 }
                 Err(err) => return Err(err),
-            }
+            };
             let sent = driver
                 .send_pending_flight(
                     cx,
                     endpoint,
                     server_addr,
-                    dcid,
+                    peer_dcid,
                     client_scid,
                     &mut packet_number,
                 )
@@ -1014,16 +1069,35 @@ pub async fn server_handshake_over_udp(
     dcid: ConnectionId,
     server_scid: ConnectionId,
 ) -> Result<SocketAddr, QuicTlsError> {
+    let (peer_addr, early_one_rtt) =
+        server_handshake_over_udp_with_early_data(cx, endpoint, driver, dcid, server_scid).await?;
+    if !early_one_rtt.is_empty() {
+        return Err(handshake_failure("unexpected_early_one_rtt"));
+    }
+    Ok(peer_addr)
+}
+
+/// Drive a server handshake while retaining bounded early 1-RTT packets for
+/// the application-data owner that will consume the completed driver.
+pub(crate) async fn server_handshake_over_udp_with_early_data(
+    cx: &Cx,
+    endpoint: &mut QuicUdpEndpoint,
+    driver: &mut QuicHandshakeDriver,
+    dcid: ConnectionId,
+    server_scid: ConnectionId,
+) -> Result<(SocketAddr, Vec<ReceivedPacket>), QuicTlsError> {
     driver.install_initial_keys(dcid.as_bytes())?;
     let mut packet_number = 0u64;
     let mut peer: Option<(SocketAddr, ConnectionId)> = None;
     let mut last_flight = Vec::new();
+    let mut early_one_rtt = Vec::new();
+    let mut last_early_data_resend: Option<Instant> = None;
     let mut no_peer_idle_timeouts = 0usize;
 
     for _ in 0..HANDSHAKE_MAX_FLIGHTS {
         if driver.is_complete() {
             return peer
-                .map(|(addr, _)| addr)
+                .map(|(addr, _)| (addr, early_one_rtt))
                 .ok_or_else(|| handshake_failure("server_handshake_no_peer"));
         }
         let received = match crate::time::timeout(
@@ -1054,7 +1128,27 @@ pub async fn server_handshake_over_udp(
         }
         // Pump after EACH packet so newly-derived keys are installed before the
         // next packet is processed (symmetry with the client side).
-        for packet in &received {
+        for packet in received {
+            if packet.data.first().is_none_or(|byte| byte & 0x80 == 0) {
+                let Some((peer_addr, _)) = peer else {
+                    continue;
+                };
+                if packet.src_addr != peer_addr {
+                    continue;
+                }
+                if early_one_rtt.len() >= MAX_EARLY_ONE_RTT_PACKETS {
+                    return Err(handshake_failure("early_one_rtt_queue_exhausted"));
+                }
+                early_one_rtt.push(packet);
+                if !driver.is_complete()
+                    && !last_flight.is_empty()
+                    && last_early_data_resend.is_none_or(|at| at.elapsed() >= HANDSHAKE_PTO)
+                {
+                    last_early_data_resend = Some(Instant::now());
+                    let _ = retransmit_handshake_flight(cx, endpoint, &last_flight).await?;
+                }
+                continue;
+            }
             let peer_scid = match driver.recv_handshake_packet(&packet.data) {
                 Ok(peer_scid) => peer_scid,
                 Err(err) if is_stale_handshake_packet_error(&err) => {
@@ -1089,7 +1183,7 @@ pub async fn server_handshake_over_udp(
     }
 
     if driver.is_complete() {
-        peer.map(|(addr, _)| addr)
+        peer.map(|(addr, _)| (addr, early_one_rtt))
             .ok_or_else(|| handshake_failure("server_handshake_no_peer"))
     } else {
         Err(handshake_failure("server_handshake_incomplete"))

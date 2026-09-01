@@ -16,6 +16,8 @@ pub mod managed_endpoint;
 pub mod streams;
 pub mod tls;
 pub mod transport;
+#[cfg(feature = "tls")]
+pub mod udp_connection;
 
 #[cfg(test)]
 pub mod integration_tests;
@@ -59,4 +61,8 @@ pub use tls::{RustlsQuicCryptoProvider, RustlsQuicProviderSide};
 pub use transport::{
     AckEvent, AckRange, PacketNumberSpace, QuicConnectionState, QuicTransportMachine, RttEstimator,
     SentPacketMeta, TransportError,
+};
+#[cfg(feature = "tls")]
+pub use udp_connection::{
+    NativeQuicUdpConnection, NativeQuicUdpConnectionError, NativeQuicUdpIoProgress,
 };
