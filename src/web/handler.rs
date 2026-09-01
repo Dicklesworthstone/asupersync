@@ -480,25 +480,6 @@ impl<F, T1, T2, T3, T4, T5, T6, T7, T8, T9> FnHandler9<F, T1, T2, T3, T4, T5, T6
 // ─── Async Cx-aware Handler Implementations ─────────────────────────────────
 
 #[inline]
-fn extract_arg_1<T1>(req: Request) -> Result<T1, Response>
-where
-    T1: FromRequest,
-{
-    T1::from_request(req).map_err(IntoResponse::into_response)
-}
-
-#[inline]
-fn extract_arg_2<T1, T2>(req: Request) -> Result<(T1, T2), Response>
-where
-    T1: FromRequestParts,
-    T2: FromRequest,
-{
-    let t1 = T1::from_request_parts(&req).map_err(IntoResponse::into_response)?;
-    let t2 = T2::from_request(req).map_err(IntoResponse::into_response)?;
-    Ok((t1, t2))
-}
-
-#[inline]
 fn extract_arg_3<T1, T2, T3>(req: Request) -> Result<(T1, T2, T3), Response>
 where
     T1: FromRequestParts,
@@ -610,6 +591,164 @@ where
     Ok((t1, t2, t3, t4, t5, t6, t7, t8))
 }
 
+#[inline]
+async fn extract_async_arg_1<T1>(cx: &Cx, req: Request) -> Result<T1, Response>
+where
+    T1: FromRequest + Send,
+{
+    T1::from_request_with_cx(cx, req)
+        .await
+        .map_err(IntoResponse::into_response)
+}
+
+#[inline]
+async fn extract_async_arg_2<T1, T2>(cx: &Cx, req: Request) -> Result<(T1, T2), Response>
+where
+    T1: FromRequestParts + Send,
+    T2: FromRequest + Send,
+{
+    let t1 = T1::from_request_parts(&req).map_err(IntoResponse::into_response)?;
+    let t2 = T2::from_request_with_cx(cx, req)
+        .await
+        .map_err(IntoResponse::into_response)?;
+    Ok((t1, t2))
+}
+
+#[inline]
+async fn extract_async_arg_3<T1, T2, T3>(cx: &Cx, req: Request) -> Result<(T1, T2, T3), Response>
+where
+    T1: FromRequestParts + Send,
+    T2: FromRequestParts + Send,
+    T3: FromRequest + Send,
+{
+    let t1 = T1::from_request_parts(&req).map_err(IntoResponse::into_response)?;
+    let t2 = T2::from_request_parts(&req).map_err(IntoResponse::into_response)?;
+    let t3 = T3::from_request_with_cx(cx, req)
+        .await
+        .map_err(IntoResponse::into_response)?;
+    Ok((t1, t2, t3))
+}
+
+#[inline]
+async fn extract_async_arg_4<T1, T2, T3, T4>(
+    cx: &Cx,
+    req: Request,
+) -> Result<(T1, T2, T3, T4), Response>
+where
+    T1: FromRequestParts + Send,
+    T2: FromRequestParts + Send,
+    T3: FromRequestParts + Send,
+    T4: FromRequest + Send,
+{
+    let t1 = T1::from_request_parts(&req).map_err(IntoResponse::into_response)?;
+    let t2 = T2::from_request_parts(&req).map_err(IntoResponse::into_response)?;
+    let t3 = T3::from_request_parts(&req).map_err(IntoResponse::into_response)?;
+    let t4 = T4::from_request_with_cx(cx, req)
+        .await
+        .map_err(IntoResponse::into_response)?;
+    Ok((t1, t2, t3, t4))
+}
+
+#[inline]
+async fn extract_async_arg_5<T1, T2, T3, T4, T5>(
+    cx: &Cx,
+    req: Request,
+) -> Result<(T1, T2, T3, T4, T5), Response>
+where
+    T1: FromRequestParts + Send,
+    T2: FromRequestParts + Send,
+    T3: FromRequestParts + Send,
+    T4: FromRequestParts + Send,
+    T5: FromRequest + Send,
+{
+    let t1 = T1::from_request_parts(&req).map_err(IntoResponse::into_response)?;
+    let t2 = T2::from_request_parts(&req).map_err(IntoResponse::into_response)?;
+    let t3 = T3::from_request_parts(&req).map_err(IntoResponse::into_response)?;
+    let t4 = T4::from_request_parts(&req).map_err(IntoResponse::into_response)?;
+    let t5 = T5::from_request_with_cx(cx, req)
+        .await
+        .map_err(IntoResponse::into_response)?;
+    Ok((t1, t2, t3, t4, t5))
+}
+
+#[inline]
+async fn extract_async_arg_6<T1, T2, T3, T4, T5, T6>(
+    cx: &Cx,
+    req: Request,
+) -> Result<(T1, T2, T3, T4, T5, T6), Response>
+where
+    T1: FromRequestParts + Send,
+    T2: FromRequestParts + Send,
+    T3: FromRequestParts + Send,
+    T4: FromRequestParts + Send,
+    T5: FromRequestParts + Send,
+    T6: FromRequest + Send,
+{
+    let t1 = T1::from_request_parts(&req).map_err(IntoResponse::into_response)?;
+    let t2 = T2::from_request_parts(&req).map_err(IntoResponse::into_response)?;
+    let t3 = T3::from_request_parts(&req).map_err(IntoResponse::into_response)?;
+    let t4 = T4::from_request_parts(&req).map_err(IntoResponse::into_response)?;
+    let t5 = T5::from_request_parts(&req).map_err(IntoResponse::into_response)?;
+    let t6 = T6::from_request_with_cx(cx, req)
+        .await
+        .map_err(IntoResponse::into_response)?;
+    Ok((t1, t2, t3, t4, t5, t6))
+}
+
+#[inline]
+async fn extract_async_arg_7<T1, T2, T3, T4, T5, T6, T7>(
+    cx: &Cx,
+    req: Request,
+) -> Result<(T1, T2, T3, T4, T5, T6, T7), Response>
+where
+    T1: FromRequestParts + Send,
+    T2: FromRequestParts + Send,
+    T3: FromRequestParts + Send,
+    T4: FromRequestParts + Send,
+    T5: FromRequestParts + Send,
+    T6: FromRequestParts + Send,
+    T7: FromRequest + Send,
+{
+    let t1 = T1::from_request_parts(&req).map_err(IntoResponse::into_response)?;
+    let t2 = T2::from_request_parts(&req).map_err(IntoResponse::into_response)?;
+    let t3 = T3::from_request_parts(&req).map_err(IntoResponse::into_response)?;
+    let t4 = T4::from_request_parts(&req).map_err(IntoResponse::into_response)?;
+    let t5 = T5::from_request_parts(&req).map_err(IntoResponse::into_response)?;
+    let t6 = T6::from_request_parts(&req).map_err(IntoResponse::into_response)?;
+    let t7 = T7::from_request_with_cx(cx, req)
+        .await
+        .map_err(IntoResponse::into_response)?;
+    Ok((t1, t2, t3, t4, t5, t6, t7))
+}
+
+#[inline]
+async fn extract_async_arg_8<T1, T2, T3, T4, T5, T6, T7, T8>(
+    cx: &Cx,
+    req: Request,
+) -> Result<(T1, T2, T3, T4, T5, T6, T7, T8), Response>
+where
+    T1: FromRequestParts + Send,
+    T2: FromRequestParts + Send,
+    T3: FromRequestParts + Send,
+    T4: FromRequestParts + Send,
+    T5: FromRequestParts + Send,
+    T6: FromRequestParts + Send,
+    T7: FromRequestParts + Send,
+    T8: FromRequest + Send,
+{
+    let t1 = T1::from_request_parts(&req).map_err(IntoResponse::into_response)?;
+    let t2 = T2::from_request_parts(&req).map_err(IntoResponse::into_response)?;
+    let t3 = T3::from_request_parts(&req).map_err(IntoResponse::into_response)?;
+    let t4 = T4::from_request_parts(&req).map_err(IntoResponse::into_response)?;
+    let t5 = T5::from_request_parts(&req).map_err(IntoResponse::into_response)?;
+    let t6 = T6::from_request_parts(&req).map_err(IntoResponse::into_response)?;
+    let t7 = T7::from_request_parts(&req).map_err(IntoResponse::into_response)?;
+    let t8 = T8::from_request_with_cx(cx, req)
+        .await
+        .map_err(IntoResponse::into_response)?;
+    Ok((t1, t2, t3, t4, t5, t6, t7, t8))
+}
+
 /// Wrapper for async handlers that receive a [`Cx`] and no extractors.
 pub struct AsyncCxFnHandler<F> {
     func: F,
@@ -694,7 +833,7 @@ where
 /// Wrapper for async handlers with 1 extractor.
 pub struct AsyncCxFnHandler1<F, T1> {
     func: F,
-    _marker: std::marker::PhantomData<T1>,
+    _marker: std::marker::PhantomData<fn() -> T1>,
 }
 
 impl<F, T1> AsyncCxFnHandler1<F, T1> {
@@ -710,7 +849,7 @@ impl<F, T1> AsyncCxFnHandler1<F, T1> {
 impl<F, Fut, Res, T1> Handler for AsyncCxFnHandler1<F, T1>
 where
     F: Fn(Cx, T1) -> Fut + Send + Sync + 'static,
-    T1: FromRequest + Send + Sync + 'static,
+    T1: FromRequest + Send + 'static,
     Fut: Future<Output = Res> + Send,
     Res: IntoResponse,
 {
@@ -719,7 +858,7 @@ where
         let cx = cx.clone();
         let func = &self.func;
         Box::pin(async move {
-            let t1 = match extract_arg_1::<T1>(req) {
+            let t1 = match extract_async_arg_1::<T1>(&cx, req).await {
                 Ok(v) => v,
                 Err(resp) => return resp,
             };
@@ -731,7 +870,7 @@ where
 /// Wrapper for async handlers with 2 extractors.
 pub struct AsyncCxFnHandler2<F, T1, T2> {
     func: F,
-    _marker: std::marker::PhantomData<(T1, T2)>,
+    _marker: std::marker::PhantomData<fn() -> (T1, T2)>,
 }
 
 impl<F, T1, T2> AsyncCxFnHandler2<F, T1, T2> {
@@ -748,7 +887,7 @@ impl<F, Fut, Res, T1, T2> Handler for AsyncCxFnHandler2<F, T1, T2>
 where
     F: Fn(Cx, T1, T2) -> Fut + Send + Sync + 'static,
     T1: FromRequestParts + Send + Sync + 'static,
-    T2: FromRequest + Send + Sync + 'static,
+    T2: FromRequest + Send + 'static,
     Fut: Future<Output = Res> + Send,
     Res: IntoResponse,
 {
@@ -757,7 +896,7 @@ where
         let cx = cx.clone();
         let func = &self.func;
         Box::pin(async move {
-            let (t1, t2) = match extract_arg_2::<T1, T2>(req) {
+            let (t1, t2) = match extract_async_arg_2::<T1, T2>(&cx, req).await {
                 Ok(v) => v,
                 Err(resp) => return resp,
             };
@@ -769,7 +908,7 @@ where
 /// Wrapper for async handlers with 3 extractors.
 pub struct AsyncCxFnHandler3<F, T1, T2, T3> {
     func: F,
-    _marker: std::marker::PhantomData<(T1, T2, T3)>,
+    _marker: std::marker::PhantomData<fn() -> (T1, T2, T3)>,
 }
 
 impl<F, T1, T2, T3> AsyncCxFnHandler3<F, T1, T2, T3> {
@@ -787,7 +926,7 @@ where
     F: Fn(Cx, T1, T2, T3) -> Fut + Send + Sync + 'static,
     T1: FromRequestParts + Send + Sync + 'static,
     T2: FromRequestParts + Send + Sync + 'static,
-    T3: FromRequest + Send + Sync + 'static,
+    T3: FromRequest + Send + 'static,
     Fut: Future<Output = Res> + Send,
     Res: IntoResponse,
 {
@@ -796,7 +935,7 @@ where
         let cx = cx.clone();
         let func = &self.func;
         Box::pin(async move {
-            let (t1, t2, t3) = match extract_arg_3::<T1, T2, T3>(req) {
+            let (t1, t2, t3) = match extract_async_arg_3::<T1, T2, T3>(&cx, req).await {
                 Ok(v) => v,
                 Err(resp) => return resp,
             };
@@ -808,7 +947,7 @@ where
 /// Wrapper for async handlers with 4 extractors.
 pub struct AsyncCxFnHandler4<F, T1, T2, T3, T4> {
     func: F,
-    _marker: std::marker::PhantomData<(T1, T2, T3, T4)>,
+    _marker: std::marker::PhantomData<fn() -> (T1, T2, T3, T4)>,
 }
 
 impl<F, T1, T2, T3, T4> AsyncCxFnHandler4<F, T1, T2, T3, T4> {
@@ -827,7 +966,7 @@ where
     T1: FromRequestParts + Send + Sync + 'static,
     T2: FromRequestParts + Send + Sync + 'static,
     T3: FromRequestParts + Send + Sync + 'static,
-    T4: FromRequest + Send + Sync + 'static,
+    T4: FromRequest + Send + 'static,
     Fut: Future<Output = Res> + Send,
     Res: IntoResponse,
 {
@@ -836,7 +975,7 @@ where
         let cx = cx.clone();
         let func = &self.func;
         Box::pin(async move {
-            let (t1, t2, t3, t4) = match extract_arg_4::<T1, T2, T3, T4>(req) {
+            let (t1, t2, t3, t4) = match extract_async_arg_4::<T1, T2, T3, T4>(&cx, req).await {
                 Ok(v) => v,
                 Err(resp) => return resp,
             };
@@ -848,7 +987,7 @@ where
 /// Wrapper for async handlers with 5 extractors.
 pub struct AsyncCxFnHandler5<F, T1, T2, T3, T4, T5> {
     func: F,
-    _marker: std::marker::PhantomData<(T1, T2, T3, T4, T5)>,
+    _marker: std::marker::PhantomData<fn() -> (T1, T2, T3, T4, T5)>,
 }
 
 impl<F, T1, T2, T3, T4, T5> AsyncCxFnHandler5<F, T1, T2, T3, T4, T5> {
@@ -868,7 +1007,7 @@ where
     T2: FromRequestParts + Send + Sync + 'static,
     T3: FromRequestParts + Send + Sync + 'static,
     T4: FromRequestParts + Send + Sync + 'static,
-    T5: FromRequest + Send + Sync + 'static,
+    T5: FromRequest + Send + 'static,
     Fut: Future<Output = Res> + Send,
     Res: IntoResponse,
 {
@@ -877,10 +1016,11 @@ where
         let cx = cx.clone();
         let func = &self.func;
         Box::pin(async move {
-            let (t1, t2, t3, t4, t5) = match extract_arg_5::<T1, T2, T3, T4, T5>(req) {
-                Ok(v) => v,
-                Err(resp) => return resp,
-            };
+            let (t1, t2, t3, t4, t5) =
+                match extract_async_arg_5::<T1, T2, T3, T4, T5>(&cx, req).await {
+                    Ok(v) => v,
+                    Err(resp) => return resp,
+                };
             run_async_cx_handler(cx, |handler_cx| func(handler_cx, t1, t2, t3, t4, t5)).await
         })
     }
@@ -889,7 +1029,7 @@ where
 /// Wrapper for async handlers with 6 extractors.
 pub struct AsyncCxFnHandler6<F, T1, T2, T3, T4, T5, T6> {
     func: F,
-    _marker: std::marker::PhantomData<(T1, T2, T3, T4, T5, T6)>,
+    _marker: std::marker::PhantomData<fn() -> (T1, T2, T3, T4, T5, T6)>,
 }
 
 impl<F, T1, T2, T3, T4, T5, T6> AsyncCxFnHandler6<F, T1, T2, T3, T4, T5, T6> {
@@ -910,7 +1050,7 @@ where
     T3: FromRequestParts + Send + Sync + 'static,
     T4: FromRequestParts + Send + Sync + 'static,
     T5: FromRequestParts + Send + Sync + 'static,
-    T6: FromRequest + Send + Sync + 'static,
+    T6: FromRequest + Send + 'static,
     Fut: Future<Output = Res> + Send,
     Res: IntoResponse,
 {
@@ -919,10 +1059,11 @@ where
         let cx = cx.clone();
         let func = &self.func;
         Box::pin(async move {
-            let (t1, t2, t3, t4, t5, t6) = match extract_arg_6::<T1, T2, T3, T4, T5, T6>(req) {
-                Ok(v) => v,
-                Err(resp) => return resp,
-            };
+            let (t1, t2, t3, t4, t5, t6) =
+                match extract_async_arg_6::<T1, T2, T3, T4, T5, T6>(&cx, req).await {
+                    Ok(v) => v,
+                    Err(resp) => return resp,
+                };
             run_async_cx_handler(cx, |handler_cx| func(handler_cx, t1, t2, t3, t4, t5, t6)).await
         })
     }
@@ -931,7 +1072,7 @@ where
 /// Wrapper for async handlers with 7 extractors.
 pub struct AsyncCxFnHandler7<F, T1, T2, T3, T4, T5, T6, T7> {
     func: F,
-    _marker: std::marker::PhantomData<(T1, T2, T3, T4, T5, T6, T7)>,
+    _marker: std::marker::PhantomData<fn() -> (T1, T2, T3, T4, T5, T6, T7)>,
 }
 
 impl<F, T1, T2, T3, T4, T5, T6, T7> AsyncCxFnHandler7<F, T1, T2, T3, T4, T5, T6, T7> {
@@ -954,7 +1095,7 @@ where
     T4: FromRequestParts + Send + Sync + 'static,
     T5: FromRequestParts + Send + Sync + 'static,
     T6: FromRequestParts + Send + Sync + 'static,
-    T7: FromRequest + Send + Sync + 'static,
+    T7: FromRequest + Send + 'static,
     Fut: Future<Output = Res> + Send,
     Res: IntoResponse,
 {
@@ -964,7 +1105,7 @@ where
         let func = &self.func;
         Box::pin(async move {
             let (t1, t2, t3, t4, t5, t6, t7) =
-                match extract_arg_7::<T1, T2, T3, T4, T5, T6, T7>(req) {
+                match extract_async_arg_7::<T1, T2, T3, T4, T5, T6, T7>(&cx, req).await {
                     Ok(v) => v,
                     Err(resp) => return resp,
                 };
@@ -979,7 +1120,7 @@ where
 /// Wrapper for async handlers with 8 extractors.
 pub struct AsyncCxFnHandler8<F, T1, T2, T3, T4, T5, T6, T7, T8> {
     func: F,
-    _marker: std::marker::PhantomData<(T1, T2, T3, T4, T5, T6, T7, T8)>,
+    _marker: std::marker::PhantomData<fn() -> (T1, T2, T3, T4, T5, T6, T7, T8)>,
 }
 
 impl<F, T1, T2, T3, T4, T5, T6, T7, T8> AsyncCxFnHandler8<F, T1, T2, T3, T4, T5, T6, T7, T8> {
@@ -1003,7 +1144,7 @@ where
     T5: FromRequestParts + Send + Sync + 'static,
     T6: FromRequestParts + Send + Sync + 'static,
     T7: FromRequestParts + Send + Sync + 'static,
-    T8: FromRequest + Send + Sync + 'static,
+    T8: FromRequest + Send + 'static,
     Fut: Future<Output = Res> + Send,
     Res: IntoResponse,
 {
@@ -1013,7 +1154,7 @@ where
         let func = &self.func;
         Box::pin(async move {
             let (t1, t2, t3, t4, t5, t6, t7, t8) =
-                match extract_arg_8::<T1, T2, T3, T4, T5, T6, T7, T8>(req) {
+                match extract_async_arg_8::<T1, T2, T3, T4, T5, T6, T7, T8>(&cx, req).await {
                     Ok(v) => v,
                     Err(resp) => return resp,
                 };
@@ -1038,16 +1179,155 @@ mod tests {
         clippy::future_not_send
     )]
     use super::*;
+    use std::cell::Cell;
     use std::collections::HashMap;
-    use std::sync::mpsc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex, mpsc};
     use std::thread;
 
     use crate::bytes::Bytes;
     use crate::runtime::RuntimeBuilder;
     use crate::time::TimerDriverHandle;
     use crate::types::Budget;
-    use crate::web::extract::{Accept, Header, Json, Path, Query, State, UserAgent};
+    use crate::web::extract::{
+        Accept, ExtractionError, Header, Json, Path, Query, State, UserAgent,
+    };
     use crate::web::response::StatusCode;
+
+    struct LegacyFinal(String);
+
+    impl FromRequest for LegacyFinal {
+        fn from_request(req: Request) -> Result<Self, ExtractionError> {
+            Ok(Self(req.path))
+        }
+    }
+
+    #[derive(Clone)]
+    struct AsyncExtractionTrace(Arc<Mutex<Vec<u8>>>);
+
+    impl AsyncExtractionTrace {
+        fn new() -> Self {
+            Self(Arc::new(Mutex::new(Vec::new())))
+        }
+
+        fn request(&self) -> Request {
+            let mut req = Request::new("POST", "/async-extractor");
+            req.extensions.insert_typed(self.clone());
+            req
+        }
+
+        fn assert_order(&self, expected: &[u8]) {
+            assert_eq!(
+                self.0
+                    .lock()
+                    .expect("async extraction trace lock")
+                    .as_slice(),
+                expected
+            );
+        }
+    }
+
+    struct OrderedPart<const INDEX: u8>;
+
+    impl<const INDEX: u8> FromRequestParts for OrderedPart<INDEX> {
+        fn from_request_parts(req: &Request) -> Result<Self, ExtractionError> {
+            let trace = req
+                .extensions
+                .get_typed::<AsyncExtractionTrace>()
+                .ok_or_else(|| ExtractionError::bad_request("missing async extraction trace"))?;
+            trace
+                .0
+                .lock()
+                .expect("async extraction trace lock")
+                .push(INDEX);
+            Ok(Self)
+        }
+    }
+
+    struct AsyncFinal {
+        value: Cell<u8>,
+        request_task: String,
+    }
+
+    impl FromRequest for AsyncFinal {
+        fn from_request(_req: Request) -> Result<Self, ExtractionError> {
+            Err(ExtractionError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "legacy final extraction path must not run",
+            ))
+        }
+
+        fn from_request_with_cx<'a>(
+            cx: &'a Cx,
+            req: Request,
+        ) -> impl Future<Output = Result<Self, ExtractionError>> + Send + 'a
+        where
+            Self: Send + 'a,
+        {
+            async move {
+                let trace = req
+                    .extensions
+                    .get_typed_cloned::<AsyncExtractionTrace>()
+                    .ok_or_else(|| {
+                        ExtractionError::bad_request("missing async extraction trace")
+                    })?;
+                trace
+                    .0
+                    .lock()
+                    .expect("async extraction trace lock")
+                    .push(99);
+
+                let mut yielded_pending = false;
+                std::future::poll_fn(move |task_cx| {
+                    if yielded_pending {
+                        Poll::Ready(())
+                    } else {
+                        yielded_pending = true;
+                        task_cx.waker().wake_by_ref();
+                        Poll::Pending
+                    }
+                })
+                .await;
+
+                Ok(Self {
+                    value: Cell::new(7),
+                    request_task: format!("{:?}", cx.task_id()),
+                })
+            }
+        }
+    }
+
+    struct FailingAsyncFinal;
+
+    impl FromRequest for FailingAsyncFinal {
+        fn from_request(_req: Request) -> Result<Self, ExtractionError> {
+            Err(ExtractionError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "legacy failure must not win",
+            ))
+        }
+
+        fn from_request_with_cx<'a>(
+            _cx: &'a Cx,
+            _req: Request,
+        ) -> impl Future<Output = Result<Self, ExtractionError>> + Send + 'a
+        where
+            Self: Send + 'a,
+        {
+            std::future::ready(Err(ExtractionError::bad_request(
+                "async final extraction failed",
+            )))
+        }
+    }
+
+    fn assert_async_final(cx: &Cx, body: &AsyncFinal) {
+        assert_eq!(body.value.get(), 7);
+        assert_eq!(body.request_task, format!("{:?}", cx.task_id()));
+        assert!(
+            cx.timer_driver().is_some(),
+            "extractor and handler must share the runtime-backed request Cx"
+        );
+    }
 
     #[test]
     fn handler_no_extractors() {
@@ -1570,5 +1850,205 @@ mod tests {
             std::str::from_utf8(&resp.body).expect("utf8"),
             "req-123:green:42:created"
         );
+    }
+
+    #[test]
+    fn async_cx_handler_default_hook_preserves_legacy_from_request() {
+        let handler = AsyncCxFnHandler1::<_, LegacyFinal>::new(
+            |_cx: Cx, body: LegacyFinal| async move { body.0 },
+        );
+        let cx = Cx::for_testing();
+        let response = futures_lite::future::block_on(
+            handler.call(&cx, Request::new("POST", "/legacy-default")),
+        );
+        assert_eq!(response.status, StatusCode::OK);
+        assert_eq!(response.body.as_ref(), b"/legacy-default");
+    }
+
+    #[test]
+    fn async_cx_handlers_await_send_not_sync_final_for_all_arities() {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("build current-thread runtime");
+        let request_cx = runtime.request_cx_with_budget(Budget::with_deadline_at_secs(7));
+        let handler_cx = request_cx.clone();
+
+        runtime.block_on_with_cx(request_cx, async move {
+            let trace = AsyncExtractionTrace::new();
+            let handler =
+                AsyncCxFnHandler1::<_, AsyncFinal>::new(|cx: Cx, body: AsyncFinal| async move {
+                    assert_async_final(&cx, &body);
+                    StatusCode::NO_CONTENT
+                });
+            let response = handler.call(&handler_cx, trace.request()).await;
+            assert_eq!(response.status, StatusCode::NO_CONTENT);
+            trace.assert_order(&[99]);
+
+            let trace = AsyncExtractionTrace::new();
+            let handler = AsyncCxFnHandler2::<_, OrderedPart<1>, AsyncFinal>::new(
+                |cx: Cx, _p1: OrderedPart<1>, body: AsyncFinal| async move {
+                    assert_async_final(&cx, &body);
+                    StatusCode::NO_CONTENT
+                },
+            );
+            let response = handler.call(&handler_cx, trace.request()).await;
+            assert_eq!(response.status, StatusCode::NO_CONTENT);
+            trace.assert_order(&[1, 99]);
+
+            let trace = AsyncExtractionTrace::new();
+            let handler = AsyncCxFnHandler3::<_, OrderedPart<1>, OrderedPart<2>, AsyncFinal>::new(
+                |cx: Cx, _p1: OrderedPart<1>, _p2: OrderedPart<2>, body: AsyncFinal| async move {
+                    assert_async_final(&cx, &body);
+                    StatusCode::NO_CONTENT
+                },
+            );
+            let response = handler.call(&handler_cx, trace.request()).await;
+            assert_eq!(response.status, StatusCode::NO_CONTENT);
+            trace.assert_order(&[1, 2, 99]);
+
+            let trace = AsyncExtractionTrace::new();
+            let handler = AsyncCxFnHandler4::<
+                _,
+                OrderedPart<1>,
+                OrderedPart<2>,
+                OrderedPart<3>,
+                AsyncFinal,
+            >::new(
+                |cx: Cx,
+                 _p1: OrderedPart<1>,
+                 _p2: OrderedPart<2>,
+                 _p3: OrderedPart<3>,
+                 body: AsyncFinal| async move {
+                    assert_async_final(&cx, &body);
+                    StatusCode::NO_CONTENT
+                },
+            );
+            let response = handler.call(&handler_cx, trace.request()).await;
+            assert_eq!(response.status, StatusCode::NO_CONTENT);
+            trace.assert_order(&[1, 2, 3, 99]);
+
+            let trace = AsyncExtractionTrace::new();
+            let handler = AsyncCxFnHandler5::<
+                _,
+                OrderedPart<1>,
+                OrderedPart<2>,
+                OrderedPart<3>,
+                OrderedPart<4>,
+                AsyncFinal,
+            >::new(
+                |cx: Cx,
+                 _p1: OrderedPart<1>,
+                 _p2: OrderedPart<2>,
+                 _p3: OrderedPart<3>,
+                 _p4: OrderedPart<4>,
+                 body: AsyncFinal| async move {
+                    assert_async_final(&cx, &body);
+                    StatusCode::NO_CONTENT
+                },
+            );
+            let response = handler.call(&handler_cx, trace.request()).await;
+            assert_eq!(response.status, StatusCode::NO_CONTENT);
+            trace.assert_order(&[1, 2, 3, 4, 99]);
+
+            let trace = AsyncExtractionTrace::new();
+            let handler = AsyncCxFnHandler6::<
+                _,
+                OrderedPart<1>,
+                OrderedPart<2>,
+                OrderedPart<3>,
+                OrderedPart<4>,
+                OrderedPart<5>,
+                AsyncFinal,
+            >::new(
+                |cx: Cx,
+                 _p1: OrderedPart<1>,
+                 _p2: OrderedPart<2>,
+                 _p3: OrderedPart<3>,
+                 _p4: OrderedPart<4>,
+                 _p5: OrderedPart<5>,
+                 body: AsyncFinal| async move {
+                    assert_async_final(&cx, &body);
+                    StatusCode::NO_CONTENT
+                },
+            );
+            let response = handler.call(&handler_cx, trace.request()).await;
+            assert_eq!(response.status, StatusCode::NO_CONTENT);
+            trace.assert_order(&[1, 2, 3, 4, 5, 99]);
+
+            let trace = AsyncExtractionTrace::new();
+            let handler = AsyncCxFnHandler7::<
+                _,
+                OrderedPart<1>,
+                OrderedPart<2>,
+                OrderedPart<3>,
+                OrderedPart<4>,
+                OrderedPart<5>,
+                OrderedPart<6>,
+                AsyncFinal,
+            >::new(
+                |cx: Cx,
+                 _p1: OrderedPart<1>,
+                 _p2: OrderedPart<2>,
+                 _p3: OrderedPart<3>,
+                 _p4: OrderedPart<4>,
+                 _p5: OrderedPart<5>,
+                 _p6: OrderedPart<6>,
+                 body: AsyncFinal| async move {
+                    assert_async_final(&cx, &body);
+                    StatusCode::NO_CONTENT
+                },
+            );
+            let response = handler.call(&handler_cx, trace.request()).await;
+            assert_eq!(response.status, StatusCode::NO_CONTENT);
+            trace.assert_order(&[1, 2, 3, 4, 5, 6, 99]);
+
+            let trace = AsyncExtractionTrace::new();
+            let handler = AsyncCxFnHandler8::<
+                _,
+                OrderedPart<1>,
+                OrderedPart<2>,
+                OrderedPart<3>,
+                OrderedPart<4>,
+                OrderedPart<5>,
+                OrderedPart<6>,
+                OrderedPart<7>,
+                AsyncFinal,
+            >::new(
+                |cx: Cx,
+                 _p1: OrderedPart<1>,
+                 _p2: OrderedPart<2>,
+                 _p3: OrderedPart<3>,
+                 _p4: OrderedPart<4>,
+                 _p5: OrderedPart<5>,
+                 _p6: OrderedPart<6>,
+                 _p7: OrderedPart<7>,
+                 body: AsyncFinal| async move {
+                    assert_async_final(&cx, &body);
+                    StatusCode::NO_CONTENT
+                },
+            );
+            let response = handler.call(&handler_cx, trace.request()).await;
+            assert_eq!(response.status, StatusCode::NO_CONTENT);
+            trace.assert_order(&[1, 2, 3, 4, 5, 6, 7, 99]);
+        });
+    }
+
+    #[test]
+    fn async_cx_handler_final_extraction_failure_short_circuits_handler() {
+        let handler_calls = Arc::new(AtomicUsize::new(0));
+        let handler_calls_for_fn = Arc::clone(&handler_calls);
+        let handler = AsyncCxFnHandler1::<_, FailingAsyncFinal>::new(
+            move |_cx: Cx, _body: FailingAsyncFinal| {
+                handler_calls_for_fn.fetch_add(1, Ordering::AcqRel);
+                async { StatusCode::NO_CONTENT }
+            },
+        );
+        let cx = Cx::for_testing();
+        let response = futures_lite::future::block_on(
+            handler.call(&cx, Request::new("POST", "/async-failure")),
+        );
+        assert_eq!(response.status, StatusCode::BAD_REQUEST);
+        assert_eq!(response.body.as_ref(), b"async final extraction failed");
+        assert_eq!(handler_calls.load(Ordering::Acquire), 0);
     }
 }

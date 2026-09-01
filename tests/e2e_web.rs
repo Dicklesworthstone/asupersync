@@ -177,6 +177,83 @@ impl FromRequestParts for StreamingRequestReplay {
     }
 }
 
+#[derive(Clone)]
+struct AsyncBodyExtractionProbe {
+    extract_started: Arc<AtomicUsize>,
+    extract_pending: Arc<AtomicUsize>,
+    extract_failed: Arc<AtomicUsize>,
+    handler_called: Arc<AtomicUsize>,
+}
+
+impl AsyncBodyExtractionProbe {
+    fn new() -> Self {
+        Self {
+            extract_started: Arc::new(AtomicUsize::new(0)),
+            extract_pending: Arc::new(AtomicUsize::new(0)),
+            extract_failed: Arc::new(AtomicUsize::new(0)),
+            handler_called: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+}
+
+struct AsyncCollectedStreamingBody;
+
+impl FromRequest for AsyncCollectedStreamingBody {
+    fn from_request(_req: Request) -> Result<Self, ExtractionError> {
+        Err(ExtractionError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "legacy body extraction path must not run",
+        ))
+    }
+
+    fn from_request_with_cx<'a>(
+        cx: &'a Cx,
+        req: Request,
+    ) -> impl Future<Output = Result<Self, ExtractionError>> + Send + 'a
+    where
+        Self: Send + 'a,
+    {
+        async move {
+            let probe = req
+                .extensions
+                .get_typed_cloned::<AsyncBodyExtractionProbe>()
+                .ok_or_else(|| {
+                    ExtractionError::new(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "async body extraction probe missing",
+                    )
+                })?;
+            let body = StreamingRawBody::from_request(req)?;
+            probe.extract_started.fetch_add(1, Ordering::AcqRel);
+
+            let mut collection = std::pin::pin!(body.collect_bounded_with_cx(cx, 64));
+            let collected =
+                std::future::poll_fn(|task_cx| match collection.as_mut().poll(task_cx) {
+                    Poll::Pending => {
+                        probe.extract_pending.store(1, Ordering::Release);
+                        Poll::Pending
+                    }
+                    Poll::Ready(result) => Poll::Ready(result),
+                })
+                .await;
+
+            match collected {
+                Ok(_) => Ok(Self),
+                Err(StreamingRawBodyCollectError::Body(error)) => {
+                    probe.extract_failed.fetch_add(1, Ordering::AcqRel);
+                    Err(ExtractionError::bad_request(format!(
+                        "streaming body disconnected: {error}"
+                    )))
+                }
+                Err(error) => Err(ExtractionError::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("unexpected streaming body extraction error: {error}"),
+                )),
+            }
+        }
+    }
+}
+
 fn web_poll_body<B: Body + Unpin>(body: &mut B) -> Option<Result<Frame<B::Data>, B::Error>> {
     let waker = web_noop_waker();
     let mut cx = Context::from_waker(&waker);
@@ -1379,10 +1456,12 @@ fn e2e_router_http1_streaming_raw_body_is_live_bounded_and_cancel_correct() {
     runtime.block_on(async move {
         let upload_started = Arc::new(AtomicUsize::new(0));
         let upload_started_for_handler = Arc::clone(&upload_started);
-        let disconnect_observed = Arc::new(AtomicUsize::new(0));
-        let disconnect_observed_for_handler = Arc::clone(&disconnect_observed);
+        let disconnect_probe = AsyncBodyExtractionProbe::new();
+        let disconnect_probe_for_router = disconnect_probe.clone();
+        let disconnect_handler_calls = Arc::clone(&disconnect_probe.handler_called);
 
         let router = Router::new()
+            .with_state(disconnect_probe_for_router)
             .route(
                 "/upload",
                 post(AsyncCxFnHandler2::<
@@ -1442,18 +1521,10 @@ fn e2e_router_http1_streaming_raw_body_is_live_bounded_and_cancel_correct() {
             )
             .route(
                 "/disconnect",
-                post(AsyncCxFnHandler1::<_, StreamingRawBody>::new(
-                    move |cx: Cx, body: StreamingRawBody| {
-                        let disconnect_observed = Arc::clone(&disconnect_observed_for_handler);
-                        async move {
-                            if matches!(
-                                body.collect_bounded_with_cx(&cx, 64).await,
-                                Err(StreamingRawBodyCollectError::Body(_))
-                            ) {
-                                disconnect_observed.fetch_add(1, Ordering::AcqRel);
-                            }
-                            StatusCode::NO_CONTENT
-                        }
+                post(AsyncCxFnHandler1::<_, AsyncCollectedStreamingBody>::new(
+                    move |_cx: Cx, _body: AsyncCollectedStreamingBody| {
+                        disconnect_handler_calls.fetch_add(1, Ordering::AcqRel);
+                        async { StatusCode::NO_CONTENT }
                     },
                 )),
             );
@@ -1555,15 +1626,48 @@ fn e2e_router_http1_streaming_raw_body_is_live_bounded_and_cancel_correct() {
             )
             .await
             .expect("write truncated request body");
-        drop(disconnect_client);
 
         for _ in 0..400 {
-            if disconnect_observed.load(Ordering::Acquire) == 1 && manager.is_empty() {
+            if disconnect_probe.extract_pending.load(Ordering::Acquire) == 1 {
                 break;
             }
             asupersync::time::sleep(asupersync::time::wall_now(), Duration::from_millis(5)).await;
         }
-        assert_eq!(disconnect_observed.load(Ordering::Acquire), 1);
+        assert_eq!(
+            disconnect_probe.extract_started.load(Ordering::Acquire),
+            1,
+            "the async final extractor must start before client disconnect"
+        );
+        assert_eq!(
+            disconnect_probe.extract_pending.load(Ordering::Acquire),
+            1,
+            "the async final extractor must reach Poll::Pending before client disconnect"
+        );
+        assert_eq!(
+            disconnect_probe.extract_failed.load(Ordering::Acquire),
+            0,
+            "the async final extractor must still be waiting before client disconnect"
+        );
+        assert_eq!(
+            disconnect_probe.handler_called.load(Ordering::Acquire),
+            0,
+            "the handler must not run while final body extraction is pending"
+        );
+        assert_eq!(in_flight.load(Ordering::Acquire), 1);
+        assert!(
+            !manager.is_empty(),
+            "the streaming connection must still be active before disconnect"
+        );
+        drop(disconnect_client);
+
+        for _ in 0..400 {
+            if disconnect_probe.extract_failed.load(Ordering::Acquire) == 1 && manager.is_empty() {
+                break;
+            }
+            asupersync::time::sleep(asupersync::time::wall_now(), Duration::from_millis(5)).await;
+        }
+        assert_eq!(disconnect_probe.extract_failed.load(Ordering::Acquire), 1);
+        assert_eq!(disconnect_probe.handler_called.load(Ordering::Acquire), 0);
         assert_eq!(in_flight.load(Ordering::Acquire), 0);
         assert!(manager.is_empty(), "all streaming connections quiesced");
 

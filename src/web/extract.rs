@@ -25,7 +25,6 @@ use std::sync::Arc;
 #[cfg(not(target_arch = "wasm32"))]
 use std::task::{Context, Poll};
 
-#[cfg(not(target_arch = "wasm32"))]
 use crate::Cx;
 use crate::bytes::Bytes;
 #[cfg(not(target_arch = "wasm32"))]
@@ -270,6 +269,22 @@ pub trait FromRequestParts: Sized {
 pub trait FromRequest: Sized {
     /// Attempt to extract from the request.
     fn from_request(req: Request) -> Result<Self, ExtractionError>;
+
+    /// Extract from the request while borrowing its structured-concurrency
+    /// context.
+    ///
+    /// The default preserves the synchronous [`Self::from_request`] contract
+    /// exactly. Body extractors that must wait for streamed ingress may
+    /// override this hook without breaking existing implementations.
+    fn from_request_with_cx<'a>(
+        _cx: &'a Cx,
+        req: Request,
+    ) -> impl std::future::Future<Output = Result<Self, ExtractionError>> + Send + 'a
+    where
+        Self: Send + 'a,
+    {
+        std::future::ready(Self::from_request(req))
+    }
 }
 
 // Blanket: anything that implements FromRequestParts also implements FromRequest.
