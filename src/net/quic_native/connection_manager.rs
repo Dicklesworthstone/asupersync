@@ -954,7 +954,7 @@ pub(crate) async fn assemble_protected_1rtt_packet(
             PacketNumberSpace::ApplicationData,
             packet_len as u64,
             ack_eliciting,
-            true,
+            ack_eliciting,
             now_micros,
             frames,
         )
@@ -1044,6 +1044,7 @@ pub(crate) fn is_ack_eliciting(frame: &crate::net::atp::protocol::quic_frames::Q
         frame,
         crate::net::atp::protocol::quic_frames::QuicFrame::Padding { .. }
             | crate::net::atp::protocol::quic_frames::QuicFrame::Ack { .. }
+            | crate::net::atp::protocol::quic_frames::QuicFrame::ConnectionClose { .. }
     )
 }
 
@@ -1174,6 +1175,27 @@ mod tests {
     use crate::net::quic_core::{LongHeader, LongPacketType, PacketHeader};
     use crate::net::quic_native::QuicHandshakeTranscript;
     use crate::test_utils::run_test_with_cx;
+
+    #[test]
+    fn protected_packet_ack_elicitation_matches_rfc_9000() {
+        let zero = crate::net::atp::protocol::quic_frames::VarInt(0);
+        assert!(!is_ack_eliciting(&QuicFrame::Padding { length: 1 }));
+        assert!(!is_ack_eliciting(&QuicFrame::Ack {
+            largest_acknowledged: zero,
+            ack_delay: zero,
+            ack_range_count: zero,
+            first_ack_range: zero,
+            ack_ranges: Vec::new(),
+            ecn_counts: None,
+        }));
+        assert!(!is_ack_eliciting(&QuicFrame::ConnectionClose {
+            error_code: zero,
+            frame_type: None,
+            reason_phrase: Bytes::new(),
+        }));
+        assert!(is_ack_eliciting(&QuicFrame::Ping));
+        assert!(is_ack_eliciting(&QuicFrame::MaxData { maximum_data: zero }));
+    }
 
     #[test]
     fn test_connection_router_creation() {
