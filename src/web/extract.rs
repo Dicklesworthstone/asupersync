@@ -19,9 +19,21 @@
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::fmt;
+#[cfg(not(target_arch = "wasm32"))]
+use std::pin::Pin;
 use std::sync::Arc;
+#[cfg(not(target_arch = "wasm32"))]
+use std::task::{Context, Poll};
 
+#[cfg(not(target_arch = "wasm32"))]
+use crate::bytes::{Buf, BytesCursor};
 use crate::bytes::Bytes;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::http::body::{Body, Frame, HeaderMap, SizeHint};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::http::h1::stream::{BodyKind, IncomingBodyError, IncomingRequestBody};
+#[cfg(not(target_arch = "wasm32"))]
+use parking_lot::Mutex;
 use serde::de::{
     self, DeserializeOwned, DeserializeSeed, IntoDeserializer, SeqAccess, Unexpected, Visitor,
 };
@@ -1351,6 +1363,9 @@ pub struct Json<T>(pub T);
 
 impl<T: serde::de::DeserializeOwned> FromRequest for Json<T> {
     fn from_request(req: Request) -> Result<Self, ExtractionError> {
+        #[cfg(not(target_arch = "wasm32"))]
+        reject_buffered_extractor_on_streaming_request(&req, "Json")?;
+
         let limit = req
             .extensions
             .get_typed::<BodyLimits>()
@@ -1421,6 +1436,9 @@ pub struct Form<T>(pub T);
 #[allow(clippy::implicit_hasher)]
 impl<T: DeserializeOwned> FromRequest for Form<T> {
     fn from_request(req: Request) -> Result<Self, ExtractionError> {
+        #[cfg(not(target_arch = "wasm32"))]
+        reject_buffered_extractor_on_streaming_request(&req, "Form")?;
+
         let limit = req
             .extensions
             .get_typed::<BodyLimits>()
@@ -1578,6 +1596,9 @@ pub struct RawBody(pub Bytes);
 
 impl FromRequest for RawBody {
     fn from_request(req: Request) -> Result<Self, ExtractionError> {
+        #[cfg(not(target_arch = "wasm32"))]
+        reject_buffered_extractor_on_streaming_request(&req, "RawBody")?;
+
         let limit = req
             .extensions
             .get_typed::<BodyLimits>()
@@ -1601,6 +1622,302 @@ impl FromRequest for RawBody {
         validate_content_length(&req)?;
 
         Ok(Self(req.body))
+    }
+}
+
+// ─── StreamingRawBody ───────────────────────────────────────────────────────
+
+/// Extract the live HTTP/1 request body without implicitly collecting it.
+///
+/// This additive extractor is available only on the HTTP/1 streaming Router
+/// path. Existing [`RawBody`] handlers retain their buffered byte contract.
+/// The body remains single-consumer and cancel-correct: dropping it before EOF
+/// tells the protocol driver to apply its bounded drain-or-close policy.
+#[cfg(not(target_arch = "wasm32"))]
+#[pin_project::pin_project]
+#[derive(Debug)]
+pub struct StreamingRawBody {
+    #[pin]
+    inner: IncomingRequestBody,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl StreamingRawBody {
+    /// Return the framing mode declared by the validated request head.
+    #[must_use]
+    pub fn kind(&self) -> BodyKind {
+        self.inner.kind()
+    }
+
+    /// Return bytes currently retained by the bounded incoming-frame queue.
+    #[must_use]
+    pub fn queued_bytes(&self) -> usize {
+        self.inner.queued_bytes()
+    }
+
+    /// Consume this wrapper and return the hardened HTTP/1 body.
+    #[must_use]
+    pub fn into_inner(self) -> IncomingRequestBody {
+        self.inner
+    }
+
+    /// Explicitly collect the stream under a caller-selected byte limit.
+    ///
+    /// Data-frame order and the terminal trailer map are preserved. Exceeding
+    /// the limit drops the live consumer; the HTTP/1 driver then performs its
+    /// existing bounded unread-body drain before considering connection reuse.
+    pub async fn collect_bounded(
+        mut self,
+        max_bytes: usize,
+    ) -> Result<CollectedStreamingRawBody, StreamingRawBodyCollectError> {
+        let max_bytes_u64 = u64::try_from(max_bytes).unwrap_or(u64::MAX);
+        if let Some(upper) = self.size_hint().upper()
+            && upper > max_bytes_u64
+        {
+            return Err(StreamingRawBodyCollectError::LengthLimitExceeded {
+                actual: Some(upper),
+                limit: max_bytes,
+            });
+        }
+
+        let mut data = Vec::new();
+        let mut trailers = None;
+        while let Some(frame) =
+            std::future::poll_fn(|poll_cx| Pin::new(&mut self).poll_frame(poll_cx)).await
+        {
+            match frame.map_err(StreamingRawBodyCollectError::Body)? {
+                Frame::Data(chunk) => {
+                    let Some(next_len) = data.len().checked_add(chunk.remaining()) else {
+                        return Err(StreamingRawBodyCollectError::LengthLimitExceeded {
+                            actual: None,
+                            limit: max_bytes,
+                        });
+                    };
+                    if next_len > max_bytes {
+                        return Err(StreamingRawBodyCollectError::LengthLimitExceeded {
+                            actual: u64::try_from(next_len).ok(),
+                            limit: max_bytes,
+                        });
+                    }
+                    data.extend_from_slice(chunk.chunk());
+                }
+                Frame::Trailers(frame_trailers) => trailers = Some(frame_trailers),
+            }
+        }
+
+        Ok(CollectedStreamingRawBody {
+            data: data.into(),
+            trailers,
+        })
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Body for StreamingRawBody {
+    type Data = BytesCursor;
+    type Error = IncomingBodyError;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        poll_cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        self.project().inner.poll_frame(poll_cx)
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.inner.is_end_stream()
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        self.inner.size_hint()
+    }
+}
+
+/// Bytes and trailers returned by [`StreamingRawBody::collect_bounded`].
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug)]
+pub struct CollectedStreamingRawBody {
+    data: Bytes,
+    trailers: Option<HeaderMap>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl CollectedStreamingRawBody {
+    /// Return the collected data bytes.
+    #[must_use]
+    pub fn data(&self) -> &Bytes {
+        &self.data
+    }
+
+    /// Return the terminal trailer map, when the request carried trailers.
+    #[must_use]
+    pub fn trailers(&self) -> Option<&HeaderMap> {
+        self.trailers.as_ref()
+    }
+
+    /// Consume the collection and return its data plus terminal trailers.
+    #[must_use]
+    pub fn into_parts(self) -> (Bytes, Option<HeaderMap>) {
+        (self.data, self.trailers)
+    }
+}
+
+/// Failure from [`StreamingRawBody::collect_bounded`].
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug)]
+pub enum StreamingRawBodyCollectError {
+    /// The declared or observed data length exceeded the caller's limit.
+    LengthLimitExceeded {
+        /// Declared or observed length, when representable.
+        actual: Option<u64>,
+        /// Caller-selected maximum number of bytes.
+        limit: usize,
+    },
+    /// The HTTP/1 request-body protocol terminated with an error.
+    Body(IncomingBodyError),
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl fmt::Display for StreamingRawBodyCollectError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::LengthLimitExceeded {
+                actual: Some(actual),
+                limit,
+            } => write!(
+                f,
+                "streaming raw body too large: {actual} bytes (limit {limit})"
+            ),
+            Self::LengthLimitExceeded {
+                actual: None,
+                limit,
+            } => write!(
+                f,
+                "streaming raw body length overflowed (limit {limit})"
+            ),
+            Self::Body(error) => write!(f, "streaming raw body failed: {error}"),
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl std::error::Error for StreamingRawBodyCollectError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Body(error) => Some(error),
+            Self::LengthLimitExceeded { .. } => None,
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone)]
+pub(crate) struct StreamingRawBodySlot {
+    state: Arc<Mutex<StreamingRawBodySlotState>>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+enum StreamingRawBodySlotState {
+    Available(IncomingRequestBody),
+    Taken,
+    Closed,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl StreamingRawBodySlot {
+    fn new(body: IncomingRequestBody) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(StreamingRawBodySlotState::Available(body))),
+        }
+    }
+
+    fn take(&self) -> Result<IncomingRequestBody, &'static str> {
+        let mut state = self.state.lock();
+        match std::mem::replace(&mut *state, StreamingRawBodySlotState::Closed) {
+            StreamingRawBodySlotState::Available(body) => {
+                *state = StreamingRawBodySlotState::Taken;
+                Ok(body)
+            }
+            StreamingRawBodySlotState::Taken => {
+                *state = StreamingRawBodySlotState::Taken;
+                Err("streaming request body was already extracted")
+            }
+            StreamingRawBodySlotState::Closed => Err("streaming request body is no longer available"),
+        }
+    }
+
+    /// Drop an unclaimed body outside the state lock so producer wakeups
+    /// cannot re-enter while the one-shot ownership guard is held.
+    pub(crate) fn drop_unclaimed(&self) {
+        let body = {
+            let mut state = self.state.lock();
+            match std::mem::replace(&mut *state, StreamingRawBodySlotState::Closed) {
+                StreamingRawBodySlotState::Available(body) => Some(body),
+                StreamingRawBodySlotState::Taken => {
+                    *state = StreamingRawBodySlotState::Taken;
+                    None
+                }
+                StreamingRawBodySlotState::Closed => None,
+            }
+        };
+        drop(body);
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn insert_streaming_raw_body(
+    req: &mut Request,
+    body: IncomingRequestBody,
+) -> StreamingRawBodyControl {
+    let slot = StreamingRawBodySlot::new(body);
+    req.extensions.insert_typed(slot.clone());
+    StreamingRawBodyControl(slot)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) struct StreamingRawBodyControl(StreamingRawBodySlot);
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for StreamingRawBodyControl {
+    fn drop(&mut self) {
+        self.0.drop_unclaimed();
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn reject_buffered_extractor_on_streaming_request(
+    req: &Request,
+    extractor: &str,
+) -> Result<(), ExtractionError> {
+    if req.extensions.get_typed::<StreamingRawBodySlot>().is_none() {
+        return Ok(());
+    }
+    Err(ExtractionError::new(
+        super::response::StatusCode::INTERNAL_SERVER_ERROR,
+        format!("{extractor} cannot consume a streaming request; use StreamingRawBody"),
+    ))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl FromRequest for StreamingRawBody {
+    fn from_request(req: Request) -> Result<Self, ExtractionError> {
+        let slot = req
+            .extensions
+            .get_typed::<StreamingRawBodySlot>()
+            .ok_or_else(|| {
+                ExtractionError::new(
+                    super::response::StatusCode::INTERNAL_SERVER_ERROR,
+                    "streaming request body unavailable on this transport",
+                )
+            })?;
+        slot.take()
+            .map(|inner| Self { inner })
+            .map_err(|message| {
+                ExtractionError::new(
+                    super::response::StatusCode::INTERNAL_SERVER_ERROR,
+                    message,
+                )
+            })
     }
 }
 
