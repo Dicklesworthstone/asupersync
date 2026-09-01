@@ -30,7 +30,7 @@ use crate::bytes::Bytes;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::bytes::{Buf, BytesCursor};
 #[cfg(not(target_arch = "wasm32"))]
-use crate::http::body::{Body, Frame, HeaderMap, SizeHint};
+use crate::http::body::{Body, Frame, HeaderMap, Limited, LimitedError, SizeHint};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::http::h1::stream::{BodyKind, IncomingBodyError, IncomingRequestBody};
 #[cfg(not(target_arch = "wasm32"))]
@@ -1731,6 +1731,76 @@ pub struct StreamingRawBody {
     inner: IncomingRequestBody,
 }
 
+/// Contiguous collection storage whose retained capacity is within the
+/// caller's byte budget after each successful append.
+///
+/// `Vec::extend_from_slice` normally grows geometrically, so checking only the
+/// resulting length can retain more allocation than the configured body
+/// limit. Reserve each required length exactly, shrink an allocator-granted
+/// excess back to the budget, and fail closed before copying if the reported
+/// capacity still exceeds it.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug)]
+struct BoundedCollectionBuffer {
+    data: Vec<u8>,
+    max_bytes: usize,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl BoundedCollectionBuffer {
+    fn new(max_bytes: usize) -> Self {
+        Self {
+            data: Vec::new(),
+            max_bytes,
+        }
+    }
+
+    fn extend_from_slice(&mut self, chunk: &[u8]) -> Result<(), StreamingRawBodyCollectError> {
+        let Some(next_len) = self.data.len().checked_add(chunk.len()) else {
+            return Err(StreamingRawBodyCollectError::LengthLimitExceeded {
+                actual: None,
+                limit: self.max_bytes,
+            });
+        };
+        if next_len > self.max_bytes {
+            return Err(StreamingRawBodyCollectError::LengthLimitExceeded {
+                actual: u64::try_from(next_len).ok(),
+                limit: self.max_bytes,
+            });
+        }
+
+        if next_len > self.data.capacity() {
+            self.data
+                .try_reserve_exact(next_len - self.data.len())
+                .map_err(|_| {
+                    StreamingRawBodyCollectError::Body(IncomingBodyError::AccountingOverflow)
+                })?;
+            if self.data.capacity() > self.max_bytes {
+                self.data.shrink_to(self.max_bytes);
+            }
+            if self.data.capacity() > self.max_bytes {
+                return Err(StreamingRawBodyCollectError::Body(
+                    IncomingBodyError::AccountingOverflow,
+                ));
+            }
+        }
+
+        self.data.extend_from_slice(chunk);
+        debug_assert!(self.data.len() <= self.max_bytes);
+        debug_assert!(self.data.capacity() <= self.max_bytes);
+        Ok(())
+    }
+
+    fn into_bytes(self) -> Bytes {
+        self.data.into()
+    }
+
+    #[cfg(test)]
+    fn retained_capacity(&self) -> usize {
+        self.data.capacity()
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 impl StreamingRawBody {
     fn take_from_request(req: &Request) -> Result<Self, ExtractionError> {
@@ -1791,7 +1861,7 @@ impl StreamingRawBody {
     }
 
     async fn collect_bounded_inner(
-        mut self,
+        self,
         cx: Option<&Cx>,
         max_bytes: usize,
     ) -> Result<CollectedStreamingRawBody, StreamingRawBodyCollectError> {
@@ -1805,7 +1875,8 @@ impl StreamingRawBody {
             });
         }
 
-        let mut data = Vec::new();
+        let mut body = Limited::new(self, max_bytes_u64);
+        let mut data = BoundedCollectionBuffer::new(max_bytes);
         let mut trailers = None;
         loop {
             if let Some(cx) = cx
@@ -1818,33 +1889,36 @@ impl StreamingRawBody {
                     IncomingBodyError::Cancelled { kind },
                 ));
             }
-            let Some(frame) =
-                std::future::poll_fn(|poll_cx| Pin::new(&mut self).poll_frame(poll_cx)).await
-            else {
-                break;
-            };
-            match frame.map_err(StreamingRawBodyCollectError::Body)? {
-                Frame::Data(chunk) => {
-                    let Some(next_len) = data.len().checked_add(chunk.remaining()) else {
+            let frame =
+                match std::future::poll_fn(|poll_cx| Pin::new(&mut body).poll_frame(poll_cx)).await
+                {
+                    Some(Ok(frame)) => frame,
+                    Some(Err(LimitedError::LengthLimit)) => {
                         return Err(StreamingRawBodyCollectError::LengthLimitExceeded {
-                            actual: None,
-                            limit: max_bytes,
-                        });
-                    };
-                    if next_len > max_bytes {
-                        return Err(StreamingRawBodyCollectError::LengthLimitExceeded {
-                            actual: u64::try_from(next_len).ok(),
+                            actual: body.length_limit_actual(),
                             limit: max_bytes,
                         });
                     }
-                    data.extend_from_slice(chunk.chunk());
+                    Some(Err(LimitedError::Inner(error))) => {
+                        return Err(StreamingRawBodyCollectError::Body(error));
+                    }
+                    Some(Err(LimitedError::PolledAfterCompletion)) => {
+                        return Err(StreamingRawBodyCollectError::Body(
+                            IncomingBodyError::AlreadyTerminal,
+                        ));
+                    }
+                    None => break,
+                };
+            match frame {
+                Frame::Data(chunk) => {
+                    data.extend_from_slice(chunk.chunk())?;
                 }
                 Frame::Trailers(frame_trailers) => trailers = Some(frame_trailers),
             }
         }
 
         Ok(CollectedStreamingRawBody {
-            data: data.into(),
+            data: data.into_bytes(),
             trailers,
         })
     }
@@ -2329,6 +2403,41 @@ mod tests {
 
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
+    fn streaming_json_and_form_bounded_collection_caps_fragmented_capacity() {
+        let mut zero = BoundedCollectionBuffer::new(0);
+        zero.extend_from_slice(b"")
+            .expect("empty body fits zero limit");
+        assert_eq!(zero.retained_capacity(), 0);
+        assert!(matches!(
+            zero.extend_from_slice(b"x"),
+            Err(StreamingRawBodyCollectError::LengthLimitExceeded {
+                actual: Some(1),
+                limit: 0,
+            })
+        ));
+
+        let mut fragmented = BoundedCollectionBuffer::new(10);
+        for chunk in [b"a".as_slice(), b"bc", b"def", b"ghij"] {
+            fragmented
+                .extend_from_slice(chunk)
+                .expect("fragment fits collection limit");
+            assert!(fragmented.retained_capacity() <= 10);
+        }
+        assert_eq!(fragmented.data.as_slice(), b"abcdefghij");
+
+        assert!(matches!(
+            fragmented.extend_from_slice(b"k"),
+            Err(StreamingRawBodyCollectError::LengthLimitExceeded {
+                actual: Some(11),
+                limit: 10,
+            })
+        ));
+        assert_eq!(fragmented.data.as_slice(), b"abcdefghij");
+        assert!(fragmented.retained_capacity() <= 10);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
     fn streaming_json_and_form_enforce_declared_and_actual_limits() {
         let cx = Cx::for_testing();
 
@@ -2363,6 +2472,23 @@ mod tests {
         assert!(!form_writer.consumer_dropped());
         drop(form_control);
         assert!(form_writer.consumer_dropped());
+
+        let (mut empty_form_writer, empty_form_req, empty_form_control) =
+            streaming_extractor_request(
+                &cx,
+                BodyKind::Chunked,
+                "application/x-www-form-urlencoded",
+                0,
+            );
+        block_on(empty_form_writer.push_bytes(&cx, b"0\r\n\r\n"))
+            .expect("publish zero-length chunked form");
+        let Form(values) = block_on(Form::<HashMap<String, String>>::from_request_with_cx(
+            &cx,
+            empty_form_req,
+        ))
+        .expect("zero-length form without content-length");
+        assert!(values.is_empty());
+        drop(empty_form_control);
 
         let (mut json_writer, json_req, json_control) =
             streaming_extractor_request(&cx, BodyKind::Chunked, "application/json", 7);

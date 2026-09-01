@@ -712,6 +712,8 @@ where
 pub struct Limited<B> {
     inner: B,
     remaining: u64,
+    consumed: u64,
+    length_limit_actual: Option<u64>,
     // After a terminal result, stop polling the inner body again. Clean EOF
     // stays idempotent, while terminal failures fail closed on repoll.
     state: LimitedState,
@@ -730,8 +732,21 @@ impl<B> Limited<B> {
         Self {
             inner,
             remaining: limit,
+            consumed: 0,
+            length_limit_actual: None,
             state: LimitedState::Open,
         }
+    }
+
+    /// Returns the total attempted DATA length that exceeded the limit.
+    ///
+    /// This is populated only after [`LimitedError::LengthLimit`] and lets a
+    /// transport adapter preserve an exact over-limit diagnostic without
+    /// exposing the refused frame.
+    #[must_use]
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub(crate) fn length_limit_actual(&self) -> Option<u64> {
+        self.length_limit_actual
     }
 }
 
@@ -771,10 +786,12 @@ where
                 if let Some(data) = frame.data_ref() {
                     let len = data.remaining() as u64;
                     if len > this.remaining {
+                        this.length_limit_actual = this.consumed.checked_add(len);
                         this.state = LimitedState::Failed;
                         return Poll::Ready(Some(Err(LimitedError::LengthLimit)));
                     }
                     this.remaining -= len;
+                    this.consumed += len;
                 }
                 Poll::Ready(Some(Ok(frame)))
             }
@@ -1848,6 +1865,7 @@ mod tests {
             first,
             Poll::Ready(Some(Err(LimitedError::LengthLimit)))
         ));
+        assert_eq!(limited.length_limit_actual(), Some(7));
 
         let second = poll_body(&mut limited);
         assert!(matches!(
