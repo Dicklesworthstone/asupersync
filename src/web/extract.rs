@@ -1965,6 +1965,16 @@ impl StreamingRawBody {
         self.inner.queued_bytes()
     }
 
+    /// Return the producer-observed high-water mark for queued body bytes.
+    ///
+    /// Unlike sampling [`Self::queued_bytes`] before a consumer poll, this
+    /// value is updated at byte-permit admission and cannot miss a frame that
+    /// is dequeued by that poll.
+    #[must_use]
+    pub fn queued_bytes_peak(&self) -> usize {
+        self.inner.queued_bytes_peak()
+    }
+
     /// Consume this wrapper and return the hardened HTTP/1 body.
     #[must_use]
     pub fn into_inner(self) -> IncomingRequestBody {

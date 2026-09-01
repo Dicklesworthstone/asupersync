@@ -236,6 +236,7 @@ enum IncomingConsumerTerminal {
 #[derive(Debug)]
 struct QueuedByteState {
     queued: usize,
+    peak: usize,
     next_waiter_id: u64,
     waiter: Option<QueuedByteWaiter>,
 }
@@ -258,6 +259,7 @@ impl QueuedByteBudget {
             limit,
             state: Mutex::new(QueuedByteState {
                 queued: 0,
+                peak: 0,
                 next_waiter_id: 0,
                 waiter: None,
             }),
@@ -415,6 +417,7 @@ impl Future for QueuedByteReserve<'_> {
 
             if next <= budget.limit {
                 state.queued = next;
+                state.peak = state.peak.max(next);
                 let retired_waker = if self.waiter_id.is_some_and(|waiter_id| {
                     state
                         .waiter
@@ -697,6 +700,17 @@ impl IncomingRequestBody {
     #[must_use]
     pub fn queued_bytes(&self) -> usize {
         self.shared.queued_bytes.state.lock().queued
+    }
+
+    /// Returns the maximum queued request-body bytes retained so far.
+    ///
+    /// The high-water mark is updated under the same lock as byte-permit
+    /// admission, before the bounded channel send. It therefore includes a
+    /// producer frame whose send is pending behind a full frame queue and
+    /// remains available after the consumer drains the queue.
+    #[must_use]
+    pub fn queued_bytes_peak(&self) -> usize {
+        self.shared.queued_bytes.state.lock().peak
     }
 
     /// Tighten the aggregate body limit shared with the protocol writer.
@@ -2860,6 +2874,7 @@ mod tests {
             let mut push = std::pin::pin!(writer.push_bytes(&cx, b"data"));
             assert!(matches!(push.as_mut().poll(&mut task_cx), Poll::Pending));
             assert_eq!(body.queued_bytes(), 2);
+            assert_eq!(body.queued_bytes_peak(), 2);
 
             let first = poll_body(&mut body)
                 .expect("first frame")
@@ -2877,6 +2892,11 @@ mod tests {
             .expect("valid second frame");
         assert_eq!(second.into_data().expect("data").chunk(), b"ta");
         assert_eq!(body.queued_bytes(), 0);
+        assert_eq!(
+            body.queued_bytes_peak(),
+            2,
+            "the producer-side high-water mark survives queue drain"
+        );
     }
 
     #[test]

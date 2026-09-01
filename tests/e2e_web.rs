@@ -6,7 +6,7 @@ use asupersync::bytes::Buf;
 use asupersync::http::body::{Body, Frame, HeaderName};
 use asupersync::http::h1::codec::HttpError;
 use asupersync::http::h1::listener::{Http1Listener, Http1ListenerConfig};
-use asupersync::http::h1::server::{HostPolicy, Http1Config};
+use asupersync::http::h1::server::{HostPolicy, Http1Config, Http1StreamingConfig};
 use asupersync::http::h1::types::{
     Method as HttpMethod, Request as HttpRequest, Response as HttpResponse, Version as HttpVersion,
 };
@@ -22,6 +22,7 @@ use asupersync::tls::{
     Certificate, CertificateChain, PrivateKey, TlsAcceptor, TlsAcceptorBuilder, TlsConnector,
     TlsConnectorBuilder,
 };
+use asupersync::web::RequestBodyPolicy;
 use asupersync::web::extract::{
     BodyLimits, ExtractionError, Form as FormExtract, FromRequest, FromRequestParts,
     Json as JsonExtract, Path, Query, Request, StreamingRawBody, StreamingRawBodyCollectError,
@@ -2567,6 +2568,264 @@ fn e2e_router_http1_streaming_raw_body_is_live_bounded_and_cancel_correct() {
     });
 
     test_complete!("e2e_router_http1_streaming_raw_body");
+}
+
+#[test]
+fn e2e_router_http1_generated_large_upload_stays_inside_streaming_envelope() {
+    common::init_test_logging();
+    test_phase!("Router -> HTTP/1 generated large upload envelope");
+
+    const BODY_BYTES: usize = 8 * 1024 * 1024 + 37;
+    const CLIENT_CHUNK_BYTES: usize = 8 * 1024;
+    const SERVER_READ_CHUNK_BYTES: usize = 8 * 1024;
+    const INCOMING_FRAME_CAPACITY: usize = 8;
+    const QUEUED_BYTE_LIMIT: usize = 512 * 1024;
+    // The byte permit is acquired before the bounded channel send, so the
+    // observable retention envelope includes the eight queued frames plus the
+    // producer's one pending send.
+    const OBSERVABLE_QUEUE_ENVELOPE: usize =
+        SERVER_READ_CHUNK_BYTES * (INCOMING_FRAME_CAPACITY + 1);
+
+    let runtime = RuntimeBuilder::new()
+        .worker_threads(2)
+        .build()
+        .expect("build runtime");
+    let handle = runtime.handle();
+
+    runtime.block_on(async move {
+        let streaming_defaults = Http1StreamingConfig::default();
+        assert_eq!(
+            streaming_defaults.incoming_body_frame_capacity,
+            INCOMING_FRAME_CAPACITY
+        );
+        assert_eq!(
+            streaming_defaults.incoming_body_queued_bytes,
+            QUEUED_BYTE_LIMIT
+        );
+
+        let next_cell = Arc::new(AtomicUsize::new(0));
+        let received = Arc::new([AtomicU64::new(0), AtomicU64::new(0)]);
+        let queue_peaks = Arc::new([AtomicUsize::new(0), AtomicUsize::new(0)]);
+        let trailer_counts = Arc::new([AtomicUsize::new(0), AtomicUsize::new(0)]);
+
+        let next_cell_for_route = Arc::clone(&next_cell);
+        let received_for_route = Arc::clone(&received);
+        let peaks_for_route = Arc::clone(&queue_peaks);
+        let trailers_for_route = Arc::clone(&trailer_counts);
+        let router = Router::new()
+            .with_server_body_policy(RequestBodyPolicy::new().max_total_body_size(BODY_BYTES))
+            .route(
+                "/large-upload",
+                post(AsyncCxFnHandler1::<_, StreamingRawBody>::new(
+                    move |_cx: Cx, mut body: StreamingRawBody| {
+                        let cell = next_cell_for_route.fetch_add(1, Ordering::AcqRel);
+                        assert!(cell < 2, "only the fixed and chunked cells are expected");
+                        let received_for_request = Arc::clone(&received_for_route);
+                        let peaks_for_request = Arc::clone(&peaks_for_route);
+                        let trailers_for_request = Arc::clone(&trailers_for_route);
+                        async move {
+                            let mut body_bytes = 0_u64;
+                            while let Some(frame) = std::future::poll_fn(|task_cx| {
+                                Pin::new(&mut body).poll_frame(task_cx)
+                            })
+                            .await
+                            {
+                                match frame.expect("generated upload frame") {
+                                    Frame::Data(data) => {
+                                        let chunk = data.chunk();
+                                        for (offset, byte) in chunk.iter().copied().enumerate() {
+                                            let absolute = body_bytes
+                                                .checked_add(
+                                                    u64::try_from(offset)
+                                                        .expect("chunk offset fits u64"),
+                                                )
+                                                .expect("generated upload offset");
+                                            assert_eq!(
+                                                byte,
+                                                u8::try_from(absolute % 251)
+                                                    .expect("pattern byte fits u8"),
+                                                "generated byte mismatch at offset {absolute}"
+                                            );
+                                        }
+                                        body_bytes = body_bytes
+                                            .checked_add(
+                                                u64::try_from(chunk.len())
+                                                    .expect("chunk length fits u64"),
+                                            )
+                                            .expect("generated upload byte count");
+                                    }
+                                    Frame::Trailers(trailers) => {
+                                        assert_eq!(cell, 1, "only the chunked cell has trailers");
+                                        assert_eq!(
+                                            trailers
+                                                .get(&HeaderName::from_static("x-upload-complete",))
+                                                .and_then(|value| value.to_str().ok()),
+                                            Some("yes")
+                                        );
+                                        trailers_for_request[cell].fetch_add(1, Ordering::AcqRel);
+                                    }
+                                }
+                            }
+                            let queue_peak = body.queued_bytes_peak();
+                            peaks_for_request[cell].store(queue_peak, Ordering::Release);
+                            received_for_request[cell].store(body_bytes, Ordering::Release);
+                            format!("cell={cell};received={body_bytes};peak={}", queue_peak)
+                        }
+                    },
+                )),
+            );
+
+        let listener = Http1Listener::bind_streaming_with_config(
+            "127.0.0.1:0",
+            router.into_http1_streaming_handler(),
+            Http1ListenerConfig::default()
+                .http_config(
+                    Http1Config {
+                        allowed_hosts: HostPolicy::allow_list(vec!["localhost".to_owned()]),
+                        ..Http1Config::default()
+                    }
+                    .max_body_size(BODY_BYTES)
+                    .request_timeout(Some(Duration::from_secs(30)))
+                    .idle_timeout(Some(Duration::from_secs(30))),
+                )
+                .drain_timeout(Duration::from_secs(2))
+                .hard_drain_timeout(Duration::from_secs(5)),
+        )
+        .await
+        .expect("bind generated-upload listener");
+        let addr = listener.local_addr().expect("generated-upload address");
+        let manager = listener.connection_manager().clone();
+        let in_flight = listener.in_flight_requests();
+        let run_handle = handle
+            .clone()
+            .try_spawn(async move { listener.run_streaming(&handle).await })
+            .expect("spawn generated-upload listener");
+
+        for cell in 0..2 {
+            let chunked = cell == 1;
+            let mut client = TcpStream::connect(addr)
+                .await
+                .expect("connect generated-upload client");
+            if chunked {
+                client
+                    .write_all(
+                        b"POST /large-upload HTTP/1.1\r\n\
+                          Host: localhost\r\n\
+                          Transfer-Encoding: chunked\r\n\
+                          Trailer: X-Upload-Complete\r\n\
+                          Connection: close\r\n\
+                          \r\n",
+                    )
+                    .await
+                    .expect("write chunked generated-upload head");
+            } else {
+                let head = format!(
+                    "POST /large-upload HTTP/1.1\r\n\
+                     Host: localhost\r\n\
+                     Content-Length: {BODY_BYTES}\r\n\
+                     Connection: close\r\n\
+                     \r\n"
+                );
+                client
+                    .write_all(head.as_bytes())
+                    .await
+                    .expect("write fixed generated-upload head");
+            }
+
+            let mut sent = 0_usize;
+            let mut client_chunk = [0_u8; CLIENT_CHUNK_BYTES];
+            while sent < BODY_BYTES {
+                let chunk_len = CLIENT_CHUNK_BYTES.min(BODY_BYTES - sent);
+                for (offset, byte) in client_chunk[..chunk_len].iter_mut().enumerate() {
+                    *byte = u8::try_from((sent + offset) % 251).expect("pattern byte fits u8");
+                }
+                if chunked {
+                    let chunk_head = format!("{chunk_len:X}\r\n");
+                    client
+                        .write_all(chunk_head.as_bytes())
+                        .await
+                        .expect("write generated chunk size");
+                }
+                client
+                    .write_all(&client_chunk[..chunk_len])
+                    .await
+                    .expect("write generated body chunk");
+                if chunked {
+                    client
+                        .write_all(b"\r\n")
+                        .await
+                        .expect("write generated chunk terminator");
+                }
+                sent += chunk_len;
+            }
+            if chunked {
+                client
+                    .write_all(b"0\r\nX-Upload-Complete: yes\r\n\r\n")
+                    .await
+                    .expect("finish generated chunked upload");
+            }
+
+            let mut response = Vec::new();
+            client
+                .read_to_end(&mut response)
+                .await
+                .expect("read generated-upload response");
+            let response = std::str::from_utf8(&response).expect("ASCII upload response");
+            assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+            assert!(
+                response.contains(&format!("cell={cell};received={BODY_BYTES}")),
+                "{response}"
+            );
+            assert!(
+                response.len() < 1024,
+                "the response sink must remain independent of upload size"
+            );
+        }
+
+        assert_eq!(next_cell.load(Ordering::Acquire), 2);
+        for cell in 0..2 {
+            assert_eq!(
+                received[cell].load(Ordering::Acquire),
+                u64::try_from(BODY_BYTES).expect("body size fits u64")
+            );
+            let peak = queue_peaks[cell].load(Ordering::Acquire);
+            assert!(peak > 0, "cell {cell} must observe queued request bytes");
+            assert!(
+                peak <= OBSERVABLE_QUEUE_ENVELOPE.min(QUEUED_BYTE_LIMIT),
+                "cell {cell} queue peak {peak} exceeded the declared frame/byte envelope"
+            );
+            assert!(
+                BODY_BYTES > peak.saturating_mul(100),
+                "cell {cell} upload must be much larger than peak queue retention"
+            );
+        }
+        assert_eq!(trailer_counts[0].load(Ordering::Acquire), 0);
+        assert_eq!(trailer_counts[1].load(Ordering::Acquire), 1);
+        let fixed_queue_peak = queue_peaks[0].load(Ordering::Acquire);
+        let chunked_queue_peak = queue_peaks[1].load(Ordering::Acquire);
+
+        for _ in 0..400 {
+            if in_flight.load(Ordering::Acquire) == 0 && manager.is_empty() {
+                break;
+            }
+            asupersync::time::sleep(asupersync::time::wall_now(), Duration::from_millis(5)).await;
+        }
+        assert_eq!(in_flight.load(Ordering::Acquire), 0);
+        assert!(manager.is_empty(), "generated-upload connections quiesced");
+
+        assert!(manager.begin_drain(Duration::from_secs(2)));
+        let stats = run_handle.await.expect("generated-upload listener result");
+        assert_eq!(stats.force_closed, 0);
+        test_complete!(
+            "e2e_router_http1_generated_large_upload_envelope",
+            body_bytes = BODY_BYTES,
+            sender_chunk_bytes = CLIENT_CHUNK_BYTES,
+            fixed_queue_peak = fixed_queue_peak,
+            chunked_queue_peak = chunked_queue_peak,
+            in_flight_requests = in_flight.load(Ordering::Acquire),
+            active_connections = manager.active_count(),
+        );
+    });
 }
 
 #[test]
