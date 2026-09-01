@@ -186,6 +186,7 @@ impl QuicConnection {
     ///
     /// This stays crate-private so application code cannot bypass the
     /// role-aware stream API or replay handshake transitions manually.
+    #[cfg(feature = "tls")]
     pub(crate) fn inner_mut(&mut self) -> &mut NativeQuicConnection {
         &mut self.inner
     }

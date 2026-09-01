@@ -27,9 +27,11 @@ use smallvec::SmallVec;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use super::extract::{Extensions, Request};
+use super::extract::{BodyLimits, Extensions, ExtractionError, Request, parse_content_length};
 #[cfg(not(target_arch = "wasm32"))]
-use super::extract::{StreamingRawBodyControl, insert_streaming_raw_body};
+use super::extract::{
+    StreamingRawBodyControl, insert_streaming_raw_body, tighten_streaming_raw_body,
+};
 use super::handler::Handler;
 use super::middleware::{
     RequestLogSink, RequestTracePolicy, resolve_trace_id, trace_request, wall_clock_now,
@@ -47,6 +49,7 @@ use super::response::{
 use super::response::{IntoResponse, Response, StatusCode};
 #[cfg(not(target_arch = "wasm32"))]
 use super::websocket::Http1UpgradeSlot;
+use super::{EnforcedRequestBodyPolicy, RequestBodyPolicy, multipart::MultipartLimits};
 use crate::Cx;
 #[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
 use crate::bytes::Bytes;
@@ -107,12 +110,32 @@ pub struct RouteInfo {
     pub mount_prefix: Option<String>,
 }
 
+/// Discoverable request-body policy for one concrete route method.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RouteBodyPolicyInfo {
+    /// HTTP method handled by this route entry.
+    pub method: String,
+    /// Full route pattern, including nested router mount prefixes.
+    pub pattern: String,
+    /// Stable diagnostic name reported by the registered handler.
+    pub handler_name: &'static str,
+    /// Full mount prefix when the route came from a nested router.
+    pub mount_prefix: Option<String>,
+    /// Route-local policy, when one was configured on the [`MethodRouter`].
+    pub route_policy: Option<RequestBodyPolicy>,
+    /// Monotonic merge of server, router, nested-router, and route policies.
+    /// `None` means no first-class policy was configured and legacy extractor
+    /// defaults plus transport-specific ingress limits remain authoritative.
+    pub effective_policy: Option<RequestBodyPolicy>,
+}
+
 // ─── MethodRouter ────────────────────────────────────────────────────────────
 
 /// A set of handlers for different HTTP methods on a single route.
 pub struct MethodRouter {
     handlers: HashMap<String, Box<dyn Handler>>,
     method_not_allowed: Box<dyn Handler>,
+    body_policy: Option<RequestBodyPolicy>,
 }
 
 impl MethodRouter {
@@ -121,6 +144,7 @@ impl MethodRouter {
         Self {
             handlers: HashMap::with_capacity(4),
             method_not_allowed: Box::new(MethodNotAllowedHandler::new(String::new())),
+            body_policy: None,
         }
     }
 
@@ -174,6 +198,22 @@ impl MethodRouter {
         self.on(METHOD_OPTIONS, handler)
     }
 
+    /// Apply a monotonic request-body policy to every method on this route.
+    ///
+    /// The policy is met with the enclosing server and router policies during
+    /// dispatch, so it may tighten but never loosen an outer ceiling.
+    #[must_use]
+    pub fn with_body_policy(mut self, policy: RequestBodyPolicy) -> Self {
+        self.body_policy = Some(policy.resolved());
+        self
+    }
+
+    /// Return the route-local request-body policy, when configured.
+    #[must_use]
+    pub const fn body_policy(&self) -> Option<RequestBodyPolicy> {
+        self.body_policy
+    }
+
     /// Re-wrap every registered method handler through `wrap`.
     ///
     /// Used by [`Router::layer`] to apply middleware onion-style
@@ -220,7 +260,14 @@ impl MethodRouter {
     }
 
     /// Dispatch a request to the appropriate method handler.
-    async fn dispatch(&self, cx: &Cx, req: Request) -> Response {
+    async fn dispatch(&self, cx: &Cx, mut req: Request) -> Response {
+        if let Err(response) = apply_request_body_policy(
+            &mut req,
+            None,
+            self.body_policy.map(RequestBodyPolicyState::from_policy),
+        ) {
+            return response;
+        }
         // Fast path: method is already uppercase (true for virtually all HTTP traffic).
         if let Some(handler) = self.handlers.get(&req.method) {
             return handler.call(cx, req).await;
@@ -500,6 +547,8 @@ pub struct Router {
     nested: Vec<(String, Self)>,
     fallback: Option<Box<dyn Handler>>,
     extensions: Extensions,
+    server_body_policy: Option<RequestBodyPolicy>,
+    body_policy: Option<RequestBodyPolicy>,
     default_trace: Option<DefaultTrace>,
 }
 
@@ -2308,6 +2357,8 @@ impl Default for Router {
             nested: Vec::new(),
             fallback: None,
             extensions: Extensions::new(),
+            server_body_policy: None,
+            body_policy: None,
             default_trace: Some(DefaultTrace::default()),
         }
     }
@@ -2419,6 +2470,40 @@ impl Router {
     {
         self.extensions.insert_typed(state);
         self
+    }
+
+    /// Set the outer server request-body policy for this router tree.
+    ///
+    /// This is the application dispatch boundary, not a replacement for
+    /// protocol pre-buffer limits such as
+    /// [`crate::http::h1::Http1Config::max_body_size`]. Keep the transport
+    /// ceiling at least as strict as this value. On the live HTTP/1 Router
+    /// path the resolved policy is also pushed into the shared body writer
+    /// before application extraction; every nested router and route can only
+    /// tighten it.
+    #[must_use]
+    pub fn with_server_body_policy(mut self, policy: RequestBodyPolicy) -> Self {
+        self.server_body_policy = Some(policy.resolved());
+        self
+    }
+
+    /// Set the default request-body policy for routes in this router.
+    #[must_use]
+    pub fn with_body_policy(mut self, policy: RequestBodyPolicy) -> Self {
+        self.body_policy = Some(policy.resolved());
+        self
+    }
+
+    /// Return the configured outer server request-body policy.
+    #[must_use]
+    pub const fn server_body_policy(&self) -> Option<RequestBodyPolicy> {
+        self.server_body_policy
+    }
+
+    /// Return the configured router-default request-body policy.
+    #[must_use]
+    pub const fn body_policy(&self) -> Option<RequestBodyPolicy> {
+        self.body_policy
     }
 
     /// Disable the default request trace.
@@ -2920,7 +3005,20 @@ impl Router {
 
     /// Route-match and dispatch without trace instrumentation.
     async fn handle_inner(&self, cx: &Cx, mut req: Request) -> Response {
+        let inherited_policy = explicit_policy_state_from_extensions(&req.extensions);
+        let local_extension_policy = explicit_policy_state_from_extensions(&self.extensions);
         req.extensions.extend_from(&self.extensions);
+        let local_policy = meet_optional_policy_state(
+            local_extension_policy,
+            meet_optional_policy_state(
+                self.server_body_policy
+                    .map(RequestBodyPolicyState::from_policy),
+                self.body_policy.map(RequestBodyPolicyState::from_policy),
+            ),
+        );
+        if let Err(response) = apply_request_body_policy(&mut req, inherited_policy, local_policy) {
+            return response;
+        }
 
         // Pick the most specific top-level route. First-registered only wins
         // among equal-specificity routes; broad wildcard routes must not shadow
@@ -3006,6 +3104,28 @@ impl Router {
         entries
     }
 
+    /// Return deterministic route-policy metadata for diagnostics and tooling.
+    ///
+    /// `effective_policy` includes every explicit server, router,
+    /// nested-router, and route policy. Router-owned legacy extensions join
+    /// that value only after the first explicit [`RequestBodyPolicy`] boundary;
+    /// before then they retain the ordinary inner-router last-write-wins
+    /// behavior. `None` explicitly distinguishes an unconfigured route from a
+    /// configured compatibility-default policy. Request-local middleware
+    /// injection is necessarily excluded because it is not known until dispatch.
+    #[must_use]
+    pub fn route_body_policies(&self) -> Vec<RouteBodyPolicyInfo> {
+        let mut entries = Vec::new();
+        self.collect_route_body_policies("", None, None, None, &mut entries);
+        entries.sort_by(|left, right| {
+            left.pattern
+                .cmp(&right.pattern)
+                .then_with(|| compare_methods(&left.method, &right.method))
+                .then_with(|| left.handler_name.cmp(right.handler_name))
+        });
+        entries
+    }
+
     fn collect_routes(
         &self,
         prefix: &str,
@@ -3022,6 +3142,229 @@ impl Router {
             router.collect_routes(&full_prefix, Some(&full_prefix), entries);
         }
     }
+
+    fn collect_route_body_policies(
+        &self,
+        prefix: &str,
+        mount_prefix: Option<&str>,
+        inherited_policy: Option<RequestBodyPolicyState>,
+        inherited_legacy: Option<RequestBodyPolicyState>,
+        entries: &mut Vec<RouteBodyPolicyInfo>,
+    ) {
+        let legacy_policy = override_legacy_policy_state(
+            inherited_legacy,
+            legacy_policy_state_from_extensions(&self.extensions),
+        );
+        let explicit_policy = meet_optional_policy_state(
+            inherited_policy,
+            meet_optional_policy_state(
+                explicit_policy_state_from_extensions(&self.extensions),
+                meet_optional_policy_state(
+                    self.server_body_policy
+                        .map(RequestBodyPolicyState::from_policy),
+                    self.body_policy.map(RequestBodyPolicyState::from_policy),
+                ),
+            ),
+        );
+        let router_policy = explicit_policy
+            .map(|policy| legacy_policy.map_or(policy, |legacy| policy.tightened_with(legacy)));
+
+        for (pattern, method_router) in &self.routes {
+            let full_pattern = join_route_pattern(prefix, &pattern.raw);
+            let effective_policy = meet_optional_policy_state(
+                router_policy,
+                method_router
+                    .body_policy
+                    .map(RequestBodyPolicyState::from_policy),
+            )
+            .map(|policy| legacy_policy.map_or(policy, |legacy| policy.tightened_with(legacy)))
+            .map(RequestBodyPolicyState::resolved);
+            for route in method_router.route_entries(&full_pattern, mount_prefix) {
+                entries.push(RouteBodyPolicyInfo {
+                    method: route.method,
+                    pattern: route.pattern,
+                    handler_name: route.handler_name,
+                    mount_prefix: route.mount_prefix,
+                    route_policy: method_router.body_policy,
+                    effective_policy,
+                });
+            }
+        }
+
+        for (nested_prefix, router) in &self.nested {
+            let full_prefix = join_route_pattern(prefix, nested_prefix);
+            router.collect_route_body_policies(
+                &full_prefix,
+                Some(&full_prefix),
+                router_policy,
+                legacy_policy,
+                entries,
+            );
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct RequestBodyPolicyState {
+    max_total_body_size: Option<usize>,
+    body_limits: Option<BodyLimits>,
+    multipart_limits: Option<MultipartLimits>,
+}
+
+impl RequestBodyPolicyState {
+    fn from_policy(policy: RequestBodyPolicy) -> Self {
+        Self {
+            max_total_body_size: Some(policy.max_total_body_size),
+            body_limits: Some(policy.body_limits),
+            multipart_limits: Some(policy.multipart_limits),
+        }
+    }
+
+    fn tightened_with(self, other: Self) -> Self {
+        Self {
+            max_total_body_size: meet_optional(self.max_total_body_size, other.max_total_body_size),
+            body_limits: meet_optional_with(
+                self.body_limits,
+                other.body_limits,
+                BodyLimits::tightened_with,
+            ),
+            multipart_limits: meet_optional_with(
+                self.multipart_limits,
+                other.multipart_limits,
+                MultipartLimits::tightened_with,
+            ),
+        }
+    }
+
+    fn resolved(self) -> RequestBodyPolicy {
+        let max_total_body_size = self.max_total_body_size.unwrap_or(usize::MAX);
+        RequestBodyPolicy {
+            max_total_body_size,
+            body_limits: self
+                .body_limits
+                .unwrap_or_default()
+                .max_total_body_size(max_total_body_size),
+            multipart_limits: self
+                .multipart_limits
+                .unwrap_or_default()
+                .max_total_body_size(max_total_body_size),
+        }
+    }
+
+    fn is_empty(self) -> bool {
+        self.max_total_body_size.is_none()
+            && self.body_limits.is_none()
+            && self.multipart_limits.is_none()
+    }
+}
+
+fn meet_optional<T: Ord + Copy>(current: Option<T>, next: Option<T>) -> Option<T> {
+    meet_optional_with(current, next, std::cmp::min)
+}
+
+fn meet_optional_with<T: Copy>(
+    current: Option<T>,
+    next: Option<T>,
+    meet: impl FnOnce(T, T) -> T,
+) -> Option<T> {
+    match (current, next) {
+        (Some(current), Some(next)) => Some(meet(current, next)),
+        (Some(value), None) | (None, Some(value)) => Some(value),
+        (None, None) => None,
+    }
+}
+
+fn meet_optional_policy_state(
+    current: Option<RequestBodyPolicyState>,
+    next: Option<RequestBodyPolicyState>,
+) -> Option<RequestBodyPolicyState> {
+    meet_optional_with(current, next, RequestBodyPolicyState::tightened_with)
+}
+
+fn explicit_policy_state_from_extensions(
+    extensions: &Extensions,
+) -> Option<RequestBodyPolicyState> {
+    if let Some(state) = extensions.get_typed_cloned::<RequestBodyPolicyState>() {
+        return Some(state);
+    }
+    extensions
+        .get_typed_cloned::<RequestBodyPolicy>()
+        .map(RequestBodyPolicyState::from_policy)
+}
+
+fn legacy_policy_state_from_extensions(extensions: &Extensions) -> Option<RequestBodyPolicyState> {
+    let mut state = RequestBodyPolicyState::default();
+    if let Some(body_limits) = extensions.get_typed_cloned::<BodyLimits>() {
+        state.body_limits = Some(body_limits);
+    }
+    if let Some(multipart_limits) = extensions.get_typed_cloned::<MultipartLimits>() {
+        state.multipart_limits = Some(multipart_limits);
+    }
+    if state.is_empty() {
+        return None;
+    }
+    Some(state)
+}
+
+fn override_legacy_policy_state(
+    inherited: Option<RequestBodyPolicyState>,
+    local: Option<RequestBodyPolicyState>,
+) -> Option<RequestBodyPolicyState> {
+    match (inherited, local) {
+        (Some(inherited), Some(local)) => Some(RequestBodyPolicyState {
+            max_total_body_size: None,
+            body_limits: local.body_limits.or(inherited.body_limits),
+            multipart_limits: local.multipart_limits.or(inherited.multipart_limits),
+        }),
+        (Some(value), None) | (None, Some(value)) => Some(value),
+        (None, None) => None,
+    }
+}
+
+fn request_body_policy_refusal(limit: usize) -> Response {
+    ExtractionError::new(
+        StatusCode::PAYLOAD_TOO_LARGE,
+        format!("request body too large (limit {limit})"),
+    )
+    .into_response()
+}
+
+fn apply_request_body_policy(
+    request: &mut Request,
+    inherited: Option<RequestBodyPolicyState>,
+    local: Option<RequestBodyPolicyState>,
+) -> Result<(), Response> {
+    let Some(explicit_policy) = meet_optional_policy_state(
+        inherited.or_else(|| explicit_policy_state_from_extensions(&request.extensions)),
+        local,
+    ) else {
+        return Ok(());
+    };
+    let state = legacy_policy_state_from_extensions(&request.extensions)
+        .map_or(explicit_policy, |legacy| {
+            explicit_policy.tightened_with(legacy)
+        });
+    let effective = state.resolved();
+    if let Some(raw_content_length) = request.header("content-length") {
+        let declared =
+            parse_content_length(raw_content_length).map_err(ExtractionError::into_response)?;
+        if declared > effective.max_total_body_size {
+            return Err(request_body_policy_refusal(effective.max_total_body_size));
+        }
+    }
+    if request.body.len() > effective.max_total_body_size {
+        return Err(request_body_policy_refusal(effective.max_total_body_size));
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    tighten_streaming_raw_body(request, effective.max_total_body_size);
+    request.extensions.insert_typed(state);
+    request
+        .extensions
+        .insert_typed(EnforcedRequestBodyPolicy { policy: effective });
+    request.extensions.insert_typed(effective);
+    request.extensions.insert_typed(effective.body_limits);
+    request.extensions.insert_typed(effective.multipart_limits);
+    Ok(())
 }
 
 fn join_route_pattern(prefix: &str, pattern: &str) -> String {
@@ -3443,7 +3786,9 @@ mod tests {
         clippy::future_not_send
     )]
     use super::*;
-    use crate::web::handler::FnHandler;
+    use crate::bytes::Bytes;
+    use crate::web::extract::Extension;
+    use crate::web::handler::{FnHandler, FnHandler1};
 
     fn ok_handler() -> &'static str {
         "ok"
@@ -3457,12 +3802,412 @@ mod tests {
         StatusCode::CREATED
     }
 
+    fn body_policy_summary(Extension(policy): Extension<RequestBodyPolicy>) -> String {
+        format!(
+            "total={};json={};form={};raw={};multipart={};field={};parts={};request_timeout={};idle_timeout={}",
+            policy.max_total_body_size,
+            policy.body_limits.max_json_body_size,
+            policy.body_limits.max_form_body_size,
+            policy.body_limits.max_raw_body_size,
+            policy.multipart_limits.max_total_size,
+            policy.multipart_limits.max_part_body_size,
+            policy.multipart_limits.max_parts,
+            policy.multipart_limits.request_timeout_secs,
+            policy.multipart_limits.idle_timeout_secs,
+        )
+    }
+
+    fn body_limits_summary(Extension(limits): Extension<BodyLimits>) -> String {
+        format!(
+            "json={};form={};raw={}",
+            limits.max_json_body_size, limits.max_form_body_size, limits.max_raw_body_size,
+        )
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    struct BodyPolicyWriterProbe {
+        writer: parking_lot::Mutex<Option<crate::http::h1::IncomingRequestBodyWriter>>,
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    impl crate::web::Handler for BodyPolicyWriterProbe {
+        fn call(
+            &self,
+            cx: &crate::Cx,
+            _request: Request,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send + '_>> {
+            let cx = cx.clone();
+            let writer = self.writer.lock().take();
+            Box::pin(async move {
+                let Some(mut writer) = writer else {
+                    return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                };
+                match writer
+                    .push_bytes(&cx, b"4\r\nABCD\r\n4\r\nEFGH\r\n0\r\n\r\n")
+                    .await
+                {
+                    Err(crate::http::h1::IncomingBodyError::BodyTooLarge {
+                        actual: Some(8),
+                        limit: 6,
+                    }) => StatusCode::PAYLOAD_TOO_LARGE.into_response(),
+                    Ok(()) | Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+                }
+            })
+        }
+    }
+
+    #[test]
+    fn body_policy_server_router_and_route_merge_monotonically() {
+        let server = RequestBodyPolicy::new()
+            .max_total_body_size(90)
+            .body_limits(
+                BodyLimits::new()
+                    .max_json_body_size(80)
+                    .max_form_body_size(70)
+                    .max_raw_body_size(60),
+            )
+            .multipart_limits(
+                MultipartLimits::new()
+                    .max_total_size(85)
+                    .max_part_body_size(75)
+                    .max_parts(50)
+                    .request_timeout_secs(40)
+                    .idle_timeout_secs(20),
+            );
+        let router = RequestBodyPolicy::new()
+            .max_total_body_size(100)
+            .body_limits(
+                BodyLimits::new()
+                    .max_json_body_size(50)
+                    .max_form_body_size(80)
+                    .max_raw_body_size(70),
+            )
+            .multipart_limits(
+                MultipartLimits::new()
+                    .max_total_size(95)
+                    .max_part_body_size(65)
+                    .max_parts(60)
+                    .request_timeout_secs(30)
+                    .idle_timeout_secs(25),
+            );
+        let route = RequestBodyPolicy::new()
+            .max_total_body_size(110)
+            .body_limits(
+                BodyLimits::new()
+                    .max_json_body_size(70)
+                    .max_form_body_size(40)
+                    .max_raw_body_size(80),
+            )
+            .multipart_limits(
+                MultipartLimits::new()
+                    .max_total_size(105)
+                    .max_part_body_size(30)
+                    .max_parts(70)
+                    .request_timeout_secs(50)
+                    .idle_timeout_secs(10),
+            );
+        let router = Router::new()
+            .route(
+                "/upload",
+                post(FnHandler1::<_, Extension<RequestBodyPolicy>>::new(
+                    body_policy_summary,
+                ))
+                .with_body_policy(route),
+            )
+            .with_body_policy(router)
+            .with_server_body_policy(server);
+
+        let response = router.handle(Request::new("POST", "/upload"));
+        assert_eq!(response.status, StatusCode::OK);
+        assert_eq!(
+            std::str::from_utf8(response.body.as_ref()).expect("policy response is UTF-8"),
+            "total=90;json=50;form=40;raw=60;multipart=85;field=30;parts=50;request_timeout=30;idle_timeout=10"
+        );
+
+        let policies = router.route_body_policies();
+        assert_eq!(policies.len(), 1);
+        assert_eq!(policies[0].pattern, "/upload");
+        assert_eq!(policies[0].method, "POST");
+        assert_eq!(policies[0].route_policy, Some(route.resolved()));
+        let effective = policies[0]
+            .effective_policy
+            .expect("configured route has effective policy");
+        assert_eq!(effective.max_total_body_size, 90);
+        assert_eq!(effective.body_limits.max_json_body_size, 50);
+        assert_eq!(effective.multipart_limits.max_part_body_size, 30);
+    }
+
+    #[test]
+    fn nested_body_policy_cannot_loosen_parent_server_policy() {
+        let outer = RequestBodyPolicy::new().max_total_body_size(64);
+        let attempted_loosen = RequestBodyPolicy::new()
+            .max_total_body_size(128)
+            .body_limits(BodyLimits::new().max_json_body_size(128));
+        let nested = Router::new()
+            .route(
+                "/upload",
+                post(FnHandler1::<_, Extension<RequestBodyPolicy>>::new(
+                    body_policy_summary,
+                ))
+                .with_body_policy(attempted_loosen),
+            )
+            .with_server_body_policy(attempted_loosen)
+            .with_body_policy(attempted_loosen);
+        let router = Router::new()
+            .nest("/api", nested)
+            .with_server_body_policy(outer);
+
+        let response = router.handle(Request::new("POST", "/api/upload"));
+        let body = std::str::from_utf8(response.body.as_ref()).expect("policy response is UTF-8");
+        assert!(body.starts_with("total=64;"), "unexpected policy: {body}");
+
+        let policies = router.route_body_policies();
+        assert_eq!(policies.len(), 1);
+        assert_eq!(policies[0].pattern, "/api/upload");
+        assert_eq!(
+            policies[0]
+                .effective_policy
+                .expect("configured nested route has effective policy")
+                .max_total_body_size,
+            64
+        );
+    }
+
+    #[test]
+    fn route_only_policy_runtime_and_metadata_agree_above_defaults() {
+        let route = RequestBodyPolicy::new()
+            .max_total_body_size(64 * 1024 * 1024)
+            .body_limits(
+                BodyLimits::new()
+                    .max_json_body_size(32 * 1024 * 1024)
+                    .max_form_body_size(4 * 1024 * 1024)
+                    .max_raw_body_size(24 * 1024 * 1024),
+            );
+        let router = Router::new().route(
+            "/upload",
+            post(FnHandler1::<_, Extension<RequestBodyPolicy>>::new(
+                body_policy_summary,
+            ))
+            .with_body_policy(route),
+        );
+
+        let response = router.handle(Request::new("POST", "/upload"));
+        let body = std::str::from_utf8(response.body.as_ref()).expect("policy response is UTF-8");
+        assert!(
+            body.starts_with("total=67108864;json=33554432;form=4194304;raw=25165824;"),
+            "route-only runtime policy was unexpectedly clamped: {body}"
+        );
+        let metadata = router.route_body_policies();
+        assert_eq!(metadata[0].effective_policy, Some(route.resolved()));
+    }
+
+    #[test]
+    fn partial_legacy_limits_preserve_the_other_inherited_plane() {
+        let outer_multipart = MultipartLimits::new()
+            .max_total_size(12 * 1024 * 1024)
+            .max_part_body_size(6 * 1024 * 1024)
+            .max_parts(17);
+        let nested_body = BodyLimits::new()
+            .max_json_body_size(8 * 1024 * 1024)
+            .max_form_body_size(1024 * 1024)
+            .max_raw_body_size(8 * 1024 * 1024);
+        let nested = Router::new()
+            .route(
+                "/upload",
+                post(FnHandler1::<_, Extension<RequestBodyPolicy>>::new(
+                    body_policy_summary,
+                ))
+                .with_body_policy(RequestBodyPolicy::new()),
+            )
+            .with_state(nested_body);
+        let router = Router::new()
+            .nest("/api", nested)
+            .with_state(outer_multipart);
+
+        let response = router.handle(Request::new("POST", "/api/upload"));
+        let body = std::str::from_utf8(response.body.as_ref()).expect("policy response is UTF-8");
+        assert!(body.contains("json=8388608;form=1048576;raw=8388608;"));
+        assert!(body.contains("multipart=12582912;field=6291456;parts=17;"));
+
+        let metadata = router.route_body_policies();
+        let effective = metadata[0]
+            .effective_policy
+            .expect("route policy promotes legacy limits");
+        assert_eq!(effective.body_limits, nested_body);
+        assert_eq!(effective.multipart_limits, outer_multipart);
+    }
+
+    #[test]
+    fn legacy_body_limits_remain_supported_without_explicit_policy() {
+        let legacy = BodyLimits::new()
+            .max_json_body_size(32 * 1024 * 1024)
+            .max_form_body_size(4 * 1024 * 1024)
+            .max_raw_body_size(24 * 1024 * 1024);
+        let router = Router::new()
+            .route(
+                "/legacy",
+                post(FnHandler1::<_, Extension<BodyLimits>>::new(
+                    body_limits_summary,
+                )),
+            )
+            .with_state(legacy);
+
+        let response = router.handle(Request::new("POST", "/legacy"));
+        let body = std::str::from_utf8(response.body.as_ref()).expect("policy response is UTF-8");
+        assert!(
+            body == "json=33554432;form=4194304;raw=25165824",
+            "legacy limits were not preserved: {body}"
+        );
+        assert_eq!(router.route_body_policies()[0].effective_policy, None);
+    }
+
+    #[test]
+    fn body_policy_legacy_only_nested_body_limits_keep_inner_precedence() {
+        let outer = BodyLimits::new().max_json_body_size(4);
+        let inner = BodyLimits::new().max_json_body_size(64);
+        let nested = Router::new()
+            .route(
+                "/legacy",
+                post(FnHandler1::<_, Extension<BodyLimits>>::new(
+                    body_limits_summary,
+                )),
+            )
+            .with_state(inner);
+        let router = Router::new().with_state(outer).nest("/api", nested);
+
+        let response = router.handle(Request::new("POST", "/api/legacy"));
+        assert_eq!(response.status, StatusCode::OK);
+        assert_eq!(
+            std::str::from_utf8(response.body.as_ref()).expect("legacy response is UTF-8"),
+            "json=64;form=2097152;raw=10485760"
+        );
+        assert_eq!(router.route_body_policies()[0].effective_policy, None);
+    }
+
+    #[test]
+    fn explicit_policy_and_legacy_limits_meet_instead_of_shadowing() {
+        let explicit = RequestBodyPolicy::new()
+            .max_total_body_size(100)
+            .body_limits(BodyLimits::new().max_json_body_size(80));
+        let legacy = BodyLimits::new().max_json_body_size(50);
+        let router = Router::new()
+            .route(
+                "/mixed",
+                post(FnHandler1::<_, Extension<RequestBodyPolicy>>::new(
+                    body_policy_summary,
+                )),
+            )
+            .with_state(explicit)
+            .with_state(legacy);
+
+        let response = router.handle(Request::new("POST", "/mixed"));
+        let body = std::str::from_utf8(response.body.as_ref()).expect("policy response is UTF-8");
+        assert!(
+            body.starts_with("total=100;json=50;"),
+            "unexpected policy: {body}"
+        );
+        assert_eq!(
+            router.route_body_policies()[0]
+                .effective_policy
+                .expect("mixed policy is discoverable")
+                .body_limits
+                .max_json_body_size,
+            50
+        );
+    }
+
+    #[test]
+    fn route_total_policy_rejects_buffered_actual_and_declared_lengths() {
+        let policy = RequestBodyPolicy::new().max_total_body_size(4);
+        let router = Router::new().route(
+            "/ignore",
+            post(FnHandler::new(ok_handler)).with_body_policy(policy),
+        );
+
+        let actual =
+            router.handle(Request::new("POST", "/ignore").with_body(Bytes::from_static(b"12345")));
+        assert_eq!(actual.status, StatusCode::PAYLOAD_TOO_LARGE);
+
+        let declared =
+            router.handle(Request::new("POST", "/ignore").with_header("content-length", "5"));
+        assert_eq!(declared.status, StatusCode::PAYLOAD_TOO_LARGE);
+
+        let mut mixed_case = Request::new("POST", "/ignore");
+        mixed_case
+            .headers
+            .insert("Content-Length".to_string(), "5".to_string());
+        assert_eq!(
+            router.handle(mixed_case).status,
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
+
+        for invalid in ["5, 6", "+5", "184467440737095516160"] {
+            let response = router
+                .handle(Request::new("POST", "/ignore").with_header("content-length", invalid));
+            assert_eq!(response.status, StatusCode::BAD_REQUEST, "value={invalid}");
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn body_policy_route_tightens_live_writer_before_handler_extraction() {
+        use crate::http::h1::types::{Method, Version};
+        use crate::http::h1::{RequestHead, StreamingServerRequest};
+
+        let cx = crate::Cx::for_testing();
+        let head = RequestHead {
+            method: Method::Post,
+            uri: "/streamed".to_string(),
+            version: Version::Http11,
+            headers: vec![("transfer-encoding".to_string(), "chunked".to_string())],
+        };
+        let (writer, request) = StreamingServerRequest::channel(head, &cx, 8);
+        let router = Router::new().route(
+            "/streamed",
+            post(BodyPolicyWriterProbe {
+                writer: parking_lot::Mutex::new(Some(writer)),
+            })
+            .with_body_policy(RequestBodyPolicy::new().max_total_body_size(6)),
+        );
+
+        let response = futures_lite::future::block_on(
+            router.handle_http1_streaming_request_with_cx(&cx, request),
+        );
+        assert_eq!(response.status, 413);
+    }
+
+    #[test]
+    fn route_body_policy_rejects_declared_json_length_before_parsing() {
+        let route_policy = RequestBodyPolicy::new()
+            .max_total_body_size(4)
+            .body_limits(BodyLimits::new().max_json_body_size(4));
+        let router = Router::new().route(
+            "/json",
+            post(FnHandler1::<
+                _,
+                super::super::extract::Json<serde_json::Value>,
+            >::new(|_json| StatusCode::OK))
+            .with_body_policy(route_policy),
+        );
+        let request = Request::new("POST", "/json")
+            .with_header("content-type", "application/json")
+            .with_header("content-length", "5");
+
+        let response = router.handle(request);
+        assert_eq!(response.status, StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
     #[test]
     fn route_exact_match() {
         let router = Router::new().route("/", get(FnHandler::new(ok_handler)));
 
         let resp = router.handle(Request::new("GET", "/"));
         assert_eq!(resp.status, StatusCode::OK);
+        assert_eq!(
+            router.route_body_policies()[0].effective_policy,
+            None,
+            "unconfigured routes must not report a phantom first-class policy"
+        );
     }
 
     #[test]

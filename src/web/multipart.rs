@@ -83,7 +83,7 @@ const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 5;
 ///     .max_parts(50);
 /// // Inject via middleware into request.extensions.insert_typed(limits)
 /// ```
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MultipartLimits {
     /// Maximum total multipart body size in bytes.
     pub max_total_size: usize,
@@ -159,6 +159,38 @@ impl MultipartLimits {
     pub fn idle_timeout_secs(mut self, secs: u64) -> Self {
         self.idle_timeout_secs = secs;
         self
+    }
+
+    /// Meet these limits with another boundary's limits.
+    #[must_use]
+    pub fn tightened_with(self, other: Self) -> Self {
+        Self {
+            max_total_size: self.max_total_size.min(other.max_total_size),
+            max_parts: self.max_parts.min(other.max_parts),
+            max_part_headers: self.max_part_headers.min(other.max_part_headers),
+            max_part_body_size: self.max_part_body_size.min(other.max_part_body_size),
+            request_timeout_secs: self.request_timeout_secs.min(other.request_timeout_secs),
+            idle_timeout_secs: self.idle_timeout_secs.min(other.idle_timeout_secs),
+        }
+    }
+
+    /// Apply a format-independent total request-body ceiling.
+    #[must_use]
+    pub fn max_total_body_size(mut self, bytes: usize) -> Self {
+        self.max_total_size = self.max_total_size.min(bytes);
+        self.max_part_body_size = self.max_part_body_size.min(bytes);
+        self
+    }
+}
+
+fn effective_multipart_limits(req: &Request) -> MultipartLimits {
+    let projected = req.extensions.get_typed::<MultipartLimits>().copied();
+    let enforced =
+        super::extract::effective_request_body_policy(req).map(|policy| policy.multipart_limits);
+    match (enforced, projected) {
+        (Some(enforced), Some(projected)) => enforced.tightened_with(projected),
+        (Some(limits), None) | (None, Some(limits)) => limits,
+        (None, None) => MultipartLimits::default(),
     }
 }
 
@@ -270,11 +302,7 @@ impl FromRequest for Multipart {
         #[cfg(not(target_arch = "wasm32"))]
         reject_buffered_extractor_on_streaming_request(&req, "Multipart")?;
 
-        let limits = req
-            .extensions
-            .get_typed::<MultipartLimits>()
-            .copied()
-            .unwrap_or_default();
+        let limits = effective_multipart_limits(&req);
 
         check_request_content_length_limit(&req, limits.max_total_size)?;
 
@@ -592,11 +620,7 @@ impl StreamingMultipart {
     const INPUT_WINDOW: usize = 4096;
 
     fn from_streaming_request(req: Request) -> Result<Self, ExtractionError> {
-        let limits = req
-            .extensions
-            .get_typed::<MultipartLimits>()
-            .copied()
-            .unwrap_or_default();
+        let limits = effective_multipart_limits(&req);
         check_request_content_length_limit(&req, limits.max_total_size)?;
         let expected_length = header_value_ci(&req, "content-length")
             .map(parse_content_length)
@@ -1835,11 +1859,7 @@ fn find_streaming_boundary(
 
 #[cfg(not(target_arch = "wasm32"))]
 async fn extract_streaming_multipart(cx: &Cx, req: Request) -> Result<Multipart, ExtractionError> {
-    let limits = req
-        .extensions
-        .get_typed::<MultipartLimits>()
-        .copied()
-        .unwrap_or_default();
+    let limits = effective_multipart_limits(&req);
     check_request_content_length_limit(&req, limits.max_total_size)?;
     let expected_length = header_value_ci(&req, "content-length")
         .map(parse_content_length)
@@ -2344,6 +2364,38 @@ mod tests {
         clippy::future_not_send
     )]
     use super::*;
+
+    #[test]
+    fn body_policy_enforced_snapshot_prevents_late_multipart_limit_loosen() {
+        let strict_multipart = MultipartLimits::new()
+            .max_total_size(1024)
+            .max_part_body_size(2);
+        let enforced = super::super::RequestBodyPolicy::new()
+            .max_total_body_size(1024)
+            .multipart_limits(strict_multipart)
+            .resolved();
+        let loose_multipart = MultipartLimits::new()
+            .max_total_size(4096)
+            .max_part_body_size(4096);
+        let mut request = Request::new("POST", "/upload")
+            .with_header("content-type", "multipart/form-data; boundary=X")
+            .with_body(Bytes::from_static(
+                b"--X\r\nContent-Disposition: form-data; name=\"field\"\r\n\r\nabc\r\n--X--\r\n",
+            ));
+        request
+            .extensions
+            .insert_typed(super::super::EnforcedRequestBodyPolicy { policy: enforced });
+        request.extensions.insert_typed(
+            super::super::RequestBodyPolicy::new()
+                .max_total_body_size(4096)
+                .multipart_limits(loose_multipart),
+        );
+        request.extensions.insert_typed(loose_multipart);
+
+        let error = Multipart::from_request(request)
+            .expect_err("late middleware must not loosen locked multipart field limit");
+        assert_eq!(error.status, StatusCode::PAYLOAD_TOO_LARGE);
+    }
 
     // ================================================================
     // Boundary extraction

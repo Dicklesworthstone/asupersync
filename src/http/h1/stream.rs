@@ -519,6 +519,7 @@ struct QueuedIncomingFrame {
 struct IncomingBodyShared {
     producer_terminal: AtomicU8,
     consumer_terminal: AtomicU8,
+    policy_max_body_size: AtomicU64,
     terminal_error: Mutex<Option<IncomingBodyError>>,
     queued_bytes: Arc<QueuedByteBudget>,
     abandoned_frames: AtomicU64,
@@ -662,6 +663,7 @@ impl IncomingRequestBody {
                 IncomingProducerTerminal::Open as u8
             }),
             consumer_terminal: AtomicU8::new(IncomingConsumerTerminal::Active as u8),
+            policy_max_body_size: AtomicU64::new(u64::MAX),
             terminal_error: Mutex::new(None),
             queued_bytes: QueuedByteBudget::new(queued_byte_limit),
             abandoned_frames: AtomicU64::new(0),
@@ -691,6 +693,18 @@ impl IncomingRequestBody {
     #[must_use]
     pub fn queued_bytes(&self) -> usize {
         self.shared.queued_bytes.state.lock().queued
+    }
+
+    /// Tighten the aggregate body limit shared with the protocol writer.
+    ///
+    /// This is crate-private because application-facing policy is authored at
+    /// the web Router boundary. The minimum is retained atomically so a nested
+    /// route can never race an outer policy into a looser value.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn tighten_max_body_size(&self, bytes: u64) {
+        self.shared
+            .policy_max_body_size
+            .fetch_min(bytes, Ordering::AcqRel);
     }
 }
 
@@ -744,6 +758,19 @@ impl Body for IncomingRequestBody {
                             .store(IncomingConsumerTerminal::Failed as u8, Ordering::Release);
                         return Poll::Ready(Some(Err(IncomingBodyError::AccountingOverflow)));
                     };
+                    let policy_limit = self.shared.policy_max_body_size.load(Ordering::Acquire);
+                    if received > policy_limit {
+                        self.done = true;
+                        self.size_hint = SizeHint::with_exact(0);
+                        self.terminal_observed = true;
+                        self.shared
+                            .consumer_terminal
+                            .store(IncomingConsumerTerminal::Failed as u8, Ordering::Release);
+                        return Poll::Ready(Some(Err(IncomingBodyError::BodyTooLarge {
+                            actual: Some(received),
+                            limit: policy_limit,
+                        })));
+                    }
                     if let BodyKind::ContentLength(expected) = self.kind {
                         if received > expected {
                             self.done = true;
@@ -807,7 +834,19 @@ impl Body for IncomingRequestBody {
     }
 
     fn size_hint(&self) -> SizeHint {
-        self.size_hint
+        if self.done {
+            return SizeHint::with_exact(0);
+        }
+        let policy_limit = self.shared.policy_max_body_size.load(Ordering::Acquire);
+        let remaining_policy = policy_limit.saturating_sub(self.received);
+        let mut hint = SizeHint::new();
+        match self.size_hint.upper() {
+            Some(upper) => hint.set_upper(upper.min(remaining_policy)),
+            None if policy_limit != u64::MAX => hint.set_upper(remaining_policy),
+            None => {}
+        }
+        hint.set_lower(self.size_hint.lower().min(remaining_policy));
+        hint
     }
 }
 
@@ -1170,10 +1209,13 @@ impl IncomingRequestBodyWriter {
             .total_bytes
             .checked_add(additional)
             .ok_or(HttpError::BodyTooLarge)?;
-        if total > self.max_body_size {
+        let max_body_size = self
+            .max_body_size
+            .min(self.shared.policy_max_body_size.load(Ordering::Acquire));
+        if total > max_body_size {
             return Err(HttpError::BodyTooLargeDetailed {
                 actual: total,
-                limit: self.max_body_size,
+                limit: max_body_size,
             });
         }
         Ok(total)

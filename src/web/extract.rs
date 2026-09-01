@@ -118,6 +118,19 @@ impl Request {
             .map(|(_, value)| value.as_str())
     }
 
+    /// Return the effective request-body policy currently enforced by the
+    /// router and body extractors.
+    ///
+    /// This meets backwards-compatible public projection updates with the
+    /// router's protected snapshot, so replacing a typed `RequestBodyPolicy`
+    /// extension cannot report a value looser than the enforced policy.
+    /// Middleware that replaces the entire public [`Self::extensions`] map
+    /// also discards the router snapshot and is outside this guarantee.
+    #[must_use]
+    pub fn body_policy(&self) -> Option<super::RequestBodyPolicy> {
+        effective_request_body_policy(self)
+    }
+
     /// Set path parameters (used internally by the router).
     #[must_use]
     pub fn with_path_params(mut self, params: HashMap<String, String>) -> Self {
@@ -1313,7 +1326,7 @@ const DEFAULT_MAX_RAW_BODY_SIZE: usize = 10 * 1024 * 1024;
 ///     .max_json_body_size(50 * 1024 * 1024);
 /// // Inject via middleware into request.extensions.insert_typed(limits)
 /// ```
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BodyLimits {
     /// Maximum JSON body size in bytes.
     pub max_json_body_size: usize,
@@ -1360,6 +1373,65 @@ impl BodyLimits {
         self.max_raw_body_size = bytes;
         self
     }
+
+    /// Meet these limits with another boundary's limits.
+    #[must_use]
+    pub fn tightened_with(self, other: Self) -> Self {
+        Self {
+            max_json_body_size: self.max_json_body_size.min(other.max_json_body_size),
+            max_form_body_size: self.max_form_body_size.min(other.max_form_body_size),
+            max_raw_body_size: self.max_raw_body_size.min(other.max_raw_body_size),
+        }
+    }
+
+    /// Apply a format-independent total request-body ceiling.
+    #[must_use]
+    pub fn max_total_body_size(self, bytes: usize) -> Self {
+        self.tightened_with(Self {
+            max_json_body_size: bytes,
+            max_form_body_size: bytes,
+            max_raw_body_size: bytes,
+        })
+    }
+}
+
+pub(super) fn effective_request_body_policy(req: &Request) -> Option<super::RequestBodyPolicy> {
+    let enforced = req
+        .extensions
+        .get_typed::<super::EnforcedRequestBodyPolicy>()
+        .map(|snapshot| snapshot.policy);
+    let projected = req
+        .extensions
+        .get_typed::<super::RequestBodyPolicy>()
+        .copied();
+    let mut effective = match (enforced, projected) {
+        (Some(enforced), Some(projected)) => Some(enforced.tightened_with(projected)),
+        (Some(policy), None) | (None, Some(policy)) => Some(policy.resolved()),
+        (None, None) => None,
+    }?;
+
+    if let Some(body_limits) = req.extensions.get_typed::<BodyLimits>().copied() {
+        effective.body_limits = effective.body_limits.tightened_with(body_limits);
+    }
+    if let Some(multipart_limits) = req
+        .extensions
+        .get_typed::<super::multipart::MultipartLimits>()
+        .copied()
+    {
+        effective.multipart_limits = effective.multipart_limits.tightened_with(multipart_limits);
+    }
+
+    Some(effective.resolved())
+}
+
+fn effective_body_limits(req: &Request) -> BodyLimits {
+    let projected = req.extensions.get_typed::<BodyLimits>().copied();
+    let enforced = effective_request_body_policy(req).map(|policy| policy.body_limits);
+    match (enforced, projected) {
+        (Some(enforced), Some(projected)) => enforced.tightened_with(projected),
+        (Some(limits), None) | (None, Some(limits)) => limits,
+        (None, None) => BodyLimits::default(),
+    }
 }
 
 // ─── Json<T> ─────────────────────────────────────────────────────────────────
@@ -1381,11 +1453,7 @@ impl BodyLimits {
 pub struct Json<T>(pub T);
 
 fn json_body_limit(req: &Request) -> usize {
-    req.extensions
-        .get_typed::<BodyLimits>()
-        .map_or(DEFAULT_MAX_JSON_BODY_SIZE, |limits| {
-            limits.max_json_body_size
-        })
+    effective_body_limits(req).max_json_body_size
 }
 
 fn validate_json_content_type(req: &Request) -> Result<(), ExtractionError> {
@@ -1491,11 +1559,7 @@ impl<T: serde::de::DeserializeOwned> FromRequest for Json<T> {
 pub struct Form<T>(pub T);
 
 fn form_body_limit(req: &Request) -> usize {
-    req.extensions
-        .get_typed::<BodyLimits>()
-        .map_or(DEFAULT_MAX_FORM_BODY_SIZE, |limits| {
-            limits.max_form_body_size
-        })
+    effective_body_limits(req).max_form_body_size
 }
 
 fn validate_form_content_type(req: &Request) -> Result<(), ExtractionError> {
@@ -1689,10 +1753,7 @@ impl FromRequest for RawBody {
         #[cfg(not(target_arch = "wasm32"))]
         reject_buffered_extractor_on_streaming_request(&req, "RawBody")?;
 
-        let limit = req
-            .extensions
-            .get_typed::<BodyLimits>()
-            .map_or(DEFAULT_MAX_RAW_BODY_SIZE, |l| l.max_raw_body_size);
+        let limit = effective_body_limits(&req).max_raw_body_size;
 
         // SECURITY: Check Content-Length header BEFORE reading body to prevent DoS
         check_content_length_limit(&req, limit)?;
@@ -1813,9 +1874,20 @@ impl StreamingRawBody {
                     "streaming request body unavailable on this transport",
                 )
             })?;
-        slot.take().map(|inner| Self { inner }).map_err(|message| {
-            ExtractionError::new(super::response::StatusCode::INTERNAL_SERVER_ERROR, message)
-        })
+        let max_bytes = effective_request_body_policy(req).map(|policy| policy.max_total_body_size);
+        if let Some(max_bytes) = max_bytes {
+            check_content_length_limit(req, max_bytes)?;
+        }
+        slot.take()
+            .map(|inner| {
+                if let Some(max_bytes) = max_bytes {
+                    inner.tighten_max_body_size(u64::try_from(max_bytes).unwrap_or(u64::MAX));
+                }
+                Self { inner }
+            })
+            .map_err(|message| {
+                ExtractionError::new(super::response::StatusCode::INTERNAL_SERVER_ERROR, message)
+            })
     }
 
     /// Return the framing mode declared by the validated request head.
@@ -2140,6 +2212,12 @@ impl StreamingRawBodySlot {
         }
     }
 
+    fn tighten_max_body_size(&self, bytes: u64) {
+        if let StreamingRawBodySlotState::Available(body) = &*self.state.lock() {
+            body.tighten_max_body_size(bytes);
+        }
+    }
+
     /// Drop an unclaimed body outside the state lock so producer wakeups
     /// cannot re-enter while the one-shot ownership guard is held.
     pub(crate) fn drop_unclaimed(&self) {
@@ -2169,6 +2247,13 @@ pub(crate) fn insert_streaming_raw_body(
     let slot = StreamingRawBodySlot::new(body);
     req.extensions.insert_typed(slot.clone());
     Ok(StreamingRawBodyControl(slot))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn tighten_streaming_raw_body(req: &Request, max_bytes: usize) {
+    if let Some(slot) = req.extensions.get_typed::<StreamingRawBodySlot>() {
+        slot.tighten_max_body_size(u64::try_from(max_bytes).unwrap_or(u64::MAX));
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -2434,6 +2519,188 @@ mod tests {
         ));
         assert_eq!(fragmented.data.as_slice(), b"abcdefghij");
         assert!(fragmented.retained_capacity() <= 10);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn body_policy_streaming_raw_body_enforces_actual_chunked_bytes() {
+        let cx = Cx::for_testing();
+        let (mut writer, incoming) = IncomingRequestBody::channel(&cx, BodyKind::Chunked);
+        let mut request = Request::new("POST", "/streamed");
+        request
+            .extensions
+            .insert_typed(super::super::RequestBodyPolicy::new().max_total_body_size(6));
+        let control = insert_streaming_raw_body(&mut request, incoming)
+            .expect("install policy-limited streaming body");
+        block_on(writer.push_bytes(&cx, b"4\r\nABCD\r\n4\r\nEFGH\r\n0\r\n\r\n"))
+            .expect("publish chunked body through protocol decoder");
+
+        let body = StreamingRawBody::from_request(request).expect("take streaming body");
+        let error = block_on(body.collect_bounded_with_cx(&cx, 32))
+            .expect_err("actual bytes above policy total must fail");
+        assert!(matches!(
+            error,
+            StreamingRawBodyCollectError::Body(IncomingBodyError::BodyTooLarge {
+                actual: Some(8),
+                limit: 6,
+            })
+        ));
+        drop(control);
+    }
+
+    #[test]
+    fn body_policy_enforced_snapshot_prevents_late_body_limit_loosen() {
+        let enforced = super::super::RequestBodyPolicy::new()
+            .max_total_body_size(1024)
+            .body_limits(BodyLimits::new().max_json_body_size(4))
+            .resolved();
+        let mut request = Request::new("POST", "/json")
+            .with_header("content-type", "application/json")
+            .with_body(Bytes::from_static(b"{\"x\":1}"));
+        request
+            .extensions
+            .insert_typed(super::super::EnforcedRequestBodyPolicy { policy: enforced });
+        request.extensions.insert_typed(
+            super::super::RequestBodyPolicy::new()
+                .max_total_body_size(4096)
+                .body_limits(BodyLimits::new().max_json_body_size(4096)),
+        );
+        request
+            .extensions
+            .insert_typed(BodyLimits::new().max_json_body_size(4096));
+
+        let reported = request
+            .body_policy()
+            .expect("protected effective policy remains inspectable");
+        assert_eq!(reported.body_limits.max_json_body_size, 4);
+        assert_eq!(reported.max_total_body_size, 1024);
+
+        let error = Json::<serde_json::Value>::from_request(request)
+            .expect_err("late middleware must not loosen locked JSON limit");
+        assert_eq!(
+            error.status,
+            super::super::response::StatusCode::PAYLOAD_TOO_LARGE
+        );
+    }
+
+    #[test]
+    fn body_policy_accessor_includes_tighter_legacy_projections() {
+        let enforced = super::super::RequestBodyPolicy::new()
+            .max_total_body_size(1024)
+            .body_limits(BodyLimits::new().max_json_body_size(10))
+            .multipart_limits(
+                super::super::multipart::MultipartLimits::new().max_part_body_size(12),
+            )
+            .resolved();
+        let mut request = Request::new("POST", "/upload");
+        request
+            .extensions
+            .insert_typed(super::super::EnforcedRequestBodyPolicy { policy: enforced });
+        request
+            .extensions
+            .insert_typed(BodyLimits::new().max_json_body_size(4));
+        request
+            .extensions
+            .insert_typed(super::super::multipart::MultipartLimits::new().max_part_body_size(3));
+
+        let reported = request
+            .body_policy()
+            .expect("protected effective policy remains inspectable");
+        assert_eq!(reported.max_total_body_size, 1024);
+        assert_eq!(reported.body_limits.max_json_body_size, 4);
+        assert_eq!(reported.multipart_limits.max_part_body_size, 3);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn body_policy_unconfigured_chunked_body_preserves_unknown_upper_hint() {
+        let cx = Cx::for_testing();
+        let (mut writer, incoming) = IncomingRequestBody::channel(&cx, BodyKind::Chunked);
+        let mut request = Request::new("POST", "/streamed");
+        let control = insert_streaming_raw_body(&mut request, incoming)
+            .expect("install unconfigured streaming body");
+        let body = StreamingRawBody::from_request(request).expect("take streaming body");
+        assert_eq!(body.size_hint().upper(), None);
+
+        block_on(writer.push_bytes(&cx, b"4\r\nbody\r\n0\r\n\r\n"))
+            .expect("publish bounded chunked body");
+        let collected = block_on(body.collect_bounded_with_cx(&cx, 4))
+            .expect("unconfigured chunked body remains collectable");
+        assert_eq!(collected.data().as_ref(), b"body");
+        drop(control);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn body_policy_streaming_raw_body_rejects_declared_length_before_take() {
+        let cx = Cx::for_testing();
+        let (writer, incoming) = IncomingRequestBody::channel(&cx, BodyKind::ContentLength(8));
+        let mut request = Request::new("POST", "/streamed").with_header("content-length", "8");
+        request
+            .extensions
+            .insert_typed(super::super::RequestBodyPolicy::new().max_total_body_size(6));
+        let control = insert_streaming_raw_body(&mut request, incoming)
+            .expect("install policy-limited streaming body");
+
+        let error = StreamingRawBody::from_request(request)
+            .expect_err("declared length above policy must fail before take");
+        assert_eq!(
+            error.status,
+            super::super::response::StatusCode::PAYLOAD_TOO_LARGE
+        );
+        assert!(!writer.consumer_dropped());
+        drop(control);
+        assert!(writer.consumer_dropped());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn body_policy_streaming_raw_body_into_inner_retains_limit_and_size_hint() {
+        let cx = Cx::for_testing();
+        let (mut writer, incoming) = IncomingRequestBody::channel(&cx, BodyKind::Chunked);
+        let mut request = Request::new("POST", "/streamed");
+        request
+            .extensions
+            .insert_typed(super::super::RequestBodyPolicy::new().max_total_body_size(6));
+        let control = insert_streaming_raw_body(&mut request, incoming)
+            .expect("install policy-limited streaming body");
+        let body = StreamingRawBody::from_request(request).expect("take streaming body");
+        let mut body = body.into_inner();
+        assert_eq!(body.size_hint().upper(), Some(6));
+
+        block_on(writer.push_bytes(&cx, b"4\r\nABCD\r\n"))
+            .expect("first chunk stays inside policy");
+        let frame = block_on(std::future::poll_fn(|poll_cx| {
+            Pin::new(&mut body).poll_frame(poll_cx)
+        }))
+        .expect("first frame")
+        .expect("first frame succeeds");
+        assert_eq!(frame.data_ref().expect("DATA frame").remaining(), 4);
+        assert_eq!(body.size_hint().upper(), Some(2));
+
+        let writer_error = block_on(writer.push_bytes(&cx, b"3\r\nEFG\r\n0\r\n\r\n"))
+            .expect_err("inner body must retain the route policy");
+        assert!(matches!(
+            writer_error,
+            IncomingBodyError::BodyTooLarge {
+                actual: Some(7),
+                limit: 6,
+            }
+        ));
+        let body_error = block_on(std::future::poll_fn(|poll_cx| {
+            Pin::new(&mut body).poll_frame(poll_cx)
+        }))
+        .expect("terminal policy error")
+        .expect_err("body observes policy error");
+        assert!(matches!(
+            body_error,
+            IncomingBodyError::BodyTooLarge {
+                actual: Some(7),
+                limit: 6,
+            }
+        ));
+        assert_eq!(body.size_hint().exact(), Some(0));
+        drop(control);
     }
 
     #[cfg(not(target_arch = "wasm32"))]

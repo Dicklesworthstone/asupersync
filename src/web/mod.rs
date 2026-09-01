@@ -84,6 +84,117 @@ pub mod static_files_path_traversal_audit;
 /// WebSocket support for the web framework.
 pub mod websocket;
 
+/// Effective request-body budgets applied at the server, router, and route
+/// boundaries.
+///
+/// Policies compose monotonically: every nested boundary takes the minimum of
+/// each byte, count, and timeout ceiling. A route can therefore tighten an
+/// outer server policy, but it cannot accidentally loosen one. The resolved
+/// policy is inserted into request extensions together with its
+/// [`extract::BodyLimits`] and [`multipart::MultipartLimits`] projections.
+/// Handlers that need the protected effective value can inspect it with
+/// [`extract::Request::body_policy`].
+///
+/// Existing callers that inject `BodyLimits` or `MultipartLimits` directly
+/// remain supported. The first explicit `RequestBodyPolicy` boundary converts
+/// those legacy values into the same monotonic policy plane.
+///
+/// The monotonic guarantee covers server, nested-router, route, and typed
+/// projection updates while the router-provided request extensions remain
+/// intact. Middleware that deliberately replaces the entire public
+/// [`extract::Request::extensions`] map discards all router state, including
+/// the protected policy snapshot, and is outside that guarantee.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct RequestBodyPolicy {
+    /// Format-independent ceiling for request DATA bytes.
+    pub max_total_body_size: usize,
+    /// JSON, form, and raw buffered-extractor ceilings.
+    pub body_limits: extract::BodyLimits,
+    /// Multipart total, field, header, count, and timeout ceilings.
+    pub multipart_limits: multipart::MultipartLimits,
+}
+
+/// Private monotonic snapshot retained after the first explicit policy boundary.
+///
+/// Public projection extensions remain writable for backwards compatibility.
+/// While the extensions map remains intact, extractors meet those projections
+/// with this snapshot so later projection updates can tighten but never loosen
+/// an already-enforced policy.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct EnforcedRequestBodyPolicy {
+    pub(super) policy: RequestBodyPolicy,
+}
+
+impl Default for RequestBodyPolicy {
+    fn default() -> Self {
+        Self {
+            max_total_body_size: 16 * 1024 * 1024,
+            body_limits: extract::BodyLimits::default(),
+            multipart_limits: multipart::MultipartLimits::default(),
+        }
+    }
+}
+
+impl RequestBodyPolicy {
+    /// Create the compatibility defaults: 16 MiB total, 10 MiB JSON/raw,
+    /// 2 MiB form, and the standard multipart ceilings.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the format-independent request DATA ceiling.
+    #[must_use]
+    pub fn max_total_body_size(mut self, bytes: usize) -> Self {
+        self.max_total_body_size = bytes;
+        self
+    }
+
+    /// Set the JSON, form, and raw extractor ceilings.
+    #[must_use]
+    pub fn body_limits(mut self, limits: extract::BodyLimits) -> Self {
+        self.body_limits = limits;
+        self
+    }
+
+    /// Set the multipart parser ceilings.
+    #[must_use]
+    pub fn multipart_limits(mut self, limits: multipart::MultipartLimits) -> Self {
+        self.multipart_limits = limits;
+        self
+    }
+
+    /// Meet this policy with another boundary's policy.
+    ///
+    /// Every field takes the smaller value, including timeout ceilings. For
+    /// resolved policies this operation is commutative, associative, and
+    /// idempotent. The returned policy is always resolved.
+    #[must_use]
+    pub fn tightened_with(self, other: Self) -> Self {
+        Self {
+            max_total_body_size: self.max_total_body_size.min(other.max_total_body_size),
+            body_limits: self.body_limits.tightened_with(other.body_limits),
+            multipart_limits: self.multipart_limits.tightened_with(other.multipart_limits),
+        }
+        .resolved()
+    }
+
+    /// Return the extractor projections after applying the format-independent
+    /// total ceiling.
+    #[must_use]
+    pub fn resolved(self) -> Self {
+        let total = self.max_total_body_size;
+        let body_limits = self.body_limits.max_total_body_size(total);
+        let multipart_limits = self.multipart_limits.max_total_body_size(total);
+        Self {
+            max_total_body_size: total,
+            body_limits,
+            multipart_limits,
+        }
+    }
+}
+
 pub use extract::{
     Accept, Authorization, ContentType, Cookie, CookieJar, Extension, Form, FromHeaderValue,
     FromRequest, FromRequestParts, Header, HeaderParseError, Json as JsonExtract, Path, Query,
@@ -109,7 +220,8 @@ pub use response::{Http3BodySender, Http3StreamResponder};
 #[cfg(not(target_arch = "wasm32"))]
 pub use router::{Http1ProducedHandlerFuture, Http2ProducedHandlerFuture};
 pub use router::{
-    HttpHandlerFuture, MethodRouter, RouteInfo, Router, delete, get, patch, post, put,
+    HttpHandlerFuture, MethodRouter, RouteBodyPolicyInfo, RouteInfo, Router, delete, get, patch,
+    post, put,
 };
 #[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
 pub use router::{
