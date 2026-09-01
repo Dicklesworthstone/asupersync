@@ -394,6 +394,38 @@ pub trait Body {
     }
 }
 
+/// Treat an already-buffered byte string as a single-frame HTTP body.
+///
+/// This compatibility-preserving implementation lets the public
+/// `web::Response::body` field participate in the same [`Body`] contract as
+/// [`Full`] and channel-backed streaming bodies without changing its `Bytes`
+/// type. Polling transfers the immutable buffer into a [`BytesCursor`] without
+/// copying it; an empty buffer is already at end-of-stream.
+impl Body for Bytes {
+    type Data = BytesCursor;
+    type Error = Infallible;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        let bytes = std::mem::take(self.get_mut());
+        if bytes.is_empty() {
+            Poll::Ready(None)
+        } else {
+            Poll::Ready(Some(Ok(Frame::Data(BytesCursor::new(bytes)))))
+        }
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.is_empty()
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        SizeHint::with_exact(u64::try_from(self.len()).unwrap_or(u64::MAX))
+    }
+}
+
 // Implement Body for Pin<Box<dyn Body>>
 impl<B: Body + ?Sized> Body for Pin<Box<B>> {
     type Data = B::Data;
@@ -864,6 +896,45 @@ mod tests {
     fn empty_body_returns_none() {
         let mut body = Empty::new();
         assert!(matches!(poll_body(&mut body), Poll::Ready(None)));
+    }
+
+    #[test]
+    fn buffered_bytes_body_returns_one_zero_copy_frame_then_eof() {
+        let original = Bytes::from_static(b"buffered response");
+        let original_ptr = original.as_ref().as_ptr();
+        let mut body = original.clone();
+
+        assert!(!body.is_end_stream());
+        assert_eq!(body.size_hint().exact(), Some(17));
+
+        let frame = poll_body(&mut body);
+        let Poll::Ready(Some(Ok(Frame::Data(data)))) = frame else {
+            panic!("nonempty Bytes body must yield one DATA frame");
+        };
+        let framed = data.into_inner();
+        assert_eq!(framed, original);
+        assert_eq!(framed.as_ref().as_ptr(), original_ptr);
+        assert!(body.is_end_stream());
+        assert_eq!(body.size_hint().exact(), Some(0));
+        assert!(matches!(poll_body(&mut body), Poll::Ready(None)));
+    }
+
+    #[test]
+    fn buffered_bytes_body_empty_is_immediate_eof() {
+        let mut body = Bytes::new();
+
+        assert!(body.is_end_stream());
+        assert_eq!(body.size_hint().exact(), Some(0));
+        assert!(matches!(poll_body(&mut body), Poll::Ready(None)));
+    }
+
+    #[test]
+    fn buffered_bytes_body_shares_streamed_data_contract() {
+        fn assert_shared_contract<B: Body<Data = BytesCursor>>() {}
+
+        assert_shared_contract::<Bytes>();
+        assert_shared_contract::<Full<BytesCursor>>();
+        assert_shared_contract::<crate::http::h1::stream::OutgoingBody>();
     }
 
     #[test]
