@@ -1131,7 +1131,9 @@ impl<'a> PacketReader<'a> {
 // ============================================================================
 
 /// Compute SHA1 hash.
-#[cfg(test)]
+///
+/// Production use is confined to the opt-in `mysql_native_password`
+/// exchange (see `MySqlConnectOptions::insecure_legacy_mysql_native_password`).
 fn sha1(data: &[u8]) -> [u8; 20] {
     use sha1::Digest;
     let mut hasher = sha1::Sha1::new();
@@ -1221,6 +1223,15 @@ impl<T: AsMut<[u8]>> Drop for ZeroizingBytes<T> {
 /// mysql_native_password authentication.
 /// scramble = SHA1(password) XOR SHA1(nonce + SHA1(SHA1(password)))
 ///
+/// `nonce` is the 20-byte server challenge: HandshakeV10 auth-plugin-data
+/// part 1 ++ part 2 with the trailing NUL already stripped by the handshake
+/// parser, or the AuthSwitchRequest payload with its trailing NUL stripped by
+/// `MySqlConnection::handle_auth_switch`.
+///
+/// Only reachable on the wire when
+/// `MySqlConnectOptions::insecure_legacy_mysql_native_password` is `true`;
+/// the default client fails closed before computing this value.
+///
 /// br-asupersync-h75445: `double_hash = SHA1(SHA1(password))` is the
 /// exact value `mysql.user.authentication_string` stores for
 /// mysql_native_password accounts — i.e. password-equivalent for the
@@ -1228,7 +1239,6 @@ impl<T: AsMut<[u8]>> Drop for ZeroizingBytes<T> {
 /// [`ZeroizingBytes`] so they are volatile-zeroed when this function
 /// returns; only the XOR'd scramble (which is what we send on the
 /// wire and is meaningless without the matching nonce) is returned.
-#[cfg(test)]
 fn mysql_native_auth(password: &str, nonce: &[u8]) -> Result<Vec<u8>, MySqlError> {
     validate_auth_nonce("mysql_native_password", nonce)?;
 
@@ -1313,23 +1323,31 @@ pub struct MySqlConnectOptions {
     pub connect_timeout: Option<std::time::Duration>,
     /// Require SSL.
     pub ssl_mode: SslMode,
-    /// Compatibility policy input retained for callers that configured legacy
-    /// `mysql_native_password` authentication before v0.4.3.
+    /// Opt-in for the legacy `mysql_native_password` authentication plugin.
     ///
-    /// Setting this field does **not** enable the plugin. The production client
-    /// permanently rejects `mysql_native_password` during both the initial
-    /// handshake and an authentication switch because its SHA-1 exchange is
-    /// vulnerable to offline password cracking. The field remains public so
-    /// existing struct literals keep compiling; migrate the server account to
-    /// `caching_sha2_password` instead of relying on this value.
+    /// **Default `false` (fail closed).** When `false`, the client rejects
+    /// `mysql_native_password` with [`MySqlError::UnsupportedAuthPlugin`]
+    /// during both the initial handshake and an `AuthSwitchRequest`, before
+    /// any authentication response is written to the socket.
+    ///
+    /// When `true`, the client answers a `mysql_native_password` challenge
+    /// with the SHA-1 scramble
+    /// `SHA1(password) XOR SHA1(nonce || SHA1(SHA1(password)))`.
+    ///
+    /// **Security:** the exchange is SHA-1 based; a captured nonce/scramble
+    /// pair permits offline password guessing. Prefer migrating the server
+    /// account to `caching_sha2_password`. A server-driven switch *down* from
+    /// `caching_sha2_password` additionally requires
+    /// [`insecure_allow_auth_switch_downgrade`](Self::insecure_allow_auth_switch_downgrade).
     pub insecure_legacy_mysql_native_password: bool,
-    /// Compatibility policy input for server-driven authentication-plugin
-    /// downgrades during `AuthSwitchRequest`.
+    /// Opt-in for server-driven authentication-plugin downgrades during
+    /// `AuthSwitchRequest` (`caching_sha2_password` -> `mysql_native_password`).
     ///
-    /// The value is still consulted by the downgrade policy check, but it does
-    /// not override the permanent production rejection of
-    /// `mysql_native_password`. In particular, setting both insecure opt-ins
-    /// cannot make a SHA-1 authentication response reachable.
+    /// This flag only relaxes the downgrade policy check; the switched-to
+    /// plugin must still be enabled on its own (for `mysql_native_password`,
+    /// via
+    /// [`insecure_legacy_mysql_native_password`](Self::insecure_legacy_mysql_native_password)).
+    /// Setting this flag alone never makes a SHA-1 response reachable.
     pub insecure_allow_auth_switch_downgrade: bool,
     /// br-asupersync-charset-negotiation: requested character set for
     /// the connection. If specified, the client validates that the server
@@ -2492,16 +2510,21 @@ impl MySqlConnection {
             .unwrap_or_default();
         let auth_response = match handshake.auth_plugin_name.as_str() {
             "mysql_native_password" => {
-                // SECURITY: mysql_native_password uses SHA1 which is cryptographically broken
-                // and vulnerable to offline password cracking attacks. This authentication
-                // method is permanently disabled to prevent password compromise.
-                return Err(MySqlError::UnsupportedAuthPlugin(
-                    "mysql_native_password is permanently disabled due to SHA1 cryptographic \
-                     weaknesses that enable offline password cracking from captured network \
-                     exchanges. Use MySQL 5.7+ with caching_sha2_password (default in MySQL 8.0+) \
-                     or configure your MySQL server to require secure authentication plugins."
-                        .to_string(),
-                ));
+                // SECURITY: mysql_native_password uses SHA1, so a captured
+                // nonce/scramble pair permits offline password cracking. It is
+                // fail-closed unless the operator explicitly opted in via
+                // `insecure_legacy_mysql_native_password`. The rejection
+                // happens before any authentication bytes are written.
+                if !options.insecure_legacy_mysql_native_password {
+                    return Err(MySqlError::UnsupportedAuthPlugin(
+                        "mysql_native_password is permanently disabled due to SHA1 cryptographic \
+                         weaknesses that enable offline password cracking from captured network \
+                         exchanges. Use MySQL 5.7+ with caching_sha2_password (default in MySQL 8.0+) \
+                         or configure your MySQL server to require secure authentication plugins."
+                            .to_string(),
+                    ));
+                }
+                mysql_native_auth(password, &handshake.auth_plugin_data)?
             }
             "caching_sha2_password" => caching_sha2_auth(password, &handshake.auth_plugin_data)?,
             plugin => {
@@ -2701,12 +2724,18 @@ impl MySqlConnection {
         validate_auth_plugin_switch(handshake.auth_plugin_name.as_str(), plugin_name, options)?;
         let auth_response = match plugin_name {
             "mysql_native_password" => {
-                return Err(MySqlError::UnsupportedAuthPlugin(
-                    "mysql_native_password permanently blocked due to SHA1 cryptographic weakness. \
-                     SHA1 enables offline password cracking from captured network exchanges. \
-                     Use caching_sha2_password instead."
-                        .to_string(),
-                ));
+                // SECURITY: fail closed unless the operator explicitly opted
+                // in; `validate_auth_plugin_switch` above has already applied
+                // the separate downgrade policy. Rejection precedes any write.
+                if !options.insecure_legacy_mysql_native_password {
+                    return Err(MySqlError::UnsupportedAuthPlugin(
+                        "mysql_native_password permanently blocked due to SHA1 cryptographic weakness. \
+                         SHA1 enables offline password cracking from captured network exchanges. \
+                         Use caching_sha2_password instead."
+                            .to_string(),
+                    ));
+                }
+                mysql_native_auth(password, auth_data)?
             }
             "caching_sha2_password" => caching_sha2_auth(password, auth_data)?,
             plugin => {
@@ -7524,6 +7553,38 @@ mod tests {
         assert_eq!(result.len(), 20);
     }
 
+    /// Known-answer test. The expected bytes were derived OUTSIDE this crate
+    /// with coreutils `sha1sum` (derivation recorded in
+    /// `tests/mysql_native_password_optin.rs`). `SHA1(SHA1("password"))` is
+    /// additionally the value MySQL itself stores for such an account:
+    /// `SELECT PASSWORD('password')` = `*2470C0C06DEE42FD1618BB99005ADCA2EC9D1E19`.
+    #[test]
+    fn test_mysql_native_auth_known_answer_vector() {
+        // RFC 3174 test vector for the SHA-1 primitive itself.
+        assert_eq!(
+            sha1(b"abc"),
+            [
+                0xa9, 0x99, 0x3e, 0x36, 0x47, 0x06, 0x81, 0x6a, 0xba, 0x3e, 0x25, 0x71, 0x78, 0x50,
+                0xc2, 0x6c, 0x9c, 0xd0, 0xd8, 0x9d
+            ]
+        );
+        assert_eq!(
+            sha1(&sha1(NATIVE_KAT_PASSWORD.as_bytes())),
+            [
+                0x24, 0x70, 0xc0, 0xc0, 0x6d, 0xee, 0x42, 0xfd, 0x16, 0x18, 0xbb, 0x99, 0x00, 0x5a,
+                0xdc, 0xa2, 0xec, 0x9d, 0x1e, 0x19
+            ]
+        );
+        assert_eq!(
+            mysql_native_auth(NATIVE_KAT_PASSWORD, NATIVE_KAT_HANDSHAKE_NONCE).unwrap(),
+            NATIVE_KAT_HANDSHAKE_SCRAMBLE
+        );
+        assert_eq!(
+            mysql_native_auth(NATIVE_KAT_PASSWORD, NATIVE_KAT_SWITCH_NONCE).unwrap(),
+            NATIVE_KAT_SWITCH_SCRAMBLE
+        );
+    }
+
     #[test]
     fn test_caching_sha2_auth() {
         let nonce = b"12345678901234567890";
@@ -10347,36 +10408,101 @@ mod tests {
         opts.insecure_legacy_mysql_native_password = true;
         opts.insecure_allow_auth_switch_downgrade = true;
 
-        // This helper validates only the downgrade-policy layer. The actual
-        // transport path still rejects mysql_native_password below.
+        // This helper validates only the downgrade-policy layer. Whether the
+        // switched-to plugin is itself enabled is decided separately by
+        // `insecure_legacy_mysql_native_password` inside `handle_auth_switch`.
         validate_auth_plugin_switch("caching_sha2_password", "mysql_native_password", &opts)
             .unwrap();
     }
 
-    #[test]
-    fn test_initial_mysql_native_password_stays_rejected_with_compatibility_opt_ins() {
-        let mut conn = make_test_connection();
-        let mut options = MySqlConnectOptions::parse("mysql://user:pass@localhost/db").unwrap();
-        options.insecure_legacy_mysql_native_password = true;
-        options.insecure_allow_auth_switch_downgrade = true;
-        let handshake = Handshake {
+    /// Known-answer vectors shared by the native-password tests. Derived
+    /// outside this crate with coreutils `sha1sum`; the full derivation is
+    /// recorded in `tests/mysql_native_password_optin.rs`.
+    const NATIVE_KAT_PASSWORD: &str = "password";
+    const NATIVE_KAT_HANDSHAKE_NONCE: &[u8; 20] = b"nativeauthnonce12345";
+    const NATIVE_KAT_HANDSHAKE_SCRAMBLE: [u8; 20] = [
+        0x5a, 0x04, 0x8b, 0x87, 0x96, 0x11, 0xaf, 0x44, 0xbd, 0xa3, 0xba, 0x23, 0x55, 0xc0, 0xe8,
+        0xc8, 0xf8, 0x79, 0x78, 0x9e,
+    ];
+    const NATIVE_KAT_SWITCH_NONCE: &[u8; 20] = b"switchnonce-98765432";
+    const NATIVE_KAT_SWITCH_SCRAMBLE: [u8; 20] = [
+        0x27, 0xb9, 0xd5, 0x0f, 0xea, 0xe4, 0xd7, 0x90, 0xf1, 0x0c, 0x48, 0x79, 0x0b, 0x44, 0xdf,
+        0x93, 0x9a, 0x2b, 0xf5, 0x84,
+    ];
+
+    fn native_kat_handshake(plugin: &str, nonce: &[u8]) -> Handshake {
+        Handshake {
             server_version: "8.0.0-test".to_string(),
             connection_id: 1,
-            auth_plugin_data: b"01234567890123456789".to_vec(),
+            auth_plugin_data: nonce.to_vec(),
             capabilities: capability::CLIENT_PROTOCOL_41
                 | capability::CLIENT_SECURE_CONNECTION
                 | capability::CLIENT_PLUGIN_AUTH,
             charset: 45,
             status_flags: 0,
-            auth_plugin_name: "mysql_native_password".to_string(),
-        };
+            auth_plugin_name: plugin.to_string(),
+        }
+    }
+
+    fn native_kat_options(legacy: bool, downgrade: bool) -> MySqlConnectOptions {
+        let mut options =
+            MySqlConnectOptions::parse(&format!("mysql://user:{NATIVE_KAT_PASSWORD}@localhost/db"))
+                .unwrap();
+        options.insecure_legacy_mysql_native_password = legacy;
+        options.insecure_allow_auth_switch_downgrade = downgrade;
+        options
+    }
+
+    /// Read one MySQL packet from the peer side of a test socket; returns
+    /// `(sequence_id, payload)`.
+    fn read_native_kat_peer_packet(peer: &mut std::net::TcpStream) -> (u8, Vec<u8>) {
+        let mut header = [0u8; 4];
+        peer.read_exact(&mut header).expect("packet header");
+        let len =
+            usize::from(header[0]) | (usize::from(header[1]) << 8) | (usize::from(header[2]) << 16);
+        let mut payload = vec![0u8; len];
+        peer.read_exact(&mut payload).expect("packet payload");
+        (header[3], payload)
+    }
+
+    #[test]
+    fn test_initial_mysql_native_password_rejected_without_legacy_opt_in() {
+        let mut conn = make_test_connection();
+        // The downgrade flag alone must not enable the plugin.
+        let options = native_kat_options(false, true);
+        let handshake = native_kat_handshake("mysql_native_password", NATIVE_KAT_HANDSHAKE_NONCE);
 
         let err = run(conn.send_handshake_response(&options, &handshake)).unwrap_err();
         assert!(
             matches!(err, MySqlError::UnsupportedAuthPlugin(ref message) if message.contains("permanently disabled")),
-            "compatibility opt-ins must not enable initial SHA-1 authentication: {err:?}"
+            "initial SHA-1 authentication must fail closed without the legacy opt-in: {err:?}"
         );
         assert_eq!(conn.inner.sequence, 0, "rejection must precede wire output");
+    }
+
+    #[test]
+    fn test_initial_mysql_native_password_opt_in_writes_known_scramble() {
+        let (mut conn, mut peer) = make_test_connection_with_peer();
+        let options = native_kat_options(true, false);
+        let handshake = native_kat_handshake("mysql_native_password", NATIVE_KAT_HANDSHAKE_NONCE);
+
+        run(conn.send_handshake_response(&options, &handshake))
+            .expect("opt-in native-password handshake response must be written");
+        assert_eq!(
+            conn.inner.sequence, 1,
+            "exactly one packet must have been written"
+        );
+
+        let (sequence, payload) = read_native_kat_peer_packet(&mut peer);
+        assert_eq!(sequence, 0);
+        // HandshakeResponse41 tail: lenenc(20) || scramble || "db\0" || plugin\0
+        let mut expected_tail = vec![20u8];
+        expected_tail.extend_from_slice(&NATIVE_KAT_HANDSHAKE_SCRAMBLE);
+        expected_tail.extend_from_slice(b"db\0mysql_native_password\0");
+        assert!(
+            payload.ends_with(&expected_tail),
+            "handshake response must end with lenenc(20) || scramble || db || plugin; got {payload:02x?}"
+        );
     }
 
     #[test]
@@ -10428,31 +10554,52 @@ mod tests {
     }
 
     #[test]
-    fn test_switched_mysql_native_password_stays_rejected_with_compatibility_opt_ins() {
+    fn test_switched_mysql_native_password_rejected_without_legacy_opt_in() {
         let mut conn = make_test_connection();
-        let mut options = MySqlConnectOptions::parse("mysql://user:pass@localhost/db").unwrap();
-        options.insecure_legacy_mysql_native_password = true;
-        options.insecure_allow_auth_switch_downgrade = true;
-        let handshake = Handshake {
-            server_version: "8.0.0-test".to_string(),
-            connection_id: 1,
-            auth_plugin_data: b"01234567890123456789".to_vec(),
-            capabilities: capability::CLIENT_PROTOCOL_41
-                | capability::CLIENT_SECURE_CONNECTION
-                | capability::CLIENT_PLUGIN_AUTH,
-            charset: 45,
-            status_flags: 0,
-            auth_plugin_name: "caching_sha2_password".to_string(),
-        };
+        // Downgrade policy passes (flag set) but the plugin itself is not enabled.
+        let options = native_kat_options(false, true);
+        let handshake = native_kat_handshake("caching_sha2_password", b"01234567890123456789");
         let mut auth_switch = b"mysql_native_password\0".to_vec();
-        auth_switch.extend_from_slice(b"01234567890123456789\0");
+        auth_switch.extend_from_slice(NATIVE_KAT_SWITCH_NONCE);
+        auth_switch.push(0);
 
         let err = run(conn.handle_auth_switch(&auth_switch, &options, &handshake)).unwrap_err();
         assert!(
             matches!(err, MySqlError::UnsupportedAuthPlugin(ref message) if message.contains("permanently blocked")),
-            "compatibility opt-ins must not enable switched SHA-1 authentication: {err:?}"
+            "switched SHA-1 authentication must fail closed without the legacy opt-in: {err:?}"
         );
         assert_eq!(conn.inner.sequence, 0, "rejection must precede wire output");
+    }
+
+    #[test]
+    fn test_switched_mysql_native_password_opt_in_writes_known_scramble() {
+        let (mut conn, mut peer) = make_test_connection_with_peer();
+        let options = native_kat_options(true, true);
+        let handshake = native_kat_handshake("caching_sha2_password", b"01234567890123456789");
+        // AuthSwitchRequest payload after the 0xFE header: plugin\0 || nonce || \0.
+        // The trailing NUL must be excluded from the scramble input.
+        let mut auth_switch = b"mysql_native_password\0".to_vec();
+        auth_switch.extend_from_slice(NATIVE_KAT_SWITCH_NONCE);
+        auth_switch.push(0);
+
+        let server = std::thread::spawn(move || {
+            let (sequence, payload) = read_native_kat_peer_packet(&mut peer);
+            // OK packet: header(len=7, seq+1) || 0x00 affected rows, last insert id,
+            // status flags (2), warnings (2).
+            let mut ok = vec![0x07, 0x00, 0x00, sequence.wrapping_add(1)];
+            ok.extend_from_slice(&[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+            peer.write_all(&ok).expect("write ok");
+            peer.flush().expect("flush ok");
+            payload
+        });
+
+        run(conn.handle_auth_switch(&auth_switch, &options, &handshake))
+            .expect("opt-in native-password auth switch must complete on the OK packet");
+        let payload = server.join().expect("peer thread");
+        assert_eq!(
+            payload, NATIVE_KAT_SWITCH_SCRAMBLE,
+            "auth-switch response must be exactly the SHA-1 scramble for the switch nonce"
+        );
     }
 
     #[test]
