@@ -6235,8 +6235,30 @@ mod tests {
             })
             .expect("over-limit body closes the connection cleanly");
 
-        assert_eq!(state.requests_served, 0);
-        assert!(written.lock().unwrap().is_empty());
+        // ASUP-E505 contract: an in-flight streaming-body refusal writes the
+        // safely writable 413 with `Connection: close`, counts that hop, and
+        // closes so the unread body bytes cannot be mistaken for a new
+        // request. The handler's 200 must never reach the wire.
+        assert_eq!(state.requests_served, 1);
+        let written_text = String::from_utf8_lossy(&written.lock().unwrap()).into_owned();
+        assert!(
+            written_text.starts_with("HTTP/1.1 413 "),
+            "expected a 413 refusal, wrote {written_text:?}"
+        );
+        assert!(
+            written_text.contains("[ASUP-E505]"),
+            "refusal must carry the diagnostic token, wrote {written_text:?}"
+        );
+        assert!(
+            written_text
+                .to_ascii_lowercase()
+                .contains("\r\nconnection: close\r\n"),
+            "refusal must close the connection, wrote {written_text:?}"
+        );
+        assert!(
+            !written_text.contains("must not commit"),
+            "handler response leaked after the body refusal: {written_text:?}"
+        );
         assert_eq!(state.phase, ConnectionPhase::Closing);
         assert_eq!(
             observed_error.lock().unwrap().as_ref(),

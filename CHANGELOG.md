@@ -103,8 +103,16 @@ real macOS host found:
   `TcpStream`/`TcpListener` sites in grpc/client.rs and the h1/h2 listeners
   need review, not a snapshot refresh), the pwsh/elvish completion snapshot
   was never committed, `x509-parser` 0.18 accepts a malformed SPKI the
-  `der_min` differential expects rejected, the ALPN-required acceptor test,
-  and one streaming h1 body-limit test.
+  `der_min` differential expects rejected, and the ALPN-required acceptor
+  test.
+- Correction: four of those failures were not feature-dependent at all and
+  fail with default features too (`ambient_authority_does_not_regress`,
+  `known_findings_reference_real_code`, the multipart cancellation message,
+  and `streaming_server_refuses_actual_chunked_bytes_over_limit`). The last
+  one pinned the pre-2026-09-01 silent close; the h1 streaming server now
+  writes the 413 `[ASUP-E505]` refusal with `Connection: close` and counts
+  the hop, and the test asserts exactly that (the handler's 200 must not
+  reach the wire).
 - Genuine macOS differences (51 failures on macOS 26.2 with the same feature
   set, 24 of which are the cross-platform items above) are listed on the
   same bead: TCP option read-back, UDP re-`connect` needing `AF_UNSPEC`,

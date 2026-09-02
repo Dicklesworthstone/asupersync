@@ -2075,7 +2075,11 @@ mod tests {
             .position(|window| window == spki)
             .expect("SPKI fixture location");
         malformed_spki[spki_offset] = TAG_SEQUENCE ^ 0x20;
-        assert!(!x509_parser_accepts_one_complete_certificate(
+        // Divergence: x509-parser 0.18 (asn1-rs) tolerates a SEQUENCE whose
+        // constructed bit is cleared and still yields one complete
+        // certificate; DER requires the bit (X.690 8.1.2.5), so the pinned
+        // parser refuses the SPKI with `ConstructedBit`.
+        assert!(x509_parser_accepts_one_complete_certificate(
             &malformed_spki
         ));
         expect_error(
