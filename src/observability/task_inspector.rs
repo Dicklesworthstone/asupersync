@@ -24,15 +24,171 @@
 use crate::console::Console;
 use crate::cx::Cx;
 use crate::record::task::{TaskPhase, TaskRecord, TaskState};
+use crate::record::{ObligationRecord, RegionRecord};
+use crate::runtime::obligation_table::ObligationTable;
 use crate::runtime::state::RuntimeState;
+use crate::runtime::task_table::TaskTable;
+use crate::sync::ContendedMutex;
 use crate::time::TimerDriverHandle;
 use crate::tracing_compat::{debug, info, trace, warn};
 use crate::types::{ObligationId, Outcome, RegionId, TaskId, Time};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
-use std::sync::Arc;
+use std::sync::{Arc, PoisonError};
 use std::time::Duration;
+
+/// Where an inspector or diagnostics engine reads runtime state from.
+///
+/// `Owned` is the historical detached form: [`TaskInspector::new`] and
+/// [`Diagnostics::new`](crate::observability::Diagnostics::new) hand over an
+/// `Arc<RuntimeState>` that nothing else mutates concurrently.
+///
+/// `Shared` binds to a live [`Runtime`](crate::runtime::Runtime). Every
+/// query locks the unified runtime state for its own duration and, when the
+/// runtime keeps task records in the scheduler's external dispatch table
+/// and/or obligation records in a shard-C table, those tables too, in the
+/// canonical B -> A -> C lock order (the same order `spawn`,
+/// `cancel_request`, and `Runtime::is_quiescent` use from user threads).
+/// Queries copy plain data out and never run user code or await while
+/// holding those locks, so they are safe to issue from any thread, including
+/// from inside a task running on the same runtime.
+#[derive(Debug)]
+pub(crate) enum RuntimeStateSource {
+    /// Caller-owned, detached state.
+    Owned(Arc<RuntimeState>),
+    /// A live runtime's shared state, locked per query.
+    Shared {
+        /// Unified runtime state (lock class B).
+        state: Arc<ContendedMutex<RuntimeState>>,
+        /// The scheduler's external dispatch task table (lock class A) when
+        /// the runtime keeps live task records outside the unified arena
+        /// (E1.2 dispatch-table runtimes and the sharded state shape, whose
+        /// shard A is this same table). `None` when task records live in the
+        /// unified state.
+        tasks: Option<Arc<ContendedMutex<TaskTable>>>,
+        /// Shard-C obligation table when the runtime was built with the
+        /// sharded state shape. `None` on the default unified shape.
+        obligations: Option<Arc<ContendedMutex<ObligationTable>>>,
+    },
+}
+
+/// Borrowed read view over runtime state that resolves each record kind to
+/// the table owning it (embedded arena, or external shard when present).
+pub(crate) struct RuntimeStateView<'a> {
+    state: &'a RuntimeState,
+    shard_tasks: Option<&'a TaskTable>,
+    shard_obligations: Option<&'a ObligationTable>,
+}
+
+impl<'a> RuntimeStateView<'a> {
+    /// Task record by id: external shard-A table first, then the embedded arena.
+    pub(crate) fn task(&self, task_id: TaskId) -> Option<&'a TaskRecord> {
+        let state: &'a RuntimeState = self.state;
+        self.shard_tasks
+            .and_then(|table| table.task(task_id))
+            .or_else(|| state.task(task_id))
+    }
+
+    /// Every task record: the external shard-A table (when present), then
+    /// the embedded arena.
+    pub(crate) fn tasks(&self) -> impl Iterator<Item = &'a TaskRecord> + 'a {
+        let state: &'a RuntimeState = self.state;
+        let external = self.shard_tasks.map(|table| table.tasks_arena().iter());
+        external
+            .into_iter()
+            .flatten()
+            .chain(state.tasks_arena().iter())
+            .map(|(_, record)| record)
+    }
+
+    /// Region record by id (regions stay embedded in the unified state on
+    /// every shape).
+    pub(crate) fn region(&self, region_id: RegionId) -> Option<&'a RegionRecord> {
+        let state: &'a RuntimeState = self.state;
+        state.region(region_id)
+    }
+
+    /// Every obligation record: the external shard-C table (when present),
+    /// then the embedded table.
+    pub(crate) fn obligations(&self) -> impl Iterator<Item = &'a ObligationRecord> + 'a {
+        let state: &'a RuntimeState = self.state;
+        let external = self.shard_obligations.map(ObligationTable::iter);
+        external
+            .into_iter()
+            .flatten()
+            .chain(state.obligations.iter())
+            .map(|(_, record)| record)
+    }
+
+    /// Sorted ids of pending obligations held by `task_id` across the
+    /// owning table(s).
+    pub(crate) fn pending_obligations_for_holder(&self, task_id: TaskId) -> Vec<ObligationId> {
+        let mut ids: Vec<ObligationId> = self
+            .state
+            .obligations
+            .sorted_pending_ids_for_holder(task_id)
+            .into_iter()
+            .collect();
+        if let Some(table) = self.shard_obligations {
+            ids.extend(table.sorted_pending_ids_for_holder(task_id));
+            ids.sort_unstable();
+            ids.dedup();
+        }
+        ids
+    }
+
+    /// Current runtime time for observability.
+    ///
+    /// Live runtimes advance time through the timer driver, while timerless
+    /// runtimes and many direct tests only move `RuntimeState::now`. Prefer
+    /// the timer driver when present and fall back to the logical state
+    /// clock so ages remain meaningful in both modes.
+    pub(crate) fn now(&self) -> Time {
+        self.state
+            .timer_driver()
+            .map_or(self.state.now, TimerDriverHandle::now)
+    }
+}
+
+impl RuntimeStateSource {
+    /// Runs `f` against a consistent read view of the state.
+    ///
+    /// For `Shared` sources this holds the unified state lock (and the shard
+    /// A/C table locks on the sharded shape) for exactly the duration of `f`;
+    /// `f` must therefore stay a pure read that copies data out — never a
+    /// callback into user code, a tracing emit, or an await.
+    pub(crate) fn with_view<R>(&self, f: impl FnOnce(&RuntimeStateView<'_>) -> R) -> R {
+        match self {
+            Self::Owned(state) => f(&RuntimeStateView {
+                state: state.as_ref(),
+                shard_tasks: None,
+                shard_obligations: None,
+            }),
+            Self::Shared {
+                state,
+                tasks,
+                obligations,
+            } => {
+                // Lock order B (unified state) -> A (dispatch/shard tasks) ->
+                // C (shard obligations); locals drop in reverse declaration
+                // order, so C and A release before B.
+                let state = state.lock().unwrap_or_else(PoisonError::into_inner);
+                let tasks = tasks
+                    .as_ref()
+                    .map(|table| table.lock().unwrap_or_else(PoisonError::into_inner));
+                let obligations = obligations
+                    .as_ref()
+                    .map(|table| table.lock().unwrap_or_else(PoisonError::into_inner));
+                f(&RuntimeStateView {
+                    state: &state,
+                    shard_tasks: tasks.as_deref(),
+                    shard_obligations: obligations.as_deref(),
+                })
+            }
+        }
+    }
+}
 
 /// Configuration for the task inspector.
 #[derive(Debug, Clone)]
@@ -435,7 +591,7 @@ pub struct TaskSummary {
 /// Real-time task inspector for runtime diagnostics.
 #[derive(Debug)]
 pub struct TaskInspector {
-    state: Arc<RuntimeState>,
+    state: RuntimeStateSource,
     config: TaskInspectorConfig,
     console: Option<Console>,
 }
@@ -454,6 +610,17 @@ impl TaskInspector {
         console: Option<Console>,
         config: TaskInspectorConfig,
     ) -> Self {
+        Self::from_source(RuntimeStateSource::Owned(state), console, config)
+    }
+
+    /// Create an inspector over any state source: detached state or a live
+    /// runtime's shared state (see
+    /// [`Runtime::task_inspector`](crate::runtime::Runtime::task_inspector)).
+    pub(crate) fn from_source(
+        state: RuntimeStateSource,
+        console: Option<Console>,
+        config: TaskInspectorConfig,
+    ) -> Self {
         debug!(
             stuck_threshold_secs = config.stuck_task_threshold.as_secs(),
             show_obligations = config.show_obligations,
@@ -464,18 +631,6 @@ impl TaskInspector {
             config,
             console,
         }
-    }
-
-    /// Get the current runtime time for observability.
-    ///
-    /// Live runtimes advance time through the timer driver, while timerless
-    /// runtimes and many direct tests only move `RuntimeState::now`.
-    /// Prefer the timer driver when present and fall back to the logical state
-    /// clock otherwise so task ages remain meaningful in both modes.
-    fn current_time(&self) -> Time {
-        self.state
-            .timer_driver()
-            .map_or(self.state.now, TimerDriverHandle::now)
     }
 
     /// Get the current checkpoint time when it shares the task's checkpoint clock.
@@ -498,19 +653,20 @@ impl TaskInspector {
     #[must_use]
     pub fn inspect_task(&self, task_id: TaskId) -> Option<TaskDetails> {
         trace!(task_id = ?task_id, "inspecting task");
+        self.state
+            .with_view(|view| self.inspect_task_in(view, task_id))
+    }
 
-        let task = self.state.task(task_id)?;
-        let current_time = self.current_time();
+    /// Pure read of one task against an already-resolved state view.
+    fn inspect_task_in(&self, view: &RuntimeStateView<'_>, task_id: TaskId) -> Option<TaskDetails> {
+        let task = view.task(task_id)?;
+        let current_time = view.now();
         let age_nanos = current_time.duration_since(task.created_at);
         let age = Duration::from_nanos(age_nanos);
 
         // Collect obligations held by this task
         let obligations: Vec<ObligationId> = if self.config.show_obligations {
-            self.state
-                .obligations
-                .sorted_pending_ids_for_holder(task_id)
-                .into_iter()
-                .collect()
+            view.pending_obligations_for_holder(task_id)
         } else {
             Vec::new()
         };
@@ -547,9 +703,13 @@ impl TaskInspector {
     #[must_use]
     pub fn list_tasks(&self) -> Vec<TaskDetails> {
         trace!("listing all tasks");
-        self.state
-            .tasks_iter()
-            .filter_map(|(_, task)| self.inspect_task(task.id))
+        self.state.with_view(|view| self.list_tasks_in(view))
+    }
+
+    /// Pure read of every task against an already-resolved state view.
+    fn list_tasks_in(&self, view: &RuntimeStateView<'_>) -> Vec<TaskDetails> {
+        view.tasks()
+            .filter_map(|task| self.inspect_task_in(view, task.id))
             .collect()
     }
 
@@ -688,14 +848,14 @@ impl TaskInspector {
     /// Build a deterministic wire snapshot suitable for console or dashboard consumers.
     #[must_use]
     pub fn wire_snapshot(&self) -> TaskConsoleWireSnapshot {
-        let tasks = self.list_tasks();
+        // One view so the task list and the snapshot timestamp come from the
+        // same lock scope.
+        let (captured_at, tasks) = self
+            .state
+            .with_view(|view| (view.now(), self.list_tasks_in(view)));
         let summary = Self::summarize_tasks(&tasks, self.config.stuck_task_threshold);
         let wire_tasks = tasks.into_iter().map(TaskDetailsWire::from).collect();
-        TaskConsoleWireSnapshot::new(
-            self.current_time(),
-            TaskSummaryWire::from(summary),
-            wire_tasks,
-        )
+        TaskConsoleWireSnapshot::new(captured_at, TaskSummaryWire::from(summary), wire_tasks)
     }
 
     /// Serialize a wire snapshot as compact JSON.

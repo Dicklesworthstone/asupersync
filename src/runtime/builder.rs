@@ -158,7 +158,11 @@
 
 use crate::error::Error;
 use crate::observability::ObservabilityConfig;
+use crate::observability::diagnostics::Diagnostics;
 use crate::observability::metrics::MetricsProvider;
+use crate::observability::task_inspector::{
+    RuntimeStateSource, TaskInspector, TaskInspectorConfig,
+};
 use crate::record::RegionLimits;
 use crate::runtime::RuntimeState;
 use crate::runtime::SpawnError;
@@ -3835,6 +3839,57 @@ impl Runtime {
             })
     }
 
+    /// Build a [`TaskInspector`] bound to this runtime's live task state.
+    ///
+    /// Every inspector query locks the runtime state (and, on the sharded
+    /// state shape, the shard-A task table and shard-C obligation table in the
+    /// canonical B -> A -> C order) for exactly the duration of that query,
+    /// copies plain data out, and releases the locks before returning. It
+    /// never runs user code or awaits under those locks, so it is safe to call
+    /// from any thread, including from a task running on this runtime. The
+    /// returned inspector holds a strong reference to the runtime state and
+    /// stays valid until it is dropped; queries after runtime teardown observe
+    /// an empty task table.
+    ///
+    /// This is the production counterpart of
+    /// [`TaskInspector::new`](crate::observability::task_inspector::TaskInspector::new),
+    /// which inspects a detached [`RuntimeState`] that nothing else mutates.
+    #[must_use]
+    pub fn task_inspector(&self, config: TaskInspectorConfig) -> TaskInspector {
+        TaskInspector::from_source(
+            RuntimeStateSource::Shared {
+                state: Arc::clone(&self.inner.state),
+                tasks: self.inner.scheduler.dispatch_task_table(),
+                obligations: self
+                    .inner
+                    .sharded_state
+                    .as_ref()
+                    .map(|shards| Arc::clone(&shards.obligations)),
+            },
+            None,
+            config,
+        )
+    }
+
+    /// Build a [`Diagnostics`] engine bound to this runtime's live state.
+    ///
+    /// `explain_task_blocked`, `explain_region_open`, `explain_cancellation`,
+    /// `find_leaked_obligations`, and the structural/deadlock analyses read the
+    /// live task, region, and obligation tables under the same per-query lock
+    /// discipline as [`Runtime::task_inspector`].
+    #[must_use]
+    pub fn diagnostics(&self) -> Diagnostics {
+        Diagnostics::from_source(RuntimeStateSource::Shared {
+            state: Arc::clone(&self.inner.state),
+            tasks: self.inner.scheduler.dispatch_task_table(),
+            obligations: self
+                .inner
+                .sharded_state
+                .as_ref()
+                .map(|shards| Arc::clone(&shards.obligations)),
+        })
+    }
+
     /// Returns the current number of regions in the draining/finalizing cleanup path.
     ///
     /// This is a runtime-local observability signal for cleanup debt. It is not
@@ -3982,6 +4037,45 @@ impl RuntimeHandle {
         Self {
             inner: RuntimeHandleRef::Weak(Arc::downgrade(inner)),
         }
+    }
+
+    /// Build a [`TaskInspector`] bound to the runtime behind this handle.
+    ///
+    /// Returns `None` when this is a weak handle whose runtime has already
+    /// been torn down. See [`Runtime::task_inspector`] for the per-query lock
+    /// discipline; the same rules apply here.
+    #[must_use]
+    pub fn task_inspector(&self, config: TaskInspectorConfig) -> Option<TaskInspector> {
+        let inner = self.try_inner().ok()?;
+        Some(TaskInspector::from_source(
+            RuntimeStateSource::Shared {
+                state: Arc::clone(&inner.state),
+                tasks: inner.scheduler.dispatch_task_table(),
+                obligations: inner
+                    .sharded_state
+                    .as_ref()
+                    .map(|shards| Arc::clone(&shards.obligations)),
+            },
+            None,
+            config,
+        ))
+    }
+
+    /// Build a [`Diagnostics`] engine bound to the runtime behind this handle.
+    ///
+    /// Returns `None` when this is a weak handle whose runtime has already
+    /// been torn down. See [`Runtime::diagnostics`].
+    #[must_use]
+    pub fn diagnostics(&self) -> Option<Diagnostics> {
+        let inner = self.try_inner().ok()?;
+        Some(Diagnostics::from_source(RuntimeStateSource::Shared {
+            state: Arc::clone(&inner.state),
+            tasks: inner.scheduler.dispatch_task_table(),
+            obligations: inner
+                .sharded_state
+                .as_ref()
+                .map(|shards| Arc::clone(&shards.obligations)),
+        }))
     }
 
     fn try_inner(&self) -> Result<Arc<RuntimeInner>, SpawnError> {
@@ -4290,7 +4384,6 @@ struct RuntimeInner {
     /// stay dormant until task minting moves off the unified lifecycle
     /// owner; holding the Arc here keeps shard identity stable for
     /// diagnostics and the replay-fingerprint proof lanes.
-    #[allow(dead_code)] // Retained for shard identity; read by proof/test lanes.
     sharded_state: Option<Arc<crate::runtime::ShardedState>>,
     scheduler: ThreeLaneScheduler,
     worker_threads: Mutex<Vec<std::thread::JoinHandle<()>>>,

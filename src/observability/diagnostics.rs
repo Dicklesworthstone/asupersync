@@ -80,13 +80,13 @@ fn sanitize_cancel_message(input: &str) -> String {
     }
     out
 }
+use crate::observability::task_inspector::{RuntimeStateSource, RuntimeStateView};
 use crate::record::ObligationState;
 use crate::record::region::RegionState;
 use crate::record::task::TaskState;
 use crate::runtime::state::RuntimeState;
-use crate::time::TimerDriverHandle;
 use crate::tracing_compat::{debug, trace, warn};
-use crate::types::{CancelKind, ObligationId, RegionId, TaskId, Time};
+use crate::types::{CancelKind, CancelReason, ObligationId, Outcome, RegionId, TaskId};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
@@ -95,7 +95,7 @@ use std::sync::Arc;
 /// Diagnostics engine for runtime troubleshooting.
 #[derive(Debug)]
 pub struct Diagnostics {
-    state: Arc<RuntimeState>,
+    state: RuntimeStateSource,
     spectral_monitor: parking_lot::Mutex<SpectralHealthMonitor>,
 }
 
@@ -103,17 +103,19 @@ impl Diagnostics {
     /// Create a new diagnostics engine.
     #[must_use]
     pub fn new(state: Arc<RuntimeState>) -> Self {
-        Self {
-            state,
-            spectral_monitor: parking_lot::Mutex::new(SpectralHealthMonitor::new(
-                SpectralThresholds::default(),
-            )),
-        }
+        Self::from_source(RuntimeStateSource::Owned(state))
     }
 
     /// Create a diagnostics engine with console output (used for richer rendering).
     #[must_use]
     pub fn with_console(state: Arc<RuntimeState>, _console: Console) -> Self {
+        Self::from_source(RuntimeStateSource::Owned(state))
+    }
+
+    /// Create a diagnostics engine over any state source: detached state or
+    /// a live runtime's shared state (see
+    /// [`Runtime::diagnostics`](crate::runtime::Runtime::diagnostics)).
+    pub(crate) fn from_source(state: RuntimeStateSource) -> Self {
         Self {
             state,
             spectral_monitor: parking_lot::Mutex::new(SpectralHealthMonitor::new(
@@ -122,23 +124,10 @@ impl Diagnostics {
         }
     }
 
-    /// Get the current runtime time for observability.
-    ///
-    /// Live runtimes advance time through the timer driver, while timerless
-    /// runtimes and many direct tests only move `RuntimeState::now`.
-    /// Prefer the timer driver when present and fall back to the logical state
-    /// clock so leak ages remain meaningful in both modes.
-    fn now(&self) -> Time {
-        self.state
-            .timer_driver()
-            .map_or(self.state.now, TimerDriverHandle::now)
-    }
-
-    fn build_task_wait_graph(&self) -> TaskWaitGraph {
-        let mut task_ids: Vec<TaskId> = self
-            .state
-            .tasks_iter()
-            .filter_map(|(_, task)| (!task.state.is_terminal()).then_some(task.id))
+    fn build_task_wait_graph_in(view: &RuntimeStateView<'_>) -> TaskWaitGraph {
+        let mut task_ids: Vec<TaskId> = view
+            .tasks()
+            .filter_map(|task| (!task.state.is_terminal()).then_some(task.id))
             .collect();
         task_ids.sort();
         let index_by_task: BTreeMap<TaskId, usize> = task_ids
@@ -148,7 +137,7 @@ impl Diagnostics {
             .collect();
 
         let mut directed_edges = Vec::new();
-        for (_, task) in self.state.tasks_iter() {
+        for task in view.tasks() {
             if task.state.is_terminal() {
                 continue;
             }
@@ -185,7 +174,7 @@ impl Diagnostics {
     /// history each time it is called.
     #[must_use]
     pub fn analyze_structural_health(&self) -> SpectralHealthReport {
-        let graph = self.build_task_wait_graph();
+        let graph = self.state.with_view(Self::build_task_wait_graph_in);
         let adjacency = wait_graph_adjacency(&graph);
         let mut monitor = self.spectral_monitor.lock();
         monitor.analyze_with_trapped_cycle(
@@ -198,12 +187,17 @@ impl Diagnostics {
     /// Analyze directional deadlock risk from wait-for dependencies.
     #[must_use]
     pub fn analyze_directional_deadlock(&self) -> DirectionalDeadlockReport {
-        let graph = self.build_task_wait_graph();
+        let graph = self.state.with_view(Self::build_task_wait_graph_in);
+        Self::directional_deadlock_from_graph(&graph)
+    }
+
+    /// Directional deadlock analysis over an already-captured wait graph.
+    fn directional_deadlock_from_graph(graph: &TaskWaitGraph) -> DirectionalDeadlockReport {
         if graph.task_ids.is_empty() {
             return DirectionalDeadlockReport::empty();
         }
 
-        let adjacency = wait_graph_adjacency(&graph);
+        let adjacency = wait_graph_adjacency(graph);
 
         let sccs = strongly_connected_components(&adjacency);
         let mut components = Vec::new();
@@ -295,8 +289,27 @@ impl Diagnostics {
     #[must_use]
     pub fn explain_region_open(&self, region_id: RegionId) -> RegionOpenExplanation {
         trace!(region_id = ?region_id, "diagnostics: explain_region_open");
+        let explanation = self
+            .state
+            .with_view(|view| Self::explain_region_open_in(view, region_id));
+        if explanation.region_state.is_some() {
+            debug!(
+                region_id = ?region_id,
+                region_state = ?explanation.region_state,
+                reason_count = explanation.reasons.len(),
+                "diagnostics: region open explanation computed"
+            );
+        }
+        explanation
+    }
 
-        let Some(region) = self.state.region(region_id) else {
+    /// Pure read behind [`Self::explain_region_open`]; runs under the state
+    /// lock for live runtimes, so it must not emit tracing or call out.
+    fn explain_region_open_in(
+        view: &RuntimeStateView<'_>,
+        region_id: RegionId,
+    ) -> RegionOpenExplanation {
+        let Some(region) = view.region(region_id) else {
             return RegionOpenExplanation {
                 region_id,
                 region_state: None,
@@ -321,7 +334,7 @@ impl Diagnostics {
         let mut child_ids = region.child_ids();
         child_ids.sort();
         for child_id in child_ids {
-            if let Some(child) = self.state.region(child_id) {
+            if let Some(child) = view.region(child_id) {
                 let child_state = child.state();
                 if child_state != RegionState::Closed {
                     reasons.push(Reason::ChildRegionOpen {
@@ -336,7 +349,7 @@ impl Diagnostics {
         let mut task_ids = region.task_ids();
         task_ids.sort();
         for task_id in task_ids {
-            if let Some(task) = self.state.task(task_id) {
+            if let Some(task) = view.task(task_id) {
                 if !task.state.is_terminal() {
                     let mut waiters = task.waiters.to_vec();
                     waiters.sort();
@@ -353,7 +366,7 @@ impl Diagnostics {
 
         // Held obligations in this region.
         let mut held = Vec::new();
-        for (_, ob) in self.state.obligations_iter() {
+        for ob in view.obligations() {
             if ob.region == region_id && ob.state == ObligationState::Reserved {
                 held.push((ob.id, ob.holder, ob.kind));
             }
@@ -361,13 +374,11 @@ impl Diagnostics {
         held.sort_by_key(|(id, _, _)| *id);
         for (id, holder, kind) in held {
             let (holder_waiters, holder_last_checkpoint_message) =
-                self.state
-                    .task(holder)
-                    .map_or((Vec::new(), None), |holder_task| {
-                        let mut waiters = holder_task.waiters.to_vec();
-                        waiters.sort();
-                        (waiters, Self::task_checkpoint_message(holder_task))
-                    });
+                view.task(holder).map_or((Vec::new(), None), |holder_task| {
+                    let mut waiters = holder_task.waiters.to_vec();
+                    waiters.sort();
+                    (waiters, Self::task_checkpoint_message(holder_task))
+                });
             reasons.push(Reason::ObligationHeld {
                 obligation_id: id,
                 obligation_type: format!("{kind:?}"),
@@ -399,20 +410,13 @@ impl Diagnostics {
                 .push("Ensure obligations are committed/aborted before closing.".to_string());
         }
 
-        let deadlock = self.analyze_directional_deadlock();
+        let deadlock = Self::directional_deadlock_from_graph(&Self::build_task_wait_graph_in(view));
         if deadlock.severity != DeadlockSeverity::None {
             recommendations.push(format!(
                 "Directional deadlock risk {:?} (score {:.3}); inspect cycles and break wait-for loops.",
                 deadlock.severity, deadlock.risk_score
             ));
         }
-
-        debug!(
-            region_id = ?region_id,
-            region_state = ?region_state,
-            reason_count = reasons.len(),
-            "diagnostics: region open explanation computed"
-        );
 
         RegionOpenExplanation {
             region_id,
@@ -438,8 +442,17 @@ impl Diagnostics {
     #[must_use]
     pub fn explain_task_blocked(&self, task_id: TaskId) -> TaskBlockedExplanation {
         trace!(task_id = ?task_id, "diagnostics: explain_task_blocked");
+        self.state
+            .with_view(|view| Self::explain_task_blocked_in(view, task_id))
+    }
 
-        let Some(task) = self.state.task(task_id) else {
+    /// Pure read behind [`Self::explain_task_blocked`]; runs under the state
+    /// lock for live runtimes, so it must not emit tracing or call out.
+    fn explain_task_blocked_in(
+        view: &RuntimeStateView<'_>,
+        task_id: TaskId,
+    ) -> TaskBlockedExplanation {
+        let Some(task) = view.task(task_id) else {
             return TaskBlockedExplanation {
                 task_id,
                 block_reason: BlockReason::TaskNotFound,
@@ -529,35 +542,86 @@ impl Diagnostics {
         }
     }
 
+    /// Explain the cancellation a task has observed, if any.
+    ///
+    /// Returns `None` when the task is unknown or has never had cancellation
+    /// requested (`Created`/`Running`, or completed without a cancelled
+    /// outcome). Otherwise `kind` and `message` are the task's own
+    /// (leaf) cancel reason exactly as the runtime recorded it, and
+    /// `propagation_path` is that reason's cause chain rendered root -> leaf:
+    /// one [`CancellationStep`] per chained reason, each naming the region the
+    /// runtime stamped as that link's origin. Region-tree propagation builds
+    /// the chain through `CancelReason::with_cause_limited`, so the path is
+    /// bounded by the runtime's `CancelAttributionConfig` and a truncated
+    /// chain simply ends early; a task cancelled directly in its own region
+    /// yields a single step.
+    ///
+    /// Messages are sanitized like every other diagnostic string (control
+    /// characters stripped, length capped) before they are returned.
+    #[must_use]
+    pub fn explain_cancellation(&self, task_id: TaskId) -> Option<CancellationExplanation> {
+        trace!(task_id = ?task_id, "diagnostics: explain_cancellation");
+        self.state.with_view(|view| {
+            let task = view.task(task_id)?;
+            let reason = match &task.state {
+                TaskState::Completed(Outcome::Cancelled(reason)) => reason,
+                _ => task.cancel_reason()?,
+            };
+            Some(Self::explain_cancel_reason(reason))
+        })
+    }
+
+    /// Render one recorded cancel reason (and its cause chain) as an
+    /// explanation. Pure; safe to call under the state lock.
+    fn explain_cancel_reason(reason: &CancelReason) -> CancellationExplanation {
+        // `chain()` walks leaf -> root cause; the explanation is documented
+        // root -> leaf.
+        let mut propagation_path: Vec<CancellationStep> = reason
+            .chain()
+            .map(|link| CancellationStep {
+                region_id: link.origin_region,
+                kind: link.kind,
+            })
+            .collect();
+        propagation_path.reverse();
+        CancellationExplanation {
+            kind: reason.kind,
+            message: reason.message.as_deref().map(sanitize_cancel_message),
+            propagation_path,
+        }
+    }
+
     /// Find obligations that look leaked (still reserved) and return a snapshot.
     ///
     /// This is a low-level heuristic. For stronger guarantees, prefer lab oracles.
     #[must_use]
     pub fn find_leaked_obligations(&self) -> Vec<ObligationLeak> {
-        let now = self.now();
-        let mut leaks = Vec::new();
-
-        for (_, ob) in self.state.obligations_iter() {
-            if ob.state == ObligationState::Reserved {
-                // Skip obligations whose holder task has already completed.
-                // A completed holder will tear down its obligations via
-                // the normal scope-exit path, so flagging them here would
-                // produce false positives in leak detection.
-                if let Some(holder) = self.state.task(ob.holder) {
-                    if matches!(holder.state, TaskState::Completed(_)) {
-                        continue;
+        let mut leaks = self.state.with_view(|view| {
+            let now = view.now();
+            let mut leaks = Vec::new();
+            for ob in view.obligations() {
+                if ob.state == ObligationState::Reserved {
+                    // Skip obligations whose holder task has already completed.
+                    // A completed holder will tear down its obligations via
+                    // the normal scope-exit path, so flagging them here would
+                    // produce false positives in leak detection.
+                    if let Some(holder) = view.task(ob.holder) {
+                        if matches!(holder.state, TaskState::Completed(_)) {
+                            continue;
+                        }
                     }
+                    let age = std::time::Duration::from_nanos(now.duration_since(ob.reserved_at));
+                    leaks.push(ObligationLeak {
+                        obligation_id: ob.id,
+                        obligation_type: format!("{:?}", ob.kind),
+                        holder_task: Some(ob.holder),
+                        region_id: ob.region,
+                        age,
+                    });
                 }
-                let age = std::time::Duration::from_nanos(now.duration_since(ob.reserved_at));
-                leaks.push(ObligationLeak {
-                    obligation_id: ob.id,
-                    obligation_type: format!("{:?}", ob.kind),
-                    holder_task: Some(ob.holder),
-                    region_id: ob.region,
-                    age,
-                });
             }
-        }
+            leaks
+        });
 
         // Deterministic ordering.
         leaks.sort_by_key(|l| (l.region_id, l.obligation_id));
