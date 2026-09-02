@@ -18,8 +18,9 @@ is `v0.4.9`.
 
 - **v0.4.10 Release**: lock-free `Cx::published_cancel_requested()` for hot
   cancellation polls and a RaptorQ lib-test build fix, preserving the v0.4.3
-  public compatibility floor. Published to crates.io on 2026-09-01; no
-  `v0.4.10` git tag existed when this entry was written.
+  public compatibility floor. Published to crates.io on 2026-09-01 from
+  `997e8d116` (the sha recorded in the tarball's `.cargo_vcs_info.json`);
+  the `v0.4.10` tag was created at that commit on 2026-09-02.
 - **v0.4.9 Release**: additive runtime-context and owned-OTLP APIs, SQLite
   cancellation/security/row-metadata correctness, ATP bootstrap-secret
   hardening, and a terminal dual-engine SQLite parity packet, while preserving
