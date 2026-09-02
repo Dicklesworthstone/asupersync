@@ -1390,6 +1390,49 @@ fn recycle_unused_recv_batch_payload(spare_payloads: &mut Vec<Vec<u8>>, buf: Vec
     }
 }
 
+/// Whether a `connect(2)` failure means "this UDP socket is already
+/// connected to another peer" (`EISCONN`), the BSD refusal that
+/// [`UdpSocket::connect`] resolves by dissolving the association first.
+#[cfg(all(unix, not(target_arch = "wasm32")))]
+fn udp_already_connected(err: &io::Error) -> bool {
+    err.raw_os_error() == Some(nix::errno::Errno::EISCONN as i32)
+}
+
+/// Windows replaces the peer of a connected UDP socket directly; there is no
+/// `EISCONN` to translate.
+#[cfg(all(not(unix), not(target_arch = "wasm32")))]
+fn udp_already_connected(_err: &io::Error) -> bool {
+    false
+}
+
+/// Dissolve a connected UDP socket's peer association by connecting to the
+/// null address of the same family as `next_peer` (unspecified address,
+/// port 0). BSD documents this as the way to disconnect a datagram socket
+/// and may "harmlessly" answer `EAFNOSUPPORT`; such a benign refusal is
+/// treated as success and the caller's real re-connect decides the outcome.
+#[cfg(not(target_arch = "wasm32"))]
+fn dissolve_udp_association(socket: &StdUdpSocket, next_peer: SocketAddr) -> io::Result<()> {
+    let null_address = if next_peer.is_ipv4() {
+        SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 0)
+    } else {
+        SocketAddr::new(Ipv6Addr::UNSPECIFIED.into(), 0)
+    };
+    match socket.connect(null_address) {
+        Ok(()) => Ok(()),
+        Err(err)
+            if matches!(
+                err.kind(),
+                io::ErrorKind::Unsupported
+                    | io::ErrorKind::AddrNotAvailable
+                    | io::ErrorKind::InvalidInput
+            ) =>
+        {
+            Ok(())
+        }
+        Err(err) => Err(err),
+    }
+}
+
 /// A UDP socket.
 #[derive(Debug)]
 pub struct UdpSocket {
@@ -1439,6 +1482,13 @@ impl UdpSocket {
     }
 
     /// Connect to a remote address (for send/recv).
+    ///
+    /// Re-connecting an already-connected socket to a different peer is
+    /// supported on every platform: Linux and Windows replace the peer
+    /// directly, and on BSD-derived stacks (macOS, iOS, FreeBSD), which
+    /// answer `EISCONN`, the existing association is dissolved first by
+    /// connecting to the null address of the same family (the documented BSD
+    /// idiom) and the connect is retried once.
     pub async fn connect<A: ToSocketAddrs + Send + 'static>(&self, addr: A) -> io::Result<()> {
         #[cfg(target_arch = "wasm32")]
         {
@@ -1463,6 +1513,18 @@ impl UdpSocket {
                 }
                 match self.inner.connect(addr) {
                     Ok(()) => return Ok(()),
+                    Err(err) if udp_already_connected(&err) => {
+                        // BSD-derived stacks (macOS, iOS, FreeBSD) refuse to
+                        // re-target a connected UDP socket with EISCONN
+                        // where Linux and Windows simply replace the peer.
+                        // Dissolve the association first, then re-connect
+                        // (br-asupersync-bi2462.21.2).
+                        dissolve_udp_association(&self.inner, addr)?;
+                        match self.inner.connect(addr) {
+                            Ok(()) => return Ok(()),
+                            Err(err) => last_err = Some(err),
+                        }
+                    }
                     Err(err) => last_err = Some(err),
                 }
             }
@@ -2913,6 +2975,47 @@ mod tests {
 
         assert_eq!(config.recv_buffer_bytes, Some(UDP_MIN_SOCKET_BUFFER_BYTES));
         assert_eq!(config.send_buffer_bytes, Some(UDP_MAX_SOCKET_BUFFER_BYTES));
+    }
+
+    /// br-asupersync-bi2462.21.2: a connected UDP socket can be re-targeted
+    /// to a second peer on every platform. Linux replaces the peer directly;
+    /// macOS answers `EISCONN` unless the association is dissolved first,
+    /// which `connect` now does. Both peers must actually receive.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn udp_socket_reconnects_to_a_second_peer() {
+        future::block_on(async {
+            let mut sender = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let first = StdUdpSocket::bind("127.0.0.1:0").unwrap();
+            let second = StdUdpSocket::bind("127.0.0.1:0").unwrap();
+            first
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            second
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+
+            sender.connect(first.local_addr().unwrap()).await.unwrap();
+            sender.send(b"to-first").await.unwrap();
+            let mut buf = [0u8; 16];
+            let (len, from) = first.recv_from(&mut buf).unwrap();
+            assert_eq!(&buf[..len], b"to-first");
+            assert_eq!(from, sender.local_addr().unwrap());
+
+            // The re-target that returned EISCONN on macOS before the fix.
+            sender
+                .connect(second.local_addr().unwrap())
+                .await
+                .expect("re-connecting a connected UDP socket must succeed");
+            sender.send(b"to-second").await.unwrap();
+            let (len, from) = second.recv_from(&mut buf).unwrap();
+            assert_eq!(&buf[..len], b"to-second");
+            assert_eq!(from, sender.local_addr().unwrap());
+            assert!(
+                first.recv_from(&mut buf).is_err(),
+                "the first peer must not receive after the re-target"
+            );
+        });
     }
 
     #[test]
