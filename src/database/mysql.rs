@@ -489,10 +489,17 @@ impl MySqlValue {
     }
 
     /// Try to get as i32.
+    ///
+    /// A `LongLong` (BIGINT) value is accepted when it fits: the binary
+    /// protocol types integer literals such as `SELECT 1 AS v` as BIGINT, so a
+    /// caller asking for `i32` would otherwise fail on the most ordinary query
+    /// (found by the real-server suite). Out-of-range values still return
+    /// `None`; nothing is truncated silently.
     #[must_use]
     pub fn as_i32(&self) -> Option<i32> {
         match self {
             Self::Long(v) => Some(*v),
+            Self::LongLong(v) => i32::try_from(*v).ok(),
             Self::Short(v) => Some(i32::from(*v)),
             Self::Tiny(v) => Some(i32::from(*v)),
             _ => None,
@@ -1939,6 +1946,64 @@ fn eof_or_cancelled() -> MySqlError {
     }
 }
 
+/// Substring patterns the static-SQL heuristic rejects outright.
+const INJECTION_SUBSTRING_PATTERNS: &[&str] = &[
+    " or ",
+    " and ",
+    " union ",
+    " drop ",
+    " delete ",
+    " insert ",
+    " update ",
+    " alter ",
+    " create ",
+    " exec ",
+    " execute ",
+    " load ",
+    " into ",
+    " outfile ",
+    " dumpfile ",
+    "--",
+    "/*",
+    "*/",
+    ";",
+    "'",
+    "\"",
+];
+
+/// Function-call patterns the heuristic rejects, matched only at an
+/// identifier boundary: plain substring matching rejected `VARCHAR(64)`
+/// because it contains `char(` (found by the real-server suite, 2026-09-02).
+const INJECTION_FUNCTION_PATTERNS: &[&str] = &["concat(", "char(", "ascii(", "substring("];
+
+/// Returns the first injection pattern found in `sql_lower` (already
+/// lower-cased), or `None` when the text passes the heuristic.
+fn sql_injection_pattern(sql_lower: &str) -> Option<&'static str> {
+    if let Some(pattern) = INJECTION_SUBSTRING_PATTERNS
+        .iter()
+        .find(|pattern| sql_lower.contains(**pattern))
+    {
+        return Some(pattern);
+    }
+    INJECTION_FUNCTION_PATTERNS
+        .iter()
+        .find(|pattern| contains_sql_token(sql_lower, pattern))
+        .copied()
+}
+
+/// True when `pattern` occurs in `sql_lower` where the preceding byte is not
+/// part of an identifier (`[a-z0-9_]`), so `char(` matches `CHAR(65)` and
+/// `=char(` but not `varchar(` or `mychar(`.
+fn contains_sql_token(sql_lower: &str, pattern: &str) -> bool {
+    let bytes = sql_lower.as_bytes();
+    sql_lower.match_indices(pattern).any(|(idx, _)| {
+        idx == 0 || {
+            let before = bytes[idx - 1];
+            !(before.is_ascii_alphanumeric() || before == b'_')
+        }
+    })
+}
+
 /// Read a complete buffer while preserving cancellation precedence at EOF.
 ///
 /// Keeping the loop generic over the stream gives deterministic tests a narrow
@@ -2874,42 +2939,10 @@ impl MySqlConnection {
             }
         }
 
-        // Detect dangerous SQL injection patterns
-        const INJECTION_PATTERNS: &[&str] = &[
-            " or ",
-            " and ",
-            " union ",
-            " drop ",
-            " delete ",
-            " insert ",
-            " update ",
-            " alter ",
-            " create ",
-            " exec ",
-            " execute ",
-            " load ",
-            " into ",
-            " outfile ",
-            " dumpfile ",
-            "--",
-            "/*",
-            "*/",
-            ";",
-            "'",
-            "\"",
-            "concat(",
-            "char(",
-            "ascii(",
-            "substring(",
-        ];
-
-        for pattern in INJECTION_PATTERNS {
-            if sql_lower.contains(pattern) {
-                return Err(MySqlError::InvalidParameter(format!(
-                    "Potential SQL injection detected: query contains '{}'. Use prepared statements for dynamic content.",
-                    pattern
-                )));
-            }
+        if let Some(pattern) = sql_injection_pattern(&sql_lower) {
+            return Err(MySqlError::InvalidParameter(format!(
+                "Potential SQL injection detected: query contains '{pattern}'. Use prepared statements for dynamic content.",
+            )));
         }
 
         // Additional check: if SQL contains dynamic-looking patterns
@@ -7531,6 +7564,61 @@ mod tests {
         let opts = MySqlConnectOptions::parse("mysql://user@localhost").unwrap();
         assert_eq!(opts.user, "user");
         assert_eq!(opts.database, None);
+    }
+
+    #[test]
+    fn injection_heuristic_matches_function_names_at_identifier_boundaries() {
+        // Real-server finding: `VARCHAR(64)` was rejected because it contains
+        // the substring `char(`.
+        assert_eq!(
+            sql_injection_pattern(
+                "create temporary table t (id int primary key, name varchar(64) not null)"
+            ),
+            None
+        );
+        assert_eq!(sql_injection_pattern("select mychar(1)"), None);
+        assert_eq!(sql_injection_pattern("select x_concat(a)"), None);
+        // The genuine function calls are still caught, at the start and after
+        // punctuation or whitespace.
+        assert_eq!(sql_injection_pattern("select char(65)"), Some("char("));
+        assert_eq!(sql_injection_pattern("char(65)"), Some("char("));
+        assert_eq!(
+            sql_injection_pattern("select 1 where a=concat(b,c)"),
+            Some("concat(")
+        );
+        assert_eq!(sql_injection_pattern("select ascii(x)"), Some("ascii("));
+        assert_eq!(
+            sql_injection_pattern("select substring(x,1,2)"),
+            Some("substring(")
+        );
+        // Non-function patterns keep plain substring semantics (list order
+        // decides which pattern is reported: " drop " precedes ";").
+        assert_eq!(
+            sql_injection_pattern("select 1; drop table t"),
+            Some(" drop ")
+        );
+        assert_eq!(sql_injection_pattern("select 1; select 2"), Some(";"));
+        assert_eq!(
+            sql_injection_pattern("select 1 union select 2"),
+            Some(" union ")
+        );
+    }
+
+    #[test]
+    fn as_i32_accepts_in_range_bigint_and_rejects_overflow() {
+        // Real-server finding: `SELECT 1 AS v` over the binary protocol is a
+        // BIGINT, and `get_i32("v")` failed with TypeConversion.
+        assert_eq!(MySqlValue::LongLong(1).as_i32(), Some(1));
+        assert_eq!(
+            MySqlValue::LongLong(i64::from(i32::MAX)).as_i32(),
+            Some(i32::MAX)
+        );
+        assert_eq!(
+            MySqlValue::LongLong(i64::from(i32::MIN)).as_i32(),
+            Some(i32::MIN)
+        );
+        assert_eq!(MySqlValue::LongLong(i64::from(i32::MAX) + 1).as_i32(), None);
+        assert_eq!(MySqlValue::LongLong(i64::from(i32::MIN) - 1).as_i32(), None);
     }
 
     #[test]

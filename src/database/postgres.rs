@@ -39,7 +39,7 @@
 //!
 //! [`Cx`]: crate::cx::Cx
 
-use crate::cx::Cx;
+use crate::cx::{CancelWakerToken, Cx};
 use crate::database::transaction::trace_database_transaction;
 use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
 use crate::net::TcpStream;
@@ -53,7 +53,7 @@ use std::fmt;
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll};
+use std::task::{Context, Poll, Waker};
 
 // ============================================================================
 // Error Types
@@ -3223,6 +3223,43 @@ fn eof_or_cancelled(cx: &Cx) -> PgError {
     ))
 }
 
+/// Owns exactly one cancellation-Waker registration on a `Cx` for the
+/// lifetime of a socket poll loop.
+///
+/// The in-poll `cx.checkpoint()` guard only observes cancellation when the
+/// task is polled. A read parked on a socket with no bytes arriving is never
+/// polled again on its own, so an external `cancel_with` (the deadline
+/// monitor, a sibling thread, a region cancel) used to be noticed only when
+/// the server finally answered: the real-server suite measured `pg_sleep(30)`
+/// running its full 30 s before `Outcome::Cancelled` surfaced. Registering the
+/// task's Waker with the `Cx` makes the cancel wake the parked poll, after
+/// which the checkpoint guard returns `PgError::Cancelled` and the caller's
+/// `cancel_in_flight` fires the `CancelRequest`. Same owned-token pattern as
+/// the oneshot `RecvFuture`; a stale token from an earlier poll is refreshed
+/// without allocation when the Waker is unchanged.
+struct CancelWakerGuard<'a> {
+    cx: &'a Cx,
+    token: Option<CancelWakerToken>,
+}
+
+impl<'a> CancelWakerGuard<'a> {
+    fn new(cx: &'a Cx) -> Self {
+        Self { cx, token: None }
+    }
+
+    fn refresh(&mut self, waker: &Waker) {
+        self.token = Some(self.cx.refresh_cancel_waker(self.token, waker));
+    }
+}
+
+impl Drop for CancelWakerGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(token) = self.token.take() {
+            self.cx.clear_cancel_waker(token);
+        }
+    }
+}
+
 /// Read a complete buffer while preserving cancellation precedence at EOF.
 ///
 /// Keeping the loop generic over the stream gives deterministic tests a narrow
@@ -3233,12 +3270,14 @@ where
     R: AsyncRead + Unpin,
 {
     let mut pos = 0;
+    let mut cancel_wake = CancelWakerGuard::new(cx);
     while pos < buf.len() {
         let mut read_buf = ReadBuf::new(&mut buf[pos..]);
         std::future::poll_fn(|task_cx| {
             if cx.checkpoint().is_err() {
                 return Poll::Ready(Err(cancelled_error(cx)));
             }
+            cancel_wake.refresh(task_cx.waker());
             match Pin::new(&mut *stream).poll_read(task_cx, &mut read_buf) {
                 Poll::Ready(Ok(())) => Poll::Ready(Ok(())),
                 Poll::Ready(Err(err)) => Poll::Ready(Err(PgError::Io(err))),
@@ -3918,6 +3957,8 @@ impl PgConnection {
             ]
         };
 
+        let mut cancel_wake = CancelWakerGuard::new(cx);
+
         // Write SSLRequest
         {
             let mut pos = 0;
@@ -3926,6 +3967,7 @@ impl PgConnection {
                     if cx.checkpoint().is_err() {
                         return Poll::Ready(Err(cancelled_error(cx)));
                     }
+                    cancel_wake.refresh(task_cx.waker());
                     match Pin::new(&mut tcp).poll_write(task_cx, &ssl_request[pos..]) {
                         Poll::Ready(Ok(written)) => Poll::Ready(Ok(written)),
                         Poll::Ready(Err(err)) => Poll::Ready(Err(PgError::Io(err))),
@@ -3951,6 +3993,7 @@ impl PgConnection {
                 if cx.checkpoint().is_err() {
                     return Poll::Ready(Err(cancelled_error(cx)));
                 }
+                cancel_wake.refresh(task_cx.waker());
                 match Pin::new(&mut tcp).poll_read(task_cx, &mut read_buf) {
                     Poll::Ready(Ok(())) => Poll::Ready(Ok(())),
                     Poll::Ready(Err(err)) => Poll::Ready(Err(PgError::Io(err))),
@@ -6501,11 +6544,13 @@ impl PgConnection {
     /// cancellation checks from the caller-provided capability context.
     async fn write_all(&mut self, cx: &Cx, data: &[u8]) -> Result<(), PgError> {
         let mut pos = 0;
+        let mut cancel_wake = CancelWakerGuard::new(cx);
         while pos < data.len() {
             let written = std::future::poll_fn(|task_cx| {
                 if cx.checkpoint().is_err() {
                     return Poll::Ready(Err(cancelled_error(cx)));
                 }
+                cancel_wake.refresh(task_cx.waker());
                 match Pin::new(&mut self.inner.stream).poll_write(task_cx, &data[pos..]) {
                     Poll::Ready(Ok(written)) => Poll::Ready(Ok(written)),
                     Poll::Ready(Err(err)) => Poll::Ready(Err(PgError::Io(err))),
@@ -6526,6 +6571,7 @@ impl PgConnection {
             if cx.checkpoint().is_err() {
                 return Poll::Ready(Err(cancelled_error(cx)));
             }
+            cancel_wake.refresh(task_cx.waker());
             match Pin::new(&mut self.inner.stream).poll_flush(task_cx) {
                 Poll::Ready(Ok(())) => Poll::Ready(Ok(())),
                 Poll::Ready(Err(err)) => Poll::Ready(Err(PgError::Io(err))),
@@ -9166,6 +9212,68 @@ mod tests {
     use crate::test_complete;
     use crate::types::CancelKind;
     use crate::{Budget, Cx, RegionId, TaskId};
+
+    /// A stream that never has bytes and never wakes its reader on its own:
+    /// the shape of a socket waiting on `pg_sleep(30)`.
+    struct NeverReadyStream;
+
+    impl AsyncRead for NeverReadyStream {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _task_cx: &mut Context<'_>,
+            _buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            Poll::Pending
+        }
+    }
+
+    /// Regression for the real-server finding that `cancel_with` from another
+    /// thread did not interrupt an in-flight read (the query ran the full 30 s).
+    /// Before `CancelWakerGuard`, the parked read was never re-polled, so the
+    /// block_on below never returned; the harness thread + `recv_timeout`
+    /// turns that hang into a failure instead of a stuck suite.
+    #[test]
+    fn external_cancel_wakes_a_read_parked_on_a_silent_stream() {
+        use std::time::{Duration, Instant};
+
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let cx = Cx::for_testing();
+        let canceller = cx.clone();
+        let reader = std::thread::Builder::new()
+            .name("pg-parked-reader".into())
+            .spawn(move || {
+                let runtime = crate::runtime::RuntimeBuilder::current_thread()
+                    .build()
+                    .expect("build runtime");
+                let started = Instant::now();
+                let result = runtime.block_on(async {
+                    let mut stream = NeverReadyStream;
+                    let mut buf = [0u8; 8];
+                    read_exact_from(&cx, &mut stream, &mut buf).await
+                });
+                let _ = done_tx.send((result, started.elapsed()));
+            })
+            .expect("spawn reader thread");
+
+        std::thread::sleep(Duration::from_millis(150));
+        canceller.cancel_with(
+            CancelKind::User,
+            Some("external cancel while read is parked"),
+        );
+
+        let (result, elapsed) = done_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("cancel must wake the parked read; the read never returned");
+        reader.join().expect("reader thread");
+        assert!(
+            matches!(result, Err(PgError::Cancelled(ref reason)) if reason.kind == CancelKind::User),
+            "expected Cancelled(User), got {result:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "cancel must short-circuit the parked read promptly, took {elapsed:?}"
+        );
+    }
 
     #[cfg(feature = "tls")]
     static POSTGRES_SSL_CERT_FILE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());

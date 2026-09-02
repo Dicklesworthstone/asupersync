@@ -216,6 +216,22 @@ fn positive_ttl_millis(ttl: Duration) -> Result<u64, RedisError> {
     Ok(ttl_millis_rounded_up(ttl))
 }
 
+/// Decode a reply that is either a bulk string or "no value".
+///
+/// The client negotiates RESP3 (`HELLO 3`), and Redis 7 answers a missing
+/// hash field or key with the RESP3 null (`_\r\n`), not the RESP2 null bulk
+/// (`$-1\r\n`). Accepting only `BulkString(None)` turned every miss into a
+/// protocol error against a real server (found by the real-server suite).
+fn optional_bulk_reply(resp: RespValue, command: &str) -> Result<Option<Vec<u8>>, RedisError> {
+    match resp {
+        RespValue::BulkString(Some(bytes)) => Ok(Some(bytes)),
+        RespValue::BulkString(None) | RespValue::Null => Ok(None),
+        other => Err(RedisError::Protocol(format!(
+            "{command} expected bulk string, got {other:?}"
+        ))),
+    }
+}
+
 fn parse_i64_ascii(bytes: &[u8]) -> Result<i64, RedisError> {
     if bytes.is_empty() {
         return Err(RedisError::Protocol(
@@ -3372,14 +3388,7 @@ impl RedisClient {
         let resp = self
             .cmd_bytes(cx, &[b"HGET", key.as_bytes(), field.as_bytes()])
             .await?;
-
-        match resp {
-            RespValue::BulkString(Some(bytes)) => Ok(Some(bytes)),
-            RespValue::BulkString(None) => Ok(None),
-            other => Err(RedisError::Protocol(format!(
-                "HGET expected bulk string, got {other:?}"
-            ))),
-        }
+        optional_bulk_reply(resp, "HGET")
     }
 
     /// HSET key field value
@@ -6632,6 +6641,29 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener as StdTcpListener;
     use std::pin::Pin;
+
+    #[test]
+    fn optional_bulk_reply_accepts_resp3_null_and_resp2_null_bulk() {
+        assert_eq!(
+            optional_bulk_reply(RespValue::BulkString(Some(b"v".to_vec())), "HGET").expect("bulk"),
+            Some(b"v".to_vec())
+        );
+        assert_eq!(
+            optional_bulk_reply(RespValue::BulkString(None), "HGET").expect("resp2 null bulk"),
+            None
+        );
+        // RESP3 miss, as sent by Redis 7 after HELLO 3.
+        assert_eq!(
+            optional_bulk_reply(RespValue::Null, "HGET").expect("resp3 null"),
+            None
+        );
+        // Planted negative: a wrong-typed reply is still a protocol error.
+        let err = optional_bulk_reply(RespValue::Integer(1), "HGET").expect_err("integer");
+        assert!(
+            matches!(err, RedisError::Protocol(ref m) if m.starts_with("HGET expected bulk string")),
+            "{err:?}"
+        );
+    }
 
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::mpsc;

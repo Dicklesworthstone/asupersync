@@ -788,6 +788,22 @@ impl<T: PbftTransport> PbftConsensus<T> {
     }
 
     /// Submit a request for consensus.
+    ///
+    /// # Experimental stub
+    ///
+    /// This forwards the request to the local node and then returns a
+    /// **placeholder** response (`view 0`, `sequence 0`, the fixed bytes
+    /// `b"consensus result"`, timestamp `0`). It does not wait for the
+    /// three-phase protocol to execute the request and does not return the
+    /// replicated result. Treat it as a scaffold for the message loop, not
+    /// as a working consensus API; the deprecation attribute exists so that
+    /// callers cannot pick it up by accident. The item stays exported and
+    /// functional under the 0.4.x compatibility rule.
+    #[deprecated(
+        since = "0.4.11",
+        note = "experimental PBFT scaffold: returns a fixed placeholder response, not a replicated \
+                consensus result"
+    )]
     pub async fn submit(&self, cx: &Cx, request: ConsensusRequest) -> Result<ConsensusResponse> {
         self.node.submit_request(cx, request.clone()).await?;
 

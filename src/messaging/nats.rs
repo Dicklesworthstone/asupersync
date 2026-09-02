@@ -2403,7 +2403,16 @@ impl NatsConnection {
             return None;
         }
 
-        let detail = description.unwrap_or_else(|| format!("status {status}"));
+        // nats-server answers a request with no subscribers with a bare
+        // `NATS/1.0 503` header and no Description line (real-server suite,
+        // nats:2.10). Supply the protocol's well-known wording for that code
+        // so callers can recognise the condition the way other clients
+        // (`ErrNoResponders`) surface it; unknown bare codes keep the numeric
+        // fallback.
+        let detail = description.unwrap_or_else(|| match status {
+            503 => "No Responders".to_string(),
+            _ => format!("status {status}"),
+        });
         Some(NatsError::Server(format!("status {status}: {detail}")))
     }
 
@@ -5934,6 +5943,43 @@ mod tests {
         });
 
         server.join().expect("server join");
+    }
+
+    /// nats-server 2.10 sends the no-responders status as a bare
+    /// `NATS/1.0 503` line with no Description header (observed against the
+    /// real server); the client must still name the condition.
+    #[test]
+    fn reply_status_error_names_no_responders_for_bare_503_header() {
+        let message = Message {
+            subject: "_INBOX.2".into(),
+            sid: 2,
+            reply_to: None,
+            headers: Some(b"NATS/1.0 503\r\n\r\n".to_vec()),
+            payload: Vec::new(),
+        };
+
+        let err = NatsConnection::reply_status_error(&message)
+            .expect("bare 503 status reply must surface as error");
+        match err {
+            NatsError::Server(message) => {
+                assert_eq!(message, "status 503: No Responders");
+            }
+            other => panic!("expected server error, got {other:?}"),
+        }
+
+        // Planted negative: an unknown bare code keeps the numeric fallback
+        // and is not relabelled.
+        let unknown = Message {
+            subject: "_INBOX.3".into(),
+            sid: 3,
+            reply_to: None,
+            headers: Some(b"NATS/1.0 599\r\n\r\n".to_vec()),
+            payload: Vec::new(),
+        };
+        match NatsConnection::reply_status_error(&unknown).expect("599 must surface as error") {
+            NatsError::Server(message) => assert_eq!(message, "status 599: status 599"),
+            other => panic!("expected server error, got {other:?}"),
+        }
     }
 
     #[test]
