@@ -11,6 +11,11 @@ This document provides a comprehensive analysis of asupersync's RaptorQ implemen
 
 ## Key Findings
 
+> **Superseded for current status:** the 2026-04-16 analysis below is the
+> historical record. The MUST list was re-verified against the code on
+> 2026-09-02; see [Re-verification (2026-09-02)](#re-verification-2026-09-02)
+> at the end of this document.
+
 ### Conformance Status Overview
 - **Total Requirements Analyzed:** 13 (10 MUST, 1 SHOULD, 2 MAY)
 - **Implementation Status:**
@@ -244,3 +249,36 @@ tests/rfc6330_conformance/
 Asupersync's RaptorQ implementation has a solid foundation with 62% of critical requirements implemented. The three remaining P0 gaps (triple generation, parameter derivation, encoding ID) are well-defined and implementable within 1-2 weeks.
 
 This conformance analysis provides the roadmap for achieving full RFC 6330 compliance while maintaining asupersync's high standards for deterministic testing and structured concurrency integration.
+## Re-verification (2026-09-02)
+
+Re-verified by SapphireHill for `asupersync-gap-raptorq-k2048-interop-creh6g`
+against the code at the time of writing. The strongest evidence is
+independent: `tests/raptorq_reference_encoder_vectors.rs` shows our
+`repair_symbol(esi)` is byte-for-byte equal to the `raptorq` crate's repair
+packets for K in {10, 100, 1000} (K=10000 is the `#[ignore]`d release-lane
+case in the same file), and `tests/raptorq_encoder_k2048_differential.rs`
+shows the `raptorq` crate decodes our K=2048 output. Identical repair bytes
+from an implementation we do not control are only possible if the coding
+parameters (§5.3.3), tuple generation (§5.3.5) and constraint matrix (§5.4.1)
+all match the RFC.
+
+| Requirement | 2026-04-16 | 2026-09-02 | Evidence |
+|---|---|---|---|
+| RFC6330-4.1-1 Fountain code property | ✅ | ✅ | `systematic.rs` `rfc6330_systematic_index_table_stratified_k_coverage_decodes`; reference-vector decode after dropping `loss` source symbols |
+| RFC6330-4.2-1 FEC Encoding ID = 6 | ❌ | N/A (no claim) | ATP frames RaptorQ symbols in its own datagram header (`net/atp/transport_rq/mod.rs`: magic, transfer tag, entry, SBN, ESI, kind); there is no FLUTE/ALC FEC OTI signalling in this codebase, so the IANA identifier has nowhere to appear. RFC packet-format interoperability is explicitly not claimed. |
+| RFC6330-5.1-1 Source block size constraints | 🟡 | ✅ | `systematic.rs` `rfc6330_systematic_index_table_rejects_out_of_range_k`, `..._mid_table_boundary_jumps`, `..._stratified_k_coverage_decodes` (K=4..56403); `pipeline.rs` K' handling |
+| RFC6330-5.2-1 ESI in every encoding packet | ❌ | 🟡 | Every ATP datagram carries `sbn` and `esi: u32` (`transport_rq/mod.rs`); the RFC FEC Payload ID layout (8-bit SBN + 24-bit ESI) is not used. |
+| RFC6330-5.3.1-1 Systematic index | ✅ | ✅ | `rfc6330_systematic_index_table.inc`, `systematic.rs` |
+| RFC6330-5.3.2-1 Symbol ordering | ✅ | ✅ | reference vectors assert repair ESIs start at K; systematic tests |
+| RFC6330-5.3.3-1 Coding parameters (Table 2) | 🟡 | ✅ | Table 2 is `rfc6330_systematic_index_table.inc`; `params_lookup_rejects_zero_k`; byte-equal repair symbols vs `raptorq` for K=10/100/1000 |
+| RFC6330-5.3.4-1 Random functions | ✅ | ✅ | `rfc6330.rs` `rand_known_values`, `rand_worked_examples_match_rfc_5_3_5_1_canonical_formula`, `v0_v3_lookup_tables_byte_exact` |
+| RFC6330-5.3.5-1 Tuple generation | ❌ | ✅ | `rfc6330::tuple`, `tuple_with_prime_p1`, `tuple_indices`; tests `tuple_scenarios`, `deg_threshold_edges`, `deg_distribution_matches_rfc_thresholds_within_5_sigma`; byte-equal repair symbols vs `raptorq` |
+| RFC6330-5.4.1-1 Matrix construction | 🟡 | ✅ | `tests/raptorq_constraint_matrix_solve_roundtrip.rs`; both differential directions (we decode `raptorq` packets, `raptorq` decodes ours) |
+| RFC6330-5.4.2-1 Decoding process | ✅ | ✅ | `decoder.rs` inactivation decoder; reference-vector decode; planted corrupted-packet negative |
+| RFC6330-5.4.2-2 Decode success rate (SHOULD) | ✅ | ✅ | `tests/atp_g5_raptorq_conformance.rs` loss patterns; conformance suite |
+| RFC6330-5.5-1 Random number tables | ✅ | ✅ | `v0_v3_lookup_tables_byte_exact` |
+
+Net: 8 of 10 MUSTs verified, 1 partial (ESI carried, RFC payload-ID layout
+not used), 1 not applicable (no OTI signalling surface). Neither open item
+affects ATP-to-ATP transfers; both would matter only for interoperating with
+a third-party RFC 6330 packet stream, which is not a project goal today.
