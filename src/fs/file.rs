@@ -875,6 +875,7 @@ mod tests {
             let mut reader = File {
                 inner: Arc::clone(&shared),
                 cursor_gate: Arc::clone(&seeker.cursor_gate),
+                pending: Mutex::new(None),
                 #[cfg(feature = "test-internals")]
                 cursor_probe: None,
             };
