@@ -54,8 +54,13 @@ fn pick_unique_drop_indices_from_draws(
     drops.into_iter().collect()
 }
 
+/// Was `#[ignore]`d as "raptorq-rs 1.8.1 does not decode these K=2048
+/// asupersync emissions". Against the current dev-dependency (`raptorq`
+/// 2.0) the same emissions decode (verified 2026-09-02 with
+/// `--include-ignored`, 320 s on a debug build), so the ignore was stale
+/// rather than a live encoder defect. Slow: it runs the full K'=2070
+/// systematic encode plus a raptorq-rs decode.
 #[test]
-#[ignore = "current blocker: raptorq-rs 1.8.1 does not decode these K=2048 asupersync emissions"]
 fn k2048_encoder_emissions_decode_with_raptorq_rs() {
     let k = 2048usize;
     let symbol_size = 16usize;
