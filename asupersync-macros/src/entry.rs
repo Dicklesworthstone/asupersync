@@ -37,7 +37,7 @@ impl RuntimeFlavor {
     }
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct EntryArgs {
     flavor: Option<RuntimeFlavor>,
     workers: Option<usize>,
@@ -435,7 +435,9 @@ mod tests {
 
         let err = syn::parse2::<EntryArgs>(quote!(blocking_threads = 4)).unwrap_err();
         let message = err.to_string();
-        assert!(message.contains("valid arguments are `flavor`, `workers`, `budget`, and `blocking`"));
+        assert!(
+            message.contains("valid arguments are `flavor`, `workers`, `budget`, and `blocking`")
+        );
         assert!(message.contains("did you mean `blocking`"));
     }
 
