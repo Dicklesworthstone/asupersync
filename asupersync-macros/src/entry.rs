@@ -10,18 +10,39 @@ use syn::{
     ReturnType, Token, Type, parse_macro_input,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// Upper bound of the lazily populated blocking pool that the entry macros
+/// configure by default. It mirrors tokio's `max_blocking_threads` default so
+/// `spawn_blocking` from an entry-macro program offloads to a dedicated thread
+/// instead of running inline on an async worker. Threads are only created on
+/// demand (`min = 0`) and retire when idle. `blocking = 0` restores the
+/// inline behaviour of a bare `RuntimeBuilder`.
+const DEFAULT_BLOCKING_THREADS: usize = 512;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RuntimeFlavor {
-    #[default]
     CurrentThread,
     MultiThread,
 }
 
+impl RuntimeFlavor {
+    /// `#[main]` drives a production program, so it defaults to the
+    /// multi-thread scheduler with the host-independent worker count
+    /// (`RuntimeBuilder::multi_thread()`). `#[test]` keeps the current-thread
+    /// default so test bodies stay replay-stable under the Rust test harness.
+    const fn default_for(kind: EntryKind) -> Self {
+        match kind {
+            EntryKind::Main => Self::MultiThread,
+            EntryKind::Test => Self::CurrentThread,
+        }
+    }
+}
+
 #[derive(Default)]
 struct EntryArgs {
-    flavor: RuntimeFlavor,
+    flavor: Option<RuntimeFlavor>,
     workers: Option<usize>,
     poll_budget: Option<u32>,
+    blocking: Option<usize>,
 }
 
 impl Parse for EntryArgs {
@@ -33,7 +54,12 @@ impl Parse for EntryArgs {
             match key.to_string().as_str() {
                 "flavor" => {
                     input.parse::<Token![=]>()?;
-                    args.flavor = parse_flavor(input)?;
+                    args.flavor = Some(parse_flavor(input)?);
+                }
+                "blocking" => {
+                    input.parse::<Token![=]>()?;
+                    let value: LitInt = input.parse()?;
+                    args.blocking = Some(value.base10_parse::<usize>()?);
                 }
                 "workers" => {
                     input.parse::<Token![=]>()?;
@@ -106,7 +132,7 @@ fn expand_entry(args: &EntryArgs, mut function: ItemFn, kind: EntryKind) -> Resu
     } = function;
     sig.asyncness = None;
 
-    let builder = builder_tokens(args);
+    let builder = builder_tokens(args, kind);
     let cx_binding = cx_ident.map(|ident| {
         quote! {
             let __asupersync_entry_cx =
@@ -264,8 +290,11 @@ fn is_cx_reference(ty: &Type) -> bool {
     })
 }
 
-fn builder_tokens(args: &EntryArgs) -> TokenStream2 {
-    let base = match args.flavor {
+fn builder_tokens(args: &EntryArgs, kind: EntryKind) -> TokenStream2 {
+    let base = match args
+        .flavor
+        .unwrap_or_else(|| RuntimeFlavor::default_for(kind))
+    {
         RuntimeFlavor::CurrentThread => {
             quote!(::asupersync::runtime::RuntimeBuilder::current_thread())
         }
@@ -279,8 +308,18 @@ fn builder_tokens(args: &EntryArgs) -> TokenStream2 {
         let literal = Literal::u32_unsuffixed(budget);
         quote!(.poll_budget(#literal))
     });
+    // A bare `RuntimeBuilder` ships with no blocking pool, which makes
+    // `spawn_blocking` run inline on the async worker. Entry-macro programs
+    // get an on-demand pool unless the author opts out with `blocking = 0`.
+    let blocking_step = match args.blocking.unwrap_or(DEFAULT_BLOCKING_THREADS) {
+        0 => None,
+        max_threads => {
+            let literal = Literal::usize_unsuffixed(max_threads);
+            Some(quote!(.blocking_threads(0, #literal)))
+        }
+    };
 
-    quote!(#base #worker_step #budget_step)
+    quote!(#base #worker_step #budget_step #blocking_step)
 }
 
 fn unsupported_entry_arg(key: &Ident) -> Error {
