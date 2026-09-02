@@ -64,6 +64,48 @@ is `v0.4.9`.
 
 ## [Unreleased]
 
+### Reality-check follow-through (2026-09-01)
+
+- **`TaskInspector` and `Diagnostics` are reachable from a production
+  runtime.** Additive `Runtime::task_inspector(config)`,
+  `Runtime::diagnostics()`, and the `RuntimeHandle` equivalents lock the live
+  runtime state (and the scheduler's dispatch task table / shard-C obligation
+  table where records live) for exactly one query each. New
+  `Diagnostics::explain_cancellation(task_id)` renders a task's recorded cancel
+  reason and cause chain. Proven by `tests/runtime_inspector_e2e.rs`. Finding:
+  the production dispatch path does not advance `TaskRecord::total_polls`, so
+  `TaskDetails::poll_count` is 0 for live production tasks.
+- **`Scope::quorum` and `Scope::first_ok` execute the combinators the README
+  lists.** Quorum spawns every branch, returns once M succeed or success is
+  impossible, and protocol-cancels and joins every remaining branch;
+  `first_ok` runs lazy factories sequentially and drains an in-flight attempt
+  on cancellation. The aggregation types in `src/combinator/{quorum,first_ok}.rs`
+  are unchanged. Proven by `tests/combinator_quorum_first_ok_e2e.rs` on the
+  production runtime and LabRuntime with leak oracles.
+- **MySQL `mysql_native_password` behind the existing opt-in.** With
+  `MySqlConnectOptions::insecure_legacy_mysql_native_password = true` the
+  client answers the SHA-1 challenge on both the handshake and AuthSwitch
+  paths; the default remains fail-closed before any bytes are written. Proven
+  with externally derived known-answer vectors and a scripted loopback server
+  (`tests/mysql_native_password_optin.rs`).
+- **The pooled HTTP client can trust a private root.** New
+  `HttpClientBuilder::add_root_certificate` /
+  `HttpClientConfig::tls_root_certificates`, consumed by the TLS connect path.
+  Previously there was no way to install a root, so plain-`tls` builds failed
+  every `https://` request closed and a private CA could never be trusted.
+  Proven by `tests/http_client_https_e2e.rs` against a real TLS listener
+  (positive with an installed root; fail-closed without one).
+- **`cargo test --lib` builds again on main.** A `tls`-only accessor was gated
+  on `any(test, feature = "tls")`, failing `deny(dead_code)` in default-feature
+  test builds (`b5dd9f8aa`). First full in-source unit-test run afterwards:
+  22,197 passed, 4 failed (two ambient-audit drifts, two server-stack
+  body-lifecycle tests), 24 ignored.
+- **README and docs/WASM.md now describe verified behaviour** for the Browser
+  Edition (a lifecycle ledger over browser promises, not a scheduler), RaptorQ
+  snapshot distribution (in-process model, test-double transport only), the
+  HTTP client, connection pooling, `#[main]` defaults, ProgressCertificate
+  reach, the crates.io version, and stale bead/directory references.
+
 ### Entry macro runtime defaults
 
 - **`#[asupersync::main]` now builds the multi-thread production runtime by

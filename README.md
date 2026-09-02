@@ -916,11 +916,15 @@ A `VirtualTcp` implementation (`src/net/tcp/virtual_tcp.rs`) provides a fully in
 
 The shipped client is HTTP/1.1 only: `asupersync::http::Client` (a re-export
 of `h1::HttpClient`) offers a pooled, redirect-aware fluent request API with a
-`tls`-feature HTTPS arm, CONNECT tunnelling, and a cookie jar. Connection
-pooling (`src/http/pool.rs`) applies to that client; the HTTP/1.1 and HTTP/2
-servers do not use it, and there is no general-purpose HTTP/2 client (gRPC
-owns a private H2 channel). Optional response compression lives in
-`src/http/compress.rs`.
+`tls`-feature HTTPS arm, CONNECT tunnelling, and a cookie jar. HTTPS trusts
+the roots selected by `tls-native-roots` / `tls-webpki-roots` plus any root
+installed with `HttpClient::builder().add_root_certificate(cert)`; with plain
+`tls` and no installed root every `https://` request fails closed before a
+ClientHello (`tests/http_client_https_e2e.rs` proves both directions against a
+real TLS listener). Connection pooling (`src/http/pool.rs`) applies to that
+client; the HTTP/1.1 and HTTP/2 servers do not use it, and there is no
+general-purpose HTTP/2 client (gRPC owns a private H2 channel). Optional
+response compression lives in `src/http/compress.rs`.
 
 ### WebSocket
 
@@ -989,7 +993,7 @@ Asupersync includes async clients for three databases, each respecting structure
 |----------|----------|---------------|------|
 | **SQLite** | `src/database/sqlite.rs` | Blocking pool bridge | N/A |
 | **PostgreSQL** | `src/database/postgres.rs` | Binary protocol v3 | SCRAM-SHA-256 |
-| **MySQL** | `src/database/mysql.rs` | MySQL wire protocol | Native + caching_sha2 |
+| **MySQL** | `src/database/mysql.rs` | MySQL wire protocol | caching_sha2 by default; `mysql_native_password` only with the explicit `insecure_legacy_mysql_native_password` opt-in (SHA-1 exchange, fail-closed otherwise) |
 
 All three support prepared statements, transactions, and connection reuse. SQLite operations run on the blocking thread pool (since `rusqlite` is synchronous) with cancel-safe wrappers that respect region deadlines. PostgreSQL and MySQL implement their wire protocols directly over `TcpStream`, avoiding external driver dependencies.
 
@@ -1309,11 +1313,11 @@ Beyond `join`, `race`, and `timeout`, the combinator library includes patterns f
 
 | Combinator | Location | Purpose |
 |------------|----------|---------|
-| **quorum** | `src/combinator/quorum.rs` | M-of-N completion for consensus patterns |
-| **hedge** | `src/combinator/hedge.rs` | Start backup after delay, first response wins |
-| **first_ok** | `src/combinator/first_ok.rs` | Try operations sequentially until one succeeds |
-| **pipeline** | `src/combinator/pipeline.rs` | Staged transformations with backpressure |
-| **map_reduce** | `src/combinator/map_reduce.rs` | Parallel map + monoid reduction |
+| **quorum** | `Scope::quorum` (`src/cx/scope.rs`) + `src/combinator/quorum.rs` | M-of-N completion: spawns every branch, returns once M succeed or success is impossible, then cancels and drains every remaining branch |
+| **hedge** | `Scope::hedge` (`src/cx/scope.rs`); the `hedge()` future in `src/combinator/hedge.rs` | Start backup after delay, first response wins. `Scope::hedge` aborts and joins the loser; the standalone `hedge()` future drops it |
+| **first_ok** | `Scope::first_ok` (`src/cx/scope.rs`) + `src/combinator/first_ok.rs` | Try lazy operations sequentially until one succeeds; an in-flight attempt is drained on cancellation |
+| **pipeline** | `src/combinator/pipeline.rs` | Outcome aggregation for staged transformations; the module does not execute stages or apply backpressure itself |
+| **map_reduce** | `src/combinator/map_reduce.rs` | Monoid reduction over already-collected outcomes; the module does not spawn the map phase itself |
 | **circuit_breaker** | `src/combinator/circuit_breaker.rs` | Failure detection, open/half-open/closed states |
 | **bulkhead** | `src/combinator/bulkhead.rs` | Concurrency isolation (bounded parallelism) |
 | **rate_limit** | `src/combinator/rate_limit.rs` | Token bucket throughput control |
