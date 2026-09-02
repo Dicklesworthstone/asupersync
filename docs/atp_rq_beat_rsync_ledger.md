@@ -4027,3 +4027,19 @@ L3 = commit-write rename-not-copy (bead br-asupersync-sze9ym, codex-drafted + Sa
 ## 2026-09-02 (SapphireHill) — MATRIX-235 receipts committed; no new measurement
 
 Bookkeeping only, no performance claim. `artifacts/*` is gitignored, so a fresh clone carried zero bench evidence. The MATRIX-235 scorecards (`scorecard.md`) and per-rep rows (`results.jsonl`) for the 16 runs `artifacts/atp_bench_matrix/M235_*` (2026-07-10, encrypted tier, matched-pair L2 A/B) are now force-tracked; raw cell logs stay ignored. Reminder that the honest state of the encrypted tier is unchanged since MATRIX-235: rsync-ssh-aes128gcm failed to establish in that session (`no verified reps` rows), so those scorecards carry ATP-only medians and NO ATP-vs-rsync ratio; the last crypto-symmetric encrypted comparison on clean links still shows ATP slower (50M/perfect 1.48x, tree_big/perfect 2.46x, see the 2026-06/07 entries). No cross-machine QUIC receipt exists yet. Bead: asupersync-gap-atp-bench-receipts-xwyrr2.
+
+## 2026-09-02 (SapphireHill) — FIRST CROSS-MACHINE QUIC RECEIPT (Hetzner→Contabo, SHA-256 both ends) + harness certificate defect fixed
+
+Receipt: `artifacts/atp_bench_matrix/wan_quic_receipt_2026-09-02.md` (tracked). Binary `atp 0.4.10` release from b1ed41481, sha256 `7be73269…`, same bytes on every host.
+
+| path (RTT) | transport | 256 MiB elapsed | throughput | committed + SHA-256 match |
+|---|---|---|---|---|
+| Hetzner Ashburn → Contabo Lauterbourg (96 ms) | QUIC/TLS1.3 | 42.90 s | 6.26 MB/s | yes |
+| same | ATP TCP plaintext | 13.47 s | 19.93 MB/s | yes |
+| Contabo NY → Contabo Lauterbourg (88 ms) | QUIC/TLS1.3 | 100.86 s | 2.66 MB/s | yes |
+| same | ATP TCP plaintext | 11.73 s | 22.89 MB/s | yes |
+
+- **Correctness banked:** 4/4 committed, merkle_ok, receiver-side SHA-256 equal to the sender's digest. First QUIC cross-machine receipt (previous cross-machine evidence was TCP plaintext, 2026-06-13).
+- **Performance, honestly:** on ~90 ms WAN paths the QUIC sender is 3.2–8.6× slower than the same binary over TCP. The path is not the limit. No encrypted "beats rsync" wording is supported; rsync was not measured on these paths (no ssh trust between the sender and receiver hosts; the netns matrix carries that comparison).
+- **Harness defect (fixed):** OpenSSL 3.5 `req -x509` stamps `basicConstraints=CA:TRUE`; rustls-webpki refuses a CA cert as an end entity, so every `atp-quic-tls13` netns cell on ovh-a failed in 0.15 s (`read_hs_fatal_alert`) while rsync cells passed. `run_matrix_cell.sh` now pins `CA:FALSE`. Any encrypted-tier number produced by the old harness on a modern OpenSSL host was a connection failure, not a slow loss.
+- One rep per cell; no loss regimes; single hour of the day.

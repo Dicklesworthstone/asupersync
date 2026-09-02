@@ -540,13 +540,19 @@ run_atp() {  # $1=auth-mode: lab|key|tls   $2=transport: rq|quic
         # extendedKeyUsage=serverAuth (a bare -x509 cert omits it → the client
         # rejects the server cert and the QUIC/TLS handshake dies with a fatal
         # alert). Add EKU serverAuth + keyUsage so the self-signed leaf validates.
+        # OpenSSL 3.5 additionally stamps `basicConstraints=critical,CA:TRUE` on
+        # every `req -x509` certificate; webpki refuses a CA certificate as an
+        # end entity (the 2026-09-02 ovh-a run lost every atp-quic-tls13 cell in
+        # 0.15 s with `read_hs_fatal_alert`), so pin CA:FALSE explicitly.
         openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
             -keyout "$key" -out "$cert" -days 3 \
             -subj "/CN=${HOST_IP}" -addext "subjectAltName=IP:${HOST_IP}" \
+            -addext "basicConstraints=critical,CA:FALSE" \
             -addext "keyUsage=critical,digitalSignature" \
             -addext "extendedKeyUsage=serverAuth" >/dev/null 2>&1 || \
         openssl req -x509 -newkey rsa:2048 -nodes -keyout "$key" -out "$cert" -days 3 \
             -subj "/CN=${HOST_IP}" -addext "subjectAltName=IP:${HOST_IP}" \
+            -addext "basicConstraints=critical,CA:FALSE" \
             -addext "keyUsage=critical,digitalSignature,keyEncipherment" \
             -addext "extendedKeyUsage=serverAuth" >/dev/null 2>&1
         tls_recv=(--server-cert "$cert" --server-key "$key"); tls_send=(--ca "$cert" --server-name "$HOST_IP")
