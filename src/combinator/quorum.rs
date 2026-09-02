@@ -45,6 +45,19 @@
 //! - `quorum(N, N)`: Equivalent to join_all
 //! - `quorum(1, N)`: Equivalent to race_all (first success wins)
 //! - `quorum(M, N) where M > N`: Error (invalid quorum)
+//!
+//! # Executable entry point
+//!
+//! The items in this module are the *aggregation* half of the combinator:
+//! [`quorum_outcomes`] / [`quorum_to_result`] fold an already-collected
+//! outcome vector, and [`quorum_still_possible`] / [`quorum_achieved`] are the
+//! early-termination predicates. The half that actually spawns branches,
+//! waits for M successes, and cancels **and drains** the rest is
+//! [`Scope::quorum`](crate::cx::Scope::quorum): it runs the pseudocode above
+//! on the runtime and aggregates through these folders. Note that the
+//! executable entry rejects `needed == 0` (as well as `needed > N`) with
+//! [`QuorumError::InvalidQuorum`] before spawning anything, while the folder
+//! keeps `quorum(0, N)` as the algebraic additive identity.
 
 use core::fmt;
 use std::marker::PhantomData;
@@ -55,7 +68,9 @@ use crate::types::outcome::PanicPayload;
 
 /// A quorum combinator for M-of-N completion semantics.
 ///
-/// This is a builder/marker type; actual execution happens via the runtime.
+/// This is a builder/marker type; execution happens through
+/// [`Scope::quorum`](crate::cx::Scope::quorum), which aggregates through
+/// [`quorum_outcomes`] and [`quorum_to_result`].
 #[derive(Debug)]
 pub struct Quorum<T, E> {
     _t: PhantomData<T>,

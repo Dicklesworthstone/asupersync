@@ -10,8 +10,14 @@
 //! - **race**: Run all concurrently, first to *complete* wins (regardless of outcome)
 //! - **first_ok**: Try sequentially, first *success* wins (errors cause fallback)
 //!
-//! For Phase 0 (single-threaded), this implements sequential first_ok.
-//! Concurrent variants will be added in Phase 1.
+//! Two executable forms share the aggregation types in this module:
+//!
+//! - the inline [`first_ok!`](crate::first_ok) macro awaits each operation in
+//!   place and yields a [`FirstOkResult`];
+//! - [`Scope::first_ok`](crate::cx::Scope::first_ok) invokes lazy branch
+//!   *factories* one at a time, runs each attempt as a region task, drains an
+//!   in-flight attempt when the caller is cancelled, and folds the terminal
+//!   outcomes through [`FirstOkResult`] / [`first_ok_to_result`].
 //!
 //! # Semantics
 //!
@@ -50,7 +56,9 @@ use crate::types::outcome::PanicPayload;
 
 /// A first_ok combinator for fallback chains.
 ///
-/// This is a builder/marker type; actual execution happens via the runtime.
+/// This is a builder/marker type; execution happens through the
+/// [`first_ok!`](crate::first_ok) macro (inline) or
+/// [`Scope::first_ok`](crate::cx::Scope::first_ok) (runtime tasks).
 #[derive(Debug)]
 pub struct FirstOk<T, E> {
     _t: PhantomData<T>,

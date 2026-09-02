@@ -1500,6 +1500,354 @@ impl<P: Policy> std::fmt::Debug for Scope<'_, P> {
     }
 }
 
+// =============================================================================
+// Executable M-of-N quorum and sequential first-ok
+// =============================================================================
+
+/// Folds a spawned branch's join result into the four-valued [`Outcome`]
+/// lattice consumed by the quorum / first-ok aggregators.
+fn branch_join_to_outcome<T, E>(joined: Result<Result<T, E>, JoinError>) -> Outcome<T, E> {
+    match joined {
+        Ok(Ok(value)) => Outcome::Ok(value),
+        Ok(Err(error)) => Outcome::Err(error),
+        Err(JoinError::Cancelled(reason)) => Outcome::Cancelled(reason),
+        Err(JoinError::Panicked(payload)) => Outcome::Panicked(payload),
+        Err(JoinError::PolledAfterCompletion) => Outcome::Panicked(PanicPayload::new(
+            "branch join handle polled after completion",
+        )),
+    }
+}
+
+impl<P: Policy> Scope<'_, P> {
+    /// Runs `branches` concurrently in this scope's region and resolves once
+    /// `needed` of them have returned `Ok` — M-of-N completion.
+    ///
+    /// Every branch is spawned as a region task through the same
+    /// cancellation-dominant admission path [`JoinSet`](crate::combinator::JoinSet)
+    /// uses, so a branch that returns a value *after* it was cancelled is
+    /// reported as [`Outcome::Cancelled`], never as a late winner. Progress is
+    /// observed by polling every branch's join handle each round, exactly like
+    /// [`Scope::race_all`], and the wait ends at the first of:
+    ///
+    /// 1. `needed` branches have returned `Ok` (quorum met);
+    /// 2. so many branches have failed that `needed` successes can no longer
+    ///    happen (quorum impossible; see
+    ///    [`quorum_still_possible`](crate::combinator::quorum::quorum_still_possible));
+    /// 3. the caller's `cx` is cancelled.
+    ///
+    /// In all three cases every still-running branch is then protocol-cancelled
+    /// (with [`CancelReason::quorum_met`], or the caller's own reason in case 3)
+    /// **and joined to termination** before this future returns — losers are
+    /// drained, never drop-abandoned, mirroring the `race_all` loser-drain
+    /// invariant. The drain is recorded in the loser-drain history when one is
+    /// wired (`winner` = the first successful branch in spawn order, or the
+    /// first branch when none succeeded).
+    ///
+    /// The terminal outcomes are aggregated in spawn order through
+    /// [`quorum_outcomes`](crate::combinator::quorum::quorum_outcomes) and
+    /// [`quorum_to_result`](crate::combinator::quorum::quorum_to_result):
+    ///
+    /// - `Ok(values)`: the successful values in spawn order. At least `needed`
+    ///   values are returned; a branch that completed successfully in the same
+    ///   scheduling round as the deciding success (before cancellation could be
+    ///   requested) is included as well.
+    /// - [`QuorumError::InvalidQuorum`](crate::combinator::quorum::QuorumError::InvalidQuorum):
+    ///   `needed == 0` or `needed > branches.len()`. Rejected deterministically
+    ///   **before any branch is spawned**. The outcome folder keeps `quorum(0, N)`
+    ///   as its additive identity; this executable entry rejects it because
+    ///   "spawn N branches and immediately cancel them all" is never what a
+    ///   caller means.
+    /// - [`QuorumError::InsufficientSuccesses`](crate::combinator::quorum::QuorumError::InsufficientSuccesses):
+    ///   quorum impossible; returned only after all branches terminated.
+    /// - [`QuorumError::Cancelled`](crate::combinator::quorum::QuorumError::Cancelled):
+    ///   the caller was cancelled (or a branch failed admission) before the
+    ///   quorum was met; every branch has been drained.
+    /// - [`QuorumError::Panicked`](crate::combinator::quorum::QuorumError::Panicked):
+    ///   any branch — winner or drained loser — panicked. A panic outranks a
+    ///   met quorum, exactly as documented on `quorum_to_result`.
+    ///
+    /// Branch factories must be `Send + 'static` (they run as spawned tasks);
+    /// heterogeneous branches can be boxed:
+    ///
+    /// ```ignore
+    /// type Branch = Box<dyn FnOnce(Cx) -> Pin<Box<dyn Future<Output = Result<u32, String>> + Send>> + Send>;
+    /// let branches: Vec<Branch> = vec![
+    ///     Box::new(|cx| Box::pin(replica_a(cx))),
+    ///     Box::new(|cx| Box::pin(replica_b(cx))),
+    ///     Box::new(|cx| Box::pin(replica_c(cx))),
+    /// ];
+    /// let two_of_three = cx.scope().quorum(&cx, 2, branches).await?;
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// See the variant list above. Never panics on invalid `needed`.
+    pub async fn quorum<T, E, I, F, Fut>(
+        &self,
+        cx: &Cx,
+        needed: usize,
+        branches: I,
+    ) -> Result<Vec<T>, crate::combinator::quorum::QuorumError<E>>
+    where
+        I: IntoIterator<Item = F>,
+        F: FnOnce(Cx) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<T, E>> + Send + 'static,
+        T: Send + 'static,
+        E: Send + 'static,
+    {
+        use crate::combinator::quorum::{
+            QuorumError, quorum_achieved, quorum_outcomes, quorum_still_possible, quorum_to_result,
+        };
+
+        let branches: Vec<F> = branches.into_iter().collect();
+        let total = branches.len();
+        if needed == 0 || needed > total {
+            return Err(QuorumError::InvalidQuorum {
+                required: needed,
+                total,
+            });
+        }
+
+        let mut handles = self.spawn_quorum_branches(cx, branches).await?;
+        let participants: Vec<TaskId> = handles.iter().map(TaskHandle::task_id).collect();
+        let race_id = self.record_loser_drain_start(cx, participants.clone());
+
+        let mut outcomes: Vec<Option<Outcome<T, E>>> =
+            std::iter::repeat_with(|| None).take(total).collect();
+        let mut successes = 0_usize;
+        let mut failures = 0_usize;
+        let mut caller_cancelled = false;
+
+        // Phase 1: collect terminal outcomes as they land until the quorum is
+        // met, provably impossible, or the caller is cancelled. Every branch is
+        // polled each round so same-round terminals are never lost.
+        std::future::poll_fn(|poll_cx| {
+            for (index, handle) in handles.iter_mut().enumerate() {
+                if outcomes[index].is_some() {
+                    continue;
+                }
+                if let Poll::Ready(joined) = handle.poll_join(poll_cx) {
+                    let outcome = branch_join_to_outcome(joined);
+                    if outcome.is_ok() {
+                        successes += 1;
+                    } else {
+                        failures += 1;
+                    }
+                    Self::record_loser_drain_task_complete(cx, handle.task_id());
+                    outcomes[index] = Some(outcome);
+                }
+            }
+            if quorum_achieved(needed, successes)
+                || !quorum_still_possible(needed, total, successes, failures)
+            {
+                return Poll::Ready(());
+            }
+            if cx.checkpoint().is_err() {
+                caller_cancelled = true;
+                return Poll::Ready(());
+            }
+            Poll::Pending
+        })
+        .await;
+
+        // Phase 2: protocol-cancel every branch that is still running, then
+        // join each one to termination. Already-finished branches are joined
+        // without an abort so a terminal panic is not obscured by a
+        // strengthened cancellation reason (same rule as `race_all`).
+        let drain_reason = if caller_cancelled {
+            cx.cancel_reason()
+                .unwrap_or_else(|| CancelReason::user("quorum cancelled"))
+        } else {
+            CancelReason::quorum_met()
+        };
+        for (index, handle) in handles.iter().enumerate() {
+            if outcomes[index].is_none() && !handle.is_finished() {
+                handle.abort_with_reason(drain_reason.clone());
+            }
+        }
+        for (index, handle) in handles.iter_mut().enumerate() {
+            if outcomes[index].is_some() {
+                continue;
+            }
+            let outcome = branch_join_to_outcome(handle.join(cx).await);
+            Self::record_loser_drain_task_complete(cx, handle.task_id());
+            outcomes[index] = Some(outcome);
+        }
+
+        let winner = outcomes
+            .iter()
+            .zip(&participants)
+            .find_map(|(outcome, task)| match outcome {
+                Some(Outcome::Ok(_)) => Some(*task),
+                _ => None,
+            })
+            .unwrap_or(participants[0]);
+        Self::record_loser_drain_complete(cx, race_id, winner);
+
+        let outcomes: Vec<Outcome<T, E>> = outcomes
+            .into_iter()
+            .map(|outcome| outcome.expect("every quorum branch was joined to a terminal outcome"))
+            .collect();
+        quorum_to_result(quorum_outcomes(needed, outcomes))
+    }
+
+    /// Spawns every quorum branch into this scope's region, failing closed on
+    /// the first admission failure: siblings already admitted are cancelled
+    /// **and drained** before the error is returned.
+    async fn spawn_quorum_branches<T, E, F, Fut>(
+        &self,
+        cx: &Cx,
+        branches: Vec<F>,
+    ) -> Result<Vec<TaskHandle<Result<T, E>>>, crate::combinator::quorum::QuorumError<E>>
+    where
+        F: FnOnce(Cx) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<T, E>> + Send + 'static,
+        T: Send + 'static,
+        E: Send + 'static,
+    {
+        use crate::combinator::quorum::QuorumError;
+
+        let mut handles: Vec<TaskHandle<Result<T, E>>> = Vec::with_capacity(branches.len());
+        for branch in branches {
+            match cx.spawn_in_cancellation_dominant(self, branch) {
+                Ok(handle) => handles.push(handle),
+                Err(_spawn_err) => {
+                    let reason = CancelReason::resource_unavailable();
+                    for handle in &handles {
+                        handle.abort_with_reason(reason.clone());
+                    }
+                    let mut sibling_panic = None;
+                    for handle in &mut handles {
+                        if let Err(JoinError::Panicked(payload)) = handle.join(cx).await {
+                            sibling_panic.get_or_insert(payload);
+                        }
+                    }
+                    return Err(
+                        sibling_panic.map_or(QuorumError::Cancelled(reason), QuorumError::Panicked)
+                    );
+                }
+            }
+        }
+        Ok(handles)
+    }
+
+    /// Tries `factories` **sequentially** — each one is invoked and its branch
+    /// run to a terminal outcome before the next is even constructed — and
+    /// resolves with the first `Ok` value.
+    ///
+    /// Each attempt is spawned as a cancellation-dominant task in this scope's
+    /// region (the same admission path [`JoinSet`](crate::combinator::JoinSet)
+    /// uses) and joined to termination. Later factories are never invoked
+    /// once an attempt succeeds, so `factories[i + 1]` runs only if
+    /// `factories[0..=i]` all failed with `Err`. Before each attempt, and on
+    /// every poll while an attempt is in flight, the caller's `cx` is
+    /// checkpointed: if the caller has been cancelled, the in-flight attempt is
+    /// protocol-cancelled with the caller's reason and **drained** (joined to
+    /// termination) before the chain stops, and no further factory is invoked.
+    ///
+    /// The terminal outcomes are aggregated through
+    /// [`FirstOkResult`](crate::combinator::first_ok::FirstOkResult) and
+    /// [`first_ok_to_result`](crate::combinator::first_ok::first_ok_to_result):
+    ///
+    /// - `Ok(value)`: the first successful attempt's value.
+    /// - [`FirstOkError::AllFailed`](crate::combinator::first_ok::FirstOkError::AllFailed):
+    ///   every attempt returned `Err`; carries the errors in attempt order.
+    /// - [`FirstOkError::Cancelled`](crate::combinator::first_ok::FirstOkError::Cancelled):
+    ///   the caller was cancelled (or an attempt failed admission) before any
+    ///   attempt succeeded; carries the errors collected so far.
+    /// - [`FirstOkError::Panicked`](crate::combinator::first_ok::FirstOkError::Panicked):
+    ///   an attempt panicked; the chain stops there.
+    /// - [`FirstOkError::Empty`](crate::combinator::first_ok::FirstOkError::Empty):
+    ///   no factories were supplied.
+    ///
+    /// This is the runtime-backed counterpart of the inline [`first_ok!`]
+    /// macro: the macro awaits futures in place, this method runs each attempt
+    /// as a region task whose cancellation and drain are owned by the runtime.
+    /// Heterogeneous factories can be boxed exactly as for [`Scope::quorum`].
+    ///
+    /// [`first_ok!`]: crate::first_ok
+    ///
+    /// # Errors
+    ///
+    /// See the variant list above.
+    pub async fn first_ok<T, E, I, F, Fut>(
+        &self,
+        cx: &Cx,
+        factories: I,
+    ) -> Result<T, crate::combinator::first_ok::FirstOkError<E>>
+    where
+        I: IntoIterator<Item = F>,
+        F: FnOnce(Cx) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<T, E>> + Send + 'static,
+        T: Send + 'static,
+        E: Send + 'static,
+    {
+        use crate::combinator::first_ok::{
+            FirstOkError, FirstOkFailure, FirstOkResult, first_ok_to_result,
+        };
+
+        let factories: Vec<F> = factories.into_iter().collect();
+        let total = factories.len();
+        if total == 0 {
+            return Err(FirstOkError::Empty);
+        }
+        let mut failures: Vec<(usize, FirstOkFailure<E>)> = Vec::new();
+
+        for (index, factory) in factories.into_iter().enumerate() {
+            // Never start a new attempt once the caller is cancelled.
+            if cx.checkpoint().is_err() {
+                let reason = cx
+                    .cancel_reason()
+                    .unwrap_or_else(|| CancelReason::user("first_ok cancelled"));
+                failures.push((index, FirstOkFailure::Cancelled(reason)));
+                return first_ok_to_result(FirstOkResult::failure(failures, total));
+            }
+
+            let mut handle = match cx.spawn_in_cancellation_dominant(self, factory) {
+                Ok(handle) => handle,
+                Err(_spawn_err) => {
+                    failures.push((
+                        index,
+                        FirstOkFailure::Cancelled(CancelReason::resource_unavailable()),
+                    ));
+                    return first_ok_to_result(FirstOkResult::failure(failures, total));
+                }
+            };
+
+            // Await the attempt to termination. If the caller is cancelled
+            // while it is in flight, forward the cancellation to the attempt
+            // once and keep joining: the attempt is drained, not abandoned.
+            let mut abort_requested = false;
+            let joined = std::future::poll_fn(|poll_cx| {
+                if !abort_requested && cx.checkpoint().is_err() {
+                    let reason = cx
+                        .cancel_reason()
+                        .unwrap_or_else(|| CancelReason::user("first_ok cancelled"));
+                    handle.abort_with_reason(reason);
+                    abort_requested = true;
+                }
+                handle.poll_join(poll_cx)
+            })
+            .await;
+
+            match branch_join_to_outcome(joined) {
+                Outcome::Ok(value) => return Ok(value),
+                Outcome::Err(error) => failures.push((index, FirstOkFailure::Error(error))),
+                Outcome::Cancelled(reason) => {
+                    failures.push((index, FirstOkFailure::Cancelled(reason)));
+                    return first_ok_to_result(FirstOkResult::failure(failures, total));
+                }
+                Outcome::Panicked(payload) => {
+                    failures.push((index, FirstOkFailure::Panicked(payload)));
+                    return first_ok_to_result(FirstOkResult::failure(failures, total));
+                }
+            }
+        }
+
+        first_ok_to_result(FirstOkResult::failure(failures, total))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(

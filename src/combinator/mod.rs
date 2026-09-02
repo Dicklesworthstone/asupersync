@@ -9,8 +9,11 @@
 //! - [`bracket`](mod@bracket): Acquire/use/release resource safety pattern
 //! - [`mod@retry`]: Retry with exponential backoff
 //! - [`quorum`]: M-of-N completion semantics for consensus patterns
+//!   (executed by [`Scope::quorum`](crate::cx::Scope::quorum))
 //! - [`mod@hedge`]: Latency hedging - start backup after delay, first wins
 //! - [`first_ok`]: Try operations sequentially until one succeeds
+//!   (executed by [`Scope::first_ok`](crate::cx::Scope::first_ok) or the
+//!   inline [`first_ok!`](crate::first_ok) macro)
 //! - [`pipeline`]: Chain transformations with staged processing
 //! - [`map_reduce`]: Parallel map followed by monoid-based reduction
 //! - [`circuit_breaker`]: Failure detection and prevention
