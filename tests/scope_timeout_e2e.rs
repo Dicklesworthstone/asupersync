@@ -102,12 +102,12 @@ fn overrunning_operation_is_cancelled_and_drained_before_return() {
             .await
             .expect("spawn");
         let cleanup_seen = cleanup_runs.load(Ordering::SeqCst);
-        let acknowledged_err = match result {
-            TimedResult::Completed(outcome) => {
-                matches!(outcome.into_result(), Err(TimedError::Error(ref e)) if e == "cancelled")
-            }
-            TimedResult::TimedOut(_) => false,
-        };
+        // `TimedResult::into_result` maps Completed(Err(e)) to
+        // Err(TimedError::Error(e)) and TimedOut to Err(TimedError::TimedOut).
+        let acknowledged_err = matches!(
+            result.into_result(),
+            Err(TimedError::Error(ref e)) if e == "cancelled"
+        );
         (acknowledged_err, cleanup_seen)
     });
     assert!(

@@ -103,7 +103,7 @@ fn production_trace_exports_spawn_and_complete_for_every_task() {
     // Three independent tasks that touch no shared resource: the detector
     // must at least run to completion; its race count is reported but not
     // asserted (see the DPOR clock-mode gap bead).
-    let _ = detector.race_count();
+    let _ = detector.races().len();
 
     let via_handle = runtime
         .handle()
