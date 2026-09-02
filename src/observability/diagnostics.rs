@@ -4254,29 +4254,28 @@ mod tests {
         diagnostics: &Diagnostics,
         leaked_obligations: usize,
     ) -> DiagnosticResourceAccounting {
-        let total_regions = diagnostics.state.regions.iter().count();
-        let open_regions = diagnostics
-            .state
-            .regions
-            .iter()
-            .filter(|(_, region)| region.state() != RegionState::Closed)
-            .count();
-        let total_tasks = diagnostics.state.tasks_iter().count();
-        let live_tasks = diagnostics
-            .state
-            .tasks_iter()
-            .filter(|(_, task)| !task.state.is_terminal())
-            .count();
-        let total_obligations = diagnostics.state.obligations.iter().count();
+        diagnostics.state.with_view(|view| {
+            let total_regions = view.regions().count();
+            let open_regions = view
+                .regions()
+                .filter(|region| region.state() != RegionState::Closed)
+                .count();
+            let total_tasks = view.tasks().count();
+            let live_tasks = view
+                .tasks()
+                .filter(|task| !task.state.is_terminal())
+                .count();
+            let total_obligations = view.obligations().count();
 
-        DiagnosticResourceAccounting {
-            total_regions,
-            open_regions,
-            total_tasks,
-            live_tasks,
-            total_obligations,
-            leaked_obligations,
-        }
+            DiagnosticResourceAccounting {
+                total_regions,
+                open_regions,
+                total_tasks,
+                live_tasks,
+                total_obligations,
+                leaked_obligations,
+            }
+        })
     }
 
     fn render_structured_diagnostic_report_v3(

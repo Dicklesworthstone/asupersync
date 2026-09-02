@@ -109,6 +109,13 @@ impl<'a> RuntimeStateView<'a> {
         state.region(region_id)
     }
 
+    /// Every region record (regions stay embedded in the unified state on
+    /// every shape).
+    pub(crate) fn regions(&self) -> impl Iterator<Item = &'a RegionRecord> + 'a {
+        let state: &'a RuntimeState = self.state;
+        state.regions.iter().map(|(_, record)| record)
+    }
+
     /// Every obligation record: the external shard-C table (when present),
     /// then the embedded table.
     pub(crate) fn obligations(&self) -> impl Iterator<Item = &'a ObligationRecord> + 'a {
