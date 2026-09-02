@@ -563,6 +563,38 @@ netem_json() {
     broken)
       printf '{"rate":"10mbit","delay_ms":200,"jitter_ms":50,"loss_pct":10,"reorder_pct":5,"duplicate_pct":1}'
       ;;
+    wan)
+      # Clean long pipe at WAN latency: 45 ms each way (90 ms RTT), 300 mbit,
+      # no loss. Reproduces the 2026-09-02 cross-machine finding (ATP-over-QUIC
+      # 3-9x slower than the same binary over TCP at ~90 ms RTT; see
+      # artifacts/atp_bench_matrix/wan_quic_receipt_2026-09-02.md) without
+      # leaving the host: neither the 2 ms "perfect" cell nor the 50 mbit
+      # "bad" cell can show a window-limited sender. BDP = 300 mbit x 90 ms
+      # ~= 3.4 MB ~= 2.8k 1200-byte packets; limit 20000 keeps netem from
+      # tail-dropping either transport (br-asupersync-bi2462.1).
+      printf '{"rate":"300mbit","delay_ms":45,"jitter_ms":2,"loss_pct":0,"reorder_pct":0,"duplicate_pct":0,"limit":20000}'
+      ;;
+    wanloss)
+      # The wan pipe with the residual loss a real internet path has
+      # (0.01 % = 1e-4 per packet). A Reno-shaped window on 1200-byte
+      # datagrams at 90 ms RTT is bounded by ~MSS/(RTT*sqrt(p)) ~= 1.3 MB/s
+      # while Linux TCP (CUBIC, 1448-byte MSS) keeps most of the link; the
+      # 2026-09-02 cross-machine receipt (QUIC 2.7-6.3 MB/s vs TCP 20 MB/s)
+      # matches that shape and the clean `wan` cell does not
+      # (br-asupersync-bi2462.1).
+      printf '{"rate":"300mbit","delay_ms":45,"jitter_ms":2,"loss_pct":0.01,"reorder_pct":0,"duplicate_pct":0,"limit":20000}'
+      ;;
+    wanqueue)
+      # The wan pipe with a SHALLOW queue: netem's default 1000-packet limit
+      # (~1.2 MB) instead of the BDP-sized 20000. A sender that bursts a
+      # 4-16 MB window into a 1 Gbit NIC meets exactly this on a real path
+      # (fq_codel/pfifo_fast limits) — the hetzner1 sender showed 13762
+      # UDP SndbufErrors after the 2026-09-02 cross-machine runs while the
+      # netns runs show none. Clean 90 ms and 0.01 % loss did not reproduce
+      # the collapse; queue tail-drop is the next candidate
+      # (br-asupersync-bi2462.1).
+      printf '{"rate":"300mbit","delay_ms":45,"jitter_ms":2,"loss_pct":0,"reorder_pct":0,"duplicate_pct":0,"limit":1000}'
+      ;;
     highbdp)
       # Clean fat + long pipe (1gbit @ 200ms RTT => BDP ~33k pkts) to ISOLATE
       # multi-stream fan-out: a single ATP-RQ stream is capped by per-stream
