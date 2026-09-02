@@ -16,6 +16,10 @@ is `v0.4.9`.
 
 ## Version Timeline
 
+- **v0.4.10 Release**: lock-free `Cx::published_cancel_requested()` for hot
+  cancellation polls and a RaptorQ lib-test build fix, preserving the v0.4.3
+  public compatibility floor. Published to crates.io on 2026-09-01; no
+  `v0.4.10` git tag existed when this entry was written.
 - **v0.4.9 Release**: additive runtime-context and owned-OTLP APIs, SQLite
   cancellation/security/row-metadata correctness, ATP bootstrap-secret
   hardening, and a terminal dual-engine SQLite parity packet, while preserving
@@ -59,6 +63,24 @@ is `v0.4.9`.
 ---
 
 ## [Unreleased]
+
+### Entry macro runtime defaults
+
+- **`#[asupersync::main]` now builds the multi-thread production runtime by
+  default and both entry macros configure an on-demand blocking pool.**
+  Previously `#[main]` expanded to `RuntimeBuilder::current_thread()` with the
+  builder's default `blocking_threads(0, 0)`, so a hello-world program ran one
+  worker and `spawn_blocking` executed inline on that worker. `#[main]` now
+  expands to `RuntimeBuilder::multi_thread()` (the host-independent default
+  worker count) and both `#[main]` and `#[test]` add `blocking_threads(0, 512)`;
+  threads are created only when blocking work arrives. `#[test]` keeps the
+  current-thread scheduler so test bodies stay replay-stable. Opt out with
+  `#[main(flavor = "current_thread")]` and/or the new `blocking = 0` argument
+  (`blocking = N` sets the cap). A bare `RuntimeBuilder` is unchanged: it still
+  ships without a pool until `blocking_threads(min, max)` is called. Proven by
+  `tests/entry_macro_defaults_e2e.rs` (two spinning tasks only both observe each
+  other under the multi-thread default; `spawn_blocking` runs off the worker
+  thread with the default pool and on it with `blocking = 0`).
 
 ### gRPC server routing
 
