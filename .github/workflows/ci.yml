@@ -1790,11 +1790,12 @@ jobs:
             echo "rch is required for Run unit tests" >&2
             exit 1
           fi
-          # Every feature except `legacy-internal-test-harnesses` (stale audit
-          # harnesses with uncommitted goldens; see scripts/ci/release_test_features.sh).
+          # Every feature except the legacy audit harnesses (uncommitted
+          # goldens; see scripts/ci/release_test_features.sh). On Windows the
+          # `ci-cross-platform` members minus those harnesses.
           feature_args=(--features "$(scripts/ci/release_test_features.sh)")
           if [[ "${{ runner.os }}" == "Windows" ]]; then
-            feature_args=(--features ci-cross-platform)
+            feature_args=(--features "$(scripts/ci/release_test_features.sh windows)")
           fi
           max_parallel_threads="${ASUPERSYNC_CI_LIB_TEST_THREADS:-}"
           if [[ -z "$max_parallel_threads" ]]; then
@@ -1856,11 +1857,12 @@ jobs:
             echo "rch is required for Run integration tests" >&2
             exit 1
           fi
-          # Every feature except `legacy-internal-test-harnesses` (stale audit
-          # harnesses with uncommitted goldens; see scripts/ci/release_test_features.sh).
+          # Every feature except the legacy audit harnesses (uncommitted
+          # goldens; see scripts/ci/release_test_features.sh). On Windows the
+          # `ci-cross-platform` members minus those harnesses.
           feature_args=(--features "$(scripts/ci/release_test_features.sh)")
           if [[ "${{ runner.os }}" == "Windows" ]]; then
-            feature_args=(--features ci-cross-platform)
+            feature_args=(--features "$(scripts/ci/release_test_features.sh windows)")
           fi
           "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_integration" cargo test --test '*' "${feature_args[@]}"
 
@@ -1872,11 +1874,12 @@ jobs:
             echo "rch is required for Run doc tests" >&2
             exit 1
           fi
-          # Every feature except `legacy-internal-test-harnesses` (stale audit
-          # harnesses with uncommitted goldens; see scripts/ci/release_test_features.sh).
+          # Every feature except the legacy audit harnesses (uncommitted
+          # goldens; see scripts/ci/release_test_features.sh). On Windows the
+          # `ci-cross-platform` members minus those harnesses.
           feature_args=(--features "$(scripts/ci/release_test_features.sh)")
           if [[ "${{ runner.os }}" == "Windows" ]]; then
-            feature_args=(--features ci-cross-platform)
+            feature_args=(--features "$(scripts/ci/release_test_features.sh windows)")
           fi
           "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_doctest" cargo test --doc "${feature_args[@]}"
 

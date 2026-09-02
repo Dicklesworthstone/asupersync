@@ -139,11 +139,13 @@ test-internals = [
 ]
 # Opt-in for legacy crate-root metamorphic/conformance harness modules that are
 # retained for audit history but not part of the default release compile gate.
-# CI's test/coverage jobs deliberately run every feature EXCEPT this one
-# (scripts/ci/release_test_features.sh): the goldens these modules expect under
+# CI's test/coverage jobs deliberately run every feature EXCEPT this one and
+# `serialization-golden-harnesses` (scripts/ci/release_test_features.sh; note
+# `ci-cross-platform` enables both): the goldens these modules expect under
 # tests/golden/state were never committed and several harnesses assert on
-# message shapes that have since changed, so they are red on every OS
-# (2026-09-02: 93 failures reproduced on macOS, none platform-specific).
+# message shapes that have since changed, so they are red on any OS
+# (2026-09-02: 93 failures on Linux with --all-features, the same modules that
+# head the GitHub macOS runner's failure list).
 legacy-internal-test-harnesses = []
 # Focused proof lane for protocol serialization goldens and messaging
 # conformance rows without compiling the full legacy harness set.
