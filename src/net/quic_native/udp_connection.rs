@@ -19,7 +19,8 @@ use crate::time::timeout;
 use super::connection::{NativeQuicConnectionConfig, NativeQuicConnectionError};
 use super::connection_manager::{
     ConnectionRouterError, PROTECTED_1RTT_MAX_PACKET_BYTES, assemble_protected_1rtt_packet,
-    is_ack_eliciting, protected_1rtt_packet_len, unprotect_1rtt_packet,
+    generate_congestion_admitted_1rtt_frames, is_ack_eliciting, protected_1rtt_packet_len,
+    unprotect_1rtt_packet,
 };
 use super::endpoint::{OutgoingPacket, QuicUdpEndpoint, QuicUdpEndpointError, ReceivedPacket};
 use super::endpoint_api::QuicConnection;
@@ -411,9 +412,9 @@ impl NativeQuicUdpConnection {
         let mut packets = Vec::new();
 
         for _ in 0..MAX_PACKETS_PER_FLUSH {
-            let frames = self.connection.inner_mut().generate_frames(
+            let frames = generate_congestion_admitted_1rtt_frames(
                 cx,
-                PacketNumberSpace::ApplicationData,
+                self.connection.inner_mut(),
                 max_frame_bytes,
             )?;
             if frames.is_empty() {

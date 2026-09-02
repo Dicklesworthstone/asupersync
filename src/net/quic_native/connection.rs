@@ -2506,6 +2506,53 @@ impl NativeQuicConnection {
         self.generate_frames_inner(cx, space, max_frame_bytes, false)
     }
 
+    /// Drain only pending ACK frames without touching congestion-controlled
+    /// control, STREAM, or DATAGRAM state.
+    ///
+    /// Protected UDP owners use this when the congestion window cannot admit a
+    /// full MTU-sized packet. ACK-only packets are not congestion controlled,
+    /// so they may still make recovery progress while every destructive data
+    /// generator remains untouched until admission succeeds.
+    pub(crate) fn generate_pending_ack_frames(
+        &mut self,
+        cx: &Cx,
+        max_frame_bytes: usize,
+    ) -> Result<Vec<QuicFrame>, NativeQuicConnectionError> {
+        checkpoint(cx)?;
+        let mut frames = Vec::new();
+        let mut used = 0usize;
+        let mut index = 0usize;
+
+        while index < self.pending_control_frames.len() {
+            let Some(frame) = self.pending_control_frames.get(index) else {
+                break;
+            };
+            if !matches!(frame, QuicFrame::Ack { .. }) {
+                index += 1;
+                continue;
+            }
+
+            let mut encoded = BytesMut::new();
+            frame.encode(&mut encoded)?;
+            let frame_len = encoded.len();
+            if used.saturating_add(frame_len) > max_frame_bytes {
+                break;
+            }
+
+            let frame = self
+                .pending_control_frames
+                .remove(index)
+                .expect("ACK index came from the same queue");
+            used = used.saturating_add(frame_len);
+            frames.push(frame);
+            if used >= max_frame_bytes {
+                break;
+            }
+        }
+
+        Ok(frames)
+    }
+
     /// Generate only STREAM frames for one application stream.
     ///
     /// This is used by ATP's paced source-stream bulk path, where coalescing
@@ -3969,6 +4016,112 @@ mod tests {
             )),
             "normal generator should still drain the deferred control stream"
         );
+    }
+
+    #[test]
+    fn quic_flow_admission_ack_only_preserves_mixed_congestion_controlled_state() {
+        let cx = test_cx();
+        let mut conn = established_conn();
+        let mut in_flight_packets = Vec::new();
+        while conn.transport().can_send(1_200) {
+            in_flight_packets.push(
+                conn.on_packet_sent(
+                    &cx,
+                    PacketNumberSpace::ApplicationData,
+                    1_200,
+                    true,
+                    true,
+                    10_000,
+                )
+                .expect("fill congestion window"),
+            );
+        }
+        assert!(!conn.transport().can_send(1_200));
+
+        let stream = conn.open_local_bidi(&cx).expect("open stream");
+        conn.write_stream_bytes(&cx, stream, Bytes::from_static(b"stream-body"), true)
+            .expect("queue STREAM frame");
+        conn.send_datagram(&cx, Bytes::from_static(b"datagram-body"))
+            .expect("queue DATAGRAM frame");
+
+        let zero = VarInt::from_u64_unchecked(0);
+        let max_data = QuicFrame::MaxData {
+            maximum_data: VarInt::from_u64_unchecked(4096),
+        };
+        let ack = QuicFrame::Ack {
+            largest_acknowledged: VarInt::from_u64_unchecked(7),
+            ack_delay: zero,
+            ack_range_count: zero,
+            first_ack_range: zero,
+            ack_ranges: Vec::new(),
+            ecn_counts: None,
+        };
+        let path_response = QuicFrame::PathResponse { data: [9; 8] };
+        let connection_close = QuicFrame::ConnectionClose {
+            error_code: zero,
+            frame_type: None,
+            reason_phrase: Bytes::from_static(b"later"),
+        };
+        conn.pending_control_frames.extend([
+            max_data.clone(),
+            ack.clone(),
+            path_response.clone(),
+            connection_close.clone(),
+        ]);
+
+        let pending_stream_bytes = conn.pending_stream_data_bytes();
+        let ack_frames =
+            crate::net::quic_native::connection_manager::generate_congestion_admitted_1rtt_frames(
+                &cx, &mut conn, 1_176,
+            )
+            .expect("full congestion window generates ACKs only");
+        assert_eq!(ack_frames, vec![ack]);
+        assert_eq!(
+            conn.pending_control_frames,
+            VecDeque::from([
+                max_data.clone(),
+                path_response.clone(),
+                connection_close.clone(),
+            ])
+        );
+        assert_eq!(conn.pending_stream_data_bytes(), pending_stream_bytes);
+        assert_eq!(conn.pending_outbound_datagram_count(), 1);
+        assert_eq!(conn.datagrams_sent(), 0);
+
+        conn.on_ack_received(
+            &cx,
+            PacketNumberSpace::ApplicationData,
+            &[in_flight_packets[0]],
+            0,
+            20_000,
+        )
+        .expect("ACK reopens congestion window");
+        assert!(conn.transport().can_send(1_200));
+        let resumed =
+            crate::net::quic_native::connection_manager::generate_congestion_admitted_1rtt_frames(
+                &cx, &mut conn, 1_176,
+            )
+            .expect("ordinary generation after congestion admission");
+        assert_eq!(
+            &resumed[..3],
+            &[max_data, path_response, connection_close],
+            "congestion-controlled control frames retain their original order"
+        );
+        assert!(resumed.iter().any(|frame| matches!(
+            frame,
+            QuicFrame::Stream {
+                stream_id,
+                data,
+                fin: true,
+                ..
+            } if stream_id.value() == stream.0 && data.as_ref() == b"stream-body"
+        )));
+        assert!(resumed.iter().any(|frame| matches!(
+            frame,
+            QuicFrame::Datagram { data } if data.as_ref() == b"datagram-body"
+        )));
+        assert_eq!(conn.pending_outbound_datagram_count(), 0);
+        assert_eq!(conn.datagrams_sent(), 1);
     }
 
     #[test]

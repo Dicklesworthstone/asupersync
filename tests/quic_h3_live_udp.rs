@@ -391,7 +391,7 @@ fn authenticated_h3_router_request_response_crosses_real_udp() {
 #[test]
 #[cfg(feature = "test-internals")]
 fn authenticated_h3_produced_response_obeys_live_udp_credit_and_quiesces() {
-    const FRAME_BYTES: usize = 1024;
+    const FRAME_BYTES: usize = 64 * 1024;
     const BODY_FRAMES: usize = 64;
     const BODY_BYTES: usize = FRAME_BYTES * BODY_FRAMES;
     const FRAME_WIRE_BUDGET: u64 = FRAME_BYTES as u64 + 16;
@@ -766,6 +766,7 @@ fn authenticated_h3_produced_response_obeys_live_udp_credit_and_quiesces() {
         assert!(connection_credit_observed);
 
         let mut producer_ready = false;
+        let mut observed_congestion_admitted_prefix = false;
         for frame_index in 0..BODY_FRAMES {
             assert!(matches!(
                 bridge.poll_produced_response_with_cx(
@@ -790,11 +791,33 @@ fn authenticated_h3_produced_response_obeys_live_udp_credit_and_quiesces() {
             assert!(attempted.saturating_sub(received) <= 3 * FRAME_BYTES);
 
             let mut data_events = Vec::new();
-            for _ in 0..32 {
-                let _ = server
+            for drive_attempt in 0..32 {
+                let pending_before_flush = server
+                    .connection()
+                    .pending_stream_data_bytes(produced_stream);
+                let packets_sent = server
                     .flush(&cx)
                     .await
                     .expect("flush congestion-admitted produced DATA packets");
+                if frame_index == 0 && drive_attempt == 0 {
+                    let pending_after_flush = server
+                        .connection()
+                        .pending_stream_data_bytes(produced_stream);
+                    let transport = server.connection().inner().transport();
+                    assert!(packets_sent > 0, "the admitted prefix must reach UDP");
+                    assert!(pending_after_flush > 0);
+                    assert!(pending_after_flush < pending_before_flush);
+                    assert!(transport.bytes_in_flight() > 0);
+                    assert!(
+                        transport.bytes_in_flight() <= transport.congestion_window_bytes(),
+                        "an admitted prefix must never overshoot cwnd"
+                    );
+                    assert!(
+                        !transport.can_send(1_200),
+                        "the first flush must stop with less than one protected-packet ceiling available"
+                    );
+                    observed_congestion_admitted_prefix = true;
+                }
                 client
                     .drive_io_once(&cx, DRIVE_STEP)
                     .await
@@ -804,6 +827,12 @@ fn authenticated_h3_produced_response_obeys_live_udp_credit_and_quiesces() {
                     &mut client_h3,
                     client.connection_mut(),
                 ));
+                if frame_index == 0 && drive_attempt == 0 {
+                    assert!(
+                        data_events.is_empty(),
+                        "an admitted packet prefix must not fabricate a partial H3 DATA event"
+                    );
+                }
                 if !data_events.is_empty() {
                     break;
                 }
@@ -864,6 +893,7 @@ fn authenticated_h3_produced_response_obeys_live_udp_credit_and_quiesces() {
             producer_ready,
             "producer must finish after its final bounded send"
         );
+        assert!(observed_congestion_admitted_prefix);
         assert!(matches!(
             bridge.poll_produced_response_with_cx(
                 &cx,

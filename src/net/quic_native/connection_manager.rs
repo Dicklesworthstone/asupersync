@@ -818,13 +818,17 @@ async fn drain_connection_frames(
     } else {
         PROTECTED_1RTT_MAX_PACKET_BYTES
     };
-    let frames = handle
-        .connection
-        .generate_frames(cx, space, max_frame_bytes)
-        .map_err(|err| ConnectionRouterError::PacketProcessingFailed {
-            connection_id,
-            reason: err.to_string(),
-        })?;
+    let frames = if space == PacketNumberSpace::ApplicationData {
+        generate_congestion_admitted_1rtt_frames(cx, &mut handle.connection, max_frame_bytes)
+    } else {
+        handle
+            .connection
+            .generate_frames(cx, space, max_frame_bytes)
+    }
+    .map_err(|err| ConnectionRouterError::PacketProcessingFailed {
+        connection_id,
+        reason: err.to_string(),
+    })?;
     if frames.is_empty() {
         return Ok(Vec::new());
     }
@@ -1039,6 +1043,29 @@ pub(crate) fn protected_1rtt_packet_len(connection_id: ConnectionId, payload_len
         + PROTECTED_1RTT_TAG_LEN
 }
 
+/// Generate a protected 1-RTT packet only after conservatively reserving one
+/// full packet against the congestion window.
+///
+/// The fixed ceiling makes admission stable across destructive generation and
+/// asynchronous packet protection while the caller holds exclusive connection
+/// ownership. When the window is full, only congestion-exempt ACK frames may
+/// drain; all other control, STREAM, and DATAGRAM state remains queued exactly
+/// as it was.
+pub(crate) fn generate_congestion_admitted_1rtt_frames(
+    cx: &Cx,
+    connection: &mut NativeQuicConnection,
+    max_frame_bytes: usize,
+) -> Result<Vec<QuicFrame>, NativeQuicConnectionError> {
+    if connection
+        .transport()
+        .can_send(PROTECTED_1RTT_MAX_PACKET_BYTES as u64)
+    {
+        connection.generate_frames(cx, PacketNumberSpace::ApplicationData, max_frame_bytes)
+    } else {
+        connection.generate_pending_ack_frames(cx, max_frame_bytes)
+    }
+}
+
 pub(crate) fn is_ack_eliciting(frame: &crate::net::atp::protocol::quic_frames::QuicFrame) -> bool {
     !matches!(
         frame,
@@ -1178,7 +1205,7 @@ mod tests {
 
     #[test]
     fn protected_packet_ack_elicitation_matches_rfc_9000() {
-        let zero = crate::net::atp::protocol::quic_frames::VarInt(0);
+        let zero = crate::net::VarInt(0);
         assert!(!is_ack_eliciting(&QuicFrame::Padding { length: 1 }));
         assert!(!is_ack_eliciting(&QuicFrame::Ack {
             largest_acknowledged: zero,

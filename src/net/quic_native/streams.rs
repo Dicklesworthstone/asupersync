@@ -2,6 +2,7 @@
 
 use crate::bytes::{Bytes, BytesMut};
 use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
+use crate::net::atp::protocol::varint::VARINT_MAX;
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
 use std::io;
@@ -1230,11 +1231,31 @@ impl StreamTable {
         id: StreamId,
         window: u64,
     ) -> Result<u64, StreamTableError> {
+        if window > VARINT_MAX {
+            return Err(StreamTableError::Stream(QuicStreamError::OffsetOverflow {
+                offset: 0,
+                len: window,
+            }));
+        }
         if !self.streams.contains_key(&id) {
             self.accept_remote_stream(id)?;
         }
         let stream = self.stream_mut(id)?;
-        let advertised = stream.read_offset.saturating_add(window);
+        let requested = stream
+            .read_offset
+            .checked_add(window)
+            .filter(|limit| *limit <= VARINT_MAX)
+            .ok_or(StreamTableError::Stream(QuicStreamError::OffsetOverflow {
+                offset: stream.read_offset,
+                len: window,
+            }))?;
+        let advertised = requested.max(stream.recv_limit_advertised);
+        if advertised > stream.recv_credit.limit() {
+            stream
+                .recv_credit
+                .increase_limit(advertised)
+                .map_err(|err| StreamTableError::Stream(QuicStreamError::Flow(err)))?;
+        }
         stream.recv_window_bytes = Some(window);
         stream.recv_limit_advertised = advertised;
         Ok(advertised)
@@ -1389,7 +1410,7 @@ impl StreamTable {
             let Some(window) = stream.recv_window_bytes else {
                 continue;
             };
-            let desired = stream.read_offset.saturating_add(window);
+            let desired = stream.read_offset.saturating_add(window).min(VARINT_MAX);
             // Advertisement granularity is also the sender's credit-grant
             // step: a quarter-window step quantized the whole transfer into
             // one flush-window per RTT (measured 50M/good 3.5 s → 4.9 s), so
@@ -1397,6 +1418,12 @@ impl StreamTable {
             let hysteresis = (window / 16).max(1);
             if desired.saturating_sub(stream.recv_limit_advertised) < hysteresis {
                 continue;
+            }
+            if desired > stream.recv_credit.limit() {
+                stream
+                    .recv_credit
+                    .increase_limit(desired)
+                    .expect("larger advertised receive limit must be monotonic");
             }
             stream.recv_limit_advertised = desired;
             updates.push((*id, desired));
@@ -2867,30 +2894,79 @@ mod tests {
     }
 
     #[test]
-    fn bounded_recv_window_advertises_on_read_with_hysteresis() {
-        let mut tbl = StreamTable::new(StreamRole::Server, 0, 0, 1 << 20, 1 << 20);
+    fn quic_flow_admission_keeps_bounded_receive_enforcement_aligned() {
+        let mut tbl = StreamTable::new(StreamRole::Server, 0, 0, 1 << 20, 50);
         let id = StreamId::local(StreamRole::Client, StreamDirection::Bidirectional, 0);
         let advertised = tbl
             .configure_stream_recv_window(id, 100)
             .expect("configure");
         assert_eq!(advertised, 100);
         assert_eq!(tbl.bounded_recv_window_advertisements(), vec![(id, 100)]);
+        assert_eq!(tbl.stream(id).expect("stream").recv_credit.limit(), 100);
 
-        // Under a sixteenth window drained: no fresh advertisement yet.
-        tbl.receive_stream_bytes(id, 0, Bytes::from_static(&[0u8; 4]), false)
-            .expect("recv");
+        // Receive past the old absolute limit (50) into the newly advertised
+        // region, then drain below the hysteresis threshold.
+        tbl.receive_stream_bytes(id, 0, Bytes::from(vec![0u8; 60]), false)
+            .expect("receive across former limit");
         assert_eq!(tbl.read_stream_bytes(id, 4).expect("read").len(), 4);
         assert!(tbl.advance_bounded_recv_windows().is_empty());
 
         // Crossing the sixteenth-window hysteresis advances the advertisement.
-        tbl.receive_stream_bytes(id, 4, Bytes::from_static(&[0u8; 4]), false)
-            .expect("recv2");
         assert_eq!(tbl.read_stream_bytes(id, 4).expect("read2").len(), 4);
         assert_eq!(tbl.advance_bounded_recv_windows(), vec![(id, 108)]);
         assert_eq!(tbl.bounded_recv_window_advertisements(), vec![(id, 108)]);
-        // Receive-credit enforcement stays permissive (fail-open for peers
-        // that predate bounded windows): only the advertisement moved.
-        assert!(tbl.stream(id).expect("stream").recv_credit.limit() >= 1 << 20);
+        assert_eq!(tbl.stream(id).expect("stream").recv_credit.limit(), 108);
+        tbl.receive_stream_bytes(id, 60, Bytes::from(vec![0u8; 48]), false)
+            .expect("receive across former advertised limit");
+        assert!(matches!(
+            tbl.receive_stream_bytes(id, 108, Bytes::from_static(b"x"), false),
+            Err(StreamTableError::Stream(QuicStreamError::Flow(
+                FlowControlError::Exhausted { .. }
+            )))
+        ));
+
+        // Configuring a bounded advertisement must never lower a more
+        // permissive legacy receive limit.
+        let mut permissive = StreamTable::new(StreamRole::Server, 0, 0, 1 << 20, 1 << 20);
+        let permissive_id = StreamId::local(StreamRole::Client, StreamDirection::Bidirectional, 1);
+        assert_eq!(
+            permissive
+                .configure_stream_recv_window(permissive_id, 100)
+                .expect("configure permissive stream"),
+            100
+        );
+        assert_eq!(
+            permissive
+                .stream(permissive_id)
+                .expect("permissive stream")
+                .recv_credit
+                .limit(),
+            1 << 20
+        );
+
+        // Reconfiguration may shrink the desired future window, but an
+        // already-advertised QUIC maximum remains monotonic.
+        assert_eq!(
+            permissive
+                .configure_stream_recv_window(permissive_id, 40)
+                .expect("shrink desired window"),
+            100
+        );
+        assert_eq!(
+            permissive.bounded_recv_window_advertisements(),
+            vec![(permissive_id, 100)]
+        );
+
+        let mut invalid = StreamTable::new(StreamRole::Server, 0, 0, 1 << 20, 50);
+        let invalid_id = StreamId::local(StreamRole::Client, StreamDirection::Bidirectional, 2);
+        assert!(matches!(
+            invalid.configure_stream_recv_window(invalid_id, VARINT_MAX + 1),
+            Err(StreamTableError::Stream(QuicStreamError::OffsetOverflow {
+                offset: 0,
+                len
+            })) if len == VARINT_MAX + 1
+        ));
+        assert!(!invalid.streams.contains_key(&invalid_id));
     }
 
     #[test]
