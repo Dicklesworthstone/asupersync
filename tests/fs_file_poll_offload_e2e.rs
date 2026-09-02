@@ -3,14 +3,17 @@
 //! instead of running them on the async worker thread.
 //!
 //! The observable: on a single-worker runtime, a peer task keeps a counter
-//! moving only if the worker is free while the file transfer is in flight.
-//! With pool offload every chunk hop returns `Pending`, so the peer advances
-//! during one `read_exact` of a large buffer. On a runtime built without a
-//! blocking pool (`blocking_threads(0, 0)`) the offload degrades to the inline
-//! fallback and the peer cannot advance inside that single `read_exact` poll;
-//! that case is the planted negative and documents the pool requirement.
-//! Round-trip tests prove chunked writes, read-ahead handling, and relative
-//! seeks keep the bytes and cursor consistent.
+//! moving only while the worker is free during the file transfer. With pool
+//! offload every 128 KiB chunk hop returns `Pending`, so the peer advances
+//! once per chunk during one `read_exact` of a 48 MiB buffer (384 chunks). On
+//! a runtime built without a blocking pool (`blocking_threads(0, 0)`) the
+//! offload degrades to the inline fallback: the only yields left are
+//! `ReadExact`'s cooperative one every 32 polls (about 12 for this file), so
+//! the peer advances an order of magnitude less. That contrast is the planted
+//! negative and documents the pool requirement. A round-trip test proves
+//! chunked writes, read-ahead left by an abandoned poll, the owned `seek`
+//! (which must reconcile that read-ahead), and a write after read-ahead keep
+//! the bytes and the cursor consistent.
 //!
 //! No-claim: this does not prove throughput, io_uring behaviour, or
 //! semantics on non-regular files.
@@ -22,7 +25,7 @@ use std::time::Duration;
 
 use asupersync::Cx;
 use asupersync::fs::{File, OpenOptions};
-use asupersync::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+use asupersync::io::{AsyncReadExt, AsyncWriteExt};
 use asupersync::runtime::{RuntimeBuilder, yield_now};
 
 const BIG: usize = 48 * 1024 * 1024;
@@ -104,8 +107,8 @@ fn read_exact_lets_a_peer_task_run_when_a_blocking_pool_exists() {
         .expect("runtime with a blocking pool");
     let progress = peer_progress_during_read_exact(runtime, &path);
     assert!(
-        progress > 0,
-        "the peer task must advance while the file read is offloaded; ticks = {progress}"
+        progress >= 100,
+        "the peer task must advance roughly once per 128 KiB chunk (384 chunks) while the read is offloaded; ticks = {progress}"
     );
 }
 
@@ -117,9 +120,9 @@ fn read_exact_starves_the_peer_without_a_blocking_pool_planted_negative() {
         .build()
         .expect("runtime without a blocking pool");
     let progress = peer_progress_during_read_exact(runtime, &path);
-    assert_eq!(
-        progress, 0,
-        "without a pool the syscalls run inline in one poll, so the peer cannot advance"
+    assert!(
+        progress <= 40,
+        "without a pool the syscalls run inline; only ReadExact's cooperative yield every 32 polls (about 12 here) lets the peer run; ticks = {progress}"
     );
 }
 
