@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use asupersync::Cx;
-use asupersync::fs::File;
+use asupersync::fs::{File, OpenOptions};
 use asupersync::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use asupersync::runtime::{RuntimeBuilder, yield_now};
 
@@ -41,9 +41,15 @@ fn pattern(len: usize) -> Vec<u8> {
     (0..len).map(|i| (i % 251) as u8).collect()
 }
 
-/// Reads `BIG` bytes through `read_exact` while a peer task counts yields.
-/// Returns how many times the peer ran strictly between the start and end of
-/// the single `read_exact` call.
+/// Reads `BIG` bytes through `read_exact` from a task that shares the single
+/// worker with a peer task counting its own polls. Returns how many times the
+/// peer ran strictly between the start and end of the reader's single
+/// `read_exact` call, as observed by the reader itself.
+///
+/// The reader must be a spawned task: a `current_thread` runtime still drives
+/// the `block_on` future on the caller's thread, separately from the worker
+/// that runs spawned tasks, so blocking inside `block_on` would not starve
+/// the peer and would prove nothing.
 fn peer_progress_during_read_exact(
     runtime: asupersync::runtime::Runtime,
     path: &std::path::Path,
@@ -62,21 +68,29 @@ fn peer_progress_during_read_exact(
                 }
             })
             .expect("spawn peer");
-        // Let the peer start so that "ticks during the read" is meaningful.
-        for _ in 0..3 {
-            yield_now().await;
-        }
 
-        let mut file = File::open(&path).await.expect("open");
-        let mut buf = vec![0u8; BIG];
-        let before = ticks.load(Ordering::SeqCst);
-        file.read_exact(&mut buf).await.expect("read_exact");
-        let after = ticks.load(Ordering::SeqCst);
-        assert_eq!(buf, pattern(BIG), "bytes must round-trip exactly");
+        let reader_ticks = Arc::clone(&ticks);
+        let mut reader = cx
+            .spawn(move |_task_cx| async move {
+                // Let the peer start so that "ticks during the read" is
+                // meaningful, then measure from inside this task only.
+                for _ in 0..3 {
+                    yield_now().await;
+                }
+                let mut file = File::open(&path).await.expect("open");
+                let mut buf = vec![0u8; BIG];
+                let before = reader_ticks.load(Ordering::SeqCst);
+                file.read_exact(&mut buf).await.expect("read_exact");
+                let after = reader_ticks.load(Ordering::SeqCst);
+                assert_eq!(buf, pattern(BIG), "bytes must round-trip exactly");
+                after - before
+            })
+            .expect("spawn reader");
 
+        let progress = reader.join(&cx).await.expect("join reader");
         stop.store(true, Ordering::SeqCst);
         peer.join(&cx).await.expect("join peer");
-        after - before
+        progress
     })
 }
 
@@ -119,7 +133,15 @@ fn chunked_writes_read_ahead_and_relative_seek_stay_consistent() {
     let expected = pattern(3 * 128 * 1024 + 7777);
     let path_for_task = path.clone();
     runtime.block_on(async move {
-        let mut file = File::create(&path_for_task).await.expect("create");
+        // Read + write: `File::create` alone opens write-only.
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&path_for_task)
+            .await
+            .expect("create read/write");
         // Larger than one pool chunk, so write_all crosses several hops.
         file.write_all(&expected).await.expect("write_all");
         file.flush().await.expect("flush");
