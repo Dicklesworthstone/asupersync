@@ -7,9 +7,15 @@
 //! completes, even if the awaiting future is dropped.
 //!
 //! The owned async methods offload filesystem calls through the runtime
-//! blocking-I/O path. The poll-based traits perform immediate file syscalls
-//! because regular files do not expose portable readiness notifications; use
-//! the owned async methods when a call must not run on the polling thread.
+//! blocking-I/O path. The poll-based traits (`AsyncRead`, `AsyncWrite`,
+//! `AsyncSeek`) offload through the same path: each poll submits one bounded
+//! syscall to the blocking pool and returns `Pending` until it completes, so
+//! `BufReader<File>` and friends no longer stall the async worker. Regular
+//! files expose no portable readiness notification, which is why the trait
+//! path is a blocking-pool state machine rather than a reactor registration.
+//! On a runtime built without a blocking pool (`blocking_threads(0, 0)`, the
+//! bare `RuntimeBuilder` default) the offload degrades to the deterministic
+//! inline fallback of `spawn_blocking`, which is the pre-existing behaviour.
 
 #![allow(clippy::unused_async)]
 
@@ -18,6 +24,8 @@ use crate::fs::metadata::{Metadata, Permissions};
 use crate::io::{AsyncRead, AsyncSeek, AsyncWrite, ReadBuf};
 use crate::runtime::spawn_blocking_io;
 use parking_lot::Mutex;
+use std::fmt;
+use std::future::Future;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::pin::Pin;
@@ -165,16 +173,77 @@ impl Default for FileCursorOperationProbe {
     }
 }
 
+/// Largest single syscall the poll-trait path submits to the blocking pool.
+///
+/// Bounding the chunk keeps each pool hop's buffer allocation small and lets
+/// the async worker interleave other tasks between hops of a large transfer.
+const POLL_IO_CHUNK_BYTES: usize = 128 * 1024;
+
+type PollIoFuture<T> = Pin<Box<dyn Future<Output = io::Result<T>> + Send>>;
+
+/// In-flight blocking-pool operation behind the poll-based traits.
+///
+/// Exactly one operation is outstanding per handle at a time; the trait
+/// contracts already require callers to retry the same operation until it
+/// completes.
+enum PendingIo {
+    Read {
+        future: PollIoFuture<Vec<u8>>,
+    },
+    /// Bytes read by a completed syscall that did not fit the caller's buffer
+    /// on the poll that observed completion.
+    ReadAhead {
+        bytes: Vec<u8>,
+        consumed: usize,
+    },
+    Write {
+        future: PollIoFuture<usize>,
+    },
+    Flush {
+        future: PollIoFuture<()>,
+    },
+    Seek {
+        future: PollIoFuture<u64>,
+    },
+}
+
+impl fmt::Debug for PendingIo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Read { .. } => f.write_str("PendingIo::Read"),
+            Self::ReadAhead { bytes, consumed } => f
+                .debug_struct("PendingIo::ReadAhead")
+                .field("remaining", &(bytes.len() - consumed))
+                .finish(),
+            Self::Write { .. } => f.write_str("PendingIo::Write"),
+            Self::Flush { .. } => f.write_str("PendingIo::Flush"),
+            Self::Seek { .. } => f.write_str("PendingIo::Seek"),
+        }
+    }
+}
+
 /// An open file on the filesystem.
 ///
 /// The file handle is wrapped in `Arc` to allow sharing across
 /// `spawn_blocking_io` boundaries for async operations.
-#[derive(Debug)]
 pub struct File {
     pub(crate) inner: Arc<std::fs::File>,
     cursor_gate: Arc<Mutex<()>>,
+    /// Outstanding blocking-pool operation of the poll-based traits.
+    pending: Mutex<Option<PendingIo>>,
     #[cfg(feature = "test-internals")]
     cursor_probe: Option<Arc<FileCursorOperationProbe>>,
+}
+
+impl fmt::Debug for File {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut debug = f.debug_struct("File");
+        debug.field("inner", &self.inner);
+        debug.field("pending", &*self.pending.lock());
+        #[cfg(feature = "test-internals")]
+        debug.field("cursor_probe", &self.cursor_probe);
+        debug.finish_non_exhaustive()
+    }
 }
 
 impl File {
@@ -268,6 +337,7 @@ impl File {
         Self {
             inner: Arc::new(file),
             cursor_gate: Arc::new(Mutex::new(())),
+            pending: Mutex::new(None),
             #[cfg(feature = "test-internals")]
             cursor_probe: None,
         }
@@ -283,6 +353,7 @@ impl File {
         let Self {
             inner,
             cursor_gate,
+            pending: _,
             #[cfg(feature = "test-internals")]
                 cursor_probe: _,
         } = self;
@@ -328,6 +399,7 @@ impl File {
         Ok(Self {
             inner: Arc::new(file),
             cursor_gate: Arc::clone(&self.cursor_gate),
+            pending: Mutex::new(None),
             #[cfg(feature = "test-internals")]
             cursor_probe: self.cursor_probe.clone(),
         })
@@ -796,6 +868,7 @@ mod tests {
             let mut seeker = File {
                 inner: Arc::clone(&shared),
                 cursor_gate: Arc::new(Mutex::new(())),
+                pending: Mutex::new(None),
                 #[cfg(feature = "test-internals")]
                 cursor_probe: None,
             };
