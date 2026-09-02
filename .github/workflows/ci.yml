@@ -9,6 +9,16 @@ on:
   pull_request:
     branches: [main]
 
+# One run per ref per event: a newer push replaces the *pending* run
+# (a superseded commit never earns a full matrix) but never cancels a run that
+# is already executing on `main`, so `main` always reaches a complete result.
+# Pull requests cancel their in-progress run outright. Without this, a push
+# cadence of a few minutes queued 80+ full runs (2026-09-02) and no run
+# finished for a day.
+concurrency:
+  group: ci-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
@@ -1754,6 +1764,149 @@ jobs:
             feature_args=(--features ci-cross-platform)
           fi
           "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_doctest" cargo test --doc "${feature_args[@]}"
+
+  # Real-server suites (br-asupersync-gap-real-server-ci-aoovsx). Every suite
+  # below skips cleanly without its REAL_* toggle, so until this job existed no
+  # workflow ever exercised the PostgreSQL/MySQL/Redis/NATS/Kafka clients
+  # against a real server. Servers run as plain docker containers on the runner
+  # (GitHub `services:` cannot pass command-line flags such as `-js`), cargo
+  # runs on the runner next to them via the CI rch fallback, and
+  # scripts/ci/run_real_server_suite.sh fails closed on skips and zero-test runs.
+  real-servers:
+    name: Real-server suites (PostgreSQL, MySQL, Redis, NATS, Kafka)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      REAL_SERVERS_TARGET_DIR: ${{ github.workspace }}/target/real-servers
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # upstream branch snapshot 2026-07-16
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Cache cargo registry
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/real-servers
+          key: ${{ runner.os }}-cargo-real-servers-${{ env.RUST_TOOLCHAIN }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-real-servers-${{ env.RUST_TOOLCHAIN }}-
+
+      - name: Start real servers
+        run: |
+          set -euo pipefail
+          docker run -d --name asup-pg -e POSTGRES_PASSWORD=postgres \
+            -p 127.0.0.1:5432:5432 postgres:16
+          docker run -d --name asup-mysql -e MYSQL_ROOT_PASSWORD=password -e MYSQL_ROOT_HOST=% \
+            -p 127.0.0.1:3306:3306 mysql:8.0
+          docker run -d --name asup-redis -p 127.0.0.1:6379:6379 redis:7
+          docker run -d --name asup-nats -p 127.0.0.1:4222:4222 -p 127.0.0.1:8222:8222 \
+            nats:2.10 -js -m 8222
+          docker run -d --name asup-redpanda -p 127.0.0.1:9092:9092 \
+            docker.redpanda.com/redpandadata/redpanda:v24.2.7 \
+            redpanda start --mode dev-container --smp 1 --memory 1G --overprovisioned \
+            --kafka-addr PLAINTEXT://0.0.0.0:9092 --advertise-kafka-addr PLAINTEXT://localhost:9092
+
+          wait_for() {
+            local label="$1"; shift
+            for i in $(seq 1 90); do
+              if "$@" >/dev/null 2>&1; then echo "$label ready after ${i}s"; return 0; fi
+              sleep 1
+            done
+            echo "::error::$label not ready after 90s" >&2
+            docker ps -a
+            return 1
+          }
+          wait_for postgres docker exec asup-pg pg_isready -U postgres
+          wait_for mysql docker exec asup-mysql mysqladmin ping -uroot -ppassword --silent
+          wait_for redis docker exec asup-redis redis-cli ping
+          wait_for nats curl -fsS http://127.0.0.1:8222/healthz
+          wait_for redpanda docker exec asup-redpanda rpk cluster info
+
+      - name: Warm the MySQL caching_sha2_password cache
+        # The client implements caching_sha2_password fast auth only (no RSA
+        # public-key exchange and no full auth over TLS). A fresh server demands
+        # full auth on the first login of an account, so log in once over TLS
+        # from inside the container as root@'%' (the account a TCP connection
+        # from the runner maps to; the image runs with skip-name-resolve) so the
+        # server caches the credential and the runner's plaintext login can use
+        # fast auth. A client that cannot do this against a cold server is a
+        # documented limitation, not something this job hides: the suite still
+        # performs the real handshake, auth, and query round-trips.
+        run: |
+          set -euo pipefail
+          docker exec asup-mysql mysql --protocol=TCP -h127.0.0.1 --ssl-mode=REQUIRED \
+            -uroot -ppassword -e 'SELECT 1' >/dev/null
+
+      - name: PostgreSQL real-server suite
+        env:
+          REAL_POSTGRES_TESTS: "true"
+          POSTGRES_URL: postgres://postgres:postgres@localhost:5432/postgres
+          CARGO_TARGET_DIR: ${{ env.REAL_SERVERS_TARGET_DIR }}
+        run: scripts/ci/run_real_server_suite.sh postgres_real_server --features postgres,mysql
+
+      - name: Negative control - wrong PostgreSQL password must fail
+        # Proves the suite really authenticates against the server; a suite
+        # that passes here is skipping or not connecting, and the lane is void.
+        env:
+          REAL_POSTGRES_TESTS: "true"
+          POSTGRES_URL: postgres://postgres:not-the-password@localhost:5432/postgres
+          CARGO_TARGET_DIR: ${{ env.REAL_SERVERS_TARGET_DIR }}
+        run: |
+          set -euo pipefail
+          if scripts/ci/run_real_server_suite.sh postgres_real_server --features postgres,mysql; then
+            echo "::error::PostgreSQL suite passed with a wrong password; it is not talking to the server" >&2
+            exit 1
+          fi
+          echo "negative control: suite failed with the wrong password, as required"
+
+      - name: MySQL real-server suite
+        env:
+          REAL_MYSQL_TESTS: "true"
+          MYSQL_URL: mysql://root:password@localhost:3306/mysql
+          CARGO_TARGET_DIR: ${{ env.REAL_SERVERS_TARGET_DIR }}
+        run: scripts/ci/run_real_server_suite.sh mysql_real_server --features postgres,mysql
+
+      - name: Redis E2E suite
+        env:
+          REDIS_URL: redis://127.0.0.1:6379
+          CARGO_TARGET_DIR: ${{ env.REAL_SERVERS_TARGET_DIR }}
+        run: scripts/ci/run_real_server_suite.sh e2e_redis --features postgres,mysql
+
+      - name: NATS real-server suite
+        env:
+          REAL_NATS_TESTS: "true"
+          NATS_URL: nats://127.0.0.1:4222
+          CARGO_TARGET_DIR: ${{ env.REAL_SERVERS_TARGET_DIR }}
+        run: scripts/ci/run_real_server_suite.sh nats_real_server --features postgres,mysql
+
+      - name: JetStream real-server suite
+        env:
+          REAL_NATS_TESTS: "true"
+          NATS_URL: nats://127.0.0.1:4222
+          CARGO_TARGET_DIR: ${{ env.REAL_SERVERS_TARGET_DIR }}
+        run: scripts/ci/run_real_server_suite.sh jetstream_real_server --features postgres,mysql
+
+      - name: Kafka real-broker suite (Redpanda)
+        # Adds the `kafka` feature (rdkafka builds librdkafka from source), so
+        # it runs last to keep the earlier suites' compile shared.
+        env:
+          REAL_KAFKA_TESTS: "true"
+          KAFKA_BOOTSTRAP_SERVERS: localhost:9092
+          CARGO_TARGET_DIR: ${{ env.REAL_SERVERS_TARGET_DIR }}
+        run: scripts/ci/run_real_server_suite.sh kafka_real_broker --features postgres,mysql,kafka
+
+      - name: Server logs on failure
+        if: failure()
+        run: |
+          for c in asup-pg asup-mysql asup-redis asup-nats asup-redpanda; do
+            echo "::group::$c"; docker logs --tail 80 "$c" 2>&1 || true; echo "::endgroup::"
+          done
 
   coverage:
     name: Coverage (llvm-cov)

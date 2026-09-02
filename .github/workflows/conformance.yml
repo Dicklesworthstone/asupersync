@@ -18,6 +18,11 @@ on:
       - 'Cargo.toml'
       - 'Cargo.lock'
 
+# Newest pending run per ref wins; in-progress runs on `main` finish (see ci.yml).
+concurrency:
+  group: conformance-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
