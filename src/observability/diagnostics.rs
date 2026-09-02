@@ -4095,7 +4095,7 @@ mod tests {
     use crate::record::region::RegionRecord;
     use crate::record::task::{TaskRecord, TaskState};
     use crate::time::{TimerDriverHandle, VirtualClock};
-    use crate::types::{Budget, CancelReason, CxInner, Outcome};
+    use crate::types::{Budget, CancelReason, CxInner, Outcome, Time};
     use crate::util::ArenaIndex;
     use serde_json::{Value, json};
     use std::fmt::Write as _;
