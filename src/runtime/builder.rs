@@ -3868,8 +3868,16 @@ impl Runtime {
     /// elapsed first; in the latter case teardown proceeds with today's
     /// abort-by-drop semantics for whatever is still running. Non-cooperative
     /// work (no checkpoints) is not bounded by this call beyond the wait.
+    ///
+    /// The success predicate is task-and-obligation quiescence, deliberately
+    /// narrower than [`Runtime::is_quiescent`]: that predicate also requires
+    /// every region to have left the close lifecycle and the I/O driver to
+    /// hold no registered wakers, which a shutting-down runtime need not
+    /// satisfy for its work to be drained. The root region is advanced
+    /// through its close lifecycle after the drain so a later
+    /// `is_quiescent` check can succeed when nothing else is registered.
     pub fn drain_root_region(&self, bound: Duration) -> RootDrainOutcome {
-        if self.is_quiescent() {
+        if self.work_is_drained() {
             return RootDrainOutcome::Quiescent;
         }
         let reason = crate::types::CancelReason::new(crate::types::CancelKind::Shutdown);
@@ -3889,7 +3897,13 @@ impl Runtime {
 
         let started = Instant::now();
         loop {
-            if self.is_quiescent() {
+            if self.work_is_drained() {
+                let mut guard = self
+                    .inner
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                guard.advance_region_state(self.inner.root_region);
                 return RootDrainOutcome::Quiescent;
             }
             if started.elapsed() >= bound {
@@ -3901,6 +3915,44 @@ impl Runtime {
             }
             std::thread::sleep(Duration::from_millis(1));
         }
+    }
+
+    /// True when no live task (embedded or dispatch-table resident), no
+    /// pending obligation, and no not-yet-admitted spawn on the root region
+    /// remains.
+    ///
+    /// Spawns travel through the admission mailbox, so a task spawned just
+    /// before `block_on` returned may not have a record yet; counting only
+    /// live records would report an empty runtime while work is still
+    /// queued for admission (observed under parallel test load).
+    fn work_is_drained(&self) -> bool {
+        let (embedded_live, pending_obligations, pending_spawns) = {
+            let guard = self
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            (
+                guard.live_task_count(),
+                guard.pending_obligation_count(),
+                guard
+                    .region(self.inner.root_region)
+                    .map_or(0, crate::record::RegionRecord::pending_spawn_count),
+            )
+        };
+        if embedded_live != 0 || pending_obligations != 0 || pending_spawns != 0 {
+            return false;
+        }
+        self.inner
+            .scheduler
+            .dispatch_task_table()
+            .is_none_or(|table| {
+                table
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .live_task_count()
+                    == 0
+            })
     }
 
     /// Snapshot of the runtime's bounded trace buffer.

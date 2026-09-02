@@ -9074,7 +9074,14 @@ fn adaptive_reward_ignores_sanctioned_drain_boost_base_exceedances() {
     );
 }
 
-fn replay_adaptive_limit_trace(_seed: u64, epochs: usize) -> Vec<usize> {
+/// Replays the adaptive limit trace for a fixed alternating snapshot stream.
+///
+/// The `seed` is recorded in the artifact for provenance only: the policy has
+/// no random source, so the trace is a function of the snapshot stream alone
+/// and two different seeds yield the same trace
+/// (`adaptive_limit_trace_is_seed_independent_and_stream_dependent`).
+fn replay_adaptive_limit_trace(seed: u64, epochs: usize) -> Vec<usize> {
+    let _ = seed;
     let mut policy = AdaptiveCancelStreakPolicy::new(4);
     let start = test_adaptive_epoch_snapshot(100.0, 0.25, 0, 0, 0);
     let relaxed = test_adaptive_epoch_snapshot(72.0, 0.10, 0, 0, 0);
@@ -9560,6 +9567,38 @@ fn scheduler_decision_static_oracle_100_fixed_seed_json(seed: u64) -> Value {
     })
 }
 
+/// The limit trace depends on the reward stream, not on the recorded seed:
+/// two seeds replay identically, and a perturbed stream (every epoch
+/// pressured instead of alternating) diverges. This is what "deterministic
+/// replay" means for a policy with no random source.
+#[test]
+fn adaptive_limit_trace_is_seed_independent_and_stream_dependent() {
+    let seed_one = replay_adaptive_limit_trace(0xC0DE_CAFE_BEEF_0001, 24);
+    let seed_two = replay_adaptive_limit_trace(0xC0DE_CAFE_BEEF_0002, 24);
+    assert_eq!(
+        seed_one, seed_two,
+        "the policy has no random source, so the seed must not change the trace"
+    );
+
+    // Planted negative: a different reward stream must produce a different
+    // trace, so the equality above is not vacuous.
+    let mut policy = AdaptiveCancelStreakPolicy::new(4);
+    let start = test_adaptive_epoch_snapshot(100.0, 0.25, 0, 0, 0);
+    let pressured = test_adaptive_epoch_snapshot(128.0, 0.70, 2, 4, 2);
+    let mut perturbed = Vec::with_capacity(24);
+    for _ in 0..24 {
+        policy.begin_epoch(start);
+        policy
+            .complete_epoch(pressured)
+            .expect("epoch start snapshot should be present");
+        perturbed.push(policy.current_limit());
+    }
+    assert_ne!(
+        seed_one, perturbed,
+        "an always-pressured stream must steer the limit differently from the alternating stream"
+    );
+}
+
 #[test]
 fn golden_test_cancel_streak_adaptivity_same_seed_replays_limit_trace() {
     let trace_a = replay_adaptive_limit_trace(0xC0DE_CAFE_BEEF_0001, 24);
@@ -9733,104 +9772,96 @@ fn metamorphic_ucb1_cancel_streak_pressure_monotonicity() {
     }
 }
 
+/// Policy state sampled every ten dispatches: selected arm, epoch count,
+/// steps in the open epoch, mean rewards, discounted pulls.
+type AdaptivePolicyTrace = Vec<(
+    usize,
+    u64,
+    u32,
+    [f64; ADAPTIVE_STREAK_ARMS.len()],
+    [f64; ADAPTIVE_STREAK_ARMS.len()],
+)>;
+
+/// Drives one worker through 100 cancel-lane dispatches with the adaptive
+/// policy enabled at `epoch_steps` dispatches per epoch and samples the
+/// policy state every ten dispatches.
+fn adaptive_policy_trace_for_cancel_flood(epoch_steps: u32) -> AdaptivePolicyTrace {
+    let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+    let mut scheduler = ThreeLaneScheduler::new_with_cancel_limit(1, &state, 4);
+    scheduler.set_adaptive_cancel_streak(true, epoch_steps);
+    let mut workers = scheduler.take_workers();
+    let worker = workers.first_mut().expect("one worker");
+    let mut trace = Vec::with_capacity(10);
+
+    for i in 0..100 {
+        worker.schedule_local_cancel(TaskId::new_for_test(4000, i), 100);
+        worker.next_task();
+        if i % 10 == 9 {
+            let policy = worker
+                .adaptive_cancel_policy
+                .as_ref()
+                .expect("set_adaptive_cancel_streak(true, ..) installs the policy");
+            trace.push((
+                policy.selected_arm,
+                policy.epoch_count,
+                policy.steps_in_epoch,
+                policy.mean_rewards,
+                policy.discounted_pulls,
+            ));
+        }
+    }
+    trace
+}
+
+/// Golden: the discounted-UCB1 cancel-streak selector is a deterministic
+/// function of the dispatch sequence. Two workers driven through the same 100
+/// cancel-lane dispatches record bit-identical policy state (selected arm,
+/// epoch count, steps in epoch, mean rewards, discounted pulls).
+///
+/// History: this golden was `#[ignore]`d on 2026-04-22 as "broken by recent
+/// changes". The break was in the test, not the policy: it built the
+/// scheduler with `new_with_options`, which leaves `adaptive_cancel_policy`
+/// as `None`, so its `unwrap()` panicked. It now enables the policy
+/// explicitly with a short epoch so several epochs close within 100
+/// dispatches, and it carries a planted negative so bit-equality is not
+/// vacuous.
+///
+/// No-claim: `LabRuntime` does not run this selector (it uses a fixed
+/// `DEFAULT_LAB_CANCEL_STREAK_LIMIT`), so this proves the production policy
+/// replays deterministically, not that lab replays reproduce production arm
+/// choices.
 #[test]
-#[ignore = "Broken by recent changes"]
 fn golden_test_lab_runtime_replay_determinism() {
-    // Golden test: discounted-UCB1 arm selection should be deterministic
-    // under LabRuntime replay.
-    let mut trace_a = Vec::new();
-    let mut trace_b = Vec::new();
+    let trace_a = adaptive_policy_trace_for_cancel_flood(4);
+    let trace_b = adaptive_policy_trace_for_cancel_flood(4);
 
-    // Run 1: Collect discounted-UCB1 decision trace
-    {
-        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
-        let mut scheduler = ThreeLaneScheduler::new_with_options(1, &state, 4, true, 32);
-        let worker = &mut scheduler.workers[0];
-
-        for i in 0..100 {
-            let task_id = TaskId::new_for_test(4000, i);
-            worker.schedule_local_cancel(task_id, 100);
-
-            // Record adaptive-policy state every 10 steps
-            if i % 10 == 9 {
-                let policy = &worker.adaptive_cancel_policy;
-                trace_a.push((
-                    policy.as_ref().unwrap().selected_arm,
-                    policy.as_ref().unwrap().epoch_count,
-                    policy.as_ref().unwrap().steps_in_epoch,
-                    policy.as_ref().unwrap().mean_rewards,
-                    policy.as_ref().unwrap().discounted_pulls,
-                ));
-            }
-
-            worker.next_task();
-        }
-    }
-
-    // Run 2: Same operations, should produce identical trace
-    {
-        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
-        let mut scheduler = ThreeLaneScheduler::new_with_options(1, &state, 4, true, 32);
-        let worker = &mut scheduler.workers[0];
-
-        for i in 0..100 {
-            let task_id = TaskId::new_for_test(4000, i);
-            worker.schedule_local_cancel(task_id, 100);
-
-            // Record adaptive-policy state every 10 steps
-            if i % 10 == 9 {
-                let policy = &worker.adaptive_cancel_policy;
-                trace_b.push((
-                    policy.as_ref().unwrap().selected_arm,
-                    policy.as_ref().unwrap().epoch_count,
-                    policy.as_ref().unwrap().steps_in_epoch,
-                    policy.as_ref().unwrap().mean_rewards,
-                    policy.as_ref().unwrap().discounted_pulls,
-                ));
-            }
-
-            worker.next_task();
-        }
-    }
-
-    // Verify traces are identical
-    assert_eq!(trace_a.len(), trace_b.len(), "Trace lengths should match");
-
-    for (step, (state_a, state_b)) in trace_a.iter().zip(trace_b.iter()).enumerate() {
+    assert_eq!(trace_a.len(), 10, "ten samples over 100 dispatches");
+    assert!(
+        trace_a.last().is_some_and(|sample| sample.1 >= 1),
+        "no epoch closed in 100 dispatches, so the comparison would be vacuous: {trace_a:?}"
+    );
+    for (step, (a, b)) in trace_a.iter().zip(trace_b.iter()).enumerate() {
+        assert_eq!(a.0, b.0, "step {step}: selected arm must replay");
+        assert_eq!(a.1, b.1, "step {step}: epoch count must replay");
+        assert_eq!(a.2, b.2, "step {step}: steps in epoch must replay");
         assert_eq!(
-            state_a.0, state_b.0,
-            "Step {}: Selected arm should be deterministic: {} vs {}",
-            step, state_a.0, state_b.0
+            a.3, b.3,
+            "step {step}: mean rewards must replay bit-exactly"
         );
         assert_eq!(
-            state_a.1, state_b.1,
-            "Step {}: Epoch count should be deterministic: {} vs {}",
-            step, state_a.1, state_b.1
+            a.4, b.4,
+            "step {step}: discounted pulls must replay bit-exactly"
         );
-        assert_eq!(
-            state_a.2, state_b.2,
-            "Step {}: Steps in epoch should be deterministic: {} vs {}",
-            step, state_a.2, state_b.2
-        );
-
-        // Weights should be identical (floating-point exact)
-        for arm in 0..5 {
-            assert_eq!(
-                state_a.3[arm], state_b.3[arm],
-                "Step {}: Weight[{}] should be deterministic: {:.6} vs {:.6}",
-                step, arm, state_a.3[arm], state_b.3[arm]
-            );
-        }
-
-        // Probabilities should be identical (floating-point exact)
-        for arm in 0..5 {
-            assert_eq!(
-                state_a.4[arm], state_b.4[arm],
-                "Step {}: Prob[{}] should be deterministic: {:.6} vs {:.6}",
-                step, arm, state_a.4[arm], state_b.4[arm]
-            );
-        }
     }
+
+    // Planted negative: a different dispatch regime (a different epoch
+    // length) must change the recorded state, proving the equality above has
+    // teeth.
+    let trace_c = adaptive_policy_trace_for_cancel_flood(8);
+    assert_ne!(
+        trace_a, trace_c,
+        "a different epoch length must change the recorded policy state"
+    );
 }
 
 #[test]
