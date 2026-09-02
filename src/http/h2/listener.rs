@@ -1071,8 +1071,9 @@ fn classify_h2_producer_hop(
                 ServerProducerCancellation::Cancelled => Http2ProducerOutcome::Cancelled,
             }
         }
-        Some(ServerHopOutcome::Ok(Ok(_)) | ServerHopOutcome::Ok(Err(_)))
-        | Some(ServerHopOutcome::Panicked(_)) => Http2ProducerOutcome::Failed,
+        Some(ServerHopOutcome::Ok(Ok(_) | Err(_)) | ServerHopOutcome::Panicked(_)) => {
+            Http2ProducerOutcome::Failed
+        }
         Some(ServerHopOutcome::DeadlineExceeded) => Http2ProducerOutcome::DeadlineExceeded,
         Some(ServerHopOutcome::ConnectionLost) => Http2ProducerOutcome::ConnectionLost,
         Some(ServerHopOutcome::Cancelled) | None => Http2ProducerOutcome::Cancelled,
@@ -2478,8 +2479,9 @@ where
                         WebBodyDiagnostic::ClientAbort,
                         "connection-lost producer exceeded its bounded drain grace",
                     ),
-                    Some(Http2ProducerOutcome::Cancelled)
-                    | Some(Http2ProducerOutcome::Finished { .. })
+                    Some(
+                        Http2ProducerOutcome::Cancelled | Http2ProducerOutcome::Finished { .. },
+                    )
                     | None => {}
                 }
                 conn.reset_stream(stream_id, ErrorCode::Cancel);

@@ -5283,7 +5283,7 @@ async fn capture_source_metadata(
                 metadata.file_kind
             )));
         }
-        validate_entry_metadata_for_receive(&entry.rel_path, &metadata, &policy).map_err(
+        validate_entry_metadata_for_receive(&entry.rel_path, &metadata, policy).map_err(
             |error| {
                 RqError::Source(format!(
                     "{}: source metadata is not portable: {error}",

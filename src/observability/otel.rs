@@ -746,7 +746,7 @@ fn fixed_phone_match_at(
         FixedPhoneCountry::None,
     ] {
         if let Some(end) = fixed_phone_variant_at(input, start, country, digits, spaces, work)?
-            && best_end.map_or(true, |current| end > current)
+            && best_end.is_none_or(|current| end > current)
         {
             best_end = Some(end);
         }

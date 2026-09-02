@@ -123,8 +123,7 @@ fn parse_iso_date_epoch_day(text: &str) -> Result<i64, String> {
     let year_of_era = adjusted_year - era * 400;
     let adjusted_month = i64::from(month) + if month > 2 { -3 } else { 9 };
     let day_of_year = (153 * adjusted_month + 2) / 5 + i64::from(day) - 1;
-    let day_of_era =
-        year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
     Ok(era * 146_097 + day_of_era - 719_468)
 }
 
@@ -140,8 +139,7 @@ fn freshness_as_of_epoch_day(policy: &Value) -> Result<i64, String> {
     let elapsed = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|error| format!("system clock predates Unix epoch: {error}"))?;
-    Ok(i64::try_from(elapsed.as_secs() / 86_400)
-        .expect("current epoch day must fit in i64"))
+    Ok(i64::try_from(elapsed.as_secs() / 86_400).expect("current epoch day must fit in i64"))
 }
 
 fn validate_claim_freshness(
@@ -160,12 +158,10 @@ fn validate_claim_freshness(
         .get(evidence_date_field)
         .and_then(Value::as_str)
         .ok_or_else(|| {
-            format!(
-                "{claim_id}: {fresh_status} requires string field {evidence_date_field}"
-            )
+            format!("{claim_id}: {fresh_status} requires string field {evidence_date_field}")
         })?;
-    let evidence_epoch_day = parse_iso_date_epoch_day(evidence_date)
-        .map_err(|error| format!("{claim_id}: {error}"))?;
+    let evidence_epoch_day =
+        parse_iso_date_epoch_day(evidence_date).map_err(|error| format!("{claim_id}: {error}"))?;
     let age_days = as_of_epoch_day - evidence_epoch_day;
     if age_days < 0 {
         return Err(format!(
@@ -885,7 +881,10 @@ fn fresh_claim_evidence_has_a_bounded_structured_date() {
         .iter()
         .filter(|row| string(row, "proof_evidence_status") == fresh_status)
         .collect::<Vec<_>>();
-    assert!(!fresh_rows.is_empty(), "snapshot needs at least one fresh row");
+    assert!(
+        !fresh_rows.is_empty(),
+        "snapshot needs at least one fresh row"
+    );
     for row in fresh_rows {
         validate_claim_freshness(
             row,
@@ -911,9 +910,8 @@ fn freshness_checker_rejects_missing_invalid_expired_and_future_dates() {
         }
         row
     };
-    let validate = |row: &Value| {
-        validate_claim_freshness(row, "fresh-rch-pass", "evidence_date", 30, as_of)
-    };
+    let validate =
+        |row: &Value| validate_claim_freshness(row, "fresh-rch-pass", "evidence_date", 30, as_of);
 
     validate(&fresh_row(Some("2026-08-01"))).expect("30-day boundary must remain fresh");
     assert!(validate(&fresh_row(None)).unwrap_err().contains("requires"));
@@ -942,9 +940,9 @@ fn nightly_workflow_runs_the_bounded_freshness_check_without_overclaiming_proof(
     assert!(workflow.contains(
         "cargo test -p asupersync --test proof_status_snapshot_contract fresh_claim_evidence_has_a_bounded_structured_date -- --exact --nocapture"
     ));
-    assert!(workflow.contains(
-        "This is a local cadence/drift check, not remote-required RCH proof."
-    ));
+    assert!(
+        workflow.contains("This is a local cadence/drift check, not remote-required RCH proof.")
+    );
 }
 
 #[test]

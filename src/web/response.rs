@@ -404,7 +404,7 @@ impl Http1StreamPlan {
                 max_frame_bytes,
                 status,
                 reason,
-                move |cx, sender| producer(cx, sender),
+                producer,
             ),
             BodyKind::ContentLength(length) => {
                 Http1ProducedResponse::with_content_length_and_max_frame_bytes(
@@ -413,7 +413,7 @@ impl Http1StreamPlan {
                     status,
                     reason,
                     length,
-                    move |cx, sender| producer(cx, sender),
+                    producer,
                 )
             }
             BodyKind::Empty => {

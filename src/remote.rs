@@ -3820,7 +3820,7 @@ async fn write_remote_service_frame<T, IO>(
 ) -> Result<(), RemoteComputationServiceError>
 where
     IO: AsyncRead + AsyncWrite + Unpin,
-    T: Serialize + ?Sized,
+    T: Serialize + ?Sized + Sync,
 {
     let encoded = encode_remote_service_frame(value, max_frame_bytes)?;
     send_remote_service_frame(cx, framed, &encoded).await
@@ -4169,7 +4169,7 @@ where
         command: Option<&T>,
     ) -> Result<RemoteServiceSessionEvent, RemoteServiceSessionError>
     where
-        T: Serialize + ?Sized,
+        T: Serialize + ?Sized + Sync,
     {
         let framed = self
             .framed
@@ -5109,8 +5109,7 @@ where
                             last_renewal.map(|(last_id, _)| last_id),
                         );
                         let is_replay = last_renewal == lease.map(|lease| (renewal_id, lease));
-                        if lease.is_none()
-                            || lease.is_some_and(|duration| duration.is_zero())
+                        if lease.is_none_or(|duration| duration.is_zero())
                             || (!is_replay && expected_renewal_id != Some(renewal_id))
                         {
                             let expected = expected_renewal_id.map_or_else(
@@ -7145,12 +7144,11 @@ impl NativeRemoteShared {
             if !delivered {
                 state.tasks.remove(&task_id);
             }
-            let waiters = if state.active.is_empty() {
+            if state.active.is_empty() {
                 std::mem::take(&mut state.drain_waiters)
             } else {
                 Vec::new()
-            };
-            waiters
+            }
         };
         for waiter in waiters {
             let _ = waiter.send_blocking(());

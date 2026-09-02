@@ -1559,29 +1559,24 @@ impl<T: serde::de::DeserializeOwned> FromRequest for Json<T> {
         deserialize_json_body(req.body.as_ref())
     }
 
-    fn from_request_with_cx<'a>(
-        cx: &'a Cx,
-        req: Request,
-    ) -> impl std::future::Future<Output = Result<Self, ExtractionError>> + Send + 'a
+    async fn from_request_with_cx<'a>(cx: &'a Cx, req: Request) -> Result<Self, ExtractionError>
     where
         Self: Send + 'a,
     {
-        async move {
-            #[cfg(not(target_arch = "wasm32"))]
-            if req.extensions.get_typed::<StreamingRawBodySlot>().is_some() {
-                let limit = json_body_limit(&req);
-                check_content_length_limit(&req, limit)?;
-                validate_json_content_type(&req)?;
-                let body = StreamingRawBody::take_from_request(&req)?;
-                let collected = body
-                    .collect_bounded_with_cx(cx, limit)
-                    .await
-                    .map_err(|error| streaming_extraction_error("JSON", error))?;
-                return deserialize_json_body(collected.data().as_ref());
-            }
-
-            Self::from_request(req)
+        #[cfg(not(target_arch = "wasm32"))]
+        if req.extensions.get_typed::<StreamingRawBodySlot>().is_some() {
+            let limit = json_body_limit(&req);
+            check_content_length_limit(&req, limit)?;
+            validate_json_content_type(&req)?;
+            let body = StreamingRawBody::take_from_request(&req)?;
+            let collected = body
+                .collect_bounded_with_cx(cx, limit)
+                .await
+                .map_err(|error| streaming_extraction_error("JSON", error))?;
+            return deserialize_json_body(collected.data().as_ref());
         }
+
+        Self::from_request(req)
     }
 }
 
@@ -1662,29 +1657,24 @@ impl<T: DeserializeOwned> FromRequest for Form<T> {
         deserialize_form_body(req.body.as_ref())
     }
 
-    fn from_request_with_cx<'a>(
-        cx: &'a Cx,
-        req: Request,
-    ) -> impl std::future::Future<Output = Result<Self, ExtractionError>> + Send + 'a
+    async fn from_request_with_cx<'a>(cx: &'a Cx, req: Request) -> Result<Self, ExtractionError>
     where
         Self: Send + 'a,
     {
-        async move {
-            #[cfg(not(target_arch = "wasm32"))]
-            if req.extensions.get_typed::<StreamingRawBodySlot>().is_some() {
-                let limit = form_body_limit(&req);
-                check_content_length_limit(&req, limit)?;
-                validate_form_content_type(&req)?;
-                let body = StreamingRawBody::take_from_request(&req)?;
-                let collected = body
-                    .collect_bounded_with_cx(cx, limit)
-                    .await
-                    .map_err(|error| streaming_extraction_error("form", error))?;
-                return deserialize_form_body(collected.data().as_ref());
-            }
-
-            Self::from_request(req)
+        #[cfg(not(target_arch = "wasm32"))]
+        if req.extensions.get_typed::<StreamingRawBodySlot>().is_some() {
+            let limit = form_body_limit(&req);
+            check_content_length_limit(&req, limit)?;
+            validate_form_content_type(&req)?;
+            let body = StreamingRawBody::take_from_request(&req)?;
+            let collected = body
+                .collect_bounded_with_cx(cx, limit)
+                .await
+                .map_err(|error| streaming_extraction_error("form", error))?;
+            return deserialize_form_body(collected.data().as_ref());
         }
+
+        Self::from_request(req)
     }
 }
 

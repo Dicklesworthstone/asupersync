@@ -758,15 +758,17 @@ impl<F> Http1Listener<F> {
         spawn_connection: Spawn,
     ) -> io::Result<ShutdownStats>
     where
+        F: Send + Sync,
         Spawn: Fn(
-            crate::net::tcp::stream::TcpStream,
-            ConnectionGuard,
-            Arc<F>,
-            Http1Config,
-            ShutdownSignal,
-            Arc<AtomicUsize>,
-            &RuntimeHandle,
-        ) -> Result<JoinHandle<()>, SpawnError>,
+                crate::net::tcp::stream::TcpStream,
+                ConnectionGuard,
+                Arc<F>,
+                Http1Config,
+                ShutdownSignal,
+                Arc<AtomicUsize>,
+                &RuntimeHandle,
+            ) -> Result<JoinHandle<()>, SpawnError>
+            + Send,
     {
         let mut tasks = ConnectionTasks::default();
         let mut shutdown_rx = self.shutdown_signal.subscribe();

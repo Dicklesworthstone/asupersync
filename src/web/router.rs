@@ -2034,9 +2034,9 @@ fn make_native_h3_producer(
                     ServerProducerCancellation::Cancelled => NativeH3ProducerOutcome::Cancelled,
                 }
             }
-            ServerHopOutcome::Ok(Ok(_))
-            | ServerHopOutcome::Ok(Err(_))
-            | ServerHopOutcome::Panicked(_) => NativeH3ProducerOutcome::Failed,
+            ServerHopOutcome::Ok(Ok(_) | Err(_)) | ServerHopOutcome::Panicked(_) => {
+                NativeH3ProducerOutcome::Failed
+            }
             ServerHopOutcome::Cancelled => NativeH3ProducerOutcome::Cancelled,
             ServerHopOutcome::DeadlineExceeded => NativeH3ProducerOutcome::DeadlineExceeded,
             ServerHopOutcome::ConnectionLost => NativeH3ProducerOutcome::ConnectionLost,
@@ -2483,7 +2483,6 @@ fn poll_one_native_h3_produced(
                     if matches!(error, crate::http::h3::NativeH3SessionError::Transport(_)) {
                         return Poll::Ready(Err(error));
                     }
-                    continue;
                 }
             }
             Poll::Ready(Some(Ok(BodyFrame::Trailers(trailers)))) => {
@@ -3726,15 +3725,15 @@ fn http1_produced_trace_policy(
     }
 
     let mut safe = policy.clone();
-    let mut refused = false;
-    if safe.duration_header.as_deref().is_some_and(transport_owned) {
+    let duration_refused = safe.duration_header.as_deref().is_some_and(transport_owned);
+    if duration_refused {
         safe.duration_header = None;
-        refused = true;
     }
-    if safe.trace_header.as_deref().is_some_and(transport_owned) {
+    let trace_refused = safe.trace_header.as_deref().is_some_and(transport_owned);
+    if trace_refused {
         safe.trace_header = None;
-        refused = true;
     }
+    let refused = duration_refused || trace_refused;
     (
         safe,
         refused.then_some("HTTP/1 produced-response trace policy uses a transport-owned header"),
@@ -3753,15 +3752,15 @@ fn http2_produced_trace_policy(
     }
 
     let mut safe = policy.clone();
-    let mut refused = false;
-    if safe.duration_header.as_deref().is_some_and(transport_owned) {
+    let duration_refused = safe.duration_header.as_deref().is_some_and(transport_owned);
+    if duration_refused {
         safe.duration_header = None;
-        refused = true;
     }
-    if safe.trace_header.as_deref().is_some_and(transport_owned) {
+    let trace_refused = safe.trace_header.as_deref().is_some_and(transport_owned);
+    if trace_refused {
         safe.trace_header = None;
-        refused = true;
     }
+    let refused = duration_refused || trace_refused;
     (
         safe,
         refused.then_some("HTTP/2 produced-response trace policy uses a framing header"),

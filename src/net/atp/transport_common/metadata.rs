@@ -2417,9 +2417,12 @@ fn set_special_file_mtime_no_open(path: &Path, seconds: i64, nanos: u32) -> Resu
 
     let seconds = libc::time_t::try_from(seconds)
         .map_err(|_| "mtime seconds out of platform range".to_string())?;
-    let nanos = libc::c_long::try_from(nanos % 1_000_000_000)
+    // `nanos % 1_000_000_000` always fits in `i32`, and `c_long` is at least
+    // 32 bits wide on every unix target, so widening it is infallible even
+    // where `c_long` is `i32` (32-bit targets) and `u32 -> c_long` is not.
+    let nanos = i32::try_from(nanos % 1_000_000_000)
         .map_err(|_| "mtime nanoseconds out of platform range".to_string())?;
-    let mtime = TimeSpec::new(seconds, nanos);
+    let mtime = TimeSpec::new(seconds, libc::c_long::from(nanos));
     utimensat(
         AT_FDCWD,
         path,

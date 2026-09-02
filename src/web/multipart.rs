@@ -365,21 +365,16 @@ impl FromRequest for Multipart {
         Ok(Self { fields })
     }
 
-    fn from_request_with_cx<'a>(
-        cx: &'a Cx,
-        req: Request,
-    ) -> impl std::future::Future<Output = Result<Self, ExtractionError>> + Send + 'a
+    async fn from_request_with_cx<'a>(cx: &'a Cx, req: Request) -> Result<Self, ExtractionError>
     where
         Self: Send + 'a,
     {
-        async move {
-            #[cfg(not(target_arch = "wasm32"))]
-            if req.extensions.get_typed::<StreamingRawBodySlot>().is_some() {
-                return extract_streaming_multipart(cx, req).await;
-            }
-
-            Self::from_request(req)
+        #[cfg(not(target_arch = "wasm32"))]
+        if req.extensions.get_typed::<StreamingRawBodySlot>().is_some() {
+            return extract_streaming_multipart(cx, req).await;
         }
+
+        Self::from_request(req)
     }
 }
 
