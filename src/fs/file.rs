@@ -261,6 +261,11 @@ impl File {
         R: Send + 'static,
         F: FnOnce(Arc<std::fs::File>) -> io::Result<R> + Send + 'static,
     {
+        // The poll-based traits may have a syscall in flight or read-ahead
+        // bytes the caller never consumed; both move the OS cursor past where
+        // the caller believes it is. Settle them first so this owned cursor
+        // operation observes the caller's cursor.
+        let rewind = self.settle_trait_pending().await?;
         let inner = Arc::clone(&self.inner);
         let cursor_gate = Arc::clone(&self.cursor_gate);
         #[cfg(feature = "test-internals")]
@@ -279,6 +284,10 @@ impl File {
                 probe.after_gate();
             }
 
+            if rewind != 0 {
+                let mut file_ref: &std::fs::File = &inner;
+                Seek::seek(&mut file_ref, SeekFrom::Current(-rewind))?;
+            }
             op(inner)
         })
         .await
@@ -565,6 +574,29 @@ impl File {
             Some(PendingIo::ReadAhead { bytes, consumed }) => bytes.len() - consumed,
             _ => 0,
         }
+    }
+
+    /// Waits for any in-flight poll-trait syscall, discards unconsumed
+    /// read-ahead, and returns how many bytes the OS cursor must be rewound
+    /// so the next owned cursor operation starts where the caller believes
+    /// the cursor is.
+    async fn settle_trait_pending(&self) -> io::Result<i64> {
+        std::future::poll_fn(|poll_cx| {
+            let mut pending = self.pending.lock();
+            match Self::settle_foreign_pending(&mut pending, poll_cx) {
+                Poll::Pending => Poll::Pending,
+                Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
+                Poll::Ready(Ok(())) => {
+                    let unconsumed = Self::unconsumed_read_ahead(&pending);
+                    *pending = None;
+                    Poll::Ready(
+                        i64::try_from(unconsumed)
+                            .map_err(|_| io::Error::other("read-ahead exceeds seek range")),
+                    )
+                }
+            }
+        })
+        .await
     }
 }
 
