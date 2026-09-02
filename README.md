@@ -264,7 +264,7 @@ additionally gives spawn adapters a private terminal-result sender with no
 cancellation-aware send method, making publication through the completed
 task's cancelled `Cx` unavailable at the type boundary.
 
-Cancellation progress is continuously observable through `ProgressCertificate`. It tracks potential descent, classifies the current drain regime (`warmup`, `rapid_drain`, `slow_tail`, `stalled`, `quiescent`), and reports range-bounded Freedman and Azuma candidates plus a separate projected conditional calculation. Under the current range-only variation cap, raw Freedman is never tighter than Azuma, so the selected public envelope equals Azuma. At the current same-history horizon, telescoping makes both candidate tails algebraically `1`; they are not evidence of convergence. The `converging` flag is instead an empirical status over the complete accepted finite non-negative observation history represented by running statistics. It requires positive endpoint net progress, no detected stall, bounded rebound count and magnitude, no latest-step rebound, and no dropped invalid sample. Non-finite or materially negative telemetry is dropped; that suppresses the remaining-step estimate and reports `warmup` instead of an actionable terminal phase until reset. The realized delta variance remains diagnostic-only rather than being reused as predictable variation. This makes the evidence behind "is shutdown actually converging?" inspectable without treating one trace as proof of future drift, termination, or bounded drain time.
+Cancellation progress is observable through `ProgressCertificate` where the runtime wires it: today that is the HTTP/1 and HTTP/2 listeners' graceful-drain supervisor (`src/server/shutdown.rs`) and the opt-in scheduler governor; region close and `Runtime::shutdown_timeout` do not consult it. It tracks potential descent, classifies the current drain regime (`warmup`, `rapid_drain`, `slow_tail`, `stalled`, `quiescent`), and reports range-bounded Freedman and Azuma candidates plus a separate projected conditional calculation. Under the current range-only variation cap, raw Freedman is never tighter than Azuma, so the selected public envelope equals Azuma. At the current same-history horizon, telescoping makes both candidate tails algebraically `1`; they are not evidence of convergence. The `converging` flag is instead an empirical status over the complete accepted finite non-negative observation history represented by running statistics. It requires positive endpoint net progress, no detected stall, bounded rebound count and magnitude, no latest-step rebound, and no dropped invalid sample. Non-finite or materially negative telemetry is dropped; that suppresses the remaining-step estimate and reports `warmup` instead of an actionable terminal phase until reset. The realized delta variance remains diagnostic-only rather than being reused as predictable variation. This makes the evidence behind "is shutdown actually converging?" inspectable without treating one trace as proof of future drift, termination, or bounded drain time.
 
 ### 3. Two-Phase Effects Prevent Data Loss
 
@@ -503,7 +503,7 @@ It maps common Tokio ecosystem crates to the corresponding Asupersync modules.
 | TLS | `tokio-rustls`, `native-tls` | `src/tls/` (`tls`, `tls-native-roots`, `tls-webpki-roots`) | Feature-gated | Active | Mixed | Medium |
 | WebSocket | `tokio-tungstenite` | `src/net/websocket/` | Built-in | Active (broad RFC6455 conformance registry wired; runtime e2e coverage remains lane-specific) | Mixed | Medium |
 | HTTP stack (HTTP/1.1 + HTTP/2) | `hyper`, `h2`, `http-body`, `hyper-util` | `src/http/h1/`, `src/http/h2/`, `src/http/body.rs`, `src/http/pool.rs` | Built-in | Active | Mixed | Medium |
-| QUIC + HTTP/3 (default static-only QPACK; opt-in dynamic QPACK field-section and instruction-stream state machine) | `quinn`, `h3`, `h3-quinn` | `src/net/quic_core/`, `src/net/quic_native/`, `src/http/h3_native.rs`, `src/http/h3_quic.rs` (the `http3` feature includes an established-connection adapter that maps SETTINGS, requests, informational/final responses, DATA, trailers, GOAWAY, cancellation, FIN, and reset semantics onto native QUIC stream bytes. A caller-driven single-connection owner now composes the real UDP endpoint, rustls QUIC handshake, WebPKI identity verification, authenticated handshake CIDs, negotiated ALPN, handshake-derived 1-RTT protection, bounded I/O/timer driving, `NativeH3Session`, and `NativeH3Router`; a no-mock loopback test carries an exact Router request/response through that path. Historical wrapper sources in `src/net/quic/` and `src/http/h3/` remain parked outside the core feature graph; support matrix: `artifacts/http3_qpack_support_matrix_v1.json`. **SECURITY (`asupersync-7pwwwe`, fixed fail-closed; `asupersync-arq-quic-epic-b0k8qo.7.4`): untrusted-root, wrong-hostname, expired-certificate, unverified-identity, non-H3 ALPN, and pre-I/O cancellation paths fail closed; there is no insecure skip-verify default. Native ATP-over-QUIC control frames and the transfer manifest ride the verified handshake-derived 1-RTT STREAM path; direct single-connection RaptorQ symbols ride verified 1-RTT DATAGRAM packets and rely on QUIC AEAD, while non-direct symbol planes retain explicit per-symbol auth. This row is still not a release-readiness, multi-connection listener/deployment, external-interoperability, migration, 0-RTT, WAN, or fleet-performance claim; see `docs/quic_atp_threat_model.md` for the precise ATP scope.**) | Feature-gated | Active transport/QPACK surfaces plus authenticated single-connection H3-over-real-UDP composition; **multi-connection deployment and external interop remain unproven** | Mixed | Medium |
+| QUIC + HTTP/3 (default static-only QPACK; opt-in dynamic QPACK field-section and instruction-stream state machine) | `quinn`, `h3`, `h3-quinn` | `src/net/quic_core/`, `src/net/quic_native/`, `src/http/h3_native.rs`, `src/http/h3_quic.rs` (the `http3` feature includes an established-connection adapter that maps SETTINGS, requests, informational/final responses, DATA, trailers, GOAWAY, cancellation, FIN, and reset semantics onto native QUIC stream bytes. A caller-driven single-connection owner now composes the real UDP endpoint, rustls QUIC handshake, WebPKI identity verification, authenticated handshake CIDs, negotiated ALPN, handshake-derived 1-RTT protection, bounded I/O/timer driving, `NativeH3Session`, and `NativeH3Router`; a no-mock loopback test carries an exact Router request/response through that path. Historical wrapper sources in `src/net/quic/` remain parked outside the core feature graph (the former `src/http/h3/` directory no longer exists); support matrix: `artifacts/http3_qpack_support_matrix_v1.json`. **SECURITY (`asupersync-7pwwwe`, fixed fail-closed; `asupersync-arq-quic-epic-b0k8qo.7.4`): untrusted-root, wrong-hostname, expired-certificate, unverified-identity, non-H3 ALPN, and pre-I/O cancellation paths fail closed; there is no insecure skip-verify default. Native ATP-over-QUIC control frames and the transfer manifest ride the verified handshake-derived 1-RTT STREAM path; direct single-connection RaptorQ symbols ride verified 1-RTT DATAGRAM packets and rely on QUIC AEAD, while non-direct symbol planes retain explicit per-symbol auth. This row is still not a release-readiness, multi-connection listener/deployment, external-interoperability, migration, 0-RTT, WAN, or fleet-performance claim; see `docs/quic_atp_threat_model.md` for the precise ATP scope.**) | Feature-gated | Active transport/QPACK surfaces plus authenticated single-connection H3-over-real-UDP composition; **multi-connection deployment and external interop remain unproven** | Mixed | Medium |
 | Web framework primitives (router/extractors/local middleware/request-region/SSE helpers; not axum/warp parity) | `axum`, `warp`, `tower-http` | `src/web/`, `src/service/`, `src/server/` | Partial native primitives | Active (bounded) | Mixed | Medium |
 | gRPC | `tonic` + `prost` + `tower` + `hyper` | `src/grpc/` | Built-in | Active | Mixed | Medium |
 | Database clients | `tokio-postgres`, `mysql_async`, `sqlx` | `src/database/{postgres,mysql,sqlite}.rs` | Feature-gated | Active | Mixed | Medium |
@@ -542,8 +542,8 @@ bodies before handler dispatch, so none of these surfaces claims general
 full-duplex request/response progress. The native H3 path also does not claim a
 multi-connection listener, CONNECT, server push, deployment readiness, or
 external interoperability. WebSocket upgrade authoring is provided separately
-by `web::websocket::WebSocketUpgrade`. The SSE lane is proof-backed: `Sse`
-finite bounded batch responses, plus a `StreamingSse` pull API carrying a
+by `web::websocket::WebSocketUpgrade`. The SSE lane is proof-backed:
+`Sse` finite bounded batch responses, plus a `StreamingSse` pull API carrying a
 request-region E2E proof and an HTTP/1 transport drain proof
 (`tests/e2e_web.rs` streaming artifact rows). It is not an
 axum/warp/tower-http-compatible framework: handlers operate on Asupersync's
@@ -914,7 +914,13 @@ A `VirtualTcp` implementation (`src/net/tcp/virtual_tcp.rs`) provides a fully in
 
 `src/http/h1/` implements HTTP/1.1 with chunked transfer encoding, connection keep-alive, and streaming request/response bodies. `src/http/h2/` implements HTTP/2 frame parsing, HPACK header compression, flow control, and stream multiplexing over a single connection.
 
-Both layers integrate with connection pooling (`src/http/pool.rs`) and optional response compression (`src/http/compress.rs`).
+The shipped client is HTTP/1.1 only: `asupersync::http::Client` (a re-export
+of `h1::HttpClient`) offers a pooled, redirect-aware fluent request API with a
+`tls`-feature HTTPS arm, CONNECT tunnelling, and a cookie jar. Connection
+pooling (`src/http/pool.rs`) applies to that client; the HTTP/1.1 and HTTP/2
+servers do not use it, and there is no general-purpose HTTP/2 client (gRPC
+owns a private H2 channel). Optional response compression lives in
+`src/http/compress.rs`.
 
 ### WebSocket
 
@@ -1320,7 +1326,7 @@ The core combinators publish cancel-safety contracts, and race/select-style winn
 
 ## RaptorQ Fountain Coding
 
-`src/raptorq/` implements RFC 6330 systematic RaptorQ codes, a fountain code where any K-of-N encoded symbols suffice to recover the original K source symbols. This underpins Asupersync's distributed snapshot distribution: region state is encoded, symbols are assigned to replicas via consistent hashing, and recovery requires collecting a quorum of symbols from surviving nodes.
+`src/raptorq/` implements RFC 6330 systematic RaptorQ codes, a fountain code where any K-of-N encoded symbols suffice to recover the original K source symbols. Its production consumer today is the ATP file-transfer data plane. The distributed snapshot-distribution model in `src/distributed/` (region state encoded into symbols, symbols assigned to replicas via consistent hashing, quorum recovery) is an in-process encode/assign/decode pipeline whose only `DistributorTransport` implementation is a test double; it does not yet move symbols between nodes.
 
 | Module | Purpose |
 |--------|---------|
@@ -1733,10 +1739,10 @@ dependency-cutover, file-deletion, or local-Cargo-fallback authority.
 ```toml
 [dependencies]
 # crates.io
-asupersync = "0.4.9"
+asupersync = "0.4.10"
 
 # or git
-# asupersync = { git = "https://github.com/Dicklesworthstone/asupersync", version = "0.4.9" }
+# asupersync = { git = "https://github.com/Dicklesworthstone/asupersync", version = "0.4.10" }
 ```
 
 ### Feature Flags
@@ -1976,15 +1982,22 @@ disallows `std::collections::HashMap/HashSet` in favor of `util::DetHashMap/DetH
 ## Browser Edition (WASM)
 
 Asupersync compiles to `wasm32-unknown-unknown` and ships a Browser Edition
-that exposes the structured concurrency runtime to JavaScript and TypeScript
-applications via `wasm-bindgen`.
+for JavaScript and TypeScript applications via `wasm-bindgen`. Be precise
+about what crosses that boundary today: the wasm ABI exported by
+`asupersync-browser-core` is a structured lifecycle ledger (regions, scopes,
+task handles, capability-gated `fetch`/`WebSocket` calls, and fail-closed
+scope-close ordering), not a scheduler. Browser work runs on the host's own
+promises and event loop; no Rust future is polled inside the wasm module.
 
 ### What works today
 
-- **JS/TS consumers (GA)**: `@asupersync/browser` provides production-ready
-  browser main thread and dedicated worker support. The shipped direct-runtime
-  lane supports a real browser `window` + `document` + `WebAssembly` environment
-  and dedicated workers when the required worker Web APIs are present.
+- **JS/TS consumers (GA)**: `@asupersync/browser` supports the browser main
+  thread and dedicated workers. The shipped direct-runtime lane requires a real
+  browser `window` + `document` + `WebAssembly` environment, or the required
+  worker Web APIs. Its GA signoff (`artifacts/browser_ga_final_signoff_v1.json`)
+  hashes the wasm binary built on 2026-06-19, the last recorded headless-browser
+  runs date from March 2026, and no browser-engine test runs in CI; read the GA
+  label as a package-integrity statement, not as fresh runtime evidence.
 - **Capability-gated browser transports**: shipped browser networking uses
   `fetch`, `WebSocket`, and an explicit WebTransport datagram lane when the
   host exposes `globalThis.WebTransport` over HTTPS.
@@ -2000,10 +2013,12 @@ applications via `wasm-bindgen`.
   `@asupersync/next` remain client-rendered browser adapters layered on top of
   the same Browser Edition runtime boundary.
 - **Rust repo/browser-build surface**: `asupersync` supports the
-  canonical `wasm-browser-*` profile set, and the repository ships
-  `asupersync-browser-core` plus `asupersync-wasm` for the JS ABI/package
-  boundary. That is real Rust-side browser infrastructure, but it is not yet a
-  stable external Rust consumer runtime lane.
+  canonical `wasm-browser-*` profile set (CI builds `wasm-browser-prod`), and
+  the repository ships `asupersync-browser-core` for the JS ABI/package
+  boundary. `asupersync-wasm` is a fail-closed scaffold excluded from the
+  workspace whose every export returns an error. That is real Rust-side browser
+  infrastructure, but it is not yet a stable external Rust consumer runtime
+  lane.
 - **Preview public Rust builder lane**: external Rust consumers now have a
   preview browser-runtime bootstrap path through `RuntimeBuilder::browser()`.
   It is dispatcher-backed, narrower than the shipped JS/TS Browser Edition
@@ -2011,11 +2026,16 @@ applications via `wasm-bindgen`.
   `asupersync-j1xbon.4` support decision keeps this lane
   artifact-contract-backed preview, not a stable external Rust Browser Edition
   API.
-- **Core invariants preserved**: no orphan tasks, cancel-correctness,
-  obligation accounting, and region-close-implies-quiescence all hold in
-  the browser runtime.
-- **Single-threaded cooperative model**: the scheduler yields back to the
-  browser event loop between steps, preserving UI responsiveness.
+- **Invariants enforced by the ledger**: the wasm ABI refuses to close a
+  scope with live task handles and rejects unknown, foreign, or already-closed
+  handles, so the no-orphan and scope-close-ordering rules hold for work that
+  is registered with it. The cancel-correctness, obligation-accounting, and
+  quiescence proofs for the browser path run natively against that ledger
+  (`tests/obligation_wasm_parity.rs`, `tests/scheduler_browser_determinism.rs`),
+  not inside a browser engine.
+- **Single-threaded, event-loop-driven**: the package never blocks the browser
+  event loop, and there is no wasm-side scheduler loop yet; `docs/WASM.md`
+  tracks the lane pump as designed but not exposed.
 
 ### What does not work yet
 
@@ -2124,9 +2144,9 @@ JS/TS packages GA for browser main-thread and dedicated-worker consumers; Rust b
 | Actor supervision (GenServer, links, monitors) | ✅ Implemented |
 | DPOR-style race-guided seed exploration | ⚠️ Implemented as trace analysis, seed derivation, and equivalence-class telemetry; no exact-prefix backtracking or completeness claim |
 | Distributed runtime (remote tasks, sagas, leases, recovery) | Protocol/state-machine, lease, idempotency, saga, native V3 TCP+mTLS runtime/service, Unix static process host, strict statically linked application-registry hosting, and caller-owned single-destination active discovery implemented; deterministic, in-process, cross-process localhost, and one terminal two-worker RCH mTLS proof shipped. Dynamic plugins/code shipping, route persistence, restart-durable idempotency, and general production-WAN reliability remain open. |
-| RaptorQ fountain coding for snapshot distribution | ✅ Implemented |
+| RaptorQ fountain coding for snapshot distribution | ⚠️ Codec and in-process encode/assign/decode model implemented; no network transport for symbol distribution yet (the only `DistributorTransport` is a test double) |
 | Formal methods (TLA+ export + Lean-checked model-invariant coverage) | ⚠️ Partial implementation (Lean checks six abstract-model invariants; no production-Rust refinement proof or blanket adapter/protocol proof) |
-| Browser Edition (WASM, JS/TS consumers) | ✅ Implemented for browser main-thread and dedicated-worker consumers (single-threaded, event-loop-driven) |
+| Browser Edition (WASM, JS/TS consumers) | ⚠️ Structured lifecycle ledger over browser promises for main-thread and dedicated-worker consumers (single-threaded, event-loop-driven); the wasm ABI records regions, scopes, and task handles and enforces scope-close ordering, but does not schedule or poll futures, and no browser-engine test runs in CI |
 | Service worker direct runtime | Broker/coordinator-only; direct runtime unsupported, bounded broker/handoff supported |
 | Shared worker direct runtime | Broker/coordinator-only; direct runtime unsupported, bounded coordinator attach/detach/fallback supported |
 | Rust-to-WASM compilation path | Preview public lane exists via `RuntimeBuilder::browser()`, but current Rust support is still narrower than the shipped JS/TS packages and remains anchored by fixture/evidence validation |
@@ -2155,7 +2175,7 @@ JS/TS packages GA for browser main-thread and dedicated-worker consumers; Rust b
 | **Phase 0** | Single-thread deterministic kernel | ✅ Complete |
 | **Phase 1** | Parallel scheduler + region heap | ✅ Complete |
 | **Phase 2** | I/O integration (Linux epoll, optional io_uring, TCP, HTTP/1.1-2, TLS, HTTP/3 native core with default static-only QPACK plus opt-in dynamic field-section context; BSD/Windows reactors currently expose narrower interest support) | ⚠️ Partial |
-| **Phase 3** | Actors + supervision (GenServer, links, monitors) | ✅ Complete for live per-actor supervision (`src/actor.rs` drives restart-on-failure with backoff/intensity); the Spork `CompiledSupervisor` tree computes restart *plans* but its tree-level live restart loop is pending (`asupersync-8y37kz.2` / `asupersync-u2vgjg`) |
+| **Phase 3** | Actors + supervision (GenServer, links, monitors) | ✅ Complete for live per-actor supervision (`src/actor.rs` drives restart-on-failure with backoff/intensity); the Spork `CompiledSupervisor` tree computes restart *plans* but its tree-level live restart loop is pending (`asupersync-dist-otp-completeness-8y37kz.2`, blocked as of 2026-09-01) |
 | **Phase 4** | Distributed structured concurrency | ✅ Core primitives complete; production remote network adapters remain support-class scoped |
 | **Phase 5** | Schedule exploration + formal tooling | ⚠️ Partial (DPOR-style race-guided seed exploration, TLA+ export, and Lean-checked model invariants exist; exact-prefix DPOR and a production-Rust-to-model refinement proof do not) |
 | **Phase 6** | Hardening, policy gates, and adapter surface expansion | ✅ Continuous (see [Policy Gates](#phase-6-policy-gates)) |

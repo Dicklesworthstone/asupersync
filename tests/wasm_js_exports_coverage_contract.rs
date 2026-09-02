@@ -1654,7 +1654,7 @@ fn readme_pins_deferred_service_and_shared_worker_direct_runtime_truth() {
 
     for marker in [
         "See [`docs/WASM.md`](./docs/WASM.md) for the full Browser Edition guide,",
-        "| Browser Edition (WASM, JS/TS consumers) | ✅ Implemented for browser main-thread and dedicated-worker consumers (single-threaded, event-loop-driven) |",
+        "| Browser Edition (WASM, JS/TS consumers) | ⚠️ Structured lifecycle ledger over browser promises for main-thread and dedicated-worker consumers (single-threaded, event-loop-driven); the wasm ABI records regions, scopes, and task handles and enforces scope-close ordering, but does not schedule or poll futures, and no browser-engine test runs in CI |",
         "| Rust-to-WASM compilation path | Preview public lane exists via `RuntimeBuilder::browser()`, but current Rust support is still narrower than the shipped JS/TS packages and remains anchored by fixture/evidence validation |",
         "the broker/coordinator-only service/shared worker boundaries, the preview public Rust-to-WASM `RuntimeBuilder::browser()` lane",
     ] {

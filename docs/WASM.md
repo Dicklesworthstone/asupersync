@@ -671,13 +671,18 @@ via `web-sys` and `wasm-bindgen-futures`.
 
 The current browser runtime model (Phase 1) is:
 
-- **Single-threaded**: all Asupersync tasks run on the browser main thread
-  or inside a single dedicated Web Worker.
-- **Cooperative**: the scheduler yields back to the JS event loop between
-  scheduling steps to avoid blocking the UI thread.
+- **Single-threaded**: all Asupersync-registered work runs on the browser
+  main thread or inside a single dedicated Web Worker.
+- **Ledger, not scheduler**: the shipped wasm ABI (`asupersync-browser-core`
+  over `src/types/wasm_abi.rs`) records regions, scopes, and task handles and
+  enforces fail-closed scope-close ordering; it does not poll Rust futures.
+  `task_spawn` takes no future and `task_join` takes the outcome from the
+  caller. The browser-specific scheduler pump described earlier in this
+  document is designed but not exposed, so there is no wasm-side scheduling
+  loop that "yields between steps" yet.
 - **Event-loop driven**: browser timer APIs, `fetch` completions,
-  WebSocket events, and WebTransport session/stream events feed into the
-  runtime's wakeup machinery.
+  WebSocket events, and WebTransport session/stream events complete on the
+  host's own promises; the package never blocks the JS event loop.
 
 ### What this means for guarantees
 
