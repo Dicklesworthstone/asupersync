@@ -444,20 +444,57 @@ fn mysql_real_read_only_transaction_rejects_mutation() {
         assert!(tx.is_read_only(), "transaction should be read-only");
 
         log.phase("insert_rejected");
-        let insert_stmt = unwrap_mysql(
-            tx.prepare(&cx, &insert_sql).await,
-            "prepare_insert_rejected",
-            &log,
-        );
-        match tx
-            .execute_prepared(&cx, &insert_stmt, &[&7_i32, &"should-fail"])
-            .await
-        {
-            Outcome::Err(MySqlError::Server {
+        // MySQL 8 rejects the mutation already at COM_STMT_PREPARE
+        // (ER_CANT_EXECUTE_IN_READ_ONLY_TRANSACTION, SQLSTATE 25006); older
+        // servers and MariaDB reject at execute. Either is the READ ONLY
+        // rejection this test proves; anything else is a failure.
+        let rejection = match tx.prepare(&cx, &insert_sql).await {
+            Outcome::Err(err) => {
+                log.line(
+                    "assertion",
+                    &[
+                        ("field", "rejected_at".to_string()),
+                        ("expected", "prepare|execute".to_string()),
+                        ("actual", "prepare".to_string()),
+                    ],
+                );
+                err
+            }
+            Outcome::Ok(insert_stmt) => match tx
+                .execute_prepared(&cx, &insert_stmt, &[&7_i32, &"should-fail"])
+                .await
+            {
+                Outcome::Err(err) => {
+                    log.line(
+                        "assertion",
+                        &[
+                            ("field", "rejected_at".to_string()),
+                            ("expected", "prepare|execute".to_string()),
+                            ("actual", "execute".to_string()),
+                        ],
+                    );
+                    err
+                }
+                other => {
+                    log.end("fail");
+                    panic!("expected READ ONLY mutation rejection at execute, got {other:?}");
+                }
+            },
+            Outcome::Cancelled(reason) => {
+                log.end("fail");
+                panic!("prepare was cancelled instead of rejected: {reason:?}");
+            }
+            Outcome::Panicked(payload) => {
+                log.end("fail");
+                panic!("prepare panicked instead of being rejected: {payload:?}");
+            }
+        };
+        match rejection {
+            MySqlError::Server {
                 code,
                 sql_state,
                 message,
-            }) => {
+            } => {
                 let mentions_read_only = message.to_ascii_uppercase().contains("READ ONLY");
                 assert!(
                     sql_state == "25006" || mentions_read_only,
@@ -466,7 +503,7 @@ fn mysql_real_read_only_transaction_rejects_mutation() {
             }
             other => {
                 log.end("fail");
-                panic!("expected READ ONLY mutation rejection, got {other:?}");
+                panic!("expected a server-side READ ONLY rejection, got {other:?}");
             }
         }
 
@@ -513,7 +550,9 @@ fn mysql_real_read_only_transaction_rejects_mutation() {
 ///   * the connection is genuinely reusable for further reads and
 ///     writes after the drain,
 ///   * MySQL itself agrees the transaction was aborted (a fresh
-///     `SELECT @@in_transaction` returns 0).
+///     `information_schema.innodb_trx` probe for this connection returns
+///     0 rows; `@@in_transaction` is MariaDB-only and does not exist on
+///     MySQL 8).
 ///
 /// This is the canonical safety net for panic-unwind correctness: if
 /// the Drop poison logic regresses, partial writes from a panicked
@@ -562,7 +601,7 @@ fn mysql_real_dropped_transaction_drains_rollback_on_next_op() {
 
         log.phase("baseline_in_transaction_off");
         let baseline = unwrap_mysql(
-            conn.query_static_sql(&cx, "SELECT @@in_transaction AS in_txn")
+            conn.query_static_sql(&cx, "SELECT COUNT(*) AS in_txn FROM information_schema.innodb_trx WHERE trx_mysql_thread_id = CONNECTION_ID()")
                 .await,
             "baseline_in_transaction",
             &log,
@@ -647,11 +686,12 @@ fn mysql_real_dropped_transaction_drains_rollback_on_next_op() {
         );
 
         // Server-side proof: MySQL itself must agree the connection is
-        // out of the transaction. @@in_transaction is server-side state,
-        // not anything our wire codec can synthesize.
+        // out of the transaction. The innodb_trx row for this connection
+        // is server-side state, not anything our wire codec can
+        // synthesize (`@@in_transaction` would be MariaDB-only).
         log.phase("server_side_in_transaction_off");
         let post_drain = unwrap_mysql(
-            conn.query_static_sql(&cx, "SELECT @@in_transaction AS in_txn")
+            conn.query_static_sql(&cx, "SELECT COUNT(*) AS in_txn FROM information_schema.innodb_trx WHERE trx_mysql_thread_id = CONNECTION_ID()")
                 .await,
             "post_drain_in_transaction",
             &log,
@@ -668,7 +708,7 @@ fn mysql_real_dropped_transaction_drains_rollback_on_next_op() {
         assert_eq!(
             post_drain_in_txn, 0,
             "after drain, MySQL must report the connection is no longer \
-             inside a transaction; got @@in_transaction={post_drain_in_txn}"
+             inside a transaction; got innodb_trx rows={post_drain_in_txn}"
         );
 
         // Connection must remain genuinely usable: write, then read.

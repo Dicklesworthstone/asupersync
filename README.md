@@ -1309,11 +1309,17 @@ The two-phase pattern (reserve a permit, then commit the send) is central to can
 The synchronization primitives are deterministic under the lab runtime and
 their wait queues/guards have focused cancellation and cleanup coverage.
 Futurelock detection is narrower: it fires for tasks that stop being polled
-while holding runtime-recorded obligations, such as channel permits, leases,
-`IoOp` records, and semaphore permit tokens. Mutex and RwLock guards release
-on drop and are covered by guard/queue cleanup tests, but they are not
-themselves futurelock-tracked obligations unless the surrounding task also
-holds a runtime obligation.
+while holding obligations recorded in the runtime's obligation table
+(`RuntimeState::create_obligation`). Today that table is fed by the lab
+harness and by explicit `IoOp::submit` calls; the stock `mpsc`/`oneshot`/
+`broadcast` send permits and `Semaphore` permits do not register there, and
+neither do the session-tracked permits or the database transaction tokens,
+which are standalone typestate tokens (`ObligationToken<K>`). Making those
+permits runtime obligations is tracked as
+`asupersync-gap-permits-as-obligations-cv5sqe`; until it lands the
+futurelock and obligation-leak oracles do not see them. Mutex and RwLock
+guards release on drop and are covered by guard/queue cleanup tests, but
+they are not futurelock-tracked either.
 
 ---
 

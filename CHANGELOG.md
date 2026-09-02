@@ -65,6 +65,70 @@ is `v0.4.9`.
 
 ## [Unreleased]
 
+### Real-server client fixes and CI proof lanes (2026-09-02)
+
+Running the existing real-server suites against real servers for the first
+time (docker: postgres:16, mysql:8.0, redis:7, nats:2.10, redpanda) found
+four client defects and two test assumptions that only a real server exposes:
+
+- **PostgreSQL: an external cancel now interrupts a parked read.** The
+  socket poll loops checked `cx.checkpoint()` but never registered the task's
+  waker with the `Cx`, so cancelling a `pg_sleep(30)` query took the full 30 s
+  before `Outcome::Cancelled` surfaced. `read_exact`/`write_all`/TLS
+  negotiation now hold an owned cancellation-waker registration for the
+  duration of the poll; the cancel wakes the read, the checkpoint returns
+  `Cancelled`, and the `CancelRequest` path fires. Unit test with a
+  never-ready stream plus the real-server suite (8/8, cancel in under 0.4 s).
+- **MySQL: `begin_with_isolation` can now succeed for a non-default level.**
+  It issued the next-transaction `SET TRANSACTION ISOLATION LEVEL`, which
+  never changes `@@SESSION.transaction_isolation` on MySQL 8 or MariaDB, so
+  the post-`START TRANSACTION` verification could only pass when the
+  requested level equalled the session default. It now sets the SESSION level
+  and restores the previous one on commit, rollback, or the implicit rollback
+  of an abandoned transaction.
+- **MySQL: the static-SQL injection heuristic matches function names at
+  identifier boundaries.** `VARCHAR(64)` was rejected because it contains
+  `char(`. `MySqlValue::as_i32` accepts an in-range BIGINT (the binary
+  protocol types `SELECT 1 AS v` as BIGINT).
+- **Redis: a RESP3 null is "no value".** `hget` treated the `_` null Redis 7
+  sends after `HELLO 3` as a protocol error.
+- **NATS: a bare `NATS/1.0 503` reply is named "No Responders".**
+  nats-server sends no Description header for it.
+- **Test assumption:** `@@in_transaction` is MariaDB-only; the MySQL
+  real-server suite now probes `information_schema.innodb_trx`.
+
+CI:
+
+- New `real-servers` job runs all six real-server suites with the servers in
+  docker; `scripts/ci/run_real_server_suite.sh` fails on any skip marker or
+  zero-test run, and a wrong-password negative control must fail.
+- New `lean-build` job runs `lake build` on the pinned toolchain and uploads
+  a hash-bound receipt (`formal/lean/coverage/lake_build_receipt.txt` holds
+  the last local build: 189 theorems, 0 sorry).
+- New `tla-tlc` job installs Java and a sha-pinned TLC and runs
+  `tests/lab_tla_export_tlc_e2e.rs`, the first caller of
+  `LabRunReport::export_tla`: a real lab trace is model-checked (with a
+  planted invariant that TLC must reject) and the test fails closed under
+  `CI=true` when TLC is missing.
+- Six workflows carry `concurrency` groups so a push cadence of minutes no
+  longer queues dozens of full matrices.
+
+Also:
+
+- `Runtime::trace_snapshot` / `RuntimeHandle::trace_snapshot` export the
+  production trace ring buffer for the lab analysis tools.
+- The discounted-UCB1 replay golden runs again (it had been ignored since
+  2026-04-22 because the scheduler constructor it used never enabled the
+  policy); the README now says the selector is a pure function of the
+  dispatch sequence and that `LabRuntime` does not run it.
+- The K=2048 RaptorQ encoder differential is no longer ignored: it passes
+  against `raptorq` 2.0 (the ignore cited 1.8.1).
+- `PbftConsensus::submit` is deprecated as an experimental scaffold that
+  returns a placeholder response.
+- `Runtime::drain_root_region` counts not-yet-admitted spawns on the root
+  region and reports task-and-obligation quiescence rather than full
+  runtime quiescence (which also requires an empty I/O driver).
+
 ### Root-region drain, drain-correct timeout, non-blocking file traits (2026-09-02)
 
 - **The root region is drained when the entry future returns.** New

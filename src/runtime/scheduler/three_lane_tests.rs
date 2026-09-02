@@ -9782,20 +9782,42 @@ type AdaptivePolicyTrace = Vec<(
     [f64; ADAPTIVE_STREAK_ARMS.len()],
 )>;
 
-/// Drives one worker through 100 cancel-lane dispatches with the adaptive
-/// policy enabled at `epoch_steps` dispatches per epoch and samples the
-/// policy state every ten dispatches.
+/// Drives one worker through 100 cancel-lane dispatches of real (trivially
+/// completing) tasks with the adaptive policy enabled at `epoch_steps`
+/// dispatches per epoch and samples the policy state every ten dispatches.
+/// Real task records matter: the adaptive step is credited in the task poll
+/// path, so a fake `TaskId` with no record never advances an epoch.
 fn adaptive_policy_trace_for_cancel_flood(epoch_steps: u32) -> AdaptivePolicyTrace {
     let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+    let region = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .create_root_region(Budget::INFINITE);
     let mut scheduler = ThreeLaneScheduler::new_with_cancel_limit(1, &state, 4);
     scheduler.set_adaptive_cancel_streak(true, epoch_steps);
-    let mut workers = scheduler.take_workers();
-    let worker = workers.first_mut().expect("one worker");
     let mut trace = Vec::with_capacity(10);
 
+    // Same dispatch recipe as `adaptive_epoch_credit_waits_for_task_execution`:
+    // inject through the scheduler, dequeue, execute. The policy credits every
+    // executed dispatch regardless of lane.
     for i in 0..100 {
-        worker.schedule_local_cancel(TaskId::new_for_test(4000, i), 100);
-        worker.next_task();
+        let task_id = {
+            let mut guard = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let (task_id, _handle) = guard
+                .create_task(region, Budget::INFINITE, async {})
+                .expect("create task");
+            task_id
+        };
+        scheduler.inject_ready(task_id, 100);
+        let worker = scheduler.workers.first_mut().expect("one worker");
+        assert_eq!(
+            worker.next_task(),
+            Some(task_id),
+            "dispatch {i} must dequeue the injected task"
+        );
+        worker.execute(task_id);
         if i % 10 == 9 {
             let policy = worker
                 .adaptive_cancel_policy

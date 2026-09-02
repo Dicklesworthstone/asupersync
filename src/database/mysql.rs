@@ -93,7 +93,7 @@ pub enum MySqlError {
     /// Unsupported authentication plugin.
     UnsupportedAuthPlugin(String),
     /// br-asupersync-dvgvcu — `begin_with_isolation` issued
-    /// `SET TRANSACTION ISOLATION LEVEL X` but the server-reported
+    /// `SET SESSION TRANSACTION ISOLATION LEVEL X` but the server-reported
     /// session value did NOT match the requested level. This signals
     /// a silent downgrade (e.g., a server-side override, a permission
     /// limit, or a replication-mode constraint stripping the
@@ -1408,10 +1408,9 @@ pub enum SslMode {
 ///
 /// Used by [`MySqlConnection::begin_with_isolation`]. MySQL/MariaDB require
 /// two separate statements to start a transaction at a non-default level:
-/// `SET TRANSACTION ISOLATION LEVEL X` followed by
-/// `START TRANSACTION [READ ONLY|READ WRITE]`. The `SET TRANSACTION`
-/// statement (without `GLOBAL`/`SESSION`) applies only to the next
-/// transaction on the connection, so the pair is effectively atomic from
+/// `SET SESSION TRANSACTION ISOLATION LEVEL X` followed by
+/// `START TRANSACTION [READ ONLY|READ WRITE]` (the session level is put
+/// back when the transaction ends). The pair is effectively atomic from
 /// the connection's perspective even though it is two round-trips.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IsolationLevel {
@@ -1685,6 +1684,15 @@ struct MySqlConnectionInner {
     /// True when a transaction was dropped without explicit commit/rollback.
     /// The next command will issue an implicit ROLLBACK first.
     needs_rollback: bool,
+    /// Session isolation level to restore once the transaction opened by
+    /// `begin_with_isolation` ends (commit, rollback, or the implicit
+    /// rollback of an abandoned transaction). `begin_with_isolation` sets
+    /// the level with `SET SESSION ...` because the next-transaction form
+    /// never changes `@@SESSION.transaction_isolation` on MySQL or MariaDB,
+    /// which made the post-`START TRANSACTION` verification unpassable for
+    /// any level other than the session default (real-server suite,
+    /// 2026-09-02).
+    session_isolation_restore: Option<IsolationLevel>,
     /// Maximum number of rows to return from a result set.
     max_result_rows: usize,
     /// Logical pool-borrow epoch for prepared statement handles.
@@ -2093,6 +2101,7 @@ impl MySqlConnection {
                 closed: false,
                 server_version: String::new(),
                 needs_rollback: false,
+                session_isolation_restore: None,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
                 prepared_statement_epoch: 0,
                 prepared_cache: MySqlPreparedStatementCache::new(DEFAULT_MAX_PREPARED_STATEMENTS),
@@ -4054,16 +4063,23 @@ impl MySqlConnection {
     /// br-asupersync-rsifm3 — Begin a transaction with explicit isolation
     /// level and read-only configuration.
     ///
-    /// Sends `SET TRANSACTION ISOLATION LEVEL <level>` followed by
-    /// `START TRANSACTION [READ ONLY|READ WRITE]`. MySQL/MariaDB do not
-    /// support setting the level inside the START TRANSACTION statement
-    /// itself, so this is two protocol round-trips. The `SET TRANSACTION`
-    /// (without `GLOBAL`/`SESSION`) only affects the next transaction on
-    /// this connection, so the level cannot leak past the START TRANSACTION
-    /// that follows.
+    /// Reads the session isolation level, sends
+    /// `SET SESSION TRANSACTION ISOLATION LEVEL <level>`, then
+    /// `START TRANSACTION [READ ONLY|READ WRITE]`, and verifies
+    /// `@@SESSION.transaction_isolation` reports the requested level.
+    /// MySQL/MariaDB do not support setting the level inside the START
+    /// TRANSACTION statement itself, so this is several round-trips.
     ///
-    /// On failure of the `SET TRANSACTION` half, no transaction is started
-    /// and the connection state is unchanged.
+    /// The SESSION form is used deliberately: the next-transaction form
+    /// (`SET TRANSACTION ...` without `SESSION`) never changes
+    /// `@@SESSION.transaction_isolation`, so the verification could only
+    /// pass when the requested level equalled the session default (found
+    /// against MySQL 8.0 by the real-server suite). The previous session
+    /// level is restored when the transaction ends: on commit, rollback, or
+    /// the implicit rollback of an abandoned transaction.
+    ///
+    /// On failure of the `SET SESSION` half, no transaction is started and
+    /// the connection state is unchanged.
     pub async fn begin_with_isolation(
         &mut self,
         cx: &Cx,
@@ -4071,7 +4087,35 @@ impl MySqlConnection {
         read_only: bool,
     ) -> Outcome<MySqlTransaction<'_>, MySqlError> {
         trace_database_transaction(cx, "mysql", "begin_with_isolation", "start");
-        let set_sql = format!("SET TRANSACTION ISOLATION LEVEL {level}");
+        // Read the session level first so it can be restored when the
+        // transaction ends. `SET TRANSACTION ISOLATION LEVEL X` (the
+        // next-transaction form) leaves `@@SESSION.transaction_isolation`
+        // untouched on MySQL 8 and MariaDB, so the verification below could
+        // only ever pass when `level` equalled the session default. Setting
+        // the SESSION level makes the verification meaningful; the previous
+        // level is put back on commit/rollback/abandon-drain.
+        let previous_level = match self
+            .query_unchecked_internal(cx, "SELECT @@SESSION.transaction_isolation AS isolation")
+            .await
+        {
+            Outcome::Ok(rows) => rows
+                .first()
+                .and_then(|r| r.get_str("isolation").ok())
+                .and_then(IsolationLevel::from_server_string),
+            Outcome::Err(e) => {
+                trace_database_transaction(cx, "mysql", "begin_with_isolation", "err");
+                return outcome_from_error(e);
+            }
+            Outcome::Cancelled(r) => {
+                trace_database_transaction(cx, "mysql", "begin_with_isolation", "cancelled");
+                return Outcome::Cancelled(r);
+            }
+            Outcome::Panicked(p) => {
+                trace_database_transaction(cx, "mysql", "begin_with_isolation", "panicked");
+                return Outcome::Panicked(p);
+            }
+        };
+        let set_sql = format!("SET SESSION TRANSACTION ISOLATION LEVEL {level}");
         match self.execute_unchecked_internal(cx, &set_sql).await {
             Outcome::Ok(_) => {}
             Outcome::Err(e) => {
@@ -4087,19 +4131,26 @@ impl MySqlConnection {
                 return Outcome::Panicked(p);
             }
         }
+        // From here on the session level differs from what the caller had;
+        // every exit path must run through a restore (explicit, or via the
+        // abandoned-transaction drain).
+        self.inner.session_isolation_restore = previous_level.filter(|prev| *prev != level);
         let access_mode = if read_only { "READ ONLY" } else { "READ WRITE" };
         let start_sql = format!("START TRANSACTION {access_mode}");
         match self.execute_unchecked_internal(cx, &start_sql).await {
             Outcome::Ok(_) => {}
             Outcome::Err(e) => {
+                self.restore_session_isolation(cx).await;
                 trace_database_transaction(cx, "mysql", "begin_with_isolation", "err");
                 return outcome_from_error(e);
             }
             Outcome::Cancelled(r) => {
+                self.restore_session_isolation(cx).await;
                 trace_database_transaction(cx, "mysql", "begin_with_isolation", "cancelled");
                 return Outcome::Cancelled(r);
             }
             Outcome::Panicked(p) => {
+                self.restore_session_isolation(cx).await;
                 trace_database_transaction(cx, "mysql", "begin_with_isolation", "panicked");
                 return Outcome::Panicked(p);
             }
@@ -4181,6 +4232,38 @@ impl MySqlConnection {
     /// br-asupersync-9g47af — once `START TRANSACTION` succeeds, any verification
     /// failure must either return the connection to idle or mark it for orphan
     /// cleanup before the caller can reuse it.
+    /// Puts the session isolation level back to what it was before
+    /// `begin_with_isolation` changed it. A restore failure leaves the
+    /// session at an unexpected level, so the connection is marked for
+    /// orphan cleanup rather than reused silently.
+    async fn restore_session_isolation(&mut self, cx: &Cx) {
+        let Some(previous) = self.inner.session_isolation_restore.take() else {
+            return;
+        };
+        let restore_sql = format!("SET SESSION TRANSACTION ISOLATION LEVEL {previous}");
+        match self.execute_unchecked_internal(cx, &restore_sql).await {
+            Outcome::Ok(_) => {}
+            Outcome::Err(err) => {
+                self.mark_unusable_after_cleanup_failure();
+                cx.trace(&format!(
+                    "restoring the session isolation level failed; marking connection for orphan cleanup: {err:?}"
+                ));
+            }
+            Outcome::Cancelled(reason) => {
+                self.mark_unusable_after_cleanup_failure();
+                cx.trace(&format!(
+                    "restoring the session isolation level was cancelled; marking connection for orphan cleanup: {reason}"
+                ));
+            }
+            Outcome::Panicked(_) => {
+                self.mark_unusable_after_cleanup_failure();
+                cx.trace(
+                    "restoring the session isolation level panicked; marking connection for orphan cleanup",
+                );
+            }
+        }
+    }
+
     async fn rollback_isolated_begin_or_mark(&mut self, cx: &Cx) {
         const MASKED_ROLLBACK_POLLS: u32 = 32;
 
@@ -4191,7 +4274,9 @@ impl MySqlConnection {
         )
         .await
         {
-            Outcome::Ok(_) => {}
+            Outcome::Ok(_) => {
+                self.restore_session_isolation(cx).await;
+            }
             Outcome::Err(err) => {
                 self.mark_unusable_after_cleanup_failure();
                 cx.trace(&format!(
@@ -4820,10 +4905,30 @@ impl MySqlConnection {
         // will remain closed, preventing protocol desynchronization.
         self.inner.closed = true;
 
+        self.raw_query_expect_ok("ROLLBACK", "implicit ROLLBACK")
+            .await?;
+        self.inner.needs_rollback = false;
+        // The abandoned transaction may have been opened by
+        // `begin_with_isolation`; put the session level back before the
+        // connection is reused.
+        if let Some(previous) = self.inner.session_isolation_restore.take() {
+            let restore_sql = format!("SET SESSION TRANSACTION ISOLATION LEVEL {previous}");
+            self.raw_query_expect_ok(&restore_sql, "session isolation restore")
+                .await?;
+        }
+        self.inner.closed = false;
+        Ok(())
+    }
+
+    /// Sends one `COM_QUERY` on the raw stream and requires an OK packet.
+    /// Used on cleanup paths that run without a caller `Cx`. Any failure
+    /// shuts the socket down: the connection stays `closed` and cannot be
+    /// reused with a desynchronized protocol state.
+    async fn raw_query_expect_ok(&mut self, sql: &str, what: &str) -> Result<(), MySqlError> {
         let mut buf = PacketBuffer::new();
         buf.set_sequence(0);
         buf.write_byte(command::COM_QUERY);
-        buf.write_bytes(b"ROLLBACK");
+        buf.write_bytes(sql.as_bytes());
         let packet = buf.build_packet();
 
         if let Err(e) = self.write_all(&packet.bytes).await {
@@ -4843,9 +4948,7 @@ impl MySqlConnection {
 
         match data.first() {
             Some(0x00) => {
-                self.inner.needs_rollback = false;
                 self.inner.status_flags = Self::parse_ok_packet(&data)?.status_flags;
-                self.inner.closed = false;
                 Ok(())
             }
             Some(0xFF) => {
@@ -4854,9 +4957,9 @@ impl MySqlConnection {
             }
             _ => {
                 let _ = self.inner.stream.shutdown(std::net::Shutdown::Both);
-                Err(MySqlError::Protocol(
-                    "unexpected response to implicit ROLLBACK".to_string(),
-                ))
+                Err(MySqlError::Protocol(format!(
+                    "unexpected response to {what}"
+                )))
             }
         }
     }
@@ -5879,6 +5982,7 @@ impl MySqlTransaction<'_> {
         match self.conn.execute_unchecked_internal(cx, "COMMIT").await {
             Outcome::Ok(_) => {
                 self.finished = true;
+                self.conn.restore_session_isolation(cx).await;
                 // The transaction truly committed: discharge the obligation.
                 if let Some(token) = self.obligation.take() {
                     let _ = token.commit();
@@ -5911,6 +6015,7 @@ impl MySqlTransaction<'_> {
         match self.conn.execute_unchecked_internal(cx, "ROLLBACK").await {
             Outcome::Ok(_) => {
                 self.finished = true;
+                self.conn.restore_session_isolation(cx).await;
                 // Explicit rollback: abort the obligation.
                 if let Some(token) = self.obligation.take() {
                     let _ = token.abort();
@@ -6616,6 +6721,7 @@ mod tests {
                 closed: false,
                 server_version: String::new(),
                 needs_rollback: false,
+                session_isolation_restore: None,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
                 prepared_statement_epoch: 0,
                 prepared_cache: MySqlPreparedStatementCache::new(DEFAULT_MAX_PREPARED_STATEMENTS),
@@ -6994,6 +7100,7 @@ mod tests {
                 closed: false,
                 server_version: String::new(),
                 needs_rollback: false,
+                session_isolation_restore: None,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
                 prepared_statement_epoch: 0,
                 prepared_cache: MySqlPreparedStatementCache::new(DEFAULT_MAX_PREPARED_STATEMENTS),
@@ -7024,6 +7131,7 @@ mod tests {
                     closed: false,
                     server_version: String::new(),
                     needs_rollback: false,
+                    session_isolation_restore: None,
                     max_result_rows: DEFAULT_MAX_RESULT_ROWS,
                     prepared_statement_epoch: 0,
                     prepared_cache: MySqlPreparedStatementCache::new(
@@ -7090,6 +7198,7 @@ mod tests {
                 closed: false,
                 server_version: String::new(),
                 needs_rollback: false,
+                session_isolation_restore: None,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
                 prepared_statement_epoch: 0,
                 prepared_cache: MySqlPreparedStatementCache::new(DEFAULT_MAX_PREPARED_STATEMENTS),
@@ -7138,6 +7247,7 @@ mod tests {
                     closed: false,
                     server_version: String::new(),
                     needs_rollback: false,
+                    session_isolation_restore: None,
                     max_result_rows: DEFAULT_MAX_RESULT_ROWS,
                     prepared_statement_epoch: 0,
                     prepared_cache: MySqlPreparedStatementCache::new(
@@ -7485,8 +7595,11 @@ mod tests {
     #[test]
     fn isolation_level_begin_sql_strings_match_spec() {
         let level = IsolationLevel::Serializable;
-        let set_sql = format!("SET TRANSACTION ISOLATION LEVEL {level}");
-        assert_eq!(set_sql, "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE");
+        let set_sql = format!("SET SESSION TRANSACTION ISOLATION LEVEL {level}");
+        assert_eq!(
+            set_sql,
+            "SET SESSION TRANSACTION ISOLATION LEVEL SERIALIZABLE"
+        );
         let access_mode = "READ ONLY";
         let start_sql = format!("START TRANSACTION {access_mode}");
         assert_eq!(start_sql, "START TRANSACTION READ ONLY");
@@ -8252,6 +8365,7 @@ mod tests {
                 closed: false,
                 server_version: String::new(),
                 needs_rollback: false,
+                session_isolation_restore: None,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
                 prepared_statement_epoch: 0,
                 prepared_cache: MySqlPreparedStatementCache::new(DEFAULT_MAX_PREPARED_STATEMENTS),
@@ -8340,6 +8454,7 @@ mod tests {
                 closed: false,
                 server_version: String::new(),
                 needs_rollback: false,
+                session_isolation_restore: None,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
                 prepared_statement_epoch: 0,
                 prepared_cache: MySqlPreparedStatementCache::new(DEFAULT_MAX_PREPARED_STATEMENTS),
@@ -8977,6 +9092,7 @@ mod tests {
                 closed: false,
                 server_version: String::new(),
                 needs_rollback: false,
+                session_isolation_restore: None,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
                 prepared_statement_epoch: 0,
                 prepared_cache: MySqlPreparedStatementCache::new(DEFAULT_MAX_PREPARED_STATEMENTS),
@@ -9059,6 +9175,7 @@ mod tests {
                 closed: false,
                 server_version: String::new(),
                 needs_rollback: false,
+                session_isolation_restore: None,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
                 prepared_statement_epoch: 0,
                 prepared_cache: MySqlPreparedStatementCache::new(DEFAULT_MAX_PREPARED_STATEMENTS),
@@ -9269,6 +9386,7 @@ mod tests {
                 closed: false,
                 server_version: String::new(),
                 needs_rollback: false,
+                session_isolation_restore: None,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
                 prepared_statement_epoch: 0,
                 prepared_cache: MySqlPreparedStatementCache::new(DEFAULT_MAX_PREPARED_STATEMENTS),
@@ -9384,6 +9502,7 @@ mod tests {
                 closed: false,
                 server_version: String::new(),
                 needs_rollback: false,
+                session_isolation_restore: None,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
                 prepared_statement_epoch: 0,
                 prepared_cache: MySqlPreparedStatementCache::new(DEFAULT_MAX_PREPARED_STATEMENTS),
@@ -9461,6 +9580,7 @@ mod tests {
                 closed: false,
                 server_version: String::new(),
                 needs_rollback: false,
+                session_isolation_restore: None,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
                 prepared_statement_epoch: 0,
                 prepared_cache: MySqlPreparedStatementCache::new(DEFAULT_MAX_PREPARED_STATEMENTS),
@@ -9593,6 +9713,7 @@ mod tests {
                 closed: false,
                 server_version: String::new(),
                 needs_rollback: false,
+                session_isolation_restore: None,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
                 prepared_statement_epoch: 0,
                 prepared_cache: MySqlPreparedStatementCache::new(DEFAULT_MAX_PREPARED_STATEMENTS),
@@ -9705,6 +9826,7 @@ mod tests {
                 closed: false,
                 server_version: String::new(),
                 needs_rollback: false,
+                session_isolation_restore: None,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
                 prepared_statement_epoch: 0,
                 prepared_cache: MySqlPreparedStatementCache::new(1),
@@ -9808,6 +9930,7 @@ mod tests {
                 closed: false,
                 server_version: String::new(),
                 needs_rollback: false,
+                session_isolation_restore: None,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
                 prepared_statement_epoch: 0,
                 prepared_cache: MySqlPreparedStatementCache::new(DEFAULT_MAX_PREPARED_STATEMENTS),
@@ -9906,6 +10029,7 @@ mod tests {
                 closed: false,
                 server_version: String::new(),
                 needs_rollback: false,
+                session_isolation_restore: None,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
                 prepared_statement_epoch: 0,
                 prepared_cache: MySqlPreparedStatementCache::new(DEFAULT_MAX_PREPARED_STATEMENTS),
@@ -10025,6 +10149,7 @@ mod tests {
                 closed: false,
                 server_version: String::new(),
                 needs_rollback: false,
+                session_isolation_restore: None,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
                 prepared_statement_epoch: 0,
                 prepared_cache: MySqlPreparedStatementCache::new(DEFAULT_MAX_PREPARED_STATEMENTS),
@@ -10217,6 +10342,7 @@ mod tests {
                 closed: false,
                 server_version: String::new(),
                 needs_rollback: false,
+                session_isolation_restore: None,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
                 prepared_statement_epoch: 0,
                 prepared_cache: MySqlPreparedStatementCache::new(DEFAULT_MAX_PREPARED_STATEMENTS),
@@ -10304,6 +10430,7 @@ mod tests {
                 closed: false,
                 server_version: String::new(),
                 needs_rollback: false,
+                session_isolation_restore: None,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
                 prepared_statement_epoch: 0,
                 prepared_cache: MySqlPreparedStatementCache::new(DEFAULT_MAX_PREPARED_STATEMENTS),
@@ -10834,6 +10961,7 @@ mod tests {
                 closed: false,
                 server_version: String::new(),
                 needs_rollback: false,
+                session_isolation_restore: None,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
                 prepared_statement_epoch: 0,
                 prepared_cache: MySqlPreparedStatementCache::new(DEFAULT_MAX_PREPARED_STATEMENTS),
@@ -11092,6 +11220,7 @@ mod tests {
                 closed: false,
                 server_version: String::new(),
                 needs_rollback: false,
+                session_isolation_restore: None,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
                 prepared_statement_epoch: 0,
                 prepared_cache: MySqlPreparedStatementCache::new(DEFAULT_MAX_PREPARED_STATEMENTS),
@@ -11175,6 +11304,7 @@ mod tests {
                 closed: false,
                 server_version: String::new(),
                 needs_rollback: false,
+                session_isolation_restore: None,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
                 prepared_statement_epoch: 0,
                 prepared_cache: MySqlPreparedStatementCache::new(DEFAULT_MAX_PREPARED_STATEMENTS),

@@ -569,7 +569,7 @@ impl File {
 
     /// Number of read-ahead bytes the OS cursor is already past but the
     /// caller has not consumed. Writes and relative seeks compensate for it.
-    fn unconsumed_read_ahead(pending: &Option<PendingIo>) -> usize {
+    fn unconsumed_read_ahead(pending: Option<&PendingIo>) -> usize {
         match pending {
             Some(PendingIo::ReadAhead { bytes, consumed }) => bytes.len() - consumed,
             _ => 0,
@@ -587,7 +587,7 @@ impl File {
                 Poll::Pending => Poll::Pending,
                 Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
                 Poll::Ready(Ok(())) => {
-                    let unconsumed = Self::unconsumed_read_ahead(&pending);
+                    let unconsumed = Self::unconsumed_read_ahead(pending.as_ref());
                     *pending = None;
                     Poll::Ready(
                         i64::try_from(unconsumed)
@@ -787,7 +787,7 @@ impl AsyncSeek for File {
                 Some(read_ahead @ PendingIo::ReadAhead { .. }) => {
                     // Discard unconsumed read-ahead; a relative seek is
                     // measured from where the caller believes the cursor is.
-                    let unconsumed = Self::unconsumed_read_ahead(&Some(read_ahead));
+                    let unconsumed = Self::unconsumed_read_ahead(Some(&read_ahead));
                     let adjusted = match pos {
                         SeekFrom::Current(offset) => {
                             let unconsumed = i64::try_from(unconsumed)

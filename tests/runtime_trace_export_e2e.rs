@@ -27,11 +27,11 @@ use asupersync::trace::{
 };
 use asupersync::types::TaskId;
 
-fn task_events<'a>(
-    events: &'a [TraceEvent],
+fn task_events(
+    events: &[TraceEvent],
     kind: TraceEventKind,
     task_id: TaskId,
-) -> impl Iterator<Item = &'a TraceEvent> + 'a {
+) -> impl Iterator<Item = &TraceEvent> {
     events.iter().filter(move |event| {
         event.kind == kind && matches!(event.data, TraceData::Task { task, .. } if task == task_id)
     })

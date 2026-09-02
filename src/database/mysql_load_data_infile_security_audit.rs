@@ -79,6 +79,7 @@ fn make_test_connection(stream: crate::net::TcpStream, sequence: u8) -> MySqlCon
             closed: false,
             server_version: String::new(),
             needs_rollback: false,
+            session_isolation_restore: None,
             max_result_rows: super::DEFAULT_MAX_RESULT_ROWS,
             prepared_statement_epoch: 0,
             prepared_cache: MySqlPreparedStatementCache::new(DEFAULT_MAX_PREPARED_STATEMENTS),
