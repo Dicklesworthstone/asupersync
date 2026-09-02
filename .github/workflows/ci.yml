@@ -1790,7 +1790,9 @@ jobs:
             echo "rch is required for Run unit tests" >&2
             exit 1
           fi
-          feature_args=(--all-features)
+          # Every feature except `legacy-internal-test-harnesses` (stale audit
+          # harnesses with uncommitted goldens; see scripts/ci/release_test_features.sh).
+          feature_args=(--features "$(scripts/ci/release_test_features.sh)")
           if [[ "${{ runner.os }}" == "Windows" ]]; then
             feature_args=(--features ci-cross-platform)
           fi
@@ -1854,7 +1856,9 @@ jobs:
             echo "rch is required for Run integration tests" >&2
             exit 1
           fi
-          feature_args=(--all-features)
+          # Every feature except `legacy-internal-test-harnesses` (stale audit
+          # harnesses with uncommitted goldens; see scripts/ci/release_test_features.sh).
+          feature_args=(--features "$(scripts/ci/release_test_features.sh)")
           if [[ "${{ runner.os }}" == "Windows" ]]; then
             feature_args=(--features ci-cross-platform)
           fi
@@ -1868,7 +1872,9 @@ jobs:
             echo "rch is required for Run doc tests" >&2
             exit 1
           fi
-          feature_args=(--all-features)
+          # Every feature except `legacy-internal-test-harnesses` (stale audit
+          # harnesses with uncommitted goldens; see scripts/ci/release_test_features.sh).
+          feature_args=(--features "$(scripts/ci/release_test_features.sh)")
           if [[ "${{ runner.os }}" == "Windows" ]]; then
             feature_args=(--features ci-cross-platform)
           fi
@@ -2057,15 +2063,16 @@ jobs:
           "$RCH_BIN" exec -- env \
             CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_coverage" \
             COVERAGE_MIN_LINE_PCT="$COVERAGE_MIN_LINE_PCT" \
+            TEST_FEATURES="$(scripts/ci/release_test_features.sh)" \
             bash -lc "
               set -euo pipefail
               rustup component add llvm-tools-preview
               mkdir -p coverage
-              cargo llvm-cov --lib --all-features \
+              cargo llvm-cov --lib --features \"\$TEST_FEATURES\" \
                 --ignore-filename-regex '(^|/)(tests|benches|examples|fuzz|conformance)/' \
                 --fail-under-lines \"\$COVERAGE_MIN_LINE_PCT\" \
                 --lcov --output-path coverage/lcov.info
-              cargo llvm-cov --lib --all-features \
+              cargo llvm-cov --lib --features \"\$TEST_FEATURES\" \
                 --ignore-filename-regex '(^|/)(tests|benches|examples|fuzz|conformance)/' \
                 --text --output-path coverage/coverage.txt --no-run
               cargo llvm-cov report --json --output-path coverage/llvm_cov.json \
