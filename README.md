@@ -321,7 +321,7 @@ Asupersync deliberately uses mathematically rigorous machinery where it buys rea
 
 The runtime design is backed by a small-step operational semantics (`asupersync_v4_formal_semantics.md`) and a Lean project (`formal/lean/Asupersync.lean`) that checks six invariants of that abstract model, recorded in `formal/lean/coverage/invariant_status_inventory.json`: structured concurrency single-owner, region-close quiescence, cancellation protocol, race loser drain, obligation no leaks, and no ambient authority.
 
-The proof posture is exact: these are Lean-checked **model** invariants with theorem and executable-test linkage. The production Rust runtime has not been proved to refine that model. This is therefore not a blanket mechanized proof of the executor, adapters, protocol implementations, platform backends, or distributed transports. Broader runtime-facing claims stay tiered through TLA+/TLC exports, lab/refinement oracles, and lane-specific coverage artifacts. The canonical proof command is `RCH_REQUIRE_REMOTE=1 rch exec -- lake --dir formal/lean build`; see [`artifacts/formal_proof_posture_contract_v1.json`](./artifacts/formal_proof_posture_contract_v1.json), [`tests/formal_proof_posture_contract.rs`](./tests/formal_proof_posture_contract.rs), and [`formal/README.md`](./formal/README.md).
+The proof posture is exact: these are Lean-checked **model** invariants with theorem and executable-test linkage. The production Rust runtime has not been proved to refine that model. This is therefore not a blanket mechanized proof of the executor, adapters, protocol implementations, platform backends, or distributed transports. Broader runtime-facing claims stay tiered through TLA+/TLC exports, lab/refinement oracles, and lane-specific coverage artifacts. The CI job `lean-build` runs `lake build` on the pinned toolchain and uploads a hash-bound receipt; the last recorded local build is in `formal/lean/coverage/lake_build_receipt.txt`. The canonical proof command is `RCH_REQUIRE_REMOTE=1 rch exec -- lake --dir formal/lean build`; see [`artifacts/formal_proof_posture_contract_v1.json`](./artifacts/formal_proof_posture_contract_v1.json), [`tests/formal_proof_posture_contract.rs`](./tests/formal_proof_posture_contract.rs), and [`formal/README.md`](./formal/README.md).
 
 Some checked artifacts retain the legacy markers `Lean-checked core invariants cover the six non-negotiable runtime invariants` and `checks the six non-negotiable runtime invariants`. In this README those phrases mean coverage of the six abstract-model rows only; they do not assert a Rust refinement proof.
 
@@ -385,8 +385,13 @@ each worker runs a deterministic discounted-UCB1 selector over
 dispatches by default), it discounts prior pull mass by `0.95`, updates the
 selected arm from a reward that blends Lyapunov decrease with deadline, fairness, and
 fallback penalties, then chooses the next upper-confidence arm. An
-anytime-valid e-process monitors the epoch rewards. The deterministic policy
-state is part of replay, so identical schedules make identical choices.
+anytime-valid e-process monitors the epoch rewards. The policy is a pure
+function of the dispatch sequence (no RNG, no wall clock), so identical
+schedules make identical choices; the golden
+`golden_test_lab_runtime_replay_determinism` in
+`src/runtime/scheduler/three_lane_tests.rs` replays it bit-exactly. The lab
+runtime does not run this selector: `LabRuntime` uses a fixed cancel-streak
+limit of 16, so a lab replay does not reproduce production arm choices.
 
 This is a nonstationary stochastic-bandit controller, not an EXP3 adversarial
 no-regret claim. The separate ATP RaptorQ transport adapter has its own seeded,
@@ -1695,7 +1700,7 @@ Payoff: principled plan optimization without silently breaking cancel/drain/quie
 
 ### TLA+ Export for Model Checking
 
-Traces can be exported as TLA+ behaviors with spec skeletons for bounded TLC model checking of core invariants (no orphans, obligation linearity, quiescence). See `src/trace/tla_export.rs`.
+Traces can be exported as TLA+ behaviors with spec skeletons for bounded TLC model checking of core invariants (no orphans, obligation linearity, quiescence). See `src/trace/tla_export.rs`. `tests/lab_tla_export_tlc_e2e.rs` exports a real `LabRuntime` trace and runs TLC on it (invariants `NoObligationLeaks`, `QuiescenceOnClose`, `ObligationLinearity`, plus a planted violation that TLC must reject); the CI job `tla-tlc` installs Java and a sha-pinned `tla2tools.jar` and fails closed if TLC is missing. TLC checks the recorded concrete behavior, not a parametric model of the runtime.
 
 Payoff: bridge from deterministic runtime traces to model-checking workflows when you need "prove it", not "it passed tests".
 

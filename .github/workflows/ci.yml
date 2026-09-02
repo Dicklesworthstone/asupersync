@@ -1647,6 +1647,115 @@ jobs:
           path: ${{ steps.lean_full_contract.outputs.artifact_dir }}/
           retention-days: ${{ fromJSON(steps.lean_full_contract.outputs.retention_days) }}
 
+  # Real Lean build (br-asupersync-gap-lean-tla-receipts-48ukyp). The Lean
+  # smoke/full gates above run cargo-side structural tests only; nothing in CI
+  # ever ran `lake build` on formal/lean, so the "189 theorems, 0 sorry"
+  # claim had no hash-bound receipt. This job installs the pinned toolchain
+  # from formal/lean/lean-toolchain, builds the library, fails on any error,
+  # and uploads the build log plus a receipt naming the commit and source
+  # hashes.
+  lean-build:
+    name: Lean build (lake build formal/lean)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Cache elan toolchains
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.elan
+          key: elan-${{ runner.os }}-${{ hashFiles('formal/lean/lean-toolchain') }}
+
+      - name: Install elan and the pinned Lean toolchain
+        run: |
+          set -euo pipefail
+          if [[ ! -x "$HOME/.elan/bin/elan" ]]; then
+            curl -sSf https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -o /tmp/elan-init.sh
+            sh /tmp/elan-init.sh -y --default-toolchain none
+          fi
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+          "$HOME/.elan/bin/elan" toolchain install "$(cat formal/lean/lean-toolchain)"
+
+      - name: lake build
+        working-directory: formal/lean
+        run: |
+          set -euo pipefail
+          mkdir -p ../../lean-build
+          lean --version | tee ../../lean-build/lean-version.txt
+          lake build 2>&1 | tee ../../lean-build/lake-build.log
+          {
+            echo "schema=lean.build.receipt.v1"
+            echo "git_commit=${GITHUB_SHA}"
+            echo "toolchain=$(cat lean-toolchain)"
+            echo "lean_version=$(lean --version)"
+            echo "theorems=$(grep -cE '^theorem|^lemma' Asupersync.lean)"
+            echo "sorry_count=$(grep -c 'sorry' Asupersync.lean || true)"
+            sha256sum Asupersync.lean lakefile.lean lean-toolchain
+          } | tee ../../lean-build/receipt.txt
+          if grep -qE '^error:|error: ' ../../lean-build/lake-build.log; then
+            echo "::error::lake build reported errors" >&2
+            exit 1
+          fi
+          test "$(grep -c 'sorry' Asupersync.lean || true)" -eq 0
+
+      - name: Upload Lean build receipt
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: lean-build-receipt
+          path: lean-build/
+          retention-days: 90
+
+  # TLA+ export model-checked with TLC (same bead). `LabRunReport::export_tla`
+  # had no callers and no exported trace had ever been checked. The test
+  # exports a lab trace, runs TLC on it, and fails closed under CI=true when
+  # the jar is missing, so this job cannot silently skip.
+  tla-tlc:
+    name: TLA+ export checked by TLC
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      TLA2TOOLS_VERSION: v1.7.4
+      TLA2TOOLS_SHA256: 936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # upstream branch snapshot 2026-07-16
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Cache cargo registry
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/tla-tlc
+          key: ${{ runner.os }}-cargo-tla-tlc-${{ env.RUST_TOOLCHAIN }}-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install Java and TLC
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends default-jre-headless
+          curl -sSL -o /tmp/tla2tools.jar \
+            "https://github.com/tlaplus/tlaplus/releases/download/${TLA2TOOLS_VERSION}/tla2tools.jar"
+          echo "${TLA2TOOLS_SHA256}  /tmp/tla2tools.jar" | sha256sum -c -
+          java -version
+
+      - name: Export a lab trace and model-check it with TLC
+        env:
+          CI: "true"
+          ASUPERSYNC_TLA2TOOLS_JAR: /tmp/tla2tools.jar
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target/tla-tlc
+        run: |
+          set -euo pipefail
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
+            cargo test -p asupersync --test lab_tla_export_tlc_e2e -- --nocapture
+
   test:
     name: Test Suite
     runs-on: ${{ matrix.os }}
