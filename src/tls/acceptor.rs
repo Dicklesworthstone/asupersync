@@ -895,7 +895,10 @@ impl TlsAcceptorBuilder {
     /// Require that the peer negotiates an ALPN protocol.
     ///
     /// If the peer does not negotiate any protocol (or negotiates something
-    /// unexpected), `accept()` returns `TlsError::AlpnNegotiationFailed`.
+    /// unexpected), `accept()` returns a sanitized `TlsError::Configuration`
+    /// error ("ALPN protocol negotiation failed - client protocol not
+    /// supported"); the message deliberately names neither the expected nor
+    /// the negotiated protocol (br-asupersync-iz6751).
     pub fn require_alpn(mut self) -> Self {
         self.alpn_required = true;
         self
@@ -1980,9 +1983,20 @@ SrXuVI5uunTgPWuOtJOP+KM=
             let client = client_res.unwrap();
             assert!(client.alpn_protocol().is_none());
 
-            // Server enforces ALPN and rejects post-handshake if nothing was negotiated.
+            // Server enforces ALPN and rejects post-handshake if nothing was
+            // negotiated. Since br-asupersync-iz6751 the server-side failure is
+            // the sanitized `Configuration` error: the message names neither
+            // the expected nor the negotiated protocol. v0.4.3 shipped this
+            // shape, so it is the compatibility contract.
             let server_err = server_res.unwrap_err();
-            assert!(matches!(server_err, TlsError::AlpnNegotiationFailed { .. }));
+            assert!(
+                matches!(
+                    &server_err,
+                    TlsError::Configuration(message)
+                        if message == "ALPN protocol negotiation failed - client protocol not supported"
+                ),
+                "unexpected server error: {server_err:?}"
+            );
         });
     }
 
