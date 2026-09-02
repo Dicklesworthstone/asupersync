@@ -46,7 +46,10 @@ attached run artifacts rather than copying these summaries into scorecards.
 | good | 200 mbit | 25 ms | 0.1% | — |
 | bad | 50 mbit | 80 ms ± 20 | 2% | — |
 | broken | 10 mbit | 200 ms ± 50 | 10% | reorder 5%, dup 1% |
-Apply netem on BOTH veth ends (symmetric). Use `netem ... rate <r>` (or tbf) for the cap.
+| wan | 300 mbit | 45 ms ± 2 each end (90 ms RTT) | 0 | limit 20000 pkts; clean long pipe (2026-09-02: QUIC 53 % of link, ≈ rsync-ssh; RQ 87 %) |
+| wanloss | 300 mbit | 45 ms ± 2 each end (90 ms RTT) | 0.01% | limit 20000 pkts; the residual loss of a real path (2026-09-02: QUIC lost only 8 % vs `wan` — loss sensitivity refuted at 1e-4) |
+| wanqueue | 300 mbit | 45 ms ± 2 each end (90 ms RTT) | 0 | limit 1000 pkts (netem default): shallow real-NIC queue; tests whether sender bursts tail-drop (the Hetzner sender showed 13762 UDP SndbufErrors after the cross-machine runs) |
+Apply netem on BOTH veth ends (symmetric), so `delay` is one-way and the RTT is twice it. Use `netem ... rate <r>` (or tbf) for the cap.
 
 ## Per-cell measurement (gauntlet measure_with_teardown)
 - REPS ≥ 3 (≥5 for small/fast cells); report **median wall + cv_pct** (cv>5% ⇒ noise, flag).

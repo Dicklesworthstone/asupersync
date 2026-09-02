@@ -4061,3 +4061,55 @@ Per-regime geomean ATP/rsync: bad 0.808, good 1.234, perfect 1.767. Sender peak 
 
 - **Honest summary:** on the encrypted tier atp beats rsync-over-ssh only on the lossy `bad` regime and on the 50M single file; it loses on small trees on clean links (4× on tree_small/perfect: per-file protocol overhead dominates a 0.7 s rsync). This matches MATRIX-233's "trees gap" diagnosis and does not support an unqualified encrypted "beats rsync" claim.
 - **WAN cross-check (same day, `wan_quic_receipt_2026-09-02.md`):** the netns 50M/perfect cell moves 77 MB/s at 2 ms RTT, but the same binary managed 2.7–6.3 MB/s at ~90 ms RTT while ATP-over-TCP did 20–23 MB/s on the same paths. In-flight window ≈ throughput × RTT ≈ 0.23–0.6 MB, i.e. the QUIC sender is window-limited on high-RTT paths (flow-control credit or cwnd growth), which the 2 ms netns matrix cannot see. That is the next lead; not diagnosed here.
+
+## 2026-09-02 (SapphireHill) — A1 (asupersync-bi2462.1): netem `wan`, `wanloss`, `wanqueue` regimes; the cross-machine QUIC collapse is reproduced by a SHALLOW QUEUE, not by RTT or random loss
+
+Motivation: the 2026-09-02 cross-machine receipt (`wan_quic_receipt_2026-09-02.md`) showed ATP-over-QUIC at 2.7–6.3 MB/s where ATP-over-TCP did 20–23 MB/s on the same ~90 ms paths. Neither the 2 ms `perfect` cell nor the 50 mbit `bad` cell can show a window-limited sender, so three regimes were added to `scripts/atp_bench/matrix_bench.sh` (`netem_json`, documented in `docs/atp_bench_matrix_spec.md`): `wan` = 45 ms ± 2 each end (90 ms RTT), 300 mbit, 0 % loss, netem `limit 20000`; `wanloss` = the same with 0.01 % loss; `wanqueue` = the same as `wan` with netem's default `limit 1000`. Host ovh-a (16 cores, idle), release `atp 0.4.10` from b1ed41481 (sha256 `7be73269…`), harness with the CA:FALSE certificate fix, reps 3, every rep `sha_ok`, no cell cv above 5 % except where noted.
+
+Run `artifacts/atp_bench_matrix/20260902T204926Z/` (`wan`, 24/24 ok):
+
+| workload | tier | method | median wall s | link share |
+|---|---|---|---:|---:|
+| 500M | encrypted | atp-quic-tls13 | 26.173 | 53 % |
+| 500M | encrypted | rsync-ssh-aes128gcm | 27.267 | 51 % |
+| 500M | nocrypto | atp-rq-lab | 16.061 | 87 % |
+| 500M | nocrypto | rsyncd | 20.638 | 68 % |
+| 50M | encrypted | atp-quic-tls13 | 3.154 | — |
+| 50M | encrypted | rsync-ssh-aes128gcm | 4.853 | — |
+| 50M | nocrypto | atp-rq-lab | 2.556 | — |
+| 50M | nocrypto | rsyncd | 4.319 | — |
+
+Ratios ATP/rsync: 500M encrypted 0.960, 50M encrypted 0.650, 500M nocrypto 0.778, 50M nocrypto 0.592.
+
+Reading: on a CLEAN 90 ms pipe the QUIC sender is not collapsed — it edges out rsync-over-ssh and reaches half the link, while RQ-over-UDP reaches 87 %. RTT alone does not reproduce the cross-machine numbers. It does expose a second, milder ceiling: 53 % of 300 mbit ≈ 19.9 MB/s ≈ a 1.8 MB window per 90 ms RTT, i.e. the sender is window-limited on a clean pipe. The candidates are the source-stream in-flight admission cap (`source_stream_bdp_admission_cap`: BtlBw × RTprop with a 16 MiB ceiling) and the receiver's MAX_STREAM_DATA window; A2's limiter report names which.
+
+Run `artifacts/atp_bench_matrix/20260902T205700Z/` (`wanloss`, 0.01 % loss, 24/24 ok):
+
+| workload | tier | method | median wall s | vs `wan` |
+|---|---|---|---:|---:|
+| 500M | encrypted | atp-quic-tls13 | 28.268 | +8 % |
+| 500M | encrypted | rsync-ssh-aes128gcm | 27.152 | 0 % |
+| 500M | nocrypto | atp-rq-lab | 16.118 | 0 % |
+| 500M | nocrypto | rsyncd | 20.744 | 0 % |
+| 50M | encrypted | atp-quic-tls13 | 3.454 | +10 % |
+| 50M | encrypted | rsync-ssh-aes128gcm | 4.839 | 0 % |
+
+Reading: 0.01 % loss costs the QUIC sender 8–10 %, not the 3–9× seen cross-machine. Loss sensitivity at p = 1e-4 is refuted as the cause; recovery (RaptorQ repair on the RQ tier, retransmission on QUIC) absorbs it. The Reno-shaped bound MSS/(RTT·√p) that the first draft of this entry proposed does not describe this sender.
+
+Host facts from the cross-machine endpoints (probed 2026-09-02 17:05 ET, cumulative since boot): all three hosts (hetzner1, vmi1149989, ovh-a) have `net.core.rmem_max = wmem_max = 4 MiB` (atp asks for 16 MiB and gets 4), the receiver vmi1149989 has **0** `Udp RcvbufErrors`, and the sender hetzner1 has **13 762 `Udp SndbufErrors`** (0 on vmi, 0 on ovh-a where every netns cell ran). CPU steal is 0.1–0.5 %. A sender-side send-buffer error means `sendmsg` failed because the socket/qdisc queue was full: a real NIC behind a shallow default qdisc, fed by a multi-MB burst, does exactly that; a veth into netem with `limit 20000` never does. `wanqueue` tests that on one host.
+
+Run `artifacts/atp_bench_matrix/20260902T210707Z/` (`wanqueue`, netem `limit 1000`, 500M only, 12/12 ok):
+
+| workload | tier | method | median wall s | vs `wan` |
+|---|---|---|---:|---:|
+| 500M | encrypted | atp-quic-tls13 | 42.195 (cv 3.2 %) | +61 % |
+| 500M | encrypted | rsync-ssh-aes128gcm | 27.060 | −1 % |
+| 500M | nocrypto | atp-rq-lab | 16.031 | 0 % |
+| 500M | nocrypto | rsyncd | 20.650 | 0 % |
+
+Ratios ATP/rsync: 500M encrypted 1.559 (rsync-over-ssh 1.56× faster), 500M nocrypto 0.776.
+
+- **Reproduced.** A 1000-packet tail-drop queue (≈ 1.2 MB, ≈ 32 ms of the 300 mbit link) costs the QUIC sender 61 % of its clean-pipe time while TCP-under-ssh and the RQ fountain over UDP are unchanged. Of the four methods only ATP-over-QUIC is queue-sensitive. That is the shape of the cross-machine collapse (sender-side `SndbufErrors` on hetzner1), and it says the QUIC sender's burst structure overflows shallow queues and its recovery does not refill the pipe.
+- **Refuted.** RTT alone (`wan`: QUIC ≈ rsync-ssh) and residual random loss (`wanloss`: +8 %).
+- **Not yet known (A2/A3).** Which limiter dominates after a drop episode — cwnd collapse (NewReno halving per burst-loss episode on the source stream), the in-flight admission cap, PTO-serialized stream retransmission (`QUIC_SOURCE_STREAM_PTO_RETRANSMIT_MAX_PACKETS` per firing), or the pacer's burst size against the queue depth. The sender report carries none of these today; A2 adds a `limiter` block (stall reasons with durations, peak/final cwnd, ssthresh, RTTs, loss timeouts, retransmitted bytes, `sendmsg` errors and the applied socket buffer sizes) so the next `wanqueue` and cross-machine runs answer this directly instead of by inference.
+- Method note: `wanqueue` ran the 500M workload only (the 50M cells finish inside slow start and cannot show a steady-state queue effect); rsync-ssh's cv was 1.4 %, rq-lab 0.2 %, rsyncd 0.3 %.
