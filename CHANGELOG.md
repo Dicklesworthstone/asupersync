@@ -65,6 +65,41 @@ is `v0.4.9`.
 
 ## [Unreleased]
 
+### Kafka client against a real broker (2026-09-02)
+
+- **Dropping a subscribed `KafkaConsumer` no longer hangs.** A consumer
+  dropped without `close()`, and a consumer that had been `close()`d and was
+  then dropped, both blocked the dropping thread forever inside librdkafka's
+  close path (the rebalance callback's assign/unassign call cannot be
+  serviced while `rd_kafka_consumer_close` runs). The consumer now carries
+  its own rebalance context and leaves the group in normal polling mode
+  before the handle is closed; `close()` and `Drop` both do this, bounded.
+- **Transient `UnknownTopicOrPartition` no longer aborts `poll`.** A
+  subscription whose topic is still being created is "no message yet"; the
+  poll keeps going until its deadline. Transport failures still return an
+  error.
+- The real-broker suite runs green locally against Redpanda (13/13); CI's
+  broker now advertises `127.0.0.1` so a host that resolves `localhost` to
+  `::1` cannot strand consumer connections.
+
+### Encrypted ATP measured honestly (2026-09-02)
+
+- First cross-machine ATP-over-QUIC receipt with SHA-256 on both ends
+  (`artifacts/atp_bench_matrix/wan_quic_receipt_2026-09-02.md`): correct,
+  but 3–9× slower than the same binary over TCP on ~90 ms paths.
+- The bench harness's self-signed certificate carried `CA:TRUE` under
+  OpenSSL 3.5, which rustls-webpki refuses for an end entity, so every
+  encrypted QUIC cell had been failing in 0.15 s; fixed, and the encrypted
+  tier re-measured (48/48 cells, scorecard committed, README table with the
+  losses stated).
+
+### Windows CI (2026-09-02)
+
+- The pinned nightly compiles the lib on real Windows hardware (both
+  nightly-2026-07-05 and nightly-2026-08-20). The CI-only rustc crash is an
+  abort on the small runner; the Windows lib job now runs the rustc frontend
+  single-threaded.
+
 ### Feature-gated test truth: what `--all-features` was hiding (2026-09-02)
 
 The CI lib job had never completed (runner shutdowns), so nothing had run

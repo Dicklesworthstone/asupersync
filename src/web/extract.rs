@@ -3043,7 +3043,6 @@ mod tests {
             error.message,
             "[ASUP-E501] server request budget deadline exceeded: JSON request body unavailable"
         );
-        drop(extraction);
         drop(json_control);
         assert_eq!(
             block_on(json_writer.push_bytes(&cancelled_cx, b"x")),

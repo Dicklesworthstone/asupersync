@@ -5231,6 +5231,10 @@ pub(crate) mod collector {
 }
 
 #[cfg(test)]
+// The `ver_a1_asupersync_5z2scg_1_3_<hash>__…` test names are registered
+// verification-lane identifiers (br-asupersync-5z2scg.1.3) and must stay
+// verbatim, so the snake-case lint is silenced for this module.
+#[allow(non_snake_case)]
 mod tests {
     use crate::grpc::codec::Codec;
     use crate::grpc::protobuf::ProtoCodec;

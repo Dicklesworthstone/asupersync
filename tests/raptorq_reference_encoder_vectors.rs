@@ -17,8 +17,11 @@
 //!   the decode either fail or recover the wrong bytes (never silently
 //!   "succeed" with the right bytes).
 //!
-//! No-claim: K=10000 and the RFC MUST-list re-verification stay open on the
-//! bead; sub-block/alignment variants are not exercised (one source block,
+//! K=10000 is the `#[ignore]`d `reference_encoder_vectors_k10000` (release
+//! lane only; run with `--ignored`).
+//!
+//! No-claim: the RFC MUST-list re-verification stays open on the bead;
+//! sub-block/alignment variants are not exercised (one source block,
 //! alignment 1).
 
 use std::collections::BTreeSet;
@@ -169,4 +172,13 @@ fn reference_encoder_vectors_k100() {
 #[test]
 fn reference_encoder_vectors_k1000() {
     check_k(1000, 16, 40, 0x6330_1000);
+}
+
+/// K=10000 against the reference encoder. Ignored by default because the
+/// debug-profile encode/decode takes minutes; the release lane runs it with
+/// `cargo test --release --test raptorq_reference_encoder_vectors -- --ignored`.
+#[test]
+#[ignore = "release-profile lane only (debug build takes minutes at K=10000)"]
+fn reference_encoder_vectors_k10000() {
+    check_k(10_000, 8, 200, 0x6330_2710);
 }

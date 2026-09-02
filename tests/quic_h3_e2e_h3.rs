@@ -2071,7 +2071,9 @@ fn native_h3_router_dispatches_completed_streams_and_refuses_invalid_messages() 
                 .expect("deliver staged matched request packet")
                 > 0
         );
-        while let Some(event) = server_h3
+        // At most one event is consumed per pump round: the headers event
+        // ends the search and anything else is a contract violation.
+        if let Some(event) = server_h3
             .next_event(&cx, &mut server)
             .expect("decode staged matched request event")
         {
@@ -2085,7 +2087,6 @@ fn native_h3_router_dispatches_completed_streams_and_refuses_invalid_messages() 
                         }
                     );
                     saw_matched_headers = true;
-                    break;
                 }
                 other => panic!("matched request must remain before DATA/FIN: {other:?}"),
             }

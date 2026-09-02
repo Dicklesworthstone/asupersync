@@ -57,10 +57,12 @@ use std::time::Duration;
 
 #[cfg(feature = "kafka")]
 use rdkafka::{
-    consumer::{BaseConsumer, CommitMode, Consumer},
+    client::ClientContext,
+    consumer::{BaseConsumer, CommitMode, Consumer, ConsumerContext},
     error::KafkaError as RdKafkaError,
     message::{Headers, Message},
     topic_partition_list::{Offset, TopicPartitionList},
+    types::{RDKafkaErrorCode, RDKafkaRespErr},
 };
 
 /// Offset reset strategy when no committed offset exists.
@@ -446,6 +448,104 @@ fn duration_to_nanos(duration: Duration) -> u64 {
 #[cfg(feature = "kafka")]
 const MAX_BROKER_POLL_SLICE: Duration = Duration::from_millis(50);
 
+/// Consumer context for the real-broker backend.
+///
+/// The stock `ConsumerContext::rebalance` asks librdkafka which rebalance
+/// protocol is active on every event. During `rd_kafka_consumer_close`, which
+/// `BaseConsumer`'s `Drop` runs for a consumer that was never closed, that
+/// query is an infinite-timeout op the terminating group never answers, so
+/// dropping a subscribed consumer (for example during panic unwinding) hung
+/// the dropping thread forever. The protocol is fixed at construction from the
+/// configured assignment strategy instead, and the handler assigns directly.
+#[cfg(feature = "kafka")]
+#[derive(Clone, Copy, Debug)]
+struct BrokerConsumerContext {
+    cooperative: bool,
+}
+
+#[cfg(feature = "kafka")]
+impl ClientContext for BrokerConsumerContext {}
+
+#[cfg(feature = "kafka")]
+impl ConsumerContext for BrokerConsumerContext {
+    fn rebalance(
+        &self,
+        base_consumer: &BaseConsumer<Self>,
+        err: RDKafkaRespErr,
+        tpl: &mut TopicPartitionList,
+    ) {
+        let result = match (err, self.cooperative) {
+            (RDKafkaRespErr::RD_KAFKA_RESP_ERR__ASSIGN_PARTITIONS, true) => {
+                base_consumer.incremental_assign(tpl)
+            }
+            (RDKafkaRespErr::RD_KAFKA_RESP_ERR__ASSIGN_PARTITIONS, false) => {
+                base_consumer.assign(tpl)
+            }
+            (RDKafkaRespErr::RD_KAFKA_RESP_ERR__REVOKE_PARTITIONS, true) => {
+                base_consumer.incremental_unassign(tpl)
+            }
+            // Eager revoke and every other outcome: drop the whole assignment,
+            // exactly what the stock handler does.
+            _ => base_consumer.unassign(),
+        };
+        // Errors here are reported to the caller through the next poll
+        // (librdkafka queues them); there is no channel back from a callback.
+        let _ = result;
+    }
+}
+
+/// Upper bound on the 50 ms polls spent draining the revoke that
+/// `unsubscribe()` triggers (about five seconds).
+#[cfg(feature = "kafka")]
+const LEAVE_GROUP_DRAIN_POLLS: usize = 100;
+
+/// Unsubscribe and drive the resulting revoke through the rebalance callback
+/// while the consumer is still in normal polling mode.
+///
+/// librdkafka only completes a rebalance once the callback has made its
+/// assign/unassign call. A revoke that is still queued when `BaseConsumer`'s
+/// `Drop` closes the handle fires inside `rd_kafka_consumer_close`, where that
+/// call is routed back to the very queue the dropping thread is polling and
+/// blocks forever. Leaving the group here, before the handle is closed, keeps
+/// that path from ever being taken. Records surfaced while draining belong to
+/// a consumer that is closing without commit and are discarded.
+#[cfg(feature = "kafka")]
+fn leave_group_bounded(consumer: &BaseConsumer<BrokerConsumerContext>) {
+    let had_assignment = consumer
+        .assignment()
+        .map(|assignment| assignment.count() > 0)
+        .unwrap_or(false);
+    consumer.unsubscribe();
+    if !had_assignment {
+        return;
+    }
+    for _ in 0..LEAVE_GROUP_DRAIN_POLLS {
+        let _ = consumer.poll(Duration::from_millis(50));
+        let still_assigned = consumer
+            .assignment()
+            .map(|assignment| assignment.count() > 0)
+            .unwrap_or(false);
+        if !still_assigned {
+            break;
+        }
+    }
+}
+
+impl Drop for KafkaConsumer {
+    fn drop(&mut self) {
+        #[cfg(feature = "kafka")]
+        if !self.closed.load(Ordering::Acquire) {
+            if let Some((consumer, broker_ops)) = self.broker_backend() {
+                // A consumer dropped without `close()` (panic unwinding, early
+                // return) leaves the group here, bounded, so rdkafka's own Drop
+                // never has to service a revoke mid-close.
+                let _guard = broker_ops.lock();
+                leave_group_bounded(&consumer);
+            }
+        }
+    }
+}
+
 /// Kafka consumer with Cx-aware real-broker operations.
 ///
 /// The no-feature build keeps the type and configuration surface available, but
@@ -457,7 +557,7 @@ pub struct KafkaConsumer {
     closed: AtomicBool,
     state_notify: Notify,
     #[cfg(feature = "kafka")]
-    consumer: Option<Arc<BaseConsumer>>,
+    consumer: Option<Arc<BaseConsumer<BrokerConsumerContext>>>,
     #[cfg(feature = "kafka")]
     broker_ops: Option<Arc<Mutex<()>>>,
     #[cfg(feature = "kafka")]
@@ -691,7 +791,9 @@ fn broker_snapshot_from_topic_maps(
 }
 
 #[cfg(feature = "kafka")]
-fn capture_broker_snapshot(consumer: &BaseConsumer) -> Result<BrokerSnapshot, KafkaError> {
+fn capture_broker_snapshot(
+    consumer: &BaseConsumer<BrokerConsumerContext>,
+) -> Result<BrokerSnapshot, KafkaError> {
     let assignment = consumer.assignment().map_err(map_consumer_error)?;
     let assigned_partitions: BTreeSet<(String, i32)> =
         assignment.to_topic_map().into_keys().collect();
@@ -772,9 +874,15 @@ impl KafkaConsumer {
         config.validate()?;
         #[cfg(feature = "kafka")]
         let consumer = if cfg!(not(test)) || config.force_real_kafka {
+            let client_config = build_consumer_config(&config);
+            let cooperative = client_config
+                .get("partition.assignment.strategy")
+                .is_some_and(|strategy| strategy.contains("cooperative-sticky"));
             Some(
-                build_consumer_config(&config)
-                    .create::<BaseConsumer>()
+                client_config
+                    .create_with_context::<BrokerConsumerContext, BaseConsumer<BrokerConsumerContext>>(
+                        BrokerConsumerContext { cooperative },
+                    )
                     .map_err(map_consumer_error)?,
             )
         } else {
@@ -803,7 +911,7 @@ impl KafkaConsumer {
     }
 
     #[cfg(feature = "kafka")]
-    fn broker_backend(&self) -> Option<(Arc<BaseConsumer>, Arc<Mutex<()>>)> {
+    fn broker_backend(&self) -> Option<(Arc<BaseConsumer<BrokerConsumerContext>>, Arc<Mutex<()>>)> {
         self.consumer
             .as_ref()
             .zip(self.broker_ops.as_ref())
@@ -1134,6 +1242,16 @@ impl KafkaConsumer {
                                     RdKafkaError::NoMessageReceived | RdKafkaError::PartitionEOF(_),
                                 ))
                                 | None => None,
+                                // librdkafka raises this informational error while a
+                                // subscribed topic is still being created or its
+                                // metadata is propagating (a consumer that subscribes
+                                // before the first produce sees it against Redpanda
+                                // and Kafka alike). It self-heals once the topic
+                                // appears, so it is "no message yet", not a failure:
+                                // keep polling until the caller's deadline.
+                                Some(Err(RdKafkaError::MessageConsumption(
+                                    RDKafkaErrorCode::UnknownTopicOrPartition,
+                                ))) => None,
                                 Some(Err(err)) => {
                                     *buffered_outcome.lock() = Some(Err(map_consumer_error(err)));
                                     return Ok(());
@@ -1455,7 +1573,7 @@ impl KafkaConsumer {
             if let Some((consumer, broker_ops)) = self.broker_backend() {
                 crate::runtime::spawn_blocking::spawn_blocking_on_thread(move || {
                     let _guard = broker_ops.lock();
-                    consumer.unsubscribe();
+                    leave_group_bounded(&consumer);
                     consumer.unassign().map_err(map_consumer_error)
                 })
                 .await?;

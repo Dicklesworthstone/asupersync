@@ -1936,7 +1936,7 @@ jobs:
           docker run -d --name asup-redpanda -p 127.0.0.1:9092:9092 \
             docker.redpanda.com/redpandadata/redpanda:v24.2.7 \
             redpanda start --mode dev-container --smp 1 --memory 1G --overprovisioned \
-            --kafka-addr PLAINTEXT://0.0.0.0:9092 --advertise-kafka-addr PLAINTEXT://localhost:9092
+            --kafka-addr PLAINTEXT://0.0.0.0:9092 --advertise-kafka-addr PLAINTEXT://127.0.0.1:9092
 
           wait_for() {
             local label="$1"; shift
@@ -2023,7 +2023,12 @@ jobs:
         # it runs last to keep the earlier suites' compile shared.
         env:
           REAL_KAFKA_TESTS: "true"
-          KAFKA_BOOTSTRAP_SERVERS: localhost:9092
+          # 127.0.0.1 on purpose: the broker advertises 127.0.0.1 and the port
+          # is published on 127.0.0.1 only, so a host where `localhost`
+          # resolves to ::1 first cannot strand the consumer's follow-up
+          # connections (observed 2026-09-02: producer sends succeeded, every
+          # consumer poll failed with BrokerTransportFailure).
+          KAFKA_BOOTSTRAP_SERVERS: 127.0.0.1:9092
           CARGO_TARGET_DIR: ${{ env.REAL_SERVERS_TARGET_DIR }}
         run: scripts/ci/run_real_server_suite.sh kafka_real_broker --features postgres,mysql,kafka
 

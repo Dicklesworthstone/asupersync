@@ -118,7 +118,7 @@ fn parse_iso_date_epoch_day(text: &str) -> Result<i64, String> {
 
     // Gregorian civil date to days since 1970-01-01. This keeps the checker
     // dependency-free and makes fixed as-of-date fixtures deterministic.
-    let adjusted_year = year - if month <= 2 { 1 } else { 0 };
+    let adjusted_year = year - i64::from(month <= 2);
     let era = adjusted_year.div_euclid(400);
     let year_of_era = adjusted_year - era * 400;
     let adjusted_month = i64::from(month) + if month > 2 { -3 } else { 9 };

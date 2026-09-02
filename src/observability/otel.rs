@@ -9226,6 +9226,9 @@ mod tests {
     }
 
     #[test]
+    // The domain matrix deliberately contains U+212A KELVIN SIGN, a non-NFC
+    // confusable for `K`, to pin the incumbent regex behaviour on it.
+    #[allow(clippy::unicode_not_nfc)]
     fn fixed_email_and_ssn_generated_matrix_matches_incumbent() {
         let email_re = Regex::new(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,63}\b")
             .expect("frozen email regex");

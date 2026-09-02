@@ -427,7 +427,7 @@ fn loopback_from_output_rejects_metadata_event_without_details() {
     let events = std::fs::read_to_string(&events_path).expect("read events fixture");
     write_file(
         &events_path,
-        &events.replace(r#","details":{"status":"passed"}}"#, r#"}"#),
+        &events.replace(r#","details":{"status":"passed"}}"#, "}"),
     );
 
     let output = Command::new(repo_root().join("scripts/run_arq_quic_loopback_e2e.sh"))

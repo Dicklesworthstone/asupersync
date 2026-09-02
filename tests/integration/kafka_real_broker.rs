@@ -1280,9 +1280,17 @@ fn test_real_broker_consumer_producer_round_trip() {
 
         log.phase("commit");
 
-        // Test offset commits with real broker
-        let last_record_offset = sent_metadata.last().unwrap().offset;
-        let commit_offset = TopicPartitionOffset::new(&topic, 0, last_record_offset + 1);
+        // Test offset commits with real broker. The batch factory spreads the
+        // records over `{topic}-0..2`, so commit to the topic/partition the
+        // last record actually landed on; the base name was never subscribed
+        // and the client rejects a commit for it (InvalidTopic).
+        let last_record = sent_metadata.last().unwrap();
+        let last_record_offset = last_record.offset;
+        let commit_offset = TopicPartitionOffset::new(
+            &last_record.topic,
+            last_record.partition,
+            last_record_offset + 1,
+        );
         consumer
             .commit_offsets(&cx, &[commit_offset])
             .await
@@ -1290,7 +1298,7 @@ fn test_real_broker_consumer_producer_round_trip() {
 
         // Verify committed offset is persisted in broker
         assert_eq!(
-            consumer.committed_offset(&topic, 0),
+            consumer.committed_offset(&last_record.topic, last_record.partition),
             Some(last_record_offset + 1)
         );
 
@@ -1426,24 +1434,70 @@ fn test_real_broker_consumer_group_rebalancing() {
 
         log.phase("initial_subscription");
 
-        // Consumer 1 joins first
-        consumer1.subscribe(&cx, &[&topic]).await.unwrap();
-        let initial_gen = consumer1.rebalance_generation();
+        // The topic must exist before anyone subscribes: consumers do not
+        // auto-create topics, and a subscription to a missing topic is only
+        // re-checked every topic.metadata.refresh.interval.ms (5 min). One
+        // produced record creates it with the broker's default partition count.
+        let seed_producer = KafkaProducer::new(
+            ProducerConfig::new(config.bootstrap_servers.clone()).client_id("test-rebalance-seed"),
+        )
+        .unwrap();
+        seed_producer
+            .send(&cx, &topic, Some(b"seed".as_slice()), b"seed", None)
+            .await
+            .unwrap();
+        seed_producer
+            .flush(&cx, Duration::from_secs(10))
+            .await
+            .unwrap();
+        seed_producer
+            .close(&cx, Duration::from_secs(5))
+            .await
+            .unwrap();
 
-        // Wait for initial assignment to stabilize
-        std::thread::sleep(std::time::Duration::from_secs(5));
+        // Consumer 1 joins first. librdkafka delivers group membership changes
+        // through `poll`, so the consumer has to be driven; sleeping without
+        // polling never observes an assignment.
+        consumer1.subscribe(&cx, &[&topic]).await.unwrap();
+        let settle = std::time::Instant::now();
+        while settle.elapsed() < Duration::from_secs(30)
+            && consumer1.assigned_partitions().is_empty()
+        {
+            let _ = consumer1
+                .poll(&cx, Duration::from_millis(500))
+                .await
+                .unwrap();
+        }
+        assert!(
+            !consumer1.assigned_partitions().is_empty(),
+            "consumer 1 never received an assignment from the real broker"
+        );
+        let initial_gen = consumer1.rebalance_generation();
+        assert!(initial_gen > 0, "first assignment must bump the generation");
 
         log.phase("second_consumer_join");
 
-        // Consumer 2 joins, triggering rebalance
+        // Consumer 2 joins, triggering a rebalance. With the eager protocol the
+        // broker revokes consumer 1's partitions and reassigns them, so its
+        // generation moves even when consumer 2 ends up with no partition
+        // (a one-partition topic cannot be split between two members).
         consumer2.subscribe(&cx, &[&topic]).await.unwrap();
-
-        // Wait for rebalance to complete
-        std::thread::sleep(std::time::Duration::from_secs(10));
+        let rebalance = std::time::Instant::now();
+        while rebalance.elapsed() < Duration::from_secs(60)
+            && consumer1.rebalance_generation() <= initial_gen
+        {
+            let _ = consumer1
+                .poll(&cx, Duration::from_millis(500))
+                .await
+                .unwrap();
+            let _ = consumer2
+                .poll(&cx, Duration::from_millis(500))
+                .await
+                .unwrap();
+        }
 
         log.phase("verify_rebalance");
 
-        // Both consumers should have incremented generation due to rebalance
         let gen1_after = consumer1.rebalance_generation();
         let gen2_after = consumer2.rebalance_generation();
 
@@ -1454,8 +1508,8 @@ fn test_real_broker_consumer_group_rebalancing() {
             gen1_after
         );
         assert!(
-            gen2_after > 0,
-            "Consumer 2 should have non-zero generation after joining"
+            gen2_after > 0 || consumer2.assigned_partitions().is_empty(),
+            "Consumer 2 holds partitions without ever observing an assignment"
         );
 
         // In a real broker, both consumers should be assigned to the same group
@@ -1621,7 +1675,10 @@ fn test_real_broker_payment_message_delivery() {
                 .force_real_kafka(true); // One payment at a time
 
         let consumer = KafkaConsumer::new(consumer_config).unwrap();
-        consumer.subscribe(&cx, &[&payment_topic]).await.unwrap();
+        // Subscribe only after the topic exists (the first send auto-creates
+        // it): a subscription to a not-yet-existing topic is re-checked by
+        // librdkafka at topic.metadata.refresh.interval.ms (5 min), far beyond
+        // the consume window below.
 
         log.phase("send_payment_messages");
 
@@ -1649,6 +1706,8 @@ fn test_real_broker_payment_message_delivery() {
                 }
             }
         }
+
+        consumer.subscribe(&cx, &[&payment_topic]).await.unwrap();
 
         log.phase("consume_payments");
 
@@ -1878,6 +1937,79 @@ fn test_real_broker_close_without_commit_loses_positions() {
             .await
             .expect("producer close");
 
+        log.test_end("pass");
+    });
+}
+
+/// Dropping a subscribed consumer that was never `close()`d must not hang.
+///
+/// Before `BrokerConsumerContext`, `BaseConsumer`'s `Drop` ran the stock
+/// rebalance handler, which asks librdkafka for the rebalance protocol with an
+/// infinite timeout while the group is terminating; the dropping thread (for
+/// example a panicking test) never returned. The drop runs on its own thread
+/// here so a regression shows up as a timeout instead of a hung suite.
+#[test]
+fn test_real_broker_drop_subscribed_consumer_without_close_does_not_hang() {
+    let Some(config) = require_real_broker() else {
+        return;
+    };
+    let log = KafkaTestLogger::new("real_broker_drop_without_close");
+    run_test_with_cx(|cx| async move {
+        let topic = unique_topic("test-drop-without-close");
+        let group_id = format!("test-drop-group-{}", fastrand::u32(..));
+        log.phase("setup");
+
+        let producer = KafkaProducer::new(
+            ProducerConfig::new(config.bootstrap_servers.clone()).client_id("test-drop-seed"),
+        )
+        .unwrap();
+        producer
+            .send(&cx, &topic, Some(b"seed".as_slice()), b"seed", None)
+            .await
+            .unwrap();
+        producer.flush(&cx, Duration::from_secs(10)).await.unwrap();
+        producer.close(&cx, Duration::from_secs(5)).await.unwrap();
+
+        let consumer = KafkaConsumer::new(
+            ConsumerConfig::new(config.bootstrap_servers.clone(), &group_id)
+                .client_id("test-drop-consumer")
+                .auto_offset_reset(AutoOffsetReset::Earliest)
+                .force_real_kafka(true),
+        )
+        .unwrap();
+        consumer.subscribe(&cx, &[&topic]).await.unwrap();
+
+        log.phase("join_group");
+        let joined = std::time::Instant::now();
+        while joined.elapsed() < Duration::from_secs(30)
+            && consumer.assigned_partitions().is_empty()
+        {
+            let _ = consumer
+                .poll(&cx, Duration::from_millis(500))
+                .await
+                .unwrap();
+        }
+        assert!(
+            !consumer.assigned_partitions().is_empty(),
+            "consumer never joined the group, so the drop path under test was not reached"
+        );
+
+        log.phase("drop_without_close");
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let dropper = std::thread::spawn(move || {
+            let started = std::time::Instant::now();
+            drop(consumer);
+            let _ = done_tx.send(started.elapsed());
+        });
+        let elapsed = done_rx
+            .recv_timeout(Duration::from_secs(60))
+            .expect("dropping a subscribed consumer without close() must finish within 60 s");
+        dropper.join().expect("dropper thread");
+        log.kafka_operation(
+            &format!("drop_elapsed_ms={}", elapsed.as_millis()),
+            None,
+            None,
+        );
         log.test_end("pass");
     });
 }

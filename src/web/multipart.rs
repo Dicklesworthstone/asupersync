@@ -3829,7 +3829,6 @@ mod tests {
             panic!("multipart extraction must complete after request EOF");
         };
         assert_eq!(extracted.field("f").unwrap().body.as_ref(), b"v");
-        drop(extraction);
         drop(eof_control);
 
         let cancelled_cx = Cx::for_testing();
@@ -3867,7 +3866,6 @@ mod tests {
             "message must name the unavailable body: {}",
             error.message
         );
-        drop(extraction);
         drop(control);
         assert_eq!(
             multipart_block_on(writer.push_bytes(&cancelled_cx, b"x")),
@@ -3942,7 +3940,6 @@ mod tests {
             std::future::Future::poll(terminal.as_mut(), &mut task_cx),
             std::task::Poll::Ready(Ok(None))
         ));
-        drop(terminal);
         drop(control);
         assert!(!writer.consumer_dropped());
     }
@@ -4181,7 +4178,6 @@ mod tests {
         assert!(error.to_string().starts_with("[ASUP-E504] 503 "));
         let response = crate::web::response::IntoResponse::into_response(error.clone());
         assert!(response.body.starts_with(b"[ASUP-E501] "));
-        drop(next);
         assert!(cancel_writer.consumer_dropped());
         drop(cancel_control);
 

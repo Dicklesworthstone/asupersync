@@ -462,7 +462,7 @@ fn authenticated_h3_produced_response_obeys_live_udp_credit_and_quiesces() {
                                     NonZeroUsize::MIN,
                                     NonZeroUsize::new(FRAME_BYTES).expect("non-zero H3 frame size"),
                                     move |producer_cx, mut sender| async move {
-                                        let mut chunk = [0_u8; FRAME_BYTES];
+                                        let mut chunk = vec![0_u8; FRAME_BYTES];
                                         for frame_index in 0..BODY_FRAMES {
                                             chunk.fill(
                                                 u8::try_from(frame_index % 251)

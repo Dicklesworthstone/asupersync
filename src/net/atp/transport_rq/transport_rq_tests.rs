@@ -7330,9 +7330,7 @@ fn parallel_encode_runtime_fields_are_valid(
             entry.get_field("kernel_path"),
             entry.get_field("kernel_family"),
         ),
-        (Some("scalar"), Some("scalar"))
-            | (Some("simd"), Some("x86_avx2"))
-            | (Some("simd"), Some("aarch64_neon"))
+        (Some("scalar"), Some("scalar")) | (Some("simd"), Some("x86_avx2" | "aarch64_neon"))
     );
     occupancy > 0
         && occupancy <= capacity

@@ -1,16 +1,22 @@
 #![cfg(feature = "test-internals")]
 //! Production-transport-backed proof for the RemoteRuntime lifecycle contract.
 
+#[cfg(feature = "tls")]
+use asupersync::Budget;
+use asupersync::Cx;
 use asupersync::channel::oneshot;
-use asupersync::distributed::{ComputationRegistryFingerprint, ComputationSchemaRegistry};
+#[cfg(feature = "tls")]
+use asupersync::distributed::ComputationRegistryFingerprint;
+use asupersync::distributed::ComputationSchemaRegistry;
 use asupersync::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use asupersync::net::{TcpListener, TcpStream};
 use asupersync::remote::{
-    ComputationName, IdempotencyKey, LeaseRenewal, MessageEnvelope, NodeId,
-    RemoteComputationRegistry, RemoteError, RemoteInput, RemoteMessage, RemoteOutcome,
-    RemotePeerAdmissionPolicy, RemotePeerHello, RemoteProtocolVersion, RemoteRuntime, RemoteTaskId,
-    RemoteTaskState, RemoteTransport, SpawnRejectReason, SpawnRequest, spawn_remote,
+    ComputationName, MessageEnvelope, NodeId, RemoteError, RemoteInput, RemoteMessage,
+    RemoteOutcome, RemotePeerAdmissionPolicy, RemotePeerHello, RemoteProtocolVersion,
+    RemoteRuntime, RemoteTaskId, RemoteTaskState, RemoteTransport, SpawnRejectReason, spawn_remote,
 };
+#[cfg(feature = "tls")]
+use asupersync::remote::{IdempotencyKey, LeaseRenewal, RemoteComputationRegistry, SpawnRequest};
 #[cfg(feature = "tls")]
 use asupersync::remote::{
     NativeRemoteDiscoveryBuildError, NativeRemoteDiscoveryConfig, NativeRemoteDiscoveryDriver,
@@ -48,7 +54,6 @@ use asupersync::types::CancelKind;
 use asupersync::types::CancelReason;
 #[cfg(feature = "tls")]
 use asupersync::types::{RegionId, TaskId, Time};
-use asupersync::{Budget, Cx};
 use futures_lite::future::block_on;
 use parking_lot::Mutex;
 #[cfg(feature = "tls")]
@@ -64,7 +69,9 @@ use std::net::{Shutdown, SocketAddr};
 use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+#[cfg(feature = "tls")]
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::Duration;
 

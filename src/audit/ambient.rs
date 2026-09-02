@@ -1481,7 +1481,16 @@ fn test_function() {
     /// pinned by file, category, pattern, occurrence count, line, and normalized context in
     /// `ambient_authority_inventory_v1.snap`. Review that snapshot diff and
     /// document intentional production additions before updating the baseline.
-    const AMBIENT_VIOLATION_BASELINE_COUNT: usize = 708;
+    // 2026-09-02 (SapphireHill, br-asupersync-gap-nonlinux-reactor-ci-gxv3dy):
+    // 708 -> 724 after reviewing every new site: grpc/client.rs async
+    // connect_timeout inside a runtime timeout; remote.rs and the h1/h2
+    // listener bind variants (async TcpListener constructors);
+    // cancel/symbol_cancel.rs bounded wall-clock wait (c344862df);
+    // net/quic_native/udp_connection.rs clock_origin + pacing (ccb5af622);
+    // handshake_driver early-data resend stamp; transport_rq File::create /
+    // File::open / Instant::now on the receive path; runtime/builder.rs drain
+    // timing. No new site takes authority outside its owning subsystem.
+    const AMBIENT_VIOLATION_BASELINE_COUNT: usize = 724;
 
     fn src_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("src")

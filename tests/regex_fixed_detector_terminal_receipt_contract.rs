@@ -654,7 +654,7 @@ fn r2_5_release_performance_emitter() {
     let operation_filter = std::env::var("R2_5_FIXED_DETECTOR_PERF_OPERATION").ok();
     assert!(matches!(
         operation_filter.as_deref(),
-        None | Some("candidate") | Some("incumbent")
+        None | Some("candidate" | "incumbent")
     ));
 
     let candidate = PrivacyConfig::new().with_auto_pii_detection();

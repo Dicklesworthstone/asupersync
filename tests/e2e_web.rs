@@ -256,6 +256,9 @@ impl FromRequest for AsyncCollectedStreamingBody {
         ))
     }
 
+    // Written in the trait's desugared shape on purpose: the `Send + 'a`
+    // bound on the returned future is the contract under test.
+    #[allow(clippy::manual_async_fn)]
     fn from_request_with_cx<'a>(
         cx: &'a Cx,
         req: Request,

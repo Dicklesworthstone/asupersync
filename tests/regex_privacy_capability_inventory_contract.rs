@@ -1961,10 +1961,10 @@ fn validate_r3_7_1_full_surface_join(map: &Value) -> Result<(), String> {
     }
     for pin in upstream {
         if checked_text(pin, "sha256")?.len() != 64
-            || !pin
+            || pin
                 .get("line_count")
                 .and_then(Value::as_u64)
-                .is_some_and(|count| count > 0)
+                .is_none_or(|count| count == 0)
         {
             return Err(format!(
                 "official source pin {} is incomplete",
