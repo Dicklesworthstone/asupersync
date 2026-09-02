@@ -4043,3 +4043,21 @@ Receipt: `artifacts/atp_bench_matrix/wan_quic_receipt_2026-09-02.md` (tracked). 
 - **Performance, honestly:** on ~90 ms WAN paths the QUIC sender is 3.2–8.6× slower than the same binary over TCP. The path is not the limit. No encrypted "beats rsync" wording is supported; rsync was not measured on these paths (no ssh trust between the sender and receiver hosts; the netns matrix carries that comparison).
 - **Harness defect (fixed):** OpenSSL 3.5 `req -x509` stamps `basicConstraints=CA:TRUE`; rustls-webpki refuses a CA cert as an end entity, so every `atp-quic-tls13` netns cell on ovh-a failed in 0.15 s (`read_hs_fatal_alert`) while rsync cells passed. `run_matrix_cell.sh` now pins `CA:FALSE`. Any encrypted-tier number produced by the old harness on a modern OpenSSL host was a connection failure, not a slow loss.
 - One rep per cell; no loss regimes; single hour of the day.
+
+## 2026-09-02 (SapphireHill) — ENCRYPTED TIER RE-MEASURED on the corrected harness (ovh-a netns, 48/48 cells ok)
+
+Run `artifacts/atp_bench_matrix/20260902T151751Z/` (scorecard.md + results.jsonl tracked). Host ovh-a (16 cores, idle, OpenSSL 3.5), release `atp 0.4.10` from b1ed41481, harness with the CA:FALSE certificate fix (previous run the same morning: every atp-quic-tls13 cell status=error in 0.15 s). Workloads 50M + tree_small; regimes perfect (2 ms, 1 Gbit) / good / bad (80 ms ±20, 2 % loss, 50 Mbit); reps 3 (tree_small 5). Every row sha_ok; no auth-posture exclusions.
+
+| workload | regime | atp-quic-tls13 median s | rsync-ssh-aes128gcm median s | wall ratio ATP/rsync | verdict |
+|---|---|---:|---:|---:|---|
+| 50M | perfect | 0.651 | 0.837 (cv 18.5 %, noisy) | 0.778 | atp faster |
+| 50M | good | 3.353 | 3.838 | 0.874 | atp faster |
+| 50M | bad | 13.959 | 17.346 | 0.805 | atp faster |
+| tree_small | perfect | 2.953 | 0.736 | 4.013 | rsync 4× faster |
+| tree_small | good | 3.553 | 2.037 | 1.744 | rsync faster |
+| tree_small | bad | 5.956 | 7.341 (cv 13.2 %, noisy) | 0.811 | atp faster |
+
+Per-regime geomean ATP/rsync: bad 0.808, good 1.234, perfect 1.767. Sender peak RSS 1.6–2.1× rsync's, receiver 0.9–2.3×.
+
+- **Honest summary:** on the encrypted tier atp beats rsync-over-ssh only on the lossy `bad` regime and on the 50M single file; it loses on small trees on clean links (4× on tree_small/perfect: per-file protocol overhead dominates a 0.7 s rsync). This matches MATRIX-233's "trees gap" diagnosis and does not support an unqualified encrypted "beats rsync" claim.
+- **WAN cross-check (same day, `wan_quic_receipt_2026-09-02.md`):** the netns 50M/perfect cell moves 77 MB/s at 2 ms RTT, but the same binary managed 2.7–6.3 MB/s at ~90 ms RTT while ATP-over-TCP did 20–23 MB/s on the same paths. In-flight window ≈ throughput × RTT ≈ 0.23–0.6 MB, i.e. the QUIC sender is window-limited on high-RTT paths (flow-control credit or cwnd growth), which the 2 ms netns matrix cannot see. That is the next lead; not diagnosed here.

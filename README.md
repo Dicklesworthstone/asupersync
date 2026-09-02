@@ -1387,6 +1387,35 @@ Operational notes:
 - Artifact outputs include `summary.json`, `scenarios.ndjson`, and (when bundled) `validation_stages.ndjson`.
 - Increase `VALIDATION_TIMEOUT` or `E2E_TIMEOUT` if your environment is slower than expected.
 
+### ATP vs rsync, measured (encrypted tier, 2026-09-02)
+
+Every number below comes from the committed scorecard
+[`artifacts/atp_bench_matrix/20260902T151751Z/scorecard.md`](./artifacts/atp_bench_matrix/20260902T151751Z/scorecard.md)
+(ovh-a netns harness, release `atp 0.4.10`, `atp-quic-tls13` vs optimally
+tuned `rsync-ssh-aes128gcm`, SHA-256 verified every rep, median wall
+seconds). The append-only record of every run and refuted hypothesis is
+[`docs/atp_rq_beat_rsync_ledger.md`](./docs/atp_rq_beat_rsync_ledger.md).
+
+| workload | regime | atp-quic-tls13 | rsync-ssh-aes128gcm | ATP/rsync |
+|---|---|---:|---:|---:|
+| 50M | perfect (2 ms, 1 Gbit) | 0.651 s | 0.837 s (noisy) | 0.78 |
+| 50M | good | 3.353 s | 3.838 s | 0.87 |
+| 50M | bad (80 ms, 2 % loss, 50 Mbit) | 13.959 s | 17.346 s | 0.81 |
+| tree_small | perfect | 2.953 s | 0.736 s | 4.01 |
+| tree_small | good | 3.553 s | 2.037 s | 1.74 |
+| tree_small | bad | 5.956 s | 7.341 s (noisy) | 0.81 |
+
+Read it plainly: encrypted ATP is faster than rsync-over-ssh on lossy links
+and on a single large file, and slower on small trees over clean links
+(per-file overhead dominates a sub-second rsync). It also uses 1.6–2.1×
+rsync's sender memory. Across real WAN paths the picture is worse for QUIC:
+the dated cross-machine receipt
+[`artifacts/atp_bench_matrix/wan_quic_receipt_2026-09-02.md`](./artifacts/atp_bench_matrix/wan_quic_receipt_2026-09-02.md)
+(Hetzner Ashburn → Contabo France, SHA-256 verified on both ends) shows
+ATP-over-QUIC at 6.3 MB/s where ATP-over-TCP reaches 20 MB/s on the same
+path, so the QUIC sender is window-limited at ~90 ms RTT. No unqualified
+"beats rsync" claim is made for the encrypted tier.
+
 ### Multi-Donor Bonded Transfers (`atp bond-pull`)
 
 RaptorQ's fountain property — any K-of-N symbols recover the K source symbols — makes it natural to pull a single object from **many donors at once**. In a *bonded* transfer, one receiver enrolls N donors; each donor is assigned a disjoint slice of the symbol stream (source + repair ESIs) and sprays it over UDP, and the receiver decodes from the *union*. The aggregate goodput is the sum of the donors' upload paths, and because symbols are order-independent, a donor that dies mid-transfer costs nothing but its remaining repair window, which is reallocated to the survivors (`src/net/atp/bonding/`, `src/net/atp/transport_rq/bonded.rs`).
