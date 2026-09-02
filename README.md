@@ -64,7 +64,10 @@ controlled schedules deterministic and replayable.
 The attribute macro builds and drives the production runtime (a multi-thread
 scheduler with the host-independent default worker count plus an on-demand
 blocking pool; `#[main(flavor = "current_thread")]` and `blocking = N` adjust
-both), so the first program needs no runtime concepts:
+both) and, when the entry future returns, drains the root region: tasks that
+outlived `main` are protocol-cancelled and given `drain_ms` (default 2000) to
+finish their cleanup before teardown. The first program needs no runtime
+concepts:
 
 ```rust
 use asupersync::main;

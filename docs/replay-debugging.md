@@ -391,7 +391,7 @@ failure without guesswork.
 | Cancellation misbehavior | **Yes** - Trace cancellation propagation step by step |
 | Timer interaction bugs | **Yes** - See exact firing order |
 | Performance investigation | Maybe - Traces add overhead; use for correctness first |
-| Production debugging | **Yes** - If you captured a trace before the bug |
+| Production debugging | **Partly** - `Runtime::trace_snapshot()` exports the production ring buffer (default 4096 events) for offline analysis (canonicalization, happens-before, race detection). Schedule re-execution of a production interleaving is not available; replay drives lab-recorded runs. |
 
 ---
 
@@ -941,22 +941,24 @@ tests/
     issue_456_cancellation_leak.trace
 ```
 
-Then add regression tests:
+Then add regression tests that load the saved trace and run the analysis
+that caught the bug (see `tests/runtime_trace_export_e2e.rs` for the
+production export path end to end):
 
 ```rust
-#[test]
-fn regression_issue_123() {
-    let trace = TraceReader::open("tests/traces/issue_123_race_condition.trace")
-        .unwrap()
-        .read_all()
-        .unwrap();
+use asupersync::runtime::RuntimeBuilder;
+use asupersync::trace::{RaceDetector, normalize_trace_default};
 
-    // Replay with the fixed code
-    let mut replayer = TraceReplayer::new(trace);
+// Export the production ring buffer (default 4096 events) after the
+// suspicious run; save it with serde_json for later.
+let runtime = RuntimeBuilder::multi_thread().build()?;
+runtime.block_on(app());
+let events = runtime.trace_snapshot();
 
-    // Verify the fix - execution should now diverge at the bug point
-    // in a good way (the fix prevents the race)
-}
+// Offline: canonicalize and look for races in the exported trace.
+let (canonical, _geodesic) = normalize_trace_default(&events);
+let detector = RaceDetector::from_trace(&canonical);
+assert_eq!(detector.race_count(), 0, "the fix removed the race");
 ```
 
 ### Combine with Tracing

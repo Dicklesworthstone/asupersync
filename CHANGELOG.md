@@ -65,6 +65,40 @@ is `v0.4.9`.
 
 ## [Unreleased]
 
+### Root-region drain, drain-correct timeout, non-blocking file traits (2026-09-02)
+
+- **The root region is drained when the entry future returns.** New
+  `Runtime::drain_root_region(bound) -> RootDrainOutcome` requests
+  `CancelKind::Shutdown` on every task the root region still owns, schedules
+  them on the cancel lane, and waits up to `bound` for quiescence.
+  `#[asupersync::main]` and `#[asupersync::test]` call it after `block_on`
+  (new `drain_ms = N` argument, default 2000; `0` restores drop-at-teardown).
+  Previously `block_on` returned as soon as its future completed and teardown
+  abort-by-dropped any task that outlived `main`, so their cleanup never ran.
+  Proven by `tests/entry_macro_root_drain_e2e.rs`: a task that outlives `main`
+  runs its post-cancel cleanup before the macro-expanded function returns;
+  with `drain_ms = 0` it does not (planted negative); the bound is respected
+  against non-cooperative work. A bare `RuntimeBuilder` is unchanged.
+- **`Scope::timeout` is the drain-correct timeout.** It spawns the operation
+  as a region task and, when the deadline or the caller's cancellation wins,
+  protocol-cancels and joins it before returning. Because it uses the ordinary
+  `spawn_in` path, an operation that acknowledges the cancellation and still
+  returns `Ok`/`Err` has that outcome preserved as `TimedResult::Completed`;
+  only a cancellation-blind operation is reported `TimedOut`. `time::timeout`
+  is unchanged (it drops the inner future) and its docs now say so. Proven by
+  `tests/scope_timeout_e2e.rs` (cleanup counter checked immediately on
+  return; late `Ok` preserved; cancellation-blind value discarded).
+- **`fs::File`'s `AsyncRead`/`AsyncWrite`/`AsyncSeek` no longer block the
+  async worker.** Each poll submits one bounded (128 KiB) syscall to the
+  blocking pool and returns `Pending` until it completes; a per-handle state
+  machine keeps read-ahead from an abandoned poll, rewinds before writes and
+  relative seeks, and the owned cursor methods (`seek`, `read_into_vec`, ...)
+  settle any in-flight trait operation first. Without a pool the path degrades
+  to the previous inline behaviour. Proven by
+  `tests/fs_file_poll_offload_e2e.rs` (a peer task advances once per chunk
+  during a 48 MiB `read_exact` on a single-worker runtime; byte-exact
+  round-trips through read-ahead, relative seek, and write-after-read-ahead).
+
 ### Reality-check follow-through (2026-09-01)
 
 - **`TaskInspector` and `Diagnostics` are reachable from a production
