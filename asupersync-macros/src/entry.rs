@@ -328,10 +328,11 @@ fn unsupported_entry_arg(key: &Ident) -> Error {
         "flavour" | "runtime" => Some("flavor"),
         "worker" | "worker_threads" => Some("workers"),
         "poll_budget" | "task_budget" => Some("budget"),
+        "blocking_threads" | "max_blocking" | "blocking_pool" => Some("blocking"),
         _ => None,
     };
     let mut message = format!(
-        "unsupported asupersync entry argument `{key_name}`; valid arguments are `flavor`, `workers`, and `budget`"
+        "unsupported asupersync entry argument `{key_name}`; valid arguments are `flavor`, `workers`, `budget`, and `blocking`"
     );
     if let Some(suggestion) = suggestion {
         message.push_str("; did you mean `");
@@ -366,7 +367,7 @@ mod tests {
     use quote::quote;
 
     #[test]
-    fn main_expansion_builds_current_thread_runtime_by_default() {
+    fn main_expansion_builds_multi_thread_runtime_with_blocking_pool_by_default() {
         let input: ItemFn = syn::parse2(quote! {
             async fn main() {}
         })
@@ -374,8 +375,68 @@ mod tests {
         let tokens = expand_entry(&EntryArgs::default(), input, EntryKind::Main)
             .unwrap()
             .to_string();
-        assert!(tokens.contains("RuntimeBuilder :: current_thread"));
+        assert!(tokens.contains("RuntimeBuilder :: multi_thread"));
+        assert!(!tokens.contains("RuntimeBuilder :: current_thread"));
+        assert!(tokens.contains("blocking_threads (0 , 512)"));
         assert!(tokens.contains("block_on"));
+    }
+
+    #[test]
+    fn test_expansion_builds_current_thread_runtime_with_blocking_pool_by_default() {
+        let input: ItemFn = syn::parse2(quote! {
+            async fn works() {}
+        })
+        .unwrap();
+        let tokens = expand_entry(&EntryArgs::default(), input, EntryKind::Test)
+            .unwrap()
+            .to_string();
+        assert!(tokens.contains("RuntimeBuilder :: current_thread"));
+        assert!(tokens.contains("blocking_threads (0 , 512)"));
+    }
+
+    #[test]
+    fn explicit_flavor_overrides_the_kind_default() {
+        let input: ItemFn = syn::parse2(quote! {
+            async fn main() {}
+        })
+        .unwrap();
+        let args = EntryArgs {
+            flavor: Some(RuntimeFlavor::CurrentThread),
+            ..EntryArgs::default()
+        };
+        let tokens = expand_entry(&args, input, EntryKind::Main)
+            .unwrap()
+            .to_string();
+        assert!(tokens.contains("RuntimeBuilder :: current_thread"));
+    }
+
+    #[test]
+    fn blocking_zero_omits_the_pool_configuration() {
+        let input: ItemFn = syn::parse2(quote! {
+            async fn main() {}
+        })
+        .unwrap();
+        let args = EntryArgs {
+            blocking: Some(0),
+            ..EntryArgs::default()
+        };
+        let tokens = expand_entry(&args, input, EntryKind::Main)
+            .unwrap()
+            .to_string();
+        assert!(!tokens.contains("blocking_threads"));
+    }
+
+    #[test]
+    fn parses_blocking_argument_and_suggests_it_for_near_misses() {
+        let args: EntryArgs = syn::parse2(quote!(blocking = 8, workers = 2)).unwrap();
+        assert_eq!(args.blocking, Some(8));
+        assert_eq!(args.workers, Some(2));
+        assert_eq!(args.flavor, None);
+
+        let err = syn::parse2::<EntryArgs>(quote!(blocking_threads = 4)).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("valid arguments are `flavor`, `workers`, `budget`, and `blocking`"));
+        assert!(message.contains("did you mean `blocking`"));
     }
 
     #[test]
