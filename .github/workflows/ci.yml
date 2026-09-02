@@ -1796,6 +1796,14 @@ jobs:
           feature_args=(--features "$(scripts/ci/release_test_features.sh)")
           if [[ "${{ runner.os }}" == "Windows" ]]; then
             feature_args=(--features "$(scripts/ci/release_test_features.sh windows)")
+            # rustc on nightly-2026-07-05 aborted twice here with
+            # STATUS_ILLEGAL_INSTRUCTION (on x86_64 Windows that is the `ud2`
+            # a rustc abort compiles to), while the identical check finishes
+            # on real Windows hardware (2026-09-02, 51 min, exit 0; see
+            # br-asupersync-gap-nonlinux-reactor-ci-gxv3dy). `.cargo/config.toml`
+            # enables the parallel frontend (`-Z threads=4`) for every build;
+            # run the frontend single-threaded on this 7 GB runner instead.
+            export RUSTFLAGS="-Z threads=1"
           fi
           max_parallel_threads="${ASUPERSYNC_CI_LIB_TEST_THREADS:-}"
           if [[ -z "$max_parallel_threads" ]]; then
