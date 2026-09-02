@@ -46,8 +46,17 @@ are not part of the root `asupersync` macro contract.
 `#[main]` and `#[test]` are production-runtime entry attributes. They build an
 `asupersync::runtime::Runtime`, call `block_on`, and allow an optional
 `cx: &Cx` parameter that is bound from the root context installed by `block_on`.
-They accept `flavor`, `workers`, and `budget` arguments and reject unsupported
-signatures at macro expansion time.
+They accept `flavor`, `workers`, `budget`, and `blocking` arguments and reject
+unsupported signatures at macro expansion time.
+
+Defaults differ by attribute, mirroring tokio: `#[main]` builds
+`RuntimeBuilder::multi_thread()` (the host-independent default worker count,
+currently 4; pass `workers = N` or `flavor = "current_thread"` to change it),
+while `#[test]` builds `RuntimeBuilder::current_thread()` so test bodies stay
+replay-stable. Both configure an on-demand blocking pool
+(`blocking_threads(0, 512)`) so `spawn_blocking` offloads to a dedicated thread;
+`blocking = N` changes the cap and `blocking = 0` restores the inline behaviour
+of a bare `RuntimeBuilder`, which ships without a pool.
 
 ```rust
 use asupersync::{Cx, main};

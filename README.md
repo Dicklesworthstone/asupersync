@@ -61,8 +61,10 @@ controlled schedules deterministic and replayable.
 
 ## Quick Example
 
-The attribute macro builds and drives the production runtime, so the first
-program needs no runtime concepts:
+The attribute macro builds and drives the production runtime (a multi-thread
+scheduler with the host-independent default worker count plus an on-demand
+blocking pool; `#[main(flavor = "current_thread")]` and `blocking = N` adjust
+both), so the first program needs no runtime concepts:
 
 ```rust
 use asupersync::main;
@@ -91,7 +93,7 @@ If you already know tokio, this section maps the primitives you use daily to the
 | `tokio::spawn(fut)` | `cx.spawn(\|cx\| async move { fut.await })` or `cx.spawn_in(&scope, \|cx\| fut)` | Task is owned by a region; the factory receives its own `Cx`. See [`onramp_level2.rs`](./examples/onramp_level2.rs). |
 | `JoinHandle<T>` | `TaskHandle<T>` | `.join(cx).await` returns `Result<T, JoinError>`; cancellation and panic remain distinct. |
 | `tokio::task::JoinSet<T>` | `JoinSet<T, E, P>` | `JoinSet::in_cx(cx)` or `JoinSet::new(&scope)` owns dynamic fan-out in one region; `join_next`, `join_all`, and `cancel_all` always retain drain ownership. |
-| `tokio::spawn_blocking(f)` | `spawn_blocking(f)` | Same idea. Runs closure on a blocking pool thread. |
+| `tokio::spawn_blocking(f)` | `cx.spawn_blocking(\|cx\| f())` | Same idea when the runtime has a blocking pool: `#[main]`/`#[test]` configure one on demand (`blocking = N`, `0` opts out). A bare `RuntimeBuilder::new()` ships with `blocking_threads(0, 0)`, and without a pool the closure runs inline on the async worker. |
 | `tokio::select!` | `race!(cx, { a, b })` or `cx.race_drained(...)` | Returns only after the winner is selected and every loser is protocol-cancelled and drained. See [`macros_race.rs`](./examples/macros_race.rs). |
 | `tokio::join!` | `join!(a, b)`; use `JoinSet::join_all(cx)` for dynamic arity | Inline branches complete together; spawned dynamic members remain region-owned and are collected in spawn order. See [`macros_basic.rs`](./examples/macros_basic.rs). |
 | `tokio::time::sleep(dur)` | `sleep(now, dur)` | Takes current `Time` instead of reading the clock implicitly. Works with virtual time in lab runtime. |
