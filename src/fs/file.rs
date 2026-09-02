@@ -485,42 +485,242 @@ impl File {
 // std::fs::File. Shared handles inherit the platform's shared-cursor semantics
 // and use the same gate as the owned cursor operations.
 
+impl File {
+    /// Submits one bounded blocking syscall to the runtime blocking pool on
+    /// behalf of a poll-trait call. The cursor gate is taken inside the
+    /// closure so a started syscall keeps the gate until it completes, exactly
+    /// like the owned async methods.
+    fn submit_blocking<T, Op>(&self, op: Op) -> PollIoFuture<T>
+    where
+        T: Send + 'static,
+        Op: FnOnce(&std::fs::File) -> io::Result<T> + Send + 'static,
+    {
+        let inner = Arc::clone(&self.inner);
+        let cursor_gate = Arc::clone(&self.cursor_gate);
+        Box::pin(spawn_blocking_io(move || {
+            let _cursor_guard = cursor_gate.lock();
+            op(&inner)
+        }))
+    }
+
+    /// Drives an outstanding operation that belongs to a *different* trait
+    /// call (for example a write whose future the caller dropped mid-flight)
+    /// to a settled state before a new operation starts, so no started
+    /// syscall is ever lost or reordered. A completed read settles as
+    /// read-ahead bytes; a completed write, flush, or seek settles as `None`.
+    fn settle_foreign_pending(
+        pending: &mut Option<PendingIo>,
+        poll_cx: &mut Context<'_>,
+    ) -> Poll<io::Result<()>> {
+        match pending.take() {
+            None => Poll::Ready(Ok(())),
+            Some(read_ahead @ PendingIo::ReadAhead { .. }) => {
+                *pending = Some(read_ahead);
+                Poll::Ready(Ok(()))
+            }
+            Some(PendingIo::Read { mut future }) => match future.as_mut().poll(poll_cx) {
+                Poll::Pending => {
+                    *pending = Some(PendingIo::Read { future });
+                    Poll::Pending
+                }
+                Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
+                Poll::Ready(Ok(bytes)) => {
+                    if !bytes.is_empty() {
+                        *pending = Some(PendingIo::ReadAhead { bytes, consumed: 0 });
+                    }
+                    Poll::Ready(Ok(()))
+                }
+            },
+            Some(PendingIo::Write { mut future }) => match future.as_mut().poll(poll_cx) {
+                Poll::Pending => {
+                    *pending = Some(PendingIo::Write { future });
+                    Poll::Pending
+                }
+                // The abandoned write's byte count has no consumer left; the
+                // bytes were committed to the file, which is the documented
+                // "started syscall commits" behaviour.
+                Poll::Ready(result) => Poll::Ready(result.map(|_| ())),
+            },
+            Some(PendingIo::Flush { mut future }) => match future.as_mut().poll(poll_cx) {
+                Poll::Pending => {
+                    *pending = Some(PendingIo::Flush { future });
+                    Poll::Pending
+                }
+                Poll::Ready(result) => Poll::Ready(result),
+            },
+            Some(PendingIo::Seek { mut future }) => match future.as_mut().poll(poll_cx) {
+                Poll::Pending => {
+                    *pending = Some(PendingIo::Seek { future });
+                    Poll::Pending
+                }
+                Poll::Ready(result) => Poll::Ready(result.map(|_| ())),
+            },
+        }
+    }
+
+    /// Number of read-ahead bytes the OS cursor is already past but the
+    /// caller has not consumed. Writes and relative seeks compensate for it.
+    fn unconsumed_read_ahead(pending: &Option<PendingIo>) -> usize {
+        match pending {
+            Some(PendingIo::ReadAhead { bytes, consumed }) => bytes.len() - consumed,
+            _ => 0,
+        }
+    }
+}
+
 impl AsyncRead for File {
     fn poll_read(
         self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
+        poll_cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        // Regular files are readiness-ready at the OS API level. This trait
-        // path performs one immediate syscall; callers that need thread
-        // offload should use read_into_vec().
-        let _cursor_guard = self.cursor_gate.lock();
-        let mut inner_ref: &std::fs::File = &self.inner;
-        let n = Read::read(&mut inner_ref, buf.unfilled())?;
-        buf.advance(n);
-        Poll::Ready(Ok(()))
+        if buf.remaining() == 0 {
+            return Poll::Ready(Ok(()));
+        }
+        let this = self.get_mut();
+        let mut pending = this.pending.lock();
+        loop {
+            match pending.take() {
+                None => {
+                    let len = buf.remaining().min(POLL_IO_CHUNK_BYTES);
+                    let future = this.submit_blocking(move |file| {
+                        let mut bytes = vec![0u8; len];
+                        let mut file_ref: &std::fs::File = file;
+                        let read = Read::read(&mut file_ref, &mut bytes)?;
+                        bytes.truncate(read);
+                        Ok(bytes)
+                    });
+                    *pending = Some(PendingIo::Read { future });
+                }
+                Some(PendingIo::Read { mut future }) => match future.as_mut().poll(poll_cx) {
+                    Poll::Pending => {
+                        *pending = Some(PendingIo::Read { future });
+                        return Poll::Pending;
+                    }
+                    Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                    Poll::Ready(Ok(bytes)) => {
+                        if bytes.is_empty() {
+                            // End of file: nothing to hand over, nothing pending.
+                            return Poll::Ready(Ok(()));
+                        }
+                        *pending = Some(PendingIo::ReadAhead { bytes, consumed: 0 });
+                    }
+                },
+                Some(PendingIo::ReadAhead { bytes, consumed }) => {
+                    let available = &bytes[consumed..];
+                    let take = available.len().min(buf.remaining());
+                    buf.unfilled()[..take].copy_from_slice(&available[..take]);
+                    buf.advance(take);
+                    let consumed = consumed + take;
+                    if consumed < bytes.len() {
+                        *pending = Some(PendingIo::ReadAhead { bytes, consumed });
+                    }
+                    return Poll::Ready(Ok(()));
+                }
+                other => {
+                    *pending = other;
+                    match Self::settle_foreign_pending(&mut pending, poll_cx) {
+                        Poll::Pending => return Poll::Pending,
+                        Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                        Poll::Ready(Ok(())) => {}
+                    }
+                }
+            }
+        }
     }
 }
 
 impl AsyncWrite for File {
     fn poll_write(
         self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
+        poll_cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        // See poll_read: this trait path performs one immediate file syscall.
-        let _cursor_guard = self.cursor_gate.lock();
-        let mut inner_ref: &std::fs::File = &self.inner;
-        let n = Write::write(&mut inner_ref, buf)?;
-        Poll::Ready(Ok(n))
+        if buf.is_empty() {
+            return Poll::Ready(Ok(0));
+        }
+        let this = self.get_mut();
+        let mut pending = this.pending.lock();
+        loop {
+            match pending.take() {
+                Some(PendingIo::Write { mut future }) => match future.as_mut().poll(poll_cx) {
+                    Poll::Pending => {
+                        *pending = Some(PendingIo::Write { future });
+                        return Poll::Pending;
+                    }
+                    Poll::Ready(result) => return Poll::Ready(result),
+                },
+                None => {
+                    // The trait contract requires callers to retry with the
+                    // same bytes until `Ready`, so the chunk is copied once and
+                    // the count of that chunk is reported on completion.
+                    let chunk = buf[..buf.len().min(POLL_IO_CHUNK_BYTES)].to_vec();
+                    let future = this.submit_blocking(move |file| {
+                        let mut file_ref: &std::fs::File = file;
+                        Write::write(&mut file_ref, &chunk)
+                    });
+                    *pending = Some(PendingIo::Write { future });
+                }
+                Some(PendingIo::ReadAhead { bytes, consumed }) => {
+                    // The OS cursor sits past bytes the caller never consumed;
+                    // rewind before writing so the write lands where the
+                    // caller believes the cursor is.
+                    let rewind = i64::try_from(bytes.len() - consumed)
+                        .map_err(|_| io::Error::other("read-ahead exceeds seek range"))?;
+                    let chunk = buf[..buf.len().min(POLL_IO_CHUNK_BYTES)].to_vec();
+                    let future = this.submit_blocking(move |file| {
+                        let mut file_ref: &std::fs::File = file;
+                        Seek::seek(&mut file_ref, SeekFrom::Current(-rewind))?;
+                        Write::write(&mut file_ref, &chunk)
+                    });
+                    *pending = Some(PendingIo::Write { future });
+                }
+                other => {
+                    *pending = other;
+                    match Self::settle_foreign_pending(&mut pending, poll_cx) {
+                        Poll::Pending => return Poll::Pending,
+                        Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                        Poll::Ready(Ok(())) => {}
+                    }
+                }
+            }
+        }
     }
 
-    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        // See poll_read: this trait path performs one immediate file syscall.
-        let _cursor_guard = self.cursor_gate.lock();
-        let mut inner_ref: &std::fs::File = &self.inner;
-        Write::flush(&mut inner_ref)?;
-        Poll::Ready(Ok(()))
+    fn poll_flush(self: Pin<&mut Self>, poll_cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        let mut pending = this.pending.lock();
+        loop {
+            match pending.take() {
+                Some(PendingIo::Flush { mut future }) => match future.as_mut().poll(poll_cx) {
+                    Poll::Pending => {
+                        *pending = Some(PendingIo::Flush { future });
+                        return Poll::Pending;
+                    }
+                    Poll::Ready(result) => return Poll::Ready(result),
+                },
+                // Flushing does not move the cursor, so read-ahead survives.
+                Some(PendingIo::ReadAhead { bytes, consumed }) => {
+                    *pending = Some(PendingIo::ReadAhead { bytes, consumed });
+                    return Poll::Ready(Ok(()));
+                }
+                None => {
+                    let future = this.submit_blocking(|file| {
+                        let mut file_ref: &std::fs::File = file;
+                        Write::flush(&mut file_ref)
+                    });
+                    *pending = Some(PendingIo::Flush { future });
+                }
+                other => {
+                    *pending = other;
+                    match Self::settle_foreign_pending(&mut pending, poll_cx) {
+                        Poll::Pending => return Poll::Pending,
+                        Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                        Poll::Ready(Ok(())) => {}
+                    }
+                }
+            }
+        }
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
@@ -531,14 +731,55 @@ impl AsyncWrite for File {
 impl AsyncSeek for File {
     fn poll_seek(
         self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
+        poll_cx: &mut Context<'_>,
         pos: SeekFrom,
     ) -> Poll<io::Result<u64>> {
-        // See poll_read: this trait path performs one immediate file syscall.
-        let _cursor_guard = self.cursor_gate.lock();
-        let mut inner_ref: &std::fs::File = &self.inner;
-        let n = Seek::seek(&mut inner_ref, pos)?;
-        Poll::Ready(Ok(n))
+        let this = self.get_mut();
+        let mut pending = this.pending.lock();
+        loop {
+            match pending.take() {
+                Some(PendingIo::Seek { mut future }) => match future.as_mut().poll(poll_cx) {
+                    Poll::Pending => {
+                        *pending = Some(PendingIo::Seek { future });
+                        return Poll::Pending;
+                    }
+                    Poll::Ready(result) => return Poll::Ready(result),
+                },
+                None => {
+                    let future = this.submit_blocking(move |file| {
+                        let mut file_ref: &std::fs::File = file;
+                        Seek::seek(&mut file_ref, pos)
+                    });
+                    *pending = Some(PendingIo::Seek { future });
+                }
+                Some(read_ahead @ PendingIo::ReadAhead { .. }) => {
+                    // Discard unconsumed read-ahead; a relative seek is
+                    // measured from where the caller believes the cursor is.
+                    let unconsumed = Self::unconsumed_read_ahead(&Some(read_ahead));
+                    let adjusted = match pos {
+                        SeekFrom::Current(offset) => {
+                            let unconsumed = i64::try_from(unconsumed)
+                                .map_err(|_| io::Error::other("read-ahead exceeds seek range"))?;
+                            SeekFrom::Current(offset - unconsumed)
+                        }
+                        absolute => absolute,
+                    };
+                    let future = this.submit_blocking(move |file| {
+                        let mut file_ref: &std::fs::File = file;
+                        Seek::seek(&mut file_ref, adjusted)
+                    });
+                    *pending = Some(PendingIo::Seek { future });
+                }
+                other => {
+                    *pending = other;
+                    match Self::settle_foreign_pending(&mut pending, poll_cx) {
+                        Poll::Pending => return Poll::Pending,
+                        Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                        Poll::Ready(Ok(())) => {}
+                    }
+                }
+            }
+        }
     }
 }
 
