@@ -97,7 +97,7 @@ If you already know tokio, this section maps the primitives you use daily to the
 | `tokio::select!` | `race!(cx, { a, b })` or `cx.race_drained(...)` | Returns only after the winner is selected and every loser is protocol-cancelled and drained. See [`macros_race.rs`](./examples/macros_race.rs). |
 | `tokio::join!` | `join!(a, b)`; use `JoinSet::join_all(cx)` for dynamic arity | Inline branches complete together; spawned dynamic members remain region-owned and are collected in spawn order. See [`macros_basic.rs`](./examples/macros_basic.rs). |
 | `tokio::time::sleep(dur)` | `sleep(now, dur)` | Takes current `Time` instead of reading the clock implicitly. Works with virtual time in lab runtime. |
-| `tokio::time::timeout(dur, fut)` | `timeout(now, dur, fut)` | Returns `Result<T, Elapsed>`. Also see the `Timeout` combinator type for richer outcome handling. |
+| `tokio::time::timeout(dur, fut)` | `timeout(now, dur, fut)` or `cx.scope().timeout(&cx, dur, \|cx\| op)` | `time::timeout` returns `Result<T, Elapsed>` and drops the inner future when the clock wins; `Scope::timeout` spawns the operation as a region task and cancels **and drains** it on expiry, reporting a late terminal outcome instead of losing it. |
 | `tokio::time::interval(dur)` | `interval(now, dur)` | Same `MissedTickBehavior` options (Burst, Delay, Skip). |
 | `tokio::sync::mpsc::channel(n)` | `channel::mpsc::channel::<T>(n)` | Two-phase send: `tx.reserve(&cx).await?.send(val)`. Reserve is cancel-safe; commit cannot fail. |
 | `tokio::sync::oneshot::channel()` | `channel::oneshot::channel::<T>()` | Two-phase: `tx.reserve(&cx)` then `permit.send(val)`. |
@@ -557,7 +557,9 @@ Filesystem status is deliberately conservative. `src/fs/` currently exposes
 `File`, buffered readers/writers, metadata, directory/path helpers,
 `try_exists`, `write_atomic`, `UnixVfs`, and platform capability reports that
 ATP consumes through `src/atp/platform/`. Most operations are async facades over
-`spawn_blocking_io`; poll-based `File` traits still use direct blocking I/O,
+`spawn_blocking_io`; the poll-based `File` traits offload each bounded syscall
+through the same blocking pool (and degrade to inline calls only on a runtime
+built without a pool),
 recursive directory removal and large copy operations inherit standard-library
 partial-state semantics, and Linux `io_uring` support is limited to
 feature-gated helper paths. Treat this as an early blocking-backed filesystem

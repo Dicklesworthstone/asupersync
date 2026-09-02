@@ -1846,6 +1846,85 @@ impl<P: Policy> Scope<'_, P> {
 
         first_ok_to_result(FirstOkResult::failure(failures, total))
     }
+
+    /// Runs `operation` as a task in this scope's region with a deadline and
+    /// **drains** it if the deadline expires.
+    ///
+    /// This is the drain-correct counterpart of
+    /// [`crate::time::timeout`], which drops the inner future when the clock
+    /// wins. Here the operation is spawned as a region task; when
+    /// `duration` elapses first (or the caller is cancelled) the task is
+    /// protocol-cancelled with [`CancelReason::timeout`] and then **joined**
+    /// before this method returns, so the operation's cleanup has run and the
+    /// region cannot observe an abandoned child. A branch that completes with
+    /// `Ok`/`Err`/`Panicked` while it is being drained still reports that
+    /// terminal outcome (see [`make_timed_result`](crate::combinator::timeout::make_timed_result)):
+    /// data produced after the deadline is surfaced rather than lost.
+    ///
+    /// The deadline is measured on the scope's clock (`cx.now()`), so lab
+    /// virtual time drives it deterministically.
+    ///
+    /// # Errors
+    ///
+    /// Returns the admission error if the operation cannot be spawned.
+    pub async fn timeout<T, E, F, Fut>(
+        &self,
+        cx: &Cx,
+        duration: std::time::Duration,
+        operation: F,
+    ) -> Result<crate::combinator::timeout::TimedResult<T, E>, SpawnError>
+    where
+        F: FnOnce(Cx) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<T, E>> + Send + 'static,
+        T: Send + 'static,
+        E: Send + 'static,
+    {
+        use crate::combinator::timeout::make_timed_result;
+
+        let mut sleep = std::pin::pin!(crate::time::sleep(cx.now(), duration));
+        let deadline = sleep.deadline();
+        let mut handle = cx.spawn_in_cancellation_dominant(self, operation)?;
+        let task = handle.task_id();
+        let race_id = self.record_loser_drain_start(cx, vec![task]);
+
+        // Phase 1: wait for the operation, the deadline, or caller cancellation.
+        let mut caller_cancelled = false;
+        let early = std::future::poll_fn(|poll_cx| {
+            if let Poll::Ready(joined) = handle.poll_join(poll_cx) {
+                return Poll::Ready(Some(branch_join_to_outcome(joined)));
+            }
+            if sleep.as_mut().poll(poll_cx).is_ready() {
+                return Poll::Ready(None);
+            }
+            if cx.checkpoint().is_err() {
+                caller_cancelled = true;
+                return Poll::Ready(None);
+            }
+            Poll::Pending
+        })
+        .await;
+
+        let (outcome, completed_in_time) = match early {
+            Some(outcome) => (outcome, true),
+            None => {
+                // Phase 2: the deadline (or the caller's cancellation) won.
+                // Protocol-cancel the task and join it to termination.
+                let reason = if caller_cancelled {
+                    cx.cancel_reason()
+                        .unwrap_or_else(|| CancelReason::user("timeout cancelled"))
+                } else {
+                    CancelReason::timeout()
+                };
+                if !handle.is_finished() {
+                    handle.abort_with_reason(reason);
+                }
+                (branch_join_to_outcome(handle.join(cx).await), false)
+            }
+        };
+        Self::record_loser_drain_task_complete(cx, task);
+        Self::record_loser_drain_complete(cx, race_id, task);
+        Ok(make_timed_result(outcome, deadline, completed_in_time))
+    }
 }
 
 #[cfg(test)]

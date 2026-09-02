@@ -1,15 +1,24 @@
 //! Timeout combinator: add a deadline to an operation.
 //!
-//! The timeout combinator races an operation against a deadline.
-//! If the deadline expires first, the operation is cancelled and drained.
+//! The timeout combinator races an operation against a deadline. This module
+//! holds the deadline value type and the outcome folders; the executing
+//! entry points are:
+//!
+//! - [`crate::cx::Scope::timeout`], which spawns the operation as a region
+//!   task and, when the deadline wins, protocol-cancels **and drains** it
+//!   before returning (a late terminal outcome is surfaced through
+//!   [`make_timed_result`], never lost);
+//! - [`crate::time::timeout`], the lightweight inline form, which **drops**
+//!   the inner future when the deadline wins and returns `Err(Elapsed)`.
 //!
 //! This is semantically equivalent to: `race(operation, sleep(duration))`
 //!
-//! # Critical Invariant: Timed-out Operations Are Drained
+//! # Draining Is a Property of the Entry Point
 //!
-//! Like race, timeout guarantees that timed-out operations are cancelled AND
-//! drained before returning. This ensures resources held by the operation
-//! are properly released.
+//! Only `Scope::timeout` guarantees that a timed-out operation is cancelled
+//! and drained before the call returns. `time::timeout` relies on `Drop` for
+//! cleanup, so an operation holding a runtime obligation must use the scope
+//! form (or be drained by its owner) to keep region close honest.
 //!
 //! # Algebraic Law: Timeout Composition
 //!
