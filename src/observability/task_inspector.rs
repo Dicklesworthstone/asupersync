@@ -110,7 +110,9 @@ impl<'a> RuntimeStateView<'a> {
     }
 
     /// Every region record (regions stay embedded in the unified state on
-    /// every shape).
+    /// every shape). Only the in-source diagnostics tests need the full
+    /// iterator today; production queries look regions up by id.
+    #[cfg(test)]
     pub(crate) fn regions(&self) -> impl Iterator<Item = &'a RegionRecord> + 'a {
         let state: &'a RuntimeState = self.state;
         state.regions.iter().map(|(_, record)| record)
