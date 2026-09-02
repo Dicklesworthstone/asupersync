@@ -8,10 +8,13 @@
 //! - an operation that finishes in time reports `Completed(Ok)`;
 //! - an operation that overruns is cancelled, its post-cancel cleanup has run
 //!   by the time `timeout` returns (a counter is checked immediately, not after
-//!   a sleep), and the result is `TimedOut`;
-//! - planted negative for the "no data loss" rule: an operation that observes
-//!   cancellation and still returns `Ok` during the drain is reported as
-//!   `Completed(Ok)`, not `TimedOut`;
+//!   a sleep), and because it acknowledged the cancellation its returned
+//!   `Err` is preserved as `Completed(Err)`;
+//! - the "no data loss" rule: an operation that observes cancellation and
+//!   still returns `Ok` during the drain is reported as `Completed(Ok)`;
+//! - planted negative: a cancellation-blind operation (never checkpoints,
+//!   returns a value after the abort) is reported as `TimedOut` and its late
+//!   value is discarded, per the v0.4.3 task-level cancellation rule;
 //! - the region reaches quiescence afterwards (the runtime shuts down within
 //!   its bound).
 //!
@@ -23,7 +26,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::Poll;
 use std::time::Duration;
 
-use asupersync::combinator::timeout::TimedResult;
+use asupersync::combinator::timeout::{TimedError, TimedResult};
 use asupersync::cx::Cx;
 use asupersync::runtime::RuntimeBuilder;
 
@@ -99,15 +102,40 @@ fn overrunning_operation_is_cancelled_and_drained_before_return() {
             .await
             .expect("spawn");
         let cleanup_seen = cleanup_runs.load(Ordering::SeqCst);
-        (result.is_timed_out(), cleanup_seen)
+        let acknowledged_err = match result {
+            TimedResult::Completed(outcome) => {
+                matches!(outcome.into_result(), Err(TimedError::Error(ref e)) if e == "cancelled")
+            }
+            TimedResult::TimedOut(_) => false,
+        };
+        (acknowledged_err, cleanup_seen)
     });
     assert!(
         timed_out,
-        "the 50 ms deadline must win against a parked task"
+        "the task acknowledged the deadline's cancellation and returned Err; that value must be preserved as Completed(Err)"
     );
     assert_eq!(
         cleanup_seen_at_return, 1,
         "the drained task's cleanup must have run before Scope::timeout returned"
+    );
+}
+
+#[test]
+fn cancellation_blind_operation_is_reported_as_timed_out_planted_negative() {
+    let result = run_on_production(|cx| async move {
+        cx.scope()
+            .timeout::<u32, String, _, _>(&cx, Duration::from_millis(50), |_task_cx| async move {
+                // Never checkpoints: it cannot acknowledge the cancellation,
+                // so its late value is cancellation-blind and is discarded.
+                std::thread::sleep(Duration::from_millis(200));
+                Ok(7)
+            })
+            .await
+            .expect("spawn")
+    });
+    assert!(
+        result.is_timed_out(),
+        "a cancellation-blind late value must be reported as TimedOut, got {result:?}"
     );
 }
 

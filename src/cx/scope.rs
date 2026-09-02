@@ -1856,10 +1856,18 @@ impl<P: Policy> Scope<'_, P> {
     /// `duration` elapses first (or the caller is cancelled) the task is
     /// protocol-cancelled with [`CancelReason::timeout`] and then **joined**
     /// before this method returns, so the operation's cleanup has run and the
-    /// region cannot observe an abandoned child. A branch that completes with
-    /// `Ok`/`Err`/`Panicked` while it is being drained still reports that
-    /// terminal outcome (see [`make_timed_result`](crate::combinator::timeout::make_timed_result)):
-    /// data produced after the deadline is surfaced rather than lost.
+    /// region cannot observe an abandoned child.
+    ///
+    /// The operation is spawned through the ordinary [`Cx::spawn_in`] path,
+    /// so the result classification follows the runtime's acknowledged-value
+    /// rule: an operation that observes the cancellation (a failed
+    /// `checkpoint`) and still returns `Ok`/`Err`/panics has that terminal
+    /// outcome preserved as `TimedResult::Completed` (see
+    /// [`make_timed_result`](crate::combinator::timeout::make_timed_result));
+    /// data produced after the deadline is surfaced rather than lost. Only an
+    /// operation that never acknowledged the cancellation (cancellation-blind,
+    /// or cancelled before its first poll) is reported as
+    /// `TimedResult::TimedOut`.
     ///
     /// The deadline is measured on the scope's clock (`cx.now()`), so lab
     /// virtual time drives it deterministically.
@@ -1883,7 +1891,7 @@ impl<P: Policy> Scope<'_, P> {
 
         let mut sleep = std::pin::pin!(crate::time::sleep(cx.now(), duration));
         let deadline = sleep.deadline();
-        let mut handle = cx.spawn_in_cancellation_dominant(self, operation)?;
+        let mut handle = cx.spawn_in(self, operation)?;
         let task = handle.task_id();
         let race_id = self.record_loser_drain_start(cx, vec![task]);
 

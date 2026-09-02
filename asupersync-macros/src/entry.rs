@@ -37,12 +37,18 @@ impl RuntimeFlavor {
     }
 }
 
+/// Default bound, in milliseconds, for draining the root region after the
+/// entry future returns. Tasks that outlive `main` are protocol-cancelled and
+/// given this long to run their cleanup before teardown drops the rest.
+const DEFAULT_DRAIN_MS: u64 = 2_000;
+
 #[derive(Debug, Default)]
 struct EntryArgs {
     flavor: Option<RuntimeFlavor>,
     workers: Option<usize>,
     poll_budget: Option<u32>,
     blocking: Option<usize>,
+    drain_ms: Option<u64>,
 }
 
 impl Parse for EntryArgs {
@@ -60,6 +66,11 @@ impl Parse for EntryArgs {
                     input.parse::<Token![=]>()?;
                     let value: LitInt = input.parse()?;
                     args.blocking = Some(value.base10_parse::<usize>()?);
+                }
+                "drain_ms" => {
+                    input.parse::<Token![=]>()?;
+                    let value: LitInt = input.parse()?;
+                    args.drain_ms = Some(value.base10_parse::<u64>()?);
                 }
                 "workers" => {
                     input.parse::<Token![=]>()?;
@@ -141,6 +152,19 @@ fn expand_entry(args: &EntryArgs, mut function: ItemFn, kind: EntryKind) -> Resu
         }
     });
     let test_attr = (kind == EntryKind::Test).then(|| quote!(#[test]));
+    // Root-region drain: tasks that outlive the entry future are
+    // protocol-cancelled and given `drain_ms` to finish cleanup before
+    // teardown. `drain_ms = 0` restores drop-at-teardown.
+    let drain_step = match args.drain_ms.unwrap_or(DEFAULT_DRAIN_MS) {
+        0 => None,
+        millis => {
+            let literal = Literal::u64_unsuffixed(millis);
+            Some(quote! {
+                let _ = __asupersync_entry_runtime
+                    .drain_root_region(::core::time::Duration::from_millis(#literal));
+            })
+        }
+    };
 
     Ok(quote! {
         #(#attrs)*
@@ -149,10 +173,12 @@ fn expand_entry(args: &EntryArgs, mut function: ItemFn, kind: EntryKind) -> Resu
             let __asupersync_entry_runtime = #builder
                 .build()
                 .expect("asupersync entry macro failed to build the runtime");
-            __asupersync_entry_runtime.block_on(async move {
+            let __asupersync_entry_output = __asupersync_entry_runtime.block_on(async move {
                 #cx_binding
                 #block
-            })
+            });
+            #drain_step
+            __asupersync_entry_output
         }
     })
 }
@@ -329,10 +355,11 @@ fn unsupported_entry_arg(key: &Ident) -> Error {
         "worker" | "worker_threads" => Some("workers"),
         "poll_budget" | "task_budget" => Some("budget"),
         "blocking_threads" | "max_blocking" | "blocking_pool" => Some("blocking"),
+        "drain" | "drain_timeout" | "drain_millis" | "shutdown_ms" => Some("drain_ms"),
         _ => None,
     };
     let mut message = format!(
-        "unsupported asupersync entry argument `{key_name}`; valid arguments are `flavor`, `workers`, `budget`, and `blocking`"
+        "unsupported asupersync entry argument `{key_name}`; valid arguments are `flavor`, `workers`, `budget`, `blocking`, and `drain_ms`"
     );
     if let Some(suggestion) = suggestion {
         message.push_str("; did you mean `");
@@ -435,10 +462,32 @@ mod tests {
 
         let err = syn::parse2::<EntryArgs>(quote!(blocking_threads = 4)).unwrap_err();
         let message = err.to_string();
-        assert!(
-            message.contains("valid arguments are `flavor`, `workers`, `budget`, and `blocking`")
-        );
+        assert!(message.contains(
+            "valid arguments are `flavor`, `workers`, `budget`, `blocking`, and `drain_ms`"
+        ));
         assert!(message.contains("did you mean `blocking`"));
+    }
+
+    #[test]
+    fn main_expansion_drains_the_root_region_by_default_and_drain_zero_skips_it() {
+        let input: ItemFn = syn::parse2(quote! {
+            async fn main() {}
+        })
+        .unwrap();
+        let tokens = expand_entry(&EntryArgs::default(), input.clone(), EntryKind::Main)
+            .unwrap()
+            .to_string();
+        assert!(tokens.contains("drain_root_region"));
+        assert!(tokens.contains("from_millis (2000)"));
+
+        let args = EntryArgs {
+            drain_ms: Some(0),
+            ..EntryArgs::default()
+        };
+        let tokens = expand_entry(&args, input, EntryKind::Main)
+            .unwrap()
+            .to_string();
+        assert!(!tokens.contains("drain_root_region"));
     }
 
     #[test]

@@ -3388,6 +3388,17 @@ fn scheduler_adaptive_ready_batch_profile(
     })
 }
 
+/// Result of [`Runtime::drain_root_region`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RootDrainOutcome {
+    /// Every root-region task reached a terminal state and no obligation is
+    /// pending; teardown will find nothing to abort.
+    Quiescent,
+    /// The bound elapsed with live work remaining; teardown proceeds with
+    /// abort-by-drop for whatever is still running.
+    TimedOut,
+}
+
 /// A configured Asupersync runtime.
 ///
 /// Created via [`RuntimeBuilder`]. The runtime owns worker threads and a
@@ -3839,6 +3850,85 @@ impl Runtime {
             })
     }
 
+    /// Requests cancellation of every task owned by the root region and waits
+    /// up to `bound` for the region to reach quiescence.
+    ///
+    /// Until this method existed, nothing closed the root region: `block_on`
+    /// returns as soon as its future completes and runtime teardown joins the
+    /// workers and drops state, so root-region tasks that outlived the entry
+    /// future were abort-by-dropped and their cleanup never ran. This is the
+    /// request -> drain -> finalize protocol applied to the root: every live
+    /// root-region task receives [`CancelKind::Shutdown`](crate::types::CancelKind::Shutdown),
+    /// is scheduled on the cancel lane, and is given until `bound` to reach a
+    /// terminal state. The entry macros call this after the entry future
+    /// returns (`drain_ms = N` to change the bound, `0` to skip).
+    ///
+    /// Returns [`RootDrainOutcome::Quiescent`] when no live task or pending
+    /// obligation remains, or [`RootDrainOutcome::TimedOut`] when the bound
+    /// elapsed first; in the latter case teardown proceeds with today's
+    /// abort-by-drop semantics for whatever is still running. Non-cooperative
+    /// work (no checkpoints) is not bounded by this call beyond the wait.
+    pub fn drain_root_region(&self, bound: Duration) -> RootDrainOutcome {
+        if self.is_quiescent() {
+            return RootDrainOutcome::Quiescent;
+        }
+        let reason = crate::types::CancelReason::new(crate::types::CancelKind::Shutdown);
+        let effects = {
+            let mut guard = self
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            guard.cancel_request(self.inner.root_region, &reason, None)
+        };
+        let (tasks_to_schedule, wakes) = effects.into_parts();
+        for (task_id, priority) in tasks_to_schedule {
+            self.inner.scheduler.inject_cancel(task_id, priority);
+        }
+        wakes.dispatch();
+
+        let started = Instant::now();
+        loop {
+            if self.is_quiescent() {
+                return RootDrainOutcome::Quiescent;
+            }
+            if started.elapsed() >= bound {
+                crate::tracing_compat::warn!(
+                    bound_ms = bound.as_millis() as u64,
+                    "root region drain timed out; remaining work is dropped at teardown"
+                );
+                return RootDrainOutcome::TimedOut;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    /// Snapshot of the runtime's bounded trace buffer.
+    ///
+    /// The production runtime records the same canonical event schema the
+    /// lab runtime does (`Spawn`, `Poll`, `Wake`, `Complete`, cancellation and
+    /// region-lifecycle events, timer events, `UserTrace`) into a ring buffer
+    /// sized by the [`RuntimeBuilder::trace_storage_profile`] (default 4096
+    /// events; the oldest are overwritten). This returns a copy of what the
+    /// buffer currently holds, in sequence order, so a production trace can
+    /// be saved and fed to the lab analysis tools
+    /// ([`crate::trace::normalize_trace_default`],
+    /// [`crate::trace::RaceDetector::from_trace`],
+    /// [`crate::trace::HappensBeforeGraph::from_trace`]) offline.
+    ///
+    /// The snapshot is a point-in-time copy; it does not stop recording and
+    /// it does not include events that the ring has already overwritten.
+    #[must_use]
+    pub fn trace_snapshot(&self) -> Vec<crate::trace::TraceEvent> {
+        let handle = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .trace_handle();
+        handle.snapshot()
+    }
+
     /// Build a [`TaskInspector`] bound to this runtime's live task state.
     ///
     /// Every inspector query locks the runtime state (and, on the sharded
@@ -4059,6 +4149,21 @@ impl RuntimeHandle {
             None,
             config,
         ))
+    }
+
+    /// Snapshot of the trace buffer of the runtime behind this handle.
+    ///
+    /// Returns `None` when this is a weak handle whose runtime has already
+    /// been torn down. See [`Runtime::trace_snapshot`].
+    #[must_use]
+    pub fn trace_snapshot(&self) -> Option<Vec<crate::trace::TraceEvent>> {
+        let inner = self.try_inner().ok()?;
+        let handle = inner
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .trace_handle();
+        Some(handle.snapshot())
     }
 
     /// Build a [`Diagnostics`] engine bound to the runtime behind this handle.
