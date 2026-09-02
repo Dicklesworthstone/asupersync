@@ -823,6 +823,20 @@ impl HttpClientBuilder {
         self
     }
 
+    /// Trusts an additional root certificate for HTTPS connections.
+    ///
+    /// Roots added here are used together with any roots selected by the
+    /// `tls-native-roots` / `tls-webpki-roots` features. Without a roots
+    /// feature this is the only way the client can verify a server, so a
+    /// plain-`tls` client with no installed root still fails every
+    /// `https://` request closed before sending a ClientHello.
+    #[cfg(feature = "tls")]
+    #[must_use]
+    pub fn add_root_certificate(mut self, certificate: crate::tls::Certificate) -> Self {
+        self.config.tls_root_certificates.push(certificate);
+        self
+    }
+
     /// Builds the [`HttpClient`].
     #[must_use]
     pub fn build(self) -> HttpClient {
@@ -860,6 +874,18 @@ pub struct HttpClientConfig {
     /// caller can extend past the caller's budget deadline. `None` (the
     /// default) imposes no client-side total timeout.
     pub request_timeout: Option<std::time::Duration>,
+    /// Additional root certificates trusted for HTTPS connections, on top of
+    /// the roots selected by the `tls-native-roots` / `tls-webpki-roots`
+    /// features.
+    ///
+    /// Empty by default. With plain `tls` and no entry here the client keeps
+    /// its fail-closed behaviour: every `https://` request is refused before a
+    /// ClientHello with "no root certificates configured". Installing a root
+    /// (typically a private CA or a self-signed test certificate) is the only
+    /// way to make the pooled client trust a server that public roots did not
+    /// issue.
+    #[cfg(feature = "tls")]
+    pub tls_root_certificates: Vec<crate::tls::Certificate>,
     /// Time source used for pool bookkeeping.
     time_getter: fn() -> Time,
 }
@@ -876,6 +902,8 @@ impl Default for HttpClientConfig {
             proxy_url: None,
             max_body_size: None,
             request_timeout: None,
+            #[cfg(feature = "tls")]
+            tls_root_certificates: Vec::new(),
             time_getter: wall_clock_now,
         }
     }
@@ -1997,6 +2025,16 @@ impl HttpClient {
 
         #[cfg(all(not(feature = "tls-native-roots"), feature = "tls-webpki-roots"))]
         let builder = builder.with_webpki_roots();
+
+        // Explicitly installed roots (private CAs, self-signed test servers)
+        // extend whatever the feature roots provided.
+        let builder = self
+            .config
+            .tls_root_certificates
+            .iter()
+            .fold(builder, |builder, certificate| {
+                builder.add_root_certificate(certificate)
+            });
 
         let connector = builder
             .build()
