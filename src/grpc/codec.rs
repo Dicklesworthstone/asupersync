@@ -603,6 +603,16 @@ impl<C: Codec> FramedCodec<C> {
         // Serialize the message
         let data = self.inner.encode(item).map_err(C::map_encode_error)?;
 
+        // The limit bounds the message, not its wire form: check the
+        // uncompressed bytes first so a highly compressible payload cannot
+        // slip a message larger than the limit past the check
+        // (br-asupersync-trmye2, `test_compression_bypass_vulnerability`).
+        // The compressed length is still checked below because the framing
+        // length prefix and the peer's frame limit apply to the frame.
+        if data.len() > self.max_encode_message_size() {
+            return Err(GrpcError::MessageTooLarge);
+        }
+
         let message = if self.use_compression {
             let compressor = self.compressor.ok_or_else(|| {
                 GrpcError::compression("compression requested but no frame compressor configured")

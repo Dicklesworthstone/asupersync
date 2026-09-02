@@ -753,7 +753,11 @@ mod tests {
             .create_obligation(ObligationKind::Ack, task_id, root, Some("new ack".into()))
             .expect("create obligation");
 
-        state.now = Time::from_secs(150); // Age the second obligation moderately
+        // Age the second obligation moderately: 80 s is over the 60 s
+        // threshold (a Warning leak) but under 2x the threshold (Critical),
+        // while the first, created at the 1 s initial clock, is ~199 s old.
+        // (At 150 s the second was only 30 s old and never counted as a leak.)
+        state.now = Time::from_secs(200);
 
         let tracker = ObligationTracker::new(Arc::new(state), None);
         let threshold = Duration::from_secs(60);
@@ -806,7 +810,9 @@ mod tests {
         assert_eq!(attribution.obligation_type, "IoOp");
         assert_eq!(attribution.holder_task, task_id);
         assert_eq!(attribution.holder_region, root);
-        assert_eq!(attribution.age, Duration::from_secs(90));
+        // `RuntimeState::new()` starts its clock at 1 s, so an obligation
+        // created immediately and observed at 90 s is 89 s old.
+        assert_eq!(attribution.age, Duration::from_secs(89));
         assert_eq!(attribution.description.as_deref(), Some("test io"));
     }
 

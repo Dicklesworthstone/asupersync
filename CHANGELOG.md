@@ -65,6 +65,52 @@ is `v0.4.9`.
 
 ## [Unreleased]
 
+### Feature-gated test truth: what `--all-features` was hiding (2026-09-02)
+
+The CI lib job had never completed (runner shutdowns), so nothing had run
+the lib suite with every feature on for months. Doing so on Linux and on a
+real macOS host found:
+
+- **gRPC: a large but compressible message could bypass the encode size
+  limit** (`FramedCodec::encode_message` checked the limit only on the
+  compressed bytes). The uncompressed length is now checked first; the
+  compressed length is still checked for the frame. `test_compression_bypass_vulnerability`
+  (br-asupersync-trmye2) is green.
+- **`fs::File` poll traits ran on a fallback thread outside a runtime** after
+  the blocking-pool offload (this release), which parked callers with no
+  executor. They now offload only when a blocking pool exists and otherwise
+  run inline, as before.
+- **CI test and coverage jobs run every feature except the legacy audit
+  harnesses.** `legacy-internal-test-harnesses` and
+  `serialization-golden-harnesses` (both also pulled in by
+  `ci-cross-platform`) gate crate-root golden/metamorphic/conformance modules
+  whose goldens were never committed; with them on, 93 tests fail on any OS.
+  `scripts/ci/release_test_features.sh` derives the list from `cargo metadata`.
+- **Lock-name policy under `lock-metrics`** now allows the test-only names
+  `external-tasks`, `reader_fanout`, `close_fanout` (7 runtime/sync tests
+  failed closed on them).
+- Test repairs where the code was right and the test was stale: MySQL/ATP
+  CLI content hash is bare hex, config-precedence CLI layer must not carry
+  the default profile, `RuntimeState::new()` starts its clock at 1 s
+  (obligation ages), `try_wait` polls instead of sleeping 50 ms, multipart
+  cancellation message carries the deadline context, TLS acceptor error
+  wording, 0-RTT requires an explicit replay-protection policy, and the
+  ambient-authority known-finding at `metadata.rs:2546` now names
+  `std::fs::metadata`.
+- Still red under the CI feature set, deliberately left open rather than
+  papered over (tracked on br-asupersync-gap-nonlinux-reactor-ci-gxv3dy):
+  the ambient-authority inventory snapshot no longer matches the code (new
+  `TcpStream`/`TcpListener` sites in grpc/client.rs and the h1/h2 listeners
+  need review, not a snapshot refresh), the pwsh/elvish completion snapshot
+  was never committed, `x509-parser` 0.18 accepts a malformed SPKI the
+  `der_min` differential expects rejected, the ALPN-required acceptor test,
+  and one streaming h1 body-limit test.
+- Genuine macOS differences (51 failures on macOS 26.2 with the same feature
+  set, 24 of which are the cross-platform items above) are listed on the
+  same bead: TCP option read-back, UDP re-`connect` needing `AF_UNSPEC`,
+  `/tmp` and `/var` symlink path validation, unix datagram `peer_cred`,
+  bonded-transport loopback binding, APFS sparse allocation.
+
 ### Real-server client fixes and CI proof lanes (2026-09-02)
 
 Running the existing real-server suites against real servers for the first

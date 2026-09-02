@@ -3852,9 +3852,20 @@ mod tests {
             panic!("cancelled multipart extraction must terminate");
         };
         assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(
-            error.message,
-            "[ASUP-E501] multipart request body unavailable"
+        // The message carries the cancellation context ("server request
+        // budget deadline exceeded: ...") in front of the fixed tail; pin the
+        // code token and the tail rather than the exact composition.
+        assert!(
+            error.message.starts_with("[ASUP-E501]"),
+            "message must lead with the error code: {}",
+            error.message
+        );
+        assert!(
+            error
+                .message
+                .ends_with("multipart request body unavailable"),
+            "message must name the unavailable body: {}",
+            error.message
         );
         drop(extraction);
         drop(control);

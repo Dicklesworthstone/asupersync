@@ -144,10 +144,10 @@ pub const KNOWN_FINDINGS: &[AmbientFinding] = &[
     AmbientFinding {
         file: "net/atp/transport_common/metadata.rs",
         line: 2546,
-        evidence_pattern: "std::fs::File::open",
+        evidence_pattern: "std::fs::metadata",
         category: AmbientCategory::Io,
         severity: Severity::Low,
-        description: "Blocking-pool file open for applying committed entry timestamps",
+        description: "Blocking-pool metadata read for applying committed entry timestamps",
         exempt: true,
         exemption_reason: Some("ATP metadata applier owns this filesystem provider boundary"),
     },

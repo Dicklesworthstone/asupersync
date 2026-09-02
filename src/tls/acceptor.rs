@@ -2170,6 +2170,15 @@ SrXuVI5uunTgPWuOtJOP+KM=
             CertificateChain::from_pem(TEST_CERT_PEM).unwrap(),
             PrivateKey::from_pem(TEST_KEY_PEM).unwrap(),
         )
+        // `enable_early_data_with_protection` only sets the byte cap; the
+        // replay-protection policy is a separate, explicit builder call.
+        // `build()` refuses 0-RTT with `None`, and also with
+        // `SafeMethodsOnly` because per-request replay enforcement is not
+        // wired into the server pipeline yet (it says so in its error). The
+        // only mode that builds today is the explicit testing mode, which is
+        // enough for this test's purpose: the byte cap must reach
+        // `ServerConfig::max_early_data_size`.
+        .with_early_data_replay_protection(EarlyDataReplayProtection::UnprotectedForTesting)
         .enable_early_data_with_protection(16384)
         .build()
         .expect("build with early data enabled");
@@ -2207,7 +2216,7 @@ SrXuVI5uunTgPWuOtJOP+KM=
             .expect_err("empty cert chain must be rejected");
         match err {
             TlsError::Configuration(msg) => assert!(
-                msg.contains("empty certificate chain"),
+                msg.contains("certificate chain is empty"),
                 "unexpected error message: {msg}"
             ),
             other => panic!("expected Configuration error, got {other:?}"),
@@ -2268,7 +2277,7 @@ SrXuVI5uunTgPWuOtJOP+KM=
             .expect_err("allow-list with non-advertised protocol must be rejected");
         match err {
             TlsError::Configuration(msg) => assert!(
-                msg.contains("not in alpn_protocols"),
+                msg.contains("not advertised in alpn_protocols"),
                 "unexpected error message: {msg}"
             ),
             other => panic!("expected Configuration error, got {other:?}"),

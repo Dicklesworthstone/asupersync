@@ -917,9 +917,14 @@ daemon_socket = "./run/../atp.sock"
             .insert(ConfigSource::LocalConfig, local_config);
 
         // Set CLI flags
+        // `AtpConfig::default()` carries `profile: Some(AtpProfile::Auto)`, so
+        // a layer built from `..Default::default()` would override the local
+        // profile with Auto. A CLI layer that did not name a profile leaves
+        // it unset.
         let cli_config = AtpConfig {
             timeout: Some(120),
             compression: Some(true),
+            profile: None,
             ..Default::default()
         };
         manager.layers.insert(ConfigSource::CliFlags, cli_config);

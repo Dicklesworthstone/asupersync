@@ -561,7 +561,12 @@ fn allowed_unranked_reason(name: &str) -> Option<&'static str> {
         "transfer_actor" | "atp_transfer_actor" => Some(LOCK_ORDER_REASON_ATP_TRANSFER_ACTOR),
         "epoch_gc.last_advance" => Some(LOCK_ORDER_REASON_EPOCH_GC_RATE_LIMITER),
         "service_adapter" => Some(LOCK_ORDER_REASON_SERVICE_ADAPTER),
-        "test_abandon_read" | "test_abandon_write" => Some(LOCK_ORDER_REASON_TEST_HELPER),
+        // Test-only lock names created by in-crate unit tests. Under
+        // `lock-metrics` the constructor fails closed on undocumented names,
+        // which turned these tests red on every OS once CI ran the lib suite
+        // with that feature (2026-09-02).
+        "test_abandon_read" | "test_abandon_write" | "external-tasks" | "reader_fanout"
+        | "close_fanout" => Some(LOCK_ORDER_REASON_TEST_HELPER),
         _ => None,
     }
 }

@@ -506,10 +506,21 @@ impl File {
     {
         let inner = Arc::clone(&self.inner);
         let cursor_gate = Arc::clone(&self.cursor_gate);
-        Box::pin(spawn_blocking_io(move || {
+        let run = move || {
             let _cursor_guard = cursor_gate.lock();
             op(&inner)
-        }))
+        };
+        // Offload only when a runtime blocking pool exists. Outside a runtime,
+        // or inside one built without a pool, run the syscall inline and
+        // resolve immediately: that is the previous (phase-0 sync) behaviour
+        // the owned cursor methods and `fs::file_concurrent_test` rely on, and
+        // it avoids parking a caller that has no executor to wake it.
+        match crate::cx::Cx::current().and_then(|cx| cx.blocking_pool_handle()) {
+            Some(pool) => Box::pin(crate::runtime::spawn_blocking::spawn_blocking_on_pool(
+                pool, run,
+            )),
+            None => Box::pin(std::future::ready(run())),
+        }
     }
 
     /// Drives an outstanding operation that belongs to a *different* trait

@@ -4211,11 +4211,14 @@ mod tests {
         // Start a quick command
         let mut child = Command::new("true").spawn().expect("spawn failed");
 
-        // Give it time to complete
-        std::thread::sleep(std::time::Duration::from_millis(50));
-
-        // Should be done by now
-        let status = child.try_wait().expect("try_wait failed");
+        // Poll until the child has exited. A fixed 50 ms sleep was not enough
+        // on a loaded 16-slot CI worker; the bound below only limits a hang.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut status = child.try_wait().expect("try_wait failed");
+        while status.is_none() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            status = child.try_wait().expect("try_wait failed");
+        }
         crate::assert_with_log!(status.is_some(), "completed", true, status.is_some());
         crate::test_complete!("test_command_try_wait");
     }
