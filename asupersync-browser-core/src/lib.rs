@@ -174,9 +174,13 @@ fn dispatcher_handle_is_live(handle: &WasmHandleRef) -> bool {
 #[cfg(target_arch = "wasm32")]
 fn cleanup_released_fetches() {
     INFLIGHT_FETCHES.with(|inflight| {
-        inflight
-            .borrow_mut()
-            .retain(|handle, _| dispatcher_handle_is_live(handle));
+        inflight.borrow_mut().retain(|handle, controller| {
+            let keep = dispatcher_handle_is_live(handle);
+            if !keep {
+                controller.abort();
+            }
+            keep
+        });
     });
 }
 
