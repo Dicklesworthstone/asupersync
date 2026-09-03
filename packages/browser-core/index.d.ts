@@ -13,7 +13,7 @@ export interface AbiVersion {
 
 export interface AbiMetadata {
   readonly abi_version: Readonly<AbiVersion>;
-  readonly abi_signature_fingerprint_v1: number;
+  readonly abi_signature_fingerprint_v1: string;
   readonly profile: string;
 }
 
@@ -50,6 +50,7 @@ export interface HandleRef {
   kind: HandleKind;
   slot: number;
   generation: number;
+  owner_token?: bigint | string | number;
 }
 
 export type RuntimeHandleRef = HandleRef & { kind: "runtime" };
@@ -69,7 +70,7 @@ export interface AbiCancellation {
   phase: CancellationPhase;
   origin_region: string;
   origin_task: string | null;
-  timestamp_nanos: number;
+  timestamp_nanos: number | bigint;
   message: string | null;
   truncated: boolean;
 }
@@ -93,6 +94,7 @@ export type WasmValue =
   | undefined
   | boolean
   | number
+  | bigint
   | string
   | Uint8Array
   | HandleLike;
@@ -353,7 +355,7 @@ export declare function webtransport_cancel(
   consumerVersion?: AbiVersion | null,
 ): Outcome<void>;
 export declare function abi_version(): AbiVersion;
-export declare function abi_fingerprint(): number;
+export declare function abi_fingerprint(): string;
 
 export declare const runtimeCreate: typeof runtime_create;
 export declare const runtimeClose: typeof runtime_close;
@@ -397,5 +399,5 @@ export declare const rawBindings: Readonly<{
   websocket_close(requestJson: string, consumerVersionJson?: string): string;
   websocket_cancel(requestJson: string, consumerVersionJson?: string): string;
   abi_version(): string;
-  abi_fingerprint(): number;
+  abi_fingerprint(): bigint;
 }>;

@@ -367,7 +367,7 @@ log_event() {
         --arg error_code "${error_code}" \
         --argjson abi_major "${ABI_MAJOR}" \
         --argjson abi_minor "${ABI_MINOR}" \
-        --argjson abi_fingerprint "${ABI_FINGERPRINT}" \
+        --arg abi_fingerprint "${ABI_FINGERPRINT}" \
         --argjson wasm_size_bytes "${WASM_SIZE_BYTES}" \
         --argjson evidence_ids "${EVIDENCE_IDS}" \
         --argjson duration_ms "${duration_ms}" \
@@ -652,7 +652,7 @@ jq -n \
     --arg perf_summary_file "${PERF_SUMMARY_FILE}" \
     --argjson abi_major "${ABI_MAJOR}" \
     --argjson abi_minor "${ABI_MINOR}" \
-    --argjson abi_fingerprint "${ABI_FINGERPRINT}" \
+    --arg abi_fingerprint "${ABI_FINGERPRINT}" \
     --argjson wasm_size_bytes "${WASM_SIZE_BYTES}" \
     --argjson duration_ms "${TOTAL_DURATION_MS}" \
     --argjson log_line_count "${LOG_LINE_COUNT}" \

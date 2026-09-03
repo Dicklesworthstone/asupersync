@@ -113,7 +113,7 @@ cat > "${STAGING_DIR}/abi-metadata.json" <<EOF
     "major": ${major},
     "minor": ${minor}
   },
-  "abi_signature_fingerprint_v1": ${fingerprint},
+  "abi_signature_fingerprint_v1": "${fingerprint}",
   "profile": "${PROFILE}"
 }
 EOF
@@ -136,7 +136,7 @@ cat > "${STAGING_DIR}/debug-metadata.json" <<EOF
     "major": ${major},
     "minor": ${minor}
   },
-  "abi_signature_fingerprint_v1": ${fingerprint},
+  "abi_signature_fingerprint_v1": "${fingerprint}",
   "symbols": [
     "runtime_create",
     "runtime_close",

@@ -5,7 +5,7 @@
     "major": 1,
     "minor": 0
   },
-  "abi_signature_fingerprint_v1": 4558451663113424898,
+  "abi_signature_fingerprint_v1": "4558451663113424898",
   "symbols": [
     "runtime_create",
     "runtime_close",

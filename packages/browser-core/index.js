@@ -24,6 +24,14 @@ const HANDLE_KINDS = new Set([
   "fetch_request",
 ]);
 
+const HANDLE_OWNER_TOKEN = Symbol("asupersync.handleOwnerToken");
+const MIN_I64 = -(1n << 63n);
+const MAX_I64 = (1n << 63n) - 1n;
+const MAX_U64 = (1n << 64n) - 1n;
+const MAX_U32 = 0xffff_ffff;
+const MIN_SAFE_INTEGER_BIGINT = BigInt(Number.MIN_SAFE_INTEGER);
+const MAX_SAFE_INTEGER_BIGINT = BigInt(Number.MAX_SAFE_INTEGER);
+
 const REGION_PARENTS = new Map();
 const INFLIGHT_WEBTRANSPORTS = new Map();
 const WEBTRANSPORT_TASK_LABEL = "browser-webtransport";
@@ -66,7 +74,7 @@ export const abiMetadata = Object.freeze({
     major: 1,
     minor: 0,
   }),
-  abi_signature_fingerprint_v1: 4558451663113424898,
+  abi_signature_fingerprint_v1: "4558451663113424898",
   profile: "prod",
 });
 
@@ -227,9 +235,138 @@ function isRawHandle(value) {
     typeof value === "object" &&
     typeof value.kind === "string" &&
     HANDLE_KINDS.has(value.kind) &&
-    Number.isInteger(value.slot) &&
-    Number.isInteger(value.generation)
+    Number.isSafeInteger(value.slot) &&
+    value.slot >= 0 &&
+    value.slot <= MAX_U32 &&
+    Number.isSafeInteger(value.generation) &&
+    value.generation >= 0 &&
+    value.generation <= MAX_U32
   );
+}
+
+function normalizeOwnerToken(value, label) {
+  if (value === null || value === undefined) {
+    return null;
+  }
+
+  let token;
+  if (typeof value === "bigint") {
+    token = value;
+  } else if (typeof value === "string" && /^[0-9]{1,20}$/.test(value)) {
+    token = BigInt(value);
+  } else if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) {
+    token = BigInt(value);
+  } else {
+    throw new TypeError(
+      label + " must be a non-negative bigint, decimal string, or safe integer",
+    );
+  }
+
+  if (token < 0n || token > MAX_U64) {
+    throw new RangeError(label + " must fit in an unsigned 64-bit integer");
+  }
+  return token.toString();
+}
+
+function ownerTokenOf(handle, label) {
+  if (handle instanceof BaseHandle) {
+    return handle[HANDLE_OWNER_TOKEN];
+  }
+  return normalizeOwnerToken(handle?.owner_token, label + ".owner_token");
+}
+
+function handleJson(handle, label, expectedKind) {
+  const normalized = normHandle(handle, label, expectedKind);
+  const ownerToken = ownerTokenOf(handle, label);
+  const base = JSON.stringify(normalized);
+  return ownerToken === null
+    ? base
+    : base.slice(0, -1) + ',"owner_token":' + ownerToken + "}";
+}
+
+function requestJsonWithHandle(key, handle, label, expectedKind, fields = {}) {
+  const tail = JSON.stringify(fields);
+  return (
+    '{"' +
+    key +
+    '":' +
+    handleJson(handle, label, expectedKind) +
+    (tail === "{}" ? "}" : "," + tail.slice(1))
+  );
+}
+
+function exactOwnerTokenFromJson(raw) {
+  const match = /"owner_token"\s*:\s*([0-9]+)/.exec(raw);
+  return match ? match[1] : null;
+}
+
+function parseHandleJson(raw, label) {
+  const handle = parseJson(raw, label);
+  const ownerToken = exactOwnerTokenFromJson(raw);
+  if (ownerToken !== null) {
+    handle.owner_token = ownerToken;
+  }
+  return handle;
+}
+
+function exactAbiIntegerFromJson(raw) {
+  const match = /"kind"\s*:\s*"(i64|u64)"\s*,\s*"value"\s*:\s*(-?[0-9]+)/.exec(raw);
+  return match ? { kind: match[1], value: match[2] } : null;
+}
+
+function exactCancellationTimestampFromJson(raw) {
+  const match = /"timestamp_nanos"\s*:\s*([0-9]+)/.exec(raw);
+  return match ? match[1] : null;
+}
+
+function normalizeAbiInteger(value, label) {
+  let integer;
+  if (typeof value === "bigint") {
+    integer = value;
+  } else if (typeof value === "number" && Number.isSafeInteger(value)) {
+    integer = BigInt(value);
+  } else {
+    throw new TypeError(`${label} must be a bigint or safe integer`);
+  }
+  if (integer < MIN_I64 || integer > MAX_U64) {
+    throw new RangeError(`${label} must fit in a signed or unsigned 64-bit integer`);
+  }
+  return {
+    kind: integer < 0 ? "i64" : "u64",
+    value: integer,
+  };
+}
+
+function normalizeUnsignedAbiInteger(value, label) {
+  const normalized = normalizeAbiInteger(value, label);
+  if (normalized.value < 0n) {
+    throw new RangeError(`${label} must fit in an unsigned 64-bit integer`);
+  }
+  return normalized.value;
+}
+
+function reviveAbiInteger(rawValue) {
+  let integer;
+  if (typeof rawValue.value === "bigint") {
+    integer = rawValue.value;
+  } else if (typeof rawValue.value === "string" && /^-?[0-9]+$/.test(rawValue.value)) {
+    integer = BigInt(rawValue.value);
+  } else if (typeof rawValue.value === "number" && Number.isSafeInteger(rawValue.value)) {
+    integer = BigInt(rawValue.value);
+  } else {
+    throw new TypeError(`Outcome ${rawValue.kind} value must be an exact integer`);
+  }
+
+  const inRange = rawValue.kind === "i64"
+    ? integer >= MIN_I64 && integer <= MAX_I64
+    : integer >= 0n && integer <= MAX_U64;
+  if (!inRange) {
+    throw new RangeError(`Outcome ${rawValue.kind} value is outside its 64-bit range`);
+  }
+  if (integer >= MIN_SAFE_INTEGER_BIGINT && integer <= MAX_SAFE_INTEGER_BIGINT) {
+    return Number(integer);
+  }
+  return integer;
 }
 
 function normHandle(handle, label, expectedKind) {
@@ -251,22 +388,24 @@ function wrapHandle(rawHandle) {
   const handle = normHandle(rawHandle, "value");
   switch (handle.kind) {
     case "runtime":
-      return new RuntimeHandle(handle);
+      return new RuntimeHandle(rawHandle);
     case "region":
-      return new RegionHandle(handle);
+      return new RegionHandle(rawHandle);
     case "task":
-      return new TaskHandle(handle);
+      return new TaskHandle(rawHandle);
     case "cancel_token":
-      return new CancellationToken(handle);
+      return new CancellationToken(rawHandle);
     case "fetch_request":
-      return new FetchHandle(handle);
+      return new FetchHandle(rawHandle);
     default:
       throw new TypeError(`Unsupported handle kind ${handle.kind}`);
   }
 }
 
 function parseHandleResult(rawHandle, label, expectedKind) {
-  return wrapHandle(normHandle(parseJson(rawHandle, label), label, expectedKind));
+  const handle = parseHandleJson(rawHandle, label);
+  normHandle(handle, label, expectedKind);
+  return wrapHandle(handle);
 }
 
 function reviveValue(rawValue) {
@@ -277,8 +416,13 @@ function reviveValue(rawValue) {
     case "unit":
       return undefined;
     case "bool":
+      if (typeof rawValue.value !== "boolean") {
+        throw new TypeError("Outcome bool value must be a boolean");
+      }
+      return rawValue.value;
     case "i64":
     case "u64":
+      return reviveAbiInteger(rawValue);
     case "string":
       return rawValue.value;
     case "bytes":
@@ -297,11 +441,8 @@ function encodeValue(value, label) {
   if (typeof value === "boolean") {
     return { kind: "bool", value };
   }
-  if (typeof value === "number") {
-    if (!Number.isFinite(value) || !Number.isInteger(value)) {
-      throw new TypeError(`${label} must be a finite integer`);
-    }
-    return value >= 0 ? { kind: "u64", value } : { kind: "i64", value };
+  if (typeof value === "number" || typeof value === "bigint") {
+    return normalizeAbiInteger(value, label);
   }
   if (typeof value === "string") {
     return { kind: "string", value };
@@ -329,10 +470,33 @@ function reviveOutcomeEnvelope(rawOutcome, label) {
     throw new TypeError(`${label} must decode to a tagged outcome envelope`);
   }
   if (outcome.outcome === "ok") {
+    const exactInteger = exactAbiIntegerFromJson(rawOutcome);
+    if (exactInteger && outcome.value?.kind === exactInteger.kind) {
+      outcome.value.value = exactInteger.value;
+    }
+    if (outcome.value?.kind === "handle" && outcome.value.value) {
+      const ownerToken = exactOwnerTokenFromJson(rawOutcome);
+      if (ownerToken !== null) {
+        outcome.value.value.owner_token = ownerToken;
+      }
+    }
     return {
       outcome: "ok",
       value: reviveValue(outcome.value),
     };
+  }
+  if (outcome.outcome === "cancelled") {
+    if (!outcome.cancellation || typeof outcome.cancellation !== "object") {
+      throw new TypeError(`${label} cancelled outcome must include cancellation details`);
+    }
+    const exactTimestamp = exactCancellationTimestampFromJson(rawOutcome);
+    if (exactTimestamp !== null) {
+      outcome.cancellation.timestamp_nanos = exactTimestamp;
+    }
+    outcome.cancellation.timestamp_nanos = reviveAbiInteger({
+      kind: "u64",
+      value: outcome.cancellation.timestamp_nanos,
+    });
   }
   return outcome;
 }
@@ -348,6 +512,47 @@ function encodeOutcomeEnvelope(outcome, label) {
     };
   }
   return outcome;
+}
+
+function encodeValueJson(value, label) {
+  if (value instanceof BaseHandle || isRawHandle(value)) {
+    return (
+      '{"kind":"handle","value":' +
+      handleJson(value, label) +
+      "}"
+    );
+  }
+  const encoded = encodeValue(value, label);
+  if (encoded.kind === "i64" || encoded.kind === "u64") {
+    return `{"kind":"${encoded.kind}","value":${encoded.value.toString()}}`;
+  }
+  return JSON.stringify(encoded);
+}
+
+function encodeOutcomeEnvelopeJson(outcome, label) {
+  const encoded = encodeOutcomeEnvelope(outcome, label);
+  if (outcome.outcome === "ok") {
+    return (
+      '{"outcome":"ok","value":' +
+      encodeValueJson(outcome.value, label + ".value") +
+      "}"
+    );
+  }
+  if (outcome.outcome === "cancelled") {
+    if (!outcome.cancellation || typeof outcome.cancellation !== "object") {
+      throw new TypeError(`${label} cancelled outcome must include cancellation details`);
+    }
+    const timestamp = normalizeUnsignedAbiInteger(
+      outcome.cancellation.timestamp_nanos,
+      `${label}.cancellation.timestamp_nanos`,
+    );
+    const cancellationJson = JSON.stringify({
+      ...outcome.cancellation,
+      timestamp_nanos: 0,
+    }).replace('"timestamp_nanos":0', `"timestamp_nanos":${timestamp.toString()}`);
+    return `{"outcome":"cancelled","cancellation":${cancellationJson}}`;
+  }
+  return JSON.stringify(encoded);
 }
 
 function invokeHandleOperation(label, expectedKind, fn) {
@@ -408,6 +613,12 @@ function cancelOut(kind, phase, message, originTask = null) {
 
 function keyOf(handle, label = "handle", expectedKind = undefined) {
   const normalized = normHandle(handle, label, expectedKind);
+  const ownerToken = ownerTokenOf(handle, label) ?? "legacy";
+  return `${normalized.kind}:${normalized.slot}:${normalized.generation}:${ownerToken}`;
+}
+
+function displayKeyOf(handle, label = "handle", expectedKind = undefined) {
+  const normalized = normHandle(handle, label, expectedKind);
   return `${normalized.kind}:${normalized.slot}:${normalized.generation}`;
 }
 
@@ -436,9 +647,7 @@ function collectOwnedRegionKeys(rootKey) {
 function deleteOwnedRegionKeys(rootKey) {
   const owned = collectOwnedRegionKeys(rootKey);
   for (const regionKey of owned) {
-    if (regionKey !== rootKey) {
-      REGION_PARENTS.delete(regionKey);
-    }
+    REGION_PARENTS.delete(regionKey);
   }
   return owned;
 }
@@ -753,15 +962,22 @@ export class BaseHandle {
     this.kind = handle.kind;
     this.slot = handle.slot;
     this.generation = handle.generation;
+    Object.defineProperty(this, HANDLE_OWNER_TOKEN, {
+      value: ownerTokenOf(rawHandle, "handle"),
+    });
     Object.freeze(this);
   }
 
   toJSON() {
-    return {
+    const handle = {
       kind: this.kind,
       slot: this.slot,
       generation: this.generation,
     };
+    const ownerToken = this[HANDLE_OWNER_TOKEN];
+    return ownerToken === null
+      ? handle
+      : { ...handle, owner_token: ownerToken };
   }
 }
 
@@ -856,7 +1072,7 @@ export function runtime_create(options = {}, consumerVersion = null) {
 export function runtime_close(runtimeHandle, consumerVersion = null) {
   const outcome = invokeOutcomeOperation("runtime_close", () =>
     rawRuntimeClose(
-      JSON.stringify(normHandle(runtimeHandle, "runtimeHandle", "runtime")),
+      handleJson(runtimeHandle, "runtimeHandle", "runtime"),
       vjson(consumerVersion),
     ),
   );
@@ -869,8 +1085,7 @@ export function runtime_close(runtimeHandle, consumerVersion = null) {
 export function scope_enter(request, consumerVersion = null) {
   const outcome = invokeHandleOperation("scope_enter", "region", () =>
     rawScopeEnter(
-      JSON.stringify({
-        parent: normHandle(request.parent, "request.parent"),
+      requestJsonWithHandle("parent", request.parent, "request.parent", undefined, {
         label: request.label ?? undefined,
       }),
       vjson(consumerVersion),
@@ -885,7 +1100,7 @@ export function scope_enter(request, consumerVersion = null) {
 export function scope_close(regionHandle, consumerVersion = null) {
   const outcome = invokeOutcomeOperation("scope_close", () =>
     rawScopeClose(
-      JSON.stringify(normHandle(regionHandle, "regionHandle", "region")),
+      handleJson(regionHandle, "regionHandle", "region"),
       vjson(consumerVersion),
     ),
   );
@@ -898,8 +1113,7 @@ export function scope_close(regionHandle, consumerVersion = null) {
 export function task_spawn(request, consumerVersion = null) {
   return invokeHandleOperation("task_spawn", "task", () =>
     rawTaskSpawn(
-      JSON.stringify({
-        scope: normHandle(request.scope, "request.scope", "region"),
+      requestJsonWithHandle("scope", request.scope, "request.scope", "region", {
         label: request.label ?? undefined,
         cancel_kind: request.cancel_kind ?? undefined,
       }),
@@ -911,8 +1125,8 @@ export function task_spawn(request, consumerVersion = null) {
 export function task_join(taskHandle, outcome, consumerVersion = null) {
   return invokeOutcomeOperation("task_join", () =>
     rawTaskJoin(
-      JSON.stringify(normHandle(taskHandle, "taskHandle", "task")),
-      JSON.stringify(encodeOutcomeEnvelope(outcome, "outcome")),
+      handleJson(taskHandle, "taskHandle", "task"),
+      encodeOutcomeEnvelopeJson(outcome, "outcome"),
       vjson(consumerVersion),
     ),
   );
@@ -921,8 +1135,7 @@ export function task_join(taskHandle, outcome, consumerVersion = null) {
 export function task_cancel(request, consumerVersion = null) {
   return invokeOutcomeOperation("task_cancel", () =>
     rawTaskCancel(
-      JSON.stringify({
-        task: normHandle(request.task, "request.task", "task"),
+      requestJsonWithHandle("task", request.task, "request.task", "task", {
         kind: request.kind,
         message: request.message ?? undefined,
       }),
@@ -938,8 +1151,7 @@ export function fetch_request(request, consumerVersion = null) {
   }
   return invokeOutcomeOperation("fetch_request", () =>
     rawFetchRequest(
-      JSON.stringify({
-        scope: normHandle(request.scope, "request.scope", "region"),
+      requestJsonWithHandle("scope", request.scope, "request.scope", "region", {
         url: request.url,
         method: request.method,
         credentials,
@@ -956,8 +1168,7 @@ export function fetch_request(request, consumerVersion = null) {
 export function websocket_open(request, consumerVersion = null) {
   return invokeOutcomeOperation("websocket_open", () =>
     rawWebSocketOpen(
-      JSON.stringify({
-        scope: normHandle(request.scope, "request.scope", "region"),
+      requestJsonWithHandle("scope", request.scope, "request.scope", "region", {
         url: request.url,
         protocols: request.protocols ?? undefined,
       }),
@@ -969,10 +1180,11 @@ export function websocket_open(request, consumerVersion = null) {
 export function websocket_send(request, consumerVersion = null) {
   return invokeOutcomeOperation("websocket_send", () =>
     rawWebSocketSend(
-      JSON.stringify({
-        socket: normHandle(request.socket, "request.socket", "task"),
-        value: encodeValue(request.value, "request.value"),
-      }),
+      '{"socket":' +
+        handleJson(request.socket, "request.socket", "task") +
+        ',"value":' +
+        encodeValueJson(request.value, "request.value") +
+        "}",
       vjson(consumerVersion),
     ),
   );
@@ -981,9 +1193,7 @@ export function websocket_send(request, consumerVersion = null) {
 export function websocket_recv(request, consumerVersion = null) {
   return invokeOutcomeOperation("websocket_recv", () =>
     rawWebSocketRecv(
-      JSON.stringify({
-        socket: normHandle(request.socket, "request.socket", "task"),
-      }),
+      requestJsonWithHandle("socket", request.socket, "request.socket", "task"),
       vjson(consumerVersion),
     ),
   );
@@ -992,8 +1202,7 @@ export function websocket_recv(request, consumerVersion = null) {
 export function websocket_close(request, consumerVersion = null) {
   return invokeOutcomeOperation("websocket_close", () =>
     rawWebSocketClose(
-      JSON.stringify({
-        socket: normHandle(request.socket, "request.socket", "task"),
+      requestJsonWithHandle("socket", request.socket, "request.socket", "task", {
         reason: request.reason ?? undefined,
       }),
       vjson(consumerVersion),
@@ -1004,8 +1213,7 @@ export function websocket_close(request, consumerVersion = null) {
 export function websocket_cancel(request, consumerVersion = null) {
   return invokeOutcomeOperation("websocket_cancel", () =>
     rawWebSocketCancel(
-      JSON.stringify({
-        socket: normHandle(request.socket, "request.socket", "task"),
+      requestJsonWithHandle("socket", request.socket, "request.socket", "task", {
         kind: request.kind,
         message: request.message ?? undefined,
       }),
@@ -1041,14 +1249,16 @@ export function webtransport_open(request, consumerVersion = null) {
     return spawned;
   }
   const session = spawned.value;
-  const sessionOrigin = keyOf(session, "session", "task");
+  const sessionKey = keyOf(session, "session", "task");
+  const sessionOrigin = displayKeyOf(session, "session", "task");
   try {
     const transport = new WebTransportConstructor(normalizedUrl, request.options ?? undefined);
     const state = {
       consumerVersion,
       taskHandle: session,
       transport,
-      sessionKey: sessionOrigin,
+      sessionKey,
+      sessionOrigin,
       scopeKey: keyOf(request.scope, "request.scope", "region"),
       inbox: [],
       pendingWrites: [],
@@ -1060,7 +1270,7 @@ export function webtransport_open(request, consumerVersion = null) {
       writer: null,
       flushPromise: null,
     };
-    INFLIGHT_WEBTRANSPORTS.set(sessionOrigin, state);
+    INFLIGHT_WEBTRANSPORTS.set(sessionKey, state);
     void initializeWebTransportState(state, sessionOrigin);
     return Outcome.ok(session);
   } catch (error) {
@@ -1110,7 +1320,7 @@ export function webtransport_send(request, _consumerVersion = null) {
       `webtransport_send rejected: ${errorMessage(error)}`,
     );
   }
-  flushPendingWebTransportWrites(state, keyOf(request.session, "request.session", "task"));
+  flushPendingWebTransportWrites(state, state.sessionOrigin);
   return Outcome.ok(undefined);
 }
 
@@ -1165,7 +1375,7 @@ export function webtransport_close(request, consumerVersion = null) {
     WEBTRANSPORT_CLOSE_KIND,
     "completed",
     request.reason ?? "webtransport session closed by caller",
-    taken.sessionKey,
+    taken.state.sessionOrigin,
   );
   return task_join(request.session, outcome, consumerVersion);
 }
@@ -1202,7 +1412,7 @@ export function webtransport_cancel(request, consumerVersion = null) {
       request.kind,
       "cancelling",
       request.message ?? null,
-      taken.sessionKey,
+      taken.state?.sessionOrigin ?? displayKeyOf(request.session, "request.session", "task"),
     ),
     consumerVersion,
   );
@@ -1213,7 +1423,7 @@ export function abi_version() {
 }
 
 export function abi_fingerprint() {
-  return rawAbiFingerprint();
+  return rawAbiFingerprint().toString();
 }
 
 export const runtimeCreate = runtime_create;

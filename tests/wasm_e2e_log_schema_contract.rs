@@ -89,6 +89,24 @@ fn log_entry_has_optional_fields() {
 }
 
 #[test]
+fn abi_fingerprint_is_an_exact_decimal_string() {
+    let schema = load_schema();
+    let optional = schema["log_entry"]["optional_fields"]
+        .as_array()
+        .expect("optional_fields must be array");
+    let fingerprint = optional
+        .iter()
+        .find(|field| field["name"] == "abi_fingerprint")
+        .expect("abi_fingerprint field must exist");
+
+    assert_eq!(
+        fingerprint["type"].as_str(),
+        Some("string"),
+        "ABI fingerprints must remain decimal strings so full u64 values stay exact in JSON"
+    );
+}
+
+#[test]
 fn log_entry_ts_field_is_iso8601() {
     let schema = load_schema();
     let required = schema["log_entry"]["required_fields"].as_array().unwrap();

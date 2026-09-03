@@ -35,7 +35,7 @@ Every E2E log entry is a single JSON line (JSONL) with these fields:
 | Field | Type | Description |
 |-------|------|-------------|
 | `abi_version` | object | `{ "major": u32, "minor": u32 }` |
-| `abi_fingerprint` | u64 | `WASM_ABI_SIGNATURE_FINGERPRINT_V1` value |
+| `abi_fingerprint` | string (decimal u64) | Exact `WASM_ABI_SIGNATURE_FINGERPRINT_V1` value without JSON number rounding |
 | `browser` | object | `{ "name": string, "version": string, "os": string }` |
 | `build` | object | `{ "profile": string, "commit": string, "wasm_size_bytes": u64 }` |
 | `module_url` | string | URL or path of the loaded WASM module |
@@ -100,7 +100,7 @@ e2e-runs/
     "wasm_size_bytes": 245760
   },
   "abi_version": { "major": 1, "minor": 0 },
-  "abi_fingerprint": 1234567890,
+  "abi_fingerprint": "1234567890",
   "evidence_ids_covered": ["L4-FETCH-E2E", "L4-WS-E2E"],
   "failure_summary": null,
   "log_line_count": 47,

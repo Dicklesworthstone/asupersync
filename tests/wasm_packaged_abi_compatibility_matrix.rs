@@ -122,6 +122,82 @@ fn browser_core_manifest_publishes_abi_metadata_sidecar() {
 }
 
 #[test]
+fn published_fingerprint_surfaces_preserve_the_exact_u64() {
+    let declaration = read("src/types/wasm_abi.rs")
+        .lines()
+        .find(|line| line.contains("WASM_ABI_SIGNATURE_FINGERPRINT_V1: u64"))
+        .expect("ABI fingerprint declaration must exist")
+        .split_once('=')
+        .expect("ABI fingerprint declaration must have a value")
+        .1
+        .trim()
+        .trim_end_matches(';')
+        .replace('_', "");
+
+    for path in [
+        "packages/browser-core/abi-metadata.json",
+        "packages/browser-core/debug-metadata.json",
+    ] {
+        let metadata = read_json(path);
+        assert_eq!(
+            metadata["abi_signature_fingerprint_v1"].as_str(),
+            Some(declaration.as_str()),
+            "{path} must store the fingerprint as its exact decimal string"
+        );
+    }
+
+    let browser_core = read("packages/browser-core/index.js");
+    assert!(
+        browser_core.contains(&format!("abi_signature_fingerprint_v1: \"{declaration}\"")),
+        "browser-core JavaScript metadata must preserve the exact decimal fingerprint"
+    );
+}
+
+#[test]
+fn browser_wrappers_preserve_authenticated_handle_identity() {
+    let browser_core = read("packages/browser-core/index.js");
+    for marker in [
+        "const HANDLE_OWNER_TOKEN = Symbol(\"asupersync.handleOwnerToken\");",
+        "owner_token: ownerToken",
+        "handleJson(runtimeHandle, \"runtimeHandle\", \"runtime\")",
+    ] {
+        assert!(
+            browser_core.contains(marker),
+            "browser-core must preserve authenticated handle identity: {marker}"
+        );
+    }
+
+    let browser = read("packages/browser/src/index.ts");
+    assert!(
+        browser.contains(
+            "`${raw.kind}:${raw.slot}:${raw.generation}:${raw.owner_token ?? \"legacy\"}`"
+        ),
+        "browser WebTransport lifecycle maps must include the authenticated owner token"
+    );
+}
+
+#[test]
+fn browser_fingerprint_api_is_exact_and_json_serializable() {
+    let browser_core = read("packages/browser-core/index.js");
+    assert!(
+        browser_core.contains("return rawAbiFingerprint().toString();"),
+        "browser-core convenience API must return the exact fingerprint as a JSON-safe string"
+    );
+
+    let declarations = read("packages/browser-core/index.d.ts");
+    assert!(
+        declarations.contains("export declare function abi_fingerprint(): string;"),
+        "browser-core declarations must expose the JSON-safe fingerprint string"
+    );
+
+    let browser = read("packages/browser/src/index.ts");
+    assert!(
+        browser.contains("abiFingerprint: string;"),
+        "browser SDK diagnostics must agree with the exact fingerprint string"
+    );
+}
+
+#[test]
 fn build_artifact_script_emits_and_syncs_abi_metadata() {
     let script = read("scripts/build_browser_core_artifacts.sh");
     for marker in [
@@ -163,7 +239,7 @@ fn cross_framework_runner_reads_canonical_abi_metadata_fingerprint_key() {
     for marker in [
         "ABI_METADATA_PATH=\"${PROJECT_ROOT}/packages/browser-core/abi-metadata.json\"",
         "ABI_FINGERPRINT=\"$(jq -r '.abi_signature_fingerprint_v1 // 0'",
-        "--argjson abi_fingerprint \"${ABI_FINGERPRINT}\"",
+        "--arg abi_fingerprint \"${ABI_FINGERPRINT}\"",
     ] {
         assert!(
             script.contains(marker),
@@ -174,6 +250,29 @@ fn cross_framework_runner_reads_canonical_abi_metadata_fingerprint_key() {
         !script.contains("ABI_FINGERPRINT=\"$(jq -r '.abi_fingerprint // 0'"),
         "cross-framework E2E runner must not read the obsolete ABI fingerprint key"
     );
+    assert!(
+        !script.contains("--argjson abi_fingerprint"),
+        "cross-framework E2E runner must not round the u64 fingerprint through a JSON number"
+    );
+}
+
+#[test]
+fn wasm_e2e_runners_keep_fingerprints_as_decimal_strings() {
+    for path in [
+        "scripts/test_wasm_cross_framework_e2e.sh",
+        "scripts/test_wasm_packaged_bootstrap_e2e.sh",
+        "scripts/test_wasm_packaged_cancellation_e2e.sh",
+    ] {
+        let script = read(path);
+        assert!(
+            script.contains("--arg abi_fingerprint \"${ABI_FINGERPRINT}\""),
+            "{path} must pass the fingerprint to jq as a string"
+        );
+        assert!(
+            !script.contains("--argjson abi_fingerprint"),
+            "{path} must not round the u64 fingerprint through a JSON number"
+        );
+    }
 }
 
 #[test]

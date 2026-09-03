@@ -393,7 +393,7 @@ emit_log_entry() {
         --argjson wasm_size_bytes "${WASM_SIZE_BYTES}" \
         --argjson abi_major "${ABI_MAJOR}" \
         --argjson abi_minor "${ABI_MINOR}" \
-        --argjson abi_fingerprint "${ABI_FINGERPRINT}" \
+        --arg abi_fingerprint "${ABI_FINGERPRINT}" \
         --argjson duration_ms "${duration_ms}" \
         --argjson evidence_ids "${evidence_ids_json}" \
         --arg error_code "${error_code}" \
@@ -717,7 +717,7 @@ jq -n \
     --argjson wasm_size_bytes "${WASM_SIZE_BYTES}" \
     --argjson abi_major "${ABI_MAJOR}" \
     --argjson abi_minor "${ABI_MINOR}" \
-    --argjson abi_fingerprint "${ABI_FINGERPRINT}" \
+    --arg abi_fingerprint "${ABI_FINGERPRINT}" \
     --argjson duration_ms "${TOTAL_DURATION_MS}" \
     --argjson evidence_ids_covered "${evidence_ids_json}" \
     --argjson log_line_count "${log_line_count}" \

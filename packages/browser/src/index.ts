@@ -154,7 +154,7 @@ export interface BrowserScopeOptions {
 
 export interface BrowserSdkDiagnostics {
   abiVersion: AbiVersion;
-  abiFingerprint: number;
+  abiFingerprint: string;
   abiMetadata: BrowserAbiMetadata;
   consumerVersion: AbiVersion | null;
   executionLadder: BrowserExecutionLadderDiagnostics;
@@ -5194,7 +5194,7 @@ function browserWebTransportStateKey(
   handle: BrowserHandleLike,
 ): string {
   const raw = handle.toJSON();
-  return `${raw.kind}:${raw.slot}:${raw.generation}`;
+  return `${raw.kind}:${raw.slot}:${raw.generation}:${raw.owner_token ?? "legacy"}`;
 }
 
 function recordRegionParent(

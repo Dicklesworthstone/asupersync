@@ -12,7 +12,7 @@
     ],
     "optional_fields": [
       { "name": "abi_version", "type": "object", "fields": ["major", "minor"], "description": "ABI version at time of event" },
-      { "name": "abi_fingerprint", "type": "u64", "description": "WASM_ABI_SIGNATURE_FINGERPRINT_V1 value" },
+      { "name": "abi_fingerprint", "type": "string", "description": "Exact decimal rendering of WASM_ABI_SIGNATURE_FINGERPRINT_V1" },
       { "name": "browser", "type": "object", "fields": ["name", "version", "os"], "description": "Browser environment" },
       { "name": "build", "type": "object", "fields": ["profile", "commit", "wasm_size_bytes"], "description": "Build metadata" },
       { "name": "module_url", "type": "string", "description": "URL or path of loaded WASM module" },
