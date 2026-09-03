@@ -940,7 +940,10 @@ input[type="text"]:focus, select:focus, textarea:focus {
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    animation-delay: 0ms !important;
     transition-duration: 0.01ms !important;
+    transition-delay: 0ms !important;
   }
   html { scroll-behavior: auto; }
 }
@@ -1875,7 +1878,7 @@ t.<span class="fn">join</span>(<span class="typ">Outcome</span>.<span class="fn"
           </div>
         </div>
         <div id="isolation-result">
-          <div class="text-dim" style="text-align:center;padding:32px 0;">Click Build to create 4 sibling scopes, then close them one-by-one to prove isolation</div>
+          <div class="text-dim" style="text-align:center;padding:32px 0;">Build four sibling scopes, then close them one-by-one and probe every survivor</div>
         </div>
       </div>
       <div class="console mt-2" id="isolation-console">
@@ -1903,7 +1906,7 @@ t.<span class="fn">join</span>(<span class="typ">Outcome</span>.<span class="fn"
     <div class="mt-4 reveal">
       <div class="viz" id="replay-viz">
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:8px;">
-          <div class="viz-title" style="margin-bottom:0;">LIFO Recycling Proof</div>
+          <div class="viz-title" style="margin-bottom:0;">LIFO Recycling Check</div>
           <button class="btn btn-primary btn-sm" onclick="runReplayDemo()">Run Test</button>
         </div>
         <div id="replay-result">
@@ -2153,6 +2156,7 @@ let wasmReady = false;
 let mod = null;  // browser-core module
 let liveRT = null;  // current RuntimeHandle
 let liveScope = null;  // current RegionHandle
+let initRuntimePromise = null;
 const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
 // ─── Module Loading ──────────────────────────────────────────────
@@ -2435,47 +2439,72 @@ function logWasm(op, args, result) {
 }
 
 // ─── Init Runtime (auto-called on page load) ────────────────────
+function showInitError(message) {
+  const error = document.getElementById('init-error');
+  const retry = document.createElement('button');
+  retry.type = 'button';
+  retry.className = 'btn btn-ghost btn-sm';
+  retry.textContent = 'Retry';
+  retry.addEventListener('click', () => window.retryWasm());
+  error.replaceChildren(document.createTextNode(message + ' '), retry);
+  error.hidden = false;
+  updateWasmBadge('failed');
+}
+
 async function initRuntime() {
-  if (liveRT) return; // Already initialized
+  if (liveRT) return true;
+  if (initRuntimePromise) return initRuntimePromise;
 
-  const loaded = await loadWasm();
+  initRuntimePromise = (async () => {
+    const loaded = await loadWasm();
+    const a = requireWasm();
+    if (!loaded || !a) {
+      showInitError('The deployed WASM artifact could not start.');
+      announce('The WASM lifecycle ledger failed to load. Retry is available.');
+      return false;
+    }
 
-  const a = requireWasm();
-  if (!loaded || !a) {
-    const error = document.getElementById('init-error');
-    error.hidden = false;
-    error.innerHTML = 'The deployed WASM artifact could not start. <button type="button" class="btn btn-ghost btn-sm" onclick="retryWasm()">Retry</button>';
-    announce('The WASM lifecycle ledger failed to load. Retry is available.');
-    return;
-  }
-  console.log(`${LOG_PREFIX} %cInitializing persistent runtime...`, LOG_STYLE, 'color:#94A3B8;');
-  const rtResult = (a.runtimeCreate || a.runtime_create)();
-  if (rtResult.outcome === 'ok') {
+    console.log(`${LOG_PREFIX} %cInitializing persistent runtime...`, LOG_STYLE, 'color:#94A3B8;');
+    const rtResult = (a.runtimeCreate || a.runtime_create)();
+    if (rtResult.outcome !== 'ok') {
+      showInitError(`The lifecycle ledger loaded, but its runtime handle was rejected: ${rtResult.failure?.message || rtResult.outcome}.`);
+      announce('The WASM runtime handle could not be created. Retry is available.');
+      return false;
+    }
+
     liveRT = rtResult.value;
     console.log(`${LOG_PREFIX} %cPersistent runtime created: slot=${liveRT.slot} gen=${liveRT.generation}`, LOG_STYLE, LOG_OK);
     const scopeResult = liveRT.enterScope('demo-root');
-    if (scopeResult.outcome === 'ok') {
-      liveScope = scopeResult.value;
-      console.log(`${LOG_PREFIX} %cRoot scope created: slot=${liveScope.slot} gen=${liveScope.generation}`, LOG_STYLE, LOG_OK);
-    } else {
+    if (scopeResult.outcome !== 'ok') {
       liveRT.close();
       liveRT = null;
-      const error = document.getElementById('init-error');
-      error.hidden = false;
-      error.textContent = `Runtime created, but its root scope was rejected: ${scopeResult.failure?.message || scopeResult.outcome}`;
-      updateWasmBadge('failed');
-      announce('The WASM root scope could not be created.');
-      return;
+      liveScope = null;
+      showInitError(`Runtime created, but its root scope was rejected: ${scopeResult.failure?.message || scopeResult.outcome}.`);
+      announce('The WASM root scope could not be created. Retry is available.');
+      return false;
     }
+
+    liveScope = scopeResult.value;
+    console.log(`${LOG_PREFIX} %cRoot scope created: slot=${liveScope.slot} gen=${liveScope.generation}`, LOG_STYLE, LOG_OK);
     document.getElementById('init-error').hidden = true;
     const version = (a.abiVersion || a.abi_version)();
     const fingerprint = (a.abiFingerprint || a.abi_fingerprint)();
     updateWasmBadge('live', version, fingerprint);
     console.log(`${LOG_PREFIX} %cRuntime handle ready. Lifecycle operations are ledger-backed; browser work is host-driven.`, LOG_STYLE, 'color:#4ADE80;font-weight:bold;');
-  } else {
-    const error = document.getElementById('init-error');
-    error.hidden = false;
-    error.textContent = 'The lifecycle ledger loaded, but the runtime handle was rejected.';
+    return true;
+  })();
+
+  try {
+    return await initRuntimePromise;
+  } catch (error) {
+    if (liveRT) { try { liveRT.close(); } catch(_) {} }
+    liveRT = null;
+    liveScope = null;
+    showInitError(`The lifecycle ledger stopped during initialization: ${error?.message || error}.`);
+    announce('The WASM lifecycle ledger stopped during initialization. Retry is available.');
+    return false;
+  } finally {
+    initRuntimePromise = null;
   }
 }
 window.retryWasm = async function() {
@@ -2529,7 +2558,10 @@ window.runAbiDemo = function() {
 const regionState = {
   regions: [],
   tasks: [],
+  timers: [],
   init() {
+    this.timers.forEach(clearTimeout);
+    this.timers = [];
     this.regions = [
       { id:'root', label:'Root Region', parent:null, x:10, y:10, w:780, h:400, status:'running' },
       { id:'http', label:'HTTP Handler', parent:'root', x:30, y:50, w:350, h:340, status:'running' },
@@ -2549,32 +2581,65 @@ const regionState = {
     // Create real WASM scope hierarchy
     const a = requireWasm();
     if (a) {
+      let scopeCount = 0;
+      let taskCount = 0;
       try {
         if (this.wasmRT) { try { this.wasmRT.close(); } catch(e) {} }
+        this.wasmRT = null;
+        this.wasmHandles = null;
         const rt = (a.runtimeCreate || a.runtime_create)();
         if (rt.outcome === 'ok') {
           this.wasmRT = rt.value;
           const root = rt.value.enterScope('root-region');
           if (root.outcome === 'ok') {
+            scopeCount++;
             this.wasmHandles = { root: root.value };
             const httpSc = root.value.enterScope('http-handler');
             if (httpSc.outcome === 'ok') {
+              scopeCount++;
               this.wasmHandles.http = httpSc.value;
               const reqASc = httpSc.value.enterScope('request-a');
-              if (reqASc.outcome === 'ok') { this.wasmHandles.reqA = reqASc.value; reqASc.value.spawnTask({ label: 't1' }); reqASc.value.spawnTask({ label: 't2' }); }
+              if (reqASc.outcome === 'ok') {
+                scopeCount++;
+                this.wasmHandles.reqA = reqASc.value;
+                for (const label of ['t1', 't2']) {
+                  if (reqASc.value.spawnTask({ label }).outcome === 'ok') taskCount++;
+                }
+              }
               const reqBSc = httpSc.value.enterScope('request-b');
-              if (reqBSc.outcome === 'ok') { this.wasmHandles.reqB = reqBSc.value; reqBSc.value.spawnTask({ label: 't3' }); reqBSc.value.spawnTask({ label: 't4' }); }
+              if (reqBSc.outcome === 'ok') {
+                scopeCount++;
+                this.wasmHandles.reqB = reqBSc.value;
+                for (const label of ['t3', 't4']) {
+                  if (reqBSc.value.spawnTask({ label }).outcome === 'ok') taskCount++;
+                }
+              }
             }
             const dbSc = root.value.enterScope('database-pool');
             if (dbSc.outcome === 'ok') {
+              scopeCount++;
               this.wasmHandles.db = dbSc.value;
               const connSc = dbSc.value.enterScope('connection');
-              if (connSc.outcome === 'ok') { this.wasmHandles.conn = connSc.value; connSc.value.spawnTask({ label: 't5' }); connSc.value.spawnTask({ label: 't6' }); }
+              if (connSc.outcome === 'ok') {
+                scopeCount++;
+                this.wasmHandles.conn = connSc.value;
+                for (const label of ['t5', 't6']) {
+                  if (connSc.value.spawnTask({ label }).outcome === 'ok') taskCount++;
+                }
+              }
             }
-            clog('region-console', `WASM: created real scope hierarchy (root + 5 child scopes, 6 tasks)`, 'ok');
+            clog('region-console', `WASM: created ${scopeCount} scopes and ${taskCount} tasks in the lifecycle ledger`, scopeCount === 6 && taskCount === 6 ? 'ok' : 'warn');
+          } else {
+            this.wasmRT.close();
+            this.wasmRT = null;
           }
         }
-      } catch(e) { /* WASM not available, visual-only mode */ }
+      } catch(e) {
+        if (this.wasmRT) { try { this.wasmRT.close(); } catch(_) {} }
+        this.wasmRT = null;
+        this.wasmHandles = null;
+        clog('region-console', `WASM hierarchy setup stopped: ${e.message || e}`, 'err');
+      }
     }
   },
   getDescendants(id) {
@@ -2632,7 +2697,7 @@ window.cancelRegion = function(id) {
   clog('region-console', `Cancel requested: ${descendants.join(', ')}`, 'warn');
 
   // Phase 2: draining
-  setTimeout(() => {
+  regionState.timers.push(setTimeout(() => {
     descendants.forEach(rid => {
       const r = regionState.regions.find(rr => rr.id === rid);
       if (r) r.status = 'draining';
@@ -2642,10 +2707,10 @@ window.cancelRegion = function(id) {
     });
     renderRegionTree();
     clog('region-console', `Draining tasks in: ${descendants.join(', ')}`, 'warn');
-  }, 600);
+  }, 600));
 
   // Phase 3: quiescent
-  setTimeout(() => {
+  regionState.timers.push(setTimeout(() => {
     descendants.forEach(rid => {
       const r = regionState.regions.find(rr => rr.id === rid);
       if (r) r.status = 'quiescent';
@@ -2661,13 +2726,18 @@ window.cancelRegion = function(id) {
         if (h) {
           try {
             h.close();
-            clog('region-console', `WASM: scope "${rid}" closed (slot=${h.slot || 'n/a'})`, 'ok');
+            clog('region-console', `WASM: scope "${rid}" closed (slot=${h.slot ?? 'n/a'})`, 'ok');
           } catch(e) {}
           delete regionState.wasmHandles[rid];
         }
       });
+      if (id === 'root' && regionState.wasmRT) {
+        try { regionState.wasmRT.close(); } catch(e) {}
+        regionState.wasmRT = null;
+        regionState.wasmHandles = null;
+      }
     }
-  }, 1400);
+  }, 1400));
 };
 
 window.runRegionDemo = async function() {
@@ -2705,7 +2775,7 @@ const outcomeTypes = [
     code:`<span class="typ">Outcome</span>.<span class="fn">cancelled</span>({\n  <span class="prop">kind</span>: <span class="str">'timeout'</span>,\n  <span class="prop">phase</span>: <span class="str">'completed'</span>,\n  <span class="prop">origin_region</span>: <span class="str">'http-handler'</span>,\n  <span class="prop">message</span>: <span class="str">'5s deadline exceeded'</span>,\n  <span class="prop">truncated</span>: <span class="kw">false</span>\n})`,
     severity: 2 },
   { id:'panicked', title:'Panicked', icon:'&#9889;', desc:'Unrecoverable task panic with payload', color:HEX.violet, badge:'badge-panic',
-    code:`<span class="typ">Outcome</span>.<span class="fn">panicked</span>(\n  <span class="str">'index out of bounds: len is 0 but index is 5'</span>\n)\n<span class="cmt">// Severity: highest; always propagated</span>`,
+    code:`<span class="typ">Outcome</span>.<span class="fn">panicked</span>(\n  <span class="str">'index out of bounds: len is 0 but index is 5'</span>\n)\n<span class="cmt">// Highest severity in this ordering</span>`,
     severity: 3 },
 ];
 
@@ -2829,10 +2899,12 @@ const cancelStatusText = {
   requested: 'Cancellation requested with a shutdown attribution record.',
   draining: 'Host-timed presentation of the draining phase.',
   finalizing: 'Joining each task with its terminal cancellation outcome.',
-  completed: 'Task obligations joined; scope close recorded in WASM.',
 };
 
-let cancelState = { phase: 'running', budget: 100, animating: false, timers: [] };
+let cancelState = {
+  phase: 'running', budget: 100, animating: false, timers: [],
+  wasmRT: null, wasmScope: null, wasmTaskCount: 0, wasmJoinedCount: 0, wasmClosed: false,
+};
 
 function renderCancelSM() {
   const svg = document.getElementById('cancel-svg');
@@ -2885,7 +2957,11 @@ function renderCancelSM() {
   fill.style.boxShadow = cancelState.budget < 30 ? '0 0 12px rgba(239,68,68,0.4)' : 'none';
 
   // Status
-  document.getElementById('cancel-status').textContent = cancelStatusText[cancelState.phase];
+  document.getElementById('cancel-status').textContent = cancelState.phase === 'completed'
+    ? cancelState.wasmClosed
+      ? `${cancelState.wasmJoinedCount}/${cancelState.wasmTaskCount} task outcomes joined; scope close recorded in WASM.`
+      : 'The visual sequence completed, but this run did not confirm scope closure in WASM.'
+    : cancelStatusText[cancelState.phase];
 }
 
 window.triggerCancel = function() {
@@ -2901,27 +2977,41 @@ window.triggerCancel = function() {
       if (rt.outcome === 'ok') {
         const sc = rt.value.enterScope('cancel-demo');
         if (sc.outcome === 'ok') {
+          cancelState.wasmRT = rt.value;
+          cancelState.wasmScope = sc.value;
           const tasks = [];
           for (let i = 0; i < 3; i++) {
             const t = sc.value.spawnTask({ label: 'resource-' + i });
             if (t.outcome === 'ok') tasks.push(t.value);
           }
+          cancelState.wasmTaskCount = tasks.length;
           console.log(`${LOG_PREFIX} %cCancel demo: spawned ${tasks.length} real tasks`, LOG_STYLE, 'color:#06B6D4;');
           // Cancel each task through the real protocol on a timer
           tasks.forEach((t, i) => {
             cancelState.timers.push(setTimeout(() => {
               try {
-                t.cancel('shutdown', 'graceful drain');
-                t.join(a.Outcome.cancelled({kind:'shutdown',phase:'completed',origin_region:'cancel-demo',origin_task:null,timestamp_nanos:0,message:'graceful drain',truncated:false}));
-                console.log(`${LOG_PREFIX} %cCancel demo: task "resource-${i}" cancelled+joined (real WASM)`, LOG_STYLE, LOG_OK);
+                const cancelResult = t.cancel('shutdown', 'graceful drain');
+                const joinResult = t.join(a.Outcome.cancelled({kind:'shutdown',phase:'completed',origin_region:'cancel-demo',origin_task:null,timestamp_nanos:0,message:'graceful drain',truncated:false}));
+                if (cancelResult.outcome !== 'err' && joinResult.outcome !== 'err') cancelState.wasmJoinedCount++;
+                console.log(`${LOG_PREFIX} %cCancel demo: task "resource-${i}" cancel=${cancelResult.outcome}, join=${joinResult.outcome}`, LOG_STYLE, joinResult.outcome === 'err' ? LOG_ERR : LOG_OK);
               } catch(e) {}
             }, 800 + i * 400));
           });
           // Close scope after all tasks are joined
           cancelState.timers.push(setTimeout(() => {
-            try { sc.value.close(); rt.value.close(); } catch(e) {}
-            console.log(`${LOG_PREFIX} %cCancel demo: three task outcomes joined and scope closed in WASM`, LOG_STYLE, LOG_OK);
-          }, 2600));
+            try {
+              const scopeClose = sc.value.close();
+              const runtimeClose = rt.value.close();
+              cancelState.wasmClosed = scopeClose.outcome === 'ok' && runtimeClose.outcome === 'ok';
+            } catch(e) {
+              cancelState.wasmClosed = false;
+            }
+            cancelState.wasmScope = null;
+            cancelState.wasmRT = null;
+            console.log(`${LOG_PREFIX} %cCancel demo: ${cancelState.wasmJoinedCount}/${tasks.length} task outcomes joined; scope close ${cancelState.wasmClosed ? 'confirmed' : 'not confirmed'}`, LOG_STYLE, cancelState.wasmClosed ? LOG_OK : LOG_ERR);
+          }, 2200));
+        } else {
+          rt.value.close();
         }
       }
     } catch(e) { /* WASM not available */ }
@@ -2981,8 +3071,10 @@ window.triggerCancel = function() {
     document.getElementById('async-status-dot').style.background = 'var(--green)';
     document.getElementById('async-panel').style.borderColor = 'rgba(34,197,94,0.3)';
     document.getElementById('async-panel').style.boxShadow = '0 0 20px rgba(34,197,94,0.1)';
-    document.getElementById('async-status').textContent = 'Three task obligations joined; scope closed.';
-    document.getElementById('async-status').style.color = 'var(--green)';
+    document.getElementById('async-status').textContent = cancelState.wasmClosed
+      ? `${cancelState.wasmJoinedCount}/${cancelState.wasmTaskCount} task obligations joined; scope closed.`
+      : 'Visual drain complete; WASM scope closure was not confirmed.';
+    document.getElementById('async-status').style.color = cancelState.wasmClosed ? 'var(--green)' : 'var(--orange)';
   }, 2400));
 
   // Budget countdown
@@ -2998,6 +3090,7 @@ window.triggerCancel = function() {
   cancelState.timers.push(setTimeout(() => { cancelState.phase = 'draining'; renderCancelSM(); }, 500));
   cancelState.timers.push(setTimeout(() => { cancelState.phase = 'finalizing'; renderCancelSM(); }, 1500));
   cancelState.timers.push(setTimeout(() => {
+    clearInterval(budgetInterval);
     cancelState.phase = 'completed';
     cancelState.budget = 0;
     cancelState.animating = false;
@@ -3007,7 +3100,12 @@ window.triggerCancel = function() {
 
 window.resetCancel = function() {
   cancelState.timers.forEach(id => { clearInterval(id); clearTimeout(id); });
-  cancelState = { phase: 'running', budget: 100, animating: false, timers: [] };
+  if (cancelState.wasmScope) { try { cancelState.wasmScope.close(); } catch(e) {} }
+  if (cancelState.wasmRT) { try { cancelState.wasmRT.close(); } catch(e) {} }
+  cancelState = {
+    phase: 'running', budget: 100, animating: false, timers: [],
+    wasmRT: null, wasmScope: null, wasmTaskCount: 0, wasmJoinedCount: 0, wasmClosed: false,
+  };
   document.getElementById('btn-cancel-trigger').disabled = false;
   renderCancelSM();
 
@@ -3103,6 +3201,8 @@ window.runStaleDemo = function() {
   if (rt.outcome !== 'ok') { clog('stale-console', 'Failed to create runtime', 'err'); return; }
 
   const steps = [];
+  let staleRejected = false;
+  let slotReused = false;
 
   // Step 1: Create and record first scope
   const s1 = rt.value.enterScope('first');
@@ -3113,32 +3213,46 @@ window.runStaleDemo = function() {
 
     // Step 2: Close it
     const staleHandle = h; // retain the exact authenticated handle bytes for the post-close probe
-    h.close();
-    steps.push({ action: 'Close scope', slot: h.slot, gen: h.generation, label: 'first', status: 'closed', color: HEX.text3 });
-    clog('stale-console', `Closed scope "first": slot ${h.slot} freed`, 'info');
+    const firstClose = h.close();
+    const firstClosed = firstClose.outcome === 'ok';
+    steps.push({ action: 'Close scope', slot: h.slot, gen: h.generation, label: 'first', status: firstClosed ? 'closed' : 'FAILED', color: firstClosed ? HEX.text3 : HEX.red });
+    clog('stale-console', firstClosed
+      ? `Closed scope "first": slot ${h.slot} freed`
+      : `First scope close failed: ${firstClose.failure?.message || firstClose.outcome}`,
+    firstClosed ? 'info' : 'err');
 
     // Step 3: Create new scope; it may reuse the slot
-    const s2 = rt.value.enterScope('second');
+    const s2 = firstClosed ? rt.value.enterScope('second') : { outcome: 'err' };
     if (s2.outcome === 'ok') {
       const h2 = s2.value;
       steps.push({ action: 'Create scope', slot: h2.slot, gen: h2.generation, label: 'second', status: 'active', color: HEX.blue });
-      const reused = h2.slot === staleHandle.slot;
-      clog('stale-console', `Created scope "second": slot=${h2.slot} gen=${h2.generation}${reused ? ' (SLOT REUSED!)' : ''}`, 'ok');
+      slotReused = h2.slot === staleHandle.slot;
+      clog('stale-console', `Created scope "second": slot=${h2.slot} gen=${h2.generation}${slotReused ? ' (slot reused)' : ''}`, 'ok');
 
       // Step 4: Try using the stale handle
       const closeStale = (a.scopeClose || a.scope_close)(staleHandle);
-      const wasRejected = closeStale.outcome === 'err';
-      steps.push({ action: 'Use stale handle', slot: staleHandle.slot, gen: staleHandle.generation, label: 'first (stale)', status: wasRejected ? 'REJECTED' : closeStale.outcome.toUpperCase(), color: wasRejected ? HEX.red : HEX.orange });
-      if (wasRejected) {
+      staleRejected = closeStale.outcome === 'err';
+      steps.push({ action: 'Use stale handle', slot: staleHandle.slot, gen: staleHandle.generation, label: 'first (stale)', status: staleRejected ? 'REJECTED' : closeStale.outcome.toUpperCase(), color: staleRejected ? HEX.red : HEX.orange });
+      if (staleRejected) {
         clog('stale-console', `REJECTED: ${closeStale.failure.message}`, 'err');
       } else {
         clog('stale-console', `Stale close returned: ${closeStale.outcome} (handle already released by prior close)`, 'warn');
       }
 
       h2.close();
+    } else if (firstClosed) {
+      clog('stale-console', `Second scope creation failed: ${s2.failure?.message || s2.outcome}`, 'err');
     }
+  } else {
+    clog('stale-console', `First scope creation failed: ${s1.failure?.message || s1.outcome}`, 'err');
   }
   rt.value.close();
+
+  const observation = staleRejected
+    ? slotReused
+      ? 'the runtime reused the slot with a new generation and rejected the old authenticated handle.'
+      : 'the runtime rejected the old authenticated handle after closure; this allocation used a different slot.'
+    : 'this run did not complete a successful post-close rejection probe.';
 
   // Render timeline with entrance animation
   renderWithEntrance('stale-result', `
@@ -3151,15 +3265,15 @@ window.runStaleDemo = function() {
           <td style="color:${s.color}; font-weight:700;">${s.slot}</td>
           <td style="color:${s.color};">${s.gen}</td>
           <td style="color:var(--text2);">${s.label}</td>
-          <td><span class="badge ${s.status === 'active' ? 'badge-ok' : s.status === 'REJECTED' ? 'badge-err' : s.status === 'closed' ? '' : 'badge-blue'}" style="font-size:11px;${s.status === 'closed' ? 'background:rgba(100,116,139,0.15);color:#64748B;' : ''}">${s.status}</span></td>
+          <td><span class="badge ${s.status === 'active' ? 'badge-ok' : ['REJECTED','FAILED'].includes(s.status) ? 'badge-err' : s.status === 'closed' ? '' : 'badge-blue'}" style="font-size:11px;${s.status === 'closed' ? 'background:rgba(100,116,139,0.15);color:#64748B;' : ''}">${s.status}</span></td>
         </tr>`).join('')}
       </tbody>
     </table>
     <div style="margin-top:12px; padding:12px; border-radius:8px; background:rgba(239,68,68,0.06); border:1px solid rgba(239,68,68,0.15); font-size:13px; color:var(--text2);">
-      <strong style="color:var(--red);">Observed here:</strong> the runtime reused a slot, incremented its generation, and rejected the old handle instead of addressing the new occupant.
+      <strong style="color:var(--red);">Observed here:</strong> ${observation}
     </div>
   `);
-  showToast('Stale handle correctly rejected', 'ok');
+  showToast(staleRejected ? 'Stale handle correctly rejected' : 'Stale-handle probe was incomplete', staleRejected ? 'ok' : 'err');
 };
 
 // ─── Exhibit 7: Deep Cascade Close ──────────────────────────────
@@ -3179,7 +3293,12 @@ window.cascadeBuild = function() {
 
   // Level 1: root scope
   const l1 = rt.value.enterScope('server');
-  if (l1.outcome !== 'ok') return;
+  if (l1.outcome !== 'ok') {
+    rt.value.close();
+    cascadeHandles.rt = null;
+    clog('cascade-console', 'Root scope creation failed', 'err');
+    return;
+  }
   tree.push({ handle: l1.value, label: 'server', depth: 0, id: 'server' });
 
   // Level 2: two children
@@ -3210,10 +3329,14 @@ window.cascadeBuild = function() {
   // Render tree
   renderCascadeTree(tree, null);
   clog('cascade-console', `Built tree: ${tree.filter(t=>!t.isTask).length} scopes, ${tree.filter(t=>t.isTask).length} tasks`, 'ok');
-  clog('cascade-console', 'Click "Close Mid-Node" to close http-handler and watch cascade', 'info');
+  const canCloseMidNode = tree.some(node => node.id === 'http-handler');
+  clog('cascade-console', canCloseMidNode
+    ? 'Click "Close Mid-Node" to close http-handler and watch cascade'
+    : 'The http-handler scope was not created, so there is no mid-node to close',
+  canCloseMidNode ? 'info' : 'err');
 
   document.getElementById('btn-cascade-build').disabled = true;
-  document.getElementById('btn-cascade-close').disabled = false;
+  document.getElementById('btn-cascade-close').disabled = !canCloseMidNode;
 };
 
 function renderCascadeTree(tree, closedSet) {
@@ -3238,13 +3361,23 @@ window.cascadeClose = function() {
 
   // Find http-handler scope
   const httpNode = tree.find(n => n.id === 'http-handler');
-  if (!httpNode) return;
+  if (!httpNode) {
+    clog('cascade-console', 'The http-handler scope is unavailable in this run', 'err');
+    return;
+  }
 
   clog('cascade-console', 'Closing "http-handler"; cascade begins...', 'warn');
+  const closeResult = httpNode.handle.close();
+  if (closeResult.outcome !== 'ok') {
+    clog('cascade-console', `Mid-node close rejected: ${closeResult.failure?.message || closeResult.outcome}`, 'err');
+    showToast('Mid-node close was rejected', 'err');
+    return;
+  }
 
   // Animate: mark as closing one by one
   let delay = 0;
-  const order = ['request-A-t0', 'request-A-t1', 'request-B-t0', 'request-B-t1', 'request-A', 'request-B', 'http-handler'];
+  const order = ['request-A-t0', 'request-A-t1', 'request-B-t0', 'request-B-t1', 'request-A', 'request-B', 'http-handler']
+    .filter(id => tree.some(node => node.id === id));
   const closedSoFar = new Set();
 
   order.forEach((id, i) => {
@@ -3256,8 +3389,6 @@ window.cascadeClose = function() {
       clog('cascade-console', `  ${type} "${id}" → closed (slot=${node?.handle?.slot ?? '?'})`, node?.isTask ? 'warn' : 'ok');
 
       if (i === order.length - 1) {
-        // Actually close via WASM
-        httpNode.handle.close();
         clog('cascade-console', `Cascade complete: scope close recorded; ${order.length} displayed handles are now invalid.`, 'ok');
         showToast(`Cascade closed ${order.length} handles`, 'ok');
         document.getElementById('btn-cascade-close').disabled = true;
@@ -3291,14 +3422,23 @@ window.runProtocolDemo = function() {
   const rt = (a.runtimeCreate || a.runtime_create)();
   if (rt.outcome !== 'ok') { clog('protocol-console', 'Failed', 'err'); return; }
   const scope = rt.value.enterScope('protocol-demo');
-  if (scope.outcome !== 'ok') { clog('protocol-console', 'Failed', 'err'); return; }
+  if (scope.outcome !== 'ok') {
+    rt.value.close();
+    clog('protocol-console', 'Scope creation failed', 'err');
+    return;
+  }
   const sc = scope.value;
 
   const steps = [];
 
   // Step 1: Spawn; task is PINNED
   const t = sc.spawnTask({ label: 'worker' });
-  if (t.outcome !== 'ok') { clog('protocol-console', 'Spawn failed', 'err'); return; }
+  if (t.outcome !== 'ok') {
+    sc.close();
+    rt.value.close();
+    clog('protocol-console', 'Spawn failed', 'err');
+    return;
+  }
   const task = t.value;
   steps.push({ step: 'Spawn', state: 'Active (pinned)', slot: task.slot, gen: task.generation, badge: 'badge-ok', badgeText: 'Active' });
   clog('protocol-console', `Spawned task: slot=${task.slot} gen=${task.generation}; handle is PINNED`, 'ok');
@@ -3327,8 +3467,19 @@ window.runProtocolDemo = function() {
     kind: 'user', phase: 'completed', origin_region: 'demo',
     origin_task: null, timestamp_nanos: 0, message: 'stop requested', truncated: false
   }));
-  steps.push({ step: 'Join', state: 'Closed (unpinned, released)', slot: task.slot, gen: task.generation, badge: 'badge-blue', badgeText: 'Released' });
-  clog('protocol-console', `Join succeeded → handle unpinned & released. Slot ${task.slot} recycled.`, 'ok');
+  const released = joined.outcome !== 'err';
+  steps.push({
+    step: 'Join',
+    state: released ? 'Closed (unpinned, released)' : `Rejected: ${joined.failure?.message || joined.outcome}`,
+    slot: task.slot,
+    gen: task.generation,
+    badge: released ? 'badge-blue' : 'badge-err',
+    badgeText: released ? 'Released' : 'Failed',
+  });
+  clog('protocol-console', released
+    ? `Join returned ${joined.outcome}; handle unpinned and released. Slot ${task.slot} can be recycled.`
+    : `Join failed: ${joined.failure?.message || joined.outcome}`,
+  released ? 'ok' : 'err');
 
   // Render state table with entrance animation
   renderWithEntrance('protocol-result', `
@@ -3337,20 +3488,23 @@ window.runProtocolDemo = function() {
       <tbody>${steps.map((s, i) => `
         <tr>
           <td style="color:var(--text3);">${i + 1}</td>
-          <td style="font-weight:600;">${s.step}</td>
+          <td style="font-weight:600;">${escHtml(s.step)}</td>
           <td style="color:var(--cyan);">${s.slot}:${s.gen}</td>
-          <td><span class="badge ${s.badge}" style="font-size:11px;">${s.badgeText}</span> <span style="font-size:12px;color:var(--text3);">${s.state}</span></td>
+          <td><span class="badge ${s.badge}" style="font-size:11px;">${escHtml(s.badgeText)}</span> <span style="font-size:12px;color:var(--text3);">${escHtml(s.state)}</span></td>
         </tr>`).join('')}
       </tbody>
     </table>
     <div style="margin-top:12px; padding:12px; border-radius:8px; background:rgba(6,182,212,0.06); border:1px solid rgba(6,182,212,0.15); font-size:13px; color:var(--text2);">
-      <strong style="color:var(--cyan);">Protocol enforced:</strong> Cancel alone doesn't release the handle. The task must be <em>joined</em> to acknowledge the outcome and unpin the slot. Double-cancel is rejected because the task is no longer in Active state.
+      <strong style="color:var(--cyan);">${released ? 'Protocol enforced:' : 'Protocol result:'}</strong>
+      ${released
+        ? `Cancel alone doesn't release the handle. The task must be <em>joined</em> to acknowledge the outcome and unpin the slot. Double-cancel is rejected because the task is no longer in Active state.`
+        : `The final join was rejected, so this run does not claim that the task handle was released.`}
     </div>
   `);
 
   sc.close();
   rt.value.close();
-  showToast('Cancel→Join protocol demonstrated', 'ok');
+  showToast(released ? 'Cancel→Join protocol demonstrated' : 'Join operation was rejected', released ? 'ok' : 'err');
 };
 
 // ─── Exhibit 9: Live REPL ────────────────────────────────────────
@@ -3539,9 +3693,12 @@ document.addEventListener('keydown', (e) => {
 
 // ─── Exhibit 10: Chaos Stress Test ───────────────────────────────
 let chaosRunning = false;
+let chaosRunId = 0;
+let chaosActiveRT = null;
 window.runChaos = async function() {
   if (chaosRunning) return;
   chaosRunning = true;
+  const runId = ++chaosRunId;
   document.getElementById('btn-chaos-run').disabled = true;
   clearConsole('chaos-console');
 
@@ -3564,6 +3721,7 @@ window.runChaos = async function() {
   const rootScope = rt.value.enterScope('chaos-root');
   if (rootScope.outcome !== 'ok') { clog('chaos-console', 'Failed to create root scope', 'err'); rt.value.close(); chaosRunning = false; document.getElementById('btn-chaos-run').disabled = false; console.groupEnd(); return; }
   const root = rootScope.value;
+  chaosActiveRT = rt.value;
 
   function updateMetrics() {
     document.getElementById('chaos-ops').textContent = ops;
@@ -3635,6 +3793,11 @@ window.runChaos = async function() {
     document.getElementById('chaos-phase').textContent = `Round ${end}/${ROUNDS}`;
     // Yield to UI
     await new Promise(r => setTimeout(r, 0));
+    if (runId !== chaosRunId) {
+      if (chaosActiveRT === rt.value) chaosActiveRT = null;
+      console.groupEnd();
+      return;
+    }
   }
 
   // Close the root, then probe every handle created in this run.
@@ -3645,6 +3808,7 @@ window.runChaos = async function() {
     if (probe.outcome !== 'err') liveAfterClose++;
   }
   rt.value.close();
+  if (chaosActiveRT === rt.value) chaosActiveRT = null;
 
   document.getElementById('chaos-phase').textContent = 'Complete';
   document.getElementById('chaos-pct').textContent = '100%';
@@ -3669,6 +3833,11 @@ window.runChaos = async function() {
 };
 
 window.resetChaos = function() {
+  chaosRunId++;
+  if (chaosActiveRT) {
+    try { chaosActiveRT.close(); } catch(e) {}
+    chaosActiveRT = null;
+  }
   chaosRunning = false;
   document.getElementById('btn-chaos-run').disabled = false;
   document.getElementById('chaos-ops').textContent = '0';
@@ -3688,6 +3857,7 @@ window.resetChaos = function() {
 let sfState = { rt: null, scope: null, fetchHandles: [], timeline: [], startTime: 0 };
 
 window.runScopeFetch = function() {
+  if (sfState.scope) return;
   clearConsole('scopefetch-console');
   const a = requireWasm('scopefetch-console');
   if (!a) return;
@@ -3744,15 +3914,19 @@ window.closeScopeFetch = function() {
   // Scope closure invalidates each fetch handle and signals the controllers
   // retained by the Browser Edition WASM host bridge.
   const closeResult = sfState.scope.close();
-  sfState.rt.close();
+  const runtimeClose = sfState.rt.close();
+  const closed = closeResult.outcome === 'ok' && runtimeClose.outcome === 'ok';
 
-  sfState.timeline.push({ time: elapsed, event: `WASM SCOPE CLOSE → ${closeResult.outcome}`, badge: closeResult.outcome === 'ok' ? 'badge-cancel' : 'badge-err', detail: `${sfState.fetchHandles.length} host fetches signalled` });
+  sfState.timeline.push({ time: elapsed, event: `WASM SCOPE CLOSE → ${closeResult.outcome}`, badge: closeResult.outcome === 'ok' ? 'badge-cancel' : 'badge-err', detail: `${sfState.fetchHandles.length} fetch handles tracked` });
   renderSfTimeline(sfState.timeline);
-  clog('scopefetch-console', `Scope close returned ${closeResult.outcome}; the host bridge signalled ${sfState.fetchHandles.length} request controllers.`, closeResult.outcome === 'ok' ? 'ok' : 'err');
-  showToast(`${sfState.fetchHandles.length} browser requests cancelled with their scope`, closeResult.outcome === 'ok' ? 'ok' : 'err');
-  announce(`${sfState.fetchHandles.length} browser requests were cancelled with their lifecycle scope.`);
+  clog('scopefetch-console', `Scope close returned ${closeResult.outcome}; runtime close returned ${runtimeClose.outcome}; ${sfState.fetchHandles.length} request controllers were tracked.`, closed ? 'ok' : 'err');
+  showToast(closed ? `${sfState.fetchHandles.length} browser requests cancelled with their scope` : 'Fetch-scope close was not confirmed', closed ? 'ok' : 'err');
+  announce(closed
+    ? `${sfState.fetchHandles.length} browser requests were cancelled with their lifecycle scope.`
+    : 'The fetch-scope close was not confirmed.');
 
   sfState.scope = null;
+  sfState.rt = null;
   document.getElementById('btn-sf-close').disabled = true;
   document.getElementById('btn-sf-start').disabled = false;
 };
@@ -3762,8 +3936,8 @@ function renderSfTimeline(timeline) {
   container.innerHTML = timeline.map((e, i) => `
     <div style="display:flex;align-items:center;gap:12px;padding:6px 0;${i > 0 ? 'border-top:1px solid var(--border);' : ''}">
       <span style="color:var(--text3);font-size:11px;min-width:50px;text-align:right;font-family:var(--mono);">${e.time.toFixed(0)}ms</span>
-      <span class="badge ${e.badge}" style="font-size:11px;">${e.event}</span>
-      <span style="color:var(--text3);font-size:12px;">${e.detail}</span>
+      <span class="badge ${e.badge}" style="font-size:11px;">${escHtml(e.event)}</span>
+      <span style="color:var(--text3);font-size:12px;">${escHtml(e.detail)}</span>
     </div>
   `).join('');
 }
@@ -3776,7 +3950,7 @@ window.runSeverityDemo = function() {
   const rt = (a.runtimeCreate || a.runtime_create)();
   if (rt.outcome !== 'ok') return;
   const scope = rt.value.enterScope('severity-demo');
-  if (scope.outcome !== 'ok') return;
+  if (scope.outcome !== 'ok') { rt.value.close(); return; }
   const sc = scope.value;
 
   const configs = [
@@ -3793,6 +3967,7 @@ window.runSeverityDemo = function() {
     const joined = t.value.join(cfg.outcome);
     return { ...cfg, actual: joined.outcome, slot: t.value.slot };
   });
+  const complete = results.every(result => result.actual === result.outcome.outcome);
 
   // Compute aggregate severity
   const severityOrder = ['ok', 'err', 'cancelled', 'panicked'];
@@ -3807,10 +3982,10 @@ window.runSeverityDemo = function() {
   renderWithEntrance('severity-result', `
     <div class="result-grid-5" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px;margin-bottom:16px;">
       ${results.map(r => `
-        <div style="padding:12px;border-radius:var(--radius);border:1px solid ${r.color}33;background:${r.color}08;text-align:center;">
+        <div style="padding:12px;border-radius:var(--radius);border:1px solid ${r.actual === r.outcome.outcome ? r.color : HEX.red}33;background:${r.actual === r.outcome.outcome ? r.color : HEX.red}08;text-align:center;">
           <div style="font-size:12px;color:var(--text3);margin-bottom:4px;">${r.label}</div>
           <div style="font-size:11px;color:var(--text3);margin-bottom:6px;">slot ${r.slot ?? '?'}</div>
-          <span class="badge ${r.badge}" style="font-size:11px;">${r.display}</span>
+          <span class="badge ${r.actual === r.outcome.outcome ? r.badge : 'badge-err'}" style="font-size:11px;">${r.actual === r.outcome.outcome ? r.display : r.actual}</span>
         </div>
       `).join('')}
     </div>
@@ -3820,13 +3995,16 @@ window.runSeverityDemo = function() {
       <div style="font-size:12px;color:var(--text3);margin-top:8px;">Determined by ${worst.from}; severity level ${worst.idx}</div>
     </div>
     <div style="margin-top:12px;padding:12px;border-radius:8px;background:rgba(6,182,212,0.06);border:1px solid rgba(6,182,212,0.15);font-size:13px;color:var(--text2);">
-      <strong style="color:var(--cyan);">What this shows:</strong> four distinct terminal states can be ordered without erasing the difference between an application error, cancellation, and panic.
+      <strong style="color:var(--cyan);">${complete ? 'What this shows:' : 'Incomplete run:'}</strong>
+      ${complete
+        ? 'four distinct terminal states can be ordered without erasing the difference between an application error, cancellation, and panic.'
+        : 'at least one task did not record its configured terminal outcome, so this run does not claim a complete severity comparison.'}
     </div>
   `);
 
   sc.close();
   rt.value.close();
-  showToast('Severity lattice demonstrated', 'ok');
+  showToast(complete ? 'Severity lattice demonstrated' : 'Severity run was incomplete', complete ? 'ok' : 'err');
 };
 
 // ─── Exhibit 13: Cancellation Attribution Forensics ──────────────
@@ -3836,7 +4014,9 @@ window.runForensicsDemo = function() {
   const Outcome = a.Outcome;
   const rt = (a.runtimeCreate || a.runtime_create)();
   if (rt.outcome !== 'ok') return;
-  const sc = rt.value.enterScope('forensics-demo').value;
+  const scope = rt.value.enterScope('forensics-demo');
+  if (scope.outcome !== 'ok') { rt.value.close(); return; }
+  const sc = scope.value;
 
   const cancellations = [
     { kind: 'user', message: 'User clicked the stop button', phase: 'completed', origin: 'ui-thread' },
@@ -3848,14 +4028,23 @@ window.runForensicsDemo = function() {
 
   const results = cancellations.map(cfg => {
     const t = sc.spawnTask({ label: `${cfg.kind}-task` });
-    if (t.outcome !== 'ok') return { ...cfg, error: true };
-    t.value.cancel(cfg.kind, cfg.message);
+    if (t.outcome !== 'ok') return { ...cfg, recorded: false, error: t.failure?.message || 'spawn rejected' };
+    const cancelled = t.value.cancel(cfg.kind, cfg.message);
+    if (cancelled.outcome === 'err') {
+      return { ...cfg, recorded: false, error: cancelled.failure?.message || 'cancel rejected', slot: t.value.slot };
+    }
     const joined = t.value.join(Outcome.cancelled({
       kind: cfg.kind, phase: cfg.phase, origin_region: cfg.origin,
-      origin_task: null, timestamp_nanos: Date.now() * 1000000, message: cfg.message, truncated: false
+      origin_task: null, timestamp_nanos: 0, message: cfg.message, truncated: false
     }));
-    return { ...cfg, outcome: joined, slot: t.value.slot };
+    return {
+      ...cfg,
+      recorded: joined.outcome !== 'err',
+      error: joined.outcome === 'err' ? joined.failure?.message || 'join rejected' : '',
+      slot: t.value.slot,
+    };
   });
+  const recordedCount = results.filter(result => result.recorded).length;
 
   const kindColors = { user: HEX.blue, timeout: HEX.orange, fail_fast: HEX.red, race_lost: HEX.yellow, shutdown: HEX.violet };
 
@@ -3865,24 +4054,26 @@ window.runForensicsDemo = function() {
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
           <span style="width:10px;height:10px;border-radius:50%;background:${kindColors[r.kind]};flex-shrink:0;"></span>
           <span style="font-weight:700;color:${kindColors[r.kind]};font-size:14px;text-transform:uppercase;">${r.kind}</span>
-          <span style="font-size:11px;color:var(--text3);margin-left:auto;">slot ${r.slot}</span>
+          <span class="badge ${r.recorded ? 'badge-ok' : 'badge-err'}" style="font-size:10px;margin-left:auto;">${r.recorded ? 'recorded' : 'rejected'}</span>
+          <span style="font-size:11px;color:var(--text3);">slot ${r.slot ?? '?'}</span>
         </div>
         <div class="attr-grid" style="display:grid;grid-template-columns:100px 1fr;gap:4px 12px;font-size:12px;">
           <span style="color:var(--text3);">Message</span><span style="color:var(--text);">${r.message}</span>
           <span style="color:var(--text3);">Phase</span><span style="color:var(--text);">${r.phase}</span>
           <span style="color:var(--text3);">Origin</span><span style="color:var(--cyan);">${r.origin}</span>
           <span style="color:var(--text3);">Truncated</span><span style="color:var(--text);">false</span>
+          ${r.recorded ? '' : `<span style="color:var(--text3);">Failure</span><span style="color:var(--red);">${escHtml(String(r.error))}</span>`}
         </div>
       </div>
     `).join('')}
     <div style="margin-top:12px;padding:12px;border-radius:8px;background:rgba(251,113,133,0.06);border:1px solid rgba(251,113,133,0.15);font-size:13px;color:var(--text2);">
-      <strong style="color:var(--red);">Diagnostic value:</strong> cancellation kind, origin, phase, message, and truncation state travel together in the recorded outcome instead of depending on separate application logs.
+      <strong style="color:var(--red);">Diagnostic value:</strong> ${recordedCount}/${results.length} attribution records completed the cancel-then-join path with kind, origin, phase, message, and truncation state kept together.
     </div>
   `);
 
   sc.close();
   rt.value.close();
-  showToast('Cancel forensics: 5 attribution chains inspected', 'ok');
+  showToast(`Cancel forensics: ${recordedCount}/${results.length} attribution records completed`, recordedCount === results.length ? 'ok' : 'err');
 };
 
 // ─── Exhibit 14: Handle Slot Recycling Heatmap ───────────────────
@@ -3915,6 +4106,11 @@ window.runRecyclingDemo = function() {
 
   // Render heatmap
   const slots = Object.keys(slotUseCount).map(Number).sort((a, b) => a - b);
+  if (slots.length === 0) {
+    renderWithEntrance('recycling-result', '<div class="text-dim" style="text-align:center;padding:32px 0;">No scope allocation completed, so there is no recycling result to plot.</div>');
+    showToast('No recycling samples were recorded', 'err');
+    return;
+  }
   const maxUse = Math.max(...Object.values(slotUseCount));
 
   renderWithEntrance('recycling-result', `
@@ -3941,15 +4137,15 @@ window.runRecyclingDemo = function() {
       </div>
     </div>
     <div style="padding:12px;border-radius:8px;background:rgba(59,130,246,0.06);border:1px solid rgba(59,130,246,0.15);font-size:13px;color:var(--text2);">
-      <strong style="color:var(--blue);">LIFO recycling:</strong> Notice how the most recently freed slot gets reused first (highest reuse count on the most recently allocated slots).
-      This pattern is deterministic: the same sequence produces identical slot assignments and reproducible replay traces.
+      <strong style="color:var(--blue);">Immediate reuse:</strong> each create follows the previous close, so the slot at the top of the free-list is reused while its generation advances.
+      The next exhibit frees four scopes before reallocating them and checks the full reverse order.
     </div>
   `);
-  showToast(`Slot heatmap: ${slots.length} slots, ${CYCLES} cycles`, 'ok');
+  showToast(`Slot heatmap: ${slots.length} slots, ${events.length / 2} completed cycles`, 'ok');
 };
 
 // ─── Exhibit 15: Sibling Scope Isolation ─────────────────────────
-let isoState = { rt: null, root: null, siblings: [], closeIdx: 0, timers: [] };
+let isoState = { rt: null, root: null, siblings: [], closeIdx: 0, probeFailures: 0, timers: [] };
 
 window.buildIsolation = function() {
   clearConsole('isolation-console');
@@ -3959,7 +4155,7 @@ window.buildIsolation = function() {
   const rt = (a.runtimeCreate || a.runtime_create)();
   if (rt.outcome !== 'ok') return;
   const root = rt.value.enterScope('isolation-root');
-  if (root.outcome !== 'ok') return;
+  if (root.outcome !== 'ok') { rt.value.close(); return; }
 
   const names = ['auth-service', 'payment-service', 'email-service', 'analytics-service'];
   const siblings = names.map(name => {
@@ -3974,9 +4170,18 @@ window.buildIsolation = function() {
     return { name, handle: s.value, tasks, alive: true };
   }).filter(Boolean);
 
-  isoState = { rt: rt.value, root: root.value, siblings, closeIdx: 0, timers: [] };
+  isoState = { rt: rt.value, root: root.value, siblings, closeIdx: 0, probeFailures: 0, timers: [] };
   renderIsolation();
-  clog('isolation-console', `Built 4 sibling scopes with ${siblings.reduce((s,x)=>s+x.tasks.length,0)} tasks total`, 'ok');
+  if (siblings.length === 0) {
+    root.value.close();
+    rt.value.close();
+    isoState = { rt: null, root: null, siblings: [], closeIdx: 0, probeFailures: 0, timers: [] };
+    clog('isolation-console', 'No sibling scopes could be created', 'err');
+    showToast('Sibling scope creation failed', 'err');
+    return;
+  }
+
+  clog('isolation-console', `Built ${siblings.length} sibling scopes with ${siblings.reduce((sum, sibling) => sum + sibling.tasks.length, 0)} tasks total`, siblings.length === names.length ? 'ok' : 'warn');
   document.getElementById('btn-iso-build').disabled = true;
   document.getElementById('btn-iso-close').disabled = false;
 };
@@ -4003,10 +4208,15 @@ window.closeNextSibling = function() {
   const sib = isoState.siblings[isoState.closeIdx];
 
   // Close this sibling
-  sib.handle.close();
-  sib.alive = false;
+  const closeResult = sib.handle.close();
+  const closed = closeResult.outcome === 'ok';
+  sib.alive = !closed;
+  if (!closed) isoState.probeFailures++;
 
-  clog('isolation-console', `Closed "${sib.name}" (slot=${sib.handle.slot}) with ${sib.tasks.length} tasks`, 'warn');
+  clog('isolation-console', closed
+    ? `Closed "${sib.name}" (slot=${sib.handle.slot}) with ${sib.tasks.length} tasks`
+    : `Close rejected for "${sib.name}": ${closeResult.failure?.message || closeResult.outcome}`,
+  closed ? 'warn' : 'err');
 
   // Verify siblings are unaffected by entering a scope on each living sibling
   const living = isoState.siblings.filter(s => s.alive);
@@ -4016,6 +4226,7 @@ window.closeNextSibling = function() {
       probe.value.close();
       clog('isolation-console', `  ✓ "${s.name}" unaffected; still accepts new scopes`, 'ok');
     } else {
+      isoState.probeFailures++;
       clog('isolation-console', `  ✗ "${s.name}" BROKEN: ${probe.failure?.message}`, 'err');
     }
   });
@@ -4024,18 +4235,32 @@ window.closeNextSibling = function() {
   renderIsolation();
 
   if (isoState.closeIdx >= isoState.siblings.length) {
+    if (isoState.root) {
+      const rootClose = isoState.root.close();
+      if (rootClose.outcome !== 'ok') isoState.probeFailures++;
+      isoState.root = null;
+    }
+    if (isoState.rt) {
+      const runtimeClose = isoState.rt.close();
+      if (runtimeClose.outcome !== 'ok') isoState.probeFailures++;
+      isoState.rt = null;
+    }
     document.getElementById('btn-iso-close').disabled = true;
-    clog('isolation-console', 'All siblings closed independently. Zero cross-contamination proven.', 'ok');
-    showToast('Sibling isolation verified', 'ok');
+    const verified = isoState.probeFailures === 0;
+    clog('isolation-console', verified
+      ? 'Every sibling close completed, and every surviving sibling accepted a probe scope.'
+      : `Isolation run completed with ${isoState.probeFailures} rejected close or probe operations.`,
+    verified ? 'ok' : 'err');
+    showToast(verified ? 'Sibling isolation verified' : 'Isolation run reported failures', verified ? 'ok' : 'err');
   }
 };
 
 window.resetIsolation = function() {
   isoState.timers.forEach(clearTimeout);
   if (isoState.rt) { try { isoState.rt.close(); } catch(e) {} }
-  isoState = { rt: null, root: null, siblings: [], closeIdx: 0, timers: [] };
+  isoState = { rt: null, root: null, siblings: [], closeIdx: 0, probeFailures: 0, timers: [] };
   clearConsole('isolation-console');
-  document.getElementById('isolation-result').innerHTML = '<div class="text-dim" style="text-align:center;padding:32px 0;">Click Build to create 4 sibling scopes, then close them one-by-one to prove isolation</div>';
+  document.getElementById('isolation-result').innerHTML = '<div class="text-dim" style="text-align:center;padding:32px 0;">Build four sibling scopes, then close them one-by-one and probe every survivor</div>';
   document.getElementById('btn-iso-build').disabled = false;
   document.getElementById('btn-iso-close').disabled = true;
 };
@@ -4091,7 +4316,9 @@ window.runReplayDemo = function() {
 
   // Verify LIFO: reused order should be reverse of freed order
   const expectedLIFO = [...freedSlots].reverse();
-  const isLIFO = JSON.stringify(reusedSlots) === JSON.stringify(expectedLIFO);
+  const isLIFO = freedSlots.length >= 2
+    && reusedSlots.length === freedSlots.length
+    && JSON.stringify(reusedSlots) === JSON.stringify(expectedLIFO);
 
   renderWithEntrance('replay-result', `
     <div style="margin-bottom:16px;">
@@ -4123,8 +4350,10 @@ window.runReplayDemo = function() {
       <div style="font-size:12px;color:var(--text3);margin-top:4px;">Expected: ${expectedLIFO.join(' → ')} | Got: ${reusedSlots.join(' → ')}</div>
     </div>
     <div style="margin-top:12px;padding:12px;border-radius:8px;background:rgba(59,130,246,0.06);border:1px solid rgba(59,130,246,0.15);font-size:13px;color:var(--text2);">
-      <strong style="color:var(--blue);">Observed here:</strong> given this exact sequence of operations in one runtime instance,
-      the returned slots follow the expected LIFO reuse order. The result is calculated from the handles above.
+      <strong style="color:var(--blue);">Observed here:</strong> ${isLIFO
+        ? 'given this exact sequence of operations in one runtime instance, the returned slots follow the expected LIFO reuse order.'
+        : 'this run did not return enough matching allocations to confirm the expected LIFO reuse order.'}
+      The verdict is calculated from the handles above.
     </div>
   `);
   // REVELATION beat: spring pop on the verdict
@@ -4145,7 +4374,7 @@ window.runLeakDetectDemo = function() {
   const rt = (a.runtimeCreate || a.runtime_create)();
   if (rt.outcome !== 'ok') return;
   const scope = rt.value.enterScope('leak-demo');
-  if (scope.outcome !== 'ok') return;
+  if (scope.outcome !== 'ok') { rt.value.close(); return; }
   const sc = scope.value;
 
   // Spawn 5 tasks and intentionally leave them unjoined.
@@ -4158,7 +4387,7 @@ window.runLeakDetectDemo = function() {
     }
   }
 
-  clog('leakdetect-console', `5 tasks spawned. 0 joined. All are pinned obligations.`, 'warn');
+  clog('leakdetect-console', `${tasks.length} tasks spawned. 0 joined. Each successful spawn is a pinned obligation.`, 'warn');
   clog('leakdetect-console', 'Closing the scope to release its unjoined tasks...', 'info');
 
   // Close the scope; this should cascade-close all unjoined tasks.
@@ -4177,7 +4406,7 @@ window.runLeakDetectDemo = function() {
     return { task: t, released, outcome: probe.outcome };
   });
   const releasedCount = probeResults.filter(result => result.released).length;
-  const allReleased = releasedCount === probeResults.length;
+  const allReleased = closeResult.outcome === 'ok' && probeResults.length > 0 && releasedCount === probeResults.length;
 
   rt.value.close();
 
@@ -4215,7 +4444,7 @@ window.runTimeoutDemo = function() {
   const rt = (a.runtimeCreate || a.runtime_create)();
   if (rt.outcome !== 'ok') return;
   const scope = rt.value.enterScope('timeout-scope');
-  if (scope.outcome !== 'ok') return;
+  if (scope.outcome !== 'ok') { rt.value.close(); return; }
   const sc = scope.value;
 
   document.getElementById('btn-timeout-start').disabled = true;
@@ -4231,7 +4460,7 @@ window.runTimeoutDemo = function() {
     }
   }
 
-  clog('timeout-console', 'Three task handles recorded. Host deadline: 2 seconds...', 'info');
+  clog('timeout-console', `${tasks.length} task handles recorded. Host deadline: 2 seconds...`, tasks.length === 3 ? 'info' : 'warn');
 
   const container = document.getElementById('timeout-result');
   // Countdown timer
@@ -4255,10 +4484,11 @@ window.runTimeoutDemo = function() {
     const closeResult = sc.close();
     const probeResults = tasks.map(task => task.join(a.Outcome.ok(0)));
     const rejectedCount = probeResults.filter(result => result.outcome === 'err').length;
+    const allRejected = closeResult.outcome === 'ok' && tasks.length > 0 && rejectedCount === tasks.length;
     rt.value.close();
     const elapsed = performance.now() - startTime;
     clog('timeout-console', `HOST TIMER: scope.close() returned ${closeResult.outcome} at ${elapsed.toFixed(0)}ms`, 'warn');
-    clog('timeout-console', `${rejectedCount}/${tasks.length} old task handles rejected by post-close join probes.`, rejectedCount === tasks.length ? 'ok' : 'err');
+    clog('timeout-console', `${rejectedCount}/${tasks.length} old task handles rejected by post-close join probes.`, allRejected ? 'ok' : 'err');
 
     container.innerHTML = `
       <div style="text-align:center;padding:24px;">
@@ -4275,17 +4505,18 @@ window.runTimeoutDemo = function() {
       if (dl) motionLib.animate(dl, { scale: [0.8, 1.1, 1] }, { type: 'spring', stiffness: 400, damping: 18 });
     }
     document.getElementById('btn-timeout-start').disabled = false;
-    showToast(`Host deadline closed scope · ${rejectedCount}/${tasks.length} handles invalidated`, rejectedCount === tasks.length ? 'ok' : 'err');
+    showToast(`Host deadline closed scope · ${rejectedCount}/${tasks.length} handles invalidated`, allRejected ? 'ok' : 'err');
     announce(`Host deadline fired. ${rejectedCount} of ${tasks.length} old task handles were rejected.`);
   }, 2000);
 };
 
 // ─── Exhibit 19: Scoped Channel with Lifecycle ──────────────────
-// Uses MessageChannel (always available, no external server) to demonstrate
+// Uses the browser-native MessageChannel API, with no external server, to demonstrate
 // Scoped resource lifecycle: the channel is owned by a WASM scope.
-let chanState = { rt: null, scope: null, port: null, msgCount: 0, tasks: [] };
+let chanState = { rt: null, scope: null, sendPort: null, recvPort: null, sentCount: 0, msgCount: 0, tasks: [] };
 
 window.runChannelDemo = function() {
+  if (chanState.scope) return;
   clearConsole('websocket-console');
   const a = requireWasm('websocket-console');
   if (!a) return;
@@ -4293,18 +4524,18 @@ window.runChannelDemo = function() {
   const rt = (a.runtimeCreate || a.runtime_create)();
   if (rt.outcome !== 'ok') return;
   const scope = rt.value.enterScope('channel-scope');
-  if (scope.outcome !== 'ok') return;
+  if (scope.outcome !== 'ok') { rt.value.close(); return; }
 
   // Spawn tasks to represent the channel's send and receive sides
   const sendTask = scope.value.spawnTask({ label: 'channel-send' });
   const recvTask = scope.value.spawnTask({ label: 'channel-recv' });
 
-  // Create a real MessageChannel (browser-native, always works)
+  // Create a browser-native MessageChannel.
   const channel = new MessageChannel();
   const sendPort = channel.port1;
   const recvPort = channel.port2;
 
-  chanState = { rt: rt.value, scope: scope.value, sendPort, recvPort, msgCount: 0,
+  chanState = { rt: rt.value, scope: scope.value, sendPort, recvPort, sentCount: 0, msgCount: 0,
     tasks: [sendTask.outcome === 'ok' ? sendTask.value : null, recvTask.outcome === 'ok' ? recvTask.value : null].filter(Boolean) };
 
   recvPort.onmessage = (e) => {
@@ -4324,7 +4555,7 @@ window.runChannelDemo = function() {
 };
 
 function renderChanState(state) {
-  const stateColors = { connected: HEX.green, closed: HEX.text3 };
+  const stateColors = { connected: HEX.green, closed: HEX.text3, error: HEX.red };
   const container = document.getElementById('websocket-result');
   container.innerHTML = `
     <div class="mobile-stack" style="display:flex;align-items:center;gap:16px;justify-content:center;padding:16px;">
@@ -4337,13 +4568,17 @@ function renderChanState(state) {
         Messages echoed: <strong style="color:var(--cyan);">${chanState.msgCount}</strong>
       </div>
     </div>
-    ${state === 'closed' ? `<div style="text-align:center;padding:8px;font-size:12px;color:var(--text2);">The action closed both browser ports, then closed their WASM lifecycle scope.</div>` : ''}
+    ${state === 'closed'
+      ? `<div style="text-align:center;padding:8px;font-size:12px;color:var(--text2);">The action closed both browser ports, then closed their WASM lifecycle scope.</div>`
+      : state === 'error'
+        ? `<div style="text-align:center;padding:8px;font-size:12px;color:var(--red);">The browser ports closed, but the WASM scope or runtime close was rejected.</div>`
+        : ''}
   `;
 }
 
 window.wsSend = function() {
   if (chanState.sendPort) {
-    const n = chanState.msgCount + 1;
+    const n = ++chanState.sentCount;
     const msg = 'Hello from scope ' + (chanState.scope?.slot ?? '?') + ' (msg #' + n + ')';
     chanState.sendPort.postMessage(msg);
     clog('websocket-console', `Sent: "${msg}"`, 'info');
@@ -4354,15 +4589,19 @@ window.wsCloseScope = function() {
   // Close ports, then close scope (releases WASM tasks)
   if (chanState.sendPort) { chanState.sendPort.close(); chanState.sendPort = null; }
   if (chanState.recvPort) { chanState.recvPort.close(); chanState.recvPort = null; }
-  if (chanState.scope) { chanState.scope.close(); }
-  if (chanState.rt) { chanState.rt.close(); }
-  clog('websocket-console', `Closed both MessagePorts and the scope tracking ${chanState.tasks.length} task handles.`, 'ok');
-  showToast('Browser ports and lifecycle scope closed', 'ok');
+  const scopeClose = chanState.scope?.close() || { outcome: 'err' };
+  const runtimeClose = chanState.rt?.close() || { outcome: 'err' };
+  const closed = scopeClose.outcome === 'ok' && runtimeClose.outcome === 'ok';
+  clog('websocket-console', closed
+    ? `Closed both MessagePorts and the scope tracking ${chanState.tasks.length} task handles.`
+    : `Browser ports closed; scope=${scopeClose.outcome}, runtime=${runtimeClose.outcome}.`,
+  closed ? 'ok' : 'err');
+  showToast(closed ? 'Browser ports and lifecycle scope closed' : 'WASM lifecycle close was rejected', closed ? 'ok' : 'err');
   document.getElementById('btn-ws-send').disabled = true;
   document.getElementById('btn-ws-close').disabled = true;
   document.getElementById('btn-ws-open').disabled = false;
-  renderChanState('closed');
-  chanState = { rt: null, scope: null, sendPort: null, recvPort: null, msgCount: 0, tasks: [] };
+  renderChanState(closed ? 'closed' : 'error');
+  chanState = { rt: null, scope: null, sendPort: null, recvPort: null, sentCount: 0, msgCount: 0, tasks: [] };
 };
 
 // ─── Exhibit 21: Rapid Scope Churn Benchmark ─────────────────────
