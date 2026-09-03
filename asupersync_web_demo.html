@@ -1739,7 +1739,7 @@ t.<span class="fn">join</span>(<span class="typ">Outcome</span>.<span class="fn"
         manually creating an <code>AbortController</code>, threading its signal through the call, and remembering
         to call <code>abort()</code> on teardown. Browser Edition binds each host request to a
         <strong style="color:var(--text);">region-owned fetch handle</strong>. Closing the region invalidates the
-        associated lifecycle handles while the JavaScript adapter aborts the browser requests.
+        associated lifecycle handles while the WASM host bridge aborts the browser requests.
       </p>
     </div>
     <div class="mt-4 reveal">
@@ -2087,7 +2087,7 @@ scope.<span class="fn">fetchRequest</span>({ <span class="prop">url</span>: url3
 <span class="fn">setTimeout</span>(() => scope.<span class="fn">close</span>(), <span class="num">5000</span>);</div>
         </div>
         <div style="margin-top:8px;padding:10px 14px;border-radius:8px;background:rgba(34,197,94,0.06);border:1px solid rgba(34,197,94,0.15);font-size:12px;color:var(--text2);">
-          <strong style="color:var(--green);">One visible ownership boundary.</strong> The Browser Edition adapter maps scope closure to its host-side request cancellation and lifecycle cleanup.
+          <strong style="color:var(--green);">One visible ownership boundary.</strong> The Browser Edition host bridge maps scope closure to request cancellation and lifecycle cleanup.
         </div>
       </div>
     </div>
