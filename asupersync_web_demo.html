@@ -1150,11 +1150,10 @@ console.<span class="fn">log</span>(<span class="str">`Fingerprint: </span><span
       <span class="exhibit-num">Exhibit 2</span>
       <h2>Structured Concurrency — Region Tree</h2>
       <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
-        In tokio and async-std, <code style="color:var(--cyan)">spawn()</code> creates detached tasks with no owner.
-        In Asupersync, <strong style="color:var(--text);">every task is owned by a region</strong>. Regions form a tree
-        rooted at the runtime. When a region closes, it guarantees quiescence: all children complete, all finalizers
-        run, all obligations resolve. No orphan tasks, ever — by construction, not convention.
-        <strong style="color:var(--text);">Click any region</strong> to trigger cascading cancellation and see real WASM handles close.
+        Asupersync makes task ownership explicit: <strong style="color:var(--text);">every task belongs to a region</strong>,
+        and regions form a tree rooted at the runtime. Closing a region drives its recorded children toward quiescence
+        and resolves their lifecycle obligations. <strong style="color:var(--text);">Choose any region</strong> to watch
+        the host-timed phases while the corresponding scope handles close in WASM.
       </p>
     </div>
 
@@ -1203,9 +1202,9 @@ httpRegion.<span class="fn">close</span>();</div>
           <span><span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:var(--text3);margin-right:4px;"></span> Quiescent</span>
         </div>
       </div>
-      <div class="callout-contrast callout-danger mt-2">
-        <strong>Without structured concurrency (tokio, async-std):</strong>
-        <code style="color:var(--cyan);">tokio::spawn()</code> returns a detached <code>JoinHandle</code>. If you drop it, the task becomes an orphan — running indefinitely, holding resources, invisible to the parent scope. There is no "close region and wait for children" primitive. You must manually track every spawned task and <code>.await</code> each <code>JoinHandle</code>. Miss one? Zombie task. Forever.
+      <div class="callout-contrast callout-info mt-2">
+        <strong>The design difference:</strong>
+        Other ecosystems offer strong building blocks for cancellation and task tracking, but the ownership policy is often assembled from several primitives. Asupersync puts the region tree and its close protocol directly in the runtime contract.
       </div>
       <div class="console mt-2" id="region-console">
         <div class="console-header"><span class="traffic-dots"><span class="dot-r"></span><span class="dot-y"></span><span class="dot-g"></span></span><span class="status-dot" id="region-console-dot"></span> Region Events</div>
@@ -1224,11 +1223,10 @@ httpRegion.<span class="fn">close</span>();</div>
       <span class="exhibit-num">Exhibit 3</span>
       <h2>Four-Valued Outcome Algebra</h2>
       <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
-        Tokio tasks return <code style="color:var(--cyan)">Result&lt;T, JoinError&gt;</code> — two states, no algebra.
-        Asupersync has a <strong style="color:var(--text);">four-valued</strong> <code style="color:var(--cyan)">Outcome</code>
+        Asupersync uses a <strong style="color:var(--text);">four-valued</strong> <code style="color:var(--cyan)">Outcome</code>
         with a severity lattice: <strong style="color:var(--text);">Ok &lt; Err &lt; Cancelled &lt; Panicked</strong>.
-        Combinators aggregate by taking the worst severity automatically — making error propagation
-        algebraic instead of manual. No other async runtime has this.
+        Combinators can aggregate by severity, keeping application errors, attributed cancellation, and panics distinct
+        without flattening them into a single failure channel.
       </p>
     </div>
 
@@ -1269,8 +1267,8 @@ httpRegion.<span class="fn">close</span>();</div>
       <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
         Cancellation flows through a multi-phase protocol:
         <strong style="color:var(--text);">Running → Requested → Draining → Finalizing → Completed</strong>.
-        Budget is consumed during drain. Compare with tokio's approach below: runtime dropped,
-        futures abandoned mid-execution, resources leaked.
+        Budget is consumed during drain, so cleanup policy is visible and bounded instead of being implicit.
+        The comparison below contrasts a detached-drop pattern with Asupersync's explicit close protocol.
       </p>
     </div>
 
@@ -1315,7 +1313,7 @@ httpRegion.<span class="fn">close</span>();</div>
         <div class="card card-sm" id="tokio-panel" style="border-color: var(--border2); transition: border-color 0.4s, box-shadow 0.4s;">
           <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 12px;">
             <span class="res-dot active" id="tokio-status-dot" style="width:8px;height:8px;border-radius:50%;background:var(--blue);"></span>
-            <span style="font-size: 13px; font-weight: 700;">Tokio</span>
+            <span style="font-size: 13px; font-weight: 700;">Detached task pattern</span>
             <span style="font-size: 11px; color: var(--text3); margin-left: auto;" id="tokio-phase-label">Running</span>
           </div>
           <div id="tokio-resources">
@@ -1375,11 +1373,10 @@ httpRegion.<span class="fn">close</span>();</div>
       <span class="exhibit-num">Exhibit 5</span>
       <h2>Budget Algebra — Semiring Composition</h2>
       <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
-        In tokio, cleanup is best-effort — there is no "budget" concept, no compositional algebra, no guarantee
-        that nested timeouts compose correctly. Asupersync's cleanup budgets compose as a
+        Asupersync makes cleanup constraints first-class. Its budgets compose as a
         <strong style="color:var(--text);">semiring</strong>: <code style="color:var(--cyan)">combine(b1, b2)</code>
         takes componentwise min for quotas/deadlines and max for priority.
-        "Who constrains whom?" is algebraic, not ad-hoc — sufficient conditions, not hopes.
+        That turns nested constraints into an operation the runtime can validate and inspect.
       </p>
     </div>
 
@@ -1437,11 +1434,9 @@ httpRegion.<span class="fn">close</span>();</div>
       <span class="exhibit-num">Exhibit 6</span>
       <h2>Generation Counters — Use-After-Free Prevention</h2>
       <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
-        Browser APIs and most runtimes use opaque object references with no protection against use-after-free.
-        If an ID is recycled, old references <em>silently alias new state</em> — the classic ABA problem.
+        Integer IDs are easy to recycle incorrectly: an old reference can accidentally address new state in the same slot.
         Asupersync's handles carry a <strong style="color:var(--text);">generation counter</strong> that increments
         on every slot recycle. Stale handles are rejected with a precise error message.
-        No other browser-facing WASM runtime has this safety mechanism.
       </p>
     </div>
     <div class="grid-2 mt-4">
@@ -1477,9 +1472,9 @@ s1.<span class="fn">close</span>();  <span class="cmt">// slot N freed, generati
             </div>
           </div>
         </div>
-        <div class="callout-contrast callout-danger mt-2">
-          <strong>Without generation counters (most runtimes):</strong>
-          When a handle/ID is recycled, old references silently alias new state. This is the classic ABA problem — you think you're talking to Task A, but the slot was recycled and you're now corrupting Task B. In production, this manifests as impossible-to-reproduce state corruption. Asupersync makes this <em>structurally impossible</em>.
+        <div class="callout-contrast callout-info mt-2">
+          <strong>What the generation proves:</strong>
+          A slot can be reused without letting an old generation address its new occupant. The exhibit shows the stale call being rejected at the ABI boundary.
         </div>
         <div class="console mt-2" id="stale-console">
           <div class="console-header"><span class="traffic-dots"><span class="dot-r"></span><span class="dot-y"></span><span class="dot-g"></span></span><span class="status-dot" id="stale-console-dot"></span> Console Output</div>
@@ -1499,18 +1494,15 @@ s1.<span class="fn">close</span>();  <span class="cmt">// slot N freed, generati
       <span class="exhibit-num">Exhibit 7</span>
       <h2>Deep Cascade Close — Quiescence by Construction</h2>
       <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
-        In tokio, closing a "scope" means manually tracking every spawned task, connection, and timer,
-        then cleaning each one in every error path. Miss one? Resource leak.
-        In Asupersync, closing a scope <strong style="color:var(--text);">cascades through all descendants</strong> —
-        tasks are cancelled, child scopes are closed, handles are released.
-        This demo builds a real 4-level scope tree with real WASM handles, then closes a mid-level node
-        to prove zero orphans.
+        Asupersync regions form a <strong style="color:var(--text);">tree with cascade close</strong>:
+        close a node and its recorded descendants close children-first. This exhibit builds a four-level
+        scope tree in WASM, closes a middle node, and probes each handle after the cascade.
       </p>
     </div>
     <div class="mt-4 reveal">
       <div class="viz" id="cascade-viz">
         <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; flex-wrap: wrap; gap: 8px;">
-          <div class="viz-title" style="margin-bottom: 0;">Live Scope Tree (real WASM handles)</div>
+          <div class="viz-title" style="margin-bottom: 0;">WASM Scope Tree</div>
           <div class="flex gap-2" style="flex-wrap: wrap;">
             <button class="btn btn-primary btn-sm" id="btn-cascade-build" onclick="cascadeBuild()">Build Tree</button>
             <button class="btn btn-orange btn-sm" id="btn-cascade-close" onclick="cascadeClose()" disabled>Close Mid-Node</button>
@@ -1521,9 +1513,9 @@ s1.<span class="fn">close</span>();  <span class="cmt">// slot N freed, generati
           <div class="text-dim" style="text-align: center; padding: 32px 0;">Click <strong>Build Tree</strong> to create a real 4-level scope hierarchy</div>
         </div>
       </div>
-      <div class="callout-contrast callout-danger mt-2">
-        <strong>Without cascade close (tokio, Node.js):</strong>
-        You must manually track every spawned task, every open connection, every pending timer, and ensure each one is cleaned up in every error path. Close the HTTP handler but forget the database connections it spawned? Leaked. Close the connection pool but forget a query mid-flight? Leaked. With N components, you have O(N&sup2;) cleanup coordination points. Asupersync: <code style="color:var(--cyan);">scope.close()</code> — one call, guaranteed.
+      <div class="callout-contrast callout-info mt-2">
+        <strong>Why cascade close matters:</strong>
+        Resource ownership stays aligned with the scope tree. One close operation reaches the descendants registered beneath that scope, reducing the number of cleanup paths application code must coordinate.
       </div>
       <div class="console mt-2" id="cascade-console">
         <div class="console-header"><span class="traffic-dots"><span class="dot-r"></span><span class="dot-y"></span><span class="dot-g"></span></span><span class="status-dot" id="cascade-console-dot"></span> Cascade Events</div>
@@ -1542,12 +1534,10 @@ s1.<span class="fn">close</span>();  <span class="cmt">// slot N freed, generati
       <span class="exhibit-num">Exhibit 8</span>
       <h2>Cancel is Not Enough — You Must Join</h2>
       <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
-        In tokio, calling <code style="color:var(--cyan)">.abort()</code> on a JoinHandle kills the task instantly —
-        no acknowledgment, no cleanup confirmation, no protocol. The handle may or may not be safe to reuse.
-        In Asupersync, <code style="color:var(--cyan)">task_cancel()</code> only <em>requests</em> cancellation.
+        In Asupersync, <code style="color:var(--cyan)">task_cancel()</code> <em>requests</em> cancellation.
         The task stays <strong style="color:var(--text);">pinned</strong>.
         You <strong style="color:var(--text);">must</strong> call <code style="color:var(--cyan)">task_join()</code>
-        to acknowledge the outcome and release the handle. This is a real protocol enforced by the runtime.
+        to record the outcome and release the handle. The ledger makes this two-step protocol directly observable.
       </p>
     </div>
     <div class="grid-2 mt-4">
@@ -1581,7 +1571,7 @@ t.<span class="fn">join</span>(<span class="typ">Outcome</span>.<span class="fn"
           <div class="viz-title">Task State Machine (Live)</div>
           <div id="protocol-result">
             <div class="text-dim" style="padding: 40px 0; text-align: center;">
-              Click <strong>Run</strong> to see the cancel→join protocol enforced by real WASM
+              Click <strong>Run</strong> to exercise the cancel→join protocol in the WASM ledger
             </div>
           </div>
         </div>
@@ -1603,9 +1593,9 @@ t.<span class="fn">join</span>(<span class="typ">Outcome</span>.<span class="fn"
       <span class="exhibit-num">Exhibit 9 — Interactive</span>
       <h2>Live Runtime REPL</h2>
       <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
-        This isn't a simulation. Type JavaScript below and it executes against the
-        <strong style="color:var(--text);">real WASM runtime</strong> running in your browser. Every handle, every outcome, every
-        error is real. Try creating scopes, spawning tasks, cancelling them — experiment freely.
+        Type JavaScript below to call the shipped <strong style="color:var(--text);">WASM lifecycle API</strong> directly.
+        Handle allocation, scope transitions, task outcomes, and cancellation records cross the compiled Rust boundary;
+        the browser remains responsible for scheduling JavaScript work. Open DevTools to inspect each ABI call.
       </p>
     </div>
 
@@ -1671,14 +1661,11 @@ t.<span class="fn">join</span>(<span class="typ">Outcome</span>.<span class="fn"
   <div class="container">
     <div class="reveal">
       <span class="exhibit-num">Exhibit 10 — Stress Test</span>
-      <h2>Chaos Mode — Prove Zero Leaks Under Pressure</h2>
+      <h2>Lifecycle Stress Run</h2>
       <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
-        Most runtimes are never tested with random create/cancel/close sequences — the kind of chaos
-        that reveals use-after-free, double-free, and handle leak bugs.
-        This demo creates hundreds of real WASM handles at high speed, cancels them randomly,
-        closes scopes with live children, and verifies:
-        <strong style="color:var(--text);">zero leaked handles, zero orphaned tasks, every obligation resolved.</strong>
-        The structural guarantees that make this possible simply don't exist in tokio or async-std.
+        Rapid create, cancel, join, and close sequences exercise the places where stale generations and
+        unresolved obligations tend to surface. This browser run performs 200 randomized operations against
+        WASM handles, closes the root, then probes the handles it created to report what the ledger accepted or rejected.
       </p>
     </div>
 
@@ -1711,7 +1698,7 @@ t.<span class="fn">join</span>(<span class="typ">Outcome</span>.<span class="fn"
             <div style="font-size:24px;font-weight:800;color:var(--red);font-family:var(--mono);" id="chaos-errors">0</div>
           </div>
           <div class="card-sm" style="background:rgba(255,255,255,0.02); border:1px solid var(--border); border-radius:var(--radius); text-align:center; padding:12px;">
-            <div style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:0.06em;">Leaked</div>
+            <div style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:0.06em;">Live after close</div>
             <div style="font-size:24px;font-weight:800;font-family:var(--mono);color:var(--text3);" id="chaos-leaked">—</div>
           </div>
         </div>
@@ -1742,14 +1729,14 @@ t.<span class="fn">join</span>(<span class="typ">Outcome</span>.<span class="fn"
 <section class="section" id="scopefetch">
   <div class="container">
     <div class="reveal">
-      <span class="exhibit-num">Exhibit 11 — Unique to Asupersync</span>
-      <h2>Scope-Bounded HTTP — Close the Region, Kill the Request</h2>
+      <span class="exhibit-num">Exhibit 11 · Browser I/O</span>
+      <h2>Scope-Bounded HTTP</h2>
       <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
         In vanilla JavaScript, cancelling an in-flight <code style="color:var(--cyan)">fetch()</code> requires
         manually creating an <code>AbortController</code>, threading its signal through the call, and remembering
-        to call <code>abort()</code> in every error path. In Asupersync, the fetch handle is <strong style="color:var(--text);">scoped to a region</strong>.
-        Close the region and <em>every</em> in-flight request under it is automatically cancelled. No manual wiring.
-        No forgotten cleanup paths. Structural, not conventional.
+        to call <code>abort()</code> on teardown. Browser Edition binds each host request to a
+        <strong style="color:var(--text);">region-owned fetch handle</strong>. Closing the region invalidates the
+        associated lifecycle handles while the JavaScript adapter aborts the browser requests.
       </p>
     </div>
     <div class="mt-4 reveal">
@@ -1779,15 +1766,12 @@ t.<span class="fn">join</span>(<span class="typ">Outcome</span>.<span class="fn"
 <section class="section" id="severity">
   <div class="container">
     <div class="reveal">
-      <span class="exhibit-num">Exhibit 12 — Unique to Asupersync</span>
+      <span class="exhibit-num">Exhibit 12 · Outcome algebra</span>
       <h2>Outcome Severity Propagation — Algebraic Error Handling</h2>
       <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
-        In tokio, when you <code style="color:var(--cyan)">join_all</code> multiple tasks, you get back a
-        <code style="color:var(--cyan)">Vec&lt;Result&gt;</code> and must manually scan for errors, distinguish
-        cancellations from panics, and decide which failure is "worst." Asupersync's four-valued
-        <code style="color:var(--cyan)">Outcome</code> forms a <strong style="color:var(--text);">severity lattice</strong>:
-        Ok &lt; Err &lt; Cancelled &lt; Panicked. When combining outcomes, the worst severity wins automatically.
-        This demo spawns 5 real tasks with mixed outcomes and shows the lattice composition in real-time.
+        Asupersync's four-valued <code style="color:var(--cyan)">Outcome</code> forms a
+        <strong style="color:var(--text);">severity lattice</strong>: Ok &lt; Err &lt; Cancelled &lt; Panicked.
+        This exhibit records five mixed task outcomes in WASM and applies the same ordering used by the API.
       </p>
     </div>
     <div class="mt-4 reveal">
@@ -1810,15 +1794,13 @@ t.<span class="fn">join</span>(<span class="typ">Outcome</span>.<span class="fn"
 <section class="section" id="forensics">
   <div class="container">
     <div class="reveal">
-      <span class="exhibit-num">Exhibit 13 — Unique to Asupersync</span>
+      <span class="exhibit-num">Exhibit 13 · Diagnostics</span>
       <h2>Cancellation Forensics — Full Attribution Chain</h2>
       <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
-        When a tokio task is cancelled, you get... nothing. The future is dropped. You have no idea
-        <em>who</em> cancelled it, <em>why</em>, <em>from which region</em>, or <em>at what phase</em>.
-        Asupersync's cancellation outcome carries a <strong style="color:var(--text);">full attribution chain</strong>:
+        Asupersync's cancellation outcome carries a <strong style="color:var(--text);">structured attribution record</strong>:
         the cancel kind (user/timeout/fail_fast/race_lost/shutdown), the phase (requested/draining/finalizing/completed),
-        the originating region, task, timestamp, message, and whether the chain was truncated. This is cancel <em>forensics</em>,
-        not cancel <em>amnesia</em>.
+        the originating region, task, timestamp, message, and whether the chain was truncated. The result keeps
+        operational context attached to the terminal outcome.
       </p>
     </div>
     <div class="mt-4 reveal">
@@ -1841,15 +1823,12 @@ t.<span class="fn">join</span>(<span class="typ">Outcome</span>.<span class="fn"
 <section class="section" id="recycling">
   <div class="container">
     <div class="reveal">
-      <span class="exhibit-num">Exhibit 14 — Unique to Asupersync</span>
+      <span class="exhibit-num">Exhibit 14 · Handle allocator</span>
       <h2>Handle Slot Recycling — LIFO Determinism Under Pressure</h2>
       <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
-        Tokio's internal task IDs are opaque and non-deterministic — re-running the same test produces different IDs,
-        making trace replay impossible. Asupersync exposes
-        <strong style="color:var(--text);">deterministic slot allocation</strong> with LIFO free-list recycling.
-        The same create/close sequence <em>always</em> produces the same slot assignments — critical for
-        deterministic replay and debugging. This demo creates and closes 40 real WASM scopes and visualizes
-        which slots get reused, how generations climb, and proves the LIFO pattern.
+        Asupersync exposes <strong style="color:var(--text);">deterministic slot allocation</strong> with LIFO
+        free-list recycling. This exhibit performs 40 create/close cycles in one runtime instance and displays
+        the observed slots, generation increments, and reuse order.
       </p>
     </div>
     <div class="mt-4 reveal">
@@ -1876,15 +1855,12 @@ t.<span class="fn">join</span>(<span class="typ">Outcome</span>.<span class="fn"
 <section class="section" id="isolation">
   <div class="container">
     <div class="reveal">
-      <span class="exhibit-num">Exhibit 15 — Unique to Asupersync</span>
+      <span class="exhibit-num">Exhibit 15 · Region structure</span>
       <h2>Sibling Scope Isolation — No Cross-Contamination</h2>
       <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
-        In tokio, cancelling one task group can accidentally leak signals to siblings through shared
-        <code style="color:var(--cyan)">CancellationToken</code>s, thread-locals, or global state.
-        Asupersync guarantees <strong style="color:var(--text);">structural isolation</strong>:
-        closing or cancelling one scope has <em>zero effect</em> on sibling scopes.
-        This demo creates 4 real sibling scopes with tasks, closes them one at a time,
-        and <strong style="color:var(--text);">probes the living siblings</strong> after each close to prove they're completely unaffected.
+        Sibling scopes have distinct handles and obligations. This exhibit creates four siblings with tasks,
+        closes them one at a time, and <strong style="color:var(--text);">probes each remaining sibling</strong>
+        after every close. A successful probe is direct evidence that the living handle remains valid.
       </p>
     </div>
     <div class="mt-4 reveal">
@@ -1915,15 +1891,12 @@ t.<span class="fn">join</span>(<span class="typ">Outcome</span>.<span class="fn"
 <section class="section" id="replay">
   <div class="container">
     <div class="reveal">
-      <span class="exhibit-num">Exhibit 16 — Unique to Asupersync</span>
+      <span class="exhibit-num">Exhibit 16 · Deterministic evidence</span>
       <h2>LIFO Slot Recycling — Deterministic by Construction</h2>
       <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
-        Tokio's internal task IDs are opaque and non-deterministic — re-running the same test produces different
-        IDs, making trace replay impossible. Asupersync's handle allocator uses a
-        <strong style="color:var(--text);">deterministic LIFO free-list</strong>: when slots are freed,
-        the most recently freed slot is reused first. This demo creates 4 scopes, frees them in order,
-        then creates 4 new scopes and verifies they reuse slots in <strong style="color:var(--text);">exact reverse order</strong>.
-        This deterministic pattern means you can record a handle allocation trace and replay it identically.
+        Asupersync's handle allocator uses a <strong style="color:var(--text);">deterministic LIFO free-list</strong>.
+        This exhibit creates four scopes, frees them in order, then creates four more and compares the observed
+        slots with the exact reverse sequence. The verdict comes from the returned handles, not a prewritten animation.
       </p>
     </div>
     <div class="mt-4 reveal">
@@ -1946,15 +1919,12 @@ t.<span class="fn">join</span>(<span class="typ">Outcome</span>.<span class="fn"
 <section class="section" id="leakdetect">
   <div class="container">
     <div class="reveal">
-      <span class="exhibit-num">Exhibit 17 — Unique to Asupersync</span>
-      <h2>Handle Leak Detection — The Runtime Catches Your Mistakes</h2>
+      <span class="exhibit-num">Exhibit 17 · Obligation closure</span>
+      <h2>Unjoined Task Handles at Scope Close</h2>
       <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
-        What happens when a programmer forgets to join a spawned task? In tokio, the task becomes an orphan —
-        it runs indefinitely with no owner, leaking memory and potentially holding locks. In Asupersync,
-        <strong style="color:var(--text);">the scope won't let you</strong>. Tasks are pinned on spawn and
-        tracked as obligations. When the parent scope closes, it <em>cascade-closes every unjoinable child</em>.
-        The runtime cleans up your mistakes structurally. This demo intentionally "forgets" to join 5 tasks
-        and proves the scope catches all of them.
+        Spawned task handles are recorded as scope obligations. This exhibit intentionally leaves five handles
+        unjoined, closes their parent scope, and probes the old handles afterward. The returned outcomes show
+        whether the scope close invalidated each outstanding lifecycle record.
       </p>
     </div>
     <div class="mt-4 reveal">
@@ -1981,16 +1951,16 @@ t.<span class="fn">join</span>(<span class="typ">Outcome</span>.<span class="fn"
 <section class="section" id="timeout">
   <div class="container">
     <div class="reveal">
-      <span class="exhibit-num">Exhibit 18 — Unique to Asupersync</span>
-      <h2>Scope-as-Timeout — Structural Deadlines, Not Afterthoughts</h2>
+      <span class="exhibit-num">Exhibit 18 · Host deadline</span>
+      <h2>A Browser Deadline Closing One Scope</h2>
       <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
         In vanilla JavaScript, implementing a timeout for a group of concurrent operations requires
         creating an <code style="color:var(--cyan)">AbortController</code>, a <code style="color:var(--cyan)">setTimeout</code>,
         wiring the signal to every <code style="color:var(--cyan)">fetch()</code>, handling the
         <code style="color:var(--cyan)">AbortError</code> in every <code style="color:var(--cyan)">.catch()</code>,
-        and remembering to <code style="color:var(--cyan)">clearTimeout</code> on success. That's 6 coordination points
-        where bugs hide. In Asupersync, you <strong style="color:var(--text);">create a scope and close it when the deadline fires</strong>.
-        Every task and fetch handle under it is automatically cancelled. One line of cleanup instead of six.
+        and clearing the timer on success. Here a host <code style="color:var(--cyan)">setTimeout</code> closes one
+        Asupersync scope. The deadline still comes from the browser; the scope supplies one ownership boundary
+        for the three lifecycle handles beneath it.
       </p>
     </div>
     <div class="mt-4 reveal">
@@ -2019,15 +1989,12 @@ t.<span class="fn">join</span>(<span class="typ">Outcome</span>.<span class="fn"
 <section class="section" id="websocket">
   <div class="container">
     <div class="reveal">
-      <span class="exhibit-num">Exhibit 19 — Unique to Asupersync</span>
-      <h2>Scoped Channel Lifecycle — Resources Die with Their Scope</h2>
+      <span class="exhibit-num">Exhibit 19 · Browser channel</span>
+      <h2>Scoped Channel Lifecycle</h2>
       <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
-        Browser resources (WebSockets, MessageChannels, streams) have no concept of "ownership." If your
-        component unmounts without explicitly closing them, they become zombies.
-        In Asupersync, resources are <strong style="color:var(--text);">scoped to a region</strong> with WASM tasks
-        tracking each end. Close the region and <em>everything under it</em> is torn down — ports closed, tasks released,
-        handles freed. The resource <em>cannot outlive its scope</em>.
-        This demo creates a real MessageChannel with WASM-tracked tasks, sends messages, then closes the scope.
+        Browser resources need an explicit ownership policy. This exhibit creates a browser
+        <code style="color:var(--cyan)">MessageChannel</code>, records each end as a task handle in a WASM scope,
+        sends messages, then closes both the native ports and their lifecycle scope through one UI action.
       </p>
     </div>
     <div class="mt-4 reveal">
@@ -2058,21 +2025,19 @@ t.<span class="fn">join</span>(<span class="typ">Outcome</span>.<span class="fn"
 <section class="section" id="comparison">
   <div class="container">
     <div class="reveal">
-      <span class="exhibit-num">Exhibit 20 — The Whole Point</span>
-      <h2>Vanilla JS vs Asupersync — Side-by-Side</h2>
+      <span class="exhibit-num">Exhibit 20 · Coordination surface</span>
+      <h2>Explicit Signals vs Scope-Owned Handles</h2>
       <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
-        Every exhibit above demonstrates a structural guarantee. But the real question is:
-        <strong style="color:var(--text);">how much code do YOU have to write?</strong>
-        Here's the same scenario — 3 concurrent fetches with a 5-second timeout — implemented in vanilla
-        JavaScript (22 lines, 11 coordination points where bugs hide) vs Asupersync (6 lines, 1 coordination point).
-        The difference isn't incremental — it's a different programming model entirely.
+        Here is one three-request deadline written two ways. The left example wires a shared abort signal and
+        timer directly. The right records request handles under one scope and closes that ownership boundary.
+        This is an illustrative comparison of coordination surfaces, not a universal JavaScript benchmark.
       </p>
     </div>
     <div class="grid-2 mt-4">
       <div class="reveal">
         <div class="code-block" style="border-color: rgba(239,68,68,0.2);">
           <div class="code-header" style="border-bottom-color: rgba(239,68,68,0.1);">
-            <span class="lang" style="color:var(--red);">Vanilla JavaScript — 22 lines</span>
+            <span class="lang" style="color:var(--red);">Direct AbortController wiring</span>
           </div>
           <div class="code-body"><span class="kw">const</span> controller = <span class="kw">new</span> <span class="typ">AbortController</span>();  <span class="cmt">// 1. create controller</span>
 <span class="kw">const</span> signal = controller.signal;            <span class="cmt">// 2. extract signal</span>
@@ -2100,26 +2065,26 @@ t.<span class="fn">join</span>(<span class="typ">Outcome</span>.<span class="fn"
 }</div>
         </div>
         <div style="margin-top:8px;padding:10px 14px;border-radius:8px;background:rgba(239,68,68,0.06);border:1px solid rgba(239,68,68,0.15);font-size:12px;color:var(--text2);">
-          <strong style="color:var(--red);">11 coordination points</strong> where bugs can hide. Forget #8 or #9? Timer leaks. Forget #5-7? Request ignores timeout. Mix up #10? Wrong error type propagates.
+          <strong style="color:var(--red);">Explicit coordination:</strong> the timer, signal propagation, success cleanup, and error classification all remain visible in application code.
         </div>
       </div>
       <div class="reveal">
         <div class="code-block" style="border-color: rgba(34,197,94,0.2);">
           <div class="code-header" style="border-bottom-color: rgba(34,197,94,0.1);">
-            <span class="lang" style="color:var(--green);">Asupersync — 6 lines</span>
+            <span class="lang" style="color:var(--green);">Asupersync Browser Edition</span>
           </div>
           <div class="code-body"><span class="kw">const</span> scope = rt.<span class="fn">enterScope</span>(<span class="str">'requests'</span>).value;
 
-<span class="cmt">// All requests are scoped — no signal wiring needed</span>
+<span class="cmt">// The adapter associates each request with this scope</span>
 scope.<span class="fn">fetchRequest</span>({ <span class="prop">url</span>: url1, <span class="prop">method</span>: <span class="str">'GET'</span> });
 scope.<span class="fn">fetchRequest</span>({ <span class="prop">url</span>: url2, <span class="prop">method</span>: <span class="str">'GET'</span> });
 scope.<span class="fn">fetchRequest</span>({ <span class="prop">url</span>: url3, <span class="prop">method</span>: <span class="str">'GET'</span> });
 
-<span class="cmt">// After 5s, close the scope — ALL requests auto-cancelled</span>
+<span class="cmt">// A host timer closes the shared ownership boundary</span>
 <span class="fn">setTimeout</span>(() => scope.<span class="fn">close</span>(), <span class="num">5000</span>);</div>
         </div>
         <div style="margin-top:8px;padding:10px 14px;border-radius:8px;background:rgba(34,197,94,0.06);border:1px solid rgba(34,197,94,0.15);font-size:12px;color:var(--text2);">
-          <strong style="color:var(--green);">1 coordination point.</strong> <code style="color:var(--cyan);">scope.close()</code> handles everything. No signal wiring. No manual cleanup. No error-path bugs. The scope IS the AbortController, the timeout, and the cleanup — all in one structural primitive.
+          <strong style="color:var(--green);">One visible ownership boundary.</strong> The Browser Edition adapter maps scope closure to its host-side request cancellation and lifecycle cleanup.
         </div>
       </div>
     </div>
@@ -2132,24 +2097,22 @@ scope.<span class="fn">fetchRequest</span>({ <span class="prop">url</span>: url3
 <section class="section" id="benchmark">
   <div class="container">
     <div class="reveal">
-      <span class="exhibit-num">Exhibit 21 — Performance</span>
-      <h2>Rapid Scope Churn — How Fast Is the Runtime?</h2>
+      <span class="exhibit-num">Exhibit 21 · ABI throughput</span>
+      <h2>Rapid Scope Churn in This Browser</h2>
       <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
-        The common objection to structured concurrency is performance: "all that bookkeeping must be slow."
-        This benchmark measures <strong style="color:var(--text);">real WASM operations per second</strong> —
-        scope create + close cycles including handle allocation, generation tracking, parent registration,
-        and full cleanup. The result: structured concurrency at microsecond latency.
-        These are the same operations that power every exhibit on this page, running at production speed.
+        This local sample measures synchronous <strong style="color:var(--text);">WASM ABI bookkeeping</strong>:
+        one child-scope create plus close per cycle, including handle allocation, generation tracking, and parent
+        registration. It does not measure native task scheduling, I/O throughput, or end-to-end application latency.
       </p>
     </div>
     <div class="mt-4 reveal">
       <div class="viz" id="benchmark-viz">
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:8px;">
-          <div class="viz-title" style="margin-bottom:0;">WASM Runtime Throughput</div>
-          <button class="btn btn-primary btn-sm" id="btn-bench" onclick="runBenchmark()">Run 1s Benchmark</button>
+          <div class="viz-title" style="margin-bottom:0;">WASM ABI Bookkeeping Sample</div>
+          <button class="btn btn-primary btn-sm" id="btn-bench" onclick="runBenchmark()">Run 500ms Sample</button>
         </div>
         <div id="benchmark-result">
-          <div class="text-dim" style="text-align:center;padding:32px 0;">Measures real scope create/close operations per second</div>
+          <div class="text-dim" style="text-align:center;padding:32px 0;">Measures scope create/close calls without blocking the page for a full second</div>
         </div>
       </div>
     </div>
@@ -2508,7 +2471,8 @@ function renderRegionTree() {
     const fill = statusFill[r.status];
     html += `<rect class="region-box" x="${r.x}" y="${r.y}" width="${r.w}" height="${r.h}"
       fill="${fill}" stroke="${col}" data-region="${r.id}"
-      onclick="cancelRegion('${r.id}')" />`;
+      tabindex="0" role="button" aria-label="Cancel ${r.label} and its descendants" onclick="cancelRegion('${r.id}')"
+      onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();cancelRegion('${r.id}')}" />`;
     html += `<text x="${r.x+8}" y="${r.y+20}" fill="${col}" font-size="12" font-weight="600" font-family="var(--sans)" pointer-events="none">${r.label}</text>`;
     if (r.status !== 'running') {
       html += `<text x="${r.x+8}" y="${r.y+34}" fill="${col}" font-size="10" font-family="var(--mono)" opacity="0.7" pointer-events="none">${r.status}</text>`;
@@ -2520,10 +2484,7 @@ function renderRegionTree() {
     html += `<circle cx="${t.cx}" cy="${t.cy}" r="8" fill="${alive ? 'var(--blue)' : 'var(--text3)'}"
       opacity="${alive ? 1 : 0.15}" class="task-dot${alive?'':' dead'}" ${alive ? 'filter="url(#glow)"' : ''} />`;
     if (alive) {
-      html += `<circle cx="${t.cx}" cy="${t.cy}" r="8" fill="none" stroke="var(--blue)" stroke-width="1" opacity="0.3">
-        <animate attributeName="r" from="8" to="16" dur="2s" repeatCount="indefinite"/>
-        <animate attributeName="opacity" from="0.3" to="0" dur="2s" repeatCount="indefinite"/>
-      </circle>`;
+      if (!reducedMotion) html += `<circle cx="${t.cx}" cy="${t.cy}" r="12" fill="none" stroke="var(--blue)" stroke-width="1" opacity="0.3" />`;
     }
     html += `<text x="${t.cx}" y="${t.cy+22}" fill="${alive?'var(--text3)':'var(--text3)'}" font-size="10" font-family="var(--mono)" text-anchor="middle" opacity="${alive?0.6:0.2}" pointer-events="none">${t.id}</text>`;
   }
@@ -2605,7 +2566,7 @@ window.resetRegionViz = function() {
 
 // ─── Exhibit 3: Outcomes ─────────────────────────────────────────
 // Raw hex colors for JS contexts where CSS var concatenation is needed (e.g. '#22C55E' + '33')
-const HEX = { green:'#22C55E', red:'#EF4444', orange:'#F97316', blue:'#3B82F6', cyan:'#06B6D4', yellow:'#EAB308', violet:'#8B5CF6', text3:'#64748B', surface:'#0A1628', border2:'rgba(255,255,255,0.10)' };
+const HEX = { green:'#4ADE80', red:'#FB7185', orange:'#FB923C', blue:'#38BDF8', cyan:'#22D3EE', yellow:'#FACC15', violet:'#C4B5FD', text3:'#748C95', surface:'#0B1720', border2:'rgba(203,232,240,0.18)' };
 
 const outcomeTypes = [
   { id:'ok', title:'Ok', icon:'&#10003;', desc:'Successful completion with a value', color:HEX.green, badge:'badge-ok',
@@ -2625,14 +2586,13 @@ const outcomeTypes = [
 function renderOutcomeCards() {
   const container = document.getElementById('outcome-cards');
   container.innerHTML = outcomeTypes.map(o => `
-    <div class="outcome-card" id="oc-${o.id}" data-id="${o.id}"
+    <button type="button" class="outcome-card" id="oc-${o.id}" data-id="${o.id}"
       style="border-color: ${o.color}33; background: ${o.color}08;"
-      onclick="selectOutcome('${o.id}')" tabindex="0" role="button"
-      onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();selectOutcome('${o.id}');}">
+      onclick="selectOutcome('${o.id}')">
       <div class="oc-icon" style="color: ${o.color};">${o.icon}</div>
       <div class="oc-title" style="color: ${o.color};">${o.title}</div>
       <div class="oc-desc" style="color: var(--text2);">${o.desc}</div>
-    </div>
+    </button>
   `).join('');
 }
 
@@ -2666,9 +2626,7 @@ function renderOutcomeLattice(selected) {
   for (const n of nodes) {
     const isSelected = selected === n.id;
     html += `<circle cx="${n.cx}" cy="${n.cy}" r="${nodeR}" fill="${isSelected ? n.color+'22' : HEX.surface}" stroke="${n.color}" stroke-width="${isSelected?2.5:1.5}" ${isSelected?'filter="url(#glow)"':''}/>`;
-    if (isSelected) {
-      html += `<circle cx="${n.cx}" cy="${n.cy}" r="${nodeR}" fill="none" stroke="${n.color}" stroke-width="1" opacity="0.3"><animate attributeName="r" from="${nodeR}" to="${nodeR+12}" dur="1.5s" repeatCount="indefinite"/><animate attributeName="opacity" from="0.3" to="0" dur="1.5s" repeatCount="indefinite"/></circle>`;
-    }
+    if (isSelected && !reducedMotion) html += `<circle cx="${n.cx}" cy="${n.cy}" r="${nodeR+5}" fill="none" stroke="${n.color}" stroke-width="1" opacity="0.3"/>`;
     const fontSize = n.title.length > 5 ? 9 : 11;
     html += `<text x="${n.cx}" y="${n.cy+4}" fill="${n.color}" font-size="${fontSize}" text-anchor="middle" font-weight="700" font-family="var(--sans)">${n.title}</text>`;
     html += `<text x="${n.cx}" y="${n.cy+nodeR+16}" fill="${HEX.text3}" font-size="10" text-anchor="middle" font-family="var(--mono)">${n.severity}</text>`;
@@ -3464,16 +3422,20 @@ window.runChaos = async function() {
   if (!a) { chaosRunning = false; document.getElementById('btn-chaos-run').disabled = false; return; }
   const Outcome = a.Outcome;
   const ROUNDS = 200;
+  const SEED = 0xA5C0FFEE;
+  let seed = SEED >>> 0;
+  const rand = () => { seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0; return seed / 4294967296; };
   let ops = 0, peakHandles = 0, maxGen = 0, errors = 0;
   let liveHandles = [];
+  const createdHandles = [];
 
-  clog('chaos-console', `Starting chaos test: ${ROUNDS} rounds of random create/cancel/close...`, 'info');
+  clog('chaos-console', `Starting ${ROUNDS} deterministic operations (seed 0x${SEED.toString(16)})...`, 'info');
   console.group(`${LOG_PREFIX} %cChaos Test: ${ROUNDS} rounds`, LOG_STYLE, 'color:#F97316;font-weight:bold;');
 
   const rt = (a.runtimeCreate || a.runtime_create)();
-  if (rt.outcome !== 'ok') { clog('chaos-console', 'Failed to create runtime', 'err'); chaosRunning = false; return; }
+  if (rt.outcome !== 'ok') { clog('chaos-console', 'Failed to create runtime', 'err'); chaosRunning = false; document.getElementById('btn-chaos-run').disabled = false; console.groupEnd(); return; }
   const rootScope = rt.value.enterScope('chaos-root');
-  if (rootScope.outcome !== 'ok') { clog('chaos-console', 'Failed', 'err'); chaosRunning = false; return; }
+  if (rootScope.outcome !== 'ok') { clog('chaos-console', 'Failed to create root scope', 'err'); rt.value.close(); chaosRunning = false; document.getElementById('btn-chaos-run').disabled = false; console.groupEnd(); return; }
   const root = rootScope.value;
 
   function updateMetrics() {
@@ -3491,7 +3453,7 @@ window.runChaos = async function() {
   for (let batch = 0; batch < ROUNDS; batch += BATCH_SIZE) {
     const end = Math.min(batch + BATCH_SIZE, ROUNDS);
     for (let i = batch; i < end; i++) {
-      const action = Math.random();
+      const action = rand();
       ops++;
 
       if (action < 0.35 || liveHandles.length === 0) {
@@ -3499,6 +3461,7 @@ window.runChaos = async function() {
         const s = root.enterScope('chaos-' + i);
         if (s.outcome === 'ok') {
           liveHandles.push({ type: 'scope', handle: s.value });
+          createdHandles.push({ type: 'scope', handle: s.value });
           if (s.value.generation > maxGen) maxGen = s.value.generation;
         } else { errors++; }
 
@@ -3506,10 +3469,11 @@ window.runChaos = async function() {
         // Spawn task in random scope
         const scopes = liveHandles.filter(h => h.type === 'scope');
         if (scopes.length > 0) {
-          const parent = scopes[Math.floor(Math.random() * scopes.length)];
+          const parent = scopes[Math.floor(rand() * scopes.length)];
           const t = parent.handle.spawnTask({ label: 'chaos-task-' + i });
           if (t.outcome === 'ok') {
             liveHandles.push({ type: 'task', handle: t.value, parent: parent });
+            createdHandles.push({ type: 'task', handle: t.value });
             if (t.value.generation > maxGen) maxGen = t.value.generation;
           } else { errors++; }
         }
@@ -3518,7 +3482,7 @@ window.runChaos = async function() {
         // Join a random task
         const tasks = liveHandles.filter(h => h.type === 'task');
         if (tasks.length > 0) {
-          const idx = Math.floor(Math.random() * tasks.length);
+          const idx = Math.floor(rand() * tasks.length);
           const t = tasks[idx];
           const joined = t.handle.join(Outcome.ok(i));
           if (joined.outcome !== 'ok' && joined.outcome !== 'cancelled') errors++;
@@ -3529,7 +3493,7 @@ window.runChaos = async function() {
         // Close a random scope (cascades children)
         const scopes = liveHandles.filter(h => h.type === 'scope');
         if (scopes.length > 0) {
-          const idx = Math.floor(Math.random() * scopes.length);
+          const idx = Math.floor(rand() * scopes.length);
           const s = scopes[idx];
           s.handle.close();
           // Remove this scope and any handles that were children
@@ -3546,8 +3510,13 @@ window.runChaos = async function() {
     await new Promise(r => setTimeout(r, 0));
   }
 
-  // Cleanup: close remaining handles via cascade
-  root.close();
+  // Close the root, then probe every handle created in this run.
+  const rootClose = root.close();
+  let liveAfterClose = 0;
+  for (const entry of createdHandles) {
+    const probe = entry.type === 'task' ? entry.handle.join(Outcome.ok(0)) : entry.handle.close();
+    if (probe.outcome !== 'err') liveAfterClose++;
+  }
   rt.value.close();
 
   document.getElementById('chaos-phase').textContent = 'Complete';
@@ -3555,17 +3524,18 @@ window.runChaos = async function() {
   document.getElementById('chaos-fill').style.width = '100%';
   document.getElementById('chaos-fill').style.background = 'var(--green)';
   const leakedEl = document.getElementById('chaos-leaked');
-  leakedEl.textContent = '0';
-  leakedEl.style.color = HEX.green;
+  leakedEl.textContent = String(liveAfterClose);
+  leakedEl.style.color = liveAfterClose === 0 ? HEX.green : HEX.red;
   // REVELATION beat: spring pop on zero leaks
   if (motionLib) motionLib.animate(leakedEl, { scale: [0.5, 1.3, 1] }, { type: 'spring', stiffness: 400, damping: 20 });
 
   console.groupEnd();
-  console.log(`${LOG_PREFIX} %cChaos complete: ${ops} ops, ${peakHandles} peak handles, ${errors} errors caught, 0 leaks`, LOG_STYLE, LOG_OK);
+  console.log(`${LOG_PREFIX} %cStress run complete: ${ops} ops, ${peakHandles} peak handles, ${liveAfterClose} handles live after root close`, LOG_STYLE, liveAfterClose === 0 ? LOG_OK : LOG_ERR);
   clog('chaos-console', `Completed: ${ops} operations, peak ${peakHandles} live handles, max gen ${maxGen}`, 'ok');
   clog('chaos-console', `Errors caught by runtime: ${errors} (expected — stale handles, invalid states)`, errors > 0 ? 'warn' : 'ok');
-  clog('chaos-console', `Leaked handles: 0. Zero orphans. Every obligation resolved.`, 'ok');
-  showToast(`Chaos test passed: ${ops} ops, 0 leaks`, 'ok');
+  clog('chaos-console', `Root close: ${rootClose.outcome}. Handles still accepting operations: ${liveAfterClose}.`, liveAfterClose === 0 ? 'ok' : 'err');
+  showToast(`${ops} operations · ${liveAfterClose} handles live after close`, liveAfterClose === 0 ? 'ok' : 'err');
+  announce(`Lifecycle stress run complete. ${liveAfterClose} handles remained live after root close.`);
 
   chaosRunning = false;
   document.getElementById('btn-chaos-run').disabled = false;
@@ -4078,33 +4048,35 @@ window.runLeakDetectDemo = function() {
   clog('leakdetect-console', `Scope close: ${closeResult.outcome}`, closeResult.outcome === 'ok' ? 'ok' : 'err');
 
   // Verify: try to use the task handles — they should be released
-  let allReleased = true;
-  tasks.forEach((t, i) => {
+  const probeResults = tasks.map((t, i) => {
     const probe = t.join(Outcome.ok(0));
-    if (probe.outcome === 'err') {
+    const released = probe.outcome === 'err';
+    if (released) {
       clog('leakdetect-console', `  Task "orphan-${i}" (slot=${t.slot}): handle released by cascade ✓`, 'ok');
     } else {
       clog('leakdetect-console', `  Task "orphan-${i}": still accessible (${probe.outcome})`, 'warn');
-      allReleased = false;
     }
+    return { task: t, released, outcome: probe.outcome };
   });
+  const releasedCount = probeResults.filter(result => result.released).length;
+  const allReleased = releasedCount === probeResults.length;
 
   rt.value.close();
 
   renderWithEntrance('leakdetect-result', `
     <div class="result-grid-5" style="display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin-bottom:16px;">
-      ${tasks.map((t, i) => `
-        <div style="text-align:center;padding:12px 8px;border-radius:var(--radius);border:1px solid ${HEX.green}33;background:${HEX.green}08;">
-          <div style="font-size:20px;margin-bottom:4px;">🔓</div>
-          <div style="font-size:12px;font-weight:700;color:${HEX.green};">Released</div>
+      ${probeResults.map((result, i) => `
+        <div style="text-align:center;padding:12px 8px;border-radius:var(--radius);border:1px solid ${result.released ? HEX.green : HEX.red}33;background:${result.released ? HEX.green : HEX.red}08;">
+          <div style="font-size:20px;margin-bottom:4px;">${result.released ? '✓' : '!'}</div>
+          <div style="font-size:12px;font-weight:700;color:${result.released ? HEX.green : HEX.red};">${result.released ? 'Rejected' : result.outcome}</div>
           <div style="font-size:10px;color:var(--text3);">orphan-${i}</div>
-          <div style="font-size:10px;color:var(--text3);">slot ${t.slot}</div>
+          <div style="font-size:10px;color:var(--text3);">slot ${result.task.slot}</div>
         </div>
       `).join('')}
     </div>
-    <div style="text-align:center;padding:14px;border-radius:var(--radius);border:1px solid ${HEX.green}44;background:${HEX.green}08;">
-      <div style="font-size:16px;font-weight:700;color:${HEX.green};">5/5 orphaned tasks cleaned up by scope cascade</div>
-      <div style="font-size:13px;color:var(--text2);margin-top:4px;">In tokio, these 5 tasks would run forever as zombies, holding locks and leaking memory.</div>
+    <div style="text-align:center;padding:14px;border-radius:var(--radius);border:1px solid ${allReleased ? HEX.green : HEX.red}44;background:${allReleased ? HEX.green : HEX.red}08;">
+      <div style="font-size:16px;font-weight:700;color:${allReleased ? HEX.green : HEX.red};">${releasedCount}/${probeResults.length} old task handles rejected after scope close</div>
+      <div style="font-size:13px;color:var(--text2);margin-top:4px;">Each verdict is the result of a post-close join probe against the WASM ledger.</div>
     </div>
   `);
   // REVELATION beat: spring pop on the summary
@@ -4112,7 +4084,8 @@ window.runLeakDetectDemo = function() {
     const summary = document.querySelector('#leakdetect-result [style*="font-size:16px"]');
     if (summary) motionLib.animate(summary, { scale: [0.8, 1.05, 1], opacity: [0, 1] }, { type: 'spring', stiffness: 400, damping: 22 });
   }
-  showToast('5 orphaned tasks caught by cascade', 'ok');
+  showToast(`${releasedCount}/${probeResults.length} old handles rejected`, allReleased ? 'ok' : 'err');
+  announce(`${releasedCount} of ${probeResults.length} task handles were rejected after scope close.`);
 };
 
 // ─── Exhibit 18: Scope-as-Timeout ────────────────────────────────
@@ -4131,7 +4104,7 @@ window.runTimeoutDemo = function() {
   const startTime = performance.now();
   const tasks = [];
 
-  // Spawn 3 "long-running" tasks
+  // Record three task handles beneath the deadline scope.
   for (let i = 0; i < 3; i++) {
     const t = sc.spawnTask({ label: 'worker-' + i });
     if (t.outcome === 'ok') {
@@ -4140,7 +4113,7 @@ window.runTimeoutDemo = function() {
     }
   }
 
-  clog('timeout-console', 'All 3 tasks running. Scope deadline: 2 seconds...', 'info');
+  clog('timeout-console', 'Three task handles recorded. Host deadline: 2 seconds...', 'info');
 
   const container = document.getElementById('timeout-result');
   // Countdown timer
@@ -4149,31 +4122,32 @@ window.runTimeoutDemo = function() {
     container.innerHTML = `
       <div style="text-align:center;padding:24px;">
         <div class="big-number" style="font-size:48px;font-weight:800;font-family:var(--mono);color:${remaining > 500 ? HEX.blue : HEX.red};">${(remaining/1000).toFixed(1)}s</div>
-        <div style="font-size:13px;color:var(--text3);margin-top:4px;">until scope deadline</div>
-        <div style="margin-top:12px;display:flex;gap:8px;justify-content:center;">
+        <div style="font-size:13px;color:var(--text3);margin-top:4px;">until the host timer closes the scope</div>
+        <div style="margin-top:12px;display:flex;gap:8px;justify-content:center;flex-wrap:wrap;">
           ${tasks.map((t,i) => `<span class="badge badge-ok" style="font-size:11px;">worker-${i} (slot ${t.slot})</span>`).join('')}
         </div>
       </div>
     `;
     if (remaining <= 0) clearInterval(countdownInterval);
-  }, 50);
+  }, 100);
 
   // Auto-close scope after 2 seconds
   setTimeout(() => {
     clearInterval(countdownInterval);
-    sc.close();
+    const closeResult = sc.close();
+    const probeResults = tasks.map(task => task.join(a.Outcome.ok(0)));
+    const rejectedCount = probeResults.filter(result => result.outcome === 'err').length;
     rt.value.close();
     const elapsed = performance.now() - startTime;
-    clog('timeout-console', `DEADLINE: scope.close() at ${elapsed.toFixed(0)}ms`, 'warn');
-    clog('timeout-console', `All 3 tasks auto-cancelled by scope close. Zero manual cleanup.`, 'ok');
-    clog('timeout-console', 'In vanilla JS, this requires AbortController + setTimeout + clearTimeout + per-request signal wiring.', 'info');
+    clog('timeout-console', `HOST TIMER: scope.close() returned ${closeResult.outcome} at ${elapsed.toFixed(0)}ms`, 'warn');
+    clog('timeout-console', `${rejectedCount}/${tasks.length} old task handles rejected by post-close join probes.`, rejectedCount === tasks.length ? 'ok' : 'err');
 
     container.innerHTML = `
       <div style="text-align:center;padding:24px;">
         <div class="big-number" style="font-size:32px;font-weight:800;color:${HEX.red};margin-bottom:8px;" id="deadline-headline">DEADLINE FIRED</div>
-        <div style="font-size:14px;color:var(--text2);">scope.close() cancelled all 3 tasks in one call</div>
-        <div style="margin-top:12px;display:flex;gap:8px;justify-content:center;">
-          ${tasks.map((t,i) => `<span class="badge badge-cancel" style="font-size:11px;">worker-${i} cancelled</span>`).join('')}
+        <div style="font-size:14px;color:var(--text2);">scope.close() returned ${closeResult.outcome}; ${rejectedCount}/${tasks.length} old handles are now invalid</div>
+        <div style="margin-top:12px;display:flex;gap:8px;justify-content:center;flex-wrap:wrap;">
+          ${probeResults.map((result,i) => `<span class="badge ${result.outcome === 'err' ? 'badge-ok' : 'badge-err'}" style="font-size:11px;">worker-${i}: ${result.outcome}</span>`).join('')}
         </div>
       </div>
     `;
@@ -4183,7 +4157,8 @@ window.runTimeoutDemo = function() {
       if (dl) motionLib.animate(dl, { scale: [0.8, 1.1, 1] }, { type: 'spring', stiffness: 400, damping: 18 });
     }
     document.getElementById('btn-timeout-start').disabled = false;
-    showToast('Scope timeout: 3 tasks auto-cancelled', 'ok');
+    showToast(`Host deadline closed scope · ${rejectedCount}/${tasks.length} handles invalidated`, rejectedCount === tasks.length ? 'ok' : 'err');
+    announce(`Host deadline fired. ${rejectedCount} of ${tasks.length} old task handles were rejected.`);
   }, 2000);
 };
 
@@ -4222,7 +4197,7 @@ window.runChannelDemo = function() {
 
   clog('websocket-console', `Scope created: slot=${scope.value.slot}`, 'ok');
   clog('websocket-console', `MessageChannel opened — ${chanState.tasks.length} WASM tasks track send/recv`, 'ok');
-  clog('websocket-console', 'Channel is scoped to region. Close scope to tear down everything.', 'info');
+  clog('websocket-console', 'One action will close the browser ports and their WASM lifecycle scope.', 'info');
 
   document.getElementById('btn-ws-open').disabled = true;
   document.getElementById('btn-ws-send').disabled = false;
@@ -4244,7 +4219,7 @@ function renderChanState(state) {
         Messages echoed: <strong style="color:var(--cyan);">${chanState.msgCount}</strong>
       </div>
     </div>
-    ${state === 'closed' ? `<div style="text-align:center;padding:8px;font-size:12px;color:var(--text2);">Scope closed → channel torn down, tasks released. No manual port.close() needed.</div>` : ''}
+    ${state === 'closed' ? `<div style="text-align:center;padding:8px;font-size:12px;color:var(--text2);">The action closed both browser ports, then closed their WASM lifecycle scope.</div>` : ''}
   `;
 }
 
@@ -4263,13 +4238,13 @@ window.wsCloseScope = function() {
   if (chanState.recvPort) { chanState.recvPort.close(); chanState.recvPort = null; }
   if (chanState.scope) { chanState.scope.close(); }
   if (chanState.rt) { chanState.rt.close(); }
-  clog('websocket-console', `Scope closed → channel torn down, ${chanState.tasks.length} tasks released. Zero zombie connections.`, 'ok');
-  showToast('Scope close tore down channel + tasks', 'ok');
+  clog('websocket-console', `Closed both MessagePorts and the scope tracking ${chanState.tasks.length} task handles.`, 'ok');
+  showToast('Browser ports and lifecycle scope closed', 'ok');
   document.getElementById('btn-ws-send').disabled = true;
   document.getElementById('btn-ws-close').disabled = true;
   document.getElementById('btn-ws-open').disabled = false;
   renderChanState('closed');
-  chanState = { rt: null, scope: null, port: null, msgCount: 0, tasks: [] };
+  chanState = { rt: null, scope: null, sendPort: null, recvPort: null, msgCount: 0, tasks: [] };
 };
 
 // ─── Exhibit 21: Rapid Scope Churn Benchmark ─────────────────────
