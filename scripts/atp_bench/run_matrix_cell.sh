@@ -832,8 +832,32 @@ ROW_DELTA_OK="$DELTA_ACCEPTANCE_OK" ROW_DELTA_MODE="$DELTA_MODE_OBSERVED" \
 ROW_CONTROL_WIRE="$CONTROL_WIRE_BYTES" ROW_SENDER_PAYLOAD="$SENDER_PAYLOAD_BYTES" \
 ROW_SENDER_SYMBOLS="$SENDER_SYMBOLS" ROW_RECEIVER_PAYLOAD="$RECEIVER_PAYLOAD_BYTES" \
 ROW_RECEIVER_SYMBOLS="$RECEIVER_SYMBOLS" ROW_IDENTITY_UNCHANGED="$PAYLOAD_FILE_IDENTITY_UNCHANGED" \
+ROW_SENDER_LOG="$CASE_DIR/send.log" \
 python3 - >>"$RESULTS" <<'PY'
 import json, os
+
+
+def sender_limiter(path):
+    """The `limiter` block of the sender's atp_send JSON report, verbatim
+    (br-asupersync-bi2462.2): why an ATP-over-QUIC cell waited. None when the
+    log has no such report (older binaries, non-QUIC methods, failed cells)."""
+    if not path:
+        return None
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line.startswith("{"):
+                    continue
+                try:
+                    obj = json.loads(line)
+                except ValueError:
+                    continue
+                if obj.get("event") == "atp_send" and isinstance(obj.get("limiter"), dict):
+                    return obj["limiter"]
+    except OSError:
+        return None
+    return None
 
 
 def num(name, default=0.0):
@@ -909,6 +933,8 @@ if row["cell_profile"] == "authenticated-delta-unchanged-v1":
 if row["method"].startswith("atp-rq-"):
     row["atp_rq_streams"] = num("ROW_STREAMS", 0)
     row["stream_count"] = row["atp_rq_streams"]
+if row["method"].startswith("atp-quic"):
+    row["quic_limiter"] = sender_limiter(e("ROW_SENDER_LOG", ""))
 print(json.dumps(row, sort_keys=True, separators=(",", ":")))
 PY
 

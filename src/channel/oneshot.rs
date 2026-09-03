@@ -445,6 +445,8 @@ impl<T> Sender<T> {
         Ok(SendPermit {
             inner: Arc::clone(&self.inner),
             sent: false,
+            obligation: cx
+                .try_register_obligation(crate::record::ObligationKind::SendPermit, cx.task_id()),
         })
     }
 
@@ -501,6 +503,7 @@ impl<T> Sender<T> {
             SendPermit {
                 inner: Arc::clone(&self.inner),
                 sent: false,
+                obligation: None,
             }
         };
 
@@ -611,6 +614,13 @@ pub struct SendPermit<T> {
     inner: Arc<Mutex<OneShotInner<T>>>,
     /// Whether the value has been sent.
     sent: bool,
+    /// Runtime-tracked obligation for this reservation
+    /// (br-asupersync-bi2462.14).
+    ///
+    /// Minted through the reserving `Cx`'s obligation mailbox, committed on
+    /// a delivered send, aborted on a refused send, `abort()` or an unsent
+    /// drop. `None` for `send_blocking` (no `Cx`) or a hand-built `Cx`.
+    obligation: Option<crate::runtime::obligation_mailbox::ObligationToken>,
 }
 
 impl<T> SendPermit<T> {
@@ -646,6 +656,13 @@ impl<T> SendPermit<T> {
         };
 
         self.sent = true;
+        if let Some(token) = self.obligation.take() {
+            if result.is_ok() {
+                let _ = token.commit();
+            } else {
+                let _ = token.abort(crate::record::ObligationAbortReason::Error);
+            }
+        }
         retire_waker_after_unlock(retired_waker);
         wake_waker_after_unlock(waker);
 
@@ -658,6 +675,9 @@ impl<T> SendPermit<T> {
     /// will see a `Closed` error when attempting to receive.
     #[inline]
     pub fn abort(mut self) {
+        if let Some(token) = self.obligation.take() {
+            let _ = token.abort(crate::record::ObligationAbortReason::Explicit);
+        }
         let (waker, receiver_closed_waker) = {
             let mut inner = self.inner.lock();
             inner.permit_outstanding = false;
@@ -690,6 +710,9 @@ impl<T> Drop for SendPermit<T> {
     fn drop(&mut self) {
         if !self.sent {
             // Permit dropped without sending - abort
+            if let Some(token) = self.obligation.take() {
+                let _ = token.abort(crate::record::ObligationAbortReason::Cancel);
+            }
             let (waker, receiver_closed_waker) = {
                 let mut inner = self.inner.lock();
                 inner.permit_outstanding = false;

@@ -2633,7 +2633,9 @@ mod tests {
             )
         };
         assert_eq!(result, 0, "getsockopt TCP_NODELAY should succeed");
-        assert_eq!(nodelay_val, 1, "TCP_NODELAY should be enabled");
+        // Boolean socket options read back as "non-zero": Linux reports 1,
+        // macOS reports the option's flag value (br-asupersync-bi2462.21.1).
+        assert_ne!(nodelay_val, 0, "TCP_NODELAY should be enabled");
 
         // Test setting TCP_NODELAY to false
         stream.set_nodelay(false).expect("set nodelay false");
@@ -2684,7 +2686,8 @@ mod tests {
             )
         };
         assert_eq!(result, 0, "getsockopt SO_KEEPALIVE should succeed");
-        assert_eq!(keepalive_val, 1, "SO_KEEPALIVE should be enabled");
+        // Non-zero is the portable "enabled" read-back (macOS reports 8).
+        assert_ne!(keepalive_val, 0, "SO_KEEPALIVE should be enabled");
 
         // Test disabling SO_KEEPALIVE
         stream.set_keepalive(None).expect("set keepalive disabled");
@@ -2803,7 +2806,7 @@ mod tests {
             )
         };
         assert_eq!(result, 0, "getsockopt TCP_NODELAY should succeed");
-        assert_eq!(nodelay_val, 1, "TCP_NODELAY should be enabled via builder");
+        assert_ne!(nodelay_val, 0, "TCP_NODELAY should be enabled via builder");
     }
 
     #[cfg(all(not(target_arch = "wasm32"), unix))]
@@ -2845,8 +2848,8 @@ mod tests {
             )
         };
         assert_eq!(result, 0, "getsockopt SO_KEEPALIVE should succeed");
-        assert_eq!(
-            keepalive_val, 1,
+        assert_ne!(
+            keepalive_val, 0,
             "SO_KEEPALIVE should be enabled via builder"
         );
     }
@@ -2890,7 +2893,9 @@ mod tests {
             )
         };
         assert_eq!(result, 0, "getsockopt TCP_NODELAY should succeed");
-        assert_eq!(nodelay_val, 1, "TCP_NODELAY should be enabled");
+        // Boolean socket options read back as "non-zero": Linux reports 1,
+        // macOS reports the option's flag value (br-asupersync-bi2462.21.1).
+        assert_ne!(nodelay_val, 0, "TCP_NODELAY should be enabled");
 
         let mut keepalive_val: libc::c_int = 0;
         let mut opt_len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
@@ -2904,6 +2909,7 @@ mod tests {
             )
         };
         assert_eq!(result, 0, "getsockopt SO_KEEPALIVE should succeed");
-        assert_eq!(keepalive_val, 1, "SO_KEEPALIVE should be enabled");
+        // Non-zero is the portable "enabled" read-back (macOS reports 8).
+        assert_ne!(keepalive_val, 0, "SO_KEEPALIVE should be enabled");
     }
 }

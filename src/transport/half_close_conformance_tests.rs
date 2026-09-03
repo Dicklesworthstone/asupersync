@@ -351,7 +351,12 @@ mod tests {
         // the golden and forces explicit reviewer acknowledgment.
         #[cfg(target_os = "linux")]
         let expected = "op:shutdown_read,eof:false,read:true,write:true,err:shutdown(Read) still allowed local reads";
-        #[cfg(not(target_os = "linux"))]
+        // Darwin: shutdown(SHUT_RD) also fails the local write in this
+        // probe (observed on macOS 26.2 arm64, br-asupersync-bi2462.21);
+        // recorded as its own golden so a change in either direction trips it.
+        #[cfg(target_os = "macos")]
+        let expected = "op:shutdown_read,eof:false,read:false,write:false,err:none";
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         let expected = "op:shutdown_read,eof:false,read:false,write:true,err:none";
         tester.assert_half_close_golden(&result, "shutdown_read", expected);
 

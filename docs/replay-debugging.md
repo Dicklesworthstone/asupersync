@@ -64,6 +64,47 @@ Builds outside a clean repository may set `ASUPERSYNC_GIT_COMMIT` to a 40- or
 explicit input, the crashpack omits `commit_hash` instead of making a stale
 provenance claim.
 
+## Production schedule projection (what a production trace can re-drive)
+
+`Runtime::trace_snapshot()` exports the production ring buffer in the same
+`TraceEvent` schema the lab records. Its task ids are arena slots with
+generations that a fresh lab run never reproduces, and it records outcomes
+(I/O results, timers firing) rather than the decisions that produced them.
+`asupersync::trace::ProductionSchedule` reduces such a trace to what the lab
+can re-drive:
+
+| Production event | Projected replay event | Note |
+|---|---|---|
+| `Spawn` | `TaskSpawned { task, region, at_tick }` | assigns the task its **spawn ordinal**; the replay binds lab ids to recorded ids in this order |
+| `Poll` | `TaskScheduled { task, at_tick }` | one **step** per poll; if the trace has no `Poll` events at all, `Schedule` events are the steps instead (`summary().steps_from_schedule_events`) |
+| `Yield`, `Complete` | `TaskYielded`, `TaskCompleted { outcome: 0 }` | the production trace records no outcome severity |
+| `TimeAdvance`, `TimerScheduled/Fired/Cancelled` | `TimeAdvanced`, `TimerCreated/Fired/Cancelled` | hints only; the lab clock is virtual |
+| I/O, obligation, region, cancellation, wake events | dropped, counted in `summary().skipped` | outcomes to re-inject, not decisions to re-drive |
+
+`at_tick` is the production sequence number, monotone within the trace.
+
+Strictness: a task that acts before its `Spawn` means the ring buffer
+truncated the trace (or it was filtered). `ProductionSchedule::from_runtime_trace`
+refuses with `ProjectionError::MissingSpawn { task, seq, kind }` rather than
+replaying a partial history; `from_runtime_trace_with(ProjectionOptions {
+allow_orphans: true })` admits such tasks at first sight and lists them in
+`summary().orphans`, which is the right choice for a long-running service
+whose early spawns predate the ring window. A duplicate `Spawn` for one id and
+a trace with no schedule events are also errors.
+
+```rust
+let events = runtime.trace_snapshot();
+let schedule = asupersync::trace::ProductionSchedule::from_runtime_trace(&events)?;
+for (spawn_ordinal, tick) in schedule.steps() {
+    // the recorded interleaving: which task (by birth order) was polled, when
+}
+let replay_trace = schedule.into_trace(); // feeds trace::replayer::TraceReplayer
+```
+
+Not yet: driving a `LabRuntime` from this projection (schedule re-execution)
+is the next step (bead `asupersync-bi2462.7`); until it lands, "production
+debugging" means offline analysis of the projected trace, not re-execution.
+
 ## Golden Replay-Delta Verification
 
 When the same scenario is expected to remain stable across releases, compare

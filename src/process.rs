@@ -3612,9 +3612,14 @@ mod tests {
         std::io::stdin()
             .read_to_string(&mut input)
             .expect("read exact-image helper stdin");
+        // macOS's loader injects `__CF_USER_TEXT_ENCODING` into every process;
+        // it is not part of the image the parent handed over, so it does not
+        // count against the exact environment (br-asupersync-bi2462.21).
         println!(
             "ASUPERSYNC_EXACT_IMAGE_CHILD:{input}:env={}",
-            std::env::vars_os().count()
+            std::env::vars_os()
+                .filter(|(key, _)| key != "__CF_USER_TEXT_ENCODING")
+                .count()
         );
     }
 
@@ -4021,10 +4026,14 @@ mod tests {
         let result = child.wait_with_output().expect("output failed");
 
         let stdout = String::from_utf8_lossy(&result.stdout);
+        // The child prints its resolved cwd; on macOS /tmp is a symlink to
+        // /private/tmp, so compare canonical forms.
+        let expected_dir = std::fs::canonicalize("/tmp")
+            .map_or_else(|_| "/tmp".to_string(), |p| p.display().to_string());
         crate::assert_with_log!(
-            stdout.trim() == "/tmp",
+            stdout.trim() == expected_dir,
             "current dir",
-            "/tmp",
+            expected_dir.as_str(),
             stdout.trim()
         );
         crate::test_complete!("test_command_current_dir");

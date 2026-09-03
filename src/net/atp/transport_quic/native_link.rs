@@ -99,8 +99,10 @@ use crate::types::symbol::{Symbol, SymbolId, SymbolKind};
 use super::{
     NativeQuicFrameTransport, QuicBlockRepairRequest, QuicConfig, QuicControlReply,
     QuicEntryEncoder, QuicHello, QuicHelloAck, QuicNeedMore, QuicPreparedSource,
-    QuicReceiveOptions, QuicSourceSymbolRequest, QuicSprayPacingDecision, QuicTransportError,
-    ReceiveReceipt, ReceiveReport, SendReport, TransferManifest,
+    QuicReceiveOptions, QuicSendLimiterReport, QuicSendStallReason, QuicSourceSymbolRequest,
+    QuicSprayPacingDecision, QuicStallSliceAccounting, QuicTransportError, ReceiveReceipt,
+    ReceiveReport, SendReport, TransferManifest, classify_blocked_flush,
+    classify_source_stream_admission,
 };
 
 /// Shared QUIC Initial Destination Connection ID for ATP-over-QUIC.
@@ -2054,6 +2056,10 @@ struct NativeDataPlanePacer {
     byte_pacer_next_send_at: Option<Instant>,
     byte_pacer_burst_bytes: usize,
     byte_pacer_burst_remaining: usize,
+    /// Sleeps taken by `before_send` / `before_send_bytes` (the datagram
+    /// spray path); folded into the limiter report as `pacing` stalls.
+    pacing_waits: u64,
+    pacing_wait_micros: u64,
 }
 
 impl NativeDataPlanePacer {
@@ -2068,6 +2074,8 @@ impl NativeDataPlanePacer {
             byte_pacer_next_send_at: None,
             byte_pacer_burst_bytes: symbol_frame_len.max(1).saturating_mul(burst_symbols.max(1)),
             byte_pacer_burst_remaining: 0,
+            pacing_waits: 0,
+            pacing_wait_micros: 0,
         };
         pacer.controller.configure_for_path_rate(
             pacer.pacing_rate_bps.saturating_mul(8).max(1),
@@ -2075,6 +2083,14 @@ impl NativeDataPlanePacer {
             u32::try_from(burst_symbols.max(1)).unwrap_or(u32::MAX),
         );
         pacer
+    }
+
+    /// Account one pacer sleep of `wait` for the limiter report.
+    fn note_pacer_wait(&mut self, wait: Duration) {
+        self.pacing_waits = self.pacing_waits.saturating_add(1);
+        self.pacing_wait_micros = self
+            .pacing_wait_micros
+            .saturating_add(super::duration_to_micros_saturating(wait));
     }
 
     fn configure(&mut self, pacing: &QuicSprayPacingDecision) {
@@ -2165,6 +2181,7 @@ impl NativeDataPlanePacer {
                 congestion_window,
             );
             crate::time::sleep(cx.now(), wait).await;
+            self.note_pacer_wait(wait);
             cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
         }
     }
@@ -2195,6 +2212,7 @@ impl NativeDataPlanePacer {
                 congestion_window,
             );
             crate::time::sleep(cx.now(), wait).await;
+            self.note_pacer_wait(wait);
             cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
         }
         self.note_bytes_paced(frame_bytes);
@@ -2477,6 +2495,12 @@ pub struct QuicLink {
     /// resets to [`SOURCE_STREAM_PTO`] on real ACK progress — see the cap's
     /// docs for the spurious-loss wedge this prevents (br-asupersync-daqxbz).
     app_loss_stall_pto: Duration,
+    /// Sender-side limiter telemetry (br-asupersync-bi2462.2).
+    ///
+    /// Stall reasons with held time, cwnd and in-flight peaks,
+    /// loss/retransmit counters. Observational only; read out by
+    /// [`QuicLink::limiter_report`] when the send finishes.
+    limiter: QuicSendLimiterReport,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -3199,6 +3223,12 @@ impl QuicLink {
             self.clock,
         )?;
         if event.lost_packets > 0 {
+            self.limiter.loss_timeouts = self.limiter.loss_timeouts.saturating_add(1);
+            self.limiter.lost_packets = self
+                .limiter
+                .lost_packets
+                .saturating_add(u64::try_from(event.lost_packets).unwrap_or(u64::MAX));
+            self.limiter.lost_bytes = self.limiter.lost_bytes.saturating_add(event.lost_bytes);
             // This expiry is clock-warped (never waits out real time), so a
             // stall loop re-arming it faster than the path RTT declares every
             // packet lost before its ACK can return. Back the wall-clock
@@ -3335,6 +3365,7 @@ impl QuicLink {
                         .min(max_frame_bytes)
                         .max(1);
                 let pacer_wait_started = Instant::now();
+                let mut pacer_waited = false;
                 // Pacer wait with concurrent ACK drain (MATRIX-235): while the
                 // byte pacer holds the source stream below its delivery-clocked
                 // deadline, pump inbound so ACKs are processed as they arrive.
@@ -3352,6 +3383,7 @@ impl QuicLink {
                     if now >= deadline {
                         break;
                     }
+                    pacer_waited = true;
                     let wait = deadline.duration_since(now).clamp(
                         QUIC_DATA_PLANE_PACER_MIN_PAUSE,
                         QUIC_DATA_PLANE_PACER_MAX_PAUSE,
@@ -3368,7 +3400,11 @@ impl QuicLink {
                     cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
                 }
                 self.data_plane_pacer.note_bytes_paced(frame_bytes);
-                pacer_wait_elapsed += pacer_wait_started.elapsed();
+                let pacer_held = pacer_wait_started.elapsed();
+                if pacer_waited {
+                    self.note_limiter_stall(QuicSendStallReason::Pacing, pacer_held);
+                }
+                pacer_wait_elapsed += pacer_held;
             }
             let frames = if control_stream_pending {
                 // Control-only packet: keeps the paced stream's frames out so
@@ -3814,6 +3850,58 @@ impl QuicLink {
         )
     }
 
+    /// Record one limiter stall of `held` behind `reason`, sampling the QUIC
+    /// transport's in-flight / cwnd / ssthresh at the same instant.
+    fn note_limiter_stall(&mut self, reason: QuicSendStallReason, held: Duration) {
+        let transport = self.conn.transport();
+        let (bytes_in_flight, cwnd, ssthresh) = (
+            transport.bytes_in_flight(),
+            transport.congestion_window_bytes(),
+            transport.ssthresh_bytes(),
+        );
+        self.limiter
+            .observe_transport(bytes_in_flight, cwnd, ssthresh);
+        self.limiter.note_stall(reason, held);
+    }
+
+    /// The sender's limiter telemetry for the finished transfer.
+    ///
+    /// The accumulated stalls plus the transport's final cwnd / ssthresh /
+    /// RTT / PTO state, the datagram pacer's sleeps, the admission cap in
+    /// force, and the endpoint's socket-buffer report and send-error count.
+    fn limiter_report(&self) -> QuicSendLimiterReport {
+        let mut report = self.limiter.clone();
+        let transport = self.conn.transport();
+        report.observe_transport(
+            transport.bytes_in_flight(),
+            transport.congestion_window_bytes(),
+            transport.ssthresh_bytes(),
+        );
+        report.min_rtt_micros = transport.rtt().min_rtt_micros();
+        report.smoothed_rtt_micros = transport.rtt().smoothed_rtt_micros();
+        report.pto_count = transport.pto_count();
+        report.unacked_admission_cap_bytes = self.source_stream_unacked_admission_max();
+        report.pacing.count = report
+            .pacing
+            .count
+            .saturating_add(self.data_plane_pacer.pacing_waits);
+        report.pacing.micros = report
+            .pacing
+            .micros
+            .saturating_add(self.data_plane_pacer.pacing_wait_micros);
+        report.udp_send_errors = self
+            .endpoint
+            .metrics()
+            .send_errors
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let buffers = self.endpoint.buffer_report();
+        report.requested_send_buffer_bytes = buffers.requested_send_buffer_bytes;
+        report.applied_send_buffer_bytes = buffers.applied_send_buffer_bytes;
+        report.requested_recv_buffer_bytes = buffers.requested_recv_buffer_bytes;
+        report.applied_recv_buffer_bytes = buffers.applied_recv_buffer_bytes;
+        report
+    }
+
     fn end_source_stream_rate_control(&mut self) {
         self.stream_rate_controller = None;
     }
@@ -4100,6 +4188,16 @@ impl QuicLink {
                 );
                 crate::time::sleep(cx.now(), wait).await;
                 self.clock = self.clock.saturating_add(duration_micros_u64(wait).max(1));
+                let stall_reason = match admission {
+                    DatagramSendAdmission::CwndBlocked { .. } => QuicSendStallReason::Cwnd,
+                    DatagramSendAdmission::ReceiverWindowBlocked { .. } => {
+                        QuicSendStallReason::ReceiverWindow
+                    }
+                    DatagramSendAdmission::Send | DatagramSendAdmission::Wait { .. } => {
+                        QuicSendStallReason::Pacing
+                    }
+                };
+                self.note_limiter_stall(stall_reason, wait);
                 continue;
             }
 
@@ -4255,6 +4353,11 @@ impl QuicLink {
             lost_bytes = lost_bytes.saturating_add(frame.len);
         }
         self.note_source_stream_retransmit_bytes(lost_bytes);
+        self.limiter.retransmit_batches = self.limiter.retransmit_batches.saturating_add(1);
+        self.limiter.retransmitted_stream_bytes = self
+            .limiter
+            .retransmitted_stream_bytes
+            .saturating_add(lost_bytes);
         // Requeue in REVERSE: each requeue pushes to the queue front, so
         // iterating the dedup-sorted (ascending) list in reverse leaves the
         // pending queue in ascending offset order — which is what lets the
@@ -5503,6 +5606,7 @@ fn link_from_handshake(
         last_final_flight_resend: None,
         app_loss_stall_pto: SOURCE_STREAM_PTO,
         sender_handoff: QuicSenderHandoffStats::default(),
+        limiter: QuicSendLimiterReport::default(),
     })
 }
 
@@ -6929,8 +7033,17 @@ async fn drive_native_source_stream_flush(
     let mut last_progress = Instant::now();
     let mut made_progress = false;
     let mut recent_stream_frames = Vec::new();
+    let mut stall_slices = QuicStallSliceAccounting::default();
+    let mut pending_stall: Option<QuicSendStallReason> = None;
     loop {
         cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
+        // Limiter report: attribute the previous iteration's wait to the gate
+        // it classified; an iteration that made progress takes its slice
+        // without attributing it.
+        let held = stall_slices.take_slice(started.elapsed());
+        if let Some(reason) = pending_stall.take() {
+            link.note_limiter_stall(reason, held);
+        }
         let pending_frames = link.conn.pending_stream_frame_count();
         if pending_frames == 0 {
             return Ok(());
@@ -6961,6 +7074,17 @@ async fn drive_native_source_stream_flush(
         // mid-stream cycle drains inbound opportunistically with a zero
         // timeout. Waiting a grace per 512 KiB quantum convoyed the sender
         // and receiver into RTT-scale lockstep (~47 MB/s at any pacing rate).
+        if flushed == 0 {
+            let paced_credit = link
+                .paced_source_stream
+                .map(|stream| link.conn.stream_send_credit_remaining(stream));
+            pending_stall = Some(classify_blocked_flush(
+                link.conn
+                    .transport()
+                    .can_send(QUIC_DATA_PLANE_TELEMETRY_PACKET_BYTES),
+                paced_credit,
+            ));
+        }
         let pump_timeout = if flushed == 0 {
             INBOUND_PUMP_DRAIN_GRACE
         } else {
@@ -7048,22 +7172,39 @@ async fn wait_source_stream_send_admission(
     let gate_started = Instant::now();
     let mut last_progress = Instant::now();
     let mut progress_marker = (u64::MAX, u64::MAX);
+    let mut stall_slices = QuicStallSliceAccounting::default();
+    let mut pending_stall: Option<QuicSendStallReason> = None;
     loop {
-        if gate_started.elapsed() >= config.idle_timeout {
+        // Limiter report: the previous iteration's wait belongs to the gate
+        // it classified below (queue cap, stream credit or admission cap).
+        let gate_elapsed = gate_started.elapsed();
+        let held = stall_slices.take_slice(gate_elapsed);
+        if let Some(reason) = pending_stall.take() {
+            link.note_limiter_stall(reason, held);
+        }
+        if gate_elapsed >= config.idle_timeout {
             return Err(QuicTransportError::Timeout {
                 operation: "source stream send admission",
                 timeout: config.idle_timeout,
             });
         }
         if link.conn.pending_stream_data_bytes() > QUIC_SOURCE_STREAM_SEND_QUEUE_MAX_BYTES {
+            pending_stall = classify_source_stream_admission(true, true, true);
             drive_native_source_stream_flush(cx, link, config.idle_timeout, false).await?;
             continue;
         }
         let credit_remaining = link.conn.stream_send_credit_remaining(stream);
+        link.limiter.min_stream_send_credit_bytes = Some(
+            link.limiter
+                .min_stream_send_credit_bytes
+                .map_or(credit_remaining, |min| min.min(credit_remaining)),
+        );
         let credit_ok = min_credit == 0 || credit_remaining >= min_credit;
-        if credit_ok && link.stream_unacked_bytes <= link.source_stream_unacked_admission_max() {
+        let unacked_ok = link.stream_unacked_bytes <= link.source_stream_unacked_admission_max();
+        if credit_ok && unacked_ok {
             return Ok(());
         }
+        pending_stall = classify_source_stream_admission(false, credit_ok, unacked_ok);
         // Any observable movement counts as progress. A stricter
         // ≥64KB-per-PTO watermark was measured WORSE (gate36: tree_small/good
         // 8.3→22.2s uniform): steady drainage kept re-basing the watermark,
@@ -10434,7 +10575,7 @@ pub(crate) async fn send_prepared_over_udp(
     prepared: &QuicPreparedSource,
     config: &QuicConfig,
     peer_id: &str,
-) -> Result<SendReport, QuicTransportError> {
+) -> Result<(SendReport, QuicSendLimiterReport), QuicTransportError> {
     let config = prepared.effective_config(config);
     config.validate()?;
     let client_tls = config.client_tls.as_ref().ok_or_else(|| {
@@ -10445,7 +10586,9 @@ pub(crate) async fn send_prepared_over_udp(
         )
     })?;
     let mut link = connect(cx, addr, client_tls, &config).await?;
-    run_sender_session(cx, &mut link, prepared, &config, peer_id).await
+    let report = run_sender_session(cx, &mut link, prepared, &config, peer_id).await?;
+    let limiter = link.limiter_report();
+    Ok((report, limiter))
 }
 
 /// Accept one transfer on the pre-bound server `endpoint`, write it under

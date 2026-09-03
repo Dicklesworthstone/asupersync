@@ -185,8 +185,9 @@ pub use refinement_firewall::{
     first_counterexample_prefix, first_refinement_violation, verify_refinement_firewall,
 };
 pub use replay::{
-    CompactRegionId, CompactTaskId, REPLAY_SCHEMA_VERSION, ReplayEvent, ReplayTrace,
-    ReplayTraceError, TraceMetadata,
+    CompactRegionId, CompactTaskId, ProductionSchedule, ProjectionError, ProjectionOptions,
+    ProjectionSummary, REPLAY_SCHEMA_VERSION, ReplayEvent, ReplayTrace, ReplayTraceError,
+    TraceMetadata,
 };
 pub use replayer::{
     Breakpoint, BrowserReplayReport, DivergenceError, ReplayError, ReplayMode, TraceReplayer,

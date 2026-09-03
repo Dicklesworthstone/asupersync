@@ -1774,6 +1774,10 @@ pub struct RuntimeState {
     /// Producer-side spawn gateway, cloned into every Cx at build time
     /// (br-asupersync-hwjqyo / A2.2).
     spawn_gateway: Option<std::sync::Arc<crate::runtime::spawn_mailbox::SpawnGateway>>,
+    /// Producer-side obligation mailbox gateway, cloned into every Cx at
+    /// build time next to the spawn gateway (br-asupersync-bi2462.13).
+    obligation_gateway:
+        Option<std::sync::Arc<crate::runtime::obligation_mailbox::ObligationGateway>>,
     /// Cancellation effects produced by mutation paths that cannot return a
     /// value, principally `RegionRunner::drop`. The state-lock owner must take
     /// these batches, publish their task ids, and dispatch their Wakers only
@@ -2035,6 +2039,7 @@ impl RuntimeState {
             observability: None,
             blocking_pool: None,
             spawn_gateway: None,
+            obligation_gateway: None,
             pending_cancel_dispatches: Vec::new(),
             pending_cancel_dispatch_ready: Arc::new(AtomicBool::new(false)),
             pending_cancel_dispatch_coordinator: None,
@@ -2308,6 +2313,47 @@ impl RuntimeState {
         gateway: std::sync::Arc<crate::runtime::spawn_mailbox::SpawnGateway>,
     ) {
         self.spawn_gateway = Some(gateway);
+    }
+
+    /// The producer-side obligation mailbox gateway, if installed
+    /// (br-asupersync-bi2462.13).
+    #[inline]
+    #[must_use]
+    pub fn obligation_gateway(
+        &self,
+    ) -> Option<std::sync::Arc<crate::runtime::obligation_mailbox::ObligationGateway>> {
+        self.obligation_gateway.clone()
+    }
+
+    /// Installs the obligation mailbox gateway. Cloned into every `Cx` built
+    /// after this point so `Cx::try_register_obligation` works without the
+    /// state lock.
+    pub(crate) fn set_obligation_gateway(
+        &mut self,
+        gateway: std::sync::Arc<crate::runtime::obligation_mailbox::ObligationGateway>,
+    ) {
+        self.obligation_gateway = Some(gateway);
+    }
+
+    /// Apply up to `max` posts waiting on the obligation mailbox.
+    ///
+    /// Reserve / commit / abort / leak posts go through this state's
+    /// authoritative obligation methods. Called where spawn admissions are
+    /// drained. Returns how many posts were applied; `0` without a gateway.
+    pub fn drain_obligation_posts(&mut self, max: usize) -> usize {
+        let Some(gateway) = self.obligation_gateway.clone() else {
+            return 0;
+        };
+        let mailbox = std::sync::Arc::clone(gateway.mailbox());
+        crate::runtime::obligation_mailbox::apply_obligation_posts(self, &mailbox, max)
+    }
+
+    /// Whether obligation posts are waiting to be applied.
+    #[must_use]
+    pub fn has_pending_obligation_posts(&self) -> bool {
+        self.obligation_gateway
+            .as_ref()
+            .is_some_and(|gateway| !gateway.mailbox().is_empty())
     }
 
     /// Returns a cloned handle to the blocking pool, if present.
@@ -3761,6 +3807,13 @@ impl RuntimeState {
                 .resolve_ref(&self.regions)
                 .get(region.arena_index())
                 .map(crate::record::RegionRecord::pending_spawn_handle),
+        )
+        .with_obligation_gateway(
+            self.obligation_gateway.clone(),
+            regions
+                .resolve_ref(&self.regions)
+                .get(region.arena_index())
+                .map(crate::record::RegionRecord::pending_obligation_post_handle),
         );
         cx.set_trace_buffer(self.trace_handle());
         cx.set_loser_drain_history_handle(self.loser_drain_history_handle());
@@ -4108,6 +4161,13 @@ impl RuntimeState {
                 .resolve_ref(&self.regions)
                 .get(region.arena_index())
                 .map(crate::record::RegionRecord::pending_spawn_handle),
+        )
+        .with_obligation_gateway(
+            self.obligation_gateway.clone(),
+            regions
+                .resolve_ref(&self.regions)
+                .get(region.arena_index())
+                .map(crate::record::RegionRecord::pending_obligation_post_handle),
         );
         // Mailbox admission is visible in RuntimeState before its caller can
         // publish the first scheduler lane. Cancellation mutates this Cx while
@@ -4209,6 +4269,11 @@ impl RuntimeState {
         .with_pending_spawn_counter(
             self.region(child_region)
                 .map(crate::record::RegionRecord::pending_spawn_handle),
+        )
+        .with_obligation_gateway(
+            self.obligation_gateway.clone(),
+            self.region(child_region)
+                .map(crate::record::RegionRecord::pending_obligation_post_handle),
         );
         // Mirror the mailbox-admission wiring so the principal context
         // observes and records exactly what an admitted task context would:

@@ -457,6 +457,12 @@ pub struct RegionRecord {
     /// `Arc`-shared so producers increment without the state lock; the
     /// close path treats a nonzero count as live children.
     pending_spawns: Arc<PendingSpawnCounter>,
+    /// br-asupersync-bi2462.13 — obligation reservations held by live
+    /// `ObligationToken`s of this region's tasks.
+    ///
+    /// The same increment-before-visibility shape as `pending_spawns`, so
+    /// drain gating sees a reservation between its post and its application.
+    pending_obligation_posts: Arc<PendingSpawnCounter>,
     /// Tracing span for region lifecycle (only active with tracing-integration feature).
     #[cfg(feature = "tracing-integration")]
     span: Span,
@@ -558,6 +564,7 @@ impl RegionRecord {
             }),
             double_resolve_count: AtomicU64::new(0),
             pending_spawns: Arc::new(PendingSpawnCounter::new()),
+            pending_obligation_posts: Arc::new(PendingSpawnCounter::new()),
             span,
         }
     }
@@ -715,6 +722,22 @@ impl RegionRecord {
     #[must_use]
     pub fn pending_spawn_count(&self) -> u32 {
         self.pending_spawns.count()
+    }
+
+    /// Obligation reservations posted by this region's tasks whose tokens
+    /// are still alive (br-asupersync-bi2462.13).
+    #[inline]
+    #[must_use]
+    pub fn pending_obligation_post_count(&self) -> u32 {
+        self.pending_obligation_posts.count()
+    }
+
+    /// Producers clone this out of the record at task-context build time and
+    /// reserve one credit per obligation token without the state lock.
+    #[inline]
+    #[must_use]
+    pub fn pending_obligation_post_handle(&self) -> Arc<PendingSpawnCounter> {
+        Arc::clone(&self.pending_obligation_posts)
     }
 
     /// Returns the shared pending-spawn counter handle.

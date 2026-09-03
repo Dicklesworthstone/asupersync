@@ -2013,3 +2013,224 @@ fn test_real_broker_drop_subscribed_consumer_without_close_does_not_hang() {
         log.test_end("pass");
     });
 }
+
+/// A subscription to a topic that never exists returns `Ok(None)` (the
+/// informational `UnknownTopicOrPartition` is swallowed, it would self-heal
+/// if the topic appeared) and the swallowed code is observable through
+/// `last_transient_error()` — the consumer is distinguishable from an idle
+/// topic (br-asupersync-bi2462.27).
+/// br-asupersync-bi2462.26 — with `partition.assignment.strategy` set to
+/// `cooperative-sticky` through the raw property passthrough, the consumer's
+/// rebalance handler takes the incremental path, the negotiated protocol
+/// reads back as cooperative outside the callback, and leaving the group on
+/// `close()` is an incremental revoke.
+#[test]
+fn test_real_broker_cooperative_sticky_takes_the_incremental_assignment_path() {
+    use asupersync::messaging::kafka_consumer::KafkaRebalanceProtocol;
+
+    let Some(config) = require_real_broker() else {
+        return;
+    };
+    let log = KafkaTestLogger::new("real_broker_cooperative_sticky");
+    run_test_with_cx(|cx| async move {
+        let topic = unique_topic("test-cooperative-sticky");
+        let group_id = format!("test-cooperative-group-{}", fastrand::u32(..));
+        log.phase("setup");
+
+        let producer = KafkaProducer::new(
+            ProducerConfig::new(config.bootstrap_servers.clone()).client_id("test-coop-seed"),
+        )
+        .unwrap();
+        producer
+            .send(&cx, &topic, Some(b"seed".as_slice()), b"seed", None)
+            .await
+            .unwrap();
+        producer.flush(&cx, Duration::from_secs(10)).await.unwrap();
+        producer.close(&cx, Duration::from_secs(5)).await.unwrap();
+
+        let consumer_config = ConsumerConfig::new(config.bootstrap_servers.clone(), &group_id)
+            .client_id("test-coop-consumer")
+            .auto_offset_reset(AutoOffsetReset::Earliest)
+            .with_property("partition.assignment.strategy", "cooperative-sticky")
+            .force_real_kafka(true);
+        assert_eq!(
+            consumer_config.extra_properties(),
+            &[(
+                "partition.assignment.strategy".to_string(),
+                "cooperative-sticky".to_string()
+            )]
+        );
+        let consumer = KafkaConsumer::new(consumer_config).unwrap();
+        assert!(
+            consumer.rebalance_stats().cooperative,
+            "the handler must be configured cooperative from the property"
+        );
+        assert_eq!(
+            consumer.rebalance_protocol(),
+            KafkaRebalanceProtocol::Unknown,
+            "no group joined yet"
+        );
+        consumer.subscribe(&cx, &[&topic]).await.unwrap();
+
+        log.phase("join_group");
+        let joined = std::time::Instant::now();
+        while joined.elapsed() < Duration::from_secs(30)
+            && consumer.assigned_partitions().is_empty()
+        {
+            let _ = consumer
+                .poll(&cx, Duration::from_millis(500))
+                .await
+                .unwrap();
+        }
+        assert!(
+            !consumer.assigned_partitions().is_empty(),
+            "consumer never joined the group, so the cooperative path was not exercised"
+        );
+        let stats = consumer.rebalance_stats();
+        log.kafka_operation(&format!("after_join {stats:?}"), None, None);
+        assert!(stats.cooperative, "{stats:?}");
+        assert!(
+            stats.incremental_assigns >= 1,
+            "cooperative assign must go through incremental_assign: {stats:?}"
+        );
+        assert_eq!(stats.eager_assigns, 0, "{stats:?}");
+        assert_eq!(
+            consumer.rebalance_protocol(),
+            KafkaRebalanceProtocol::Cooperative,
+            "librdkafka negotiated the cooperative protocol for the group"
+        );
+
+        log.phase("close");
+        consumer.close(&cx).await.unwrap();
+        let stats = consumer.rebalance_stats();
+        log.kafka_operation(&format!("after_close {stats:?}"), None, None);
+        assert!(
+            stats.incremental_unassigns >= 1,
+            "leaving the group under cooperative-sticky revokes incrementally: {stats:?}"
+        );
+        assert_eq!(stats.eager_unassigns, 0, "{stats:?}");
+        log.test_end("pass");
+    });
+}
+
+/// br-asupersync-bi2462.26 — the drop-without-close regression repeated
+/// under `cooperative-sticky`: the incremental revoke that leaving the group
+/// triggers is drained in normal polling mode, so the drop still finishes.
+#[test]
+fn test_real_broker_drop_subscribed_cooperative_consumer_without_close_does_not_hang() {
+    let Some(config) = require_real_broker() else {
+        return;
+    };
+    let log = KafkaTestLogger::new("real_broker_drop_without_close_cooperative");
+    run_test_with_cx(|cx| async move {
+        let topic = unique_topic("test-drop-without-close-coop");
+        let group_id = format!("test-drop-coop-group-{}", fastrand::u32(..));
+        log.phase("setup");
+
+        let producer = KafkaProducer::new(
+            ProducerConfig::new(config.bootstrap_servers.clone()).client_id("test-drop-coop-seed"),
+        )
+        .unwrap();
+        producer
+            .send(&cx, &topic, Some(b"seed".as_slice()), b"seed", None)
+            .await
+            .unwrap();
+        producer.flush(&cx, Duration::from_secs(10)).await.unwrap();
+        producer.close(&cx, Duration::from_secs(5)).await.unwrap();
+
+        let consumer = KafkaConsumer::new(
+            ConsumerConfig::new(config.bootstrap_servers.clone(), &group_id)
+                .client_id("test-drop-coop-consumer")
+                .auto_offset_reset(AutoOffsetReset::Earliest)
+                .with_property("partition.assignment.strategy", "cooperative-sticky")
+                .force_real_kafka(true),
+        )
+        .unwrap();
+        consumer.subscribe(&cx, &[&topic]).await.unwrap();
+
+        log.phase("join_group");
+        let joined = std::time::Instant::now();
+        while joined.elapsed() < Duration::from_secs(30)
+            && consumer.assigned_partitions().is_empty()
+        {
+            let _ = consumer
+                .poll(&cx, Duration::from_millis(500))
+                .await
+                .unwrap();
+        }
+        assert!(
+            !consumer.assigned_partitions().is_empty(),
+            "consumer never joined the group, so the drop path under test was not reached"
+        );
+        assert!(consumer.rebalance_stats().incremental_assigns >= 1);
+
+        log.phase("drop_without_close");
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let dropper = std::thread::spawn(move || {
+            let started = std::time::Instant::now();
+            drop(consumer);
+            let _ = done_tx.send(started.elapsed());
+        });
+        let elapsed = done_rx.recv_timeout(Duration::from_secs(60)).expect(
+            "dropping a subscribed cooperative consumer without close() must finish within 60 s",
+        );
+        dropper.join().expect("dropper thread");
+        log.kafka_operation(
+            &format!("drop_elapsed_ms={}", elapsed.as_millis()),
+            None,
+            None,
+        );
+        assert!(
+            elapsed < Duration::from_secs(30),
+            "drop took {elapsed:?}; the bounded group leave is about five seconds"
+        );
+        log.test_end("pass");
+    });
+}
+
+#[test]
+fn test_real_broker_never_created_topic_reports_transient_error() {
+    let Some(config) = require_real_broker() else {
+        return;
+    };
+    let log = KafkaTestLogger::new("real_broker_transient_error");
+    run_test_with_cx(|cx| async move {
+        let topic = unique_topic("test-never-created");
+        let group_id = format!("test-transient-group-{}", fastrand::u32(..));
+        log.phase("subscribe_to_missing_topic");
+        let consumer = KafkaConsumer::new(
+            ConsumerConfig::new(config.bootstrap_servers.clone(), &group_id)
+                .client_id("test-transient-consumer")
+                .auto_offset_reset(AutoOffsetReset::Earliest)
+                .force_real_kafka(true),
+        )
+        .unwrap();
+        consumer.subscribe(&cx, &[&topic]).await.unwrap();
+        assert!(consumer.last_transient_error().is_none());
+
+        log.phase("poll");
+        let polled = consumer.poll(&cx, Duration::from_secs(2)).await;
+        assert!(
+            matches!(polled, Ok(None)),
+            "a missing topic must look like no message yet, got {polled:?}"
+        );
+        let transient = consumer
+            .last_transient_error()
+            .expect("the swallowed UnknownTopicOrPartition must be recorded");
+        assert_eq!(transient.code, "UnknownTopicOrPartition");
+        assert!(transient.count >= 1);
+        assert!(transient.last_seen >= transient.first_seen);
+        log.kafka_operation(
+            &format!(
+                "transient_count={} code={}",
+                transient.count, transient.code
+            ),
+            None,
+            None,
+        );
+
+        log.phase("cleanup");
+        consumer.close(&cx).await.unwrap();
+        log.test_end("pass");
+    });
+}

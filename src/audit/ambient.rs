@@ -1490,7 +1490,14 @@ fn test_function() {
     // handshake_driver early-data resend stamp; transport_rq File::create /
     // File::open / Instant::now on the receive path; runtime/builder.rs drain
     // timing. No new site takes authority outside its owning subsystem.
-    const AMBIENT_VIOLATION_BASELINE_COUNT: usize = 724;
+    // 724 -> 723 (br-asupersync-bi2462.22): the wall-clock bounded spin in
+    // cancel/symbol_cancel.rs was removed by publishing `cancelled_at`
+    // before the cancelled flag, so `child()` no longer needs a clock.
+    // The snapshot itself is keyed without line numbers since
+    // br-asupersync-bi2462.23, so this count and the snapshot text move only
+    // when a site is added, removed or rewritten — never when code above a
+    // site shifts.
+    const AMBIENT_VIOLATION_BASELINE_COUNT: usize = 723;
 
     fn src_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("src")
@@ -1796,34 +1803,42 @@ fn test_function() {
         rendered.join("\n")
     }
 
+    /// The reviewed inventory text: per-(category, file, pattern) counts,
+    /// then per-(category, file, pattern, code excerpt) counts.
+    ///
+    /// Deliberately keyed WITHOUT line numbers (br-asupersync-bi2462.23):
+    /// an edit above an ambient site used to move every entry below it, so
+    /// the snapshot churned by dozens of lines for zero authority change and
+    /// a genuinely new site hid among the shifts. Now only a new, removed or
+    /// rewritten site changes the text; a site that merely moves does not.
+    /// The strict scan's `known_findings_reference_real_code` keeps its
+    /// line-window check because it names specific findings.
     fn canonical_violation_inventory(vs: &[Violation]) -> String {
         let mut grouped = std::collections::BTreeMap::<String, usize>::new();
-        let mut occurrences = Vec::with_capacity(vs.len());
+        let mut occurrences = std::collections::BTreeMap::<String, usize>::new();
         for violation in vs {
             let key = format!(
                 "{:?}\t{}\t{}",
                 violation.category, violation.file, violation.pattern
             );
             *grouped.entry(key).or_default() += 1;
-            occurrences.push(format!(
-                "{:?}\t{}\t{}\t{}\t{}",
-                violation.category,
-                violation.file,
-                violation.line,
-                violation.pattern,
-                violation.source_context
-            ));
+            let occurrence = format!(
+                "{:?}\t{}\t{}\t{}",
+                violation.category, violation.file, violation.pattern, violation.source_context
+            );
+            *occurrences.entry(occurrence).or_default() += 1;
         }
         let grouped = grouped
             .into_iter()
             .map(|(key, count)| format!("{count}\t{key}"))
             .collect::<Vec<_>>()
             .join("\n");
-        occurrences.sort();
-        format!(
-            "[grouped]\n{grouped}\n[occurrences]\n{}",
-            occurrences.join("\n")
-        )
+        let occurrences = occurrences
+            .into_iter()
+            .map(|(key, count)| format!("{count}\t{key}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!("[grouped]\n{grouped}\n[occurrences]\n{occurrences}")
     }
 
     fn collect_rs_files_strict(dir: &Path) -> Result<Vec<PathBuf>, String> {
@@ -2005,6 +2020,103 @@ fn test_function() {
                 finding.description, finding.file,
             );
         }
+    }
+
+    /// The inventory must not move when code above an ambient site moves
+    /// (br-asupersync-bi2462.23).
+    ///
+    /// A comment line inserted above a site leaves the text byte-identical,
+    /// while one new site adds exactly one occurrence entry.
+    #[test]
+    fn inventory_is_keyed_without_line_numbers() {
+        let rel = "net/inventory_key_fixture.rs";
+        let base = "use std::env;\n\
+                    fn read_a() -> Option<String> {\n    \
+                        std::env::var(\"AMBIENT_A\").ok()\n\
+                    }\n";
+        let base_violations = scan_source(rel, base);
+        assert!(
+            !base_violations.is_empty(),
+            "fixture must trigger the scanner or this test proves nothing"
+        );
+        let base_inventory = canonical_violation_inventory(&base_violations);
+
+        let shifted = format!("// a comment line pushes every site down by one\n{base}");
+        let shifted_inventory = canonical_violation_inventory(&scan_source(rel, &shifted));
+        assert_eq!(
+            base_inventory, shifted_inventory,
+            "a line shift with no authority change must not move the inventory"
+        );
+
+        // A structurally different second site (the scanner scrubs string
+        // literals from the excerpt, so a look-alike line would merge into
+        // the first entry's count instead of adding one).
+        let added = format!(
+            "{base}fn read_b() -> String {{\n    std::env::var(\"AMBIENT_B\").unwrap_or_default()\n}}\n"
+        );
+        let added_violations = scan_source(rel, &added);
+        assert_eq!(
+            added_violations.len(),
+            base_violations.len() + 1,
+            "one new env site must scan as one new violation"
+        );
+        let added_inventory = canonical_violation_inventory(&added_violations);
+
+        // An identical duplicate of the first site does not add an entry;
+        // it raises that entry's count, which is the whole point of keying
+        // by excerpt instead of by line number.
+        let duplicated = format!(
+            "{base}fn read_again() -> Option<String> {{\n    std::env::var(\"AMBIENT_A\").ok()\n}}\n"
+        );
+        let duplicated_inventory = canonical_violation_inventory(&scan_source(rel, &duplicated));
+        let duplicate_entries: Vec<&str> = duplicated_inventory
+            .split_once("[occurrences]\n")
+            .map(|(_, tail)| tail.lines().collect())
+            .unwrap_or_default();
+        assert_eq!(
+            duplicate_entries.len(),
+            base_inventory
+                .split_once("[occurrences]\n")
+                .map_or(0, |(_, tail)| tail.lines().count()),
+            "a duplicate excerpt merges into the existing entry"
+        );
+        assert!(
+            duplicate_entries.iter().any(|line| line.starts_with("2\t")),
+            "the merged entry counts both sites: {duplicate_entries:?}"
+        );
+        let occurrence_lines = |inventory: &str| -> Vec<String> {
+            inventory
+                .split_once("[occurrences]\n")
+                .map(|(_, tail)| tail.lines().map(str::to_string).collect())
+                .unwrap_or_default()
+        };
+        let base_occurrences = occurrence_lines(&base_inventory);
+        let added_occurrences = occurrence_lines(&added_inventory);
+        assert_eq!(
+            added_occurrences.len(),
+            base_occurrences.len() + 1,
+            "one new site must add exactly one occurrence entry"
+        );
+        assert!(
+            base_occurrences
+                .iter()
+                .all(|line| added_occurrences.contains(line)),
+            "existing entries must be unchanged by an added site"
+        );
+        let new_entry = added_occurrences
+            .iter()
+            .find(|line| !base_occurrences.contains(line))
+            .expect("new occurrence entry");
+        assert!(
+            new_entry.contains("unwrap_or_default"),
+            "the new entry carries the new site's excerpt: {new_entry}"
+        );
+        assert!(
+            !new_entry
+                .split('\t')
+                .any(|field| field.parse::<usize>().is_ok() && field != "1"),
+            "no line number may appear in an occurrence entry: {new_entry}"
+        );
     }
 
     #[test]

@@ -601,6 +601,7 @@ impl<T> Sender<T> {
             Ok(SendPermit {
                 sender: self,
                 sent: false,
+                obligation: None,
             })
         } else {
             Err(SendError::<()>::Full(()))
@@ -922,6 +923,10 @@ impl<'a, T> Future for Reserve<'a, T> {
                 return Poll::Ready(Ok(SendPermit {
                     sender: self.sender,
                     sent: false,
+                    obligation: self.cx.try_register_obligation(
+                        crate::record::ObligationKind::SendPermit,
+                        self.cx.task_id(),
+                    ),
                 }));
             }
 
@@ -1197,6 +1202,30 @@ impl DeferredReceiverWake {
 pub struct SendPermit<'a, T> {
     sender: &'a Sender<T>,
     sent: bool,
+    /// Runtime-tracked obligation for this reservation
+    /// (br-asupersync-bi2462.14).
+    ///
+    /// Minted through the reserving `Cx`'s obligation mailbox, committed on
+    /// send, aborted on `abort()` or an unsent drop. `None` when the permit
+    /// was reserved without a runtime context (`try_reserve`, or a
+    /// hand-built `Cx`).
+    obligation: Option<crate::runtime::obligation_mailbox::ObligationToken>,
+}
+
+/// Resolve a permit's runtime obligation: committed when the value was
+/// delivered, aborted as an error when the channel refused it.
+#[inline]
+fn resolve_send_obligation(
+    token: Option<crate::runtime::obligation_mailbox::ObligationToken>,
+    delivered: bool,
+) {
+    if let Some(token) = token {
+        if delivered {
+            let _ = token.commit();
+        } else {
+            let _ = token.abort(crate::record::ObligationAbortReason::Error);
+        }
+    }
 }
 
 impl<T> SendPermit<'_, T> {
@@ -1233,6 +1262,7 @@ impl<T> SendPermit<'_, T> {
         value: T,
     ) -> (Result<(), SendError<T>>, DeferredReceiverWake) {
         self.sent = true;
+        let obligation = self.obligation.take();
         let mut inner = self.sender.shared.inner.lock();
 
         if inner.reserved == 0 {
@@ -1245,6 +1275,7 @@ impl<T> SendPermit<'_, T> {
             // Receiver is gone; drop the value and release capacity.
             // Note: Receiver::drop already drained and woke any pending send_wakers.
             drop(inner);
+            resolve_send_obligation(obligation, false);
             return (
                 Err(SendError::Disconnected(value)),
                 DeferredReceiverWake::none(),
@@ -1256,6 +1287,7 @@ impl<T> SendPermit<'_, T> {
         // Extract waker before dropping the lock to avoid wake-under-lock.
         let recv_waker = inner.recv_waker.take();
         drop(inner);
+        resolve_send_obligation(obligation, true);
         (Ok(()), DeferredReceiverWake(recv_waker))
     }
 
@@ -1263,6 +1295,9 @@ impl<T> SendPermit<'_, T> {
     #[inline]
     pub fn abort(mut self) {
         self.sent = true;
+        if let Some(token) = self.obligation.take() {
+            let _ = token.abort(crate::record::ObligationAbortReason::Explicit);
+        }
         let next_waker = {
             let mut inner = self.sender.shared.inner.lock();
             if inner.reserved == 0 {
@@ -1290,6 +1325,9 @@ impl<T> SendPermit<'_, T> {
 impl<T> Drop for SendPermit<'_, T> {
     fn drop(&mut self) {
         if !self.sent {
+            if let Some(token) = self.obligation.take() {
+                let _ = token.abort(crate::record::ObligationAbortReason::Cancel);
+            }
             let next_waker = {
                 let mut inner = self.sender.shared.inner.lock();
                 if inner.reserved == 0 {

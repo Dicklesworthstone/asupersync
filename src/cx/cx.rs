@@ -191,6 +191,17 @@ struct CxHandles {
     /// Pending-spawn counter for THIS Cx's region (cloned under the state
     /// lock at Cx build time; credits gate region close per A1.2).
     pending_spawns: Option<Arc<crate::record::region::PendingSpawnCounter>>,
+    /// Obligation mailbox gateway (br-asupersync-bi2462.13).
+    ///
+    /// Lets `Cx::try_register_obligation` mint a runtime-tracked obligation
+    /// without the RuntimeState lock. `None` for a Cx built without a runtime.
+    obligation_gateway: Option<Arc<crate::runtime::obligation_mailbox::ObligationGateway>>,
+    /// Pending obligation-post counter for THIS Cx's region.
+    ///
+    /// Same shape and role as `pending_spawns`: a live token holds one
+    /// credit so region close and drain gating see the reservation before it
+    /// is applied.
+    pending_obligation_posts: Option<Arc<crate::record::region::PendingSpawnCounter>>,
     /// Runtime-scoped default HTTP client slot. It is lazy so Cx creation does
     /// not allocate a pool unless the high-level HTTP facade is used.
     default_http_client: DefaultHttpClientSlot,
@@ -981,6 +992,8 @@ impl<Caps> Cx<Caps> {
                 macaroon: None,
                 spawn_gateway: None,
                 pending_spawns: None,
+                obligation_gateway: None,
+                pending_obligation_posts: None,
                 default_http_client: DefaultHttpClientSlot::default(),
                 #[cfg(feature = "messaging-fabric")]
                 fabric_capabilities: Arc::new(FabricCapabilityRegistry::default()),
@@ -1086,6 +1099,8 @@ impl<Caps> Cx<Caps> {
                 macaroon: None,
                 spawn_gateway: None,
                 pending_spawns: None,
+                obligation_gateway: None,
+                pending_obligation_posts: None,
                 default_http_client: DefaultHttpClientSlot::default(),
                 #[cfg(feature = "messaging-fabric")]
                 fabric_capabilities: Arc::new(FabricCapabilityRegistry::default()),
@@ -1388,6 +1403,49 @@ impl<Caps> Cx<Caps> {
     ) -> Self {
         Arc::make_mut(&mut self.handles).pending_spawns = counter;
         self
+    }
+
+    /// Attach the runtime's obligation mailbox gateway and the owning
+    /// region's pending-post counter (br-asupersync-bi2462.13).
+    ///
+    /// Set by the runtime at task-context build time, next to the spawn
+    /// gateway.
+    #[must_use]
+    pub(crate) fn with_obligation_gateway(
+        mut self,
+        gateway: Option<Arc<crate::runtime::obligation_mailbox::ObligationGateway>>,
+        pending_posts: Option<Arc<crate::record::region::PendingSpawnCounter>>,
+    ) -> Self {
+        let handles = Arc::make_mut(&mut self.handles);
+        handles.obligation_gateway = gateway;
+        handles.pending_obligation_posts = pending_posts;
+        self
+    }
+
+    /// Mint a runtime-tracked obligation of `kind` held by `holder` in this
+    /// context's region (br-asupersync-bi2462.13).
+    ///
+    /// Returns `None` when this context carries no runtime (a hand-built
+    /// `Cx`), preserving the untracked behaviour such contexts always had.
+    /// Otherwise the reservation is posted to the runtime's obligation
+    /// mailbox and applied through `RuntimeState::create_obligation` at the
+    /// next drain; the returned [`ObligationToken`] must be committed or
+    /// aborted, and dropping it unresolved is reported as a leak.
+    ///
+    /// [`ObligationToken`]: crate::runtime::obligation_mailbox::ObligationToken
+    pub(crate) fn try_register_obligation(
+        &self,
+        kind: crate::record::ObligationKind,
+        holder: TaskId,
+    ) -> Option<crate::runtime::obligation_mailbox::ObligationToken> {
+        let gateway = self.handles.obligation_gateway.as_ref()?;
+        let region = self.region_id();
+        gateway.register(
+            kind,
+            holder,
+            region,
+            self.handles.pending_obligation_posts.as_ref(),
+        )
     }
 
     /// Share the parent's lazy runtime-default HTTP client slot with this Cx.

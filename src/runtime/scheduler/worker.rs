@@ -600,6 +600,14 @@ impl Worker {
                     .state
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
+                // Obligation posts made during this poll are applied while
+                // the task record is still live, inside the lock this arm
+                // already holds (br-asupersync-bi2462.13): a reserve+resolve
+                // within one poll is tracked, and an open reservation is
+                // caught by the completion-time leak check below.
+                if state.has_pending_obligation_posts() {
+                    let _ = state.drain_obligation_posts(64);
+                }
                 let (cancel_ack, cancel_wakes) =
                     Self::consume_cancel_ack_locked(&mut state, task_id).into_parts();
                 let cancel_ack = cancel_ack.is_some();
@@ -714,6 +722,9 @@ impl Worker {
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner);
                         state.store_spawned_task(task_id, t);
+                        if state.has_pending_obligation_posts() {
+                            let _ = state.drain_obligation_posts(64);
+                        }
                         // Cache waker back in the task record for reuse on next poll
                         let _ = state.update_task(task_id, |record| {
                             record.cached_waker = Some((waker, 0));
@@ -727,6 +738,9 @@ impl Worker {
                             .state
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        if state.has_pending_obligation_posts() {
+                            let _ = state.drain_obligation_posts(64);
+                        }
                         let _ = state.update_task(task_id, |record| {
                             record.cached_waker = Some((waker, 0));
                         });

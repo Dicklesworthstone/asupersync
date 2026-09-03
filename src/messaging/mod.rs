@@ -159,7 +159,8 @@ pub use kafka::{
 };
 pub use kafka_consumer::{
     AutoOffsetReset, ConsumerConfig as KafkaConsumerConfig, ConsumerRecord as KafkaConsumerRecord,
-    IsolationLevel, KafkaConsumer, TopicPartitionOffset,
+    IsolationLevel, KafkaConsumer, KafkaRebalanceProtocol, RebalanceStats as KafkaRebalanceStats,
+    TopicPartitionOffset,
 };
 #[cfg(feature = "messaging-fabric")]
 pub use morphism::{

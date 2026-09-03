@@ -538,7 +538,17 @@ mod tests {
             .expect_err("parent symlink swap must be rejected");
         match error {
             PathSecurityError::OutsideAllowedBounds { path, allowed_base } => {
-                assert!(path.starts_with(&outside_dir.path().display().to_string()));
+                // The reported path is canonical; the temp dir may sit behind
+                // a symlinked mount point (macOS /var -> /private/var).
+                let outside_canonical = outside_dir
+                    .path()
+                    .canonicalize()
+                    .unwrap_or_else(|_| outside_dir.path().to_path_buf());
+                assert!(
+                    path.starts_with(&outside_canonical.display().to_string()),
+                    "{path} must start with {}",
+                    outside_canonical.display()
+                );
                 assert_eq!(
                     allowed_base,
                     secure_path.base_directory().display().to_string()

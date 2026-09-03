@@ -420,6 +420,11 @@ fn build_client_config(
     transactional: Option<&TransactionalConfig>,
 ) -> ClientConfig {
     let mut client = ClientConfig::new();
+    // Raw passthrough first: the typed setters below override any key they
+    // own, so typed fields win on conflict (documented on `with_property`).
+    for (key, value) in &config.extra_properties {
+        client.set(key.as_str(), value.as_str());
+    }
     client.set("bootstrap.servers", config.bootstrap_servers.join(","));
     apply_security_config(&mut client, &config.security);
     if let Some(client_id) = &config.client_id {
@@ -1229,6 +1234,9 @@ pub struct ProducerConfig {
     /// integration tests.
     #[cfg(any(test, feature = "test-internals"))]
     allow_deterministic_broker_for_testing: bool,
+    /// Raw librdkafka properties applied before the typed fields
+    /// ([`ProducerConfig::with_property`]), in insertion order.
+    extra_properties: Vec<(String, String)>,
 }
 
 impl Default for ProducerConfig {
@@ -1249,6 +1257,7 @@ impl Default for ProducerConfig {
             allow_insecure_transport_for_testing: false,
             #[cfg(any(test, feature = "test-internals"))]
             allow_deterministic_broker_for_testing: false,
+            extra_properties: Vec::new(),
         }
     }
 }
@@ -1268,6 +1277,40 @@ impl ProducerConfig {
     pub fn client_id(mut self, client_id: &str) -> Self {
         self.client_id = Some(client_id.to_string());
         self
+    }
+
+    /// Forward a raw librdkafka property.
+    ///
+    /// Applied in insertion order BEFORE the typed fields, so a typed field
+    /// always wins over a raw property with the same key; a later call for
+    /// the same key overrides an earlier one. Unknown keys are rejected by
+    /// librdkafka when the producer is created.
+    #[must_use]
+    pub fn with_property(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.set_property(key, value);
+        self
+    }
+
+    /// In-place form of [`Self::with_property`].
+    pub fn set_property(&mut self, key: impl Into<String>, value: impl Into<String>) {
+        let key = key.into();
+        let value = value.into();
+        if let Some(slot) = self
+            .extra_properties
+            .iter_mut()
+            .find(|(existing, _)| *existing == key)
+        {
+            slot.1 = value;
+        } else {
+            self.extra_properties.push((key, value));
+        }
+    }
+
+    /// The raw properties set through [`Self::with_property`], in the order
+    /// they are applied.
+    #[must_use]
+    pub fn extra_properties(&self) -> &[(String, String)] {
+        &self.extra_properties
     }
 
     /// Set the batch size in bytes.

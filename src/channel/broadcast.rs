@@ -371,7 +371,11 @@ impl<T: Clone> Sender<T> {
             return Err(SendError::Closed(()));
         }
 
-        Ok(SendPermit { sender: self })
+        Ok(SendPermit {
+            sender: self,
+            obligation: cx
+                .try_register_obligation(crate::record::ObligationKind::SendPermit, cx.task_id()),
+        })
     }
 
     /// Sends a message to all receivers.
@@ -495,6 +499,21 @@ impl<T> Drop for Sender<T> {
 #[must_use = "SendPermit must be consumed via send()"]
 pub struct SendPermit<'a, T> {
     sender: &'a Sender<T>,
+    /// Runtime-tracked obligation for this reservation
+    /// (br-asupersync-bi2462.14).
+    ///
+    /// Minted through the reserving `Cx`'s obligation mailbox, committed
+    /// when `send` runs (even to zero live receivers: the permit was
+    /// honoured), aborted on an unsent drop.
+    obligation: Option<crate::runtime::obligation_mailbox::ObligationToken>,
+}
+
+impl<T> Drop for SendPermit<'_, T> {
+    fn drop(&mut self) {
+        if let Some(token) = self.obligation.take() {
+            let _ = token.abort(crate::record::ObligationAbortReason::Cancel);
+        }
+    }
 }
 
 enum FinalLivenessAction {
@@ -529,7 +548,10 @@ impl<T: Clone> SendPermit<'_, T> {
     }
 
     #[inline]
-    fn send_impl(self, msg: T, final_liveness_action: FinalLivenessAction) -> usize {
+    fn send_impl(mut self, msg: T, final_liveness_action: FinalLivenessAction) -> usize {
+        if let Some(token) = self.obligation.take() {
+            let _ = token.commit();
+        }
         let mut inner = self.sender.channel.inner.lock();
 
         // Re-check receiver liveness under the same lock used for commit.

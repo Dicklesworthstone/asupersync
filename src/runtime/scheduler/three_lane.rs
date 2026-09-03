@@ -5695,6 +5695,20 @@ impl ThreeLaneWorker {
     /// can pick them up.
     fn drain_spawn_admissions(&mut self) {
         const SPAWN_ADMISSION_BATCH: usize = 1;
+        const OBLIGATION_POST_BATCH: usize = 64;
+
+        // Obligation posts (br-asupersync-bi2462.13) are applied here, next
+        // to spawn admissions, so a token's reserve/commit/abort/leak reaches
+        // `RuntimeState` in post order on the same cadence as spawns.
+        {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if state.has_pending_obligation_posts() {
+                let _ = state.drain_obligation_posts(OBLIGATION_POST_BATCH);
+            }
+        }
 
         let Some(mailbox) = self.spawn_mailbox.as_ref() else {
             return;

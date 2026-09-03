@@ -455,20 +455,22 @@ impl SymbolCancelToken {
         // This prevents a race where a listener observes cancelled=true but reason=None.
         let mut reason_guard = self.state.reason.write();
 
-        if self
-            .state
-            .cancelled
-            .compare_exchange(false, true, Ordering::Release, Ordering::Acquire)
-            .is_ok()
-        {
-            // We won the race. State is now cancelled.
-            // Clamp to u64::MAX - 1 to avoid colliding with the
-            // "not yet recorded" sentinel in cancelled_at queries.
+        if !self.state.cancelled.load(Ordering::Acquire) {
+            // First cancel(). Every writer of `cancelled` holds this write
+            // lock, so no other cancel() can interleave here. Publish the
+            // timestamp and the reason BEFORE the flag: a thread that
+            // observes `cancelled == true` (Acquire) is then guaranteed to
+            // see `cancelled_at` and the reason as well, so readers never
+            // have to wait out an in-flight publication (the former
+            // flag-first order forced a wall-clock bounded spin in
+            // `child()`; br-asupersync-bi2462.22). Clamp to u64::MAX - 1 to
+            // avoid colliding with the "not yet recorded" sentinel.
             let stored_nanos = now.as_nanos().min(u64::MAX - 1);
             self.state
                 .cancelled_at
                 .store(stored_nanos, Ordering::Release);
             *reason_guard = Some(reason.clone());
+            self.state.cancelled.store(true, Ordering::Release);
 
             // Drop the reason lock before notifying to avoid reentrancy
             // deadlocks. Retained listeners are moved out of the listener
@@ -543,67 +545,26 @@ impl SymbolCancelToken {
         }
     }
 
-    /// Returns the cancellation timestamp to inherit in `child()`
-    /// after `cancelled == true` has been observed under the
-    /// `children` lock.
+    /// Returns the cancellation timestamp a `child()` inherits once
+    /// `cancelled == true` has been observed under the `children` lock.
     ///
-    /// br-asupersync-n1a1br: if a local `cancel()` is in flight, the
-    /// flag can become visible before `cancelled_at` is written. In
-    /// that window the reason write lock is still held, so `try_read`
-    /// fails and we spin until the timestamp is published. For
-    /// deserialized remote tokens (`from_bytes`) there is no local
-    /// writer and `reason == None`, so the fallback remains
-    /// `Time::ZERO`.
-    fn cancelled_at_snapshot_for_child(&self) -> Option<Time> {
-        if !self.is_cancelled() {
-            return None;
-        }
-
-        // br-asupersync-wze4x9: bounded wait instead of infinite spin. The
-        // bound must still outlast a LEGITIMATE in-flight cancel(), where the
-        // writer holds the reason write lock across real setup work before
-        // publishing `cancelled_at`. A fixed 100x100ns retry budget exhausts
-        // inside ordinary millisecond-scale windows and made children inherit
-        // a zero timestamp (caught by
-        // cancelled_at_snapshot_for_child_livelock_regression). Use
-        // exponential backoff capped at 5ms against a wall-clock deadline.
-        const MAX_WAIT: std::time::Duration = std::time::Duration::from_millis(500);
-        let started = std::time::Instant::now();
-        let mut backoff = std::time::Duration::from_nanos(100);
-        loop {
-            let nanos = self.state.cancelled_at.load(Ordering::Acquire);
-            if nanos != u64::MAX {
-                return Some(Time::from_nanos(nanos));
-            }
-
-            if started.elapsed() >= MAX_WAIT {
-                // Degraded fallback: cancelled with the timestamp still
-                // unpublished after half a second indicates a stuck writer,
-                // not ordinary contention. Report cancellation rather than
-                // hanging child creation.
-                return Some(Time::ZERO);
-            }
-
-            if let Some(reason_guard) = self.state.reason.try_read() {
-                if reason_guard.is_none() {
-                    return Some(Time::ZERO);
-                }
-
-                let synced = self.state.cancelled_at.load(Ordering::Acquire);
-                debug_assert_ne!(
-                    synced,
-                    u64::MAX,
-                    "cancelled_at must be published before reason write lock is released"
-                );
-                return Some(if synced == u64::MAX {
-                    Time::ZERO
-                } else {
-                    Time::from_nanos(synced)
-                });
-            }
-
-            std::thread::sleep(backoff);
-            backoff = (backoff * 2).min(std::time::Duration::from_millis(5));
+    /// `cancel()` publishes `cancelled_at` (and the reason) before it
+    /// flips `cancelled`, both with Release ordering, so a flag observed
+    /// with Acquire guarantees the timestamp is visible: there is no
+    /// in-flight window to wait out (br-asupersync-n1a1br and
+    /// br-asupersync-wze4x9 fixed the symptoms of the old flag-first
+    /// order with a wall-clock bounded spin; br-asupersync-bi2462.22
+    /// removed the window instead). The only reachable "cancelled
+    /// without a timestamp" state is a token parsed from the wire
+    /// (`from_bytes`) that no local `cancel()` has touched; its
+    /// timestamp is `Time::ZERO` by definition. Never waits, never
+    /// sleeps, takes no lock.
+    fn inherited_cancelled_at(&self) -> Time {
+        let nanos = self.state.cancelled_at.load(Ordering::Acquire);
+        if nanos == u64::MAX {
+            Time::ZERO
+        } else {
+            Time::from_nanos(nanos)
         }
     }
 
@@ -630,36 +591,17 @@ impl SymbolCancelToken {
             return child;
         }
 
-        // Parent is cancelled. Drop the children lock before waiting for timestamp
-        // to avoid blocking other child creation during the timestamp resolution.
+        // Parent is cancelled. Drop the children lock before resolving the
+        // timestamp and the cascade reason, so other child creation is never
+        // queued behind the reason lock (br-asupersync-53nvge). The flag
+        // never resets, so the timestamp is final (or the wire-shape
+        // `Time::ZERO`); nothing here waits or sleeps
+        // (br-asupersync-bi2462.22).
         drop(children);
 
-        if let Some(at) = self.cancelled_at_snapshot_for_child() {
-            let parent_reason = self.parent_cascade_reason_at(at);
-            child.cancel(&parent_reason, at);
-        } else {
-            // Timestamp not yet available. Re-acquire children lock and check again.
-            // This ensures we don't add a child if cancellation completed while
-            // we were waiting for the timestamp.
-            let mut children = self.state.children.write();
-            if !self.state.cancelled.load(Ordering::Acquire) {
-                children.push(child.clone());
-            } else {
-                // Parent became fully cancelled while we waited. Cancel the child.
-                drop(children);
-                // Wait for timestamp with exponential backoff to avoid busy spinning
-                let mut backoff_ms = 1;
-                for _ in 0..10 {
-                    if let Some(at) = self.cancelled_at_snapshot_for_child() {
-                        let parent_reason = self.parent_cascade_reason_at(at);
-                        child.cancel(&parent_reason, at);
-                        break;
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(backoff_ms));
-                    backoff_ms = (backoff_ms * 2).min(16);
-                }
-            }
-        }
+        let at = self.inherited_cancelled_at();
+        let parent_reason = self.parent_cascade_reason_at(at);
+        child.cancel(&parent_reason, at);
 
         child
     }
@@ -5112,64 +5054,101 @@ mod tests {
         );
     }
 
-    /// br-asupersync-n1a1br — if `cancelled` becomes visible before
-    /// `cancelled_at` is published, `child()` must wait out that
-    /// local-cancel window rather than fabricating `Time::ZERO`.
+    /// br-asupersync-bi2462.22 — `cancel()` publishes `cancelled_at` before
+    /// the flag.
+    ///
+    /// A concurrent `child()` that observes the parent as cancelled always
+    /// inherits the real timestamp, never `Time::ZERO`. Exercised through
+    /// the public path (no manufactured state).
     #[test]
-    fn child_waits_for_inflight_cancelled_at_publication() {
-        use std::sync::{
-            Arc,
-            atomic::{AtomicBool, Ordering},
-        };
+    fn concurrent_cancel_publishes_cancelled_at_before_flag() {
+        use std::sync::Arc;
+        use std::sync::Barrier;
+
+        for round in 0..32_u64 {
+            let mut rng = DetRng::new(0x2262_0000 + round);
+            let parent = SymbolCancelToken::new(ObjectId::new(7, 7), &mut rng);
+            let cancel_time = Time::from_nanos(1_000 + round);
+            let barrier = Arc::new(Barrier::new(2));
+
+            let canceller = {
+                let parent = parent.clone();
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    parent.cancel(&CancelReason::new(CancelKind::User), cancel_time);
+                })
+            };
+
+            barrier.wait();
+            let mut child_rng = DetRng::new(0x2262_1000 + round);
+            // Bounded by iterations, not by the clock: the canceller finishes
+            // in finite steps, so a cancelled child is observed eventually.
+            let mut observed = None;
+            for _ in 0..1_000_000 {
+                let child = parent.child(&mut child_rng);
+                if child.is_cancelled() {
+                    observed = Some(child.cancelled_at());
+                    break;
+                }
+            }
+            canceller.join().expect("canceller thread");
+            assert_eq!(
+                observed,
+                Some(Some(cancel_time)),
+                "round {round}: a child that observed the parent as cancelled must \
+                 inherit the published timestamp"
+            );
+            // Late children (after the cancel completed) inherit it too.
+            let late = parent.child(&mut child_rng);
+            assert_eq!(late.cancelled_at(), Some(cancel_time));
+        }
+    }
+
+    /// A token in the wire shape yields `Time::ZERO` immediately.
+    ///
+    /// Wire shape: `cancelled == true`, no timestamp, no local writer. Nothing
+    /// waits for a publication that will never come
+    /// (br-asupersync-bi2462.22 removed the wall-clock bounded spin).
+    #[test]
+    fn child_of_wire_shaped_token_inherits_time_zero_without_waiting() {
+        use std::sync::atomic::Ordering;
 
         let mut rng = DetRng::new(0x5678);
         let parent = SymbolCancelToken::new(ObjectId::new(3, 3), &mut rng);
-        let cancel_time = Time::from_nanos(777);
-        let started = Arc::new(AtomicBool::new(false));
-
-        let mut reason_guard = parent.state.reason.write();
-        *reason_guard = Some(CancelReason::new(CancelKind::User));
-        parent.state.cancelled.store(true, Ordering::Release);
+        *parent.state.reason.write() = Some(CancelReason::new(CancelKind::User));
         parent.state.cancelled_at.store(u64::MAX, Ordering::Release);
+        parent.state.cancelled.store(true, Ordering::Release);
 
-        let parent_for_child = parent.clone();
-        let started_for_child = started.clone();
-        let join = std::thread::spawn(move || {
-            started_for_child.store(true, Ordering::Release);
-            let mut child_rng = DetRng::new(0x9abc);
-            let child = parent_for_child.child(&mut child_rng);
-            child.cancelled_at().map(Time::as_nanos)
-        });
-
-        // br-asupersync-wze4x9: Replace infinite spin with bounded retry to prevent test hangs
-        const MAX_WAIT_RETRIES: u32 = 10000;
-        for _attempt in 0..MAX_WAIT_RETRIES {
-            if started.load(Ordering::Acquire) {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_nanos(100));
-        }
+        let mut child_rng = DetRng::new(0x9abc);
+        let child = parent.child(&mut child_rng);
         assert!(
-            started.load(Ordering::Acquire),
-            "Test thread failed to start within timeout"
+            child.is_cancelled(),
+            "child of a cancelled parent is cancelled"
+        );
+        assert_eq!(
+            child.cancelled_at(),
+            Some(Time::ZERO),
+            "wire-shaped cancelled token yields Time::ZERO without waiting"
         );
 
+        // A later local timestamp publication stays observable through the accessor.
+        let cancel_time = Time::from_nanos(777);
         parent
             .state
             .cancelled_at
             .store(cancel_time.as_nanos(), Ordering::Release);
-        drop(reason_guard);
-
-        let child_cancelled_at = join.join().expect("child thread must complete");
-        assert_eq!(child_cancelled_at, Some(cancel_time.as_nanos()));
+        assert_eq!(parent.cancelled_at(), Some(cancel_time));
     }
 
-    /// br-asupersync-53nvge — a late `child()` call may need to wait for
-    /// `cancelled_at` publication, but that wait must not monopolize the
-    /// `children` lock. Other threads still need that lock for drain/metrics
-    /// work in the same handoff window.
+    /// br-asupersync-53nvge — a `child()` blocked on the reason lock must
+    /// not hold the `children` lock meanwhile.
+    ///
+    /// A manufactured writer holds the reason lock here, the way an
+    /// in-flight `cancel()` briefly does. Other threads still need the
+    /// children lock for drain/metrics work in the same handoff window.
     #[test]
-    fn child_wait_for_cancelled_at_does_not_hold_children_lock() {
+    fn child_blocked_on_reason_lock_does_not_hold_children_lock() {
         use std::sync::{
             Arc,
             atomic::{AtomicBool, Ordering},
@@ -5181,8 +5160,8 @@ mod tests {
 
         let mut reason_guard = parent.state.reason.write();
         *reason_guard = Some(CancelReason::new(CancelKind::User));
-        parent.state.cancelled.store(true, Ordering::Release);
         parent.state.cancelled_at.store(u64::MAX, Ordering::Release);
+        parent.state.cancelled.store(true, Ordering::Release);
 
         let parent_for_child = parent.clone();
         let started_for_child = Arc::clone(&started);
@@ -5205,21 +5184,31 @@ mod tests {
             "child thread failed to start within timeout"
         );
 
+        // The child thread is parked in `parent_cascade_reason_at` behind the
+        // held reason lock; the children lock must be free meanwhile.
         std::thread::sleep(std::time::Duration::from_millis(1));
         assert!(
             parent.state.children.try_write().is_some(),
-            "late child creation must not hold children.write() while waiting for cancelled_at"
+            "late child creation must not hold children.write() while blocked on the reason lock"
         );
 
+        // Release the manufactured writer. The child resolves with the
+        // timestamp it read before blocking: the flag was visible without
+        // a timestamp, a shape only a wire-parsed token can show, so it is
+        // `Time::ZERO` regardless of what the writer publishes afterwards.
         let cancel_time = Time::from_nanos(991);
         parent
             .state
             .cancelled_at
             .store(cancel_time.as_nanos(), Ordering::Release);
         drop(reason_guard);
-
         let child_cancelled_at = join.join().expect("child thread must complete");
-        assert_eq!(child_cancelled_at, Some(cancel_time.as_nanos()));
+        assert_eq!(
+            child_cancelled_at,
+            Some(Time::ZERO.as_nanos()),
+            "wire-shaped cancelled token yields Time::ZERO without waiting"
+        );
+        assert_eq!(parent.cancelled_at(), Some(cancel_time));
     }
 
     /// Regression test for asupersync-4txkrb: notify_retained_listeners_until_current()
@@ -5435,8 +5424,22 @@ mod tests {
             Some(CancelReason::user("livelock test")),
             "manual race setup must still publish a real final cancel reason"
         );
+        // The child was created around the manufactured flag-before-timestamp
+        // window, which production `cancel()` can no longer produce
+        // (br-asupersync-bi2462.22 publishes the timestamp first). Inside the
+        // window the reader treats the token as wire-shaped and yields
+        // Time::ZERO immediately; if the child thread lost the race and ran
+        // after the store, it inherits the real timestamp. Either is correct
+        // here; the property under test is that neither path waits.
+        let child_at = child.cancelled_at();
+        assert!(
+            child_at == Some(crate::types::Time::ZERO)
+                || child_at == Some(crate::types::Time::from_millis(12345)),
+            "child timestamp must be ZERO (inside the window) or the published \
+             value (after it), got {child_at:?}"
+        );
         assert_eq!(
-            child.cancelled_at(),
+            token.cancelled_at(),
             Some(crate::types::Time::from_millis(12345)),
             "child created during in-flight cancel must inherit the canonical parent timestamp"
         );

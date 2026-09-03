@@ -88,6 +88,22 @@ pub enum IsolationLevel {
 }
 
 /// Configuration for a Kafka consumer.
+///
+/// Typed fields cover the common librdkafka settings; anything else goes
+/// through [`ConsumerConfig::with_property`] (typed fields win on conflict).
+///
+/// **Assignor rule.** The rebalance protocol is fixed at construction from
+/// `partition.assignment.strategy`: a value containing `cooperative-sticky`
+/// makes the consumer's rebalance handler take the incremental
+/// assign/unassign path, anything else (the default `range,roundrobin`) the
+/// eager path. [`KafkaConsumer::rebalance_protocol`] reports what the group
+/// negotiated and [`KafkaConsumer::rebalance_stats`] counts which path ran.
+///
+/// **Leaving the group.** [`KafkaConsumer::close`] (and dropping a
+/// subscribed consumer without `close()`) unsubscribes and drains the
+/// resulting revoke in normal polling mode, bounded to about five seconds,
+/// before the librdkafka handle is closed; the close path itself never waits
+/// on the group.
 #[derive(Debug, Clone)]
 pub struct ConsumerConfig {
     /// Bootstrap server addresses (host:port).
@@ -153,6 +169,9 @@ pub struct ConsumerConfig {
     /// integration tests.
     #[cfg(any(test, feature = "test-internals"))]
     allow_deterministic_broker_for_testing: bool,
+    /// Raw librdkafka properties applied before the typed fields
+    /// ([`ConsumerConfig::with_property`]), in insertion order.
+    extra_properties: Vec<(String, String)>,
 }
 
 impl Default for ConsumerConfig {
@@ -183,6 +202,7 @@ impl Default for ConsumerConfig {
             allow_insecure_transport_for_testing: false,
             #[cfg(any(test, feature = "test-internals"))]
             allow_deterministic_broker_for_testing: false,
+            extra_properties: Vec::new(),
         }
     }
 }
@@ -203,6 +223,42 @@ impl ConsumerConfig {
     pub fn client_id(mut self, client_id: &str) -> Self {
         self.client_id = Some(client_id.to_string());
         self
+    }
+
+    /// Forward a raw librdkafka property (for example
+    /// `partition.assignment.strategy` = `cooperative-sticky`).
+    ///
+    /// Properties are applied in insertion order BEFORE the typed fields, so
+    /// a typed field always wins over a raw property with the same key; a
+    /// later `with_property` for the same key overrides an earlier one.
+    /// Unknown keys are rejected by librdkafka when the consumer is created
+    /// ([`KafkaError::Config`]).
+    #[must_use]
+    pub fn with_property(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.set_property(key, value);
+        self
+    }
+
+    /// In-place form of [`Self::with_property`].
+    pub fn set_property(&mut self, key: impl Into<String>, value: impl Into<String>) {
+        let key = key.into();
+        let value = value.into();
+        if let Some(slot) = self
+            .extra_properties
+            .iter_mut()
+            .find(|(existing, _)| *existing == key)
+        {
+            slot.1 = value;
+        } else {
+            self.extra_properties.push((key, value));
+        }
+    }
+
+    /// The raw properties set through [`Self::with_property`], in the order
+    /// they are applied.
+    #[must_use]
+    pub fn extra_properties(&self) -> &[(String, String)] {
+        &self.extra_properties
     }
 
     /// Set the session timeout.
@@ -458,9 +514,72 @@ const MAX_BROKER_POLL_SLICE: Duration = Duration::from_millis(50);
 /// the dropping thread forever. The protocol is fixed at construction from the
 /// configured assignment strategy instead, and the handler assigns directly.
 #[cfg(feature = "kafka")]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct BrokerConsumerContext {
     cooperative: bool,
+    counters: Arc<RebalanceCounters>,
+}
+
+/// Live counters behind [`RebalanceStats`].
+///
+/// Shared between the consumer and its rebalance context (librdkafka owns
+/// the context; the consumer keeps a second handle to read them).
+#[cfg(feature = "kafka")]
+#[derive(Debug, Default)]
+struct RebalanceCounters {
+    incremental_assigns: std::sync::atomic::AtomicU64,
+    eager_assigns: std::sync::atomic::AtomicU64,
+    incremental_unassigns: std::sync::atomic::AtomicU64,
+    eager_unassigns: std::sync::atomic::AtomicU64,
+}
+
+#[cfg(feature = "kafka")]
+impl RebalanceCounters {
+    fn snapshot(&self, cooperative: bool) -> RebalanceStats {
+        RebalanceStats {
+            cooperative,
+            incremental_assigns: self.incremental_assigns.load(Ordering::Relaxed),
+            eager_assigns: self.eager_assigns.load(Ordering::Relaxed),
+            incremental_unassigns: self.incremental_unassigns.load(Ordering::Relaxed),
+            eager_unassigns: self.eager_unassigns.load(Ordering::Relaxed),
+        }
+    }
+}
+
+/// Which rebalance path a [`KafkaConsumer`] has taken so far
+/// ([`KafkaConsumer::rebalance_stats`]).
+///
+/// `cooperative` is decided at construction from
+/// `partition.assignment.strategy` (see [`ConsumerConfig`]); the counters
+/// record every rebalance callback librdkafka delivered. Without the `kafka`
+/// feature, or before a group is joined, every counter is zero.
+/// `#[non_exhaustive]`: fields may be added in later `0.4.x` releases.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct RebalanceStats {
+    /// The handler was configured for the cooperative (incremental) path.
+    pub cooperative: bool,
+    /// `incremental_assign` calls (cooperative assign callbacks).
+    pub incremental_assigns: u64,
+    /// `assign` calls (eager assign callbacks).
+    pub eager_assigns: u64,
+    /// `incremental_unassign` calls (cooperative revoke callbacks).
+    pub incremental_unassigns: u64,
+    /// `unassign` calls (eager revoke and every other rebalance outcome).
+    pub eager_unassigns: u64,
+}
+
+/// The rebalance protocol a consumer group negotiated, read outside any
+/// rebalance callback ([`KafkaConsumer::rebalance_protocol`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum KafkaRebalanceProtocol {
+    /// No group joined yet, no broker backend, or the `kafka` feature is off.
+    Unknown,
+    /// Eager (stop-the-world) rebalancing: `range` / `roundrobin` assignors.
+    Eager,
+    /// Cooperative incremental rebalancing: the `cooperative-sticky` assignor.
+    Cooperative,
 }
 
 #[cfg(feature = "kafka")]
@@ -474,19 +593,28 @@ impl ConsumerContext for BrokerConsumerContext {
         err: RDKafkaRespErr,
         tpl: &mut TopicPartitionList,
     ) {
+        let counters = &self.counters;
         let result = match (err, self.cooperative) {
             (RDKafkaRespErr::RD_KAFKA_RESP_ERR__ASSIGN_PARTITIONS, true) => {
+                counters.incremental_assigns.fetch_add(1, Ordering::Relaxed);
                 base_consumer.incremental_assign(tpl)
             }
             (RDKafkaRespErr::RD_KAFKA_RESP_ERR__ASSIGN_PARTITIONS, false) => {
+                counters.eager_assigns.fetch_add(1, Ordering::Relaxed);
                 base_consumer.assign(tpl)
             }
             (RDKafkaRespErr::RD_KAFKA_RESP_ERR__REVOKE_PARTITIONS, true) => {
+                counters
+                    .incremental_unassigns
+                    .fetch_add(1, Ordering::Relaxed);
                 base_consumer.incremental_unassign(tpl)
             }
             // Eager revoke and every other outcome: drop the whole assignment,
             // exactly what the stock handler does.
-            _ => base_consumer.unassign(),
+            _ => {
+                counters.eager_unassigns.fetch_add(1, Ordering::Relaxed);
+                base_consumer.unassign()
+            }
         };
         // Errors here are reported to the caller through the next poll
         // (librdkafka queues them); there is no channel back from a callback.
@@ -559,6 +687,8 @@ pub struct KafkaConsumer {
     #[cfg(feature = "kafka")]
     consumer: Option<Arc<BaseConsumer<BrokerConsumerContext>>>,
     #[cfg(feature = "kafka")]
+    rebalance: Option<(bool, Arc<RebalanceCounters>)>,
+    #[cfg(feature = "kafka")]
     broker_ops: Option<Arc<Mutex<()>>>,
     #[cfg(feature = "kafka")]
     buffered_outcome: Arc<Mutex<Option<Result<BrokerPollOutcome, KafkaError>>>>,
@@ -578,8 +708,58 @@ impl fmt::Debug for KafkaConsumer {
     }
 }
 
+/// A broker error that [`KafkaConsumer::poll`] swallowed because it self-heals.
+///
+/// librdkafka reports it while the condition is still transient (today:
+/// `UnknownTopicOrPartition` while a subscribed topic is still being
+/// created). Exposed through [`KafkaConsumer::last_transient_error`] so a
+/// consumer that only ever returns `Ok(None)` is distinguishable from an
+/// idle topic.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransientConsumerError {
+    /// librdkafka error code name.
+    pub code: String,
+    /// Runtime time of the first occurrence of this code (since the last
+    /// distinct code).
+    pub first_seen: crate::types::Time,
+    /// Runtime time of the most recent occurrence.
+    pub last_seen: crate::types::Time,
+    /// Occurrences of this code since `first_seen`.
+    pub count: u32,
+}
+
+/// Record a swallowed transient error on the consumer state.
+///
+/// Returns the entry to announce when this is the first occurrence of a
+/// distinct code (callers trace once per code, never once per poll).
+#[cfg_attr(not(feature = "kafka"), allow(dead_code))]
+fn record_transient_error(
+    state: &mut ConsumerState,
+    code: &'static str,
+    now: crate::types::Time,
+) -> Option<TransientConsumerError> {
+    match state.last_transient_error.as_mut() {
+        Some(existing) if existing.code == code => {
+            existing.count = existing.count.saturating_add(1);
+            existing.last_seen = now;
+            None
+        }
+        _ => {
+            let entry = TransientConsumerError {
+                code: code.to_owned(),
+                first_seen: now,
+                last_seen: now,
+                count: 1,
+            };
+            state.last_transient_error = Some(entry.clone());
+            Some(entry)
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 struct ConsumerState {
+    last_transient_error: Option<TransientConsumerError>,
     subscribed_topics: BTreeSet<String>,
     assigned_partitions: BTreeSet<(String, i32)>,
     committed_offsets: BTreeMap<(String, i32), i64>,
@@ -636,6 +816,9 @@ struct BrokerSnapshot {
 struct BrokerPollOutcome {
     record: Option<ConsumerRecord>,
     snapshot: BrokerSnapshot,
+    /// An informational librdkafka error that this poll swallowed (it
+    /// self-heals; see `KafkaConsumer::poll`), named for observability.
+    transient_error: Option<&'static str>,
 }
 
 #[cfg(feature = "kafka")]
@@ -663,6 +846,11 @@ fn duration_to_millis(duration: Duration) -> u64 {
 #[cfg(feature = "kafka")]
 fn build_consumer_config(config: &ConsumerConfig) -> rdkafka::ClientConfig {
     let mut client = rdkafka::ClientConfig::new();
+    // Raw passthrough first: the typed setters below override any key they
+    // own, so typed fields win on conflict (documented on `with_property`).
+    for (key, value) in &config.extra_properties {
+        client.set(key.as_str(), value.as_str());
+    }
     client.set("bootstrap.servers", config.bootstrap_servers.join(","));
     apply_security_config(&mut client, &config.security);
     client.set("group.id", &config.group_id);
@@ -878,18 +1066,26 @@ impl KafkaConsumer {
             let cooperative = client_config
                 .get("partition.assignment.strategy")
                 .is_some_and(|strategy| strategy.contains("cooperative-sticky"));
-            Some(
-                client_config
-                    .create_with_context::<BrokerConsumerContext, BaseConsumer<BrokerConsumerContext>>(
-                        BrokerConsumerContext { cooperative },
-                    )
-                    .map_err(map_consumer_error)?,
-            )
+            let counters = Arc::new(RebalanceCounters::default());
+            let base = client_config
+                .create_with_context::<BrokerConsumerContext, BaseConsumer<BrokerConsumerContext>>(
+                    BrokerConsumerContext {
+                        cooperative,
+                        counters: Arc::clone(&counters),
+                    },
+                )
+                .map_err(map_consumer_error)?;
+            Some((base, cooperative, counters))
         } else {
             None
         };
         #[cfg(feature = "kafka")]
-        let consumer = consumer.map(Arc::new);
+        let (consumer, rebalance) = match consumer {
+            Some((base, cooperative, counters)) => {
+                (Some(Arc::new(base)), Some((cooperative, counters)))
+            }
+            None => (None, None),
+        };
         #[cfg(feature = "kafka")]
         let broker_ops = consumer.as_ref().map(|_| Arc::new(Mutex::new(())));
         Ok(Self {
@@ -900,6 +1096,8 @@ impl KafkaConsumer {
             #[cfg(feature = "kafka")]
             consumer,
             #[cfg(feature = "kafka")]
+            rebalance,
+            #[cfg(feature = "kafka")]
             broker_ops,
             #[cfg(feature = "kafka")]
             buffered_outcome: Arc::new(Mutex::new(None)),
@@ -908,6 +1106,53 @@ impl KafkaConsumer {
             #[cfg(all(test, not(feature = "kafka")))]
             poll_before_wait_hook: Mutex::new(None),
         })
+    }
+
+    /// Which rebalance path this consumer has taken so far
+    /// (br-asupersync-bi2462.26).
+    ///
+    /// Whether the handler was configured cooperative, and how many
+    /// incremental vs eager assign/unassign callbacks ran.
+    #[must_use]
+    pub fn rebalance_stats(&self) -> RebalanceStats {
+        #[cfg(feature = "kafka")]
+        {
+            self.rebalance
+                .as_ref()
+                .map_or_else(RebalanceStats::default, |(cooperative, counters)| {
+                    counters.snapshot(*cooperative)
+                })
+        }
+        #[cfg(not(feature = "kafka"))]
+        {
+            RebalanceStats::default()
+        }
+    }
+
+    /// The rebalance protocol the group negotiated for this consumer.
+    ///
+    /// Read from librdkafka outside any rebalance callback (where it is safe
+    /// to query). [`KafkaRebalanceProtocol::Unknown`] before a group is
+    /// joined, without a broker backend, or without the `kafka` feature.
+    #[must_use]
+    pub fn rebalance_protocol(&self) -> KafkaRebalanceProtocol {
+        #[cfg(feature = "kafka")]
+        {
+            use rdkafka::consumer::RebalanceProtocol;
+            match self
+                .consumer
+                .as_ref()
+                .map(|consumer| consumer.rebalance_protocol())
+            {
+                Some(RebalanceProtocol::Eager) => KafkaRebalanceProtocol::Eager,
+                Some(RebalanceProtocol::Cooperative) => KafkaRebalanceProtocol::Cooperative,
+                Some(RebalanceProtocol::None) | None => KafkaRebalanceProtocol::Unknown,
+            }
+        }
+        #[cfg(not(feature = "kafka"))]
+        {
+            KafkaRebalanceProtocol::Unknown
+        }
     }
 
     #[cfg(feature = "kafka")]
@@ -1117,6 +1362,16 @@ impl KafkaConsumer {
     }
 
     /// Poll for the next record.
+    ///
+    /// Returns `Ok(None)` when no record arrived before `timeout`. Errors
+    /// from the broker backend are returned as `Err`, with one exception:
+    /// librdkafka's informational `UnknownTopicOrPartition` (reported while a
+    /// subscribed topic is still being created or its metadata propagates)
+    /// self-heals once the topic exists, so it is treated as "no message
+    /// yet" and polling continues until the deadline. Such an occurrence is
+    /// recorded and readable through [`KafkaConsumer::last_transient_error`]
+    /// and traced once per distinct code. Transport failures still return
+    /// `Err`.
     #[allow(unused_variables, clippy::too_many_lines)]
     pub async fn poll(
         &self,
@@ -1181,18 +1436,34 @@ impl KafkaConsumer {
                                 // server-side state is naturally protected.
                                 // The remaining defense is to not let the
                                 // application observe the revoked record.
-                                let dropped_record_for_revoked: bool = {
+                                let (dropped_record_for_revoked, announce_transient): (
+                                    bool,
+                                    Option<TransientConsumerError>,
+                                ) = {
                                     let mut state = self.state.lock();
                                     apply_broker_snapshot(&mut state, outcome.snapshot);
-                                    if let Some(ref rec) = outcome.record {
+                                    let announce = outcome.transient_error.and_then(|code| {
+                                        record_transient_error(&mut state, code, now_fn())
+                                    });
+                                    let dropped = if let Some(ref rec) = outcome.record {
                                         let owned = state
                                             .assigned_partitions
                                             .contains(&(rec.topic.clone(), rec.partition));
                                         !owned
                                     } else {
                                         false
-                                    }
+                                    };
+                                    (dropped, announce)
                                 };
+                                if let Some(transient) = announce_transient {
+                                    // Once per distinct code, not once per poll: the
+                                    // condition self-heals and a busy consumer would
+                                    // otherwise emit a line every 50 ms.
+                                    cx.trace(&format!(
+                                        "kafka consumer: transient {} while polling; kept polling until the deadline",
+                                        transient.code
+                                    ));
+                                }
 
                                 if !dropped_record_for_revoked {
                                     if let Some(record) = outcome.record {
@@ -1225,6 +1496,7 @@ impl KafkaConsumer {
                         let buffered_outcome = Arc::clone(&self.buffered_outcome);
                         move || -> Result<(), KafkaError> {
                             let _guard = broker_ops.lock();
+                            let mut transient_error: Option<&'static str> = None;
                             let record = match consumer.poll(wait_for) {
                                 Some(Ok(message)) => {
                                     if auto_commit {
@@ -1251,7 +1523,10 @@ impl KafkaConsumer {
                                 // keep polling until the caller's deadline.
                                 Some(Err(RdKafkaError::MessageConsumption(
                                     RDKafkaErrorCode::UnknownTopicOrPartition,
-                                ))) => None,
+                                ))) => {
+                                    transient_error = Some("UnknownTopicOrPartition");
+                                    None
+                                }
                                 Some(Err(err)) => {
                                     *buffered_outcome.lock() = Some(Err(map_consumer_error(err)));
                                     return Ok(());
@@ -1264,8 +1539,11 @@ impl KafkaConsumer {
                                     return Ok(());
                                 }
                             };
-                            *buffered_outcome.lock() =
-                                Some(Ok(BrokerPollOutcome { record, snapshot }));
+                            *buffered_outcome.lock() = Some(Ok(BrokerPollOutcome {
+                                record,
+                                snapshot,
+                                transient_error,
+                            }));
                             Ok(())
                         }
                     })
@@ -1618,6 +1896,16 @@ impl KafkaConsumer {
             .collect()
     }
 
+    /// The most recent informational broker error that `poll` swallowed.
+    ///
+    /// Carries first/last occurrence times and a count (see
+    /// [`TransientConsumerError`]). `None` until one occurs. Cleared only
+    /// when a different code replaces it.
+    #[must_use]
+    pub fn last_transient_error(&self) -> Option<TransientConsumerError> {
+        self.state.lock().last_transient_error.clone()
+    }
+
     /// Monotonic rebalance generation counter.
     #[must_use]
     pub fn rebalance_generation(&self) -> u64 {
@@ -1805,6 +2093,96 @@ mod tests {
         lock_deterministic_broker_for_tests,
     };
     use crate::test_utils::run_test_with_cx;
+
+    /// br-asupersync-bi2462.26: raw properties keep insertion order and a
+    /// repeated key overrides in place (consumer and producer twins).
+    #[test]
+    fn with_property_keeps_insertion_order_and_overrides_the_same_key() {
+        let consumer = ConsumerConfig::new(vec!["127.0.0.1:1".to_string()], "group")
+            .with_property("a", "1")
+            .with_property("b", "2")
+            .with_property("a", "3");
+        assert_eq!(
+            consumer.extra_properties(),
+            &[
+                ("a".to_string(), "3".to_string()),
+                ("b".to_string(), "2".to_string())
+            ]
+        );
+        let mut in_place = consumer.clone();
+        in_place.set_property("b", "4");
+        assert_eq!(
+            in_place.extra_properties()[1],
+            ("b".to_string(), "4".to_string())
+        );
+
+        let producer =
+            crate::messaging::kafka::ProducerConfig::new(vec!["127.0.0.1:1".to_string()])
+                .with_property("linger.ms", "9")
+                .with_property("linger.ms", "10");
+        assert_eq!(
+            producer.extra_properties(),
+            &[("linger.ms".to_string(), "10".to_string())]
+        );
+    }
+
+    /// br-asupersync-bi2462.26: a raw property never overrides a typed field
+    /// (typed setters run after the passthrough), while a key no typed field
+    /// owns reaches librdkafka unchanged.
+    #[cfg(feature = "kafka")]
+    #[test]
+    fn typed_fields_win_over_raw_properties_in_the_client_config() {
+        let config = ConsumerConfig::new(vec!["127.0.0.1:1".to_string()], "group")
+            .with_property("bootstrap.servers", "raw-host:9")
+            .with_property("group.id", "raw-group")
+            .with_property("partition.assignment.strategy", "cooperative-sticky");
+        let client = build_consumer_config(&config);
+        assert_eq!(client.get("bootstrap.servers"), Some("127.0.0.1:1"));
+        assert_eq!(client.get("group.id"), Some("group"));
+        assert_eq!(
+            client.get("partition.assignment.strategy"),
+            Some("cooperative-sticky")
+        );
+    }
+
+    #[test]
+    fn transient_error_is_recorded_once_per_code_and_counted() {
+        use crate::types::Time;
+        let mut state = ConsumerState::default();
+        assert!(state.last_transient_error.is_none());
+
+        let first =
+            record_transient_error(&mut state, "UnknownTopicOrPartition", Time::from_nanos(10));
+        assert_eq!(
+            first
+                .as_ref()
+                .map(|entry| (entry.code.as_str(), entry.count)),
+            Some(("UnknownTopicOrPartition", 1)),
+            "first occurrence of a code is announced"
+        );
+        assert!(
+            record_transient_error(&mut state, "UnknownTopicOrPartition", Time::from_nanos(20))
+                .is_none(),
+            "a repeat of the same code is counted, not announced"
+        );
+        let recorded = state.last_transient_error.clone().expect("recorded");
+        assert_eq!(recorded.count, 2);
+        assert_eq!(recorded.first_seen, Time::from_nanos(10));
+        assert_eq!(recorded.last_seen, Time::from_nanos(20));
+
+        let other = record_transient_error(&mut state, "SomeOtherCode", Time::from_nanos(30));
+        assert_eq!(
+            other
+                .as_ref()
+                .map(|entry| (entry.code.as_str(), entry.count)),
+            Some(("SomeOtherCode", 1)),
+            "a different code replaces the entry and is announced again"
+        );
+        assert_eq!(
+            state.last_transient_error.as_ref().map(|entry| entry.count),
+            Some(1)
+        );
+    }
     #[cfg(feature = "kafka")]
     use rdkafka::topic_partition_list::Offset;
     use std::sync::Arc;

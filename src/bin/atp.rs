@@ -3491,16 +3491,17 @@ fn send_to_addr_with_transport(
                 let cfg = quic_config_send(args, quic_auth_override)?;
                 let chosen_fanout = cfg.datagram_fanout.max(1);
                 let start = Instant::now();
-                let report = runtime
+                let outcome = runtime
                     .block_on(runtime.handle().spawn(async move {
                         let cx = Cx::current().expect("sender cx");
-                        asupersync::net::atp::transport_quic::send_path(
+                        asupersync::net::atp::transport_quic::send_path_with_limiter_report(
                             &cx, addr, &source, cfg, &peer_id,
                         )
                         .await
                     }))
                     .map_err(classify_quic_send_failure)?;
                 let elapsed = start.elapsed();
+                let report = &outcome.report;
                 print_atp_metrics_line(
                     "send",
                     Transport::Quic,
@@ -3512,7 +3513,13 @@ fn send_to_addr_with_transport(
                     chosen_fanout,
                     Some(elapsed),
                 );
-                Ok(quic_send_json(&report, chosen_fanout, Some(elapsed)))
+                print_quic_limiter_line(&outcome.limiter, Some(elapsed));
+                Ok(quic_send_json(
+                    report,
+                    &outcome.limiter,
+                    chosen_fanout,
+                    Some(elapsed),
+                ))
             }
             #[cfg(not(feature = "tls"))]
             {
@@ -9375,6 +9382,7 @@ fn quic_recv_json(
 #[cfg(feature = "tls")]
 fn quic_send_json(
     report: &asupersync::net::atp::transport_quic::SendReport,
+    limiter: &asupersync::net::atp::transport_quic::QuicSendLimiterReport,
     chosen_fanout: usize,
     elapsed: Option<Duration>,
 ) -> serde_json::Value {
@@ -9399,13 +9407,179 @@ fn quic_send_json(
             chosen_fanout,
             elapsed,
         ),
+        "limiter": quic_limiter_json(limiter, elapsed),
         "peer": report.peer.to_string(),
     })
+}
+
+/// Microseconds of a wall-clock duration, saturating at `u64::MAX`.
+fn duration_micros_u64(duration: Duration) -> u64 {
+    u64::try_from(duration.as_micros()).unwrap_or(u64::MAX)
+}
+
+/// The `limiter` block of the QUIC `atp_send` report (br-asupersync-bi2462.2).
+///
+/// Every stall reason with its count and held microseconds, the dominant
+/// reason (and its share of the wall time, integer percent), QUIC recovery
+/// state at the end of the transfer, loss/retransmit counters, and the UDP
+/// socket facts. Additive: consumers that ignore the block keep parsing the
+/// report unchanged.
+fn quic_limiter_json(
+    limiter: &asupersync::net::atp::transport_quic::QuicSendLimiterReport,
+    elapsed: Option<Duration>,
+) -> serde_json::Value {
+    let stalls: serde_json::Map<String, serde_json::Value> = limiter
+        .stalls()
+        .iter()
+        .map(|(reason, stall)| {
+            (
+                reason.name().to_string(),
+                serde_json::json!({ "count": stall.count, "micros": stall.micros }),
+            )
+        })
+        .collect();
+    let dominant = limiter.dominant_stall();
+    let elapsed_micros = elapsed.map(duration_micros_u64);
+    let dominant_share_pct = dominant.and_then(|(_, stall)| {
+        elapsed_micros
+            .filter(|micros| *micros > 0)
+            .map(|micros| stall.micros.saturating_mul(100) / micros)
+    });
+    serde_json::json!({
+        "stalls": stalls,
+        "total_stall_micros": limiter.total_stall_micros(),
+        "dominant_stall": dominant.map(|(reason, _)| reason.name()),
+        "dominant_stall_micros": dominant.map(|(_, stall)| stall.micros),
+        "dominant_stall_share_pct": dominant_share_pct,
+        "transport_samples": limiter.transport_samples,
+        "peak_bytes_in_flight": limiter.peak_bytes_in_flight,
+        "peak_congestion_window_bytes": limiter.peak_congestion_window_bytes,
+        "min_congestion_window_bytes": limiter.min_congestion_window_bytes,
+        "final_congestion_window_bytes": limiter.final_congestion_window_bytes,
+        "final_ssthresh_bytes": limiter.final_ssthresh_bytes,
+        "slow_start_exited": limiter.slow_start_exited,
+        "min_rtt_micros": limiter.min_rtt_micros,
+        "smoothed_rtt_micros": limiter.smoothed_rtt_micros,
+        "loss_timeouts": limiter.loss_timeouts,
+        "lost_packets": limiter.lost_packets,
+        "lost_bytes": limiter.lost_bytes,
+        "retransmit_batches": limiter.retransmit_batches,
+        "retransmitted_stream_bytes": limiter.retransmitted_stream_bytes,
+        "pto_count": limiter.pto_count,
+        "unacked_admission_cap_bytes": limiter.unacked_admission_cap_bytes,
+        "min_stream_send_credit_bytes": limiter.min_stream_send_credit_bytes,
+        "udp_send_errors": limiter.udp_send_errors,
+        "socket_buffers": {
+            "requested_send_bytes": limiter.requested_send_buffer_bytes,
+            "applied_send_bytes": limiter.applied_send_buffer_bytes,
+            "requested_recv_bytes": limiter.requested_recv_buffer_bytes,
+            "applied_recv_bytes": limiter.applied_recv_buffer_bytes,
+        },
+    })
+}
+
+/// One stderr progress line naming the sender's dominant limiter, so a slow
+/// QUIC cell is explained without parsing the JSON report.
+fn print_quic_limiter_line(
+    limiter: &asupersync::net::atp::transport_quic::QuicSendLimiterReport,
+    elapsed: Option<Duration>,
+) {
+    let (dominant, dominant_micros) = limiter
+        .dominant_stall()
+        .map_or(("none", 0), |(reason, stall)| (reason.name(), stall.micros));
+    let share_pct = elapsed
+        .map(duration_micros_u64)
+        .filter(|micros| *micros > 0)
+        .map_or_else(
+            || "n/a".to_string(),
+            |micros| (dominant_micros.saturating_mul(100) / micros).to_string(),
+        );
+    eprintln!(
+        "[atp] progress quic_limiter dominant={dominant} dominant_micros={dominant_micros} \
+         dominant_share_pct={share_pct} total_stall_micros={} peak_bytes_in_flight={} \
+         peak_cwnd={} final_cwnd={} final_ssthresh={:?} slow_start_exited={} min_rtt_micros={:?} \
+         smoothed_rtt_micros={:?} loss_timeouts={} lost_packets={} lost_bytes={} \
+         retransmit_batches={} retransmitted_stream_bytes={} pto_count={} \
+         unacked_admission_cap_bytes={} min_stream_send_credit_bytes={:?} udp_send_errors={} \
+         sndbuf_requested={:?} sndbuf_applied={:?} rcvbuf_applied={:?}",
+        limiter.total_stall_micros(),
+        limiter.peak_bytes_in_flight,
+        limiter.peak_congestion_window_bytes,
+        limiter.final_congestion_window_bytes,
+        limiter.final_ssthresh_bytes,
+        limiter.slow_start_exited,
+        limiter.min_rtt_micros,
+        limiter.smoothed_rtt_micros,
+        limiter.loss_timeouts,
+        limiter.lost_packets,
+        limiter.lost_bytes,
+        limiter.retransmit_batches,
+        limiter.retransmitted_stream_bytes,
+        limiter.pto_count,
+        limiter.unacked_admission_cap_bytes,
+        limiter.min_stream_send_credit_bytes,
+        limiter.udp_send_errors,
+        limiter.requested_send_buffer_bytes,
+        limiter.applied_send_buffer_bytes,
+        limiter.applied_recv_buffer_bytes,
+    );
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn quic_limiter_json_names_the_dominant_stall_and_lists_every_reason() {
+        use asupersync::net::atp::transport_quic::{
+            QuicSendLimiterReport, QuicSendStall, QuicSendStallReason,
+        };
+        let mut limiter = QuicSendLimiterReport::default();
+        limiter.cwnd = QuicSendStall {
+            count: 3,
+            micros: 900_000,
+        };
+        limiter.pacing = QuicSendStall {
+            count: 40,
+            micros: 100_000,
+        };
+        limiter.peak_bytes_in_flight = 1_234_567;
+        limiter.final_ssthresh_bytes = Some(65_536);
+        limiter.slow_start_exited = true;
+        limiter.udp_send_errors = 2;
+        limiter.applied_send_buffer_bytes = Some(4 * 1024 * 1024);
+
+        let json = quic_limiter_json(&limiter, Some(Duration::from_secs(2)));
+        assert_eq!(json["dominant_stall"], "cwnd");
+        assert_eq!(json["dominant_stall_micros"], 900_000);
+        // 0.9 s of a 2 s transfer = 45 %.
+        assert_eq!(json["dominant_stall_share_pct"], 45);
+        assert_eq!(json["total_stall_micros"], 1_000_000);
+        for reason in QuicSendStallReason::ALL {
+            assert!(
+                json["stalls"][reason.name()].is_object(),
+                "missing stall entry {}",
+                reason.name()
+            );
+        }
+        assert_eq!(json["stalls"]["pacing"]["count"], 40);
+        assert_eq!(json["stalls"]["stream_credit"]["micros"], 0);
+        assert_eq!(json["peak_bytes_in_flight"], 1_234_567);
+        assert_eq!(json["final_ssthresh_bytes"], 65_536);
+        assert_eq!(json["slow_start_exited"], true);
+        assert_eq!(json["udp_send_errors"], 2);
+        assert_eq!(
+            json["socket_buffers"]["applied_send_bytes"],
+            4 * 1024 * 1024
+        );
+
+        // Nothing stalled: the dominant fields are null, never a made-up reason.
+        let idle = quic_limiter_json(&QuicSendLimiterReport::default(), None);
+        assert!(idle["dominant_stall"].is_null());
+        assert!(idle["dominant_stall_share_pct"].is_null());
+        assert_eq!(idle["total_stall_micros"], 0);
+    }
 
     #[test]
     fn symbol_size_defaults_per_transport_and_respects_explicit_values() {

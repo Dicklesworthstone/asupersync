@@ -726,6 +726,13 @@ impl UnixDatagram {
         }
 
         if let Some(path) = addr.path() {
+            // macOS/BSD report an unbound sender as a zero-filled sun_path
+            // with a non-zero length; std would refuse the interior NULs.
+            // That is the unnamed address (br-asupersync-bi2462.21.4).
+            let bytes = std::os::unix::ffi::OsStrExt::as_bytes(path.as_os_str());
+            if bytes.iter().all(|byte| *byte == 0) {
+                return get_unnamed();
+            }
             return SocketAddr::from_pathname(path)
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e));
         }
@@ -845,8 +852,20 @@ fn datagram_peer_cred_impl(socket: &net::UnixDatagram) -> io::Result<UCred> {
     target_os = "netbsd"
 ))]
 fn datagram_peer_cred_impl(socket: &net::UnixDatagram) -> io::Result<UCred> {
-    let (uid, gid) =
-        nix::unistd::getpeereid(socket).map_err(|e| io::Error::from_raw_os_error(e as i32))?;
+    let (uid, gid) = nix::unistd::getpeereid(socket).map_err(|e| match e {
+        // LOCAL_PEERCRED (what getpeereid reads) is defined for connected
+        // stream sockets; a datagram socket pair answers EINVAL on macOS.
+        // That is a typed capability gap, not a transient failure
+        // (br-asupersync-bi2462.21.4).
+        nix::errno::Errno::EINVAL | nix::errno::Errno::ENOTCONN | nix::errno::Errno::EOPNOTSUPP => {
+            io::Error::new(
+                io::ErrorKind::Unsupported,
+                "peer credentials are not available for unix datagram sockets on this \
+                 platform (LOCAL_PEERCRED requires a connected stream socket)",
+            )
+        }
+        other => io::Error::from_raw_os_error(other as i32),
+    })?;
     Ok(UCred {
         uid: uid.as_raw(),
         gid: gid.as_raw(),
@@ -1613,9 +1632,26 @@ mod tests {
         init_test("test_datagram_peer_cred");
         let (a, b) = UnixDatagram::pair().expect("pair failed");
 
-        // Both sides should be able to get peer credentials
-        let cred_a = a.peer_cred().expect("peer_cred a failed");
-        let cred_b = b.peer_cred().expect("peer_cred b failed");
+        // Both sides should be able to get peer credentials. macOS answers
+        // the datagram pair with a typed `Unsupported` (LOCAL_PEERCRED is a
+        // stream-socket facility there); that is the documented contract, so
+        // the test records it instead of asserting Linux behaviour.
+        let (cred_a, cred_b) = match (a.peer_cred(), b.peer_cred()) {
+            (Ok(cred_a), Ok(cred_b)) => (cred_a, cred_b),
+            (Err(err), _) | (_, Err(err))
+                if cfg!(not(target_os = "linux")) && err.kind() == io::ErrorKind::Unsupported =>
+            {
+                crate::assert_with_log!(
+                    true,
+                    "datagram peer credentials unsupported on this platform (typed)",
+                    "Unsupported",
+                    err.kind()
+                );
+                crate::test_complete!("test_datagram_peer_cred");
+                return;
+            }
+            (Err(err), _) | (_, Err(err)) => panic!("peer_cred failed: {err}"),
+        };
 
         // Both should report the same process (ourselves)
         let user_id = nix::unistd::getuid().as_raw();

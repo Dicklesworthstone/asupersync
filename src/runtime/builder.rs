@@ -3937,7 +3937,14 @@ impl Runtime {
                 guard.pending_obligation_count(),
                 guard
                     .region(self.inner.root_region)
-                    .map_or(0, crate::record::RegionRecord::pending_spawn_count),
+                    .map_or(0, |root| {
+                        // Obligation reservations posted but not yet
+                        // applied count as live work too
+                        // (br-asupersync-bi2462.13).
+                        root.pending_spawn_count()
+                            .saturating_add(root.pending_obligation_post_count())
+                    })
+                    .saturating_add(u32::from(guard.has_pending_obligation_posts())),
             )
         };
         if embedded_live != 0 || pending_obligations != 0 || pending_spawns != 0 {
@@ -4836,6 +4843,16 @@ impl RuntimeInner {
                 clock.clone(),
                 Arc::downgrade(&spawn_liveness),
             )));
+            // Obligation mailbox (br-asupersync-bi2462.13): same notifier and
+            // liveness token as the spawn gateway; drained by the workers
+            // next to spawn admissions.
+            guard.set_obligation_gateway(Arc::new(
+                crate::runtime::obligation_mailbox::ObligationGateway::new(
+                    Arc::new(crate::runtime::obligation_mailbox::ObligationMailbox::new()),
+                    scheduler.spawn_enqueued_notifier(),
+                    Arc::downgrade(&spawn_liveness),
+                ),
+            ));
             (mailbox, pending, clock)
         };
         let spawn_mailbox =

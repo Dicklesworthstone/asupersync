@@ -150,9 +150,35 @@ consumer-verification, or privileged-execution-safety claim.
   `control_wire_bytes`, `payload_file_identity_unchanged`, and
   `performance_claim:false`. (artifacts/ is gitignored → write under a tracked
   path or attach to ledger.)
+  ATP-over-QUIC rows additionally carry `quic_limiter`: the sender's `limiter`
+  block verbatim (see "Sender limiter block" below), `null` for binaries that
+  predate it.
 - `score_matrix.py`: JSONL → per-cell median + cv + atp/rsync wall & RSS ratios + per-regime geomean
   + a markdown scorecard. Missing/mismatched current QUIC auth postures are quarantined before
   median grouping. Headline = atp-vs-rsync ONLY.
+
+### Sender limiter block (`limiter` in the QUIC `atp_send` JSON)
+
+`atp send --transport quic` adds an additive `limiter` object to its `atp_send`
+JSON line (and one `[atp] progress quic_limiter ...` stderr line). It comes from
+`transport_quic::QuicSendLimiterReport` and says WHY a cell was slow instead of
+leaving it to throughput × RTT arithmetic (br-asupersync-bi2462.2). Consumers
+that ignore it keep parsing the report unchanged.
+
+| key | meaning |
+|---|---|
+| `stalls.<reason>.count` / `.micros` | how often and for how long the sender waited behind each gate: `pacing` (byte/token pacer deadlines and the AIMD retry-after), `cwnd` (bytes in flight reached the QUIC congestion window), `stream_credit` (receiver's `MAX_STREAM_DATA` below the admission minimum), `unacked_guard` (ATP's in-flight admission cap: BtlBw × RTprop, 16 MiB ceiling), `send_queue` (source-stream queue over its cap, drained before more data was admitted), `receiver_window` (datagram-tier NeedMore credit), `other` (a blocked flush with cwnd and credit both available) |
+| `total_stall_micros`, `dominant_stall`, `dominant_stall_micros`, `dominant_stall_share_pct` | the sum, the longest-held reason (null when nothing stalled), and its integer share of the wall time |
+| `peak_bytes_in_flight`, `peak_congestion_window_bytes`, `min_congestion_window_bytes`, `final_congestion_window_bytes`, `final_ssthresh_bytes`, `slow_start_exited`, `transport_samples` | QUIC recovery state sampled at every stall and at the end (`final_ssthresh_bytes` is null while recovery never left slow start) |
+| `min_rtt_micros`, `smoothed_rtt_micros`, `pto_count` | the transport's RTT estimator and PTO backoff at the end |
+| `loss_timeouts`, `lost_packets`, `lost_bytes`, `retransmit_batches`, `retransmitted_stream_bytes` | application-data loss timeouts that declared loss, what they declared, and source-stream retransmission volume |
+| `unacked_admission_cap_bytes`, `min_stream_send_credit_bytes` | the admission cap in force at the end and the lowest stream credit the admission gate saw |
+| `udp_send_errors`, `socket_buffers.{requested,applied}_{send,recv}_bytes` | UDP send-batch failures (ENOBUFS on a real NIC behind a shallow qdisc) and what the kernel actually granted (Linux clamps to `net.core.wmem_max` / `rmem_max`) |
+
+Stall durations are attributed per wait-loop iteration from the loop's own
+elapsed clock, so their sum never exceeds the wall time of the loops that
+recorded them. Connection-level `MAX_DATA` credit is not tracked by the native
+stack and has no entry.
 
 ## Files
 - `scripts/atp_bench/matrix_bench.sh` — the harness (gen + regimes + run + measure + JSONL).

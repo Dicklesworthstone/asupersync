@@ -27,7 +27,10 @@ use crate::trace::crashpack::{
 };
 use crate::trace::event::TraceEventKind;
 use crate::trace::recorder::TraceRecorder;
-use crate::trace::replay::{CompactTaskId, ReplayEvent, ReplayTrace, TraceMetadata};
+use crate::trace::replay::{
+    CompactTaskId, ProductionSchedule, ProjectionError, ProjectionOptions, ReplayEvent,
+    ReplayTrace, TraceMetadata,
+};
 use crate::trace::scoring::seed_fingerprint;
 use crate::trace::{TraceData, TraceEvent, check_refinement_firewall};
 use crate::trace::{canonicalize::trace_fingerprint, certificate::TraceCertificate};
@@ -1097,6 +1100,264 @@ struct ForcedScheduleRecorder {
     truncated: bool,
 }
 
+/// Why a production-schedule replay stopped following the recorded order
+/// (br-asupersync-bi2462.7).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReplayDivergenceReason {
+    /// The recorded task is bound to a lab task that was not runnable
+    /// after `waited` bounded virtual-time advances.
+    ///
+    /// Making it runnable would take polling a different task first, which
+    /// is exactly the divergence.
+    TaskNotRunnable {
+        /// Virtual-time advances spent looking for the task.
+        waited: usize,
+    },
+    /// No lab task ever entered the scheduler at the recorded spawn ordinal.
+    TaskNeverSpawned,
+    /// The lab scheduler's dedup set and its lane queues disagreed about
+    /// the task.
+    SchedulerInvariant,
+}
+
+/// The first point where the lab could not follow a recorded production
+/// schedule.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplayDivergence {
+    /// Lab step counter when the divergence was detected.
+    pub step: u64,
+    /// Index into the recorded schedule of the step that could not be
+    /// honoured.
+    pub schedule_index: usize,
+    /// Recorded spawn ordinal of the expected task.
+    pub expected_ordinal: usize,
+    /// Recorded task id of the expected task (`None` only for a malformed
+    /// schedule whose step names an ordinal outside its spawn order).
+    pub expected: Option<CompactTaskId>,
+    /// The lab task bound to that ordinal, if any.
+    pub actual: Option<TaskId>,
+    /// Why the recorded choice could not be taken.
+    pub reason: ReplayDivergenceReason,
+}
+
+/// What a production-schedule replay does after its first divergence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OnReplayDivergence {
+    /// Stop dispatching: the run loops return and the report names the
+    /// divergence (default).
+    #[default]
+    Stop,
+    /// Record the divergence, then continue with the lab's normal policy.
+    Continue,
+}
+
+/// Options for [`LabRuntime::replay_production_schedule`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProductionReplayOptions {
+    /// Divergence policy.
+    pub on_divergence: OnReplayDivergence,
+    /// Bounded virtual-time advances spent waiting for a recorded task that
+    /// is not runnable yet.
+    ///
+    /// Each advance moves to the next timer or reactor deadline; when no
+    /// deadline exists at all the wait is exhausted immediately and the
+    /// divergence is declared.
+    pub max_wait_steps: usize,
+}
+
+impl Default for ProductionReplayOptions {
+    fn default() -> Self {
+        Self {
+            on_divergence: OnReplayDivergence::Stop,
+            max_wait_steps: 64,
+        }
+    }
+}
+
+/// Outcome of a production-schedule replay so far
+/// ([`LabRuntime::replay_report`]).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ReplayReport {
+    /// Recorded steps the lab dispatched exactly as recorded.
+    pub steps_matched: usize,
+    /// Recorded steps in the schedule.
+    pub steps_total: usize,
+    /// Recorded spawn ordinals that resolved to a lab task so far.
+    pub spawns_bound: usize,
+    /// The first divergence, if any.
+    pub divergence: Option<ReplayDivergence>,
+    /// Whether the replay stopped dispatching
+    /// ([`OnReplayDivergence::Stop`] after a divergence).
+    pub stopped: bool,
+}
+
+/// Errors from configuring or deriving a production-schedule replay.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProductionReplayError {
+    /// The runtime already executed steps; a replay must start from step
+    /// zero so spawn ordinals line up.
+    AlreadyStarted {
+        /// Steps already executed.
+        steps: u64,
+    },
+    /// The schedule has no dispatch steps to follow.
+    EmptySchedule,
+    /// Replay recording is disabled on this runtime, so no schedule can be
+    /// derived from it.
+    RecordingDisabled,
+    /// The recorded events did not project into a schedule.
+    Projection(ProjectionError),
+}
+
+impl std::fmt::Display for ProductionReplayError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AlreadyStarted { steps } => write!(
+                f,
+                "production replay must be configured before the first step (already ran {steps})"
+            ),
+            Self::EmptySchedule => f.write_str("production schedule has no dispatch steps"),
+            Self::RecordingDisabled => {
+                f.write_str("replay recording is disabled; enable LabConfig::replay_recording")
+            }
+            Self::Projection(error) => write!(f, "recorded events did not project: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for ProductionReplayError {}
+
+/// The oracle state behind [`LabRuntime::replay_production_schedule`].
+///
+/// The recorded `(spawn ordinal, seq)` steps, how far the lab has followed
+/// them, and the report. Spawn ordinals bind to lab tasks by the order in
+/// which tasks first enter the lab scheduler
+/// ([`LabScheduler::first_entry`]).
+#[derive(Debug)]
+struct ProductionReplayState {
+    steps: Vec<(usize, u64)>,
+    spawn_order: Vec<CompactTaskId>,
+    options: ProductionReplayOptions,
+    next: usize,
+    waited: usize,
+    following: bool,
+    report: ReplayReport,
+}
+
+/// What the oracle decided for one lab step.
+enum ReplayPick {
+    /// Dispatch exactly this task from this lane on this worker.
+    Take(TaskId, DispatchLane, usize),
+    /// The recorded task is not runnable yet: advance virtual time once and
+    /// retry on the next step.
+    WaitForTime,
+    /// The replay diverged under `OnReplayDivergence::Stop`: dispatch nothing.
+    Stopped,
+    /// Not (or no longer) following the schedule: use the normal policy.
+    Normal,
+}
+
+impl ProductionReplayState {
+    fn new(schedule: &ProductionSchedule, options: ProductionReplayOptions) -> Self {
+        let steps: Vec<(usize, u64)> = schedule.steps().collect();
+        let report = ReplayReport {
+            steps_total: steps.len(),
+            ..ReplayReport::default()
+        };
+        Self {
+            steps,
+            spawn_order: schedule.spawn_order().to_vec(),
+            options,
+            next: 0,
+            waited: 0,
+            following: true,
+            report,
+        }
+    }
+
+    fn pick(&mut self, sched: &mut LabScheduler, now: Time, step: u64) -> ReplayPick {
+        if self.report.stopped {
+            return ReplayPick::Stopped;
+        }
+        if !self.following {
+            return ReplayPick::Normal;
+        }
+        let Some(&(ordinal, _seq)) = self.steps.get(self.next) else {
+            // Schedule exhausted: the rest of the run is the lab's own policy.
+            self.following = false;
+            return ReplayPick::Normal;
+        };
+        let Some(task) = sched.first_entry(ordinal) else {
+            return self.diverge(
+                step,
+                ordinal,
+                None,
+                ReplayDivergenceReason::TaskNeverSpawned,
+            );
+        };
+        match sched.take_preferred(task, now) {
+            Ok((lane, worker)) => {
+                self.next = self.next.saturating_add(1);
+                self.waited = 0;
+                self.report.steps_matched = self.report.steps_matched.saturating_add(1);
+                ReplayPick::Take(task, lane, worker)
+            }
+            Err(PreferredDispatchError::NotRunnable | PreferredDispatchError::TimedNotDue) => {
+                if self.waited < self.options.max_wait_steps {
+                    self.waited = self.waited.saturating_add(1);
+                    ReplayPick::WaitForTime
+                } else {
+                    let waited = self.waited;
+                    self.diverge(
+                        step,
+                        ordinal,
+                        Some(task),
+                        ReplayDivergenceReason::TaskNotRunnable { waited },
+                    )
+                }
+            }
+            Err(PreferredDispatchError::SchedulerInvariant) => self.diverge(
+                step,
+                ordinal,
+                Some(task),
+                ReplayDivergenceReason::SchedulerInvariant,
+            ),
+        }
+    }
+
+    /// Nothing can make the awaited task runnable without polling another
+    /// task: spend the whole wait budget so the next pick diverges.
+    fn exhaust_wait(&mut self) {
+        self.waited = self.options.max_wait_steps;
+    }
+
+    fn diverge(
+        &mut self,
+        step: u64,
+        ordinal: usize,
+        actual: Option<TaskId>,
+        reason: ReplayDivergenceReason,
+    ) -> ReplayPick {
+        let expected = self.spawn_order.get(ordinal).copied();
+        self.report.divergence.get_or_insert(ReplayDivergence {
+            step,
+            schedule_index: self.next,
+            expected_ordinal: ordinal,
+            expected,
+            actual,
+            reason,
+        });
+        self.following = false;
+        match self.options.on_divergence {
+            OnReplayDivergence::Stop => {
+                self.report.stopped = true;
+                ReplayPick::Stopped
+            }
+            OnReplayDivergence::Continue => ReplayPick::Normal,
+        }
+    }
+}
+
 enum LabDispatchMode<'a> {
     Normal,
     Forced {
@@ -2052,6 +2313,8 @@ pub struct LabRuntime {
     replay_recorder: TraceRecorder,
     /// Optional bounded recorder for exact lab dispatch choices.
     forced_schedule_recorder: Option<ForcedScheduleRecorder>,
+    /// Optional production-schedule oracle (br-asupersync-bi2462.7).
+    production_replay: Option<ProductionReplayState>,
     /// Optional deadline monitor for warning callbacks.
     deadline_monitor: Option<DeadlineMonitor>,
     /// Oracle suite for invariant verification.
@@ -2095,6 +2358,16 @@ impl LabRuntime {
             state.timer_driver_handle(),
             Arc::downgrade(&spawn_liveness),
         )));
+        // Obligation mailbox (br-asupersync-bi2462.13): drained at the start
+        // of every step next to spawn admissions, so token reserve/commit/
+        // abort/leak posts reach `RuntimeState` deterministically.
+        state.set_obligation_gateway(Arc::new(
+            crate::runtime::obligation_mailbox::ObligationGateway::new(
+                Arc::new(crate::runtime::obligation_mailbox::ObligationMailbox::new()),
+                Arc::new(|| {}),
+                Arc::downgrade(&spawn_liveness),
+            ),
+        ));
         state.set_entropy_source(Arc::new(DetEntropy::new(config.entropy_seed)));
 
         // Initialize replay recorder if configured
@@ -2135,6 +2408,7 @@ impl LabRuntime {
             seen_reactor_chaos_stats: ChaosStats::new(),
             replay_recorder,
             forced_schedule_recorder: None,
+            production_replay: None,
             deadline_monitor: None,
             oracles: OracleSuite::new(),
             certificate: ScheduleCertificate::new(),
@@ -2673,7 +2947,9 @@ impl LabRuntime {
     /// Returns true if the runtime is quiescent.
     #[must_use]
     pub fn is_quiescent(&self) -> bool {
-        self.state.is_quiescent() && self.spawn_mailbox.is_empty()
+        self.state.is_quiescent()
+            && self.spawn_mailbox.is_empty()
+            && !self.state.has_pending_obligation_posts()
     }
 
     /// Advances virtual time by the given number of nanoseconds.
@@ -2972,6 +3248,9 @@ impl LabRuntime {
                     break;
                 }
             }
+            if self.replay_stopped() {
+                break;
+            }
             self.step();
         }
 
@@ -3000,6 +3279,9 @@ impl LabRuntime {
             self.drain_deferred_cancel_dispatches();
             let is_empty = self.scheduler.lock().is_empty();
             if is_empty && !self.has_pending_dispatch_commands() {
+                break;
+            }
+            if self.replay_stopped() {
                 break;
             }
 
@@ -3491,6 +3773,15 @@ impl LabRuntime {
     /// budget priority. Deterministic: admission order is exactly enqueue
     /// order, and the admitted arena ids depend only on prior state.
     fn drain_spawn_admissions(&mut self) {
+        // Obligation posts first (br-asupersync-bi2462.13): a reservation a
+        // task posted during its last poll is applied before any new task is
+        // admitted or polled this step.
+        const OBLIGATION_POST_BATCH: usize = 64;
+        while self.state.has_pending_obligation_posts() {
+            if self.state.drain_obligation_posts(OBLIGATION_POST_BATCH) == 0 {
+                break;
+            }
+        }
         if self.spawn_mailbox.spawn_requests_are_empty() {
             return;
         }
@@ -3715,6 +4006,152 @@ impl LabRuntime {
         }
     }
 
+    /// Drives this run's scheduling choices from a recorded production
+    /// schedule (br-asupersync-bi2462.7).
+    ///
+    /// While the schedule is being followed, each lab step dispatches the
+    /// recorded task if it is runnable; a task that is not runnable yet is
+    /// waited for through bounded virtual-time advances
+    /// ([`ProductionReplayOptions::max_wait_steps`]); a task that no lab task
+    /// ever bound to, or one still not runnable after the bound, is a
+    /// [`ReplayDivergence`] handled per [`ProductionReplayOptions::on_divergence`].
+    /// Once the schedule is exhausted the lab's normal policy resumes.
+    /// Recorded spawn ordinals bind to lab tasks by the order in which tasks
+    /// first enter the lab scheduler, so the replay must be configured before
+    /// the first step. [`ForcedSchedule`] replay is a separate, hash-bound
+    /// mechanism and is untouched.
+    ///
+    /// # Errors
+    ///
+    /// [`ProductionReplayError::AlreadyStarted`] after any step,
+    /// [`ProductionReplayError::EmptySchedule`] for a schedule without steps.
+    pub fn replay_production_schedule(
+        &mut self,
+        schedule: &ProductionSchedule,
+        options: ProductionReplayOptions,
+    ) -> Result<(), ProductionReplayError> {
+        if self.steps != 0 {
+            return Err(ProductionReplayError::AlreadyStarted { steps: self.steps });
+        }
+        let state = ProductionReplayState::new(schedule, options);
+        if state.steps.is_empty() {
+            return Err(ProductionReplayError::EmptySchedule);
+        }
+        self.production_replay = Some(state);
+        Ok(())
+    }
+
+    /// The production-schedule replay report, or `None` when no schedule was
+    /// configured with [`Self::replay_production_schedule`].
+    #[must_use]
+    pub fn replay_report(&self) -> Option<ReplayReport> {
+        let replay = self.production_replay.as_ref()?;
+        let mut report = replay.report.clone();
+        report.spawns_bound = self
+            .scheduler
+            .lock()
+            .first_entry_count()
+            .min(replay.spawn_order.len());
+        Some(report)
+    }
+
+    /// Whether a production-schedule replay diverged under
+    /// [`OnReplayDivergence::Stop`]; the run loops stop stepping then.
+    fn replay_stopped(&self) -> bool {
+        self.production_replay
+            .as_ref()
+            .is_some_and(|replay| replay.report.stopped)
+    }
+
+    /// One bounded wait for a recorded task that is not runnable yet.
+    ///
+    /// Advances virtual time to the next timer/reactor deadline and pumps
+    /// the system events that become due. Without any deadline nothing will
+    /// ever make the task runnable except polling another task, so the wait
+    /// is exhausted at once and the next pick reports the divergence.
+    fn replay_wait_for_time(&mut self) {
+        if let Some(deadline) = self.next_auto_advance_deadline() {
+            if deadline > self.now() {
+                self.advance_time_to(deadline);
+            }
+            let _ = self.pump_due_system_events();
+        } else if let Some(replay) = self.production_replay.as_mut() {
+            replay.exhaust_wait();
+        }
+        self.check_deadline_monitor();
+    }
+
+    /// The runtime trace this lab run would hand to
+    /// [`ProductionSchedule::from_runtime_trace`].
+    ///
+    /// The `Spawn` events from the trace buffer (creation order) followed by
+    /// one `Poll` event per recorded scheduling decision, in dispatch order.
+    /// `None` when replay recording is disabled. A polled task without a
+    /// `Spawn` event in the (bounded) trace buffer is attributed to the first
+    /// spawned region so it projects as an orphan rather than vanishing.
+    #[must_use]
+    pub fn recorded_production_trace_events(&self) -> Option<Vec<TraceEvent>> {
+        let recording = self.replay_recorder.snapshot()?;
+        let mut events: Vec<TraceEvent> = self
+            .trace()
+            .snapshot()
+            .into_iter()
+            .filter(|event| event.kind == TraceEventKind::Spawn)
+            .collect();
+        events.sort_by_key(|event| event.seq);
+        let mut region_of: Vec<(TaskId, RegionId)> = Vec::with_capacity(events.len());
+        let mut fallback_region = None;
+        for event in &events {
+            if let TraceData::Task { task, region } = &event.data {
+                region_of.push((*task, *region));
+                fallback_region.get_or_insert(*region);
+            }
+        }
+        let mut seq = events.last().map_or(0, |event| event.seq).saturating_add(1);
+        for event in recording.iter() {
+            if let ReplayEvent::TaskScheduled { task, at_tick } = event {
+                let task_id = compact_task_id(*task);
+                let region = region_of
+                    .iter()
+                    .find(|(candidate, _)| *candidate == task_id)
+                    .map(|(_, region)| *region)
+                    .or(fallback_region)?;
+                events.push(TraceEvent::poll(
+                    seq,
+                    Time::from_nanos(*at_tick),
+                    task_id,
+                    region,
+                ));
+                seq = seq.saturating_add(1);
+            }
+        }
+        Some(events)
+    }
+
+    /// The [`ProductionSchedule`] projected from this run's recording.
+    ///
+    /// See [`Self::recorded_production_trace_events`]; this is what a second
+    /// lab runtime replays through [`Self::replay_production_schedule`].
+    ///
+    /// # Errors
+    ///
+    /// [`ProductionReplayError::RecordingDisabled`] without replay recording,
+    /// [`ProductionReplayError::Projection`] when the events do not project.
+    pub fn recorded_production_schedule(
+        &self,
+    ) -> Result<ProductionSchedule, ProductionReplayError> {
+        let events = self
+            .recorded_production_trace_events()
+            .ok_or(ProductionReplayError::RecordingDisabled)?;
+        ProductionSchedule::from_runtime_trace_with(
+            &events,
+            ProjectionOptions {
+                allow_orphans: true,
+            },
+        )
+        .map_err(ProductionReplayError::Projection)
+    }
+
     /// Executes a single step.
     #[allow(clippy::too_many_lines)]
     fn step(&mut self) {
@@ -3781,16 +4218,40 @@ impl LabRuntime {
             let mut sched = self.scheduler.lock();
             match dispatch_mode {
                 LabDispatchMode::Normal => {
-                    if let Some((tid, lane)) = sched.pop_for_worker(worker_hint, rng_value, now) {
-                        (tid, lane, worker_hint)
-                    } else if let Some(tid) =
-                        sched.steal_for_worker(worker_hint, rng_value.rotate_left(17))
-                    {
-                        (tid, DispatchLane::Stolen, worker_hint)
-                    } else {
-                        drop(sched);
-                        self.check_deadline_monitor();
-                        return Ok(false);
+                    // Production-schedule oracle (br-asupersync-bi2462.7):
+                    // while a recorded schedule is being followed it names
+                    // the exact task to dispatch; the RNG sample above is
+                    // still drawn so the lab's own state evolves as usual.
+                    let replay_pick = self
+                        .production_replay
+                        .as_mut()
+                        .map(|replay| replay.pick(&mut sched, now, self.steps));
+                    match replay_pick {
+                        Some(ReplayPick::Take(tid, lane, worker)) => (tid, lane, worker),
+                        Some(ReplayPick::WaitForTime) => {
+                            drop(sched);
+                            self.replay_wait_for_time();
+                            return Ok(false);
+                        }
+                        Some(ReplayPick::Stopped) => {
+                            drop(sched);
+                            return Ok(false);
+                        }
+                        None | Some(ReplayPick::Normal) => {
+                            if let Some((tid, lane)) =
+                                sched.pop_for_worker(worker_hint, rng_value, now)
+                            {
+                                (tid, lane, worker_hint)
+                            } else if let Some(tid) =
+                                sched.steal_for_worker(worker_hint, rng_value.rotate_left(17))
+                            {
+                                (tid, DispatchLane::Stolen, worker_hint)
+                            } else {
+                                drop(sched);
+                                self.check_deadline_monitor();
+                                return Ok(false);
+                            }
+                        }
                     }
                 }
                 LabDispatchMode::Forced {
@@ -4008,6 +4469,17 @@ impl LabRuntime {
             // Task lost (should not happen if consistent)
             return Ok(true);
         };
+
+        // Obligation posts made during this poll are applied while the task
+        // record still exists: a reserve+resolve within one poll is tracked,
+        // and a reservation left open is caught by the task's completion-time
+        // leak check instead of being refused as a post from a retired holder
+        // (br-asupersync-bi2462.13).
+        while self.state.has_pending_obligation_posts() {
+            if self.state.drain_obligation_posts(64) == 0 {
+                break;
+            }
+        }
 
         // Record the poll so futurelock detection uses the correct idle step count.
         let _ = self.state.update_task(task_id, |record| {
@@ -5243,6 +5715,24 @@ pub struct LabScheduler {
     next_worker: usize,
     cancel_streak: Vec<usize>,
     cancel_streak_limit: usize,
+    /// Tasks in the order they first entered this scheduler.
+    ///
+    /// The binding between recorded production spawn ordinals and lab tasks
+    /// for [`LabRuntime::replay_production_schedule`]
+    /// (br-asupersync-bi2462.7).
+    first_entry_order: Vec<TaskId>,
+    first_entry_seen: DetHashSet<TaskId>,
+}
+
+/// Why [`LabScheduler::take_preferred`] could not dispatch the requested task.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PreferredDispatchError {
+    /// The task is not scheduled on any worker.
+    NotRunnable,
+    /// The task sits in the timed lane with a deadline in the future.
+    TimedNotDue,
+    /// The dedup set says scheduled but no lane holds the task.
+    SchedulerInvariant,
 }
 
 impl LabScheduler {
@@ -5258,6 +5748,8 @@ impl LabScheduler {
                 .map(|_| crate::runtime::scheduler::PriorityScheduler::new())
                 .collect(),
             scheduled: DetHashSet::with_hasher(build_hasher.clone()),
+            first_entry_seen: DetHashSet::with_hasher(build_hasher.clone()),
+            first_entry_order: Vec::new(),
             pending_spurious_wakes: DetHashMap::with_hasher(build_hasher),
             assignments: Vec::new(),
             next_worker: 0,
@@ -5327,6 +5819,7 @@ impl LabScheduler {
         if !self.scheduled.insert(task) {
             return;
         }
+        self.note_first_entry(task);
 
         let worker = self.assign_worker(task);
         self.workers[worker].schedule(task, priority);
@@ -5368,6 +5861,7 @@ impl LabScheduler {
     /// Schedules or promotes a task into the cancel lane.
     pub fn schedule_cancel(&mut self, task: TaskId, priority: u8) {
         if self.scheduled.insert(task) {
+            self.note_first_entry(task);
             let worker = self.assign_worker(task);
             self.workers[worker].schedule_cancel(task, priority);
             return;
@@ -5391,9 +5885,82 @@ impl LabScheduler {
         if !self.scheduled.insert(task) {
             return;
         }
+        self.note_first_entry(task);
 
         let worker = self.assign_worker(task);
         self.workers[worker].schedule_timed(task, deadline);
+    }
+
+    /// Record the first time `task` enters the scheduler (any lane).
+    fn note_first_entry(&mut self, task: TaskId) {
+        if self.first_entry_seen.insert(task) {
+            self.first_entry_order.push(task);
+        }
+    }
+
+    /// The task that entered this scheduler `ordinal`-th (zero-based), if
+    /// any task has yet.
+    fn first_entry(&self, ordinal: usize) -> Option<TaskId> {
+        self.first_entry_order.get(ordinal).copied()
+    }
+
+    /// How many distinct tasks have entered this scheduler.
+    fn first_entry_count(&self) -> usize {
+        self.first_entry_order.len()
+    }
+
+    /// Dispatch exactly `task` from whichever worker and lane hold it
+    /// (br-asupersync-bi2462.7).
+    ///
+    /// Unlike [`Self::take_forced`], no worker or lane is prescribed: a
+    /// recorded production schedule names tasks, not lab workers.
+    /// Bookkeeping mirrors the normal pop path.
+    fn take_preferred(
+        &mut self,
+        task: TaskId,
+        now: Time,
+    ) -> Result<(DispatchLane, usize), PreferredDispatchError> {
+        if !self.scheduled.contains(&task) {
+            return Err(PreferredDispatchError::NotRunnable);
+        }
+        let worker_count = self.workers.len();
+        let first = self.assignment_for(task).unwrap_or(0) % worker_count.max(1);
+        for offset in 0..worker_count {
+            let worker = (first + offset) % worker_count;
+            let outcome = match self.workers[worker].take_exact(task, DispatchLane::Ready, now) {
+                Ok(()) => Ok(DispatchLane::Ready),
+                Err(ExactDispatchError::LaneMismatch { actual }) => self.workers[worker]
+                    .take_exact(task, actual, now)
+                    .map(|()| actual),
+                Err(other) => Err(other),
+            };
+            match outcome {
+                Ok(lane) => {
+                    let removed = self.scheduled.remove(&task);
+                    debug_assert!(removed, "preferred task was checked in lab scheduled set");
+                    self.set_assignment(task, worker);
+                    self.rearm_spurious_wake(task);
+                    let limit = self.cancel_streak_limit;
+                    let streak = &mut self.cancel_streak[worker];
+                    *streak = if lane == DispatchLane::Cancel {
+                        streak.saturating_add(1).min(limit)
+                    } else {
+                        0
+                    };
+                    return Ok((lane, worker));
+                }
+                Err(ExactDispatchError::NotScheduled) => {}
+                Err(ExactDispatchError::TimedNotDue { .. }) => {
+                    return Err(PreferredDispatchError::TimedNotDue);
+                }
+                Err(
+                    ExactDispatchError::LaneMismatch { .. } | ExactDispatchError::QueueInvariant,
+                ) => {
+                    return Err(PreferredDispatchError::SchedulerInvariant);
+                }
+            }
+        }
+        Err(PreferredDispatchError::NotRunnable)
     }
 
     fn pop_for_worker(
@@ -9133,6 +9700,329 @@ mod tests {
     // =========================================================================
     // Replay severity correctness (bd-beuyd)
     // =========================================================================
+
+    /// Completes once `flag` is set; parks its waker otherwise so only the
+    /// setter's explicit wake makes the task runnable again.
+    struct WaitForFlag {
+        flag: Arc<std::sync::atomic::AtomicBool>,
+        waker: Arc<Mutex<Option<Waker>>>,
+    }
+
+    impl std::future::Future for WaitForFlag {
+        type Output = ();
+
+        fn poll(
+            self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<()> {
+            if self.flag.load(std::sync::atomic::Ordering::Acquire) {
+                std::task::Poll::Ready(())
+            } else {
+                *self.waker.lock() = Some(cx.waker().clone());
+                std::task::Poll::Pending
+            }
+        }
+    }
+
+    /// Two tasks with a real dependency (br-asupersync-bi2462.7).
+    ///
+    /// `A` (spawn ordinal 0) observes 0, yields, then sets the flag, wakes
+    /// `B` and observes 10; `B` (ordinal 1) observes 1, waits for the flag
+    /// and observes 11. `B`'s second poll is only runnable after `A`'s
+    /// second.
+    fn production_replay_fixture(
+        config: LabConfig,
+        observations: Arc<Mutex<Vec<u8>>>,
+    ) -> LabRuntime {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let mut runtime = LabRuntime::new(config);
+        let root = runtime.state.create_root_region(Budget::INFINITE);
+        let flag = Arc::new(AtomicBool::new(false));
+        let waker: Arc<Mutex<Option<Waker>>> = Arc::new(Mutex::new(None));
+
+        let task_a = {
+            let observations = Arc::clone(&observations);
+            let flag = Arc::clone(&flag);
+            let waker = Arc::clone(&waker);
+            let (task, _handle) = runtime
+                .state
+                .create_task(root, Budget::INFINITE, async move {
+                    observations.lock().push(0);
+                    futures_lite::future::yield_now().await;
+                    flag.store(true, Ordering::Release);
+                    if let Some(waker) = waker.lock().take() {
+                        waker.wake();
+                    }
+                    observations.lock().push(10);
+                })
+                .expect("create production-replay task A");
+            task
+        };
+        let task_b = {
+            let observations = Arc::clone(&observations);
+            let (task, _handle) = runtime
+                .state
+                .create_task(root, Budget::INFINITE, async move {
+                    observations.lock().push(1);
+                    WaitForFlag { flag, waker }.await;
+                    observations.lock().push(11);
+                })
+                .expect("create production-replay task B");
+            task
+        };
+        runtime.scheduler.lock().schedule(task_a, 0);
+        runtime.scheduler.lock().schedule(task_b, 1);
+        runtime
+    }
+
+    fn production_replay_config(seed: u64) -> LabConfig {
+        LabConfig::new(seed)
+            .with_default_replay_recording()
+            .max_steps(256)
+    }
+
+    /// The fixture's spawn events (ordinals 0 and 1) plus the root region,
+    /// so a test can hand-craft a poll order.
+    fn production_replay_spawns(source: &LabRuntime) -> (Vec<TraceEvent>, RegionId) {
+        let events = source
+            .recorded_production_trace_events()
+            .expect("recording enabled");
+        let spawns: Vec<TraceEvent> = events
+            .iter()
+            .filter(|event| event.kind == TraceEventKind::Spawn)
+            .cloned()
+            .collect();
+        assert_eq!(spawns.len(), 2, "fixture spawns exactly two tasks");
+        let region = match &spawns[0].data {
+            TraceData::Task { region, .. } => *region,
+            other => panic!("spawn event carries task data, got {other:?}"),
+        };
+        (spawns, region)
+    }
+
+    fn spawn_task_id(event: &TraceEvent) -> TaskId {
+        match &event.data {
+            TraceData::Task { task, .. } => *task,
+            other => panic!("spawn event carries task data, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn production_replay_of_a_lab_recording_matches_every_step() {
+        init_test("production_replay_of_a_lab_recording_matches_every_step");
+        let config = production_replay_config(0xB2_0001);
+        let source_observations = Arc::new(Mutex::new(Vec::new()));
+        let mut source =
+            production_replay_fixture(config.clone(), Arc::clone(&source_observations));
+        assert!(source.run_until_quiescent_with_report().quiescent);
+        let schedule = source
+            .recorded_production_schedule()
+            .expect("recording projects into a schedule");
+        assert_eq!(schedule.spawn_order().len(), 2);
+        // Either A1 B1 A2 B2 (four polls) or A1 A2 B1 (B sees the flag on
+        // its first poll): the lab's own RNG decides, the recording keeps it.
+        let recorded_steps = schedule.summary().steps;
+        assert!(
+            matches!(recorded_steps, 3 | 4),
+            "unexpected recorded step count {recorded_steps}"
+        );
+        assert_eq!(source_observations.lock().len(), 4);
+
+        let replay_observations = Arc::new(Mutex::new(Vec::new()));
+        let mut replay = production_replay_fixture(config, Arc::clone(&replay_observations));
+        replay
+            .replay_production_schedule(&schedule, ProductionReplayOptions::default())
+            .expect("configure before the first step");
+        assert!(replay.run_until_quiescent_with_report().quiescent);
+
+        let report = replay.replay_report().expect("replay configured");
+        assert_eq!(report.divergence, None);
+        assert_eq!(report.steps_matched, recorded_steps);
+        assert_eq!(report.steps_total, recorded_steps);
+        assert_eq!(report.spawns_bound, 2);
+        assert!(!report.stopped);
+        assert_eq!(*replay_observations.lock(), *source_observations.lock());
+        crate::test_complete!("production_replay_of_a_lab_recording_matches_every_step");
+    }
+
+    #[test]
+    fn production_replay_rejects_configuration_after_the_first_step() {
+        init_test("production_replay_rejects_configuration_after_the_first_step");
+        let config = production_replay_config(0xB2_0002);
+        let mut source =
+            production_replay_fixture(config.clone(), Arc::new(Mutex::new(Vec::new())));
+        source.run_until_quiescent();
+        let schedule = source.recorded_production_schedule().expect("schedule");
+
+        let mut late = production_replay_fixture(config, Arc::new(Mutex::new(Vec::new())));
+        late.step();
+        assert_eq!(
+            late.replay_production_schedule(&schedule, ProductionReplayOptions::default()),
+            Err(ProductionReplayError::AlreadyStarted { steps: 1 })
+        );
+        crate::test_complete!("production_replay_rejects_configuration_after_the_first_step");
+    }
+
+    #[test]
+    fn production_replay_diverges_at_the_step_that_is_not_runnable() {
+        init_test("production_replay_diverges_at_the_step_that_is_not_runnable");
+        let config = production_replay_config(0xB2_0003);
+        let mut source =
+            production_replay_fixture(config.clone(), Arc::new(Mutex::new(Vec::new())));
+        source.run_until_quiescent();
+        let (spawns, region) = production_replay_spawns(&source);
+        let task_a = spawn_task_id(&spawns[0]);
+        let task_b = spawn_task_id(&spawns[1]);
+
+        // Hand-swapped order: B twice before A ever runs. B's second poll
+        // needs A's wake, so the schedule cannot be followed at index 1.
+        let mut events = spawns;
+        let base_seq = events.last().map_or(0, |event| event.seq) + 1;
+        for (offset, task) in [task_b, task_b, task_a, task_a].into_iter().enumerate() {
+            events.push(TraceEvent::poll(
+                base_seq + offset as u64,
+                Time::ZERO,
+                task,
+                region,
+            ));
+        }
+        let schedule = ProductionSchedule::from_runtime_trace(&events).expect("projects");
+        assert_eq!(schedule.summary().steps, 4);
+
+        let observations = Arc::new(Mutex::new(Vec::new()));
+        let mut replay = production_replay_fixture(config, Arc::clone(&observations));
+        replay
+            .replay_production_schedule(&schedule, ProductionReplayOptions::default())
+            .expect("configure");
+        replay.run_until_quiescent();
+
+        let report = replay.replay_report().expect("replay configured");
+        let divergence = report
+            .divergence
+            .clone()
+            .expect("swapped step must diverge");
+        assert_eq!(divergence.schedule_index, 1);
+        assert_eq!(divergence.expected_ordinal, 1);
+        assert_eq!(divergence.expected, Some(schedule.spawn_order()[1]));
+        assert!(
+            divergence.actual.is_some(),
+            "ordinal 1 is bound to lab task B"
+        );
+        assert!(
+            matches!(
+                divergence.reason,
+                ReplayDivergenceReason::TaskNotRunnable { .. }
+            ),
+            "{divergence:?}"
+        );
+        assert_eq!(report.steps_matched, 1);
+        assert!(report.stopped, "Stop policy halts dispatch");
+        assert_eq!(
+            *observations.lock(),
+            vec![1],
+            "only B's first poll ran before the stop"
+        );
+        assert!(!replay.is_quiescent(), "the stopped run left work behind");
+        crate::test_complete!("production_replay_diverges_at_the_step_that_is_not_runnable");
+    }
+
+    #[test]
+    fn production_replay_reports_a_task_that_is_never_spawned() {
+        init_test("production_replay_reports_a_task_that_is_never_spawned");
+        let config = production_replay_config(0xB2_0004);
+        let mut source =
+            production_replay_fixture(config.clone(), Arc::new(Mutex::new(Vec::new())));
+        source.run_until_quiescent();
+        let (spawns, region) = production_replay_spawns(&source);
+        let task_a = spawn_task_id(&spawns[0]);
+
+        let mut events = spawns;
+        let mut seq = events.last().map_or(0, |event| event.seq) + 1;
+        let phantom = TaskId::from_arena(ArenaIndex::new(77, 1));
+        events.push(TraceEvent::spawn(seq, Time::ZERO, phantom, region));
+        seq += 1;
+        events.push(TraceEvent::poll(seq, Time::ZERO, task_a, region));
+        seq += 1;
+        events.push(TraceEvent::poll(seq, Time::ZERO, phantom, region));
+        let schedule = ProductionSchedule::from_runtime_trace(&events).expect("projects");
+        assert_eq!(schedule.spawn_order().len(), 3);
+
+        let observations = Arc::new(Mutex::new(Vec::new()));
+        let mut replay = production_replay_fixture(config, Arc::clone(&observations));
+        replay
+            .replay_production_schedule(&schedule, ProductionReplayOptions::default())
+            .expect("configure");
+        replay.run_until_quiescent();
+
+        let report = replay.replay_report().expect("replay configured");
+        let divergence = report
+            .divergence
+            .clone()
+            .expect("phantom task must diverge");
+        assert_eq!(divergence.schedule_index, 1);
+        assert_eq!(divergence.expected_ordinal, 2);
+        assert_eq!(divergence.actual, None);
+        assert_eq!(divergence.reason, ReplayDivergenceReason::TaskNeverSpawned);
+        assert_eq!(report.steps_matched, 1);
+        assert_eq!(report.spawns_bound, 2, "only the two real tasks bound");
+        assert!(report.stopped);
+        assert_eq!(*observations.lock(), vec![0]);
+        crate::test_complete!("production_replay_reports_a_task_that_is_never_spawned");
+    }
+
+    #[test]
+    fn production_replay_continue_mode_finishes_and_keeps_the_first_divergence() {
+        init_test("production_replay_continue_mode_finishes_and_keeps_the_first_divergence");
+        let config = production_replay_config(0xB2_0005);
+        let mut source =
+            production_replay_fixture(config.clone(), Arc::new(Mutex::new(Vec::new())));
+        source.run_until_quiescent();
+        let (spawns, region) = production_replay_spawns(&source);
+        let task_a = spawn_task_id(&spawns[0]);
+        let task_b = spawn_task_id(&spawns[1]);
+
+        let mut events = spawns;
+        let base_seq = events.last().map_or(0, |event| event.seq) + 1;
+        for (offset, task) in [task_b, task_b, task_a, task_a].into_iter().enumerate() {
+            events.push(TraceEvent::poll(
+                base_seq + offset as u64,
+                Time::ZERO,
+                task,
+                region,
+            ));
+        }
+        let schedule = ProductionSchedule::from_runtime_trace(&events).expect("projects");
+
+        let observations = Arc::new(Mutex::new(Vec::new()));
+        let mut replay = production_replay_fixture(config, Arc::clone(&observations));
+        replay
+            .replay_production_schedule(
+                &schedule,
+                ProductionReplayOptions {
+                    on_divergence: OnReplayDivergence::Continue,
+                    max_wait_steps: 8,
+                },
+            )
+            .expect("configure");
+        assert!(replay.run_until_quiescent_with_report().quiescent);
+
+        let report = replay.replay_report().expect("replay configured");
+        let divergence = report.divergence.clone().expect("first divergence is kept");
+        assert_eq!(divergence.schedule_index, 1);
+        assert!(matches!(
+            divergence.reason,
+            ReplayDivergenceReason::TaskNotRunnable { waited: 8 }
+        ));
+        assert_eq!(report.steps_matched, 1);
+        assert!(!report.stopped);
+        // B's first poll was replayed; the normal policy then ran A twice
+        // (waking B) and B's second poll finished the run.
+        assert_eq!(*observations.lock(), vec![1, 0, 10, 11]);
+        crate::test_complete!(
+            "production_replay_continue_mode_finishes_and_keeps_the_first_divergence"
+        );
+    }
 
     fn forced_schedule_fixture(config: LabConfig, observations: Arc<Mutex<Vec<u8>>>) -> LabRuntime {
         let mut runtime = LabRuntime::new(config);

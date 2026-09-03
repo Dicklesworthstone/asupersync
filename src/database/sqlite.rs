@@ -1037,8 +1037,17 @@ fn validate_sqlite_open_path(path: &Path) -> Result<(), SqliteError> {
 /// Validate a resolved (canonicalized) SQLite path for security restrictions
 /// This function operates on already-resolved paths to avoid TOCTOU vulnerabilities
 fn validate_resolved_sqlite_path(resolved_path: &Path) -> Result<(), SqliteError> {
-    // SECURITY: Check resolved path against restricted system directories
-    if resolved_path.starts_with(Path::new("/etc")) {
+    // SECURITY: Check resolved path against restricted system directories.
+    // The candidate is canonical, so compare against the canonical form of
+    // each restricted root too: on macOS /etc is a symlink to /private/etc
+    // and a resolved path never starts with the literal "/etc"
+    // (br-asupersync-bi2462.21.3).
+    fn resolves_into(resolved_path: &Path, restricted: &str) -> bool {
+        resolved_path.starts_with(Path::new(restricted))
+            || std::fs::canonicalize(restricted)
+                .is_ok_and(|canonical| resolved_path.starts_with(&canonical))
+    }
+    if resolves_into(resolved_path, "/etc") {
         return Err(SqliteError::UnsafePath(format!(
             "SQLite database path resolves into restricted system directory: {}",
             resolved_path.display()
@@ -4924,9 +4933,17 @@ mod tests {
             let resolved =
                 resolve_sqlite_open_path(&symlink_path).expect("Failed to resolve symlink");
 
-            // The resolved path should point to /etc/passwd and be rejected
+            // The resolved path should point to /etc/passwd and be rejected.
+            // On macOS /etc resolves through /private/etc, so accept the
+            // canonical form of the restricted root as well.
             assert!(validate_resolved_sqlite_path(&resolved).is_err());
-            assert!(resolved.starts_with("/etc"));
+            let canonical_etc = std::fs::canonicalize("/etc").unwrap_or_else(|_| "/etc".into());
+            assert!(
+                resolved.starts_with("/etc") || resolved.starts_with(&canonical_etc),
+                "resolved {} must be under /etc or {}",
+                resolved.display(),
+                canonical_etc.display()
+            );
         }
     }
 

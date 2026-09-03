@@ -727,6 +727,346 @@ pub fn u8_to_error_kind(value: u8) -> io::ErrorKind {
 // Tests
 // =============================================================================
 
+// =============================================================================
+// Production schedule projection (br-asupersync-bi2462.6)
+// =============================================================================
+
+/// Why a production trace could not be projected into a replayable schedule.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProjectionError {
+    /// The trace carried no schedule-defining events at all.
+    Empty,
+    /// A task acted (`Schedule`/`Poll`/`Yield`/`Complete`) before any `Spawn`
+    /// for it was seen.
+    ///
+    /// The ring buffer truncated the trace before that task's birth, or the
+    /// trace was filtered. Strict projection refuses rather than silently
+    /// replaying a partial history; see
+    /// [`ProjectionOptions::allow_orphans`].
+    MissingSpawn {
+        /// The task without a recorded spawn.
+        task: CompactTaskId,
+        /// Sequence number of the offending event.
+        seq: u64,
+        /// Kind of the offending event.
+        kind: crate::trace::event::TraceEventKind,
+    },
+    /// The same task id was spawned twice inside one trace.
+    DuplicateSpawn {
+        /// The task spawned again.
+        task: CompactTaskId,
+        /// Sequence number of the second spawn.
+        seq: u64,
+    },
+}
+
+impl core::fmt::Display for ProjectionError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Empty => write!(f, "production trace carries no schedule events"),
+            Self::MissingSpawn { task, seq, kind } => write!(
+                f,
+                "event {kind:?} at seq {seq} names task {task:?} whose spawn is outside the trace window"
+            ),
+            Self::DuplicateSpawn { task, seq } => {
+                write!(f, "task {task:?} spawned twice (second at seq {seq})")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ProjectionError {}
+
+/// Options for [`ProductionSchedule::from_runtime_trace_with`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ProjectionOptions {
+    /// Accept tasks whose `Spawn` lies before the trace window: they receive
+    /// a spawn ordinal at first appearance and are listed in
+    /// [`ProjectionSummary::orphans`]. Off by default (strict).
+    pub allow_orphans: bool,
+}
+
+/// What a projection kept and dropped.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ProjectionSummary {
+    /// `Spawn` events projected to [`ReplayEvent::TaskSpawned`].
+    pub spawned: usize,
+    /// Scheduling steps projected to [`ReplayEvent::TaskScheduled`].
+    pub steps: usize,
+    /// `Yield` events projected.
+    pub yielded: usize,
+    /// `Complete` events projected (outcome is not recorded by the
+    /// production trace and is projected as 0).
+    pub completed: usize,
+    /// `TimeAdvance` events projected.
+    pub time_advances: usize,
+    /// Timer events projected.
+    pub timers: usize,
+    /// Tasks admitted without a recorded spawn (only with
+    /// [`ProjectionOptions::allow_orphans`]).
+    pub orphans: Vec<CompactTaskId>,
+    /// Events of kinds the projection does not carry (I/O, obligations,
+    /// regions, cancellation, ...) plus `Schedule` events when `Poll`
+    /// events define the steps.
+    pub skipped: usize,
+    /// Sequence number of the first and last event in the input.
+    pub first_seq: u64,
+    /// See `first_seq`.
+    pub last_seq: u64,
+    /// True when the input had no `Poll` events and `Schedule` events were
+    /// used as steps instead.
+    pub steps_from_schedule_events: bool,
+}
+
+/// A production runtime trace reduced to the decisions the lab can re-drive.
+///
+/// The production runtime records the lab's [`crate::trace::event::TraceEvent`]
+/// schema (`Runtime::trace_snapshot`); its task ids are arena slots with
+/// generations that a fresh lab run will never reproduce. This projection
+/// keeps the interleaving — spawn order, the order of `Poll` steps, yields,
+/// completions, virtual-time and timer hints — as a [`ReplayTrace`], and
+/// pairs every task with its spawn ordinal so a replay can bind the lab's
+/// own ids to the recorded ones as tasks are created.
+///
+/// Semantics:
+/// - a step is a `Poll` event (one per poll of a task); when the input has
+///   no `Poll` events at all, `Schedule` events are used instead and
+///   [`ProjectionSummary::steps_from_schedule_events`] is set;
+/// - the tick recorded on every projected event is the production sequence
+///   number, monotone within the trace;
+/// - I/O, obligation, region and cancellation events are not carried (they
+///   are outcomes to re-inject, not decisions to re-drive) and are counted
+///   in [`ProjectionSummary::skipped`];
+/// - a task that acts before its `Spawn` is a truncated ring buffer: strict
+///   projection returns [`ProjectionError::MissingSpawn`]; with
+///   [`ProjectionOptions::allow_orphans`] it is admitted and listed.
+#[derive(Debug, Clone)]
+pub struct ProductionSchedule {
+    trace: ReplayTrace,
+    spawn_order: Vec<CompactTaskId>,
+    summary: ProjectionSummary,
+}
+
+impl ProductionSchedule {
+    /// Strict projection: refuses truncated histories.
+    pub fn from_runtime_trace(
+        events: &[crate::trace::event::TraceEvent],
+    ) -> Result<Self, ProjectionError> {
+        Self::from_runtime_trace_with(events, ProjectionOptions::default())
+    }
+
+    /// Projection with explicit options.
+    pub fn from_runtime_trace_with(
+        events: &[crate::trace::event::TraceEvent],
+        options: ProjectionOptions,
+    ) -> Result<Self, ProjectionError> {
+        use crate::trace::event::{TraceData, TraceEventKind};
+
+        let (Some(first), Some(last)) = (events.first(), events.last()) else {
+            return Err(ProjectionError::Empty);
+        };
+        let use_polls = events
+            .iter()
+            .any(|event| matches!(event.kind, TraceEventKind::Poll));
+
+        let mut trace = ReplayTrace::new(
+            TraceMetadata::new(0).with_description("production schedule projection"),
+        );
+        let mut spawn_order: Vec<CompactTaskId> = Vec::new();
+        // Keyed by the packed id: `CompactTaskId` is not `Ord`/`Hash`.
+        let mut ordinal: std::collections::BTreeMap<u64, usize> = std::collections::BTreeMap::new();
+        let mut summary = ProjectionSummary {
+            first_seq: first.seq,
+            last_seq: last.seq,
+            steps_from_schedule_events: !use_polls,
+            ..ProjectionSummary::default()
+        };
+
+        // A task that acts before its spawn was seen: admit it as an orphan
+        // (tolerant mode) or refuse (strict mode).
+        fn admit(
+            ordinal: &mut std::collections::BTreeMap<u64, usize>,
+            spawn_order: &mut Vec<CompactTaskId>,
+            summary: &mut ProjectionSummary,
+            options: ProjectionOptions,
+            task: CompactTaskId,
+            seq: u64,
+            kind: TraceEventKind,
+        ) -> Result<(), ProjectionError> {
+            if ordinal.contains_key(&task.0) {
+                return Ok(());
+            }
+            if options.allow_orphans {
+                ordinal.insert(task.0, spawn_order.len());
+                spawn_order.push(task);
+                summary.orphans.push(task);
+                Ok(())
+            } else {
+                Err(ProjectionError::MissingSpawn { task, seq, kind })
+            }
+        }
+
+        for event in events {
+            match (&event.kind, &event.data) {
+                (TraceEventKind::Spawn, TraceData::Task { task, region }) => {
+                    let task = CompactTaskId::from(*task);
+                    if ordinal.contains_key(&task.0) {
+                        return Err(ProjectionError::DuplicateSpawn {
+                            task,
+                            seq: event.seq,
+                        });
+                    }
+                    ordinal.insert(task.0, spawn_order.len());
+                    spawn_order.push(task);
+                    trace.push(ReplayEvent::TaskSpawned {
+                        task,
+                        region: CompactRegionId::from(*region),
+                        at_tick: event.seq,
+                    });
+                    summary.spawned += 1;
+                }
+                (
+                    kind @ (TraceEventKind::Poll | TraceEventKind::Schedule),
+                    TraceData::Task { task, .. },
+                ) => {
+                    let is_step = if use_polls {
+                        matches!(kind, TraceEventKind::Poll)
+                    } else {
+                        matches!(kind, TraceEventKind::Schedule)
+                    };
+                    if !is_step {
+                        summary.skipped += 1;
+                        continue;
+                    }
+                    let task = CompactTaskId::from(*task);
+                    admit(
+                        &mut ordinal,
+                        &mut spawn_order,
+                        &mut summary,
+                        options,
+                        task,
+                        event.seq,
+                        *kind,
+                    )?;
+                    trace.push(ReplayEvent::TaskScheduled {
+                        task,
+                        at_tick: event.seq,
+                    });
+                    summary.steps += 1;
+                }
+                (TraceEventKind::Yield, TraceData::Task { task, .. }) => {
+                    let task = CompactTaskId::from(*task);
+                    admit(
+                        &mut ordinal,
+                        &mut spawn_order,
+                        &mut summary,
+                        options,
+                        task,
+                        event.seq,
+                        event.kind,
+                    )?;
+                    trace.push(ReplayEvent::TaskYielded { task });
+                    summary.yielded += 1;
+                }
+                (TraceEventKind::Complete, TraceData::Task { task, .. }) => {
+                    let task = CompactTaskId::from(*task);
+                    admit(
+                        &mut ordinal,
+                        &mut spawn_order,
+                        &mut summary,
+                        options,
+                        task,
+                        event.seq,
+                        event.kind,
+                    )?;
+                    trace.push(ReplayEvent::TaskCompleted { task, outcome: 0 });
+                    summary.completed += 1;
+                }
+                (TraceEventKind::TimeAdvance, TraceData::Time { old, new }) => {
+                    trace.push(ReplayEvent::TimeAdvanced {
+                        from_nanos: old.as_nanos(),
+                        to_nanos: new.as_nanos(),
+                    });
+                    summary.time_advances += 1;
+                }
+                (TraceEventKind::TimerScheduled, TraceData::Timer { timer_id, deadline }) => {
+                    trace.push(ReplayEvent::TimerCreated {
+                        timer_id: *timer_id,
+                        deadline_nanos: deadline.map_or(0, |deadline| deadline.as_nanos()),
+                    });
+                    summary.timers += 1;
+                }
+                (TraceEventKind::TimerFired, TraceData::Timer { timer_id, .. }) => {
+                    trace.push(ReplayEvent::TimerFired {
+                        timer_id: *timer_id,
+                    });
+                    summary.timers += 1;
+                }
+                (TraceEventKind::TimerCancelled, TraceData::Timer { timer_id, .. }) => {
+                    trace.push(ReplayEvent::TimerCancelled {
+                        timer_id: *timer_id,
+                    });
+                    summary.timers += 1;
+                }
+                _ => summary.skipped += 1,
+            }
+        }
+
+        if summary.spawned == 0 && summary.steps == 0 {
+            return Err(ProjectionError::Empty);
+        }
+        Ok(Self {
+            trace,
+            spawn_order,
+            summary,
+        })
+    }
+
+    /// The projected replay trace (spawns, steps, yields, completions, time
+    /// and timer hints), ready for [`crate::trace::replayer::TraceReplayer`].
+    #[must_use]
+    pub fn trace(&self) -> &ReplayTrace {
+        &self.trace
+    }
+
+    /// Consume the projection, keeping only the replay trace.
+    #[must_use]
+    pub fn into_trace(self) -> ReplayTrace {
+        self.trace
+    }
+
+    /// Recorded tasks in spawn order (orphans, if admitted, at first sight).
+    #[must_use]
+    pub fn spawn_order(&self) -> &[CompactTaskId] {
+        &self.spawn_order
+    }
+
+    /// Spawn ordinal of a recorded task id.
+    #[must_use]
+    pub fn spawn_ordinal(&self, task: CompactTaskId) -> Option<usize> {
+        self.spawn_order
+            .iter()
+            .position(|candidate| *candidate == task)
+    }
+
+    /// The interleaving as `(spawn ordinal, tick)` pairs, one per step.
+    pub fn steps(&self) -> impl Iterator<Item = (usize, u64)> + '_ {
+        self.trace.events.iter().filter_map(|event| {
+            if let ReplayEvent::TaskScheduled { task, at_tick } = event {
+                Some((self.spawn_ordinal(*task)?, *at_tick))
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Counts of what was kept and dropped.
+    #[must_use]
+    pub fn summary(&self) -> &ProjectionSummary {
+        &self.summary
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(
@@ -1310,5 +1650,176 @@ mod tests {
         );
         let dbg = format!("{e:?}");
         assert!(dbg.contains("TaskScheduled"));
+    }
+}
+
+#[cfg(test)]
+mod production_schedule_tests {
+    use super::{
+        CompactTaskId, ProductionSchedule, ProjectionError, ProjectionOptions, ReplayEvent,
+    };
+    use crate::trace::event::{TraceEvent, TraceEventKind};
+    use crate::types::{RegionId, TaskId, Time};
+
+    fn task(n: u32) -> TaskId {
+        TaskId::new_for_test(n, 1)
+    }
+
+    fn region() -> RegionId {
+        RegionId::new_for_test(1, 1)
+    }
+
+    fn at(seq: u64) -> Time {
+        Time::from_nanos(seq * 10)
+    }
+
+    #[test]
+    fn interleaved_polls_project_in_order() {
+        let events = vec![
+            TraceEvent::spawn(1, at(1), task(1), region()),
+            TraceEvent::spawn(2, at(2), task(2), region()),
+            TraceEvent::schedule(3, at(3), task(1), region()),
+            TraceEvent::poll(4, at(4), task(1), region()),
+            TraceEvent::poll(5, at(5), task(2), region()),
+            TraceEvent::poll(6, at(6), task(1), region()),
+            TraceEvent::complete(7, at(7), task(1), region()),
+            TraceEvent::complete(8, at(8), task(2), region()),
+        ];
+        let schedule = ProductionSchedule::from_runtime_trace(&events).expect("projects");
+        assert_eq!(
+            schedule.steps().collect::<Vec<_>>(),
+            vec![(0, 4), (1, 5), (0, 6)],
+            "steps are the Poll events in order, keyed by spawn ordinal"
+        );
+        let summary = schedule.summary();
+        assert_eq!(summary.spawned, 2);
+        assert_eq!(summary.steps, 3);
+        assert_eq!(summary.completed, 2);
+        assert_eq!(
+            summary.skipped, 1,
+            "the Schedule event is dropped when Polls exist"
+        );
+        assert!(!summary.steps_from_schedule_events);
+        assert_eq!((summary.first_seq, summary.last_seq), (1, 8));
+        assert_eq!(
+            schedule.spawn_order(),
+            &[CompactTaskId::from(task(1)), CompactTaskId::from(task(2))]
+        );
+        assert!(matches!(
+            schedule.trace().events.first(),
+            Some(ReplayEvent::TaskSpawned { at_tick: 1, .. })
+        ));
+    }
+
+    #[test]
+    fn poll_before_spawn_is_refused_strictly_and_tolerated_as_orphan() {
+        let events = vec![
+            TraceEvent::spawn(1, at(1), task(1), region()),
+            TraceEvent::poll(2, at(2), task(2), region()),
+        ];
+        assert_eq!(
+            ProductionSchedule::from_runtime_trace(&events).err(),
+            Some(ProjectionError::MissingSpawn {
+                task: CompactTaskId::from(task(2)),
+                seq: 2,
+                kind: TraceEventKind::Poll,
+            })
+        );
+        let tolerant = ProductionSchedule::from_runtime_trace_with(
+            &events,
+            ProjectionOptions {
+                allow_orphans: true,
+            },
+        )
+        .expect("orphans admitted");
+        assert_eq!(
+            tolerant.summary().orphans,
+            vec![CompactTaskId::from(task(2))]
+        );
+        assert_eq!(
+            tolerant.spawn_ordinal(CompactTaskId::from(task(2))),
+            Some(1)
+        );
+        assert_eq!(tolerant.steps().collect::<Vec<_>>(), vec![(1, 2)]);
+    }
+
+    #[test]
+    fn schedule_events_are_steps_only_when_no_polls_exist() {
+        let events = vec![
+            TraceEvent::spawn(1, at(1), task(1), region()),
+            TraceEvent::schedule(2, at(2), task(1), region()),
+            TraceEvent::schedule(3, at(3), task(1), region()),
+        ];
+        let schedule = ProductionSchedule::from_runtime_trace(&events).expect("projects");
+        assert_eq!(schedule.steps().collect::<Vec<_>>(), vec![(0, 2), (0, 3)]);
+        assert!(schedule.summary().steps_from_schedule_events);
+        assert_eq!(schedule.summary().skipped, 0);
+    }
+
+    #[test]
+    fn empty_and_duplicate_spawn_are_errors() {
+        assert_eq!(
+            ProductionSchedule::from_runtime_trace(&[]).err(),
+            Some(ProjectionError::Empty)
+        );
+        let events = vec![
+            TraceEvent::spawn(1, at(1), task(1), region()),
+            TraceEvent::spawn(2, at(2), task(1), region()),
+        ];
+        assert_eq!(
+            ProductionSchedule::from_runtime_trace(&events).err(),
+            Some(ProjectionError::DuplicateSpawn {
+                task: CompactTaskId::from(task(1)),
+                seq: 2,
+            })
+        );
+        // Events of kinds the projection does not carry alone are "empty".
+        let only_region = vec![TraceEvent::time_advance(
+            1,
+            Time::ZERO,
+            Time::from_nanos(0),
+            Time::from_nanos(100),
+        )];
+        assert_eq!(
+            ProductionSchedule::from_runtime_trace(&only_region).err(),
+            Some(ProjectionError::Empty)
+        );
+    }
+
+    #[test]
+    fn time_and_timer_hints_are_carried_and_others_counted() {
+        let events = vec![
+            TraceEvent::spawn(1, at(1), task(1), region()),
+            TraceEvent::time_advance(2, at(2), Time::from_nanos(0), Time::from_nanos(100)),
+            TraceEvent::timer_scheduled(3, at(3), 7, Time::from_nanos(500)),
+            TraceEvent::timer_fired(4, at(4), 7),
+            TraceEvent::wake(5, at(5), task(1), region()),
+            TraceEvent::poll(6, at(6), task(1), region()),
+            TraceEvent::yield_task(7, at(7), task(1), region()),
+        ];
+        let schedule = ProductionSchedule::from_runtime_trace(&events).expect("projects");
+        let summary = schedule.summary();
+        assert_eq!(summary.time_advances, 1);
+        assert_eq!(summary.timers, 2);
+        assert_eq!(summary.yielded, 1);
+        assert_eq!(
+            summary.skipped, 1,
+            "Wake is not a decision the lab re-drives"
+        );
+        assert!(schedule.trace().events.iter().any(|event| matches!(
+            event,
+            ReplayEvent::TimeAdvanced {
+                from_nanos: 0,
+                to_nanos: 100
+            }
+        )));
+        assert!(schedule.trace().events.iter().any(|event| matches!(
+            event,
+            ReplayEvent::TimerCreated {
+                timer_id: 7,
+                deadline_nanos: 500
+            }
+        )));
+        assert_eq!(schedule.into_trace().len(), 6);
     }
 }

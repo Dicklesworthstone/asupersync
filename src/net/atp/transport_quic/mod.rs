@@ -160,6 +160,509 @@ pub use crate::net::atp::transport_tcp::{
     ManifestEntry, PackedMember, ReceiveReceipt, ReceiveReport, SendReport, TransferManifest,
 };
 
+/// Why the ATP-over-QUIC sender could not put more bytes on the wire at some
+/// instant.
+///
+/// One variant per gate the sender waits behind. The
+/// [`QuicSendLimiterReport`] accumulates how often and for how long each gate
+/// held, so a slow transfer names its limiter instead of leaving it to be
+/// inferred from throughput × RTT (br-asupersync-bi2462.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum QuicSendStallReason {
+    /// The byte pacer (source stream) or the token pacer (datagram spray)
+    /// held the next send until its deadline.
+    Pacing,
+    /// QUIC recovery's congestion window: bytes in flight reached `cwnd`.
+    Cwnd,
+    /// Stream-level flow control: the receiver's `MAX_STREAM_DATA` credit for
+    /// the paced source stream was below the admission minimum.
+    StreamCredit,
+    /// ATP's own in-flight admission cap on the source stream (bottleneck
+    /// bandwidth × RTprop with a 16 MiB runaway ceiling): sent-but-unacked
+    /// bytes exceeded it.
+    UnackedGuard,
+    /// The source-stream send queue exceeded its cap and had to be flushed
+    /// before more data was admitted.
+    ///
+    /// The flush that drains it reports its own blocking gate (`Pacing`,
+    /// `Cwnd`, `StreamCredit`) separately.
+    SendQueue,
+    /// Datagram-tier receiver window (`NeedMore` credit) blocked the spray.
+    ReceiverWindow,
+    /// A blocked flush with the congestion window and stream credit both
+    /// available (anti-amplification or a generator refusal).
+    Other,
+}
+
+impl QuicSendStallReason {
+    /// Every reason, in report order.
+    pub const ALL: [Self; 7] = [
+        Self::Pacing,
+        Self::Cwnd,
+        Self::StreamCredit,
+        Self::UnackedGuard,
+        Self::SendQueue,
+        Self::ReceiverWindow,
+        Self::Other,
+    ];
+
+    /// Stable snake-case name used in the `atp send` JSON report.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Pacing => "pacing",
+            Self::Cwnd => "cwnd",
+            Self::StreamCredit => "stream_credit",
+            Self::UnackedGuard => "unacked_guard",
+            Self::SendQueue => "send_queue",
+            Self::ReceiverWindow => "receiver_window",
+            Self::Other => "other",
+        }
+    }
+}
+
+/// Count and total held time of one stall reason.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct QuicSendStall {
+    /// How many times the sender waited behind this gate.
+    pub count: u64,
+    /// Total time the gate held the sender, in microseconds (saturating).
+    pub micros: u64,
+}
+
+/// Sender-side limiter telemetry for one ATP-over-QUIC transfer.
+///
+/// Returned next to the [`SendReport`] by [`send_path_with_limiter_report`]
+/// and printed by `atp send --transport quic` as the `limiter` block. Every
+/// field is observational: the report changes nothing about how the sender
+/// paces or recovers. Stall durations are attributed per wait-loop iteration
+/// from the loop's own elapsed clock, so their sum never exceeds the wall
+/// time of the loops that recorded them (a loop's final, un-attributed slice
+/// is dropped, never guessed). Connection-level `MAX_DATA` credit is not
+/// tracked by the native stack and has no entry here.
+///
+/// `#[non_exhaustive]`: fields are added in later `0.4.x` releases;
+/// construct it with [`Default`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct QuicSendLimiterReport {
+    /// Pacer-held sends: the source-stream byte pacer, the datagram token
+    /// pacer, and the shared AIMD rate pacer's retry-after waits.
+    pub pacing: QuicSendStall,
+    /// Congestion-window-blocked waits.
+    pub cwnd: QuicSendStall,
+    /// `MAX_STREAM_DATA`-blocked waits on the paced source stream.
+    pub stream_credit: QuicSendStall,
+    /// Waits behind ATP's in-flight admission cap on the source stream.
+    pub unacked_guard: QuicSendStall,
+    /// Waits for the source-stream send queue to drain below its cap.
+    pub send_queue: QuicSendStall,
+    /// Datagram-tier receiver-window waits.
+    pub receiver_window: QuicSendStall,
+    /// Blocked flushes with no identifiable gate.
+    pub other: QuicSendStall,
+    /// Number of transport samples folded into the peak/min fields.
+    pub transport_samples: u64,
+    /// Highest QUIC bytes-in-flight observed at a sample point.
+    pub peak_bytes_in_flight: u64,
+    /// Highest congestion window observed at a sample point.
+    pub peak_congestion_window_bytes: u64,
+    /// Lowest congestion window observed at a sample point (`None` before
+    /// the first sample).
+    pub min_congestion_window_bytes: Option<u64>,
+    /// Congestion window when the transfer finished.
+    pub final_congestion_window_bytes: u64,
+    /// Slow-start threshold when the transfer finished; `None` while QUIC
+    /// recovery never left slow start (RFC 9002 keeps it at infinity).
+    pub final_ssthresh_bytes: Option<u64>,
+    /// Whether any sample saw recovery outside slow start.
+    pub slow_start_exited: bool,
+    /// Minimum RTT the QUIC transport measured, in microseconds.
+    pub min_rtt_micros: Option<u64>,
+    /// Smoothed RTT at the end of the transfer, in microseconds.
+    pub smoothed_rtt_micros: Option<u64>,
+    /// Application-data loss timeouts that declared at least one packet lost.
+    pub loss_timeouts: u64,
+    /// Packets those timeouts declared lost.
+    pub lost_packets: u64,
+    /// Bytes those timeouts declared lost.
+    pub lost_bytes: u64,
+    /// Source-stream retransmit batches (ACK-gap and PTO driven).
+    pub retransmit_batches: u64,
+    /// Source-stream payload bytes queued for retransmission.
+    pub retransmitted_stream_bytes: u64,
+    /// QUIC recovery's PTO backoff count at the end of the transfer.
+    pub pto_count: u32,
+    /// The in-flight admission cap in force when the transfer finished.
+    pub unacked_admission_cap_bytes: u64,
+    /// Lowest `MAX_STREAM_DATA` credit seen at the source-stream admission
+    /// gate (`None` if the gate never ran).
+    pub min_stream_send_credit_bytes: Option<u64>,
+    /// UDP send-batch failures counted by the endpoint (`ENOBUFS` and friends
+    /// surface here on a real NIC behind a shallow qdisc).
+    pub udp_send_errors: u64,
+    /// Send buffer size asked of the socket.
+    pub requested_send_buffer_bytes: Option<usize>,
+    /// Send buffer size the platform reported after tuning (Linux doubles the
+    /// request and clamps it to `net.core.wmem_max`).
+    pub applied_send_buffer_bytes: Option<usize>,
+    /// Receive buffer size asked of the socket.
+    pub requested_recv_buffer_bytes: Option<usize>,
+    /// Receive buffer size the platform reported after tuning.
+    pub applied_recv_buffer_bytes: Option<usize>,
+}
+
+impl QuicSendLimiterReport {
+    /// The stall record for `reason`.
+    #[must_use]
+    pub const fn stall(&self, reason: QuicSendStallReason) -> QuicSendStall {
+        match reason {
+            QuicSendStallReason::Pacing => self.pacing,
+            QuicSendStallReason::Cwnd => self.cwnd,
+            QuicSendStallReason::StreamCredit => self.stream_credit,
+            QuicSendStallReason::UnackedGuard => self.unacked_guard,
+            QuicSendStallReason::SendQueue => self.send_queue,
+            QuicSendStallReason::ReceiverWindow => self.receiver_window,
+            QuicSendStallReason::Other => self.other,
+        }
+    }
+
+    // The recording side lives in `native_link` (feature `tls`); the pure
+    // helpers stay available (and unit-tested) without it.
+    #[cfg_attr(not(feature = "tls"), allow(dead_code))]
+    fn stall_mut(&mut self, reason: QuicSendStallReason) -> &mut QuicSendStall {
+        match reason {
+            QuicSendStallReason::Pacing => &mut self.pacing,
+            QuicSendStallReason::Cwnd => &mut self.cwnd,
+            QuicSendStallReason::StreamCredit => &mut self.stream_credit,
+            QuicSendStallReason::UnackedGuard => &mut self.unacked_guard,
+            QuicSendStallReason::SendQueue => &mut self.send_queue,
+            QuicSendStallReason::ReceiverWindow => &mut self.receiver_window,
+            QuicSendStallReason::Other => &mut self.other,
+        }
+    }
+
+    /// Every stall reason with its record, in [`QuicSendStallReason::ALL`]
+    /// order.
+    #[must_use]
+    pub fn stalls(&self) -> [(QuicSendStallReason, QuicSendStall); 7] {
+        QuicSendStallReason::ALL.map(|reason| (reason, self.stall(reason)))
+    }
+
+    /// Total held time across all reasons, in microseconds (saturating).
+    #[must_use]
+    pub fn total_stall_micros(&self) -> u64 {
+        self.stalls()
+            .iter()
+            .fold(0u64, |total, (_, stall)| total.saturating_add(stall.micros))
+    }
+
+    /// The reason that held the sender longest, or `None` when nothing did.
+    /// Ties resolve to the earlier entry of [`QuicSendStallReason::ALL`].
+    #[must_use]
+    pub fn dominant_stall(&self) -> Option<(QuicSendStallReason, QuicSendStall)> {
+        let mut best: Option<(QuicSendStallReason, QuicSendStall)> = None;
+        for (reason, stall) in self.stalls() {
+            if stall.micros == 0 {
+                continue;
+            }
+            match best {
+                Some((_, current)) if current.micros >= stall.micros => {}
+                _ => best = Some((reason, stall)),
+            }
+        }
+        best
+    }
+
+    /// Record one wait of `held` behind `reason`.
+    #[cfg_attr(not(feature = "tls"), allow(dead_code))]
+    pub(crate) fn note_stall(&mut self, reason: QuicSendStallReason, held: Duration) {
+        let stall = self.stall_mut(reason);
+        stall.count = stall.count.saturating_add(1);
+        stall.micros = stall
+            .micros
+            .saturating_add(duration_to_micros_saturating(held));
+    }
+
+    /// Fold one transport snapshot into the peak/min/slow-start fields.
+    #[cfg_attr(not(feature = "tls"), allow(dead_code))]
+    pub(crate) fn observe_transport(
+        &mut self,
+        bytes_in_flight: u64,
+        congestion_window_bytes: u64,
+        ssthresh_bytes: u64,
+    ) {
+        self.transport_samples = self.transport_samples.saturating_add(1);
+        self.peak_bytes_in_flight = self.peak_bytes_in_flight.max(bytes_in_flight);
+        self.peak_congestion_window_bytes = self
+            .peak_congestion_window_bytes
+            .max(congestion_window_bytes);
+        self.min_congestion_window_bytes = Some(
+            self.min_congestion_window_bytes
+                .map_or(congestion_window_bytes, |min| {
+                    min.min(congestion_window_bytes)
+                }),
+        );
+        self.final_congestion_window_bytes = congestion_window_bytes;
+        if ssthresh_bytes != u64::MAX {
+            self.slow_start_exited = true;
+            self.final_ssthresh_bytes = Some(ssthresh_bytes);
+        }
+    }
+}
+
+/// Microseconds of `duration`, saturating at `u64::MAX`.
+#[cfg_attr(not(feature = "tls"), allow(dead_code))]
+pub(crate) fn duration_to_micros_saturating(duration: Duration) -> u64 {
+    u64::try_from(duration.as_micros()).unwrap_or(u64::MAX)
+}
+
+/// Splits a wait loop's monotonically growing elapsed time into
+/// non-overlapping slices.
+///
+/// Per-iteration stall attribution can then never exceed the wall time of
+/// the loop that recorded it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[cfg_attr(not(feature = "tls"), allow(dead_code))]
+pub(crate) struct QuicStallSliceAccounting {
+    accounted: Duration,
+}
+
+impl QuicStallSliceAccounting {
+    /// The time since the previous call, given the loop's total `elapsed`.
+    /// A non-monotone `elapsed` yields an empty slice rather than a negative
+    /// or double-counted one.
+    #[cfg_attr(not(feature = "tls"), allow(dead_code))]
+    pub(crate) fn take_slice(&mut self, elapsed: Duration) -> Duration {
+        let slice = elapsed.saturating_sub(self.accounted);
+        self.accounted = self.accounted.max(elapsed);
+        slice
+    }
+}
+
+/// Which gate holds the source-stream admission loop, given the three checks
+/// it makes in order (queue cap, stream credit, in-flight admission cap).
+#[cfg_attr(not(feature = "tls"), allow(dead_code))]
+pub(crate) const fn classify_source_stream_admission(
+    queue_over_cap: bool,
+    credit_ok: bool,
+    unacked_ok: bool,
+) -> Option<QuicSendStallReason> {
+    if queue_over_cap {
+        Some(QuicSendStallReason::SendQueue)
+    } else if !credit_ok {
+        Some(QuicSendStallReason::StreamCredit)
+    } else if !unacked_ok {
+        Some(QuicSendStallReason::UnackedGuard)
+    } else {
+        None
+    }
+}
+
+/// Which gate blocked a flush that sent nothing while stream frames were
+/// pending.
+///
+/// The congestion window first, then exhausted stream credit on the paced
+/// source stream, else an unidentified refusal.
+#[cfg_attr(not(feature = "tls"), allow(dead_code))]
+pub(crate) const fn classify_blocked_flush(
+    can_send: bool,
+    paced_stream_credit_remaining: Option<u64>,
+) -> QuicSendStallReason {
+    if !can_send {
+        QuicSendStallReason::Cwnd
+    } else if matches!(paced_stream_credit_remaining, Some(0)) {
+        QuicSendStallReason::StreamCredit
+    } else {
+        QuicSendStallReason::Other
+    }
+}
+
+/// A finished ATP-over-QUIC send: the shared [`SendReport`] plus the sender's
+/// limiter telemetry.
+///
+/// `#[non_exhaustive]` so later `0.4.x` releases can add fields without
+/// breaking exhaustive destructuring.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct QuicSendOutcome {
+    /// The transfer report shared with the TCP and RQ transports.
+    pub report: SendReport,
+    /// Why the sender waited, and what QUIC recovery looked like.
+    pub limiter: QuicSendLimiterReport,
+}
+
+#[cfg(test)]
+mod limiter_report_tests {
+    use super::*;
+
+    #[test]
+    fn stall_accounting_counts_every_reason_and_names_the_longest() {
+        let mut report = QuicSendLimiterReport::default();
+        assert_eq!(report.dominant_stall(), None);
+        assert_eq!(report.total_stall_micros(), 0);
+
+        let held = [
+            (QuicSendStallReason::Pacing, 1_000),
+            (QuicSendStallReason::Cwnd, 5_000),
+            (QuicSendStallReason::StreamCredit, 300),
+            (QuicSendStallReason::UnackedGuard, 7_000),
+            (QuicSendStallReason::SendQueue, 20),
+            (QuicSendStallReason::ReceiverWindow, 4),
+            (QuicSendStallReason::Other, 1),
+        ];
+        for (reason, micros) in held {
+            report.note_stall(reason, Duration::from_micros(micros));
+            report.note_stall(reason, Duration::from_micros(micros));
+        }
+
+        for (reason, micros) in held {
+            let stall = report.stall(reason);
+            assert_eq!(stall.count, 2, "{}", reason.name());
+            assert_eq!(stall.micros, micros * 2, "{}", reason.name());
+        }
+        let expected_total: u64 = held.iter().map(|(_, micros)| micros * 2).sum();
+        assert_eq!(report.total_stall_micros(), expected_total);
+        let (dominant, stall) = report.dominant_stall().expect("something stalled");
+        assert_eq!(dominant, QuicSendStallReason::UnackedGuard);
+        assert_eq!(stall.micros, 14_000);
+        assert_eq!(dominant.name(), "unacked_guard");
+        assert_eq!(
+            report.stalls().map(|(reason, _)| reason),
+            QuicSendStallReason::ALL
+        );
+    }
+
+    #[test]
+    fn dominant_stall_ties_resolve_to_report_order_and_ignore_counts() {
+        let mut report = QuicSendLimiterReport::default();
+        report.note_stall(QuicSendStallReason::Cwnd, Duration::from_micros(10));
+        report.note_stall(QuicSendStallReason::Pacing, Duration::from_micros(10));
+        // Many short pacing waits still lose to one long cwnd wait.
+        for _ in 0..50 {
+            report.note_stall(QuicSendStallReason::SendQueue, Duration::from_nanos(10));
+        }
+        let (dominant, _) = report.dominant_stall().expect("stalled");
+        assert_eq!(dominant, QuicSendStallReason::Pacing);
+        assert_eq!(report.send_queue.count, 50);
+        assert_eq!(report.send_queue.micros, 0);
+    }
+
+    #[test]
+    fn stall_micros_saturate_instead_of_wrapping() {
+        let mut report = QuicSendLimiterReport::default();
+        report.note_stall(QuicSendStallReason::Cwnd, Duration::MAX);
+        report.note_stall(QuicSendStallReason::Cwnd, Duration::MAX);
+        assert_eq!(report.cwnd.micros, u64::MAX);
+        assert_eq!(report.total_stall_micros(), u64::MAX);
+    }
+
+    #[test]
+    fn slice_accounting_never_exceeds_the_loop_wall_time() {
+        let mut slices = QuicStallSliceAccounting::default();
+        let mut attributed = Duration::ZERO;
+        // Deterministic pseudo-random monotone clock with one backwards step.
+        let mut state = 0x2545_F491_4F6C_DD1Du64;
+        let mut clock = Duration::ZERO;
+        let mut previous_clock = Duration::ZERO;
+        for step in 0..1_000u32 {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            let advance = Duration::from_micros(state % 5_000);
+            clock += advance;
+            let observed = if step == 500 {
+                // A reading BELOW the last accounted point (a non-monotone
+                // clock) must yield an empty slice, never a negative or a
+                // double-counted one; the skipped advance is attributed by
+                // the next monotone reading.
+                previous_clock
+                    .checked_sub(Duration::from_millis(3))
+                    .unwrap_or(Duration::ZERO)
+            } else {
+                clock
+            };
+            let slice = slices.take_slice(observed);
+            if step == 500 {
+                assert_eq!(slice, Duration::ZERO, "a backwards clock yields no slice");
+            }
+            attributed += slice;
+            assert!(
+                attributed <= clock,
+                "attributed {attributed:?} > wall {clock:?}"
+            );
+            previous_clock = clock;
+        }
+        assert_eq!(attributed, clock, "monotone slices sum to the wall time");
+    }
+
+    #[test]
+    fn source_stream_admission_classifier_follows_gate_order() {
+        assert_eq!(
+            classify_source_stream_admission(true, false, false),
+            Some(QuicSendStallReason::SendQueue)
+        );
+        assert_eq!(
+            classify_source_stream_admission(false, false, false),
+            Some(QuicSendStallReason::StreamCredit)
+        );
+        assert_eq!(
+            classify_source_stream_admission(false, true, false),
+            Some(QuicSendStallReason::UnackedGuard)
+        );
+        assert_eq!(classify_source_stream_admission(false, true, true), None);
+    }
+
+    #[test]
+    fn blocked_flush_classifier_prefers_cwnd_then_stream_credit() {
+        assert_eq!(
+            classify_blocked_flush(false, Some(0)),
+            QuicSendStallReason::Cwnd
+        );
+        assert_eq!(
+            classify_blocked_flush(true, Some(0)),
+            QuicSendStallReason::StreamCredit
+        );
+        assert_eq!(
+            classify_blocked_flush(true, Some(1)),
+            QuicSendStallReason::Other
+        );
+        assert_eq!(
+            classify_blocked_flush(true, None),
+            QuicSendStallReason::Other
+        );
+    }
+
+    #[test]
+    fn transport_samples_track_peaks_and_slow_start_exit() {
+        let mut report = QuicSendLimiterReport::default();
+        report.observe_transport(1_000, 12_000, u64::MAX);
+        assert!(!report.slow_start_exited);
+        assert_eq!(report.final_ssthresh_bytes, None);
+        assert_eq!(report.min_congestion_window_bytes, Some(12_000));
+        report.observe_transport(50_000, 64_000, u64::MAX);
+        report.observe_transport(30_000, 32_000, 32_000);
+        assert_eq!(report.transport_samples, 3);
+        assert_eq!(report.peak_bytes_in_flight, 50_000);
+        assert_eq!(report.peak_congestion_window_bytes, 64_000);
+        assert_eq!(report.min_congestion_window_bytes, Some(12_000));
+        assert_eq!(report.final_congestion_window_bytes, 32_000);
+        assert_eq!(report.final_ssthresh_bytes, Some(32_000));
+        assert!(report.slow_start_exited);
+    }
+
+    #[test]
+    fn stall_reason_names_are_stable_and_distinct() {
+        let names: std::collections::BTreeSet<&str> = QuicSendStallReason::ALL
+            .iter()
+            .map(|reason| reason.name())
+            .collect();
+        assert_eq!(names.len(), QuicSendStallReason::ALL.len());
+        assert!(names.contains("cwnd"));
+        assert!(names.contains("stream_credit"));
+    }
+}
+
 // The RaptorQ symbol-envelope codec (the framing of a symbol inside a QUIC
 // DATAGRAM) — the foundational piece B2/B3 build the sender/receiver on.
 pub use symbol_envelope::{
@@ -9269,6 +9772,17 @@ async fn reject_quic_destination_symlink_prefix(
     reject_quic_destination_symlink_path(base, out_path, true).await
 }
 
+/// Whether `path` is one of the operating system's own symlinked mount
+/// points (macOS: `/tmp`, `/var`, `/etc` -> `/private/...`).
+///
+/// The destination-ancestor symlink rule tolerates these: it exists to
+/// catch a destination directory swapped for a link that escapes the root,
+/// and the OS layout above every temp directory is not that
+/// (br-asupersync-bi2462.21.3).
+fn is_os_symlinked_mount_point(path: &Path) -> bool {
+    cfg!(target_os = "macos") && matches!(path.to_str(), Some("/tmp" | "/var" | "/etc"))
+}
+
 async fn reject_quic_destination_symlink_ancestors(
     base: &Path,
     out_path: &Path,
@@ -9298,6 +9812,12 @@ async fn reject_quic_destination_symlink_path(
         .skip(1)
         .filter(|path| !path.as_os_str().is_empty())
     {
+        if is_os_symlinked_mount_point(ancestor) {
+            // macOS lays out /tmp, /var and /etc as symlinks into /private;
+            // they are the operating system's own namespace, not an escape
+            // route a peer could plant (br-asupersync-bi2462.21.3).
+            continue;
+        }
         reject_quic_existing_symlink(ancestor).await?;
     }
 
@@ -10260,6 +10780,28 @@ pub async fn send_path(
     config: QuicConfig,
     peer_id: &str,
 ) -> Result<SendReport, QuicTransportError> {
+    send_path_with_limiter_report(cx, addr, source, config, peer_id)
+        .await
+        .map(|outcome| outcome.report)
+}
+
+/// [`send_path`] that also returns the sender's limiter telemetry.
+///
+/// Same transfer, same [`SendReport`]; the extra [`QuicSendLimiterReport`]
+/// says why the sender waited (pacing, cwnd, stream credit, ATP's in-flight
+/// admission cap, queue drains, receiver window), what QUIC recovery looked
+/// like (peak/final cwnd, ssthresh, RTTs, loss timeouts, retransmitted bytes,
+/// PTO count) and what the UDP socket was given (applied buffer sizes,
+/// send-batch errors). `atp send --transport quic` prints it as the `limiter`
+/// JSON block. Observational only: it does not change throughput
+/// (br-asupersync-bi2462.2).
+pub async fn send_path_with_limiter_report(
+    cx: &Cx,
+    addr: SocketAddr,
+    source: &Path,
+    config: QuicConfig,
+    peer_id: &str,
+) -> Result<QuicSendOutcome, QuicTransportError> {
     cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
     config.validate()?;
     trace_config_summary(cx, "send_path", &config, peer_id, None);
@@ -10271,7 +10813,9 @@ pub async fn send_path(
     trace_quic_fanout_dispatch_plan(cx, 0, &fanout_plan);
     #[cfg(feature = "tls")]
     {
-        native_link::send_prepared_over_udp(cx, addr, &prepared, &config, peer_id).await
+        let (report, limiter) =
+            native_link::send_prepared_over_udp(cx, addr, &prepared, &config, peer_id).await?;
+        Ok(QuicSendOutcome { report, limiter })
     }
     #[cfg(not(feature = "tls"))]
     {

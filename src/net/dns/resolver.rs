@@ -4081,10 +4081,12 @@ mod tests {
             }
         }
 
+        // /etc/nsswitch.conf is a glibc/Linux artefact; macOS and the BSDs
+        // resolve through their own directory services and never have it.
         crate::assert_with_log!(
-            has_nsswitch,
-            "nsswitch.conf availability (system-dependent)",
-            has_nsswitch,
+            has_nsswitch || !cfg!(target_os = "linux"),
+            "nsswitch.conf availability (required on Linux, absent elsewhere)",
+            cfg!(target_os = "linux"),
             has_nsswitch
         );
 

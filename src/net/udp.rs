@@ -1390,9 +1390,11 @@ fn recycle_unused_recv_batch_payload(spare_payloads: &mut Vec<Vec<u8>>, buf: Vec
     }
 }
 
-/// Whether a `connect(2)` failure means "this UDP socket is already
-/// connected to another peer" (`EISCONN`), the BSD refusal that
-/// [`UdpSocket::connect`] resolves by dissolving the association first.
+/// Whether a `connect(2)` failure means the UDP socket is already connected
+/// to another peer (`EISCONN`).
+///
+/// The BSD refusal that [`UdpSocket::connect`] resolves by dissolving the
+/// association first.
 #[cfg(all(unix, not(target_arch = "wasm32")))]
 fn udp_already_connected(err: &io::Error) -> bool {
     err.raw_os_error() == Some(nix::errno::Errno::EISCONN as i32)
@@ -1405,11 +1407,13 @@ fn udp_already_connected(_err: &io::Error) -> bool {
     false
 }
 
-/// Dissolve a connected UDP socket's peer association by connecting to the
-/// null address of the same family as `next_peer` (unspecified address,
-/// port 0). BSD documents this as the way to disconnect a datagram socket
-/// and may "harmlessly" answer `EAFNOSUPPORT`; such a benign refusal is
-/// treated as success and the caller's real re-connect decides the outcome.
+/// Dissolve a connected UDP socket's peer association.
+///
+/// Connects to the null address of the same family as `next_peer`
+/// (unspecified address, port 0). BSD documents this as the way to
+/// disconnect a datagram socket and may "harmlessly" answer `EAFNOSUPPORT`;
+/// such a benign refusal is treated as success and the caller's real
+/// re-connect decides the outcome.
 #[cfg(not(target_arch = "wasm32"))]
 fn dissolve_udp_association(socket: &StdUdpSocket, next_peer: SocketAddr) -> io::Result<()> {
     let null_address = if next_peer.is_ipv4() {
@@ -2130,8 +2134,17 @@ impl UdpSocket {
             ..UdpBatchIoReport::default()
         };
 
+        // BSD stacks (macOS) refuse `sendto` with an explicit destination on
+        // a connected UDP socket (EISCONN); Linux accepts it. Send to the
+        // connected peer without an address (br-asupersync-bi2462.21.2).
+        let connected_peer = self.inner.peer_addr().ok();
         for packet in packets {
-            match self.send_to(packet.payload, packet.dst_addr).await {
+            let outcome = if connected_peer == Some(packet.dst_addr) {
+                self.send(packet.payload).await
+            } else {
+                self.send_to(packet.payload, packet.dst_addr).await
+            };
+            match outcome {
                 Ok(sent) => {
                     report.packets_processed += 1;
                     report.bytes_processed += sent;
@@ -2978,9 +2991,11 @@ mod tests {
     }
 
     /// br-asupersync-bi2462.21.2: a connected UDP socket can be re-targeted
-    /// to a second peer on every platform. Linux replaces the peer directly;
-    /// macOS answers `EISCONN` unless the association is dissolved first,
-    /// which `connect` now does. Both peers must actually receive.
+    /// to a second peer on every platform.
+    ///
+    /// Linux replaces the peer directly; macOS answers `EISCONN` unless the
+    /// association is dissolved first, which `connect` now does. Both peers
+    /// must actually receive.
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn udp_socket_reconnects_to_a_second_peer() {

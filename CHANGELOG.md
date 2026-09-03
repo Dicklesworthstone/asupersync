@@ -81,6 +81,71 @@ is `v0.4.9`.
 - The real-broker suite runs green locally against Redpanda (13/13); CI's
   broker now advertises `127.0.0.1` so a host that resolves `localhost` to
   `::1` cannot strand consumer connections.
+- Raw librdkafka properties pass through: `ConsumerConfig::with_property` /
+  `set_property` (and the `ProducerConfig` twin) are applied before the typed
+  fields, so typed fields win on conflict. `partition.assignment.strategy =
+  cooperative-sticky` now reaches the consumer's rebalance context, whose
+  incremental path is exercised against a real broker; `KafkaConsumer::
+  rebalance_stats()` counts incremental vs eager assign/unassign callbacks and
+  `rebalance_protocol()` reads the negotiated protocol outside the callback.
+- A swallowed transient error is observable: `KafkaConsumer::last_transient_error()`
+  reports the code, first/last occurrence and count, and the consumer traces
+  it once per distinct code, so a subscription to a topic that never appears
+  is distinguishable from an idle topic.
+- `SymbolCancelToken::cancel` publishes `cancelled_at` before the cancelled
+  flag, so `child()` no longer waits (a wall-clock bounded spin) for an
+  in-flight publication; the lab's determinism no longer depends on host
+  timing there.
+- The ambient-authority inventory snapshot is keyed without line numbers, so
+  an edit above an ambient site no longer moves the snapshot; only a new,
+  removed or rewritten site does.
+
+### Lab replay of production schedules, the obligation seam, macOS UDP (2026-09-02)
+
+- `trace::replay::ProductionSchedule::from_runtime_trace` projects a runtime
+  trace (Spawn / Poll or Schedule / Yield / Complete / TimeAdvance / Timer
+  events) into a replayable schedule with spawn ordinals and a projection
+  summary; strict mode refuses a task that acts before its spawn, tolerant
+  mode lists it as an orphan. Documented in `docs/replay-debugging.md`.
+- `LabRuntime::replay_production_schedule` drives the lab's scheduling
+  choices from such a schedule: recorded spawn ordinals bind to lab tasks by
+  first entry into the scheduler, a not-yet-runnable task is waited for
+  through bounded virtual-time advances, and the first divergence (step,
+  index, expected vs actual task, reason) is reported through
+  `replay_report()` under a `Stop` or `Continue` policy. The lab derives a
+  schedule from its own recording with `recorded_production_schedule()`.
+  The production three-lane worker does not emit per-poll trace events yet,
+  so a real production trace projects its spawn order but zero steps until
+  that emission lands (tracked as the B3 prerequisite).
+- Obligation mailbox (`runtime::obligation_mailbox`): a task context built by
+  a runtime can mint a runtime-tracked obligation without the state lock
+  (`Cx::try_register_obligation`, crate-private), resolve it with
+  `commit` / `abort`, and a dropped unresolved token is reported as a leak.
+  Posts are Copy values on a lock-free queue, applied by the runtime next to
+  spawn admissions through `RuntimeState`'s authoritative obligation methods;
+  undrained posts and live tokens count as pending work for `is_quiescent`
+  and drain gating. No primitive uses the seam yet.
+- `UdpSocket::connect` re-targets a connected socket on BSD-derived stacks:
+  on `EISCONN` (macOS, iOS, FreeBSD) it dissolves the association by
+  connecting to the null address and retries once; Linux and Windows are
+  unchanged. Verified on macOS 26.2 (arm64).
+
+### ATP-over-QUIC sender limiter report (2026-09-02)
+
+- `transport_quic::send_path_with_limiter_report` returns the usual
+  `SendReport` plus a `QuicSendLimiterReport`: per-reason stall counts and
+  held time (pacing, cwnd, `MAX_STREAM_DATA` credit, ATP's in-flight
+  admission cap, send-queue drains, receiver window), peak/final cwnd and
+  ssthresh, min/smoothed RTT, loss timeouts, retransmitted bytes, PTO count,
+  the admission cap in force, UDP send-batch errors and the applied socket
+  buffer sizes. `atp send --transport quic` prints it as the additive
+  `limiter` JSON block and one `quic_limiter` progress line naming the
+  dominant reason. `send_path` is unchanged; the report is observational.
+- Motivation: the netem `wan` / `wanloss` / `wanqueue` regimes showed that a
+  shallow queue costs the QUIC sender 61 % while rsync and the RQ fountain
+  are unaffected, and that a clean 90 ms pipe leaves it window-limited at
+  53 % of the link; the report names which gate is responsible instead of
+  leaving it to throughput × RTT arithmetic.
 
 ### Encrypted ATP measured honestly (2026-09-02)
 

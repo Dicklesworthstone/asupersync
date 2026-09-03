@@ -321,6 +321,33 @@ SUITE=stub-resolution
 rch exec -- bash scripts/run_all_e2e.sh --suite "$SUITE"
 ```
 
+## Recipe 6: Assert No Leaked Obligations Through The Mailbox Seam
+
+A primitive that holds only a `&Cx` mints a runtime-tracked obligation with
+`cx.try_register_obligation(kind, cx.task_id())` (crate-private,
+`runtime::obligation_mailbox`, br-asupersync-bi2462.13). The reservation is a
+post on the runtime's obligation mailbox; the `LabRuntime` applies posts at
+the start of every step, so the accounting is deterministic. To assert a
+primitive leaks nothing:
+
+1. Build the lab with `state.set_obligation_leak_response(ObligationLeakResponse::Silent)`
+   when the test wants to observe a leak instead of panicking on it.
+2. Drive the scenario to `run_until_quiescent()`; `is_quiescent()` is false
+   while a post is undrained or a token is alive, so a hung reservation
+   shows up as a non-quiescent run, not as a silent pass.
+3. Read the mailbox counters through
+   `runtime.state.obligation_gateway().unwrap().mailbox().stats()`:
+   `posted == applied`, `refused == 0`, and `leaked == 0` for a clean run;
+   `open_tickets() == 0` proves every applied reservation was resolved.
+4. `runtime.state.pending_obligation_count() == 0` and
+   `runtime.state.leak_count() == 0` close the loop on the authoritative
+   table. A planted negative (drop the token unresolved) must move
+   `leaked` and `leak_count()` to 1, or the assertion never ran.
+
+`Cx::for_testing()` has no gateway and returns `None`: a test that needs the
+seam must build its task through a runtime (`create_task` on the lab state
+or a spawn), never through a hand-built `Cx`.
+
 ## Failure Forensics Loop
 
 1. Capture the exact command, RCH build id if present, `CARGO_TARGET_DIR`, and
