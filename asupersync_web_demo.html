@@ -160,7 +160,7 @@ h3 { font-size: 1.25rem; font-weight: 600; }
   user-select: none;
   -webkit-tap-highlight-color: transparent;
 }
-.btn:focus-visible, a:focus-visible, summary:focus-visible, textarea:focus-visible {
+.btn:focus-visible, button:focus-visible, a:focus-visible, summary:focus-visible, textarea:focus-visible {
   outline: 3px solid var(--focus); outline-offset: 3px;
 }
 .btn:active:not(:disabled) { transform: scale(0.96); transition-duration: 0.06s; }
@@ -489,6 +489,7 @@ h3 { font-size: 1.25rem; font-weight: 600; }
 /* ── Outcome Cards ─────────────────────────────────────────────── */
 .outcome-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; }
 .outcome-card {
+  appearance: none; -webkit-appearance: none; color: inherit; font: inherit; text-align: left;
   padding: 20px;
   border-radius: var(--radius);
   border: 1px solid;
@@ -784,8 +785,8 @@ input[type="text"]:focus, select:focus, textarea:focus {
 
 /* ── Interactive element focus ─────────────────────────────────── */
 .outcome-card:focus-visible, .region-box:focus-visible {
-  outline: 2px solid var(--blue);
-  outline-offset: 2px;
+  outline: 3px solid var(--focus);
+  outline-offset: 3px;
 }
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -1175,8 +1176,8 @@ console.<span class="fn">log</span>(<span class="str">`Fingerprint: </span><span
 <span class="kw">const</span> task1 = reqA.<span class="fn">spawnTask</span>({ <span class="prop">label</span>: <span class="str">'parse-headers'</span> }).value;
 <span class="kw">const</span> task2 = reqA.<span class="fn">spawnTask</span>({ <span class="prop">label</span>: <span class="str">'read-body'</span> }).value;
 
-<span class="cmt">// Closing a region waits for all children</span>
-reqA.<span class="fn">close</span>();  <span class="cmt">// → quiescence guaranteed</span>
+<span class="cmt">// Close the child scopes before their parent</span>
+reqA.<span class="fn">close</span>();  <span class="cmt">// → descendant lifecycle records close</span>
 reqB.<span class="fn">close</span>();
 httpRegion.<span class="fn">close</span>();</div>
       </div>
@@ -1191,7 +1192,7 @@ httpRegion.<span class="fn">close</span>();</div>
           </div>
         </div>
         <div id="region-tree-container">
-          <svg id="region-svg" viewBox="0 0 800 420" style="max-height: 420px;" role="img" aria-label="Interactive region tree visualization — click any region to trigger cascading cancellation">
+          <svg id="region-svg" viewBox="0 0 800 420" style="max-height: 420px;" role="group" aria-label="Interactive region tree. Select a region to trigger cascading cancellation.">
             <!-- Rendered by JS -->
           </svg>
         </div>
@@ -1306,10 +1307,11 @@ httpRegion.<span class="fn">close</span>();</div>
       </div>
     </div>
 
-    <!-- Resource-level Tokio vs Asupersync comparison -->
+    <!-- Lifecycle-policy comparison. The resource labels are illustrative. -->
     <div class="mt-3 reveal">
+      <p class="text-dim" style="font-size:12px;margin-bottom:8px;">Illustrative resource labels; the Asupersync side records and joins three WASM task obligations.</p>
       <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px;" id="comparison-grid">
-        <!-- Tokio side -->
+        <!-- Untracked cleanup side (legacy IDs retained for stable DOM hooks). -->
         <div class="card card-sm" id="tokio-panel" style="border-color: var(--border2); transition: border-color 0.4s, box-shadow 0.4s;">
           <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 12px;">
             <span class="res-dot active" id="tokio-status-dot" style="width:8px;height:8px;border-radius:50%;background:var(--blue);"></span>
@@ -1591,7 +1593,7 @@ t.<span class="fn">join</span>(<span class="typ">Outcome</span>.<span class="fn"
   <div class="container">
     <div class="reveal">
       <span class="exhibit-num">Exhibit 9 — Interactive</span>
-      <h2>Live Runtime REPL</h2>
+      <h2>Live WASM Lifecycle REPL</h2>
       <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
         Type JavaScript below to call the shipped <strong style="color:var(--text);">WASM lifecycle API</strong> directly.
         Handle allocation, scope transitions, task outcomes, and cancellation records cross the compiled Rust boundary;
@@ -2373,7 +2375,7 @@ window.runAbiDemo = function() {
 
   clog('abi-console', `ABI Version: ${JSON.stringify(version)}`, 'ok');
   clog('abi-console', `Fingerprint: ${fp}`, 'ok');
-  clog('abi-console', 'Mode: Live WASM — all operations are real', 'ok');
+  clog('abi-console', 'Mode: deployed local WASM lifecycle ledger', 'ok');
   showToast(`ABI v${version.major}.${version.minor} verified`, 'ok');
 
   const container = document.getElementById('abi-result');
@@ -2393,7 +2395,7 @@ window.runAbiDemo = function() {
     <div style="margin-top:16px; display:flex; align-items:center; gap:8px;">
       <span class="status-dot live"></span>
       <span style="font-size:13px; color:var(--text2);">
-        WASM module loaded and verified — all operations are real
+        Local WASM artifact loaded; ABI version and fingerprint returned
       </span>
     </div>
   `;
@@ -2699,11 +2701,11 @@ const cancelPhases = [
 ];
 
 const cancelStatusText = {
-  running: 'All tasks executing normally.',
-  requested: 'Cancel signal received. Notifying running tasks of shutdown budget...',
-  draining: 'Tasks winding down gracefully. Flushing buffers, closing connections...',
-  finalizing: 'Budget nearly exhausted. Forcing remaining stragglers to complete...',
-  completed: 'All resources released cleanly. Zero leaked state. Zero lost writes.',
+  running: 'Lifecycle handles are active.',
+  requested: 'Cancellation requested with a shutdown attribution record.',
+  draining: 'Host-timed presentation of the draining phase.',
+  finalizing: 'Joining each task with its terminal cancellation outcome.',
+  completed: 'Task obligations joined; scope close recorded in WASM.',
 };
 
 let cancelState = { phase: 'running', budget: 100, animating: false, timers: [] };
@@ -2734,9 +2736,7 @@ function renderCancelSM() {
     const fill = isActive ? p.color + '22' : isPast ? p.color + '11' : HEX.surface;
     const stroke = isActive ? p.color : isPast ? p.color + '66' : HEX.border2;
 
-    if (isActive) {
-      html += `<rect x="${x-2}" y="11" width="${W+4}" height="${H+4}" rx="12" fill="none" stroke="${p.color}" stroke-width="1.5" opacity="0.4"><animate attributeName="opacity" values="0.2;0.6;0.2" dur="1.5s" repeatCount="indefinite"/></rect>`;
-    }
+    if (isActive) html += `<rect x="${x-2}" y="11" width="${W+4}" height="${H+4}" rx="8" fill="none" stroke="${p.color}" stroke-width="1.5" opacity="0.5"/>`;
     html += `<rect x="${x}" y="13" width="${W}" height="${H}" rx="10" fill="${fill}" stroke="${stroke}" stroke-width="${isActive?2:1}" ${isActive?'filter="url(#glow)"':''}/>`;
     const lines = p.label.split('\n');
     const textFill = isActive||isPast ? '#fff' : HEX.text3;
@@ -2796,7 +2796,7 @@ window.triggerCancel = function() {
           // Close scope after all tasks are joined
           cancelState.timers.push(setTimeout(() => {
             try { sc.value.close(); rt.value.close(); } catch(e) {}
-            console.log(`${LOG_PREFIX} %cCancel demo: scope closed — zero leaks (real WASM)`, LOG_STYLE, LOG_OK);
+            console.log(`${LOG_PREFIX} %cCancel demo: three task outcomes joined and scope closed in WASM`, LOG_STYLE, LOG_OK);
           }, 2600));
         }
       }
@@ -2807,11 +2807,10 @@ window.triggerCancel = function() {
   cancelState.budget = 100;
   renderCancelSM();
 
-  // Resource-level Tokio comparison — leak resources one by one
+  // Illustrative comparison of untracked cleanup versus scope-owned obligations.
   const resources = ['DB Connection', 'File Handle', 'Network Socket'];
-  // Tokio: instant drop, resources leak
   cancelState.timers.push(setTimeout(() => {
-    document.getElementById('tokio-phase-label').textContent = 'Dropped';
+    document.getElementById('tokio-phase-label').textContent = 'Untracked';
     document.getElementById('tokio-status-dot').style.background = 'var(--red)';
     document.getElementById('tokio-panel').style.borderColor = 'rgba(239,68,68,0.3)';
     document.getElementById('tokio-panel').style.boxShadow = '0 0 20px rgba(239,68,68,0.1)';
@@ -2821,13 +2820,13 @@ window.triggerCancel = function() {
       const row = document.getElementById('tokio-res-' + i);
       row.className = 'resource-row leaked';
       row.querySelector('.res-dot').className = 'res-dot leaked';
-      row.querySelector('.res-status').textContent = 'LEAKED';
+      row.querySelector('.res-status').textContent = 'UNRESOLVED';
       row.querySelector('.res-status').style.color = 'var(--red)';
       if (motionLib) motionLib.animate(row, { transform: ['translateX(0)','translateX(4px)','translateX(-4px)','translateX(0)'] }, { duration: 0.3 });
     }, 300 + i * 250));
   });
   cancelState.timers.push(setTimeout(() => {
-    document.getElementById('tokio-status').textContent = 'Task dropped. All resources leaked.';
+    document.getElementById('tokio-status').textContent = 'No lifecycle owner recorded for these cleanup duties.';
     document.getElementById('tokio-status').style.color = 'var(--red)';
   }, 1100));
 
@@ -2858,7 +2857,7 @@ window.triggerCancel = function() {
     document.getElementById('async-status-dot').style.background = 'var(--green)';
     document.getElementById('async-panel').style.borderColor = 'rgba(34,197,94,0.3)';
     document.getElementById('async-panel').style.boxShadow = '0 0 20px rgba(34,197,94,0.1)';
-    document.getElementById('async-status').textContent = 'All resources released cleanly. Zero leaks.';
+    document.getElementById('async-status').textContent = 'Three task obligations joined; scope closed.';
     document.getElementById('async-status').style.color = 'var(--green)';
   }, 2400));
 
@@ -3033,7 +3032,7 @@ window.runStaleDemo = function() {
       </tbody>
     </table>
     <div style="margin-top:12px; padding:12px; border-radius:8px; background:rgba(239,68,68,0.06); border:1px solid rgba(239,68,68,0.15); font-size:13px; color:var(--text2);">
-      <strong style="color:var(--red);">Key insight:</strong> The runtime <em>reuses slots</em> for efficiency, but the generation counter ensures old references are rejected. This makes use-after-free <em>structurally impossible</em>.
+      <strong style="color:var(--red);">Observed here:</strong> the runtime reused a slot, incremented its generation, and rejected the old handle instead of addressing the new occupant.
     </div>
   `);
   showToast('Stale handle correctly rejected', 'ok');
@@ -3135,7 +3134,7 @@ window.cascadeClose = function() {
       if (i === order.length - 1) {
         // Actually close via WASM
         httpNode.handle.close();
-        clog('cascade-console', `Cascade complete: ${order.length} handles released. Zero orphans.`, 'ok');
+        clog('cascade-console', `Cascade complete: scope close recorded; ${order.length} displayed handles are now invalid.`, 'ok');
         showToast(`Cascade closed ${order.length} handles`, 'ok');
         document.getElementById('btn-cascade-close').disabled = true;
       }
@@ -3315,7 +3314,10 @@ try {
 ];
 
 window.loadSnippet = function(idx) {
-  document.getElementById('repl-input').value = REPL_SNIPPETS[idx] || '';
+  const input = document.getElementById('repl-input');
+  input.value = REPL_SNIPPETS[idx] || '';
+  input.focus();
+  announce('REPL example loaded.');
 };
 
 window.runRepl = function() {
@@ -3366,6 +3368,7 @@ window.runRepl = function() {
     console.error(`${LOG_PREFIX} REPL error:`, e);
   }
   console.groupEnd();
+  announce('REPL execution finished.');
 };
 
 window.clearRepl = function() {
@@ -3618,17 +3621,17 @@ window.closeScopeFetch = function() {
   if (!sfState.scope) return;
   const elapsed = performance.now() - sfState.startTime;
 
-  // Close scope → cancels all in-flight requests
+  // The host adapter aborts browser requests, then closes their lifecycle scope.
   sfState.controllers.forEach(c => c.abort());
-  sfState.scope.close();
+  const closeResult = sfState.scope.close();
   sfState.rt.close();
 
-  sfState.timeline.push({ time: elapsed, event: 'SCOPE CLOSED → all requests cancelled', badge: 'badge-err', detail: `at ${elapsed.toFixed(0)}ms` });
-  sfState.timeline.push({ time: elapsed + 1, event: 'Quiescent — zero leaked handles', badge: 'badge-ok', detail: '' });
+  sfState.timeline.push({ time: elapsed, event: 'HOST ABORT → 3 browser requests signalled', badge: 'badge-cancel', detail: `at ${elapsed.toFixed(0)}ms` });
+  sfState.timeline.push({ time: elapsed + 1, event: `WASM SCOPE CLOSE → ${closeResult.outcome}`, badge: closeResult.outcome === 'ok' ? 'badge-ok' : 'badge-err', detail: '' });
   renderSfTimeline(sfState.timeline);
-  clog('scopefetch-console', `Scope closed at ${elapsed.toFixed(0)}ms. All 3 in-flight requests cancelled automatically.`, 'ok');
-  clog('scopefetch-console', 'In vanilla JS, you would need 3 separate AbortControllers and manual cleanup in every error path.', 'info');
-  showToast('Scope close cancelled 3 requests', 'ok');
+  clog('scopefetch-console', `Host adapter aborted 3 requests; WASM scope close returned ${closeResult.outcome}.`, closeResult.outcome === 'ok' ? 'ok' : 'err');
+  showToast('Browser requests aborted; lifecycle scope closed', closeResult.outcome === 'ok' ? 'ok' : 'err');
+  announce('Three browser requests were aborted and their lifecycle scope was closed.');
 
   sfState.scope = null;
   document.getElementById('btn-sf-close').disabled = true;
@@ -3698,8 +3701,7 @@ window.runSeverityDemo = function() {
       <div style="font-size:12px;color:var(--text3);margin-top:8px;">Determined by ${worst.from} — severity level ${worst.idx}</div>
     </div>
     <div style="margin-top:12px;padding:12px;border-radius:8px;background:rgba(6,182,212,0.06);border:1px solid rgba(6,182,212,0.15);font-size:13px;color:var(--text2);">
-      <strong style="color:var(--cyan);">Why this matters:</strong> In tokio, you get <code>Vec&lt;Result&gt;</code> and must manually scan for errors.
-      Here, the lattice does it algebraically. Combinators like <code>join_all</code> and <code>race</code> use this to propagate the worst severity automatically.
+      <strong style="color:var(--cyan);">What this shows:</strong> four distinct terminal states can be ordered without erasing the difference between an application error, cancellation, and panic.
     </div>
   `);
 
@@ -3754,10 +3756,8 @@ window.runForensicsDemo = function() {
         </div>
       </div>
     `).join('')}
-    <div style="margin-top:12px;padding:12px;border-radius:8px;background:rgba(239,68,68,0.06);border:1px solid rgba(239,68,68,0.15);font-size:13px;color:var(--text2);">
-      <strong style="color:var(--red);">Tokio comparison:</strong> When a tokio task is cancelled, the future is silently dropped.
-      There is no <code>kind</code>, no <code>origin_region</code>, no <code>message</code>, no <code>phase</code> — just gone.
-      Debugging "why did this task stop?" requires manual logging and prayer. Asupersync gives you <em>forensic-grade</em> attribution.
+    <div style="margin-top:12px;padding:12px;border-radius:8px;background:rgba(251,113,133,0.06);border:1px solid rgba(251,113,133,0.15);font-size:13px;color:var(--text2);">
+      <strong style="color:var(--red);">Diagnostic value:</strong> cancellation kind, origin, phase, message, and truncation state travel together in the recorded outcome instead of depending on separate application logs.
     </div>
   `);
 
@@ -4004,9 +4004,8 @@ window.runReplayDemo = function() {
       <div style="font-size:12px;color:var(--text3);margin-top:4px;">Expected: ${expectedLIFO.join(' → ')} | Got: ${reusedSlots.join(' → ')}</div>
     </div>
     <div style="margin-top:12px;padding:12px;border-radius:8px;background:rgba(59,130,246,0.06);border:1px solid rgba(59,130,246,0.15);font-size:13px;color:var(--text2);">
-      <strong style="color:var(--blue);">Why this matters:</strong> LIFO free-list recycling means the allocation pattern is fully deterministic
-      given the same sequence of operations. Record a failing test's handle operations, replay them on a different machine,
-      and the same slots get assigned in the same order. In tokio, task IDs are opaque and non-deterministic.
+      <strong style="color:var(--blue);">Observed here:</strong> given this exact sequence of operations in one runtime instance,
+      the returned slots follow the expected LIFO reuse order. The result is calculated from the handles above.
     </div>
   `);
   // REVELATION beat: spring pop on the verdict
@@ -4251,43 +4250,54 @@ window.wsCloseScope = function() {
 window.runBenchmark = async function() {
   const a = requireWasm();
   if (!a) { showToast('WASM not loaded', 'err'); return; }
-  document.getElementById('btn-bench').disabled = true;
-  document.getElementById('btn-bench').textContent = 'Running...';
+  const button = document.getElementById('btn-bench');
+  button.disabled = true;
+  button.textContent = 'Sampling…';
 
   await new Promise(r => setTimeout(r, 50)); // let UI update
 
   const rt = (a.runtimeCreate || a.runtime_create)();
-  if (rt.outcome !== 'ok') return;
+  if (rt.outcome !== 'ok') {
+    button.disabled = false;
+    button.textContent = 'Run 500ms Sample';
+    showToast('Runtime handle could not be created', 'err');
+    return;
+  }
 
   let ops = 0;
+  let rejected = 0;
   const start = performance.now();
-  const DURATION = 1000; // 1 second
+  const DURATION = 500;
 
   while (performance.now() - start < DURATION) {
-    for (let i = 0; i < 100; i++) {
+    for (let i = 0; i < 200; i++) {
       const s = rt.value.enterScope('bench');
-      if (s.outcome === 'ok') s.value.close();
-      ops++;
+      if (s.outcome === 'ok') {
+        const closed = s.value.close();
+        if (closed.outcome === 'ok') ops++;
+        else rejected++;
+      } else rejected++;
     }
+    await new Promise(requestAnimationFrame);
   }
 
   const elapsed = performance.now() - start;
   const opsPerSec = Math.round(ops / (elapsed / 1000));
-  const nsPerOp = Math.round((elapsed / ops) * 1000000);
+  const microsPerOp = ops > 0 ? (elapsed / ops) * 1000 : 0;
   rt.value.close();
 
   renderWithEntrance('benchmark-result', `
     <div style="text-align:center;padding:24px;">
       <div style="font-size:48px;font-weight:800;font-family:var(--mono);color:var(--cyan);" id="bench-headline" class="big-number">0</div>
-      <div style="font-size:14px;color:var(--text3);margin-top:4px;">scope create+close operations per second</div>
+      <div style="font-size:14px;color:var(--text3);margin-top:4px;">successful scope create+close cycles per second</div>
       <div class="detail-grid-3" style="margin-top:16px;display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;">
         <div style="padding:12px;border-radius:var(--radius);border:1px solid var(--border);background:rgba(255,255,255,0.02);">
           <div style="font-size:20px;font-weight:700;color:var(--blue);font-family:var(--mono);">${ops.toLocaleString()}</div>
           <div style="font-size:11px;color:var(--text3);">total ops</div>
         </div>
         <div style="padding:12px;border-radius:var(--radius);border:1px solid var(--border);background:rgba(255,255,255,0.02);">
-          <div style="font-size:20px;font-weight:700;color:var(--orange);font-family:var(--mono);">${nsPerOp.toLocaleString()}</div>
-          <div style="font-size:11px;color:var(--text3);">ns per op</div>
+          <div style="font-size:20px;font-weight:700;color:var(--orange);font-family:var(--mono);">${microsPerOp.toFixed(2)}</div>
+          <div style="font-size:11px;color:var(--text3);">µs per cycle</div>
         </div>
         <div style="padding:12px;border-radius:var(--radius);border:1px solid var(--border);background:rgba(255,255,255,0.02);">
           <div style="font-size:20px;font-weight:700;color:var(--green);font-family:var(--mono);">${elapsed.toFixed(0)}</div>
@@ -4295,75 +4305,28 @@ window.runBenchmark = async function() {
         </div>
       </div>
       <div style="margin-top:16px;font-size:13px;color:var(--text2);">
-        Each operation includes: handle allocation, generation tracking, parent registration, and full cleanup.
-        All the bookkeeping for structured concurrency — at ${nsPerOp < 10000 ? '<strong style="color:var(--green);">microsecond</strong>' : 'millisecond'} latency.
+        Browser-local ABI sample with a frame yield after every 200 attempts. ${rejected} operations were rejected.
+        This measures lifecycle bookkeeping only, not native scheduling or I/O.
       </div>
     </div>
   `);
 
   // REVELATION beat: animated counter for headline number
   animateCounter('bench-headline', opsPerSec, 1500);
-  console.log(`${LOG_PREFIX} %cBenchmark: ${opsPerSec.toLocaleString()} ops/sec (${ops.toLocaleString()} total, ${nsPerOp}ns/op)`, LOG_STYLE, 'color:#06B6D4;font-weight:bold;');
+  console.log(`${LOG_PREFIX} %cABI sample: ${opsPerSec.toLocaleString()} cycles/sec (${ops.toLocaleString()} successful, ${microsPerOp.toFixed(2)}µs/cycle)`, LOG_STYLE, 'color:#22D3EE;font-weight:bold;');
   // REVELATION beat: spring pop on the headline number
   if (motionLib) {
     const headline = document.querySelector('#benchmark-result [style*="font-size:48px"]');
     if (headline) motionLib.animate(headline, { scale: [0.7, 1.15, 1], opacity: [0, 1] }, { type: 'spring', stiffness: 400, damping: 18 });
   }
-  document.getElementById('btn-bench').disabled = false;
-  document.getElementById('btn-bench').textContent = 'Run 1s Benchmark';
-  showToast(`${opsPerSec.toLocaleString()} ops/sec`, 'ok');
+  button.disabled = false;
+  button.textContent = 'Run 500ms Sample';
+  showToast(`${opsPerSec.toLocaleString()} ABI cycles/sec`, 'ok');
+  announce(`ABI bookkeeping sample complete: ${opsPerSec.toLocaleString()} successful cycles per second.`);
 };
 
-// ─── Motion Library (spring-physics animations) ─────────────────
+// ─── Optional animation hook (kept local; no external dependency) ─
 let motionLib = null;
-async function loadMotion() {
-  try {
-    motionLib = await import('https://esm.sh/motion@12.36.0');
-  } catch (e) {
-    console.warn('Motion library not loaded, using CSS fallback:', e.message);
-  }
-}
-
-function initMotionAnimations() {
-  // Show hero content (fallback or after motion load)
-  const heroContent = document.querySelector('.hero-content');
-  if (heroContent) heroContent.classList.add('loaded');
-
-  if (!motionLib) {
-    // Fallback: use IntersectionObserver + CSS transitions
-    const obs = new IntersectionObserver((entries) => {
-      entries.forEach(entry => { if (entry.isIntersecting) entry.target.classList.add('visible'); });
-    }, { rootMargin: '-40px', threshold: 0.1 });
-    document.querySelectorAll('.reveal').forEach(el => obs.observe(el));
-    return;
-  }
-
-  const { animate, stagger, inView, scroll } = motionLib;
-
-  // Scroll-triggered reveal with spring physics
-  document.querySelectorAll('.reveal').forEach(el => {
-    inView(el, () => {
-      animate(el, { opacity: [0, 1], transform: ['translateY(20px)', 'translateY(0)'] },
-        { type: 'spring', stiffness: 120, damping: 20, mass: 0.8 });
-      el.classList.add('visible');
-    }, { margin: '-60px' });
-  });
-
-  // Scroll progress bar driven by motion's scroll()
-  const progressFill = document.getElementById('scroll-progress-fill');
-  if (progressFill) {
-    scroll(animate(progressFill, { transform: ['scaleX(0)', 'scaleX(1)'] }, { ease: 'linear' }));
-  }
-
-  // Hero entrance stagger
-  if (heroContent) {
-    const children = heroContent.children;
-    animate([...children], { opacity: [0, 1], transform: ['translateY(24px)', 'translateY(0)'] },
-      { delay: stagger(0.12, { start: 0.15 }), type: 'spring', stiffness: 100, damping: 18 });
-  }
-}
-
-loadMotion().then(() => initMotionAnimations());
 
 // ─── Init on load ────────────────────────────────────────────────
 regionState.init();
@@ -4384,6 +4347,7 @@ window.copyCode = function(btn) {
     setTimeout(() => { btn.textContent = 'Copy'; btn.classList.remove('copied'); }, 2000);
   }).catch(() => {
     btn.textContent = 'Failed';
+    showToast('Clipboard access failed', 'err');
     setTimeout(() => { btn.textContent = 'Copy'; }, 1500);
   });
 };
@@ -4395,6 +4359,7 @@ window.showToast = function(msg, type = 'info') {
   const icons = { ok: '&#10003;', info: '&#8505;', err: '&#10007;' };
   const toast = document.createElement('div');
   toast.className = `toast toast-${type}`;
+  toast.setAttribute('role', type === 'err' ? 'alert' : 'status');
   toast.innerHTML = `<span>${icons[type] || ''}</span> ${escHtml(msg)}`;
   container.appendChild(toast);
   setTimeout(() => {
@@ -4406,11 +4371,32 @@ window.showToast = function(msg, type = 'info') {
 // ─── Mobile Menu ─────────────────────────────────────────────────
 window.toggleMobileMenu = function() {
   const menu = document.getElementById('nav-mobile-menu');
-  menu.classList.toggle('open');
+  const button = document.getElementById('nav-hamburger');
+  const open = !menu.classList.contains('open');
+  menu.classList.toggle('open', open);
+  button.setAttribute('aria-expanded', String(open));
+  button.setAttribute('aria-label', open ? 'Close exhibit navigation' : 'Open exhibit navigation');
+  if (open) menu.querySelector('a')?.focus();
 };
 window.closeMobileMenu = function() {
-  document.getElementById('nav-mobile-menu').classList.remove('open');
+  const menu = document.getElementById('nav-mobile-menu');
+  const button = document.getElementById('nav-hamburger');
+  menu.classList.remove('open');
+  button.setAttribute('aria-expanded', 'false');
+  button.setAttribute('aria-label', 'Open exhibit navigation');
 };
+document.addEventListener('keydown', event => {
+  if (event.key === 'Escape' && document.getElementById('nav-mobile-menu').classList.contains('open')) {
+    closeMobileMenu();
+    document.getElementById('nav-hamburger').focus();
+  }
+});
+document.addEventListener('click', event => {
+  const menu = document.getElementById('nav-mobile-menu');
+  const button = document.getElementById('nav-hamburger');
+  if (menu.classList.contains('open') && !menu.contains(event.target) && !button.contains(event.target)) closeMobileMenu();
+});
+window.addEventListener('resize', () => { if (window.innerWidth > 768) closeMobileMenu(); }, { passive: true });
 
 // ─── Scroll Progress + Active Nav ────────────────────────────────
 const sectionIds = ['abi','regions','outcomes','cancel','budget','stale','cascade','protocol','repl','chaos','scopefetch','severity','forensics','recycling','isolation','replay','leakdetect','timeout','websocket','comparison','benchmark'];
@@ -4418,9 +4404,15 @@ const sectionIds = ['abi','regions','outcomes','cancel','budget','stale','cascad
 const navLinkEls = document.querySelectorAll('[data-section]');
 const btnTopEl = document.getElementById('btn-top');
 const scrollFillEl = document.getElementById('scroll-progress-fill');
+const chapterFor = id => {
+  const index = sectionIds.indexOf(id);
+  if (index < 3) return 'abi';
+  if (index < 8) return 'cancel';
+  if (index < 19) return 'repl';
+  return 'comparison';
+};
 function updateScrollUI() {
-  // Progress bar (fallback if motion library didn't load)
-  if (!motionLib && scrollFillEl) {
+  if (scrollFillEl) {
     const scrollTop = window.scrollY;
     const docHeight = document.documentElement.scrollHeight - window.innerHeight;
     const pct = docHeight > 0 ? Math.min(1, scrollTop / docHeight) : 0;
@@ -4434,7 +4426,7 @@ function updateScrollUI() {
     if (el && el.getBoundingClientRect().top <= 120) activeId = id;
   }
   navLinkEls.forEach(a => {
-    a.classList.toggle('active', a.dataset.section === activeId);
+    a.classList.toggle('active', a.dataset.section === chapterFor(activeId));
   });
 
   // Back to top button
@@ -4448,37 +4440,12 @@ window.addEventListener('scroll', () => {
 }, { passive: true });
 updateScrollUI();
 
-// Auto-init WASM on page load, then set up auto-run for exhibits
-initRuntime().then(() => {
-  if (!wasmReady) return;
-  // Auto-run exhibits when they scroll into view (first time only)
-  const autoRunMap = {
-    'abi': () => runAbiDemo(),
-    'regions': () => { resetRegionViz(); clog('region-console', 'Region tree initialized with real WASM handles. Click any region to trigger cascading cancellation.', 'info'); },
-    'budget': () => runBudgetDemo(),
-    'stale': () => runStaleDemo(),
-    'protocol': () => runProtocolDemo(),
-    'severity': () => runSeverityDemo(),
-    'forensics': () => runForensicsDemo(),
-    'recycling': () => runRecyclingDemo(),
-    'replay': () => runReplayDemo(),
-    'leakdetect': () => runLeakDetectDemo(),
-  };
-  const autoRanSet = new Set();
-  const autoRunObserver = new IntersectionObserver((entries) => {
-    for (const entry of entries) {
-      if (!entry.isIntersecting) continue;
-      const id = entry.target.id;
-      if (autoRanSet.has(id)) continue;
-      const fn = autoRunMap[id];
-      if (fn) { autoRanSet.add(id); setTimeout(fn, 200); }
-    }
-  }, { rootMargin: '-80px', threshold: 0.1 });
-  for (const id of Object.keys(autoRunMap)) {
-    const el = document.getElementById(id);
-    if (el) autoRunObserver.observe(el);
-  }
-});
+document.querySelectorAll('.traffic-dots').forEach(el => el.setAttribute('aria-hidden', 'true'));
+const exhibitMap = document.querySelector('.exhibit-map');
+if (exhibitMap && window.matchMedia('(max-width: 768px)').matches) exhibitMap.open = false;
+
+// Initialize the local WASM artifact without mutating any exhibit state.
+initRuntime();
 
 </script>
 </body>
