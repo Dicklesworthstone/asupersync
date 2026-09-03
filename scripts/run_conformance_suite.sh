@@ -105,9 +105,12 @@ set -e
 
 reject_rch_local_fallback_log
 
-PASSED=$(grep -c "test .* ok" "${LOG_FILE}" 2>/dev/null || echo "0")
-FAILED=$(grep -c "test .* FAILED" "${LOG_FILE}" 2>/dev/null || echo "0")
-IGNORED=$(grep -c "test .* ignored" "${LOG_FILE}" 2>/dev/null || echo "0")
+PASSED=$(grep -c "test .* ok" "${LOG_FILE}" 2>/dev/null || true)
+FAILED=$(grep -c "test .* FAILED" "${LOG_FILE}" 2>/dev/null || true)
+IGNORED=$(grep -c "test .* ignored" "${LOG_FILE}" 2>/dev/null || true)
+PASSED=${PASSED:-0}
+FAILED=${FAILED:-0}
+IGNORED=${IGNORED:-0}
 TOTAL=$((PASSED + FAILED + IGNORED))
 
 STATUS_LABEL="passed"

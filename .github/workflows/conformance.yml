@@ -7,6 +7,8 @@ on:
       - 'src/**'
       - 'conformance/**'
       - 'tests/**'
+      - 'scripts/run_conformance_suite.sh'
+      - '.github/workflows/conformance.yml'
       - 'Cargo.toml'
       - 'Cargo.lock'
   pull_request:
@@ -15,6 +17,8 @@ on:
       - 'src/**'
       - 'conformance/**'
       - 'tests/**'
+      - 'scripts/run_conformance_suite.sh'
+      - '.github/workflows/conformance.yml'
       - 'Cargo.toml'
       - 'Cargo.lock'
 
