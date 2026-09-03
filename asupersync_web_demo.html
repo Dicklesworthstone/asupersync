@@ -4,14 +4,14 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#071119">
-<title>Asupersync Browser Lab — Live WASM Lifecycle Demo</title>
+<title>Asupersync Browser Lab | Live WASM Lifecycle Demo</title>
 <meta name="description" content="Explore Asupersync's structured-concurrency lifecycle contract in 21 interactive browser exhibits backed by the shipped WebAssembly ledger.">
 <link rel="canonical" href="https://dicklesworthstone.github.io/asupersync/asupersync_web_demo.html">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Ccircle cx='32' cy='32' r='26' fill='%23071119' stroke='%2322d3ee' stroke-width='5'/%3E%3Ccircle cx='32' cy='32' r='9' fill='%2322d3ee'/%3E%3C/svg%3E">
 
 <!-- OpenGraph -->
 <meta property="og:type" content="website">
-<meta property="og:title" content="Asupersync Browser Lab — Live WASM Lifecycle Demo">
+<meta property="og:title" content="Asupersync Browser Lab | Live WASM Lifecycle Demo">
 <meta property="og:description" content="Run 21 interactive exhibits against Asupersync's shipped WebAssembly lifecycle ledger: regions, task handles, cancellation, outcomes, and capability-gated browser work.">
 <meta property="og:image" content="https://dicklesworthstone.github.io/asupersync/assets/og-share-image.png?v=2">
 <meta property="og:image:width" content="1200">
@@ -22,7 +22,7 @@
 
 <!-- Twitter/X -->
 <meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:title" content="Asupersync Browser Lab — Live WASM Lifecycle Demo">
+<meta name="twitter:title" content="Asupersync Browser Lab | Live WASM Lifecycle Demo">
 <meta name="twitter:description" content="Run 21 interactive exhibits against Asupersync's shipped WASM lifecycle ledger: regions, cancellation, outcomes, handles, and browser resources.">
 <meta name="twitter:image" content="https://dicklesworthstone.github.io/asupersync/assets/og-share-image.png?v=2">
 <meta name="twitter:image:alt" content="Asupersync Browser Lab with interactive exhibits for structured concurrency, cancellation, outcomes, and lifecycle-safe handles">
@@ -1093,7 +1093,7 @@ input[type="text"]:focus, select:focus, textarea:focus {
       <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
         Before lifecycle work begins, Asupersync's WASM module and JavaScript host perform a
         <strong style="color:var(--text);">version handshake</strong> with a 64-bit fingerprint.
-        Incompatible consumers are rejected at the first API call — before any state is mutated.
+        Incompatible consumers are rejected at the first API call, before any state is mutated.
         That makes ABI drift an explicit contract failure instead of a late runtime surprise.
       </p>
     </div>
@@ -1149,7 +1149,7 @@ console.<span class="fn">log</span>(<span class="str">`Fingerprint: </span><span
   <div class="container">
     <div class="reveal">
       <span class="exhibit-num">Exhibit 2</span>
-      <h2>Structured Concurrency — Region Tree</h2>
+      <h2>Structured Concurrency: The Region Tree</h2>
       <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
         Asupersync makes task ownership explicit: <strong style="color:var(--text);">every task belongs to a region</strong>,
         and regions form a tree rooted at the runtime. Closing a region drives its recorded children toward quiescence
@@ -1264,7 +1264,7 @@ httpRegion.<span class="fn">close</span>();</div>
   <div class="container">
     <div class="reveal">
       <span class="exhibit-num">Exhibit 4</span>
-      <h2>Cancellation Protocol — Not a Silent Drop</h2>
+      <h2>Cancellation Is a Protocol, Not a Silent Drop</h2>
       <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
         Cancellation flows through a multi-phase protocol:
         <strong style="color:var(--text);">Running → Requested → Draining → Finalizing → Completed</strong>.
@@ -1373,7 +1373,7 @@ httpRegion.<span class="fn">close</span>();</div>
   <div class="container">
     <div class="reveal">
       <span class="exhibit-num">Exhibit 5</span>
-      <h2>Budget Algebra — Semiring Composition</h2>
+      <h2>Budget Algebra with Semiring Composition</h2>
       <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
         Asupersync makes cleanup constraints first-class. Its budgets compose as a
         <strong style="color:var(--text);">semiring</strong>: <code style="color:var(--cyan)">combine(b1, b2)</code>
@@ -1434,7 +1434,7 @@ httpRegion.<span class="fn">close</span>();</div>
   <div class="container">
     <div class="reveal">
       <span class="exhibit-num">Exhibit 6</span>
-      <h2>Generation Counters — Use-After-Free Prevention</h2>
+      <h2>Generation Counters Reject Stale Handles</h2>
       <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
         Integer IDs are easy to recycle incorrectly: an old reference can accidentally address new state in the same slot.
         Asupersync's handles carry a <strong style="color:var(--text);">generation counter</strong> that increments
@@ -1494,7 +1494,7 @@ s1.<span class="fn">close</span>();  <span class="cmt">// slot N freed, generati
   <div class="container">
     <div class="reveal">
       <span class="exhibit-num">Exhibit 7</span>
-      <h2>Deep Cascade Close — Quiescence by Construction</h2>
+      <h2>Deep Cascade Close</h2>
       <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
         Asupersync regions form a <strong style="color:var(--text);">tree with cascade close</strong>:
         close a node and its recorded descendants close children-first. This exhibit builds a four-level
@@ -1534,7 +1534,7 @@ s1.<span class="fn">close</span>();  <span class="cmt">// slot N freed, generati
   <div class="container">
     <div class="reveal">
       <span class="exhibit-num">Exhibit 8</span>
-      <h2>Cancel is Not Enough — You Must Join</h2>
+      <h2>Cancel Is Not Enough. You Must Join.</h2>
       <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
         In Asupersync, <code style="color:var(--cyan)">task_cancel()</code> <em>requests</em> cancellation.
         The task stays <strong style="color:var(--text);">pinned</strong>.
@@ -1592,7 +1592,7 @@ t.<span class="fn">join</span>(<span class="typ">Outcome</span>.<span class="fn"
 <section class="section" id="repl">
   <div class="container">
     <div class="reveal">
-      <span class="exhibit-num">Exhibit 9 — Interactive</span>
+      <span class="exhibit-num">Exhibit 9 · Interactive</span>
       <h2>Live WASM Lifecycle REPL</h2>
       <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
         Type JavaScript below to call the shipped <strong style="color:var(--text);">WASM lifecycle API</strong> directly.
@@ -1632,7 +1632,7 @@ t.<span class="fn">join</span>(<span class="typ">Outcome</span>.<span class="fn"
               style="width:100%; min-height:240px; background:transparent; color:var(--text); border:none; outline:none;
                      font-family:var(--mono); font-size:13px; line-height:1.65; padding:16px 20px; resize:vertical;
                      tab-size:2; white-space:pre; caret-color:var(--cyan);"
-              placeholder="// Type JavaScript here — the runtime is live
+              placeholder="// Type JavaScript here; the lifecycle API is live
 // Available: rt, scope, Outcome, runtimeCreate, scopeEnter,
 //            scopeClose, taskSpawn, taskJoin, taskCancel,
 //            createBudget, abiVersion, abiFingerprint, log()"
@@ -1662,7 +1662,7 @@ t.<span class="fn">join</span>(<span class="typ">Outcome</span>.<span class="fn"
 <section class="section" id="chaos">
   <div class="container">
     <div class="reveal">
-      <span class="exhibit-num">Exhibit 10 — Stress Test</span>
+      <span class="exhibit-num">Exhibit 10 · Stress test</span>
       <h2>Lifecycle Stress Run</h2>
       <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
         Rapid create, cancel, join, and close sequences exercise the places where stale generations and
@@ -1701,7 +1701,7 @@ t.<span class="fn">join</span>(<span class="typ">Outcome</span>.<span class="fn"
           </div>
           <div class="card-sm" style="background:rgba(255,255,255,0.02); border:1px solid var(--border); border-radius:var(--radius); text-align:center; padding:12px;">
             <div style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:0.06em;">Live after close</div>
-            <div style="font-size:24px;font-weight:800;font-family:var(--mono);color:var(--text3);" id="chaos-leaked">—</div>
+            <div style="font-size:24px;font-weight:800;font-family:var(--mono);color:var(--text3);" id="chaos-leaked">Not run</div>
           </div>
         </div>
 
@@ -1769,7 +1769,7 @@ t.<span class="fn">join</span>(<span class="typ">Outcome</span>.<span class="fn"
   <div class="container">
     <div class="reveal">
       <span class="exhibit-num">Exhibit 12 · Outcome algebra</span>
-      <h2>Outcome Severity Propagation — Algebraic Error Handling</h2>
+      <h2>Outcome Severity as Algebra</h2>
       <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
         Asupersync's four-valued <code style="color:var(--cyan)">Outcome</code> forms a
         <strong style="color:var(--text);">severity lattice</strong>: Ok &lt; Err &lt; Cancelled &lt; Panicked.
@@ -1797,7 +1797,7 @@ t.<span class="fn">join</span>(<span class="typ">Outcome</span>.<span class="fn"
   <div class="container">
     <div class="reveal">
       <span class="exhibit-num">Exhibit 13 · Diagnostics</span>
-      <h2>Cancellation Forensics — Full Attribution Chain</h2>
+      <h2>Cancellation Forensics with Attribution</h2>
       <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
         Asupersync's cancellation outcome carries a <strong style="color:var(--text);">structured attribution record</strong>:
         the cancel kind (user/timeout/fail_fast/race_lost/shutdown), the phase (requested/draining/finalizing/completed),
@@ -1826,7 +1826,7 @@ t.<span class="fn">join</span>(<span class="typ">Outcome</span>.<span class="fn"
   <div class="container">
     <div class="reveal">
       <span class="exhibit-num">Exhibit 14 · Handle allocator</span>
-      <h2>Handle Slot Recycling — LIFO Determinism Under Pressure</h2>
+      <h2>Handle Slot Recycling Under Pressure</h2>
       <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
         Asupersync exposes <strong style="color:var(--text);">deterministic slot allocation</strong> with LIFO
         free-list recycling. This exhibit performs 40 create/close cycles in one runtime instance and displays
@@ -1858,7 +1858,7 @@ t.<span class="fn">join</span>(<span class="typ">Outcome</span>.<span class="fn"
   <div class="container">
     <div class="reveal">
       <span class="exhibit-num">Exhibit 15 · Region structure</span>
-      <h2>Sibling Scope Isolation — No Cross-Contamination</h2>
+      <h2>Sibling Scope Isolation</h2>
       <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
         Sibling scopes have distinct handles and obligations. This exhibit creates four siblings with tasks,
         closes them one at a time, and <strong style="color:var(--text);">probes each remaining sibling</strong>
@@ -1894,7 +1894,7 @@ t.<span class="fn">join</span>(<span class="typ">Outcome</span>.<span class="fn"
   <div class="container">
     <div class="reveal">
       <span class="exhibit-num">Exhibit 16 · Deterministic evidence</span>
-      <h2>LIFO Slot Recycling — Deterministic by Construction</h2>
+      <h2>Checking LIFO Slot Reuse</h2>
       <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
         Asupersync's handle allocator uses a <strong style="color:var(--text);">deterministic LIFO free-list</strong>.
         This exhibit creates four scopes, frees them in order, then creates four more and compares the observed
@@ -1974,7 +1974,7 @@ t.<span class="fn">join</span>(<span class="typ">Outcome</span>.<span class="fn"
           </div>
         </div>
         <div id="timeout-result">
-          <div class="text-dim" style="text-align:center;padding:32px 0;">Spawns 3 tasks with a 2-second scope deadline — scope auto-closes when time's up</div>
+          <div class="text-dim" style="text-align:center;padding:32px 0;">Records 3 task handles; a two-second browser timer closes their scope</div>
         </div>
       </div>
       <div class="console mt-2" id="timeout-console">
@@ -2010,7 +2010,7 @@ t.<span class="fn">join</span>(<span class="typ">Outcome</span>.<span class="fn"
           </div>
         </div>
         <div id="websocket-result">
-          <div class="text-dim" style="text-align:center;padding:32px 0;">Opens a MessageChannel with WASM-tracked tasks — close the scope to tear down everything</div>
+          <div class="text-dim" style="text-align:center;padding:32px 0;">Opens a MessageChannel with WASM-tracked tasks; one action closes both layers</div>
         </div>
       </div>
       <div class="console mt-2" id="websocket-console">
@@ -2128,12 +2128,12 @@ scope.<span class="fn">fetchRequest</span>({ <span class="prop">url</span>: url3
 <footer style="padding: 60px 0; text-align: center; border-top: 1px solid var(--border);">
   <div class="container">
     <p style="color: var(--text3); font-size: 14px;">
-      Asupersync — Spec-first, cancel-correct, capability-secure async for Rust
+      Asupersync: spec-first, cancel-correct, capability-secure async for Rust.
     </p>
     <p style="color: var(--text3); font-size: 13px; margin-top: 8px;">
       <a href="https://github.com/Dicklesworthstone/asupersync" style="color: var(--blue); text-decoration: none;">GitHub</a>
       &nbsp;·&nbsp;
-      Static browser lab · versioned local WASM assets
+      Static browser lab · versioned local WASM assets.
     </p>
   </div>
 </footer>
@@ -3551,7 +3551,7 @@ window.resetChaos = function() {
   document.getElementById('chaos-peak').textContent = '0';
   document.getElementById('chaos-maxgen').textContent = '0';
   document.getElementById('chaos-errors').textContent = '0';
-  document.getElementById('chaos-leaked').textContent = '—';
+  document.getElementById('chaos-leaked').textContent = 'Not run';
   document.getElementById('chaos-leaked').style.color = '';
   document.getElementById('chaos-pct').textContent = '0%';
   document.getElementById('chaos-fill').style.width = '0%';
@@ -3561,19 +3561,21 @@ window.resetChaos = function() {
 };
 
 // ─── Exhibit 11: Scope-Bounded Fetch ──────────────────────────────
-let sfState = { rt: null, scope: null, controllers: [], timers: [] };
+let sfState = { rt: null, scope: null, controllers: [], fetchHandles: [], timers: [] };
 
 window.runScopeFetch = function() {
   clearConsole('scopefetch-console');
   const a = requireWasm('scopefetch-console');
   if (!a) return;
 
-  const rt = (a.runtimeCreate || a.runtime_create)();
+  const rt = (a.runtimeCreate || a.runtime_create)({
+    fetchAuthority: { allowedOrigins: ['https://httpbin.org'], allowedMethods: ['GET'] }
+  });
   if (rt.outcome !== 'ok') return;
   const scope = rt.value.enterScope('http-scope');
   if (scope.outcome !== 'ok') return;
 
-  sfState = { rt: rt.value, scope: scope.value, controllers: [], timers: [] };
+  sfState = { rt: rt.value, scope: scope.value, controllers: [], fetchHandles: [], timers: [] };
   const urls = [
     'https://httpbin.org/delay/5',
     'https://httpbin.org/delay/8',
@@ -3588,8 +3590,11 @@ window.runScopeFetch = function() {
     const controller = new AbortController();
     sfState.controllers.push(controller);
     const label = `Request ${i+1} (${url.split('/').pop()})`;
+    const recorded = scope.value.fetchRequest({ url, method: 'GET' });
+    if (recorded.outcome === 'ok') sfState.fetchHandles.push(recorded.value);
+    else clog('scopefetch-console', `  ${label} lifecycle record rejected: ${recorded.failure?.message || recorded.outcome}`, 'err');
     timeline.push({ time: performance.now() - startTime, event: `${label} started`, badge: 'badge-cyan', detail: '' });
-    clog('scopefetch-console', `  ${label} → in-flight`, 'info');
+    clog('scopefetch-console', `  ${label} → host request + ${recorded.outcome} WASM record`, recorded.outcome === 'ok' ? 'info' : 'warn');
 
     fetch(url, { signal: controller.signal }).then(r => {
       timeline.push({ time: performance.now() - startTime, event: `${label}: ${r.status}`, badge: 'badge-ok', detail: `${(performance.now()-startTime).toFixed(0)}ms` });
@@ -3627,7 +3632,7 @@ window.closeScopeFetch = function() {
   sfState.rt.close();
 
   sfState.timeline.push({ time: elapsed, event: 'HOST ABORT → 3 browser requests signalled', badge: 'badge-cancel', detail: `at ${elapsed.toFixed(0)}ms` });
-  sfState.timeline.push({ time: elapsed + 1, event: `WASM SCOPE CLOSE → ${closeResult.outcome}`, badge: closeResult.outcome === 'ok' ? 'badge-ok' : 'badge-err', detail: '' });
+  sfState.timeline.push({ time: elapsed + 1, event: `WASM SCOPE CLOSE → ${closeResult.outcome}`, badge: closeResult.outcome === 'ok' ? 'badge-ok' : 'badge-err', detail: `${sfState.fetchHandles.length} fetch handles recorded` });
   renderSfTimeline(sfState.timeline);
   clog('scopefetch-console', `Host adapter aborted 3 requests; WASM scope close returned ${closeResult.outcome}.`, closeResult.outcome === 'ok' ? 'ok' : 'err');
   showToast('Browser requests aborted; lifecycle scope closed', closeResult.outcome === 'ok' ? 'ok' : 'err');
