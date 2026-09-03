@@ -161,7 +161,8 @@ h3 { font-size: 1.25rem; font-weight: 600; }
   user-select: none;
   -webkit-tap-highlight-color: transparent;
 }
-.btn:focus-visible, button:focus-visible, a:focus-visible, summary:focus-visible, textarea:focus-visible {
+.btn:focus-visible, button:focus-visible, a:focus-visible, summary:focus-visible, textarea:focus-visible,
+[role="region"]:focus-visible {
   outline: 3px solid var(--focus); outline-offset: 3px;
 }
 .btn:active:not(:disabled) { transform: scale(0.96); transition-duration: 0.06s; }
@@ -271,7 +272,7 @@ h3 { font-size: 1.25rem; font-weight: 600; }
 .fn { color: #82AAFF; }  /* functions */
 .str { color: #C3E88D; } /* strings */
 .num { color: #F78C6C; } /* numbers */
-.cmt { color: #546E7A; font-style: italic; } /* comments */
+.cmt { color: #78909C; font-style: italic; } /* comments */
 .typ { color: #FFCB6B; } /* types */
 .op { color: #89DDFF; }  /* operators */
 .prop { color: #F07178; } /* properties */
@@ -311,8 +312,7 @@ h3 { font-size: 1.25rem; font-weight: 600; }
 .console-header .traffic-dots .dot-y { background: #FFBD2E; }
 .console-header .traffic-dots .dot-g { background: #28CA42; }
 .console-body { padding: 12px 16px; }
-.console-line { padding: 2px 0; display: flex; gap: 8px; animation: lineSlideIn 0.25s ease; }
-@keyframes lineSlideIn { from { opacity: 0; transform: translateX(-6px); } to { opacity: 1; transform: translateX(0); } }
+.console-line { padding: 2px 0; display: flex; gap: 8px; }
 .console-line .prefix { color: var(--text3); user-select: none; min-width: 16px; }
 .console-line.ok .msg { color: var(--green); }
 .console-line.err .msg { color: var(--red); }
@@ -1282,7 +1282,7 @@ httpRegion.<span class="fn">close</span>();</div>
           </div>
         </div>
 
-        <div style="overflow-x:auto;-webkit-overflow-scrolling:touch;">
+        <div class="horizontal-scroll-region" data-scroll-label="Cancellation state diagram" style="overflow-x:auto;-webkit-overflow-scrolling:touch;">
         <svg id="cancel-svg" viewBox="0 0 760 70" style="max-height: 70px; min-width:650px;" role="img" aria-label="Cancel protocol state machine: Running, Cancel Requested, Draining, Finalizing, Completed">
           <!-- State machine nodes rendered by JS -->
         </svg>
@@ -4562,6 +4562,28 @@ updateScrollUI();
 document.querySelectorAll('.traffic-dots').forEach(el => el.setAttribute('aria-hidden', 'true'));
 const exhibitMap = document.querySelector('.exhibit-map');
 if (exhibitMap && window.matchMedia('(max-width: 768px)').matches) exhibitMap.open = false;
+
+// Give keyboard users access to regions that overflow at the current viewport
+// without adding unnecessary tab stops when the full content already fits.
+const scrollRegionCandidates = document.querySelectorAll('.code-body, .horizontal-scroll-region');
+function syncScrollableRegionAccess() {
+  scrollRegionCandidates.forEach((element, index) => {
+    const scrollsHorizontally = element.scrollWidth > element.clientWidth + 1;
+    if (scrollsHorizontally) {
+      element.tabIndex = 0;
+      element.setAttribute('role', 'region');
+      element.setAttribute('aria-label', element.dataset.scrollLabel || `Scrollable code example ${index + 1}`);
+      element.dataset.keyboardScroll = 'true';
+    } else if (element.dataset.keyboardScroll === 'true') {
+      element.removeAttribute('tabindex');
+      element.removeAttribute('role');
+      element.removeAttribute('aria-label');
+      delete element.dataset.keyboardScroll;
+    }
+  });
+}
+syncScrollableRegionAccess();
+window.addEventListener('resize', syncScrollableRegionAccess, { passive: true });
 
 // Initialize the local WASM artifact without mutating any exhibit state.
 initRuntime();
