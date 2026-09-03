@@ -105,9 +105,12 @@ set -e
 
 reject_rch_local_fallback_log
 
-PASSED=$(grep -c "test .* ok" "${LOG_FILE}" 2>/dev/null || true)
-FAILED=$(grep -c "test .* FAILED" "${LOG_FILE}" 2>/dev/null || true)
-IGNORED=$(grep -c "test .* ignored" "${LOG_FILE}" 2>/dev/null || true)
+# Count individual libtest records only. Broad matches also catch Cargo's
+# aggregate `test result: ...` lines, which previously inflated both the
+# passed and ignored counts and produced a false 89% coverage failure.
+PASSED=$(grep -Ec '^test .* \.\.\. ok$' "${LOG_FILE}" 2>/dev/null || true)
+FAILED=$(grep -Ec '^test .* \.\.\. FAILED$' "${LOG_FILE}" 2>/dev/null || true)
+IGNORED=$(grep -Ec '^test .* \.\.\. ignored$' "${LOG_FILE}" 2>/dev/null || true)
 PASSED=${PASSED:-0}
 FAILED=${FAILED:-0}
 IGNORED=${IGNORED:-0}
