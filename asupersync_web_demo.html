@@ -101,6 +101,11 @@ body {
   transform: translateY(-160%);
 }
 .skip-link:focus { transform: translateY(0); }
+.sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+}
+.field-label { display: block; padding: 10px 20px 0; color: var(--text2); font-size: 12px; font-weight: 650; }
 
 /* ── Typography ────────────────────────────────────────────────── */
 h1 { font-size: clamp(2.35rem, 6vw, 5.4rem); font-weight: 760; letter-spacing: -0.045em; line-height: 0.98; }
@@ -177,7 +182,7 @@ h3 { font-size: 1.25rem; font-weight: 600; }
 .btn-sm { padding: 8px 14px; font-size: 13px; border-radius: 7px; min-height: 38px; }
 @media (max-width: 768px) {
   .btn { min-height: 44px; padding: 12px 20px; }
-  .btn-sm { min-height: 38px; padding: 8px 14px; }
+  .btn-sm, .btn-copy { min-height: 44px; padding: 8px 14px; }
 }
 
 /* ── Status Badges ─────────────────────────────────────────────── */
@@ -428,78 +433,52 @@ h3 { font-size: 1.25rem; font-weight: 600; }
 
 /* ── Hero ──────────────────────────────────────────────────────── */
 .hero {
-  min-height: 100vh;
-  display: flex; align-items: center; justify-content: center;
-  text-align: center;
+  min-height: min(900px, 100svh);
+  display: flex; align-items: center;
   position: relative;
   overflow: hidden;
-  padding-top: 56px;
+  padding: 128px 0 80px;
 }
 .hero-bg {
-  position: absolute; inset: 0; overflow: hidden;
+  position: absolute; inset: 0; overflow: hidden; pointer-events: none;
+  background-image:
+    linear-gradient(rgba(34, 211, 238, 0.055) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(34, 211, 238, 0.055) 1px, transparent 1px);
+  background-size: 80px 80px;
+  mask-image: linear-gradient(to bottom, black 10%, transparent 90%);
 }
-/* Glow orbit rings — adapted from asupersync_website glow-orbits */
-.hero-bg .glow-ring {
-  position: absolute; border-radius: 50%;
-  pointer-events: none;
-  contain: size layout style;
-  backface-visibility: hidden;
+.hero-bg .glow-ring, .hero-bg .glow-orb { display: none; }
+.hero-layout {
+  position: relative; z-index: 1;
+  display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(280px, .65fr);
+  gap: clamp(40px, 8vw, 96px); align-items: end;
 }
-.hero-bg .glow-ring-1 {
-  width: 60vw; height: 60vw; max-width: 700px; max-height: 700px;
-  top: -10%; left: -10%;
-  background: radial-gradient(circle, rgba(59,130,246,0.12) 0%, transparent 70%);
-  filter: blur(80px);
-  animation: orbitSpin1 30s ease-in-out infinite;
+.hero-content { max-width: 760px; }
+.hero h1 span { color: var(--cyan); }
+.hero-kicker {
+  margin-bottom: 18px; color: var(--cyan); font: 700 12px/1.2 var(--mono);
+  letter-spacing: .12em; text-transform: uppercase;
 }
-.hero-bg .glow-ring-2 {
-  width: 70vw; height: 70vw; max-width: 800px; max-height: 800px;
-  bottom: -20%; right: -15%;
-  background: radial-gradient(circle, rgba(6,182,212,0.09) 0%, transparent 70%);
-  filter: blur(100px);
-  animation: orbitSpin2 38s ease-in-out infinite;
+.hero .subtitle { font-size: clamp(1rem, 2vw, 1.25rem); color: var(--text2); margin-top: 22px; max-width: 670px; }
+.hero-actions { margin-top: 32px; display: flex; gap: 12px; flex-wrap: wrap; }
+.runtime-readout {
+  background: #08141c; border: 1px solid var(--border2); border-top: 3px solid var(--cyan);
+  padding: 24px; box-shadow: var(--elevation-1);
 }
-.hero-bg .glow-ring-3 {
-  width: 50vw; height: 50vw; max-width: 600px; max-height: 600px;
-  top: 30%; left: 40%;
-  background: radial-gradient(circle, rgba(139,92,246,0.07) 0%, transparent 70%);
-  filter: blur(120px);
-  animation: orbitSpin3 46s ease-in-out infinite;
-}
-.hero-bg .glow-orb {
-  position: absolute; border-radius: 50%; pointer-events: none;
-  backface-visibility: hidden;
-  contain: size layout style;
-}
-.hero-bg .glow-orb-1 {
-  width: 200px; height: 200px; top: 20%; right: 20%;
-  background: rgba(59,130,246,0.12); filter: blur(60px);
-  opacity: 0.15;
-  animation: orbFloat1 10s ease-in-out infinite;
-}
-.hero-bg .glow-orb-2 {
-  width: 260px; height: 260px; bottom: 20%; left: 25%;
-  background: rgba(249,115,22,0.08); filter: blur(70px);
-  opacity: 0.1;
-  animation: orbFloat2 12s ease-in-out infinite 2s;
-}
-@keyframes orbitSpin1 { 0%,100% { transform: rotate(0deg) scale(1); } 50% { transform: rotate(180deg) scale(1.15); } }
-@keyframes orbitSpin2 { 0%,100% { transform: rotate(0deg) scale(1); } 50% { transform: rotate(-180deg) scale(1.12); } }
-@keyframes orbitSpin3 { 0%,100% { transform: rotate(0deg) scale(1); } 50% { transform: rotate(180deg) scale(1.1); } }
-@keyframes orbFloat1 { 0%,100% { transform: scale(1); } 50% { transform: scale(1.25); } }
-@keyframes orbFloat2 { 0%,100% { transform: scale(1.2); } 50% { transform: scale(1); } }
-.hero-content { position: relative; z-index: 1; max-width: 800px; padding: 0 24px; }
-.hero-content > * { opacity: 0; transition: opacity 0.3s ease; } /* Hidden until motion stagger runs */
-.hero-content.loaded > * { opacity: 1; } /* Fallback if motion fails */
-.hero h1 span { background: linear-gradient(135deg, var(--blue), var(--cyan)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; }
-.hero .subtitle { font-size: clamp(1rem, 2vw, 1.3rem); color: var(--text2); margin-top: 16px; max-width: 600px; margin-left: auto; margin-right: auto; }
+.runtime-readout h2 { font: 700 12px/1.2 var(--mono); color: var(--cyan); letter-spacing: .1em; text-transform: uppercase; }
+.runtime-readout dl { margin-top: 18px; }
+.runtime-readout .readout-row { display: grid; grid-template-columns: 82px 1fr; gap: 12px; padding: 9px 0; border-top: 1px solid var(--border); }
+.runtime-readout dt { color: var(--text3); font: 600 11px/1.45 var(--mono); text-transform: uppercase; }
+.runtime-readout dd { color: var(--text); font: 500 12px/1.45 var(--mono); }
+.engine-status { margin-top: 18px; display: flex; align-items: center; gap: 9px; color: var(--text2); font: 600 12px/1.4 var(--mono); }
+.engine-error { margin-top: 14px; padding: 12px; border: 1px solid rgba(251,113,133,.35); color: var(--red); font-size: 13px; }
 
 /* ── Status Indicator ──────────────────────────────────────────── */
 .status-dot {
   width: 8px; height: 8px; border-radius: 50%;
   display: inline-block;
 }
-.status-dot.live { background: var(--green); box-shadow: var(--glow-green); animation: pulse 2s infinite; }
+.status-dot.live { background: var(--green); box-shadow: var(--glow-green); }
 .status-dot.dead { background: var(--red); }
 .status-dot.loading { background: var(--yellow); animation: pulse 1s infinite; }
 @keyframes pulse {
@@ -531,7 +510,7 @@ h3 { font-size: 1.25rem; font-weight: 600; }
 .nav {
   position: fixed; top: 0; left: 0; right: 0;
   z-index: 100;
-  background: rgba(2,10,20,0.95);
+  background: rgba(7,17,25,0.96);
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
   border-bottom: 1px solid var(--border);
@@ -541,16 +520,15 @@ h3 { font-size: 1.25rem; font-weight: 600; }
 .nav-inner {
   max-width: 1100px; margin: 0 auto;
   display: flex; align-items: center; justify-content: space-between;
-  height: 56px;
+  height: 64px;
 }
-.nav-brand { font-weight: 800; font-size: 16px; display: flex; align-items: center; gap: 8px; }
-.nav-links { display: flex; gap: 2px; overflow-x: auto; scrollbar-width: none; -ms-overflow-style: none; mask-image: linear-gradient(90deg, transparent, black 16px, black calc(100% - 16px), transparent); -webkit-mask-image: linear-gradient(90deg, transparent, black 16px, black calc(100% - 16px), transparent); padding: 0 8px; }
-.nav-links::-webkit-scrollbar { display: none; }
+.nav-brand { color: var(--text); text-decoration: none; font-weight: 800; font-size: 16px; display: flex; align-items: center; gap: 8px; }
+.nav-links { display: flex; align-items: center; gap: 2px; }
 .nav-links a {
   color: var(--text3);
   text-decoration: none;
   font-size: 13px; font-weight: 500;
-  padding: 6px 12px; border-radius: 8px;
+  padding: 8px 11px; border-radius: 6px;
   white-space: nowrap;
   transition: color 0.15s, background 0.15s;
   position: relative;
@@ -565,7 +543,7 @@ h3 { font-size: 1.25rem; font-weight: 600; }
 }
 /* Scroll progress bar */
 .scroll-progress {
-  position: fixed; top: 56px; left: 0; right: 0;
+  position: fixed; top: 64px; left: 0; right: 0;
   height: 2px; z-index: 99;
   background: transparent;
 }
@@ -592,12 +570,13 @@ h3 { font-size: 1.25rem; font-weight: 600; }
 /* Mobile menu */
 .nav-mobile-menu {
   display: none;
-  position: fixed; top: 56px; left: 0; right: 0;
-  background: rgba(2,10,20,0.95);
+  position: fixed; top: 64px; left: 0; right: 0;
+  max-height: calc(100dvh - 64px); overflow-y: auto; overscroll-behavior: contain;
+  background: rgba(7,17,25,0.98);
   backdrop-filter: blur(16px);
   -webkit-backdrop-filter: blur(16px);
   border-bottom: 1px solid var(--border2);
-  padding: 8px 16px 16px;
+  padding: 8px 16px max(16px, env(safe-area-inset-bottom));
   z-index: 99;
 }
 .nav-mobile-menu.open { display: block; animation: menuSlide 0.2s ease; }
@@ -606,8 +585,8 @@ h3 { font-size: 1.25rem; font-weight: 600; }
   display: block; padding: 12px 16px;
   color: var(--text2); text-decoration: none;
   font-size: 15px; font-weight: 500;
-  border-radius: 10px;
-  transition: all 0.15s;
+  border-radius: 6px;
+  transition: color 0.15s, background 0.15s;
 }
 .nav-mobile-menu a:hover, .nav-mobile-menu a:active { background: rgba(255,255,255,0.05); color: var(--text); }
 .nav-mobile-menu a.active { color: var(--blue); }
@@ -706,18 +685,27 @@ input[type="text"]:focus, select:focus, textarea:focus {
 /* ── Section exhibit number ────────────────────────────────────── */
 .exhibit-num {
   display: inline-flex; align-items: center; gap: 6px;
-  padding: 5px 14px; border-radius: 100px;
+  padding: 5px 9px; border-radius: 4px;
   font-size: 11px; font-weight: 700;
   text-transform: uppercase; letter-spacing: 0.08em;
-  background: linear-gradient(135deg, rgba(6,182,212,0.12), rgba(59,130,246,0.12));
+  background: var(--cyan-dim);
   color: var(--cyan);
-  border: 1px solid rgba(6,182,212,0.2);
+  border: 1px solid rgba(34,211,238,0.24);
   margin-bottom: 16px;
 }
 
-/* ── Section intro accent ──────────────────────────────────────── */
+/* ── Exhibit map ───────────────────────────────────────────────── */
+.exhibit-map-section { padding: 0 0 72px; border-bottom: 1px solid var(--border); }
+.exhibit-map { background: var(--surface); border: 1px solid var(--border2); border-radius: var(--radius); }
+.exhibit-map summary { cursor: pointer; min-height: 48px; padding: 14px 18px; color: var(--text); font-weight: 700; }
+.exhibit-map-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 24px; padding: 8px 18px 22px; }
+.exhibit-map-group h2 { margin-bottom: 8px; color: var(--text3); font: 700 11px/1.3 var(--mono); letter-spacing: .08em; text-transform: uppercase; }
+.exhibit-map-group a { display: block; padding: 5px 0; color: var(--text2); font-size: 13px; text-decoration: none; }
+.exhibit-map-group a:hover { color: var(--cyan); }
+
+/* ── Section intro ─────────────────────────────────────────────── */
 .section h2 { margin-bottom: 4px; }
-.section h2 + .text-muted { border-left: 2px solid rgba(59,130,246,0.25); padding-left: 16px; }
+.section h2 + .text-muted { margin-top: 10px !important; }
 
 /* (scheduler lanes + comparison grid handled in main mobile block) */
 
@@ -811,23 +799,27 @@ input[type="text"]:focus, select:focus, textarea:focus {
   .section { padding: 48px 0; }
 
   /* Hero adjustments */
-  .hero { min-height: 85vh; padding-top: 56px; }
-  .hero h1 { font-size: 1.75rem; }
-  .hero .subtitle { font-size: 0.95rem; margin-top: 12px; }
-  .hero-content { padding: 0 16px; }
+  .hero { min-height: auto; padding: 112px 0 56px; }
+  .hero-layout { grid-template-columns: 1fr; gap: 36px; }
+  .hero h1 { font-size: clamp(2.5rem, 13vw, 4.2rem); }
+  .hero .subtitle { font-size: 1rem; margin-top: 18px; }
+  .hero-actions .btn { width: 100%; }
+  .runtime-readout { padding: 20px; }
+  .exhibit-map-section { padding-bottom: 48px; }
+  .exhibit-map-grid { grid-template-columns: 1fr 1fr; gap: 22px 16px; }
 
   /* Cards & viz: tighter padding */
-  .card { padding: 20px; border-radius: 16px; }
+  .card { padding: 20px; border-radius: var(--radius-lg); }
   .card-sm { padding: 14px; }
-  .viz { padding: 16px; border-radius: 16px; min-height: 140px; }
+  .viz { padding: 16px; border-radius: var(--radius-lg); min-height: 140px; }
   .viz-title { font-size: 12px; margin-bottom: 12px; }
 
   /* Exhibit badge */
   .exhibit-num { font-size: 10px; padding: 4px 10px; margin-bottom: 12px; }
 
   /* Section headings */
-  h2 { font-size: 1.25rem; }
-  .section h2 + .text-muted { font-size: 13px; padding-left: 12px; border-left-width: 2px; }
+  h2 { font-size: 1.45rem; }
+  .section h2 + .text-muted { font-size: 13px; }
 
   /* Code blocks: prevent horizontal overflow */
   .code-block { border-radius: 10px; }
@@ -901,12 +893,6 @@ input[type="text"]:focus, select:focus, textarea:focus {
   /* Toast: full width */
   .toast { font-size: 12px; padding: 10px 16px; }
 
-  /* Glow orbs: smaller to reduce GPU pressure */
-  .hero-bg .glow-ring-1 { filter: blur(50px); }
-  .hero-bg .glow-ring-2 { filter: blur(60px); }
-  .hero-bg .glow-ring-3 { filter: blur(70px); }
-  .hero-bg .glow-orb-1, .hero-bg .glow-orb-2 { display: none; }
-
   /* Snippet buttons in REPL */
   #repl-input + div, [style*="margin-bottom: 12px; display: flex; flex-wrap: wrap; gap: 6px"] {
     gap: 4px !important;
@@ -916,28 +902,28 @@ input[type="text"]:focus, select:focus, textarea:focus {
 /* Extra small screens (iPhone SE, etc.) */
 @media (max-width: 380px) {
   .container { padding: 0 12px; }
-  h2 { font-size: 1.1rem; }
+  h2 { font-size: 1.35rem; }
   .code-body { font-size: 11px; }
   .outcome-grid { grid-template-columns: 1fr; }
   #chaos-metrics { grid-template-columns: repeat(2, 1fr) !important; }
-  .btn-sm { font-size: 11px; padding: 6px 10px; }
+  .btn-sm, .btn-copy { min-height: 44px; font-size: 12px; padding: 8px 10px; }
+  .exhibit-map-grid { grid-template-columns: 1fr; }
 }
 
 /* ── Scroll offset for fixed nav ───────────────────────────────── */
-.section[id] { scroll-margin-top: 72px; contain: layout style; }
+.section[id] { scroll-margin-top: 80px; contain: layout style; }
 
 /* ── Back to Top ───────────────────────────────────────────────── */
 .btn-top {
   position: fixed; bottom: 24px; left: 24px; z-index: 90;
   width: 44px; height: 44px;
-  border-radius: 50%;
-  background: rgba(10,22,40,0.85);
-  backdrop-filter: blur(12px);
+  border-radius: 7px;
+  background: rgba(11,23,32,0.96);
   border: 1px solid var(--border2);
   color: var(--text2);
   cursor: pointer;
   display: flex; align-items: center; justify-content: center;
-  transition: all 0.2s;
+  transition: opacity 0.2s, transform 0.2s, color 0.2s, background 0.2s, border-color 0.2s;
   box-shadow: 0 4px 16px rgba(0,0,0,0.3);
   opacity: 0; transform: translateY(8px); pointer-events: none;
 }
@@ -956,22 +942,15 @@ input[type="text"]:focus, select:focus, textarea:focus {
     animation-duration: 0.01ms !important;
     transition-duration: 0.01ms !important;
   }
+  html { scroll-behavior: auto; }
 }
 
-/* ── Fade-in on scroll ─────────────────────────────────────────── */
-.reveal {
-  opacity: 0.01; transform: translateY(20px);
-  transition: opacity var(--dur-slow) var(--ease-stripe), transform var(--dur-slow) var(--ease-stripe);
-  will-change: opacity, transform;
-}
-.reveal.visible {
-  opacity: 1; transform: translateY(0);
-  will-change: auto;
-}
+/* Content remains readable when animation or JavaScript is unavailable. */
+.reveal { opacity: 1; transform: none; }
 
 /* ── Tooltip ───────────────────────────────────────────────────── */
 [data-tip] { position: relative; }
-[data-tip]:hover::after {
+[data-tip]:hover::after, [data-tip]:focus-visible::after {
   content: attr(data-tip);
   position: absolute; bottom: calc(100% + 8px); left: 50%;
   transform: translateX(-50%);
@@ -1017,103 +996,90 @@ input[type="text"]:focus, select:focus, textarea:focus {
 <!-- ═══════════════════════════════════════════════════════════════
      NAVIGATION
      ═══════════════════════════════════════════════════════════════ -->
-<nav class="nav" id="nav">
+<a class="skip-link" href="#main-content">Skip to experiments</a>
+<nav class="nav" id="nav" aria-label="Primary navigation">
   <div class="nav-inner">
-    <div class="nav-brand">
+    <a class="nav-brand" href="#hero" aria-label="Asupersync Browser Lab home">
       <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
-        <circle cx="11" cy="11" r="10" stroke="url(#navGrad)" stroke-width="1.5" opacity="0.7"/>
-        <circle cx="11" cy="11" r="5.5" fill="url(#navGrad)" opacity="0.8"/>
-        <circle cx="11" cy="11" r="2" fill="#fff"/>
-        <defs><linearGradient id="navGrad" x1="0" y1="0" x2="22" y2="22"><stop stop-color="#3B82F6"/><stop offset="1" stop-color="#06B6D4"/></linearGradient></defs>
+        <circle cx="11" cy="11" r="10" stroke="#22D3EE" stroke-width="1.5" opacity="0.8"/>
+        <circle cx="11" cy="11" r="5.5" fill="#22D3EE" opacity="0.75"/>
+        <circle cx="11" cy="11" r="2" fill="#EAF5F7"/>
       </svg>
-      <span>Asupersync <span class="text-dim" style="font-weight:400; font-size:13px">WASM Demo</span></span>
-    </div>
+      <span>Asupersync <span class="text-dim" style="font-weight:400; font-size:13px">Browser Lab</span></span>
+    </a>
     <div class="nav-links" id="nav-links">
-      <a href="#abi" data-section="abi">ABI</a>
-      <a href="#regions" data-section="regions">Regions</a>
-      <a href="#outcomes" data-section="outcomes">Outcomes</a>
-      <a href="#cancel" data-section="cancel">Cancel</a>
-      <a href="#budget" data-section="budget">Budget</a>
-      <a href="#stale" data-section="stale">Handles</a>
-      <a href="#cascade" data-section="cascade">Cascade</a>
-      <a href="#protocol" data-section="protocol">Protocol</a>
-      <a href="#repl" data-section="repl">REPL</a>
-      <a href="#chaos" data-section="chaos">Chaos</a>
-      <a href="#scopefetch" data-section="scopefetch">Scoped</a>
-      <a href="#severity" data-section="severity">Severity</a>
-      <a href="#forensics" data-section="forensics">Forensics</a>
-      <a href="#recycling" data-section="recycling">Slots</a>
-      <a href="#isolation" data-section="isolation">Isolation</a>
-      <a href="#replay" data-section="replay">Replay</a>
-      <a href="#leakdetect" data-section="leakdetect">Leaks</a>
-      <a href="#timeout" data-section="timeout">Timeout</a>
-      <a href="#websocket" data-section="websocket">Channel</a>
-      <a href="#comparison" data-section="comparison">vs Vanilla</a>
-      <a href="#benchmark" data-section="benchmark">Bench</a>
+      <a href="#abi" data-section="abi">Fundamentals</a>
+      <a href="#cancel" data-section="cancel">Lifecycle</a>
+      <a href="#repl" data-section="repl">Laboratory</a>
+      <a href="#comparison" data-section="comparison">Evidence</a>
+      <a href="https://github.com/Dicklesworthstone/asupersync">GitHub</a>
     </div>
-    <button class="nav-hamburger" id="nav-hamburger" onclick="toggleMobileMenu()" aria-label="Toggle navigation">
+    <button type="button" class="nav-hamburger" id="nav-hamburger" onclick="toggleMobileMenu()" aria-label="Open exhibit navigation" aria-expanded="false" aria-controls="nav-mobile-menu">
       <svg viewBox="0 0 20 20" fill="currentColor"><path d="M3 5h14M3 10h14M3 15h14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" fill="none"/></svg>
     </button>
   </div>
 </nav>
-<div class="scroll-progress"><div class="scroll-progress-fill" id="scroll-progress-fill"></div></div>
-<div class="nav-mobile-menu" id="nav-mobile-menu">
-  <a href="#abi" data-section="abi" onclick="closeMobileMenu()">ABI Handshake</a>
-  <a href="#regions" data-section="regions" onclick="closeMobileMenu()">Regions</a>
-  <a href="#outcomes" data-section="outcomes" onclick="closeMobileMenu()">Outcomes</a>
-  <a href="#cancel" data-section="cancel" onclick="closeMobileMenu()">Cancel Protocol</a>
-  <a href="#budget" data-section="budget" onclick="closeMobileMenu()">Budget Algebra</a>
-  <a href="#stale" data-section="stale" onclick="closeMobileMenu()">Handle Safety</a>
-  <a href="#cascade" data-section="cascade" onclick="closeMobileMenu()">Cascade Close</a>
-  <a href="#protocol" data-section="protocol" onclick="closeMobileMenu()">Cancel→Join Protocol</a>
-  <a href="#repl" data-section="repl" onclick="closeMobileMenu()">Live REPL</a>
-  <a href="#chaos" data-section="chaos" onclick="closeMobileMenu()">Chaos Test</a>
-  <a href="#scopefetch" data-section="scopefetch" onclick="closeMobileMenu()">Scope-Bounded Fetch</a>
-  <a href="#severity" data-section="severity" onclick="closeMobileMenu()">Severity Propagation</a>
-  <a href="#forensics" data-section="forensics" onclick="closeMobileMenu()">Cancel Forensics</a>
-  <a href="#recycling" data-section="recycling" onclick="closeMobileMenu()">Slot Recycling</a>
-  <a href="#isolation" data-section="isolation" onclick="closeMobileMenu()">Scope Isolation</a>
-  <a href="#replay" data-section="replay" onclick="closeMobileMenu()">Deterministic Replay</a>
-  <a href="#leakdetect" data-section="leakdetect" onclick="closeMobileMenu()">Leak Detection</a>
-  <a href="#timeout" data-section="timeout" onclick="closeMobileMenu()">Scope Timeout</a>
-  <a href="#websocket" data-section="websocket" onclick="closeMobileMenu()">Channel</a>
-  <a href="#comparison" data-section="comparison" onclick="closeMobileMenu()">vs Vanilla JS</a>
-  <a href="#benchmark" data-section="benchmark" onclick="closeMobileMenu()">Benchmark</a>
+<div class="scroll-progress" aria-hidden="true"><div class="scroll-progress-fill" id="scroll-progress-fill"></div></div>
+<div class="nav-mobile-menu" id="nav-mobile-menu" aria-label="Exhibit chapters">
+  <a href="#abi" data-section="abi" onclick="closeMobileMenu()">Fundamentals</a>
+  <a href="#cancel" data-section="cancel" onclick="closeMobileMenu()">Lifecycle</a>
+  <a href="#repl" data-section="repl" onclick="closeMobileMenu()">Laboratory</a>
+  <a href="#comparison" data-section="comparison" onclick="closeMobileMenu()">Evidence</a>
+  <a href="https://github.com/Dicklesworthstone/asupersync" onclick="closeMobileMenu()">GitHub</a>
 </div>
+
+<main id="main-content" tabindex="-1">
 
 <!-- ═══════════════════════════════════════════════════════════════
      HERO
      ═══════════════════════════════════════════════════════════════ -->
 <header class="hero" id="hero">
-  <div class="hero-bg">
-    <div class="glow-ring glow-ring-1"></div>
-    <div class="glow-ring glow-ring-2"></div>
-    <div class="glow-ring glow-ring-3"></div>
-    <div class="glow-orb glow-orb-1"></div>
-    <div class="glow-orb glow-orb-2"></div>
-  </div>
-  <div class="hero-content">
-    <div style="margin-bottom: 20px;">
-      <span class="badge badge-blue" id="wasm-status-badge">
-        <span class="status-dot loading"></span>
-        Initializing WASM...
-      </span>
-    </div>
-    <h1>The <span>Async Runtime</span><br>Running in Your Browser</h1>
-    <p class="subtitle">
-      Structured concurrency, cancel-correct channels, four-valued outcomes, and deterministic testing
-      — compiled to WebAssembly and running live right here.
-    </p>
-    <div style="margin-top: 32px; display: flex; gap: 12px; justify-content: center; flex-wrap: wrap;">
-      <a href="#abi" class="btn btn-primary" id="btn-init" style="text-decoration:none;">
-        Explore Exhibits
+  <div class="hero-bg" aria-hidden="true"></div>
+  <div class="container hero-layout">
+    <div class="hero-content">
+      <p class="hero-kicker">Asupersync Browser Edition · 21 live exhibits</p>
+      <h1>The lifecycle contract, <span>made visible.</span></h1>
+      <p class="subtitle">
+        Explore the ownership, cancellation, outcome, and capability model behind Asupersync. Every lifecycle mutation in this lab crosses the shipped WebAssembly boundary; the browser supplies the promises, timers, and event loop.
+      </p>
+      <div class="hero-actions">
+        <a href="#exhibit-index" class="btn btn-primary" id="btn-init" style="text-decoration:none;">
+        Choose an exhibit
         <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><polyline points="3,5 7,9 11,5" stroke="currentColor" stroke-width="2" stroke-linecap="round" fill="none"/></svg>
-      </a>
-      <a href="#repl" class="btn btn-ghost" style="text-decoration:none;">Open REPL</a>
+        </a>
+        <a href="#repl" class="btn btn-ghost" style="text-decoration:none;">Open the WASM REPL</a>
+      </div>
     </div>
-    <div id="init-error" style="margin-top: 16px; display: none;" class="badge badge-err"></div>
+    <aside class="runtime-readout" aria-labelledby="runtime-readout-title">
+      <h2 id="runtime-readout-title">Live execution boundary</h2>
+      <dl>
+        <div class="readout-row"><dt>Engine</dt><dd>WASM lifecycle ledger</dd></div>
+        <div class="readout-row"><dt>Work</dt><dd>Browser promises + event loop</dd></div>
+        <div class="readout-row"><dt>Thread</dt><dd>Single-threaded browser target</dd></div>
+        <div class="readout-row"><dt>ABI</dt><dd id="hero-abi">Checking local artifact…</dd></div>
+      </dl>
+      <div class="engine-status" id="wasm-status-badge" role="status" aria-live="polite">
+        <span class="status-dot loading"></span>
+        Initializing local WASM…
+      </div>
+      <div id="init-error" class="engine-error" hidden></div>
+    </aside>
   </div>
 </header>
+
+<section class="exhibit-map-section" id="exhibit-index" aria-labelledby="exhibit-map-title">
+  <div class="container">
+    <details class="exhibit-map" open>
+      <summary id="exhibit-map-title">Browse all 21 experiments</summary>
+      <div class="exhibit-map-grid">
+        <div class="exhibit-map-group"><h2>Contract</h2><a href="#abi">01 · ABI handshake</a><a href="#regions">02 · Region tree</a><a href="#outcomes">03 · Outcomes</a><a href="#cancel">04 · Cancel protocol</a><a href="#budget">05 · Budget algebra</a></div>
+        <div class="exhibit-map-group"><h2>Lifecycle</h2><a href="#stale">06 · Handle safety</a><a href="#cascade">07 · Cascade close</a><a href="#protocol">08 · Cancel then join</a><a href="#repl">09 · Live REPL</a><a href="#chaos">10 · Stress run</a></div>
+        <div class="exhibit-map-group"><h2>Control plane</h2><a href="#scopefetch">11 · Scoped fetch</a><a href="#severity">12 · Severity</a><a href="#forensics">13 · Forensics</a><a href="#recycling">14 · Slot recycling</a><a href="#isolation">15 · Isolation</a><a href="#replay">16 · Replay</a></div>
+        <div class="exhibit-map-group"><h2>Evidence</h2><a href="#leakdetect">17 · Leak detection</a><a href="#timeout">18 · Timeout</a><a href="#websocket">19 · Channel lifecycle</a><a href="#comparison">20 · Coordination surface</a><a href="#benchmark">21 · ABI throughput</a></div>
+      </div>
+    </details>
+  </div>
+</section>
 
 <!-- ═══════════════════════════════════════════════════════════════
      SECTION 1: ABI HANDSHAKE
@@ -1124,11 +1090,10 @@ input[type="text"]:focus, select:focus, textarea:focus {
       <span class="exhibit-num">Exhibit 1</span>
       <h2>ABI Handshake &amp; Version Negotiation</h2>
       <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
-        Most WASM libraries discover version incompatibility when something <em>crashes in production</em>.
-        Before any runtime operation, Asupersync's WASM module and JavaScript host perform a
+        Before lifecycle work begins, Asupersync's WASM module and JavaScript host perform a
         <strong style="color:var(--text);">version handshake</strong> with a 64-bit fingerprint.
         Incompatible consumers are rejected at the first API call — before any state is mutated.
-        No other browser runtime has built-in ABI version negotiation at the WASM boundary.
+        That makes ABI drift an explicit contract failure instead of a late runtime surprise.
       </p>
     </div>
 
@@ -1661,7 +1626,7 @@ t.<span class="fn">join</span>(<span class="typ">Outcome</span>.<span class="fn"
         <div>
           <div class="code-block" style="height: 100%;">
             <div class="code-header">
-              <span class="lang">REPL Input</span>
+              <span class="lang" aria-hidden="true">REPL Input</span>
               <span class="actions">
                 <button class="btn btn-ghost btn-sm" onclick="clearRepl()">Clear</button>
                 <button class="btn btn-primary btn-sm" onclick="runRepl()" id="btn-repl-run">
@@ -1670,6 +1635,7 @@ t.<span class="fn">join</span>(<span class="typ">Outcome</span>.<span class="fn"
                 </button>
               </span>
             </div>
+            <label class="field-label" for="repl-input">JavaScript against the WASM lifecycle API</label>
             <textarea id="repl-input" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off"
               style="width:100%; min-height:240px; background:transparent; color:var(--text); border:none; outline:none;
                      font-family:var(--mono); font-size:13px; line-height:1.65; padding:16px 20px; resize:vertical;
@@ -2193,6 +2159,7 @@ scope.<span class="fn">fetchRequest</span>({ <span class="prop">url</span>: url3
 <!-- ═══════════════════════════════════════════════════════════════
      FOOTER
      ═══════════════════════════════════════════════════════════════ -->
+</main>
 <footer style="padding: 60px 0; text-align: center; border-top: 1px solid var(--border);">
   <div class="container">
     <p style="color: var(--text3); font-size: 14px;">
@@ -2201,13 +2168,14 @@ scope.<span class="fn">fetchRequest</span>({ <span class="prop">url</span>: url3
     <p style="color: var(--text3); font-size: 13px; margin-top: 8px;">
       <a href="https://github.com/Dicklesworthstone/asupersync" style="color: var(--blue); text-decoration: none;">GitHub</a>
       &nbsp;·&nbsp;
-      Self-contained — open directly in any browser, no server needed
+      Static browser lab · versioned local WASM assets
     </p>
   </div>
 </footer>
 
-<div class="toast-container" id="toast-container"></div>
-<button class="btn-top" id="btn-top" onclick="window.scrollTo({top:0})" aria-label="Back to top">
+<div class="sr-only" id="sr-status" role="status" aria-live="polite" aria-atomic="true"></div>
+<div class="toast-container" id="toast-container" aria-live="polite" aria-atomic="true"></div>
+<button type="button" class="btn-top" id="btn-top" onclick="scrollToTop()" aria-label="Back to top">
   <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><polyline points="4,10 8,5 12,10" stroke="currentColor" stroke-width="2" stroke-linecap="round" fill="none"/></svg>
 </button>
 
@@ -2221,20 +2189,17 @@ let wasmReady = false;
 let mod = null;  // browser-core module
 let liveRT = null;  // current RuntimeHandle
 let liveScope = null;  // current RegionHandle
+const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
 // ─── Module Loading ──────────────────────────────────────────────
-// jsDelivr serves GitHub files with correct MIME types (application/javascript, application/wasm).
-// This makes the demo work when opened directly from file:// or any static host — no server needed.
-const CDN_BASE = 'https://cdn.jsdelivr.net/gh/Dicklesworthstone/asupersync@main/packages/browser-core';
 const LOCAL_BASE = './packages/browser-core';
 
 async function loadWasm() {
-  // Try local first (fastest when served from the repo), then CDN fallback
-  for (const base of [LOCAL_BASE, CDN_BASE]) {
-    try {
-      // Use string concatenation instead of template literal for iOS Safari compat
-      const rawMod = await import(base + '/index.js');
-      await rawMod.default(base + '/asupersync_bg.wasm');
+  try {
+      const moduleUrl = new URL(LOCAL_BASE + '/index.js', document.baseURI);
+      const wasmUrl = new URL('asupersync_bg.wasm', moduleUrl);
+      const rawMod = await import(moduleUrl.href);
+      await rawMod.default({ module_or_path: wasmUrl });
 
       // Wrap all WASM API functions with exhaustive logging.
       // Use a plain object (not Object.create) — module namespace objects
@@ -2268,30 +2233,33 @@ async function loadWasm() {
       }
 
       wasmReady = true;
-      updateWasmBadge('live', base === CDN_BASE ? 'cdn' : 'local');
-      console.log(`${LOG_PREFIX} %cWASM loaded from ${base}`, LOG_STYLE, LOG_OK);
-      console.log(`${LOG_PREFIX} %cABI v${(rawMod.abiVersion||rawMod.abi_version)().major}.${(rawMod.abiVersion||rawMod.abi_version)().minor}, fingerprint: ${(rawMod.abiFingerprint||rawMod.abi_fingerprint)()}`, LOG_STYLE, 'color:#06B6D4;');
-      console.log(`${LOG_PREFIX} %cAll WASM operations are being logged to this console. Every handle allocation, scope transition, task lifecycle, and cancellation is real.`, LOG_STYLE, 'color:#94A3B8;font-style:italic;');
+      const version = (rawMod.abiVersion||rawMod.abi_version)();
+      const fingerprint = (rawMod.abiFingerprint||rawMod.abi_fingerprint)();
+      updateWasmBadge('live', version, fingerprint);
+      console.log(`${LOG_PREFIX} %cWASM loaded from the deployed local artifact`, LOG_STYLE, LOG_OK);
+      console.log(`${LOG_PREFIX} %cABI v${version.major}.${version.minor}, fingerprint: ${fingerprint}`, LOG_STYLE, 'color:#22D3EE;');
+      console.log(`${LOG_PREFIX} %cLifecycle mutations cross the WASM boundary; presentation timing and browser I/O remain host-side.`, LOG_STYLE, 'color:#A9BEC5;font-style:italic;');
       return true;
     } catch (e) {
-      console.warn('WASM load from ' + base + ' failed:', e.message || e);
+      console.warn('Local WASM artifact failed to load:', e.message || e);
       mod = null;
     }
-  }
   updateWasmBadge('failed');
-  console.error(LOG_PREFIX + ' WASM failed to load from all sources. If on iOS, ensure iOS 15+ and Safari is up to date.', LOG_STYLE);
+  console.error(LOG_PREFIX + ' Local WASM artifact failed to load.', LOG_STYLE);
   return false;
 }
 
-function updateWasmBadge(mode, source) {
+function updateWasmBadge(mode, version, fingerprint) {
   const badge = document.getElementById('wasm-status-badge');
   if (mode === 'live') {
-    badge.className = 'badge badge-ok';
-    const src = source === 'cdn' ? ' (via CDN)' : ' (local)';
-    badge.innerHTML = `<span class="status-dot live"></span> WASM Runtime Live${src}`;
+    badge.className = 'engine-status';
+    badge.innerHTML = '<span class="status-dot live"></span> Local lifecycle ledger ready';
+    document.getElementById('hero-abi').textContent = `v${version.major}.${version.minor} · ${String(fingerprint).slice(0, 12)}…`;
+    announce('Asupersync WASM lifecycle ledger ready');
   } else {
-    badge.className = 'badge badge-err';
-    badge.innerHTML = '<span class="status-dot dead"></span> WASM Load Failed — Check Network';
+    badge.className = 'engine-status';
+    badge.innerHTML = '<span class="status-dot dead"></span> Local lifecycle ledger unavailable';
+    document.getElementById('hero-abi').textContent = 'Load failed';
   }
 }
 
@@ -2319,11 +2287,19 @@ function escHtml(s) {
   return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
 
+function announce(message) {
+  const status = document.getElementById('sr-status');
+  if (!status) return;
+  status.textContent = '';
+  requestAnimationFrame(() => { status.textContent = message; });
+}
+
 // Animated counter — REVELATION beat "Counter reveal" pattern
 // easeOutExpo: fast start, slow finish. Duration ~1.2s via RAF.
 function animateCounter(elementId, targetValue, duration = 1200) {
   const el = document.getElementById(elementId);
   if (!el) return;
+  if (reducedMotion) { el.textContent = targetValue.toLocaleString(); return; }
   const start = performance.now();
   const startVal = 0;
   function tick(now) {
@@ -2352,10 +2328,10 @@ function renderWithEntrance(containerId, html) {
   }
 }
 
-// ─── WASM Module Access (no simulation — real runtime only) ──────
+// ─── WASM Module Access ──────────────────────────────────────────
 function requireWasm(consoleId) {
   if (wasmReady && mod) return mod;
-  if (consoleId) clog(consoleId, 'WASM runtime not loaded. Ensure network connectivity for CDN access.', 'err');
+  if (consoleId) clog(consoleId, 'The local WASM lifecycle ledger is not ready. Use Retry in the execution panel.', 'err');
   return null;
 }
 
@@ -2385,12 +2361,14 @@ function logWasm(op, args, result) {
 async function initRuntime() {
   if (liveRT) return; // Already initialized
 
-  await loadWasm();
+  const loaded = await loadWasm();
 
   const a = requireWasm();
-  if (!a) {
-    document.getElementById('init-error').style.display = 'inline-flex';
-    document.getElementById('init-error').textContent = 'Could not load WASM module. Check network connectivity.';
+  if (!loaded || !a) {
+    const error = document.getElementById('init-error');
+    error.hidden = false;
+    error.innerHTML = 'The deployed WASM artifact could not start. <button type="button" class="btn btn-ghost btn-sm" onclick="retryWasm()">Retry</button>';
+    announce('The WASM lifecycle ledger failed to load. Retry is available.');
     return;
   }
   console.log(`${LOG_PREFIX} %cInitializing persistent runtime...`, LOG_STYLE, 'color:#94A3B8;');
@@ -2403,9 +2381,22 @@ async function initRuntime() {
       liveScope = scopeResult.value;
       console.log(`${LOG_PREFIX} %cRoot scope created: slot=${liveScope.slot} gen=${liveScope.generation}`, LOG_STYLE, LOG_OK);
     }
-    console.log(`${LOG_PREFIX} %c━━━ Runtime ready. All exhibit operations below are REAL WASM calls. ━━━`, LOG_STYLE, 'color:#22C55E;font-weight:bold;');
+    document.getElementById('init-error').hidden = true;
+    console.log(`${LOG_PREFIX} %cRuntime handle ready. Lifecycle operations are ledger-backed; browser work is host-driven.`, LOG_STYLE, 'color:#4ADE80;font-weight:bold;');
+  } else {
+    const error = document.getElementById('init-error');
+    error.hidden = false;
+    error.textContent = 'The lifecycle ledger loaded, but the runtime handle was rejected.';
   }
 }
+window.retryWasm = async function() {
+  wasmReady = false; mod = null;
+  const error = document.getElementById('init-error');
+  error.hidden = true;
+  document.getElementById('wasm-status-badge').innerHTML = '<span class="status-dot loading"></span> Retrying local WASM…';
+  await initRuntime();
+};
+window.scrollToTop = function() { window.scrollTo({ top: 0, behavior: reducedMotion ? 'auto' : 'smooth' }); };
 // Keep initDemo as an alias for backward compatibility with onclick handlers
 window.initDemo = initRuntime;
 
