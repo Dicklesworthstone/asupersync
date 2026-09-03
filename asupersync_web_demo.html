@@ -353,9 +353,7 @@ h3 { font-size: 1.25rem; font-weight: 600; }
   cursor: pointer;
 }
 .region-box:hover { stroke-width: 2.5; }
-.task-dot {
-  transition: all 0.3s ease;
-}
+.task-dot { transition: opacity 0.3s ease, filter 0.3s ease; }
 .task-dot.dead {
   opacity: 0.15;
 }
@@ -718,12 +716,12 @@ input[type="text"]:focus, select:focus, textarea:focus {
   font-size: 13px; font-family: var(--mono);
   border: 1px solid var(--border);
   background: rgba(255,255,255,0.02);
-  transition: all 0.35s;
+  transition: border-color 0.35s ease, background-color 0.35s ease;
   margin-bottom: 6px;
 }
 .resource-row .res-dot {
   width: 8px; height: 8px; border-radius: 50%;
-  transition: all 0.35s;
+  transition: background-color 0.35s ease, box-shadow 0.35s ease;
   flex-shrink: 0;
 }
 .resource-row .res-dot.active { background: var(--blue); box-shadow: 0 0 8px rgba(59,130,246,0.4); }
@@ -755,7 +753,7 @@ input[type="text"]:focus, select:focus, textarea:focus {
   padding: 8px 16px; border-radius: 8px;
   font-size: 13px; font-weight: 600;
   text-align: center;
-  transition: all 0.3s;
+  transition: color 0.3s ease, background-color 0.3s ease, border-color 0.3s ease;
 }
 
 /* ── Hex grid texture for viz (from SyncContainer) ─────────────── */
@@ -791,7 +789,7 @@ input[type="text"]:focus, select:focus, textarea:focus {
 }
 
 /* ═══════════════════════════════════════════════════════════════════
-   MOBILE LAYOUT — comprehensive overrides for < 768px
+   MOBILE LAYOUT: comprehensive overrides for < 768px
    ═══════════════════════════════════════════════════════════════════ */
 @media (max-width: 768px) {
   /* Tighter container padding */
@@ -2146,7 +2144,7 @@ scope.<span class="fn">fetchRequest</span>({ <span class="prop">url</span>: url3
 </button>
 
 <!-- ═══════════════════════════════════════════════════════════════
-     JAVASCRIPT — All Logic
+     JAVASCRIPT: All Logic
      ═══════════════════════════════════════════════════════════════ -->
 <script type="module">
 
@@ -2168,7 +2166,7 @@ async function loadWasm() {
       await rawMod.default({ module_or_path: wasmUrl });
 
       // Wrap all WASM API functions with exhaustive logging.
-      // Use a plain object (not Object.create) — module namespace objects
+      // Use a plain object (not Object.create); module namespace objects
       // are exotic and Object.create on them fails on some engines (iOS Safari).
       mod = {};
       const wrapFn = (name, fn) => function() {
@@ -2227,9 +2225,9 @@ async function loadWasm() {
       const encodeValue = value => {
         if (value === undefined) return { kind: 'unit' };
         if (typeof value === 'boolean') return { kind: 'bool', value };
-        if (typeof value === 'number' && Number.isInteger(value)) return { kind: value >= 0 ? 'u64' : 'i64', value };
+        if (typeof value === 'number' && Number.isSafeInteger(value)) return { kind: value >= 0 ? 'u64' : 'i64', value };
         if (typeof value === 'string') return { kind: 'string', value };
-        throw new TypeError('Outcome.ok in this lab accepts integers, booleans, strings, or undefined');
+        throw new TypeError('Outcome.ok in this lab accepts safe integers, booleans, strings, or undefined');
       };
       const encodeOutcome = outcome => outcome.outcome === 'ok'
         ? { outcome: 'ok', value: encodeValue(outcome.value) }
@@ -2373,7 +2371,7 @@ function announce(message) {
   requestAnimationFrame(() => { status.textContent = message; });
 }
 
-// Animated counter — REVELATION beat "Counter reveal" pattern
+// Animated counter: REVELATION beat "Counter reveal" pattern
 // easeOutExpo: fast start, slow finish. Duration ~1.2s via RAF.
 function animateCounter(elementId, targetValue, duration = 1200) {
   const el = document.getElementById(elementId);
@@ -2653,7 +2651,7 @@ window.cancelRegion = function(id) {
       if (r) r.status = 'quiescent';
     });
     renderRegionTree();
-    clog('region-console', `Quiescent: ${descendants.join(', ')} — all children complete`, 'ok');
+    clog('region-console', `Quiescent: ${descendants.join(', ')}; all children complete`, 'ok');
     showToast('Region closed to quiescence', 'ok');
     // Close real WASM scope handles (bottom-up: children first)
     if (regionState.wasmHandles) {
@@ -2707,7 +2705,7 @@ const outcomeTypes = [
     code:`<span class="typ">Outcome</span>.<span class="fn">cancelled</span>({\n  <span class="prop">kind</span>: <span class="str">'timeout'</span>,\n  <span class="prop">phase</span>: <span class="str">'completed'</span>,\n  <span class="prop">origin_region</span>: <span class="str">'http-handler'</span>,\n  <span class="prop">message</span>: <span class="str">'5s deadline exceeded'</span>,\n  <span class="prop">truncated</span>: <span class="kw">false</span>\n})`,
     severity: 2 },
   { id:'panicked', title:'Panicked', icon:'&#9889;', desc:'Unrecoverable task panic with payload', color:HEX.violet, badge:'badge-panic',
-    code:`<span class="typ">Outcome</span>.<span class="fn">panicked</span>(\n  <span class="str">'index out of bounds: len is 0 but index is 5'</span>\n)\n<span class="cmt">// Severity: highest — always propagated</span>`,
+    code:`<span class="typ">Outcome</span>.<span class="fn">panicked</span>(\n  <span class="str">'index out of bounds: len is 0 but index is 5'</span>\n)\n<span class="cmt">// Severity: highest; always propagated</span>`,
     severity: 3 },
 ];
 
@@ -3119,7 +3117,7 @@ window.runStaleDemo = function() {
     steps.push({ action: 'Close scope', slot: h.slot, gen: h.generation, label: 'first', status: 'closed', color: HEX.text3 });
     clog('stale-console', `Closed scope "first": slot ${h.slot} freed`, 'info');
 
-    // Step 3: Create new scope — may reuse slot
+    // Step 3: Create new scope; it may reuse the slot
     const s2 = rt.value.enterScope('second');
     if (s2.outcome === 'ok') {
       const h2 = s2.value;
@@ -3242,7 +3240,7 @@ window.cascadeClose = function() {
   const httpNode = tree.find(n => n.id === 'http-handler');
   if (!httpNode) return;
 
-  clog('cascade-console', 'Closing "http-handler" — cascade begins...', 'warn');
+  clog('cascade-console', 'Closing "http-handler"; cascade begins...', 'warn');
 
   // Animate: mark as closing one by one
   let delay = 0;
@@ -3298,14 +3296,14 @@ window.runProtocolDemo = function() {
 
   const steps = [];
 
-  // Step 1: Spawn — task is PINNED
+  // Step 1: Spawn; task is PINNED
   const t = sc.spawnTask({ label: 'worker' });
   if (t.outcome !== 'ok') { clog('protocol-console', 'Spawn failed', 'err'); return; }
   const task = t.value;
   steps.push({ step: 'Spawn', state: 'Active (pinned)', slot: task.slot, gen: task.generation, badge: 'badge-ok', badgeText: 'Active' });
-  clog('protocol-console', `Spawned task: slot=${task.slot} gen=${task.generation} — handle is PINNED`, 'ok');
+  clog('protocol-console', `Spawned task: slot=${task.slot} gen=${task.generation}; handle is PINNED`, 'ok');
 
-  // Step 2: Cancel — transitions to Cancelling
+  // Step 2: Cancel; transitions to Cancelling
   const c1 = task.cancel('user', 'stop requested');
   if (c1.outcome === 'cancelled' || c1.outcome === 'ok') {
     steps.push({ step: 'Cancel', state: 'Cancelling (still pinned)', slot: task.slot, gen: task.generation, badge: 'badge-cancel', badgeText: 'Cancelling' });
@@ -3315,7 +3313,7 @@ window.runProtocolDemo = function() {
     clog('protocol-console', `Cancel result: ${JSON.stringify(c1)}`, 'info');
   }
 
-  // Step 3: Double-cancel — should fail
+  // Step 3: Double-cancel; should fail
   const c2 = task.cancel('timeout', 'double cancel attempt');
   steps.push({ step: 'Double Cancel', state: c2.outcome === 'err' ? 'REJECTED ✓' : c2.outcome, slot: task.slot, gen: task.generation, badge: c2.outcome === 'err' ? 'badge-err' : 'badge-cancel', badgeText: c2.outcome === 'err' ? 'Rejected' : c2.outcome });
   if (c2.outcome === 'err') {
@@ -3324,7 +3322,7 @@ window.runProtocolDemo = function() {
     clog('protocol-console', `Double-cancel result: ${c2.outcome}`, 'info');
   }
 
-  // Step 4: Join — unpins and releases
+  // Step 4: Join; unpins and releases
   const joined = task.join(Outcome.cancelled({
     kind: 'user', phase: 'completed', origin_region: 'demo',
     origin_task: null, timestamp_nanos: 0, message: 'stop requested', truncated: false
@@ -3400,7 +3398,7 @@ s.value.close();
 log('Closed. Trying stale handle...');
 const result = scopeClose(snap);
 log('Result: ' + JSON.stringify(result));`,
-  `// Deep nesting — 5 levels
+  `// Deep nesting: 5 levels
 let parent = rt;
 const handles = [];
 for (let i = 0; i < 5; i++) {
@@ -3409,7 +3407,7 @@ for (let i = 0; i < 5; i++) {
   log('Level ' + i + ': slot=' + child.value.slot);
   parent = child.value;
 }
-// Close root — cascades through all 5 levels
+// Close root; cascades through all 5 levels
 handles[0].close();
 log('Closed level-0. All 5 levels cascade-closed.');
 // Verify: try using a deep handle
@@ -3455,7 +3453,7 @@ window.runRepl = function() {
   const logs = [];
   const logFn = (...args) => { logs.push(args.map(arg => typeof arg === 'object' ? JSON.stringify(arg, null, 2) : String(arg)).join(' ')); };
 
-  // Build execution context — all functions are REAL WASM bindings
+  // Build execution context; all functions are real WASM bindings
   const context = {
     rt: liveRT,
     scope: liveScope,
@@ -3661,7 +3659,7 @@ window.runChaos = async function() {
   console.groupEnd();
   console.log(`${LOG_PREFIX} %cStress run complete: ${ops} ops, ${peakHandles} peak handles, ${liveAfterClose} handles live after root close`, LOG_STYLE, liveAfterClose === 0 ? LOG_OK : LOG_ERR);
   clog('chaos-console', `Completed: ${ops} operations, peak ${peakHandles} live handles, max gen ${maxGen}`, 'ok');
-  clog('chaos-console', `Errors caught by runtime: ${errors} (expected — stale handles, invalid states)`, errors > 0 ? 'warn' : 'ok');
+  clog('chaos-console', `Errors caught by runtime: ${errors} (expected: stale handles and invalid states)`, errors > 0 ? 'warn' : 'ok');
   clog('chaos-console', `Root close: ${rootClose.outcome}. Handles still accepting operations: ${liveAfterClose}.`, liveAfterClose === 0 ? 'ok' : 'err');
   showToast(`${ops} operations · ${liveAfterClose} handles live after close`, liveAfterClose === 0 ? 'ok' : 'err');
   announce(`Lifecycle stress run complete. ${liveAfterClose} handles remained live after root close.`);
@@ -3819,7 +3817,7 @@ window.runSeverityDemo = function() {
     <div style="text-align:center;padding:16px;border-radius:var(--radius);border:1px solid ${worstColor}44;background:${worstColor}11;">
       <div style="font-size:12px;color:var(--text3);margin-bottom:8px;">AGGREGATE (worst severity wins)</div>
       <span class="badge ${worstBadge}" style="font-size:14px;padding:6px 20px;">${worst.label.toUpperCase()}</span>
-      <div style="font-size:12px;color:var(--text3);margin-top:8px;">Determined by ${worst.from} — severity level ${worst.idx}</div>
+      <div style="font-size:12px;color:var(--text3);margin-top:8px;">Determined by ${worst.from}; severity level ${worst.idx}</div>
     </div>
     <div style="margin-top:12px;padding:12px;border-radius:8px;background:rgba(6,182,212,0.06);border:1px solid rgba(6,182,212,0.15);font-size:13px;color:var(--text2);">
       <strong style="color:var(--cyan);">What this shows:</strong> four distinct terminal states can be ordered without erasing the difference between an application error, cancellation, and panic.
@@ -3944,7 +3942,7 @@ window.runRecyclingDemo = function() {
     </div>
     <div style="padding:12px;border-radius:8px;background:rgba(59,130,246,0.06);border:1px solid rgba(59,130,246,0.15);font-size:13px;color:var(--text2);">
       <strong style="color:var(--blue);">LIFO recycling:</strong> Notice how the most recently freed slot gets reused first (highest reuse count on the most recently allocated slots).
-      This pattern is deterministic — running the same sequence again produces identical slot assignments, enabling perfect replay debugging.
+      This pattern is deterministic: the same sequence produces identical slot assignments and reproducible replay traces.
     </div>
   `);
   showToast(`Slot heatmap: ${slots.length} slots, ${CYCLES} cycles`, 'ok');
@@ -3988,7 +3986,7 @@ function renderIsolation() {
   container.innerHTML = `
     <div class="result-grid-4" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;">
       ${isoState.siblings.map(s => `
-        <div style="padding:14px;border-radius:var(--radius);border:1px solid ${s.alive ? HEX.green + '44' : HEX.text3 + '33'};background:${s.alive ? HEX.green + '08' : 'rgba(100,116,139,0.04)'};transition:all 0.3s;${!s.alive ? 'opacity:0.5;' : ''}">
+        <div style="padding:14px;border-radius:var(--radius);border:1px solid ${s.alive ? HEX.green + '44' : HEX.text3 + '33'};background:${s.alive ? HEX.green + '08' : 'rgba(100,116,139,0.04)'};transition:border-color 0.3s ease,background-color 0.3s ease,opacity 0.3s ease;${!s.alive ? 'opacity:0.5;' : ''}">
           <div style="font-size:13px;font-weight:700;color:${s.alive ? HEX.green : HEX.text3};margin-bottom:4px;">${s.name}</div>
           <div style="font-size:11px;color:var(--text3);">slot ${s.handle.slot} · ${s.tasks.length} tasks</div>
           <div style="margin-top:6px;">
@@ -4010,13 +4008,13 @@ window.closeNextSibling = function() {
 
   clog('isolation-console', `Closed "${sib.name}" (slot=${sib.handle.slot}) with ${sib.tasks.length} tasks`, 'warn');
 
-  // Verify siblings are unaffected — try entering a scope on each living sibling
+  // Verify siblings are unaffected by entering a scope on each living sibling
   const living = isoState.siblings.filter(s => s.alive);
   living.forEach(s => {
     const probe = s.handle.enterScope('probe');
     if (probe.outcome === 'ok') {
       probe.value.close();
-      clog('isolation-console', `  ✓ "${s.name}" unaffected — still accepts new scopes`, 'ok');
+      clog('isolation-console', `  ✓ "${s.name}" unaffected; still accepts new scopes`, 'ok');
     } else {
       clog('isolation-console', `  ✗ "${s.name}" BROKEN: ${probe.failure?.message}`, 'err');
     }
@@ -4065,7 +4063,7 @@ window.runReplayDemo = function() {
     }
   }
 
-  // Phase 2: Close them in order (0, 1, 2, 3) — pushes to free list in this order
+  // Phase 2: Close them in order (0, 1, 2, 3), pushing to the free list in that order
   const freedSlots = [];
   for (let i = 0; i < scopes.length; i++) {
     freedSlots.push(scopes[i].slot);
@@ -4073,7 +4071,7 @@ window.runReplayDemo = function() {
     events.push({ phase: 'free', label: 'scope-' + i, slot: scopes[i].slot, gen: scopes[i].generation });
   }
 
-  // Phase 3: Create 4 new scopes WITHOUT closing them — each one pops from the free list.
+  // Phase 3: Create 4 new scopes without closing them; each pops from the free list.
   // LIFO means last-freed slot is reused first.
   const reusedSlots = [];
   const reusedScopes = [];
@@ -4083,7 +4081,7 @@ window.runReplayDemo = function() {
       reusedSlots.push(s.value.slot);
       reusedScopes.push(s.value);
       events.push({ phase: 'reuse', label: 'reuse-' + i, slot: s.value.slot, gen: s.value.generation });
-      // DO NOT close — keep the slot occupied so the next alloc pops the next item from the stack
+      // Keep the slot occupied so the next allocation pops the next item from the stack.
     }
   }
 
@@ -4121,7 +4119,7 @@ window.runReplayDemo = function() {
     </div>
     <div style="text-align:center;padding:16px;border-radius:var(--radius);border:1px solid ${isLIFO?HEX.green+'44':HEX.red+'44'};background:${isLIFO?HEX.green+'08':HEX.red+'08'};">
       <span style="font-size:24px;">${isLIFO ? '✓' : '✗'}</span>
-      <div style="font-size:16px;font-weight:700;color:${isLIFO?HEX.green:HEX.red};margin-top:4px;">${isLIFO ? 'LIFO CONFIRMED — Last freed = first reused' : 'Unexpected allocation order'}</div>
+      <div style="font-size:16px;font-weight:700;color:${isLIFO?HEX.green:HEX.red};margin-top:4px;">${isLIFO ? 'LIFO CONFIRMED: last freed = first reused' : 'Unexpected allocation order'}</div>
       <div style="font-size:12px;color:var(--text3);margin-top:4px;">Expected: ${expectedLIFO.join(' → ')} | Got: ${reusedSlots.join(' → ')}</div>
     </div>
     <div style="margin-top:12px;padding:12px;border-radius:8px;background:rgba(59,130,246,0.06);border:1px solid rgba(59,130,246,0.15);font-size:13px;color:var(--text2);">
@@ -4150,24 +4148,24 @@ window.runLeakDetectDemo = function() {
   if (scope.outcome !== 'ok') return;
   const sc = scope.value;
 
-  // Spawn 5 tasks — intentionally DON'T join them
+  // Spawn 5 tasks and intentionally leave them unjoined.
   const tasks = [];
   for (let i = 0; i < 5; i++) {
     const t = sc.spawnTask({ label: 'orphan-' + i });
     if (t.outcome === 'ok') {
       tasks.push(t.value);
-      clog('leakdetect-console', `Spawned task "orphan-${i}": slot=${t.value.slot} — NOT joining (intentional)`, 'warn');
+      clog('leakdetect-console', `Spawned task "orphan-${i}": slot=${t.value.slot}; left unjoined intentionally`, 'warn');
     }
   }
 
   clog('leakdetect-console', `5 tasks spawned. 0 joined. All are pinned obligations.`, 'warn');
-  clog('leakdetect-console', `Now closing scope — the runtime must clean up our mess...`, 'info');
+  clog('leakdetect-console', 'Closing the scope to release its unjoined tasks...', 'info');
 
-  // Close the scope — this should cascade-close all unjoined tasks
+  // Close the scope; this should cascade-close all unjoined tasks.
   const closeResult = sc.close();
   clog('leakdetect-console', `Scope close: ${closeResult.outcome}`, closeResult.outcome === 'ok' ? 'ok' : 'err');
 
-  // Verify: try to use the task handles — they should be released
+  // Verify by probing the task handles after they should have been released.
   const probeResults = tasks.map((t, i) => {
     const probe = t.join(Outcome.ok(0));
     const released = probe.outcome === 'err';
@@ -4284,7 +4282,7 @@ window.runTimeoutDemo = function() {
 
 // ─── Exhibit 19: Scoped Channel with Lifecycle ──────────────────
 // Uses MessageChannel (always available, no external server) to demonstrate
-// scoped resource lifecycle — the channel is owned by a WASM scope.
+// Scoped resource lifecycle: the channel is owned by a WASM scope.
 let chanState = { rt: null, scope: null, port: null, msgCount: 0, tasks: [] };
 
 window.runChannelDemo = function() {
@@ -4316,7 +4314,7 @@ window.runChannelDemo = function() {
   };
 
   clog('websocket-console', `Scope created: slot=${scope.value.slot}`, 'ok');
-  clog('websocket-console', `MessageChannel opened — ${chanState.tasks.length} WASM tasks track send/recv`, 'ok');
+  clog('websocket-console', `MessageChannel opened; ${chanState.tasks.length} WASM tasks track send/recv`, 'ok');
   clog('websocket-console', 'One action will close the browser ports and their WASM lifecycle scope.', 'info');
 
   document.getElementById('btn-ws-open').disabled = true;
