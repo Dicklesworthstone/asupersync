@@ -1165,11 +1165,11 @@ console.<span class="fn">log</span>(<span class="str">`Fingerprint: </span><span
           <span class="lang">JavaScript</span>
           <span class="actions"><button class="btn-copy" onclick="copyCode(this)">Copy</button><button class="btn btn-ghost btn-sm" onclick="runRegionDemo()">Run</button></span>
         </div>
-        <div class="code-body"><span class="cmt">// Enter a scope from the runtime — creates a child region</span>
+        <div class="code-body"><span class="cmt">// Enter a scope from the runtime; this creates a child region</span>
 <span class="kw">const</span> root = rt.<span class="fn">enterScope</span>(<span class="str">'http-server'</span>);
 <span class="kw">const</span> httpRegion = root.value;
 
-<span class="cmt">// Nest deeper — regions form a tree</span>
+<span class="cmt">// Nest deeper. Regions form a tree.</span>
 <span class="kw">const</span> reqA = httpRegion.<span class="fn">enterScope</span>(<span class="str">'request-A'</span>).value;
 <span class="kw">const</span> reqB = httpRegion.<span class="fn">enterScope</span>(<span class="str">'request-B'</span>).value;
 
@@ -1349,7 +1349,7 @@ httpRegion.<span class="fn">close</span>();</div>
         <div class="code-body"><span class="cmt">// Cancel a task with structured protocol</span>
 <span class="kw">const</span> task = scope.<span class="fn">spawnTask</span>({ <span class="prop">label</span>: <span class="str">'worker'</span> }).value;
 
-<span class="cmt">// Request cancellation — begins the multi-phase protocol</span>
+<span class="cmt">// Request cancellation to begin the multi-phase protocol</span>
 <span class="kw">const</span> result = task.<span class="fn">cancel</span>(
   <span class="str">'user'</span>,              <span class="cmt">// kind: user | timeout | fail_fast | race_lost | shutdown</span>
   <span class="str">'User clicked stop'</span>  <span class="cmt">// optional message for attribution</span>
@@ -1449,7 +1449,7 @@ httpRegion.<span class="fn">close</span>();</div>
             <span class="lang">JavaScript</span>
             <span class="actions"><button class="btn-copy" onclick="copyCode(this)">Copy</button><button class="btn btn-ghost btn-sm" onclick="runStaleDemo()">Run</button></span>
           </div>
-          <div class="code-body"><span class="cmt">// Create and close a scope — slot is recycled</span>
+          <div class="code-body"><span class="cmt">// Create and close a scope; its slot can be recycled</span>
 <span class="kw">const</span> s1 = rt.<span class="fn">enterScope</span>(<span class="str">'first'</span>).value;
 <span class="cmt">// s1 = { slot: N, generation: 0 }</span>
 s1.<span class="fn">close</span>();  <span class="cmt">// slot N freed, generation → 1</span>
@@ -1458,7 +1458,7 @@ s1.<span class="fn">close</span>();  <span class="cmt">// slot N freed, generati
 <span class="kw">const</span> s2 = rt.<span class="fn">enterScope</span>(<span class="str">'second'</span>).value;
 <span class="cmt">// s2 = { slot: N, generation: 1 }</span>
 
-<span class="cmt">// Try using the old handle — REJECTED</span>
+<span class="cmt">// Try using the old handle: REJECTED</span>
 <span class="kw">const</span> staleResult = <span class="fn">scopeClose</span>(s1);
 <span class="cmt">// → { outcome: "err", failure: {</span>
 <span class="cmt">//     code: "invalid_handle",</span>
@@ -1550,13 +1550,13 @@ s1.<span class="fn">close</span>();  <span class="cmt">// slot N freed, generati
             <span class="lang">JavaScript</span>
             <span class="actions"><button class="btn-copy" onclick="copyCode(this)">Copy</button><button class="btn btn-ghost btn-sm" onclick="runProtocolDemo()">Run</button></span>
           </div>
-          <div class="code-body"><span class="cmt">// Spawn a task — handle is PINNED</span>
+          <div class="code-body"><span class="cmt">// Spawn a task. Its handle is PINNED.</span>
 <span class="kw">const</span> t = scope.<span class="fn">spawnTask</span>({ <span class="prop">label</span>: <span class="str">'worker'</span> }).value;
 
-<span class="cmt">// Cancel transitions to Cancelling — but task is still alive!</span>
+<span class="cmt">// Cancel transitions to Cancelling; the obligation remains live</span>
 t.<span class="fn">cancel</span>(<span class="str">'user'</span>, <span class="str">'stop requested'</span>);
 
-<span class="cmt">// Double-cancel fails — already in Cancelling state</span>
+<span class="cmt">// Double-cancel fails because the task is already Cancelling</span>
 <span class="kw">const</span> bad = t.<span class="fn">cancel</span>(<span class="str">'timeout'</span>);
 <span class="cmt">// → { outcome: "err", code: "invalid_handle" }</span>
 
@@ -2198,36 +2198,114 @@ async function loadWasm() {
         if (rawMod[key] !== undefined && mod[key] === undefined) mod[key] = rawMod[key];
       }
 
-      // Compatibility bridge for the deployed 0.4.9 artifact, whose raw
-      // runtime_create accepts an ABI version directly while the current JS
-      // wrapper sends the newer options envelope. The exact decoder error is
-      // required before falling back, so unrelated failures still fail closed.
-      const standardRuntimeCreate = rawMod.runtimeCreate || rawMod.runtime_create;
-      let usesLegacyRuntimeCreate = false;
-      const runtimeCreateCompat = function(options = {}) {
-        if (!usesLegacyRuntimeCreate) {
-          const standard = standardRuntimeCreate(options);
-          const message = standard?.failure?.message || '';
-          if (!message.includes('failed to decode consumer_version JSON payload')) {
-            logWasm('runtimeCreate', options, standard);
-            return standard;
-          }
-          usesLegacyRuntimeCreate = true;
-          console.info(`${LOG_PREFIX} %cUsing the packaged ABI v1 runtime-create compatibility path.`, LOG_STYLE, 'color:#A9BEC5;');
-        }
+      // The deployed WASM handles include a u64 owner token. Preserve their
+      // exact JSON instead of round-tripping that token through a JS Number.
+      // This adapter also accepts both runtime_create request shapes shipped
+      // under ABI v1.
+      const ABI_VERSION = { major: 1, minor: 0 };
+      const ABI_VERSION_JSON = JSON.stringify(ABI_VERSION);
+      let legacyCreateShape;
+      const failureFrom = (error, label) => {
+        const text = String(error?.message || error);
         try {
-          const handleJson = rawMod.rawBindings.runtime_create(JSON.stringify({ major: 1, minor: 0 }));
-          const result = { outcome: 'ok', value: new rawMod.RuntimeHandle(JSON.parse(handleJson)) };
-          logWasm('runtimeCreate', options, result);
-          return result;
-        } catch (error) {
-          const result = { outcome: 'err', failure: { code: 'compatibility_rejected', recoverability: 'permanent', message: String(error?.message || error) } };
-          logWasm('runtimeCreate', options, result);
-          return result;
-        }
+          const parsed = JSON.parse(text);
+          if (parsed?.code && parsed?.message) return parsed;
+        } catch (_) {}
+        return { code: 'internal_failure', recoverability: 'unknown', message: `${label}: ${text}` };
       };
-      mod.runtimeCreate = runtimeCreateCompat;
-      mod.runtime_create = runtimeCreateCompat;
+      const outcomeCall = (label, call) => {
+        try { return JSON.parse(call()); }
+        catch (error) { return { outcome: 'err', failure: failureFrom(error, label) }; }
+      };
+      const rawOf = handle => handle?._rawJson || null;
+      const requestWithHandle = (key, handle, rest = {}) => {
+        const raw = rawOf(handle);
+        if (!raw) throw new TypeError(`${key} must be a WASM handle from this page`);
+        const tail = JSON.stringify(rest);
+        return `{"${key}":${raw}${tail === '{}' ? '}' : ',' + tail.slice(1)}`;
+      };
+      const encodeValue = value => {
+        if (value === undefined) return { kind: 'unit' };
+        if (typeof value === 'boolean') return { kind: 'bool', value };
+        if (typeof value === 'number' && Number.isInteger(value)) return { kind: value >= 0 ? 'u64' : 'i64', value };
+        if (typeof value === 'string') return { kind: 'string', value };
+        throw new TypeError('Outcome.ok in this lab accepts integers, booleans, strings, or undefined');
+      };
+      const encodeOutcome = outcome => outcome.outcome === 'ok'
+        ? { outcome: 'ok', value: encodeValue(outcome.value) }
+        : outcome;
+
+      class ExactHandle {
+        constructor(rawJson, expectedKind) {
+          const display = JSON.parse(rawJson);
+          if (display.kind !== expectedKind) throw new TypeError(`Expected ${expectedKind} handle; received ${display.kind}`);
+          this.kind = display.kind;
+          this.slot = display.slot;
+          this.generation = display.generation;
+          Object.defineProperty(this, '_rawJson', { value: rawJson });
+        }
+        toJSON() { return { kind: this.kind, slot: this.slot, generation: this.generation }; }
+      }
+      class ExactRuntimeHandle extends ExactHandle {
+        constructor(rawJson) { super(rawJson, 'runtime'); }
+        close() { return runtimeCloseCompat(this); }
+        enterScope(label) { return scopeEnterCompat({ parent: this, label }); }
+      }
+      class ExactRegionHandle extends ExactHandle {
+        constructor(rawJson) { super(rawJson, 'region'); }
+        close() { return scopeCloseCompat(this); }
+        enterScope(label) { return scopeEnterCompat({ parent: this, label }); }
+        spawnTask(options = {}) { return taskSpawnCompat({ scope: this, ...options }); }
+        fetchRequest(options = {}) { return fetchRequestCompat({ scope: this, ...options }); }
+      }
+      class ExactTaskHandle extends ExactHandle {
+        constructor(rawJson) { super(rawJson, 'task'); }
+        cancel(kind, message) { return taskCancelCompat({ task: this, kind, message }); }
+        join(outcome) { return taskJoinCompat(this, outcome); }
+      }
+      const handleCall = (label, Kind, call) => {
+        try { return { outcome: 'ok', value: new Kind(call()) }; }
+        catch (error) { return { outcome: 'err', failure: failureFrom(error, label) }; }
+      };
+      const runtimeCreateCompat = function(options = {}) {
+        let result;
+        const request = JSON.stringify({
+          fetchAuthority: options.fetchAuthority || {},
+          consumerVersion: ABI_VERSION,
+        });
+        if (legacyCreateShape !== true) {
+          result = handleCall('runtime_create', ExactRuntimeHandle, () => rawMod.rawBindings.runtime_create(request));
+          if (result.outcome === 'ok') legacyCreateShape = false;
+          else if (result.failure.message.includes('failed to decode consumer_version JSON payload')) legacyCreateShape = true;
+          else { logWasm('runtimeCreate', options, result); return result; }
+        }
+        if (legacyCreateShape) {
+          result = handleCall('runtime_create', ExactRuntimeHandle, () => rawMod.rawBindings.runtime_create(ABI_VERSION_JSON));
+        }
+        logWasm('runtimeCreate', options, result);
+        return result;
+      };
+      const logged = (operation, args, result) => { logWasm(operation, args, result); return result; };
+      const displayOf = handle => typeof handle?.toJSON === 'function' ? handle.toJSON() : handle;
+      const runtimeCloseCompat = handle => logged('runtimeClose', displayOf(handle), outcomeCall('runtime_close', () => rawMod.rawBindings.runtime_close(rawOf(handle), ABI_VERSION_JSON)));
+      const scopeEnterCompat = request => logged('scopeEnter', { parent: displayOf(request.parent), label: request.label }, handleCall('scope_enter', ExactRegionHandle, () => rawMod.rawBindings.scope_enter(requestWithHandle('parent', request.parent, { label: request.label }), ABI_VERSION_JSON)));
+      const scopeCloseCompat = handle => logged('scopeClose', displayOf(handle), outcomeCall('scope_close', () => rawMod.rawBindings.scope_close(rawOf(handle), ABI_VERSION_JSON)));
+      const taskSpawnCompat = request => logged('taskSpawn', { scope: displayOf(request.scope), label: request.label }, handleCall('task_spawn', ExactTaskHandle, () => rawMod.rawBindings.task_spawn(requestWithHandle('scope', request.scope, { label: request.label, cancel_kind: request.cancel_kind }), ABI_VERSION_JSON)));
+      const taskJoinCompat = (handle, outcome) => logged('taskJoin', { task: displayOf(handle), outcome }, outcomeCall('task_join', () => rawMod.rawBindings.task_join(rawOf(handle), JSON.stringify(encodeOutcome(outcome)), ABI_VERSION_JSON)));
+      const taskCancelCompat = request => logged('taskCancel', { task: displayOf(request.task), kind: request.kind, message: request.message }, outcomeCall('task_cancel', () => rawMod.rawBindings.task_cancel(requestWithHandle('task', request.task, { kind: request.kind, message: request.message }), ABI_VERSION_JSON)));
+      const fetchRequestCompat = request => logged('fetchRequest', { scope: displayOf(request.scope), url: request.url, method: request.method }, outcomeCall('fetch_request', () => rawMod.rawBindings.fetch_request(requestWithHandle('scope', request.scope, { url: request.url, method: request.method, credentials: request.credentials || false, body: request.body }), ABI_VERSION_JSON)));
+
+      Object.assign(mod, {
+        RuntimeHandle: ExactRuntimeHandle, RegionHandle: ExactRegionHandle, TaskHandle: ExactTaskHandle,
+        runtimeCreate: runtimeCreateCompat, runtime_create: runtimeCreateCompat,
+        runtimeClose: runtimeCloseCompat, runtime_close: runtimeCloseCompat,
+        scopeEnter: scopeEnterCompat, scope_enter: scopeEnterCompat,
+        scopeClose: scopeCloseCompat, scope_close: scopeCloseCompat,
+        taskSpawn: taskSpawnCompat, task_spawn: taskSpawnCompat,
+        taskJoin: taskJoinCompat, task_join: taskJoinCompat,
+        taskCancel: taskCancelCompat, task_cancel: taskCancelCompat,
+        fetchRequest: fetchRequestCompat, fetch_request: fetchRequestCompat,
+      });
 
       wasmReady = true;
       const version = (rawMod.abiVersion||rawMod.abi_version)();
@@ -2381,6 +2459,15 @@ async function initRuntime() {
     if (scopeResult.outcome === 'ok') {
       liveScope = scopeResult.value;
       console.log(`${LOG_PREFIX} %cRoot scope created: slot=${liveScope.slot} gen=${liveScope.generation}`, LOG_STYLE, LOG_OK);
+    } else {
+      liveRT.close();
+      liveRT = null;
+      const error = document.getElementById('init-error');
+      error.hidden = false;
+      error.textContent = `Runtime created, but its root scope was rejected: ${scopeResult.failure?.message || scopeResult.outcome}`;
+      updateWasmBadge('failed');
+      announce('The WASM root scope could not be created.');
+      return;
     }
     document.getElementById('init-error').hidden = true;
     const version = (a.abiVersion || a.abi_version)();
@@ -3027,7 +3114,7 @@ window.runStaleDemo = function() {
     clog('stale-console', `Created scope "first": slot=${h.slot} gen=${h.generation}`, 'ok');
 
     // Step 2: Close it
-    const staleHandle = { kind: h.kind, slot: h.slot, generation: h.generation }; // snapshot before close
+    const staleHandle = h; // retain the exact authenticated handle bytes for the post-close probe
     h.close();
     steps.push({ action: 'Close scope', slot: h.slot, gen: h.generation, label: 'first', status: 'closed', color: HEX.text3 });
     clog('stale-console', `Closed scope "first": slot ${h.slot} freed`, 'info');
@@ -3600,7 +3687,7 @@ window.resetChaos = function() {
 };
 
 // ─── Exhibit 11: Scope-Bounded Fetch ──────────────────────────────
-let sfState = { rt: null, scope: null, controllers: [], fetchHandles: [], timers: [] };
+let sfState = { rt: null, scope: null, fetchHandles: [], timeline: [], startTime: 0 };
 
 window.runScopeFetch = function() {
   clearConsole('scopefetch-console');
@@ -3612,9 +3699,13 @@ window.runScopeFetch = function() {
   });
   if (rt.outcome !== 'ok') return;
   const scope = rt.value.enterScope('http-scope');
-  if (scope.outcome !== 'ok') return;
+  if (scope.outcome !== 'ok') {
+    rt.value.close();
+    clog('scopefetch-console', `Scope creation failed: ${scope.failure?.message || scope.outcome}`, 'err');
+    return;
+  }
 
-  sfState = { rt: rt.value, scope: scope.value, controllers: [], fetchHandles: [], timers: [] };
+  sfState = { rt: rt.value, scope: scope.value, fetchHandles: [], timeline: [], startTime: 0 };
   const urls = [
     'https://httpbin.org/delay/5',
     'https://httpbin.org/delay/8',
@@ -3626,30 +3717,17 @@ window.runScopeFetch = function() {
   clog('scopefetch-console', `Created scope slot=${scope.value.slot}. Launching 3 slow requests...`, 'ok');
 
   urls.forEach((url, i) => {
-    const controller = new AbortController();
-    sfState.controllers.push(controller);
     const label = `Request ${i+1} (${url.split('/').pop()})`;
     const recorded = scope.value.fetchRequest({ url, method: 'GET' });
-    if (recorded.outcome === 'ok') sfState.fetchHandles.push(recorded.value);
-    else clog('scopefetch-console', `  ${label} lifecycle record rejected: ${recorded.failure?.message || recorded.outcome}`, 'err');
-    timeline.push({ time: performance.now() - startTime, event: `${label} started`, badge: 'badge-cyan', detail: '' });
-    clog('scopefetch-console', `  ${label} → host request + ${recorded.outcome} WASM record`, recorded.outcome === 'ok' ? 'info' : 'warn');
-
-    fetch(url, { signal: controller.signal }).then(r => {
-      timeline.push({ time: performance.now() - startTime, event: `${label}: ${r.status}`, badge: 'badge-ok', detail: `${(performance.now()-startTime).toFixed(0)}ms` });
-      renderSfTimeline(timeline);
-      clog('scopefetch-console', `  ${label} completed: ${r.status}`, 'ok');
-    }).catch(err => {
-      const elapsed = performance.now() - startTime;
-      if (err.name === 'AbortError') {
-        timeline.push({ time: elapsed, event: `${label}: CANCELLED`, badge: 'badge-cancel', detail: `at ${elapsed.toFixed(0)}ms` });
-        clog('scopefetch-console', `  ${label} cancelled by scope close`, 'warn');
-      } else {
-        timeline.push({ time: elapsed, event: `${label}: ${err.message}`, badge: 'badge-err', detail: '' });
-        clog('scopefetch-console', `  ${label} error: ${err.message}`, 'err');
-      }
-      renderSfTimeline(timeline);
-    });
+    const elapsed = performance.now() - startTime;
+    if (recorded.outcome === 'ok') {
+      sfState.fetchHandles.push(recorded.value);
+      timeline.push({ time: elapsed, event: `${label} started`, badge: 'badge-cyan', detail: 'WASM-owned host fetch' });
+      clog('scopefetch-console', `  ${label} → one browser request, owned by its WASM fetch handle`, 'info');
+    } else {
+      timeline.push({ time: elapsed, event: `${label} rejected`, badge: 'badge-err', detail: recorded.failure?.message || recorded.outcome });
+      clog('scopefetch-console', `  ${label} rejected: ${recorded.failure?.message || recorded.outcome}`, 'err');
+    }
   });
 
   renderSfTimeline(timeline);
@@ -3665,17 +3743,16 @@ window.closeScopeFetch = function() {
   if (!sfState.scope) return;
   const elapsed = performance.now() - sfState.startTime;
 
-  // The host adapter aborts browser requests, then closes their lifecycle scope.
-  sfState.controllers.forEach(c => c.abort());
+  // Scope closure invalidates each fetch handle and signals the controllers
+  // retained by the Browser Edition WASM host bridge.
   const closeResult = sfState.scope.close();
   sfState.rt.close();
 
-  sfState.timeline.push({ time: elapsed, event: 'HOST ABORT → 3 browser requests signalled', badge: 'badge-cancel', detail: `at ${elapsed.toFixed(0)}ms` });
-  sfState.timeline.push({ time: elapsed + 1, event: `WASM SCOPE CLOSE → ${closeResult.outcome}`, badge: closeResult.outcome === 'ok' ? 'badge-ok' : 'badge-err', detail: `${sfState.fetchHandles.length} fetch handles recorded` });
+  sfState.timeline.push({ time: elapsed, event: `WASM SCOPE CLOSE → ${closeResult.outcome}`, badge: closeResult.outcome === 'ok' ? 'badge-cancel' : 'badge-err', detail: `${sfState.fetchHandles.length} host fetches signalled` });
   renderSfTimeline(sfState.timeline);
-  clog('scopefetch-console', `Host adapter aborted 3 requests; WASM scope close returned ${closeResult.outcome}.`, closeResult.outcome === 'ok' ? 'ok' : 'err');
-  showToast('Browser requests aborted; lifecycle scope closed', closeResult.outcome === 'ok' ? 'ok' : 'err');
-  announce('Three browser requests were aborted and their lifecycle scope was closed.');
+  clog('scopefetch-console', `Scope close returned ${closeResult.outcome}; the host bridge signalled ${sfState.fetchHandles.length} request controllers.`, closeResult.outcome === 'ok' ? 'ok' : 'err');
+  showToast(`${sfState.fetchHandles.length} browser requests cancelled with their scope`, closeResult.outcome === 'ok' ? 'ok' : 'err');
+  announce(`${sfState.fetchHandles.length} browser requests were cancelled with their lifecycle scope.`);
 
   sfState.scope = null;
   document.getElementById('btn-sf-close').disabled = true;
