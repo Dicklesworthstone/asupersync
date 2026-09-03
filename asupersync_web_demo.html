@@ -2,14 +2,17 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Asupersync — Interactive WASM Demo</title>
-<meta name="description" content="Spec-first, cancel-correct async runtime for Rust — compiled to WebAssembly and running live in your browser. 21 interactive exhibits with a real WASM runtime, zero simulation.">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#071119">
+<title>Asupersync Browser Lab — Live WASM Lifecycle Demo</title>
+<meta name="description" content="Explore Asupersync's structured-concurrency lifecycle contract in 21 interactive browser exhibits backed by the shipped WebAssembly ledger.">
+<link rel="canonical" href="https://dicklesworthstone.github.io/asupersync/asupersync_web_demo.html">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Ccircle cx='32' cy='32' r='26' fill='%23071119' stroke='%2322d3ee' stroke-width='5'/%3E%3Ccircle cx='32' cy='32' r='9' fill='%2322d3ee'/%3E%3C/svg%3E">
 
 <!-- OpenGraph -->
 <meta property="og:type" content="website">
-<meta property="og:title" content="Asupersync — Interactive WASM Demo">
-<meta property="og:description" content="Structured concurrency, cancel-correct channels, four-valued outcomes, and deterministic testing — compiled to WebAssembly and running live in your browser.">
+<meta property="og:title" content="Asupersync Browser Lab — Live WASM Lifecycle Demo">
+<meta property="og:description" content="Run 21 interactive exhibits against Asupersync's shipped WebAssembly lifecycle ledger: regions, task handles, cancellation, outcomes, and capability-gated browser work.">
 <meta property="og:image" content="https://dicklesworthstone.github.io/asupersync/assets/og-share-image.png?v=2">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
@@ -19,46 +22,47 @@
 
 <!-- Twitter/X -->
 <meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:title" content="Asupersync — Interactive WASM Demo">
-<meta name="twitter:description" content="Spec-first, cancel-correct async for Rust. 21 live exhibits running real WASM — structured concurrency, cancel protocol, chaos testing, live REPL.">
+<meta name="twitter:title" content="Asupersync Browser Lab — Live WASM Lifecycle Demo">
+<meta name="twitter:description" content="Run 21 interactive exhibits against Asupersync's shipped WASM lifecycle ledger: regions, cancellation, outcomes, handles, and browser resources.">
 <meta name="twitter:image" content="https://dicklesworthstone.github.io/asupersync/assets/og-share-image.png?v=2">
-<meta name="twitter:image:alt" content="Asupersync Interactive WASM Demo — 21 live exhibits demonstrating structured concurrency, cancel-correct channels, and four-valued outcomes">
-<!-- Motion library loaded via direct URL in JS (no importmap for iOS Safari compat) -->
+<meta name="twitter:image:alt" content="Asupersync Browser Lab with interactive exhibits for structured concurrency, cancellation, outcomes, and lifecycle-safe handles">
 <style>
 /* ═══════════════════════════════════════════════════════════════════
    DESIGN SYSTEM
    ═══════════════════════════════════════════════════════════════════ */
 :root {
-  --bg:       #020a14;
-  --surface:  #0A1628;
-  --surface2: #0f1d32;
-  --border:   rgba(255,255,255,0.06);
-  --border2:  rgba(255,255,255,0.10);
-  --blue:     #3B82F6;
-  --blue-dim: #3B82F633;
-  --cyan:     #06B6D4;
-  --cyan-dim: #06B6D433;
-  --green:    #22C55E;
-  --green-dim:#22C55E33;
-  --orange:   #F97316;
-  --orange-dim:#F9731633;
-  --red:      #EF4444;
-  --red-dim:  #EF444433;
-  --yellow:   #EAB308;
-  --yellow-dim:#EAB30833;
-  --violet:   #8B5CF6;
-  --violet-dim:#8B5CF633;
-  --text:     #E2E8F0;
-  --text2:    #94A3B8;
-  --text3:    #64748B;
+  color-scheme: dark;
+  --bg:       #071119;
+  --surface:  #0b1720;
+  --surface2: #10212c;
+  --border:   rgba(203, 232, 240, 0.10);
+  --border2:  rgba(203, 232, 240, 0.18);
+  --blue:     #38BDF8;
+  --blue-dim: #38BDF829;
+  --cyan:     #22D3EE;
+  --cyan-dim: #22D3EE29;
+  --green:    #4ADE80;
+  --green-dim:#4ADE8029;
+  --orange:   #FB923C;
+  --orange-dim:#FB923C29;
+  --red:      #FB7185;
+  --red-dim:  #FB718529;
+  --yellow:   #FACC15;
+  --yellow-dim:#FACC1529;
+  --violet:   #C4B5FD;
+  --violet-dim:#C4B5FD29;
+  --text:     #EAF5F7;
+  --text2:    #A9BEC5;
+  --text3:    #748C95;
   --mono:     'SF Mono', 'Cascadia Code', 'JetBrains Mono', 'Fira Code', Consolas, monospace;
   --sans:     -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
-  --radius:   12px;
-  --radius-lg:20px;
-  --glow-blue:0 0 20px rgba(59,130,246,0.3), 0 0 60px rgba(59,130,246,0.1);
-  --glow-cyan:0 0 20px rgba(6,182,212,0.3), 0 0 60px rgba(6,182,212,0.1);
-  --glow-green:0 0 20px rgba(34,197,94,0.3);
-  --glow-red:  0 0 20px rgba(239,68,68,0.3);
+  --radius:   8px;
+  --radius-lg:12px;
+  --focus:    #FACC15;
+  --glow-blue:0 0 0 1px rgba(56,189,248,0.28);
+  --glow-cyan:0 0 0 1px rgba(34,211,238,0.28);
+  --glow-green:0 0 0 1px rgba(74,222,128,0.30);
+  --glow-red:  0 0 0 1px rgba(251,113,133,0.30);
   /* Elevation system */
   --elevation-0: 0 1px 2px rgba(0,0,0,0.3), 0 0 0 1px rgba(0,0,0,0.2);
   --elevation-1: 0 2px 8px -2px rgba(0,0,0,0.4), 0 0 0 1px rgba(255,255,255,0.04);
@@ -75,7 +79,7 @@
 
 ::selection { background: rgba(59,130,246,0.3); color: #fff; }
 
-html { scroll-behavior: smooth; scroll-padding-top: 72px; }
+html { scroll-behavior: smooth; scroll-padding-top: 76px; }
 
 body {
   font-family: var(--sans);
@@ -83,14 +87,24 @@ body {
   color: var(--text);
   line-height: 1.7;
   -webkit-font-smoothing: antialiased;
-  overflow-x: hidden;
-  /* Subtle grain texture for depth */
-  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.03'/%3E%3C/svg%3E");
+  overflow-x: clip;
+  background-image:
+    linear-gradient(rgba(34, 211, 238, 0.025) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(34, 211, 238, 0.025) 1px, transparent 1px);
+  background-size: 40px 40px;
 }
 
+.skip-link {
+  position: fixed; top: 8px; left: 8px; z-index: 1000;
+  padding: 10px 14px; border-radius: var(--radius);
+  background: var(--focus); color: #071119; font-weight: 800;
+  transform: translateY(-160%);
+}
+.skip-link:focus { transform: translateY(0); }
+
 /* ── Typography ────────────────────────────────────────────────── */
-h1 { font-size: clamp(2rem, 5vw, 3.5rem); font-weight: 800; letter-spacing: -0.03em; line-height: 1.1; }
-h2 { font-size: clamp(1.5rem, 3vw, 2.2rem); font-weight: 700; letter-spacing: -0.02em; line-height: 1.2; }
+h1 { font-size: clamp(2.35rem, 6vw, 5.4rem); font-weight: 760; letter-spacing: -0.045em; line-height: 0.98; }
+h2 { font-size: clamp(1.65rem, 3vw, 2.45rem); font-weight: 680; letter-spacing: -0.025em; line-height: 1.12; }
 h3 { font-size: 1.25rem; font-weight: 600; }
 .mono { font-family: var(--mono); }
 .text-muted { color: var(--text2); }
@@ -104,36 +118,29 @@ h3 { font-size: 1.25rem; font-weight: 600; }
 /* ── Layout ────────────────────────────────────────────────────── */
 .container { max-width: 1100px; margin: 0 auto; padding: 0 24px; }
 .section {
-  padding: 96px 0;
-  border-bottom: 1px solid transparent;
-  border-image: linear-gradient(90deg, transparent, rgba(59,130,246,0.15), rgba(6,182,212,0.1), transparent) 1;
+  padding: 88px 0;
+  border-bottom: 1px solid var(--border);
+  content-visibility: auto;
+  contain-intrinsic-size: auto 850px;
 }
-.section:last-child { border-bottom: none; border-image: none; }
+.section:last-child { border-bottom: none; }
 @media (max-width: 768px) { .section { padding: 64px 0; } }
 .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 32px; }
 @media (max-width: 768px) { .grid-2 { grid-template-columns: 1fr; } }
 
 /* ── Glass Cards ───────────────────────────────────────────────── */
 .card {
-  background: linear-gradient(145deg, rgba(10,22,40,0.8), rgba(10,22,40,0.5));
-  backdrop-filter: blur(12px) saturate(120%);
-  -webkit-backdrop-filter: blur(12px) saturate(120%);
+  background: var(--surface);
   border: 1px solid var(--border2);
   border-radius: var(--radius-lg);
   padding: 32px;
   position: relative;
   overflow: hidden;
-  box-shadow: var(--elevation-1), inset 0 1px 1px rgba(255,255,255,0.05);
-  transition: border-color var(--dur-normal) var(--ease-stripe), box-shadow var(--dur-normal) var(--ease-stripe), transform var(--dur-normal) var(--ease-stripe);
+  box-shadow: var(--elevation-0);
+  transition: border-color var(--dur-fast) ease, background var(--dur-fast) ease;
 }
-.card:hover { border-color: rgba(59,130,246,0.2); box-shadow: var(--elevation-2), inset 0 1px 1px rgba(255,255,255,0.05); transform: translateY(-2px); }
-.card::before {
-  content: '';
-  position: absolute;
-  top: 0; left: 0; right: 0;
-  height: 1px;
-  background: linear-gradient(90deg, transparent, rgba(59,130,246,0.4), transparent);
-}
+.card:hover { border-color: rgba(34,211,238,0.28); background: var(--surface2); }
+.card::before { content: none; }
 .card-sm { padding: 20px; border-radius: var(--radius); }
 
 /* ── Buttons ───────────────────────────────────────────────────── */
@@ -145,20 +152,21 @@ h3 { font-size: 1.25rem; font-weight: 600; }
   font-size: 14px; font-weight: 600;
   border: none; cursor: pointer;
   transition: box-shadow var(--dur-fast) var(--ease-stripe), transform var(--dur-fast) var(--ease-stripe), opacity var(--dur-fast) var(--ease-stripe), background var(--dur-fast) var(--ease-stripe), color var(--dur-fast) var(--ease-stripe), border-color var(--dur-fast) var(--ease-stripe);
-  outline: none;
   user-select: none;
   -webkit-tap-highlight-color: transparent;
 }
-.btn:focus-visible { box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--blue); }
+.btn:focus-visible, a:focus-visible, summary:focus-visible, textarea:focus-visible {
+  outline: 3px solid var(--focus); outline-offset: 3px;
+}
 .btn:active:not(:disabled) { transform: scale(0.96); transition-duration: 0.06s; }
 .btn:disabled { opacity: 0.4; cursor: not-allowed; pointer-events: none; }
-.btn-primary { background: linear-gradient(135deg, var(--blue), #2563EB); color: #fff; box-shadow: 0 1px 2px rgba(0,0,0,0.3), inset 0 1px 0 rgba(255,255,255,0.1); }
-.btn-primary:hover:not(:disabled) { box-shadow: var(--glow-blue), 0 1px 2px rgba(0,0,0,0.3); transform: translateY(-1px); }
-.btn-orange { background: linear-gradient(135deg, var(--orange), #EA580C); color: #fff; box-shadow: 0 1px 2px rgba(0,0,0,0.3), inset 0 1px 0 rgba(255,255,255,0.1); }
+.btn-primary { background: var(--cyan); color: #041014; box-shadow: none; }
+.btn-primary:hover:not(:disabled) { background: #67E8F9; box-shadow: var(--glow-cyan); transform: translateY(-1px); }
+.btn-orange { background: var(--orange); color: #190b02; box-shadow: none; }
 .btn-orange:hover:not(:disabled) { box-shadow: 0 0 20px rgba(249,115,22,0.3), 0 1px 2px rgba(0,0,0,0.3); transform: translateY(-1px); }
-.btn-green { background: linear-gradient(135deg, var(--green), #16A34A); color: #fff; box-shadow: 0 1px 2px rgba(0,0,0,0.3), inset 0 1px 0 rgba(255,255,255,0.1); }
+.btn-green { background: var(--green); color: #031209; box-shadow: none; }
 .btn-green:hover:not(:disabled) { box-shadow: var(--glow-green), 0 1px 2px rgba(0,0,0,0.3); transform: translateY(-1px); }
-.btn-red { background: linear-gradient(135deg, var(--red), #DC2626); color: #fff; box-shadow: 0 1px 2px rgba(0,0,0,0.3), inset 0 1px 0 rgba(255,255,255,0.1); }
+.btn-red { background: var(--red); color: #190409; box-shadow: none; }
 .btn-red:hover:not(:disabled) { box-shadow: var(--glow-red), 0 1px 2px rgba(0,0,0,0.3); transform: translateY(-1px); }
 .btn-ghost {
   background: rgba(255,255,255,0.04);
@@ -166,7 +174,7 @@ h3 { font-size: 1.25rem; font-weight: 600; }
   box-shadow: 0 1px 2px rgba(0,0,0,0.2);
 }
 .btn-ghost:hover:not(:disabled) { background: rgba(255,255,255,0.08); color: var(--text); border-color: rgba(255,255,255,0.15); transform: translateY(-1px); }
-.btn-sm { padding: 6px 14px; font-size: 13px; border-radius: 8px; min-height: 32px; }
+.btn-sm { padding: 8px 14px; font-size: 13px; border-radius: 7px; min-height: 38px; }
 @media (max-width: 768px) {
   .btn { min-height: 44px; padding: 12px 20px; }
   .btn-sm { min-height: 38px; padding: 8px 14px; }
@@ -175,7 +183,7 @@ h3 { font-size: 1.25rem; font-weight: 600; }
 /* ── Status Badges ─────────────────────────────────────────────── */
 .badge {
   display: inline-flex; align-items: center; gap: 6px;
-  padding: 4px 12px; border-radius: 100px;
+  padding: 5px 9px; border-radius: 5px;
   font-size: 12px; font-weight: 600;
   font-family: var(--mono);
 }
@@ -188,7 +196,7 @@ h3 { font-size: 1.25rem; font-weight: 600; }
 
 /* ── Code Blocks ───────────────────────────────────────────────── */
 .code-block {
-  background: #010812;
+  background: #050d13;
   border: 1px solid var(--border2);
   border-radius: var(--radius);
   overflow: hidden;
@@ -196,7 +204,7 @@ h3 { font-size: 1.25rem; font-weight: 600; }
   font-size: 13px;
   line-height: 1.65;
   box-shadow: var(--elevation-0);
-  transition: all var(--dur-normal) var(--ease-stripe);
+  transition: border-color var(--dur-fast) ease, box-shadow var(--dur-fast) ease;
 }
 .code-block:hover { border-color: rgba(59,130,246,0.15); box-shadow: var(--elevation-1); }
 .code-header {
@@ -243,8 +251,9 @@ h3 { font-size: 1.25rem; font-weight: 600; }
   font-family: var(--mono); font-size: 11px;
   background: rgba(255,255,255,0.04);
   color: var(--text3); border: 1px solid var(--border);
-  cursor: pointer; transition: all 0.15s;
+  cursor: pointer; transition: color 0.15s, background 0.15s, border-color 0.15s;
   white-space: nowrap;
+  min-height: 32px;
 }
 .btn-copy:hover { background: rgba(255,255,255,0.08); color: var(--text2); }
 .btn-copy.copied { background: var(--green-dim); color: var(--green); border-color: rgba(34,197,94,0.3); }
@@ -264,7 +273,7 @@ h3 { font-size: 1.25rem; font-weight: 600; }
 
 /* ── Console Output ────────────────────────────────────────────── */
 .console {
-  background: #010812;
+  background: #050d13;
   border: 1px solid var(--border2);
   border-radius: var(--radius);
   font-family: var(--mono);
@@ -272,7 +281,7 @@ h3 { font-size: 1.25rem; font-weight: 600; }
   max-height: 260px;
   overflow-y: auto;
   box-shadow: var(--elevation-0);
-  transition: all var(--dur-normal) var(--ease-stripe);
+  transition: border-color var(--dur-fast) ease, box-shadow var(--dur-fast) ease;
 }
 .console:hover { border-color: rgba(59,130,246,0.12); box-shadow: var(--elevation-1); }
 .console-header {
@@ -307,18 +316,16 @@ h3 { font-size: 1.25rem; font-weight: 600; }
 
 /* ── Visualization Containers ──────────────────────────────────── */
 .viz {
-  background: linear-gradient(145deg, rgba(10,22,40,0.7), rgba(10,22,40,0.4));
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
+  background: rgba(11, 23, 32, 0.94);
   border: 1px solid var(--border2);
   border-radius: var(--radius-lg);
   padding: 24px;
   min-height: 200px;
   position: relative;
-  box-shadow: var(--elevation-1), inset 0 1px 1px rgba(255,255,255,0.04);
-  transition: all var(--dur-normal) var(--ease-stripe);
+  box-shadow: var(--elevation-0);
+  transition: border-color var(--dur-fast) ease;
 }
-.viz:hover { border-color: rgba(59,130,246,0.18); box-shadow: var(--elevation-2), inset 0 1px 1px rgba(255,255,255,0.04); }
+.viz:hover { border-color: rgba(34,211,238,0.28); }
 .viz-title {
   font-size: 13px; font-weight: 600; color: var(--text3);
   text-transform: uppercase; letter-spacing: 0.08em;
@@ -328,7 +335,7 @@ h3 { font-size: 1.25rem; font-weight: 600; }
 
 /* ── State Machine Nodes ───────────────────────────────────────── */
 .sm-node {
-  transition: all 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
+  transition: opacity 0.25s ease, filter 0.25s ease;
 }
 .sm-node.active { filter: drop-shadow(0 0 12px currentColor); }
 
@@ -336,7 +343,7 @@ h3 { font-size: 1.25rem; font-weight: 600; }
 .region-box {
   stroke-width: 1.5;
   rx: 10;
-  transition: all 0.35s ease;
+  transition: stroke-width 0.2s ease, opacity 0.2s ease;
   cursor: pointer;
 }
 .region-box:hover { stroke-width: 2.5; }
@@ -409,7 +416,7 @@ h3 { font-size: 1.25rem; font-weight: 600; }
   font-family: var(--mono);
   font-size: 12px;
   border: 1px solid;
-  transition: all var(--dur-normal) var(--ease-stripe);
+  transition: transform var(--dur-fast) ease, box-shadow var(--dur-fast) ease;
   animation: taskSlideIn 0.3s var(--ease-stripe);
   box-shadow: var(--elevation-0);
 }
