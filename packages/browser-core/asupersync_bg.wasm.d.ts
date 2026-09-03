@@ -17,10 +17,10 @@ export const websocket_close: (a: number, b: number, c: number, d: number, e: nu
 export const websocket_open: (a: number, b: number, c: number, d: number, e: number) => void;
 export const websocket_recv: (a: number, b: number, c: number, d: number, e: number) => void;
 export const websocket_send: (a: number, b: number, c: number, d: number, e: number) => void;
-export const __wasm_bindgen_func_elem_803: (a: number, b: number, c: number, d: number) => void;
-export const __wasm_bindgen_func_elem_103: (a: number, b: number, c: number) => void;
-export const __wasm_bindgen_func_elem_354: (a: number, b: number, c: number) => void;
-export const __wasm_bindgen_func_elem_354_3: (a: number, b: number, c: number) => void;
+export const __wasm_bindgen_func_elem_860: (a: number, b: number, c: number, d: number) => void;
+export const __wasm_bindgen_func_elem_112: (a: number, b: number, c: number) => void;
+export const __wasm_bindgen_func_elem_385: (a: number, b: number, c: number) => void;
+export const __wasm_bindgen_func_elem_385_3: (a: number, b: number, c: number) => void;
 export const __wbindgen_export: (a: number, b: number) => number;
 export const __wbindgen_export2: (a: number, b: number, c: number, d: number) => number;
 export const __wbindgen_export3: (a: number) => void;
