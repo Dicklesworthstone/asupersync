@@ -106,6 +106,7 @@ body {
   overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
 }
 .field-label { display: block; padding: 10px 20px 0; color: var(--text2); font-size: 12px; font-weight: 650; }
+.footer-link { display: inline-flex; align-items: center; min-height: 44px; padding: 0 8px; color: var(--blue); text-decoration: none; }
 
 /* ── Typography ────────────────────────────────────────────────── */
 h1 { font-size: clamp(2.35rem, 6vw, 5.4rem); font-weight: 760; letter-spacing: -0.045em; line-height: 0.98; }
@@ -2131,7 +2132,7 @@ scope.<span class="fn">fetchRequest</span>({ <span class="prop">url</span>: url3
       Asupersync: spec-first, cancel-correct, capability-secure async for Rust.
     </p>
     <p style="color: var(--text3); font-size: 13px; margin-top: 8px;">
-      <a href="https://github.com/Dicklesworthstone/asupersync" style="color: var(--blue); text-decoration: none;">GitHub</a>
+      <a class="footer-link" href="https://github.com/Dicklesworthstone/asupersync">GitHub</a>
       &nbsp;·&nbsp;
       Static browser lab · versioned local WASM assets.
     </p>
@@ -2197,10 +2198,41 @@ async function loadWasm() {
         if (rawMod[key] !== undefined && mod[key] === undefined) mod[key] = rawMod[key];
       }
 
+      // Compatibility bridge for the deployed 0.4.9 artifact, whose raw
+      // runtime_create accepts an ABI version directly while the current JS
+      // wrapper sends the newer options envelope. The exact decoder error is
+      // required before falling back, so unrelated failures still fail closed.
+      const standardRuntimeCreate = rawMod.runtimeCreate || rawMod.runtime_create;
+      let usesLegacyRuntimeCreate = false;
+      const runtimeCreateCompat = function(options = {}) {
+        if (!usesLegacyRuntimeCreate) {
+          const standard = standardRuntimeCreate(options);
+          const message = standard?.failure?.message || '';
+          if (!message.includes('failed to decode consumer_version JSON payload')) {
+            logWasm('runtimeCreate', options, standard);
+            return standard;
+          }
+          usesLegacyRuntimeCreate = true;
+          console.info(`${LOG_PREFIX} %cUsing the packaged ABI v1 runtime-create compatibility path.`, LOG_STYLE, 'color:#A9BEC5;');
+        }
+        try {
+          const handleJson = rawMod.rawBindings.runtime_create(JSON.stringify({ major: 1, minor: 0 }));
+          const result = { outcome: 'ok', value: new rawMod.RuntimeHandle(JSON.parse(handleJson)) };
+          logWasm('runtimeCreate', options, result);
+          return result;
+        } catch (error) {
+          const result = { outcome: 'err', failure: { code: 'compatibility_rejected', recoverability: 'permanent', message: String(error?.message || error) } };
+          logWasm('runtimeCreate', options, result);
+          return result;
+        }
+      };
+      mod.runtimeCreate = runtimeCreateCompat;
+      mod.runtime_create = runtimeCreateCompat;
+
       wasmReady = true;
       const version = (rawMod.abiVersion||rawMod.abi_version)();
       const fingerprint = (rawMod.abiFingerprint||rawMod.abi_fingerprint)();
-      updateWasmBadge('live', version, fingerprint);
+      updateWasmBadge('loaded', version, fingerprint);
       console.log(`${LOG_PREFIX} %cWASM loaded from the deployed local artifact`, LOG_STYLE, LOG_OK);
       console.log(`${LOG_PREFIX} %cABI v${version.major}.${version.minor}, fingerprint: ${fingerprint}`, LOG_STYLE, 'color:#22D3EE;');
       console.log(`${LOG_PREFIX} %cLifecycle mutations cross the WASM boundary; presentation timing and browser I/O remain host-side.`, LOG_STYLE, 'color:#A9BEC5;font-style:italic;');
@@ -2218,9 +2250,13 @@ function updateWasmBadge(mode, version, fingerprint) {
   const badge = document.getElementById('wasm-status-badge');
   if (mode === 'live') {
     badge.className = 'engine-status';
-    badge.innerHTML = '<span class="status-dot live"></span> Local lifecycle ledger ready';
+    badge.innerHTML = '<span class="status-dot live"></span> Runtime handle ready';
     document.getElementById('hero-abi').textContent = `v${version.major}.${version.minor} · ${String(fingerprint).slice(0, 12)}…`;
     announce('Asupersync WASM lifecycle ledger ready');
+  } else if (mode === 'loaded') {
+    badge.className = 'engine-status';
+    badge.innerHTML = '<span class="status-dot loading"></span> ABI verified · creating runtime…';
+    document.getElementById('hero-abi').textContent = `v${version.major}.${version.minor} · ${String(fingerprint).slice(0, 12)}…`;
   } else {
     badge.className = 'engine-status';
     badge.innerHTML = '<span class="status-dot dead"></span> Local lifecycle ledger unavailable';
@@ -2347,6 +2383,9 @@ async function initRuntime() {
       console.log(`${LOG_PREFIX} %cRoot scope created: slot=${liveScope.slot} gen=${liveScope.generation}`, LOG_STYLE, LOG_OK);
     }
     document.getElementById('init-error').hidden = true;
+    const version = (a.abiVersion || a.abi_version)();
+    const fingerprint = (a.abiFingerprint || a.abi_fingerprint)();
+    updateWasmBadge('live', version, fingerprint);
     console.log(`${LOG_PREFIX} %cRuntime handle ready. Lifecycle operations are ledger-backed; browser work is host-driven.`, LOG_STYLE, 'color:#4ADE80;font-weight:bold;');
   } else {
     const error = document.getElementById('init-error');
