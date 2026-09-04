@@ -46,10 +46,12 @@
 //!
 //! # Not covered (no-claim)
 //!
-//! No primitive uses the seam yet (D2: channel permits, D3: semaphore
-//! permits, D4: remote leases). A `Cx` built without a runtime (`Cx::new`,
+//! Channel send permits (D2) and semaphore permits (D3) use the seam; remote
+//! leases (D4) do not yet. A `Cx` built without a runtime (`Cx::new`,
 //! `Cx::for_testing`) has no gateway and `try_register_obligation` returns
-//! `None`, preserving today's untracked behaviour.
+//! `None`, preserving today's untracked behaviour — which is also why
+//! `Semaphore::try_acquire`, whose signature carries no `Cx`, registers only
+//! when a task-local one happens to be current.
 
 use crate::record::{ObligationAbortReason, ObligationKind};
 use crate::runtime::scheduler::global_queue::GlobalFifoQueue;
@@ -628,6 +630,62 @@ mod tests {
             vec![TraceEventKind::ObligationAbort],
             "Recover aborts the obligation instead of marking it leaked"
         );
+        assert!(runtime.is_quiescent());
+    }
+
+    #[test]
+    fn semaphore_permits_register_and_resolve_runtime_obligations() {
+        let mut runtime = lab();
+        let root = runtime.state.create_root_region(Budget::INFINITE);
+        let (task, _handle) = runtime
+            .state
+            .create_task(root, Budget::INFINITE, async move {
+                let cx = Cx::current().expect("lab task has a current cx");
+                let semaphore = crate::sync::Semaphore::new(4);
+
+                // Released back to the semaphore: the obligation is discharged.
+                let permit = semaphore.acquire(&cx, 1).await.expect("acquire");
+                drop(permit);
+
+                // Explicit commit is the same discharge on a different path.
+                let permit = semaphore.acquire(&cx, 1).await.expect("acquire");
+                permit.commit();
+
+                // Forgotten on purpose: capacity is intentionally kept, which
+                // is an abort, not a leak.
+                let permit = semaphore.acquire(&cx, 1).await.expect("acquire");
+                permit.forget();
+
+                // Zero permits hold no capacity, so they mint nothing at all.
+                let permit = semaphore.acquire(&cx, 0).await.expect("acquire zero");
+                drop(permit);
+
+                // try_acquire has no `Cx` in its signature; it picks the
+                // current one up from the task-local.
+                let permit = semaphore.try_acquire(1).expect("try_acquire");
+                drop(permit);
+            })
+            .expect("create task");
+        runtime.scheduler.lock().schedule(task, 0);
+        let mailbox = mailbox_of(&runtime);
+
+        runtime.run_until_quiescent();
+
+        let stats = mailbox.stats();
+        assert_eq!(
+            stats.reserved, 4,
+            "three acquires plus try_acquire; the zero-permit acquire mints nothing: {stats:?}"
+        );
+        assert_eq!(
+            stats.committed, 3,
+            "drop, commit and the try_acquire drop all release capacity: {stats:?}"
+        );
+        assert_eq!(stats.aborted, 1, "forget keeps the capacity: {stats:?}");
+        assert_eq!(stats.leaked, 0, "{stats:?}");
+        assert_eq!(stats.refused, 0, "{stats:?}");
+        assert_eq!(mailbox.open_tickets(), 0);
+        assert_eq!(runtime.state.pending_obligation_count(), 0);
+        assert_eq!(runtime.state.leak_count(), 0);
         assert!(runtime.is_quiescent());
     }
 
