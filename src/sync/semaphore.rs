@@ -501,7 +501,7 @@ impl Semaphore {
                     .and_then(|cx| reserve_permit_obligation(cx.region_id())),
                 runtime_obligation: current_cx
                     .as_ref()
-                    .and_then(|cx| reserve_runtime_permit_obligation(cx)),
+                    .and_then(reserve_runtime_permit_obligation),
                 semaphore: self,
                 count,
                 lock_order,
@@ -1248,9 +1248,7 @@ impl<Caps> Future for OwnedAcquireFuture<Caps> {
                     this.cx
                         .as_ref()
                         .and_then(|cx| reserve_permit_obligation(cx.region_id())),
-                    this.cx
-                        .as_ref()
-                        .and_then(|cx| reserve_runtime_permit_obligation(cx)),
+                    this.cx.as_ref().and_then(reserve_runtime_permit_obligation),
                 );
                 if let Some(next) = next_waker {
                     next.wake_by_ref();

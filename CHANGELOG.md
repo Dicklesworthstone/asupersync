@@ -136,6 +136,23 @@ is `v0.4.9`.
   connecting to the null address and retries once; Linux and Windows are
   unchanged. Verified on macOS 26.2 (arm64).
 
+### Semaphore permits are runtime obligations (2026-09-04)
+
+- `Semaphore::acquire` and `try_acquire` now register an
+  `ObligationKind::SemaphorePermit` through the obligation mailbox, so a permit
+  held across a cancelled task is visible to the runtime's obligation table,
+  its leak policy and `is_quiescent`. Releasing capacity — dropping the permit
+  or calling `commit` — discharges the obligation; `forget`, which
+  intentionally keeps the capacity, aborts it; an acquisition that unwinds
+  before the permit reaches the caller aborts it too. Acquiring zero permits
+  holds no capacity and mints nothing.
+- The permit's existing graded token is unchanged and stays type-level; it
+  never reached `RuntimeState`, which is why the runtime could not see an
+  outstanding permit before. Public signatures are unchanged, and a `Cx`
+  without a runtime still registers nothing — including `try_acquire`, whose
+  signature carries no `Cx` and so registers only when a task-local one is
+  current.
+
 ### Kafka consumer close on the cooperative protocol (2026-09-04)
 
 - `KafkaConsumer::close` called `unassign()` unconditionally. That is the eager
