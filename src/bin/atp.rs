@@ -9465,7 +9465,7 @@ fn quic_limiter_json(
         "min_unacked_admission_cap_bytes": limiter.min_unacked_admission_cap_bytes,
         "peak_stream_unacked_bytes": limiter.peak_stream_unacked_bytes,
         "stream_window_requests": limiter.stream_window_requests,
-        "final_stream_send_window_bytes": limiter.final_stream_send_window_bytes,
+        "peak_stream_send_window_bytes": limiter.peak_stream_send_window_bytes,
         "loss_timeouts": limiter.loss_timeouts,
         "lost_packets": limiter.lost_packets,
         "lost_bytes": limiter.lost_bytes,

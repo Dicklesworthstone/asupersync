@@ -161,7 +161,7 @@ is `v0.4.9`.
   `min_rtt_micros` / `smoothed_rtt_micros` / `pto_count` run on the data
   plane's synthetic event clock and are documented as such),
   `min_unacked_admission_cap_bytes`, `peak_stream_unacked_bytes`,
-  `stream_window_requests` and `final_stream_send_window_bytes`; the CLI
+  `stream_window_requests` and `peak_stream_send_window_bytes`; the CLI
   `limiter` block prints them.
 
 ### ATP-over-QUIC sender limiter report (2026-09-02)

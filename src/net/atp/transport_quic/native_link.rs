@@ -3936,14 +3936,10 @@ impl QuicLink {
             .stream_delivery_sampler
             .rtprop_min_micros()
             .or(self.path_rtt_estimate_micros);
-        report.path_bottleneck_bytes_per_s = self
-            .stream_rate_controller
-            .as_ref()
-            .map_or(0, SourceStreamRatePacer::bottleneck_bytes_per_s);
-        report.final_stream_send_window_bytes = self
-            .paced_source_stream
-            .and_then(|stream| self.conn.stream_send_limit(stream))
-            .or(self.source_stream_send_window);
+        // `path_bottleneck_bytes_per_s` and `peak_stream_send_window_bytes`
+        // are running maxima sampled at the admission gate: the rate
+        // controller and the paced stream are gone by the time the transfer
+        // reports, so an end-of-transfer read would only see fallbacks.
         report.pacing.count = report
             .pacing
             .count
@@ -7266,8 +7262,16 @@ async fn wait_source_stream_send_admission(
         let credit_ok = min_credit == 0 || credit_remaining >= min_credit;
         let admission_cap = link.source_stream_unacked_admission_max();
         let unacked_ok = link.stream_unacked_bytes <= admission_cap;
-        link.limiter
-            .observe_source_stream(admission_cap, link.stream_unacked_bytes);
+        let bottleneck_bytes_per_s = link
+            .stream_rate_controller
+            .as_ref()
+            .map_or(0, SourceStreamRatePacer::bottleneck_bytes_per_s);
+        link.limiter.observe_source_stream(
+            admission_cap,
+            link.stream_unacked_bytes,
+            credit_remaining,
+            bottleneck_bytes_per_s,
+        );
         if credit_ok && unacked_ok {
             return Ok(());
         }

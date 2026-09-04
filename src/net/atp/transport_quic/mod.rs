@@ -292,8 +292,9 @@ pub struct QuicSendLimiterReport {
     /// time the source-stream delivery sampler saw, falling back to the
     /// handshake RTT sample before the first ACK (`None` on neither).
     pub path_rtprop_micros: Option<u64>,
-    /// Wall-clock bottleneck-bandwidth estimate (bytes per second) from the
-    /// same delivery sampler; 0 until the first delivery sample.
+    /// Highest wall-clock bottleneck-bandwidth estimate (bytes per second)
+    /// the source-stream rate controller held while the admission gate ran;
+    /// 0 until the first delivery sample.
     pub path_bottleneck_bytes_per_s: u64,
     /// Lowest in-flight admission cap the source-stream gate enforced
     /// (`None` if the gate never ran); [`Self::unacked_admission_cap_bytes`]
@@ -306,10 +307,12 @@ pub struct QuicSendLimiterReport {
     /// STREAM_DATA_BLOCKED frames the sender sent to ask the receiver for a
     /// larger source-stream window (only while credit-bound and loss-clean).
     pub stream_window_requests: u64,
-    /// The peer's `MAX_STREAM_DATA` limit on the source stream when the
-    /// transfer finished (`None` without a bounded-window source stream);
-    /// compared with the HelloAck window it shows whether the window grew.
-    pub final_stream_send_window_bytes: Option<u64>,
+    /// Largest source-stream send window the admission gate observed:
+    /// remaining `MAX_STREAM_DATA` credit plus sent-but-unacked bytes, i.e.
+    /// the peer's limit minus what it had acknowledged. Against the HelloAck
+    /// window (2 MiB by default) this shows whether the receiver grew the
+    /// window (`None` if the gate never ran).
+    pub peak_stream_send_window_bytes: Option<u64>,
     /// Application-data loss timeouts that declared at least one packet lost.
     pub loss_timeouts: u64,
     /// Packets those timeouts declared lost.
@@ -413,15 +416,29 @@ impl QuicSendLimiterReport {
             .saturating_add(duration_to_micros_saturating(held));
     }
 
-    /// Fold one source-stream admission-gate sample (the cap in force and
-    /// the sent-but-unacked bytes) into the min/peak fields.
+    /// Fold one source-stream admission-gate sample into the min/peak
+    /// fields: the cap in force, the sent-but-unacked bytes, the remaining
+    /// stream credit, and the rate controller's bottleneck estimate.
     #[cfg_attr(not(feature = "tls"), allow(dead_code))]
-    pub(crate) fn observe_source_stream(&mut self, admission_cap: u64, unacked_bytes: u64) {
+    pub(crate) fn observe_source_stream(
+        &mut self,
+        admission_cap: u64,
+        unacked_bytes: u64,
+        credit_remaining: u64,
+        bottleneck_bytes_per_s: u64,
+    ) {
         self.min_unacked_admission_cap_bytes = Some(
             self.min_unacked_admission_cap_bytes
                 .map_or(admission_cap, |min| min.min(admission_cap)),
         );
         self.peak_stream_unacked_bytes = self.peak_stream_unacked_bytes.max(unacked_bytes);
+        let window = credit_remaining.saturating_add(unacked_bytes);
+        self.peak_stream_send_window_bytes = Some(
+            self.peak_stream_send_window_bytes
+                .map_or(window, |peak| peak.max(window)),
+        );
+        self.path_bottleneck_bytes_per_s =
+            self.path_bottleneck_bytes_per_s.max(bottleneck_bytes_per_s);
     }
 
     /// Fold one transport snapshot into the peak/min/slow-start fields.
@@ -632,11 +649,18 @@ mod limiter_report_tests {
     fn source_stream_samples_track_the_min_cap_and_peak_unacked() {
         let mut report = QuicSendLimiterReport::default();
         assert_eq!(report.min_unacked_admission_cap_bytes, None);
-        report.observe_source_stream(4_000, 10);
-        report.observe_source_stream(2_000, 30);
-        report.observe_source_stream(3_000, 20);
+        assert_eq!(report.peak_stream_send_window_bytes, None);
+        report.observe_source_stream(4_000, 10, 90, 500);
+        report.observe_source_stream(2_000, 30, 20, 800);
+        report.observe_source_stream(3_000, 20, 40, 0);
         assert_eq!(report.min_unacked_admission_cap_bytes, Some(2_000));
         assert_eq!(report.peak_stream_unacked_bytes, 30);
+        assert_eq!(
+            report.peak_stream_send_window_bytes,
+            Some(100),
+            "credit remaining plus unacked bytes, at its peak"
+        );
+        assert_eq!(report.path_bottleneck_bytes_per_s, 800);
     }
 
     #[test]
