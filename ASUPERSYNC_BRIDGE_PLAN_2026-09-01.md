@@ -1,4 +1,438 @@
-# Asupersync Bridge Plan (Reality Check Phase 2), 2026-09-01
+# Asupersync Bridge Plan — reality check refreshed 2026-09-04
+
+## Current assessment and execution plan
+
+**Verdict: substantial working runtime, incomplete end-to-end vision.** The
+kernel, transports, and protocol clients contain real implementations. Recent
+root draining, channel obligation registration, production trace projection,
+platform repairs, and real-server CI wiring are substantive progress. They do
+not establish complete production replay, distributed structured concurrency,
+Browser Edition scheduling, universal cleanup bounds, or an aggregate green
+release. Finishing the pre-existing backlog would still leave uncovered goals
+and several incorrectly specified acceptance criteria.
+
+This refresh governs execution. Sections 0–15 below preserve the September 1
+baseline for comparison, **not executable marching orders**. In particular,
+their deletion quotas, branch/PR examples, automatic dependency removals,
+warning-only API breaks, default-state flip, and relabel-as-feature-completion
+alternatives are superseded. No deletion, feature removal, public compatibility
+break, or owner decision is authorized by this assessment. Work stays on shared
+`main` with exact reservations. Existing passing implementations are retained.
+
+### Evidence and scope
+
+- Root read the complete AGENTS.md and README.md, core v4 plan, existing bridge
+  plan, and testing guides. Three read-only archaeology lanes read the formal,
+  distributed, browser/server/ATP, dependency, and RABS plans and specifications
+  in full, then traced implementation and test call sites. RABS is a separate
+  build-system design: its CAS, action cache, and build scheduler are not missing
+  Asupersync runtime features. Authored plan/spec/design documents were included;
+  deliberately stale fixtures are test inputs, not competing specifications.
+- Initial source baseline: `4d1981015cd496b42e6dca90a98443ecc52343d4`.
+  Shared `main` subsequently advanced to `b442149fcb6ee2e989e5fc02d7b814566e1d62fc`.
+  Findings are static source observations unless a specific execution is cited.
+  A source file, closed bead, compiled target, model test, admission receipt, and
+  terminal native test are different evidence classes.
+- Fresh strict-remote proof on the initial baseline: installed RCH supported
+  `--base`, `--clean-overlay`, `--overlay-path`, and `--no-overlay`; the native
+  `runtime_abort_vs_cancel_semantics_audit` executed on `hz3`, **34 passed,
+  0 failed, 0 ignored, 0 filtered**, exit 0 at 2026-09-04 21:53:38 UTC.
+  Log: `/tmp/asupersync-reality-native-20260904.log`. This proves the selected
+  native parked-task cancellation contract, not subsequent commits or the whole
+  runtime. The deliberate panic sentinel is an expected test input.
+- Actual application runs on the same baseline also exited 0 remotely:
+  `onramp_level0` printed `hello from asupersync` at 22:00:17 UTC;
+  `onramp_level3` completed at 22:08:46 UTC. Logs are
+  `/tmp/asupersync-reality-onramp0-20260904.log` and
+  `/tmp/asupersync-reality-onramp3-20260904.log`. Level 3 currently injects a
+  manual RuntimeState obligation and forces a closed region; it proves that
+  illustrative assertion, not the new automatic-permit admission requirement.
+- Inspected GitHub CI run `33908913396`, source
+  `ead00ca8b4f3920e1802939a9204fd712f99ea34`,
+  has actual failures, not merely a dispatch problem: Check/no-mock, lint,
+  Linux/Windows tests, full Lean profile, and additional gates. `lake build` and
+  TLC passed. Real-server logs show PostgreSQL, MySQL, Redis, NATS, and JetStream
+  successes and the intended wrong-password refusal; Kafka times out without a
+  terminal suite result. The success-filtered CI API returned zero runs. Later
+  pending/cancelled runs are not evidence that these failures remain at HEAD or
+  have been fixed. Reproduce each against the revision being promoted.
+- Shipped: crates.io `0.4.10`, published 2026-09-01 19:08:29 UTC, checksum
+  `7e8b505d6aadb778c9c4b0ae174966641f11d578d253b7786f2407b17d5045ec`.
+  The release-train bead records its source tag at `997e8d116ae864789f2cb47be90bfd4be5985c4f`.
+  GitHub Releases still lists `v0.4.9` as latest. September 4 runtime changes are
+  source progress, not a new published crate. Browser package integrity is not
+  proof of a running Rust-future scheduler or a current browser-engine run.
+- Initial `br` inventory: 11,103 closed, 376 open, 142 in progress, 31 blocked;
+  549 unfinished. `bv` found 228 actionable. These are inventory counts, not a
+  completion percentage. Deduplication searched the full titles/descriptions/
+  notes/acceptance of unfinished issues and inspected relevant closed issues.
+
+### Vision checklist and gap coverage
+
+`PARTIAL` means meaningful implementation with remaining scope; `UNPROVEN`
+means the stated claim lacks adequate execution evidence here; `STUB` means
+the named public path deliberately refuses or does no requested work.
+`WORKING_SCOPED` is reserved for an actual exercised journey. `NO_BEAD` records
+coverage before this refresh and is resolved by the new tasks below.
+
+| Goal and measuring stick | Reality and concrete remaining gap | Execution owner |
+|---|---|---|
+| 1. Cooperative cancellation preserves typed results and cleanup (README §§Cancellation; AGENTS native contract) | WORKING_SCOPED: fresh 34-case native audit; arbitrary non-cooperative code remains outside bounds | Keep native contract first in every runtime-changing lane |
+| 2. Root closure drains children/finalizers/obligations (v4 §§6–9) | PARTIAL: explicit root drain and entry macros landed; `block_on`/explicit Runtime Drop retain compatibility; teardown timeout is not quiescence | Existing `0sd3cp` implementation retained; obligation and remote follow-through below |
+| 3. Stock permits obey runtime obligation admission (v4 §8) | PARTIAL: channel gateway exists; it returns tickets before `create_obligation` can reject limits/closed regions; refused posts only increment a counter | NEW R1 admission + R1T tests; existing `cv5sqe`, `bi2462.15/.16/.17` |
+| 4. Cleanup bounds are inspectable for stock primitives (v4 §7.6; README:249) | PARTIAL / NO_BEAD: no complete primitive responsiveness registry; fairness alone cannot bound arbitrary futures | NEW R2 bounds + R2T tests |
+| 5. Pipeline/map-reduce execute structured work (v4 §12) | PARTIAL / NO_BEAD: modules reduce already-collected outcomes; no stage executor/backpressure or spawned map phase | NEW R3 execution + R3T tests; retain existing folds |
+| 6. Region allocation has a real runtime consumer (v4 §10) | PARTIAL / NO_BEAD: generation-safe heap/RRef exist; observed heap allocations are examples/tests, not task placement | NEW R4 design, implementation, and lifetime/performance tests |
+| 7. Scheduler scaling preserves fairness and cancellation (v4 §11) | PARTIAL / UNPROVEN: unified remains default; current scheduler work is benchmark-gated; a lab policy is not native parallel proof | `sched-hot-path-perf-bt4y5f`, `m9wsza`, their existing benchmark/test children |
+| 8. Production failures replay locally (v4 §18) | PARTIAL: projection/driver landed; end-to-end production capture absent; exhausted replay falls back to normal scheduling | Strengthen `bi2462.8`, then `.9`; retain `.6/.7` work |
+| 9. DPOR explores causally distinct schedules (v4 §18) | PARTIAL: clock merge exists; seed derivation does not force an exact alternative prefix or prove completeness | NEW R11/R11T; verify original `vemwug` scope separately; preserve `lab-dx-v2-n2v2fi.7` forensic journey |
+| 10. Formal claims match executable assumptions (formal semantics §§6,8) | PARTIAL: Lean model/TLC lanes exist; fairness-only termination and exact lab-refinement wording overclaim | NEW R9 reconciliation; actual proof extension remains separate from wording |
+| 11. HTTP/body/WS/gRPC/H3 work against independent peers (README network sections) | PARTIAL: real listeners and streaming paths exist; external h2spec result absent, several protocol/CI gates red | Existing `server-stack-hardening-eeexl1`; NEW R8 external HTTP/2 proof |
+| 12. File/database clients and telemetry work for consumers (README IO/data) | PARTIAL: blocking/file/client/exporter implementations exist; five real service families ran successfully in inspected CI, Kafka did not terminate | `bi2462.19`, existing data/OTLP/Kafka children; no duplicate service harness |
+| 13. Remote handles follow region ownership (v4 §8.4/§16) | PARTIAL: real mTLS named-computation transport; parent region does not yet own every remote lease/drain | Strengthen `bi2462.16`; preserve strict V1–V3 wire |
+| 14. Snapshot distribution survives failed peers (v4 §16) | PARTIAL: encode/assign/recover model; only test-double DistributorTransport; sequential waits ignore timeout/concurrency knobs | Strengthen `bi2462.10`, native two-process faults and bounds |
+| 15. Membership drives discovery and lease revocation (v4 §16) | PARTIAL: lease-reactor logic is called by manager sync; production orchestration and incarnation-aware rejoin remain | Correct `bi2462.11`, integrate in `.12` |
+| 16. Supervisor trees restart and escalate (v4 §14/AppSpec) | PARTIAL / NO_BEAD prerequisite: per-actor loops exist; compiled tree driver missing; dynamic-child bead assumes a running supervisor | NEW R5 driver + R5T; then `dist-otp-completeness-8y37kz.2` |
+| 17. Secure ATP moves real files with bounded resources (ATP architecture) | PARTIAL: native transfer exists; WAN performance, bounded memory, incremental/multi-donor behavior still have open acceptance | Existing `bi2462.5`, ATP data-plane/bonding/RaptorQ roots and children |
+| 18. ATP SDK and CLI expose the promised workflows (ATP CLI/architecture) | STUB / NO_BEAD: closed SDK/CLI feature tasks coexist with explicit NotImplemented send/receive/resume/cancel/stream and sync/mirror/share/watch paths | NEW R6 SDK + R6T; R7 CLI + R7T; do not reopen the successful fake-success refusal fix |
+| 19. ATP performance promises are measured and mathematically justified (ATP adaptive/matrix specs) | UNPROVEN in this audit: no fresh benchmark; adaptive regret example is vacuous at its given horizon; dynamic-reset claim lacks its stated theorem | Existing `j91wza`, `bi2462.5`, adaptive-control and benchmark children |
+| 20. Browser users run, cancel, and ship supported workloads (browser plan/WASM) | PARTIAL: shipped ABI manages handles; it does not itself poll Rust futures; browser-engine/package publication freshness missing | Existing decision `94g51y` and publication `yxwno1`; retain feature goal until owner chooses |
+| 21. Dependency sovereignty loses no capability (dependency plan/ADRs) | PARTIAL: KEEP/additive decisions and substantial owned components; old removal paragraphs conflict with current parity-gated DAG | `ir2uf0` and existing Rev-5 children; NEW R9 doc reconciliation |
+| 22. RABS can consume a sound generic substrate (RABS master plan §44) | PARTIAL / external acceptance: ATP framing, managed QUIC, backpressure, timer regression matter; CAS/action/build ownership belongs to RABS | R10/R10T, R14/R14T, R15/R15T; retain existing nested-timer test; RABS owner runs adapter acceptance |
+| 23. Default, stable, feature and platform promises compile independently (AGENTS profiles) | UNPROVEN as an aggregate; integration dev-dep cycle contaminates feature proof; platform CI still has failures | `z2kt29`, stable track, `bi2462.19/.20/.21` |
+| 24. Release consumers receive the proved source (release checklist) | PARTIAL: package/source tag repair done; publish workflow depends only on planning, not aggregate behavioral/compatibility gates | Strengthen `yqlhh7` with next-release enforcement and packaged canaries |
+| 25. Examples/docs/gates describe reachable behavior (README/testing/plan corpus) | PARTIAL / NO_BEAD for cross-document reconciliation: stale untracked-permit statements, infallible-send prose, unregistered supervision E2Es, strict-JSON/CBOR contradictions | NEW R9 + R9T; use existing docs/tests, no new dashboard |
+| 26. Canonical ATP frames bind reproducible transcripts (ATP codec/RABS substrate) | REGRESSED contract / uncovered follow-up: extension HashMap is emitted unsorted and duplicate decoded IDs overwrite; closed `ovjee1` promised canonical/reject-duplicate behavior | NEW R10 fix + R10T; preserve public HashMap type |
+| 27. AppSpec manifests enact services and resource authority (AppSpec compiler/reference docs) | PARTIAL / uncovered execution: compiler stores metadata, factories supply empty demo tasks; no actual route/budget/capability enforcement | NEW R12 runtime binding + R12T after live supervision |
+| 28. Snapshot restore resumes supported work, not only metadata (snapshot-restore design) | PARTIAL / uncovered execution: proof sketch names absent restore API; suspended arbitrary Rust futures are not serializable | NEW R13 explicit supported-continuation design/implementation + R13T; reject unsupported futures |
+| 29. Managed QUIC progresses on packets, deadlines and cancellation (RABS §44.5/QUIC design) | PARTIAL / NO_BEAD: serial receive/timer waits and 1ms polling; remaining duration is passed as an absolute Sleep deadline | NEW R14/R14T; retain engine/Initial-reroute work |
+| 30. Remote admission protects peers and lifecycle control (RABS §44.4/v4 admission) | PARTIAL / NO_BEAD: global max-in-flight and coalesced control exist; generic per-peer byte/message/priority/async admission is missing | NEW R15/R15T, distinct from snapshot credit and region-lease tasks |
+
+### Bridge work packages
+
+Each package is a bounded feature or defect with a separate test companion when
+it changes runtime behavior. IDs are recorded below after Phase 3a. No package
+may close by deleting a promise or changing a test into a source-string check.
+No source change is performed by this reality-check session.
+Implementation closure means landed code and focused unit/compatibility evidence.
+Its independent behavior-test companion runs afterward; the feature pair and
+product parent require both. There is no reciprocal implementation-to-test edge.
+Design tasks close only their reviewed design and concrete owned prerequisites.
+
+- **R1 — Admit obligations before publishing success (P1, 3–5 days, high risk).**
+  `obligation_mailbox.rs:252–278,384–410` mints/posts before admission;
+  `state.rs:5018–5044` can reject region/holder/limit. Design a bounded,
+  lock-order-safe admission permit or equivalent acknowledgement with rollback;
+  retain pending-post credit until resolution, safe state-less Cx behavior, and
+  existing channel signatures. Accepted tokens must always resolve exactly once;
+  rejected admission must not silently become an untracked success. Explicitly
+  settle cross-task holder transfer, late resolution, region close, zero permits,
+  queue pressure and runtime teardown. Normal SendPermit drop aborts, it is not
+  a planted leak. R1T drives native and lab limits 0/1/N, reserve-vs-close and
+  cancel-vs-commit schedules with exact counts, reclamation and deadlock checks.
+- **R2 — Publish justified responsiveness bounds (P2, 3–5 days, medium risk).**
+  Inventory stock await/commit/mask surfaces with preconditions, unit (polls vs
+  time), blocking/IO assumptions, budget composition and explicit unbounded cases.
+  Connect real primitive implementations to those bounds; do not infer a time
+  bound from scheduler fairness. R2T tests boundaries and deliberately withheld
+  progress, including genuinely parked native cancellation and mask-depth cases.
+- **R3 — Execute pipeline and map-reduce additively (P2, 4–7 days, medium risk).**
+  Preserve fold APIs; add Scope-based execution with bounded interstage capacity,
+  deterministic output ordering, four-way Outcome aggregation, loser cancellation
+  and drain. No task detachment. R3T covers slow consumers, errors/panics/cancel at
+  each stage, empty input, noncommutative reducers, exact cleanup, and a public
+  consumer with queue high-water marks and reproducible failure logs.
+- **R4 — Give the region heap a safe real consumer (P2, design before code).**
+  First settle Pin/address stability, destructor ordering, escaped-handle refusal,
+  generation reuse, finalizer/obligation relationships and task/region ownership.
+  Keep the current allocator/default untouched. An additive opt-in implementation
+  must actually place runtime-owned work/data in the heap, then prove quiescent
+  reclamation through public APIs. Separate tests use drop counters, stale handles,
+  cancellation, panic and failed admission; compare allocation counts and latency
+  against the current path before any default proposal. No automatic unsafe waiver.
+- **R5 — Run compiled supervisor trees (P1, 5–8 days, high risk).**
+  Consume CompiledSupervisor plans in a region-owned live driver; preserve each
+  child's restart policy, topology, intensity window, backoff, and parent escalation.
+  Start with a complete bounded static-tree slice; publish which strategies are
+  supported, retain unimplemented strategy tasks, and do not call dynamic child
+  management complete. R5T covers child panic, sibling restart sets, escalation,
+  cancellation during restart/backoff and stable child order in both lab and native
+  runs. Dynamic supervision depends on this driver and its behavioral proof.
+- **R6/R7 — Finish actual ATP SDK/CLI workflows (P2, decompose by operation).**
+  SDK methods must delegate to the maintained native transfer engine through Cx,
+  with authenticated transport, progress/backpressure, cancellation and resumable
+  session ownership. CLI sync/mirror/share/watch must preserve their documented
+  semantics and use that same engine. Mirror planning is read-only by default;
+  destructive application requires the existing explicit operator policy. Retain
+  the existing typed refusal for unsupported cases. Test companions exercise real
+  two-process transfer, byte hashes, interruption/resume, wrong peer/auth, slow
+  readers, finite retry budgets and no silent partial-file success. Per-operation
+  implementation and tests are split into the following bounded pairs:
+  R6A authenticated real-peer session admission (the current helper constructs
+  both negotiators locally); R6B file/directory/object transfer with verified
+  publication; R6C progress/terminal handle state; R6D streaming; R6E durable
+  checkpoint/resume/cancel; R6F authenticated daemon IPC and restart reconciliation.
+  Temporary queue emptiness is neither completion nor EOF. `is_complete` must not
+  consume progress. Stream close waits for verified final acknowledgement before
+  commit and drains its worker; a full queue applies backpressure. R6B/D/E depend
+  on admitted sessions and corrected handle lifecycle, not socket reachability.
+  R7A covers get/inbox/status/resume/cancel/serve and the existing send routes;
+  R7B covers genuinely bidirectional sync/conflicts; R7C mirror plan/apply;
+  R7D redeemable share/pairing with expiry/revocation; R7E watch with overflow
+  recovery; R7F covers the remaining advertised seed/bench/diagnostic/config/proof
+  commands by a complete command-to-handler inventory, reusing working handlers.
+  Preserve `ProtocolError::NotImplemented`, `ASUP-E701`, validation precedence,
+  exit codes, JSON schemas and old signatures on still-unavailable paths. Each
+  operation's proof uses delayed progress/data, lost acknowledgement, wrong peer,
+  stale checkpoint, destination conflict and cancel-at-commit where applicable.
+- **R8 — Independent HTTP/2 conformance (P1, 2–4 days, proof-first).**
+  Existing internal frame assertions and a blocked build did not execute h2spec.
+  Pin an independent h2spec binary/version, start the real native H2 listener,
+  run the required suite, retain exact failures and fix them in the owning code.
+  Empty selection, listener startup failure or harness-only assertions cannot
+  pass. Include a known-invalid listener/response negative control and cancellation/
+  teardown evidence. This does not prove HTTP/3, browser behavior or all RFCs.
+- **R9 — Reconcile the controlling docs with reachable examples (P1, 2–3 days).**
+  Revise existing docs in place: permit registration versus no-Cx try paths;
+  send-disconnect outcomes; root drain versus teardown; strict JSON V1–V3 versus
+  aspirational CBOR; formal fairness/progress assumptions; WASM ledger scope;
+  dependency KEEP/parity decisions; ATP mathematical assumptions. Register/fix or
+  explicitly mark unreachable channel/signal supervision recipes; the signal
+  sketch's Tokio sleep must not be wired into core. R9T compiles/runs the real
+  examples with nonzero selection, validates advertised invocation paths, and
+  plants a disconnect and missing-test selection. Text agreement alone is not
+  behavioral proof. Keep unsupported goals visible and linked to implementation.
+
+### Corrections to existing work, without duplicate feature epics
+
+- `bi2462.8`: distinguish complete replay from an explicitly requested prefix;
+  validate trace identity, coverage/gaps and terminal outcomes. Reject tail and
+  interior truncation, extra unrecorded work and outcome drift. Do not silently
+  switch to normal scheduling and report success. Capture from real production
+  workers, then replay the same workload in the lab; handcrafted lab traces do
+  not satisfy this acceptance. `.9` waits for this proof before widening claims.
+- `bi2462.10`: preserve V1–V3 tags/fields/goldens. Prefer a versioned named
+  snapshot computation within the existing envelope; any new transport message
+  requires a deliberately versioned negotiated protocol. Honor ack_timeout,
+  max_concurrent, hedging, quorum cancellation and parent Cx; a blocked first peer
+  must not serialize every replica. Test two actual processes and failed peers.
+- `bi2462.11`: MembershipLeaseManager already calls the reactor. Connect real
+  discovery events, authenticate membership authority and reject stale incarnation
+  replay. A revoked lease stays revoked; higher-incarnation rejoin requires fresh
+  lease identity. `.12` composes transport/discovery/lease ownership only after
+  their individual tests, then proves restart/partition/heal with public APIs.
+- `bi2462.16`: bind remote spawn/lease/result/cancel to the owning region; never
+  forge success from transport loss. Preserve JSON compatibility; documentation
+  reconciliation is not a substitute for region-close/lease-expiry execution.
+- `bi2462.19/.20/.21`: use actual CI failures and platform receipts, not the old
+  no-runners premise. Kafka timed out in the inspected run. Required service tests
+  must have terminal nonzero results; wrong-password rejection is expected evidence.
+  Fix root causes on the selected revision, preserve old failures and first-attempt
+  results, and distinguish quarantine/advisory jobs from enforced gates.
+- `vemwug`: current source merges vector clocks, so do not implement that obsolete
+  fix again. Audit the original synchronization coverage and its test receipt
+  before deciding closure. NEW R11/R11T separately owns exact-prefix backtracking;
+  it must not silently convert the old clock bug into a different algorithm task.
+- `yqlhh7`: enforce release checklist before publishing, including v0.4.3 API/
+  behavior comparison, independently resolved default/stable/feature canaries,
+  packaged artifact/source/lockfile identity, native cancellation and required CI
+  results. A green package dry-run is not a green runtime. Existing `pzpol4` tag
+  repair stays closed; its expressly deferred workflow work remains here.
+- `ir2uf0`/`62jqi3`: current Rev-5 is no-loss/parity-gated. KEEP and additive
+  implementations are valid dispositions; do not automatically remove hex,
+  base64, Kafka, SQLite, TOML, YAML, generic Protobuf, regex or CLI dependencies.
+  Full generic/public interoperability remains a prerequisite to any cutover.
+
+### Original-workstream coverage and completion rule
+
+| September 1 items | Current disposition |
+|---|---|
+| A1–A3 | Preserve evidence-based tracker and ownership correction; remove count/one-epic quotas; retain unique ATP acceptance when linking roots |
+| A4–A6 | R9/R9T plus existing proof freshness `iwwj4z` and release `yqlhh7`; no separate dashboard required |
+| B1–B3 | Retain root drain and channel work; R1/R1T, `.15–.17`, R9; no new warning behavior under 0.4.x |
+| B4 | R3/R3T plus existing cancel/drain combinator and plan-rewrite work; low-level drop semantics remain explicit |
+| B5–B7 | Retain UCB1 fixes; replay `.8`; existing scheduler performance gates; R4 heap consumer |
+| C1–C6 | `.19/.20/.21/.24`, `z2kt29`, `yqlhh7`; actual failed stages and skip refusal, not recreated harnesses |
+| D1–D6 | Retain trace export, TLC and oracle improvements; `.8/.9`, corrected `vemwug`, existing adaptive-control/forensics work; R9 proof scope |
+| F1–F6 | Existing server-stack implementation and tests; R8 independent H2; R9 current DNS/TLS/WS/H3 scope |
+| G1–G6 | Existing file/data/telemetry work, `.19`, Rev-5 dependency tasks; no self-referential conformance promoted as interoperability |
+| H1–H4 | `.10/.11/.12/.16`, R5/R5T, R9 strict wire reconciliation |
+| I1–I5 | Existing WAN/bonding/RaptorQ proof tasks; R6/R7 implementations; no unapproved file/subcommand removal |
+| E1–E5 | Existing browser owner decision and npm publication tasks; retain rebuild, engine CI and Rust IO reachability acceptance |
+| J1–J6 | Correct misleading/stale consumers and ship useful proof; do not optimize LOC ratios or delete artifacts as a proxy for product progress |
+| K1–K2 | Retain complete Rev-5 capability/parity DAG, strengthen doc joins; no automatic dependency exit |
+| L1–L3 | Existing release hardening and canary tasks; no 0.5 default/API decision implied by this plan |
+
+The finish line is a user journey at a named source/package revision with its
+failure path, cleanup, compatibility and performance evidence. A documented
+limitation is honest communication; it does not complete the original feature.
+Unbounded external behavior must produce a scoped refusal/timeout with retained
+ownership, not a fabricated bounded-completion claim. Implementation agents pick
+up dependency-ready slices via `br ready`; this session supplies the revised plan
+and executable backlog, not an assertion that those features have been built.
+
+### Cross-component acceptance added by ambition pass 2
+
+The following boundaries are feature work with companion tests, not additional
+signoff metadata. No green component substitutes for a missing join:
+
+- **R10:** serialize ATP extension entries in stable ID order without changing
+  `FrameHeader.extensions: HashMap`; reject duplicate IDs under the existing
+  canonical-frame contract. Test insertion-order permutations, malformed duplicate
+  bytes, transcript equality, round trips and interoperability with old valid
+  frames. Closed `ovjee1` is provenance for the promised behavior, not fresh proof.
+- **R11:** extend the explorer with opt-in exact-prefix execution and an enabled
+  alternative transition. Reuse ForcedSchedule and proven synchronization edges;
+  preserve current seeded exploration. Compare explored equivalence classes to
+  an exhaustive tiny-state oracle; report unsupported effects and search limits.
+- **R12:** bind AppSpec factories to real capability/budget authority and route/
+  trigger/service lifecycle, including nested groups through the managed supervisor.
+  One real HTTP route, actor and trigger must produce outputs and refuse missing
+  capabilities/expired budgets. Empty factories plus quiescence are not acceptance.
+  Preserve the existing pure-data compiler and its honest unsupported cases.
+- **R13:** specify a versioned workload factory/continuation codec for the finite
+  set of supported restorable tasks; validate source/workload/state identity and
+  restore resumed effects, outcomes and obligations. Reject arbitrary futures,
+  stale generations and unsupported external effects. Metadata validation alone
+  remains useful but is not continuation execution. The design is a prerequisite;
+  no unsafe rehydration or universal crash-recovery guarantee is implied.
+- **R14:** replace the managed QUIC fixed-poll/serial-wait loop with competition
+  between actual socket readiness, due deadlines and cancellation. Preserve
+  public Instant-taking APIs through a checked same-clock mapping; a relative
+  duration is not an absolute runtime Time. Test nonzero epochs, overdue/earlier/
+  removed timers, no lost wake, idle-to-burst transitions, saturated send/cancel
+  and cross-connection fairness against the actual managed endpoint over UDP.
+- **R15:** provide additive per-peer/global message, byte and waiter admission,
+  cancellation-aware local reserve/commit, bounded retry-owned state and protected
+  authenticated lifecycle-control capacity. Retain current max_in_flight and
+  coalesced controls. Two independently controlled remote peers prove isolation,
+  bounded memory and cancel/renew/drain progress under data saturation. No user
+  priority can impersonate control authority; local commit is not remote
+  exactly-once execution. Shared remote.rs work requires exact reservations.
+
+Snapshot transport receipts must bind object digest, attempt, replica and peer
+authority; wrong-object/stale acknowledgements cannot satisfy quorum. Complete
+production replay must prove outcomes and event coverage as well as poll order,
+and preserve legacy prefix replay as an explicit compatibility mode. Membership
+cannot promote unauthenticated UDP observations into TLS/capability authority.
+The integration tests connect these exact boundaries rather than constructing
+matching structs on both sides.
+
+### Quantitative and proof discipline added by ambition pass 3
+
+- Use obligation conservation as the R1 oracle: admitted reservations equal
+  committed + aborted + explicitly leaked + still-live records; queued admission
+  credits and generation identity must prevent an apparent zero during handoff.
+  Rejected admission consumes neither capacity nor an accepted-token claim.
+  Exercise the actual queue/state boundary with a finite state-machine model and
+  native schedules; a model theorem alone does not prove the implementation.
+- R11 compares Mazurkiewicz equivalence classes only for a declared finite
+  transition system with sound dependency edges. Include a planted missing
+  happens-before edge and a spurious independence edge. A search budget ending
+  early is `incomplete`, not exhaustive success or a probabilistic guarantee.
+- R2 composes only justified finite bounds and explicit environmental premises.
+  An infinite cooperative loop is a counterexample to fairness-only termination;
+  a thread stuck inside one poll is a counterexample to universal cleanup time.
+  Formal docs must distinguish safety, conditional liveness and Rust refinement.
+- The ATP adaptive-design regret expression yields about 324 loss units for
+  T=200, where normalized cumulative loss is at most 200. That instance is a
+  vacuous bound, not evidence of a few-percent overhead. A reset detector does
+  not by itself establish the stated dynamic-regret theorem. Existing `j91wza`
+  work must define loss/units, admissible process, change budget, tuning and
+  finite-horizon comparator, then show paired real goodput/repair/latency/memory
+  results. Retain current safe fallback if either assumptions or measurements fail.
+- Performance remains a distinct acceptance dimension: reuse the maintained
+  benchmark gates, hold payload/security/feature/hardware/worker count fixed,
+  record raw before/after distributions and allocation/queue/byte high-water
+  marks. Do not substitute a clean-link win for WAN/loss/multi-file behavior or
+  silently relax the existing regression threshold. No fresh performance result
+  was produced in this assessment. Heap/default/codec/SDK optimizations do not
+  ship solely because their design sounds mathematically attractive.
+- Release acceptance consumes the actual tested package and exact source/lockfile
+  identity, not an independently regenerated lockfile or green metadata job.
+  Reuse existing compatibility and consumer gates; test a deliberately mismatched
+  package/source identity and a required-stage skip. No new release ceremony is
+  needed beyond enforcing those existing conditions on the publishing path.
+
+### Phase execution record
+
+Phase 1 source/vision/coverage audit and Phase 2 bridge revision are complete.
+Phase 3a created R1/R1T, R2/R2T, R3/R3T, R5/R5T, R8, R9/R9T as
+`bi2462.28–.38`, using the frozen generation instructions and only `br` writes.
+Ambition pass 1 expanded feature completion into full SDK/CLI operation pairs,
+exposing session self-negotiation, destructive progress peeks, early EOF and
+premature stream commit as prerequisites. It preserved the original eleven CLI
+workflows and their routing/security modes instead of reducing the goal to send.
+Further ambition/refinement and graph results are recorded as they execute.
+Ambition pass 2 added canonical ATP transcript repair, exact-prefix DPOR,
+AppSpec runtime enforcement and supported continuation restoration, with causal
+cross-component proofs and explicit compatibility boundaries. Existing closed
+schema/honesty work is preserved; missing execution is tracked separately.
+Ambition pass 3 added conservation/generation oracles, exhaustive finite DPOR
+comparison, conditional-liveness counterexamples, non-vacuous adaptive-FEC
+acceptance and paired performance/package-identity gates. These are concrete
+test obligations; no new theorem, benchmark win or release readiness is claimed.
+Phase 3a regeneration created 36 more tasks, `bi2462.39–.74`: 47 new tasks
+total at this checkpoint. Seventeen existing issues were revised with current
+evidence/scope; conflicting original descriptions were retained as explicitly
+historical context rather than discarded.
+Refinement pass 1 reviewed every core work package and changed nine boundaries:
+no denial-to-untracked fallback; complete stock wait inventory; bounded retained
+ordered outputs; explicit task-placement ownership; late-generation fencing;
+authenticated old/new codec compatibility; fresh-workload prefix reconstruction;
+AppSpec authority/budget attenuation; coordinated snapshot cuts and single-owner
+recovery. These are recorded in the affected beads' acceptance criteria.
+Refinement pass 2 reviewed all 24 SDK/CLI tasks and actual graph edges. It split
+implementation closure (code plus focused unit evidence) from feature-pair
+completion (implementation plus independent behavior proof), avoiding procedural
+cycles. It added missing real-engine/stream/command-proof prerequisites, bounded
+optional progress, precise publication granularity, source-aware resume fencing,
+complete delegated API/authority coverage, causal relay/mailbox tests, shared sync
+semantics and persistent revocation. Unsupported command rows need named children
+before the inventory can close; they do not pass the final product gate.
+Refinement pass 3 found that generic transport epics did not own managed QUIC
+wake/deadline correctness or generic per-peer remote admission. R14/R14T and
+R15/R15T became `bi2462.75–.78`, bringing new tasks to **51**. It also corrected
+four active dependency API/cutover instructions and strengthened the existing
+release task: immutable dispatched candidate, tested lockfile/archive identity,
+required terminal stage provenance, and refusal before any registry write.
+
+### Created task index
+
+All IDs below have prefix `asupersync-bi2462.`. Implementations include focused
+unit tests; the paired proof task is independently required for product completion.
+
+| Work package | Implementation/design | Independent proof |
+|---|---|---|
+| R1 obligation admission | 28 | 29 |
+| R2 responsiveness bounds | 30 | 31 |
+| R3 executing combinators | 32 | 33 |
+| R5 live supervisor | 34 | 35 |
+| R8 external h2spec | 36 (proof and discovered fixes) | 36 |
+| R9 controlling docs/recipes | 37 | 38 |
+| R4 safe runtime heap | 39 design, 40 implementation | 41 |
+| R10 canonical ATP extensions | 42 | 43 |
+| R11 exact-prefix DPOR | 44 | 45 |
+| R12 AppSpec runtime bindings | 46 | 47 |
+| R13 supported continuation restore | 48 design, 49 implementation | 50 |
+| R6A real peer session | 51 | 52 |
+| R6C progress/terminal lifecycle | 53 | 54 |
+| R6B file/directory/object transfer | 55 | 56 |
+| R6D streaming | 57 | 58 |
+| R6E checkpoint/resume/cancel | 59 | 60 |
+| R6F daemon IPC | 61 | 62 |
+| R7A persistent control/routes | 63 | 64 |
+| R7B bidirectional sync | 65 | 66 |
+| R7C mirror plan/application | 67 | 68 |
+| R7D share/pairing | 69 | 70 |
+| R7E watch | 71 | 72 |
+| R7F remaining command coverage | 73 | 74 |
+| R14 managed QUIC wake/deadline | 75 | 76 |
+| R15 protected peer admission | 77 | 78 |
+
+---
+
+## September 1 historical baseline (superseded execution instructions)
 
 **Purpose.** This is the Phase 2 deliverable of the reality check run on
 2026-09-01: a complete, granular plan to close every gap between what
