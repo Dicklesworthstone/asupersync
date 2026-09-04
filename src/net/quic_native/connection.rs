@@ -3609,6 +3609,101 @@ mod tests {
     }
 
     #[test]
+    fn peer_stream_data_blocked_grows_an_allowed_bounded_window_and_advertises_it() {
+        let cx = test_cx();
+        let mut conn = established_conn();
+        let stream = conn.open_local_bidi(&cx).expect("open");
+        conn.configure_stream_recv_window(&cx, stream, 100)
+            .expect("configure window");
+        conn.allow_stream_recv_window_growth(&cx, stream, 400)
+            .expect("allow growth");
+        let _ = conn
+            .generate_frames(&cx, PacketNumberSpace::ApplicationData, 128)
+            .expect("initial advertisement");
+
+        // The peer reports being blocked before we consumed a full window:
+        // nothing grows and nothing new is advertised.
+        conn.process_frame(
+            &cx,
+            &QuicFrame::StreamDataBlocked {
+                stream_id: VarInt(stream.0),
+                maximum_stream_data: VarInt(100),
+            },
+            PacketNumberSpace::ApplicationData,
+        )
+        .expect("blocked before consumption");
+        assert_eq!(
+            conn.stream_recv_window_bytes(stream).expect("window"),
+            Some(100)
+        );
+
+        // Consume a full window, then the peer is blocked at our new edge:
+        // the window doubles and read_offset + 200 goes on the wire.
+        conn.receive_stream_bytes(&cx, stream, 0, Bytes::from_static(&[7u8; 100]), false)
+            .expect("inbound bytes");
+        assert_eq!(
+            conn.read_stream_bytes(&cx, stream, 100)
+                .expect("drain")
+                .len(),
+            100
+        );
+        let _ = conn
+            .generate_frames(&cx, PacketNumberSpace::ApplicationData, 128)
+            .expect("consumption advertisement");
+        conn.process_frame(
+            &cx,
+            &QuicFrame::StreamDataBlocked {
+                stream_id: VarInt(stream.0),
+                maximum_stream_data: VarInt(200),
+            },
+            PacketNumberSpace::ApplicationData,
+        )
+        .expect("blocked at the edge");
+        assert_eq!(
+            conn.stream_recv_window_bytes(stream).expect("window"),
+            Some(200)
+        );
+        let frames = conn
+            .generate_frames(&cx, PacketNumberSpace::ApplicationData, 128)
+            .expect("growth advertisement");
+        assert!(frames.contains(&QuicFrame::MaxStreamData {
+            stream_id: VarInt(stream.0),
+            maximum_stream_data: VarInt(300),
+        }));
+    }
+
+    #[test]
+    fn report_stream_data_blocked_queues_one_frame_with_the_current_send_limit() {
+        let cx = test_cx();
+        let mut conn = established_conn();
+        let stream = conn.open_local_bidi(&cx).expect("open");
+        assert_eq!(
+            conn.set_fresh_stream_send_limit(&cx, stream, 64)
+                .expect("cap"),
+            64
+        );
+        conn.report_stream_data_blocked(&cx, stream)
+            .expect("report");
+        conn.report_stream_data_blocked(&cx, stream)
+            .expect("report again");
+        let frames = conn
+            .generate_frames(&cx, PacketNumberSpace::ApplicationData, 128)
+            .expect("frames");
+        let blocked: Vec<&QuicFrame> = frames
+            .iter()
+            .filter(|frame| matches!(frame, QuicFrame::StreamDataBlocked { .. }))
+            .collect();
+        assert_eq!(
+            blocked,
+            vec![&QuicFrame::StreamDataBlocked {
+                stream_id: VarInt(stream.0),
+                maximum_stream_data: VarInt(64),
+            }],
+            "a repeated report replaces the pending frame instead of stacking"
+        );
+    }
+
+    #[test]
     fn ack_path_repeats_consumption_clocked_window_past_head_of_line_hole() {
         let cx = test_cx();
         let mut conn = established_conn();
