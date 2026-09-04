@@ -4140,3 +4140,46 @@ Ratios ATP/rsync at 2 MiB: `wan` 0.955, `wanqueue` 1.56, `good` 1.69, `bad` 1.03
 - **Report caveat found.** `min_rtt_micros` / `smoothed_rtt_micros` / `pto_count` in the limiter block read the transport's estimator, which runs on the ATP data plane's synthetic event-count clock (1 ms per packet), so they are not time (`min_rtt` was 1000 in every row); the wall-clock RTprop is the delivery sampler's. Fixed under A4: `path_rtprop_micros`, `path_bottleneck_bytes_per_s`, `min_unacked_admission_cap_bytes`, `peak_stream_unacked_bytes`, plus `stream_window_requests` / `final_stream_send_window_bytes` for the growth mechanism.
 - **Design (A4, asupersync-bi2462.4).** Sender-gated window growth: the sender sends STREAM_DATA_BLOCKED only while credit is its only gate and the last window's worth of credit went by without a retransmit batch; the receiver doubles the window (up to a 4 MiB cap, clamped by the fragment guard for its MTU) only when the peer reports being blocked at its advertised edge after a full window was consumed. A queue-limited or lossy path never asks and keeps 2 MiB. Lifting the cap to 8–16 MiB needs contiguous reassembly chunks to coalesce (follow-up).
 - Host note: ovh-a's 32 GB tmpfs `/tmp` filled with per-cell workload copies during these runs; later runs live under `/data/tmp/atp_bench_runs/`. The two tmpfs runs' `results.jsonl` were read before the volume was cleared and are quoted in the A3 bead comment; the three disk-backed runs are committed under `artifacts/atp_bench_matrix/`.
+
+## 2026-09-04 (SapphireHill) — A4 (asupersync-bi2462.4): sender-gated window growth, measured wrong twice, then right
+
+The A3 entry above ended with a design: let the receiver grow the bounded source-stream window, but only when the sender says credit is its binding constraint. This entry records what that cost to get right, because both wrong versions looked plausible on paper.
+
+### Attempt 1 — "no repair since the last decision" (refuted by measurement)
+
+Sender asks whenever no retransmit batch has happened since the previous decision. Run with the HEAD binary (sha `88d90d23`), ovh-a netns, 500M, encrypted, no env override:
+
+| regime | reps | atp-quic wall s | vs the 2 MiB baseline | window requests | peak unacked | retransmitted |
+|---|---:|---|---|---:|---:|---:|
+| `wan` | 3 | 15.67 / 15.96 / 15.97 | 25.9 → 15.7, **1.72× rsync-over-ssh** | 242 | 4.19 MB | 0 |
+| `good` | 3 | 44.6 / 55.5 / 56.1 | 42.4 → 55.5, **regression** | 41-50 | 2.8-3.0 MB | 149-240 MB |
+| `wanqueue` | 2 | 51.7 / 43.7 | noisy, no better | 49-59 | 4.19 MB | 10-103 MB |
+| `bad` | 2 | 363.6 / 365.7 **FAIL, sha_ok=false** | 133 s → hard failure | — | — | — |
+
+Runs `artifacts/atp_bench_matrix/20260904T051031Z_growth_wan_good/` and `20260904T052300Z_growth_bad_wanqueue/`.
+
+- The clean cell got the intended win, and `peak_stream_unacked_bytes` 4.19 MB above the 2 MiB HelloAck window is direct proof the receiver grew it.
+- **Why the gate did not hold.** "No repair since the last decision" is trivially true at the start of a transfer, so the first ask always went out before loss could be observed; and on a bursty path any single quiet window qualified. `good` has ~333 repair episodes and still found 41-50 quiet windows. One growth was enough.
+- **What a too-large window costs.** `good` re-sent 149-240 MB against 38-42 MB at 2 MiB — the MATRIX-228 repair explosion, reproduced. `bad` died: the receiver reported `stream receive reassembly fragment limit exceeded` (4096 reassembly nodes per stream, no coalescing) and the sender then timed out with `[ASUP-E804]` after 360 s.
+
+### Attempt 2 — loss-free warmup, receiver veto (holds)
+
+Growth now needs the path to earn it: the transfer must never have retransmitted, and 8 windows of credit (16 MiB) must pass cleanly before the first ask, then at most one ask per window; and the receiver refuses to grow once a quarter of its reassembly budget is buffered as out-of-order chunks. Run with binary `2cc0fbf4`, 50M, encrypted, QUIC only, 3 reps (`artifacts/atp_bench_matrix/20260904T165946Z_hardened_gate_50m/`):
+
+| regime | atp-quic wall s | window requests | peak send window | retransmit batches | wall-clock RTprop |
+|---|---|---:|---:|---:|---:|
+| `wan` | 2.453 / 2.454 / 2.448 | 14 / 14 / 15 | 4.19 MB | 0 | 89 ms |
+| `good` | 3.656 / 3.756 / 3.954 | **0** | 2.097 MB (= the 2 MiB window) | 52-80 | 50 ms |
+| `bad` | 15.775 / 14.470 / 14.263 | **0** | 2.097 MB | 8 | 142 ms |
+
+Every row `status=ok`, `sha_ok=true` — including `bad`, which failed both reps under attempt 1.
+
+Like-for-like against the pre-A4 measurement of the same cell (`20260902T204926Z`, 50M encrypted `wan`): **3.154 s → 2.45 s**, a 22 % cut, with rsync-over-ssh at 4.853 s on that cell, so ATP is now 1.98× faster there. The loss-prone regimes are untouched, which is the point: they ask for nothing and keep the 2 MiB path law.
+
+The limiter report also tells the truth about the path for the first time: `path_rtprop_micros` reads 89 / 50 / 142 ms across the three regimes and `path_bottleneck_bytes_per_s` 67 / 67 / 6.3 MB/s, where the transport's own estimator reads 1 ms everywhere because the ATP data plane feeds QUIC recovery a synthetic event-count clock. That field is now documented as event units in the bench spec, and `peak_stream_send_window_bytes` replaces a field that was read after the paced stream was gone and therefore always reported the 2 MiB fallback.
+
+### No-claim
+
+- The hardened gate is measured at **50M**, not 500M: ovh-a's root filesystem is full (the harness keeps every cell's received copy, so a 500M matrix needs ~5 GB and 1.9 GB was free). The 500M re-measurement is still owed and is the number to quote for the headline.
+- `wanqueue` stays out of every claim here: at 2-3 reps it swings 38-52 s for ATP and 27-49 s for rsync on the same host, so nothing about it is separable from noise yet. Needs reps ≥ 5.
+- Growth is capped at 4 MiB and clamped by the receiver's fragment budget. Going higher needs contiguous reassembly chunks to coalesce (node count = holes + 1) so a large window cannot approach the 4096-node guard; and the guard itself should back-pressure rather than fail the connection. Both are follow-ups, not done here.
