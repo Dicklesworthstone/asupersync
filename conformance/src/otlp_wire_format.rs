@@ -11072,11 +11072,7 @@ fn compare_span_status_results(
     let timestamp_diff =
         (asupersync_status.timestamp_set as i64 - opentelemetry_status.timestamp_set as i64).abs();
     const TIMESTAMP_TOLERANCE_NANOS: i64 = 1_000_000; // 1ms tolerance
-    if timestamp_diff > TIMESTAMP_TOLERANCE_NANOS {
-        return false;
-    }
-
-    true
+    timestamp_diff <= TIMESTAMP_TOLERANCE_NANOS
 }
 
 /// OTLP-025: Trace.get_active() conformance test wrapper
