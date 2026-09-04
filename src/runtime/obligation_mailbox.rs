@@ -604,7 +604,11 @@ mod tests {
         let stats = mailbox.stats();
         assert_eq!(stats.leaked, 1, "{stats:?}");
         assert_eq!(stats.refused, 0, "{stats:?}");
-        assert_eq!(runtime.state.leak_count(), 1, "the escalation threshold saw it");
+        assert_eq!(
+            runtime.state.leak_count(),
+            1,
+            "the escalation threshold saw it"
+        );
         assert_eq!(runtime.state.pending_obligation_count(), 0);
         let kinds: Vec<TraceEventKind> = runtime
             .state

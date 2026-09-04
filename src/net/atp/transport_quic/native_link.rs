@@ -478,10 +478,10 @@ fn quic_source_stream_recv_window_growth_cap(
     configured_max: u64,
     max_app_payload: usize,
 ) -> Option<u64> {
-    let fragment_safe = (crate::net::quic_native::connection::MAX_BUFFERED_STREAM_REASSEMBLY_FRAGMENTS
-        as u64)
-        .saturating_sub(64)
-        .saturating_mul(u64::try_from(max_app_payload).unwrap_or(0));
+    let fragment_safe =
+        (crate::net::quic_native::connection::MAX_BUFFERED_STREAM_REASSEMBLY_FRAGMENTS as u64)
+            .saturating_sub(64)
+            .saturating_mul(u64::try_from(max_app_payload).unwrap_or(0));
     let cap = configured_max.min(fragment_safe);
     (cap > window).then_some(cap)
 }
@@ -10770,6 +10770,36 @@ mod tests {
             max_bps: Some(bps),
             max_app_limited_bps: None,
         }
+    }
+
+    #[test]
+    fn recv_window_growth_cap_is_fragment_safe_and_disables_itself() {
+        let window = 2 * 1024 * 1024;
+        // 4 MiB configured, 1200-byte frames: 4032 × 1200 ≈ 4.6 MiB fits, so
+        // the configured cap wins.
+        assert_eq!(
+            quic_source_stream_recv_window_growth_cap(window, 4 * 1024 * 1024, 1200),
+            Some(4 * 1024 * 1024)
+        );
+        // 8 MiB configured with the same frames: the fragment guard clamps it.
+        assert_eq!(
+            quic_source_stream_recv_window_growth_cap(window, 8 * 1024 * 1024, 1200),
+            Some(4032 * 1200)
+        );
+        // Tiny frames: even 4 MiB does not fit under the guard, and a cap at
+        // or below the starting window disables growth.
+        assert_eq!(
+            quic_source_stream_recv_window_growth_cap(window, 4 * 1024 * 1024, 300),
+            None
+        );
+        assert_eq!(
+            quic_source_stream_recv_window_growth_cap(window, window, 1200),
+            None
+        );
+        assert_eq!(
+            quic_source_stream_recv_window_growth_cap(window, 0, 1200),
+            None
+        );
     }
 
     #[test]

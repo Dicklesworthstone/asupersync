@@ -574,21 +574,53 @@ mod limiter_report_tests {
         let window = 1_000;
         let mut marker = None;
         // First decision on a clean sender asks.
-        assert!(source_stream_window_request_due(&mut marker, 1_000, window, 0));
+        assert!(source_stream_window_request_due(
+            &mut marker,
+            1_000,
+            window,
+            0
+        ));
         // Same window edge (or less than a window further): no new decision.
-        assert!(!source_stream_window_request_due(&mut marker, 1_000, window, 0));
-        assert!(!source_stream_window_request_due(&mut marker, 1_900, window, 0));
+        assert!(!source_stream_window_request_due(
+            &mut marker,
+            1_000,
+            window,
+            0
+        ));
+        assert!(!source_stream_window_request_due(
+            &mut marker,
+            1_900,
+            window,
+            0
+        ));
         assert_eq!(marker, Some((1_000, 0)));
         // A full window later with no retransmit batch: asks again.
-        assert!(source_stream_window_request_due(&mut marker, 2_000, window, 0));
+        assert!(source_stream_window_request_due(
+            &mut marker,
+            2_000,
+            window,
+            0
+        ));
         // A full window later with a retransmit batch in between: silent, and
         // the marker moves so the NEXT clean window can ask.
-        assert!(!source_stream_window_request_due(&mut marker, 3_000, window, 1));
+        assert!(!source_stream_window_request_due(
+            &mut marker,
+            3_000,
+            window,
+            1
+        ));
         assert_eq!(marker, Some((3_000, 1)));
-        assert!(source_stream_window_request_due(&mut marker, 4_000, window, 1));
+        assert!(source_stream_window_request_due(
+            &mut marker,
+            4_000,
+            window,
+            1
+        ));
         // A lossy first window never asks.
         let mut lossy = None;
-        assert!(!source_stream_window_request_due(&mut lossy, 1_000, window, 3));
+        assert!(!source_stream_window_request_due(
+            &mut lossy, 1_000, window, 3
+        ));
         assert_eq!(lossy, Some((1_000, 3)));
         // A zero window degrades to "once per limit change", never a panic.
         let mut zero = Some((5, 0));

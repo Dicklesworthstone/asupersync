@@ -136,6 +136,34 @@ is `v0.4.9`.
   connecting to the null address and retries once; Linux and Windows are
   unchanged. Verified on macOS 26.2 (arm64).
 
+### ATP-over-QUIC source-stream window grows on clean high-RTT paths (2026-09-03)
+
+- The limiter report answered the WAN question (ledger entry 2026-09-03): on a
+  clean 90 ms × 300 mbit path the sender waited on the receiver's
+  `MAX_STREAM_DATA` credit 90 % of the time because the source-stream receive
+  window is a fixed 2 MiB, below that path's bandwidth-delay product. A bigger
+  static window is refuted both ways (8 MiB: `good` 42 s → 68 s with 61 % of
+  the file re-sent, `bad` fails outright on the reassembly fragment guard).
+- The window now grows only when the sender asks: the native QUIC receiver
+  reacts to STREAM_DATA_BLOCKED on a bounded-window stream by doubling the
+  window (up to a cap, and only after a full window was consumed since the
+  last growth), and the ATP sender sends that frame only while credit is its
+  sole gate and the last window's worth of credit passed without a
+  retransmit batch. Queue-limited and lossy paths never ask and keep the
+  2 MiB path law; the clean WAN cell went from 25.9 s to 15.7 s (1.73× faster
+  than rsync-over-ssh). Cap: 4 MiB (`ATP_QUIC_STREAM_RECV_WINDOW_MAX`),
+  clamped by the reassembly fragment guard for the receiver's MTU.
+  `NativeQuicConnection::allow_stream_recv_window_growth`,
+  `report_stream_data_blocked`, `stream_send_limit`,
+  `stream_recv_window_bytes` are additive.
+- `QuicSendLimiterReport` gains `path_rtprop_micros`,
+  `path_bottleneck_bytes_per_s` (the wall-clock path figures; the transport's
+  `min_rtt_micros` / `smoothed_rtt_micros` / `pto_count` run on the data
+  plane's synthetic event clock and are documented as such),
+  `min_unacked_admission_cap_bytes`, `peak_stream_unacked_bytes`,
+  `stream_window_requests` and `final_stream_send_window_bytes`; the CLI
+  `limiter` block prints them.
+
 ### ATP-over-QUIC sender limiter report (2026-09-02)
 
 - `transport_quic::send_path_with_limiter_report` returns the usual
