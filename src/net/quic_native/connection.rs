@@ -394,7 +394,7 @@ const MAX_TRACKED_ACK_RANGES: usize = MAX_ACK_FRAME_RANGES * 4;
 /// Flow control bounds bytes, but without a separate metadata bound an
 /// authenticated peer can fill the receive window with tiny disjoint ranges
 /// and amplify each byte into a tree node plus reassembly work.
-const MAX_BUFFERED_STREAM_REASSEMBLY_FRAGMENTS: usize = 4096;
+pub(crate) const MAX_BUFFERED_STREAM_REASSEMBLY_FRAGMENTS: usize = 4096;
 
 /// Maximum number of outbound DATAGRAM payloads queued before `send_datagram`
 /// drops the oldest queued payload to keep the unreliable send path bounded.
@@ -939,6 +939,13 @@ impl NativeQuicConnection {
         self.streams
             .allow_stream_recv_window_growth(id, max_window)
             .map_err(map_stream_table_error)
+    }
+
+    /// The peer's current `MAX_STREAM_DATA` limit for `id` (`None` for an
+    /// unknown stream).
+    #[must_use]
+    pub fn stream_send_limit(&self, id: StreamId) -> Option<u64> {
+        self.streams.stream_send_limit(id).ok()
     }
 
     /// Current bounded receive window of `id` (`None` = unbounded).

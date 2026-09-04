@@ -1296,8 +1296,10 @@ impl StreamTable {
     /// while credit is not its limiter) and a slow reader (whose un-read
     /// bytes, not the window, are the bound) keep the window they have:
     /// * growth is allowed and the cap is above the current window;
-    /// * `limit` is at the edge we advertised (within a sixteenth-window),
-    ///   so a stale frame for an older limit is ignored;
+    /// * `limit` is within one window of the edge we advertised: on a
+    ///   high-BDP path the peer's view lags our advertisements by up to a
+    ///   window of in-flight MAX_STREAM_DATA frames, while a frame from
+    ///   further back is stale and ignored;
     /// * the application has consumed at least one full window since the
     ///   window was configured or last grew.
     ///
@@ -1317,8 +1319,7 @@ impl StreamTable {
         if max_window <= window {
             return Ok(None);
         }
-        let hysteresis = (window / 16).max(1);
-        if limit.saturating_add(hysteresis) < stream.recv_limit_advertised {
+        if limit.saturating_add(window) < stream.recv_limit_advertised {
             return Ok(None);
         }
         if stream
@@ -3135,11 +3136,17 @@ mod tests {
         // A cap at the current window is the same as no cap.
         tbl.allow_stream_recv_window_growth(id, 100).expect("cap");
         assert_eq!(tbl.note_peer_stream_data_blocked(id, 200).expect("blocked"), None);
-        // A stale BLOCKED for an older limit (more than a sixteenth-window
-        // below the advertised 200) is ignored even with a real cap.
+        // A stale BLOCKED for an older limit (more than a window below the
+        // advertised 200) is ignored even with a real cap; one within a window
+        // of the edge (the peer's lagging view on a high-BDP path) counts.
         tbl.allow_stream_recv_window_growth(id, 400).expect("cap");
-        assert_eq!(tbl.note_peer_stream_data_blocked(id, 150).expect("blocked"), None);
+        assert_eq!(tbl.note_peer_stream_data_blocked(id, 90).expect("blocked"), None);
         assert_eq!(tbl.stream_recv_window_bytes(id).expect("window"), Some(100));
+        assert_eq!(
+            tbl.note_peer_stream_data_blocked(id, 100).expect("blocked"),
+            Some(300)
+        );
+        assert_eq!(tbl.stream_recv_window_bytes(id).expect("window"), Some(200));
         // An unbounded stream ignores the frame entirely.
         let other = StreamId::local(StreamRole::Client, StreamDirection::Bidirectional, 1);
         tbl.accept_remote_stream(other).expect("accept");

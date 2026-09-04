@@ -277,10 +277,39 @@ pub struct QuicSendLimiterReport {
     pub final_ssthresh_bytes: Option<u64>,
     /// Whether any sample saw recovery outside slow start.
     pub slow_start_exited: bool,
-    /// Minimum RTT the QUIC transport measured, in microseconds.
+    /// Minimum RTT the QUIC transport's estimator measured, in its own units.
+    ///
+    /// The ATP data plane feeds QUIC recovery a synthetic event-count clock
+    /// (one tick per packet sent or received plus pacer sleeps), so this and
+    /// [`Self::smoothed_rtt_micros`] / [`Self::pto_count`] are event units,
+    /// not wall time; the wall-clock path figures are
+    /// [`Self::path_rtprop_micros`] and [`Self::path_bottleneck_bytes_per_s`].
     pub min_rtt_micros: Option<u64>,
-    /// Smoothed RTT at the end of the transfer, in microseconds.
+    /// Smoothed RTT at the end of the transfer (same units as
+    /// [`Self::min_rtt_micros`]).
     pub smoothed_rtt_micros: Option<u64>,
+    /// Wall-clock path RTprop in microseconds: the minimum send→ACK flight
+    /// time the source-stream delivery sampler saw, falling back to the
+    /// handshake RTT sample before the first ACK (`None` on neither).
+    pub path_rtprop_micros: Option<u64>,
+    /// Wall-clock bottleneck-bandwidth estimate (bytes per second) from the
+    /// same delivery sampler; 0 until the first delivery sample.
+    pub path_bottleneck_bytes_per_s: u64,
+    /// Lowest in-flight admission cap the source-stream gate enforced
+    /// (`None` if the gate never ran); [`Self::unacked_admission_cap_bytes`]
+    /// is the cap at the end.
+    pub min_unacked_admission_cap_bytes: Option<u64>,
+    /// Highest source-stream sent-but-unacked byte count the gate saw (the
+    /// bulk data is transport-untracked, so [`Self::peak_bytes_in_flight`]
+    /// stays 0 on this path).
+    pub peak_stream_unacked_bytes: u64,
+    /// STREAM_DATA_BLOCKED frames the sender sent to ask the receiver for a
+    /// larger source-stream window (only while credit-bound and loss-clean).
+    pub stream_window_requests: u64,
+    /// The peer's `MAX_STREAM_DATA` limit on the source stream when the
+    /// transfer finished (`None` without a bounded-window source stream);
+    /// compared with the HelloAck window it shows whether the window grew.
+    pub final_stream_send_window_bytes: Option<u64>,
     /// Application-data loss timeouts that declared at least one packet lost.
     pub loss_timeouts: u64,
     /// Packets those timeouts declared lost.
@@ -386,6 +415,17 @@ impl QuicSendLimiterReport {
 
     /// Fold one transport snapshot into the peak/min/slow-start fields.
     #[cfg_attr(not(feature = "tls"), allow(dead_code))]
+    /// Fold one source-stream admission-gate sample (the cap in force and
+    /// the sent-but-unacked bytes) into the min/peak fields.
+    #[cfg_attr(not(feature = "tls"), allow(dead_code))]
+    pub(crate) fn observe_source_stream(&mut self, admission_cap: u64, unacked_bytes: u64) {
+        self.min_unacked_admission_cap_bytes = Some(
+            self.min_unacked_admission_cap_bytes
+                .map_or(admission_cap, |min| min.min(admission_cap)),
+        );
+        self.peak_stream_unacked_bytes = self.peak_stream_unacked_bytes.max(unacked_bytes);
+    }
+
     pub(crate) fn observe_transport(
         &mut self,
         bytes_in_flight: u64,
@@ -478,6 +518,39 @@ pub(crate) const fn classify_blocked_flush(
     }
 }
 
+/// Whether the source-stream admission gate should ask the receiver for a
+/// larger window right now (a STREAM_DATA_BLOCKED frame), given the peer's
+/// current `MAX_STREAM_DATA` limit, the window size, and the running
+/// retransmit-batch count.
+///
+/// `marker` remembers the `(send limit, retransmit batches)` of the last
+/// decision. A decision is taken once per window's worth of credit (the
+/// limit moved by at least one window since the last decision, or the very
+/// first time) and asks only when no retransmit batch happened over that
+/// span: one loss-repair episode per window is exactly the queue-limited
+/// signature that must keep the window where it is (MATRIX-228).
+#[cfg_attr(not(feature = "tls"), allow(dead_code))]
+pub(crate) fn source_stream_window_request_due(
+    marker: &mut Option<(u64, u64)>,
+    send_limit: u64,
+    window: u64,
+    retransmit_batches: u64,
+) -> bool {
+    match *marker {
+        None => {
+            *marker = Some((send_limit, retransmit_batches));
+            retransmit_batches == 0
+        }
+        Some((last_limit, last_batches)) => {
+            if send_limit < last_limit.saturating_add(window.max(1)) {
+                return false;
+            }
+            *marker = Some((send_limit, retransmit_batches));
+            retransmit_batches == last_batches
+        }
+    }
+}
+
 /// A finished ATP-over-QUIC send: the shared [`SendReport`] plus the sender's
 /// limiter telemetry.
 ///
@@ -495,6 +568,44 @@ pub struct QuicSendOutcome {
 #[cfg(test)]
 mod limiter_report_tests {
     use super::*;
+
+    #[test]
+    fn window_request_is_once_per_window_and_only_when_loss_clean() {
+        let window = 1_000;
+        let mut marker = None;
+        // First decision on a clean sender asks.
+        assert!(source_stream_window_request_due(&mut marker, 1_000, window, 0));
+        // Same window edge (or less than a window further): no new decision.
+        assert!(!source_stream_window_request_due(&mut marker, 1_000, window, 0));
+        assert!(!source_stream_window_request_due(&mut marker, 1_900, window, 0));
+        assert_eq!(marker, Some((1_000, 0)));
+        // A full window later with no retransmit batch: asks again.
+        assert!(source_stream_window_request_due(&mut marker, 2_000, window, 0));
+        // A full window later with a retransmit batch in between: silent, and
+        // the marker moves so the NEXT clean window can ask.
+        assert!(!source_stream_window_request_due(&mut marker, 3_000, window, 1));
+        assert_eq!(marker, Some((3_000, 1)));
+        assert!(source_stream_window_request_due(&mut marker, 4_000, window, 1));
+        // A lossy first window never asks.
+        let mut lossy = None;
+        assert!(!source_stream_window_request_due(&mut lossy, 1_000, window, 3));
+        assert_eq!(lossy, Some((1_000, 3)));
+        // A zero window degrades to "once per limit change", never a panic.
+        let mut zero = Some((5, 0));
+        assert!(!source_stream_window_request_due(&mut zero, 5, 0, 0));
+        assert!(source_stream_window_request_due(&mut zero, 6, 0, 0));
+    }
+
+    #[test]
+    fn source_stream_samples_track_the_min_cap_and_peak_unacked() {
+        let mut report = QuicSendLimiterReport::default();
+        assert_eq!(report.min_unacked_admission_cap_bytes, None);
+        report.observe_source_stream(4_000, 10);
+        report.observe_source_stream(2_000, 30);
+        report.observe_source_stream(3_000, 20);
+        assert_eq!(report.min_unacked_admission_cap_bytes, Some(2_000));
+        assert_eq!(report.peak_stream_unacked_bytes, 30);
+    }
 
     #[test]
     fn stall_accounting_counts_every_reason_and_names_the_longest() {

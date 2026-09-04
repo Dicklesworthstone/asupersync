@@ -431,7 +431,28 @@ fn source_stream_bdp_admission_cap(bottleneck_bytes_per_s: u64, rtprop_micros: O
 /// queue-smaller-than-BDP path. Earlier history: gate31-33 found the same
 /// 2 MiB optimum empirically under the constant-gain pacer. Env override:
 /// `ATP_QUIC_STREAM_RECV_WINDOW` (bytes, min 64 KiB).
+///
+/// This is the STARTING window. On a clean high-RTT path it is the binding
+/// limiter (A3, 2026-09-03: `wan` 90 ms × 300 mbit, BDP 3.4 MB, the sender
+/// sat on `MAX_STREAM_DATA` credit 90 % of the time at half the link), so
+/// the receiver lets it grow — but only when the sender asks with
+/// STREAM_DATA_BLOCKED, which the sender does only while credit-bound AND
+/// loss-clean (see `wait_source_stream_send_admission`). A queue-limited or
+/// lossy path never asks, so it keeps the 2 MiB path law above; measured
+/// with static windows before the gate existed: 8 MiB took `good` from
+/// 43 s to 68 s (61 % of the file re-sent) and killed `bad` outright, while
+/// 4 MiB and 8 MiB both took `wan` from 25.9 s to 15.7 s.
 const QUIC_SOURCE_STREAM_RECV_WINDOW_BYTES: u64 = 2 * 1024 * 1024;
+/// Ceiling for sender-gated growth of the source-stream receive window
+/// (`ATP_QUIC_STREAM_RECV_WINDOW_MAX` overrides; a value at or below the
+/// starting window disables growth). 4 MiB captured the whole `wan` win
+/// (15.66 s, identical to 8 MiB) at lower receiver RSS and stays under the
+/// reassembly fragment guard for full-size stream frames; the receiver also
+/// clamps the cap by that guard for its own MTU
+/// (`quic_source_stream_recv_window_growth_cap`). Growing past it needs
+/// contiguous reassembly chunks to coalesce first (8 MiB behind one hole
+/// buffers ~7000 chunks against the 4096 guard — the `bad` failure).
+const QUIC_SOURCE_STREAM_RECV_WINDOW_MAX_BYTES: u64 = 4 * 1024 * 1024;
 
 fn quic_source_stream_recv_window_bytes() -> u64 {
     std::env::var("ATP_QUIC_STREAM_RECV_WINDOW")
@@ -439,6 +460,30 @@ fn quic_source_stream_recv_window_bytes() -> u64 {
         .and_then(|value| value.trim().parse::<u64>().ok())
         .filter(|window| *window >= 64 * 1024)
         .unwrap_or(QUIC_SOURCE_STREAM_RECV_WINDOW_BYTES)
+}
+
+fn quic_source_stream_recv_window_max_bytes() -> u64 {
+    std::env::var("ATP_QUIC_STREAM_RECV_WINDOW_MAX")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(QUIC_SOURCE_STREAM_RECV_WINDOW_MAX_BYTES)
+}
+
+/// The receive-window growth ceiling the receiver may safely allow: the
+/// configured maximum, clamped so a window full of minimum-size stream
+/// frames behind a single hole stays under the reassembly fragment guard
+/// with headroom (`None` when growth is disabled or nothing fits).
+fn quic_source_stream_recv_window_growth_cap(
+    window: u64,
+    configured_max: u64,
+    max_app_payload: usize,
+) -> Option<u64> {
+    let fragment_safe = (crate::net::quic_native::connection::MAX_BUFFERED_STREAM_REASSEMBLY_FRAGMENTS
+        as u64)
+        .saturating_sub(64)
+        .saturating_mul(u64::try_from(max_app_payload).unwrap_or(0));
+    let cap = configured_max.min(fragment_safe);
+    (cap > window).then_some(cap)
 }
 /// Inbound drain budget (batches) for the source-stream read path. The read
 /// loop drains the reassembly map between pumps, so a small budget bounds
@@ -2501,6 +2546,12 @@ pub struct QuicLink {
     /// loss/retransmit counters. Observational only; read out by
     /// [`QuicLink::limiter_report`] when the send finishes.
     limiter: QuicSendLimiterReport,
+    /// Sender-gated receive-window growth: the `(send limit, retransmit
+    /// batches)` marker of the last STREAM_DATA_BLOCKED decision, so the
+    /// admission gate asks the receiver for more window at most once per
+    /// window's worth of credit and only when that window was loss-clean
+    /// (`super::source_stream_window_request_due`).
+    source_stream_window_request: Option<(u64, u64)>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -3881,6 +3932,15 @@ impl QuicLink {
         report.smoothed_rtt_micros = transport.rtt().smoothed_rtt_micros();
         report.pto_count = transport.pto_count();
         report.unacked_admission_cap_bytes = self.source_stream_unacked_admission_max();
+        report.path_rtprop_micros = self
+            .stream_delivery_sampler
+            .rtprop_min_micros()
+            .or(self.path_rtt_estimate_micros);
+        report.path_bottleneck_bytes_per_s = self.stream_delivery_sampler.bottleneck_bytes_per_s();
+        report.final_stream_send_window_bytes = self
+            .paced_source_stream
+            .and_then(|stream| self.conn.stream_send_limit(stream))
+            .or(self.source_stream_send_window);
         report.pacing.count = report
             .pacing
             .count
@@ -5607,6 +5667,7 @@ fn link_from_handshake(
         app_loss_stall_pto: SOURCE_STREAM_PTO,
         sender_handoff: QuicSenderHandoffStats::default(),
         limiter: QuicSendLimiterReport::default(),
+        source_stream_window_request: None,
     })
 }
 
@@ -7200,11 +7261,34 @@ async fn wait_source_stream_send_admission(
                 .map_or(credit_remaining, |min| min.min(credit_remaining)),
         );
         let credit_ok = min_credit == 0 || credit_remaining >= min_credit;
-        let unacked_ok = link.stream_unacked_bytes <= link.source_stream_unacked_admission_max();
+        let admission_cap = link.source_stream_unacked_admission_max();
+        let unacked_ok = link.stream_unacked_bytes <= admission_cap;
+        link.limiter
+            .observe_source_stream(admission_cap, link.stream_unacked_bytes);
         if credit_ok && unacked_ok {
             return Ok(());
         }
         pending_stall = classify_source_stream_admission(false, credit_ok, unacked_ok);
+        // Sender-gated receive-window growth (A4): while the peer's credit is
+        // the only gate holding us, tell it so with STREAM_DATA_BLOCKED — at
+        // most once per window's worth of credit, and only when that window
+        // went by without a retransmit batch. A queue-limited or lossy path
+        // therefore never asks and keeps the 2 MiB path law.
+        if !credit_ok && unacked_ok {
+            let send_limit = link.conn.stream_send_limit(stream).unwrap_or(0);
+            let window = link.source_stream_send_window.unwrap_or(0);
+            if super::source_stream_window_request_due(
+                &mut link.source_stream_window_request,
+                send_limit,
+                window,
+                link.limiter.retransmit_batches,
+            ) {
+                link.conn.report_stream_data_blocked(cx, stream)?;
+                link.limiter.stream_window_requests =
+                    link.limiter.stream_window_requests.saturating_add(1);
+                let _ = link.flush(cx).await?;
+            }
+        }
         // Any observable movement counts as progress. A stricter
         // ≥64KB-per-PTO watermark was measured WORSE (gate36: tree_small/good
         // 8.3→22.2s uniform): steady drainage kept re-basing the watermark,
@@ -9743,6 +9827,17 @@ async fn run_receiver_session(
         // the MAX_STREAM_DATA advertisements from here on.
         link.conn
             .configure_stream_recv_window(cx, source_stream, window)?;
+        // Let the window grow (doubling, up to the fragment-safe cap) when the
+        // sender reports STREAM_DATA_BLOCKED at our edge after a full window
+        // was consumed — the sender only reports it while loss-clean.
+        if let Some(cap) = quic_source_stream_recv_window_growth_cap(
+            window,
+            quic_source_stream_recv_window_max_bytes(),
+            link.max_app_payload,
+        ) {
+            link.conn
+                .allow_stream_recv_window_growth(cx, source_stream, cap)?;
+        }
         link.flush(cx).await?;
     }
 
