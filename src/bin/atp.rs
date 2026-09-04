@@ -31,6 +31,12 @@
 //! atp send ./my-folder user@receiver:/srv/inbox --transport rq --prefer tailscale
 //! ```
 
+// A binary is its own crate, so the `recursion_limit` raised in `src/lib.rs`
+// does not reach it. `runtime.handle().spawn(...)` over the ATP RaptorQ serve
+// path needs `Send` proved across a long chain of `async fn`s, which overflows
+// the default depth of 128.
+#![recursion_limit = "256"]
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
