@@ -413,8 +413,6 @@ impl QuicSendLimiterReport {
             .saturating_add(duration_to_micros_saturating(held));
     }
 
-    /// Fold one transport snapshot into the peak/min/slow-start fields.
-    #[cfg_attr(not(feature = "tls"), allow(dead_code))]
     /// Fold one source-stream admission-gate sample (the cap in force and
     /// the sent-but-unacked bytes) into the min/peak fields.
     #[cfg_attr(not(feature = "tls"), allow(dead_code))]
@@ -426,6 +424,8 @@ impl QuicSendLimiterReport {
         self.peak_stream_unacked_bytes = self.peak_stream_unacked_bytes.max(unacked_bytes);
     }
 
+    /// Fold one transport snapshot into the peak/min/slow-start fields.
+    #[cfg_attr(not(feature = "tls"), allow(dead_code))]
     pub(crate) fn observe_transport(
         &mut self,
         bytes_in_flight: u64,
