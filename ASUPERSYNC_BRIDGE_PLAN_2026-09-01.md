@@ -56,6 +56,10 @@ break, or owner decision is authorized by this assessment. Work stays on shared
   terminal suite result. The success-filtered CI API returned zero runs. Later
   pending/cancelled runs are not evidence that these failures remain at HEAD or
   have been fixed. Reproduce each against the revision being promoted.
+  At final refresh, CI `33925726681` on `583c44e51cb52c90afc967e4afe29571ca165d74`
+  was pending; the separate parity-dashboard drift run `33925726676` had failed.
+  The earlier `b442149f` CI run was canceled. None supplies an aggregate green
+  result for the completed assessment or a release candidate.
 - Shipped: crates.io `0.4.10`, published 2026-09-01 19:08:29 UTC, checksum
   `7e8b505d6aadb778c9c4b0ae174966641f11d578d253b7786f2407b17d5045ec`.
   The release-train bead records its source tag at `997e8d116ae864789f2cb47be90bfd4be5985c4f`.
@@ -308,7 +312,12 @@ signoff metadata. No green component substitutes for a missing join:
   coalesced controls. Two independently controlled remote peers prove isolation,
   bounded memory and cancel/renew/drain progress under data saturation. No user
   priority can impersonate control authority; local commit is not remote
-  exactly-once execution. Shared remote.rs work requires exact reservations.
+  exactly-once execution. Mixed legacy/admitted callers must either share the
+  enforced envelope through a compatible internal path or use genuinely isolated
+  transport/driver/queue domains with separately stated bounds. Excluding legacy
+  buffers from a counter in the same unbounded queue is not isolation. Test mixed
+  saturation and lifecycle controls while preserving existing default behavior.
+  Shared remote.rs work requires exact reservations.
 
 Snapshot transport receipts must bind object digest, attempt, replica and peer
 authority; wrong-object/stale acknowledgements cannot satisfy quorum. Complete
@@ -396,6 +405,57 @@ R15/R15T became `bi2462.75–.78`, bringing new tasks to **51**. It also correct
 four active dependency API/cutover instructions and strengthened the existing
 release task: immutable dispatched candidate, tested lockfile/archive identity,
 required terminal stage provenance, and refusal before any registry write.
+Refinement pass 4 corrected five additional acceptance boundaries: documentation
+implementation versus its later executable proof; stale acceptance fields in the
+replay/distributed/CI children; gap roots waiting for their finishing children
+without requiring parent closure first; positive selected/passed counts with
+explicit failed/ignored/filtered counts; and mixed legacy/admitted remote credit
+accounting. Governing compatibility/release requirements now lead the five
+affected dependency/release descriptions, with contrary instructions retained
+only as marked historical context. No feature was dropped to resolve a cycle.
+Refinement pass 5 reread all 51 new tasks, 25 revised tasks, current AGENTS and
+the governing plan. It found one acceptance-order deadlock despite a structurally
+acyclic graph: Windows repair `.20` waited for aggregate CI `.19`, which now
+requires Windows success. The edge is reversed: `.19` waits for `.20`, alongside
+macOS `.21`. Windows repair starts from the selected revision's actual failure
+and retains two successful native suite runs; it does not wait for a completed
+aggregate. A sixth review is required because pass 5 made a substantive change.
+Refinement pass 6 reached **no-change convergence**. It compared all 76 reviewed
+tasks with pass 5, confirmed only the two Windows/aggregate records changed,
+rechecked their actual prerequisite direction and found no further substantive
+scope, acceptance or dependency correction. All three ambition passes, bead
+generation/regeneration and six refinement passes are complete.
+
+Final validation: `br dep cycles --json` found **zero active cycles**;
+`bv --robot-insights --label reality-check-20260904` actually computed its cycle
+metric and found **zero cycles**. Full-graph `bv` skips that metric above its
+size threshold, so its empty cycle list is not used as proof. Final
+`bv --robot-triage` reports 427 open, 142 in progress, 31 blocked: **600 unfinished**,
+including the 51 new open tasks. Its actionable count is 206; `br ready` returns
+27 under its own readiness/defer rules, including corrected Windows `.20`.
+Twenty-five existing tasks had their scope, acceptance or prerequisites revised.
+No existing issue changed status and no implementation gap was closed by this
+assessment. All new dependency references resolve.
+
+### Execution priorities after this assessment
+
+1. Take the bounded, dependency-ready correctness repairs first: R1 obligation
+   admission (`.28`), R10 canonical ATP extensions (`.42`) and R14 managed QUIC
+   readiness/deadlines (`.75`), each with its independent behavior companion.
+   Reserve exact paths; their readiness is not permission to cross peer ownership.
+2. Complete the existing real capture/replay path (`.8/.9`) and live supervisor
+   foundation (`.34/.35`). The latter unlocks actual dynamic supervision and
+   AppSpec services; a computed restart plan is insufficient.
+3. Progress SDK session/handle/transfer prerequisites into the operation-specific
+   CLI journeys; retain the independent route, interruption, authority and
+   restart tests. R15 admission and existing distributed `.10/.11/.16/.12`
+   remain separate correctness joins rather than one generic transport epic.
+4. Repair actual required CI/platform/service failures and rerun them on the
+   candidate being promoted. Existing `yqlhh7` must enforce that candidate's
+   compatibility, package and terminal proof identity before publication.
+5. Use the existing Browser and dependency-scope decision tasks for genuine
+   owner decisions. Continue compatible, useful work independently; KEEP/DEFER
+   evidence and honest limitations do not erase unimplemented product goals.
 
 ### Created task index
 
