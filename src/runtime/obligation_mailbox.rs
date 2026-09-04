@@ -29,8 +29,10 @@
 //! * The runtime drains the mailbox where it drains spawn admissions
 //!   ([`apply_obligation_posts`]): `Reserve` -> `RuntimeState::create_obligation`
 //!   (holder / region checks, region accounting, trace event, oracle hooks),
-//!   `Commit` / `Abort` / `Leak` -> the matching `RuntimeState` method through
-//!   the ticket table. Drain order is post order, so a resolution never
+//!   `Commit` / `Abort` -> the matching `RuntimeState` method through the
+//!   ticket table, `Leak` -> `RuntimeState::report_obligation_leak`, the same
+//!   leak policy a completion-time audit runs (leak count, `LeakEscalation`,
+//!   `Recover` auto-abort). Drain order is post order, so a resolution never
 //!   overtakes its reservation. Everything visible to the oracle flows through
 //!   the one authoritative implementation in `RuntimeState`.
 //!
@@ -66,7 +68,8 @@ pub enum ObligationOp {
     Commit,
     /// Resolve it as aborted (`RuntimeState::abort_obligation`).
     Abort,
-    /// The token was dropped unresolved (`RuntimeState::mark_obligation_leaked`).
+    /// The token was dropped unresolved (`RuntimeState::report_obligation_leak`:
+    /// the runtime's leak policy, so it counts, escalates, or auto-recovers).
     Leak,
 }
 
@@ -423,7 +426,7 @@ pub(crate) fn apply_obligation_posts(
                 }
             },
             ObligationOp::Leak => match tickets.remove(&post.ticket) {
-                Some(id) if state.mark_obligation_leaked(id).is_ok() => {
+                Some(id) if state.report_obligation_leak(id).is_ok() => {
                     mailbox.leaked.fetch_add(1, Ordering::Relaxed);
                 }
                 _ => {
@@ -441,7 +444,8 @@ mod tests {
     use super::*;
     use crate::cx::Cx;
     use crate::lab::{LabConfig, LabRuntime};
-    use crate::runtime::config::ObligationLeakResponse;
+    use crate::runtime::config::{LeakEscalation, ObligationLeakResponse};
+    use crate::trace::TraceEventKind;
     use crate::types::Budget;
     use std::sync::atomic::AtomicUsize;
 
@@ -551,11 +555,76 @@ mod tests {
         assert_eq!(stats.reserved, 1);
         assert_eq!(stats.leaked, 1, "{stats:?}");
         assert_eq!(stats.refused, 0, "{stats:?}");
-        assert!(
-            runtime.state.leak_count() >= 1,
-            "the runtime's leak policy saw the token"
+        assert_eq!(
+            runtime.state.leak_count(),
+            1,
+            "the runtime's leak policy counted the dropped token exactly once"
         );
+        assert_eq!(runtime.state.pending_obligation_count(), 0);
         assert_eq!(mailbox.open_tickets(), 0);
+        let kinds: Vec<TraceEventKind> = runtime
+            .state
+            .trace_handle()
+            .snapshot()
+            .into_iter()
+            .map(|event| event.kind)
+            .filter(|kind| {
+                matches!(
+                    kind,
+                    TraceEventKind::ObligationLeak | TraceEventKind::ObligationAbort
+                )
+            })
+            .collect();
+        assert_eq!(kinds, vec![TraceEventKind::ObligationLeak]);
+    }
+
+    #[test]
+    fn a_dropped_token_is_auto_aborted_when_the_leak_policy_escalates_to_recover() {
+        let mut runtime = lab();
+        runtime.state.set_leak_escalation(Some(LeakEscalation::new(
+            1,
+            ObligationLeakResponse::Recover,
+        )));
+        let root = runtime.state.create_root_region(Budget::INFINITE);
+        let (task, _handle) = runtime
+            .state
+            .create_task(root, Budget::INFINITE, async move {
+                let cx = Cx::current().expect("lab task has a current cx");
+                let token = cx
+                    .try_register_obligation(ObligationKind::SendPermit, cx.task_id())
+                    .expect("gateway");
+                drop(token);
+            })
+            .expect("create task");
+        runtime.scheduler.lock().schedule(task, 0);
+        let mailbox = mailbox_of(&runtime);
+
+        runtime.run_until_quiescent();
+
+        let stats = mailbox.stats();
+        assert_eq!(stats.leaked, 1, "{stats:?}");
+        assert_eq!(stats.refused, 0, "{stats:?}");
+        assert_eq!(runtime.state.leak_count(), 1, "the escalation threshold saw it");
+        assert_eq!(runtime.state.pending_obligation_count(), 0);
+        let kinds: Vec<TraceEventKind> = runtime
+            .state
+            .trace_handle()
+            .snapshot()
+            .into_iter()
+            .map(|event| event.kind)
+            .filter(|kind| {
+                matches!(
+                    kind,
+                    TraceEventKind::ObligationLeak | TraceEventKind::ObligationAbort
+                )
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![TraceEventKind::ObligationAbort],
+            "Recover aborts the obligation instead of marking it leaked"
+        );
+        assert!(runtime.is_quiescent());
     }
 
     #[test]

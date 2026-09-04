@@ -4704,20 +4704,23 @@ impl RuntimeState {
                 if !record.is_pending() || !predicate(record) {
                     return None;
                 }
-
-                let held_duration_ns = now.duration_since(record.reserved_at);
-                Some(LeakedObligationInfo {
-                    id: record.id,
-                    kind: record.kind,
-                    holder: record.holder,
-                    region: record.region,
-                    acquired_at: record.acquired_at,
-                    held_duration_ns,
-                    description: record.description.clone(),
-                    acquire_backtrace: record.acquire_backtrace.clone(),
-                })
+                Some(Self::leaked_obligation_info(now, record))
             })
             .collect()
+    }
+
+    /// Snapshot one pending obligation record as leak-audit input.
+    fn leaked_obligation_info(now: Time, record: &ObligationRecord) -> LeakedObligationInfo {
+        LeakedObligationInfo {
+            id: record.id,
+            kind: record.kind,
+            holder: record.holder,
+            region: record.region,
+            acquired_at: record.acquired_at,
+            held_duration_ns: now.duration_since(record.reserved_at),
+            description: record.description.clone(),
+            acquire_backtrace: record.acquire_backtrace.clone(),
+        }
     }
 
     /// Collect obligation leaks for a specific task holder using the
@@ -4738,17 +4741,7 @@ impl RuntimeState {
                 if !record.is_pending() {
                     return None;
                 }
-                let held_duration_ns = now.duration_since(record.reserved_at);
-                Some(LeakedObligationInfo {
-                    id: record.id,
-                    kind: record.kind,
-                    holder: record.holder,
-                    region: record.region,
-                    acquired_at: record.acquired_at,
-                    held_duration_ns,
-                    description: record.description.clone(),
-                    acquire_backtrace: record.acquire_backtrace.clone(),
-                })
+                Some(Self::leaked_obligation_info(now, record))
             })
             .collect()
     }
@@ -5711,6 +5704,88 @@ impl RuntimeState {
                 obligation,
             ),
         }
+    }
+
+    /// Route a leak reported by a dropped `ObligationToken` (the obligation
+    /// mailbox `Leak` post, br-asupersync-bi2462.13) through the same policy
+    /// as the completion-time audit.
+    ///
+    /// The leak counts toward [`Self::leak_count`], honours the configured
+    /// [`LeakEscalation`], and under `Recover` auto-aborts the obligation
+    /// instead of marking it leaked. [`Self::mark_obligation_leaked`] alone
+    /// resolves the record and emits the trace event but never reaches the
+    /// policy, so a dropped token could not escalate. Returns `Err` when the
+    /// obligation is unknown or already resolved.
+    pub(crate) fn report_obligation_leak(&mut self, obligation: ObligationId) -> Result<(), Error> {
+        match self.shard_tables.clone() {
+            Some(shards) => {
+                let mut deferred = Vec::new();
+                let result = {
+                    let tasks_guard = shards
+                        .tasks
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let obligations_guard = shards
+                        .obligations
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let tasks = AdmissionTaskTarget::External(tasks_guard);
+                    let mut obligations = CompletionObligationTarget::External(obligations_guard);
+                    self.report_obligation_leak_in(
+                        &mut AdmissionRegionTarget::Embedded,
+                        &tasks,
+                        &mut obligations,
+                        &mut LifecycleEffectsSink::Buffered(&mut deferred),
+                        obligation,
+                    )
+                };
+                self.dispatch_lifecycle_effects(deferred);
+                result
+            }
+            None => self.report_obligation_leak_in(
+                &mut AdmissionRegionTarget::Embedded,
+                &AdmissionTaskTarget::Embedded,
+                &mut CompletionObligationTarget::Embedded,
+                &mut LifecycleEffectsSink::Inline,
+                obligation,
+            ),
+        }
+    }
+
+    /// Core of [`Self::report_obligation_leak`] against explicit table
+    /// targets: snapshot the pending record, then hand it to
+    /// [`Self::handle_obligation_leaks`] exactly like a completion audit
+    /// would (holder attributed, no completion kind).
+    fn report_obligation_leak_in(
+        &mut self,
+        regions: &mut AdmissionRegionTarget<'_>,
+        tasks: &AdmissionTaskTarget<'_>,
+        obligations: &mut CompletionObligationTarget<'_>,
+        effects: &mut LifecycleEffectsSink<'_>,
+        obligation: ObligationId,
+    ) -> Result<(), Error> {
+        let now = self.current_runtime_time();
+        let leak = {
+            let record = obligations
+                .resolve_ref(&self.obligations)
+                .get(obligation.arena_index())
+                .ok_or_else(|| {
+                    Error::new(ErrorKind::ObligationAlreadyResolved)
+                        .with_message("obligation not found")
+                })?;
+            if !record.is_pending() {
+                return Err(Error::new(ErrorKind::ObligationAlreadyResolved));
+            }
+            Self::leaked_obligation_info(now, record)
+        };
+        let error = ObligationLeakError {
+            task_id: Some(leak.holder),
+            region_id: leak.region,
+            completion: None,
+            leaks: vec![leak],
+        };
+        self.handle_obligation_leaks(regions, tasks, obligations, effects, error);
+        Ok(())
     }
 
     /// Core of [`Self::mark_obligation_leaked`] against explicit table
