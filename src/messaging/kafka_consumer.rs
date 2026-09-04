@@ -1860,7 +1860,10 @@ impl KafkaConsumer {
                     // its own close. The leave-group drain above already ran
                     // the revoke through the callback, which unassigns
                     // incrementally, so there is nothing left to drop here.
-                    if consumer.rebalance_protocol() == RebalanceProtocol::Cooperative {
+                    if matches!(
+                        consumer.rebalance_protocol(),
+                        RebalanceProtocol::Cooperative
+                    ) {
                         Ok(())
                     } else {
                         consumer.unassign().map_err(map_consumer_error)
