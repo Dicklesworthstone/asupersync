@@ -3936,7 +3936,10 @@ impl QuicLink {
             .stream_delivery_sampler
             .rtprop_min_micros()
             .or(self.path_rtt_estimate_micros);
-        report.path_bottleneck_bytes_per_s = self.stream_delivery_sampler.bottleneck_bytes_per_s();
+        report.path_bottleneck_bytes_per_s = self
+            .stream_rate_controller
+            .as_ref()
+            .map_or(0, SourceStreamRatePacer::bottleneck_bytes_per_s);
         report.final_stream_send_window_bytes = self
             .paced_source_stream
             .and_then(|stream| self.conn.stream_send_limit(stream))
