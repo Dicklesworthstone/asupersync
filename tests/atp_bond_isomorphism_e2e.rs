@@ -30,6 +30,10 @@
 //! `donor_count_one_emission_stream_matches_single_source_order` in
 //! `src/net/atp/bonding/assignment.rs`.
 #![allow(missing_docs)]
+// An integration test is its own crate, so the `recursion_limit` raised in
+// `src/lib.rs` does not reach it. Proving `Send` for the ATP bonded/RaptorQ
+// futures walks one solver frame per async link and overflows the default 128.
+#![recursion_limit = "256"]
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};

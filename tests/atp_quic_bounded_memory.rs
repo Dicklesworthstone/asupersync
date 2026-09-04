@@ -5,6 +5,9 @@
 //! and assert peak RSS growth stays far below the transfer size.
 
 #![cfg(all(feature = "tls", feature = "test-internals"))]
+// See `atp_bond_isomorphism_e2e`: an integration test is its own crate and does
+// not inherit the `recursion_limit` from `src/lib.rs`.
+#![recursion_limit = "256"]
 
 use std::io::{Read as _, Write as _};
 use std::net::SocketAddr;

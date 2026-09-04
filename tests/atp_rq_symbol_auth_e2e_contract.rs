@@ -40,6 +40,9 @@
 //! authentication posture is real and fail-closed; it does NOT claim full
 //! Byzantine-injection prevention for the transport as a whole.
 #![allow(missing_docs)]
+// See `atp_bond_isomorphism_e2e`: an integration test is its own crate and does
+// not inherit the `recursion_limit` from `src/lib.rs`.
+#![recursion_limit = "256"]
 
 use std::net::SocketAddr;
 use std::path::PathBuf;

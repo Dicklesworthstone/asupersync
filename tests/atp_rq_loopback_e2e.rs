@@ -8,6 +8,9 @@
 //! fountain feedback loop. A sender pointed at a dead control port must fail
 //! closed. This is the regression wall for the fast/robust transport.
 #![allow(missing_docs)]
+// See `atp_bond_isomorphism_e2e`: an integration test is its own crate and does
+// not inherit the `recursion_limit` from `src/lib.rs`.
+#![recursion_limit = "256"]
 
 use std::io::{Read as _, Write as _};
 use std::net::SocketAddr;

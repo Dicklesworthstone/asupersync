@@ -1021,6 +1021,12 @@ unnecessary_wraps = "allow"
 # would reject legitimate single-threaded payloads. Surfaced when the
 # nightly-2026-08-31 pin (340ce087b) brought a stricter nursery set.
 future_not_send = "allow"
+# `assert_is_empty` wants `assert_eq!(x, "")` wherever a test writes
+# `assert!(x.is_empty())`, so the value shows on failure. It fires 588 times
+# across the integration suite, almost always on an assertion that already
+# carries a custom message, and the rewrite is pure churn with no behavioural
+# change. Also surfaced by the nightly-2026-08-31 pin.
+assert_is_empty = "allow"
 unnecessary_sort_by = "allow"
 wrong_self_convention = "allow"
 new_without_default = "allow"

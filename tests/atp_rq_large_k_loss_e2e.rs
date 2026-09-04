@@ -14,6 +14,9 @@
 //! These are the regression baseline a future two-task / continuous-drain
 //! receiver rewrite (ro853b) must preserve.
 #![allow(missing_docs)]
+// See `atp_bond_isomorphism_e2e`: an integration test is its own crate and does
+// not inherit the `recursion_limit` from `src/lib.rs`.
+#![recursion_limit = "256"]
 
 use std::net::SocketAddr;
 use std::path::PathBuf;

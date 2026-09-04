@@ -53,6 +53,9 @@
 //! second connection.
 
 #![cfg(all(feature = "postgres", feature = "test-internals"))]
+// See `atp_bond_isomorphism_e2e`: an integration test is its own crate and does
+// not inherit the `recursion_limit` from `src/lib.rs`.
+#![recursion_limit = "256"]
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
