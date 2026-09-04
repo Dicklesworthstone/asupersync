@@ -85,6 +85,22 @@ fn reserve_permit_obligation(region: RegionId) -> Option<ObligationToken<Semapho
     }
 }
 
+/// Mint the runtime-visible twin of [`reserve_permit_obligation`].
+///
+/// The graded token above is type-level only — it never reaches
+/// `RuntimeState`, so the runtime's obligation table, its leak policy and
+/// `is_quiescent` cannot see an outstanding permit. This one goes through the
+/// D1 mailbox (`br-asupersync-bi2462.13`), so a permit held across a
+/// cancelled task shows up as the capacity leak it is. Returns `None` for a
+/// `Cx` built without a runtime, which keeps `Cx::for_testing` and the
+/// host-boundary paths untracked exactly as before.
+#[inline]
+fn reserve_runtime_permit_obligation<Caps>(
+    cx: &Cx<Caps>,
+) -> Option<crate::runtime::obligation_mailbox::ObligationToken> {
+    cx.try_register_obligation(crate::record::ObligationKind::SemaphorePermit, cx.task_id())
+}
+
 /// A counting semaphore for limiting concurrent access.
 #[derive(Debug)]
 pub struct Semaphore {
@@ -439,6 +455,7 @@ impl Semaphore {
                 semaphore: self,
                 count: 0,
                 obligation: None,
+                runtime_obligation: None,
                 lock_order: Default::default(),
             });
         }
@@ -469,6 +486,9 @@ impl Semaphore {
             // Record lock acquisition for ordering tracking
             let lock_order = lock_ordering::record_guard_acquire(self.name, self.rank);
 
+            // One task-local lookup for both obligations: this is the
+            // synchronization-critical path.
+            let current_cx = crate::cx::Cx::current();
             Ok(SemaphorePermit {
                 // br-asupersync-13jmt3: static description avoids the
                 // per-acquire String allocation. The permit count is
@@ -476,8 +496,12 @@ impl Semaphore {
                 // observer that needs the numeric identity; duplicating
                 // it here in heap-allocated form was wasted work on the
                 // synchronization-critical path.
-                obligation: crate::cx::Cx::current()
+                obligation: current_cx
+                    .as_ref()
                     .and_then(|cx| reserve_permit_obligation(cx.region_id())),
+                runtime_obligation: current_cx
+                    .as_ref()
+                    .and_then(|cx| reserve_runtime_permit_obligation(cx)),
                 semaphore: self,
                 count,
                 lock_order,
@@ -534,6 +558,8 @@ struct AcquisitionRollbackGuard<'a> {
     semaphore: &'a Semaphore,
     count: usize,
     obligation: Option<ObligationToken<SemaphorePermitKind>>,
+    /// Runtime-visible twin of `obligation` (D1 mailbox).
+    runtime_obligation: Option<crate::runtime::obligation_mailbox::ObligationToken>,
     lock_order: lock_ordering::GuardLockOrder,
     armed: bool,
 }
@@ -545,6 +571,7 @@ impl<'a> AcquisitionRollbackGuard<'a> {
             semaphore,
             count,
             obligation: None,
+            runtime_obligation: None,
             lock_order: Default::default(),
             armed: false,
         }
@@ -563,15 +590,22 @@ impl<'a> AcquisitionRollbackGuard<'a> {
     }
 
     #[inline]
-    fn set_obligation(&mut self, obligation: Option<ObligationToken<SemaphorePermitKind>>) {
+    fn set_obligation(
+        &mut self,
+        obligation: Option<ObligationToken<SemaphorePermitKind>>,
+        runtime_obligation: Option<crate::runtime::obligation_mailbox::ObligationToken>,
+    ) {
         debug_assert!(self.obligation.is_none());
+        debug_assert!(self.runtime_obligation.is_none());
         self.obligation = obligation;
+        self.runtime_obligation = runtime_obligation;
     }
 
     #[inline]
     fn into_borrowed_permit(mut self) -> SemaphorePermit<'a> {
         let permit = SemaphorePermit {
             obligation: self.obligation.take(),
+            runtime_obligation: self.runtime_obligation.take(),
             semaphore: self.semaphore,
             count: self.count,
             lock_order: lock_ordering::take_guard_lock_order(&mut self.lock_order),
@@ -584,6 +618,7 @@ impl<'a> AcquisitionRollbackGuard<'a> {
     fn into_owned_permit(mut self, semaphore: Arc<Semaphore>) -> OwnedSemaphorePermit {
         let permit = OwnedSemaphorePermit {
             obligation: self.obligation.take(),
+            runtime_obligation: self.runtime_obligation.take(),
             semaphore,
             count: self.count,
             lock_order: lock_ordering::take_guard_lock_order(&mut self.lock_order),
@@ -601,6 +636,11 @@ impl Drop for AcquisitionRollbackGuard<'_> {
 
         if let Some(obligation) = self.obligation.take() {
             let _proof = obligation.commit();
+        }
+        // The permit never reached the caller, so the runtime obligation is
+        // aborted rather than committed: nothing acquired capacity.
+        if let Some(runtime_obligation) = self.runtime_obligation.take() {
+            let _ = runtime_obligation.abort(crate::record::ObligationAbortReason::Cancel);
         }
 
         let mut state = self.semaphore.state.lock();
@@ -661,6 +701,7 @@ impl<'a, Caps> Future for AcquireFuture<'a, '_, Caps> {
                 semaphore: self.semaphore,
                 count: 0,
                 obligation: None,
+                runtime_obligation: None,
                 lock_order: Default::default(),
             }));
         }
@@ -755,7 +796,10 @@ impl<'a, Caps> Future for AcquireFuture<'a, '_, Caps> {
                 drop(incoming_waker);
                 // Reserve before dispatching the next waiter so rollback also
                 // consumes the obligation if that callback unwinds.
-                rollback.set_obligation(reserve_permit_obligation(self.cx.region_id()));
+                rollback.set_obligation(
+                    reserve_permit_obligation(self.cx.region_id()),
+                    reserve_runtime_permit_obligation(self.cx),
+                );
                 if let Some(next) = next_waker {
                     next.wake_by_ref();
                 }
@@ -810,6 +854,9 @@ impl<'a, Caps> Future for AcquireFuture<'a, '_, Caps> {
 #[must_use = "permit will be immediately released if not held"]
 pub struct SemaphorePermit<'a> {
     obligation: Option<ObligationToken<SemaphorePermitKind>>,
+    /// Runtime-visible twin of `obligation`, minted through the acquiring
+    /// `Cx`'s obligation mailbox and resolved wherever `obligation` is.
+    runtime_obligation: Option<crate::runtime::obligation_mailbox::ObligationToken>,
     semaphore: &'a Semaphore,
     count: usize,
     lock_order: lock_ordering::GuardLockOrder,
@@ -831,6 +878,9 @@ impl SemaphorePermit<'_> {
         if let Some(obligation) = self.obligation.take() {
             let _proof = obligation.abort();
         }
+        if let Some(runtime_obligation) = self.runtime_obligation.take() {
+            let _ = runtime_obligation.abort(crate::record::ObligationAbortReason::Explicit);
+        }
     }
 
     /// Extracts the obligation token without releasing the permit back to the semaphore.
@@ -842,13 +892,15 @@ impl SemaphorePermit<'_> {
     ) -> (
         usize,
         Option<ObligationToken<SemaphorePermitKind>>,
+        Option<crate::runtime::obligation_mailbox::ObligationToken>,
         lock_ordering::GuardLockOrder,
     ) {
         let count = self.count;
         let obligation = self.obligation.take();
+        let runtime_obligation = self.runtime_obligation.take();
         let lock_order = lock_ordering::take_guard_lock_order(&mut self.lock_order);
         self.count = 0; // Prevent Drop from releasing permits
-        (count, obligation, lock_order)
+        (count, obligation, runtime_obligation, lock_order)
     }
 
     /// Commits the permit explicitly, releasing it back to the semaphore.
@@ -859,6 +911,9 @@ impl SemaphorePermit<'_> {
         if let Some(obligation) = self.obligation.take() {
             let _proof = obligation.commit();
         }
+        if let Some(runtime_obligation) = self.runtime_obligation.take() {
+            let _ = runtime_obligation.commit();
+        }
         // Drop will now release the semaphore permits without panicking
         drop(self);
     }
@@ -868,6 +923,12 @@ impl Drop for SemaphorePermit<'_> {
     fn drop(&mut self) {
         if let Some(obligation) = self.obligation.take() {
             let _proof = obligation.commit();
+        }
+        // Releasing capacity back to the semaphore discharges the runtime
+        // obligation; a permit dropped without release is `forget`, which
+        // aborts instead.
+        if let Some(runtime_obligation) = self.runtime_obligation.take() {
+            let _ = runtime_obligation.commit();
         }
         // End diagnostic ownership before add_permits can dispatch arbitrary
         // user Wakers. A panicking Waker must not strand a phantom held rank.
@@ -888,6 +949,9 @@ impl Drop for SemaphorePermit<'_> {
 #[must_use = "permit will be immediately released if not held"]
 pub struct OwnedSemaphorePermit {
     obligation: Option<ObligationToken<SemaphorePermitKind>>,
+    /// Runtime-visible twin of `obligation`, carried over from the borrowed
+    /// permit so converting one does not drop the runtime's view of it.
+    runtime_obligation: Option<crate::runtime::obligation_mailbox::ObligationToken>,
     semaphore: std::sync::Arc<Semaphore>,
     count: usize,
     lock_order: lock_ordering::GuardLockOrder,
@@ -904,6 +968,7 @@ impl OwnedSemaphorePermit {
         if count == 0 {
             return Ok(Self {
                 obligation: None,
+                runtime_obligation: None,
                 semaphore,
                 count: 0,
                 lock_order: Default::default(),
@@ -928,9 +993,10 @@ impl OwnedSemaphorePermit {
         let permit = semaphore.try_acquire(count)?;
         // Transfer ownership: extract the obligation token so the OwnedSemaphorePermit
         // will handle both permit release and obligation lifecycle in its own Drop.
-        let (count, obligation, lock_order) = permit.into_parts();
+        let (count, obligation, runtime_obligation, lock_order) = permit.into_parts();
         Ok(Self {
             obligation,
+            runtime_obligation,
             semaphore,
             count,
             lock_order,
@@ -953,9 +1019,10 @@ impl OwnedSemaphorePermit {
         let permit = semaphore.try_acquire(count)?;
         // Transfer ownership: extract the obligation token so the OwnedSemaphorePermit
         // will handle both permit release and obligation lifecycle in its own Drop.
-        let (count, obligation, lock_order) = permit.into_parts();
+        let (count, obligation, runtime_obligation, lock_order) = permit.into_parts();
         Ok(Self {
             obligation,
+            runtime_obligation,
             semaphore: semaphore.clone(),
             count,
             lock_order,
@@ -978,6 +1045,9 @@ impl OwnedSemaphorePermit {
         if let Some(obligation) = self.obligation.take() {
             let _proof = obligation.abort();
         }
+        if let Some(runtime_obligation) = self.runtime_obligation.take() {
+            let _ = runtime_obligation.abort(crate::record::ObligationAbortReason::Explicit);
+        }
     }
 
     /// Commits the permit explicitly, releasing it back to the semaphore.
@@ -993,6 +1063,9 @@ impl Drop for OwnedSemaphorePermit {
     fn drop(&mut self) {
         if let Some(obligation) = self.obligation.take() {
             let _proof = obligation.commit();
+        }
+        if let Some(runtime_obligation) = self.runtime_obligation.take() {
+            let _ = runtime_obligation.commit();
         }
         lock_ordering::record_guard_release(&mut self.lock_order);
         if self.count > 0 {
@@ -1079,6 +1152,7 @@ impl<Caps> Future for OwnedAcquireFuture<Caps> {
             this.completed = true;
             return Poll::Ready(Ok(OwnedSemaphorePermit {
                 obligation: None,
+                runtime_obligation: None,
                 semaphore: this.semaphore.clone(),
                 count: 0,
                 lock_order: Default::default(),
@@ -1174,6 +1248,9 @@ impl<Caps> Future for OwnedAcquireFuture<Caps> {
                     this.cx
                         .as_ref()
                         .and_then(|cx| reserve_permit_obligation(cx.region_id())),
+                    this.cx
+                        .as_ref()
+                        .and_then(|cx| reserve_runtime_permit_obligation(cx)),
                 );
                 if let Some(next) = next_waker {
                     next.wake_by_ref();
