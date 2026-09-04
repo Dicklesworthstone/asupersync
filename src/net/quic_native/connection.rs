@@ -926,6 +926,62 @@ impl NativeQuicConnection {
         Ok(applied)
     }
 
+    /// Let the bounded receive window on `id` grow up to `max_window` bytes
+    /// when the peer reports STREAM_DATA_BLOCKED at our advertised edge (see
+    /// `StreamTable::note_peer_stream_data_blocked` for the growth gates).
+    pub fn allow_stream_recv_window_growth(
+        &mut self,
+        cx: &Cx,
+        id: StreamId,
+        max_window: u64,
+    ) -> Result<(), NativeQuicConnectionError> {
+        checkpoint(cx)?;
+        self.streams
+            .allow_stream_recv_window_growth(id, max_window)
+            .map_err(map_stream_table_error)
+    }
+
+    /// Current bounded receive window of `id` (`None` = unbounded).
+    pub fn stream_recv_window_bytes(
+        &self,
+        id: StreamId,
+    ) -> Result<Option<u64>, NativeQuicConnectionError> {
+        self.streams
+            .stream_recv_window_bytes(id)
+            .map_err(map_stream_table_error)
+    }
+
+    /// Tell the peer our send side is blocked on its `MAX_STREAM_DATA` limit
+    /// for `id` (a STREAM_DATA_BLOCKED frame on the next flush).
+    ///
+    /// The stream write path queues this frame on its own when a write hits
+    /// `FlowControlError::Exhausted`; a sender that waits for credit before
+    /// writing (the paced ATP source stream) never reaches that error, so it
+    /// reports the stall explicitly through this entry point. The frame is
+    /// idempotent for the receiver: it only ever grows a window whose growth
+    /// the receiver allowed.
+    pub fn report_stream_data_blocked(
+        &mut self,
+        cx: &Cx,
+        id: StreamId,
+    ) -> Result<(), NativeQuicConnectionError> {
+        checkpoint(cx)?;
+        self.ensure_data_state()?;
+        let limit = self.streams.stream_send_limit(id).unwrap_or(0);
+        self.pending_control_frames.retain(|frame| {
+            !matches!(
+                frame,
+                QuicFrame::StreamDataBlocked { stream_id, .. } if stream_id.value() == id.0
+            )
+        });
+        self.pending_control_frames
+            .push_back(QuicFrame::StreamDataBlocked {
+                stream_id: VarInt::from_u64_unchecked(id.0),
+                maximum_stream_data: VarInt::from_u64_unchecked(limit),
+            });
+        Ok(())
+    }
+
     /// Increase the connection receive limit and advertise it with MAX_DATA.
     pub fn advertise_connection_recv_limit(
         &mut self,
@@ -2152,9 +2208,27 @@ impl NativeQuicConnection {
                 self.process_datagram_frame_run(cx, std::slice::from_ref(frame), space)?;
                 Ok(())
             }
+            QuicFrame::StreamDataBlocked {
+                stream_id,
+                maximum_stream_data,
+            } => {
+                // Sender-gated growth of a bounded receive window: the peer
+                // says our advertised limit is its binding constraint. The
+                // stream table decides whether the window may grow (cap,
+                // hysteresis, one full window consumed since the last growth)
+                // and returns the advertisement to put on the wire.
+                let id = StreamId(stream_id.value());
+                if let Some(limit) = self
+                    .streams
+                    .note_peer_stream_data_blocked(id, maximum_stream_data.value())
+                    .map_err(map_stream_table_error)?
+                {
+                    self.queue_max_stream_data_frame(id, limit);
+                }
+                Ok(())
+            }
             QuicFrame::MaxStreams { .. }
             | QuicFrame::DataBlocked { .. }
-            | QuicFrame::StreamDataBlocked { .. }
             | QuicFrame::StreamsBlocked { .. } => Ok(()),
         }
     }

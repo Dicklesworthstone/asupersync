@@ -390,6 +390,13 @@ pub struct QuicStream {
     /// initial window at configure time). Only meaningful when
     /// `recv_window_bytes` is `Some`.
     recv_limit_advertised: u64,
+    /// Ceiling for sender-gated growth of `recv_window_bytes`
+    /// ([`StreamTable::note_peer_stream_data_blocked`]); `None` or a value at
+    /// or below the current window keeps the window fixed.
+    recv_window_max_bytes: Option<u64>,
+    /// `read_offset` when the bounded window was configured or last grew:
+    /// growth requires one full window consumed since then.
+    recv_window_grown_at_read_offset: u64,
     /// STREAM frames queued for packet assembly.
     pending_send_frames: VecDeque<QueuedStreamFrame>,
     /// STREAM frames emitted at least once and available for retransmission.
@@ -416,6 +423,8 @@ impl QuicStream {
             recv_chunks: BTreeMap::new(),
             recv_window_bytes: None,
             recv_limit_advertised: 0,
+            recv_window_max_bytes: None,
+            recv_window_grown_at_read_offset: 0,
             pending_send_frames: VecDeque::new(),
             sent_stream_frames: BTreeMap::new(),
         }
@@ -1258,7 +1267,82 @@ impl StreamTable {
         }
         stream.recv_window_bytes = Some(window);
         stream.recv_limit_advertised = advertised;
+        stream.recv_window_grown_at_read_offset = stream.read_offset;
         Ok(advertised)
+    }
+
+    /// Let the bounded receive window on `id` grow up to `max_window` bytes
+    /// through [`Self::note_peer_stream_data_blocked`]. A cap at or below the
+    /// current window disables growth; an unbounded stream never grows.
+    pub fn allow_stream_recv_window_growth(
+        &mut self,
+        id: StreamId,
+        max_window: u64,
+    ) -> Result<(), StreamTableError> {
+        let stream = self.stream_mut(id)?;
+        stream.recv_window_max_bytes = Some(max_window.min(VARINT_MAX));
+        Ok(())
+    }
+
+    /// Current bounded receive window of `id` (`None` = unbounded).
+    pub fn stream_recv_window_bytes(&self, id: StreamId) -> Result<Option<u64>, StreamTableError> {
+        Ok(self.stream(id)?.recv_window_bytes)
+    }
+
+    /// React to the peer's STREAM_DATA_BLOCKED on a bounded-window stream.
+    ///
+    /// The window doubles (up to the growth cap) only when every gate holds,
+    /// so a sender that is repairing loss (it never reports being blocked
+    /// while credit is not its limiter) and a slow reader (whose un-read
+    /// bytes, not the window, are the bound) keep the window they have:
+    /// * growth is allowed and the cap is above the current window;
+    /// * `limit` is at the edge we advertised (within a sixteenth-window),
+    ///   so a stale frame for an older limit is ignored;
+    /// * the application has consumed at least one full window since the
+    ///   window was configured or last grew.
+    ///
+    /// Returns the new advertisement for the caller to put on the wire as
+    /// MAX_STREAM_DATA, or `None` when nothing changed.
+    pub fn note_peer_stream_data_blocked(
+        &mut self,
+        id: StreamId,
+        limit: u64,
+    ) -> Result<Option<u64>, StreamTableError> {
+        let stream = self.stream_mut(id)?;
+        let (Some(window), Some(max_window)) =
+            (stream.recv_window_bytes, stream.recv_window_max_bytes)
+        else {
+            return Ok(None);
+        };
+        if max_window <= window {
+            return Ok(None);
+        }
+        let hysteresis = (window / 16).max(1);
+        if limit.saturating_add(hysteresis) < stream.recv_limit_advertised {
+            return Ok(None);
+        }
+        if stream
+            .read_offset
+            .saturating_sub(stream.recv_window_grown_at_read_offset)
+            < window
+        {
+            return Ok(None);
+        }
+        let grown = window.saturating_mul(2).min(max_window);
+        stream.recv_window_bytes = Some(grown);
+        stream.recv_window_grown_at_read_offset = stream.read_offset;
+        let desired = stream.read_offset.saturating_add(grown).min(VARINT_MAX);
+        if desired <= stream.recv_limit_advertised {
+            return Ok(None);
+        }
+        if desired > stream.recv_credit.limit() {
+            stream
+                .recv_credit
+                .increase_limit(desired)
+                .map_err(|err| StreamTableError::Stream(QuicStreamError::Flow(err)))?;
+        }
+        stream.recv_limit_advertised = desired;
+        Ok(Some(desired))
     }
 
     /// Lower a freshly-opened local stream's send-credit limit so the sender
@@ -2986,6 +3070,82 @@ mod tests {
             .expect("recv past hole");
         assert!(tbl.read_stream_bytes(id, 100).expect("read").is_empty());
         assert!(tbl.advance_bounded_recv_windows().is_empty());
+    }
+
+    #[test]
+    fn stream_data_blocked_grows_a_bounded_window_only_after_a_full_window_is_consumed() {
+        let mut tbl = StreamTable::new(StreamRole::Server, 0, 0, 1 << 20, 1 << 20);
+        let id = StreamId::local(StreamRole::Client, StreamDirection::Bidirectional, 0);
+        assert_eq!(tbl.configure_stream_recv_window(id, 100).expect("configure"), 100);
+        tbl.allow_stream_recv_window_growth(id, 400).expect("growth cap");
+
+        // Blocked at our edge, but nothing consumed yet: the reader, not the
+        // window, could be the bound. No growth.
+        assert_eq!(tbl.note_peer_stream_data_blocked(id, 100).expect("blocked"), None);
+        assert_eq!(tbl.stream_recv_window_bytes(id).expect("window"), Some(100));
+
+        // One full window consumed and the peer is blocked at the edge: double.
+        tbl.receive_stream_bytes(id, 0, Bytes::from(vec![1u8; 100]), false)
+            .expect("recv");
+        assert_eq!(tbl.read_stream_bytes(id, 100).expect("read").len(), 100);
+        let advertised = tbl.advance_bounded_recv_windows();
+        assert_eq!(advertised, vec![(id, 200)]);
+        assert_eq!(
+            tbl.note_peer_stream_data_blocked(id, 200).expect("blocked"),
+            Some(300),
+            "window doubles to 200 and the advertisement becomes read_offset + 200"
+        );
+        assert_eq!(tbl.stream_recv_window_bytes(id).expect("window"), Some(200));
+
+        // Immediately blocked again: no growth until another full (new) window
+        // is consumed.
+        assert_eq!(tbl.note_peer_stream_data_blocked(id, 300).expect("blocked"), None);
+        tbl.receive_stream_bytes(id, 100, Bytes::from(vec![2u8; 200]), false)
+            .expect("recv");
+        assert_eq!(tbl.read_stream_bytes(id, 200).expect("read").len(), 200);
+        tbl.advance_bounded_recv_windows();
+        assert_eq!(
+            tbl.note_peer_stream_data_blocked(id, 500).expect("blocked"),
+            Some(700),
+            "second growth reaches the 400-byte cap"
+        );
+        assert_eq!(tbl.stream_recv_window_bytes(id).expect("window"), Some(400));
+
+        // At the cap: consumption plus a blocked peer changes nothing more.
+        tbl.receive_stream_bytes(id, 300, Bytes::from(vec![3u8; 400]), false)
+            .expect("recv");
+        assert_eq!(tbl.read_stream_bytes(id, 400).expect("read").len(), 400);
+        tbl.advance_bounded_recv_windows();
+        assert_eq!(tbl.note_peer_stream_data_blocked(id, 1100).expect("blocked"), None);
+        assert_eq!(tbl.stream_recv_window_bytes(id).expect("window"), Some(400));
+    }
+
+    #[test]
+    fn stale_or_uncapped_stream_data_blocked_never_grows_the_window() {
+        let mut tbl = StreamTable::new(StreamRole::Server, 0, 0, 1 << 20, 1 << 20);
+        let id = StreamId::local(StreamRole::Client, StreamDirection::Bidirectional, 0);
+        assert_eq!(tbl.configure_stream_recv_window(id, 100).expect("configure"), 100);
+        tbl.receive_stream_bytes(id, 0, Bytes::from(vec![1u8; 100]), false)
+            .expect("recv");
+        assert_eq!(tbl.read_stream_bytes(id, 100).expect("read").len(), 100);
+        tbl.advance_bounded_recv_windows();
+
+        // No growth cap configured: the window is fixed.
+        assert_eq!(tbl.note_peer_stream_data_blocked(id, 200).expect("blocked"), None);
+        // A cap at the current window is the same as no cap.
+        tbl.allow_stream_recv_window_growth(id, 100).expect("cap");
+        assert_eq!(tbl.note_peer_stream_data_blocked(id, 200).expect("blocked"), None);
+        // A stale BLOCKED for an older limit (more than a sixteenth-window
+        // below the advertised 200) is ignored even with a real cap.
+        tbl.allow_stream_recv_window_growth(id, 400).expect("cap");
+        assert_eq!(tbl.note_peer_stream_data_blocked(id, 150).expect("blocked"), None);
+        assert_eq!(tbl.stream_recv_window_bytes(id).expect("window"), Some(100));
+        // An unbounded stream ignores the frame entirely.
+        let other = StreamId::local(StreamRole::Client, StreamDirection::Bidirectional, 1);
+        tbl.accept_remote_stream(other).expect("accept");
+        tbl.allow_stream_recv_window_growth(other, 400).expect("cap");
+        assert_eq!(tbl.note_peer_stream_data_blocked(other, 0).expect("blocked"), None);
+        assert_eq!(tbl.stream_recv_window_bytes(other).expect("window"), None);
     }
 
     #[test]
