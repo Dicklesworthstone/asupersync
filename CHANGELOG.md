@@ -125,6 +125,12 @@ is `v0.4.9`.
   spawn admissions through `RuntimeState`'s authoritative obligation methods;
   undrained posts and live tokens count as pending work for `is_quiescent`
   and drain gating. No primitive uses the seam yet.
+- A dropped unresolved token goes through the runtime's leak policy
+  (`RuntimeState::report_obligation_leak`): it counts toward `leak_count`,
+  honours `LeakEscalation`, and under `Recover` is auto-aborted instead of
+  marked leaked. The first cut only resolved the record and emitted the trace
+  event, so a dropped token could never escalate (found by the macOS full
+  suite).
 - `UdpSocket::connect` re-targets a connected socket on BSD-derived stacks:
   on `EISCONN` (macOS, iOS, FreeBSD) it dissolves the association by
   connecting to the null address and retries once; Linux and Windows are
