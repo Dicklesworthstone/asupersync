@@ -394,6 +394,9 @@ pub struct QuicStream {
     /// ([`StreamTable::note_peer_stream_data_blocked`]); `None` or a value at
     /// or below the current window keeps the window fixed.
     recv_window_max_bytes: Option<u64>,
+    /// Reassembly-fragment budget used to veto growth on a holey stream
+    /// (0 disables the veto). Growth stops once a quarter of it is buffered.
+    recv_window_fragment_ceiling: usize,
     /// `read_offset` when the bounded window was configured or last grew:
     /// growth requires one full window consumed since then.
     recv_window_grown_at_read_offset: u64,
@@ -424,6 +427,7 @@ impl QuicStream {
             recv_window_bytes: None,
             recv_limit_advertised: 0,
             recv_window_max_bytes: None,
+            recv_window_fragment_ceiling: 0,
             recv_window_grown_at_read_offset: 0,
             pending_send_frames: VecDeque::new(),
             sent_stream_frames: BTreeMap::new(),
@@ -1278,9 +1282,11 @@ impl StreamTable {
         &mut self,
         id: StreamId,
         max_window: u64,
+        fragment_ceiling: usize,
     ) -> Result<(), StreamTableError> {
         let stream = self.stream_mut(id)?;
         stream.recv_window_max_bytes = Some(max_window.min(VARINT_MAX));
+        stream.recv_window_fragment_ceiling = fragment_ceiling;
         Ok(())
     }
 
@@ -1317,6 +1323,19 @@ impl StreamTable {
             return Ok(None);
         };
         if max_window <= window {
+            return Ok(None);
+        }
+        // A stream already holding a quarter of its reassembly budget in
+        // out-of-order chunks is holey: a larger window would buy more holes
+        // and can only end at the fragment guard, which is fatal to the
+        // connection. Refuse to grow rather than approach it.
+        if stream.recv_window_fragment_ceiling != 0
+            && stream
+                .recv_chunks
+                .len()
+                .saturating_mul(4)
+                .ge(&stream.recv_window_fragment_ceiling)
+        {
             return Ok(None);
         }
         if limit.saturating_add(window) < stream.recv_limit_advertised {
@@ -3082,7 +3101,7 @@ mod tests {
                 .expect("configure"),
             100
         );
-        tbl.allow_stream_recv_window_growth(id, 400)
+        tbl.allow_stream_recv_window_growth(id, 400, 0)
             .expect("growth cap");
 
         // Blocked at our edge, but nothing consumed yet: the reader, not the
@@ -3137,6 +3156,69 @@ mod tests {
     }
 
     #[test]
+    fn a_holey_stream_refuses_to_grow_before_it_reaches_the_fragment_guard() {
+        let mut tbl = StreamTable::new(StreamRole::Server, 0, 0, 1 << 20, 1 << 20);
+        let id = StreamId::local(StreamRole::Client, StreamDirection::Bidirectional, 0);
+        assert_eq!(
+            tbl.configure_stream_recv_window(id, 100)
+                .expect("configure"),
+            100
+        );
+        // Budget of 16 reassembly nodes: growth stops at a quarter of it.
+        tbl.allow_stream_recv_window_growth(id, 400, 16)
+            .expect("cap");
+        // Consume a full window so only the hole count can veto growth.
+        tbl.receive_stream_bytes(id, 0, Bytes::from(vec![1u8; 100]), false)
+            .expect("recv");
+        assert_eq!(tbl.read_stream_bytes(id, 100).expect("read").len(), 100);
+        tbl.advance_bounded_recv_windows();
+        // Three out-of-order chunks (under a quarter of 16): growth is fine.
+        for offset in [120u64, 140, 160] {
+            tbl.receive_stream_bytes(id, offset, Bytes::from(vec![2u8; 4]), false)
+                .expect("recv out of order");
+        }
+        assert_eq!(
+            tbl.note_peer_stream_data_blocked(id, 200).expect("blocked"),
+            Some(300)
+        );
+        assert_eq!(tbl.stream_recv_window_bytes(id).expect("window"), Some(200));
+
+        // The same stream shape with a fourth out-of-order chunk reaches the
+        // ceiling, and then no growth happens at all — the cap and the
+        // consumption rule are identical, so the hole count is what changed.
+        let mut holey = StreamTable::new(StreamRole::Server, 0, 0, 1 << 20, 1 << 20);
+        assert_eq!(
+            holey
+                .configure_stream_recv_window(id, 100)
+                .expect("configure"),
+            100
+        );
+        holey
+            .allow_stream_recv_window_growth(id, 400, 16)
+            .expect("cap");
+        holey
+            .receive_stream_bytes(id, 0, Bytes::from(vec![1u8; 100]), false)
+            .expect("recv");
+        assert_eq!(holey.read_stream_bytes(id, 100).expect("read").len(), 100);
+        holey.advance_bounded_recv_windows();
+        for offset in [120u64, 140, 160, 180] {
+            holey
+                .receive_stream_bytes(id, offset, Bytes::from(vec![2u8; 4]), false)
+                .expect("recv out of order");
+        }
+        assert_eq!(
+            holey
+                .note_peer_stream_data_blocked(id, 200)
+                .expect("blocked"),
+            None
+        );
+        assert_eq!(
+            holey.stream_recv_window_bytes(id).expect("window"),
+            Some(100)
+        );
+    }
+
+    #[test]
     fn stale_or_uncapped_stream_data_blocked_never_grows_the_window() {
         let mut tbl = StreamTable::new(StreamRole::Server, 0, 0, 1 << 20, 1 << 20);
         let id = StreamId::local(StreamRole::Client, StreamDirection::Bidirectional, 0);
@@ -3156,7 +3238,8 @@ mod tests {
             None
         );
         // A cap at the current window is the same as no cap.
-        tbl.allow_stream_recv_window_growth(id, 100).expect("cap");
+        tbl.allow_stream_recv_window_growth(id, 100, 0)
+            .expect("cap");
         assert_eq!(
             tbl.note_peer_stream_data_blocked(id, 200).expect("blocked"),
             None
@@ -3164,7 +3247,8 @@ mod tests {
         // A stale BLOCKED for an older limit (more than a window below the
         // advertised 200) is ignored even with a real cap; one within a window
         // of the edge (the peer's lagging view on a high-BDP path) counts.
-        tbl.allow_stream_recv_window_growth(id, 400).expect("cap");
+        tbl.allow_stream_recv_window_growth(id, 400, 0)
+            .expect("cap");
         assert_eq!(
             tbl.note_peer_stream_data_blocked(id, 90).expect("blocked"),
             None
@@ -3178,7 +3262,7 @@ mod tests {
         // An unbounded stream ignores the frame entirely.
         let other = StreamId::local(StreamRole::Client, StreamDirection::Bidirectional, 1);
         tbl.accept_remote_stream(other).expect("accept");
-        tbl.allow_stream_recv_window_growth(other, 400)
+        tbl.allow_stream_recv_window_growth(other, 400, 0)
             .expect("cap");
         assert_eq!(
             tbl.note_peer_stream_data_blocked(other, 0)

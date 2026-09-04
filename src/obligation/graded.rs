@@ -56,6 +56,15 @@
 //! // drop(leaked); // PANIC: obligation leaked!
 //! ```
 
+// The `TokenKind` markers near the bottom of this file (`SendPermit`,
+// `AckKind`, `LeaseKind`, `IoOpKind`, `SemaphorePermitKind`,
+// `TransactionKind`) are deliberately uninhabited: they are type-level tags
+// only, and an empty enum is the one shape that cannot be constructed at all.
+// clippy's `empty_enum` (in the pinned nightly's lint set) suggests the never
+// type instead; these are public items under the 0.4.x compatibility gate, so
+// their shape cannot change without an approved break.
+#![allow(clippy::empty_enum)]
+
 use crate::record::{ObligationKind, ObligationState};
 use crate::types::{RegionId, id::next_bootstrap_region_id};
 use std::fmt;

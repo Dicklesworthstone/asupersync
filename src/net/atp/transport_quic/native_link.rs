@@ -2551,7 +2551,7 @@ pub struct QuicLink {
     /// admission gate asks the receiver for more window at most once per
     /// window's worth of credit and only when that window was loss-clean
     /// (`super::source_stream_window_request_due`).
-    source_stream_window_request: Option<(u64, u64)>,
+    source_stream_window_request: Option<super::SourceStreamWindowProbe>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -7277,10 +7277,12 @@ async fn wait_source_stream_send_admission(
         }
         pending_stall = classify_source_stream_admission(false, credit_ok, unacked_ok);
         // Sender-gated receive-window growth (A4): while the peer's credit is
-        // the only gate holding us, tell it so with STREAM_DATA_BLOCKED — at
-        // most once per window's worth of credit, and only when that window
-        // went by without a retransmit batch. A queue-limited or lossy path
-        // therefore never asks and keeps the 2 MiB path law.
+        // the only gate holding us, tell it so with STREAM_DATA_BLOCKED —
+        // once per window of credit, and only on a transfer that has never
+        // repaired a loss (see `source_stream_window_request_due`). A
+        // queue-limited or lossy path therefore never asks and keeps the
+        // 2 MiB path law. The frame rides the gate's existing flush below;
+        // asking must never fail the transfer or add a wait of its own.
         if !credit_ok && unacked_ok {
             let send_limit = link.conn.stream_send_limit(stream).unwrap_or(0);
             let window = link.source_stream_send_window.unwrap_or(0);
@@ -7289,11 +7291,10 @@ async fn wait_source_stream_send_admission(
                 send_limit,
                 window,
                 link.limiter.retransmit_batches,
-            ) {
-                link.conn.report_stream_data_blocked(cx, stream)?;
+            ) && link.conn.report_stream_data_blocked(cx, stream).is_ok()
+            {
                 link.limiter.stream_window_requests =
                     link.limiter.stream_window_requests.saturating_add(1);
-                let _ = link.flush(cx).await?;
             }
         }
         // Any observable movement counts as progress. A stricter
@@ -7313,7 +7314,7 @@ async fn wait_source_stream_send_admission(
         // the gate's non-stall path otherwise never flushes, so pending
         // control frames starved behind the retransmit-priority queue for the
         // whole wait (br-asupersync-daqxbz).
-        if link.conn.has_pending_stream_frames() {
+        if link.conn.has_pending_stream_frames() || link.conn.has_pending_control_frames() {
             let _ = link.flush(cx).await?;
         }
         // The PTO drain must key on lack of PROGRESS, not on a silent pump:
@@ -9842,8 +9843,12 @@ async fn run_receiver_session(
             quic_source_stream_recv_window_max_bytes(),
             link.max_app_payload,
         ) {
-            link.conn
-                .allow_stream_recv_window_growth(cx, source_stream, cap)?;
+            link.conn.allow_stream_recv_window_growth(
+                cx,
+                source_stream,
+                cap,
+                crate::net::quic_native::connection::MAX_BUFFERED_STREAM_REASSEMBLY_FRAGMENTS,
+            )?;
         }
         link.flush(cx).await?;
     }

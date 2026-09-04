@@ -801,7 +801,7 @@ impl LabAtpUdpNetworkSocket {
             stats.sent = stats.sent.saturating_add(1);
             let drop_by_policy = policy
                 .drop_every
-                .is_some_and(|every| stats.sent % every.get() == 0);
+                .is_some_and(|every| stats.sent % every == 0);
             if drop_by_policy {
                 stats.dropped = stats.dropped.saturating_add(1);
                 return Ok(payload.len());

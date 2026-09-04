@@ -535,37 +535,59 @@ pub(crate) const fn classify_blocked_flush(
     }
 }
 
+/// Windows of credit a source stream must send without a single repair
+/// episode before the sender asks the receiver to grow its window.
+///
+/// A path earns a larger window by proving it is loss-free, not by being
+/// quiet for one window: at 2 MiB that is 16 MiB of clean delivery, ~3 % of
+/// a 500 MB transfer on the WAN cell the growth exists for.
+pub(crate) const SOURCE_STREAM_WINDOW_PROBE_WARMUP_WINDOWS: u64 = 8;
+
+/// Sender-side state for [`source_stream_window_request_due`]: the send
+/// limit when the admission gate first ran, and when it last asked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SourceStreamWindowProbe {
+    baseline_limit: u64,
+    last_request_limit: u64,
+}
+
 /// Whether the source-stream admission gate should ask the receiver for a
 /// larger window right now (a STREAM_DATA_BLOCKED frame), given the peer's
-/// current `MAX_STREAM_DATA` limit, the window size, and the running
-/// retransmit-batch count.
+/// current `MAX_STREAM_DATA` limit, the window size, and the transfer's
+/// running retransmit-batch count.
 ///
-/// `marker` remembers the `(send limit, retransmit batches)` of the last
-/// decision. A decision is taken once per window's worth of credit (the
-/// limit moved by at least one window since the last decision, or the very
-/// first time) and asks only when no retransmit batch happened over that
-/// span: one loss-repair episode per window is exactly the queue-limited
-/// signature that must keep the window where it is (MATRIX-228).
+/// Asks only when the transfer has never retransmitted, the stream has sent
+/// [`SOURCE_STREAM_WINDOW_PROBE_WARMUP_WINDOWS`] windows of credit since the
+/// gate first ran, and at most once per window after that.
 #[cfg_attr(not(feature = "tls"), allow(dead_code))]
 pub(crate) fn source_stream_window_request_due(
-    marker: &mut Option<(u64, u64)>,
+    probe: &mut Option<SourceStreamWindowProbe>,
     send_limit: u64,
     window: u64,
     retransmit_batches: u64,
 ) -> bool {
-    match *marker {
-        None => {
-            *marker = Some((send_limit, retransmit_batches));
-            retransmit_batches == 0
-        }
-        Some((last_limit, last_batches)) => {
-            if send_limit < last_limit.saturating_add(window.max(1)) {
-                return false;
-            }
-            *marker = Some((send_limit, retransmit_batches));
-            retransmit_batches == last_batches
-        }
+    let probe = probe.get_or_insert(SourceStreamWindowProbe {
+        baseline_limit: send_limit,
+        last_request_limit: send_limit,
+    });
+    // Any repair episode at all disqualifies growth for the rest of the
+    // transfer. Measured (2026-09-04, growth gated only on "no batch since
+    // the last decision"): one quiet window on a lossy path was enough to
+    // grow, and the grown window then cost `good` 42 s → 55 s with 149-240 MB
+    // re-sent and killed `bad` outright on the receiver's reassembly guard.
+    if retransmit_batches != 0 {
+        return false;
     }
+    let step = window.max(1);
+    let warmup = step.saturating_mul(SOURCE_STREAM_WINDOW_PROBE_WARMUP_WINDOWS);
+    if send_limit < probe.baseline_limit.saturating_add(warmup) {
+        return false;
+    }
+    if send_limit < probe.last_request_limit.saturating_add(step) {
+        return false;
+    }
+    probe.last_request_limit = send_limit;
+    true
 }
 
 /// A finished ATP-over-QUIC send: the shared [`SendReport`] plus the sender's
@@ -587,62 +609,82 @@ mod limiter_report_tests {
     use super::*;
 
     #[test]
-    fn window_request_is_once_per_window_and_only_when_loss_clean() {
+    fn window_request_needs_a_clean_warmup_and_then_asks_once_per_window() {
         let window = 1_000;
-        let mut marker = None;
-        // First decision on a clean sender asks.
+        let warmup = window * SOURCE_STREAM_WINDOW_PROBE_WARMUP_WINDOWS;
+        let mut probe = None;
+
+        // Nothing is asked during the warmup, however clean the path is.
+        assert!(!source_stream_window_request_due(
+            &mut probe, 1_000, window, 0
+        ));
+        assert!(!source_stream_window_request_due(
+            &mut probe,
+            1_000 + warmup - 1,
+            window,
+            0
+        ));
+        // The warmup completes on a still-clean path: ask.
         assert!(source_stream_window_request_due(
-            &mut marker,
-            1_000,
+            &mut probe,
+            1_000 + warmup,
             window,
             0
         ));
-        // Same window edge (or less than a window further): no new decision.
+        // Less than a window further on: no second ask.
         assert!(!source_stream_window_request_due(
-            &mut marker,
-            1_000,
+            &mut probe,
+            1_000 + warmup + window - 1,
             window,
             0
         ));
-        assert!(!source_stream_window_request_due(
-            &mut marker,
-            1_900,
-            window,
-            0
-        ));
-        assert_eq!(marker, Some((1_000, 0)));
-        // A full window later with no retransmit batch: asks again.
+        // A full window further on: ask again.
         assert!(source_stream_window_request_due(
-            &mut marker,
-            2_000,
+            &mut probe,
+            1_000 + warmup + window,
             window,
             0
         ));
-        // A full window later with a retransmit batch in between: silent, and
-        // the marker moves so the NEXT clean window can ask.
+        // One repair episode disqualifies the transfer permanently, even
+        // though windows keep going by cleanly afterwards.
         assert!(!source_stream_window_request_due(
-            &mut marker,
-            3_000,
+            &mut probe,
+            1_000 + warmup + 4 * window,
             window,
             1
         ));
-        assert_eq!(marker, Some((3_000, 1)));
-        assert!(source_stream_window_request_due(
-            &mut marker,
-            4_000,
+        assert!(!source_stream_window_request_due(
+            &mut probe,
+            1_000 + warmup + 8 * window,
             window,
             1
         ));
-        // A lossy first window never asks.
+
+        // A path that is already repairing when the gate first runs never
+        // asks. The batch counter only ever grows, so no later call can
+        // un-disqualify it however far the limit advances.
         let mut lossy = None;
         assert!(!source_stream_window_request_due(
-            &mut lossy, 1_000, window, 3
+            &mut lossy, 5_000, window, 3
         ));
-        assert_eq!(lossy, Some((1_000, 3)));
-        // A zero window degrades to "once per limit change", never a panic.
-        let mut zero = Some((5, 0));
+        assert!(!source_stream_window_request_due(
+            &mut lossy,
+            5_000 + warmup,
+            window,
+            3
+        ));
+        assert!(!source_stream_window_request_due(
+            &mut lossy,
+            5_000 + warmup + 4 * window,
+            window,
+            9
+        ));
+
+        // A zero window degrades to one ask per byte of progress after the
+        // warmup, and never panics.
+        let mut zero = None;
         assert!(!source_stream_window_request_due(&mut zero, 5, 0, 0));
-        assert!(source_stream_window_request_due(&mut zero, 6, 0, 0));
+        assert!(source_stream_window_request_due(&mut zero, 13, 0, 0));
     }
 
     #[test]

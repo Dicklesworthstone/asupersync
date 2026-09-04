@@ -735,6 +735,13 @@ impl NativeQuicConnection {
         }
     }
 
+    /// Whether a control frame (ACK, MAX_STREAM_DATA, STREAM_DATA_BLOCKED …)
+    /// is queued for the next flush.
+    #[must_use]
+    pub fn has_pending_control_frames(&self) -> bool {
+        !self.pending_control_frames.is_empty()
+    }
+
     /// Whether any STREAM frames remain queued for packet assembly.
     #[must_use]
     pub fn has_pending_stream_frames(&self) -> bool {
@@ -934,10 +941,11 @@ impl NativeQuicConnection {
         cx: &Cx,
         id: StreamId,
         max_window: u64,
+        fragment_ceiling: usize,
     ) -> Result<(), NativeQuicConnectionError> {
         checkpoint(cx)?;
         self.streams
-            .allow_stream_recv_window_growth(id, max_window)
+            .allow_stream_recv_window_growth(id, max_window, fragment_ceiling)
             .map_err(map_stream_table_error)
     }
 
@@ -3622,7 +3630,7 @@ mod tests {
         let stream = conn.open_local_bidi(&cx).expect("open");
         conn.configure_stream_recv_window(&cx, stream, 100)
             .expect("configure window");
-        conn.allow_stream_recv_window_growth(&cx, stream, 400)
+        conn.allow_stream_recv_window_growth(&cx, stream, 400, 0)
             .expect("allow growth");
         let _ = conn
             .generate_frames(&cx, PacketNumberSpace::ApplicationData, 128)

@@ -783,11 +783,7 @@ impl RepairRoiE2eHarness {
         } else {
             0.0
         };
-        if cpu_overhead_ratio > expected.max_cpu_overhead_ratio {
-            return false;
-        }
-
-        true
+        cpu_overhead_ratio <= expected.max_cpu_overhead_ratio
     }
 
     /// Generate comprehensive report from E2e results.

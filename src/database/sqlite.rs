@@ -540,6 +540,12 @@ fn rollback_abandoned_begin_mutex_guarded(
     }
 }
 
+// `fetch_update` was renamed to `try_update` in nightly-2026-08-31 (the pinned
+// toolchain), which makes the old name a `-D warnings` error in the
+// all-features lint gate. The new name does not exist on the stable subset the
+// audited stable lane builds, so keep the stable-compatible call and allow the
+// deprecation until that lane's toolchain carries the rename.
+#[allow(deprecated)]
 fn advance_transaction_generation(transaction_generation: &AtomicU64) -> Option<u64> {
     transaction_generation
         .fetch_update(Ordering::AcqRel, Ordering::Acquire, |generation| {

@@ -716,10 +716,7 @@ fn has_traversal(path: &str) -> bool {
         }
     }
     // Block null bytes.
-    if path.contains('\0') {
-        return true;
-    }
-    false
+    path.contains('\0')
 }
 
 fn has_denied_static_path_after_additional_decoding(path: &str) -> bool {

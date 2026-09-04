@@ -10206,6 +10206,11 @@ pub(crate) mod completion_observer_test_support {
             self.completed_state_observed.load(Ordering::Relaxed)
         }
 
+        // See the note on `advance_transaction_generation` in
+        // `database::sqlite`: `fetch_update` is deprecated on the pinned
+        // nightly and absent from the stable subset, so the stable-compatible
+        // spelling stays with an explicit allow.
+        #[allow(deprecated)]
         fn should_panic_on_completion(&self) -> bool {
             self.completion_panics_remaining
                 .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {

@@ -4219,6 +4219,11 @@ mod tests {
             Ok(())
         }
 
+        // See the note on `advance_transaction_generation` in
+        // `database::sqlite`: `fetch_update` is deprecated on the pinned
+        // nightly and absent from the stable subset, so the stable-compatible
+        // spelling stays with an explicit allow.
+        #[allow(deprecated)]
         fn stop(&mut self) -> Result<(), Box<dyn std::error::Error>> {
             if self
                 .stop_failures_remaining
