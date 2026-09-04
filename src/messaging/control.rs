@@ -1640,7 +1640,7 @@ impl ControlAdvisory {
         {
             return false;
         }
-        !(filter.require_decision_provenance && !self.has_decision_provenance())
+        !filter.require_decision_provenance || self.has_decision_provenance()
     }
 
     /// Serialize the advisory payload to JSON bytes for publication.

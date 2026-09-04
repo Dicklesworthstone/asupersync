@@ -63,7 +63,7 @@
 // clippy's `empty_enum` (in the pinned nightly's lint set) suggests the never
 // type instead; these are public items under the 0.4.x compatibility gate, so
 // their shape cannot change without an approved break.
-#![allow(clippy::empty_enum)]
+#![allow(clippy::empty_enums)]
 
 use crate::record::{ObligationKind, ObligationState};
 use crate::types::{RegionId, id::next_bootstrap_region_id};

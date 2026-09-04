@@ -1013,6 +1013,14 @@ too_many_arguments = "allow"
 type_complexity = "allow"
 match_like_matches_macro = "allow"
 unnecessary_wraps = "allow"
+# `future_not_send` fires on every generic `async fn` whose payload type is not
+# bounded `Send` — the channel send/recv surfaces (`channel::{crash, fault,
+# mpsc, partition, session}`), `Scope`, the HTTP/1 server loop and the stream
+# forwarders. The only way to satisfy it is to add `T: Send` to those public
+# signatures, which is a breaking change to an exhaustively used 0.4.x API and
+# would reject legitimate single-threaded payloads. Surfaced when the
+# nightly-2026-08-31 pin (340ce087b) brought a stricter nursery set.
+future_not_send = "allow"
 unnecessary_sort_by = "allow"
 wrong_self_convention = "allow"
 new_without_default = "allow"

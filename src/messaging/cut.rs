@@ -1551,7 +1551,7 @@ impl CutLatticeIndex {
                         return false;
                     }
                 }
-                !(q.materialized_only && e.materialization != MaterializationState::Materialized)
+                !q.materialized_only || e.materialization == MaterializationState::Materialized
             })
             .collect();
 

@@ -1850,9 +1850,21 @@ impl KafkaConsumer {
             #[cfg(feature = "kafka")]
             if let Some((consumer, broker_ops)) = self.broker_backend() {
                 crate::runtime::spawn_blocking::spawn_blocking_on_thread(move || {
+                    use rdkafka::consumer::RebalanceProtocol;
                     let _guard = broker_ops.lock();
                     leave_group_bounded(&consumer);
-                    consumer.unassign().map_err(map_consumer_error)
+                    // `unassign()` is the EAGER API. librdkafka refuses it
+                    // with `RD_KAFKA_RESP_ERR__STATE` ("Local: Erroneous
+                    // state") on a consumer that negotiated the cooperative
+                    // protocol, so a cooperative-sticky consumer used to fail
+                    // its own close. The leave-group drain above already ran
+                    // the revoke through the callback, which unassigns
+                    // incrementally, so there is nothing left to drop here.
+                    if consumer.rebalance_protocol() == RebalanceProtocol::Cooperative {
+                        Ok(())
+                    } else {
+                        consumer.unassign().map_err(map_consumer_error)
+                    }
                 })
                 .await?;
             }
