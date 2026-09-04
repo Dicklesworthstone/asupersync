@@ -4113,3 +4113,30 @@ Ratios ATP/rsync: 500M encrypted 1.559 (rsync-over-ssh 1.56× faster), 500M nocr
 - **Refuted.** RTT alone (`wan`: QUIC ≈ rsync-ssh) and residual random loss (`wanloss`: +8 %).
 - **Not yet known (A2/A3).** Which limiter dominates after a drop episode — cwnd collapse (NewReno halving per burst-loss episode on the source stream), the in-flight admission cap, PTO-serialized stream retransmission (`QUIC_SOURCE_STREAM_PTO_RETRANSMIT_MAX_PACKETS` per firing), or the pacer's burst size against the queue depth. The sender report carries none of these today; A2 adds a `limiter` block (stall reasons with durations, peak/final cwnd, ssthresh, RTTs, loss timeouts, retransmitted bytes, `sendmsg` errors and the applied socket buffer sizes) so the next `wanqueue` and cross-machine runs answer this directly instead of by inference.
 - Method note: `wanqueue` ran the 500M workload only (the 50M cells finish inside slow start and cannot show a steady-state queue effect); rsync-ssh's cv was 1.4 %, rq-lab 0.2 %, rsyncd 0.3 %.
+
+## 2026-09-03 (SapphireHill) — A3 (asupersync-bi2462.3): the limiter report names the WAN limiter — the fixed 2 MiB source-stream receive window; a static change is refuted in both directions
+
+Method: release `atp` with the A2 limiter report (round-6 tree, `582195258` content), ovh-a netns harness, 500M, encrypted tier, reps 2 (wanqueue rows are noisy at reps 2 — see below). Every row sha-verified unless marked FAIL. rsync-ssh (aes128-gcm) on the same cells: `wan` 27.1 s, `wanqueue` 27.2 s (48.8 s in the 4 MiB run: that regime is noisy for rsync too), `good` 25.0 s, `bad` 129 s. Source-stream receive window varied with the `ATP_QUIC_STREAM_RECV_WINDOW` override; no code change between rows.
+
+| regime | recv window | atp-quic median wall s | dominant stall (share) | retransmitted stream bytes | run |
+|---|---|---:|---|---:|---|
+| `wan` (90 ms, 300 mbit, deep queue) | 2 MiB (default) | 25.867 | stream_credit 90 % | 0 | `20260903T000439Z` (ovh-a tmpfs; rows in the A3 bead comment) |
+| `wan` | 4 MiB | 15.663 | unacked_guard 75 % | 0 | `artifacts/atp_bench_matrix/20260903T004813Z_wan4mib/` |
+| `wan` | 8 MiB | 15.661 | unacked_guard 75 % | 0 | `20260903T001018Z` (ovh-a tmpfs; rows in the A3 bead comment) |
+| `wanqueue` (limit 1000) | 2 MiB | 42.377 | stream_credit 76 % | 1.9 MB (~290 batches) | `20260903T000439Z` |
+| `wanqueue` | 4 MiB | 38.6 / 48.4 (two reps) | — | — | `…_wan4mib/` |
+| `wanqueue` | 8 MiB | 42.0 | unacked_guard 75 %, pacing 26 % | 1.1 MB | `20260903T001018Z` |
+| `good` (shallow shaper) | 2 MiB | 42.354 | stream_credit 54–58 %, pacing ~32 % | 38–42 MB (~550 batches) | `…_goodbad2mib/` |
+| `good` | 8 MiB | 67.709 | unacked_guard 66 %, pacing ~45 % | 305 MB (61 % of the file re-sent) | `…_goodbad8mib/` |
+| `bad` | 2 MiB | 133.671 | stream_credit 60 %, pacing 32 % | 108 KB (90 batches) | `…_goodbad2mib/` |
+| `bad` | 8 MiB | 363 FAIL ×2 (sha_ok=false) | sender died | — | `…_goodbad8mib/` |
+
+Ratios ATP/rsync at 2 MiB: `wan` 0.955, `wanqueue` 1.56, `good` 1.69, `bad` 1.03. At 4 MiB: `wan` 0.577 (1.73× faster than rsync-over-ssh, 255 mbit of 300).
+
+- **Answered (A3).** On the clean high-RTT path the QUIC sender is flow-control-bound: it waits on the receiver's per-stream `MAX_STREAM_DATA` credit 90 % of the time, and the source-stream receive window (`QUIC_SOURCE_STREAM_RECV_WINDOW_BYTES`, 2 MiB) is below the 3.4 MB bandwidth-delay product. NewReno cwnd never bound anywhere (`cwnd` stall = 0 in every row); pacing is the secondary limiter on the shallow-queue regimes; PTO events were 0.
+- **Refuted: a bigger static window.** 8 MiB takes `good` from 42 s to 68 s with 61 % of the file re-sent (the MATRIX-228 repair explosion, reproduced), and kills `bad` outright: the receiver hits `stream receive reassembly fragment limit exceeded` (4096 reassembly chunks per stream, no coalescing — 8 MiB behind one hole is ~7000 chunks) and the sender then times out with `[ASUP-E804]` after 360 s. The 2 MiB path law holds on queue-limited and lossy paths.
+- **Measured: 4 MiB captures the whole WAN win** (15.663 s, identical to 8 MiB) at lower receiver RSS (34 MB vs 43 MB) and under the fragment guard for full-size frames.
+- **Noise note.** `wanqueue` at reps 2 has a cv far above 5 % (38.6 / 48.4 s for QUIC, 44.8 / 48.8 s for rsync in the 4 MiB run vs 27.2 s earlier); no `wanqueue` claim from these runs beyond "the window is not its limiter". Re-measure at reps ≥ 5.
+- **Report caveat found.** `min_rtt_micros` / `smoothed_rtt_micros` / `pto_count` in the limiter block read the transport's estimator, which runs on the ATP data plane's synthetic event-count clock (1 ms per packet), so they are not time (`min_rtt` was 1000 in every row); the wall-clock RTprop is the delivery sampler's. Fixed under A4: `path_rtprop_micros`, `path_bottleneck_bytes_per_s`, `min_unacked_admission_cap_bytes`, `peak_stream_unacked_bytes`, plus `stream_window_requests` / `final_stream_send_window_bytes` for the growth mechanism.
+- **Design (A4, asupersync-bi2462.4).** Sender-gated window growth: the sender sends STREAM_DATA_BLOCKED only while credit is its only gate and the last window's worth of credit went by without a retransmit batch; the receiver doubles the window (up to a 4 MiB cap, clamped by the fragment guard for its MTU) only when the peer reports being blocked at its advertised edge after a full window was consumed. A queue-limited or lossy path never asks and keeps 2 MiB. Lifting the cap to 8–16 MiB needs contiguous reassembly chunks to coalesce (follow-up).
+- Host note: ovh-a's 32 GB tmpfs `/tmp` filled with per-cell workload copies during these runs; later runs live under `/data/tmp/atp_bench_runs/`. The two tmpfs runs' `results.jsonl` were read before the volume was cleared and are quoted in the A3 bead comment; the three disk-backed runs are committed under `artifacts/atp_bench_matrix/`.
