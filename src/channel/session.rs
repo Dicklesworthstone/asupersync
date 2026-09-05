@@ -13,6 +13,8 @@
 //! underlying channel before creating a graded permit. They return the channel's
 //! checked error on denial and retain the same explicit commit/abort requirement
 //! on success. The graded token does not register a second runtime obligation.
+//! Deliberately stateless contexts retain the underlying channel's untracked
+//! behavior; the existing graded region requirement still applies.
 //!
 //! # Two-Phase Protocol
 //!
@@ -2120,22 +2122,22 @@ mod tests {
                     let (once, mut once_rx) = tracked_oneshot::<u32>();
                     let permit = once.reserve_checked(&cx).unwrap();
                     let failure = catch_unwind(AssertUnwindSafe(move || {
-                        let permit = permit;
+                        let owned_permit = permit;
                         if primary_unwind {
                             panic!("planted session owner panic");
                         }
-                        drop(permit);
+                        drop(owned_permit);
                     }));
                     assert_eq!(once_rx.try_recv(), Err(oneshot::TryRecvError::Closed));
                     failure
                 } else {
                     let permit = tx.try_reserve_checked(&cx).unwrap();
                     catch_unwind(AssertUnwindSafe(move || {
-                        let permit = permit;
+                        let owned_permit = permit;
                         if primary_unwind {
                             panic!("planted session owner panic");
                         }
-                        drop(permit);
+                        drop(owned_permit);
                     }))
                 };
                 let failure =
