@@ -225,6 +225,7 @@ assert data["contract_version"] == "rch.capabilities.v1"
 env = {row["name"]: row["effect"] for row in data["env_vars"]}
 assert "RCH_WORKER" in env and "refused" in env["RCH_WORKER"], "installed worker-pin refusal capability absent"
 assert "RCH_REQUIRE_REMOTE" in env and "Fail closed" in env["RCH_REQUIRE_REMOTE"], "strict remote capability absent"
+assert "RCH_DISABLE_TARGET_REUSE" in env and "unique-per-job" in env["RCH_DISABLE_TARGET_REUSE"], "distinct old-build target capability absent"
 PY
 if [[ "$(git branch --show-current)" != "main" || -n "$(git rev-parse --show-prefix)" ]]; then
   log_event "blocked" "source" "run from project root on main"
@@ -290,8 +291,10 @@ verify_fixture_sources
 # Retain a distinct executable with create_new and bounded streaming copy/hash
 # inside the existing Rust helper. Its source is the pre-repair codec plus the
 # current parser/harness overlays, not an independently released historical app.
+# Old archive mtimes must not let the pooled target reuse a current executable.
+# Only this stage requests the installed RCH unique-per-job target capability.
 run_stage "prepare-pre-repair-peer" \
-  run_remote_command "${RCH_OLD_COMMAND[@]}" -- env CARGO_TARGET_DIR="${TARGET_DIR}" CARGO_HOME="${SESSION_CARGO_HOME}" \
+  run_remote_command env RCH_DISABLE_TARGET_REUSE=1 "${RCH_OLD_COMMAND[@]}" -- env CARGO_TARGET_DIR="${TARGET_DIR}" CARGO_HOME="${SESSION_CARGO_HOME}" \
     CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' \
     ASUPERSYNC_EXTENSION_EXPORT_BINARY="${OLD_BINARY}" cargo test --jobs "${SESSION_BUILD_JOBS}" -p asupersync \
     --locked --features tls --test atp_session_negotiation \
