@@ -51,6 +51,52 @@ impl<T> std::fmt::Display for SendError<T> {
 
 impl<T: std::fmt::Debug> std::error::Error for SendError<T> {}
 
+/// A checked send failed before publication, retaining the caller's value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CheckedSendError<T> {
+    /// The channel refused the operation.
+    Channel(SendError<T>),
+    /// The runtime refused the obligation before returning a permit.
+    Admission {
+        /// The authoritative admission refusal.
+        error: crate::runtime::obligation_mailbox::ObligationAdmissionError,
+        /// The value which was not published.
+        value: T,
+    },
+}
+
+impl<T> From<SendError<T>> for CheckedSendError<T> {
+    fn from(error: SendError<T>) -> Self {
+        Self::Channel(error)
+    }
+}
+
+impl<T> std::fmt::Display for CheckedSendError<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Channel(error) => write!(f, "{error}"),
+            Self::Admission { error, .. } => write!(f, "{error}"),
+        }
+    }
+}
+
+impl<T: std::fmt::Debug> std::error::Error for CheckedSendError<T> {}
+
+impl CheckedSendError<()> {
+    fn with_value<T>(self, value: T) -> CheckedSendError<T> {
+        match self {
+            Self::Channel(SendError::Closed(())) => {
+                CheckedSendError::Channel(SendError::Closed(value))
+            }
+            Self::Channel(SendError::Cancelled(())) => {
+                CheckedSendError::Channel(SendError::Cancelled(value))
+            }
+            Self::Admission { error, value: () } => CheckedSendError::Admission { error, value },
+        }
+    }
+}
+
 /// Error returned when receiving fails.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecvError {
@@ -375,6 +421,39 @@ impl<T: Clone> Sender<T> {
             sender: self,
             obligation: cx
                 .try_register_obligation(crate::record::ObligationKind::SendPermit, cx.task_id()),
+            checked: false,
+        })
+    }
+
+    /// Reserves a send permit after authoritative runtime obligation admission.
+    ///
+    /// Like [`Self::reserve`], this is synchronous and never waits for ring
+    /// capacity. Admission does not publish or evict a message. A deliberately
+    /// stateless `Cx` may return an untracked permit; a runtime-associated
+    /// context must have a live holder and available regional obligation quota.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CheckedSendError::Channel`] on cancellation or when no receiver
+    /// is active, and [`CheckedSendError::Admission`] if the runtime refuses the
+    /// obligation. Dropping an admitted permit returns its quota immediately.
+    #[inline]
+    pub fn reserve_checked(&self, cx: &Cx) -> Result<SendPermit<'_, T>, CheckedSendError<()>> {
+        if cx.checkpoint().is_err() {
+            self.channel.record_cancellation();
+            return Err(CheckedSendError::Channel(SendError::Cancelled(())));
+        }
+        if !self.channel.has_receivers_snapshot() {
+            return Err(CheckedSendError::Channel(SendError::Closed(())));
+        }
+
+        let obligation = cx
+            .try_register_obligation_checked(crate::record::ObligationKind::SendPermit, cx.task_id())
+            .map_err(|error| CheckedSendError::Admission { error, value: () })?;
+        Ok(SendPermit {
+            sender: self,
+            obligation,
+            checked: true,
         })
     }
 
@@ -409,6 +488,24 @@ impl<T: Clone> Sender<T> {
             Err(SendError::Cancelled(())) => return Err(SendError::Cancelled(msg)),
         };
         Ok(permit.send(msg))
+    }
+
+    /// Sends synchronously after checked obligation admission.
+    ///
+    /// The receiver count and last-receiver race follow [`Self::send`]. Runtime
+    /// quota is settled before invoking notification callbacks, so another
+    /// checked send may reuse it without waiting for a mailbox drain.
+    ///
+    /// # Errors
+    ///
+    /// Returns the unpublished message with any refusal from
+    /// [`Self::reserve_checked`].
+    #[inline]
+    pub fn send_checked(&self, cx: &Cx, msg: T) -> Result<usize, CheckedSendError<T>> {
+        match self.reserve_checked(cx) {
+            Ok(permit) => Ok(permit.send(msg)),
+            Err(error) => Err(error.with_value(msg)),
+        }
     }
 
     /// Returns the number of active receivers.
@@ -506,6 +603,9 @@ pub struct SendPermit<'a, T> {
     /// when `send` runs (even to zero live receivers: the permit was
     /// honoured), aborted on an unsent drop.
     obligation: Option<crate::runtime::obligation_mailbox::ObligationToken>,
+    /// Preserve legacy callback ordering while checked sends settle before
+    /// callbacks and finish waking detached receivers even if a callback panics.
+    checked: bool,
 }
 
 impl<T> Drop for SendPermit<'_, T> {
@@ -522,7 +622,54 @@ enum FinalLivenessAction {
     ForceZeroReceivers,
 }
 
+/// Own every detached callback before invoking user payload destructors. The
+/// first panic remains visible, and later callbacks still get one attempt.
+/// During an existing unwind, secondary panic payloads must not be dropped.
+struct CheckedSendNotifications {
+    obligation: Option<Arc<crate::runtime::obligation_mailbox::ObligationGateway>>,
+    receivers: SmallVec<[Waker; 4]>,
+}
+
+impl Drop for CheckedSendNotifications {
+    fn drop(&mut self) {
+        let already_panicking = std::thread::panicking();
+        let mut first_panic = None;
+        let mut invoke = |callback: &mut dyn FnMut()| {
+            if let Err(payload) =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(callback))
+            {
+                if already_panicking || first_panic.is_some() {
+                    std::mem::forget(payload);
+                } else {
+                    first_panic = Some(payload);
+                }
+            }
+        };
+        if let Some(gateway) = self.obligation.take() {
+            invoke(&mut || gateway.notify());
+        }
+        for waker in self.receivers.drain(..) {
+            let mut waker = Some(waker);
+            invoke(&mut || {
+                if let Some(waker) = waker.take() {
+                    waker.wake();
+                }
+            });
+        }
+        if let Some(payload) = first_panic {
+            std::panic::resume_unwind(payload);
+        }
+    }
+}
+
 impl<T: Clone> SendPermit<'_, T> {
+    fn checked_notifications(&mut self, receivers: SmallVec<[Waker; 4]>) -> CheckedSendNotifications {
+        CheckedSendNotifications {
+            obligation: self.obligation.take().and_then(|token| token.commit_deferred().1),
+            receivers,
+        }
+    }
+
     /// Builds an opt-in redacted telemetry snapshot.
     #[must_use]
     #[inline]
@@ -549,7 +696,7 @@ impl<T: Clone> SendPermit<'_, T> {
 
     #[inline]
     fn send_impl(mut self, msg: T, final_liveness_action: FinalLivenessAction) -> usize {
-        if let Some(token) = self.obligation.take() {
+        if !self.checked && let Some(token) = self.obligation.take() {
             let _ = token.commit();
         }
         let mut inner = self.sender.channel.inner.lock();
@@ -559,6 +706,7 @@ impl<T: Clone> SendPermit<'_, T> {
         // is waiting to acquire `inner`.
         if self.sender.channel.receiver_count.load(Ordering::Acquire) == 0 {
             drop(inner);
+            let _notifications = self.checked.then(|| self.checked_notifications(SmallVec::new()));
             drop(msg);
             return 0;
         }
@@ -590,6 +738,7 @@ impl<T: Clone> SendPermit<'_, T> {
                 inner.buffer.push_front(slot);
             }
             drop(inner);
+            let _notifications = self.checked.then(|| self.checked_notifications(SmallVec::new()));
             drop(rolled_back);
             return 0;
         }
@@ -601,10 +750,14 @@ impl<T: Clone> SendPermit<'_, T> {
         let wakers_to_wake: SmallVec<[Waker; 4]> = inner.wakers.drain_values().collect();
 
         drop(inner);
-        drop(popped);
-
-        for waker in wakers_to_wake {
-            waker.wake();
+        if self.checked {
+            let _notifications = self.checked_notifications(wakers_to_wake);
+            drop(popped);
+        } else {
+            drop(popped);
+            for waker in wakers_to_wake {
+                waker.wake();
+            }
         }
 
         live_receivers
