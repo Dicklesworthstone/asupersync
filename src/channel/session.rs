@@ -9,6 +9,11 @@
 //!
 //! The receiver side is unchanged — obligation tracking only affects the sender.
 //!
+//! The additive `*_checked` sender methods obtain runtime admission through the
+//! underlying channel before creating a graded permit. They return the channel's
+//! checked error on denial and retain the same explicit commit/abort requirement
+//! on success. The graded token does not register a second runtime obligation.
+//!
 //! # Two-Phase Protocol
 //!
 //! ```text
@@ -64,6 +69,22 @@ fn reserve_tracked_send_obligation_for_region(
     }
 
     ObligationToken::<SendPermit>::reserve(description, region)
+}
+
+fn checked_mpsc_error_with_value<T>(
+    error: mpsc::CheckedSendError<()>,
+    value: T,
+) -> mpsc::CheckedSendError<T> {
+    match error {
+        mpsc::CheckedSendError::Channel(error) => mpsc::CheckedSendError::Channel(match error {
+            mpsc::SendError::Disconnected(()) => mpsc::SendError::Disconnected(value),
+            mpsc::SendError::Full(()) => mpsc::SendError::Full(value),
+            mpsc::SendError::Cancelled(()) => mpsc::SendError::Cancelled(value),
+        }),
+        mpsc::CheckedSendError::Admission { error, value: () } => {
+            mpsc::CheckedSendError::Admission { error, value }
+        }
+    }
 }
 
 /// Redacted telemetry for one underlying channel inside a session wrapper.
@@ -216,6 +237,42 @@ impl<T> TrackedSender<T> {
         Ok(TrackedPermit { permit, obligation })
     }
 
+    /// Reserves a slot with runtime admission before creating a graded permit.
+    ///
+    /// Delegates cancellation, FIFO waiting, and admission to
+    /// [`mpsc::Sender::reserve_checked`]. Admission failure releases the channel
+    /// slot and returns its checked error without creating a graded token.
+    /// The successful permit still requires explicit send or abort.
+    ///
+    /// # Panics
+    ///
+    /// Like the legacy session reservation, requires a non-root region for
+    /// graded tracking outside test-internal builds.
+    pub async fn reserve_checked<'a>(
+        &'a self,
+        cx: &'a Cx,
+    ) -> Result<TrackedPermit<'a, T>, mpsc::CheckedSendError<()>> {
+        let permit = self.inner.reserve_checked(cx).await?;
+        let obligation =
+            reserve_tracked_send_obligation_for_region("TrackedPermit(mpsc)", cx.region_id());
+        Ok(TrackedPermit { permit, obligation })
+    }
+
+    /// Attempts checked reservation without waiting for channel capacity.
+    ///
+    /// Uses [`mpsc::Sender::try_reserve_checked`] exactly once and has the same
+    /// graded lifecycle and non-root region requirement as
+    /// [`Self::reserve_checked`].
+    pub fn try_reserve_checked(
+        &self,
+        cx: &Cx,
+    ) -> Result<TrackedPermit<'_, T>, mpsc::CheckedSendError<()>> {
+        let permit = self.inner.try_reserve_checked(cx)?;
+        let obligation =
+            reserve_tracked_send_obligation_for_region("TrackedPermit(mpsc)", cx.region_id());
+        Ok(TrackedPermit { permit, obligation })
+    }
+
     /// Convenience: reserve a slot, send a value, and return the proof.
     pub async fn send(
         &self,
@@ -234,6 +291,40 @@ impl<T> TrackedSender<T> {
             }
         };
         permit.try_send(value)
+    }
+
+    /// Reserves with checked admission, sends the value, and returns its proof.
+    ///
+    /// Returns ownership of `value` on channel or admission failure. The region
+    /// requirement is the same as [`Self::reserve_checked`].
+    pub async fn send_checked(
+        &self,
+        cx: &Cx,
+        value: T,
+    ) -> Result<CommittedProof<SendPermit>, mpsc::CheckedSendError<T>> {
+        match self.reserve_checked(cx).await {
+            Ok(permit) => permit
+                .try_send(value)
+                .map_err(mpsc::CheckedSendError::Channel),
+            Err(error) => Err(checked_mpsc_error_with_value(error, value)),
+        }
+    }
+
+    /// Attempts checked reserve and send without waiting for channel capacity.
+    ///
+    /// Returns ownership of `value` on channel or admission failure. The region
+    /// requirement is the same as [`Self::reserve_checked`].
+    pub fn try_send_checked(
+        &self,
+        cx: &Cx,
+        value: T,
+    ) -> Result<CommittedProof<SendPermit>, mpsc::CheckedSendError<T>> {
+        match self.try_reserve_checked(cx) {
+            Ok(permit) => permit
+                .try_send(value)
+                .map_err(mpsc::CheckedSendError::Channel),
+            Err(error) => Err(checked_mpsc_error_with_value(error, value)),
+        }
     }
 
     /// Returns the underlying [`mpsc::Sender`], discarding obligation tracking.
@@ -387,6 +478,26 @@ impl<T> TrackedOneshotSender<T> {
         Ok(TrackedOneshotPermit { permit, obligation })
     }
 
+    /// Consumes the sender and admits one runtime obligation before grading it.
+    ///
+    /// Delegates to [`oneshot::Sender::reserve_checked`] exactly once. Denial
+    /// closes the consumed sender without creating a graded token; a successful
+    /// permit still requires explicit send or abort.
+    ///
+    /// # Panics
+    ///
+    /// Like the legacy session reservation, requires a non-root region for
+    /// graded tracking outside test-internal builds.
+    pub fn reserve_checked(
+        self,
+        cx: &Cx,
+    ) -> Result<TrackedOneshotPermit<T>, oneshot::CheckedSendError<()>> {
+        let permit = self.inner.reserve_checked(cx)?;
+        let obligation =
+            reserve_tracked_send_obligation_for_region("TrackedOneshotPermit", cx.region_id());
+        Ok(TrackedOneshotPermit { permit, obligation })
+    }
+
     /// Convenience: reserve + send in one step, returning a proof on success.
     pub fn send(
         self,
@@ -398,6 +509,31 @@ impl<T> TrackedOneshotSender<T> {
             Err(oneshot::SendError::Cancelled(())) => Err(oneshot::SendError::Cancelled(value)),
             Err(oneshot::SendError::Disconnected(())) => {
                 Err(oneshot::SendError::Disconnected(value))
+            }
+        }
+    }
+
+    /// Reserves with checked admission, sends the value, and returns its proof.
+    ///
+    /// Returns ownership of `value` on channel or admission failure. The region
+    /// requirement is the same as [`Self::reserve_checked`].
+    pub fn send_checked(
+        self,
+        cx: &Cx,
+        value: T,
+    ) -> Result<CommittedProof<SendPermit>, oneshot::CheckedSendError<T>> {
+        match self.reserve_checked(cx) {
+            Ok(permit) => permit
+                .send(value)
+                .map_err(oneshot::CheckedSendError::Channel),
+            Err(oneshot::CheckedSendError::Channel(error)) => {
+                Err(oneshot::CheckedSendError::Channel(match error {
+                    oneshot::SendError::Cancelled(()) => oneshot::SendError::Cancelled(value),
+                    oneshot::SendError::Disconnected(()) => oneshot::SendError::Disconnected(value),
+                }))
+            }
+            Err(oneshot::CheckedSendError::Admission { error, value: () }) => {
+                Err(oneshot::CheckedSendError::Admission { error, value })
             }
         }
     }
@@ -1717,5 +1853,420 @@ mod tests {
         );
 
         crate::test_complete!("tracked_mpsc_send_recv_under_lab_runtime");
+    }
+
+    // These are component tests using a real Lab-owned task Cx and its shared
+    // regional admission gate. The task remains live until all wrapper actions
+    // finish; no scheduler turn or mailbox drain can manufacture reusable credit.
+    fn checked_session_fixture(
+        limit: usize,
+    ) -> (crate::lab::LabRuntime, Cx, crate::runtime::TaskHandle<()>) {
+        let mut lab =
+            crate::lab::LabRuntime::new(crate::lab::LabConfig::new(0x28_5e55).max_steps(128));
+        let root = lab.state.create_root_region(Budget::INFINITE);
+        let region = lab
+            .state
+            .create_child_region(root, Budget::INFINITE)
+            .unwrap();
+        assert_ne!(
+            region.as_u64(),
+            0,
+            "exercise the production graded-token path"
+        );
+        assert!(lab.state.set_region_limits(
+            region,
+            crate::record::region::RegionLimits {
+                max_obligations: Some(limit),
+                ..crate::record::region::RegionLimits::UNLIMITED
+            }
+        ));
+        let (task, handle) = lab
+            .state
+            .create_task(region, Budget::INFINITE, async {})
+            .unwrap();
+        let cx = lab.state.task(task).unwrap().cx.clone().unwrap();
+        (lab, cx, handle)
+    }
+
+    fn checked_session_ready<F: Future>(future: F) -> F::Output {
+        let mut future = std::pin::pin!(future);
+        let mut context = Context::from_waker(std::task::Waker::noop());
+        let Poll::Ready(result) = future.as_mut().poll(&mut context) else {
+            panic!("checked operation with available capacity must finish in one poll");
+        };
+        result
+    }
+
+    fn finish_checked_session_fixture(
+        mut lab: crate::lab::LabRuntime,
+        cx: &Cx,
+        mut handle: crate::runtime::TaskHandle<()>,
+        committed: u64,
+        aborted: u64,
+    ) {
+        let mailbox = lab.state.obligation_gateway().unwrap().mailbox().clone();
+        let reservations = committed + aborted;
+        assert_eq!(mailbox.stats().posted, 2 * reservations);
+        assert_eq!(
+            mailbox.stats().applied,
+            0,
+            "credit reuse precedes the drain"
+        );
+        lab.scheduler.lock().schedule(cx.task_id(), 0);
+        let report = lab.run_until_quiescent_with_report();
+        assert!(
+            report.oracle_report.all_passed(),
+            "{:?}",
+            report.oracle_report.failures()
+        );
+        assert!(report.invariant_violations.is_empty());
+        assert!(handle.try_join().unwrap().is_some());
+        let stats = mailbox.stats();
+        tracing::info!(?stats, ?cx, committed, aborted, "checked session settled");
+        assert_eq!(stats.posted, stats.applied);
+        assert_eq!(
+            stats.reserved, reservations,
+            "one runtime token per graded permit"
+        );
+        assert_eq!(stats.committed, committed);
+        assert_eq!(stats.aborted, aborted);
+        assert_eq!(stats.refused, 0);
+        assert_eq!(stats.leaked, 0);
+        assert_eq!(mailbox.open_tickets(), 0);
+        assert_eq!(lab.state.pending_obligation_count(), 0);
+        assert_eq!(lab.state.leak_count(), 0);
+    }
+
+    #[test]
+    fn checked_session_zero_quota_preserves_values_without_graded_permits() {
+        use crate::runtime::obligation_mailbox::ObligationAdmissionError;
+        init_test("checked_session_zero_quota_preserves_values_without_graded_permits");
+        let (lab, cx, handle) = checked_session_fixture(0);
+        let error = ObligationAdmissionError::LimitReached { limit: 0, live: 0 };
+        let (tx, mut rx) = tracked_channel::<String>(1);
+        assert_eq!(
+            checked_session_ready(tx.reserve_checked(&cx)).unwrap_err(),
+            mpsc::CheckedSendError::Admission { error, value: () }
+        );
+        assert_eq!(
+            tx.try_reserve_checked(&cx).unwrap_err(),
+            mpsc::CheckedSendError::Admission { error, value: () }
+        );
+        assert_eq!(
+            checked_session_ready(tx.send_checked(&cx, String::from("async owned"))).unwrap_err(),
+            mpsc::CheckedSendError::Admission {
+                error,
+                value: String::from("async owned")
+            }
+        );
+        assert_eq!(
+            tx.try_send_checked(&cx, String::from("sync owned"))
+                .unwrap_err(),
+            mpsc::CheckedSendError::Admission {
+                error,
+                value: String::from("sync owned")
+            }
+        );
+        assert_eq!(rx.try_recv(), Err(mpsc::RecvError::Empty));
+        assert_eq!(tx.telemetry_snapshot(1).reserved_uncommitted_obligations, 0);
+        assert_eq!(tx.telemetry_snapshot(1).send_waiter_count, 0);
+
+        let (once, mut once_rx) = tracked_oneshot::<String>();
+        assert_eq!(
+            once.reserve_checked(&cx).unwrap_err(),
+            oneshot::CheckedSendError::Admission { error, value: () }
+        );
+        assert_eq!(once_rx.try_recv(), Err(oneshot::TryRecvError::Closed));
+        let (once, mut once_rx) = tracked_oneshot::<String>();
+        assert_eq!(
+            once.send_checked(&cx, String::from("once owned"))
+                .unwrap_err(),
+            oneshot::CheckedSendError::Admission {
+                error,
+                value: String::from("once owned")
+            }
+        );
+        assert_eq!(once_rx.try_recv(), Err(oneshot::TryRecvError::Closed));
+        // Quota denial must also leave the physical MPSC slot usable by the
+        // unchanged legacy API. Explicitly abort its separate graded token.
+        let proof = tx.try_reserve(&cx).unwrap().abort();
+        assert_eq!(proof.kind(), crate::record::ObligationKind::SendPermit);
+        finish_checked_session_fixture(lab, &cx, handle, 0, 0);
+    }
+
+    #[test]
+    fn checked_session_shared_quota_registers_once_and_reuses_credit_in_one_poll() {
+        use crate::runtime::obligation_mailbox::ObligationAdmissionError;
+        init_test("checked_session_shared_quota_registers_once_and_reuses_credit_in_one_poll");
+        let (lab, cx, handle) = checked_session_fixture(1);
+        let (tx, mut rx) = tracked_channel::<String>(2);
+        let permit = checked_session_ready(tx.reserve_checked(&cx)).unwrap();
+        let error = ObligationAdmissionError::LimitReached { limit: 1, live: 1 };
+        // A second physical slot is free: only the shared runtime quota refuses.
+        assert_eq!(
+            tx.try_send_checked(&cx, String::from("denied"))
+                .unwrap_err(),
+            mpsc::CheckedSendError::Admission {
+                error,
+                value: String::from("denied")
+            }
+        );
+        let (once, mut once_rx) = tracked_oneshot::<String>();
+        assert_eq!(
+            once.send_checked(&cx, String::from("cross-channel denied"))
+                .unwrap_err(),
+            oneshot::CheckedSendError::Admission {
+                error,
+                value: String::from("cross-channel denied")
+            }
+        );
+        assert_eq!(once_rx.try_recv(), Err(oneshot::TryRecvError::Closed));
+        assert_eq!(tx.telemetry_snapshot(2).reserved_uncommitted_obligations, 1);
+        let proof = permit.send(String::from("first")).unwrap();
+        assert_eq!(proof.kind(), crate::record::ObligationKind::SendPermit);
+        assert_eq!(rx.try_recv(), Ok(String::from("first")));
+        let proof = tx.try_reserve_checked(&cx).unwrap().abort();
+        assert_eq!(proof.kind(), crate::record::ObligationKind::SendPermit);
+        let (once, mut once_rx) = tracked_oneshot::<String>();
+        let proof = once.reserve_checked(&cx).unwrap().abort();
+        assert_eq!(proof.kind(), crate::record::ObligationKind::SendPermit);
+        assert_eq!(once_rx.try_recv(), Err(oneshot::TryRecvError::Closed));
+        let (once, mut once_rx) = tracked_oneshot::<String>();
+        let proof = once.send_checked(&cx, String::from("once")).unwrap();
+        assert_eq!(proof.kind(), crate::record::ObligationKind::SendPermit);
+        assert_eq!(once_rx.try_recv(), Ok(String::from("once")));
+        let _proof = checked_session_ready(tx.send_checked(&cx, String::from("async"))).unwrap();
+        assert_eq!(rx.try_recv(), Ok(String::from("async")));
+        let _proof = tx.try_send_checked(&cx, String::from("sync")).unwrap();
+        assert_eq!(rx.try_recv(), Ok(String::from("sync")));
+        assert_eq!(tx.telemetry_snapshot(2).reserved_uncommitted_obligations, 0);
+        finish_checked_session_fixture(lab, &cx, handle, 4, 2);
+    }
+
+    #[test]
+    fn checked_session_channel_errors_keep_values_and_abort_runtime_tokens() {
+        init_test("checked_session_channel_errors_keep_values_and_abort_runtime_tokens");
+        let (lab, cx, handle) = checked_session_fixture(1);
+        let (tx, rx) = tracked_channel::<String>(1);
+        let permit = tx.try_reserve_checked(&cx).unwrap();
+        assert_eq!(
+            tx.try_send_checked(&cx, String::from("full")).unwrap_err(),
+            mpsc::CheckedSendError::Channel(mpsc::SendError::Full(String::from("full")))
+        );
+        drop(rx);
+        assert_eq!(
+            permit.try_send(String::from("disconnected")).unwrap_err(),
+            mpsc::SendError::Disconnected(String::from("disconnected"))
+        );
+        assert_eq!(
+            checked_session_ready(tx.send_checked(&cx, String::from("closed"))).unwrap_err(),
+            mpsc::CheckedSendError::Channel(mpsc::SendError::Disconnected(String::from("closed")))
+        );
+        let (once, once_rx) = tracked_oneshot::<String>();
+        drop(once_rx);
+        assert_eq!(
+            once.send_checked(&cx, String::from("once closed"))
+                .unwrap_err(),
+            oneshot::CheckedSendError::Channel(oneshot::SendError::Disconnected(String::from(
+                "once closed"
+            )))
+        );
+        cx.set_cancel_requested(true);
+        let (tx, mut rx) = tracked_channel::<String>(1);
+        assert_eq!(
+            checked_session_ready(tx.send_checked(&cx, String::from("async cancelled")))
+                .unwrap_err(),
+            mpsc::CheckedSendError::Channel(mpsc::SendError::Cancelled(String::from(
+                "async cancelled"
+            )))
+        );
+        assert_eq!(
+            tx.try_send_checked(&cx, String::from("sync cancelled"))
+                .unwrap_err(),
+            mpsc::CheckedSendError::Channel(mpsc::SendError::Cancelled(String::from(
+                "sync cancelled"
+            )))
+        );
+        assert_eq!(rx.try_recv(), Err(mpsc::RecvError::Empty));
+        let (once, mut once_rx) = tracked_oneshot::<String>();
+        assert_eq!(
+            once.send_checked(&cx, String::from("once cancelled"))
+                .unwrap_err(),
+            oneshot::CheckedSendError::Channel(oneshot::SendError::Cancelled(String::from(
+                "once cancelled"
+            )))
+        );
+        assert_eq!(once_rx.try_recv(), Err(oneshot::TryRecvError::Closed));
+        finish_checked_session_fixture(lab, &cx, handle, 0, 2);
+    }
+
+    fn checked_session_panic_message(payload: &(dyn std::any::Any + Send)) -> &str {
+        payload
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| payload.downcast_ref::<&str>().copied())
+            .expect("planted panic must retain a string payload")
+    }
+
+    #[test]
+    fn checked_session_drop_bombs_and_primary_unwind_return_runtime_credit() {
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+        init_test("checked_session_drop_bombs_and_primary_unwind_return_runtime_credit");
+        for oneshot in [false, true] {
+            for primary_unwind in [false, true] {
+                let (lab, cx, handle) = checked_session_fixture(1);
+                let (tx, mut rx) = tracked_channel::<u32>(1);
+                let failure = if oneshot {
+                    let (once, mut once_rx) = tracked_oneshot::<u32>();
+                    let permit = once.reserve_checked(&cx).unwrap();
+                    let failure = catch_unwind(AssertUnwindSafe(move || {
+                        let permit = permit;
+                        if primary_unwind {
+                            panic!("planted session owner panic");
+                        }
+                        drop(permit);
+                    }));
+                    assert_eq!(once_rx.try_recv(), Err(oneshot::TryRecvError::Closed));
+                    failure
+                } else {
+                    let permit = tx.try_reserve_checked(&cx).unwrap();
+                    catch_unwind(AssertUnwindSafe(move || {
+                        let permit = permit;
+                        if primary_unwind {
+                            panic!("planted session owner panic");
+                        }
+                        drop(permit);
+                    }))
+                };
+                let failure =
+                    failure.expect_err("unresolved graded permits must never silently drop");
+                let message = checked_session_panic_message(failure.as_ref());
+                if primary_unwind {
+                    assert_eq!(message, "planted session owner panic");
+                } else {
+                    assert!(
+                        message.contains("[ASUP-E101] OBLIGATION TOKEN LEAKED"),
+                        "{message}"
+                    );
+                }
+                assert_eq!(tx.telemetry_snapshot(3).reserved_uncommitted_obligations, 0);
+                assert_eq!(rx.try_recv(), Err(mpsc::RecvError::Empty));
+                let _proof = tx.try_send_checked(&cx, 37).unwrap();
+                assert_eq!(rx.try_recv(), Ok(37));
+                finish_checked_session_fixture(lab, &cx, handle, 1, 1);
+            }
+        }
+    }
+
+    #[test]
+    fn checked_session_notifier_unwind_preserves_primary_panic_and_settlement() {
+        use crate::runtime::obligation_mailbox::ObligationGateway;
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        init_test("checked_session_notifier_unwind_preserves_primary_panic_and_settlement");
+        for oneshot in [false, true] {
+            for phase in ["admission", "commit", "abort"] {
+                let (lab, cx, handle) = checked_session_fixture(1);
+                let mailbox = lab.state.obligation_gateway().unwrap().mailbox().clone();
+                let notifications = Arc::new(AtomicUsize::new(0));
+                let observed = notifications.clone();
+                let liveness = Arc::new(());
+                let gateway = Arc::new(ObligationGateway::new(
+                    mailbox,
+                    Arc::new(move || {
+                        let index = observed.fetch_add(1, Ordering::SeqCst);
+                        if index == usize::from(phase != "admission") {
+                            panic!("planted session {phase} notifier panic");
+                        }
+                    }),
+                    Arc::downgrade(&liveness),
+                ));
+                let cx = cx.with_obligation_gateway(Some(gateway), None);
+                let (tx, mut rx) = tracked_channel::<u32>(1);
+                let failure = if oneshot {
+                    let (once, mut once_rx) = tracked_oneshot::<u32>();
+                    let failure = catch_unwind(AssertUnwindSafe(|| {
+                        let permit = once.reserve_checked(&cx).unwrap();
+                        if phase == "commit" {
+                            let _proof = permit.send(41).unwrap();
+                        } else {
+                            let _proof = permit.abort();
+                        }
+                    }));
+                    if phase == "commit" {
+                        assert_eq!(once_rx.try_recv(), Ok(41));
+                    } else {
+                        assert_eq!(once_rx.try_recv(), Err(oneshot::TryRecvError::Closed));
+                    }
+                    failure
+                } else {
+                    let failure = catch_unwind(AssertUnwindSafe(|| {
+                        let permit = checked_session_ready(tx.reserve_checked(&cx)).unwrap();
+                        if phase == "commit" {
+                            let _proof = permit.send(41).unwrap();
+                        } else {
+                            let _proof = permit.abort();
+                        }
+                    }));
+                    if phase == "commit" {
+                        assert_eq!(rx.try_recv(), Ok(41));
+                    }
+                    failure
+                };
+                let failure = failure.expect_err("the selected real gateway callback must panic");
+                assert_eq!(
+                    checked_session_panic_message(failure.as_ref()),
+                    format!("planted session {phase} notifier panic")
+                );
+                assert_eq!(tx.telemetry_snapshot(4).reserved_uncommitted_obligations, 0);
+                assert_eq!(rx.try_recv(), Err(mpsc::RecvError::Empty));
+                assert_eq!(
+                    notifications.load(Ordering::SeqCst),
+                    if phase == "admission" { 1 } else { 2 }
+                );
+                let _proof = tx.try_send_checked(&cx, 43).unwrap();
+                assert_eq!(rx.try_recv(), Ok(43));
+                assert_eq!(
+                    notifications.load(Ordering::SeqCst),
+                    if phase == "admission" { 3 } else { 4 }
+                );
+                finish_checked_session_fixture(
+                    lab,
+                    &cx,
+                    handle,
+                    1 + u64::from(phase == "commit"),
+                    u64::from(phase != "commit"),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn checked_session_dropping_pending_reservation_retires_waiter_without_token() {
+        init_test("checked_session_dropping_pending_reservation_retires_waiter_without_token");
+        let (lab, cx, handle) = checked_session_fixture(1);
+        let (tx, mut rx) = tracked_channel::<u32>(1);
+        let permit = tx.try_reserve_checked(&cx).unwrap();
+        let mut waiting = Box::pin(tx.reserve_checked(&cx));
+        let mut context = Context::from_waker(std::task::Waker::noop());
+        assert!(waiting.as_mut().poll(&mut context).is_pending());
+        assert_eq!(tx.telemetry_snapshot(5).send_waiter_count, 1);
+        assert_eq!(
+            lab.state
+                .obligation_gateway()
+                .unwrap()
+                .mailbox()
+                .stats()
+                .posted,
+            1
+        );
+        drop(waiting);
+        assert_eq!(tx.telemetry_snapshot(5).send_waiter_count, 0);
+        assert_eq!(tx.telemetry_snapshot(5).reserved_uncommitted_obligations, 1);
+        let _proof = permit.abort();
+        let _proof = checked_session_ready(tx.send_checked(&cx, 47)).unwrap();
+        assert_eq!(rx.try_recv(), Ok(47));
+        finish_checked_session_fixture(lab, &cx, handle, 1, 1);
     }
 }
