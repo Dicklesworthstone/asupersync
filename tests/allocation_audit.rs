@@ -26,6 +26,7 @@ mod common;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::future::Future;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::task::{Context, Poll};
 
 // =============================================================================
@@ -42,12 +43,37 @@ thread_local! {
     static ALLOC_BYTES: Cell<u64> = const { Cell::new(0) };
 }
 
+// Disabled for all existing audits. The native paired measurement opts in
+// while holding ALLOC_TEST_GUARD and counts every thread in this process.
+static NATIVE_COST_COUNTING: AtomicBool = AtomicBool::new(false);
+static NATIVE_COST_ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
+static NATIVE_COST_BYTES: AtomicU64 = AtomicU64::new(0);
+static NATIVE_COST_COUNTER_WRITERS: AtomicUsize = AtomicUsize::new(0);
+static NATIVE_COST_WINDOW_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+fn count_native_cost_allocation(bytes: usize) {
+    let generation = NATIVE_COST_WINDOW_GENERATION.load(Ordering::SeqCst);
+    if NATIVE_COST_COUNTING.load(Ordering::SeqCst) {
+        NATIVE_COST_COUNTER_WRITERS.fetch_add(1, Ordering::SeqCst);
+        // A writer paused before joining the window must not update a closed
+        // window. Closing waits for writers that observed this second check.
+        if NATIVE_COST_COUNTING.load(Ordering::SeqCst)
+            && NATIVE_COST_WINDOW_GENERATION.load(Ordering::SeqCst) == generation
+        {
+            NATIVE_COST_ALLOCATIONS.fetch_add(1, Ordering::SeqCst);
+            NATIVE_COST_BYTES.fetch_add(bytes as u64, Ordering::SeqCst);
+        }
+        NATIVE_COST_COUNTER_WRITERS.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         ALLOC_COUNT.with(|count| count.set(count.get().saturating_add(1)));
         ALLOC_BYTES.with(|bytes| {
             bytes.set(bytes.get().saturating_add(layout.size() as u64));
         });
+        count_native_cost_allocation(layout.size());
         unsafe { System.alloc(layout) }
     }
 
@@ -1251,5 +1277,580 @@ fn bytes_mut_advance_flush_discard_is_zero_alloc_vs_split_to() {
         "bytes_mut_advance_flush_discard_is_zero_alloc_vs_split_to",
         advance_allocs = advance_allocs,
         split_to_allocs = split_to_allocs
+    );
+}
+
+// =============================================================================
+// Native paired legacy/checked full-lifecycle cost observations (.28/.29)
+// =============================================================================
+// These are instrumented end-to-end cycle costs, NOT admission-only timings.
+// Every cycle observes one real arena ID while holding its permit, performs
+// the successful operation, and waits for the holder's arena index to empty.
+// Inspector allocation/locking, polling, yield, clocks, trace, and other native
+// runtime work during the process-wide window are deliberately included.
+// Setup, warmup, sample allocation/sorting/logging, and teardown are excluded.
+// Performance evidence requires the exact named test with --exact and
+// --test-threads=1; other invocations still execute all correctness assertions
+// but their observations are explicitly ineligible for performance comparison.
+// No timing/allocation ratio is asserted to be a speed or regression gate.
+
+const NATIVE_COST_WARMUP: usize = 256;
+const NATIVE_COST_SAMPLES: usize = 4096;
+const NATIVE_COST_BLOCKS: usize = 4;
+const NATIVE_COST_OBSERVATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const NATIVE_COST_ARM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
+const NATIVE_COST_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+struct NativeCostWindow;
+
+impl NativeCostWindow {
+    fn wait_for_writers() {
+        let started = std::time::Instant::now();
+        while NATIVE_COST_COUNTER_WRITERS.load(Ordering::SeqCst) != 0 {
+            assert!(
+                started.elapsed() < NATIVE_COST_OBSERVATION_TIMEOUT,
+                "allocation counter writers must finish their atomic-only section"
+            );
+            std::thread::yield_now();
+        }
+    }
+
+    fn start() -> Self {
+        assert!(!NATIVE_COST_COUNTING.load(Ordering::SeqCst));
+        Self::wait_for_writers();
+        NATIVE_COST_WINDOW_GENERATION.fetch_add(1, Ordering::SeqCst);
+        NATIVE_COST_ALLOCATIONS.store(0, Ordering::SeqCst);
+        NATIVE_COST_BYTES.store(0, Ordering::SeqCst);
+        NATIVE_COST_COUNTING.store(true, Ordering::SeqCst);
+        Self
+    }
+
+    fn finish(self) -> AllocSnapshot {
+        NATIVE_COST_COUNTING.store(false, Ordering::SeqCst);
+        Self::wait_for_writers();
+        AllocSnapshot {
+            allocs: NATIVE_COST_ALLOCATIONS.load(Ordering::SeqCst),
+            bytes: NATIVE_COST_BYTES.load(Ordering::SeqCst),
+        }
+    }
+}
+
+impl Drop for NativeCostWindow {
+    fn drop(&mut self) {
+        // Unwinding must never leave the process-wide instrumentation enabled
+        // or replace the primary panic with a second teardown assertion.
+        NATIVE_COST_COUNTING.store(false, Ordering::SeqCst);
+    }
+}
+
+fn verify_native_cost_worker_counter() {
+    // Create the worker and synchronization storage before enabling counting.
+    // Its explicit 4096-byte allocation is opaque to the optimizer and happens
+    // entirely on a different native thread from the caller.
+    let ready = Arc::new(AtomicBool::new(false));
+    let go = Arc::new(AtomicBool::new(false));
+    let done = Arc::new(AtomicBool::new(false));
+    let worker_ready = Arc::clone(&ready);
+    let worker_go = Arc::clone(&go);
+    let worker_done = Arc::clone(&done);
+    let worker = std::thread::spawn(move || {
+        worker_ready.store(true, Ordering::Release);
+        let started = std::time::Instant::now();
+        while !worker_go.load(Ordering::Acquire) {
+            assert!(started.elapsed() < NATIVE_COST_OBSERVATION_TIMEOUT);
+            std::thread::yield_now();
+        }
+        let bytes = std::hint::black_box(vec![0x5a_u8; 4096]);
+        assert_eq!(std::hint::black_box(bytes[4095]), 0x5a);
+        drop(bytes);
+        worker_done.store(true, Ordering::Release);
+    });
+    let started = std::time::Instant::now();
+    while !ready.load(Ordering::Acquire) {
+        assert!(started.elapsed() < NATIVE_COST_OBSERVATION_TIMEOUT);
+        std::thread::yield_now();
+    }
+    let window = NativeCostWindow::start();
+    go.store(true, Ordering::Release);
+    let started = std::time::Instant::now();
+    while !done.load(Ordering::Acquire) {
+        assert!(started.elapsed() < NATIVE_COST_OBSERVATION_TIMEOUT);
+        std::thread::yield_now();
+    }
+    let observed = window.finish();
+    worker.join().expect("native allocator probe must complete");
+    assert!(observed.allocs >= 1);
+    assert!(observed.bytes >= 4096);
+    assert!(!NATIVE_COST_COUNTING.load(Ordering::SeqCst));
+    eprintln!(
+        "native_cost_worker_counter allocations={} bytes={} minimum_explicit_worker_allocation=4096",
+        observed.allocs, observed.bytes
+    );
+}
+
+#[derive(Clone, Copy, Debug)]
+enum NativeCostArm {
+    Legacy,
+    Checked,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum NativeCostPrimitive {
+    Mpsc,
+    Semaphore,
+}
+
+impl NativeCostPrimitive {
+    fn kind(self) -> asupersync::record::ObligationKind {
+        match self {
+            Self::Mpsc => asupersync::record::ObligationKind::SendPermit,
+            Self::Semaphore => asupersync::record::ObligationKind::SemaphorePermit,
+        }
+    }
+}
+
+struct NativeCostObservation {
+    holder: TaskId,
+    region: RegionId,
+    ids: Vec<asupersync::types::ObligationId>,
+    samples_ns: Vec<u64>,
+    allocations: AllocSnapshot,
+    elapsed: std::time::Duration,
+    // Observed cycle-end threads, not a claim that every configured worker
+    // participated in this single-holder workload.
+    cycle_end_threads: Vec<std::thread::ThreadId>,
+}
+
+fn native_cost_holder_ids(
+    observer: &asupersync::runtime::RuntimeHandle,
+    holder: TaskId,
+) -> Vec<asupersync::types::ObligationId> {
+    // Keep the inspector and its state access strictly within this synchronous
+    // call. They must not be retained across a native spawned future's await.
+    let details = observer
+        .task_inspector(Default::default())
+        .expect("owning native runtime remains alive")
+        .inspect_task(holder)
+        .expect("the measured holder is an actual live native task");
+    assert_eq!(details.id, holder);
+    details.obligations
+}
+
+async fn native_cost_observe_reserved(
+    observer: &asupersync::runtime::RuntimeHandle,
+    holder: TaskId,
+) -> asupersync::types::ObligationId {
+    let started = std::time::Instant::now();
+    loop {
+        let ids = native_cost_holder_ids(observer, holder);
+        assert!(
+            ids.len() <= 1,
+            "quota-one holder has unexpected IDs: {ids:?}"
+        );
+        if let Some(id) = ids.first() {
+            return *id;
+        }
+        assert!(
+            started.elapsed() < NATIVE_COST_OBSERVATION_TIMEOUT,
+            "reservation must materialize while its permit is held: holder={holder:?}"
+        );
+        asupersync::runtime::yield_now().await;
+    }
+}
+
+async fn native_cost_observe_settled(
+    observer: &asupersync::runtime::RuntimeHandle,
+    holder: TaskId,
+    reserved: asupersync::types::ObligationId,
+) {
+    let started = std::time::Instant::now();
+    loop {
+        let ids = native_cost_holder_ids(observer, holder);
+        if ids.is_empty() {
+            return;
+        }
+        assert_eq!(ids, [reserved], "only the observed reservation may remain");
+        assert!(
+            started.elapsed() < NATIVE_COST_OBSERVATION_TIMEOUT,
+            "terminal must apply before cycle completion: holder={holder:?} obligation={reserved:?}"
+        );
+        asupersync::runtime::yield_now().await;
+    }
+}
+
+async fn native_cost_cycle(
+    primitive: NativeCostPrimitive,
+    arm: NativeCostArm,
+    cx: &Cx,
+    observer: &asupersync::runtime::RuntimeHandle,
+    sender: &asupersync::channel::mpsc::Sender<u64>,
+    receiver: &mut asupersync::channel::mpsc::Receiver<u64>,
+    semaphore: &asupersync::sync::Semaphore,
+    value: u64,
+) -> asupersync::types::ObligationId {
+    let reserved = match primitive {
+        NativeCostPrimitive::Mpsc => {
+            let permit = match arm {
+                NativeCostArm::Legacy => sender.reserve(cx).await.expect("legacy reservation"),
+                NativeCostArm::Checked => sender
+                    .reserve_checked(cx)
+                    .await
+                    .expect("checked quota-one reservation"),
+            };
+            let id = native_cost_observe_reserved(observer, cx.task_id()).await;
+            permit.try_send(value).expect("accepted native payload");
+            assert_eq!(receiver.try_recv(), Ok(value), "exact u64 delivery");
+            id
+        }
+        NativeCostPrimitive::Semaphore => {
+            let permit = match arm {
+                NativeCostArm::Legacy => {
+                    semaphore.acquire(cx, 1).await.expect("legacy acquisition")
+                }
+                NativeCostArm::Checked => semaphore
+                    .acquire_checked(cx, 1)
+                    .await
+                    .expect("checked quota-one acquisition"),
+            };
+            assert_eq!(permit.count(), 1);
+            let id = native_cost_observe_reserved(observer, cx.task_id()).await;
+            drop(permit);
+            assert_eq!(semaphore.available_permits(), 1, "actual capacity release");
+            id
+        }
+    };
+    native_cost_observe_settled(observer, cx.task_id(), reserved).await;
+    reserved
+}
+
+fn native_cost_validate_cleanup(
+    runtime: &asupersync::runtime::Runtime,
+    primitive: NativeCostPrimitive,
+    observation: &NativeCostObservation,
+) -> usize {
+    use asupersync::record::ObligationState;
+    use asupersync::trace::TraceData;
+
+    let started = std::time::Instant::now();
+    while !runtime.is_quiescent() {
+        assert!(
+            started.elapsed() < NATIVE_COST_SHUTDOWN_TIMEOUT,
+            "native tasks and application barriers must drain; active={:?} leaks={:?}",
+            runtime
+                .task_inspector(Default::default())
+                .list_active_tasks(),
+            runtime.diagnostics().find_leaked_obligations(),
+        );
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    assert!(
+        runtime
+            .task_inspector(Default::default())
+            .list_tasks()
+            .is_empty()
+    );
+    assert!(runtime.diagnostics().find_leaked_obligations().is_empty());
+    let mut ids = observation.ids.clone();
+    ids.sort_unstable();
+    ids.dedup();
+    assert_eq!(ids.len(), NATIVE_COST_WARMUP + NATIVE_COST_SAMPLES);
+    let trace = runtime.trace_snapshot();
+    let retained_events = trace.len();
+    assert!(
+        retained_events < runtime.trace_buffer_capacity(),
+        "fresh native ring must never reach capacity; missing history cannot establish complete lifecycle pairs"
+    );
+    let mut lifecycles = std::collections::BTreeMap::new();
+    for event in trace {
+        if let TraceData::Obligation {
+            obligation,
+            task,
+            region,
+            kind,
+            state,
+            ..
+        } = event.data
+        {
+            assert_eq!(
+                task, observation.holder,
+                "only the live holder creates obligations"
+            );
+            assert_eq!(region, observation.region);
+            assert_eq!(kind, primitive.kind());
+            lifecycles
+                .entry(obligation)
+                .or_insert_with(Vec::new)
+                .push(state);
+        }
+    }
+    assert_eq!(
+        lifecycles.len(),
+        ids.len(),
+        "complete retained trace, no extra obligations"
+    );
+    for id in &ids {
+        assert_eq!(
+            lifecycles
+                .get(id)
+                .expect("every observed ID must have actual trace evidence"),
+            &[ObligationState::Reserved, ObligationState::Committed],
+            "exact successful reservation/terminal pair for {id:?}"
+        );
+    }
+    retained_events
+}
+
+fn native_cost_measure_arm(
+    sharded: bool,
+    primitive: NativeCostPrimitive,
+    arm: NativeCostArm,
+) -> (NativeCostObservation, usize) {
+    use asupersync::runtime::RuntimeBuilder;
+    use asupersync::runtime::config::{RuntimeStateShape, TraceStorageProfile};
+
+    let mut limits = asupersync::record::RegionLimits::UNLIMITED;
+    limits.max_obligations = Some(1);
+    let builder = if sharded {
+        RuntimeBuilder::multi_thread()
+            .worker_threads(2)
+            .with_sharded_state(true)
+    } else {
+        RuntimeBuilder::current_thread()
+    };
+    let runtime = builder
+        .root_region_limits(limits)
+        // Predeclare the same fixed retention envelope for both arms. Cleanup
+        // refuses a full ring and requires all 4352 exact lifecycle pairs;
+        // extra scheduler events may not silently evict required evidence.
+        // This is storage setup, not a claim about the worker's physical RAM.
+        .trace_storage_profile(TraceStorageProfile::LargeMemory256G)
+        .build()
+        .expect("build measured native runtime");
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        assert_eq!(runtime.config().worker_threads, if sharded { 2 } else { 1 });
+        assert_eq!(
+            runtime.config().runtime_state_shape,
+            if sharded {
+                RuntimeStateShape::Sharded
+            } else {
+                RuntimeStateShape::Unified
+            }
+        );
+        assert_eq!(
+            runtime
+                .config()
+                .trace_storage_profile
+                .trace_buffer_capacity(),
+            262_144
+        );
+        assert_eq!(runtime.trace_buffer_capacity(), 262_144);
+        let observer = runtime.handle();
+        let (sender, mut receiver) = asupersync::channel::mpsc::channel::<u64>(1);
+        let observed_sender = sender.clone();
+        let semaphore = Arc::new(asupersync::sync::Semaphore::new(1));
+        let observed_semaphore = Arc::clone(&semaphore);
+        let join = runtime.handle().spawn(async move {
+            let cx = Cx::current().expect("real spawned native holder context");
+            let mut ids = Vec::with_capacity(NATIVE_COST_WARMUP + NATIVE_COST_SAMPLES);
+            let mut samples_ns = Vec::with_capacity(NATIVE_COST_SAMPLES);
+            let mut cycle_end_threads = Vec::with_capacity(if sharded { 2 } else { 1 });
+            assert!(native_cost_holder_ids(&observer, cx.task_id()).is_empty());
+            for index in 0..NATIVE_COST_WARMUP {
+                ids.push(
+                    native_cost_cycle(
+                        primitive,
+                        arm,
+                        &cx,
+                        &observer,
+                        &sender,
+                        &mut receiver,
+                        &semaphore,
+                        index as u64,
+                    )
+                    .await,
+                );
+            }
+            let window = NativeCostWindow::start();
+            let measured_start = std::time::Instant::now();
+            for index in 0..NATIVE_COST_SAMPLES {
+                let started = std::time::Instant::now();
+                let id = native_cost_cycle(
+                    primitive,
+                    arm,
+                    &cx,
+                    &observer,
+                    &sender,
+                    &mut receiver,
+                    &semaphore,
+                    (NATIVE_COST_WARMUP + index) as u64,
+                )
+                .await;
+                let elapsed_ns = u64::try_from(started.elapsed().as_nanos())
+                    .expect("bounded cycle duration fits u64 nanoseconds");
+                samples_ns.push(elapsed_ns);
+                ids.push(id);
+                let current_thread = std::thread::current().id();
+                if !cycle_end_threads.contains(&current_thread) {
+                    assert!(
+                        cycle_end_threads.len() < cycle_end_threads.capacity(),
+                        "sample storage must not grow inside the counting window"
+                    );
+                    cycle_end_threads.push(current_thread);
+                }
+            }
+            let elapsed = measured_start.elapsed();
+            let allocations = window.finish();
+            NativeCostObservation {
+                holder: cx.task_id(),
+                region: cx.region_id(),
+                ids,
+                samples_ns,
+                allocations,
+                elapsed,
+                cycle_end_threads,
+            }
+        });
+        let started = std::time::Instant::now();
+        while !join.is_finished() {
+            assert!(
+                started.elapsed() < NATIVE_COST_ARM_TIMEOUT,
+                "bounded native arm failed to complete: sharded={sharded} primitive={primitive:?} arm={arm:?}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        // Already terminal: this preserves any original spawned-task panic.
+        let observation = runtime.block_on(join);
+        assert!(!NATIVE_COST_COUNTING.load(Ordering::SeqCst));
+        let retained_events = native_cost_validate_cleanup(&runtime, primitive, &observation);
+        let channel = observed_sender.telemetry_snapshot(29);
+        assert_eq!(channel.capacity, 1);
+        assert_eq!(channel.queued_messages, 0);
+        assert_eq!(channel.reserved_uncommitted_obligations, 0);
+        assert_eq!(channel.send_waiter_count, 0);
+        assert_eq!(channel.recv_waiter_count, 0);
+        let semaphore = observed_semaphore.telemetry_snapshot(29);
+        assert_eq!(semaphore.capacity, 1);
+        assert_eq!(semaphore.available_units, 1);
+        assert_eq!(semaphore.occupied_units, 0);
+        assert_eq!(semaphore.waiter_count, 0);
+        (observation, retained_events)
+    }));
+    NATIVE_COST_COUNTING.store(false, Ordering::SeqCst);
+    let shutdown = runtime.shutdown_timeout(NATIVE_COST_SHUTDOWN_TIMEOUT);
+    match outcome {
+        Ok(observation) => {
+            assert!(shutdown, "all native workers must finish teardown");
+            observation
+        }
+        Err(payload) => {
+            if !shutdown {
+                eprintln!("native_cost: shutdown also timed out after the primary arm failure");
+            }
+            std::panic::resume_unwind(payload)
+        }
+    }
+}
+
+fn native_cost_paired(sharded: bool, test_name: &str) {
+    let _guard = ALLOC_TEST_GUARD.lock();
+    init_test(test_name);
+    verify_native_cost_worker_counter();
+    let arguments: Vec<String> = std::env::args().collect();
+    let single_thread = arguments.iter().any(|arg| arg == "--test-threads=1")
+        || arguments
+            .windows(2)
+            .any(|pair| pair == ["--test-threads", "1"]);
+    let eligible_invocation = single_thread
+        && arguments.iter().any(|arg| arg == "--exact")
+        && arguments.iter().any(|arg| arg == test_name);
+    let mut completed_measured_cycles = 0;
+    let mut completed_warmup_cycles = 0;
+    for primitive in [NativeCostPrimitive::Mpsc, NativeCostPrimitive::Semaphore] {
+        for block in 0..NATIVE_COST_BLOCKS {
+            for (position, arm) in [
+                NativeCostArm::Legacy,
+                NativeCostArm::Checked,
+                NativeCostArm::Checked,
+                NativeCostArm::Legacy,
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let (observation, retained_events) =
+                    native_cost_measure_arm(sharded, primitive, arm);
+                assert_eq!(observation.samples_ns.len(), NATIVE_COST_SAMPLES);
+                assert!(!observation.elapsed.is_zero());
+                let mut sorted = observation.samples_ns.clone();
+                sorted.sort_unstable();
+                let p95_index = (95 * NATIVE_COST_SAMPLES).div_ceil(100) - 1;
+                completed_measured_cycles += observation.samples_ns.len();
+                completed_warmup_cycles += observation.ids.len() - observation.samples_ns.len();
+                eprintln!(
+                    "{}",
+                    serde_json::json!({
+                        "scenario": "native_instrumented_full_lifecycle_cost",
+                        "test": test_name, "crate_version": env!("CARGO_PKG_VERSION"),
+                        "debug_assertions": cfg!(debug_assertions),
+                        "performance_invocation_eligible": eligible_invocation,
+                        "backend": if sharded { "two_worker_sharded" } else { "current_thread_unified" },
+                        "configured_workers": if sharded { 2 } else { 1 },
+                        "cycle_end_threads": observation.cycle_end_threads.iter()
+                            .map(|id| format!("{id:?}")).collect::<Vec<_>>(),
+                        "primitive": format!("{primitive:?}"), "arm": format!("{arm:?}"),
+                        "block": block, "abba_position": position,
+                        "region_obligation_limit": 1, "physical_capacity": 1,
+                        "trace_event_slots": 262_144,
+                        "observed_retained_trace_events": retained_events,
+                        "warmup_cycles": NATIVE_COST_WARMUP,
+                        "completed_measured_cycles": observation.samples_ns.len(),
+                        "observed_distinct_reserved_then_committed_ids": observation.ids.len(),
+                        "holder": format!("{:?}", observation.holder),
+                        "region": format!("{:?}", observation.region),
+                        "raw_allocation_calls": observation.allocations.allocs,
+                        "raw_requested_allocation_bytes": observation.allocations.bytes,
+                        "allocation_calls_per_completed_cycle": observation.allocations.allocs as f64 / NATIVE_COST_SAMPLES as f64,
+                        "requested_bytes_per_completed_cycle": observation.allocations.bytes as f64 / NATIVE_COST_SAMPLES as f64,
+                        "window_elapsed_ns": observation.elapsed.as_nanos(),
+                        "completed_cycles_per_second": NATIVE_COST_SAMPLES as f64 / observation.elapsed.as_secs_f64(),
+                        "p95_method": "nearest_rank_ceil_0.95_times_n",
+                        "p95_ns": sorted[p95_index], "raw_samples_ns": observation.samples_ns,
+                        "denominator": "accepted_delivery_or_release_then_observed_terminal_projection",
+                        "includes": "inspector_allocation_and_locking_poll_yield_clock_trace_process_background",
+                        "excludes": "setup_warmup_sample_storage_allocation_sorting_logging_teardown",
+                        "allocation_scope": "process_wide_alloc_calls_and_requested_bytes_not_live_or_peak_bytes",
+                        "cleanup": "zero_tasks_obligations_physical_reservations_waiters_and_joined_workers",
+                        "no_claim": "isolated_admission_cost_speedup_no_regression_external_task_table_full_28_or_29_closure"
+                    })
+                );
+            }
+        }
+    }
+    assert_eq!(
+        completed_measured_cycles,
+        2 * NATIVE_COST_BLOCKS * 4 * NATIVE_COST_SAMPLES
+    );
+    assert_eq!(
+        completed_warmup_cycles,
+        2 * NATIVE_COST_BLOCKS * 4 * NATIVE_COST_WARMUP
+    );
+    assert!(!NATIVE_COST_COUNTING.load(Ordering::SeqCst));
+    eprintln!(
+        "native_cost_complete test={test_name} measured_cycles={completed_measured_cycles} warmup_cycles={completed_warmup_cycles} abba_blocks_per_primitive={NATIVE_COST_BLOCKS} performance_invocation_eligible={eligible_invocation}"
+    );
+}
+
+#[test]
+fn native_obligation_cost_legacy_checked_current_thread() {
+    native_cost_paired(
+        false,
+        "native_obligation_cost_legacy_checked_current_thread",
+    );
+}
+
+#[test]
+fn native_obligation_cost_legacy_checked_two_worker_sharded() {
+    native_cost_paired(
+        true,
+        "native_obligation_cost_legacy_checked_two_worker_sharded",
     );
 }
