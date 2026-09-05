@@ -202,6 +202,11 @@ impl AtpFrameCodec {
             let ext_id = u16::try_from(ext_id_varint.value()).map_err(|_| {
                 FrameError::InvalidFormat("Extension ID too large for u16".to_string())
             })?;
+            if extensions.contains_key(&ext_id) {
+                return Err(FrameError::InvalidFormat(format!(
+                    "Duplicate extension ID {ext_id}",
+                )));
+            }
 
             let Some(ext_len) = try_parse_varint(buf, &mut cursor)? else {
                 return Ok(None); // Need more data
@@ -362,8 +367,12 @@ impl Encoder<Frame> for AtpFrameCodec {
             Self::atp_to_frame_error(VarInt::new(frame.header.extensions.len() as u64))?;
         Self::atp_to_frame_error(ext_count_varint.encode(dst))?;
 
-        // Extensions
-        for (ext_id, ext_data) in &frame.header.extensions {
+        // Match the transcript's numeric ID order without changing the public
+        // map type or copying extension payloads. Decoding still accepts the
+        // unique, unsorted extension order emitted by older peers.
+        let mut extensions: Vec<_> = frame.header.extensions.iter().collect();
+        extensions.sort_unstable_by_key(|(id, _)| **id);
+        for (ext_id, ext_data) in extensions {
             let ext_id_varint = Self::atp_to_frame_error(VarInt::new(*ext_id as u64))?;
             Self::atp_to_frame_error(ext_id_varint.encode(dst))?;
 
@@ -397,6 +406,146 @@ impl From<FrameError> for io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::net::atp::protocol::transcript::TranscriptHasher;
+
+    fn raw_extension_frame(extensions: &[(u16, &[u8])], payload: &[u8]) -> BytesMut {
+        let mut wire = BytesMut::new();
+        for value in [
+            u64::from(ProtocolVersion::V0.0),
+            FrameType::Capabilities as u64,
+            payload.len() as u64,
+            extensions.len() as u64,
+        ] {
+            VarInt::new(value).unwrap().encode(&mut wire).unwrap();
+        }
+        for (id, data) in extensions {
+            VarInt::new(u64::from(*id))
+                .unwrap()
+                .encode(&mut wire)
+                .unwrap();
+            VarInt::new(data.len() as u64)
+                .unwrap()
+                .encode(&mut wire)
+                .unwrap();
+            wire.put_slice(data);
+        }
+        wire.put_slice(payload);
+        wire
+    }
+
+    #[test]
+    fn extension_encoding_is_canonical_across_permutations_and_hash_seeds() {
+        let entries: [(u16, &[u8]); 3] = [(0, b""), (64, b"a"), (u16::MAX, b"z")];
+        let permutations = [
+            [0, 1, 2],
+            [0, 2, 1],
+            [1, 0, 2],
+            [1, 2, 0],
+            [2, 0, 1],
+            [2, 1, 0],
+        ];
+        // Fixed protocol bytes, independent of the map iteration order or codec.
+        let expected = [
+            0, 3, 1, 3, 0, 0, 0x40, 0x40, 1, b'a', 0x80, 0, 0xff, 0xff, 1, b'z', b'p',
+        ];
+        assert_eq!(raw_extension_frame(&entries, b"p").as_ref(), expected);
+        let mut expected_transcript = None;
+        for sample in 0..16 {
+            for order in permutations {
+                let mut frame =
+                    Frame::new(ProtocolVersion::V0, FrameType::Capabilities, b"p".to_vec())
+                        .unwrap();
+                for index in order {
+                    let (id, data) = entries[index];
+                    frame.header.extensions.insert(id, data.to_vec());
+                }
+                let encoded = frame.to_wire_bytes().unwrap();
+                assert_eq!(encoded, expected, "sample={sample}, order={order:?}");
+                let mut buffer = BytesMut::from(encoded.as_slice());
+                let decoded = AtpFrameCodec::new().decode(&mut buffer).unwrap().unwrap();
+                assert!(buffer.is_empty());
+                assert_eq!(decoded.header.extensions, frame.header.extensions);
+                assert_eq!(decoded.payload(), b"p");
+                let mut transcript = TranscriptHasher::new();
+                transcript.update_frame(&decoded);
+                let hash = transcript.finalize();
+                assert_eq!(*expected_transcript.get_or_insert(hash), hash);
+            }
+        }
+        // A deliberately unsorted legacy encoder must fail the canonical-byte
+        // oracle even though its unique extension values remain decodable.
+        let unsorted = raw_extension_frame(&[entries[2], entries[0], entries[1]], b"p");
+        assert_ne!(unsorted.as_ref(), expected);
+    }
+
+    #[test]
+    fn historical_unsorted_extensions_decode_at_every_split_with_the_same_transcript() {
+        let entries: [(u16, &[u8]); 3] = [(u16::MAX, b"z"), (64, b"a"), (0, b"")];
+        let wire = raw_extension_frame(&entries, b"payload");
+        let header_len = wire.len() - b"payload".len();
+        let canonical_wire = raw_extension_frame(&[entries[2], entries[1], entries[0]], b"payload");
+        let canonical = AtpFrameCodec::new()
+            .decode(&mut canonical_wire.clone())
+            .unwrap()
+            .unwrap();
+        let mut transcript = TranscriptHasher::new();
+        transcript.update_frame(&canonical);
+        let expected_hash = transcript.finalize();
+
+        for split in 0..wire.len() {
+            let mut codec = AtpFrameCodec::new();
+            let mut buffer = BytesMut::from(&wire[..split]);
+            assert!(codec.decode(&mut buffer).unwrap().is_none(), "split={split}");
+            if split < header_len {
+                assert_eq!(buffer.as_ref(), &wire[..split], "partial header consumed");
+            }
+            buffer.extend_from_slice(&wire[split..]);
+            let decoded = codec.decode(&mut buffer).unwrap().unwrap();
+            assert_eq!(decoded.header.extensions, canonical.header.extensions);
+            assert_eq!(decoded.payload(), b"payload");
+            assert!(buffer.is_empty());
+            let mut transcript = TranscriptHasher::new();
+            transcript.update_frame(&decoded);
+            assert_eq!(transcript.finalize(), expected_hash, "split={split}");
+            assert_eq!(decoded.to_wire_bytes().unwrap(), canonical_wire.as_ref());
+        }
+    }
+
+    #[test]
+    fn duplicate_extension_ids_refuse_without_consuming_input() {
+        for id in [0, 63, 64, 16383, 16384, u16::MAX] {
+            for second in [b"first".as_slice(), b"different".as_slice(), b"".as_slice()] {
+                let wire = raw_extension_frame(&[(id, b"first"), (id, second)], b"payload");
+                let mut codec = AtpFrameCodec::new();
+                let mut buffer = wire.clone();
+                let error = codec.decode(&mut buffer).unwrap_err();
+                assert!(
+                    matches!(error, FrameError::InvalidFormat(ref message)
+                        if message == &format!("Duplicate extension ID {id}")),
+                    "id={id}, second={second:?}, error={error:?}",
+                );
+                assert_eq!(buffer.as_ref(), wire.as_ref(), "invalid frame consumed");
+
+                // Error handling must not leave the decoder expecting a payload.
+                let mut valid = raw_extension_frame(&[(id, second)], b"next");
+                let decoded = codec.decode(&mut valid).unwrap().unwrap();
+                assert_eq!(decoded.header.extensions.get(&id).unwrap(), second);
+                assert_eq!(decoded.payload(), b"next");
+                assert!(valid.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn empty_and_single_extension_wire_bytes_remain_compatible() {
+        for entries in [Vec::new(), vec![(7, b"ext".as_slice())]] {
+            let wire = raw_extension_frame(&entries, b"data");
+            let mut buffer = wire.clone();
+            let frame = AtpFrameCodec::new().decode(&mut buffer).unwrap().unwrap();
+            assert_eq!(frame.to_wire_bytes().unwrap(), wire.as_ref());
+            assert!(buffer.is_empty());
+        }
+    }
 
     #[test]
     fn test_frame_roundtrip() {
