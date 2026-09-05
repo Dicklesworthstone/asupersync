@@ -400,6 +400,7 @@ impl Worker {
         impl Drop for TaskExecutionGuard<'_> {
             fn drop(&mut self) {
                 if !self.completed && std::thread::panicking() {
+                    let cleanup = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     if let Some(stored) = self.stored.take() {
                         let _ = retire_terminal_task(stored);
                     }
@@ -471,6 +472,13 @@ impl Worker {
                     self.worker.scratch_global.set(global_waiters);
                     self.worker.scratch_foreign_wakers.set(foreign_wakers);
                     self.worker.publish_ready_finalizers(finalizers);
+                    }));
+                    if let Err(payload) = cleanup {
+                        // A lifecycle observer or foreign destructor may panic
+                        // while this guard is already unwinding. Match the
+                        // three-lane guard's secondary-panic containment.
+                        std::mem::forget(payload);
+                    }
                 }
             }
         }
@@ -1231,6 +1239,7 @@ mod tests {
     enum ObligationCompletionMode {
         Ready,
         Error,
+        Cancelled,
         PollPanic,
         DropPanic,
         PollAndDropPanic,
@@ -1280,6 +1289,11 @@ mod tests {
                 this.field_receiver = Some(receiver);
             }
             match this.mode {
+                ObligationCompletionMode::Cancelled => {
+                    cx.cancel_with(crate::types::CancelKind::User, Some("completion fixture cancellation"));
+                    assert!(cx.checkpoint().is_err());
+                    Poll::Ready(crate::types::Outcome::Ok(()))
+                }
                 ObligationCompletionMode::PollPanic
                 | ObligationCompletionMode::PollAndDropPanic => {
                     panic!("obligation completion primary poll panic")
@@ -1303,6 +1317,9 @@ mod tests {
                 crate::cx::Cx::current().is_some(),
                 "Cx remains installed during drop"
             );
+            let has_field = !matches!(self.mode, ObligationCompletionMode::RetainedToken);
+            assert_eq!(self.field_permit.is_some(), has_field);
+            assert_eq!(self.field_receiver.is_some(), has_field);
             self.drops.fetch_add(1, Ordering::SeqCst);
             // Leave the permit in its field: Rust must drop it after this
             // destructor, including the secondary-panic path below.
@@ -1438,6 +1455,7 @@ mod tests {
             .expect("completion attributed to region");
         match mode {
             ObligationCompletionMode::Error => assert!(matches!(outcome, Outcome::Err(_))),
+            ObligationCompletionMode::Cancelled => assert!(matches!(outcome, Outcome::Cancelled(_))),
             ObligationCompletionMode::PollPanic | ObligationCompletionMode::PollAndDropPanic => {
                 assert!(
                     matches!(outcome, Outcome::Panicked(ref p) if p.message().contains("primary poll panic")),
@@ -1518,6 +1536,7 @@ mod tests {
             for mode in [
                 ObligationCompletionMode::Ready,
                 ObligationCompletionMode::Error,
+                ObligationCompletionMode::Cancelled,
             ] {
                 assert_native_obligation_completion(scheduler, mode);
             }
