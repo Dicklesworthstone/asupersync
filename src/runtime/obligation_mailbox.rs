@@ -912,7 +912,8 @@ mod tests {
             let worker_state = Arc::clone(&state);
             let worker_tasks = Arc::clone(&tasks);
             let worker_mailbox = Arc::clone(&mailbox);
-            std::thread::spawn(move || {
+            let (completed_tx, completed_rx) = std::sync::mpsc::sync_channel(1);
+            let worker_thread = std::thread::spawn(move || {
                 assert_eq!(worker.next_task(), Some(holder));
                 worker.execute(holder);
                 assert_eq!(worker_mailbox.stats().posted, limit as u64);
@@ -942,9 +943,22 @@ mod tests {
                     }
                 }
                 worker.execute(holder);
-            })
-            .join()
-            .expect("external native worker completes without panic");
+                drop(worker);
+                completed_tx
+                    .send(())
+                    .expect("completion receiver remains alive");
+            });
+            // A dispatch or lock regression must fail within a bounded wait.
+            // The owned JoinHandle detaches on timeout; no scoped join can
+            // block this test's unwind waiting for the stuck worker.
+            completed_rx
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .unwrap_or_else(|error| {
+                    panic!("external native worker completion limit={limit}: {error}");
+                });
+            worker_thread
+                .join()
+                .expect("external native worker completes without panic");
             assert_eq!(polls.load(Ordering::SeqCst), 2);
             assert_eq!(handle.try_join().unwrap(), Some(83));
             assert!(matches!(
