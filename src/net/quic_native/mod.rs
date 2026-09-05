@@ -64,5 +64,6 @@ pub use transport::{
 };
 #[cfg(feature = "tls")]
 pub use udp_connection::{
-    NativeQuicUdpConnection, NativeQuicUdpConnectionError, NativeQuicUdpIoProgress,
+    ManagedQuicHandoffError, NativeQuicUdpConnection, NativeQuicUdpConnectionError,
+    NativeQuicUdpIoProgress,
 };

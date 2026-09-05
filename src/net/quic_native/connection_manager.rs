@@ -58,13 +58,14 @@ pub struct ConnectionRouter {
 pub(crate) struct RoutedOutgoingPacket {
     pub(crate) connection_id: ConnectionId,
     pub(crate) packet: OutgoingPacket,
+    pub(crate) final_handshake_flight: bool,
 }
 
 /// Handle to a managed QUIC connection with timing and lifecycle state.
 #[derive(Debug)]
 pub struct ConnectionHandle {
     /// The underlying QUIC connection state machine.
-    connection: NativeQuicConnection,
+    connection: RoutedConnection,
     /// Packet-protection provider for 1-RTT UDP handoff.
     packet_protection: Option<ConnectionPacketProtection>,
     /// Remote peer address.
@@ -78,6 +79,61 @@ pub struct ConnectionHandle {
     /// Input may make output ready while the endpoint's send queue is full.
     deferred_spaces: [bool; 3],
     next_deferred_space: usize,
+    /// Imported connections keep their negotiated peer CID and recovery epoch.
+    peer_connection_id: Option<ConnectionId>,
+    clock_origin: Option<Instant>,
+    #[cfg(feature = "tls")]
+    authenticated: Option<AuthenticatedRouting>,
+}
+
+/// Keep the application-facing owner intact when an authenticated socket moves
+/// into the router. Legacy routes retain their original native state machine.
+#[derive(Debug)]
+enum RoutedConnection {
+    Native(NativeQuicConnection),
+    #[cfg(feature = "tls")]
+    Authenticated(super::QuicConnection),
+}
+
+impl std::ops::Deref for RoutedConnection {
+    type Target = NativeQuicConnection;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Native(connection) => connection,
+            #[cfg(feature = "tls")]
+            Self::Authenticated(connection) => connection.inner(),
+        }
+    }
+}
+
+impl std::ops::DerefMut for RoutedConnection {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        match self {
+            Self::Native(connection) => connection,
+            #[cfg(feature = "tls")]
+            Self::Authenticated(connection) => connection.inner_mut(),
+        }
+    }
+}
+
+#[cfg(feature = "tls")]
+#[derive(Debug)]
+struct AuthenticatedRouting {
+    negotiated_alpn: Vec<u8>,
+    final_handshake_flight: Vec<OutgoingPacket>,
+    last_final_flight_retransmit: Option<Instant>,
+    pending_final_flight_packets: usize,
+}
+
+#[cfg(feature = "tls")]
+struct MarkApplicationOutput<'a>(&'a mut bool);
+
+#[cfg(feature = "tls")]
+impl Drop for MarkApplicationOutput<'_> {
+    fn drop(&mut self) {
+        *self.0 = true;
+    }
 }
 
 /// Native QUIC connection removed from the router for application-level handoff.
@@ -227,6 +283,122 @@ impl std::fmt::Display for ConnectionRouterError {
 impl std::error::Error for ConnectionRouterError {}
 
 impl ConnectionRouter {
+    /// All fallible validation precedes this owned move. No negotiated state
+    /// is recreated from the template or from handshake transition flags.
+    #[cfg(feature = "tls")]
+    pub(crate) fn from_authenticated_parts(
+        parts: super::udp_connection::NativeQuicUdpHandoffParts,
+        config_template: NativeQuicConnectionConfig,
+        max_connections: usize,
+        next_timer_deadline: Option<Instant>,
+        now: Instant,
+    ) -> (
+        Self,
+        super::QuicUdpEndpoint,
+        std::collections::VecDeque<ReceivedPacket>,
+    ) {
+        let super::udp_connection::NativeQuicUdpHandoffParts {
+            connection,
+            endpoint,
+            protection,
+            local_cid,
+            peer_cid,
+            peer_addr,
+            negotiated_alpn,
+            final_handshake_flight,
+            early_one_rtt_packets,
+            last_final_flight_retransmit,
+            clock_origin,
+        } = parts;
+        let mut router = Self::with_max_connections(config_template, max_connections);
+        router.connections.insert(
+            local_cid,
+            ConnectionHandle {
+                connection: RoutedConnection::Authenticated(connection),
+                packet_protection: Some(ConnectionPacketProtection { protection }),
+                peer_addr,
+                last_activity: now,
+                established_at: Some(now),
+                next_timer_deadline,
+                deferred_spaces: [false, false, true],
+                next_deferred_space: 0,
+                peer_connection_id: Some(peer_cid),
+                clock_origin: Some(clock_origin),
+                authenticated: Some(AuthenticatedRouting {
+                    negotiated_alpn,
+                    final_handshake_flight,
+                    last_final_flight_retransmit,
+                    pending_final_flight_packets: 0,
+                }),
+            },
+        );
+        (router, endpoint, early_one_rtt_packets.into())
+    }
+
+    #[cfg(feature = "tls")]
+    pub(crate) fn with_authenticated_connection<R>(
+        &mut self,
+        cx: &Cx,
+        connection_id: ConnectionId,
+        operation: impl FnOnce(&mut super::QuicConnection) -> R,
+    ) -> Result<R, ConnectionRouterError> {
+        cx.checkpoint()
+            .map_err(|_| ConnectionRouterError::Cancelled)?;
+        let handle = self
+            .connections
+            .get_mut(&connection_id)
+            .ok_or(ConnectionRouterError::ConnectionNotFound(connection_id))?;
+        let RoutedConnection::Authenticated(connection) = &mut handle.connection else {
+            return Err(ConnectionRouterError::InvalidConnectionState {
+                connection_id,
+                reason: "connection has no authenticated application owner".to_string(),
+            });
+        };
+        // An application callback may queue output and then unwind. Its caller
+        // can resume the same owned endpoint without stranding that output.
+        let _mark = MarkApplicationOutput(&mut handle.deferred_spaces[2]);
+        Ok(operation(connection))
+    }
+
+    #[cfg(feature = "tls")]
+    pub(crate) fn negotiated_alpn(
+        &self,
+        connection_id: ConnectionId,
+    ) -> Result<&[u8], ConnectionRouterError> {
+        let handle = self
+            .connections
+            .get(&connection_id)
+            .ok_or(ConnectionRouterError::ConnectionNotFound(connection_id))?;
+        handle
+            .authenticated
+            .as_ref()
+            .map(|state| state.negotiated_alpn.as_slice())
+            .ok_or_else(|| ConnectionRouterError::InvalidConnectionState {
+                connection_id,
+                reason: "connection has no authenticated ALPN".to_string(),
+            })
+    }
+
+    /// A final-flight copy remains outstanding until its actual UDP sent prefix
+    /// is acknowledged. Other application/PTO packets cannot retire that copy.
+    pub(crate) fn packet_sent(&mut self, packet: &RoutedOutgoingPacket) {
+        #[cfg(feature = "tls")]
+        if packet.final_handshake_flight {
+            if let Some(state) = self
+                .connections
+                .get_mut(&packet.connection_id)
+                .and_then(|handle| handle.authenticated.as_mut())
+            {
+                state.pending_final_flight_packets = state
+                    .pending_final_flight_packets
+                    .checked_sub(1)
+                    .expect("each final-flight packet is acknowledged once");
+            }
+        }
+        #[cfg(not(feature = "tls"))]
+        let _ = packet;
+    }
+
     /// Create a new connection router with the given configuration template.
     pub fn new(config_template: NativeQuicConnectionConfig) -> Self {
         Self::with_max_connections(config_template, DEFAULT_MAX_CONNECTIONS)
@@ -285,14 +457,59 @@ impl ConnectionRouter {
         let now_micros = self.instant_micros(packet.receive_time);
 
         if let Some(handle) = self.connections.get_mut(&connection_id) {
-            handle.last_activity = packet.receive_time;
-            handle
-                .connection
-                .on_datagram_received(cx, packet.data.len() as u64)
-                .map_err(|err| ConnectionRouterError::PacketProcessingFailed {
-                    connection_id,
-                    reason: err.to_string(),
-                })?;
+            let now_micros = handle.clock_origin.map_or(now_micros, |origin| {
+                instant_micros_from(origin, packet.receive_time)
+            });
+            #[cfg(feature = "tls")]
+            if let Some(authenticated) = &mut handle.authenticated {
+                if packet.src_addr != handle.peer_addr {
+                    return Ok(RoutingResult::Drop {
+                        reason: "packet source does not match the authenticated peer".to_string(),
+                    });
+                }
+                if routing_info.space != PacketNumberSpace::ApplicationData {
+                    // These encrypted handshake bytes belong to the retained
+                    // TLS flight, never the legacy plaintext-frame path.
+                    if authenticated.pending_final_flight_packets == 0
+                        && !authenticated.final_handshake_flight.is_empty()
+                        && authenticated
+                            .last_final_flight_retransmit
+                            .is_none_or(|last| {
+                                packet.receive_time.saturating_duration_since(last)
+                                    >= super::udp_connection::FINAL_HANDSHAKE_FLIGHT_RESEND_INTERVAL
+                            })
+                    {
+                        let retained = authenticated
+                            .final_handshake_flight
+                            .iter()
+                            .cloned()
+                            .map(|packet| RoutedOutgoingPacket {
+                                connection_id,
+                                packet,
+                                final_handshake_flight: true,
+                            })
+                            .collect::<Vec<_>>();
+                        authenticated.pending_final_flight_packets = retained.len();
+                        self.pending_deferred_packets.extend(retained);
+                        authenticated.last_final_flight_retransmit = Some(packet.receive_time);
+                    }
+                    return Ok(RoutingResult::Routed {
+                        connection_id,
+                        outgoing_packets: Vec::new(),
+                    });
+                }
+            }
+            let authenticated = handle.clock_origin.is_some();
+            if !authenticated {
+                handle.last_activity = packet.receive_time;
+                handle
+                    .connection
+                    .on_datagram_received(cx, packet.data.len() as u64)
+                    .map_err(|err| ConnectionRouterError::PacketProcessingFailed {
+                        connection_id,
+                        reason: err.to_string(),
+                    })?;
+            }
             let payload = packet.data.get(routing_info.header_len..).ok_or_else(|| {
                 ConnectionRouterError::PacketProcessingFailed {
                     connection_id,
@@ -317,6 +534,18 @@ impl ConnectionRouter {
             } else {
                 payload.to_vec()
             };
+            if authenticated {
+                // Rejected ciphertext cannot extend idle activity or increase
+                // the authenticated connection's datagram accounting.
+                handle
+                    .connection
+                    .on_datagram_received(cx, packet.data.len() as u64)
+                    .map_err(|err| ConnectionRouterError::PacketProcessingFailed {
+                        connection_id,
+                        reason: err.to_string(),
+                    })?;
+                handle.last_activity = packet.receive_time;
+            }
             handle
                 .connection
                 .process_packet_payload(
@@ -349,6 +578,7 @@ impl ConnectionRouter {
                     .extend(packets.into_iter().map(|packet| RoutedOutgoingPacket {
                         connection_id,
                         packet,
+                        final_handshake_flight: false,
                     }));
             }
             Self::refresh_connection_timer(
@@ -443,7 +673,7 @@ impl ConnectionRouter {
         let connection = NativeQuicConnection::new(config);
 
         let handle = ConnectionHandle {
-            connection,
+            connection: RoutedConnection::Native(connection),
             packet_protection: None,
             peer_addr,
             last_activity: Instant::now(),
@@ -451,6 +681,10 @@ impl ConnectionRouter {
             next_timer_deadline: None,
             deferred_spaces: [false; 3],
             next_deferred_space: 0,
+            peer_connection_id: None,
+            clock_origin: None,
+            #[cfg(feature = "tls")]
+            authenticated: None,
         };
 
         self.connections.insert(connection_id, handle);
@@ -500,7 +734,7 @@ impl ConnectionRouter {
 
         self.connections
             .get_mut(&connection_id)
-            .map(|handle| &mut handle.connection)
+            .map(|handle| &mut *handle.connection)
             .ok_or(ConnectionRouterError::ConnectionNotFound(connection_id))
     }
 
@@ -557,6 +791,9 @@ impl ConnectionRouter {
             .connections
             .get_mut(&connection_id)
             .ok_or(ConnectionRouterError::ConnectionNotFound(connection_id))?;
+        let now_micros = handle
+            .clock_origin
+            .map_or(now_micros, |origin| instant_micros_from(origin, now));
         drain_connection_frames(
             cx,
             connection_id,
@@ -598,6 +835,18 @@ impl ConnectionRouter {
             return Err(ConnectionRouterError::Cancelled);
         }
 
+        #[cfg(feature = "tls")]
+        if self
+            .connections
+            .get(&connection_id)
+            .is_some_and(|handle| handle.authenticated.is_some())
+        {
+            return Err(ConnectionRouterError::InvalidConnectionState {
+                connection_id,
+                reason: "authenticated connection ownership must remain with its managed socket and packet protection".to_string(),
+            });
+        }
+
         let handle = self
             .connections
             .remove(&connection_id)
@@ -610,7 +859,11 @@ impl ConnectionRouter {
         ));
         Ok(AcceptedNativeQuicConnection {
             connection_id,
-            connection: handle.connection,
+            connection: match handle.connection {
+                RoutedConnection::Native(connection) => connection,
+                #[cfg(feature = "tls")]
+                RoutedConnection::Authenticated(_) => unreachable!("refused before removal"),
+            },
             peer_addr: handle.peer_addr,
         })
     }
@@ -676,6 +929,9 @@ impl ConnectionRouter {
 
         let now_micros = self.instant_micros(now);
         for (connection_id, handle) in &mut self.connections {
+            let now_micros = handle
+                .clock_origin
+                .map_or(now_micros, |origin| instant_micros_from(origin, now));
             handle
                 .connection
                 .begin_close(cx, now_micros, app_error_code)
@@ -699,6 +955,10 @@ impl ConnectionRouter {
         now_micros: u64,
         now_instant: Instant,
     ) -> Result<(), ConnectionRouterError> {
+        let now_micros = handle.clock_origin.map_or(now_micros, |origin| {
+            instant_micros_from(origin, now_instant)
+        });
+        let origin = handle.clock_origin.unwrap_or(origin);
         handle.next_timer_deadline = handle
             .connection
             .pto_deadline_micros(cx, now_micros)
@@ -777,6 +1037,7 @@ impl ConnectionRouter {
                 .connections
                 .get_mut(&connection_id)
                 .expect("snapshot CID");
+            let origin = handle.clock_origin.unwrap_or(origin);
             if let Some(deadline) = handle.next_timer_deadline {
                 if current_time >= deadline {
                     cx.trace(&format!(
@@ -832,6 +1093,7 @@ impl ConnectionRouter {
                                 .extend(packets.into_iter().map(|packet| RoutedOutgoingPacket {
                                     connection_id,
                                     packet,
+                                    final_handshake_flight: false,
                                 }))
                         }
                         Err(ConnectionRouterError::Cancelled) => {
@@ -902,6 +1164,9 @@ impl ConnectionRouter {
                 .connections
                 .get_mut(&connection_id)
                 .expect("snapshot CID");
+            let now_micros = handle
+                .clock_origin
+                .map_or(now_micros, |origin| instant_micros_from(origin, now));
             let first_space = handle.next_deferred_space;
             for offset in 0..3 {
                 if self.pending_deferred_packets.len() >= max_packets {
@@ -939,6 +1204,7 @@ impl ConnectionRouter {
                             .extend(packets.into_iter().map(|packet| RoutedOutgoingPacket {
                                 connection_id,
                                 packet,
+                                final_handshake_flight: false,
                             }));
                     }
                     Err(error) => {
@@ -1151,11 +1417,13 @@ async fn drain_connection_frames_inner(
     now_micros: u64,
     pto_probe: bool,
 ) -> Result<Vec<OutgoingPacket>, ConnectionRouterError> {
+    let destination_cid = handle.peer_connection_id.unwrap_or(connection_id);
     let max_frame_bytes = if space == PacketNumberSpace::ApplicationData {
         if handle.packet_protection.is_none() {
             return Err(ConnectionRouterError::PacketProtectionUnavailable { connection_id });
         }
-        PROTECTED_1RTT_MAX_PACKET_BYTES.saturating_sub(protected_1rtt_packet_len(connection_id, 0))
+        PROTECTED_1RTT_MAX_PACKET_BYTES
+            .saturating_sub(protected_1rtt_packet_len(destination_cid, 0))
     } else {
         PROTECTED_1RTT_MAX_PACKET_BYTES
     };
@@ -1190,7 +1458,7 @@ async fn drain_connection_frames_inner(
             Some(packet_protection) => {
                 assemble_protected_1rtt_packet_inner(
                     cx,
-                    connection_id,
+                    destination_cid,
                     &mut handle.connection,
                     &mut packet_protection.protection,
                     &frames,

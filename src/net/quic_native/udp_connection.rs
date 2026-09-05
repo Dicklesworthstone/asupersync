@@ -22,17 +22,20 @@ use super::connection_manager::{
     generate_congestion_admitted_1rtt_frames, is_ack_eliciting, protected_1rtt_packet_len,
     unprotect_1rtt_packet,
 };
-use super::endpoint::{OutgoingPacket, QuicUdpEndpoint, QuicUdpEndpointError, ReceivedPacket};
+use super::endpoint::{
+    OutgoingPacket, QuicUdpEndpoint, QuicUdpEndpointConfig, QuicUdpEndpointError, ReceivedPacket,
+};
 use super::endpoint_api::QuicConnection;
 use super::handshake_driver::{
     QuicHandshakeDriver, client_handshake_over_udp, server_handshake_over_udp_with_early_data,
 };
+use super::managed_endpoint::{ManagedEndpointConfig, ManagedEndpointError, ManagedQuicEndpoint};
 use super::streams::StreamRole;
 use super::transport::PacketNumberSpace;
 
 const RECEIVE_BATCH_SIZE: usize = 32;
 const MAX_PACKETS_PER_FLUSH: usize = 64;
-const FINAL_HANDSHAKE_FLIGHT_RESEND_INTERVAL: Duration = Duration::from_millis(750);
+pub(crate) const FINAL_HANDSHAKE_FLIGHT_RESEND_INTERVAL: Duration = Duration::from_millis(750);
 
 /// Progress made by one bounded live-UDP drive operation.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -144,6 +147,8 @@ impl From<ConnectionRouterError> for NativeQuicUdpConnectionError {
 /// silently detach from one another. Callers queue/read streams through
 /// [`Self::connection_mut`], then call [`Self::flush`] and
 /// [`Self::drive_io_once`] from their structured-concurrency scope.
+/// [`Self::into_managed`] transfers this complete owner into a managed endpoint
+/// without repeating the handshake or detaching its packet protection.
 pub struct NativeQuicUdpConnection {
     connection: QuicConnection,
     endpoint: QuicUdpEndpoint,
@@ -156,6 +161,82 @@ pub struct NativeQuicUdpConnection {
     early_one_rtt_packets: Vec<ReceivedPacket>,
     last_final_flight_retransmit: Option<Instant>,
     clock_origin: Instant,
+}
+
+/// Crate-private ownership transfer after the managed endpoint's preflight.
+///
+/// Keep the complete application handle and its original recovery clock. These
+/// parts are moved, never reconstructed from handshake flags or cloned keys.
+/// The retained packet vectors keep their existing order and timestamps.
+pub(crate) struct NativeQuicUdpHandoffParts {
+    pub(crate) connection: QuicConnection,
+    pub(crate) endpoint: QuicUdpEndpoint,
+    pub(crate) protection: AtpPacketProtection,
+    pub(crate) local_cid: ConnectionId,
+    pub(crate) peer_cid: ConnectionId,
+    pub(crate) peer_addr: SocketAddr,
+    pub(crate) negotiated_alpn: Vec<u8>,
+    pub(crate) final_handshake_flight: Vec<OutgoingPacket>,
+    pub(crate) early_one_rtt_packets: Vec<ReceivedPacket>,
+    pub(crate) last_final_flight_retransmit: Option<Instant>,
+    pub(crate) clock_origin: Instant,
+}
+
+/// A refused managed handoff, retaining the original authenticated UDP owner.
+///
+/// No connection, socket, queued stream data, packet-protection state, or
+/// retained handshake/early packets are discarded by a preflight refusal.
+/// Recover the owner with [`Self::into_connection`] to continue driving it or
+/// retry the handoff with a suitable context and configuration.
+#[derive(Debug)]
+pub struct ManagedQuicHandoffError {
+    error: ManagedEndpointError,
+    connection: Box<NativeQuicUdpConnection>,
+}
+
+impl ManagedQuicHandoffError {
+    pub(crate) fn new(error: ManagedEndpointError, connection: NativeQuicUdpConnection) -> Self {
+        Self {
+            error,
+            connection: Box::new(connection),
+        }
+    }
+
+    /// The typed reason the managed endpoint refused the handoff.
+    #[must_use]
+    pub fn error(&self) -> &ManagedEndpointError {
+        &self.error
+    }
+
+    /// Inspect the original owner without consuming the refusal.
+    #[must_use]
+    pub fn connection(&self) -> &NativeQuicUdpConnection {
+        &self.connection
+    }
+
+    /// Recover the original authenticated UDP owner.
+    #[must_use]
+    pub fn into_connection(self) -> NativeQuicUdpConnection {
+        *self.connection
+    }
+
+    /// Recover both the refusal reason and the original owner.
+    #[must_use]
+    pub fn into_parts(self) -> (ManagedEndpointError, NativeQuicUdpConnection) {
+        (self.error, *self.connection)
+    }
+}
+
+impl fmt::Display for ManagedQuicHandoffError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "native QUIC managed handoff refused: {}", self.error)
+    }
+}
+
+impl std::error::Error for ManagedQuicHandoffError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
+    }
 }
 
 impl fmt::Debug for NativeQuicUdpConnection {
@@ -175,6 +256,94 @@ impl fmt::Debug for NativeQuicUdpConnection {
 }
 
 impl NativeQuicUdpConnection {
+    /// Transfer this authenticated connection and its socket to a managed driver.
+    ///
+    /// The handoff preserves the whole application handle, verified TLS state,
+    /// packet-protection provider, negotiated transport parameters and ALPN,
+    /// distinct local/peer connection IDs, original recovery clock, retained
+    /// final handshake flight, and early application packets in their order.
+    /// It performs no network I/O and starts no background task. Drive the
+    /// returned endpoint from the caller's structured-concurrency scope.
+    ///
+    /// The supplied configuration controls managed scheduling and lifecycle.
+    /// Its UDP and connection templates do not reconfigure the already bound
+    /// socket or replace the authenticated connection's negotiated state.
+    ///
+    /// # Errors
+    ///
+    /// Returns the original owner with a typed reason when managed preflight
+    /// refuses the context, configuration, role, clock, or connection state.
+    pub fn into_managed(
+        self,
+        cx: &Cx,
+        config: ManagedEndpointConfig,
+    ) -> Result<ManagedQuicEndpoint, ManagedQuicHandoffError> {
+        ManagedQuicEndpoint::from_authenticated_connection(cx, self, config)
+    }
+
+    /// The exact configuration retained by the already bound UDP endpoint.
+    pub(crate) fn udp_config(&self) -> &QuicUdpEndpointConfig {
+        self.endpoint.config()
+    }
+
+    pub(crate) fn into_managed_parts(self) -> NativeQuicUdpHandoffParts {
+        let Self {
+            connection,
+            endpoint,
+            protection,
+            local_cid,
+            peer_cid,
+            peer_addr,
+            negotiated_alpn,
+            final_handshake_flight,
+            early_one_rtt_packets,
+            last_final_flight_retransmit,
+            clock_origin,
+        } = self;
+        NativeQuicUdpHandoffParts {
+            connection,
+            endpoint,
+            protection,
+            local_cid,
+            peer_cid,
+            peer_addr,
+            negotiated_alpn,
+            final_handshake_flight,
+            early_one_rtt_packets,
+            last_final_flight_retransmit,
+            clock_origin,
+        }
+    }
+
+    pub(crate) fn from_managed_parts(parts: NativeQuicUdpHandoffParts) -> Self {
+        let NativeQuicUdpHandoffParts {
+            connection,
+            endpoint,
+            protection,
+            local_cid,
+            peer_cid,
+            peer_addr,
+            negotiated_alpn,
+            final_handshake_flight,
+            early_one_rtt_packets,
+            last_final_flight_retransmit,
+            clock_origin,
+        } = parts;
+        Self {
+            connection,
+            endpoint,
+            protection,
+            local_cid,
+            peer_cid,
+            peer_addr,
+            negotiated_alpn,
+            final_handshake_flight,
+            early_one_rtt_packets,
+            last_final_flight_retransmit,
+            clock_origin,
+        }
+    }
+
     /// Complete a client handshake over `endpoint` and bind its authenticated
     /// state directly to a live application-data connection.
     pub async fn connect(

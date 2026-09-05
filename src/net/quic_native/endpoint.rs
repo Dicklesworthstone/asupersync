@@ -347,6 +347,12 @@ impl QuicUdpEndpoint {
         self.local_addr
     }
 
+    /// Preserve the bound socket's configuration when adopting its owner.
+    #[cfg(feature = "tls")]
+    pub(crate) fn config(&self) -> &QuicUdpEndpointConfig {
+        &self.config
+    }
+
     /// Get the endpoint ID for logging and tracing.
     #[inline]
     pub fn endpoint_id(&self) -> u64 {

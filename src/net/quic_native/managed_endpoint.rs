@@ -22,7 +22,9 @@ use crate::net::quic_native::{
 use std::collections::VecDeque;
 use std::future::poll_fn;
 use std::net::SocketAddr;
-use std::task::Poll;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::task::{Context, Poll, Wake, Waker};
 use std::time::Instant;
 
 /// Complete managed QUIC endpoint with connection routing and timer integration.
@@ -40,14 +42,71 @@ pub struct ManagedQuicEndpoint {
     shutting_down: bool,
     /// Packets stay owned by the endpoint until the socket acknowledges a sent prefix.
     pending_outgoing: VecDeque<RoutedOutgoingPacket>,
+    /// Receive ownership survives cancellation and preserves handshake-buffered
+    /// application packets ahead of fresh socket input.
+    pending_incoming: VecDeque<ReceivedPacket>,
+    /// An imported authenticated socket cannot create an unauthenticated route
+    /// merely because another datagram resembles an Initial packet.
+    authenticated_only: bool,
     /// Alternate ready read/write batches; timers and cancellation always get a turn.
     prefer_send: bool,
 }
 
-enum EndpointEvent {
+enum EndpointEvent<T> {
     Packets(Vec<ReceivedPacket>),
+    RetainedPackets,
     Sent(std::io::Result<crate::net::quic_native::BatchResult>),
     Timer(Instant),
+    ApplicationTurn,
+    ApplicationComplete(T),
+}
+
+#[derive(Debug)]
+struct ManagedApplicationWake {
+    ready: AtomicBool,
+    parent: std::sync::Mutex<Option<Arc<Waker>>>,
+}
+
+impl ManagedApplicationWake {
+    fn register_parent(&self, parent: &Waker) {
+        let current = self
+            .parent
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .map(Arc::clone);
+        if current.as_ref().is_some_and(|old| old.will_wake(parent)) {
+            return;
+        }
+        // RawWaker clone/drop callbacks execute outside this lock. The lock
+        // only moves Arc ownership, including when the driver changes tasks.
+        let next = Arc::new(parent.clone());
+        let old = self
+            .parent
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .replace(next);
+        drop(old);
+    }
+}
+
+impl Wake for ManagedApplicationWake {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.ready.store(true, Ordering::Release);
+        let parent = self
+            .parent
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .map(Arc::clone);
+        if let Some(parent) = parent {
+            parent.wake_by_ref();
+        }
+    }
 }
 
 /// Configuration for the managed QUIC endpoint.
@@ -127,6 +186,154 @@ impl std::fmt::Display for ManagedEndpointError {
 impl std::error::Error for ManagedEndpointError {}
 
 impl ManagedQuicEndpoint {
+    fn poll_application<T, F>(
+        &mut self,
+        cx: &Cx,
+        wake: &Arc<ManagedApplicationWake>,
+        application: &mut F,
+    ) -> Option<Result<EndpointEvent<T>, ManagedEndpointError>>
+    where
+        F: FnMut(&Cx, &mut Self, &mut Context<'_>) -> Poll<Result<T, ManagedEndpointError>>,
+    {
+        if !wake.ready.swap(false, Ordering::AcqRel) {
+            return None;
+        }
+        let waker = Waker::from(Arc::clone(wake));
+        let mut context = Context::from_waker(&waker);
+        Some(match application(cx, self, &mut context) {
+            Poll::Ready(result) => result.map(EndpointEvent::ApplicationComplete),
+            Poll::Pending => Ok(EndpointEvent::ApplicationTurn),
+        })
+    }
+
+    #[cfg(feature = "tls")]
+    pub(crate) fn from_authenticated_connection(
+        cx: &Cx,
+        connection: super::NativeQuicUdpConnection,
+        mut config: ManagedEndpointConfig,
+    ) -> Result<Self, super::udp_connection::ManagedQuicHandoffError> {
+        use super::udp_connection::ManagedQuicHandoffError;
+        let mut timer_scheduler = QuicTimerScheduler::new();
+        let preflight = (|| -> Result<Instant, ManagedEndpointError> {
+            cx.checkpoint()
+                .map_err(|_| ManagedEndpointError::Cancelled)?;
+            if config.max_connections == 0 || config.packet_batch_size == 0 {
+                return Err(ManagedEndpointError::InvalidConfig(
+                    "max_connections and packet_batch_size must be > 0".to_string(),
+                ));
+            }
+            if config.is_server != (connection.connection().role() == super::StreamRole::Server) {
+                return Err(ManagedEndpointError::InvalidConfig(
+                    "managed role must match the authenticated connection".to_string(),
+                ));
+            }
+            if !connection.connection().can_send_app_data() {
+                return Err(ConnectionRouterError::InvalidConnectionState {
+                    connection_id: connection.local_connection_id(),
+                    reason: "managed handoff requires an established application-data connection"
+                        .to_string(),
+                }
+                .into());
+            }
+            timer_scheduler.now(cx).map_err(Into::into)
+        })();
+        let now = match preflight {
+            Ok(now) => now,
+            Err(error) => return Err(ManagedQuicHandoffError::new(error, connection)),
+        };
+        // The socket is already configured. Retain its requested bind settings;
+        // this does not claim the kernel used those exact buffer capacities.
+        config.udp_config = connection.udp_config().clone();
+        let parts = connection.into_managed_parts();
+        let deadline = (|| -> Result<Option<Instant>, ManagedEndpointError> {
+            let elapsed = now
+                .checked_duration_since(parts.clock_origin)
+                .ok_or_else(|| {
+                    ManagedEndpointError::InvalidConfig(
+                        "managed clock predates the connection epoch".to_string(),
+                    )
+                })?;
+            let now_micros = elapsed.as_micros().min(u128::from(u64::MAX)) as u64;
+            let deadline = parts
+                .connection
+                .inner()
+                .pto_deadline_micros(cx, now_micros)
+                .map_err(|error| ConnectionRouterError::PacketProcessingFailed {
+                    connection_id: parts.local_cid,
+                    reason: error.to_string(),
+                })?;
+            deadline
+                .map(|deadline| {
+                    parts
+                        .clock_origin
+                        .checked_add(std::time::Duration::from_micros(deadline))
+                        .ok_or_else(|| {
+                            ManagedEndpointError::InvalidConfig(
+                                "connection deadline exceeds the managed clock range".to_string(),
+                            )
+                        })
+                })
+                .transpose()
+        })();
+        let deadline = match deadline {
+            Ok(deadline) => deadline,
+            Err(error) => {
+                return Err(ManagedQuicHandoffError::new(
+                    error,
+                    super::NativeQuicUdpConnection::from_managed_parts(parts),
+                ));
+            }
+        };
+        let (connection_router, udp_endpoint, pending_incoming) =
+            ConnectionRouter::from_authenticated_parts(
+                parts,
+                config.connection_config,
+                config.max_connections,
+                deadline,
+                now,
+            );
+        Ok(Self {
+            udp_endpoint,
+            connection_router,
+            timer_scheduler,
+            config,
+            shutting_down: false,
+            pending_outgoing: VecDeque::new(),
+            pending_incoming,
+            authenticated_only: true,
+            prefer_send: true,
+        })
+    }
+
+    /// Access a negotiated application connection while its socket, keys and
+    /// timers remain owned by this endpoint. Output queued before a callback
+    /// panic remains eligible when the caller resumes the driver.
+    #[cfg(feature = "tls")]
+    pub fn with_connection_mut<R>(
+        &mut self,
+        cx: &Cx,
+        connection_id: ConnectionId,
+        operation: impl FnOnce(&mut super::QuicConnection) -> R,
+    ) -> Result<R, ManagedEndpointError> {
+        if self.shutting_down {
+            return Err(ManagedEndpointError::ShuttingDown);
+        }
+        self.connection_router
+            .with_authenticated_connection(cx, connection_id, operation)
+            .map_err(Into::into)
+    }
+
+    /// The ALPN accepted by the original authenticated handshake.
+    #[cfg(feature = "tls")]
+    pub fn negotiated_alpn(
+        &self,
+        connection_id: ConnectionId,
+    ) -> Result<&[u8], ManagedEndpointError> {
+        self.connection_router
+            .negotiated_alpn(connection_id)
+            .map_err(Into::into)
+    }
+
     /// Create a new managed QUIC endpoint bound to the specified address.
     pub async fn bind(
         cx: &Cx,
@@ -178,6 +385,8 @@ impl ManagedQuicEndpoint {
             config,
             shutting_down: false,
             pending_outgoing: VecDeque::new(),
+            pending_incoming: VecDeque::new(),
+            authenticated_only: false,
             prefer_send: true,
         })
     }
@@ -269,7 +478,12 @@ impl ManagedQuicEndpoint {
     /// This processes incoming packets, handles timer events, and manages
     /// connection lifecycle until cancellation or shutdown.
     pub async fn run_event_loop(&mut self, cx: &Cx) -> Result<(), ManagedEndpointError> {
-        let result = self.drive_event_loop(cx).await;
+        let result = self
+            .drive_event_loop(cx, false, |_, _, _| {
+                Poll::<Result<(), ManagedEndpointError>>::Pending
+            })
+            .await
+            .map(|_| ());
         self.timer_scheduler.cancel_pending();
         match result {
             Err(ManagedEndpointError::ConnectionRouter(ConnectionRouterError::Cancelled)) => {
@@ -279,7 +493,45 @@ impl ManagedQuicEndpoint {
         }
     }
 
-    async fn drive_event_loop(&mut self, cx: &Cx) -> Result<(), ManagedEndpointError> {
+    /// Drive authenticated application work together with UDP and protocol
+    /// timers. The callback can access connections through `with_connection_mut`
+    /// and poll its own futures using the supplied task context.
+    ///
+    /// After returning `Pending`, the callback runs again when its registered
+    /// waker fires or transport/timer progress is available. It is not polled by
+    /// a periodic timer. Queued output gets a driver turn before parking.
+    /// `Ready` returns the application result; the endpoint retains queued I/O
+    /// and can be driven again or explicitly shut down by its owner.
+    #[cfg(feature = "tls")]
+    pub async fn run_event_loop_with_application<T, F>(
+        &mut self,
+        cx: &Cx,
+        application: F,
+    ) -> Result<T, ManagedEndpointError>
+    where
+        F: FnMut(&Cx, &mut Self, &mut Context<'_>) -> Poll<Result<T, ManagedEndpointError>>,
+    {
+        let result = self.drive_event_loop(cx, true, application).await;
+        self.timer_scheduler.cancel_pending();
+        match result {
+            Ok(Some(value)) => Ok(value),
+            Ok(None) => Err(ManagedEndpointError::ShuttingDown),
+            Err(ManagedEndpointError::ConnectionRouter(ConnectionRouterError::Cancelled)) => {
+                Err(ManagedEndpointError::Cancelled)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn drive_event_loop<T, F>(
+        &mut self,
+        cx: &Cx,
+        application_enabled: bool,
+        mut application: F,
+    ) -> Result<Option<T>, ManagedEndpointError>
+    where
+        F: FnMut(&Cx, &mut Self, &mut Context<'_>) -> Poll<Result<T, ManagedEndpointError>>,
+    {
         if cx.checkpoint().is_err() {
             return Err(ManagedEndpointError::Cancelled);
         }
@@ -293,6 +545,13 @@ impl ManagedQuicEndpoint {
         // packet timestamps use the same explicit runtime-clock mapping.
         self.timer_scheduler.now(cx)?;
         let mut cancel = QuicCancelWake::new(cx);
+        let application_wake = application_enabled.then(|| {
+            Arc::new(ManagedApplicationWake {
+                ready: AtomicBool::new(true),
+                parent: std::sync::Mutex::new(None),
+            })
+        });
+        let mut application_yielded = false;
         while !self.shutting_down {
             if cx.checkpoint().is_err() {
                 return Err(ManagedEndpointError::Cancelled);
@@ -325,6 +584,16 @@ impl ManagedQuicEndpoint {
                 if let Poll::Ready(Some(deadline)) = self.timer_scheduler.poll_timer(task_cx) {
                     return Poll::Ready(Ok(EndpointEvent::Timer(deadline)));
                 }
+                if let Some(wake) = &application_wake {
+                    // Updating the parent does not itself make application
+                    // work ready; even executors replacing wakers can park.
+                    wake.register_parent(task_cx.waker());
+                    if !application_yielded {
+                        if let Some(event) = self.poll_application(cx, wake, &mut application) {
+                            return Poll::Ready(event);
+                        }
+                    }
+                }
                 for send in [self.prefer_send, !self.prefer_send] {
                     if send {
                         if !self.pending_outgoing.is_empty() {
@@ -344,6 +613,10 @@ impl ManagedQuicEndpoint {
                     } else {
                         // ACKs and other peers must progress even when writes are blocked.
                         // Packet processing defers output generation when the queue is full.
+                        if !self.pending_incoming.is_empty() {
+                            self.prefer_send = true;
+                            return Poll::Ready(Ok(EndpointEvent::RetainedPackets));
+                        }
                         match self.udp_endpoint.poll_receive_batch(
                             cx,
                             task_cx,
@@ -364,11 +637,26 @@ impl ManagedQuicEndpoint {
                         }
                     }
                 }
+                // A self-waking application gets another turn only after both
+                // read and write readiness were offered service. Keep its wake
+                // bit while doing so; no application event is discarded.
+                if application_yielded {
+                    if let Some(wake) = &application_wake {
+                        if let Some(event) = self.poll_application(cx, wake, &mut application) {
+                            return Poll::Ready(event);
+                        }
+                    }
+                }
                 Poll::Pending
             })
             .await?;
+            let application_turn = matches!(&event, EndpointEvent::ApplicationTurn);
+            application_yielded = application_turn;
             match event {
+                EndpointEvent::ApplicationComplete(value) => return Ok(Some(value)),
+                EndpointEvent::ApplicationTurn => {}
                 EndpointEvent::Packets(packets) => self.process_packet_batch(cx, packets).await?,
+                EndpointEvent::RetainedPackets => self.process_packet_batch(cx, Vec::new()).await?,
                 EndpointEvent::Timer(deadline) => self.process_timer_events(cx, deadline).await?,
                 EndpointEvent::Sent(Err(error)) => {
                     use std::io::ErrorKind;
@@ -390,6 +678,8 @@ impl ManagedQuicEndpoint {
                             let queued = self.pending_outgoing.len();
                             self.pending_outgoing
                                 .retain(|packet| packet.packet.dst_addr != peer);
+                            self.pending_incoming
+                                .retain(|packet| packet.src_addr != peer);
                             let retired = self.connection_router.discard_peer_connections(peer);
                             cx.trace(&format!("QUIC peer {peer} send failed ({error}); retired {retired} connections and {} unsent packets", queued - self.pending_outgoing.len()));
                         }
@@ -405,11 +695,18 @@ impl ManagedQuicEndpoint {
                             "UDP send made invalid progress".to_string(),
                         ));
                     }
-                    self.pending_outgoing.drain(..result.packets_processed);
+                    for packet in self.pending_outgoing.drain(..result.packets_processed) {
+                        self.connection_router.packet_sent(&packet);
+                    }
                     if let Some(error) = result.error {
                         // The unsent suffix remains available if the owner retries this loop.
                         return Err(ManagedEndpointError::UdpEndpoint(error));
                     }
+                }
+            }
+            if !application_turn {
+                if let Some(wake) = &application_wake {
+                    wake.ready.store(true, Ordering::Release);
                 }
             }
             // A perpetually readable socket must not monopolize a worker.
@@ -422,7 +719,7 @@ impl ManagedQuicEndpoint {
             self.endpoint_id()
         ));
 
-        Ok(())
+        Ok(None)
     }
 
     /// Process a batch of incoming packets.
@@ -431,6 +728,10 @@ impl ManagedQuicEndpoint {
         cx: &Cx,
         packets: Vec<ReceivedPacket>,
     ) -> Result<(), ManagedEndpointError> {
+        // Own the entire received batch before checking cancellation. The
+        // front packet is retained until routing completes, and later packets
+        // never disappear when an earlier asynchronous operation is dropped.
+        self.pending_incoming.extend(packets);
         if cx.checkpoint().is_err() {
             return Err(ManagedEndpointError::Cancelled);
         }
@@ -439,12 +740,23 @@ impl ManagedQuicEndpoint {
             return Err(ManagedEndpointError::ShuttingDown);
         }
 
-        if packets.is_empty() {
+        if self.pending_incoming.is_empty() {
             return Ok(()); // No packets to process
         }
 
-        for mut packet in packets {
-            packet.receive_time = self.timer_scheduler.now(cx)?;
+        let count = self
+            .config
+            .packet_batch_size
+            .min(self.pending_incoming.len());
+        for _ in 0..count {
+            let mut packet = self
+                .pending_incoming
+                .front()
+                .expect("owned receive prefix")
+                .clone();
+            if !self.authenticated_only {
+                packet.receive_time = self.timer_scheduler.now(cx)?;
+            }
             // Route packet through connection router
             let emit_output = self.pending_outgoing.len() < self.config.packet_batch_size;
             let routed = match self
@@ -457,10 +769,12 @@ impl ManagedQuicEndpoint {
                     return Err(ManagedEndpointError::Cancelled);
                 }
                 Err(error) => {
+                    self.pending_incoming.pop_front();
                     cx.trace(&format!("Packet processing error: {error}"));
                     continue;
                 }
             };
+            self.pending_incoming.pop_front();
             match routed {
                 RoutingResult::Routed {
                     connection_id,
@@ -475,6 +789,12 @@ impl ManagedQuicEndpoint {
                     triggering_packet,
                     outgoing_packets: packets,
                 } => {
+                    if self.authenticated_only {
+                        cx.trace(
+                            "Dropped an unauthenticated Initial on an imported managed socket",
+                        );
+                        continue;
+                    }
                     // Check connection limit
                     let stats = self.connection_router.connection_stats();
                     if stats.active_connections >= self.config.max_connections {
@@ -576,6 +896,7 @@ impl ManagedQuicEndpoint {
             .extend(packets.into_iter().map(|packet| RoutedOutgoingPacket {
                 connection_id,
                 packet,
+                final_handshake_flight: false,
             }));
     }
 
@@ -643,6 +964,7 @@ impl ManagedQuicEndpoint {
         // Keep it unconditional so cancellation cannot strand a retained endpoint.
         self.connection_router.discard_all();
         self.pending_outgoing.clear();
+        self.pending_incoming.clear();
         self.timer_scheduler.cancel_pending();
         let udp_result = self.udp_endpoint.shutdown(cx).await;
         close_result.map_err(|error| match error {
