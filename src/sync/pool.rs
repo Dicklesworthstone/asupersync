@@ -690,10 +690,8 @@ impl<R> CheckedPooledResource<R> {
             pooled: Some(pooled),
             obligation: None,
         };
-        checked.obligation = cx.try_register_obligation_checked(
-            crate::record::ObligationKind::Lease,
-            cx.task_id(),
-        )?;
+        checked.obligation =
+            cx.try_register_obligation_checked(crate::record::ObligationKind::Lease, cx.task_id())?;
         Ok(checked)
     }
 
@@ -705,7 +703,10 @@ impl<R> CheckedPooledResource<R> {
 
     /// Mutably borrow the checked-out resource.
     pub fn get_mut(&mut self) -> &mut R {
-        self.pooled.as_mut().expect("active checked checkout").get_mut()
+        self.pooled
+            .as_mut()
+            .expect("active checked checkout")
+            .get_mut()
     }
 
     /// Mark the resource for destruction instead of reuse on any return path.
@@ -786,12 +787,10 @@ impl<R> CheckedPooledResource<R> {
             };
             notification
         });
-        let waker = pooled.return_wakers.as_ref().and_then(|wakers| {
-            wakers
-                .lock()
-                .first()
-                .map(|(_, waker)| waker.clone_waker())
-        });
+        let waker = pooled
+            .return_wakers
+            .as_ref()
+            .and_then(|wakers| wakers.lock().first().map(|(_, waker)| waker.clone_waker()));
         if let Some(gateway) = notification {
             panics.run(|| gateway.notify());
             panics.run(|| drop(gateway));
@@ -830,7 +829,10 @@ impl<R> std::ops::DerefMut for CheckedPooledResource<R> {
 impl<R: std::fmt::Debug> std::fmt::Debug for CheckedPooledResource<R> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CheckedPooledResource")
-            .field("resource", &self.pooled.as_ref().and_then(PooledResource::try_get))
+            .field(
+                "resource",
+                &self.pooled.as_ref().and_then(PooledResource::try_get),
+            )
             .field("tracked", &self.obligation.is_some())
             .finish_non_exhaustive()
     }
@@ -3156,7 +3158,9 @@ mod tests {
                         held.push(resource);
                     }
                     for refusal in [
-                        task_pool.try_acquire_checked(&cx).map(|value| value.unwrap()),
+                        task_pool
+                            .try_acquire_checked(&cx)
+                            .map(|value| value.unwrap()),
                         task_pool.acquire_checked(&cx).await,
                     ] {
                         assert!(matches!(refusal,
@@ -3184,11 +3188,15 @@ mod tests {
                         broken.mark_broken();
                         drop(broken);
                         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            let _held = futures_lite::future::block_on(task_pool.acquire_checked(&cx))
-                                .unwrap();
+                            let _held =
+                                futures_lite::future::block_on(task_pool.acquire_checked(&cx))
+                                    .unwrap();
                             panic!("checked pool body panic");
                         }));
-                        assert_eq!(result.unwrap_err().downcast_ref::<&str>(), Some(&"checked pool body panic"));
+                        assert_eq!(
+                            result.unwrap_err().downcast_ref::<&str>(),
+                            Some(&"checked pool body panic")
+                        );
                     }
                     let stats = task_pool.stats();
                     assert_eq!(stats.active, 0);
@@ -3202,9 +3210,16 @@ mod tests {
             let report = lab.run_until_quiescent_with_report();
             assert!(report.lab_test_passed(), "limit={limit}: {report:?}");
             assert_eq!(handle.try_join().unwrap(), Some(limit));
-            assert_checked_pool_ledger(&lab, u64::from(limit > 0), limit as u64 + if limit > 0 { 4 } else { 0 });
+            assert_checked_pool_ledger(
+                &lab,
+                u64::from(limit > 0),
+                limit as u64 + if limit > 0 { 4 } else { 0 },
+            );
             assert_eq!(pool.stats().active, 0);
-            eprintln!("bead=asupersync-bi2462.29 scenario=checked_pool_lab limit={limit} report={}", report.to_json());
+            eprintln!(
+                "bead=asupersync-bi2462.29 scenario=checked_pool_lab limit={limit} report={}",
+                report.to_json()
+            );
         }
     }
 
@@ -3220,13 +3235,21 @@ mod tests {
             Some(Arc::new(ObligationGateway::new(
                 mailbox,
                 Arc::new(move || {
-                    assert_ne!(notified.fetch_add(1, Ordering::SeqCst), 0, "pool admission notify panic");
+                    assert_ne!(
+                        notified.fetch_add(1, Ordering::SeqCst),
+                        0,
+                        "pool admission notify panic"
+                    );
                 }),
                 Arc::downgrade(&live),
             ))),
             None,
         );
-        let pool = GenericPool::with_time_getter(simple_factory, PoolConfig::with_max_size(1), test_pool_time_now);
+        let pool = GenericPool::with_time_getter(
+            simple_factory,
+            PoolConfig::with_max_size(1),
+            test_pool_time_now,
+        );
         let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _held = futures_lite::future::block_on(pool.acquire_checked(&cx)).unwrap();
         }));
@@ -3246,7 +3269,11 @@ mod tests {
     fn checked_pool_clock_panic_and_body_unwind_settle_once() {
         reset_test_pool_time();
         let (lab, cx, handle) = checked_pool_fixture(1);
-        let pool = GenericPool::with_time_getter(simple_factory, PoolConfig::with_max_size(1), panic_once_test_pool_time_now);
+        let pool = GenericPool::with_time_getter(
+            simple_factory,
+            PoolConfig::with_max_size(1),
+            panic_once_test_pool_time_now,
+        );
         for body_panics in [false, true] {
             let held = futures_lite::future::block_on(pool.acquire_checked(&cx)).unwrap();
             panic_test_pool_time_on_call(1);
@@ -3258,16 +3285,193 @@ mod tests {
             }));
             let failure = result.unwrap_err();
             if body_panics {
-                assert_eq!(failure.downcast_ref::<&str>(), Some(&"primary checked pool body panic"));
+                assert_eq!(
+                    failure.downcast_ref::<&str>(),
+                    Some(&"primary checked pool body panic")
+                );
             } else {
-                assert!(failure.downcast_ref::<String>().unwrap().contains("intentional pool time panic"));
+                assert!(
+                    failure
+                        .downcast_ref::<String>()
+                        .unwrap()
+                        .contains("intentional pool time panic")
+                );
             }
             assert_eq!(test_pool_time_probe_state(), (1, None));
             assert_eq!(pool.stats().active, 0);
             assert_eq!(pool.stats().idle, 1);
         }
-        pool.try_acquire_checked(&cx).unwrap().unwrap().return_to_pool();
+        pool.try_acquire_checked(&cx)
+            .unwrap()
+            .unwrap()
+            .return_to_pool();
         finish_checked_pool_fixture(lab, &cx, handle, 1, 2);
+    }
+
+    #[test]
+    fn checked_pool_notifier_wake_retirement_and_resource_panics_preserve_primary() {
+        use crate::runtime::obligation_mailbox::ObligationGateway;
+        use std::sync::atomic::AtomicUsize;
+        struct PanickingWake {
+            wakes: Arc<AtomicUsize>,
+            drops: Arc<AtomicUsize>,
+        }
+        impl Wake for PanickingWake {
+            fn wake(self: Arc<Self>) {
+                self.wake_by_ref();
+            }
+            fn wake_by_ref(self: &Arc<Self>) {
+                self.wakes.fetch_add(1, Ordering::SeqCst);
+                panic!("secondary checked pool wake panic");
+            }
+        }
+        impl Drop for PanickingWake {
+            fn drop(&mut self) {
+                self.drops.fetch_add(1, Ordering::SeqCst);
+                panic!("secondary checked pool waker retirement panic");
+            }
+        }
+
+        let (lab, cx, handle) = checked_pool_fixture(1);
+        let pending: Arc<PoolMutex<Option<Pin<Box<dyn Future<Output = ()> + Send>>>>> =
+            Arc::new(PoolMutex::new(None));
+        let cancelled_pending = Arc::clone(&pending);
+        let armed = Arc::new(AtomicBool::new(false));
+        let notify_armed = Arc::clone(&armed);
+        let live = Arc::new(());
+        let gateway = Arc::new(ObligationGateway::new(
+            Arc::clone(lab.state.obligation_gateway().unwrap().mailbox()),
+            Arc::new(move || {
+                if notify_armed.swap(false, Ordering::SeqCst) {
+                    // Cancel the real first acquisition while the checked
+                    // cleanup still owns its cloned dispatcher waker. Its
+                    // retirement must be a distinct catch after wake_by_ref.
+                    let retired = cancelled_pending.lock().take().unwrap();
+                    drop(retired);
+                    panic!("primary checked pool notifier panic");
+                }
+            }),
+            Arc::downgrade(&live),
+        ));
+        let cx = cx.with_obligation_gateway(Some(gateway), None);
+        let created = Arc::new(AtomicUsize::new(0));
+        let creations = Arc::clone(&created);
+        let destroyed = Arc::new(AtomicUsize::new(0));
+        let destructions = Arc::clone(&destroyed);
+        let pool = Arc::new(GenericPool::with_time_getter(
+            move || {
+                let id = creations.fetch_add(1, Ordering::SeqCst);
+                std::future::ready(Ok::<_, std::io::Error>(PanicOnDropPoolResource {
+                    id,
+                    panic_on_drop: id == 0,
+                    drop_attempts: Arc::clone(&destructions),
+                }))
+            },
+            PoolConfig::with_max_size(1),
+            test_pool_time_now,
+        ));
+        let held = futures_lite::future::block_on(pool.acquire_checked(&cx)).unwrap();
+        assert_eq!(held.id, 0);
+        let first_pool = Arc::clone(&pool);
+        let first_cx = cx.clone();
+        let first: Pin<Box<dyn Future<Output = ()> + Send>> = Box::pin(async move {
+            let _resource = first_pool.acquire_checked(&first_cx).await.unwrap();
+            panic!("the cancelled first waiter must never acquire");
+        });
+        *pending.lock() = Some(first);
+        let wake_count = Arc::new(AtomicUsize::new(0));
+        let drop_count = Arc::new(AtomicUsize::new(0));
+        let bad_waker = Waker::from(Arc::new(PanickingWake {
+            wakes: Arc::clone(&wake_count),
+            drops: Arc::clone(&drop_count),
+        }));
+        assert!(
+            pending
+                .lock()
+                .as_mut()
+                .unwrap()
+                .as_mut()
+                .poll(&mut Context::from_waker(&bad_waker))
+                .is_pending()
+        );
+        drop(bad_waker);
+        assert_eq!(
+            drop_count.load(Ordering::SeqCst),
+            0,
+            "only actual parked registrations now own the waker payload"
+        );
+
+        let (wake_tx, wake_rx) = mpsc::channel();
+        let real_waker = Waker::from(Arc::new(ReentrantReturnWaker {
+            return_wakers: Arc::clone(&pool.return_wakers),
+            tx: wake_tx,
+        }));
+        let mut successor = pool.acquire_checked(&cx);
+        assert!(
+            successor
+                .as_mut()
+                .poll(&mut Context::from_waker(&real_waker))
+                .is_pending()
+        );
+        assert_eq!(pool.stats().waiters, 2);
+        armed.store(true, Ordering::SeqCst);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| held.discard()));
+        assert_eq!(
+            result.unwrap_err().downcast_ref::<&str>(),
+            Some(&"primary checked pool notifier panic")
+        );
+        assert!(pending.lock().is_none());
+        assert_eq!(wake_count.load(Ordering::SeqCst), 1);
+        assert_eq!(drop_count.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            destroyed.load(Ordering::SeqCst),
+            1,
+            "discard attempts the resource destructor exactly once"
+        );
+        assert_eq!(
+            wake_rx.try_recv(),
+            Ok(true),
+            "surviving real pool waiter is notified outside its return lock"
+        );
+        assert_eq!(pool.stats().active, 0);
+        assert_eq!(pool.stats().total, 0);
+        let Poll::Ready(Ok(replacement)) = successor
+            .as_mut()
+            .poll(&mut Context::from_waker(&real_waker))
+        else {
+            panic!("surviving waiter must acquire the replacement after cleanup");
+        };
+        assert_eq!(replacement.id, 1);
+        replacement.return_to_pool();
+        assert_eq!(pool.stats().active, 0);
+        assert_eq!(pool.stats().idle, 1);
+        assert_eq!(pool.stats().waiters, 0);
+        drop(successor);
+        finish_checked_pool_fixture(lab, &cx, handle, 1, 1);
+    }
+
+    #[test]
+    fn checked_pool_return_after_pool_drop_aborts_and_releases_live_quota() {
+        let (lab, cx, handle) = checked_pool_fixture(1);
+        let pool = GenericPool::with_time_getter(
+            simple_factory,
+            PoolConfig::with_max_size(1),
+            test_pool_time_now,
+        );
+        let held = futures_lite::future::block_on(pool.acquire_checked(&cx)).unwrap();
+        drop(pool);
+        // A disconnected return receiver cannot accept a committed return.
+        held.return_to_pool();
+        let replacement = GenericPool::with_time_getter(
+            simple_factory,
+            PoolConfig::with_max_size(1),
+            test_pool_time_now,
+        );
+        let held = futures_lite::future::block_on(replacement.acquire_checked(&cx)).unwrap();
+        assert!(held.obligation.is_some());
+        held.return_to_pool();
+        assert_eq!(replacement.stats().active, 0);
+        finish_checked_pool_fixture(lab, &cx, handle, 1, 1);
     }
 
     #[test]
@@ -3281,12 +3485,24 @@ mod tests {
         held.return_to_pool();
         let cancelled = Cx::for_testing();
         cancelled.set_cancel_requested(true);
-        assert!(matches!(pool.try_acquire_checked(&cancelled), Err(CheckedPoolError::Pool(PoolError::Cancelled))));
-        assert!(matches!(futures_lite::future::block_on(pool.acquire_checked(&cancelled)), Err(CheckedPoolError::Pool(PoolError::Cancelled))));
+        assert!(matches!(
+            pool.try_acquire_checked(&cancelled),
+            Err(CheckedPoolError::Pool(PoolError::Cancelled))
+        ));
+        assert!(matches!(
+            futures_lite::future::block_on(pool.acquire_checked(&cancelled)),
+            Err(CheckedPoolError::Pool(PoolError::Cancelled))
+        ));
         assert_eq!(pool.stats().idle, 1);
         futures_lite::future::block_on(pool.close());
-        assert!(matches!(pool.try_acquire_checked(&cx), Err(CheckedPoolError::Pool(PoolError::Closed))));
-        assert!(matches!(futures_lite::future::block_on(pool.acquire_checked(&cx)), Err(CheckedPoolError::Pool(PoolError::Closed))));
+        assert!(matches!(
+            pool.try_acquire_checked(&cx),
+            Err(CheckedPoolError::Pool(PoolError::Closed))
+        ));
+        assert!(matches!(
+            futures_lite::future::block_on(pool.acquire_checked(&cx)),
+            Err(CheckedPoolError::Pool(PoolError::Closed))
+        ));
     }
 
     #[test]
@@ -3306,109 +3522,162 @@ mod tests {
             let worker = std::thread::spawn(move || {
                 for limit in [0, 1] {
                     let builder = if sharded {
-                        RuntimeBuilder::multi_thread().worker_threads(2).with_sharded_state(true)
+                        RuntimeBuilder::multi_thread()
+                            .worker_threads(2)
+                            .with_sharded_state(true)
                     } else {
                         RuntimeBuilder::current_thread()
                     };
-                    let runtime = builder.root_region_limits(crate::record::RegionLimits {
-                        max_obligations: Some(limit),
-                        ..crate::record::RegionLimits::UNLIMITED
-                    }).build().unwrap();
+                    let runtime = builder
+                        .root_region_limits(crate::record::RegionLimits {
+                            max_obligations: Some(limit),
+                            ..crate::record::RegionLimits::UNLIMITED
+                        })
+                        .build()
+                        .unwrap();
                     let observer = runtime.handle();
                     let pool = Arc::new(GenericPool::new(
                         || std::future::ready(Ok::<_, std::io::Error>(Cell::new(41_u32))),
                         PoolConfig::with_max_size(1),
                     ));
                     let task_pool = Arc::clone(&pool);
-                    let parent: Pin<Box<dyn Future<Output = Option<(TaskId, TaskId)>> + Send>> = Box::pin(async move {
-                        let cx = Cx::current().expect("native parent context");
-                        if limit == 0 {
-                            for denial in [
-                                task_pool.acquire_checked(&cx).await,
-                                task_pool.try_acquire_checked(&cx).map(|resource| resource.unwrap()),
-                            ] {
-                                assert!(matches!(denial, Err(CheckedPoolError::Admission(
+                    let parent: Pin<Box<dyn Future<Output = Option<(TaskId, TaskId)>> + Send>> =
+                        Box::pin(async move {
+                            let cx = Cx::current().expect("native parent context");
+                            if limit == 0 {
+                                for denial in [
+                                    task_pool.acquire_checked(&cx).await,
+                                    task_pool
+                                        .try_acquire_checked(&cx)
+                                        .map(|resource| resource.unwrap()),
+                                ] {
+                                    assert!(matches!(denial, Err(CheckedPoolError::Admission(
                                     crate::runtime::obligation_mailbox::ObligationAdmissionError::LimitReached { limit: 0, live: 0 }
                                 ))));
+                                }
+                                assert_eq!(task_pool.stats().active, 0);
+                                assert_eq!(task_pool.stats().idle, 1);
+                                return None;
                             }
+
+                            let mutex = Arc::new(Mutex::new(()));
+                            let mutex_owner = mutex.try_lock_owned().unwrap();
+                            let held_pool = Arc::clone(&task_pool);
+                            let held_mutex = Arc::clone(&mutex);
+                            let holder_context = Arc::new(PoolMutex::new(None));
+                            let published_context = Arc::clone(&holder_context);
+                            let mut holder = cx
+                                .spawn(move |holder_cx| {
+                                    let future: Pin<
+                                        Box<dyn Future<Output = Result<(), LockError>> + Send>,
+                                    > = Box::pin(async move {
+                                        let resource =
+                                            held_pool.acquire_checked(&holder_cx).await.unwrap();
+                                        assert!(resource.obligation.is_some());
+                                        resource.get().set(73);
+                                        *published_context.lock() = Some(holder_cx.clone());
+                                        let result = OwnedMutexGuard::lock(held_mutex, &holder_cx)
+                                            .await
+                                            .map(drop);
+                                        // Cell is Send but !Sync and remains in the
+                                        // real task future across this native Pending.
+                                        assert_eq!(resource.get().get(), 73);
+                                        drop(resource);
+                                        result
+                                    });
+                                    future
+                                })
+                                .unwrap();
+                            let started = Instant::now();
+                            let holder_cx = loop {
+                                let context = holder_context.lock().clone();
+                                if let Some(context) = context {
+                                    let task = observer
+                                        .task_inspector(Default::default())
+                                        .unwrap()
+                                        .inspect_task(context.task_id());
+                                    if mutex.waiters() == 1
+                                        && task
+                                            .as_ref()
+                                            .is_some_and(|task| task.obligations.len() == 1)
+                                    {
+                                        break context;
+                                    }
+                                }
+                                assert!(
+                                    started.elapsed() < Duration::from_secs(5),
+                                    "native checked holder must reach a real parked state with an arena obligation"
+                                );
+                                yield_now().await;
+                            };
+                            let successor_pool = Arc::clone(&task_pool);
+                            let mut successor = cx
+                                .spawn(move |waiter_cx| {
+                                    let future: Pin<
+                                        Box<dyn Future<Output = (TaskId, u32)> + Send>,
+                                    > = Box::pin(async move {
+                                        let resource = successor_pool
+                                            .acquire_checked(&waiter_cx)
+                                            .await
+                                            .unwrap();
+                                        let value = resource.get().get();
+                                        resource.return_to_pool();
+                                        (waiter_cx.task_id(), value)
+                                    });
+                                    future
+                                })
+                                .unwrap();
+                            let waiting = Instant::now();
+                            while task_pool.stats().waiters != 1 {
+                                assert!(
+                                    waiting.elapsed() < Duration::from_secs(5),
+                                    "native successor must park in the actual pool queue"
+                                );
+                                yield_now().await;
+                            }
+                            assert_eq!(task_pool.stats().active, 1);
+                            holder.abort();
+                            assert_eq!(holder.join(&cx).await, Ok(Err(LockError::Cancelled)));
+                            let (successor_id, value) = successor.join(&cx).await.unwrap();
+                            assert_eq!(
+                                value, 73,
+                                "cancellation returns the actual Cell resource to the parked successor"
+                            );
+                            assert_eq!(mutex.waiters(), 0);
+                            drop(mutex_owner);
                             assert_eq!(task_pool.stats().active, 0);
                             assert_eq!(task_pool.stats().idle, 1);
-                            return None;
-                        }
-
-                        let mutex = Arc::new(Mutex::new(()));
-                        let mutex_owner = mutex.try_lock_owned().unwrap();
-                        let held_pool = Arc::clone(&task_pool);
-                        let held_mutex = Arc::clone(&mutex);
-                        let holder_context = Arc::new(PoolMutex::new(None));
-                        let published_context = Arc::clone(&holder_context);
-                        let mut holder = cx.spawn(move |holder_cx| {
-                            let future: Pin<Box<dyn Future<Output = Result<(), LockError>> + Send>> = Box::pin(async move {
-                                let resource = held_pool.acquire_checked(&holder_cx).await.unwrap();
-                                assert!(resource.obligation.is_some());
-                                resource.get().set(73);
-                                *published_context.lock() = Some(holder_cx.clone());
-                                let result = OwnedMutexGuard::lock(held_mutex, &holder_cx).await.map(drop);
-                                // Cell is Send but !Sync and remains in the
-                                // real task future across this native Pending.
-                                assert_eq!(resource.get().get(), 73);
-                                drop(resource);
-                                result
-                            });
-                            future
-                        }).unwrap();
-                        let started = Instant::now();
-                        let holder_cx = loop {
-                            let context = holder_context.lock().clone();
-                            if let Some(context) = context {
-                                let task = observer.task_inspector(Default::default()).unwrap().inspect_task(context.task_id());
-                                if mutex.waiters() == 1 && task.as_ref().is_some_and(|task| task.obligations.len() == 1) {
-                                    break context;
-                                }
-                            }
-                            assert!(started.elapsed() < Duration::from_secs(5), "native checked holder must reach a real parked state with an arena obligation");
-                            yield_now().await;
-                        };
-                        let successor_pool = Arc::clone(&task_pool);
-                        let mut successor = cx.spawn(move |waiter_cx| {
-                            let future: Pin<Box<dyn Future<Output = (TaskId, u32)> + Send>> = Box::pin(async move {
-                                let resource = successor_pool.acquire_checked(&waiter_cx).await.unwrap();
-                                let value = resource.get().get();
-                                resource.return_to_pool();
-                                (waiter_cx.task_id(), value)
-                            });
-                            future
-                        }).unwrap();
-                        let waiting = Instant::now();
-                        while task_pool.stats().waiters != 1 {
-                            assert!(waiting.elapsed() < Duration::from_secs(5), "native successor must park in the actual pool queue");
-                            yield_now().await;
-                        }
-                        assert_eq!(task_pool.stats().active, 1);
-                        holder.abort();
-                        assert_eq!(holder.join(&cx).await, Ok(Err(LockError::Cancelled)));
-                        let (successor_id, value) = successor.join(&cx).await.unwrap();
-                        assert_eq!(value, 73, "cancellation returns the actual Cell resource to the parked successor");
-                        assert_eq!(mutex.waiters(), 0);
-                        drop(mutex_owner);
-                        assert_eq!(task_pool.stats().active, 0);
-                        assert_eq!(task_pool.stats().idle, 1);
-                        assert_eq!(task_pool.stats().waiters, 0);
-                        Some((holder_cx.task_id(), successor_id))
-                    });
+                            assert_eq!(task_pool.stats().waiters, 0);
+                            Some((holder_cx.task_id(), successor_id))
+                        });
                     let holders = runtime.block_on(runtime.handle().spawn(parent));
                     runtime.block_on(async {
                         let started = Instant::now();
                         while !runtime.is_quiescent() {
-                            assert!(started.elapsed() < Duration::from_secs(5), "native pool obligations and task retirement must drain");
+                            assert!(
+                                started.elapsed() < Duration::from_secs(5),
+                                "native pool obligations and task retirement must drain"
+                            );
                             yield_now().await;
                         }
                     });
-                    assert!(runtime.task_inspector(Default::default()).list_tasks().is_empty());
+                    assert!(
+                        runtime
+                            .task_inspector(Default::default())
+                            .list_tasks()
+                            .is_empty()
+                    );
                     assert!(runtime.diagnostics().find_leaked_obligations().is_empty());
                     let mut records = std::collections::BTreeMap::new();
                     for event in runtime.trace_snapshot() {
-                        if let TraceData::Obligation { obligation, task, kind: ObligationKind::Lease, state, .. } = event.data {
+                        if let TraceData::Obligation {
+                            obligation,
+                            task,
+                            kind: ObligationKind::Lease,
+                            state,
+                            ..
+                        } = event.data
+                        {
                             let entry = records.entry(obligation).or_insert((task, Vec::new()));
                             assert_eq!(entry.0, task);
                             entry.1.push(state);
@@ -3418,18 +3687,29 @@ mod tests {
                         assert_eq!(records.len(), 2);
                         for (task, states) in records.values() {
                             if *task == holder {
-                                assert_eq!(states, &[ObligationState::Reserved, ObligationState::Aborted]);
+                                assert_eq!(
+                                    states,
+                                    &[ObligationState::Reserved, ObligationState::Aborted]
+                                );
                             } else {
                                 assert_eq!(*task, successor);
-                                assert_eq!(states, &[ObligationState::Reserved, ObligationState::Committed]);
+                                assert_eq!(
+                                    states,
+                                    &[ObligationState::Reserved, ObligationState::Committed]
+                                );
                             }
                         }
                     } else {
-                        assert!(records.is_empty(), "zero quota cannot produce a false reservation");
+                        assert!(
+                            records.is_empty(),
+                            "zero quota cannot produce a false reservation"
+                        );
                     }
                     assert_eq!(pool.stats().active, 0);
                     assert_eq!(pool.stats().idle, 1);
-                    eprintln!("bead=asupersync-bi2462.29 scenario=checked_pool_native sharded={sharded} limit={limit} holders={holders:?} trace={records:?}");
+                    eprintln!(
+                        "bead=asupersync-bi2462.29 scenario=checked_pool_native sharded={sharded} limit={limit} holders={holders:?} trace={records:?}"
+                    );
                     assert!(runtime.shutdown_timeout(Duration::from_secs(5)));
                 }
                 done_tx.send(()).unwrap();
