@@ -408,7 +408,7 @@ impl Worker {
                         .state
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    let _ = state.drain_obligation_posts_before_completion();
+                    let _ = state.drain_obligation_posts_before_completion(None);
                     let _ = state.update_task(self.task_id, |record| {
                         if !record.state.is_terminal() {
                             record.complete(crate::types::Outcome::Panicked(
@@ -487,7 +487,7 @@ impl Worker {
         // state, failing the global lookup, dropping, then re-locking.
         let local_task = crate::runtime::local::remove_local_task(task_id);
 
-        let (mut stored, task_cx, wake_state, cached_waker) = {
+        let (stored, task_cx, wake_state, cached_waker) = {
             let mut state = self
                 .state
                 .lock()
@@ -646,7 +646,7 @@ impl Worker {
                 // already holds (br-asupersync-bi2462.13): a reserve+resolve
                 // within one poll is tracked, and an open reservation is
                 // caught by the completion-time leak check below.
-                let _ = state.drain_obligation_posts_before_completion();
+                let _ = state.drain_obligation_posts_before_completion(None);
                 let (cancel_ack, cancel_wakes) =
                     Self::consume_cancel_ack_locked(&mut state, task_id).into_parts();
                 let cancel_ack = cancel_ack.is_some();
@@ -822,7 +822,7 @@ impl Worker {
                     .state
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                let _ = state.drain_obligation_posts_before_completion();
+                let _ = state.drain_obligation_posts_before_completion(None);
                 let (_cancel_ack, cancel_wakes) =
                     Self::consume_cancel_ack_locked(&mut state, task_id).into_parts();
                 let _ = state.update_task(task_id, |record| {

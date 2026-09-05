@@ -386,6 +386,15 @@ pub(crate) fn apply_obligation_posts(
     mailbox: &ObligationMailbox,
     max: usize,
 ) -> usize {
+    apply_obligation_posts_with_task_table(state, mailbox, max, None)
+}
+
+pub(crate) fn apply_obligation_posts_with_task_table(
+    state: &mut RuntimeState,
+    mailbox: &ObligationMailbox,
+    max: usize,
+    dispatch_tasks: Option<&Arc<crate::sync::ContendedMutex<crate::runtime::TaskTable>>>,
+) -> usize {
     if mailbox.is_empty() {
         return 0;
     }
@@ -401,7 +410,13 @@ pub(crate) fn apply_obligation_posts(
     for post in posts {
         match post.op {
             ObligationOp::Reserve => {
-                match state.create_obligation(post.kind, post.holder, post.region, None) {
+                let admission = match dispatch_tasks {
+                    Some(tasks) => state.create_obligation_from_dispatch_table(
+                        post.kind, post.holder, post.region, tasks,
+                    ),
+                    None => state.create_obligation(post.kind, post.holder, post.region, None),
+                };
+                match admission {
                     Ok(id) => {
                         tickets.insert(post.ticket, id);
                         mailbox.reserved.fetch_add(1, Ordering::Relaxed);

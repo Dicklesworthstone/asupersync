@@ -2354,7 +2354,10 @@ impl RuntimeState {
     /// phase indefinitely. The queue's count includes publications in flight,
     /// so stop on an empty batch instead of waiting for those producers. Posts
     /// whose push returned during the completed poll are already visible.
-    pub(crate) fn drain_obligation_posts_before_completion(&mut self) -> usize {
+    pub(crate) fn drain_obligation_posts_before_completion(
+        &mut self,
+        dispatch_tasks: Option<&Arc<crate::sync::ContendedMutex<TaskTable>>>,
+    ) -> usize {
         let Some(gateway) = self.obligation_gateway.clone() else {
             return 0;
         };
@@ -2362,10 +2365,11 @@ impl RuntimeState {
         let mut remaining = mailbox.len();
         let mut applied = 0;
         while remaining > 0 {
-            let batch = crate::runtime::obligation_mailbox::apply_obligation_posts(
+            let batch = crate::runtime::obligation_mailbox::apply_obligation_posts_with_task_table(
                 self,
                 mailbox,
                 remaining.min(64),
+                dispatch_tasks,
             );
             if batch == 0 {
                 break;
@@ -5011,6 +5015,49 @@ impl RuntimeState {
                 description,
             ),
         }
+    }
+
+    /// Completion may run with a dispatch table independent of the unified
+    /// state's task arena. Validate a posted holder against that exact table,
+    /// while retaining the state's ordinary obligation backing and effects.
+    #[allow(clippy::result_large_err)]
+    pub(crate) fn create_obligation_from_dispatch_table(
+        &mut self,
+        kind: ObligationKind,
+        holder: TaskId,
+        region: RegionId,
+        dispatch_tasks: &Arc<crate::sync::ContendedMutex<TaskTable>>,
+    ) -> Result<ObligationId, Error> {
+        let mut deferred = Vec::new();
+        let result = {
+            let tasks = AdmissionTaskTarget::External(
+                dispatch_tasks
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+            );
+            let shards = self.shard_tables.clone();
+            let mut obligations = match shards.as_ref() {
+                Some(shards) => CompletionObligationTarget::External(
+                    shards
+                        .obligations
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner),
+                ),
+                None => CompletionObligationTarget::Embedded,
+            };
+            self.create_obligation_in(
+                &AdmissionRegionTarget::Embedded,
+                &tasks,
+                &mut obligations,
+                &mut LifecycleEffectsSink::Buffered(&mut deferred),
+                kind,
+                holder,
+                region,
+                None,
+            )
+        };
+        self.dispatch_lifecycle_effects(deferred);
+        result
     }
 
     /// Core of [`Self::create_obligation`] against explicit table targets

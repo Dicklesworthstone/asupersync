@@ -7323,6 +7323,7 @@ impl ThreeLaneWorker {
             worker: &'a ThreeLaneWorker,
             task_id: TaskId,
             completed: bool,
+            stored: Option<AnyStoredTask>,
         }
 
         impl Drop for TaskExecutionGuard<'_> {
@@ -7330,6 +7331,9 @@ impl ThreeLaneWorker {
             fn drop(&mut self) {
                 if !self.completed && std::thread::panicking() {
                     let cleanup = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        if let Some(stored) = self.stored.take() {
+                            let _ = super::worker::retire_terminal_task(stored);
+                        }
                         // E1.2 subsystem 3b: route through the single ordered
                         // completion backing (E1.1 row T16). Observer
                         // suppression and the ack-free panic transition live
@@ -7353,7 +7357,7 @@ impl ThreeLaneWorker {
         });
 
         let (
-            mut stored,
+            stored,
             wake_state,
             priority,
             task_cx,
@@ -7560,6 +7564,7 @@ impl ThreeLaneWorker {
             worker: self,
             task_id,
             completed: false,
+            stored: Some(stored),
         };
 
         // The worker dispatch quantum is one `Future::poll`. Do not loop on a
@@ -7567,7 +7572,11 @@ impl ThreeLaneWorker {
         // timed, and ready lanes re-evaluate their fairness gates.
         let poll_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let mut cx = Context::from_waker(&waker);
-            stored.poll(&mut cx)
+            guard
+                .stored
+                .as_mut()
+                .expect("executing task storage")
+                .poll(&mut cx)
         }));
 
         let mut credit_adaptive_epoch = true;
@@ -7577,8 +7586,16 @@ impl ThreeLaneWorker {
                     credit_adaptive_epoch = false;
                 }
                 // Map Outcome<(), ()> to Outcome<(), Error> for record.complete()
-                let task_outcome = outcome
+                let mut task_outcome = outcome
                     .map_err(|()| crate::error::Error::new(crate::error::ErrorKind::Internal));
+                if let Some(panic) = super::worker::retire_terminal_task(
+                    guard.stored.take().expect("completed task storage"),
+                ) {
+                    credit_adaptive_epoch = false;
+                    if !matches!(task_outcome, crate::types::Outcome::Panicked(_)) {
+                        task_outcome = crate::types::Outcome::Panicked(panic);
+                    }
+                }
                 // E1.2 subsystem 3b: route through the single ordered
                 // completion backing (E1.1 rows T17/T18).
                 let artifacts = self
@@ -7592,7 +7609,7 @@ impl ThreeLaneWorker {
                 // Move waker into cache (not clone) since it is not needed after this point.
                 // Store task, cache wakers, and reconcile the checkpoint ack in
                 // one bookkeeping-aware task-table update.
-                let cancel_effects = match stored {
+                let cancel_effects = match guard.stored.take().expect("pending task storage") {
                     AnyStoredTask::Global(t) => self.with_task_table(move |tt| {
                         tt.store_spawned_task(task_id, t);
                         tt.update_task(task_id, |record| {
@@ -7716,6 +7733,11 @@ impl ThreeLaneWorker {
                 std::mem::forget(payload);
                 let panic_payload = crate::types::outcome::PanicPayload::new(panic_message);
                 let panic_outcome = crate::types::Outcome::Panicked(panic_payload);
+                // Retire retained fields before the completion audit. Preserve
+                // the original poll panic over any secondary destructor panic.
+                let _ = super::worker::retire_terminal_task(
+                    guard.stored.take().expect("panicked task storage"),
+                );
                 // E1.2 subsystem 3b: route through the single ordered
                 // completion backing (E1.1 rows T20/T21).
                 let artifacts = self.complete_polled_task_ordered(
@@ -7812,6 +7834,10 @@ impl ThreeLaneWorker {
         task_id: TaskId,
         completion: PolledCompletion,
     ) -> PolledCompletionArtifacts {
+        // The holder must still be in its dispatch table when Reserve posts
+        // are admitted. Release B before the existing detach phase takes A;
+        // the drainer acquires A/C in the ordinary minting order itself.
+        self.drain_completion_obligation_posts();
         if self.task_table.is_some() {
             // The sharded table owns the authoritative record. Reconcile the
             // checkpoint receipt and terminal outcome there, then detach the
@@ -7894,6 +7920,7 @@ impl ThreeLaneWorker {
     /// (`into_waiters_and_retirements_without_observers`) because this path
     /// runs during a worker unwind.
     fn complete_task_after_unwind_ordered(&self, task_id: TaskId) -> UnwindCompletionArtifacts {
+        self.drain_completion_obligation_posts();
         let panic_outcome = crate::types::Outcome::Panicked(
             crate::types::outcome::PanicPayload::new("task panicked during scheduler bookkeeping"),
         );
@@ -7943,6 +7970,14 @@ impl ThreeLaneWorker {
             detached_record,
             finalizer_publication,
         }
+    }
+
+    fn drain_completion_obligation_posts(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _ = state.drain_obligation_posts_before_completion(self.task_table.as_ref());
     }
 
     fn publish_ready_finalizers(
