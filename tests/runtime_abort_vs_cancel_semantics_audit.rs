@@ -2064,7 +2064,12 @@ fn checked_native_one_quota(sharded: bool) {
     let observer = runtime.handle();
     let (sender, mut receiver) = mpsc::channel(2);
     let observed_sender = sender.clone();
-    let (parent_id, child_id) = runtime.block_on(runtime.handle().spawn(async move {
+    // Keep the test's parent state machine behind a checked Send boundary too:
+    // TLS adds enough runtime state to exceed the compiler's trait recursion
+    // budget when both complete task types reach the storage wrapper together.
+    let parent: std::pin::Pin<
+        Box<dyn Future<Output = (asupersync::types::TaskId, asupersync::types::TaskId)> + Send>,
+    > = Box::pin(async move {
         let cx = Cx::current().expect("actual spawned native parent context");
         let mutex = Arc::new(Mutex::new(()));
         let holder = mutex.try_lock_owned().expect("hold real native mutex");
@@ -2073,20 +2078,28 @@ fn checked_native_one_quota(sharded: bool) {
         let child_context = Arc::new(std::sync::Mutex::new(None));
         let context_slot = Arc::clone(&child_context);
         let child = cx
-            .spawn(move |child_cx| async move {
-                let permit = child_sender
-                    .reserve_checked(&child_cx)
-                    .await
-                    .expect("the only obligation credit is initially available");
-                *context_slot.lock().expect("publish actual child context") =
-                    Some(child_cx.clone());
-                let result = OwnedMutexGuard::lock(child_mutex, &child_cx)
-                    .await
-                    .map(drop);
-                // The permit remains owned throughout the native Pending and the
-                // cancellation checkpoint, then returns its physical slot and credit.
-                drop(permit);
-                result
+            .spawn(move |child_cx| {
+                // Erase only this fixture's nested future type before embedding
+                // it in the parent spawn. The strict TLS lane still checks Send
+                // at this boundary, without recursively expanding both tasks'
+                // complete async types through each runtime wrapper.
+                let future: std::pin::Pin<Box<dyn Future<Output = Result<(), LockError>> + Send>> =
+                    Box::pin(async move {
+                        let permit = child_sender
+                            .reserve_checked(&child_cx)
+                            .await
+                            .expect("the only obligation credit is initially available");
+                        *context_slot.lock().expect("publish actual child context") =
+                            Some(child_cx.clone());
+                        let result = OwnedMutexGuard::lock(child_mutex, &child_cx)
+                            .await
+                            .map(drop);
+                        // The permit remains owned throughout the native Pending and the
+                        // cancellation checkpoint, then returns its physical slot and credit.
+                        drop(permit);
+                        result
+                    });
+                future
             })
             .expect("spawn actual checked-permit holder");
 
@@ -2180,11 +2193,16 @@ fn checked_native_one_quota(sharded: bool) {
             0
         );
         let retirement_started = Instant::now();
-        while observer.task_inspector(Default::default()).expect("live runtime inspector")
-            .inspect_task(retained_cx.task_id()).is_some()
+        while observer
+            .task_inspector(Default::default())
+            .expect("live runtime inspector")
+            .inspect_task(retained_cx.task_id())
+            .is_some()
         {
-            assert!(retirement_started.elapsed() < Duration::from_secs(5),
-                "terminal result publication must be followed by actual holder retirement");
+            assert!(
+                retirement_started.elapsed() < Duration::from_secs(5),
+                "terminal result publication must be followed by actual holder retirement"
+            );
             yield_now().await;
         }
         assert!(
@@ -2222,7 +2240,8 @@ fn checked_native_one_quota(sharded: bool) {
         assert_eq!(clean.send_waiter_count, 0);
         assert_eq!(clean.recv_waiter_count, 0);
         (cx.task_id(), retained_cx.task_id())
-    }));
+    });
+    let (parent_id, child_id) = runtime.block_on(runtime.handle().spawn(parent));
     assert_checked_native_cleanup(&runtime);
     let trace = runtime.trace_snapshot();
     let mut observed = BTreeMap::new();

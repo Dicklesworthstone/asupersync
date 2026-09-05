@@ -101,6 +101,9 @@ pub enum ObligationTransferError {
     /// A terminal outcome already won the source credit.
     #[error("source obligation is already resolved")]
     SourceResolved,
+    /// Direct-ID settlement closed admission before choosing its terminal.
+    #[error("source obligation settlement has started")]
+    SourceSettlementStarted,
     /// Completion revoked the source generation.
     #[error("source obligation holder is no longer live")]
     SourceHolderNotLive,
@@ -166,11 +169,16 @@ pub(crate) struct AdmittedObligation {
     ticket: u64,
     active: AtomicBool,
     resolution: Mutex<AdmissionDecision>,
+    settlement_started: Arc<AtomicBool>,
     predecessor: Weak<AdmittedObligation>,
     application_finished: AtomicBool,
 }
 
 impl AdmittedObligation {
+    pub(crate) fn fence_transfers(&self) {
+        self.settlement_started.store(true, Ordering::SeqCst);
+    }
+
     fn resolve(&self, resolution: ObligationResolution, publish: impl FnOnce()) -> bool {
         if !self.active.load(Ordering::Acquire) {
             return false;
@@ -248,6 +256,35 @@ impl AdmittedObligation {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .remove(&self.ticket);
+            }
+        }
+    }
+
+    fn take_successor_for_drop(&mut self) -> Option<Arc<Self>> {
+        let decision = self
+            .resolution
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match std::mem::replace(decision, AdmissionDecision::Pending) {
+            AdmissionDecision::HandedOff(next) => Some(next),
+            AdmissionDecision::Pending | AdmissionDecision::Terminal(_) => None,
+        }
+    }
+}
+
+impl Drop for AdmittedObligation {
+    fn drop(&mut self) {
+        let mut successor = self.take_successor_for_drop();
+        while let Some(next) = successor {
+            match Arc::into_inner(next) {
+                Some(mut owned) => {
+                    successor = owned.take_successor_for_drop();
+                    // Its Drop now sees Pending, never the remaining chain.
+                }
+                // A shared decrement cannot drop the inner value here. With
+                // try_unwrap, another owner could disappear before dropping
+                // Err(shared), reentering this destructor recursively.
+                None => break,
             }
         }
     }
@@ -557,6 +594,7 @@ impl ObligationGateway {
             ticket,
             active: AtomicBool::new(false),
             resolution: Mutex::new(AdmissionDecision::Pending),
+            settlement_started: Arc::new(AtomicBool::new(false)),
             predecessor: Weak::new(),
             application_finished: AtomicBool::new(false),
         });
@@ -709,6 +747,7 @@ impl ObligationToken {
             ticket,
             active: AtomicBool::new(false),
             resolution: Mutex::new(AdmissionDecision::Pending),
+            settlement_started: Arc::clone(&source.settlement_started),
             predecessor: Arc::downgrade(source),
             application_finished: AtomicBool::new(false),
         });
@@ -731,10 +770,13 @@ impl ObligationToken {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 if !matches!(*decision, AdmissionDecision::Pending) {
-                    return false;
+                    return Err(Error::SourceResolved);
+                }
+                if source.settlement_started.load(Ordering::SeqCst) {
+                    return Err(Error::SourceSettlementStarted);
                 }
                 *decision = AdmissionDecision::HandedOff(Arc::clone(&admission));
-                true
+                Ok(())
             },
             || {
                 admission.active.store(true, Ordering::Release);
@@ -1106,6 +1148,155 @@ mod tests {
             .collect()
     }
 
+    #[derive(Debug, Clone, Copy)]
+    enum FiniteAction {
+        Reserve(usize),
+        ApplyOne,
+        Settle(usize, ObligationResolution),
+        Handoff,
+        Complete(usize),
+        Close,
+    }
+
+    #[derive(Debug)]
+    struct FiniteOwned {
+        root: Arc<AdmittedObligation>,
+        original_holder: TaskId,
+        original_id: Option<ObligationId>,
+        holder: TaskId,
+        region: RegionId,
+        terminal: Option<ObligationResolution>,
+    }
+
+    #[derive(Debug, Default)]
+    struct FiniteCoverage {
+        checks: usize,
+        admitted: usize,
+        denied: usize,
+        handed_off: usize,
+        refused_handoffs: usize,
+        completed_live: usize,
+        completed_transferred_source: usize,
+        applied: usize,
+        closed_with_barrier: usize,
+    }
+
+    // The same checker serves every real-state prefix and both planted faults.
+    // L counts a lineage's pending leaf exactly once; U counts each accepted
+    // credit whose projection has not retired. Arena rows are never added to L.
+    fn check_finite_conservation(
+        runtime: &LabRuntime,
+        mailbox: &ObligationMailbox,
+        regions: [RegionId; 2],
+        owned: &mut [Option<FiniteOwned>; 2],
+        physical: [bool; 2],
+    ) -> Result<(), String> {
+        let mut live = [0_usize; 2];
+        let mut unapplied = [0_usize; 2];
+        let mut expected_live = [0_usize; 2];
+        let mut pending_terminal = false;
+        let mut original_ids = std::collections::BTreeSet::new();
+        let events = runtime.trace_handle().snapshot();
+        for (index, slot) in owned.iter_mut().enumerate() {
+            let Some(slot) = slot else {
+                if physical[index] {
+                    return Err(format!("missing_admission: physical slot {index} has no checked credit"));
+                }
+                continue;
+            };
+            if slot.terminal.is_none() {
+                let region = regions.iter().position(|region| *region == slot.region).unwrap();
+                expected_live[region] += 1;
+            }
+            let reservations: Vec<_> = events.iter().filter_map(|event| {
+                if event.kind == TraceEventKind::ObligationReserve {
+                    if let crate::trace::TraceData::Obligation { obligation, task, .. } = event.data {
+                        if task == slot.original_holder { return Some(obligation); }
+                    }
+                }
+                None
+            }).collect();
+            if reservations.len() > 1 {
+                return Err(format!("duplicate_original_id: slot {index} {reservations:?}"));
+            }
+            if let Some(id) = reservations.first().copied() {
+                if slot.original_id.is_some_and(|original| original != id) {
+                    return Err(format!("changed_original_id: slot {index}"));
+                }
+                slot.original_id = Some(id);
+                if !original_ids.insert(id) { return Err("aliased_original_id".to_owned()); }
+            }
+            let mut credit = Arc::clone(&slot.root);
+            let mut projected = None;
+            let mut last_binding;
+            loop {
+                let binding = credit.binding();
+                last_binding = binding;
+                let region = regions.iter().position(|region| *region == binding.2).unwrap();
+                if !credit.active.load(Ordering::Acquire) {
+                    return Err(format!("inactive_owned_credit: ticket {}", binding.0));
+                }
+                let finished = credit.application_finished.load(Ordering::Acquire);
+                if !finished {
+                    unapplied[region] += 1;
+                    projected.get_or_insert(binding);
+                }
+                let next = {
+                    let decision = credit.resolution.lock().unwrap();
+                    match &*decision {
+                        AdmissionDecision::Pending => {
+                            live[region] += 1;
+                            if slot.terminal.is_some() || (slot.holder, slot.region) != (binding.1, binding.2) {
+                                return Err(format!("pending_owner_mismatch: slot {index} {binding:?}"));
+                            }
+                            None
+                        }
+                        AdmissionDecision::Terminal(terminal) => {
+                            if slot.terminal != Some(*terminal) || (slot.holder, slot.region) != (binding.1, binding.2) {
+                                return Err(format!("terminal_owner_mismatch: slot {index} {binding:?} terminal={terminal:?}"));
+                            }
+                            pending_terminal |= !finished;
+                            None
+                        }
+                        AdmissionDecision::HandedOff(next) => Some(Arc::clone(next)),
+                    }
+                };
+                match next { Some(next) => credit = next, None => break }
+            }
+            if let Some(id) = slot.original_id {
+                let record = runtime.state.obligation(id).ok_or_else(|| format!("missing_original_row: {id:?}"))?;
+                let binding = projected.unwrap_or(last_binding);
+                if (record.holder, record.region) != (binding.1, binding.2) {
+                    return Err(format!("arena_projection_owner: id={id:?} binding={binding:?} row={record:?}"));
+                }
+                if projected.is_some() != record.is_pending() {
+                    return Err(format!("arena_projection_terminal: id={id:?} U={projected:?} row={record:?}"));
+                }
+                if projected.is_none() && slot.terminal.map(ObligationResolution::state) != Some(record.state) {
+                    return Err(format!("arena_terminal_decision: id={id:?}"));
+                }
+            }
+        }
+        if live != expected_live { return Err(format!("logical_live_count: actual={live:?} expected={expected_live:?}")); }
+        for (index, region) in regions.iter().enumerate() {
+            let actual = runtime.state.region(*region).map_or((0, 0), |record|
+                (record.pending_obligations(), record.unapplied_obligation_count()));
+            if actual != (live[index], unapplied[index]) {
+                return Err(format!("region_conservation: region={region:?} actual={actual:?} L={} U={}", live[index], unapplied[index]));
+            }
+        }
+        let stats = mailbox.stats();
+        if stats.refused != 0 { return Err(format!("refused_actual_post: {stats:?}")); }
+        if stats.posted.checked_sub(stats.applied) != Some(mailbox.len() as u64) {
+            let code = if pending_terminal { "lost_terminal_post" } else { "lost_post" };
+            return Err(format!("{code}: stats={stats:?} queued={}", mailbox.len()));
+        }
+        if unapplied == [0, 0] && mailbox.open_tickets() != 0 {
+            return Err(format!("retained_ticket_after_projection: {}", mailbox.open_tickets()));
+        }
+        Ok(())
+    }
+
     #[test]
     fn checked_transfer_full_same_region_keeps_one_id_age_and_holder_index() {
         for materialized in [false, true] {
@@ -1206,9 +1397,31 @@ mod tests {
             );
             let messages = handoff_messages(&runtime);
             assert_eq!(messages.len(), 1);
-            assert!(messages[0].contains(&format!("id={id:?}")));
-            assert!(messages[0].contains(&format!("source_ticket={old_ticket}")));
-            assert!(messages[0].contains(&format!("destination_ticket={new_ticket}")));
+            let event = crate::trace::TraceEvent::user_trace(
+                0,
+                crate::types::Time::ZERO,
+                messages[0].clone(),
+            );
+            let handoff = crate::trace::event::decode_obligation_handoff(&event)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                (
+                    handoff.id,
+                    handoff.source_ticket,
+                    handoff.destination_ticket
+                ),
+                (id, old_ticket, new_ticket)
+            );
+            assert_eq!(
+                (
+                    handoff.source_holder,
+                    handoff.destination_holder,
+                    handoff.source_region,
+                    handoff.destination_region
+                ),
+                (source, target, region, region)
+            );
             assert_eq!(mailbox.open_tickets(), 0);
             assert!(!mailbox.has_pending_handoffs());
             assert_eq!(
@@ -2189,6 +2402,384 @@ mod tests {
                 0
             );
         }
+    }
+
+    #[test]
+    fn checked_transfer_actual_lab_run_closes_source_and_accepts_destination_terminal() {
+        for cross_region in [false, true] {
+            let mut runtime = lab();
+            let source_region = runtime.state.create_root_region(Budget::INFINITE);
+            let destination_region = if cross_region {
+                runtime.state.create_root_region(Budget::INFINITE)
+            } else {
+                source_region
+            };
+            let delivery = Arc::new(Mutex::new(None::<ObligationToken>));
+            let received = Arc::clone(&delivery);
+            let (destination, mut destination_join) = runtime
+                .state
+                .create_task(destination_region, Budget::INFINITE, async move {
+                    let cx = Cx::current().expect("Lab polls real destination context");
+                    let token = received
+                        .lock()
+                        .unwrap()
+                        .take()
+                        .expect("accepted token delivered");
+                    assert_eq!(token.holder(), cx.task_id());
+                    assert!(token.commit());
+                    73_u32
+                })
+                .unwrap();
+            let destination_cx = runtime.state.task(destination).unwrap().cx.clone().unwrap();
+            let (source, mut source_join) = runtime
+                .state
+                .create_task(source_region, Budget::INFINITE, async move {
+                    let cx = Cx::current().expect("Lab polls real source context");
+                    let token = cx
+                        .try_register_obligation_checked(ObligationKind::Lease, cx.task_id())
+                        .unwrap()
+                        .unwrap()
+                        .try_transfer(&destination_cx)
+                        .unwrap();
+                    *delivery.lock().unwrap() = Some(token);
+                    41_u32
+                })
+                .unwrap();
+            runtime.scheduler.lock().schedule(source, 0);
+            assert!(runtime.run_until_idle() > 0);
+            assert_eq!(source_join.try_join().unwrap(), Some(41));
+            assert!(runtime.state.task(source).is_none());
+            assert!(runtime.state.task(destination).is_some());
+            assert_eq!(
+                runtime
+                    .state
+                    .obligations
+                    .sorted_pending_ids_for_holder(destination)
+                    .len(),
+                1
+            );
+            if cross_region {
+                runtime.state.close_region_command(
+                    source_region,
+                    &crate::types::CancelReason::user("source transferred"),
+                );
+                assert!(runtime.state.region(source_region).is_none());
+            }
+            let before = crate::trace::refinement_firewall::check_refinement_firewall(
+                &runtime.trace_handle().snapshot(),
+            );
+            assert!(
+                before.first_violation.is_none(),
+                "source completion/close after handoff: {before:?}"
+            );
+            runtime.scheduler.lock().schedule(destination, 0);
+            let report = runtime.run_until_quiescent_with_report();
+            assert_eq!(destination_join.try_join().unwrap(), Some(73));
+            assert!(
+                report.lab_test_passed(),
+                "actual transfer Lab report: {report:?}"
+            );
+            assert!(report.refinement_firewall_rule_id.is_none());
+            assert!(!report.refinement_firewall_skipped_due_to_trace_truncation);
+            assert_eq!(runtime.state.leak_count(), 0);
+            assert_eq!(mailbox_of(&runtime).stats().reserved, 1);
+            assert_eq!(mailbox_of(&runtime).stats().committed, 1);
+            assert_eq!(mailbox_of(&runtime).stats().refused, 0);
+            assert_eq!(handoff_messages(&runtime).len(), 1);
+            eprintln!(
+                "actual Lab handoff cross_region={cross_region} source={source:?} destination={destination:?} results=41,73 report={}",
+                report.to_json()
+            );
+        }
+    }
+
+    #[test]
+    fn checked_transfer_settlement_fence_refuses_without_consuming_pending_token() {
+        let (mut runtime, region, source, cx) = checked_holder(1);
+        let (_target, destination) = transfer_holder(&mut runtime, region);
+        let token = cx
+            .try_register_obligation_checked(ObligationKind::Lease, source)
+            .unwrap()
+            .unwrap();
+        let credit = Arc::clone(token.admission.as_ref().unwrap());
+        // Pin the actual admission fence before a terminal decision, the
+        // pause between direct settlement starting and its arena projection.
+        credit.fence_transfers();
+        let (reason, token) = token.try_transfer(&destination).unwrap_err().into_parts();
+        assert_eq!(reason, ObligationTransferError::SourceSettlementStarted);
+        assert!(matches!(
+            *credit.resolution.lock().unwrap(),
+            AdmissionDecision::Pending
+        ));
+        assert_eq!(
+            runtime.state.region(region).unwrap().pending_obligations(),
+            1
+        );
+        assert_eq!(
+            runtime
+                .state
+                .region(region)
+                .unwrap()
+                .unapplied_obligation_count(),
+            1
+        );
+        assert!(
+            token.abort(ObligationAbortReason::Explicit),
+            "returned token can win the terminal race"
+        );
+        assert_eq!(runtime.state.drain_obligation_posts(64), 2);
+        assert_eq!(mailbox_of(&runtime).stats().aborted, 1);
+        assert_eq!(mailbox_of(&runtime).stats().refused, 0);
+        assert_eq!(runtime.state.pending_obligation_count(), 0);
+    }
+
+    #[test]
+    fn checked_transfer_long_lineage_settlement_and_retirement_use_bounded_stack() {
+        let (mut runtime, region, source, cx) = checked_holder(1);
+        let (_target, destination) = transfer_holder(&mut runtime, region);
+        let mut token = cx
+            .try_register_obligation_checked(ObligationKind::Lease, source)
+            .unwrap()
+            .unwrap();
+        let oldest = Arc::clone(token.admission.as_ref().unwrap());
+        assert_eq!(runtime.state.drain_obligation_posts(1), 1);
+        let id = runtime
+            .state
+            .obligations
+            .sorted_pending_ids_for_holder(source)[0];
+        for index in 0..2048 {
+            token = token
+                .try_transfer(if index % 2 == 0 { &destination } else { &cx })
+                .unwrap();
+        }
+        let youngest = Arc::downgrade(token.admission.as_ref().unwrap());
+        let oldest_weak = Arc::downgrade(&oldest);
+        assert_eq!(
+            runtime.state.region(region).unwrap().pending_obligations(),
+            1
+        );
+        runtime.state.commit_obligation(id).unwrap();
+        assert!(!token.commit());
+        assert_eq!(
+            runtime.state.drain_obligation_posts_before_completion(None),
+            2048
+        );
+        assert_eq!(
+            runtime
+                .state
+                .region(region)
+                .unwrap()
+                .unapplied_obligation_count(),
+            0
+        );
+        assert_eq!(mailbox_of(&runtime).open_tickets(), 0);
+        assert_eq!(mailbox_of(&runtime).stats().refused, 0);
+        drop(runtime);
+        let (done_tx, done_rx) = std::sync::mpsc::sync_channel(1);
+        let worker = std::thread::Builder::new()
+            .stack_size(64 * 1024)
+            .spawn(move || {
+                // Retaining the historical root makes all successors uniquely
+                // owned by that chain after projection; this drop must iterate.
+                drop(oldest);
+                done_tx.send(()).unwrap();
+            })
+            .unwrap();
+        done_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("long handoff chain settles and drops on a small stack");
+        worker.join().unwrap();
+        assert!(oldest_weak.upgrade().is_none());
+        assert!(
+            youngest.upgrade().is_none(),
+            "iterative retirement releases the entire chain"
+        );
+    }
+
+    #[test]
+    fn checked_transfer_shared_lineage_retires_under_concurrent_small_stack_drops() {
+        let (mut runtime, region, source, cx) = checked_holder(1);
+        let (_target, destination) = transfer_holder(&mut runtime, region);
+        let mut token = cx
+            .try_register_obligation_checked(ObligationKind::Lease, source)
+            .unwrap()
+            .unwrap();
+        let oldest = Arc::clone(token.admission.as_ref().unwrap());
+        let oldest_weak = Arc::downgrade(&oldest);
+        assert_eq!(runtime.state.drain_obligation_posts(1), 1);
+        let id = runtime
+            .state
+            .obligations
+            .sorted_pending_ids_for_holder(source)[0];
+        let mut first_owners = Vec::new();
+        let mut second_owners = Vec::new();
+        let mut witnesses = Vec::new();
+        for index in 0..2048 {
+            token = token
+                .try_transfer(if index % 2 == 0 { &destination } else { &cx })
+                .unwrap();
+            let credit = token.admission.as_ref().unwrap();
+            first_owners.push(Arc::clone(credit));
+            second_owners.push(Arc::clone(credit));
+            witnesses.push(Arc::downgrade(credit));
+        }
+        runtime.state.commit_obligation(id).unwrap();
+        assert!(!token.commit());
+        assert_eq!(
+            runtime.state.drain_obligation_posts_before_completion(None),
+            2048
+        );
+        assert_eq!(runtime.state.pending_obligation_count(), 0);
+        assert_eq!(
+            runtime
+                .state
+                .region(region)
+                .unwrap()
+                .unapplied_obligation_count(),
+            0
+        );
+        assert_eq!(mailbox_of(&runtime).open_tickets(), 0);
+        assert_eq!(mailbox_of(&runtime).stats().refused, 0);
+        drop(runtime);
+        // Retiring the root reaches a successor that still has external
+        // owners. Later concurrent final releases must neither recurse down
+        // the remaining lineage nor strand any of its actual credits.
+        drop(oldest);
+        assert!(oldest_weak.upgrade().is_none());
+        assert!(witnesses.iter().all(|credit| credit.strong_count() >= 2));
+        let start = Arc::new(std::sync::Barrier::new(2));
+        let (done_tx, done_rx) = std::sync::mpsc::sync_channel(2);
+        let workers: Vec<_> = [first_owners, second_owners]
+            .into_iter()
+            .map(|owners| {
+                let start = Arc::clone(&start);
+                let done_tx = done_tx.clone();
+                std::thread::Builder::new()
+                    .stack_size(64 * 1024)
+                    .spawn(move || {
+                        start.wait();
+                        for credit in owners {
+                            drop(credit);
+                            std::thread::yield_now();
+                        }
+                        done_tx.send(()).unwrap();
+                    })
+                    .unwrap()
+            })
+            .collect();
+        drop(done_tx);
+        for _ in 0..workers.len() {
+            done_rx
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .expect("concurrent shared handoff retirement finishes on small stacks");
+        }
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        assert!(
+            witnesses.iter().all(|credit| credit.upgrade().is_none()),
+            "every shared credit retires after its final concurrent release"
+        );
+    }
+
+    #[test]
+    fn checked_transfer_public_id_settlement_stops_concurrent_successor_admission() {
+        let (mut runtime, region, source, cx) = checked_holder(1);
+        let (_target, destination) = transfer_holder(&mut runtime, region);
+        let token = cx
+            .try_register_obligation_checked(ObligationKind::Lease, source)
+            .unwrap()
+            .unwrap();
+        assert_eq!(runtime.state.drain_obligation_posts(1), 1);
+        let id = runtime
+            .state
+            .obligations
+            .sorted_pending_ids_for_holder(source)[0];
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let produced = Arc::clone(&accepted);
+        let (refused_tx, refused_rx) = std::sync::mpsc::sync_channel(1);
+        let producer = std::thread::spawn(move || {
+            let mut token = token;
+            let started = std::time::Instant::now();
+            loop {
+                assert!(
+                    started.elapsed() < std::time::Duration::from_secs(10),
+                    "settlement must fence the live transfer producer"
+                );
+                let destination = if token.holder() == source {
+                    &destination
+                } else {
+                    &cx
+                };
+                match token.try_transfer(destination) {
+                    Ok(next) => {
+                        token = next;
+                        produced.fetch_add(1, Ordering::Release);
+                    }
+                    Err(failure) => {
+                        let (reason, token) = failure.into_parts();
+                        assert!(matches!(
+                            reason,
+                            ObligationTransferError::SourceSettlementStarted
+                                | ObligationTransferError::SourceResolved
+                        ));
+                        refused_tx.send((reason, token)).unwrap();
+                        return;
+                    }
+                }
+                std::thread::yield_now();
+            }
+        });
+        let started = std::time::Instant::now();
+        while accepted.load(Ordering::Acquire) < 64 {
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(5),
+                "producer must make real handoffs before settlement begins"
+            );
+            std::thread::yield_now();
+        }
+        let (settled_tx, settled_rx) = std::sync::mpsc::sync_channel(1);
+        let settler = std::thread::spawn(move || {
+            runtime.state.commit_obligation(id).unwrap();
+            runtime.state.drain_obligation_posts_before_completion(None);
+            assert_eq!(
+                runtime.state.obligation(id).unwrap().state,
+                crate::record::ObligationState::Committed
+            );
+            assert_eq!(
+                runtime.state.region(region).unwrap().pending_obligations(),
+                0
+            );
+            assert_eq!(
+                runtime
+                    .state
+                    .region(region)
+                    .unwrap()
+                    .unapplied_obligation_count(),
+                0
+            );
+            assert_eq!(mailbox_of(&runtime).stats().refused, 0);
+            assert_eq!(mailbox_of(&runtime).open_tickets(), 0);
+            settled_tx.send(runtime).unwrap();
+        });
+        let runtime = settled_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("public-ID settlement completes while transfers compete");
+        let (reason, token) = refused_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("competing admission observes the shared lineage fence");
+        assert!(!token.commit());
+        producer.join().unwrap();
+        settler.join().unwrap();
+        assert!(accepted.load(Ordering::Acquire) >= 64);
+        assert_eq!(
+            mailbox_of(&runtime).stats().posted,
+            mailbox_of(&runtime).stats().applied
+        );
+        eprintln!(
+            "public-ID settlement id={id:?} concurrent_handoffs={} producer_refusal={reason:?} final_state=Committed",
+            accepted.load(Ordering::Acquire)
+        );
     }
 
     #[test]

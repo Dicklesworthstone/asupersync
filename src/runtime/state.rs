@@ -5226,9 +5226,16 @@ impl RuntimeState {
         destination.bind_ticket(obligation);
         self.admitted_obligations.insert(obligation, destination);
         source.finish_application();
-        let message = format!(
-            "obligation_handoff_v1 id={obligation:?} source_ticket={old_ticket} destination_ticket={new_ticket} source_holder={old_holder:?} destination_holder={new_holder:?} source_region={old_region:?} destination_region={new_region:?}"
-        );
+        let message = crate::trace::event::ObligationHandoff {
+            id: obligation,
+            source_ticket: old_ticket,
+            destination_ticket: new_ticket,
+            source_holder: old_holder,
+            destination_holder: new_holder,
+            source_region: old_region,
+            destination_region: new_region,
+        }
+        .to_message();
         let now = self.current_runtime_time();
         self.emit_obligation_lifecycle_effect(
             effects,
@@ -5255,6 +5262,15 @@ impl RuntimeState {
         holder: Option<TaskId>,
         desired: ObligationResolution,
     ) -> Result<Option<ObligationResolution>, Error> {
+        if holder.is_none() {
+            if let Some(credit) = self.admitted_obligations.get(&obligation) {
+                // The consumed-token protocol permits only one transfer at a
+                // time per lineage. This fence allows that already-admitted
+                // transfer to finish but prevents an unbounded succession
+                // while direct settlement owns RuntimeState/table guards.
+                credit.fence_transfers();
+            }
+        }
         loop {
             if let Some(holder) = holder {
                 if obligations
@@ -5479,7 +5495,9 @@ impl RuntimeState {
     fn dispatch_obligation_lifecycle_effect(&mut self, effect: ObligationLifecycleEffect) {
         match effect {
             ObligationLifecycleEffect::Handoff { message, now } => {
+                self.notify_runtime_epoch_advance(super::epoch_tracker::ModuleId::RegionTable);
                 self.record_trace_event(|seq| TraceEvent::user_trace(seq, now, message));
+                self.notify_runtime_epoch_advance(super::epoch_tracker::ModuleId::ObligationTable);
             }
             ObligationLifecycleEffect::Reserve {
                 obligation,
@@ -10939,3 +10957,101 @@ mod state_metamorphic;
 #[allow(clippy::too_many_lines)]
 #[path = "state_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod obligation_transfer_epoch_tests {
+    use super::*;
+
+    #[test]
+    fn checked_transfer_projection_advances_both_epochs_once() {
+        for cross_region in [false, true] {
+            for eager_terminal in [false, true] {
+                let mut lab = crate::lab::LabRuntime::new(crate::lab::LabConfig::new(0x28_E0));
+                let source_region = lab.state.create_root_region(Budget::INFINITE);
+                let destination_region = if cross_region {
+                    lab.state.create_root_region(Budget::INFINITE)
+                } else {
+                    source_region
+                };
+                let (source, _source_join) = lab
+                    .state
+                    .create_task(
+                        source_region,
+                        Budget::INFINITE,
+                        std::future::pending::<()>(),
+                    )
+                    .unwrap();
+                let (destination, _destination_join) = lab
+                    .state
+                    .create_task(
+                        destination_region,
+                        Budget::INFINITE,
+                        std::future::pending::<()>(),
+                    )
+                    .unwrap();
+                let source_cx = lab.state.task(source).unwrap().cx.clone().unwrap();
+                let destination_cx = lab.state.task(destination).unwrap().cx.clone().unwrap();
+                let token = source_cx
+                    .try_register_obligation_checked(ObligationKind::Lease, source)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(lab.state.drain_obligation_posts(1), 1);
+                let id = lab.state.obligations.sorted_pending_ids_for_holder(source)[0];
+                let before = (
+                    lab.state.region_table_epoch,
+                    lab.state.obligation_table_epoch,
+                );
+                let token = token.try_transfer(&destination_cx).unwrap();
+                assert_eq!(
+                    (
+                        lab.state.region_table_epoch,
+                        lab.state.obligation_table_epoch
+                    ),
+                    before
+                );
+                if eager_terminal {
+                    lab.state.commit_obligation(id).unwrap();
+                    assert!(!token.commit());
+                    assert_eq!(lab.state.region_table_epoch, before.0.next());
+                    assert_eq!(lab.state.obligation_table_epoch, before.1.next().next());
+                } else {
+                    assert_eq!(lab.state.drain_obligation_posts(1), 1);
+                    assert_eq!(lab.state.region_table_epoch, before.0.next());
+                    assert_eq!(lab.state.obligation_table_epoch, before.1.next());
+                    assert_eq!(lab.state.obligation(id).unwrap().holder, destination);
+                    assert!(token.commit());
+                    assert_eq!(lab.state.drain_obligation_posts(1), 1);
+                }
+                let after = (
+                    lab.state.region_table_epoch,
+                    lab.state.obligation_table_epoch,
+                );
+                assert_eq!(
+                    lab.state.drain_obligation_posts(64),
+                    usize::from(eager_terminal)
+                );
+                assert_eq!(
+                    (
+                        lab.state.region_table_epoch,
+                        lab.state.obligation_table_epoch
+                    ),
+                    after,
+                    "late handoff receipt cannot advance either epoch again"
+                );
+                assert_eq!(lab.state.pending_obligation_count(), 0);
+                assert_eq!(
+                    lab.state
+                        .obligation_gateway()
+                        .unwrap()
+                        .mailbox()
+                        .stats()
+                        .refused,
+                    0
+                );
+                eprintln!(
+                    "handoff epochs cross_region={cross_region} eager_terminal={eager_terminal} before={before:?} after={after:?} id={id:?}"
+                );
+            }
+        }
+    }
+}

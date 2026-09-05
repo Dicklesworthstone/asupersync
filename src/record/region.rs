@@ -375,7 +375,7 @@ impl ObligationAdmissionHandle {
     pub(crate) fn transfer_to(
         &self,
         destination: &Self,
-        claim: impl FnOnce() -> bool,
+        claim: impl FnOnce() -> Result<(), crate::runtime::obligation_mailbox::ObligationTransferError>,
         publish: impl FnOnce(),
     ) -> Result<(), crate::runtime::obligation_mailbox::ObligationTransferError> {
         use crate::runtime::obligation_mailbox::{
@@ -423,9 +423,7 @@ impl ObligationAdmissionHandle {
         if Arc::ptr_eq(&source, &target) {
             let mut inner = source.write();
             validate(&inner, &inner, true)?;
-            if !claim() {
-                return Err(Error::SourceResolved);
-            }
+            claim()?;
             inner.unapplied_obligations += 1;
             publish();
             return Ok(());
@@ -444,9 +442,7 @@ impl ObligationAdmissionHandle {
             (source, target)
         };
         validate(&source, &target, false)?;
-        if !claim() {
-            return Err(Error::SourceResolved);
-        }
+        claim()?;
         target.pending_obligations += 1;
         target.unapplied_obligations += 1;
         source.pending_obligations = source
