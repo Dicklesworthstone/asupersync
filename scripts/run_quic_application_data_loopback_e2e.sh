@@ -12,6 +12,7 @@ OVERLAY_MODE="${ASUPERSYNC_QUIC_CLEAN_OVERLAY:-0}"
 QUIC_WORKER="${ASUPERSYNC_QUIC_RCH_WORKER:-${RCH_WORKER:-}}"
 BUILD_JOBS="${ASUPERSYNC_QUIC_BUILD_JOBS:-8}"
 QUIC_CARGO_HOME="${ASUPERSYNC_QUIC_CARGO_HOME:-${CARGO_HOME:-}}"
+QUIC_ARTIFACT_BASE="${ASUPERSYNC_MANAGED_QUIC_ARTIFACT_BASE:-}"
 OVERLAY_FINGERPRINT=""
 if [[ ! "${BUILD_JOBS}" =~ ^[1-9][0-9]*$ ]]; then
   echo "refused: ASUPERSYNC_QUIC_BUILD_JOBS must be a positive integer" >&2
@@ -20,6 +21,16 @@ fi
 REMOTE_CARGO_ENV=()
 if [[ -n "${QUIC_CARGO_HOME}" ]]; then
   REMOTE_CARGO_ENV+=("CARGO_HOME=${QUIC_CARGO_HOME}")
+fi
+if [[ -n "${QUIC_ARTIFACT_BASE}" ]]; then
+  if [[ "${QUIC_ARTIFACT_BASE}" != /* ]]; then
+    echo "refused: ASUPERSYNC_MANAGED_QUIC_ARTIFACT_BASE must be an absolute remote directory" >&2
+    exit 2
+  fi
+  # Select an existing worker directory outside the clean-overlay snapshot to
+  # retain process artifacts after RCH reaps that snapshot. Forward explicitly;
+  # the harness creates its own unique child directory beneath this base.
+  REMOTE_CARGO_ENV+=("ASUPERSYNC_MANAGED_QUIC_ARTIFACT_BASE=${QUIC_ARTIFACT_BASE}")
 fi
 if [[ -e "${OUTPUT_ROOT}" ]]; then
   echo "refused: OUTPUT_ROOT already exists; preserve its earlier evidence: ${OUTPUT_ROOT}" >&2
@@ -57,6 +68,7 @@ fi
 echo "ATP_QUIC_TRACE=${ATP_QUIC_TRACE:-1}"
 echo "CARGO_TARGET_DIR=${TARGET_DIR}"
 echo "build_jobs=${BUILD_JOBS} cargo_home=${QUIC_CARGO_HOME:-remote-default}"
+echo "managed_artifact_base=${QUIC_ARTIFACT_BASE:-remote-test-default}"
 echo "base=${BASE_REV} overlay_mode=${OVERLAY_MODE} logs=${OUTPUT_ROOT}"
 
 run_stage() {
@@ -94,17 +106,29 @@ PY
 # Preserve the original protocol fixture stage and its assertions. Its keys and
 # manually established state are not credited as authenticated managed proof.
 run_stage protocol-fixture test-internals,tls quic_application_data_udp_loopback
-# No test-internals feature: the ignored peer is explicitly executed twice by
-# its parent after real TLS handshakes and public consuming handoffs.
-# Three original tests plus two managed parents run here. The fourth original
-# produced-response test remains behind its existing test-internals gate.
+# The managed tests use public APIs for real TLS handshakes and consuming
+# handoffs. The conformance dev-dependency unifies test-internals into this
+# target, so all four original tests and both managed parents must execute.
+# The ignored peer is explicitly executed twice by its parent.
 run_stage authenticated-managed http3,tls quic_h3_live_udp
 python3 - "${OUTPUT_ROOT}/authenticated-managed.log" "${BASE_REV}" "${OVERLAY_MODE}" <<'PY'
 import hashlib, json, pathlib, re, subprocess, sys
 path, base, overlay = sys.argv[1:]
 log = re.sub(r"\x1b\[[0-9;]*m", "", pathlib.Path(path).read_text())
 counts = re.findall(r"test result: ok\. (\d+) passed; (\d+) failed; (\d+) ignored; (\d+) measured; (\d+) filtered out", log)
-assert counts[-1:] == [("5", "0", "1", "0", "0")], ("all public parents and one intentional helper required", counts)
+assert counts[-1:] == [("6", "0", "1", "0", "0")], ("all public parents and one intentional helper required", counts)
+parents = {
+    "authenticated_h3_router_request_response_crosses_real_udp",
+    "authenticated_h3_produced_response_obeys_live_udp_credit_and_quiesces",
+    "cancellation_refuses_live_request_before_router_dispatch",
+    "negotiated_non_h3_alpn_refuses_live_application_handles",
+    "authenticated_managed_public_handoff_self_wake_and_restart_cross_real_udp",
+    "authenticated_managed_two_process_public_exchange_cancel_and_restart",
+}
+passed = re.findall(r"^test ([A-Za-z0-9_]+) \.\.\. ok$", log, re.M)
+assert len(passed) == len(parents) and set(passed) == parents, ("all six named parents must pass exactly once", passed)
+ignored = re.findall(r"^test ([A-Za-z0-9_]+) \.\.\. ignored(?:, [^\n]*)?$", log, re.M)
+assert ignored == ["authenticated_managed_process_peer"], ("only the named process helper may be ignored", ignored)
 rows = [json.loads(line.split("MANAGED_QUIC_TWO_PROCESS ", 1)[1]) for line in log.splitlines() if "MANAGED_QUIC_TWO_PROCESS " in line]
 assert len(rows) == 1, "one actual two-process summary required"
 summary = rows[0]
@@ -122,5 +146,5 @@ for child in children:
     assert child["runtime_quiescent"] and child["parked_cancelled_and_restarted"]
     assert child["active_connections_after_shutdown"] == 0 and len(child["rounds"]) == 2
     assert all(round["received_bytes"] > 0 and round["packets_sent"] > 0 and round["packets_received"] > 0 for round in child["rounds"])
-print("verified managed public proof: 5 parent tests; 2 executed child helpers; 1 authenticated session; 2 exchange rounds; no same-router, WouldBlock, or performance claim")
+print("verified managed public proof: 6 parent tests; 2 executed child helpers; 1 authenticated session; 2 exchange rounds; managed tests use public APIs; no same-router, WouldBlock, or performance claim")
 PY

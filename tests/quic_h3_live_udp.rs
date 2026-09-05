@@ -1668,7 +1668,9 @@ async fn managed_cancel_parked(cx: &Cx, mut endpoint: ManagedQuicEndpoint) -> Ma
 #[test]
 fn authenticated_managed_public_handoff_self_wake_and_restart_cross_real_udp() {
     let runtime = managed_runtime();
-    runtime.block_on(runtime.handle().spawn(async {
+    // Erase the parent type before runtime storage while retaining a checked
+    // Send boundary for the complete authenticated application state machine.
+    let parent: std::pin::Pin<Box<dyn Future<Output = ()> + Send>> = Box::pin(async {
         let cx = Cx::current().expect("actual native task Cx");
         assert!(cx.has_timer());
         let client_socket = QuicUdpEndpoint::bind(
@@ -1719,13 +1721,14 @@ fn authenticated_managed_public_handoff_self_wake_and_restart_cross_real_udp() {
         assert_eq!(client.connection_stats().active_connections, 0);
         assert_eq!(server.connection_stats().active_connections, 0);
         assert_eq!(cx.timer_driver().unwrap().pending_count(), 0);
-    }));
+    });
+    runtime.block_on(runtime.handle().spawn(parent));
     managed_assert_runtime_cleanup(&runtime);
 }
 
 fn managed_sha256(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
-    format!("{:x}", Sha256::digest(bytes))
+    hex::encode(Sha256::digest(bytes))
 }
 
 fn managed_source_identity() -> serde_json::Value {
@@ -1763,7 +1766,7 @@ fn managed_executable_sha256() -> String {
         hasher.update(&buffer[..count]);
     }
     assert_eq!(total, expected);
-    format!("{:x}", hasher.finalize())
+    hex::encode(hasher.finalize())
 }
 
 fn managed_write_receipt(path: &std::path::Path, value: &serde_json::Value) {
@@ -1793,20 +1796,37 @@ fn authenticated_managed_process_peer() {
     let source = managed_source_identity();
     let executable = managed_executable_sha256();
     let runtime = managed_runtime();
-    let receipt = runtime.block_on(runtime.handle().spawn(async move {
+    // This checked Send coercion keeps nested task wrappers from recursively
+    // expanding the complete parent type in the strict TLS contributor lane.
+    let parent: std::pin::Pin<
+        Box<dyn Future<Output = (std::path::PathBuf, String, serde_json::Value)> + Send>,
+    > = Box::pin(async move {
         let cx = Cx::current().expect("actual native child-process task Cx");
         assert!(cx.has_timer());
-        let socket = QuicUdpEndpoint::bind(&cx, "127.0.0.1:0".parse().unwrap(), QuicUdpEndpointConfig::default()).await.unwrap();
+        let socket = QuicUdpEndpoint::bind(
+            &cx,
+            "127.0.0.1:0".parse().unwrap(),
+            QuicUdpEndpointConfig::default(),
+        )
+        .await
+        .unwrap();
         let local = socket.local_addr();
         let metrics = socket.metrics();
         let server_addr = if server {
-            managed_write_receipt(&artifacts.join("server-ready.json"), &serde_json::json!({
-                "server_addr": local.to_string(), "pid": std::process::id(),
-                "source": source, "executable_sha256": executable,
-            }));
+            managed_write_receipt(
+                &artifacts.join("server-ready.json"),
+                &serde_json::json!({
+                    "server_addr": local.to_string(), "pid": std::process::id(),
+                    "source": source, "executable_sha256": executable,
+                }),
+            );
             local
         } else {
-            let address: std::net::SocketAddr = std::env::var("ASUPERSYNC_MANAGED_QUIC_SERVER_ADDR").expect("parent supplies actual bound server address").parse().unwrap();
+            let address: std::net::SocketAddr =
+                std::env::var("ASUPERSYNC_MANAGED_QUIC_SERVER_ADDR")
+                    .expect("parent supplies actual bound server address")
+                    .parse()
+                    .unwrap();
             assert!(address.ip().is_loopback() && address.port() != 0);
             address
         };
@@ -1827,11 +1847,21 @@ fn authenticated_managed_process_peer() {
                 old_proxy.wake_by_ref();
                 // Both peers finish the parked cancellation before the next
                 // request. This is process orchestration, not UDP evidence.
-                managed_write_receipt(&artifacts.join(format!("{role}-restart-ready.json")), &serde_json::json!({"pid": std::process::id()}));
-                let other = artifacts.join(if server { "client-restart-ready.json" } else { "server-restart-ready.json" });
+                managed_write_receipt(
+                    &artifacts.join(format!("{role}-restart-ready.json")),
+                    &serde_json::json!({"pid": std::process::id()}),
+                );
+                let other = artifacts.join(if server {
+                    "client-restart-ready.json"
+                } else {
+                    "server-restart-ready.json"
+                });
                 let started = Instant::now();
                 while !other.exists() {
-                    assert!(started.elapsed() < Duration::from_secs(10), "other real peer did not complete cancellation; artifacts={artifacts:?}");
+                    assert!(
+                        started.elapsed() < Duration::from_secs(10),
+                        "other real peer did not complete cancellation; artifacts={artifacts:?}"
+                    );
                     asupersync::time::sleep(cx.now(), Duration::from_millis(10)).await;
                 }
             }
@@ -1852,7 +1882,8 @@ fn authenticated_managed_process_peer() {
             "performance_claim": false,
         });
         (artifacts, role, receipt)
-    }));
+    });
+    let receipt = runtime.block_on(runtime.handle().spawn(parent));
     managed_assert_runtime_cleanup(&runtime);
     let (artifacts, role, mut receipt) = receipt;
     receipt["runtime_quiescent"] = serde_json::json!(runtime.is_quiescent());

@@ -3948,14 +3948,28 @@ mod tests {
                 "ACK/control output remains owned"
             );
             let stream = crate::net::quic_native::StreamId(1);
-            assert_eq!(
-                handle
+            let readiness = handle
+                .connection
+                .next_readable_stream(&observer)
+                .unwrap()
+                .expect("both authenticated STREAM frames are committed before cancellation");
+            assert_eq!(readiness.stream_id, stream);
+            assert_eq!(readiness.readable_bytes, 10);
+            assert!(readiness.fin_received);
+            assert_eq!(readiness.reset, None);
+            assert_eq!(readiness.receive_stopped, None);
+            // Reads may return one reassembled chunk at a time. Drain both
+            // committed chunks without routing another packet or polling I/O.
+            let mut received = Vec::new();
+            for _ in 0..2 {
+                let bytes = handle
                     .connection
                     .read_stream_bytes(&observer, stream, 32)
-                    .unwrap()
-                    .as_ref(),
-                b"first-last"
-            );
+                    .unwrap();
+                assert!(!bytes.is_empty());
+                received.extend_from_slice(&bytes);
+            }
+            assert_eq!(received.as_slice(), b"first-last");
             assert!(
                 handle
                     .connection
