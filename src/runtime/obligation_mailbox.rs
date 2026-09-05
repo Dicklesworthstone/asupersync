@@ -487,6 +487,71 @@ mod tests {
         )
     }
 
+    struct PostingDuringAdmissionMetrics {
+        cx: Cx,
+        remaining: AtomicUsize,
+    }
+
+    impl crate::observability::metrics::MetricsProvider for PostingDuringAdmissionMetrics {
+        fn task_spawned(&self, _: RegionId, _: TaskId) {}
+        fn task_completed(&self, _: TaskId, _: crate::observability::metrics::OutcomeKind, _: std::time::Duration) {}
+        fn region_created(&self, _: RegionId, _: Option<RegionId>) {}
+        fn region_closed(&self, _: RegionId, _: std::time::Duration) {}
+        fn cancellation_requested(&self, _: RegionId, _: crate::types::CancelKind) {}
+        fn drain_completed(&self, _: RegionId, _: std::time::Duration) {}
+        fn deadline_set(&self, _: RegionId, _: std::time::Duration) {}
+        fn deadline_exceeded(&self, _: RegionId) {}
+        fn deadline_warning(&self, _: &str, _: &'static str, _: std::time::Duration) {}
+        fn deadline_violation(&self, _: &str, _: std::time::Duration) {}
+        fn deadline_remaining(&self, _: &str, _: std::time::Duration) {}
+        fn checkpoint_interval(&self, _: &str, _: std::time::Duration) {}
+        fn task_stuck_detected(&self, _: &str) {}
+        fn obligation_created(&self, _: RegionId) {
+            if self.remaining.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1)).is_ok() {
+                let token = self.cx.try_register_obligation(ObligationKind::SendPermit, self.cx.task_id())
+                    .expect("producer posts while the captured backlog is draining");
+                assert!(token.commit());
+            }
+        }
+        fn obligation_discharged(&self, _: RegionId) {}
+        fn obligation_leaked(&self, _: RegionId) {}
+        fn scheduler_tick(&self, _: usize, _: std::time::Duration) {}
+    }
+
+    #[test]
+    fn completion_obligation_drain_captures_once_despite_new_publications() {
+        let mut runtime = lab();
+        let root = runtime.state.create_root_region(Budget::INFINITE);
+        let (holder, _handle) = runtime.state.create_task(root, Budget::INFINITE, std::future::pending::<()>())
+            .expect("live holder");
+        let cx = runtime.state.task(holder).unwrap().cx.clone().unwrap();
+        let metrics = Arc::new(PostingDuringAdmissionMetrics { cx: cx.clone(), remaining: AtomicUsize::new(80) });
+        runtime.state.set_metrics_provider(metrics.clone());
+        let mailbox = mailbox_of(&runtime);
+        assert!(cx.try_register_obligation(ObligationKind::SendPermit, holder).unwrap().commit());
+        assert_eq!(mailbox.len(), 2);
+
+        // The first Reserve callback publishes another reserve+commit pair.
+        // A reloading/unbounded drain would process 162 posts; the captured
+        // prefix must stop after the original two, leaving the new pair live.
+        let applied = runtime.state.drain_obligation_posts_before_completion(None);
+        assert_eq!(applied, 2);
+        assert_eq!(metrics.remaining.load(Ordering::SeqCst), 79);
+        assert_eq!(mailbox.len(), 2);
+        assert_eq!(mailbox.stats().posted, 4);
+        assert_eq!(mailbox.stats().applied, 2);
+        metrics.remaining.store(0, Ordering::SeqCst);
+        assert_eq!(runtime.state.drain_obligation_posts_before_completion(None), 2);
+        let stats = mailbox.stats();
+        assert_eq!(stats.reserved, 2);
+        assert_eq!(stats.committed, 2);
+        assert_eq!(stats.refused, 0);
+        assert_eq!(mailbox.open_tickets(), 0);
+        assert_eq!(runtime.state.pending_obligation_count(), 0);
+        assert!(mailbox.is_empty());
+        eprintln!("completion snapshot initial_posts=2 first_applied={applied} queued_after_first=2 final_stats={stats:?}");
+    }
+
     #[test]
     fn register_then_commit_is_applied_through_runtime_state() {
         let mut runtime = lab();
