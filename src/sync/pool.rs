@@ -1627,9 +1627,11 @@ where
         if self.closed.load(Ordering::Acquire) {
             return Err(PoolError::Closed.into());
         }
-        self.try_acquire()
-            .map(|pooled| CheckedPooledResource::admit(pooled, cx))
-            .transpose()
+        match self.try_acquire() {
+            Some(pooled) => CheckedPooledResource::admit(pooled, cx).map(Some),
+            None if self.closed.load(Ordering::Acquire) => Err(PoolError::Closed.into()),
+            None => Ok(None),
+        }
     }
 
     /// Configures metrics collection for this pool.
@@ -3143,7 +3145,7 @@ mod tests {
             ));
             let pool = Arc::new(GenericPool::with_time_getter(
                 simple_factory,
-                PoolConfig::with_max_size(limit + 1).min_size(limit + 1),
+                PoolConfig::with_max_size(limit + 1).warmup_connections(limit + 1),
                 test_pool_time_now,
             ));
             let task_pool = Arc::clone(&pool);
@@ -3151,7 +3153,7 @@ mod tests {
                 .state
                 .create_task(region, Budget::INFINITE, async move {
                     let cx = Cx::current().expect("actual scheduled Lab pool holder");
-                    assert_eq!(task_pool.warmup(&cx).await.unwrap(), limit + 1);
+                    assert_eq!(task_pool.warmup().await.unwrap(), limit + 1);
                     let mut held = Vec::new();
                     for _ in 0..limit {
                         let resource = task_pool.acquire_checked(&cx).await.unwrap();
@@ -3355,6 +3357,7 @@ mod tests {
             Arc::downgrade(&live),
         ));
         let cx = cx.with_obligation_gateway(Some(gateway), None);
+        let _current = Cx::set_current(Some(cx.clone()));
         let created = Arc::new(AtomicUsize::new(0));
         let creations = Arc::clone(&created);
         let destroyed = Arc::new(AtomicUsize::new(0));
@@ -3386,15 +3389,26 @@ mod tests {
             wakes: Arc::clone(&wake_count),
             drops: Arc::clone(&drop_count),
         }));
-        assert!(
-            pending
-                .lock()
-                .as_mut()
-                .unwrap()
-                .as_mut()
-                .poll(&mut Context::from_waker(&bad_waker))
-                .is_pending()
-        );
+        // Give this independently dropped waiter its own real timer driver.
+        // A wheel with another live timer can retain a cancelled entry until
+        // compaction, which would make the dispatcher an intermediate waker
+        // owner instead of exercising final-payload retirement here. The
+        // explicit acquisition Cx still supplies the actual holder authority.
+        let first_timer =
+            TimerDriverHandle::with_virtual_clock(Arc::new(VirtualClock::starting_at(Time::ZERO)));
+        {
+            let _first_timer = Cx::set_current(Some(test_cx_with_timer(first_timer.clone())));
+            assert!(
+                pending
+                    .lock()
+                    .as_mut()
+                    .unwrap()
+                    .as_mut()
+                    .poll(&mut Context::from_waker(&bad_waker))
+                    .is_pending()
+            );
+        }
+        assert_eq!(first_timer.pending_count(), 1);
         drop(bad_waker);
         assert_eq!(
             drop_count.load(Ordering::SeqCst),
@@ -3422,6 +3436,7 @@ mod tests {
             Some(&"primary checked pool notifier panic")
         );
         assert!(pending.lock().is_none());
+        assert_eq!(first_timer.pending_count(), 0);
         assert_eq!(wake_count.load(Ordering::SeqCst), 1);
         assert_eq!(drop_count.load(Ordering::SeqCst), 1);
         assert_eq!(
@@ -3517,6 +3532,53 @@ mod tests {
             futures_lite::future::block_on(pool.acquire_checked(&cx)),
             Err(CheckedPoolError::Pool(PoolError::Closed))
         ));
+    }
+
+    #[test]
+    fn checked_pool_concurrent_close_cannot_report_idle_unavailability() {
+        let (lab, cx, handle) = checked_pool_fixture(1);
+        let pool = Arc::new(GenericPool::with_time_getter(
+            simple_factory,
+            PoolConfig::with_max_size(1).warmup_connections(1),
+            checked_pool_close_race_now,
+        ));
+        assert_eq!(futures_lite::future::block_on(pool.warmup()).unwrap(), 1);
+        assert_eq!(pool.stats().idle, 1);
+        assert_eq!(pool.stats().active, 0);
+        assert_eq!(pool.stats().waiters, 0);
+        let closed_pool = Arc::clone(&pool);
+        let closed = Arc::new(AtomicBool::new(false));
+        let observed_closed = Arc::clone(&closed);
+        TEST_CHECKED_POOL_CLOSE_CALLBACK.with(|callback| {
+            *callback.borrow_mut() = Some(Box::new(move || {
+                // The legacy try-acquire's first clock callback follows the
+                // checked method's initial open observation. Close the real
+                // pool precisely there, while its idle resource still exists.
+                futures_lite::future::block_on(closed_pool.close());
+                observed_closed.store(true, Ordering::SeqCst);
+            }));
+        });
+        assert!(matches!(
+            pool.try_acquire_checked(&cx),
+            Err(CheckedPoolError::Pool(PoolError::Closed))
+        ));
+        assert!(closed.load(Ordering::SeqCst));
+        TEST_CHECKED_POOL_CLOSE_CALLBACK.with(|callback| assert!(callback.borrow().is_none()));
+        let stats = pool.stats();
+        assert_eq!(stats.active, 0);
+        assert_eq!(stats.idle, 0);
+        assert_eq!(stats.total, 0);
+        assert_eq!(stats.waiters, 0);
+        assert_eq!(
+            lab.state
+                .obligation_gateway()
+                .unwrap()
+                .mailbox()
+                .stats()
+                .posted,
+            0
+        );
+        finish_checked_pool_fixture(lab, &cx, handle, 0, 0);
     }
 
     #[test]
@@ -3734,10 +3796,20 @@ mod tests {
     }
 
     std::thread_local! {
+        static TEST_CHECKED_POOL_CLOSE_CALLBACK: RefCell<Option<Box<dyn FnOnce()>>> = const { RefCell::new(None) };
         static TEST_POOL_TIME_BASE: RefCell<Option<Instant>> = const { RefCell::new(None) };
         static TEST_POOL_TIME_OFFSET_NANOS: Cell<u64> = const { Cell::new(0) };
         static TEST_POOL_TIME_CALL_COUNT: Cell<usize> = const { Cell::new(0) };
         static TEST_POOL_TIME_PANIC_ON_CALL: Cell<Option<usize>> = const { Cell::new(None) };
+    }
+
+    fn checked_pool_close_race_now() -> Instant {
+        let callback =
+            TEST_CHECKED_POOL_CLOSE_CALLBACK.with(|callback| callback.borrow_mut().take());
+        if let Some(callback) = callback {
+            callback();
+        }
+        test_pool_time_now()
     }
 
     fn test_pool_time_now() -> Instant {
