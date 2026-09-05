@@ -506,7 +506,7 @@ mod extension_wire {
         assert!(file.metadata().unwrap().len() <= MAX_PEER_BINARY_BYTES);
         let mut hash = Sha256::new();
         let mut length = 0u64;
-        let mut buffer = [0u8; 64 * 1024];
+        let mut buffer = vec![0u8; 64 * 1024];
         loop {
             let count = file.read(&mut buffer).unwrap();
             if count == 0 {
@@ -1449,7 +1449,7 @@ mod extension_wire {
             .unwrap();
         let mut hash = Sha256::new();
         let mut total = 0u64;
-        let mut buffer = [0u8; 64 * 1024];
+        let mut buffer = vec![0u8; 64 * 1024];
         loop {
             let count = source.read(&mut buffer).unwrap();
             if count == 0 {
