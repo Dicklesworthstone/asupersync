@@ -5,6 +5,7 @@ RUN_ID="${RUN_ID:-atp-session-$(date -u +%Y%m%dT%H%M%SZ)}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-target/atp-session-negotiation-e2e/${RUN_ID}}"
 LOG_FILE="${OUTPUT_ROOT}/events.ndjson"
 TARGET_DIR="${CARGO_TARGET_DIR:-${TMPDIR:-/tmp}/rch_target_atp_session_negotiation_e2e}"
+SESSION_CARGO_HOME="${ATP_SESSION_CARGO_HOME:-/tmp/rch_cargo_home_asupersync_reality}"
 # Keep child logs outside RCH's disposable per-command source root. The test
 # appends a unique process/time directory and never deletes previous artifacts.
 SESSION_ARTIFACT_ROOT="${ATP_SESSION_ARTIFACT_ROOT:-/tmp/asupersync-atp-session-negotiation-artifacts}"
@@ -77,7 +78,7 @@ log_event "pass" "clean-overlay-capability" "base=${BASE_COMMIT}; exact three ow
 
 if [[ "${ATP_SESSION_RUN_LIB_UNIT:-1}" == "1" ]]; then
   run_stage "unit-session-state-machine" \
-    "${RCH_COMMAND[@]}" -- env CARGO_TARGET_DIR="${TARGET_DIR}" \
+    "${RCH_COMMAND[@]}" -- env CARGO_TARGET_DIR="${TARGET_DIR}" CARGO_HOME="${SESSION_CARGO_HOME}" \
       CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' \
       cargo test -p asupersync --locked \
       --lib net::atp::protocol::session::tests -- --nocapture
@@ -87,7 +88,7 @@ else
 fi
 
 run_stage "integration-session-e2e" \
-  "${RCH_COMMAND[@]}" -- env CARGO_TARGET_DIR="${TARGET_DIR}" \
+  "${RCH_COMMAND[@]}" -- env CARGO_TARGET_DIR="${TARGET_DIR}" CARGO_HOME="${SESSION_CARGO_HOME}" \
     CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' \
     ASUPERSYNC_TEST_ARTIFACTS_DIR="${SESSION_ARTIFACT_ROOT}" cargo test -p asupersync \
     --locked --features tls --test atp_session_negotiation -- --nocapture
