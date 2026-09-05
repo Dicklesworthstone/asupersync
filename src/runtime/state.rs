@@ -5018,16 +5018,17 @@ impl RuntimeState {
     }
 
     /// Completion may run with a dispatch table independent of the unified
-    /// state's task arena. Validate a posted holder against that exact table,
-    /// while retaining the state's ordinary obligation backing and effects.
+    /// state's task arena. Use that exact table for every posted operation's
+    /// holder clock and region advancement, retaining the state's obligation
+    /// backing. All observer effects run after A/C guards are released.
     #[allow(clippy::result_large_err)]
-    pub(crate) fn create_obligation_from_dispatch_table(
+    pub(crate) fn apply_obligation_post_from_dispatch_table(
         &mut self,
-        kind: ObligationKind,
-        holder: TaskId,
-        region: RegionId,
+        post: crate::runtime::obligation_mailbox::ObligationPost,
+        obligation: Option<ObligationId>,
         dispatch_tasks: &Arc<crate::sync::ContendedMutex<TaskTable>>,
-    ) -> Result<ObligationId, Error> {
+    ) -> Result<Option<ObligationId>, Error> {
+        use crate::runtime::obligation_mailbox::ObligationOp;
         let mut deferred = Vec::new();
         let result = {
             let tasks = AdmissionTaskTarget::External(
@@ -5045,16 +5046,57 @@ impl RuntimeState {
                 ),
                 None => CompletionObligationTarget::Embedded,
             };
-            self.create_obligation_in(
-                &AdmissionRegionTarget::Embedded,
-                &tasks,
-                &mut obligations,
-                &mut LifecycleEffectsSink::Buffered(&mut deferred),
-                kind,
-                holder,
-                region,
-                None,
-            )
+            let mut regions = AdmissionRegionTarget::Embedded;
+            let mut effects = LifecycleEffectsSink::Buffered(&mut deferred);
+            match post.op {
+                ObligationOp::Reserve => self
+                    .create_obligation_in(
+                        &regions,
+                        &tasks,
+                        &mut obligations,
+                        &mut effects,
+                        post.kind,
+                        post.holder,
+                        post.region,
+                        None,
+                    )
+                    .map(Some),
+                ObligationOp::Commit | ObligationOp::Abort | ObligationOp::Leak => {
+                    let id = obligation
+                        .ok_or_else(|| Error::new(ErrorKind::ObligationAlreadyResolved))?;
+                    match post.op {
+                        ObligationOp::Commit => self
+                            .commit_obligation_in(
+                                &mut regions,
+                                &tasks,
+                                &mut obligations,
+                                &mut effects,
+                                id,
+                            )
+                            .map(|_| None),
+                        ObligationOp::Abort => self
+                            .abort_obligation_in(
+                                &mut regions,
+                                &tasks,
+                                &mut obligations,
+                                &mut effects,
+                                id,
+                                post.abort_reason,
+                            )
+                            .map(|_| None),
+                        ObligationOp::Leak => self
+                            .report_obligation_leak_in(
+                                &mut regions,
+                                &tasks,
+                                &mut obligations,
+                                &mut effects,
+                                id,
+                            )
+                            .map(|()| None),
+                        ObligationOp::Reserve => unreachable!("handled reserve above"),
+                    }
+                }
+            }
         };
         self.dispatch_lifecycle_effects(deferred);
         result

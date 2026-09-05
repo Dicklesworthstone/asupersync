@@ -401,77 +401,77 @@ impl Worker {
             fn drop(&mut self) {
                 if !self.completed && std::thread::panicking() {
                     let cleanup = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    if let Some(stored) = self.stored.take() {
-                        let _ = retire_terminal_task(stored);
-                    }
-                    let mut state = self
-                        .worker
-                        .state
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    let _ = state.drain_obligation_posts_before_completion(None);
-                    let _ = state.update_task(self.task_id, |record| {
-                        if !record.state.is_terminal() {
-                            record.complete(crate::types::Outcome::Panicked(
-                                crate::types::outcome::PanicPayload::new(
-                                    "task panicked during poll",
-                                ),
-                            ));
+                        if let Some(stored) = self.stored.take() {
+                            let _ = retire_terminal_task(stored);
                         }
-                    });
+                        let mut state = self
+                            .worker
+                            .state
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        let _ = state.drain_obligation_posts_before_completion(None);
+                        let _ = state.update_task(self.task_id, |record| {
+                            if !record.state.is_terminal() {
+                                record.complete(crate::types::Outcome::Panicked(
+                                    crate::types::outcome::PanicPayload::new(
+                                        "task panicked during poll",
+                                    ),
+                                ));
+                            }
+                        });
 
-                    let (waiters, cancel_waker_retirements) = state
-                        .task_completed(self.task_id)
-                        .into_waiters_and_retirements_without_observers();
-                    let finalizers = state.drain_ready_async_finalizers();
-                    let mut local_waiters = self.worker.scratch_local.take();
-                    let mut global_waiters = self.worker.scratch_global.take();
-                    let mut foreign_wakers = self.worker.scratch_foreign_wakers.take();
-                    local_waiters.clear();
-                    global_waiters.clear();
-                    foreign_wakers.clear();
+                        let (waiters, cancel_waker_retirements) = state
+                            .task_completed(self.task_id)
+                            .into_waiters_and_retirements_without_observers();
+                        let finalizers = state.drain_ready_async_finalizers();
+                        let mut local_waiters = self.worker.scratch_local.take();
+                        let mut global_waiters = self.worker.scratch_global.take();
+                        let mut foreign_wakers = self.worker.scratch_foreign_wakers.take();
+                        local_waiters.clear();
+                        global_waiters.clear();
+                        foreign_wakers.clear();
 
-                    for waiter in waiters {
-                        if let Some(record) = state.task(waiter) {
-                            if record.wake_state.notify() {
-                                if record.is_local() {
-                                    match record.pinned_worker() {
-                                        Some(worker_id) if worker_id == self.worker.id => {
-                                            local_waiters.push(waiter);
-                                        }
-                                        Some(_worker_id) => {
-                                            record.wake_state.clear();
-                                            if let Some((waker, _)) = &record.cached_waker {
-                                                foreign_wakers.push(waker.clone());
+                        for waiter in waiters {
+                            if let Some(record) = state.task(waiter) {
+                                if record.wake_state.notify() {
+                                    if record.is_local() {
+                                        match record.pinned_worker() {
+                                            Some(worker_id) if worker_id == self.worker.id => {
+                                                local_waiters.push(waiter);
                                             }
-                                            // No cached waker: task hasn't been polled yet.
-                                            // Clear notified state so the next proper wake
-                                            // (via the task's waker on its owning worker)
-                                            // is not dedup-suppressed.
+                                            Some(_worker_id) => {
+                                                record.wake_state.clear();
+                                                if let Some((waker, _)) = &record.cached_waker {
+                                                    foreign_wakers.push(waker.clone());
+                                                }
+                                                // No cached waker: task hasn't been polled yet.
+                                                // Clear notified state so the next proper wake
+                                                // (via the task's waker on its owning worker)
+                                                // is not dedup-suppressed.
+                                            }
+                                            None => local_waiters.push(waiter),
                                         }
-                                        None => local_waiters.push(waiter),
+                                    } else {
+                                        global_waiters.push(waiter);
                                     }
-                                } else {
-                                    global_waiters.push(waiter);
                                 }
                             }
                         }
-                    }
-                    drop(state);
-                    cancel_waker_retirements.retire();
+                        drop(state);
+                        cancel_waker_retirements.retire();
 
-                    while let Some(waker) = foreign_wakers.pop() {
-                        waker.wake();
-                    }
+                        while let Some(waker) = foreign_wakers.pop() {
+                            waker.wake();
+                        }
 
-                    for waiter in &global_waiters {
-                        self.worker.global.push(*waiter);
-                    }
-                    self.worker.local.push_many(&local_waiters);
-                    self.worker.scratch_local.set(local_waiters);
-                    self.worker.scratch_global.set(global_waiters);
-                    self.worker.scratch_foreign_wakers.set(foreign_wakers);
-                    self.worker.publish_ready_finalizers(finalizers);
+                        for waiter in &global_waiters {
+                            self.worker.global.push(*waiter);
+                        }
+                        self.worker.local.push_many(&local_waiters);
+                        self.worker.scratch_local.set(local_waiters);
+                        self.worker.scratch_global.set(global_waiters);
+                        self.worker.scratch_foreign_wakers.set(foreign_wakers);
+                        self.worker.publish_ready_finalizers(finalizers);
                     }));
                     if let Err(payload) = cleanup {
                         // A lifecycle observer or foreign destructor may panic
@@ -1244,6 +1244,7 @@ mod tests {
         DropPanic,
         PollAndDropPanic,
         RetainedToken,
+        DroppedToken,
     }
 
     struct CompletionObligationFuture {
@@ -1263,6 +1264,9 @@ mod tests {
         fn poll(self: std::pin::Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Self::Output> {
             let this = self.get_mut();
             let cx = crate::cx::Cx::current().expect("native worker installs its Cx");
+            for _ in 0..17 {
+                let _ = cx.logical_tick();
+            }
             // 130 real send posts in this one poll exceed the old 64-post
             // completion drain. Assert delivered values, not only counters.
             for value in 0..65_u8 {
@@ -1275,14 +1279,21 @@ mod tests {
                 assert_eq!(receiver.try_recv(), Ok(value));
                 this.observed.fetch_add(1, Ordering::SeqCst);
             }
-            if matches!(this.mode, ObligationCompletionMode::RetainedToken) {
-                *this.retained.lock().unwrap() = Some(
-                    cx.try_register_obligation(
+            if matches!(
+                this.mode,
+                ObligationCompletionMode::RetainedToken | ObligationCompletionMode::DroppedToken
+            ) {
+                let token = cx
+                    .try_register_obligation(
                         crate::record::ObligationKind::SendPermit,
                         cx.task_id(),
                     )
-                    .expect("retain the actual unresolved tail ticket"),
-                );
+                    .expect("actual unresolved tail ticket");
+                if matches!(this.mode, ObligationCompletionMode::RetainedToken) {
+                    *this.retained.lock().unwrap() = Some(token);
+                } else {
+                    drop(token);
+                }
             } else {
                 let (sender, receiver) = crate::channel::oneshot::channel();
                 this.field_permit = Some(sender.reserve(&cx).expect("permit field"));
@@ -1290,7 +1301,10 @@ mod tests {
             }
             match this.mode {
                 ObligationCompletionMode::Cancelled => {
-                    cx.cancel_with(crate::types::CancelKind::User, Some("completion fixture cancellation"));
+                    cx.cancel_with(
+                        crate::types::CancelKind::User,
+                        Some("completion fixture cancellation"),
+                    );
                     assert!(cx.checkpoint().is_err());
                     Poll::Ready(crate::types::Outcome::Ok(()))
                 }
@@ -1317,7 +1331,10 @@ mod tests {
                 crate::cx::Cx::current().is_some(),
                 "Cx remains installed during drop"
             );
-            let has_field = !matches!(self.mode, ObligationCompletionMode::RetainedToken);
+            let has_field = !matches!(
+                self.mode,
+                ObligationCompletionMode::RetainedToken | ObligationCompletionMode::DroppedToken
+            );
             assert_eq!(self.field_permit.is_some(), has_field);
             assert_eq!(self.field_receiver.is_some(), has_field);
             self.drops.fetch_add(1, Ordering::SeqCst);
@@ -1345,6 +1362,7 @@ mod tests {
         let (root, task) = {
             let mut runtime = state.lock().unwrap();
             runtime.set_obligation_leak_response(ObligationLeakResponse::Log);
+            runtime.set_logical_clock_mode(crate::trace::distributed::LogicalClockMode::Lamport);
             runtime.set_obligation_gateway(Arc::new(ObligationGateway::new(
                 mailbox.clone(),
                 Arc::new(|| {}),
@@ -1453,9 +1471,43 @@ mod tests {
             .unwrap()
             .close_outcome()
             .expect("completion attributed to region");
+        let mut previous_tick = 0;
+        let mut timed_posts = 0;
+        for event in runtime.trace_handle().snapshot() {
+            use crate::trace::TraceEventKind;
+            if matches!(
+                event.kind,
+                TraceEventKind::ObligationReserve
+                    | TraceEventKind::ObligationCommit
+                    | TraceEventKind::ObligationAbort
+            ) || (matches!(mode, ObligationCompletionMode::DroppedToken)
+                && event.kind == TraceEventKind::ObligationLeak)
+            {
+                let Some(crate::trace::distributed::LogicalTime::Lamport(tick)) =
+                    event.logical_time
+                else {
+                    panic!(
+                        "every posted operation must retain the dispatch holder clock: mode={scheduler_mode}/{mode:?}, event={event:?}"
+                    );
+                };
+                assert!(tick.raw() >= 17 && tick.raw() > previous_tick);
+                previous_tick = tick.raw();
+                timed_posts += 1;
+            }
+        }
+        assert_eq!(
+            timed_posts,
+            if matches!(mode, ObligationCompletionMode::RetainedToken) {
+                131
+            } else {
+                132
+            }
+        );
         match mode {
             ObligationCompletionMode::Error => assert!(matches!(outcome, Outcome::Err(_))),
-            ObligationCompletionMode::Cancelled => assert!(matches!(outcome, Outcome::Cancelled(_))),
+            ObligationCompletionMode::Cancelled => {
+                assert!(matches!(outcome, Outcome::Cancelled(_)))
+            }
             ObligationCompletionMode::PollPanic | ObligationCompletionMode::PollAndDropPanic => {
                 assert!(
                     matches!(outcome, Outcome::Panicked(ref p) if p.message().contains("primary poll panic")),
@@ -1505,6 +1557,20 @@ mod tests {
             } else {
                 assert_tail(&runtime.obligations);
             }
+        } else if matches!(mode, ObligationCompletionMode::DroppedToken) {
+            assert_eq!(stats.posted, 132);
+            assert_eq!(stats.applied, 132);
+            assert_eq!(stats.aborted, 0);
+            assert_eq!(stats.leaked, 1);
+            assert_eq!(runtime.leak_count(), 1);
+            assert_eq!(mailbox.open_tickets(), 0);
+            assert_eq!(
+                runtime
+                    .region(root)
+                    .unwrap()
+                    .pending_obligation_post_count(),
+                0
+            );
         } else {
             assert_eq!(stats.posted, 132);
             assert_eq!(stats.applied, 132);
@@ -1560,6 +1626,7 @@ mod tests {
     fn native_obligation_completion_attributes_unresolved_tail_once() {
         for scheduler in 0..4 {
             assert_native_obligation_completion(scheduler, ObligationCompletionMode::RetainedToken);
+            assert_native_obligation_completion(scheduler, ObligationCompletionMode::DroppedToken);
         }
     }
 

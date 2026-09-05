@@ -408,29 +408,41 @@ pub(crate) fn apply_obligation_posts_with_task_table(
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     for post in posts {
-        match post.op {
-            ObligationOp::Reserve => {
-                let admission = match dispatch_tasks {
-                    Some(tasks) => state.create_obligation_from_dispatch_table(
-                        post.kind,
-                        post.holder,
-                        post.region,
-                        tasks,
-                    ),
-                    None => state.create_obligation(post.kind, post.holder, post.region, None),
-                };
-                match admission {
-                    Ok(id) => {
-                        tickets.insert(post.ticket, id);
-                        mailbox.reserved.fetch_add(1, Ordering::Relaxed);
-                    }
-                    Err(_) => {
-                        mailbox.refused.fetch_add(1, Ordering::Relaxed);
+        let apply = |state: &mut RuntimeState, id: Option<ObligationId>| {
+            if let Some(tasks) = dispatch_tasks {
+                return state.apply_obligation_post_from_dispatch_table(post, id, tasks);
+            }
+            match post.op {
+                ObligationOp::Reserve => state
+                    .create_obligation(post.kind, post.holder, post.region, None)
+                    .map(Some),
+                ObligationOp::Commit | ObligationOp::Abort | ObligationOp::Leak => {
+                    let id = id.ok_or_else(|| {
+                        crate::error::Error::new(crate::error::ErrorKind::ObligationAlreadyResolved)
+                    })?;
+                    match post.op {
+                        ObligationOp::Commit => state.commit_obligation(id).map(|_| None),
+                        ObligationOp::Abort => {
+                            state.abort_obligation(id, post.abort_reason).map(|_| None)
+                        }
+                        ObligationOp::Leak => state.report_obligation_leak(id).map(|()| None),
+                        ObligationOp::Reserve => unreachable!("handled reserve above"),
                     }
                 }
             }
+        };
+        match post.op {
+            ObligationOp::Reserve => match apply(state, None) {
+                Ok(Some(id)) => {
+                    tickets.insert(post.ticket, id);
+                    mailbox.reserved.fetch_add(1, Ordering::Relaxed);
+                }
+                _ => {
+                    mailbox.refused.fetch_add(1, Ordering::Relaxed);
+                }
+            },
             ObligationOp::Commit => match tickets.remove(&post.ticket) {
-                Some(id) if state.commit_obligation(id).is_ok() => {
+                Some(id) if apply(state, Some(id)).is_ok() => {
                     mailbox.committed.fetch_add(1, Ordering::Relaxed);
                 }
                 _ => {
@@ -438,7 +450,7 @@ pub(crate) fn apply_obligation_posts_with_task_table(
                 }
             },
             ObligationOp::Abort => match tickets.remove(&post.ticket) {
-                Some(id) if state.abort_obligation(id, post.abort_reason).is_ok() => {
+                Some(id) if apply(state, Some(id)).is_ok() => {
                     mailbox.aborted.fetch_add(1, Ordering::Relaxed);
                 }
                 _ => {
@@ -446,7 +458,7 @@ pub(crate) fn apply_obligation_posts_with_task_table(
                 }
             },
             ObligationOp::Leak => match tickets.remove(&post.ticket) {
-                Some(id) if state.report_obligation_leak(id).is_ok() => {
+                Some(id) if apply(state, Some(id)).is_ok() => {
                     mailbox.leaked.fetch_add(1, Ordering::Relaxed);
                 }
                 _ => {
@@ -494,7 +506,13 @@ mod tests {
 
     impl crate::observability::metrics::MetricsProvider for PostingDuringAdmissionMetrics {
         fn task_spawned(&self, _: RegionId, _: TaskId) {}
-        fn task_completed(&self, _: TaskId, _: crate::observability::metrics::OutcomeKind, _: std::time::Duration) {}
+        fn task_completed(
+            &self,
+            _: TaskId,
+            _: crate::observability::metrics::OutcomeKind,
+            _: std::time::Duration,
+        ) {
+        }
         fn region_created(&self, _: RegionId, _: Option<RegionId>) {}
         fn region_closed(&self, _: RegionId, _: std::time::Duration) {}
         fn cancellation_requested(&self, _: RegionId, _: crate::types::CancelKind) {}
@@ -507,8 +525,14 @@ mod tests {
         fn checkpoint_interval(&self, _: &str, _: std::time::Duration) {}
         fn task_stuck_detected(&self, _: &str) {}
         fn obligation_created(&self, _: RegionId) {
-            if self.remaining.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1)).is_ok() {
-                let token = self.cx.try_register_obligation(ObligationKind::SendPermit, self.cx.task_id())
+            if self
+                .remaining
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                .is_ok()
+            {
+                let token = self
+                    .cx
+                    .try_register_obligation(ObligationKind::SendPermit, self.cx.task_id())
                     .expect("producer posts while the captured backlog is draining");
                 assert!(token.commit());
             }
@@ -522,13 +546,22 @@ mod tests {
     fn completion_obligation_drain_captures_once_despite_new_publications() {
         let mut runtime = lab();
         let root = runtime.state.create_root_region(Budget::INFINITE);
-        let (holder, _handle) = runtime.state.create_task(root, Budget::INFINITE, std::future::pending::<()>())
+        let (holder, _handle) = runtime
+            .state
+            .create_task(root, Budget::INFINITE, std::future::pending::<()>())
             .expect("live holder");
         let cx = runtime.state.task(holder).unwrap().cx.clone().unwrap();
-        let metrics = Arc::new(PostingDuringAdmissionMetrics { cx: cx.clone(), remaining: AtomicUsize::new(80) });
+        let metrics = Arc::new(PostingDuringAdmissionMetrics {
+            cx: cx.clone(),
+            remaining: AtomicUsize::new(80),
+        });
         runtime.state.set_metrics_provider(metrics.clone());
         let mailbox = mailbox_of(&runtime);
-        assert!(cx.try_register_obligation(ObligationKind::SendPermit, holder).unwrap().commit());
+        assert!(
+            cx.try_register_obligation(ObligationKind::SendPermit, holder)
+                .unwrap()
+                .commit()
+        );
         assert_eq!(mailbox.len(), 2);
 
         // The first Reserve callback publishes another reserve+commit pair.
@@ -541,7 +574,10 @@ mod tests {
         assert_eq!(mailbox.stats().posted, 4);
         assert_eq!(mailbox.stats().applied, 2);
         metrics.remaining.store(0, Ordering::SeqCst);
-        assert_eq!(runtime.state.drain_obligation_posts_before_completion(None), 2);
+        assert_eq!(
+            runtime.state.drain_obligation_posts_before_completion(None),
+            2
+        );
         let stats = mailbox.stats();
         assert_eq!(stats.reserved, 2);
         assert_eq!(stats.committed, 2);
@@ -549,7 +585,9 @@ mod tests {
         assert_eq!(mailbox.open_tickets(), 0);
         assert_eq!(runtime.state.pending_obligation_count(), 0);
         assert!(mailbox.is_empty());
-        eprintln!("completion snapshot initial_posts=2 first_applied={applied} queued_after_first=2 final_stats={stats:?}");
+        eprintln!(
+            "completion snapshot initial_posts=2 first_applied={applied} queued_after_first=2 final_stats={stats:?}"
+        );
     }
 
     #[test]
