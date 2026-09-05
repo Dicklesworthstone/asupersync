@@ -1114,7 +1114,7 @@ impl ClientHello {
         .map_err(SessionError::Frame)
     }
 
-    /// Decode a canonical client hello received in an ATP handshake frame.
+    /// Decode a client hello received in an ATP handshake frame.
     ///
     /// This validates wire structure, bounds and canonical ordering. Decoded
     /// grants are unverified assertions: their issuer fields are not signatures.
@@ -1123,8 +1123,13 @@ impl ClientHello {
     /// identity, nonce, scope and feature policy, not cryptographic grant
     /// verification. Header extensions remain in
     /// the caller's frame; they are not fields of this hello payload. Sets must
-    /// have the serializer's strict order and grant ids must be unique. Decode
-    /// the outer frame with `AtpFrameCodec` first to validate its extensions.
+    /// have the serializer's strict order. The grants vector preserves its
+    /// received order and duplicates. Decode the outer frame with
+    /// `AtpFrameCodec` first to validate its extensions.
+    ///
+    /// Hello payloads have a fixed [`super::frames::MAX_FRAME_SIZE`] ceiling,
+    /// checked before allocating decoded fields. Raising a general frame
+    /// codec's limit does not raise this hello-specific limit.
     pub fn from_frame(frame: &Frame) -> Result<Self, SessionError> {
         let mut wire = HelloReader::new(frame, FrameType::Handshake)?;
         let initiator = PeerId(wire.array()?);
@@ -1141,12 +1146,6 @@ impl ClientHello {
         let requested_actions = wire.set(1, HelloReader::action)?;
         let trace_id = SessionTraceId(wire.u64()?);
         let grants = wire.list(80, HelloReader::grant)?;
-        let mut ids = BTreeSet::new();
-        for grant in &grants {
-            if !ids.insert(grant.id) {
-                return Err(HelloReader::invalid("duplicate capability grant id"));
-            }
-        }
         wire.finish()?;
         Ok(Self {
             initiator,
@@ -1218,14 +1217,20 @@ impl ServerHello {
         .map_err(SessionError::Frame)
     }
 
-    /// Decode a canonical server acknowledgement received from the peer.
+    /// Decode a server acknowledgement received from the peer.
     ///
     /// Warning reasons must be the protocol's per-feature
     /// [`AtpFeature::downgrade_reason_code`] strings. Unknown strings are
     /// refused without interning untrusted input into the public static field.
+    /// Warning and accepted-grant vectors preserve received order and duplicates;
+    /// set-valued fields retain the serializer's strict canonical order.
     /// Session identity and selected features must subsequently be checked by
     /// [`SessionNegotiator::finish_client`]. Decode the outer frame with
     /// `AtpFrameCodec` first to validate its extensions.
+    ///
+    /// Hello payloads have a fixed [`super::frames::MAX_FRAME_SIZE`] ceiling,
+    /// checked before allocating decoded fields. This does not accept larger
+    /// payloads merely because a general frame codec has a raised limit.
     pub fn from_frame(frame: &Frame) -> Result<Self, SessionError> {
         let mut wire = HelloReader::new(frame, FrameType::HandshakeAck)?;
         let session_id = SessionId(wire.array()?);
@@ -1248,16 +1253,7 @@ impl ServerHello {
                 reason_code,
             })
         })?;
-        if downgrade_warnings
-            .windows(2)
-            .any(|pair| pair[0].feature >= pair[1].feature)
-        {
-            return Err(HelloReader::invalid("noncanonical downgrade feature order"));
-        }
-        let accepted_grants = wire
-            .set(16, |wire| Ok(CapabilityGrantId(wire.array()?)))?
-            .into_iter()
-            .collect();
+        let accepted_grants = wire.list(16, |wire| Ok(CapabilityGrantId(wire.array()?)))?;
         let trace_id = SessionTraceId(wire.u64()?);
         wire.finish()?;
         Ok(Self {
@@ -1946,8 +1942,8 @@ fn redact_transcript_hash(hash: TranscriptHash) -> String {
     hex::encode(&hash.as_bytes()[..12])
 }
 
-/// Bounded inverse of the hello serializers below. Counts cannot reserve
-/// memory: each collection grows only after a complete element is decoded.
+/// Decoder for the supported hello schema within its fixed payload ceiling.
+/// Counts cannot reserve memory: collections grow after complete elements decode.
 struct HelloReader<'a> {
     remaining: &'a [u8],
 }
@@ -2550,25 +2546,61 @@ mod tests {
                 Err(SessionError::Frame(FrameError::InvalidFormat(_)))
             ));
         }
-        let mut duplicate_grant = hello.clone();
-        duplicate_grant.grants.push(hello.grants[0].clone());
-        assert!(matches!(
-            ClientHello::from_frame(&duplicate_grant.to_frame().unwrap()),
-            Err(SessionError::Frame(FrameError::InvalidFormat(_)))
-        ));
         let mut policy = policy_for(SessionContextKind::Direct);
         let (mut ack, _, _) = SessionNegotiator::server(hello.responder)
             .accept_client_hello(&hello, &mut policy)
             .unwrap();
-        let mut duplicate_ack = ack.clone();
-        duplicate_ack.accepted_grants.push(ack.accepted_grants[0]);
-        assert!(matches!(
-            ServerHello::from_frame(&duplicate_ack.to_frame().unwrap()),
-            Err(SessionError::Frame(FrameError::InvalidFormat(_)))
-        ));
         ack.downgrade_warnings[0].reason_code = "arbitrary_caller_reason";
         assert!(matches!(ServerHello::from_frame(&ack.to_frame().unwrap()),
             Err(SessionError::Frame(FrameError::InvalidFormat(message))) if message == "unknown downgrade reason"));
+    }
+
+    #[test]
+    fn received_hello_vectors_preserve_existing_order_and_duplicates_exactly() {
+        let mut hello = hello_for(SessionContextKind::Direct).with_features(&AtpFeature::ALL);
+        let grant = hello.grants[0].clone();
+        let mut changed_grant = grant.clone();
+        changed_grant.valid_from_micros = 1;
+        changed_grant.actions.insert(CapabilityAction::Receive);
+        assert_eq!(grant.id, changed_grant.id);
+        assert_ne!(grant, changed_grant);
+        for grants in [
+            vec![grant.clone(), grant.clone()],
+            vec![grant.clone(), changed_grant.clone()],
+            vec![changed_grant, grant.clone(), grant],
+        ] {
+            hello.grants = grants;
+            let encoded = hello.to_frame().unwrap();
+            let decoded = ClientHello::from_frame(&encoded).unwrap();
+            assert_eq!(decoded, hello);
+            assert_eq!(decoded.to_frame().unwrap(), encoded);
+            assert_eq!(
+                decoded.to_frame().unwrap().to_wire_bytes().unwrap(),
+                encoded.to_wire_bytes().unwrap()
+            );
+        }
+
+        let mut policy = policy_for(SessionContextKind::Direct);
+        let (mut ack, _, _) = SessionNegotiator::server(hello.responder)
+            .accept_client_hello(&hello, &mut policy)
+            .unwrap();
+        assert!(ack.downgrade_warnings.len() > 1);
+        ack.downgrade_warnings.reverse();
+        ack.downgrade_warnings
+            .push(ack.downgrade_warnings[0].clone());
+        ack.accepted_grants = vec![
+            CapabilityGrantId::new([255; 16]),
+            CapabilityGrantId::new([0; 16]),
+            CapabilityGrantId::new([255; 16]),
+        ];
+        let encoded = ack.to_frame().unwrap();
+        let decoded = ServerHello::from_frame(&encoded).unwrap();
+        assert_eq!(decoded, ack);
+        assert_eq!(decoded.to_frame().unwrap(), encoded);
+        assert_eq!(
+            decoded.to_frame().unwrap().to_wire_bytes().unwrap(),
+            encoded.to_wire_bytes().unwrap()
+        );
     }
 
     #[test]
