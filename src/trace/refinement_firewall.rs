@@ -26,6 +26,7 @@ struct ObligationRecord {
     task: TaskId,
     region: RegionId,
     resolved: bool,
+    handoff_ticket: Option<u64>,
 }
 
 /// First violation found by the refinement firewall.
@@ -122,6 +123,11 @@ struct FirewallState {
 
 impl FirewallState {
     fn observe(&mut self, index: usize, event: &TraceEvent) -> Option<RefinementViolation> {
+        match super::event::decode_obligation_handoff(event) {
+            Ok(Some(handoff)) => return self.on_obligation_handoff(index, event, &handoff),
+            Err(detail) => return Some(violation("RFW-HANDOFF-001", index, event, detail)),
+            Ok(None) => {}
+        }
         match event.kind {
             TraceEventKind::Spawn => self.on_spawn(index, event),
             TraceEventKind::Complete => self.on_complete(index, event),
@@ -141,6 +147,73 @@ impl FirewallState {
             )),
             _ => None,
         }
+    }
+
+    fn on_obligation_handoff(
+        &mut self,
+        index: usize,
+        event: &TraceEvent,
+        handoff: &super::event::ObligationHandoff,
+    ) -> Option<RefinementViolation> {
+        let Some(record) = self.obligations.get(&handoff.id) else {
+            return Some(violation(
+                "RFW-HANDOFF-002",
+                index,
+                event,
+                "handoff precedes its obligation reservation".to_owned(),
+            ));
+        };
+        if record.resolved
+            || record.task != handoff.source_holder
+            || record.region != handoff.source_region
+            || record
+                .handoff_ticket
+                .is_some_and(|ticket| ticket != handoff.source_ticket)
+        {
+            return Some(violation(
+                "RFW-HANDOFF-003",
+                index,
+                event,
+                "handoff source does not match the pending owner and ticket lineage".to_owned(),
+            ));
+        }
+        if self
+            .tasks
+            .get(&handoff.source_holder)
+            .is_none_or(|task| task.completed || task.region != handoff.source_region)
+            || self
+                .tasks
+                .get(&handoff.destination_holder)
+                .is_none_or(|task| task.completed || task.region != handoff.destination_region)
+            || self
+                .regions
+                .get(&handoff.destination_region)
+                .is_some_and(|region| region.close_completed)
+        {
+            return Some(violation("RFW-HANDOFF-004", index, event,
+                "handoff requires the actual live source and destination generations and destination region".to_owned()));
+        }
+        // Admission can precede a region's close-begin/cancel event while its
+        // projection is queued. Its pending credit forbids close-complete;
+        // rejecting close-begin here would incorrectly reject that valid race.
+        let record = self
+            .obligations
+            .get_mut(&handoff.id)
+            .expect("checked source retained");
+        record.task = handoff.destination_holder;
+        record.region = handoff.destination_region;
+        record.handoff_ticket = Some(handoff.destination_ticket);
+        if let Some(source) = self
+            .reserved_obligations_by_region
+            .get_mut(&handoff.source_region)
+        {
+            source.remove(&handoff.id);
+        }
+        self.reserved_obligations_by_region
+            .entry(handoff.destination_region)
+            .or_default()
+            .insert(handoff.id);
+        None
     }
 
     fn on_spawn(&mut self, index: usize, event: &TraceEvent) -> Option<RefinementViolation> {
@@ -474,6 +547,7 @@ impl FirewallState {
                 task,
                 region,
                 resolved: false,
+                handoff_ticket: None,
             },
         );
         self.reserved_obligations_by_region
@@ -659,6 +733,219 @@ mod tests {
 
     fn oid(n: u32) -> ObligationId {
         ObligationId::new_for_test(n, 0)
+    }
+
+    fn handoff_prefix() -> (Vec<TraceEvent>, super::super::event::ObligationHandoff) {
+        let events = vec![
+            TraceEvent::region_created(1, Time::ZERO, rid(1), None),
+            TraceEvent::region_created(2, Time::ZERO, rid(2), None),
+            TraceEvent::spawn(3, Time::ZERO, tid(1), rid(1)),
+            TraceEvent::spawn(4, Time::ZERO, tid(2), rid(2)),
+            TraceEvent::obligation_reserve(
+                5,
+                Time::ZERO,
+                oid(1),
+                tid(1),
+                rid(1),
+                ObligationKind::Lease,
+            ),
+        ];
+        (
+            events,
+            super::super::event::ObligationHandoff {
+                id: oid(1),
+                source_ticket: 4,
+                destination_ticket: 7,
+                source_holder: tid(1),
+                destination_holder: tid(2),
+                source_region: rid(1),
+                destination_region: rid(2),
+            },
+        )
+    }
+
+    #[test]
+    fn handoff_moves_close_liability_and_preserves_old_terminal_refusals() {
+        let (mut events, handoff) = handoff_prefix();
+        events.push(TraceEvent::obligation_handoff(6, Time::ZERO, &handoff));
+        events.push(TraceEvent::complete(7, Time::ZERO, tid(1), rid(1)));
+        events.push(TraceEvent::new(
+            8,
+            Time::ZERO,
+            TraceEventKind::RegionCloseBegin,
+            TraceData::Region {
+                region: rid(1),
+                parent: None,
+            },
+        ));
+        events.push(TraceEvent::new(
+            9,
+            Time::ZERO,
+            TraceEventKind::RegionCloseComplete,
+            TraceData::Region {
+                region: rid(1),
+                parent: None,
+            },
+        ));
+        assert!(
+            check_refinement_firewall(&events).is_ok(),
+            "source close no longer owns the pending ID"
+        );
+        let mut wrong_owner = events.clone();
+        wrong_owner.push(TraceEvent::obligation_commit(
+            10,
+            Time::ZERO,
+            oid(1),
+            tid(1),
+            rid(1),
+            ObligationKind::Lease,
+            1,
+        ));
+        assert_eq!(
+            first_refinement_violation(&wrong_owner).unwrap().rule_id,
+            "RFW-OBL-009"
+        );
+        events.push(TraceEvent::obligation_commit(
+            10,
+            Time::ZERO,
+            oid(1),
+            tid(2),
+            rid(2),
+            ObligationKind::Lease,
+            1,
+        ));
+        assert!(check_refinement_firewall(&events).is_ok());
+        events.push(TraceEvent::obligation_commit(
+            11,
+            Time::ZERO,
+            oid(1),
+            tid(2),
+            rid(2),
+            ObligationKind::Lease,
+            1,
+        ));
+        assert_eq!(
+            first_refinement_violation(&events).unwrap().rule_id,
+            "RFW-OBL-010"
+        );
+    }
+
+    #[test]
+    fn handoff_refuses_missing_source_stale_generations_and_reordered_lineage() {
+        for scenario in [
+            "missing",
+            "source",
+            "destination_generation",
+            "destination_region",
+            "completed",
+            "resolved",
+            "repeat",
+            "ticket",
+            "malformed",
+        ] {
+            let (mut events, mut handoff) = handoff_prefix();
+            let rule = match scenario {
+                "missing" => {
+                    handoff.id = oid(9);
+                    "RFW-HANDOFF-002"
+                }
+                "source" => {
+                    handoff.source_holder = tid(3);
+                    "RFW-HANDOFF-003"
+                }
+                "destination_generation" => {
+                    handoff.destination_holder = TaskId::new_for_test(2, 1);
+                    "RFW-HANDOFF-004"
+                }
+                "destination_region" => {
+                    handoff.destination_region = rid(1);
+                    "RFW-HANDOFF-004"
+                }
+                "completed" => {
+                    events.push(TraceEvent::complete(6, Time::ZERO, tid(2), rid(2)));
+                    "RFW-HANDOFF-004"
+                }
+                "resolved" => {
+                    events.push(TraceEvent::obligation_commit(
+                        6,
+                        Time::ZERO,
+                        oid(1),
+                        tid(1),
+                        rid(1),
+                        ObligationKind::Lease,
+                        1,
+                    ));
+                    "RFW-HANDOFF-003"
+                }
+                "repeat" => {
+                    events.push(TraceEvent::obligation_handoff(6, Time::ZERO, &handoff));
+                    "RFW-HANDOFF-003"
+                }
+                "ticket" => {
+                    events.push(TraceEvent::obligation_handoff(6, Time::ZERO, &handoff));
+                    handoff = super::super::event::ObligationHandoff {
+                        id: oid(1),
+                        source_ticket: 8,
+                        destination_ticket: 9,
+                        source_holder: tid(2),
+                        destination_holder: tid(1),
+                        source_region: rid(2),
+                        destination_region: rid(1),
+                    };
+                    "RFW-HANDOFF-003"
+                }
+                "malformed" => "RFW-HANDOFF-001",
+                _ => unreachable!(),
+            };
+            events.push(if scenario == "malformed" {
+                TraceEvent::user_trace(7, Time::ZERO, "obligation_handoff_v1 {}")
+            } else {
+                TraceEvent::obligation_handoff(7, Time::ZERO, &handoff)
+            });
+            let violation = first_refinement_violation(&events).expect(scenario);
+            assert_eq!(violation.rule_id, rule, "{scenario}: {violation}");
+            assert_eq!(violation.event_index, events.len() - 1);
+        }
+    }
+
+    #[test]
+    fn handoff_chain_after_destination_close_begin_preserves_accepted_projection() {
+        let (mut events, handoff) = handoff_prefix();
+        events.push(TraceEvent::new(
+            6,
+            Time::ZERO,
+            TraceEventKind::RegionCloseBegin,
+            TraceData::Region {
+                region: rid(2),
+                parent: None,
+            },
+        ));
+        events.push(TraceEvent::obligation_handoff(7, Time::ZERO, &handoff));
+        let return_handoff = super::super::event::ObligationHandoff {
+            id: oid(1),
+            source_ticket: 7,
+            destination_ticket: 11,
+            source_holder: tid(2),
+            destination_holder: tid(1),
+            source_region: rid(2),
+            destination_region: rid(1),
+        };
+        events.push(TraceEvent::obligation_handoff(
+            8,
+            Time::ZERO,
+            &return_handoff,
+        ));
+        events.push(TraceEvent::obligation_abort(
+            9,
+            Time::ZERO,
+            oid(1),
+            tid(1),
+            rid(1),
+            ObligationKind::Lease,
+            2,
+            ObligationAbortReason::Explicit,
+        ));
+        assert!(check_refinement_firewall(&events).is_ok());
     }
 
     #[test]

@@ -106,7 +106,7 @@ pub fn accesses_conflict(a: &ResourceAccess, b: &ResourceAccess) -> bool {
 /// Compute the resource footprint of a trace event.
 ///
 /// Returns the set of (resource, access-mode) pairs that this event touches.
-/// Events with an empty footprint (like `UserTrace`) are independent of all
+/// Events with an empty footprint (ordinary `UserTrace` annotations) are independent of all
 /// other events (except themselves, by irreflexivity).
 #[must_use]
 #[allow(clippy::too_many_lines)]
@@ -218,10 +218,18 @@ pub fn resource_footprint(event: &TraceEvent) -> Vec<ResourceAccess> {
             fp
         }
 
-        // === User trace: no resource footprint (pure annotation) ===
-        (UserTrace, _) => {
-            vec![]
-        }
+        // === User trace: ownership messages carry real resources ===
+        (UserTrace, _) => match super::event::decode_obligation_handoff(event) {
+            Ok(Some(handoff)) => vec![
+                ResourceAccess::write(Resource::Obligation(handoff.id)),
+                ResourceAccess::write(Resource::Task(handoff.source_holder)),
+                ResourceAccess::write(Resource::Task(handoff.destination_holder)),
+                ResourceAccess::write(Resource::Region(handoff.source_region)),
+                ResourceAccess::write(Resource::Region(handoff.destination_region)),
+            ],
+            Ok(None) => vec![],
+            Err(_) => vec![ResourceAccess::write(Resource::GlobalState)],
+        },
 
         // === Monitor / Down (Spork) ===
         //
@@ -298,6 +306,14 @@ pub fn independent(a: &TraceEvent, b: &TraceEvent) -> bool {
         return false;
     }
 
+    // Unknown ownership cannot commute with any event, including an empty
+    // annotation. GlobalState alone does not intersect every typed footprint.
+    if super::event::decode_obligation_handoff(a).is_err()
+        || super::event::decode_obligation_handoff(b).is_err()
+    {
+        return false;
+    }
+
     let fa = resource_footprint(a);
     let fb = resource_footprint(b);
 
@@ -340,6 +356,66 @@ mod tests {
 
     fn rid(n: u32) -> RegionId {
         RegionId::new_for_test(n, 0)
+    }
+
+    #[test]
+    fn handoff_dependencies_preserve_both_owners_regions_and_terminal_order() {
+        let id = ObligationId::new_for_test(3, 1);
+        let handoff = super::super::event::ObligationHandoff {
+            id,
+            source_ticket: 3,
+            destination_ticket: 4,
+            source_holder: tid(1),
+            destination_holder: tid(2),
+            source_region: rid(1),
+            destination_region: rid(2),
+        };
+        let event = TraceEvent::obligation_handoff(1, Time::ZERO, &handoff);
+        let related = [
+            TraceEvent::complete(2, Time::ZERO, tid(1), rid(1)),
+            TraceEvent::complete(3, Time::ZERO, tid(2), rid(2)),
+            TraceEvent::new(
+                4,
+                Time::ZERO,
+                TraceEventKind::RegionCloseComplete,
+                TraceData::Region {
+                    region: rid(1),
+                    parent: None,
+                },
+            ),
+            TraceEvent::new(
+                5,
+                Time::ZERO,
+                TraceEventKind::RegionCloseBegin,
+                TraceData::Region {
+                    region: rid(2),
+                    parent: None,
+                },
+            ),
+            TraceEvent::obligation_commit(
+                6,
+                Time::ZERO,
+                id,
+                tid(2),
+                rid(2),
+                ObligationKind::Lease,
+                1,
+            ),
+        ];
+        for other in &related {
+            assert!(!independent(&event, other));
+            assert!(!independent(other, &event));
+        }
+        let unrelated = TraceEvent::complete(7, Time::ZERO, tid(9), rid(9));
+        assert!(independent(&event, &unrelated));
+        assert!(independent(&unrelated, &event));
+        let malformed = TraceEvent::user_trace(8, Time::ZERO, "obligation_handoff_v1 {}");
+        let ordinary = TraceEvent::user_trace(9, Time::ZERO, "ordinary annotation");
+        for other in related.iter().chain([&unrelated, &ordinary, &event]) {
+            assert!(!independent(&malformed, other));
+            assert!(!independent(other, &malformed));
+        }
+        assert!(independent(&event, &ordinary));
     }
 
     fn oid(n: u32) -> ObligationId {

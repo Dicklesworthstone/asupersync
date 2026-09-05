@@ -145,6 +145,10 @@ impl MarkingEvent {
 ///
 /// Filters and projects the full trace into only the events relevant
 /// for VASS marking analysis.
+///
+/// This legacy event representation cannot express ownership handoffs.
+/// Use [`MarkingAnalyzer::analyze_trace`] for complete runtime traces, or
+/// [`try_project_trace`] to refuse rather than lose a reserved handoff.
 #[must_use]
 pub fn project_trace(events: &[TraceEvent]) -> Vec<MarkingEvent> {
     let mut projected = Vec::new();
@@ -248,6 +252,162 @@ pub fn project_trace(events: &[TraceEvent]) -> Vec<MarkingEvent> {
     }
 
     projected
+}
+
+/// Project only traces representable by the legacy marking event enum.
+///
+/// # Errors
+/// Refuses any reserved handoff message, including malformed messages. A
+/// valid handoff must be interpreted directly by [`MarkingAnalyzer::analyze_trace`].
+pub fn try_project_trace(events: &[TraceEvent]) -> Result<Vec<MarkingEvent>, InvalidTransition> {
+    for event in events {
+        match crate::trace::event::decode_obligation_handoff(event) {
+            Ok(None) => {}
+            Ok(Some(_)) => {
+                return Err(InvalidTransition {
+                    time: event.time,
+                    description: "ownership handoff requires transfer-aware trace analysis"
+                        .to_owned(),
+                });
+            }
+            Err(description) => {
+                return Err(InvalidTransition {
+                    time: event.time,
+                    description,
+                });
+            }
+        }
+    }
+    Ok(project_trace(events))
+}
+
+#[derive(Debug)]
+struct TraceObligationBinding {
+    kind: ObligationKind,
+    holder: TaskId,
+    region: RegionId,
+    ticket: Option<u64>,
+    pending: bool,
+}
+
+#[derive(Default)]
+struct TraceOwnership {
+    bindings: HashMap<ObligationId, TraceObligationBinding>,
+    tasks: HashMap<TaskId, RegionId>,
+    completed: HashSet<TaskId>,
+    closed: HashSet<RegionId>,
+}
+
+impl TraceOwnership {
+    fn observe(&mut self, event: &TraceEvent) -> Result<(), String> {
+        match (&event.kind, &event.data) {
+            (TraceEventKind::Spawn, TraceData::Task { task, region }) => {
+                self.tasks.entry(*task).or_insert(*region);
+            }
+            (TraceEventKind::Complete, TraceData::Task { task, .. }) => {
+                self.completed.insert(*task);
+            }
+            (TraceEventKind::RegionCloseComplete, TraceData::Region { region, .. }) => {
+                self.closed.insert(*region);
+            }
+            (
+                TraceEventKind::ObligationReserve,
+                TraceData::Obligation {
+                    obligation,
+                    task,
+                    region,
+                    kind,
+                    ..
+                },
+            ) => {
+                if let Some(binding) = self.bindings.get(obligation) {
+                    return Err(format!(
+                        "obligation cannot be reserved again (pending={})",
+                        binding.pending
+                    ));
+                }
+                self.bindings.insert(
+                    *obligation,
+                    TraceObligationBinding {
+                        kind: *kind,
+                        holder: *task,
+                        region: *region,
+                        ticket: None,
+                        pending: true,
+                    },
+                );
+            }
+            (
+                TraceEventKind::ObligationCommit
+                | TraceEventKind::ObligationAbort
+                | TraceEventKind::ObligationLeak,
+                TraceData::Obligation {
+                    obligation,
+                    task,
+                    region,
+                    kind,
+                    ..
+                },
+            ) => {
+                let binding = self
+                    .bindings
+                    .get_mut(obligation)
+                    .ok_or_else(|| "terminal precedes its actual reservation".to_owned())?;
+                if !binding.pending
+                    || binding.holder != *task
+                    || binding.region != *region
+                    || binding.kind != *kind
+                {
+                    return Err(
+                        "transferred obligation terminal does not match its pending owner/kind"
+                            .to_owned(),
+                    );
+                }
+                binding.pending = false;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn handoff(
+        &mut self,
+        handoff: &crate::trace::event::ObligationHandoff,
+        apply: impl FnOnce(ObligationKind) -> Result<(), String>,
+    ) -> Result<(), String> {
+        let binding = self
+            .bindings
+            .get_mut(&handoff.id)
+            .ok_or_else(|| "handoff precedes its reservation".to_owned())?;
+        if !binding.pending
+            || binding.holder != handoff.source_holder
+            || binding.region != handoff.source_region
+            || binding
+                .ticket
+                .is_some_and(|ticket| ticket != handoff.source_ticket)
+        {
+            return Err(
+                "handoff does not match a unique pending source and ticket lineage".to_owned(),
+            );
+        }
+        if self.tasks.get(&handoff.source_holder) != Some(&handoff.source_region)
+            || self.tasks.get(&handoff.destination_holder) != Some(&handoff.destination_region)
+            || self.completed.contains(&handoff.source_holder)
+            || self.completed.contains(&handoff.destination_holder)
+            || self.closed.contains(&handoff.source_region)
+            || self.closed.contains(&handoff.destination_region)
+        {
+            return Err(
+                "handoff requires live source/destination generations and owning regions"
+                    .to_owned(),
+            );
+        }
+        apply(binding.kind)?;
+        binding.holder = handoff.destination_holder;
+        binding.region = handoff.destination_region;
+        binding.ticket = Some(handoff.destination_ticket);
+        Ok(())
+    }
 }
 
 // ============================================================================
@@ -673,6 +833,10 @@ impl MarkingAnalyzer {
 
         // Record final state using the last event's timestamp (or zero if empty).
         let final_time = events.last().map_or(Time::ZERO, |e| e.time);
+        self.finish_analysis(events.len(), final_time)
+    }
+
+    fn finish_analysis(&mut self, events_processed: usize, final_time: Time) -> AnalysisResult {
         self.snapshot("final", final_time);
 
         AnalysisResult {
@@ -680,7 +844,7 @@ impl MarkingAnalyzer {
             leaks: self.leaks.clone(),
             invalid_transitions: self.invalid_transitions.clone(),
             closed_regions: self.closed_regions.clone(),
-            events_processed: events.len(),
+            events_processed,
             stats: AnalysisStats {
                 total_reserved: self.stats.total_reserved,
                 total_committed: self.stats.total_committed,
@@ -695,11 +859,100 @@ impl MarkingAnalyzer {
 
     /// Analyze a trace event stream directly (convenience method).
     ///
-    /// Projects the trace into marking events and analyzes them.
+    /// Ordinary traces retain the legacy projection. Reserved handoffs move
+    /// one existing obligation between region dimensions without fabricating
+    /// a reservation or resolution. Malformed handoffs and inconsistent
+    /// transferred ownership produce [`InvalidTransition`] entries.
+    ///
+    /// For transfer-bearing runtime traces, closure is observed at
+    /// `RegionCloseComplete`: close-begin can precede projection of an already
+    /// admitted handoff, whose application barrier still prevents completion.
     #[must_use]
     pub fn analyze_trace(&mut self, trace: &[TraceEvent]) -> AnalysisResult {
-        let events = project_trace(trace);
-        self.analyze(&events)
+        if let Ok(events) = try_project_trace(trace) {
+            return self.analyze(&events);
+        }
+        self.reset();
+        self.snapshot("initial", Time::ZERO);
+        let mut ownership = TraceOwnership::default();
+        let mut processed = 0;
+        let mut final_time = Time::ZERO;
+        for event in trace {
+            let handoff = crate::trace::event::decode_obligation_handoff(event);
+            match handoff {
+                Ok(Some(handoff)) => {
+                    processed += 1;
+                    final_time = event.time;
+                    let result = ownership.handoff(&handoff, |kind| {
+                        if self.marking.get(kind, handoff.source_region) == 0 {
+                            return Err("handoff source marking is already zero".to_owned());
+                        }
+                        if handoff.source_region != handoff.destination_region {
+                            if self.marking.get(kind, handoff.destination_region) == u32::MAX {
+                                return Err("handoff destination marking would overflow".to_owned());
+                            }
+                            self.marking.decrement(kind, handoff.source_region);
+                            self.marking.increment(kind, handoff.destination_region);
+                        }
+                        self.all_regions.insert(handoff.destination_region);
+                        self.snapshot(
+                            &format!(
+                                "handoff({:?}, {:?}->{:?})",
+                                handoff.id, handoff.source_region, handoff.destination_region
+                            ),
+                            event.time,
+                        );
+                        Ok(())
+                    });
+                    if let Err(description) = result {
+                        self.invalid_transitions.push(InvalidTransition {
+                            time: event.time,
+                            description,
+                        });
+                    }
+                    continue;
+                }
+                Err(description) => {
+                    processed += 1;
+                    final_time = event.time;
+                    self.invalid_transitions.push(InvalidTransition {
+                        time: event.time,
+                        description,
+                    });
+                    continue;
+                }
+                Ok(None) => {}
+            }
+            if let Err(description) = ownership.observe(event) {
+                processed += 1;
+                final_time = event.time;
+                self.invalid_transitions.push(InvalidTransition {
+                    time: event.time,
+                    description,
+                });
+                continue;
+            }
+            if event.kind == TraceEventKind::RegionCloseBegin {
+                continue;
+            }
+            let projected =
+                if let (TraceEventKind::RegionCloseComplete, TraceData::Region { region, .. }) =
+                    (&event.kind, &event.data)
+                {
+                    vec![MarkingEvent::new(
+                        event.time,
+                        MarkingEventKind::RegionClose { region: *region },
+                    )]
+                } else {
+                    project_trace(std::slice::from_ref(event))
+                };
+            for marking_event in projected {
+                processed += 1;
+                final_time = marking_event.time;
+                self.process_event(&marking_event);
+            }
+        }
+        self.finish_analysis(processed, final_time)
     }
 
     fn reset(&mut self) {
@@ -923,6 +1176,390 @@ mod tests {
             Time::from_nanos(time_ns),
             MarkingEventKind::RegionClose { region },
         )
+    }
+
+    fn transfer_trace(
+        cross_region: bool,
+        kind: ObligationKind,
+    ) -> (Vec<TraceEvent>, crate::trace::event::ObligationHandoff) {
+        let destination_region = if cross_region { r(1) } else { r(0) };
+        let handoff = crate::trace::event::ObligationHandoff {
+            id: o(0),
+            source_ticket: 4,
+            destination_ticket: 7,
+            source_holder: t(0),
+            destination_holder: TaskId::new_for_test(0, 1),
+            source_region: r(0),
+            destination_region,
+        };
+        (
+            vec![
+                TraceEvent::region_created(0, Time::ZERO, r(0), None),
+                TraceEvent::spawn(1, Time::ZERO, handoff.source_holder, r(0)),
+                TraceEvent::spawn(
+                    2,
+                    Time::ZERO,
+                    handoff.destination_holder,
+                    destination_region,
+                ),
+                TraceEvent::obligation_reserve(
+                    3,
+                    Time::ZERO,
+                    o(0),
+                    handoff.source_holder,
+                    r(0),
+                    kind,
+                ),
+            ],
+            handoff,
+        )
+    }
+
+    fn trace_close(seq: u64, region: RegionId, kind: TraceEventKind) -> TraceEvent {
+        TraceEvent::new(
+            seq,
+            Time::from_nanos(seq),
+            kind,
+            TraceData::Region {
+                region,
+                parent: None,
+            },
+        )
+    }
+
+    #[test]
+    fn transfer_trace_moves_one_marking_without_minting_or_settling() {
+        for cross_region in [false, true] {
+            for kind in [ObligationKind::Lease, ObligationKind::SemaphorePermit] {
+                for abort in [false, true] {
+                    let (mut trace, handoff) = transfer_trace(cross_region, kind);
+                    trace.push(TraceEvent::obligation_handoff(
+                        4,
+                        Time::from_nanos(4),
+                        &handoff,
+                    ));
+                    if cross_region {
+                        trace.push(TraceEvent::complete(
+                            5,
+                            Time::from_nanos(5),
+                            handoff.source_holder,
+                            handoff.source_region,
+                        ));
+                        trace.push(trace_close(
+                            6,
+                            handoff.source_region,
+                            TraceEventKind::RegionCloseComplete,
+                        ));
+                    }
+                    let mut analyzer = MarkingAnalyzer::new();
+                    let pending = analyzer.analyze_trace(&trace);
+                    assert!(pending.is_safe(), "pending handoff: {pending}");
+                    let marking = pending.timeline.final_marking().unwrap();
+                    assert_eq!(marking.total_pending(), 1);
+                    assert_eq!(marking.region_pending(handoff.destination_region), 1);
+                    if cross_region {
+                        assert_eq!(marking.region_pending(handoff.source_region), 0);
+                    }
+                    assert_eq!(pending.stats.total_reserved, 1);
+                    assert_eq!(pending.stats.total_committed, 0);
+                    assert_eq!(pending.stats.total_aborted, 0);
+                    assert_eq!(pending.stats.max_pending, 1);
+                    let terminal = if abort {
+                        TraceEvent::obligation_abort(
+                            7,
+                            Time::from_nanos(7),
+                            handoff.id,
+                            handoff.destination_holder,
+                            handoff.destination_region,
+                            kind,
+                            7,
+                            crate::record::ObligationAbortReason::Explicit,
+                        )
+                    } else {
+                        TraceEvent::obligation_commit(
+                            7,
+                            Time::from_nanos(7),
+                            handoff.id,
+                            handoff.destination_holder,
+                            handoff.destination_region,
+                            kind,
+                            7,
+                        )
+                    };
+                    trace.push(terminal);
+                    trace.push(trace_close(
+                        8,
+                        handoff.destination_region,
+                        TraceEventKind::RegionCloseComplete,
+                    ));
+                    let result = analyzer.analyze_trace(&trace);
+                    assert!(
+                        result.is_safe(),
+                        "cross_region={cross_region} abort={abort}: {result}"
+                    );
+                    assert!(result.timeline.final_marking().unwrap().is_zero());
+                    assert_eq!(result.stats.total_reserved, 1);
+                    assert_eq!(result.stats.total_committed, u32::from(!abort));
+                    assert_eq!(result.stats.total_aborted, u32::from(abort));
+                    assert_eq!(result.stats.total_leaked, 0);
+                    assert_eq!(result.stats.max_pending, 1);
+                    assert!(
+                        try_project_trace(&trace).is_err(),
+                        "legacy projection must refuse loss of ownership"
+                    );
+                    eprintln!(
+                        "marking transfer cross_region={cross_region} kind={kind:?} abort={abort}: {result}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn transfer_trace_refuses_stale_or_reset_ownership_and_keeps_destination_leaks() {
+        for scenario in [
+            "malformed",
+            "missing",
+            "generation",
+            "ticket",
+            "source",
+            "old_terminal",
+            "reset",
+            "double_terminal",
+            "completed",
+            "closed",
+            "source_closed",
+        ] {
+            let (mut trace, mut handoff) = transfer_trace(true, ObligationKind::Lease);
+            match scenario {
+                "missing" => handoff.id = o(2),
+                "generation" => handoff.destination_holder = TaskId::new_for_test(0, 2),
+                "ticket" => handoff.destination_ticket = handoff.source_ticket,
+                "source" => handoff.source_region = r(2),
+                "source_closed" => trace.insert(
+                    1,
+                    trace_close(
+                        0,
+                        handoff.source_region,
+                        TraceEventKind::RegionCloseComplete,
+                    ),
+                ),
+                "completed" => trace.push(TraceEvent::complete(
+                    4,
+                    Time::ZERO,
+                    handoff.destination_holder,
+                    handoff.destination_region,
+                )),
+                "closed" => trace.push(trace_close(
+                    4,
+                    handoff.destination_region,
+                    TraceEventKind::RegionCloseComplete,
+                )),
+                _ => {}
+            }
+            trace.push(if scenario == "malformed" {
+                TraceEvent::user_trace(5, Time::ZERO, "obligation_handoff_v1 {}")
+            } else {
+                TraceEvent::obligation_handoff(5, Time::ZERO, &handoff)
+            });
+            if scenario == "old_terminal" {
+                trace.push(TraceEvent::obligation_commit(
+                    6,
+                    Time::ZERO,
+                    handoff.id,
+                    handoff.source_holder,
+                    handoff.source_region,
+                    ObligationKind::Lease,
+                    1,
+                ));
+            }
+            if scenario == "reset" {
+                trace.push(TraceEvent::obligation_reserve(
+                    6,
+                    Time::ZERO,
+                    handoff.id,
+                    handoff.source_holder,
+                    handoff.source_region,
+                    ObligationKind::Lease,
+                ));
+            }
+            if scenario == "double_terminal" {
+                for seq in [6, 7] {
+                    trace.push(TraceEvent::obligation_commit(
+                        seq,
+                        Time::ZERO,
+                        handoff.id,
+                        handoff.destination_holder,
+                        handoff.destination_region,
+                        ObligationKind::Lease,
+                        1,
+                    ));
+                }
+            }
+            let result = MarkingAnalyzer::new().analyze_trace(&trace);
+            assert!(!result.is_safe(), "accepted {scenario}");
+            assert_eq!(result.invalid_transitions.len(), 1, "{scenario}: {result}");
+            assert_eq!(result.stats.total_reserved, 1, "{scenario}");
+        }
+        let (mut trace, handoff) = transfer_trace(true, ObligationKind::Lease);
+        trace.push(TraceEvent::obligation_handoff(4, Time::ZERO, &handoff));
+        trace.push(trace_close(
+            5,
+            handoff.destination_region,
+            TraceEventKind::RegionCloseComplete,
+        ));
+        let result = MarkingAnalyzer::new().analyze_trace(&trace);
+        assert!(!result.is_safe());
+        assert_eq!(result.leaks.len(), 1);
+        assert_eq!(result.leaks[0].region, handoff.destination_region);
+        assert_eq!(result.leaks[0].count, 1);
+    }
+
+    #[test]
+    fn transfer_trace_queued_close_and_return_chain_preserve_legacy_analysis() {
+        let (mut trace, handoff) = transfer_trace(true, ObligationKind::Lease);
+        let mut analyzer = MarkingAnalyzer::new();
+        let old = analyzer.analyze(&project_trace(&trace));
+        let direct = analyzer.analyze_trace(&trace);
+        assert_eq!(old.to_string(), direct.to_string());
+        assert_eq!(old.timeline.to_string(), direct.timeline.to_string());
+        assert!(try_project_trace(&trace).is_ok());
+        trace.push(trace_close(
+            4,
+            handoff.destination_region,
+            TraceEventKind::RegionCloseBegin,
+        ));
+        trace.push(TraceEvent::obligation_handoff(5, Time::ZERO, &handoff));
+        let returned = crate::trace::event::ObligationHandoff {
+            id: handoff.id,
+            source_ticket: 7,
+            destination_ticket: 11,
+            source_holder: handoff.destination_holder,
+            destination_holder: handoff.source_holder,
+            source_region: handoff.destination_region,
+            destination_region: handoff.source_region,
+        };
+        trace.push(TraceEvent::obligation_handoff(6, Time::ZERO, &returned));
+        trace.push(trace_close(
+            7,
+            handoff.destination_region,
+            TraceEventKind::RegionCloseComplete,
+        ));
+        trace.push(TraceEvent::obligation_commit(
+            8,
+            Time::ZERO,
+            returned.id,
+            returned.destination_holder,
+            returned.destination_region,
+            ObligationKind::Lease,
+            1,
+        ));
+        let result = analyzer.analyze_trace(&trace);
+        assert!(result.is_safe(), "{result}");
+        assert_eq!(result.stats.total_reserved, 1);
+        assert_eq!(result.stats.total_committed, 1);
+        assert_eq!(result.stats.max_pending, 1);
+        assert!(result.timeline.final_marking().unwrap().is_zero());
+        let legacy_negative = [TraceEvent::obligation_commit(
+            1,
+            Time::ZERO,
+            o(3),
+            t(0),
+            r(0),
+            ObligationKind::Lease,
+            1,
+        )];
+        let old = analyzer.analyze(&project_trace(&legacy_negative));
+        let direct = analyzer.analyze_trace(&legacy_negative);
+        assert!(!direct.is_safe());
+        assert_eq!(old.to_string(), direct.to_string());
+        assert_eq!(old.timeline.to_string(), direct.timeline.to_string());
+    }
+
+    #[test]
+    fn transfer_trace_unrelated_terminal_cannot_consume_destination_marking() {
+        for scenario in ["unknown", "other_region", "other_kind", "other_duplicate"] {
+            let (mut trace, handoff) = transfer_trace(true, ObligationKind::Lease);
+            let other_holder = if scenario == "other_region" {
+                handoff.source_holder
+            } else {
+                handoff.destination_holder
+            };
+            let other_region = if scenario == "other_region" {
+                handoff.source_region
+            } else {
+                handoff.destination_region
+            };
+            if scenario != "unknown" {
+                trace.push(TraceEvent::obligation_reserve(
+                    4,
+                    Time::ZERO,
+                    o(1),
+                    other_holder,
+                    other_region,
+                    if scenario == "other_kind" {
+                        ObligationKind::Ack
+                    } else {
+                        ObligationKind::Lease
+                    },
+                ));
+            }
+            if scenario == "other_duplicate" {
+                trace.push(TraceEvent::obligation_commit(
+                    5,
+                    Time::ZERO,
+                    o(1),
+                    other_holder,
+                    other_region,
+                    ObligationKind::Lease,
+                    1,
+                ));
+            }
+            trace.push(TraceEvent::obligation_handoff(6, Time::ZERO, &handoff));
+            trace.push(TraceEvent::obligation_commit(
+                7,
+                Time::ZERO,
+                o(1),
+                other_holder,
+                handoff.destination_region,
+                ObligationKind::Lease,
+                1,
+            ));
+            if scenario == "other_kind" {
+                trace.push(TraceEvent::obligation_commit(
+                    8,
+                    Time::ZERO,
+                    o(1),
+                    other_holder,
+                    other_region,
+                    ObligationKind::Ack,
+                    1,
+                ));
+            }
+            trace.push(trace_close(
+                8,
+                handoff.destination_region,
+                TraceEventKind::RegionCloseComplete,
+            ));
+            let result = MarkingAnalyzer::new().analyze_trace(&trace);
+            assert!(!result.is_safe(), "aggregate theft accepted: {scenario}");
+            assert_eq!(result.invalid_transitions.len(), 1, "{scenario}: {result}");
+            assert_eq!(
+                result
+                    .timeline
+                    .final_marking()
+                    .unwrap()
+                    .region_pending(handoff.destination_region),
+                1
+            );
+            assert_eq!(result.leaks.len(), 1);
+            assert_eq!(result.leaks[0].region, handoff.destination_region);
+            assert_eq!(result.leaks[0].count, 1);
+            assert_eq!(
+                result.stats.total_committed,
+                u32::from(matches!(scenario, "other_duplicate" | "other_kind"))
+            );
+        }
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -17,6 +17,64 @@ pub const TRACE_EVENT_SCHEMA_VERSION: u32 = 1;
 pub const BROWSER_TRACE_SCHEMA_VERSION: &str = "browser-trace-schema-v1";
 const MAX_BROWSER_TRACE_ATTRIBUTE_BYTES: usize = 128;
 
+/// Private versioned ownership record carried inside the existing UserTrace
+/// envelope. IDs use their maintained serde representation, never Debug text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ObligationHandoff {
+    pub(crate) id: ObligationId,
+    pub(crate) source_ticket: u64,
+    pub(crate) destination_ticket: u64,
+    pub(crate) source_holder: TaskId,
+    pub(crate) destination_holder: TaskId,
+    pub(crate) source_region: RegionId,
+    pub(crate) destination_region: RegionId,
+}
+
+const OBLIGATION_HANDOFF_PREFIX: &str = "obligation_handoff_v1 ";
+const MAX_OBLIGATION_HANDOFF_MESSAGE_BYTES: usize = 2048;
+
+impl ObligationHandoff {
+    pub(crate) fn to_message(&self) -> String {
+        format!(
+            "{OBLIGATION_HANDOFF_PREFIX}{}",
+            serde_json::to_string(self).expect("fixed scalar handoff fields serialize")
+        )
+    }
+}
+
+/// Decode the reserved ownership-message namespace; unrelated annotations are
+/// unchanged. Parsing establishes syntax only. Consumers must validate the
+/// pending source, destination generation/region, and prior ticket linkage.
+pub(crate) fn decode_obligation_handoff(
+    event: &TraceEvent,
+) -> Result<Option<ObligationHandoff>, String> {
+    let TraceData::Message(message) = &event.data else {
+        return Ok(None);
+    };
+    if !message.starts_with("obligation_handoff_v") {
+        return Ok(None);
+    }
+    if event.kind != TraceEventKind::UserTrace || event.version != TRACE_EVENT_SCHEMA_VERSION {
+        return Err("handoff requires the supported UserTrace envelope".to_owned());
+    }
+    if message.len() > MAX_OBLIGATION_HANDOFF_MESSAGE_BYTES {
+        return Err("handoff message exceeds 2048 bytes".to_owned());
+    }
+    let payload = message
+        .strip_prefix(OBLIGATION_HANDOFF_PREFIX)
+        .ok_or_else(|| "unsupported handoff message version".to_owned())?;
+    let handoff: ObligationHandoff = serde_json::from_str(payload)
+        .map_err(|error| format!("invalid handoff fields: {error}"))?;
+    if handoff.source_holder == handoff.destination_holder {
+        return Err("handoff requires distinct holder generations".to_owned());
+    }
+    if handoff.destination_ticket <= handoff.source_ticket {
+        return Err("handoff destination ticket must follow its source ticket".to_owned());
+    }
+    Ok(Some(handoff))
+}
+
 /// Browser trace event category for deterministic diagnostics.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(rename_all = "snake_case")]
@@ -784,10 +842,21 @@ pub fn decode_browser_trace_schema(payload: &str) -> Result<BrowserTraceSchema, 
 /// strings rewritten to `"<redacted>"` while structural fields
 /// (TaskId, RegionId, sequence numbers) are preserved so causality
 /// can still be reconstructed by browser-side debug tooling.
+/// The reserved handoff message schema contains only structural IDs and
+/// tickets, which are preserved after strict decoding; malformed reserved
+/// messages become a fixed invalid marker without their original payload.
 #[must_use]
 pub fn redact_browser_trace_event(event: &TraceEvent) -> TraceEvent {
     let mut redacted = event.clone();
-    redacted.data = redact_browser_trace_data(&event.data);
+    redacted.data = match decode_obligation_handoff(event) {
+        // This strict schema contains structural IDs/tickets only, just like
+        // the structural fields retained in an Obligation event below.
+        Ok(Some(handoff)) => TraceData::Message(handoff.to_message()),
+        // Never turn malformed ownership into a harmless annotation. Retain
+        // a fixed invalid marker without exposing its untrusted payload.
+        Err(_) => TraceData::Message("obligation_handoff_v1 <redacted-invalid>".to_owned()),
+        Ok(None) => redact_browser_trace_data(&event.data),
+    };
     redacted
 }
 
@@ -1779,6 +1848,14 @@ macro_rules! worker_lifecycle_constructors {
 }
 
 impl TraceEvent {
+    /// Record an actual ownership projection without extending the public
+    /// exhaustive event enums or changing the outer wire schema.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn obligation_handoff(seq: u64, time: Time, handoff: &ObligationHandoff) -> Self {
+        Self::user_trace(seq, time, handoff.to_message())
+    }
+
     /// Creates a new trace event.
     #[must_use]
     #[inline]
@@ -2901,6 +2978,105 @@ mod tests {
         let e = TraceEvent::user_trace(33, Time::ZERO, "hello");
         assert_eq!(e.kind, TraceEventKind::UserTrace);
         assert_eq!(e.data, TraceData::Message("hello".into()));
+    }
+
+    #[test]
+    fn obligation_handoff_typed_message_preserves_generations_and_envelope() {
+        let handoff = ObligationHandoff {
+            id: obligation(7),
+            source_ticket: 9,
+            destination_ticket: 12,
+            source_holder: task(2),
+            destination_holder: TaskId::new_for_test(2, 3),
+            source_region: region(4),
+            destination_region: RegionId::new_for_test(4, 5),
+        };
+        let event = TraceEvent::obligation_handoff(21, Time::from_nanos(31), &handoff);
+        assert_eq!(event.kind, TraceEventKind::UserTrace);
+        assert_eq!(event.version, TRACE_EVENT_SCHEMA_VERSION);
+        assert_eq!(decode_obligation_handoff(&event).unwrap(), Some(handoff));
+        let outer = serde_json::to_vec(&event).unwrap();
+        let decoded: TraceEvent = serde_json::from_slice(&outer).unwrap();
+        assert_eq!(decoded, event);
+        assert_eq!(
+            decode_obligation_handoff(&decoded),
+            decode_obligation_handoff(&event)
+        );
+        assert_eq!(redact_browser_trace_event(&event), event);
+        let invalid = TraceEvent::user_trace(
+            22,
+            Time::ZERO,
+            "obligation_handoff_v1 {\"secret\":\"must-not-leak\"}",
+        );
+        let redacted = redact_browser_trace_event(&invalid);
+        assert!(decode_obligation_handoff(&redacted).is_err());
+        let TraceData::Message(message) = redacted.data else {
+            panic!("retained envelope")
+        };
+        assert!(!message.contains("must-not-leak"));
+        assert!(!message.contains("secret"));
+    }
+
+    #[test]
+    fn obligation_handoff_parser_refuses_malformed_ambiguous_and_oversized_messages() {
+        let handoff = ObligationHandoff {
+            id: obligation(1),
+            source_ticket: 3,
+            destination_ticket: 4,
+            source_holder: task(1),
+            destination_holder: task(2),
+            source_region: region(1),
+            destination_region: region(2),
+        };
+        let payload = serde_json::to_string(&handoff).unwrap();
+        let mut missing = serde_json::to_value(&handoff).unwrap();
+        missing.as_object_mut().unwrap().remove("source_holder");
+        let mut unknown = serde_json::to_value(&handoff).unwrap();
+        unknown["ignored_authority"] = Value::Bool(true);
+        let messages = [
+            "obligation_handoff_v2 {}".to_owned(),
+            "obligation_handoff_v1 {}".to_owned(),
+            format!("{OBLIGATION_HANDOFF_PREFIX}{payload} {{}}"),
+            format!(
+                "{OBLIGATION_HANDOFF_PREFIX}{{\"source_ticket\":3,{}",
+                &payload[1..]
+            ),
+            format!("{OBLIGATION_HANDOFF_PREFIX}{missing}"),
+            format!("{OBLIGATION_HANDOFF_PREFIX}{unknown}"),
+            format!(
+                "{OBLIGATION_HANDOFF_PREFIX}{payload}{}",
+                " ".repeat(MAX_OBLIGATION_HANDOFF_MESSAGE_BYTES)
+            ),
+        ];
+        for message in messages {
+            assert!(
+                decode_obligation_handoff(&TraceEvent::user_trace(1, Time::ZERO, &message))
+                    .is_err(),
+                "{message}"
+            );
+        }
+        let mut same_holder = handoff.clone();
+        same_holder.destination_holder = same_holder.source_holder;
+        assert!(
+            decode_obligation_handoff(&TraceEvent::obligation_handoff(1, Time::ZERO, &same_holder))
+                .is_err()
+        );
+        let mut old_ticket = handoff.clone();
+        old_ticket.destination_ticket = old_ticket.source_ticket;
+        assert!(
+            decode_obligation_handoff(&TraceEvent::obligation_handoff(1, Time::ZERO, &old_ticket))
+                .is_err()
+        );
+        let mut wrong_envelope = TraceEvent::obligation_handoff(1, Time::ZERO, &handoff);
+        wrong_envelope.kind = TraceEventKind::Checkpoint;
+        assert!(decode_obligation_handoff(&wrong_envelope).is_err());
+        wrong_envelope.kind = TraceEventKind::UserTrace;
+        wrong_envelope.version += 1;
+        assert!(decode_obligation_handoff(&wrong_envelope).is_err());
+        assert_eq!(
+            decode_obligation_handoff(&TraceEvent::user_trace(1, Time::ZERO, "ordinary {bad json")),
+            Ok(None)
+        );
     }
 
     #[test]

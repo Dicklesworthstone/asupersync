@@ -21,7 +21,7 @@
 //! ```
 
 use crate::trace::event::{TraceData, TraceEvent, TraceEventKind};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{self, Write};
 
 /// State of a task in the TLA+ model.
@@ -252,19 +252,228 @@ impl fmt::Display for TlaModule {
 /// TLA+ exporter.
 pub struct TlaExporter {
     snapshots: Vec<TlaStateSnapshot>,
+    handoff_error: Option<TlaTraceError>,
 }
+
+/// A reserved ownership message cannot be interpreted as a valid handoff.
+/// This checks trace interpretation, not TLA model validity or a TLC result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TlaTraceError {
+    /// Zero-based index of the first invalid ownership event.
+    pub event_index: usize,
+    /// The original event sequence number.
+    pub event_seq: u64,
+    /// The malformed or inconsistent ownership assertion.
+    pub detail: String,
+}
+
+impl fmt::Display for TlaTraceError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "unverifiable handoff at event[{}] seq={}: {}",
+            self.event_index, self.event_seq, self.detail
+        )
+    }
+}
+
+impl std::error::Error for TlaTraceError {}
 
 impl TlaExporter {
     /// Build state snapshots from a trace.
+    ///
+    /// Ordinary annotations and historical partial/negative traces retain
+    /// their previous interpretation. The reserved `obligation_handoff_v*`
+    /// message namespace must describe valid ownership transitions. Malformed
+    /// handoffs are retained as a diagnostic accessible through
+    /// [`Self::validation_error`]; [`Self::export_behavior`] then emits an
+    /// explicitly unverifiable diagnostic with no runnable module or `Spec`.
+    /// Use [`Self::try_from_trace`] to receive the refusal directly.
     #[must_use]
     pub fn from_trace(events: &[TraceEvent]) -> Self {
         let mut state = TlaStateSnapshot::new();
         let mut snapshots = vec![state.clone()]; // initial state
-        for event in events {
+        let mut tickets = BTreeMap::new();
+        let mut completed_tasks = BTreeSet::new();
+        let mut closed_regions = BTreeSet::new();
+        let mut reserved_ids = BTreeSet::new();
+        let mut duplicate_reservations = BTreeSet::new();
+        let mut first_task_regions = BTreeMap::new();
+        let mut handoff_error = None;
+        for (index, event) in events.iter().enumerate() {
+            if handoff_error.is_none() {
+                let result = super::event::decode_obligation_handoff(event).and_then(|handoff| {
+                    if let Some(handoff) = handoff {
+                        Self::apply_handoff(
+                            &mut state,
+                            &mut tickets,
+                            &completed_tasks,
+                            &closed_regions,
+                            &duplicate_reservations,
+                            &first_task_regions,
+                            &handoff,
+                        )
+                    } else {
+                        Self::validate_handoff_terminal(&state, &tickets, event)
+                    }
+                });
+                if let Err(detail) = result {
+                    handoff_error = Some(TlaTraceError {
+                        event_index: index,
+                        event_seq: event.seq,
+                        detail,
+                    });
+                }
+            }
+            // Historical negative prefixes remain representable, but a later
+            // reserved handoff cannot resurrect these exact generations.
+            match (&event.kind, &event.data) {
+                (TraceEventKind::Spawn, TraceData::Task { task, region }) => {
+                    first_task_regions
+                        .entry(arena_key(task.0))
+                        .or_insert(arena_key(region.0));
+                }
+                (TraceEventKind::ObligationReserve, TraceData::Obligation { obligation, .. }) => {
+                    let id = arena_key(obligation.0);
+                    if !reserved_ids.insert(id) {
+                        duplicate_reservations.insert(id);
+                    }
+                }
+                (TraceEventKind::Complete, TraceData::Task { task, .. }) => {
+                    completed_tasks.insert(arena_key(task.0));
+                }
+                (TraceEventKind::RegionCloseComplete, TraceData::Region { region, .. }) => {
+                    closed_regions.insert(arena_key(region.0));
+                }
+                _ => {}
+            }
             state.apply(event);
             snapshots.push(state.clone());
         }
-        Self { snapshots }
+        Self {
+            snapshots,
+            handoff_error,
+        }
+    }
+
+    /// Build snapshots while explicitly refusing malformed/inconsistent
+    /// reserved handoff records. Other negative traces remain exportable for
+    /// model exploration; success is not a model-checking verdict.
+    ///
+    /// # Errors
+    /// Returns the first invalid reserved handoff or inconsistent terminal
+    /// ownership event after an interpreted handoff.
+    pub fn try_from_trace(events: &[TraceEvent]) -> Result<Self, TlaTraceError> {
+        let exporter = Self::from_trace(events);
+        if let Some(error) = &exporter.handoff_error {
+            return Err(error.clone());
+        }
+        Ok(exporter)
+    }
+
+    /// The first reserved handoff error, if any.
+    #[must_use]
+    pub fn validation_error(&self) -> Option<&TlaTraceError> {
+        self.handoff_error.as_ref()
+    }
+
+    fn apply_handoff(
+        state: &mut TlaStateSnapshot,
+        tickets: &mut BTreeMap<EntityKey, u64>,
+        completed_tasks: &BTreeSet<EntityKey>,
+        closed_regions: &BTreeSet<EntityKey>,
+        duplicate_reservations: &BTreeSet<EntityKey>,
+        first_task_regions: &BTreeMap<EntityKey, EntityKey>,
+        handoff: &super::event::ObligationHandoff,
+    ) -> Result<(), String> {
+        let id = arena_key(handoff.id.0);
+        let source = arena_key(handoff.source_holder.0);
+        let destination = arena_key(handoff.destination_holder.0);
+        let source_region = arena_key(handoff.source_region.0);
+        let destination_region = arena_key(handoff.destination_region.0);
+        if duplicate_reservations.contains(&id)
+            || state.obligations.get(&id)
+                != Some(&(TlaObligationState::Reserved, source, source_region))
+            || tickets
+                .get(&id)
+                .is_some_and(|ticket| *ticket != handoff.source_ticket)
+        {
+            return Err("handoff does not match its pending source and ticket lineage".to_owned());
+        }
+        if first_task_regions.get(&source) != Some(&source_region)
+            || first_task_regions.get(&destination) != Some(&destination_region)
+            || completed_tasks.contains(&source)
+            || completed_tasks.contains(&destination)
+            || closed_regions.contains(&source_region)
+            || closed_regions.contains(&destination_region)
+            || state.tasks.get(&source).is_none_or(|(status, region)| {
+                *status == TlaTaskState::Completed || *region != source_region
+            })
+            || state
+                .tasks
+                .get(&destination)
+                .is_none_or(|(status, region)| {
+                    *status == TlaTaskState::Completed || *region != destination_region
+                })
+            || state
+                .regions
+                .get(&destination_region)
+                .is_some_and(|(status, _)| *status == TlaRegionState::Closed)
+        {
+            return Err(
+                "handoff source/destination generation or owning region is not live".to_owned(),
+            );
+        }
+        // Close-begin or cancellation may precede projection of an admission
+        // which already succeeded; completed destination ownership may not.
+        state.obligations.insert(
+            id,
+            (
+                TlaObligationState::Reserved,
+                destination,
+                destination_region,
+            ),
+        );
+        tickets.insert(id, handoff.destination_ticket);
+        Ok(())
+    }
+
+    fn validate_handoff_terminal(
+        state: &TlaStateSnapshot,
+        tickets: &BTreeMap<EntityKey, u64>,
+        event: &TraceEvent,
+    ) -> Result<(), String> {
+        if matches!(
+            event.kind,
+            TraceEventKind::ObligationReserve
+                | TraceEventKind::ObligationCommit
+                | TraceEventKind::ObligationAbort
+                | TraceEventKind::ObligationLeak
+        ) {
+            if let TraceData::Obligation {
+                obligation,
+                task,
+                region,
+                ..
+            } = &event.data
+            {
+                let id = arena_key(obligation.0);
+                if tickets.contains_key(&id) && event.kind == TraceEventKind::ObligationReserve {
+                    return Err("transferred obligation cannot be reserved again".to_owned());
+                }
+                if tickets.contains_key(&id)
+                    && state.obligations.get(&id)
+                        != Some(&(
+                            TlaObligationState::Reserved,
+                            arena_key(task.0),
+                            arena_key(region.0),
+                        ))
+                {
+                    return Err("transferred obligation terminal does not match its pending destination owner".to_owned());
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Export a TLA+ behavior (concrete trace as a sequence of states).
@@ -273,6 +482,15 @@ impl TlaExporter {
         // Sanitize so a name with whitespace/newlines/`-` cannot produce an
         // invalid or injected `---- MODULE ... ----` header.
         let name = sanitize_module_name(name);
+        if let Some(error) = &self.handoff_error {
+            // A diagnostic only: deliberately no MODULE/Init/Next/Spec and
+            // no ASSUME FALSE that could turn refusal into a vacuous proof.
+            // Debug quoting keeps untrusted field errors on one comment line.
+            return TlaModule {
+                name,
+                source: format!("\\* UNVERIFIABLE_TRANSFER_TRACE {:?}\n", error.to_string()),
+            };
+        }
         let mut src = String::new();
         let _ = writeln!(&mut src, "---- MODULE {name} ----");
         src.push_str("EXTENDS Integers, Sequences, TLC\n\n");
@@ -560,6 +778,317 @@ mod tests {
 
     fn oid(n: u32) -> ObligationId {
         ObligationId::new_for_test(n, 0)
+    }
+
+    fn transfer_trace() -> (Vec<TraceEvent>, super::super::event::ObligationHandoff) {
+        let handoff = super::super::event::ObligationHandoff {
+            id: oid(1),
+            source_ticket: 2,
+            destination_ticket: 7,
+            source_holder: tid(1),
+            destination_holder: TaskId::new_for_test(1, 2),
+            source_region: rid(1),
+            destination_region: RegionId::new_for_test(1, 3),
+        };
+        (
+            vec![
+                TraceEvent::region_created(1, Time::ZERO, handoff.source_region, None),
+                TraceEvent::region_created(2, Time::ZERO, handoff.destination_region, None),
+                TraceEvent::spawn(3, Time::ZERO, handoff.source_holder, handoff.source_region),
+                TraceEvent::spawn(
+                    4,
+                    Time::ZERO,
+                    handoff.destination_holder,
+                    handoff.destination_region,
+                ),
+                TraceEvent::obligation_reserve(
+                    5,
+                    Time::ZERO,
+                    handoff.id,
+                    handoff.source_holder,
+                    handoff.source_region,
+                    ObligationKind::Lease,
+                ),
+            ],
+            handoff,
+        )
+    }
+
+    #[test]
+    fn transfer_export_rebinds_one_pending_id_with_distinct_generations() {
+        let (mut events, handoff) = transfer_trace();
+        events.push(TraceEvent::obligation_handoff(
+            6,
+            Time::from_nanos(23),
+            &handoff,
+        ));
+        events.push(TraceEvent::complete(
+            7,
+            Time::from_nanos(24),
+            handoff.source_holder,
+            handoff.source_region,
+        ));
+        events.push(TraceEvent::obligation_commit(
+            8,
+            Time::from_nanos(31),
+            handoff.id,
+            handoff.destination_holder,
+            handoff.destination_region,
+            ObligationKind::Lease,
+            31,
+        ));
+        let exporter = TlaExporter::try_from_trace(&events).expect("valid typed ownership history");
+        assert_eq!(
+            exporter.snapshots[5].obligations[&(1, 0)],
+            (TlaObligationState::Reserved, (1, 0), (1, 0))
+        );
+        assert_eq!(
+            exporter.snapshots[6].obligations[&(1, 0)],
+            (TlaObligationState::Reserved, (1, 2), (1, 3))
+        );
+        assert_eq!(exporter.snapshots[6].obligations.len(), 1);
+        assert_eq!(
+            exporter.snapshots[8].obligations[&(1, 0)],
+            (TlaObligationState::Committed, (1, 2), (1, 3))
+        );
+        assert!(exporter.validation_error().is_none());
+        assert!(
+            exporter
+                .export_behavior("Transferred")
+                .source
+                .contains("Spec ==")
+        );
+        // This is the maintained interpreter's output, not an executed TLC proof.
+    }
+
+    #[test]
+    fn transfer_export_refuses_bad_ownership_without_panicking_or_emitting_a_spec() {
+        for scenario in [
+            "malformed",
+            "unknown",
+            "source",
+            "generation",
+            "ticket",
+            "old_terminal",
+            "double_terminal",
+            "reset_before_terminal",
+            "reset_after_terminal",
+        ] {
+            let (mut events, mut handoff) = transfer_trace();
+            match scenario {
+                "unknown" => handoff.id = oid(2),
+                "source" => handoff.source_region = rid(2),
+                "generation" => handoff.destination_holder = TaskId::new_for_test(1, 7),
+                "ticket" => handoff.destination_ticket = handoff.source_ticket,
+                _ => {}
+            }
+            events.push(if scenario == "malformed" {
+                TraceEvent::user_trace(6, Time::ZERO, "obligation_handoff_v1 {}")
+            } else {
+                TraceEvent::obligation_handoff(6, Time::ZERO, &handoff)
+            });
+            if scenario == "reset_after_terminal" {
+                events.push(TraceEvent::obligation_commit(
+                    7,
+                    Time::ZERO,
+                    handoff.id,
+                    handoff.destination_holder,
+                    handoff.destination_region,
+                    ObligationKind::Lease,
+                    1,
+                ));
+            }
+            if matches!(scenario, "reset_before_terminal" | "reset_after_terminal") {
+                events.push(TraceEvent::obligation_reserve(
+                    8,
+                    Time::ZERO,
+                    handoff.id,
+                    handoff.source_holder,
+                    handoff.source_region,
+                    ObligationKind::Lease,
+                ));
+            }
+            if matches!(scenario, "old_terminal" | "double_terminal") {
+                let (holder, region) = if scenario == "old_terminal" {
+                    (handoff.source_holder, handoff.source_region)
+                } else {
+                    (handoff.destination_holder, handoff.destination_region)
+                };
+                events.push(TraceEvent::obligation_commit(
+                    7,
+                    Time::ZERO,
+                    handoff.id,
+                    holder,
+                    region,
+                    ObligationKind::Lease,
+                    1,
+                ));
+                if scenario == "double_terminal" {
+                    events.push(TraceEvent::obligation_commit(
+                        8,
+                        Time::ZERO,
+                        handoff.id,
+                        holder,
+                        region,
+                        ObligationKind::Lease,
+                        1,
+                    ));
+                }
+            }
+            let error = match TlaExporter::try_from_trace(&events) {
+                Ok(_) => panic!("invalid handoff accepted: {scenario}"),
+                Err(error) => error,
+            };
+            assert_eq!(error.event_index, events.len() - 1, "{scenario}");
+            let legacy = TlaExporter::from_trace(&events);
+            assert_eq!(legacy.validation_error(), Some(&error));
+            assert_eq!(legacy.snapshot_count(), events.len() + 1);
+            let rejected = legacy.export_behavior("CannotProve").source;
+            assert!(rejected.starts_with("\\* UNVERIFIABLE_TRANSFER_TRACE"));
+            assert!(rejected.lines().all(|line| line.starts_with("\\*")));
+            assert!(!rejected.contains("---- MODULE"));
+            assert!(!rejected.contains("Spec =="));
+            assert!(!rejected.contains("ASSUME FALSE"));
+        }
+    }
+
+    #[test]
+    fn ordinary_annotations_and_existing_negative_trace_export_remain_available() {
+        let events = [
+            TraceEvent::user_trace(1, Time::ZERO, "ordinary {malformed json"),
+            TraceEvent::obligation_leak(
+                2,
+                Time::ZERO,
+                oid(1),
+                tid(1),
+                rid(1),
+                ObligationKind::Lease,
+                1,
+            ),
+        ];
+        let legacy = TlaExporter::from_trace(&events);
+        let checked = TlaExporter::try_from_trace(&events).unwrap();
+        assert!(legacy.validation_error().is_none());
+        assert_eq!(
+            legacy.export_behavior("Negative").source,
+            checked.export_behavior("Negative").source
+        );
+        assert!(
+            checked
+                .export_behavior("Negative")
+                .source
+                .contains("Spec ==")
+        );
+    }
+
+    #[test]
+    fn transfer_export_cannot_resurrect_completed_task_or_closed_region_generations() {
+        for scenario in [
+            "task_schedule",
+            "task_spawn",
+            "region_create",
+            "region_close_begin",
+            "source_closed",
+            "duplicate_reserve_prefix",
+            "task_owner_rewrite",
+        ] {
+            let (mut events, mut handoff) = transfer_trace();
+            if scenario == "task_owner_rewrite" {
+                handoff.destination_region = rid(2);
+                events.push(TraceEvent::spawn(
+                    7,
+                    Time::ZERO,
+                    handoff.destination_holder,
+                    handoff.destination_region,
+                ));
+            } else if scenario == "source_closed" {
+                events.insert(
+                    1,
+                    TraceEvent::new(
+                        1,
+                        Time::ZERO,
+                        TraceEventKind::RegionCloseComplete,
+                        TraceData::Region {
+                            region: handoff.source_region,
+                            parent: None,
+                        },
+                    ),
+                );
+            } else if scenario == "duplicate_reserve_prefix" {
+                events.push(TraceEvent::obligation_reserve(
+                    7,
+                    Time::ZERO,
+                    handoff.id,
+                    handoff.source_holder,
+                    handoff.source_region,
+                    ObligationKind::Lease,
+                ));
+            } else if scenario.starts_with("task_") {
+                events.push(TraceEvent::complete(
+                    6,
+                    Time::ZERO,
+                    handoff.destination_holder,
+                    handoff.destination_region,
+                ));
+                events.push(TraceEvent::new(
+                    7,
+                    Time::ZERO,
+                    if scenario == "task_schedule" {
+                        TraceEventKind::Schedule
+                    } else {
+                        TraceEventKind::Spawn
+                    },
+                    TraceData::Task {
+                        task: handoff.destination_holder,
+                        region: handoff.destination_region,
+                    },
+                ));
+            } else {
+                events.push(TraceEvent::new(
+                    6,
+                    Time::ZERO,
+                    TraceEventKind::RegionCloseComplete,
+                    TraceData::Region {
+                        region: handoff.destination_region,
+                        parent: None,
+                    },
+                ));
+                events.push(TraceEvent::new(
+                    7,
+                    Time::ZERO,
+                    if scenario == "region_create" {
+                        TraceEventKind::RegionCreated
+                    } else {
+                        TraceEventKind::RegionCloseBegin
+                    },
+                    TraceData::Region {
+                        region: handoff.destination_region,
+                        parent: None,
+                    },
+                ));
+            }
+            let ordinary = TlaExporter::try_from_trace(&events)
+                .expect("historical negative prefix remains representable");
+            assert!(
+                ordinary
+                    .export_behavior("HistoricalNegative")
+                    .source
+                    .contains("Spec ==")
+            );
+            events.push(TraceEvent::obligation_handoff(8, Time::ZERO, &handoff));
+            let rejected = TlaExporter::from_trace(&events);
+            assert_eq!(
+                rejected.validation_error().expect(scenario).event_index,
+                events.len() - 1
+            );
+            assert!(TlaExporter::try_from_trace(&events).is_err());
+            assert!(
+                rejected
+                    .export_behavior("Refused")
+                    .source
+                    .starts_with("\\* UNVERIFIABLE_TRANSFER_TRACE")
+            );
+        }
     }
 
     #[test]
