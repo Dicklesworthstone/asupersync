@@ -23,6 +23,23 @@ use std::time::Duration;
 /// Identifier for a scheduler worker.
 pub type WorkerId = usize;
 
+/// Destroy terminal task storage before auditing its holder, outside all
+/// runtime and shard locks. A custom future may retain permits even after
+/// returning Ready, and its destructor may itself panic.
+pub(super) fn retire_terminal_task(
+    stored: crate::runtime::stored_task::AnyStoredTask,
+) -> Option<crate::types::outcome::PanicPayload> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(stored)))
+        .err()
+        .map(|payload| {
+            let message = crate::cx::scope::payload_to_string(&payload);
+            // Match the native poll-panic boundary: an opaque panic payload
+            // can panic again on Drop, so retain only its closed message.
+            std::mem::forget(payload);
+            crate::types::outcome::PanicPayload::new(message)
+        })
+}
+
 /// Cap on the per-worker `seen_io_tokens` generation table (br-asupersync-414j0b).
 ///
 /// The direct table replaces one colliding slot at a time instead of clearing
@@ -377,16 +394,21 @@ impl Worker {
             worker: &'a Worker,
             task_id: TaskId,
             completed: bool,
+            stored: Option<AnyStoredTask>,
         }
 
         impl Drop for TaskExecutionGuard<'_> {
             fn drop(&mut self) {
                 if !self.completed && std::thread::panicking() {
+                    if let Some(stored) = self.stored.take() {
+                        let _ = retire_terminal_task(stored);
+                    }
                     let mut state = self
                         .worker
                         .state
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let _ = state.drain_obligation_posts_before_completion();
                     let _ = state.update_task(self.task_id, |record| {
                         if !record.state.is_terminal() {
                             record.complete(crate::types::Outcome::Panicked(
@@ -550,6 +572,7 @@ impl Worker {
             worker: self,
             task_id,
             completed: false,
+            stored: Some(stored),
         };
 
         // br-asupersync-qdkyqs: replay-determinism. Sample the
@@ -583,19 +606,37 @@ impl Worker {
             )
         };
 
-        let poll_attempt = stored.poll_count().saturating_add(1);
+        let poll_attempt = guard
+            .stored
+            .as_ref()
+            .expect("executing task storage")
+            .poll_count()
+            .saturating_add(1);
         let poll_attempt = u32::try_from(poll_attempt).unwrap_or(u32::MAX);
 
         // Isolate the potentially panicking task poll operation
         let poll_result =
             self.panic_isolator
-                .isolate_task_execution(task_id, region_id, poll_attempt, || stored.poll(&mut cx));
+                .isolate_task_execution(task_id, region_id, poll_attempt, || {
+                    guard
+                        .stored
+                        .as_mut()
+                        .expect("executing task storage")
+                        .poll(&mut cx)
+                });
 
         match poll_result {
             PanicIsolationResult::Success(Poll::Ready(outcome)) => {
                 // Map Outcome<(), ()> to Outcome<(), Error> for record.complete()
-                let task_outcome = outcome
+                let mut task_outcome = outcome
                     .map_err(|()| crate::error::Error::new(crate::error::ErrorKind::Internal));
+                if let Some(panic) = retire_terminal_task(
+                    guard.stored.take().expect("completed task storage"),
+                ) {
+                    if !matches!(task_outcome, crate::types::Outcome::Panicked(_)) {
+                        task_outcome = crate::types::Outcome::Panicked(panic);
+                    }
+                }
                 let mut state = self
                     .state
                     .lock()
@@ -605,9 +646,7 @@ impl Worker {
                 // already holds (br-asupersync-bi2462.13): a reserve+resolve
                 // within one poll is tracked, and an open reservation is
                 // caught by the completion-time leak check below.
-                if state.has_pending_obligation_posts() {
-                    let _ = state.drain_obligation_posts(64);
-                }
+                let _ = state.drain_obligation_posts_before_completion();
                 let (cancel_ack, cancel_wakes) =
                     Self::consume_cancel_ack_locked(&mut state, task_id).into_parts();
                 let cancel_ack = cancel_ack.is_some();
@@ -715,7 +754,7 @@ impl Worker {
             PanicIsolationResult::Success(Poll::Pending) => {
                 let is_local = is_local_task;
 
-                let cancel_effects = match stored {
+                let cancel_effects = match guard.stored.take().expect("pending task storage") {
                     AnyStoredTask::Global(t) => {
                         let mut state = self
                             .state
@@ -772,12 +811,18 @@ impl Worker {
             } => {
                 // Task panicked during poll - convert to structured outcome
                 let panic_outcome = self.panic_isolator.panic_to_outcome(&panic_context);
+                // Preserve the original poll panic if retiring its remaining
+                // fields also panics. Field drops still publish their posts.
+                let _ = retire_terminal_task(
+                    guard.stored.take().expect("panicked task storage"),
+                );
 
                 // Complete the task with panic outcome (similar to Ready case but with panic outcome)
                 let mut state = self
                     .state
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let _ = state.drain_obligation_posts_before_completion();
                 let (_cancel_ack, cancel_wakes) =
                     Self::consume_cancel_ack_locked(&mut state, task_id).into_parts();
                 let _ = state.update_task(task_id, |record| {

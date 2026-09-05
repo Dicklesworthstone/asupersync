@@ -2348,6 +2348,34 @@ impl RuntimeState {
         crate::runtime::obligation_mailbox::apply_obligation_posts(self, &mailbox, max)
     }
 
+    /// Settles a finite backlog before a native worker retires a task holder.
+    ///
+    /// Capture once: concurrent producers must not extend this completion
+    /// phase indefinitely. The queue's count includes publications in flight,
+    /// so stop on an empty batch instead of waiting for those producers. Posts
+    /// whose push returned during the completed poll are already visible.
+    pub(crate) fn drain_obligation_posts_before_completion(&mut self) -> usize {
+        let Some(gateway) = self.obligation_gateway.clone() else {
+            return 0;
+        };
+        let mailbox = gateway.mailbox();
+        let mut remaining = mailbox.len();
+        let mut applied = 0;
+        while remaining > 0 {
+            let batch = crate::runtime::obligation_mailbox::apply_obligation_posts(
+                self,
+                mailbox,
+                remaining.min(64),
+            );
+            if batch == 0 {
+                break;
+            }
+            remaining -= batch;
+            applied += batch;
+        }
+        applied
+    }
+
     /// Whether obligation posts are waiting to be applied.
     #[must_use]
     pub fn has_pending_obligation_posts(&self) -> bool {
