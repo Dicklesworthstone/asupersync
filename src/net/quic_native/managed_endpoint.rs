@@ -662,6 +662,324 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
 
+    #[derive(Default)]
+    struct SelectionWake(std::sync::atomic::AtomicUsize);
+
+    impl std::task::Wake for SelectionWake {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    async fn selection_packet_protection(cx: &Cx) -> crate::net::atp::quic::AtpPacketProtection {
+        use crate::net::atp::quic::AtpPacketProtection;
+        use crate::net::quic_native::{PacketProtectionSpace, QuicHandshakeTranscript};
+        let mut transcript = QuicHandshakeTranscript::new();
+        transcript.record("client_initial", b"managed selection client fixture");
+        transcript.record("server_handshake", b"managed selection server fixture");
+        let mut protection = AtpPacketProtection::new_client(true).unwrap();
+        protection
+            .derive_keys(
+                cx,
+                PacketProtectionSpace::OneRtt,
+                &transcript,
+                b"managed selection unit fixture, not authenticated handshake proof",
+            )
+            .await
+            .unwrap();
+        protection
+    }
+
+    async fn selection_fixture(
+        owner: &Cx,
+    ) -> (
+        Cx,
+        Arc<crate::time::VirtualClock>,
+        crate::time::TimerDriverHandle,
+        ManagedQuicEndpoint,
+        std::net::UdpSocket,
+        ConnectionId,
+    ) {
+        use crate::net::quic_native::PacketNumberSpace;
+        use crate::time::{TimerDriverHandle, VirtualClock};
+        let clock = Arc::new(VirtualClock::starting_at(crate::Time::from_secs(37)));
+        let driver = TimerDriverHandle::with_virtual_clock(clock.clone());
+        let cx = Cx::new_with_drivers(
+            crate::types::RegionId::new_for_test(0, 1),
+            crate::types::TaskId::new_for_test(0, 0),
+            crate::types::Budget::INFINITE,
+            None,
+            owner.io_driver_handle(),
+            None,
+            Some(driver.clone()),
+            None,
+        );
+        let protection = selection_packet_protection(&cx).await;
+        let peer = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        peer.set_nonblocking(true).unwrap();
+        let mut endpoint = ManagedQuicEndpoint::bind(
+            &cx,
+            "127.0.0.1:0".parse().unwrap(),
+            ManagedEndpointConfig {
+                packet_batch_size: 1,
+                ..ManagedEndpointConfig::default()
+            },
+        )
+        .await
+        .unwrap();
+        endpoint.timer_scheduler.now(&cx).unwrap();
+        let cid = ConnectionId::new(&[7; 8]).unwrap();
+        endpoint
+            .create_connection_for_testing(&cx, cid, peer.local_addr().unwrap())
+            .await
+            .unwrap();
+        endpoint
+            .connection_router
+            .install_packet_protection(&cx, cid, protection)
+            .unwrap();
+        // Only recovery state is planted. Selection, timer registration, packet
+        // protection and UDP use production code; this is not a TLS/.76 proof.
+        let connection = endpoint
+            .connection_router
+            .connection_mut_for_testing(&cx, cid)
+            .unwrap();
+        connection.begin_handshake(&cx).unwrap();
+        connection.on_handshake_keys_available(&cx).unwrap();
+        connection.on_1rtt_keys_available(&cx).unwrap();
+        connection.record_verified_server_identity();
+        connection.on_handshake_confirmed(&cx).unwrap();
+        connection
+            .on_packet_sent(
+                &cx,
+                PacketNumberSpace::ApplicationData,
+                1_200,
+                true,
+                true,
+                1_000,
+            )
+            .unwrap();
+        endpoint
+            .connection_router
+            .refresh_connection_timer_for_testing(&cx, cid, 1_000)
+            .unwrap();
+        (cx, clock, driver, endpoint, peer, cid)
+    }
+
+    fn witness_selection_io_wake(owner: &Cx, wake: &SelectionWake, before: usize) {
+        let driver = owner.io_driver_handle().unwrap();
+        for _ in 0..16 {
+            driver.turn_with(Some(Duration::ZERO), |_, _| {}).unwrap();
+            if wake.0.load(Ordering::SeqCst) > before {
+                return;
+            }
+        }
+        panic!("managed selection: registered native read interest lost its UDP wake");
+    }
+
+    #[test]
+    fn simultaneous_ready_io_and_due_timer_cancel_before_consuming_owned_suffix() {
+        let runtime = crate::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .unwrap();
+        runtime.block_on(runtime.handle().spawn(async {
+            let owner = Cx::current().unwrap();
+            let io_driver = owner.io_driver_handle().unwrap();
+            let registrations = io_driver.waker_count();
+            let (cx, clock, driver, mut endpoint, peer, _) = selection_fixture(&owner).await;
+            let deadline = endpoint.connection_router.next_timer_deadline().unwrap();
+            let advance = u64::try_from(
+                deadline
+                    .duration_since(endpoint.timer_scheduler.now(&cx).unwrap())
+                    .as_nanos(),
+            )
+            .unwrap();
+            assert!(advance > 0);
+            let metrics = endpoint.udp_endpoint.metrics();
+            let wake = Arc::new(SelectionWake::default());
+            let waker = std::task::Waker::from(wake.clone());
+            let endpoint_addr = endpoint.local_addr();
+            {
+                let mut run = std::pin::pin!(endpoint.run_event_loop(&cx));
+                assert!(run.as_mut().poll(&mut std::task::Context::from_waker(&waker)).is_pending());
+                assert_eq!(wake.0.load(Ordering::SeqCst), 0, "idle loop must genuinely park");
+                assert_eq!(driver.pending_count(), 1);
+                assert_eq!(io_driver.waker_count(), registrations + 1);
+                let before = wake.0.load(Ordering::SeqCst);
+                assert_eq!(peer.send_to(b"invalid QUIC", endpoint_addr).unwrap(), 12);
+                witness_selection_io_wake(&owner, &wake, before);
+                // Do not repoll before observing the real wake. Drop this parked
+                // future solely to seed output through the retained endpoint.
+            }
+            assert_eq!(metrics.packets_received.load(Ordering::Relaxed), 0);
+            assert_eq!(metrics.packets_sent.load(Ordering::Relaxed), 0);
+            assert_eq!(endpoint.timer_scheduler.current_deadline(), Some(deadline));
+            let queue_cid = ConnectionId::new(&[9; 8]).unwrap();
+            for index in 0..3u8 {
+                endpoint.queue_connection_packets(
+                    queue_cid,
+                    [OutgoingPacket {
+                        dst_addr: peer.local_addr().unwrap(),
+                        data: vec![index],
+                        send_time: None,
+                    }],
+                );
+            }
+            {
+                let mut run = std::pin::pin!(endpoint.run_event_loop(&cx));
+                // Restart the same owner; one writable packet commits before
+                // yield, leaving an exact suffix and unread input ready.
+                assert!(run.as_mut().poll(&mut std::task::Context::from_waker(&waker)).is_pending());
+                assert_eq!(metrics.packets_sent.load(Ordering::Relaxed), 1);
+                assert_eq!(metrics.packets_received.load(Ordering::Relaxed), 0);
+                let before_timer = wake.0.load(Ordering::SeqCst);
+                clock.advance(advance);
+                assert_eq!(driver.process_timers(), 1);
+                assert!(wake.0.load(Ordering::SeqCst) > before_timer, "due timer must wake the retained loop");
+                let before_cancel = wake.0.load(Ordering::SeqCst);
+                cx.cancel_with(crate::types::CancelKind::User, None);
+                assert!(wake.0.load(Ordering::SeqCst) > before_cancel, "cancellation must wake its current registered waiter");
+                assert_eq!(
+                    run.as_mut().poll(&mut std::task::Context::from_waker(&waker)),
+                    Poll::Ready(Err(ManagedEndpointError::Cancelled))
+                );
+            }
+            assert_eq!(metrics.packets_sent.load(Ordering::Relaxed), 1);
+            assert_eq!(metrics.packets_received.load(Ordering::Relaxed), 0);
+            assert_eq!(endpoint.pending_outgoing.len(), 2);
+            for (packet, index) in endpoint.pending_outgoing.iter().zip(1..3u8) {
+                assert_eq!(packet.connection_id, queue_cid);
+                assert_eq!(packet.packet.data, vec![index]);
+                assert_eq!(packet.packet.dst_addr, peer.local_addr().unwrap());
+            }
+            assert_eq!(driver.pending_count(), 0);
+            assert!(!endpoint.timer_scheduler.has_pending_timer());
+            let mut bytes = [0u8; 1_200];
+            assert_eq!(peer.recv_from(&mut bytes).unwrap(), (1, endpoint_addr));
+            assert_eq!(bytes[0], 0);
+            assert_eq!(peer.recv_from(&mut bytes).unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
+            assert_eq!(endpoint.shutdown(&cx).await, Err(ManagedEndpointError::Cancelled));
+            assert!(endpoint.pending_outgoing.is_empty());
+            assert_eq!(endpoint.connection_stats().active_connections, 0);
+            assert_eq!(driver.pending_count(), 0);
+            assert_eq!(io_driver.waker_count(), registrations);
+            println!("managed_selection_cancel bead=asupersync-bi2462.75 fixture=virtual37_native_udp parked_read_wake=true timer_firings=1 sent_prefix=1 retained_suffix=2 received_before_cancel=0 registrations_after_cleanup={registrations} outcome=cancelled");
+        }));
+    }
+
+    #[test]
+    fn continuous_ready_ingress_cannot_starve_due_protected_pto_output() {
+        let runtime = crate::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .unwrap();
+        runtime.block_on(runtime.handle().spawn(async {
+            let owner = Cx::current().unwrap();
+            let io_driver = owner.io_driver_handle().unwrap();
+            let registrations = io_driver.waker_count();
+            let (cx, clock, driver, mut endpoint, peer, cid) = selection_fixture(&owner).await;
+            let mut verifier = selection_packet_protection(&owner).await;
+            let endpoint_addr = endpoint.local_addr();
+            let deadline = endpoint.connection_router.next_timer_deadline().unwrap();
+            let advance = u64::try_from(
+                deadline
+                    .duration_since(endpoint.timer_scheduler.now(&cx).unwrap())
+                    .as_nanos(),
+            )
+            .unwrap();
+            assert!(advance > 0);
+            let metrics = endpoint.udp_endpoint.metrics();
+            let wake = Arc::new(SelectionWake::default());
+            let waker = std::task::Waker::from(wake.clone());
+            {
+                let mut run = std::pin::pin!(endpoint.run_event_loop(&cx));
+                assert!(run.as_mut().poll(&mut std::task::Context::from_waker(&waker)).is_pending());
+                assert_eq!(wake.0.load(Ordering::SeqCst), 0, "idle loop must genuinely park");
+                assert_eq!(driver.pending_count(), 1);
+                assert_eq!(io_driver.waker_count(), registrations + 1);
+                let mut before = wake.0.load(Ordering::SeqCst);
+                for _ in 0..32 {
+                    assert_eq!(peer.send_to(b"invalid QUIC", endpoint_addr).unwrap(), 12);
+                }
+                witness_selection_io_wake(&owner, &wake, before);
+                // Four real read batches precede the deadline. Every later
+                // turn still has queued input: at most eight of 32 are read.
+                for received in 1..=4 {
+                    assert!(wake.0.load(Ordering::SeqCst) > before, "ready ingress/cooperative turn must wake before repoll");
+                    before = wake.0.load(Ordering::SeqCst);
+                    assert!(run.as_mut().poll(&mut std::task::Context::from_waker(&waker)).is_pending());
+                    assert_eq!(metrics.packets_received.load(Ordering::Relaxed), received);
+                    assert_eq!(metrics.packets_sent.load(Ordering::Relaxed), 0);
+                }
+                let before_timer = wake.0.load(Ordering::SeqCst);
+                clock.advance(advance);
+                assert_eq!(driver.process_timers(), 1);
+                assert!(wake.0.load(Ordering::SeqCst) > before_timer, "actual timer registration must wake the loop");
+                before = wake.0.load(Ordering::SeqCst);
+                assert!(run.as_mut().poll(&mut std::task::Context::from_waker(&waker)).is_pending());
+                assert_eq!(metrics.packets_received.load(Ordering::Relaxed), 4, "due PTO must beat already-readable input");
+                assert_eq!(metrics.packets_sent.load(Ordering::Relaxed), 0);
+                assert!(wake.0.load(Ordering::SeqCst) > before);
+                before = wake.0.load(Ordering::SeqCst);
+                assert!(run.as_mut().poll(&mut std::task::Context::from_waker(&waker)).is_pending());
+                assert_eq!(metrics.packets_sent.load(Ordering::Relaxed), 1, "PTO output must reach actual UDP while ingress remains ready");
+                assert_eq!(metrics.packets_received.load(Ordering::Relaxed), 4);
+                for received in 5..=8 {
+                    assert!(wake.0.load(Ordering::SeqCst) > before);
+                    before = wake.0.load(Ordering::SeqCst);
+                    assert!(run.as_mut().poll(&mut std::task::Context::from_waker(&waker)).is_pending());
+                    assert_eq!(metrics.packets_received.load(Ordering::Relaxed), received);
+                    assert_eq!(metrics.packets_sent.load(Ordering::Relaxed), 1);
+                }
+                let before_cancel = wake.0.load(Ordering::SeqCst);
+                cx.cancel_with(crate::types::CancelKind::User, None);
+                assert!(wake.0.load(Ordering::SeqCst) > before_cancel);
+                assert_eq!(
+                    run.as_mut().poll(&mut std::task::Context::from_waker(&waker)),
+                    Poll::Ready(Err(ManagedEndpointError::Cancelled))
+                );
+            }
+            assert_eq!(metrics.packets_received.load(Ordering::Relaxed), 8);
+            assert_eq!(metrics.packets_sent.load(Ordering::Relaxed), 1);
+            assert!(endpoint.pending_outgoing.is_empty());
+            assert!(endpoint.connection_router.next_timer_deadline().unwrap() > deadline);
+            assert_eq!(driver.now(), crate::Time::from_nanos(37_000_000_000 + advance));
+            assert_eq!(driver.pending_count(), 0);
+            let mut bytes = [0u8; 1_200];
+            let (length, source) = peer.recv_from(&mut bytes).unwrap();
+            assert_eq!(source, endpoint_addr);
+            let (crate::net::quic_core::PacketHeader::Short(header), header_len) =
+                crate::net::quic_core::PacketHeader::decode(&bytes[..length], 8).unwrap()
+            else {
+                panic!("due managed PTO must emit an actual protected short packet")
+            };
+            assert_eq!(header.dst_cid, cid);
+            assert_eq!(header.packet_number, 1);
+            let plaintext = crate::net::quic_native::connection_manager::unprotect_1rtt_packet(
+                &owner,
+                cid,
+                &mut verifier,
+                &bytes[..header_len],
+                &bytes[header_len..length],
+                header.packet_number,
+                header.key_phase,
+            )
+            .await
+            .unwrap();
+            let mut expected = bytes::BytesMut::new();
+            crate::net::atp::protocol::quic_frames::QuicFrame::Ping.encode(&mut expected).unwrap();
+            assert_eq!(plaintext, expected.as_ref());
+            assert_eq!(peer.recv_from(&mut bytes).unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
+            assert_eq!(endpoint.shutdown(&cx).await, Err(ManagedEndpointError::Cancelled));
+            assert_eq!(endpoint.connection_stats().active_connections, 0);
+            assert_eq!(io_driver.waker_count(), registrations);
+            assert_eq!(driver.pending_count(), 0);
+            println!("managed_selection_pto bead=asupersync-bi2462.75 fixture=virtual37_native_udp input_sent=32 input_before_due=4 input_after_probe=8 protected_ping_packets=1 protected_bytes={length} timer_firings=1 virtual_advance_ns={advance} registrations_after_cleanup={registrations} outcome=pass no_authenticated_handshake_claim=true");
+        }));
+    }
+
     #[test]
     fn native_idle_loop_parks_and_acknowledges_cancellation_without_packets() {
         let runtime = crate::runtime::RuntimeBuilder::current_thread()

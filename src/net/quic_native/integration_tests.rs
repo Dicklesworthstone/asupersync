@@ -109,7 +109,11 @@ mod tests {
 
     #[test]
     fn test_timer_scheduler_deadline_management() {
-        run_test_with_cx(|cx| async move {
+        let runtime = crate::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .expect("native runtime with timer driver");
+        runtime.block_on(runtime.handle().spawn(async {
+            let cx = crate::Cx::current().expect("native task context with timer capability");
             let mut scheduler = QuicTimerScheduler::new();
 
             // No timer initially
@@ -117,7 +121,8 @@ mod tests {
             assert_eq!(scheduler.current_deadline(), None);
 
             // Schedule a timer
-            let deadline1 = Instant::now() + Duration::from_millis(100);
+            let start = Instant::now();
+            let deadline1 = start + Duration::from_millis(100);
             scheduler
                 .schedule_timer(&cx, deadline1)
                 .await
@@ -127,7 +132,7 @@ mod tests {
             assert_eq!(scheduler.current_deadline(), Some(deadline1));
 
             // Schedule an earlier timer (should reschedule)
-            let deadline2 = Instant::now() + Duration::from_millis(50);
+            let deadline2 = start + Duration::from_millis(50);
             scheduler
                 .schedule_timer(&cx, deadline2)
                 .await
@@ -137,7 +142,7 @@ mod tests {
             assert_eq!(scheduler.current_deadline(), Some(deadline2));
 
             // Schedule a later timer (should not reschedule)
-            let deadline3 = Instant::now() + Duration::from_millis(200);
+            let deadline3 = start + Duration::from_millis(200);
             scheduler
                 .schedule_timer(&cx, deadline3)
                 .await
@@ -145,7 +150,7 @@ mod tests {
 
             // Should still have the earlier deadline
             assert_eq!(scheduler.current_deadline(), Some(deadline2));
-        });
+        }));
     }
 
     #[test]
