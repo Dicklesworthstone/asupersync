@@ -61,6 +61,10 @@ fn managed_public_types_preserve_config_traits_and_error_conversions() {
     );
 
     fn assert_send_future<T: std::future::Future + Send>(_: T) {}
+    let _assert_drive_futures = |endpoint: &mut ManagedQuicEndpoint, cx: &Cx| {
+        assert_send_future(endpoint.run_event_loop(cx));
+        assert_send_future(endpoint.shutdown(cx));
+    };
     let cx = test_cx();
     let mut timer = QuicTimerScheduler::new();
     assert_send_future(timer.schedule_timer(&cx, std::time::Instant::now()));

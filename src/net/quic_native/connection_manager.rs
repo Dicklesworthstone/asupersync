@@ -3225,6 +3225,10 @@ mod tests {
             // repolls, including if a wheel wake only requests a rearm.
             let limit = Instant::now() + Duration::from_secs(2);
             loop {
+                assert!(
+                    Instant::now() < limit,
+                    "shared fallback did not complete within its test bound"
+                );
                 signal
                     .recv_timeout(limit.saturating_duration_since(Instant::now()))
                     .expect("shared wall-clock fallback wake");
@@ -3287,6 +3291,8 @@ mod tests {
         }
         let bound = scheduler.clock.as_ref().unwrap();
         assert!(bound.driver.ptr_eq(&driver));
+        assert_eq!(bound.runtime_origin, crate::Time::from_secs(700));
+        assert_eq!(driver.now(), crate::Time::from_secs(700));
         let due = scheduler.current_sleep.as_ref().unwrap().deadline();
         assert_eq!(
             due.as_nanos(),
