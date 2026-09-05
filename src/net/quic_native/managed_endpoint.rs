@@ -99,19 +99,13 @@ pub enum ManagedEndpointError {
 
 impl From<QuicUdpEndpointError> for ManagedEndpointError {
     fn from(e: QuicUdpEndpointError) -> Self {
-        match e {
-            QuicUdpEndpointError::Cancelled => Self::Cancelled,
-            other => Self::UdpEndpoint(other.to_string()),
-        }
+        Self::UdpEndpoint(e.to_string())
     }
 }
 
 impl From<ConnectionRouterError> for ManagedEndpointError {
     fn from(e: ConnectionRouterError) -> Self {
-        match e {
-            ConnectionRouterError::Cancelled => Self::Cancelled,
-            other => Self::ConnectionRouter(other),
-        }
+        Self::ConnectionRouter(e)
     }
 }
 
@@ -277,7 +271,12 @@ impl ManagedQuicEndpoint {
     pub async fn run_event_loop(&mut self, cx: &Cx) -> Result<(), ManagedEndpointError> {
         let result = self.drive_event_loop(cx).await;
         self.timer_scheduler.cancel();
-        result
+        match result {
+            Err(ManagedEndpointError::ConnectionRouter(ConnectionRouterError::Cancelled)) => {
+                Err(ManagedEndpointError::Cancelled)
+            }
+            other => other,
+        }
     }
 
     async fn drive_event_loop(&mut self, cx: &Cx) -> Result<(), ManagedEndpointError> {
@@ -353,7 +352,10 @@ impl ManagedQuicEndpoint {
                             Poll::Ready(result) => {
                                 self.prefer_send = true;
                                 return Poll::Ready(
-                                    result.map(EndpointEvent::Packets).map_err(Into::into),
+                                    result.map(EndpointEvent::Packets).map_err(|error| match error {
+                                        QuicUdpEndpointError::Cancelled => ManagedEndpointError::Cancelled,
+                                        other => other.into(),
+                                    }),
                                 );
                             }
                             Poll::Pending => {}
@@ -639,8 +641,14 @@ impl ManagedQuicEndpoint {
         self.pending_outgoing.clear();
         self.timer_scheduler.cancel();
         let udp_result = self.udp_endpoint.shutdown(cx).await;
-        close_result?;
-        udp_result?;
+        close_result.map_err(|error| match error {
+            ConnectionRouterError::Cancelled => ManagedEndpointError::Cancelled,
+            other => other.into(),
+        })?;
+        udp_result.map_err(|error| match error {
+            QuicUdpEndpointError::Cancelled => ManagedEndpointError::Cancelled,
+            other => other.into(),
+        })?;
 
         cx.trace(&format!(
             "Managed QUIC endpoint {} shutdown complete; closed {} connections",

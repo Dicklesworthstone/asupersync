@@ -18,6 +18,21 @@ mod tests {
     use std::time::Instant;
 
     #[test]
+    fn managed_error_conversions_preserve_public_variant_contract() {
+        use crate::net::quic_native::{
+            ConnectionRouterError, ManagedEndpointError, QuicUdpEndpointError,
+        };
+        assert_eq!(
+            ManagedEndpointError::from(QuicUdpEndpointError::Cancelled),
+            ManagedEndpointError::UdpEndpoint("operation cancelled".to_owned())
+        );
+        assert_eq!(
+            ManagedEndpointError::from(ConnectionRouterError::Cancelled),
+            ManagedEndpointError::ConnectionRouter(ConnectionRouterError::Cancelled)
+        );
+    }
+
+    #[test]
     fn test_managed_endpoint_basic_lifecycle() {
         run_test_with_cx(|cx| async move {
             // Create server endpoint
