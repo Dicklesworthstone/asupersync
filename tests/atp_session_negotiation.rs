@@ -5,6 +5,8 @@
 //! the TLS-gated extension cases use two real native-runtime child processes.
 //! Historical extension order is an explicit wire fixture, not a released
 //! historical binary or a claim about the daemon's transfer workflow.
+//! A separate mixed-binary lane executes the pre-repair codec build with the
+//! current parser/harness overlays against the current codec build.
 
 use asupersync::atp::path::PathCandidateId;
 use asupersync::net::atp::protocol::{
@@ -477,7 +479,7 @@ mod extension_wire {
     use serde_json::{Value, json};
     use sha2::{Digest, Sha256};
     use std::fs::{File, OpenOptions};
-    use std::io::Write;
+    use std::io::{Read, Write};
     use std::path::{Path, PathBuf};
     use std::process::{Child, Command, Stdio};
     use std::sync::Arc;
@@ -485,6 +487,10 @@ mod extension_wire {
 
     const BEAD: &str = "asupersync-bi2462.43";
     const CHILD_TEST: &str = "extension_wire::native_extension_peer";
+    const PRE_REPAIR_BASE: &str = "97c5b2d02146d8cf60cfba57241a852e68ae4926";
+    const PRE_REPAIR_CODEC_SHA: &str =
+        "a724a6138cf7a6239f6af721de7484670b9cc2f5a539b616e545b50d0b99a8a3";
+    const MAX_PEER_BINARY_BYTES: u64 = 512 * 1024 * 1024;
     const ALPN: &[u8] = b"atp-extension-proof/1";
     // Inside the checked-in certificate's validity interval. This replaces
     // only the verification clock; WebPKI still checks chain, usage, signature,
@@ -493,6 +499,88 @@ mod extension_wire {
 
     fn digest(bytes: &[u8]) -> String {
         hex::encode(Sha256::digest(bytes))
+    }
+
+    fn binary_digest(path: &Path) -> (String, u64) {
+        let mut file = File::open(path).unwrap();
+        assert!(file.metadata().unwrap().len() <= MAX_PEER_BINARY_BYTES);
+        let mut hash = Sha256::new();
+        let mut length = 0u64;
+        let mut buffer = [0u8; 64 * 1024];
+        loop {
+            let count = file.read(&mut buffer).unwrap();
+            if count == 0 {
+                break;
+            }
+            length += count as u64;
+            assert!(length <= MAX_PEER_BINARY_BYTES);
+            hash.update(&buffer[..count]);
+        }
+        (hex::encode(hash.finalize()), length)
+    }
+
+    fn pre_repair_codec() -> bool {
+        digest(include_bytes!("../src/net/atp/protocol/codec.rs")) == PRE_REPAIR_CODEC_SHA
+    }
+
+    fn actual_codec_wire(frame: &Frame) -> (Vec<u8>, usize) {
+        if !pre_repair_codec() {
+            let wire = frame.to_wire_bytes().unwrap();
+            assert_eq!(wire, canonical_fixture(frame));
+            return (wire, 1);
+        }
+        // Vary only legitimate caller-owned HashMap inputs. Every observed
+        // byte comes from the actual compiled public encoder, never raw_frame.
+        for attempt in 1..=128 {
+            let mut candidate = frame.clone();
+            candidate.header.extensions = std::collections::HashMap::new();
+            candidate
+                .header
+                .extensions
+                .extend(frame.header.extensions.clone());
+            let wire = candidate.to_wire_bytes().unwrap();
+            if wire != canonical_fixture(&candidate) {
+                assert_eq!(decode_fragmented(&wire), *frame);
+                return (wire, attempt);
+            }
+        }
+        panic!("pre-repair public encoder did not emit noncanonical order in 128 fresh maps");
+    }
+
+    fn exchange_outgoing(
+        frame: &Frame,
+        historical: bool,
+        mixed: bool,
+        attempts: &mut Vec<usize>,
+    ) -> Vec<u8> {
+        if mixed {
+            let (wire, count) = actual_codec_wire(frame);
+            attempts.push(count);
+            wire
+        } else {
+            outgoing(frame, historical)
+        }
+    }
+
+    fn exchange_received(wire: &[u8], historical: bool, mixed: bool) -> Frame {
+        if !mixed {
+            return received(wire, historical);
+        }
+        let frame = decode_fragmented(wire);
+        if pre_repair_codec() {
+            assert_eq!(
+                wire,
+                canonical_fixture(&frame),
+                "current peer must emit canonical bytes"
+            );
+        } else {
+            assert_ne!(
+                wire,
+                canonical_fixture(&frame),
+                "old peer must witness actual unsorted emission"
+            );
+        }
+        frame
     }
 
     fn frame(role: &str, index: usize) -> Frame {
@@ -645,6 +733,98 @@ mod extension_wire {
             FrameError::FrameTooLarge { .. } => "header_limit",
             other => panic!("unexpected refusal: {other:?}"),
         }
+    }
+
+    fn mixed_malformed_observation(index: usize, code: &str, wire: &[u8]) -> Value {
+        let mut codec = AtpFrameCodec::new();
+        let mut pending = BytesMut::new();
+        let mut supplied = 0;
+        for chunk in wire.chunks(7) {
+            pending.extend_from_slice(chunk);
+            supplied += chunk.len();
+            match codec.decode(&mut pending) {
+                Ok(None) => {}
+                Ok(Some(frame)) => {
+                    assert!(pre_repair_codec() && code == "duplicate");
+                    assert_eq!(supplied, wire.len());
+                    assert!(pending.is_empty());
+                    assert_eq!(frame.payload(), b"p");
+                    let winner = if index == 0 {
+                        b"same".as_slice()
+                    } else {
+                        b"changed".as_slice()
+                    };
+                    assert_eq!(frame.header.extensions.get(&64).unwrap(), winner);
+                    assert_eq!(
+                        duplicate_oracle(Ok(Some(frame))),
+                        Err("duplicate_extension_admitted")
+                    );
+                    return json!({"case_index": index, "outcome": "duplicate_extension_admitted",
+                        "invariant": "duplicate_id_refusal", "invariant_satisfied": false,
+                        "last_value_sha256": digest(winner), "supplied_bytes": supplied,
+                        "wire_sha256": digest(wire), "incremental_chunk_bytes": 7});
+                }
+                Err(error) => {
+                    assert_eq!(rejection(&error), code);
+                    assert_eq!(
+                        pending.as_ref(),
+                        &wire[..supplied],
+                        "invalid partial header consumed"
+                    );
+                    if code == "duplicate" {
+                        assert!(!pre_repair_codec());
+                        assert!(matches!(&error, FrameError::InvalidFormat(message)
+                            if message == "Duplicate extension ID 64"));
+                    }
+                    return json!({"case_index": index, "outcome": code,
+                        "invariant_satisfied": true, "supplied_bytes": supplied,
+                        "wire_sha256": digest(wire), "incremental_chunk_bytes": 7,
+                        "source_consumed": false});
+                }
+            }
+        }
+        panic!(
+            "malformed case {index} produced neither required refusal nor witnessed old overwrite"
+        );
+    }
+
+    async fn mixed_malformed_exchange(
+        stream: &mut TlsStream<TcpStream>,
+        role: &str,
+        cases: &[(&str, Vec<u8>)],
+    ) -> Vec<Value> {
+        let mut observations = Vec::new();
+        for sending_role in ["sender", "receiver"] {
+            for (index, (code, wire)) in cases.iter().enumerate() {
+                if role == sending_role {
+                    send_blob(stream, wire).await;
+                    let response: Value = serde_json::from_slice(&recv_blob(stream).await).unwrap();
+                    let expected = if *code == "duplicate" && !pre_repair_codec() {
+                        "duplicate_extension_admitted"
+                    } else {
+                        *code
+                    };
+                    assert_eq!(response["outcome"], expected);
+                    assert_eq!(response["case_index"], index);
+                    assert_eq!(response["wire_sha256"], digest(wire));
+                } else {
+                    let incoming = recv_blob(stream).await;
+                    assert_eq!(
+                        &incoming, wire,
+                        "mixed malformed bytes must cross authenticated transport"
+                    );
+                    let observed = mixed_malformed_observation(index, code, &incoming);
+                    send_blob(stream, &serde_json::to_vec(&observed).unwrap()).await;
+                    println!(
+                        "{}",
+                        json!({"bead_id": BEAD, "stage": "mixed_malformed_observed", "role": role, "observation": observed})
+                    );
+                    observations.push(observed);
+                }
+            }
+        }
+        assert_eq!(observations.len(), cases.len());
+        observations
     }
 
     fn decode_fragmented(wire: &[u8]) -> Frame {
@@ -860,6 +1040,14 @@ mod extension_wire {
     }
 
     async fn exchange(role: &str, scenario: &str, root: &Path) -> Value {
+        let mixed = matches!(scenario, "mixed_old_sender" | "mixed_old_receiver");
+        if mixed {
+            assert_eq!(
+                pre_repair_codec(),
+                (scenario == "mixed_old_sender") == (role == "sender")
+            );
+        }
+        let mut encoding_attempts = Vec::new();
         let (connector, acceptor) = tls_configs();
         let mut stream = if role == "receiver" {
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -956,10 +1144,11 @@ mod extension_wire {
                 negotiator.state(),
                 &SessionNegotiationState::ClientHelloSent
             );
-            let local_wire = outgoing(&client_frame, historical);
+            let local_wire =
+                exchange_outgoing(&client_frame, historical, mixed, &mut encoding_attempts);
             send_blob(&mut stream, &local_wire).await;
             let incoming = recv_blob(&mut stream).await;
-            let server_frame = received(&incoming, !historical);
+            let server_frame = exchange_received(&incoming, !historical, mixed);
             let server_hello =
                 ServerHello::from_frame(&server_frame).expect("decode actual received ack");
             let (session, proof) = negotiator
@@ -985,7 +1174,7 @@ mod extension_wire {
             )
         } else {
             let incoming = recv_blob(&mut stream).await;
-            let client_frame = received(&incoming, !historical);
+            let client_frame = exchange_received(&incoming, !historical, mixed);
             let hello =
                 ClientHello::from_frame(&client_frame).expect("decode actual received hello");
             assert_eq!(hello.initiator, peer("sender"));
@@ -1006,7 +1195,8 @@ mod extension_wire {
             );
             assert!(session_policy.seen_nonces.contains(&hello.nonce));
             let server_frame = extensions(server_frame, role);
-            let local_wire = outgoing(&server_frame, historical);
+            let local_wire =
+                exchange_outgoing(&server_frame, historical, mixed, &mut encoding_attempts);
             send_blob(&mut stream, &local_wire).await;
             (
                 client_frame,
@@ -1074,7 +1264,9 @@ mod extension_wire {
         let mut received_payload_hash = None;
         for index in 1..3 {
             let local = frame(role, index);
-            let local_wire = if historical {
+            let local_wire = if mixed {
+                exchange_outgoing(&local, historical, true, &mut encoding_attempts)
+            } else if historical {
                 legacy_wire(&local)
             } else {
                 local.to_wire_bytes().unwrap()
@@ -1100,15 +1292,19 @@ mod extension_wire {
             } else {
                 assert_eq!(decoded.payload(), received_payload_hash.as_ref().unwrap());
             }
-            let expected_incoming = if historical {
-                canonical_fixture(&decoded)
+            if mixed {
+                assert_eq!(exchange_received(&incoming, !historical, true), decoded);
             } else {
-                legacy_wire(&decoded)
-            };
-            assert_eq!(
-                incoming, expected_incoming,
-                "peer must exercise its declared wire order"
-            );
+                let expected_incoming = if historical {
+                    canonical_fixture(&decoded)
+                } else {
+                    legacy_wire(&decoded)
+                };
+                assert_eq!(
+                    incoming, expected_incoming,
+                    "peer must exercise its declared wire order"
+                );
+            }
             transcript.update_frame(&decoded);
             if role == "receiver" {
                 transcript.update_frame(&local);
@@ -1124,28 +1320,37 @@ mod extension_wire {
             );
         }
         let cases = malformed();
-        for (index, (code, wire)) in cases.iter().enumerate() {
-            if role == "sender" {
-                send_blob(&mut stream, wire).await;
-                assert_eq!(recv_blob(&mut stream).await, code.as_bytes());
-            } else {
-                let incoming = recv_blob(&mut stream).await;
-                assert_eq!(
-                    &incoming, wire,
-                    "malformed fixture {index} must reach the authenticated peer"
-                );
-                let mut pending = BytesMut::from(incoming.as_slice());
-                let error = AtpFrameCodec::new().decode(&mut pending).unwrap_err();
-                assert_eq!(rejection(&error), *code);
-                assert_eq!(pending.as_ref(), incoming.as_slice());
-                send_blob(&mut stream, code.as_bytes()).await;
-            }
-            max_wire_bytes = max_wire_bytes.max(wire.len());
-            println!(
-                "{}",
-                json!({"bead_id": BEAD, "scenario_id": scenario, "role": role,
+        let mixed_observations = if mixed {
+            max_wire_bytes =
+                max_wire_bytes.max(cases.iter().map(|(_, wire)| wire.len()).max().unwrap());
+            mixed_malformed_exchange(&mut stream, role, &cases).await
+        } else {
+            Vec::new()
+        };
+        if !mixed {
+            for (index, (code, wire)) in cases.iter().enumerate() {
+                if role == "sender" {
+                    send_blob(&mut stream, wire).await;
+                    assert_eq!(recv_blob(&mut stream).await, code.as_bytes());
+                } else {
+                    let incoming = recv_blob(&mut stream).await;
+                    assert_eq!(
+                        &incoming, wire,
+                        "malformed fixture {index} must reach the authenticated peer"
+                    );
+                    let mut pending = BytesMut::from(incoming.as_slice());
+                    let error = AtpFrameCodec::new().decode(&mut pending).unwrap_err();
+                    assert_eq!(rejection(&error), *code);
+                    assert_eq!(pending.as_ref(), incoming.as_slice());
+                    send_blob(&mut stream, code.as_bytes()).await;
+                }
+                max_wire_bytes = max_wire_bytes.max(wire.len());
+                println!(
+                    "{}",
+                    json!({"bead_id": BEAD, "scenario_id": scenario, "role": role,
                 "stage": "malformed_refused", "case_index": index, "refusal_code": code, "wire_bytes": wire.len()})
-            );
+                );
+            }
         }
         let hash = transcript.finalize();
         if role == "sender" {
@@ -1159,8 +1364,11 @@ mod extension_wire {
         json!({"bead_id": BEAD, "scenario_id": scenario, "role": role,
             "pid": std::process::id(), "transport": "native_tcp_mutual_tls13",
             "peer_certificate_sha256": digest(&peer_certificate), "certificate_test_clock_unix": CERTIFICATE_TEST_TIME,
-            "historical_encoder": if historical { "explicit_unsorted_fixture" } else { "current_public_codec" },
-            "valid_frames_sent": 3, "valid_frames_received": 3, "rejected_frames": cases.len(),
+            "historical_encoder": if mixed && pre_repair_codec() { "pre_repair_public_codec" } else if !mixed && historical { "explicit_unsorted_fixture" } else { "current_public_codec" },
+            "valid_frames_sent": 3, "valid_frames_received": 3,
+            "rejected_frames": if mixed { mixed_observations.iter().filter(|row| row["outcome"] != "duplicate_extension_admitted").count() } else { cases.len() },
+            "mixed_malformed_observations": mixed_observations, "actual_public_encode_attempts": encoding_attempts,
+            "binary_sha256": binary_digest(&std::env::current_exe().unwrap()).0,
             "transcript_sha256": hash.to_hex(), "wire_hashes": wire_hashes,
             "negotiation": negotiation,
             "max_wire_bytes": max_wire_bytes, "stream_dropped": true,
@@ -1174,6 +1382,9 @@ mod extension_wire {
     #[test]
     #[ignore = "child entry point; executed only by native_two_process_extension_exchange"]
     fn native_extension_peer() {
+        if let Ok(expected) = std::env::var("ASUPERSYNC_EXTENSION_EXPECTED_BINARY_SHA") {
+            assert_eq!(binary_digest(&std::env::current_exe().unwrap()).0, expected);
+        }
         let role = std::env::var("ASUPERSYNC_EXTENSION_ROLE").expect("parent-provided role");
         assert!(matches!(role.as_str(), "sender" | "receiver"));
         let scenario = std::env::var("ASUPERSYNC_EXTENSION_SCENARIO").unwrap();
@@ -1192,6 +1403,78 @@ mod extension_wire {
         let root = PathBuf::from(std::env::var_os("ASUPERSYNC_EXTENSION_ROOT").unwrap());
         println!("{report}");
         write_json(&root.join(format!("{role}.json")), &report);
+    }
+
+    #[test]
+    #[ignore = "runner executes this only in the pre-repair codec build"]
+    fn prepare_pre_repair_peer_binary() {
+        assert!(
+            pre_repair_codec(),
+            "preparation requires the actual pre-repair codec source"
+        );
+        let (wire, attempts) = actual_codec_wire(&frame("sender", 0));
+        assert_ne!(wire, canonical_fixture(&frame("sender", 0)));
+        assert_eq!(decode_fragmented(&wire), frame("sender", 0));
+        assert_eq!(
+            decode_fragmented(&canonical_fixture(&frame("sender", 0))),
+            frame("sender", 0)
+        );
+        let controls = malformed();
+        let observations: Vec<_> = controls
+            .iter()
+            .enumerate()
+            .map(|(index, (code, wire))| mixed_malformed_observation(index, code, wire))
+            .collect();
+        assert_eq!(
+            observations
+                .iter()
+                .filter(|row| row["outcome"] == "duplicate_extension_admitted")
+                .count(),
+            2
+        );
+        let executable = std::env::current_exe().unwrap();
+        let destination = PathBuf::from(
+            std::env::var_os("ASUPERSYNC_EXTENSION_EXPORT_BINARY")
+                .expect("explicit persistent binary path"),
+        );
+        assert!(destination.is_absolute());
+        std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+        let mut source = File::open(&executable).unwrap();
+        let metadata = source.metadata().unwrap();
+        assert!(metadata.len() > 0 && metadata.len() <= MAX_PEER_BINARY_BYTES);
+        let mut target = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&destination)
+            .unwrap();
+        let mut hash = Sha256::new();
+        let mut total = 0u64;
+        let mut buffer = [0u8; 64 * 1024];
+        loop {
+            let count = source.read(&mut buffer).unwrap();
+            if count == 0 {
+                break;
+            }
+            total += count as u64;
+            assert!(total <= MAX_PEER_BINARY_BYTES);
+            target.write_all(&buffer[..count]).unwrap();
+            hash.update(&buffer[..count]);
+        }
+        target.sync_all().unwrap();
+        target.set_permissions(metadata.permissions()).unwrap();
+        assert_eq!(total, metadata.len());
+        let binary_sha = hex::encode(hash.finalize());
+        assert_eq!(binary_digest(&destination), (binary_sha.clone(), total));
+        let receipt = json!({"scenario_id": "pre_repair_peer_prepared", "result": "pass",
+            "source_base": PRE_REPAIR_BASE, "binary_path": destination, "binary_sha256": binary_sha,
+            "binary_bytes": total, "codec_source_sha256": PRE_REPAIR_CODEC_SHA,
+            "session_source_sha256": digest(include_bytes!("../src/net/atp/protocol/session.rs")),
+            "test_source_sha256": digest(include_bytes!("atp_session_negotiation.rs")),
+            "old_noncanonical_encode_attempts": attempts, "malformed_observations": observations,
+            "build_scope": "pre-repair codec build with current parser/harness overlays",
+            "historical_released_binary_executed": false});
+        write_json(&destination.with_extension("json"), &receipt);
+        println!("{receipt}");
     }
 
     struct OwnedPeer(Child);
@@ -1222,6 +1505,43 @@ mod extension_wire {
                 .env("ASUPERSYNC_EXTENSION_ROLE", role)
                 .env("ASUPERSYNC_EXTENSION_ROOT", root)
                 .env("ASUPERSYNC_EXTENSION_SCENARIO", scenario)
+                .stdout(Stdio::from(log.try_clone().unwrap()))
+                .stderr(Stdio::from(log))
+                .spawn()
+                .unwrap(),
+        )
+    }
+
+    fn start_mixed_peer(
+        root: &Path,
+        role: &str,
+        scenario: &str,
+        executable: &Path,
+        expected_sha: &str,
+    ) -> OwnedPeer {
+        assert_eq!(
+            binary_digest(executable).0,
+            expected_sha,
+            "verify selected executable before spawn"
+        );
+        let log = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(root.join(format!("{role}.log")))
+            .unwrap();
+        OwnedPeer(
+            Command::new(executable)
+                .args([
+                    "--exact",
+                    CHILD_TEST,
+                    "--ignored",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env("ASUPERSYNC_EXTENSION_ROLE", role)
+                .env("ASUPERSYNC_EXTENSION_ROOT", root)
+                .env("ASUPERSYNC_EXTENSION_SCENARIO", scenario)
+                .env("ASUPERSYNC_EXTENSION_EXPECTED_BINARY_SHA", expected_sha)
                 .stdout(Stdio::from(log.try_clone().unwrap()))
                 .stderr(Stdio::from(log))
                 .spawn()
@@ -1342,6 +1662,199 @@ mod extension_wire {
             "result": "pass", "child_processes": 4, "negotiated_sessions": 2, "scenarios": reports,
             "test_binary_sha256": digest(&std::fs::read(std::env::current_exe().unwrap()).unwrap()),
             "historical_released_binary_executed": false, "artifact_root": artifact_root});
+        write_json(&artifact_root.join("summary.json"), &summary);
+        println!("{summary}");
+    }
+
+    #[test]
+    #[ignore = "runner executes after the separately built pre-repair peer is verified"]
+    fn mixed_codec_two_process_extension_exchange() {
+        assert!(
+            !pre_repair_codec(),
+            "mixed parent must execute the current codec build"
+        );
+        let old = PathBuf::from(
+            std::env::var_os("ASUPERSYNC_EXTENSION_OLD_BINARY").expect("prepared old executable"),
+        );
+        let expected_old_sha =
+            std::env::var("ASUPERSYNC_EXTENSION_OLD_BINARY_SHA").expect("preparation receipt hash");
+        assert!(old.is_absolute());
+        let prepared: Value =
+            serde_json::from_reader(File::open(old.with_extension("json")).unwrap()).unwrap();
+        let current = std::env::current_exe().unwrap();
+        let (old_sha, old_bytes) = binary_digest(&old);
+        let (current_sha, _) = binary_digest(&current);
+        let current_codec_sha = digest(include_bytes!("../src/net/atp/protocol/codec.rs"));
+        assert_eq!(old_sha, expected_old_sha);
+        assert_eq!(prepared["scenario_id"], "pre_repair_peer_prepared");
+        assert_eq!(prepared["result"], "pass");
+        assert_eq!(prepared["binary_path"], json!(old));
+        assert_eq!(prepared["binary_sha256"], old_sha);
+        assert_eq!(prepared["binary_bytes"], old_bytes);
+        assert_eq!(prepared["source_base"], PRE_REPAIR_BASE);
+        assert_eq!(prepared["codec_source_sha256"], PRE_REPAIR_CODEC_SHA);
+        assert_eq!(
+            prepared["session_source_sha256"],
+            digest(include_bytes!("../src/net/atp/protocol/session.rs"))
+        );
+        assert_eq!(
+            prepared["test_source_sha256"],
+            digest(include_bytes!("atp_session_negotiation.rs"))
+        );
+        assert_ne!(
+            old_sha, current_sha,
+            "two paths to one executable are not mixed-binary proof"
+        );
+        assert_ne!(PRE_REPAIR_CODEC_SHA, current_codec_sha);
+        let base = PathBuf::from(
+            std::env::var_os("ASUPERSYNC_TEST_ARTIFACTS_DIR").expect("persistent artifact root"),
+        );
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let artifact_root = base.join(format!("mixed-{}-{nonce}", std::process::id()));
+        std::fs::create_dir_all(&artifact_root).unwrap();
+        let mut reports = Vec::new();
+        for scenario in ["mixed_old_sender", "mixed_old_receiver"] {
+            let root = artifact_root.join(scenario);
+            std::fs::create_dir(&root).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(40);
+            let (sender_path, sender_sha, receiver_path, receiver_sha) =
+                if scenario == "mixed_old_sender" {
+                    (&old, old_sha.as_str(), &current, current_sha.as_str())
+                } else {
+                    (&current, current_sha.as_str(), &old, old_sha.as_str())
+                };
+            let mut receiver =
+                start_mixed_peer(&root, "receiver", scenario, receiver_path, receiver_sha);
+            while std::fs::read(root.join("ready.json"))
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+                .is_none()
+            {
+                assert!(
+                    receiver.0.try_wait().unwrap().is_none(),
+                    "mixed receiver exited before bind: {}",
+                    std::fs::read_to_string(root.join("receiver.log")).unwrap()
+                );
+                assert!(
+                    Instant::now() < deadline,
+                    "mixed bind watchdog: {}",
+                    root.display()
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let mut sender = start_mixed_peer(&root, "sender", scenario, sender_path, sender_sha);
+            await_peer(&mut sender, deadline, &root, "sender");
+            await_peer(&mut receiver, deadline, &root, "receiver");
+            let sender: Value =
+                serde_json::from_reader(File::open(root.join("sender.json")).unwrap()).unwrap();
+            let receiver: Value =
+                serde_json::from_reader(File::open(root.join("receiver.json")).unwrap()).unwrap();
+            assert_ne!(sender["pid"], receiver["pid"]);
+            assert_ne!(sender["pid"], std::process::id());
+            assert_ne!(receiver["pid"], std::process::id());
+            assert_eq!(sender["binary_sha256"], sender_sha);
+            assert_eq!(receiver["binary_sha256"], receiver_sha);
+            assert_ne!(
+                sender["codec_source_sha256"],
+                receiver["codec_source_sha256"]
+            );
+            assert_eq!(sender["negotiation"]["state"], "Established");
+            assert_eq!(receiver["negotiation"]["state"], "ServerHelloSent");
+            assert_eq!(sender["transcript_sha256"], receiver["transcript_sha256"]);
+            for key in [
+                "session_id",
+                "policy_transcript_sha256",
+                "manifest_sha256",
+                "selected_features",
+                "configured_grant_sha256",
+            ] {
+                assert_eq!(
+                    sender["negotiation"][key], receiver["negotiation"][key],
+                    "{key}"
+                );
+            }
+            assert_eq!(
+                sender["negotiation"]["local_peer"],
+                receiver["negotiation"]["remote_peer"]
+            );
+            assert_eq!(
+                receiver["negotiation"]["local_peer"],
+                sender["negotiation"]["remote_peer"]
+            );
+            for (report, expected_sha) in [(&sender, sender_sha), (&receiver, receiver_sha)] {
+                let is_old = expected_sha == old_sha.as_str();
+                assert_eq!(report["transport"], "native_tcp_mutual_tls13");
+                assert_eq!(
+                    report["peer_certificate_sha256"],
+                    digest(certificate().as_ref())
+                );
+                assert_eq!(report["certificate_test_clock_unix"], CERTIFICATE_TEST_TIME);
+                assert_eq!(
+                    report["session_source_sha256"],
+                    prepared["session_source_sha256"]
+                );
+                assert_eq!(report["test_source_sha256"], prepared["test_source_sha256"]);
+                assert_eq!(
+                    report["codec_source_sha256"],
+                    if is_old {
+                        PRE_REPAIR_CODEC_SHA
+                    } else {
+                        &current_codec_sha
+                    }
+                );
+                assert_eq!(report["valid_frames_sent"], 3);
+                assert_eq!(report["valid_frames_received"], 3);
+                assert_eq!(report["stream_dropped"], true);
+                assert_eq!(
+                    report["actual_public_encode_attempts"]
+                        .as_array()
+                        .unwrap()
+                        .len(),
+                    3
+                );
+                for count in report["actual_public_encode_attempts"].as_array().unwrap() {
+                    assert!((1..=128).contains(&count.as_u64().unwrap()));
+                    if !is_old {
+                        assert_eq!(count.as_u64(), Some(1));
+                    }
+                }
+                let observations = report["mixed_malformed_observations"].as_array().unwrap();
+                assert_eq!(observations.len(), 5);
+                assert_eq!(
+                    observations
+                        .iter()
+                        .filter(|row| row["outcome"] == "duplicate_extension_admitted")
+                        .count(),
+                    if is_old { 2 } else { 0 }
+                );
+                assert_eq!(report["rejected_frames"], if is_old { 3 } else { 5 });
+            }
+            for index in 0..3 {
+                assert_eq!(
+                    sender["wire_hashes"][index]["sent"],
+                    receiver["wire_hashes"][index]["received"]
+                );
+                assert_eq!(
+                    receiver["wire_hashes"][index]["sent"],
+                    sender["wire_hashes"][index]["received"]
+                );
+            }
+            reports.push(json!({"scenario": scenario, "sender": sender, "receiver": receiver}));
+        }
+        assert_eq!(reports.len(), 2);
+        assert_eq!(
+            reports[0]["sender"]["transcript_sha256"],
+            reports[1]["sender"]["transcript_sha256"]
+        );
+        let summary = json!({"bead_id": BEAD, "scenario_id": "mixed_codec_two_process_extension_exchange",
+            "result": "pass", "child_processes": 4, "negotiated_sessions": 2,
+            "old_binary_sha256": old_sha, "current_binary_sha256": current_sha,
+            "old_codec_source_sha256": PRE_REPAIR_CODEC_SHA, "current_codec_source_sha256": current_codec_sha,
+            "old_build_scope": "pre-repair codec build with current parser/harness overlays",
+            "historical_released_binary_executed": false, "scenarios": reports, "artifact_root": artifact_root});
         write_json(&artifact_root.join("summary.json"), &summary);
         println!("{summary}");
     }
