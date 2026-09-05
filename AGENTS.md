@@ -455,9 +455,21 @@ rch exec -- env CARGO_TARGET_DIR="${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target
 # Check for clippy lints (pedantic + nursery are enabled)
 rch exec -- env CARGO_TARGET_DIR="${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_clippy_all_targets" cargo clippy --all-targets -- -D warnings
 
-# Verify formatting
-rch exec -- env CARGO_TARGET_DIR="${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_fmt_check" cargo fmt --check
+# Verify formatting; set this path to an owned, reserved file.
+# Repeat --overlay-path for each additional owned file to include.
+CARGO_TARGET_DIR="${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_fmt_check" \
+  RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay \
+  --overlay-path "${ASUPERSYNC_FMT_OVERLAY_PATH:?set an owned, reserved repository-relative path}" \
+  -- cargo fmt --check
 ```
+
+Installed RCH 1.0.63 admits this direct `cargo fmt --check` diagnostic in
+clean-overlay mode. Keep `CARGO_TARGET_DIR` outside RCH: an inner `env` wrapper
+prevents that recognition and returns `RCH-E301`; `--job` conflicts with
+`--clean-overlay`. Select every owned change needed for the formatting check.
+The legacy `rustfmt-check` manifest recipe still has the incompatible wrapper;
+its contract test does not establish formatting execution. Use the direct form
+above and retain its terminal remote result and source receipt.
 
 If you see errors, **carefully understand and resolve each issue**. Read sufficient context to fix them the RIGHT way.
 
