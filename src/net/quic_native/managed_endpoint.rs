@@ -870,8 +870,8 @@ mod tests {
                 endpoint.prefer_send = false;
                 peer.send_to(b"invalid QUIC", endpoint.local_addr())
                     .unwrap();
-                let mut task_cx = std::task::Context::from_waker(std::task::Waker::noop());
                 {
+                    let mut task_cx = std::task::Context::from_waker(std::task::Waker::noop());
                     let mut drive = std::pin::pin!(endpoint.run_event_loop(&cx));
                     assert!(drive.as_mut().poll(&mut task_cx).is_pending());
                 }
@@ -901,6 +901,7 @@ mod tests {
                 assert_eq!(endpoint.pending_outgoing.len(), 1);
                 assert_eq!(endpoint.pending_outgoing[0].connection_id, ids[1]);
                 {
+                    let mut task_cx = std::task::Context::from_waker(std::task::Waker::noop());
                     let mut drive = std::pin::pin!(endpoint.run_event_loop(&cx));
                     assert!(drive.as_mut().poll(&mut task_cx).is_pending());
                 }
@@ -1010,11 +1011,10 @@ mod tests {
             }
             let deadline = endpoint.connection_router.next_timer_deadline().unwrap();
             endpoint.refresh_timer(&cx).await.unwrap();
-            let mut task_cx = std::task::Context::from_waker(std::task::Waker::noop());
             assert!(
                 endpoint
                     .timer_scheduler
-                    .poll_timer(&mut task_cx)
+                    .poll_timer(&mut std::task::Context::from_waker(std::task::Waker::noop()))
                     .is_pending()
             );
             clock.advance(
@@ -1027,12 +1027,15 @@ mod tests {
             );
             assert_eq!(driver.process_timers(), 1);
             assert_eq!(
-                endpoint.timer_scheduler.poll_timer(&mut task_cx),
+                endpoint
+                    .timer_scheduler
+                    .poll_timer(&mut std::task::Context::from_waker(std::task::Waker::noop())),
                 Poll::Ready(Some(deadline))
             );
             {
                 // This is the same timer branch awaited by the main loop. Drop
                 // it at the cooperative yield with its committed prefix retained.
+                let mut task_cx = std::task::Context::from_waker(std::task::Waker::noop());
                 let mut timer_turn = std::pin::pin!(endpoint.process_timer_events(&cx, deadline));
                 assert!(timer_turn.as_mut().poll(&mut task_cx).is_pending());
             }
@@ -1041,6 +1044,7 @@ mod tests {
             assert!(next > endpoint.timer_scheduler.now(&cx).unwrap());
             let metrics = endpoint.udp_endpoint.metrics();
             {
+                let mut task_cx = std::task::Context::from_waker(std::task::Waker::noop());
                 let mut restarted = std::pin::pin!(endpoint.run_event_loop(&cx));
                 for _ in 0..64 {
                     assert!(restarted.as_mut().poll(&mut task_cx).is_pending());
