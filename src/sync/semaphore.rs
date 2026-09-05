@@ -7,7 +7,9 @@
 //!
 //! The acquire operation is split into two phases:
 //! - **Phase 1**: Wait for permit availability (cancel-safe)
-//! - **Phase 2**: Acquire permit and create obligation (cannot fail)
+//! - **Phase 2**: Acquire the complete permit set and create its obligation.
+//!   Checked acquisition returns an admission error if the region cannot accept
+//!   another obligation, restoring capacity before returning.
 //!
 //! # Example
 //!
@@ -75,6 +77,25 @@ impl std::fmt::Display for TryAcquireError {
 }
 
 impl std::error::Error for TryAcquireError {}
+
+/// Failure of an explicitly checked semaphore acquisition.
+///
+/// Existing acquisition methods keep their original error types and admission
+/// behavior. Checked methods require an explicit context and admit one runtime
+/// obligation per nonempty permit set, regardless of its number of units.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum CheckedAcquireError {
+    /// The semaphore acquisition failed before obligation admission.
+    #[error(transparent)]
+    Semaphore(#[from] AcquireError),
+    /// A try-acquire would wait for capacity or an earlier FIFO waiter.
+    #[error(transparent)]
+    Unavailable(#[from] TryAcquireError),
+    /// The runtime refused the obligation; no permit is returned.
+    #[error(transparent)]
+    Admission(#[from] crate::runtime::obligation_mailbox::ObligationAdmissionError),
+}
 
 #[inline]
 fn reserve_permit_obligation(region: RegionId) -> Option<ObligationToken<SemaphorePermitKind>> {
@@ -446,6 +467,88 @@ impl Semaphore {
         self.acquire(cx, count)
     }
 
+    /// Acquires a permit set only after checked runtime obligation admission.
+    ///
+    /// FIFO, cancellation and all-or-nothing capacity rules match
+    /// [`Self::acquire`]. A deliberately stateless context stays untracked;
+    /// a stale or runtime-associated context without admission authority fails.
+    /// Acquiring zero units needs no obligation and succeeds even after close
+    /// or cancellation, matching the existing zero-unit operation.
+    pub fn acquire_checked<'a, 'b, Caps>(
+        &'a self,
+        cx: &'b Cx<Caps>,
+        count: usize,
+    ) -> CheckedAcquireFuture<'a, 'b, Caps> {
+        CheckedAcquireFuture {
+            inner: self.acquire(cx, count),
+        }
+    }
+
+    /// Checked all-or-nothing acquisition of `count` units.
+    pub fn acquire_many_checked<'a, 'b, Caps>(
+        &'a self,
+        cx: &'b Cx<Caps>,
+        count: usize,
+    ) -> CheckedAcquireFuture<'a, 'b, Caps> {
+        self.acquire_checked(cx, count)
+    }
+
+    /// Tries to acquire capacity and checked admission without waiting.
+    ///
+    /// Returns the semaphore's capacity unchanged on admission refusal.
+    /// Zero units succeed without checking cancellation or minting a token.
+    pub fn try_acquire_checked<Caps>(
+        &self,
+        cx: &Cx<Caps>,
+        count: usize,
+    ) -> Result<SemaphorePermit<'_>, CheckedAcquireError> {
+        if count == 0 {
+            return Ok(SemaphorePermit {
+                semaphore: self,
+                count: 0,
+                obligation: None,
+                runtime_obligation: None,
+                lock_order: Default::default(),
+            });
+        }
+        cx.checkpoint().map_err(|_| AcquireError::Cancelled)?;
+        let mut rollback = AcquisitionRollbackGuard::new(self, count);
+        rollback.notify_on_rollback = true;
+        let mut state = self.state.lock();
+        if state.closed {
+            return Err(AcquireError::Closed.into());
+        }
+        if state.waiter_head.is_some() || state.permits < count {
+            return Err(TryAcquireError.into());
+        }
+        if let Some(rank) = self.rank {
+            lock_ordering::check_acquire(self.name, rank);
+        }
+        state.permits -= count;
+        self.permits_shadow.store(state.permits, Ordering::Relaxed);
+        rollback.arm();
+        rollback.record_lock_acquire();
+        drop(state);
+
+        // Arm capacity rollback before arbitrary notifier callbacks, and admit
+        // before minting the graded token so refusal cannot trip its drop bomb.
+        rollback.runtime_obligation = cx.try_register_obligation_checked(
+            crate::record::ObligationKind::SemaphorePermit,
+            cx.task_id(),
+        )?;
+        rollback.obligation = reserve_permit_obligation(cx.region_id());
+        Ok(rollback.into_borrowed_permit())
+    }
+
+    /// Checked nonblocking all-or-nothing acquisition of `count` units.
+    pub fn try_acquire_many_checked<Caps>(
+        &self,
+        cx: &Cx<Caps>,
+        count: usize,
+    ) -> Result<SemaphorePermit<'_>, CheckedAcquireError> {
+        self.try_acquire_checked(cx, count)
+    }
+
     /// Tries to acquire the given number of permits without waiting.
     #[inline]
     pub fn try_acquire(&self, count: usize) -> Result<SemaphorePermit<'_>, TryAcquireError> {
@@ -527,12 +630,19 @@ impl Semaphore {
     /// Saturates at `usize::MAX` if adding would overflow.
     #[inline]
     pub fn add_permits(&self, count: usize) {
+        if let Some(waiter) = self.add_permits_deferred(count) {
+            waiter.wake_by_ref();
+        }
+    }
+
+    /// Return physical capacity before running any notifier or Waker callback.
+    fn add_permits_deferred(&self, count: usize) -> Option<Arc<RegisteredWaker>> {
         if count == 0 {
-            return;
+            return None;
         }
         let mut state = self.state.lock();
         if state.closed {
-            return;
+            return None;
         }
         state.permits = state.permits.saturating_add(count);
         self.permits_shadow.store(state.permits, Ordering::Relaxed);
@@ -541,8 +651,37 @@ impl Semaphore {
         // If the first waiter acquires and releases, it will wake the next.
         let waiter_to_wake = front_waiter_waker_if_runnable(&state);
         drop(state);
-        if let Some(waiter) = waiter_to_wake {
-            waiter.wake_by_ref();
+        waiter_to_wake
+    }
+}
+
+/// Keeps an already-runnable waiter notified even if obligation settlement
+/// unwinds. A secondary callback panic must not replace the primary panic.
+struct ReleasedSemaphoreWake(Option<Arc<RegisteredWaker>>);
+
+impl Drop for ReleasedSemaphoreWake {
+    fn drop(&mut self) {
+        let Some(waker) = self.0.take() else {
+            return;
+        };
+        let already_unwinding = std::thread::panicking();
+        let notified =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| waker.wake_by_ref()));
+        let retired = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(waker)));
+        let failure = match (notified, retired) {
+            (Err(primary), Err(secondary)) => {
+                std::mem::forget(secondary);
+                Some(primary)
+            }
+            (Err(error), Ok(())) | (Ok(()), Err(error)) => Some(error),
+            (Ok(()), Ok(())) => None,
+        };
+        if let Some(payload) = failure {
+            if already_unwinding {
+                std::mem::forget(payload);
+            } else {
+                std::panic::resume_unwind(payload);
+            }
         }
     }
 }
@@ -551,9 +690,8 @@ impl Semaphore {
 ///
 /// This guard is declared before the semaphore state guard in each poll loop,
 /// so the state mutex is released before rollback runs during unwinding. The
-/// rollback deliberately restores capacity without waking a waiter: the wake
-/// that caused the unwind may itself panic, and invoking it again from `Drop`
-/// would cause a second panic while the thread is already unwinding.
+/// Checked refusal also notifies a successor after restoring capacity. Once a
+/// cascade callback has been dispatched, rollback must not dispatch it again.
 struct AcquisitionRollbackGuard<'a> {
     semaphore: &'a Semaphore,
     count: usize,
@@ -562,6 +700,7 @@ struct AcquisitionRollbackGuard<'a> {
     runtime_obligation: Option<crate::runtime::obligation_mailbox::ObligationToken>,
     lock_order: lock_ordering::GuardLockOrder,
     armed: bool,
+    notify_on_rollback: bool,
 }
 
 impl<'a> AcquisitionRollbackGuard<'a> {
@@ -574,6 +713,7 @@ impl<'a> AcquisitionRollbackGuard<'a> {
             runtime_obligation: None,
             lock_order: Default::default(),
             armed: false,
+            notify_on_rollback: false,
         }
     }
 
@@ -634,25 +774,17 @@ impl Drop for AcquisitionRollbackGuard<'_> {
             return;
         }
 
+        lock_ordering::record_guard_release(&mut self.lock_order);
+        let waker = self.semaphore.add_permits_deferred(self.count);
+        let _wake = ReleasedSemaphoreWake(if self.notify_on_rollback { waker } else { None });
         if let Some(obligation) = self.obligation.take() {
             let _proof = obligation.commit();
         }
-        // The permit never reached the caller, so the runtime obligation is
-        // aborted rather than committed: nothing acquired capacity.
+        // No permit reached the caller. Physical rollback and its successor
+        // wake are already protected before the runtime notifier can unwind.
         if let Some(runtime_obligation) = self.runtime_obligation.take() {
             let _ = runtime_obligation.abort(crate::record::ObligationAbortReason::Cancel);
         }
-
-        let mut state = self.semaphore.state.lock();
-        if !state.closed {
-            state.permits = state.permits.saturating_add(self.count);
-            self.semaphore
-                .permits_shadow
-                .store(state.permits, Ordering::Relaxed);
-        }
-        drop(state);
-
-        lock_ordering::record_guard_release(&mut self.lock_order);
     }
 }
 
@@ -690,8 +822,24 @@ impl<'a, Caps> Future for AcquireFuture<'a, '_, Caps> {
 
     #[inline]
     fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        self.poll_with_registration(context, false, |cx| {
+            Ok(reserve_runtime_permit_obligation(cx))
+        })
+    }
+}
+
+impl<'a, Caps> AcquireFuture<'a, '_, Caps> {
+    fn poll_with_registration<E: From<AcquireError>>(
+        &mut self,
+        context: &mut Context<'_>,
+        checked: bool,
+        register: impl FnOnce(
+            &Cx<Caps>,
+        )
+            -> Result<Option<crate::runtime::obligation_mailbox::ObligationToken>, E>,
+    ) -> Poll<Result<SemaphorePermit<'a>, E>> {
         if self.completed {
-            return Poll::Ready(Err(AcquireError::PolledAfterCompletion));
+            return Poll::Ready(Err(AcquireError::PolledAfterCompletion.into()));
         }
 
         // Acquiring 0 permits succeeds immediately (no resources needed)
@@ -724,7 +872,7 @@ impl<'a, Caps> Future for AcquireFuture<'a, '_, Caps> {
             if let Some(next) = next_waker {
                 next.wake_by_ref();
             }
-            return Poll::Ready(Err(AcquireError::Cancelled));
+            return Poll::Ready(Err(AcquireError::Cancelled.into()));
         }
 
         // Prepare a registration lazily. The uncontended acquisition path
@@ -736,6 +884,7 @@ impl<'a, Caps> Future for AcquireFuture<'a, '_, Caps> {
             // This must be declared before `state`: unwind drops locals in
             // reverse order, releasing the mutex before rollback re-locks it.
             let mut rollback = AcquisitionRollbackGuard::new(self.semaphore, self.count);
+            rollback.notify_on_rollback = checked;
             let mut state = self.semaphore.state.lock();
 
             if state.closed {
@@ -747,7 +896,7 @@ impl<'a, Caps> Future for AcquireFuture<'a, '_, Caps> {
                 self.completed = true;
                 drop(retired_waiter);
                 drop(incoming_waker);
-                return Poll::Ready(Err(AcquireError::Closed));
+                return Poll::Ready(Err(AcquireError::Closed.into()));
             }
 
             // FIFO fairness: only acquire if queue is empty or we are at the front.
@@ -796,11 +945,13 @@ impl<'a, Caps> Future for AcquireFuture<'a, '_, Caps> {
                 drop(incoming_waker);
                 // Reserve before dispatching the next waiter so rollback also
                 // consumes the obligation if that callback unwinds.
-                rollback.set_obligation(
-                    reserve_permit_obligation(self.cx.region_id()),
-                    reserve_runtime_permit_obligation(self.cx),
-                );
+                rollback.runtime_obligation = match register(self.cx) {
+                    Ok(token) => token,
+                    Err(error) => return Poll::Ready(Err(error)),
+                };
+                rollback.obligation = reserve_permit_obligation(self.cx.region_id());
                 if let Some(next) = next_waker {
+                    rollback.notify_on_rollback = false;
                     next.wake_by_ref();
                 }
                 return Poll::Ready(Ok(rollback.into_borrowed_permit()));
@@ -843,6 +994,26 @@ impl<'a, Caps> Future for AcquireFuture<'a, '_, Caps> {
             drop(state);
             return Poll::Pending;
         }
+    }
+}
+
+/// Future returned by [`Semaphore::acquire_checked`].
+/// Uses the existing FIFO waiter and cancellation path with checked admission.
+pub struct CheckedAcquireFuture<'a, 'b, Caps = crate::cx::cap::All> {
+    inner: AcquireFuture<'a, 'b, Caps>,
+}
+
+impl<'a, Caps> Future for CheckedAcquireFuture<'a, '_, Caps> {
+    type Output = Result<SemaphorePermit<'a>, CheckedAcquireError>;
+
+    fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        self.inner.poll_with_registration(context, true, |cx| {
+            cx.try_register_obligation_checked(
+                crate::record::ObligationKind::SemaphorePermit,
+                cx.task_id(),
+            )
+            .map_err(CheckedAcquireError::Admission)
+        })
     }
 }
 
@@ -907,20 +1078,18 @@ impl SemaphorePermit<'_> {
     /// This consumes the permit and commits the underlying obligation, preventing
     /// the drop bomb from firing.
     #[inline]
-    pub fn commit(mut self) {
-        if let Some(obligation) = self.obligation.take() {
-            let _proof = obligation.commit();
-        }
-        if let Some(runtime_obligation) = self.runtime_obligation.take() {
-            let _ = runtime_obligation.commit();
-        }
-        // Drop will now release the semaphore permits without panicking
+    pub fn commit(self) {
         drop(self);
     }
 }
 
 impl Drop for SemaphorePermit<'_> {
     fn drop(&mut self) {
+        // Restore physical ownership and arm its wake before token settlement
+        // can invoke a user-supplied runtime notifier.
+        lock_ordering::record_guard_release(&mut self.lock_order);
+        let _wake = ReleasedSemaphoreWake(self.semaphore.add_permits_deferred(self.count));
+        self.count = 0;
         if let Some(obligation) = self.obligation.take() {
             let _proof = obligation.commit();
         }
@@ -930,13 +1099,6 @@ impl Drop for SemaphorePermit<'_> {
         if let Some(runtime_obligation) = self.runtime_obligation.take() {
             let _ = runtime_obligation.commit();
         }
-        // End diagnostic ownership before add_permits can dispatch arbitrary
-        // user Wakers. A panicking Waker must not strand a phantom held rank.
-        lock_ordering::record_guard_release(&mut self.lock_order);
-        if self.count > 0 {
-            self.semaphore.add_permits(self.count);
-        }
-
         // Ordinary RAII drop is the normal release path for semaphore permits.
     }
 }
@@ -958,6 +1120,61 @@ pub struct OwnedSemaphorePermit {
 }
 
 impl OwnedSemaphorePermit {
+    /// Acquires an owned permit with checked runtime obligation admission.
+    ///
+    /// Ownership conversion preserves the one admitted token. No second
+    /// obligation is minted. Zero units follow [`Semaphore::acquire_checked`].
+    pub async fn acquire_checked<Caps>(
+        semaphore: Arc<Semaphore>,
+        cx: &Cx<Caps>,
+        count: usize,
+    ) -> Result<Self, CheckedAcquireError> {
+        let permit = semaphore.acquire_checked(cx, count).await?;
+        let (count, obligation, runtime_obligation, lock_order) = permit.into_parts();
+        Ok(Self {
+            obligation,
+            runtime_obligation,
+            semaphore,
+            count,
+            lock_order,
+        })
+    }
+
+    /// Tries to acquire an owned permit with checked admission and explicit
+    /// cancellation authority.
+    pub fn try_acquire_checked<Caps>(
+        semaphore: Arc<Semaphore>,
+        cx: &Cx<Caps>,
+        count: usize,
+    ) -> Result<Self, CheckedAcquireError> {
+        let permit = semaphore.try_acquire_checked(cx, count)?;
+        let (count, obligation, runtime_obligation, lock_order) = permit.into_parts();
+        Ok(Self {
+            obligation,
+            runtime_obligation,
+            semaphore,
+            count,
+            lock_order,
+        })
+    }
+
+    /// Checked try-acquire that clones the semaphore `Arc` only on success.
+    pub fn try_acquire_arc_checked<Caps>(
+        semaphore: &Arc<Semaphore>,
+        cx: &Cx<Caps>,
+        count: usize,
+    ) -> Result<Self, CheckedAcquireError> {
+        let permit = semaphore.try_acquire_checked(cx, count)?;
+        let (count, obligation, runtime_obligation, lock_order) = permit.into_parts();
+        Ok(Self {
+            obligation,
+            runtime_obligation,
+            semaphore: Arc::clone(semaphore),
+            count,
+            lock_order,
+        })
+    }
+
     /// Acquires an owned permit asynchronously.
     pub async fn acquire<Caps>(
         semaphore: std::sync::Arc<Semaphore>,
@@ -1061,15 +1278,14 @@ impl OwnedSemaphorePermit {
 
 impl Drop for OwnedSemaphorePermit {
     fn drop(&mut self) {
+        lock_ordering::record_guard_release(&mut self.lock_order);
+        let _wake = ReleasedSemaphoreWake(self.semaphore.add_permits_deferred(self.count));
+        self.count = 0;
         if let Some(obligation) = self.obligation.take() {
             let _proof = obligation.commit();
         }
         if let Some(runtime_obligation) = self.runtime_obligation.take() {
             let _ = runtime_obligation.commit();
-        }
-        lock_ordering::record_guard_release(&mut self.lock_order);
-        if self.count > 0 {
-            self.semaphore.add_permits(self.count);
         }
     }
 }
