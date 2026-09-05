@@ -1576,7 +1576,10 @@ impl QuicTimerScheduler {
             return Err(ConnectionRouterError::Cancelled);
         }
 
-        if self.current_deadline.is_some_and(|current| current <= deadline) {
+        if self
+            .current_deadline
+            .is_some_and(|current| current <= deadline)
+        {
             return Ok(());
         }
         let clock = cx.timer_driver().map(|driver| {
@@ -1603,7 +1606,10 @@ impl QuicTimerScheduler {
         cx.checkpoint()
             .map_err(|_| ConnectionRouterError::Cancelled)?;
         let clock = self.bind_clock(cx)?.clone();
-        if self.current_deadline.is_some_and(|current| current <= deadline) {
+        if self
+            .current_deadline
+            .is_some_and(|current| current <= deadline)
+        {
             return Ok(());
         }
         self.arm_timer(cx, deadline, Some(clock))
@@ -1633,10 +1639,7 @@ impl QuicTimerScheduler {
                         .unwrap_or(u64::MAX),
                 )
             };
-            Sleep::with_timer_driver(
-                crate::Time::from_nanos(time_deadline),
-                clock.driver.clone(),
-            )
+            Sleep::with_timer_driver(crate::Time::from_nanos(time_deadline), clock.driver.clone())
         } else {
             // Sleep's shared fallback and WallClock use this exact process
             // epoch. A duration from now is not an absolute Time deadline.
@@ -3026,22 +3029,26 @@ mod tests {
 
     #[test]
     fn timer_refuses_missing_changed_or_overflowing_clock_without_losing_current_timer() {
+        // This newly authored strict-owner test targets managed admission.
+        // The established public API allows no-ops and independent caller cancellation.
         let mut scheduler = QuicTimerScheduler::new();
         let missing = Cx::for_testing();
         assert!(matches!(
-            futures_lite::future::block_on(scheduler.schedule_timer(&missing, Instant::now())),
+            futures_lite::future::block_on(
+                scheduler.schedule_timer_bound(&missing, Instant::now())
+            ),
             Err(ConnectionRouterError::TimerSchedulingFailed(_))
         ));
         let (cx, _, _) = timer_test_context(crate::Time::from_nanos(u64::MAX - 100));
         let start = scheduler.now(&cx).unwrap();
         assert!(matches!(
             futures_lite::future::block_on(
-                scheduler.schedule_timer(&cx, start + Duration::from_secs(1))
+                scheduler.schedule_timer_bound(&cx, start + Duration::from_secs(1))
             ),
             Err(ConnectionRouterError::TimerSchedulingFailed(_))
         ));
         assert!(!scheduler.has_pending_timer());
-        futures_lite::future::block_on(scheduler.schedule_timer(&cx, start)).unwrap();
+        futures_lite::future::block_on(scheduler.schedule_timer_bound(&cx, start)).unwrap();
         let (other, _, _) = timer_test_context(crate::Time::ZERO);
         assert!(matches!(
             scheduler.now(&other),
@@ -3050,16 +3057,340 @@ mod tests {
         for refused in [&other, &missing] {
             assert!(matches!(
                 futures_lite::future::block_on(
-                    scheduler.schedule_timer(refused, start + Duration::from_secs(1))
+                    scheduler.schedule_timer_bound(refused, start + Duration::from_secs(1))
                 ),
                 Err(ConnectionRouterError::TimerSchedulingFailed(_))
             ));
             assert!(matches!(
-                futures_lite::future::block_on(scheduler.wait_for_timer(refused)),
+                scheduler.now(refused),
                 Err(ConnectionRouterError::TimerSchedulingFailed(_))
             ));
         }
         assert_eq!(scheduler.current_deadline(), Some(start));
+    }
+
+    struct TimerSignal(std::sync::mpsc::Sender<()>);
+
+    impl std::task::Wake for TimerSignal {
+        fn wake(self: std::sync::Arc<Self>) {
+            let _ = self.0.send(());
+        }
+    }
+
+    fn timer_signal() -> (Waker, std::sync::mpsc::Receiver<()>) {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        (
+            Waker::from(std::sync::Arc::new(TimerSignal(sender))),
+            receiver,
+        )
+    }
+
+    #[test]
+    fn public_timer_noop_and_cancel_allow_a_new_driver_without_old_wakes() {
+        let (first, first_clock, first_driver) = timer_test_context(crate::Time::from_secs(123));
+        let (second, second_clock, second_driver) = timer_test_context(crate::Time::from_secs(987));
+        let mut scheduler = QuicTimerScheduler::new();
+        let first_deadline = Instant::now() + Duration::from_secs(2);
+        futures_lite::future::block_on(scheduler.schedule_timer(&first, first_deadline)).unwrap();
+        let (waker, signal) = timer_signal();
+        {
+            let mut wait = std::pin::pin!(scheduler.wait_for_timer(&first));
+            assert!(
+                wait.as_mut()
+                    .poll(&mut Context::from_waker(&waker))
+                    .is_pending()
+            );
+        }
+        assert_eq!(first_driver.pending_count(), 1);
+        let first_registered = first_driver.next_deadline();
+        futures_lite::future::block_on(
+            scheduler.schedule_timer(&second, first_deadline + Duration::from_secs(1)),
+        )
+        .unwrap();
+        assert_eq!(scheduler.current_deadline(), Some(first_deadline));
+        assert_eq!(first_driver.next_deadline(), first_registered);
+        assert_eq!(first_driver.pending_count(), 1);
+        assert_eq!(second_driver.pending_count(), 0);
+        scheduler.cancel();
+        assert_eq!(first_driver.pending_count(), 0);
+        assert!(scheduler.clock.is_none());
+        let second_deadline = Instant::now() + Duration::from_secs(2);
+        futures_lite::future::block_on(scheduler.schedule_timer(&second, second_deadline)).unwrap();
+        let due = scheduler.current_sleep.as_ref().unwrap().deadline();
+        let advance = due.as_nanos() - second_driver.now().as_nanos();
+        assert!(advance > 0);
+        {
+            let mut wait = std::pin::pin!(scheduler.wait_for_timer(&second));
+            assert!(
+                wait.as_mut()
+                    .poll(&mut Context::from_waker(&waker))
+                    .is_pending()
+            );
+            assert_eq!(second_driver.pending_count(), 1);
+            first_clock.advance(3_000_000_000);
+            assert_eq!(first_driver.process_timers(), 0);
+            second_clock.advance(advance - 1);
+            assert_eq!(second_driver.process_timers(), 0);
+            assert!(matches!(
+                signal.try_recv(),
+                Err(std::sync::mpsc::TryRecvError::Empty)
+            ));
+            second_clock.advance(1);
+            assert_eq!(second_driver.process_timers(), 1);
+            signal
+                .try_recv()
+                .expect("new driver must wake the current waiter");
+            assert_eq!(
+                wait.as_mut().poll(&mut Context::from_waker(&waker)),
+                Poll::Ready(Ok(Some(second_deadline)))
+            );
+        }
+        assert_eq!(first_driver.pending_count(), 0);
+        assert_eq!(second_driver.pending_count(), 0);
+        assert!(!scheduler.has_pending_timer());
+        assert_eq!(scheduler.current_deadline(), None);
+        println!(
+            "quic_timer_public_reuse first_epoch_s=123 second_epoch_s=987 no_op_kept_registration=true old_driver_firings=0 new_driver_firings=1 pending_after=0"
+        );
+    }
+
+    #[test]
+    fn public_wait_keeps_created_driver_and_observes_callers_cancellation() {
+        let (owner, _, owner_driver) = timer_test_context(crate::Time::from_secs(41));
+        let (caller, caller_clock, caller_driver) = timer_test_context(crate::Time::from_secs(800));
+        let mut scheduler = QuicTimerScheduler::new();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        futures_lite::future::block_on(scheduler.schedule_timer(&owner, deadline)).unwrap();
+        let (waker, signal) = timer_signal();
+        {
+            let mut wait = std::pin::pin!(scheduler.wait_for_timer(&caller));
+            assert!(
+                wait.as_mut()
+                    .poll(&mut Context::from_waker(&waker))
+                    .is_pending()
+            );
+            assert_eq!(owner_driver.pending_count(), 1);
+            assert_eq!(caller_driver.pending_count(), 0);
+            caller_clock.advance(10_000_000_000);
+            assert_eq!(caller_driver.process_timers(), 0);
+            assert!(matches!(
+                signal.try_recv(),
+                Err(std::sync::mpsc::TryRecvError::Empty)
+            ));
+            caller.cancel_with(crate::types::CancelKind::User, None);
+            signal
+                .try_recv()
+                .expect("explicit caller cancellation must wake its wait");
+            assert_eq!(
+                wait.as_mut().poll(&mut Context::from_waker(&waker)),
+                Poll::Ready(Err(ConnectionRouterError::Cancelled))
+            );
+        }
+        assert_eq!(scheduler.current_deadline(), Some(deadline));
+        scheduler.cancel();
+        assert_eq!(owner_driver.pending_count(), 0);
+        assert_eq!(caller_driver.pending_count(), 0);
+        assert!(!scheduler.has_pending_timer());
+    }
+
+    #[test]
+    fn public_driverless_timer_uses_shared_epoch_and_real_fallback_wake() {
+        let missing = Cx::for_testing();
+        assert!(missing.timer_driver().is_none());
+        let (ambient, _, ambient_driver) = timer_test_context(crate::Time::from_secs(9_000));
+        let _ambient = Cx::set_current(Some(ambient));
+        let epoch = crate::time::process_epoch();
+        let mut scheduler = QuicTimerScheduler::new();
+        let deadline = Instant::now() + Duration::from_millis(150);
+        futures_lite::future::block_on(scheduler.schedule_timer(&missing, deadline)).unwrap();
+        let sleep = scheduler.current_sleep.as_ref().unwrap();
+        assert_eq!(
+            sleep.deadline(),
+            crate::Time::from_nanos(
+                u64::try_from(deadline.duration_since(epoch).as_nanos()).unwrap()
+            )
+        );
+        assert!(!sleep.has_custom_time_getter());
+        assert!(scheduler.clock.is_none());
+        let (waker, signal) = timer_signal();
+        {
+            let mut wait = std::pin::pin!(scheduler.wait_for_timer(&missing));
+            assert!(
+                wait.as_mut()
+                    .poll(&mut Context::from_waker(&waker))
+                    .is_pending()
+            );
+            assert_eq!(ambient_driver.pending_count(), 0);
+            // The maintained shared fallback must wake us; no speculative
+            // repolls, including if a wheel wake only requests a rearm.
+            let limit = Instant::now() + Duration::from_secs(2);
+            loop {
+                signal
+                    .recv_timeout(limit.saturating_duration_since(Instant::now()))
+                    .expect("shared wall-clock fallback wake");
+                if let Poll::Ready(result) = wait.as_mut().poll(&mut Context::from_waker(&waker)) {
+                    assert_eq!(result, Ok(Some(deadline)));
+                    assert!(
+                        Instant::now() >= deadline,
+                        "fallback completed before the absolute deadline"
+                    );
+                    break;
+                }
+            }
+        }
+        assert!(!scheduler.has_pending_timer());
+        assert_eq!(scheduler.current_deadline(), None);
+        assert_eq!(ambient_driver.pending_count(), 0);
+        // An already due fallback deadline is observed once instead of discarded.
+        let overdue = Instant::now() - Duration::from_millis(1);
+        futures_lite::future::block_on(scheduler.schedule_timer(&missing, overdue)).unwrap();
+        assert_eq!(
+            futures_lite::future::block_on(scheduler.wait_for_timer(&missing)),
+            Ok(Some(overdue))
+        );
+        assert_eq!(
+            futures_lite::future::block_on(scheduler.wait_for_timer(&missing)),
+            Ok(None)
+        );
+        scheduler.cancel();
+        assert!(scheduler.clock.is_none());
+        println!(
+            "quic_timer_public_fallback source=shared_process_epoch actual_wake=true custom_getter=false unrelated_driver_pending=0 owned_timer_after=none"
+        );
+    }
+
+    #[test]
+    fn public_fallback_wait_adopts_nonzero_driver_before_polling() {
+        let missing = Cx::for_testing();
+        let (adopter, clock, driver) = timer_test_context(crate::Time::from_secs(700));
+        let mut scheduler = QuicTimerScheduler::new();
+        let deadline = Instant::now() + Duration::from_millis(250);
+        futures_lite::future::block_on(scheduler.schedule_timer(&missing, deadline)).unwrap();
+        let (old_waker, old_signal) = timer_signal();
+        {
+            let mut wait = std::pin::pin!(scheduler.wait_for_timer(&missing));
+            assert!(
+                wait.as_mut()
+                    .poll(&mut Context::from_waker(&old_waker))
+                    .is_pending()
+            );
+        }
+        assert!(scheduler.clock.is_none());
+        let (new_waker, new_signal) = timer_signal();
+        {
+            let mut wait = std::pin::pin!(scheduler.wait_for_timer(&adopter));
+            assert!(
+                wait.as_mut()
+                    .poll(&mut Context::from_waker(&new_waker))
+                    .is_pending()
+            );
+        }
+        let bound = scheduler.clock.as_ref().unwrap();
+        assert!(bound.driver.ptr_eq(&driver));
+        let due = scheduler.current_sleep.as_ref().unwrap().deadline();
+        assert_eq!(
+            due.as_nanos(),
+            bound.runtime_origin.as_nanos()
+                + u64::try_from(deadline.duration_since(bound.instant_origin).as_nanos()).unwrap()
+        );
+        let advance = due.as_nanos() - driver.now().as_nanos();
+        assert!(advance > 0);
+        assert_eq!(driver.pending_count(), 1);
+        // Cross the retired wall-clock deadline while the adopted virtual clock
+        // stays fixed. A leaked old registration would wake old_signal here.
+        assert!(matches!(
+            old_signal.recv_timeout(
+                deadline.saturating_duration_since(Instant::now()) + Duration::from_millis(50)
+            ),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ));
+        assert!(matches!(
+            new_signal.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+        clock.advance(advance - 1);
+        assert_eq!(driver.process_timers(), 0);
+        assert!(matches!(
+            new_signal.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+        clock.advance(1);
+        assert_eq!(driver.process_timers(), 1);
+        new_signal
+            .try_recv()
+            .expect("adopted nonzero-epoch driver must wake the retained timer");
+        assert_eq!(
+            futures_lite::future::block_on(scheduler.wait_for_timer(&adopter)),
+            Ok(Some(deadline))
+        );
+        assert_eq!(driver.pending_count(), 0);
+        assert!(!scheduler.has_pending_timer());
+        assert_eq!(scheduler.current_deadline(), None);
+        println!(
+            "quic_timer_public_adoption virtual_epoch_s=700 retired_fallback_wakes=0 early_virtual_firings=0 due_virtual_firings=1 pending_after=0"
+        );
+    }
+
+    #[test]
+    fn managed_timer_wrong_owner_keeps_pending_registration() {
+        let (owner, clock, driver) = timer_test_context(crate::Time::from_secs(63));
+        let (other, _, other_driver) = timer_test_context(crate::Time::from_secs(900));
+        let missing = Cx::for_testing();
+        let mut scheduler = QuicTimerScheduler::new();
+        let start = scheduler.now(&owner).unwrap();
+        let deadline = start + Duration::from_secs(2);
+        futures_lite::future::block_on(scheduler.schedule_timer_bound(&owner, deadline)).unwrap();
+        let (waker, signal) = timer_signal();
+        assert!(
+            scheduler
+                .poll_timer(&mut Context::from_waker(&waker))
+                .is_pending()
+        );
+        let registered = driver.next_deadline();
+        assert_eq!(driver.pending_count(), 1);
+        for refused in [&other, &missing] {
+            for candidate in [
+                deadline - Duration::from_secs(1),
+                deadline + Duration::from_secs(1),
+            ] {
+                assert!(matches!(
+                    futures_lite::future::block_on(
+                        scheduler.schedule_timer_bound(refused, candidate)
+                    ),
+                    Err(ConnectionRouterError::TimerSchedulingFailed(_))
+                ));
+                assert_eq!(driver.next_deadline(), registered);
+                assert_eq!(driver.pending_count(), 1);
+                assert_eq!(other_driver.pending_count(), 0);
+            }
+            assert!(matches!(
+                scheduler.now(refused),
+                Err(ConnectionRouterError::TimerSchedulingFailed(_))
+            ));
+        }
+        assert!(matches!(
+            signal.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+        clock.advance(1_999_999_999);
+        assert_eq!(driver.process_timers(), 0);
+        clock.advance(1);
+        assert_eq!(driver.process_timers(), 1);
+        signal
+            .try_recv()
+            .expect("refusals must retain the original timer's wake");
+        assert_eq!(
+            scheduler.poll_timer(&mut Context::from_waker(&waker)),
+            Poll::Ready(Some(deadline))
+        );
+        scheduler.cancel_pending();
+        assert_eq!(driver.pending_count(), 0);
+        assert_eq!(scheduler.current_deadline(), None);
+        assert!(scheduler.clock.as_ref().unwrap().driver.ptr_eq(&driver));
+        assert!(matches!(
+            futures_lite::future::block_on(scheduler.schedule_timer_bound(&other, deadline)),
+            Err(ConnectionRouterError::TimerSchedulingFailed(_))
+        ));
     }
 
     #[test]
