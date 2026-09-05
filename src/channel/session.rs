@@ -1905,6 +1905,7 @@ mod tests {
         mut handle: crate::runtime::TaskHandle<()>,
         committed: u64,
         aborted: u64,
+        expected_terminal: Result<Option<()>, crate::runtime::JoinError>,
     ) {
         let mailbox = lab.state.obligation_gateway().unwrap().mailbox().clone();
         let reservations = committed + aborted;
@@ -1922,7 +1923,7 @@ mod tests {
             report.oracle_report.failures()
         );
         assert!(report.invariant_violations.is_empty());
-        assert!(handle.try_join().unwrap().is_some());
+        assert_eq!(handle.try_join(), expected_terminal);
         let stats = mailbox.stats();
         tracing::info!(?stats, ?cx, committed, aborted, "checked session settled");
         assert_eq!(stats.posted, stats.applied);
@@ -1993,7 +1994,7 @@ mod tests {
         // unchanged legacy API. Explicitly abort its separate graded token.
         let proof = tx.try_reserve(&cx).unwrap().abort();
         assert_eq!(proof.kind(), crate::record::ObligationKind::SendPermit);
-        finish_checked_session_fixture(lab, &cx, handle, 0, 0);
+        finish_checked_session_fixture(lab, &cx, handle, 0, 0, Ok(Some(())));
     }
 
     #[test]
@@ -2042,7 +2043,7 @@ mod tests {
         let _proof = tx.try_send_checked(&cx, String::from("sync")).unwrap();
         assert_eq!(rx.try_recv(), Ok(String::from("sync")));
         assert_eq!(tx.telemetry_snapshot(2).reserved_uncommitted_obligations, 0);
-        finish_checked_session_fixture(lab, &cx, handle, 4, 2);
+        finish_checked_session_fixture(lab, &cx, handle, 4, 2, Ok(Some(())));
     }
 
     #[test]
@@ -2099,7 +2100,19 @@ mod tests {
             )))
         );
         assert_eq!(once_rx.try_recv(), Err(oneshot::TryRecvError::Closed));
-        finish_checked_session_fixture(lab, &cx, handle, 0, 2);
+        // The same state-owned holder is cancelled before its first poll.
+        // Keep that request live: the cancellation-dominant state-task API
+        // retains the exact v0.4.x fallback for a reasonless cancellation.
+        finish_checked_session_fixture(
+            lab,
+            &cx,
+            handle,
+            0,
+            2,
+            Err(crate::runtime::JoinError::Cancelled(
+                crate::types::CancelReason::user("join channel closed"),
+            )),
+        );
     }
 
     fn checked_session_panic_message(payload: &(dyn std::any::Any + Send)) -> &str {
@@ -2155,7 +2168,7 @@ mod tests {
                 assert_eq!(rx.try_recv(), Err(mpsc::RecvError::Empty));
                 let _proof = tx.try_send_checked(&cx, 37).unwrap();
                 assert_eq!(rx.try_recv(), Ok(37));
-                finish_checked_session_fixture(lab, &cx, handle, 1, 1);
+                finish_checked_session_fixture(lab, &cx, handle, 1, 1, Ok(Some(())));
             }
         }
     }
@@ -2239,6 +2252,7 @@ mod tests {
                     handle,
                     1 + u64::from(phase == "commit"),
                     u64::from(phase != "commit"),
+                    Ok(Some(())),
                 );
             }
         }
@@ -2269,6 +2283,6 @@ mod tests {
         let _proof = permit.abort();
         let _proof = checked_session_ready(tx.send_checked(&cx, 47)).unwrap();
         assert_eq!(rx.try_recv(), Ok(47));
-        finish_checked_session_fixture(lab, &cx, handle, 1, 1);
+        finish_checked_session_fixture(lab, &cx, handle, 1, 1, Ok(Some(())));
     }
 }
