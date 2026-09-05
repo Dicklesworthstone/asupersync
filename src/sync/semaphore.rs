@@ -1755,6 +1755,7 @@ mod tests {
             "borrowed_drop",
             "owned_commit",
             "owned_drop",
+            "owned_drop_secondary",
         ] {
             let (lab, cx, handle) = checked_admission_fixture(1);
             let notifications = Arc::new(AtomicUsize::new(0));
@@ -1803,7 +1804,12 @@ mod tests {
             let successor_cx = Cx::for_testing();
             let mut successor = semaphore.acquire(&successor_cx, 1);
             let wakes = CountingWaker::new();
-            let waker = Waker::from(wakes.clone());
+            let panic_wakes = PanicOnceWaker::new();
+            let waker = if operation == "owned_drop_secondary" {
+                Waker::from(panic_wakes.clone())
+            } else {
+                Waker::from(wakes.clone())
+            };
             assert!(poll_once_with_waker(&mut successor, &waker).is_none());
             assert_eq!(
                 semaphore.telemetry_snapshot(0).waiter_count,
@@ -1820,7 +1826,7 @@ mod tests {
                     "borrowed_commit" => borrowed.take().unwrap().commit(),
                     "borrowed_drop" => drop(borrowed.take().unwrap()),
                     "owned_commit" => owned.take().unwrap().commit(),
-                    "owned_drop" => drop(owned.take().unwrap()),
+                    "owned_drop" | "owned_drop_secondary" => drop(owned.take().unwrap()),
                     _ => unreachable!(),
                 }))
                 .expect_err("the planted notifier must run");
@@ -1830,7 +1836,13 @@ mod tests {
                     .unwrap()
                     .contains(&format!("planted semaphore {operation} notifier panic"))
             );
-            assert_eq!(wakes.count(), 1);
+            if operation == "owned_drop_secondary" {
+                assert_eq!(panic_wakes.count(), 1);
+                assert_eq!(wakes.count(), 0);
+            } else {
+                assert_eq!(wakes.count(), 1);
+                assert_eq!(panic_wakes.count(), 0);
+            }
             assert_eq!(semaphore.available_permits(), 1);
             #[cfg(any(debug_assertions, feature = "lock-metrics"))]
             assert!(lock_ordering::current_held_locks().is_empty());
