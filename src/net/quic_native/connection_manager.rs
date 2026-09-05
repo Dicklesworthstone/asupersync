@@ -2992,7 +2992,9 @@ mod tests {
         let mut scheduler = QuicTimerScheduler::new();
         let start = scheduler.now(&cx).unwrap();
         let mut task_cx = Context::from_waker(Waker::noop());
-        let overdue = start - Duration::from_secs(1);
+        let overdue = start
+            .checked_sub(Duration::from_secs(1))
+            .expect("test clock supports an overdue deadline");
         futures_lite::future::block_on(scheduler.schedule_timer(&cx, overdue)).unwrap();
         assert!(scheduler.has_pending_timer());
         assert_eq!(
@@ -3246,7 +3248,9 @@ mod tests {
         assert_eq!(scheduler.current_deadline(), None);
         assert_eq!(ambient_driver.pending_count(), 0);
         // An already due fallback deadline is observed once instead of discarded.
-        let overdue = Instant::now() - Duration::from_millis(1);
+        let overdue = Instant::now()
+            .checked_sub(Duration::from_millis(1))
+            .expect("test clock supports an overdue deadline");
         futures_lite::future::block_on(scheduler.schedule_timer(&missing, overdue)).unwrap();
         assert_eq!(
             futures_lite::future::block_on(scheduler.wait_for_timer(&missing)),
@@ -3356,7 +3360,9 @@ mod tests {
         assert_eq!(driver.pending_count(), 1);
         for refused in [&other, &missing] {
             for candidate in [
-                deadline - Duration::from_secs(1),
+                deadline
+                    .checked_sub(Duration::from_secs(1))
+                    .expect("test deadline has one second of headroom"),
                 deadline + Duration::from_secs(1),
             ] {
                 assert!(matches!(
