@@ -323,7 +323,6 @@ struct RegionInner {
     capability_budget: CapabilityBudget,
     children: Vec<RegionId>,
     tasks: Vec<TaskId>,
-    finalizers: FinalizerStack,
     cancel_reason: Option<CancelReason>,
     close_outcome: Option<TaskOutcome>,
     limits: RegionLimits,
@@ -565,6 +564,11 @@ pub struct RegionRecord {
     pub close_notify: std::sync::Arc<parking_lot::Mutex<RegionCloseState>>,
     /// Current state (atomic for concurrent access).
     state: Arc<AtomicRegionState>,
+    /// Finalizers may be Send without Sync. Keep their ownership on the record,
+    /// outside the Arc-shared admission state, and acquire this lock only after
+    /// `inner`. This preserves both the region's Send contract and its existing
+    /// shared-read heap semantics. Drop finalizers before the region heap.
+    finalizers: RwLock<FinalizerStack>,
     /// Inner mutable state (guarded by a lock).
     inner: Arc<RwLock<RegionInner>>,
     /// br-asupersync-bjrqu3 — Count of `resolve_obligation` calls
@@ -670,12 +674,12 @@ impl RegionRecord {
                 waiters: Vec::new(),
             })),
             state: Arc::new(AtomicRegionState::new(RegionState::Open)),
+            finalizers: RwLock::new(FinalizerStack::new()),
             inner: Arc::new(RwLock::new(RegionInner {
                 budget,
                 capability_budget,
                 children: Vec::new(),
                 tasks: Vec::new(),
-                finalizers: FinalizerStack::new(),
                 cancel_reason: None,
                 close_outcome: None,
                 limits: RegionLimits::UNLIMITED,
@@ -1095,32 +1099,34 @@ impl RegionRecord {
     /// Finalizers are stored in LIFO order and will be executed
     /// in reverse registration order during the Finalizing phase.
     pub fn add_finalizer(&self, finalizer: Finalizer) {
-        let mut inner = self.inner.write();
-        inner.finalizers.push(finalizer);
+        let _inner = self.inner.write();
+        self.finalizers.write().push(finalizer);
     }
 
     /// Pops the next finalizer to run (LIFO order).
     ///
     /// Returns `None` when all finalizers have been executed.
     pub fn pop_finalizer(&self) -> Option<Finalizer> {
-        let mut inner = self.inner.write();
+        let _inner = self.inner.write();
         if self.state.load() != RegionState::Finalizing {
             return None;
         }
 
-        inner.finalizers.pop()
+        self.finalizers.write().pop()
     }
 
     /// Returns the number of pending finalizers.
     #[must_use]
     pub fn finalizer_count(&self) -> usize {
-        self.inner.read().finalizers.len()
+        let _inner = self.inner.read();
+        self.finalizers.read().len()
     }
 
     /// Returns true if there are no pending finalizers.
     #[must_use]
     pub fn finalizers_empty(&self) -> bool {
-        self.inner.read().finalizers.is_empty()
+        let _inner = self.inner.read();
+        self.finalizers.read().is_empty()
     }
 
     /// Allocates a value in the region's heap.
@@ -1220,7 +1226,7 @@ impl RegionRecord {
             && inner.tasks.is_empty()
             && inner.pending_obligations == 0
             && inner.unapplied_obligations == 0
-            && inner.finalizers.is_empty()
+            && self.finalizers.read().is_empty()
             && self.pending_spawns.count() == 0
     }
 
@@ -1356,7 +1362,7 @@ impl RegionRecord {
             && inner.tasks.is_empty()
             && inner.pending_obligations == 0
             && inner.unapplied_obligations == 0
-            && inner.finalizers.is_empty()
+            && self.finalizers.read().is_empty()
             // Pending (not-yet-admitted) spawn requests are live children:
             // their credits were taken before the requests became visible,
             // so a nonzero count here means the mailbox still holds work
@@ -2185,6 +2191,89 @@ mod tests {
     // =========================================================================
     // Finalizer Tests
     // =========================================================================
+
+    #[test]
+    fn shared_admission_preserves_send_runtime_and_send_only_finalizers() {
+        fn assert_send<T: Send>() {}
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send::<RegionRecord>();
+        assert_send::<crate::runtime::RuntimeState>();
+        assert_send::<crate::lab::LabRuntime>();
+        assert_send_sync::<crate::cx::Cx>();
+        assert_send_sync::<ObligationAdmissionHandle>();
+        assert_send_sync::<crate::runtime::obligation_mailbox::ObligationToken>();
+        assert_send_sync::<crate::runtime::obligation_mailbox::ObligationGateway>();
+
+        let region = RegionRecord::new(test_region_id(), None, Budget::INFINITE);
+        let index = region.heap_alloc(11_u32).unwrap();
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let sync_order = Arc::clone(&order);
+        let sync_inner = Arc::clone(&region.inner);
+        let sync_cell = Cell::new(7_u32);
+        region.add_finalizer(Finalizer::Sync(Box::new(move || {
+            // Cell deliberately keeps this valid Send closure !Sync.
+            assert!(sync_inner.try_write().is_some());
+            sync_order.lock().push(sync_cell.get());
+            sync_cell.set(0);
+        })));
+        let async_order = Arc::clone(&order);
+        let async_inner = Arc::clone(&region.inner);
+        let async_cell = Cell::new(9_u32);
+        region.add_finalizer(Finalizer::Async(Box::pin(async move {
+            // Retain the Cell across a real Pending boundary: adding Sync to
+            // the public finalizer future would reject this supported input.
+            crate::runtime::yield_now().await;
+            assert!(async_inner.try_write().is_some());
+            async_order.lock().push(async_cell.get());
+            async_cell.set(0);
+        })));
+        assert_eq!(region.finalizer_count(), 2);
+        assert!(!region.finalizers_empty());
+        assert!(!region.is_quiescent());
+        assert!(region.begin_close(None));
+        assert!(region.begin_finalize());
+        assert!(!region.complete_close());
+
+        // Move the real record, including both Send-only callback forms, to a
+        // native thread. No unsafe trait assertion or stronger public bound.
+        let (completed_tx, completed_rx) = std::sync::mpsc::sync_channel(1);
+        let thread = std::thread::spawn(move || {
+            // A whole-inner Mutex would restore Send but break the supported
+            // nested shared-read path. Keep this assertion under the watchdog.
+            assert_eq!(
+                region.heap_with::<u32, _, _>(index, |outer| {
+                    region.heap_with::<u32, _, _>(index, |inner| outer + inner)
+                }),
+                Some(Some(22))
+            );
+            let Some(Finalizer::Async(mut future)) = region.pop_finalizer() else {
+                panic!("asynchronous finalizer is last in, first out");
+            };
+            let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+            assert!(future.as_mut().poll(&mut context).is_pending());
+            assert!(future.as_mut().poll(&mut context).is_ready());
+            drop(future);
+            let Some(Finalizer::Sync(callback)) = region.pop_finalizer() else {
+                panic!("synchronous finalizer remains second");
+            };
+            callback();
+            assert!(region.finalizers_empty());
+            assert!(region.is_quiescent());
+            assert!(region.complete_close());
+            assert_eq!(region.heap_len(), 0);
+            drop(region);
+            completed_tx
+                .send(())
+                .expect("completion receiver remains alive");
+        });
+        completed_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("Send-only finalizer execution must finish within ten seconds");
+        thread
+            .join()
+            .expect("Send-only finalizers execute after moving the region");
+        assert_eq!(*order.lock(), vec![9, 7]);
+    }
 
     #[test]
     fn finalizer_registration() {
