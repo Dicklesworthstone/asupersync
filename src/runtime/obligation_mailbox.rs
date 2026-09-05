@@ -799,6 +799,208 @@ mod tests {
     }
 
     #[test]
+    fn checked_external_dispatch_admits_drains_and_retires_its_actual_holder() {
+        use crate::runtime::scheduler::three_lane::ThreeLaneScheduler;
+        use crate::runtime::state::{AdmissionRegionTarget, AdmissionTaskTarget};
+        use crate::sync::ContendedMutex;
+        use crate::trace::distributed::{LogicalClockMode, LogicalTime};
+
+        for limit in [0, 1] {
+            let state = Arc::new(ContendedMutex::new(
+                "checked_external_state",
+                RuntimeState::new(),
+            ));
+            // This is the external-only dispatch shape: no ShardedState is
+            // installed, and the embedded task table stays empty throughout.
+            let tasks = Arc::new(ContendedMutex::new(
+                "checked_external_tasks",
+                crate::runtime::TaskTable::new(),
+            ));
+            let mailbox = Arc::new(ObligationMailbox::new());
+            let liveness = Arc::new(());
+            let polls = Arc::new(AtomicUsize::new(0));
+            let observed_polls = Arc::clone(&polls);
+            let (region, holder, mut handle, spawn_effects) = {
+                let mut runtime = state.lock().unwrap();
+                runtime.set_logical_clock_mode(LogicalClockMode::Lamport);
+                runtime.set_obligation_leak_response(ObligationLeakResponse::Log);
+                runtime.set_obligation_gateway(Arc::new(ObligationGateway::new(
+                    Arc::clone(&mailbox),
+                    Arc::new(|| {}),
+                    Arc::downgrade(&liveness),
+                )));
+                let region = runtime.create_root_region(Budget::INFINITE);
+                assert!(runtime.set_region_limits(
+                    region,
+                    crate::record::region::RegionLimits {
+                        max_obligations: Some(limit),
+                        ..crate::record::region::RegionLimits::UNLIMITED
+                    }
+                ));
+                let mut held = None;
+                let future = std::future::poll_fn(move |context| {
+                    let cx = Cx::current().expect("native worker installs the external holder Cx");
+                    assert_eq!(cx.region_id(), region);
+                    if observed_polls.fetch_add(1, Ordering::SeqCst) == 0 {
+                        for _ in 0..17 {
+                            let _ = cx.logical_tick();
+                        }
+                        if limit == 1 {
+                            let token = cx
+                                .try_register_obligation_checked(
+                                    ObligationKind::SendPermit,
+                                    cx.task_id(),
+                                )
+                                .unwrap()
+                                .expect("external holder has authoritative admission");
+                            assert_eq!(token.holder(), cx.task_id());
+                            assert_eq!(token.region(), region);
+                            held = Some(token);
+                        }
+                        assert!(matches!(cx.try_register_obligation_checked(
+                            ObligationKind::SendPermit, cx.task_id(),
+                        ), Err(ObligationAdmissionError::LimitReached { limit: quota, live })
+                            if quota == limit && live == limit));
+                        context.waker().wake_by_ref();
+                        return std::task::Poll::Pending;
+                    }
+                    if let Some(token) = held.take() {
+                        assert!(token.commit());
+                        // The first Commit is still queued. The same external
+                        // holder must nevertheless be able to reuse its quota.
+                        let next = cx
+                            .try_register_obligation_checked(ObligationKind::Lease, cx.task_id())
+                            .unwrap()
+                            .expect("same-poll external quota reuse");
+                        assert!(next.abort(ObligationAbortReason::Explicit));
+                    }
+                    std::task::Poll::Ready(83_u32)
+                });
+                let mut target = AdmissionTaskTarget::External(tasks.lock().unwrap());
+                let (holder, handle, spawn_effects) = runtime
+                    .create_task_with_deferred_spawn_effects_in(
+                        region,
+                        Budget::INFINITE,
+                        future,
+                        &mut target,
+                        &AdmissionRegionTarget::Embedded,
+                    )
+                    .expect("mint a real holder directly into the dispatch table");
+                assert!(runtime.tasks.is_empty());
+                assert_eq!(runtime.tasks.stored_future_count(), 0);
+                (region, holder, handle, spawn_effects)
+            };
+            let cx = tasks
+                .lock()
+                .unwrap()
+                .task(holder)
+                .unwrap()
+                .cx
+                .clone()
+                .unwrap();
+            let mut scheduler = ThreeLaneScheduler::new_with_options_and_task_table(
+                1,
+                &state,
+                Some(Arc::clone(&tasks)),
+                16,
+                false,
+                32,
+            );
+            let mut worker = scheduler.take_workers().remove(0);
+            scheduler.inject_ready(holder, 0);
+            spawn_effects.dispatch();
+            let worker_state = Arc::clone(&state);
+            let worker_tasks = Arc::clone(&tasks);
+            let worker_mailbox = Arc::clone(&mailbox);
+            std::thread::spawn(move || {
+                assert_eq!(worker.next_task(), Some(holder));
+                worker.execute(holder);
+                assert_eq!(worker_mailbox.stats().posted, limit as u64);
+                assert_eq!(worker_mailbox.stats().applied, 0);
+                assert_eq!(worker_mailbox.open_tickets(), 0);
+                {
+                    let runtime = worker_state.lock().unwrap();
+                    assert!(runtime.tasks.is_empty());
+                    assert!(worker_tasks.lock().unwrap().task(holder).is_some());
+                    assert_eq!(runtime.region(region).unwrap().pending_obligations(), limit);
+                }
+                // The ordinary native selection path must drain against the
+                // selected external table while the holder is still live.
+                assert_eq!(worker.next_task(), Some(holder));
+                assert_eq!(worker_mailbox.stats().reserved, limit as u64);
+                assert_eq!(worker_mailbox.stats().applied, limit as u64);
+                assert_eq!(worker_mailbox.stats().refused, 0);
+                assert_eq!(worker_mailbox.open_tickets(), limit);
+                {
+                    let runtime = worker_state.lock().unwrap();
+                    assert!(runtime.tasks.is_empty());
+                    assert!(worker_tasks.lock().unwrap().task(holder).is_some());
+                    assert_eq!(runtime.pending_obligation_count(), limit);
+                    for (_, record) in runtime.obligations.iter() {
+                        assert_eq!(record.holder, holder);
+                        assert_eq!(record.region, region);
+                    }
+                }
+                worker.execute(holder);
+            })
+            .join()
+            .expect("external native worker completes without panic");
+            assert_eq!(polls.load(Ordering::SeqCst), 2);
+            assert_eq!(handle.try_join().unwrap(), Some(83));
+            assert!(matches!(
+                cx.try_register_obligation_checked(ObligationKind::SendPermit, holder,),
+                Err(ObligationAdmissionError::HolderNotLive)
+            ));
+            let runtime = state.lock().unwrap();
+            assert!(runtime.tasks.is_empty());
+            assert_eq!(runtime.tasks.stored_future_count(), 0);
+            assert!(tasks.lock().unwrap().is_empty());
+            assert_eq!(tasks.lock().unwrap().stored_future_count(), 0);
+            assert_eq!(runtime.pending_obligation_count(), 0);
+            assert_eq!(runtime.leak_count(), 0);
+            let record = runtime.region(region).unwrap();
+            assert_eq!(record.pending_obligations(), 0);
+            assert_eq!(record.pending_obligation_post_count(), 0);
+            assert_eq!(record.unapplied_obligation_count(), 0);
+            assert!(matches!(
+                record.close_outcome(),
+                Some(crate::types::Outcome::Ok(()))
+            ));
+            let stats = mailbox.stats();
+            assert_eq!(stats.posted, 4 * limit as u64);
+            assert_eq!(stats.applied, stats.posted);
+            assert_eq!(stats.reserved, 2 * limit as u64);
+            assert_eq!(stats.committed, limit as u64);
+            assert_eq!(stats.aborted, limit as u64);
+            assert_eq!(stats.refused, 0);
+            assert_eq!(stats.leaked, 0);
+            assert!(mailbox.is_empty());
+            assert_eq!(mailbox.open_tickets(), 0);
+            let mut previous_tick = 17;
+            let mut traced = 0;
+            for event in runtime.trace_handle().snapshot() {
+                if matches!(
+                    event.kind,
+                    TraceEventKind::ObligationReserve
+                        | TraceEventKind::ObligationCommit
+                        | TraceEventKind::ObligationAbort
+                ) {
+                    let Some(LogicalTime::Lamport(tick)) = event.logical_time else {
+                        panic!("external holder attribution missing: {event:?}");
+                    };
+                    assert!(tick.raw() > previous_tick, "{event:?}");
+                    previous_tick = tick.raw();
+                    traced += 1;
+                }
+            }
+            assert_eq!(traced, 4 * limit);
+            eprintln!(
+                "checked external-only dispatch limit={limit} holder={holder:?} region={region:?} polls=2 result=83 trace_events={traced} stats={stats:?}"
+            );
+        }
+    }
+
+    #[test]
     fn checked_admission_shares_zero_one_n_quota_before_any_drain() {
         for limit in [0, 1, 4] {
             let (mut runtime, region, holder, cx) = checked_holder(limit);
@@ -1250,6 +1452,61 @@ mod tests {
         assert_eq!(runtime.state.pending_obligation_count(), 0);
         assert_eq!(mailbox.open_tickets(), 0);
         assert_eq!(mailbox.stats().refused, 0);
+    }
+
+    #[test]
+    fn checked_late_resolution_after_actual_lab_drop_retires_existing_ticket() {
+        for materialized in [false, true] {
+            for terminal in ["commit", "abort", "drop"] {
+                let (mut runtime, _region, holder, cx) = checked_holder(1);
+                let mailbox = mailbox_of(&runtime);
+                let gateway = Arc::clone(runtime.state.obligation_gateway().unwrap());
+                let token = cx
+                    .try_register_obligation_checked(ObligationKind::SendPermit, holder)
+                    .unwrap()
+                    .expect("real Lab holder returns an accepted token");
+                let credit = Arc::clone(token.admission.as_ref().unwrap());
+                if materialized {
+                    assert_eq!(runtime.state.drain_obligation_posts(1), 1);
+                    assert_eq!(runtime.state.pending_obligation_count(), 1);
+                    assert_eq!(mailbox.open_tickets(), 1);
+                } else {
+                    assert_eq!(runtime.state.pending_obligation_count(), 0);
+                    assert_eq!(mailbox.open_tickets(), 0);
+                }
+                assert!(!credit.application_finished.load(Ordering::Acquire));
+                let before = mailbox.stats();
+                // Keep diagnostic mailbox/gateway handles and the token, but
+                // destroy the actual runtime and its region/task ownership.
+                // The earlier test only withdraws a replacement gateway's
+                // liveness while leaving those runtime records intact.
+                drop(runtime);
+                assert!(!gateway.is_runtime_available());
+                assert!(matches!(
+                    cx.try_register_obligation_checked(ObligationKind::SendPermit, holder),
+                    Err(ObligationAdmissionError::RuntimeUnavailable)
+                ));
+                match terminal {
+                    "commit" => assert!(!token.commit()),
+                    "abort" => assert!(!token.abort(ObligationAbortReason::Explicit)),
+                    _ => drop(token),
+                }
+                assert!(credit.application_finished.load(Ordering::Acquire));
+                assert_eq!(mailbox.open_tickets(), 0);
+                assert_eq!(
+                    mailbox.stats(),
+                    before,
+                    "no new post or fictitious runtime application"
+                );
+                assert_eq!(mailbox.len(), usize::from(!materialized));
+                assert_eq!(before.reserved, u64::from(materialized));
+                assert_eq!(before.refused, 0);
+                assert_eq!(before.leaked, 0);
+                eprintln!(
+                    "checked actual Lab teardown materialized={materialized} late_terminal={terminal} open_tickets=0 no_new_posts=true prior_stats={before:?}"
+                );
+            }
+        }
     }
 
     #[test]
