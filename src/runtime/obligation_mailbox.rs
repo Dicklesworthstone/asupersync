@@ -1200,31 +1200,48 @@ mod tests {
         for (index, slot) in owned.iter_mut().enumerate() {
             let Some(slot) = slot else {
                 if physical[index] {
-                    return Err(format!("missing_admission: physical slot {index} has no checked credit"));
+                    return Err(format!(
+                        "missing_admission: physical slot {index} has no checked credit"
+                    ));
                 }
                 continue;
             };
             if slot.terminal.is_none() {
-                let region = regions.iter().position(|region| *region == slot.region).unwrap();
+                let region = regions
+                    .iter()
+                    .position(|region| *region == slot.region)
+                    .unwrap();
                 expected_live[region] += 1;
             }
-            let reservations: Vec<_> = events.iter().filter_map(|event| {
-                if event.kind == TraceEventKind::ObligationReserve {
-                    if let crate::trace::TraceData::Obligation { obligation, task, .. } = event.data {
-                        if task == slot.original_holder { return Some(obligation); }
+            let reservations: Vec<_> = events
+                .iter()
+                .filter_map(|event| {
+                    if event.kind == TraceEventKind::ObligationReserve {
+                        if let crate::trace::TraceData::Obligation {
+                            obligation, task, ..
+                        } = event.data
+                        {
+                            if task == slot.original_holder {
+                                return Some(obligation);
+                            }
+                        }
                     }
-                }
-                None
-            }).collect();
+                    None
+                })
+                .collect();
             if reservations.len() > 1 {
-                return Err(format!("duplicate_original_id: slot {index} {reservations:?}"));
+                return Err(format!(
+                    "duplicate_original_id: slot {index} {reservations:?}"
+                ));
             }
             if let Some(id) = reservations.first().copied() {
                 if slot.original_id.is_some_and(|original| original != id) {
                     return Err(format!("changed_original_id: slot {index}"));
                 }
                 slot.original_id = Some(id);
-                if !original_ids.insert(id) { return Err("aliased_original_id".to_owned()); }
+                if !original_ids.insert(id) {
+                    return Err("aliased_original_id".to_owned());
+                }
             }
             let mut credit = Arc::clone(&slot.root);
             let mut projected = None;
@@ -1232,7 +1249,10 @@ mod tests {
             loop {
                 let binding = credit.binding();
                 last_binding = binding;
-                let region = regions.iter().position(|region| *region == binding.2).unwrap();
+                let region = regions
+                    .iter()
+                    .position(|region| *region == binding.2)
+                    .unwrap();
                 if !credit.active.load(Ordering::Acquire) {
                     return Err(format!("inactive_owned_credit: ticket {}", binding.0));
                 }
@@ -1246,14 +1266,22 @@ mod tests {
                     match &*decision {
                         AdmissionDecision::Pending => {
                             live[region] += 1;
-                            if slot.terminal.is_some() || (slot.holder, slot.region) != (binding.1, binding.2) {
-                                return Err(format!("pending_owner_mismatch: slot {index} {binding:?}"));
+                            if slot.terminal.is_some()
+                                || (slot.holder, slot.region) != (binding.1, binding.2)
+                            {
+                                return Err(format!(
+                                    "pending_owner_mismatch: slot {index} {binding:?}"
+                                ));
                             }
                             None
                         }
                         AdmissionDecision::Terminal(terminal) => {
-                            if slot.terminal != Some(*terminal) || (slot.holder, slot.region) != (binding.1, binding.2) {
-                                return Err(format!("terminal_owner_mismatch: slot {index} {binding:?} terminal={terminal:?}"));
+                            if slot.terminal != Some(*terminal)
+                                || (slot.holder, slot.region) != (binding.1, binding.2)
+                            {
+                                return Err(format!(
+                                    "terminal_owner_mismatch: slot {index} {binding:?} terminal={terminal:?}"
+                                ));
                             }
                             pending_terminal |= !finished;
                             None
@@ -1261,38 +1289,70 @@ mod tests {
                         AdmissionDecision::HandedOff(next) => Some(Arc::clone(next)),
                     }
                 };
-                match next { Some(next) => credit = next, None => break }
+                match next {
+                    Some(next) => credit = next,
+                    None => break,
+                }
             }
             if let Some(id) = slot.original_id {
-                let record = runtime.state.obligation(id).ok_or_else(|| format!("missing_original_row: {id:?}"))?;
+                let record = runtime
+                    .state
+                    .obligation(id)
+                    .ok_or_else(|| format!("missing_original_row: {id:?}"))?;
                 let binding = projected.unwrap_or(last_binding);
                 if (record.holder, record.region) != (binding.1, binding.2) {
-                    return Err(format!("arena_projection_owner: id={id:?} binding={binding:?} row={record:?}"));
+                    return Err(format!(
+                        "arena_projection_owner: id={id:?} binding={binding:?} row={record:?}"
+                    ));
                 }
                 if projected.is_some() != record.is_pending() {
-                    return Err(format!("arena_projection_terminal: id={id:?} U={projected:?} row={record:?}"));
+                    return Err(format!(
+                        "arena_projection_terminal: id={id:?} U={projected:?} row={record:?}"
+                    ));
                 }
-                if projected.is_none() && slot.terminal.map(ObligationResolution::state) != Some(record.state) {
+                if projected.is_none()
+                    && slot.terminal.map(ObligationResolution::state) != Some(record.state)
+                {
                     return Err(format!("arena_terminal_decision: id={id:?}"));
                 }
             }
         }
-        if live != expected_live { return Err(format!("logical_live_count: actual={live:?} expected={expected_live:?}")); }
+        if live != expected_live {
+            return Err(format!(
+                "logical_live_count: actual={live:?} expected={expected_live:?}"
+            ));
+        }
         for (index, region) in regions.iter().enumerate() {
-            let actual = runtime.state.region(*region).map_or((0, 0), |record|
-                (record.pending_obligations(), record.unapplied_obligation_count()));
+            let actual = runtime.state.region(*region).map_or((0, 0), |record| {
+                (
+                    record.pending_obligations(),
+                    record.unapplied_obligation_count(),
+                )
+            });
             if actual != (live[index], unapplied[index]) {
-                return Err(format!("region_conservation: region={region:?} actual={actual:?} L={} U={}", live[index], unapplied[index]));
+                return Err(format!(
+                    "region_conservation: region={region:?} actual={actual:?} L={} U={}",
+                    live[index], unapplied[index]
+                ));
             }
         }
         let stats = mailbox.stats();
-        if stats.refused != 0 { return Err(format!("refused_actual_post: {stats:?}")); }
+        if stats.refused != 0 {
+            return Err(format!("refused_actual_post: {stats:?}"));
+        }
         if stats.posted.checked_sub(stats.applied) != Some(mailbox.len() as u64) {
-            let code = if pending_terminal { "lost_terminal_post" } else { "lost_post" };
+            let code = if pending_terminal {
+                "lost_terminal_post"
+            } else {
+                "lost_post"
+            };
             return Err(format!("{code}: stats={stats:?} queued={}", mailbox.len()));
         }
         if unapplied == [0, 0] && mailbox.open_tickets() != 0 {
-            return Err(format!("retained_ticket_after_projection: {}", mailbox.open_tickets()));
+            return Err(format!(
+                "retained_ticket_after_projection: {}",
+                mailbox.open_tickets()
+            ));
         }
         if runtime.state.obligations_iter().count() != original_ids.len() {
             return Err("arena_row_without_original_reservation".to_owned());
@@ -1338,11 +1398,19 @@ mod tests {
     ) {
         let (mut runtime, first_region, first, first_cx) = checked_holder(limits[0]);
         let second_region = runtime.state.create_root_region(Budget::INFINITE);
-        let second_owner = if cross_region { second_region } else { first_region };
+        let second_owner = if cross_region {
+            second_region
+        } else {
+            first_region
+        };
         let (second, second_cx) = transfer_holder(&mut runtime, second_owner);
         let mut second_limits = runtime.state.region(second_region).unwrap().limits();
         second_limits.max_obligations = Some(limits[1]);
-        runtime.state.region(second_region).unwrap().set_limits(second_limits);
+        runtime
+            .state
+            .region(second_region)
+            .unwrap()
+            .set_limits(second_limits);
         let regions = [first_region, second_region];
         let holders = [first, second];
         let contexts = [first_cx, second_cx];
@@ -1355,30 +1423,53 @@ mod tests {
         let history = format!("limits={limits:?} cross_region={cross_region} order={order:?}");
         check_finite_conservation(&runtime, &mailbox, regions, &mut owned, [false; 2]).unwrap();
         for (step, action) in order.iter().enumerate() {
-            let live_in = |region: RegionId| owned.iter().flatten()
-                .filter(|slot| slot.region == region && slot.terminal.is_none()).count();
+            let live_in = |region: RegionId| {
+                owned
+                    .iter()
+                    .flatten()
+                    .filter(|slot| slot.region == region && slot.terminal.is_none())
+                    .count()
+            };
             match *action {
                 FiniteAction::Reserve(slot) => {
-                    let region = regions.iter().position(|region| *region == original_regions[slot]).unwrap();
+                    let region = regions
+                        .iter()
+                        .position(|region| *region == original_regions[slot])
+                        .unwrap();
                     let live = live_in(original_regions[slot]);
                     let refusal = if closing[region] {
                         Some(ObligationAdmissionError::RegionClosed)
                     } else if !alive[slot] {
                         Some(ObligationAdmissionError::HolderNotLive)
                     } else if live == limits[region] {
-                        Some(ObligationAdmissionError::LimitReached { limit: limits[region], live })
-                    } else { None };
-                    let kind = if slot == 0 { ObligationKind::Lease } else { ObligationKind::SendPermit };
-                    let result = contexts[slot].try_register_obligation_checked(kind, holders[slot]);
+                        Some(ObligationAdmissionError::LimitReached {
+                            limit: limits[region],
+                            live,
+                        })
+                    } else {
+                        None
+                    };
+                    let kind = if slot == 0 {
+                        ObligationKind::Lease
+                    } else {
+                        ObligationKind::SendPermit
+                    };
+                    let result =
+                        contexts[slot].try_register_obligation_checked(kind, holders[slot]);
                     if let Some(expected) = refusal {
                         assert_eq!(result.unwrap_err(), expected, "{history} step={step}");
                         coverage.denied += 1;
                     } else {
-                        let token = result.unwrap().expect("actual runtime must track an admitted slot");
+                        let token = result
+                            .unwrap()
+                            .expect("actual runtime must track an admitted slot");
                         owned[slot] = Some(FiniteOwned {
                             root: Arc::clone(token.admission.as_ref().unwrap()),
-                            original_holder: holders[slot], original_id: None,
-                            holder: holders[slot], region: original_regions[slot], terminal: None,
+                            original_holder: holders[slot],
+                            original_id: None,
+                            holder: holders[slot],
+                            region: original_regions[slot],
+                            terminal: None,
                         });
                         tokens[slot] = Some(token);
                         coverage.admitted += 1;
@@ -1395,20 +1486,29 @@ mod tests {
                         let expected = owned[slot].as_mut().unwrap();
                         let wins = expected.terminal.is_none();
                         match terminal {
-                            ObligationResolution::Commit => assert_eq!(token.commit(), wins, "{history} step={step}"),
-                            ObligationResolution::Abort(reason) => assert_eq!(token.abort(reason), wins, "{history} step={step}"),
+                            ObligationResolution::Commit => {
+                                assert_eq!(token.commit(), wins, "{history} step={step}")
+                            }
+                            ObligationResolution::Abort(reason) => {
+                                assert_eq!(token.abort(reason), wins, "{history} step={step}")
+                            }
                             ObligationResolution::Leak => drop(token),
                         }
-                        if wins { expected.terminal = Some(terminal); }
+                        if wins {
+                            expected.terminal = Some(terminal);
+                        }
                     }
                 }
                 FiniteAction::Handoff => {
                     if let Some(token) = tokens[0].take() {
                         let destination = usize::from(cross_region);
                         let expected = owned[0].as_ref().unwrap();
-                        let allowed = expected.terminal.is_none() && alive[0] && alive[1]
+                        let allowed = expected.terminal.is_none()
+                            && alive[0]
+                            && alive[1]
                             && !closing[destination]
-                            && (expected.region == original_regions[1] || live_in(original_regions[1]) < limits[destination]);
+                            && (expected.region == original_regions[1]
+                                || live_in(original_regions[1]) < limits[destination]);
                         let original_ticket = token.ticket();
                         match token.try_transfer(&contexts[1]) {
                             Ok(token) => {
@@ -1420,13 +1520,25 @@ mod tests {
                                 coverage.handed_off += 1;
                             }
                             Err(failure) => {
-                                assert!(!allowed, "unexpected refusal {failure:?}: {history} step={step}");
+                                assert!(
+                                    !allowed,
+                                    "unexpected refusal {failure:?}: {history} step={step}"
+                                );
                                 let (reason, token) = failure.into_parts();
-                                assert!(matches!(reason, ObligationTransferError::SourceResolved
-                                    | ObligationTransferError::SourceHolderNotLive
-                                    | ObligationTransferError::DestinationCancelled
-                                    | ObligationTransferError::Destination(ObligationAdmissionError::RegionClosed
-                                        | ObligationAdmissionError::HolderNotLive | ObligationAdmissionError::LimitReached { .. })), "{reason:?}");
+                                assert!(
+                                    matches!(
+                                        reason,
+                                        ObligationTransferError::SourceResolved
+                                            | ObligationTransferError::SourceHolderNotLive
+                                            | ObligationTransferError::DestinationCancelled
+                                            | ObligationTransferError::Destination(
+                                                ObligationAdmissionError::RegionClosed
+                                                    | ObligationAdmissionError::HolderNotLive
+                                                    | ObligationAdmissionError::LimitReached { .. }
+                                            )
+                                    ),
+                                    "{reason:?}"
+                                );
                                 assert_eq!(token.ticket(), original_ticket);
                                 assert_eq!(token.holder(), expected.holder);
                                 tokens[0] = Some(token);
@@ -1436,7 +1548,11 @@ mod tests {
                     }
                 }
                 FiniteAction::Complete(holder) => {
-                    if owned[0].as_ref().is_some_and(|slot| slot.terminal.is_none() && slot.holder == holders[1]) && holder == 0 {
+                    if owned[0]
+                        .as_ref()
+                        .is_some_and(|slot| slot.terminal.is_none() && slot.holder == holders[1])
+                        && holder == 0
+                    {
                         coverage.completed_transferred_source += 1;
                     }
                     for slot in owned.iter_mut().flatten() {
@@ -1449,9 +1565,16 @@ mod tests {
                     alive[holder] = false;
                 }
                 FiniteAction::Close => {
-                    runtime.state.close_region_command(first_region, &crate::types::CancelReason::user("finite close"));
+                    runtime.state.close_region_command(
+                        first_region,
+                        &crate::types::CancelReason::user("finite close"),
+                    );
                     closing[0] = true;
-                    if runtime.state.region(first_region).is_some_and(|region| region.unapplied_obligation_count() != 0) {
+                    if runtime
+                        .state
+                        .region(first_region)
+                        .is_some_and(|region| region.unapplied_obligation_count() != 0)
+                    {
                         assert!(!runtime.state.can_region_complete_close(first_region));
                         coverage.closed_with_barrier += 1;
                     }
@@ -1467,30 +1590,49 @@ mod tests {
                 let expected = owned[index].as_mut().unwrap();
                 let wins = expected.terminal.is_none();
                 assert_eq!(token.commit(), wins, "cleanup {history}");
-                if wins { expected.terminal = Some(ObligationResolution::Commit); }
+                if wins {
+                    expected.terminal = Some(ObligationResolution::Commit);
+                }
             }
         }
         for _ in 0..16 {
-            if mailbox.is_empty() { break; }
+            if mailbox.is_empty() {
+                break;
+            }
             assert_eq!(runtime.state.drain_obligation_posts(1), 1);
             check_finite_conservation(&runtime, &mailbox, regions, &mut owned, [false; 2])
                 .unwrap_or_else(|error| panic!("{error}: cleanup {history}"));
             coverage.checks += 1;
         }
-        assert!(mailbox.is_empty(), "finite queue failed to drain: {history}");
+        assert!(
+            mailbox.is_empty(),
+            "finite queue failed to drain: {history}"
+        );
         for index in 0..2 {
-            if alive[index] { complete_transfer_holder(&mut runtime, holders[index]); }
+            if alive[index] {
+                complete_transfer_holder(&mut runtime, holders[index]);
+            }
         }
         for region in regions {
             if runtime.state.region(region).is_some() {
-                runtime.state.close_region_command(region, &crate::types::CancelReason::user("finite final close"));
+                runtime.state.close_region_command(
+                    region,
+                    &crate::types::CancelReason::user("finite final close"),
+                );
             }
-            assert!(runtime.state.region(region).is_none(), "cleanup region {region:?}: {history}");
+            assert!(
+                runtime.state.region(region).is_none(),
+                "cleanup region {region:?}: {history}"
+            );
         }
         check_finite_conservation(&runtime, &mailbox, regions, &mut owned, [false; 2])
             .unwrap_or_else(|error| panic!("{error}: final {history}"));
         assert_eq!(runtime.state.pending_obligation_count(), 0);
-        assert!(holders.iter().all(|holder| runtime.state.task(*holder).is_none()));
+        assert!(
+            holders
+                .iter()
+                .all(|holder| runtime.state.task(*holder).is_none())
+        );
         assert_eq!(mailbox.open_tickets(), 0);
         assert_eq!(mailbox.stats().posted, mailbox.stats().applied);
     }
@@ -1498,27 +1640,55 @@ mod tests {
     #[test]
     fn checked_finite_actual_boundary_orders_conserve_original_lineages() {
         let families = [
-            finite_orders(&[FiniteAction::Reserve(0), FiniteAction::Reserve(1), FiniteAction::ApplyOne,
+            finite_orders(&[
+                FiniteAction::Reserve(0),
+                FiniteAction::Reserve(1),
+                FiniteAction::ApplyOne,
                 FiniteAction::Settle(0, ObligationResolution::Commit),
-                FiniteAction::Settle(1, ObligationResolution::Abort(ObligationAbortReason::Explicit)), FiniteAction::Close]),
-            finite_orders(&[FiniteAction::Reserve(0), FiniteAction::Reserve(1), FiniteAction::Handoff,
-                FiniteAction::ApplyOne, FiniteAction::Complete(0), FiniteAction::Settle(0, ObligationResolution::Commit)]),
-            finite_orders(&[FiniteAction::Reserve(0), FiniteAction::Reserve(1), FiniteAction::ApplyOne,
-                FiniteAction::Settle(0, ObligationResolution::Leak), FiniteAction::Complete(1)]),
+                FiniteAction::Settle(
+                    1,
+                    ObligationResolution::Abort(ObligationAbortReason::Explicit),
+                ),
+                FiniteAction::Close,
+            ]),
+            finite_orders(&[
+                FiniteAction::Reserve(0),
+                FiniteAction::Reserve(1),
+                FiniteAction::Handoff,
+                FiniteAction::ApplyOne,
+                FiniteAction::Complete(0),
+                FiniteAction::Settle(0, ObligationResolution::Commit),
+            ]),
+            finite_orders(&[
+                FiniteAction::Reserve(0),
+                FiniteAction::Reserve(1),
+                FiniteAction::ApplyOne,
+                FiniteAction::Settle(0, ObligationResolution::Leak),
+                FiniteAction::Complete(1),
+            ]),
         ];
         let mut coverage = FiniteCoverage::default();
         let mut replayed = 0;
         for cross_region in [false, true] {
             for first_limit in 0..=2 {
                 for second_limit in 0..=2 {
-                    if !cross_region && first_limit != second_limit { continue; }
+                    if !cross_region && first_limit != second_limit {
+                        continue;
+                    }
                     for family in &families {
                         for order in family {
-                            replay_finite_order([first_limit, second_limit], cross_region, order, &mut coverage);
+                            replay_finite_order(
+                                [first_limit, second_limit],
+                                cross_region,
+                                order,
+                                &mut coverage,
+                            );
                             replayed += 1;
                         }
                     }
-                    eprintln!("finite conservation limits=[{first_limit},{second_limit}] cross_region={cross_region} replays={replayed} coverage={coverage:?}");
+                    eprintln!(
+                        "finite conservation limits=[{first_limit},{second_limit}] cross_region={cross_region} replays={replayed} coverage={coverage:?}"
+                    );
                 }
             }
         }
@@ -1527,6 +1697,237 @@ mod tests {
         assert!(coverage.handed_off > 0 && coverage.refused_handoffs > 0);
         assert!(coverage.completed_live > 0 && coverage.completed_transferred_source > 0);
         assert!(coverage.closed_with_barrier > 0 && coverage.checks > replayed);
+    }
+
+    struct FiniteWithheldPost<'a> {
+        mailbox: &'a ObligationMailbox,
+        post: Option<QueuedObligationPost>,
+    }
+
+    impl<'a> FiniteWithheldPost<'a> {
+        fn take(mailbox: &'a ObligationMailbox) -> Self {
+            Self {
+                mailbox,
+                post: Some(mailbox.queue.pop().expect("genuine published receipt")),
+            }
+        }
+    }
+
+    impl Drop for FiniteWithheldPost<'_> {
+        fn drop(&mut self) {
+            if let Some(post) = self.post.take() {
+                // Restore the same owned message, including its admission Arc;
+                // do not mint a replacement or increment posted a second time.
+                self.mailbox.queue.push(post);
+            }
+        }
+    }
+
+    fn finite_capture_physical_admission(mailbox: &ObligationMailbox, cx: &Cx) -> FiniteOwned {
+        let receipt = FiniteWithheldPost::take(mailbox);
+        let Some(QueuedObligationPost::Operation {
+            post,
+            admission: Some(credit),
+        }) = &receipt.post
+        else {
+            panic!("checked physical permit must publish its actual owned Reserve")
+        };
+        assert_eq!(post.op, ObligationOp::Reserve);
+        assert_eq!(post.holder, cx.task_id());
+        assert_eq!(post.region, cx.region_id());
+        assert_eq!(post.kind, ObligationKind::SendPermit);
+        FiniteOwned {
+            root: Arc::clone(credit),
+            original_holder: cx.task_id(),
+            original_id: None,
+            holder: cx.task_id(),
+            region: cx.region_id(),
+            terminal: None,
+        }
+    }
+
+    #[test]
+    fn checked_finite_checker_detects_actual_physical_admission_bypass() {
+        for limit in [0, 1] {
+            let (mut runtime, region, holder, cx) = checked_holder(limit);
+            let spare = runtime.state.create_root_region(Budget::INFINITE);
+            let regions = [region, spare];
+            let mailbox = mailbox_of(&runtime);
+            let (sender, mut receiver) = crate::channel::mpsc::channel::<u64>(1);
+            let mut owned = [None, None];
+            let untracked = sender.try_reserve().unwrap();
+            assert_eq!(sender.debug_counts(), (0, 1));
+            let error =
+                check_finite_conservation(&runtime, &mailbox, regions, &mut owned, [true, false])
+                    .unwrap_err();
+            assert!(error.starts_with("missing_admission:"), "{error}");
+            // This is an intentionally faulty adapter choice, not a claim that
+            // the preserved legacy try_reserve API itself is incorrect.
+            drop(untracked);
+            assert_eq!(sender.debug_counts(), (0, 0));
+            check_finite_conservation(&runtime, &mailbox, regions, &mut owned, [false; 2]).unwrap();
+            match sender.try_reserve_checked(&cx) {
+                Err(crate::channel::mpsc::CheckedSendError::Admission { error, value: () }) => {
+                    assert_eq!(limit, 0);
+                    assert_eq!(
+                        error,
+                        ObligationAdmissionError::LimitReached { limit: 0, live: 0 }
+                    );
+                    assert_eq!(sender.debug_counts(), (0, 0));
+                    assert_eq!(mailbox.stats().posted, 0);
+                }
+                Ok(permit) => {
+                    assert_eq!(limit, 1);
+                    assert_eq!(sender.debug_counts(), (0, 1));
+                    owned[0] = Some(finite_capture_physical_admission(&mailbox, &cx));
+                    check_finite_conservation(
+                        &runtime,
+                        &mailbox,
+                        regions,
+                        &mut owned,
+                        [true, false],
+                    )
+                    .unwrap();
+                    permit.try_send(73).unwrap();
+                    owned[0].as_mut().unwrap().terminal = Some(ObligationResolution::Commit);
+                    assert_eq!(receiver.try_recv().unwrap(), 73);
+                    assert_eq!(sender.debug_counts(), (0, 0));
+                    check_finite_conservation(&runtime, &mailbox, regions, &mut owned, [false; 2])
+                        .unwrap();
+                    assert_eq!(runtime.state.drain_obligation_posts(2), 2);
+                    assert_eq!(mailbox.stats().reserved, 1);
+                    assert_eq!(mailbox.stats().committed, 1);
+                }
+                Err(error) => panic!("unexpected physical refusal: {error:?}"),
+            }
+            check_finite_conservation(&runtime, &mailbox, regions, &mut owned, [false; 2]).unwrap();
+            complete_transfer_holder(&mut runtime, holder);
+            for region in regions {
+                runtime.state.close_region_command(
+                    region,
+                    &crate::types::CancelReason::user("physical conservation complete"),
+                );
+                assert!(runtime.state.region(region).is_none());
+            }
+            assert_eq!(runtime.state.pending_obligation_count(), 0);
+            assert_eq!(mailbox.open_tickets(), 0);
+            assert!(mailbox.is_empty());
+            assert_eq!(runtime.state.leak_count(), 0);
+            eprintln!(
+                "finite physical quota={limit} planted={error} actual_payload_count={} final_physical={:?} stats={:?}",
+                limit,
+                sender.debug_counts(),
+                mailbox.stats()
+            );
+        }
+    }
+
+    #[test]
+    fn checked_finite_checker_detects_and_restores_actual_withheld_terminal() {
+        let (mut runtime, region, holder, cx) = checked_holder(1);
+        let spare = runtime.state.create_root_region(Budget::INFINITE);
+        let regions = [region, spare];
+        let mailbox = mailbox_of(&runtime);
+        let (sender, mut receiver) = crate::channel::mpsc::channel::<u64>(1);
+        let permit = sender.try_reserve_checked(&cx).unwrap();
+        let mut owned = [Some(finite_capture_physical_admission(&mailbox, &cx)), None];
+        assert_eq!(runtime.state.drain_obligation_posts(1), 1);
+        check_finite_conservation(&runtime, &mailbox, regions, &mut owned, [true, false]).unwrap();
+        let id = owned[0].as_ref().unwrap().original_id.unwrap();
+        permit.try_send(91).unwrap();
+        owned[0].as_mut().unwrap().terminal = Some(ObligationResolution::Commit);
+        assert_eq!(receiver.try_recv().unwrap(), 91);
+        assert_eq!(sender.debug_counts(), (0, 0));
+        let withheld = FiniteWithheldPost::take(&mailbox);
+        let Some(QueuedObligationPost::Operation {
+            post,
+            admission: Some(credit),
+        }) = &withheld.post
+        else {
+            panic!("withheld message must be the real checked terminal")
+        };
+        assert_eq!(post.op, ObligationOp::Commit);
+        assert!(Arc::ptr_eq(credit, &owned[0].as_ref().unwrap().root));
+        assert_eq!(mailbox.len(), 0);
+        assert_eq!(runtime.state.drain_obligation_posts(1), 0);
+        let error = check_finite_conservation(&runtime, &mailbox, regions, &mut owned, [false; 2])
+            .unwrap_err();
+        assert!(error.starts_with("lost_terminal_post:"), "{error}");
+        assert_eq!(
+            runtime.state.region(region).unwrap().pending_obligations(),
+            0
+        );
+        assert_eq!(
+            runtime
+                .state
+                .region(region)
+                .unwrap()
+                .unapplied_obligation_count(),
+            1
+        );
+        assert!(runtime.state.obligation(id).unwrap().is_pending());
+        assert!(
+            runtime.state.task(holder).is_some(),
+            "no completion reconciliation before fault detection"
+        );
+        runtime.state.close_region_command(
+            region,
+            &crate::types::CancelReason::user("withheld terminal"),
+        );
+        assert!(!runtime.state.can_region_complete_close(region));
+        assert_eq!(
+            runtime
+                .state
+                .region(region)
+                .unwrap()
+                .unapplied_obligation_count(),
+            1
+        );
+        assert!(runtime.state.obligation(id).unwrap().is_pending());
+        assert!(
+            check_finite_conservation(&runtime, &mailbox, regions, &mut owned, [false; 2])
+                .unwrap_err()
+                .starts_with("lost_terminal_post:")
+        );
+        drop(withheld); // The exact actual receipt is back before any completion.
+        check_finite_conservation(&runtime, &mailbox, regions, &mut owned, [false; 2]).unwrap();
+        assert_eq!(runtime.state.drain_obligation_posts(1), 1);
+        check_finite_conservation(&runtime, &mailbox, regions, &mut owned, [false; 2]).unwrap();
+        assert_eq!(
+            runtime.state.obligation(id).unwrap().state,
+            crate::record::ObligationState::Committed
+        );
+        assert_eq!(
+            runtime
+                .state
+                .region(region)
+                .unwrap()
+                .unapplied_obligation_count(),
+            0
+        );
+        assert_eq!(mailbox.stats().reserved, 1);
+        assert_eq!(mailbox.stats().committed, 1);
+        assert_eq!(mailbox.stats().posted, mailbox.stats().applied);
+        complete_transfer_holder(&mut runtime, holder);
+        for region in regions {
+            if runtime.state.region(region).is_some() {
+                runtime.state.close_region_command(
+                    region,
+                    &crate::types::CancelReason::user("restored terminal complete"),
+                );
+            }
+            assert!(runtime.state.region(region).is_none());
+        }
+        assert!(runtime.state.task(holder).is_none());
+        assert_eq!(runtime.state.pending_obligation_count(), 0);
+        assert_eq!(runtime.state.leak_count(), 0);
+        assert_eq!(mailbox.open_tickets(), 0);
+        assert!(mailbox.is_empty());
+        assert_eq!(sender.debug_counts(), (0, 0));
+        eprintln!(
+            "finite actual withheld terminal id={id:?} detected={error} restored_same_receipt=true payload=91 stats={:?}",
+            mailbox.stats()
+        );
     }
 
     #[test]
