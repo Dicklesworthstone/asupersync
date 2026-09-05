@@ -115,6 +115,53 @@ impl<T> std::fmt::Display for SendError<T> {
 
 impl<T: std::fmt::Debug> std::error::Error for SendError<T> {}
 
+/// A checked send failed before publication, retaining the caller's value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CheckedSendError<T> {
+    /// The channel refused the operation.
+    Channel(SendError<T>),
+    /// The runtime refused the obligation before returning a permit.
+    Admission {
+        /// The authoritative admission refusal.
+        error: crate::runtime::obligation_mailbox::ObligationAdmissionError,
+        /// The value which was not published.
+        value: T,
+    },
+}
+
+impl<T> From<SendError<T>> for CheckedSendError<T> {
+    fn from(error: SendError<T>) -> Self {
+        Self::Channel(error)
+    }
+}
+
+impl<T> std::fmt::Display for CheckedSendError<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Channel(error) => write!(f, "{error}"),
+            Self::Admission { error, .. } => write!(f, "{error}"),
+        }
+    }
+}
+
+impl<T: std::fmt::Debug> std::error::Error for CheckedSendError<T> {}
+
+impl CheckedSendError<()> {
+    fn with_value<T>(self, value: T) -> CheckedSendError<T> {
+        match self {
+            Self::Channel(SendError::Disconnected(())) => {
+                CheckedSendError::Channel(SendError::Disconnected(value))
+            }
+            Self::Channel(SendError::Cancelled(())) => {
+                CheckedSendError::Channel(SendError::Cancelled(value))
+            }
+            Self::Channel(SendError::Full(())) => CheckedSendError::Channel(SendError::Full(value)),
+            Self::Admission { error, value: () } => CheckedSendError::Admission { error, value },
+        }
+    }
+}
+
 /// Error returned when receiving fails.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecvError {
@@ -568,6 +615,51 @@ impl<T> Sender<T> {
         }
     }
 
+    /// Reserves channel capacity and synchronously admits its runtime obligation.
+    ///
+    /// Unlike [`Self::reserve`], this reports closed-region, retired-holder and
+    /// quota refusals before returning a permit. A deliberately stateless `Cx`
+    /// remains untracked. Waiting preserves the same FIFO and cancellation rules.
+    #[must_use]
+    pub fn reserve_checked<'a>(&'a self, cx: &'a Cx) -> CheckedReserve<'a, T> {
+        CheckedReserve {
+            inner: self.reserve(cx),
+        }
+    }
+
+    /// Sends after checked obligation admission, retaining the value on refusal.
+    pub async fn send_checked(&self, cx: &Cx, value: T) -> Result<(), CheckedSendError<T>> {
+        match self.reserve_checked(cx).await {
+            Ok(permit) => permit.try_send(value).map_err(CheckedSendError::Channel),
+            Err(error) => Err(error.with_value(value)),
+        }
+    }
+
+    /// Attempts checked reservation without waiting or bypassing queued senders.
+    pub fn try_reserve_checked(&self, cx: &Cx) -> Result<SendPermit<'_, T>, CheckedSendError<()>> {
+        if cx.checkpoint().is_err() {
+            return Err(CheckedSendError::Channel(SendError::Cancelled(())));
+        }
+        // The physical permit owns rollback before the gateway may notify user
+        // code. Admission runs outside the channel mutex.
+        let mut permit = self.try_reserve().map_err(CheckedSendError::Channel)?;
+        permit.obligation = cx
+            .try_register_obligation_checked(
+                crate::record::ObligationKind::SendPermit,
+                cx.task_id(),
+            )
+            .map_err(|error| CheckedSendError::Admission { error, value: () })?;
+        Ok(permit)
+    }
+
+    /// Attempts a checked send without waiting, returning an unpublished value.
+    pub fn try_send_checked(&self, cx: &Cx, value: T) -> Result<(), CheckedSendError<T>> {
+        match self.try_reserve_checked(cx) {
+            Ok(permit) => permit.try_send(value).map_err(CheckedSendError::Channel),
+            Err(error) => Err(error.with_value(value)),
+        }
+    }
+
     /// Convenience method: reserve and send in one step.
     #[inline]
     pub async fn send(&self, cx: &Cx, value: T) -> Result<(), SendError<T>> {
@@ -852,10 +944,18 @@ impl<T> Reserve<'_, T> {
     }
 }
 
-impl<'a, T> Future for Reserve<'a, T> {
-    type Output = Result<SendPermit<'a, T>, SendError<()>>;
-
-    fn poll(mut self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Self::Output> {
+impl<'a, T> Reserve<'a, T> {
+    fn poll_with_registration<E>(
+        mut self: Pin<&mut Self>,
+        ctx: &mut Context<'_>,
+        register: impl FnOnce(
+            &Cx,
+        )
+            -> Result<Option<crate::runtime::obligation_mailbox::ObligationToken>, E>,
+    ) -> Poll<Result<SendPermit<'a, T>, E>>
+    where
+        E: From<SendError<()>>,
+    {
         assert!(
             !self.completed,
             "mpsc reserve future polled after completion"
@@ -872,7 +972,7 @@ impl<'a, T> Future for Reserve<'a, T> {
                 self.sender.shared.inner.lock().record_cancellation();
                 self.cleanup_waiter();
                 drop(prepared_waker);
-                return Poll::Ready(Err(SendError::<()>::Cancelled(())));
+                return Poll::Ready(Err(SendError::<()>::Cancelled(()).into()));
             }
 
             let mut inner = self.sender.shared.inner.lock();
@@ -883,7 +983,7 @@ impl<'a, T> Future for Reserve<'a, T> {
                 self.waiter_token = None;
                 self.completed = true;
                 drop(prepared_waker);
-                return Poll::Ready(Err(SendError::<()>::Disconnected(())));
+                return Poll::Ready(Err(SendError::<()>::Disconnected(()).into()));
             }
 
             let is_first = self.waiter_token.map_or_else(
@@ -914,20 +1014,24 @@ impl<'a, T> Future for Reserve<'a, T> {
                 // wake callback can reenter the channel.
                 self.waiter_token = None;
                 self.completed = true;
+                // Own physical rollback before retiring or invoking arbitrary
+                // wakers and before the admission gateway can notify a runtime.
+                let mut permit = SendPermit {
+                    sender: self.sender,
+                    sent: false,
+                    obligation: None,
+                };
+                permit.obligation = match register(self.cx) {
+                    Ok(obligation) => obligation,
+                    Err(error) => return Poll::Ready(Err(error)),
+                };
                 drop(retired_waker);
                 drop(prepared_waker);
                 if let Some(waker) = cascade_waker {
                     waker.wake_by_ref();
                 }
 
-                return Poll::Ready(Ok(SendPermit {
-                    sender: self.sender,
-                    sent: false,
-                    obligation: self.cx.try_register_obligation(
-                        crate::record::ObligationKind::SendPermit,
-                        self.cx.task_id(),
-                    ),
-                }));
+                return Poll::Ready(Ok(permit));
             }
 
             let current_waker = self
@@ -973,6 +1077,38 @@ impl<'a, T> Future for Reserve<'a, T> {
             drop(new_waker);
             return Poll::Pending;
         }
+    }
+}
+
+impl<'a, T> Future for Reserve<'a, T> {
+    type Output = Result<SendPermit<'a, T>, SendError<()>>;
+
+    fn poll(self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Self::Output> {
+        self.poll_with_registration(ctx, |cx| {
+            Ok(cx.try_register_obligation(crate::record::ObligationKind::SendPermit, cx.task_id()))
+        })
+    }
+}
+
+/// Future returned by [`Sender::reserve_checked`].
+///
+/// Capacity and runtime quota are both owned before success is returned.
+/// Polling after a terminal result panics, as it does for [`Reserve`].
+pub struct CheckedReserve<'a, T> {
+    inner: Reserve<'a, T>,
+}
+
+impl<'a, T> Future for CheckedReserve<'a, T> {
+    type Output = Result<SendPermit<'a, T>, CheckedSendError<()>>;
+
+    fn poll(mut self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Self::Output> {
+        Pin::new(&mut self.inner).poll_with_registration(ctx, |cx| {
+            cx.try_register_obligation_checked(
+                crate::record::ObligationKind::SendPermit,
+                cx.task_id(),
+            )
+            .map_err(|error| CheckedSendError::Admission { error, value: () })
+        })
     }
 }
 
@@ -1078,6 +1214,22 @@ impl<T> UnboundedSender<T> {
         self.inner.reserve(cx)
     }
 
+    /// Reserves with authoritative runtime obligation admission.
+    #[must_use]
+    pub fn reserve_checked<'a>(&'a self, cx: &'a Cx) -> CheckedReserve<'a, T> {
+        self.inner.reserve_checked(cx)
+    }
+
+    /// Attempts a checked reservation using the supplied capability context.
+    pub fn try_reserve_checked(&self, cx: &Cx) -> Result<SendPermit<'_, T>, CheckedSendError<()>> {
+        self.inner.try_reserve_checked(cx)
+    }
+
+    /// Sends after checked admission, retaining the value on refusal.
+    pub fn send_checked(&self, cx: &Cx, value: T) -> Result<(), CheckedSendError<T>> {
+        self.inner.try_send_checked(cx, value)
+    }
+
     /// Attempts to reserve a slot without blocking.
     #[inline]
     pub fn try_reserve(&self) -> Result<SendPermit<'_, T>, SendError<()>> {
@@ -1174,24 +1326,23 @@ impl<T> Clone for WeakUnboundedSender<T> {
 
 /// Detached receiver notification returned by an internal permit commit.
 ///
-/// This token must be consumed only after the caller releases every external
-/// lock: both waking and destroying an executor-provided `Waker` may run
-/// arbitrary code.
+/// Invoke `wake` after releasing every external lock. It dispatches both the
+/// runtime's obligation notification and the receiver's wake; neither callback
+/// may run inside an adapter's commit lock.
 #[derive(Debug)]
 #[must_use = "deferred receiver wake must be consumed after releasing external locks"]
-pub(crate) struct DeferredReceiverWake(Option<Arc<RegisteredWaker>>);
+pub(crate) struct DeferredReceiverWake {
+    receiver: Option<Arc<RegisteredWaker>>,
+    obligation: Option<Arc<crate::runtime::obligation_mailbox::ObligationGateway>>,
+}
 
 impl DeferredReceiverWake {
-    #[inline]
-    fn none() -> Self {
-        Self(None)
-    }
-
-    /// Invokes the detached receiver notification, if any.
+    /// Invokes detached notifications after all adapter locks are released.
     #[inline]
     pub(crate) fn wake(mut self) {
-        if let Some(waker) = self.0.take() {
-            waker.wake_by_ref();
+        let _wake = ReleasedCapacityWake(self.receiver.take());
+        if let Some(gateway) = self.obligation.take() {
+            gateway.notify();
         }
     }
 }
@@ -1218,12 +1369,47 @@ pub struct SendPermit<'a, T> {
 fn resolve_send_obligation(
     token: Option<crate::runtime::obligation_mailbox::ObligationToken>,
     delivered: bool,
-) {
-    if let Some(token) = token {
+) -> Option<Arc<crate::runtime::obligation_mailbox::ObligationGateway>> {
+    token.and_then(|token| {
         if delivered {
-            let _ = token.commit();
+            token.commit_deferred().1
         } else {
-            let _ = token.abort(crate::record::ObligationAbortReason::Error);
+            token
+                .abort_deferred(crate::record::ObligationAbortReason::Error)
+                .1
+        }
+    })
+}
+
+/// Deliver a released slot's notification even when obligation settlement
+/// unwinds. Neither callback nor final waker destruction runs under a lock.
+struct ReleasedCapacityWake(Option<Arc<RegisteredWaker>>);
+
+impl Drop for ReleasedCapacityWake {
+    fn drop(&mut self) {
+        let Some(waker) = self.0.take() else {
+            return;
+        };
+        let already_unwinding = std::thread::panicking();
+        let notified =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| waker.wake_by_ref()));
+        let retired = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(waker)));
+        let failure = match (notified, retired) {
+            (Err(primary), Err(secondary)) => {
+                // An arbitrary secondary panic payload may itself panic on
+                // drop. Preserve the first failure without a double unwind.
+                std::mem::forget(secondary);
+                Some(primary)
+            }
+            (Err(error), Ok(())) | (Ok(()), Err(error)) => Some(error),
+            (Ok(()), Ok(())) => None,
+        };
+        if let Some(payload) = failure {
+            if already_unwinding {
+                std::mem::forget(payload);
+            } else {
+                std::panic::resume_unwind(payload);
+            }
         }
     }
 }
@@ -1254,8 +1440,9 @@ impl<T> SendPermit<'_, T> {
     ///
     /// This crate-private split lets an adapter commit under its own state lock,
     /// release that lock, and only then invoke the arbitrary receiver callback.
-    /// The returned waker must be woken or dropped after all external locks have
-    /// been released.
+    /// Invoke `wake` on the returned token after releasing all external locks
+    /// to notify both the obligation drainer and the receiver. Quota settlement
+    /// and queue publication are already synchronous when this method returns.
     #[inline]
     pub(crate) fn try_send_deferred_wake(
         mut self,
@@ -1275,10 +1462,13 @@ impl<T> SendPermit<'_, T> {
             // Receiver is gone; drop the value and release capacity.
             // Note: Receiver::drop already drained and woke any pending send_wakers.
             drop(inner);
-            resolve_send_obligation(obligation, false);
+            let obligation = resolve_send_obligation(obligation, false);
             return (
                 Err(SendError::Disconnected(value)),
-                DeferredReceiverWake::none(),
+                DeferredReceiverWake {
+                    receiver: None,
+                    obligation,
+                },
             );
         }
 
@@ -1287,17 +1477,27 @@ impl<T> SendPermit<'_, T> {
         // Extract waker before dropping the lock to avoid wake-under-lock.
         let recv_waker = inner.recv_waker.take();
         drop(inner);
-        resolve_send_obligation(obligation, true);
-        (Ok(()), DeferredReceiverWake(recv_waker))
+        let obligation = resolve_send_obligation(obligation, true);
+        (
+            Ok(()),
+            DeferredReceiverWake {
+                receiver: recv_waker,
+                obligation,
+            },
+        )
     }
 
     /// Aborts the reserved slot without sending.
     #[inline]
     pub fn abort(mut self) {
         self.sent = true;
+        let _wake = self.release_capacity();
         if let Some(token) = self.obligation.take() {
             let _ = token.abort(crate::record::ObligationAbortReason::Explicit);
         }
+    }
+
+    fn release_capacity(&self) -> ReleasedCapacityWake {
         let next_waker = {
             let mut inner = self.sender.shared.inner.lock();
             if inner.reserved == 0 {
@@ -1308,10 +1508,7 @@ impl<T> SendPermit<'_, T> {
             inner.record_cancellation();
             inner.take_next_sender_waker()
         };
-        // Wake outside the lock.
-        if let Some(w) = next_waker {
-            w.wake_by_ref();
-        }
+        ReleasedCapacityWake(next_waker)
     }
 
     /// Returns an opt-in redacted telemetry snapshot for this send permit.
@@ -1325,22 +1522,10 @@ impl<T> SendPermit<'_, T> {
 impl<T> Drop for SendPermit<'_, T> {
     fn drop(&mut self) {
         if !self.sent {
+            self.sent = true;
+            let _wake = self.release_capacity();
             if let Some(token) = self.obligation.take() {
                 let _ = token.abort(crate::record::ObligationAbortReason::Cancel);
-            }
-            let next_waker = {
-                let mut inner = self.sender.shared.inner.lock();
-                if inner.reserved == 0 {
-                    debug_assert!(false, "dropped permit without reservation");
-                } else {
-                    inner.reserved -= 1;
-                }
-                inner.record_cancellation();
-                inner.take_next_sender_waker()
-            };
-            // Wake outside the lock.
-            if let Some(w) = next_waker {
-                w.wake_by_ref();
             }
         }
     }
@@ -1940,6 +2125,277 @@ mod tests {
                 Poll::Ready(v) => return v,
                 Poll::Pending => std::thread::yield_now(),
             }
+        }
+    }
+
+    fn checked_admission_fixture(
+        limit: usize,
+    ) -> (crate::lab::LabRuntime, Cx, crate::runtime::TaskHandle<()>) {
+        let mut lab =
+            crate::lab::LabRuntime::new(crate::lab::LabConfig::new(0x28_c001).max_steps(128));
+        let root = lab.state.create_root_region(crate::types::Budget::INFINITE);
+        assert!(lab.state.set_region_limits(
+            root,
+            crate::record::region::RegionLimits {
+                max_obligations: Some(limit),
+                ..crate::record::region::RegionLimits::UNLIMITED
+            }
+        ));
+        let (task, handle) = lab
+            .state
+            .create_task(root, crate::types::Budget::INFINITE, async {})
+            .unwrap();
+        let cx = lab.state.task(task).unwrap().cx.clone().unwrap();
+        (lab, cx, handle)
+    }
+
+    fn finish_checked_admission_fixture(
+        mut lab: crate::lab::LabRuntime,
+        cx: &Cx,
+        mut handle: crate::runtime::TaskHandle<()>,
+        reservations: u64,
+    ) {
+        let mailbox = Arc::clone(lab.state.obligation_gateway().unwrap().mailbox());
+        lab.scheduler.lock().schedule(cx.task_id(), 0);
+        let report = lab.run_until_quiescent_with_report();
+        assert!(
+            report.oracle_report.all_passed(),
+            "{:?}",
+            report.oracle_report.failures()
+        );
+        assert!(report.invariant_violations.is_empty());
+        assert!(handle.try_join().unwrap().is_some());
+        let stats = mailbox.stats();
+        assert_eq!(stats.posted, stats.applied);
+        assert_eq!(stats.reserved, reservations);
+        assert_eq!(stats.committed + stats.aborted, reservations);
+        assert_eq!(stats.refused, 0);
+        assert_eq!(stats.leaked, 0);
+        assert_eq!(mailbox.open_tickets(), 0);
+        assert_eq!(lab.state.pending_obligation_count(), 0);
+        assert_eq!(lab.state.leak_count(), 0);
+    }
+
+    #[test]
+    fn checked_admission_quota_denial_returns_capacity_and_same_poll_credit() {
+        use crate::runtime::obligation_mailbox::ObligationAdmissionError;
+        for limit in [0, 1, 3] {
+            let (lab, cx, handle) = checked_admission_fixture(limit);
+            let (tx, mut rx) = channel::<usize>(4);
+            let (unbounded_tx, mut unbounded_rx) = unbounded::<usize>();
+            let mut permits = Vec::new();
+            for _ in 0..limit {
+                permits.push(tx.try_reserve_checked(&cx).unwrap());
+            }
+            assert_eq!(tx.shared.inner.lock().reserved, limit);
+            let expected = CheckedSendError::Admission {
+                error: ObligationAdmissionError::LimitReached { limit, live: limit },
+                value: 91,
+            };
+            assert_eq!(tx.try_send_checked(&cx, 91), Err(expected));
+            assert_eq!(unbounded_tx.send_checked(&cx, 91), Err(expected));
+            assert_eq!(tx.shared.inner.lock().reserved, limit);
+            assert_eq!(unbounded_tx.inner.shared.inner.lock().reserved, 0);
+            assert_eq!(rx.try_recv(), Err(RecvError::Empty));
+            assert_eq!(unbounded_rx.try_recv(), Err(RecvError::Empty));
+            if let Some(permit) = permits.pop() {
+                permit.try_send(17).unwrap();
+                assert_eq!(rx.try_recv(), Ok(17));
+                // No runtime step or mailbox drain has occurred: commit must
+                // already have returned the authoritative quota credit.
+                unbounded_tx.send_checked(&cx, 23).unwrap();
+                assert_eq!(unbounded_rx.try_recv(), Ok(23));
+            }
+            drop(permits);
+            assert_eq!(tx.shared.inner.lock().reserved, 0);
+            finish_checked_admission_fixture(
+                lab,
+                &cx,
+                handle,
+                (limit + usize::from(limit > 0)) as u64,
+            );
+        }
+    }
+
+    #[test]
+    fn checked_admission_fifo_denial_wakes_next_eligible_sender() {
+        use crate::runtime::obligation_mailbox::ObligationAdmissionError;
+        let (denied_lab, denied_cx, denied_handle) = checked_admission_fixture(0);
+        let (allowed_lab, allowed_cx, allowed_handle) = checked_admission_fixture(1);
+        let (tx, mut rx) = channel::<u32>(1);
+        tx.try_send(7).unwrap();
+        let first_wakes = Arc::new(AtomicUsize::new(0));
+        let second_wakes = Arc::new(AtomicUsize::new(0));
+        let first_waker = counting_waker(first_wakes.clone());
+        let second_waker = counting_waker(second_wakes.clone());
+        let mut first_ctx = Context::from_waker(&first_waker);
+        let mut second_ctx = Context::from_waker(&second_waker);
+        let mut first = Box::pin(tx.reserve_checked(&denied_cx));
+        let mut second = Box::pin(tx.reserve_checked(&allowed_cx));
+        assert!(first.as_mut().poll(&mut first_ctx).is_pending());
+        assert!(second.as_mut().poll(&mut second_ctx).is_pending());
+        assert_eq!(tx.shared.inner.lock().waiter_queue.len(), 2);
+        assert_eq!(rx.try_recv(), Ok(7));
+        assert_eq!(first_wakes.load(Ordering::SeqCst), 1);
+        assert_eq!(second_wakes.load(Ordering::SeqCst), 0);
+        assert!(matches!(
+            first.as_mut().poll(&mut first_ctx),
+            Poll::Ready(Err(CheckedSendError::Admission {
+                error: ObligationAdmissionError::LimitReached { limit: 0, live: 0 },
+                value: (),
+            }))
+        ));
+        assert_eq!(tx.shared.inner.lock().reserved, 0);
+        assert_eq!(second_wakes.load(Ordering::SeqCst), 1);
+        let Poll::Ready(Ok(permit)) = second.as_mut().poll(&mut second_ctx) else {
+            panic!("the woken FIFO successor must obtain the returned capacity");
+        };
+        permit.try_send(19).unwrap();
+        assert_eq!(rx.try_recv(), Ok(19));
+        assert!(tx.shared.inner.lock().waiter_queue.is_empty());
+        drop(first);
+        drop(second);
+        finish_checked_admission_fixture(denied_lab, &denied_cx, denied_handle, 0);
+        finish_checked_admission_fixture(allowed_lab, &allowed_cx, allowed_handle, 1);
+    }
+
+    #[test]
+    fn checked_admission_stateless_and_cancelled_contexts_keep_value_ownership() {
+        let cx = test_cx();
+        let (tx, mut rx) = channel::<u32>(1);
+        block_on(tx.send_checked(&cx, 31)).unwrap();
+        assert_eq!(rx.try_recv(), Ok(31));
+        cx.set_cancel_requested(true);
+        assert_eq!(
+            tx.try_send_checked(&cx, 41),
+            Err(CheckedSendError::Channel(SendError::Cancelled(41)))
+        );
+        assert_eq!(rx.try_recv(), Err(RecvError::Empty));
+        assert_eq!(tx.shared.inner.lock().reserved, 0);
+    }
+
+    #[test]
+    fn checked_admission_notifier_panic_restores_capacity_and_quota() {
+        use crate::runtime::obligation_mailbox::ObligationGateway;
+        let (lab, cx, handle) = checked_admission_fixture(1);
+        let mailbox = Arc::clone(lab.state.obligation_gateway().unwrap().mailbox());
+        let notifications = Arc::new(AtomicUsize::new(0));
+        let observed = notifications.clone();
+        let liveness = Arc::new(());
+        let gateway = Arc::new(ObligationGateway::new(
+            mailbox,
+            Arc::new(move || {
+                assert_ne!(
+                    observed.fetch_add(1, Ordering::SeqCst),
+                    0,
+                    "planted checked admission notification panic"
+                );
+            }),
+            Arc::downgrade(&liveness),
+        ));
+        let cx = cx.with_obligation_gateway(Some(gateway), None);
+        let (tx, mut rx) = channel::<u32>(1);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _permit = tx.try_reserve_checked(&cx).unwrap();
+        }));
+        assert!(
+            result.is_err(),
+            "the planted admission callback must execute"
+        );
+        assert_eq!(notifications.load(Ordering::SeqCst), 1);
+        assert_eq!(tx.shared.inner.lock().reserved, 0);
+        assert_eq!(rx.try_recv(), Err(RecvError::Empty));
+        tx.try_send_checked(&cx, 53).unwrap();
+        assert_eq!(rx.try_recv(), Ok(53));
+        finish_checked_admission_fixture(lab, &cx, handle, 2);
+    }
+
+    #[test]
+    fn checked_admission_settlement_panic_keeps_parked_peer_wake_and_credit() {
+        use crate::runtime::obligation_mailbox::ObligationGateway;
+        for operation in ["commit", "abort", "drop"] {
+            let (lab, cx, handle) = checked_admission_fixture(1);
+            let mailbox = Arc::clone(lab.state.obligation_gateway().unwrap().mailbox());
+            let notifications = Arc::new(AtomicUsize::new(0));
+            let observed = notifications.clone();
+            let adapter_lock = Arc::new(Mutex::new(()));
+            let observed_lock = adapter_lock.clone();
+            let liveness = Arc::new(());
+            let gateway = Arc::new(ObligationGateway::new(
+                mailbox,
+                Arc::new(move || {
+                    assert!(
+                        observed_lock.try_lock().is_some(),
+                        "notification under adapter lock"
+                    );
+                    assert_ne!(
+                        observed.fetch_add(1, Ordering::SeqCst),
+                        1,
+                        "planted {operation} settlement notification panic"
+                    );
+                }),
+                Arc::downgrade(&liveness),
+            ));
+            let cx = cx.with_obligation_gateway(Some(gateway), None);
+            let (tx, mut rx) = channel::<u32>(1);
+            let permit = tx.try_reserve_checked(&cx).unwrap();
+            let wakes = Arc::new(AtomicUsize::new(0));
+            let waker = counting_waker(wakes.clone());
+            let mut ctx = Context::from_waker(&waker);
+            if operation == "commit" {
+                let mut receiver = Box::pin(rx.recv(&cx));
+                assert!(receiver.as_mut().poll(&mut ctx).is_pending());
+                assert!(tx.shared.inner.lock().recv_waker.is_some());
+                let guard = adapter_lock.lock();
+                let (result, wake) = permit.try_send_deferred_wake(97);
+                assert_eq!(result, Ok(()));
+                assert_eq!(notifications.load(Ordering::SeqCst), 1);
+                assert_eq!(wakes.load(Ordering::SeqCst), 0);
+                drop(guard);
+                let failure =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| wake.wake()));
+                let failure = failure.expect_err("the planted commit notifier must panic");
+                assert!(
+                    failure
+                        .downcast_ref::<String>()
+                        .is_some_and(|message| message.contains("planted commit"))
+                );
+                assert_eq!(wakes.load(Ordering::SeqCst), 1);
+                assert!(matches!(
+                    receiver.as_mut().poll(&mut ctx),
+                    Poll::Ready(Ok(97))
+                ));
+                drop(receiver);
+                tx.try_send_checked(&cx, 101).unwrap();
+                assert_eq!(rx.try_recv(), Ok(101));
+            } else {
+                let mut successor = Box::pin(tx.reserve_checked(&cx));
+                assert!(successor.as_mut().poll(&mut ctx).is_pending());
+                assert_eq!(tx.shared.inner.lock().waiter_queue.len(), 1);
+                let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    if operation == "abort" {
+                        permit.abort();
+                    } else {
+                        drop(permit);
+                    }
+                }));
+                let failure = failure.expect_err("the planted abort/drop notifier must panic");
+                assert!(
+                    failure
+                        .downcast_ref::<String>()
+                        .is_some_and(|message| message.contains("settlement notification panic"))
+                );
+                assert_eq!(tx.shared.inner.lock().reserved, 0);
+                assert_eq!(wakes.load(Ordering::SeqCst), 1);
+                let Poll::Ready(Ok(next)) = successor.as_mut().poll(&mut ctx) else {
+                    panic!("settled quota and returned capacity must admit the woken successor");
+                };
+                next.try_send(103).unwrap();
+                assert_eq!(rx.try_recv(), Ok(103));
+                drop(successor);
+            }
+            assert_eq!(notifications.load(Ordering::SeqCst), 4);
+            finish_checked_admission_fixture(lab, &cx, handle, 2);
         }
     }
 

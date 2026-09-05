@@ -13,8 +13,8 @@ use crate::types::{
 };
 use parking_lot::RwLock;
 use std::cell::Cell;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, Weak};
 
 // Thread-local flag to detect reentrant calls and prevent deadlock
 thread_local! {
@@ -328,9 +328,129 @@ struct RegionInner {
     close_outcome: Option<TaskOutcome>,
     limits: RegionLimits,
     pending_obligations: usize,
+    /// Accepted checked obligations whose terminal lifecycle has not yet been
+    /// applied to the arena. This is a close barrier, not a second quota.
+    unapplied_obligations: usize,
+    /// Removing a record revokes handles even when the removed record survives.
+    obligation_handles_live: bool,
     /// Region-owned heap for task allocations.
     /// Reclaimed when the region closes to quiescence.
     heap: RegionHeap,
+}
+
+/// A task-generation capability over the region's actual admission lock.
+/// Weak references avoid retaining region heaps/finalizers through a task Cx.
+#[derive(Debug)]
+pub(crate) struct ObligationAdmissionHandle {
+    state: Weak<AtomicRegionState>,
+    inner: Weak<RwLock<RegionInner>>,
+    holder: TaskId,
+    region: RegionId,
+    live: AtomicBool,
+}
+
+impl ObligationAdmissionHandle {
+    pub(crate) fn revoke(&self) {
+        if let Some(inner) = self.inner.upgrade() {
+            let _guard = inner.write();
+            self.live.store(false, Ordering::Release);
+        } else {
+            self.live.store(false, Ordering::Release);
+        }
+    }
+
+    pub(crate) fn is_live(&self) -> bool {
+        self.live.load(Ordering::Acquire)
+    }
+
+    /// `publish` must contain only ownership setup and queue publication. In
+    /// particular it must not notify, trace, drop user values, or acquire a
+    /// runtime/table/primitive lock. Revocation cannot pass a published credit.
+    pub(crate) fn admit(
+        &self,
+        holder: TaskId,
+        region: RegionId,
+        publish: impl FnOnce(),
+    ) -> Result<(), crate::runtime::obligation_mailbox::ObligationAdmissionError> {
+        self.admit_inner(holder, region, true, publish)
+    }
+
+    pub(crate) fn reserve_direct(
+        &self,
+        holder: TaskId,
+        region: RegionId,
+    ) -> Result<(), crate::runtime::obligation_mailbox::ObligationAdmissionError> {
+        self.admit_inner(holder, region, false, || {})
+    }
+
+    fn admit_inner(
+        &self,
+        holder: TaskId,
+        region: RegionId,
+        pending_application: bool,
+        publish: impl FnOnce(),
+    ) -> Result<(), crate::runtime::obligation_mailbox::ObligationAdmissionError> {
+        use crate::runtime::obligation_mailbox::ObligationAdmissionError as Error;
+        if self.holder != holder || self.region != region {
+            return Err(Error::HolderMismatch);
+        }
+        let inner = self.inner.upgrade().ok_or(Error::RegionClosed)?;
+        let state = self.state.upgrade().ok_or(Error::RegionClosed)?;
+        let mut inner = inner.write();
+        if !inner.obligation_handles_live || !state.load().can_accept_work() {
+            return Err(Error::RegionClosed);
+        }
+        if !self.live.load(Ordering::Acquire) {
+            return Err(Error::HolderNotLive);
+        }
+        if let Some(limit) = inner.limits.max_obligations {
+            if inner.pending_obligations >= limit {
+                return Err(Error::LimitReached {
+                    limit,
+                    live: inner.pending_obligations,
+                });
+            }
+        }
+        let pending = inner
+            .pending_obligations
+            .checked_add(1)
+            .ok_or(Error::CapacityExhausted)?;
+        let unapplied = inner
+            .unapplied_obligations
+            .checked_add(usize::from(pending_application))
+            .ok_or(Error::CapacityExhausted)?;
+        inner.pending_obligations = pending;
+        inner.unapplied_obligations = unapplied;
+        publish();
+        Ok(())
+    }
+
+    /// Claim a terminal outcome and release live quota under the same gate as
+    /// admission. The callback owns the credit's exactly-once state transition.
+    pub(crate) fn settle(&self, claim: impl FnOnce() -> bool) -> bool {
+        let Some(inner) = self.inner.upgrade() else {
+            return claim();
+        };
+        let mut inner = inner.write();
+        if !claim() {
+            return false;
+        }
+        inner.pending_obligations = inner
+            .pending_obligations
+            .checked_sub(1)
+            .expect("accepted obligation quota released exactly once");
+        true
+    }
+
+    pub(crate) fn finish_application(&self) {
+        if let Some(inner) = self.inner.upgrade() {
+            let mut inner = inner.write();
+            inner.unapplied_obligations = inner
+                .unapplied_obligations
+                .checked_sub(1)
+                .expect("accepted obligation application finished exactly once");
+        }
+    }
 }
 
 /// br-asupersync-dx-core-api-v2-u1z5hn.1.2 — Shared pending-spawn counter.
@@ -444,9 +564,9 @@ pub struct RegionRecord {
     /// Notification state for tasks waiting on this region to close.
     pub close_notify: std::sync::Arc<parking_lot::Mutex<RegionCloseState>>,
     /// Current state (atomic for concurrent access).
-    state: AtomicRegionState,
+    state: Arc<AtomicRegionState>,
     /// Inner mutable state (guarded by a lock).
-    inner: RwLock<RegionInner>,
+    inner: Arc<RwLock<RegionInner>>,
     /// br-asupersync-bjrqu3 — Count of `resolve_obligation` calls
     /// that fired when `pending_obligations` was already 0. Surfaces
     /// the double-resolve invariant violation that the previous
@@ -549,8 +669,8 @@ impl RegionRecord {
                 closed: false,
                 waiters: Vec::new(),
             })),
-            state: AtomicRegionState::new(RegionState::Open),
-            inner: RwLock::new(RegionInner {
+            state: Arc::new(AtomicRegionState::new(RegionState::Open)),
+            inner: Arc::new(RwLock::new(RegionInner {
                 budget,
                 capability_budget,
                 children: Vec::new(),
@@ -560,8 +680,10 @@ impl RegionRecord {
                 close_outcome: None,
                 limits: RegionLimits::UNLIMITED,
                 pending_obligations: 0,
+                unapplied_obligations: 0,
+                obligation_handles_live: true,
                 heap: RegionHeap::new(),
-            }),
+            })),
             double_resolve_count: AtomicU64::new(0),
             pending_spawns: Arc::new(PendingSpawnCounter::new()),
             pending_obligation_posts: Arc::new(PendingSpawnCounter::new()),
@@ -623,6 +745,29 @@ impl RegionRecord {
     #[must_use]
     pub fn pending_obligations(&self) -> usize {
         self.inner.read().pending_obligations
+    }
+
+    pub(crate) fn obligation_admission_handle(
+        &self,
+        holder: TaskId,
+    ) -> Arc<ObligationAdmissionHandle> {
+        Arc::new(ObligationAdmissionHandle {
+            state: Arc::downgrade(&self.state),
+            inner: Arc::downgrade(&self.inner),
+            holder,
+            region: self.id,
+            live: AtomicBool::new(true),
+        })
+    }
+
+    pub(crate) fn revoke_obligation_handles(&self) {
+        self.inner.write().obligation_handles_live = false;
+    }
+
+    /// Checked admission accepted before its terminal arena projection.
+    #[must_use]
+    pub fn unapplied_obligation_count(&self) -> usize {
+        self.inner.read().unapplied_obligations
     }
 
     /// Returns the current cancel reason, if any.
@@ -713,6 +858,7 @@ impl RegionRecord {
         !inner.children.is_empty()
             || !inner.tasks.is_empty()
             || inner.pending_obligations > 0
+            || inner.unapplied_obligations > 0
             || self.pending_spawns.count() > 0
     }
 
@@ -1073,6 +1219,7 @@ impl RegionRecord {
         inner.children.is_empty()
             && inner.tasks.is_empty()
             && inner.pending_obligations == 0
+            && inner.unapplied_obligations == 0
             && inner.finalizers.is_empty()
             && self.pending_spawns.count() == 0
     }
@@ -1208,6 +1355,7 @@ impl RegionRecord {
         if !(inner.children.is_empty()
             && inner.tasks.is_empty()
             && inner.pending_obligations == 0
+            && inner.unapplied_obligations == 0
             && inner.finalizers.is_empty()
             // Pending (not-yet-admitted) spawn requests are live children:
             // their credits were taken before the requests became visible,
@@ -1465,6 +1613,7 @@ impl RegionRecord {
         inner.children.is_empty()
             && inner.tasks.iter().all(|task| completed(*task))
             && inner.pending_obligations == 0
+            && inner.unapplied_obligations == 0
     }
 
     /// Applies a distributed snapshot to this region record.

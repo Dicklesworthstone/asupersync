@@ -196,6 +196,9 @@ struct CxHandles {
     /// Lets `Cx::try_register_obligation` mint a runtime-tracked obligation
     /// without the RuntimeState lock. `None` for a Cx built without a runtime.
     obligation_gateway: Option<Arc<crate::runtime::obligation_mailbox::ObligationGateway>>,
+    obligation_admission: Option<Arc<crate::record::region::ObligationAdmissionHandle>>,
+    /// Explicit provenance survives intentionally stripped gateway handles.
+    runtime_obligation_context: bool,
     /// Pending obligation-post counter for THIS Cx's region.
     ///
     /// Same shape and role as `pending_spawns`: a live token holds one
@@ -993,6 +996,8 @@ impl<Caps> Cx<Caps> {
                 spawn_gateway: None,
                 pending_spawns: None,
                 obligation_gateway: None,
+                obligation_admission: None,
+                runtime_obligation_context: false,
                 pending_obligation_posts: None,
                 default_http_client: DefaultHttpClientSlot::default(),
                 #[cfg(feature = "messaging-fabric")]
@@ -1100,6 +1105,8 @@ impl<Caps> Cx<Caps> {
                 spawn_gateway: None,
                 pending_spawns: None,
                 obligation_gateway: None,
+                obligation_admission: None,
+                runtime_obligation_context: false,
                 pending_obligation_posts: None,
                 default_http_client: DefaultHttpClientSlot::default(),
                 #[cfg(feature = "messaging-fabric")]
@@ -1390,7 +1397,9 @@ impl<Caps> Cx<Caps> {
         gateway: Option<Arc<crate::runtime::spawn_mailbox::SpawnGateway>>,
     ) -> Self {
         self.inner.write().cancel_gateway.clone_from(&gateway);
-        Arc::make_mut(&mut self.handles).spawn_gateway = gateway;
+        let handles = Arc::make_mut(&mut self.handles);
+        handles.spawn_gateway = gateway;
+        handles.runtime_obligation_context = true;
         self
     }
 
@@ -1419,7 +1428,84 @@ impl<Caps> Cx<Caps> {
         let handles = Arc::make_mut(&mut self.handles);
         handles.obligation_gateway = gateway;
         handles.pending_obligation_posts = pending_posts;
+        handles.runtime_obligation_context = true;
         self
+    }
+
+    #[must_use]
+    pub(crate) fn with_runtime_obligation_context(mut self) -> Self {
+        Arc::make_mut(&mut self.handles).runtime_obligation_context = true;
+        self
+    }
+
+    #[must_use]
+    pub(crate) fn with_obligation_admission(
+        mut self,
+        admission: Option<Arc<crate::record::region::ObligationAdmissionHandle>>,
+    ) -> Self {
+        Arc::make_mut(&mut self.handles).obligation_admission = admission;
+        self
+    }
+
+    pub(crate) fn revoke_obligation_admission(&self) {
+        if let Some(admission) = &self.handles.obligation_admission {
+            admission.revoke();
+        }
+    }
+
+    pub(crate) fn obligation_admission_is_live(&self) -> bool {
+        self.handles
+            .obligation_admission
+            .as_ref()
+            .is_none_or(|handle| handle.is_live())
+    }
+
+    pub(crate) fn reserve_direct_obligation(
+        &self,
+        holder: TaskId,
+        region: RegionId,
+    ) -> Option<Result<(), crate::runtime::obligation_mailbox::ObligationAdmissionError>> {
+        self.handles
+            .obligation_admission
+            .as_ref()
+            .map(|handle| handle.reserve_direct(holder, region))
+    }
+
+    /// Synchronously admit an obligation before returning its owned token.
+    ///
+    /// The credit shares the region's authoritative quota; arena tracing is
+    /// applied later by the runtime. `Ok(None)` is reserved for contexts built
+    /// without a runtime. Legacy primitive APIs retain their existing behavior.
+    ///
+    /// # Errors
+    /// Returns a distinct error for a retired runtime/holder, closed region,
+    /// exhausted quota, or a holder different from this context's task.
+    pub fn try_register_obligation_checked(
+        &self,
+        kind: crate::record::ObligationKind,
+        holder: TaskId,
+    ) -> Result<
+        Option<crate::runtime::obligation_mailbox::ObligationToken>,
+        crate::runtime::obligation_mailbox::ObligationAdmissionError,
+    > {
+        use crate::runtime::obligation_mailbox::ObligationAdmissionError;
+        let Some(gateway) = self.handles.obligation_gateway.as_ref() else {
+            return if self.handles.obligation_admission.is_some() {
+                Err(ObligationAdmissionError::RuntimeUnavailable)
+            } else if self.handles.runtime_obligation_context {
+                Err(ObligationAdmissionError::HolderNotLive)
+            } else {
+                Ok(None)
+            };
+        };
+        let admission = self
+            .handles
+            .obligation_admission
+            .as_ref()
+            .ok_or(ObligationAdmissionError::HolderNotLive)?;
+        gateway
+            .register_checked(kind, holder, self.region_id(), admission)
+            .map(Some)
     }
 
     /// Mint a runtime-tracked obligation of `kind` held by `holder` in this

@@ -21,8 +21,8 @@ use crate::observability::swarm_pressure_governor::{
 };
 use crate::observability::{LogCollector, ObservabilityConfig};
 use crate::record::{
-    AdmissionError, ObligationAbortReason, ObligationKind, ObligationRecord, ObligationState,
-    RegionLimits, RegionRecord, SourceLocation, TaskRecord,
+    AdmissionError, ObligationAbortReason, ObligationKind, ObligationRecord, ObligationResolution,
+    ObligationState, RegionLimits, RegionRecord, SourceLocation, TaskRecord,
     finalizer::{FINALIZER_TIME_BUDGET_NANOS, Finalizer, finalizer_budget},
     region::RegionState,
     task::{CheckpointCancelAck, HandleCancelRoute, TaskState},
@@ -55,6 +55,7 @@ use crate::types::{
     CapabilityBudgetRequirements, ObligationId, Outcome, RegionId, TaskId, Time,
     id::{next_bootstrap_region_id, next_bootstrap_task_id},
 };
+use crate::util::det_hash::DetHashMap;
 use crate::util::{Arena, ArenaIndex, DetEntropy, EntropySource, OsEntropy};
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
@@ -1730,6 +1731,9 @@ pub struct RuntimeState {
     pub tasks: TaskTable,
     /// All obligation records.
     pub obligations: ObligationTable,
+    /// Private association with preaccepted credits; quota lives in RegionRecord.
+    admitted_obligations:
+        DetHashMap<ObligationId, Arc<crate::runtime::obligation_mailbox::AdmittedObligation>>,
     /// Current logical time.
     pub now: Time,
     /// The root region.
@@ -2023,6 +2027,7 @@ impl RuntimeState {
             regions: RegionTable::with_capacity(capacity_hints.region_capacity),
             tasks: TaskTable::with_capacity(capacity_hints.task_capacity),
             obligations: ObligationTable::with_capacity(capacity_hints.obligation_capacity),
+            admitted_obligations: DetHashMap::default(),
             now: Time::from_nanos(1_000_000_000),
             root_region: None,
             trace: TraceBufferHandle::new(trace_capacity),
@@ -2398,6 +2403,32 @@ impl RuntimeState {
             applied += batch;
         }
         applied
+    }
+
+    /// Fence checked admissions before capturing a terminal holder's backlog.
+    /// The admission gate includes Reserve publication, so after this returns
+    /// no accepted Reserve for this generation can appear behind that cutoff.
+    pub(crate) fn revoke_obligation_admission_before_completion(
+        &self,
+        task_id: TaskId,
+        dispatch_tasks: Option<&Arc<crate::sync::ContendedMutex<TaskTable>>>,
+    ) {
+        let dispatch =
+            dispatch_tasks.or_else(|| self.shard_tables.as_ref().map(|shards| &shards.tasks));
+        if let Some(tasks) = dispatch {
+            let tasks = tasks
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(cx) = tasks.task(task_id).and_then(|record| record.cx.as_ref()) {
+                cx.revoke_obligation_admission();
+            }
+        } else if let Some(cx) = self
+            .tasks
+            .task(task_id)
+            .and_then(|record| record.cx.as_ref())
+        {
+            cx.revoke_obligation_admission();
+        }
     }
 
     /// Whether obligation posts are waiting to be applied.
@@ -3867,6 +3898,12 @@ impl RuntimeState {
                 .get(region.arena_index())
                 .map(crate::record::RegionRecord::pending_obligation_post_handle),
         );
+        let cx = cx.with_obligation_admission(
+            regions
+                .resolve_ref(&self.regions)
+                .get(region.arena_index())
+                .map(|record| record.obligation_admission_handle(task_id)),
+        );
         cx.set_trace_buffer(self.trace_handle());
         cx.set_loser_drain_history_handle(self.loser_drain_history_handle());
         let cx_weak = std::sync::Arc::downgrade(&cx.inner);
@@ -4225,6 +4262,12 @@ impl RuntimeState {
         // publish the first scheduler lane. Cancellation mutates this Cx while
         // the gate is false but delegates lane/Waker publication to the
         // AdmissionPublication handoff.
+        let cx = cx.with_obligation_admission(
+            regions
+                .resolve_ref(&self.regions)
+                .get(region.arena_index())
+                .map(|record| record.obligation_admission_handle(task_id)),
+        );
         cx.inner.write().runnable_publication =
             crate::types::task_context::RunnablePublication::Unpublished;
         cx.set_trace_buffer(self.trace_handle());
@@ -4331,6 +4374,10 @@ impl RuntimeState {
         // observes and records exactly what an admitted task context would:
         // trace events flow to the runtime trace buffer, and cancellation
         // loser-drain history stays attributable.
+        // This child-region principal borrows the caller's task id; it does
+        // not mint a task owned by the child. Do not manufacture checked
+        // holder authority here. Actual child tasks receive their own handle
+        // at the two task-minting seams above.
         principal_cx.set_trace_buffer(self.trace_handle());
         principal_cx.set_loser_drain_history_handle(self.loser_drain_history_handle());
         let close_notify = self
@@ -4865,6 +4912,13 @@ impl RuntimeState {
                         .get(leak.id.arena_index())
                         .is_some_and(ObligationRecord::is_pending)
                         && !self.in_flight_leak_ids.contains(&leak.id)
+                        && self
+                            .admitted_obligations
+                            .get(&leak.id)
+                            .is_none_or(|credit| {
+                                credit.claim_resolution(ObligationResolution::Leak)
+                                    == ObligationResolution::Leak
+                            })
                 })
                 .cloned()
                 .collect()
@@ -5019,6 +5073,8 @@ impl RuntimeState {
                         holder,
                         region,
                         description,
+                        None,
+                        true,
                     )
                 };
                 self.dispatch_lifecycle_effects(deferred);
@@ -5033,6 +5089,8 @@ impl RuntimeState {
                 holder,
                 region,
                 description,
+                None,
+                true,
             ),
         }
     }
@@ -5046,17 +5104,22 @@ impl RuntimeState {
         &mut self,
         post: crate::runtime::obligation_mailbox::ObligationPost,
         obligation: Option<ObligationId>,
-        dispatch_tasks: &Arc<crate::sync::ContendedMutex<TaskTable>>,
+        dispatch_tasks: Option<&Arc<crate::sync::ContendedMutex<TaskTable>>>,
+        admission: Option<Arc<crate::runtime::obligation_mailbox::AdmittedObligation>>,
     ) -> Result<Option<ObligationId>, Error> {
         use crate::runtime::obligation_mailbox::ObligationOp;
         let mut deferred = Vec::new();
         let result = {
-            let tasks = AdmissionTaskTarget::External(
-                dispatch_tasks
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner),
-            );
             let shards = self.shard_tables.clone();
+            let tasks = match dispatch_tasks.or_else(|| shards.as_ref().map(|shards| &shards.tasks))
+            {
+                Some(tasks) => AdmissionTaskTarget::External(
+                    tasks
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner),
+                ),
+                None => AdmissionTaskTarget::Embedded,
+            };
             let mut obligations = match shards.as_ref() {
                 Some(shards) => CompletionObligationTarget::External(
                     shards
@@ -5079,6 +5142,8 @@ impl RuntimeState {
                         post.holder,
                         post.region,
                         None,
+                        admission,
+                        false,
                     )
                     .map(Some),
                 ObligationOp::Commit | ObligationOp::Abort | ObligationOp::Leak => {
@@ -5148,8 +5213,15 @@ impl RuntimeState {
         holder: TaskId,
         region: RegionId,
         description: Option<String>,
+        admission: Option<Arc<crate::runtime::obligation_mailbox::AdmittedObligation>>,
+        check_holder_admission: bool,
     ) -> Result<ObligationId, Error> {
-        let holder_logical_time = {
+        let holder_logical_time = if admission.is_some() {
+            // The credit already admitted this exact holder and region. Close,
+            // quota consumption by later work, and holder retirement cannot
+            // retroactively refuse its arena projection.
+            Self::logical_time_from_table(tasks.resolve_ref(&self.tasks), holder)
+        } else {
             let Some(region_record) = regions.resolve_ref(&self.regions).get(region.arena_index())
             else {
                 return Err(Error::new(ErrorKind::RegionClosed).with_message("region not found"));
@@ -5168,7 +5240,40 @@ impl RuntimeState {
                 )));
             }
 
-            if let Err(err) = region_record.try_reserve_obligation() {
+            if check_holder_admission
+                && (task_record.state.is_terminal()
+                    || task_record
+                        .cx
+                        .as_ref()
+                        .is_some_and(|cx| !cx.obligation_admission_is_live()))
+            {
+                return Err(Error::new(ErrorKind::TaskNotOwned)
+                    .with_message("holder no longer accepts obligation admission"));
+            }
+
+            let direct_admission = if check_holder_admission {
+                task_record
+                    .cx
+                    .as_ref()
+                    .and_then(|cx| cx.reserve_direct_obligation(holder, region))
+            } else {
+                None
+            };
+            if let Some(result) = direct_admission {
+                use crate::runtime::obligation_mailbox::ObligationAdmissionError as CheckedError;
+                result.map_err(|error| {
+                    let kind = match error {
+                        CheckedError::RegionClosed => ErrorKind::RegionClosed,
+                        CheckedError::HolderNotLive | CheckedError::HolderMismatch => {
+                            ErrorKind::TaskNotOwned
+                        }
+                        CheckedError::LimitReached { .. }
+                        | CheckedError::CapacityExhausted
+                        | CheckedError::RuntimeUnavailable => ErrorKind::AdmissionDenied,
+                    };
+                    Error::new(kind).with_message(error.to_string())
+                })?;
+            } else if let Err(err) = region_record.try_reserve_obligation() {
                 return Err(match err {
                     AdmissionError::Closed => {
                         Error::new(ErrorKind::RegionClosed).with_message("region closed")
@@ -5200,6 +5305,10 @@ impl RuntimeState {
                 acquire_backtrace,
             },
         );
+
+        if let Some(admission) = admission {
+            self.admitted_obligations.insert(obligation_id, admission);
+        }
 
         // Reserving an obligation increments the owning region's pending
         // count, so the region-table epoch must advance alongside the
@@ -5570,6 +5679,30 @@ impl RuntimeState {
         effects: &mut LifecycleEffectsSink<'_>,
         obligation: ObligationId,
     ) -> Result<u64, Error> {
+        if let Some(credit) = self.admitted_obligations.get(&obligation) {
+            match credit.claim_resolution(ObligationResolution::Commit) {
+                ObligationResolution::Commit => {}
+                ObligationResolution::Abort(reason) => {
+                    return self.abort_obligation_in(
+                        regions,
+                        tasks,
+                        obligations,
+                        effects,
+                        obligation,
+                        reason,
+                    );
+                }
+                ObligationResolution::Leak => {
+                    return self.mark_obligation_leaked_in(
+                        regions,
+                        tasks,
+                        obligations,
+                        effects,
+                        obligation,
+                    );
+                }
+            }
+        }
         let now = self.current_runtime_time();
         // Shard-phase core (br-asupersync-m9wsza / E2 S3a): pre-settle reads
         // (Shard C + Shard A) and the Shard C table mutation. Sharded-shape
@@ -5607,7 +5740,11 @@ impl RuntimeState {
             },
         );
 
-        if let Some(region_record) = regions.resolve_ref(&self.regions).get(region.arena_index()) {
+        if let Some(credit) = self.admitted_obligations.remove(&obligation) {
+            credit.finish_application();
+        } else if let Some(region_record) =
+            regions.resolve_ref(&self.regions).get(region.arena_index())
+        {
             region_record.resolve_obligation();
         }
 
@@ -5745,6 +5882,39 @@ impl RuntimeState {
         obligation: ObligationId,
         reason: ObligationAbortReason,
     ) -> Result<u64, Error> {
+        if let Some(credit) = self.admitted_obligations.get(&obligation) {
+            match credit.claim_resolution(ObligationResolution::Abort(reason)) {
+                ObligationResolution::Commit => {
+                    return self.commit_obligation_in(
+                        regions,
+                        tasks,
+                        obligations,
+                        effects,
+                        obligation,
+                    );
+                }
+                ObligationResolution::Leak if !self.in_flight_leak_ids.contains(&obligation) => {
+                    return self.mark_obligation_leaked_in(
+                        regions,
+                        tasks,
+                        obligations,
+                        effects,
+                        obligation,
+                    );
+                }
+                ObligationResolution::Abort(accepted) if accepted != reason => {
+                    return self.abort_obligation_in(
+                        regions,
+                        tasks,
+                        obligations,
+                        effects,
+                        obligation,
+                        accepted,
+                    );
+                }
+                ObligationResolution::Abort(_) | ObligationResolution::Leak => {}
+            }
+        }
         let now = self.current_runtime_time();
         // Shard-phase core (br-asupersync-m9wsza / E2 S3a): see
         // `commit_obligation`.
@@ -5782,7 +5952,11 @@ impl RuntimeState {
             },
         );
 
-        if let Some(region_record) = regions.resolve_ref(&self.regions).get(region.arena_index()) {
+        if let Some(credit) = self.admitted_obligations.remove(&obligation) {
+            credit.finish_application();
+        } else if let Some(region_record) =
+            regions.resolve_ref(&self.regions).get(region.arena_index())
+        {
             region_record.resolve_obligation();
         }
 
@@ -5939,6 +6113,30 @@ impl RuntimeState {
         effects: &mut LifecycleEffectsSink<'_>,
         obligation: ObligationId,
     ) -> Result<u64, Error> {
+        if let Some(credit) = self.admitted_obligations.get(&obligation) {
+            match credit.claim_resolution(ObligationResolution::Leak) {
+                ObligationResolution::Commit => {
+                    return self.commit_obligation_in(
+                        regions,
+                        tasks,
+                        obligations,
+                        effects,
+                        obligation,
+                    );
+                }
+                ObligationResolution::Abort(reason) => {
+                    return self.abort_obligation_in(
+                        regions,
+                        tasks,
+                        obligations,
+                        effects,
+                        obligation,
+                        reason,
+                    );
+                }
+                ObligationResolution::Leak => {}
+            }
+        }
         let now = self.current_runtime_time();
         // Shard-phase core (br-asupersync-m9wsza / E2 S3): the Shard C
         // table mutation plus the Shard A logical-time read. Sharded-shape
@@ -5961,7 +6159,11 @@ impl RuntimeState {
             },
         );
 
-        if let Some(region_record) = regions.resolve_ref(&self.regions).get(region.arena_index()) {
+        if let Some(credit) = self.admitted_obligations.remove(&obligation) {
+            credit.finish_application();
+        } else if let Some(region_record) =
+            regions.resolve_ref(&self.regions).get(region.arena_index())
+        {
             region_record.resolve_obligation();
         }
 
@@ -6250,7 +6452,11 @@ impl RuntimeState {
             && self.pending_cancel_dispatches.is_empty()
             && self.io_driver.as_ref().is_none_or(IoDriverHandle::is_empty)
             && regions.resolve_ref(&self.regions).iter().all(|(_, r)| {
-                r.finalizers_empty() && !r.state().is_closing() && r.pending_spawn_count() == 0
+                r.finalizers_empty()
+                    && !r.state().is_closing()
+                    && r.pending_spawn_count() == 0
+                    && r.pending_obligations() == 0
+                    && r.unapplied_obligation_count() == 0
             })
     }
 
@@ -7399,7 +7605,8 @@ impl RuntimeState {
                 self.timer_driver_handle(),
                 Some(entropy),
             )
-            .with_logical_clock(logical_clock);
+            .with_logical_clock(logical_clock)
+            .with_runtime_obligation_context();
             cx.set_trace_buffer(self.trace_handle());
             cx.set_loser_drain_history_handle(self.loser_drain_history_handle());
             cx
@@ -8294,7 +8501,7 @@ impl RuntimeState {
         }
 
         // All obligations must be resolved
-        if region.pending_obligations() > 0 {
+        if region.pending_obligations() > 0 || region.unapplied_obligation_count() > 0 {
             return false;
         }
 

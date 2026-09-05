@@ -1197,6 +1197,9 @@ impl TaskRecord {
         if self.state.is_terminal() {
             return false;
         }
+        if let Some(cx) = &self.cx {
+            cx.revoke_obligation_admission();
+        }
         let outcome = match (&self.state, outcome) {
             (
                 TaskState::CancelRequested { reason, .. }
@@ -1361,6 +1364,9 @@ impl TaskRecord {
         };
         let reason = reason.clone();
         let budget = *cleanup_budget;
+        if let Some(cx) = &self.cx {
+            cx.revoke_obligation_admission();
+        }
         #[cfg(feature = "tracing-integration")]
         {
             // br-asupersync-1w9aot: same wall_now-routed Time

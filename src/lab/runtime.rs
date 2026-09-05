@@ -4475,6 +4475,10 @@ impl LabRuntime {
         // and a reservation left open is caught by the task's completion-time
         // leak check instead of being refused as a post from a retired holder
         // (br-asupersync-bi2462.13).
+        if result.is_ready() {
+            self.state
+                .revoke_obligation_admission_before_completion(task_id, None);
+        }
         while self.state.has_pending_obligation_posts() {
             if self.state.drain_obligation_posts(64) == 0 {
                 break;

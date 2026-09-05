@@ -1920,3 +1920,393 @@ fn cross_reference_to_prior_audits() {
         );
     }
 }
+
+// asupersync-bi2462.29: real native checked-admission coverage. These tests use
+// public builder limits, spawned task contexts and live runtime inspectors.
+// Wall time only bounds a failed native wake/drain; it is not a timing oracle.
+// The ShardedState cases do not stand in for an independent external TaskTable.
+fn checked_native_runtime(sharded: bool, limit: usize) -> asupersync::runtime::Runtime {
+    let mut limits = asupersync::record::RegionLimits::UNLIMITED;
+    limits.max_obligations = Some(limit);
+    let builder = if sharded {
+        RuntimeBuilder::multi_thread()
+            .worker_threads(2)
+            .with_sharded_state(true)
+    } else {
+        RuntimeBuilder::current_thread()
+    };
+    let runtime = builder
+        .root_region_limits(limits)
+        .build()
+        .expect("build native runtime with an authoritative obligation quota");
+    assert_eq!(
+        runtime.config().runtime_state_shape,
+        if sharded {
+            asupersync::runtime::config::RuntimeStateShape::Sharded
+        } else {
+            asupersync::runtime::config::RuntimeStateShape::Unified
+        }
+    );
+    assert_eq!(runtime.config().worker_threads, if sharded { 2 } else { 1 });
+    runtime
+}
+
+fn assert_checked_native_cleanup(runtime: &asupersync::runtime::Runtime) {
+    runtime.block_on(async {
+        let started = Instant::now();
+        while !runtime.is_quiescent() {
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "native checked-admission tasks and unapplied obligations must drain; active={:?}, leaks={:?}",
+                runtime.task_inspector(Default::default()).list_active_tasks(),
+                runtime.diagnostics().find_leaked_obligations(),
+            );
+            yield_now().await;
+        }
+    });
+    assert!(
+        runtime
+            .task_inspector(Default::default())
+            .list_tasks()
+            .is_empty()
+    );
+    assert!(runtime.diagnostics().find_leaked_obligations().is_empty());
+    assert!(
+        runtime.is_quiescent(),
+        "actual task tables and obligation barriers are empty"
+    );
+}
+
+fn checked_native_zero_quota(sharded: bool) {
+    use asupersync::channel::mpsc::{CheckedSendError, RecvError};
+    use asupersync::runtime::obligation_mailbox::ObligationAdmissionError;
+
+    let runtime = checked_native_runtime(sharded, 0);
+    let (sender, mut receiver) = mpsc::channel(2);
+    let observed_sender = sender.clone();
+    runtime.block_on(runtime.handle().spawn(async move {
+        let cx = Cx::current().expect("actual spawned native holder context");
+        assert!(matches!(
+            sender.reserve_checked(&cx).await,
+            Err(CheckedSendError::Admission {
+                error: ObligationAdmissionError::LimitReached { limit: 0, live: 0 },
+                value: (),
+            })
+        ));
+        assert_eq!(
+            sender.try_send_checked(&cx, 17_u32),
+            Err(CheckedSendError::Admission {
+                error: ObligationAdmissionError::LimitReached { limit: 0, live: 0 },
+                value: 17,
+            })
+        );
+        assert_eq!(
+            sender.send_checked(&cx, 23_u32).await,
+            Err(CheckedSendError::Admission {
+                error: ObligationAdmissionError::LimitReached { limit: 0, live: 0 },
+                value: 23,
+            })
+        );
+        assert_eq!(receiver.try_recv(), Err(RecvError::Empty));
+        let denied = sender.telemetry_snapshot(2900);
+        assert_eq!(denied.reserved_uncommitted_obligations, 0);
+        assert_eq!(denied.queued_messages, 0);
+        assert_eq!(denied.send_waiter_count, 0);
+        // An independent physical-capacity control: admission refusal must
+        // return every slot, without changing the legacy send contract.
+        sender
+            .try_send(31)
+            .expect("first physical slot was rolled back");
+        sender
+            .try_send(37)
+            .expect("second physical slot was rolled back");
+        assert_eq!(receiver.try_recv(), Ok(31));
+        assert_eq!(receiver.try_recv(), Ok(37));
+        eprintln!(
+            "{}",
+            serde_json::json!({
+                "bead_id": "asupersync-bi2462.29", "scenario": "native_checked_zero_quota",
+                "sharded": sharded, "limit": 0, "holder": format!("{:?}", cx.task_id()),
+                "typed_refusals": 3, "published_checked_values": 0, "physical_slots_reused": 2
+            })
+        );
+    }));
+    assert_checked_native_cleanup(&runtime);
+    assert!(
+        runtime.trace_snapshot().iter().all(|event| !matches!(
+            event.data,
+            asupersync::trace::TraceData::Obligation {
+                kind: asupersync::record::ObligationKind::SendPermit,
+                ..
+            }
+        )),
+        "denied checked operations must not create arena obligations"
+    );
+    let physical = observed_sender.telemetry_snapshot(2900);
+    assert_eq!(physical.reserved_uncommitted_obligations, 0);
+    assert_eq!(physical.queued_messages, 0);
+    assert_eq!(physical.send_waiter_count, 0);
+    assert_eq!(physical.recv_waiter_count, 0);
+    drop(observed_sender);
+    assert!(
+        runtime.shutdown_timeout(Duration::from_secs(5)),
+        "native workers must finish teardown"
+    );
+}
+
+fn checked_native_one_quota(sharded: bool) {
+    use asupersync::channel::mpsc::CheckedSendError;
+    use asupersync::record::{ObligationKind, ObligationState};
+    use asupersync::runtime::obligation_mailbox::ObligationAdmissionError;
+    use asupersync::trace::TraceData;
+
+    let runtime = checked_native_runtime(sharded, 1);
+    let observer = runtime.handle();
+    let (sender, mut receiver) = mpsc::channel(2);
+    let observed_sender = sender.clone();
+    let (parent_id, child_id) = runtime.block_on(runtime.handle().spawn(async move {
+        let cx = Cx::current().expect("actual spawned native parent context");
+        let mutex = Arc::new(Mutex::new(()));
+        let holder = mutex.try_lock_owned().expect("hold real native mutex");
+        let child_mutex = Arc::clone(&mutex);
+        let child_sender = sender.clone();
+        let child_context = Arc::new(std::sync::Mutex::new(None));
+        let context_slot = Arc::clone(&child_context);
+        let child = cx
+            .spawn(move |child_cx| async move {
+                let permit = child_sender
+                    .reserve_checked(&child_cx)
+                    .await
+                    .expect("the only obligation credit is initially available");
+                *context_slot.lock().expect("publish actual child context") =
+                    Some(child_cx.clone());
+                let result = OwnedMutexGuard::lock(child_mutex, &child_cx)
+                    .await
+                    .map(drop);
+                // The permit remains owned throughout the native Pending and the
+                // cancellation checkpoint, then returns its physical slot and credit.
+                drop(permit);
+                result
+            })
+            .expect("spawn actual checked-permit holder");
+
+        let started = Instant::now();
+        let retained_cx = loop {
+            let retained = child_context
+                .lock()
+                .expect("read actual child context")
+                .clone();
+            if let Some(retained) = retained {
+                let details = observer
+                    .task_inspector(Default::default())
+                    .expect("live runtime inspector")
+                    .inspect_task(retained.task_id());
+                if mutex.waiters() == 1
+                    && details.as_ref().is_some_and(|task| {
+                        task.obligations.len() == 1
+                            && observer.trace_snapshot().expect("live native trace").iter().any(|event| {
+                                matches!(&event.data, TraceData::Obligation {
+                                    obligation, task: traced_holder, kind: ObligationKind::SendPermit,
+                                    state: ObligationState::Reserved, ..
+                                } if *traced_holder == retained.task_id() && task.obligations.contains(obligation))
+                            })
+                    })
+                {
+                    break retained;
+                }
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "child must own a materialized checked credit while genuinely mutex-parked"
+            );
+            yield_now().await;
+        };
+        let live = sender.telemetry_snapshot(2901);
+        assert_eq!(live.reserved_uncommitted_obligations, 1);
+        assert_eq!(live.queued_messages, 0);
+        assert_eq!(live.send_waiter_count, 0);
+        assert_eq!(live.capacity, 2, "one physical slot remains available");
+        assert_eq!(
+            sender.try_send_checked(&cx, 41_u32),
+            Err(CheckedSendError::Admission {
+                error: ObligationAdmissionError::LimitReached { limit: 1, live: 1 },
+                value: 41
+            }),
+            "a different live task must compete for the same authoritative region quota"
+        );
+        assert_eq!(
+            sender
+                .telemetry_snapshot(2901)
+                .reserved_uncommitted_obligations,
+            1
+        );
+        eprintln!(
+            "{}",
+            serde_json::json!({
+                "bead_id": "asupersync-bi2462.29", "scenario": "native_checked_one_quota",
+                "phase": "owned_and_parked", "sharded": sharded, "limit": 1,
+                "holder": format!("{:?}", retained_cx.task_id()), "mutex_waiters": 1,
+                "physical_reservations": 1, "observed_arena_obligations": 1, "typed_refusals": 1
+            })
+        );
+
+        let mut child = std::thread::spawn(move || {
+            child.abort();
+            child
+        })
+        .join()
+        .expect("cross-thread abort caller");
+        let mut join = std::pin::pin!(child.join(&cx));
+        let join_started = Instant::now();
+        let result = std::future::poll_fn(|poll_cx| {
+            let result = join.as_mut().poll(poll_cx);
+            if result.is_pending() {
+                assert!(
+                    join_started.elapsed() < Duration::from_secs(5),
+                    "checked holder cancellation must wake and finish"
+                );
+                // Bound the observer wait without injecting a wake into the child.
+                poll_cx.waker().wake_by_ref();
+            }
+            result
+        })
+        .await;
+        assert_eq!(result, Ok(Err(LockError::Cancelled)));
+        assert_eq!(mutex.waiters(), 0);
+        assert_eq!(
+            sender
+                .telemetry_snapshot(2901)
+                .reserved_uncommitted_obligations,
+            0
+        );
+        let retirement_started = Instant::now();
+        while observer.task_inspector(Default::default()).expect("live runtime inspector")
+            .inspect_task(retained_cx.task_id()).is_some()
+        {
+            assert!(retirement_started.elapsed() < Duration::from_secs(5),
+                "terminal result publication must be followed by actual holder retirement");
+            yield_now().await;
+        }
+        assert!(
+            matches!(
+                retained_cx.try_register_obligation_checked(
+                    ObligationKind::SendPermit,
+                    retained_cx.task_id()
+                ),
+                Err(ObligationAdmissionError::HolderNotLive)
+            ),
+            "a retained completed generation cannot acquire another credit"
+        );
+        drop(holder);
+
+        // This closure has no await and is polled exactly once: every send
+        // settles the quota before the next reservation within this same poll.
+        let mut polls = 0;
+        std::future::poll_fn(|_| {
+            polls += 1;
+            for value in 0..65_u32 {
+                sender
+                    .try_reserve_checked(&cx)
+                    .expect("same-poll quota must be reusable")
+                    .try_send(value)
+                    .expect("live receiver accepts each checked payload");
+                assert_eq!(receiver.try_recv(), Ok(value));
+            }
+            Poll::Ready(())
+        })
+        .await;
+        assert_eq!(polls, 1);
+        let clean = sender.telemetry_snapshot(2901);
+        assert_eq!(clean.reserved_uncommitted_obligations, 0);
+        assert_eq!(clean.queued_messages, 0);
+        assert_eq!(clean.send_waiter_count, 0);
+        assert_eq!(clean.recv_waiter_count, 0);
+        (cx.task_id(), retained_cx.task_id())
+    }));
+    assert_checked_native_cleanup(&runtime);
+    let trace = runtime.trace_snapshot();
+    let mut observed = BTreeMap::new();
+    for event in &trace {
+        if let TraceData::Obligation {
+            obligation,
+            task,
+            kind: ObligationKind::SendPermit,
+            state,
+            ..
+        } = &event.data
+        {
+            let entry = observed.entry(*obligation).or_insert((*task, Vec::new()));
+            assert_eq!(
+                entry.0, *task,
+                "holder attribution cannot change during projection"
+            );
+            entry.1.push(*state);
+        }
+    }
+    assert_eq!(
+        observed.len(),
+        66,
+        "65 successful sends and one aborted owned permit; refusals add none"
+    );
+    let mut committed = 0;
+    let mut aborted = 0;
+    for (task, states) in observed.values() {
+        if *task == parent_id {
+            assert_eq!(
+                states,
+                &[ObligationState::Reserved, ObligationState::Committed]
+            );
+            committed += 1;
+        } else {
+            assert_eq!(
+                *task, child_id,
+                "only the actual checked holders may own these records"
+            );
+            assert_eq!(
+                states,
+                &[ObligationState::Reserved, ObligationState::Aborted]
+            );
+            aborted += 1;
+        }
+    }
+    assert_eq!((committed, aborted), (65, 1));
+    let clean = observed_sender.telemetry_snapshot(2901);
+    assert_eq!(clean.reserved_uncommitted_obligations, 0);
+    assert_eq!(clean.queued_messages, 0);
+    assert_eq!(clean.send_waiter_count, 0);
+    assert_eq!(clean.recv_waiter_count, 0);
+    eprintln!(
+        "{}",
+        serde_json::json!({
+            "bead_id": "asupersync-bi2462.29", "scenario": "native_checked_one_quota",
+            "phase": "settled", "sharded": sharded, "committed": committed, "aborted": aborted,
+            "same_poll_roundtrips": 65, "live_tasks": 0, "physical_reservations": 0,
+            "runtime_quiescent": runtime.is_quiescent(), "result": "pass"
+        })
+    );
+    drop(observed_sender);
+    assert!(
+        runtime.shutdown_timeout(Duration::from_secs(5)),
+        "native workers must finish teardown"
+    );
+}
+
+#[test]
+fn checked_zero_quota_refuses_before_publication_on_native_current_thread() {
+    checked_native_zero_quota(false);
+}
+
+#[test]
+fn checked_zero_quota_refuses_before_publication_on_native_sharded_workers() {
+    checked_native_zero_quota(true);
+}
+
+#[test]
+fn checked_owned_permit_cancellation_and_same_poll_reuse_on_native_current_thread() {
+    checked_native_one_quota(false);
+}
+
+#[test]
+fn checked_owned_permit_cancellation_and_same_poll_reuse_on_native_sharded_workers() {
+    checked_native_one_quota(true);
+}

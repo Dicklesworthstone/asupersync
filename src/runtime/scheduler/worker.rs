@@ -409,6 +409,7 @@ impl Worker {
                             .state
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        state.revoke_obligation_admission_before_completion(self.task_id, None);
                         let _ = state.drain_obligation_posts_before_completion(None);
                         let _ = state.update_task(self.task_id, |record| {
                             if !record.state.is_terminal() {
@@ -654,6 +655,7 @@ impl Worker {
                 // already holds (br-asupersync-bi2462.13): a reserve+resolve
                 // within one poll is tracked, and an open reservation is
                 // caught by the completion-time leak check below.
+                state.revoke_obligation_admission_before_completion(task_id, None);
                 let _ = state.drain_obligation_posts_before_completion(None);
                 let (cancel_ack, cancel_wakes) =
                     Self::consume_cancel_ack_locked(&mut state, task_id).into_parts();
@@ -828,6 +830,7 @@ impl Worker {
                     .state
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
+                state.revoke_obligation_admission_before_completion(task_id, None);
                 let _ = state.drain_obligation_posts_before_completion(None);
                 let (_cancel_ack, cancel_wakes) =
                     Self::consume_cancel_ack_locked(&mut state, task_id).into_parts();

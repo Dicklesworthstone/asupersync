@@ -200,6 +200,7 @@ impl RegionTable {
     #[inline]
     pub fn remove(&mut self, index: ArenaIndex) -> Option<RegionRecord> {
         let removed = self.regions.remove(index)?;
+        removed.revoke_obligation_handles();
         if let Some(parent) = removed.parent {
             if let Some(parent_record) = self.regions.get(parent.arena_index()) {
                 parent_record.remove_child(removed.id);

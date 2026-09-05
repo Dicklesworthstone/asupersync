@@ -76,6 +76,32 @@ impl<T> std::fmt::Display for SendError<T> {
 
 impl<T: std::fmt::Debug> std::error::Error for SendError<T> {}
 
+/// A checked send refused publication and retained the caller's value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CheckedSendError<T> {
+    /// The channel refused the operation.
+    Channel(SendError<T>),
+    /// Runtime obligation admission failed before a permit was returned.
+    Admission {
+        /// The authoritative admission refusal.
+        error: crate::runtime::obligation_mailbox::ObligationAdmissionError,
+        /// The value which was not published.
+        value: T,
+    },
+}
+
+impl<T> std::fmt::Display for CheckedSendError<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Channel(error) => write!(f, "{error}"),
+            Self::Admission { error, .. } => write!(f, "{error}"),
+        }
+    }
+}
+
+impl<T: std::fmt::Debug> std::error::Error for CheckedSendError<T> {}
+
 /// Error returned when receiving fails.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecvError {
@@ -393,6 +419,54 @@ pub struct Sender<T> {
 }
 
 impl<T> Sender<T> {
+    /// Reserves after synchronous runtime obligation admission.
+    ///
+    /// Closed-region, retired-holder and quota refusals consume this sender
+    /// without publishing a permit; the receiver observes closure. A context
+    /// deliberately constructed without a runtime remains untracked. Existing
+    /// [`Self::reserve`] behavior is retained for compatibility.
+    pub fn reserve_checked(self, cx: &Cx) -> Result<SendPermit<T>, CheckedSendError<()>> {
+        if cx.checkpoint().is_err() {
+            return self.reserve(cx).map_err(CheckedSendError::Channel);
+        }
+        // Keep the sender authoritative until admission succeeds. If admission
+        // refuses or its notifier unwinds, Sender::drop closes the channel;
+        // permit_outstanding has never become observable.
+        let obligation = cx
+            .try_register_obligation_checked(
+                crate::record::ObligationKind::SendPermit,
+                cx.task_id(),
+            )
+            .map_err(|error| CheckedSendError::Admission { error, value: () })?;
+        let permit = SendPermit {
+            inner: Arc::clone(&self.inner),
+            sent: false,
+            obligation,
+        };
+        {
+            let mut inner = self.inner.lock();
+            inner.sender_consumed = true;
+            inner.permit_outstanding = true;
+        }
+        Ok(permit)
+    }
+
+    /// Sends after checked admission, returning the unpublished value on error.
+    pub fn send_checked(self, cx: &Cx, value: T) -> Result<(), CheckedSendError<T>> {
+        match self.reserve_checked(cx) {
+            Ok(permit) => permit.send(value).map_err(CheckedSendError::Channel),
+            Err(CheckedSendError::Channel(SendError::Cancelled(()))) => {
+                Err(CheckedSendError::Channel(SendError::Cancelled(value)))
+            }
+            Err(CheckedSendError::Channel(SendError::Disconnected(()))) => {
+                Err(CheckedSendError::Channel(SendError::Disconnected(value)))
+            }
+            Err(CheckedSendError::Admission { error, value: () }) => {
+                Err(CheckedSendError::Admission { error, value })
+            }
+        }
+    }
+
     /// Reserves the channel for sending, returning a permit.
     ///
     /// This consumes the sender. The permit must be used to either:
@@ -623,6 +697,21 @@ pub struct SendPermit<T> {
     obligation: Option<crate::runtime::obligation_mailbox::ObligationToken>,
 }
 
+/// Keep both closure notifications owned across obligation-settlement unwind.
+struct ReleasedOneshotWake {
+    receiver: Option<Waker>,
+    closed: Option<Waker>,
+    retired: Option<Waker>,
+}
+
+impl Drop for ReleasedOneshotWake {
+    fn drop(&mut self) {
+        retire_waker_after_unlock(self.retired.take());
+        wake_waker_after_unlock(self.receiver.take());
+        wake_waker_after_unlock(self.closed.take());
+    }
+}
+
 impl<T> SendPermit<T> {
     /// Sends a value through the channel.
     ///
@@ -656,6 +745,11 @@ impl<T> SendPermit<T> {
         };
 
         self.sent = true;
+        let _wake = ReleasedOneshotWake {
+            receiver: waker,
+            closed: None,
+            retired: retired_waker,
+        };
         if let Some(token) = self.obligation.take() {
             if result.is_ok() {
                 let _ = token.commit();
@@ -663,9 +757,6 @@ impl<T> SendPermit<T> {
                 let _ = token.abort(crate::record::ObligationAbortReason::Error);
             }
         }
-        retire_waker_after_unlock(retired_waker);
-        wake_waker_after_unlock(waker);
-
         result.map_err(SendError::Disconnected)
     }
 
@@ -675,20 +766,27 @@ impl<T> SendPermit<T> {
     /// will see a `Closed` error when attempting to receive.
     #[inline]
     pub fn abort(mut self) {
+        self.sent = true;
+        let _wake = self.release_reservation("abort");
         if let Some(token) = self.obligation.take() {
             let _ = token.abort(crate::record::ObligationAbortReason::Explicit);
         }
+    }
+
+    fn release_reservation(&self, reason: &'static str) -> ReleasedOneshotWake {
         let (waker, receiver_closed_waker) = {
             let mut inner = self.inner.lock();
             inner.permit_outstanding = false;
             inner.record_cancellation();
-            inner.closed_reason = Some("abort");
+            inner.closed_reason = Some(reason);
             // Take waker under lock, wake outside.
             (inner.take_waker(), inner.receiver_closed_waker.take())
         };
-        self.sent = true; // Prevent drop from double-aborting
-        wake_waker_after_unlock(waker);
-        wake_waker_after_unlock(receiver_closed_waker);
+        ReleasedOneshotWake {
+            receiver: waker,
+            closed: receiver_closed_waker,
+            retired: None,
+        }
     }
 
     /// Returns `true` if the receiver has been dropped.
@@ -710,18 +808,11 @@ impl<T> Drop for SendPermit<T> {
     fn drop(&mut self) {
         if !self.sent {
             // Permit dropped without sending - abort
+            self.sent = true;
+            let _wake = self.release_reservation("permit_drop");
             if let Some(token) = self.obligation.take() {
                 let _ = token.abort(crate::record::ObligationAbortReason::Cancel);
             }
-            let (waker, receiver_closed_waker) = {
-                let mut inner = self.inner.lock();
-                inner.permit_outstanding = false;
-                inner.record_cancellation();
-                inner.closed_reason = Some("permit_drop");
-                (inner.take_waker(), inner.receiver_closed_waker.take())
-            };
-            wake_waker_after_unlock(waker);
-            wake_waker_after_unlock(receiver_closed_waker);
         }
     }
 }
@@ -1375,6 +1466,192 @@ mod tests {
                 Poll::Ready(v) => return v,
                 Poll::Pending => std::thread::yield_now(),
             }
+        }
+    }
+
+    #[test]
+    fn checked_admission_denial_closes_without_a_permit_and_commit_reuses_credit() {
+        use crate::runtime::obligation_mailbox::ObligationAdmissionError;
+        for limit in [0, 1] {
+            let mut lab =
+                crate::lab::LabRuntime::new(crate::lab::LabConfig::new(0x28_c002).max_steps(128));
+            let root = lab.state.create_root_region(crate::types::Budget::INFINITE);
+            assert!(lab.state.set_region_limits(
+                root,
+                crate::record::region::RegionLimits {
+                    max_obligations: Some(limit),
+                    ..crate::record::region::RegionLimits::UNLIMITED
+                }
+            ));
+            let (task, mut handle) = lab
+                .state
+                .create_task(root, crate::types::Budget::INFINITE, async {})
+                .unwrap();
+            let cx = lab.state.task(task).unwrap().cx.clone().unwrap();
+            let mailbox = Arc::clone(lab.state.obligation_gateway().unwrap().mailbox());
+            let (first, mut first_rx) = channel::<u32>();
+            let permit = if limit == 1 {
+                Some(first.reserve_checked(&cx).unwrap())
+            } else {
+                drop(first);
+                None
+            };
+            let (denied, mut denied_rx) = channel::<u32>();
+            assert_eq!(
+                denied.send_checked(&cx, 61),
+                Err(CheckedSendError::Admission {
+                    error: ObligationAdmissionError::LimitReached { limit, live: limit },
+                    value: 61,
+                })
+            );
+            assert_eq!(denied_rx.try_recv(), Err(TryRecvError::Closed));
+            assert!(!denied_rx.inner.lock().permit_outstanding);
+            if let Some(permit) = permit {
+                permit.send(67).unwrap();
+                assert_eq!(first_rx.try_recv(), Ok(67));
+                // Commit returns quota synchronously, before either mailbox
+                // reservation has been applied to the arena.
+                let (next, mut next_rx) = channel::<u32>();
+                next.send_checked(&cx, 71).unwrap();
+                assert_eq!(next_rx.try_recv(), Ok(71));
+            }
+            lab.scheduler.lock().schedule(task, 0);
+            let report = lab.run_until_quiescent_with_report();
+            assert!(
+                report.oracle_report.all_passed(),
+                "{:?}",
+                report.oracle_report.failures()
+            );
+            assert!(report.invariant_violations.is_empty());
+            assert!(handle.try_join().unwrap().is_some());
+            let stats = mailbox.stats();
+            assert_eq!(stats.reserved, (limit * 2) as u64);
+            assert_eq!(stats.committed, stats.reserved);
+            assert_eq!(stats.posted, stats.applied);
+            assert_eq!(stats.refused, 0);
+            assert_eq!(stats.leaked, 0);
+            assert_eq!(mailbox.open_tickets(), 0);
+            assert_eq!(lab.state.pending_obligation_count(), 0);
+            assert_eq!(lab.state.leak_count(), 0);
+        }
+    }
+
+    #[test]
+    fn checked_admission_stateless_cancel_and_disconnected_preserve_values() {
+        let cx = test_cx();
+        let (tx, mut rx) = channel();
+        tx.send_checked(&cx, 73).unwrap();
+        assert_eq!(rx.try_recv(), Ok(73));
+        let (tx, rx) = channel();
+        drop(rx);
+        assert_eq!(
+            tx.send_checked(&cx, 79),
+            Err(CheckedSendError::Channel(SendError::Disconnected(79)))
+        );
+        let (tx, mut rx) = channel();
+        cx.set_cancel_requested(true);
+        assert_eq!(
+            tx.send_checked(&cx, 83),
+            Err(CheckedSendError::Channel(SendError::Cancelled(83)))
+        );
+        assert_eq!(rx.try_recv(), Err(TryRecvError::Closed));
+        assert!(!rx.inner.lock().permit_outstanding);
+    }
+
+    #[test]
+    fn checked_admission_notification_panics_preserve_parked_receiver_and_cleanup() {
+        use crate::runtime::obligation_mailbox::ObligationGateway;
+        for operation in ["admission", "commit", "abort", "drop"] {
+            let mut lab =
+                crate::lab::LabRuntime::new(crate::lab::LabConfig::new(0x28_c003).max_steps(128));
+            let root = lab.state.create_root_region(crate::types::Budget::INFINITE);
+            assert!(lab.state.set_region_limits(
+                root,
+                crate::record::region::RegionLimits {
+                    max_obligations: Some(1),
+                    ..crate::record::region::RegionLimits::UNLIMITED
+                }
+            ));
+            let (task, mut handle) = lab
+                .state
+                .create_task(root, crate::types::Budget::INFINITE, async {})
+                .unwrap();
+            let cx = lab.state.task(task).unwrap().cx.clone().unwrap();
+            let mailbox = Arc::clone(lab.state.obligation_gateway().unwrap().mailbox());
+            let calls = Arc::new(AtomicUsize::new(0));
+            let observed = calls.clone();
+            let liveness = Arc::new(());
+            let gateway = Arc::new(ObligationGateway::new(
+                mailbox.clone(),
+                Arc::new(move || {
+                    let fail_on = usize::from(operation != "admission");
+                    assert_ne!(
+                        observed.fetch_add(1, Ordering::SeqCst),
+                        fail_on,
+                        "planted oneshot {operation} notification panic"
+                    );
+                }),
+                Arc::downgrade(&liveness),
+            ));
+            let cx = cx.with_obligation_gateway(Some(gateway), None);
+            let (tx, mut rx) = channel::<u32>();
+            let inner = rx.inner.clone();
+            let wakes = Arc::new(AtomicUsize::new(0));
+            let waker = counting_waker(wakes.clone());
+            let mut ctx = Context::from_waker(&waker);
+            let mut receiver = Box::pin(rx.recv(&cx));
+            assert!(receiver.as_mut().poll(&mut ctx).is_pending());
+            assert!(inner.lock().waker.is_some());
+            let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let permit = tx.reserve_checked(&cx).unwrap();
+                match operation {
+                    "commit" => permit.send(137).unwrap(),
+                    "abort" => permit.abort(),
+                    "drop" => drop(permit),
+                    _ => panic!("admission callback failed to execute"),
+                }
+            }))
+            .expect_err("the planted notification must panic");
+            assert!(
+                failure
+                    .downcast_ref::<String>()
+                    .is_some_and(|message| message.contains("planted oneshot"))
+            );
+            assert_eq!(wakes.load(Ordering::SeqCst), 1);
+            assert!(!inner.lock().permit_outstanding);
+            let expected = if operation == "commit" {
+                Ok(137)
+            } else {
+                Err(RecvError::Closed)
+            };
+            assert_eq!(receiver.as_mut().poll(&mut ctx), Poll::Ready(expected));
+            drop(receiver);
+            // No arena drain separates the failed callback from credit reuse.
+            let (next, mut next_rx) = channel();
+            next.send_checked(&cx, 139).unwrap();
+            assert_eq!(next_rx.try_recv(), Ok(139));
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                if operation == "admission" { 3 } else { 4 }
+            );
+            lab.scheduler.lock().schedule(task, 0);
+            let report = lab.run_until_quiescent_with_report();
+            assert!(
+                report.oracle_report.all_passed(),
+                "{:?}",
+                report.oracle_report.failures()
+            );
+            assert!(report.invariant_violations.is_empty());
+            assert!(handle.try_join().unwrap().is_some());
+            let stats = mailbox.stats();
+            assert_eq!(stats.reserved, 2);
+            assert_eq!(stats.committed + stats.aborted, 2);
+            assert_eq!(stats.posted, stats.applied);
+            assert_eq!(stats.refused, 0);
+            assert_eq!(stats.leaked, 0);
+            assert_eq!(mailbox.open_tickets(), 0);
+            assert_eq!(lab.state.pending_obligation_count(), 0);
+            assert_eq!(lab.state.leak_count(), 0);
         }
     }
 

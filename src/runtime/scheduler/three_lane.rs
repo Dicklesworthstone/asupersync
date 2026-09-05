@@ -7832,7 +7832,7 @@ impl ThreeLaneWorker {
         // The holder must still be in its dispatch table when Reserve posts
         // are admitted. Release B before the existing detach phase takes A;
         // the drainer acquires A/C in the ordinary minting order itself.
-        self.drain_completion_obligation_posts();
+        self.drain_completion_obligation_posts(task_id);
         if self.task_table.is_some() {
             // The sharded table owns the authoritative record. Reconcile the
             // checkpoint receipt and terminal outcome there, then detach the
@@ -7915,7 +7915,7 @@ impl ThreeLaneWorker {
     /// (`into_waiters_and_retirements_without_observers`) because this path
     /// runs during a worker unwind.
     fn complete_task_after_unwind_ordered(&self, task_id: TaskId) -> UnwindCompletionArtifacts {
-        self.drain_completion_obligation_posts();
+        self.drain_completion_obligation_posts(task_id);
         let panic_outcome = crate::types::Outcome::Panicked(
             crate::types::outcome::PanicPayload::new("task panicked during scheduler bookkeeping"),
         );
@@ -7967,11 +7967,12 @@ impl ThreeLaneWorker {
         }
     }
 
-    fn drain_completion_obligation_posts(&self) {
+    fn drain_completion_obligation_posts(&self, task_id: TaskId) {
         let mut state = self
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.revoke_obligation_admission_before_completion(task_id, self.task_table.as_ref());
         let _ = state.drain_obligation_posts_before_completion(self.task_table.as_ref());
     }
 

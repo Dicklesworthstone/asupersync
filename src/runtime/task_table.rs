@@ -342,6 +342,9 @@ impl TaskTable {
     #[inline]
     pub fn remove(&mut self, index: ArenaIndex) -> Option<TaskRecord> {
         let record = self.tasks.remove(index)?;
+        if let Some(cx) = &record.cx {
+            cx.revoke_obligation_admission();
+        }
         let slot = index.index() as usize;
         if slot < self.stored_futures.len() && self.stored_futures[slot].take().is_some() {
             self.stored_future_len -= 1;
