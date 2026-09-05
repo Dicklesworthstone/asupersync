@@ -6,6 +6,9 @@ OUTPUT_ROOT="${OUTPUT_ROOT:-target/atp-session-negotiation-e2e/${RUN_ID}}"
 LOG_FILE="${OUTPUT_ROOT}/events.ndjson"
 TARGET_DIR="${CARGO_TARGET_DIR:-${TMPDIR:-/tmp}/rch_target_atp_session_negotiation_e2e}"
 SESSION_CARGO_HOME="${ATP_SESSION_CARGO_HOME:-/tmp/rch_cargo_home_asupersync_reality}"
+# Bound build concurrency below the pinned worker's observed ten-slot capacity.
+# This does not change test concurrency or the required process exchanges.
+SESSION_BUILD_JOBS=8
 # Keep child logs outside RCH's disposable per-command source root. The test
 # appends a unique process/time directory and never deletes previous artifacts.
 SESSION_ARTIFACT_ROOT="${ATP_SESSION_ARTIFACT_ROOT:-/tmp/asupersync-atp-session-negotiation-artifacts}"
@@ -252,7 +255,7 @@ if [[ "${ATP_SESSION_RUN_LIB_UNIT:-1}" == "1" ]]; then
   run_stage "unit-session-state-machine" \
     run_remote_command "${RCH_COMMAND[@]}" -- env CARGO_TARGET_DIR="${TARGET_DIR}" CARGO_HOME="${SESSION_CARGO_HOME}" \
       CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' \
-      cargo test -p asupersync --locked \
+      cargo test --jobs "${SESSION_BUILD_JOBS}" -p asupersync --locked \
       --lib net::atp::protocol::session::tests -- --nocapture
   verify_remote_stage "unit-session-state-machine" "${BASE_COMMIT}"
 else
@@ -263,7 +266,7 @@ fi
 run_stage "integration-session-e2e" \
   run_remote_command "${RCH_COMMAND[@]}" -- env CARGO_TARGET_DIR="${TARGET_DIR}" CARGO_HOME="${SESSION_CARGO_HOME}" \
     CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' \
-    ASUPERSYNC_TEST_ARTIFACTS_DIR="${SESSION_ARTIFACT_ROOT}" cargo test -p asupersync \
+    ASUPERSYNC_TEST_ARTIFACTS_DIR="${SESSION_ARTIFACT_ROOT}" cargo test --jobs "${SESSION_BUILD_JOBS}" -p asupersync \
     --locked --features tls --test atp_session_negotiation -- --nocapture
 verify_remote_stage "integration-session-e2e" "${BASE_COMMIT}"
 
@@ -290,7 +293,7 @@ verify_fixture_sources
 run_stage "prepare-pre-repair-peer" \
   run_remote_command "${RCH_OLD_COMMAND[@]}" -- env CARGO_TARGET_DIR="${TARGET_DIR}" CARGO_HOME="${SESSION_CARGO_HOME}" \
     CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' \
-    ASUPERSYNC_EXTENSION_EXPORT_BINARY="${OLD_BINARY}" cargo test -p asupersync \
+    ASUPERSYNC_EXTENSION_EXPORT_BINARY="${OLD_BINARY}" cargo test --jobs "${SESSION_BUILD_JOBS}" -p asupersync \
     --locked --features tls --test atp_session_negotiation \
     extension_wire::prepare_pre_repair_peer_binary -- --exact --ignored --nocapture --test-threads=1
 verify_remote_stage "prepare-pre-repair-peer" "${PRE_REPAIR_BASE}" "pre-repair"
@@ -301,7 +304,7 @@ run_stage "mixed-codec-session-e2e" \
     CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' \
     ASUPERSYNC_TEST_ARTIFACTS_DIR="${SESSION_ARTIFACT_ROOT}" \
     ASUPERSYNC_EXTENSION_OLD_BINARY="${OLD_BINARY}" \
-    ASUPERSYNC_EXTENSION_OLD_BINARY_SHA="${OLD_BINARY_SHA}" cargo test -p asupersync \
+    ASUPERSYNC_EXTENSION_OLD_BINARY_SHA="${OLD_BINARY_SHA}" cargo test --jobs "${SESSION_BUILD_JOBS}" -p asupersync \
     --locked --features tls --test atp_session_negotiation \
     extension_wire::mixed_codec_two_process_extension_exchange -- --exact --ignored --nocapture --test-threads=1
 verify_remote_stage "mixed-codec-session-e2e" "${BASE_COMMIT}"
