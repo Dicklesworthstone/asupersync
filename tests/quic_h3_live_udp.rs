@@ -3,16 +3,14 @@
 #![cfg(all(feature = "http3", feature = "tls"))]
 #![allow(missing_docs)]
 
-#[cfg(feature = "test-internals")]
 use std::future::Future;
 use std::io::BufReader;
 #[cfg(feature = "test-internals")]
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-#[cfg(feature = "test-internals")]
-use std::task::{Context, Poll, Waker};
-use std::time::Duration;
+use std::task::{Context, Poll, Wake, Waker};
+use std::time::{Duration, Instant};
 
 use asupersync::bytes::Bytes;
 use asupersync::cx::Cx;
@@ -23,8 +21,9 @@ use asupersync::net::quic_native::handshake_driver::{
     QuicHandshakeDriver, client_config, server_config,
 };
 use asupersync::net::quic_native::{
-    NativeQuicConnectionConfig, NativeQuicUdpConnection, NativeQuicUdpConnectionError,
-    QuicConnection, QuicUdpEndpoint, QuicUdpEndpointConfig,
+    ManagedEndpointConfig, ManagedEndpointError, ManagedQuicEndpoint, NativeQuicConnectionConfig,
+    NativeQuicUdpConnection, NativeQuicUdpConnectionError, QuicConnection, QuicUdpEndpoint,
+    QuicUdpEndpointConfig,
 };
 use asupersync::types::{CancelKind, CancelReason};
 #[cfg(feature = "test-internals")]
@@ -1282,4 +1281,778 @@ fn negotiated_non_h3_alpn_refuses_live_application_handles() {
             }) if expected == H3_ALPN && negotiated == OTHER_ALPN
         ));
     });
+}
+
+// These additions exercise the public authenticated owner and the actual native
+// managed loop. They do not construct an established connection or crypto keys
+// through test internals, and do not claim same-router multi-peer fairness or
+// a kernel WouldBlock result from two independent sockets.
+const MANAGED_ALPN: &[u8] = b"asupersync-managed-test";
+
+fn managed_runtime() -> asupersync::runtime::Runtime {
+    asupersync::runtime::RuntimeBuilder::current_thread()
+        .with_reactor(
+            asupersync::runtime::reactor::create_reactor().expect("actual native reactor"),
+        )
+        .build()
+        .expect("native managed QUIC runtime")
+}
+
+fn managed_assert_runtime_cleanup(runtime: &asupersync::runtime::Runtime) {
+    runtime.block_on(async {
+        let started = Instant::now();
+        while !runtime.is_quiescent() {
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "managed native task and obligation cleanup must drain: {:?}",
+                runtime
+                    .task_inspector(Default::default())
+                    .list_active_tasks(),
+            );
+            asupersync::runtime::yield_now().await;
+        }
+    });
+    assert!(runtime.is_quiescent());
+    assert!(
+        runtime
+            .task_inspector(Default::default())
+            .list_tasks()
+            .is_empty()
+    );
+    assert!(runtime.diagnostics().find_leaked_obligations().is_empty());
+}
+
+fn managed_ids() -> (ConnectionId, ConnectionId, ConnectionId) {
+    (
+        ConnectionId::new(b"managed-initial").unwrap(),
+        ConnectionId::new(b"managed-client").unwrap(),
+        ConnectionId::new(b"srv76").unwrap(),
+    )
+}
+
+async fn managed_handshake(
+    cx: &Cx,
+    endpoint: QuicUdpEndpoint,
+    server: bool,
+    server_addr: std::net::SocketAddr,
+) -> NativeQuicUdpConnection {
+    let config = connection_config();
+    let (initial, client_cid, server_cid) = managed_ids();
+    assert_ne!(client_cid.len(), server_cid.len());
+    if server {
+        let tls = server_config(
+            vec![parse_one_cert(LEAF_CERT_PEM)],
+            leaf_key(),
+            vec![MANAGED_ALPN.to_vec()],
+        )
+        .unwrap();
+        let driver = QuicHandshakeDriver::server(tls, transport_parameters(config)).unwrap();
+        NativeQuicUdpConnection::accept(
+            cx,
+            endpoint,
+            driver,
+            initial,
+            server_cid,
+            config,
+            MANAGED_ALPN,
+        )
+        .await
+        .expect("real TLS server handshake")
+    } else {
+        let tls = client_config(
+            vec![parse_one_cert(CA_CERT_PEM)],
+            vec![MANAGED_ALPN.to_vec()],
+        )
+        .unwrap();
+        let driver = QuicHandshakeDriver::client(
+            tls,
+            ServerName::try_from("localhost").unwrap(),
+            transport_parameters(config),
+        )
+        .unwrap();
+        NativeQuicUdpConnection::connect(
+            cx,
+            endpoint,
+            server_addr,
+            driver,
+            initial,
+            client_cid,
+            config,
+            MANAGED_ALPN,
+        )
+        .await
+        .expect("real CA, hostname and signature verified client handshake")
+    }
+}
+
+fn managed_import(cx: &Cx, owner: NativeQuicUdpConnection, server: bool) -> ManagedQuicEndpoint {
+    let local = owner.local_addr();
+    let peer = owner.peer_addr();
+    let local_cid = owner.local_connection_id();
+    let peer_cid = owner.peer_connection_id();
+    assert_ne!(local_cid, peer_cid);
+    assert!(owner.connection().can_send_app_data());
+    let config = ManagedEndpointConfig {
+        is_server: server,
+        packet_batch_size: 2,
+        ..ManagedEndpointConfig::default()
+    };
+    let refusal = owner
+        .into_managed(
+            cx,
+            ManagedEndpointConfig {
+                packet_batch_size: 0,
+                ..config.clone()
+            },
+        )
+        .expect_err("invalid scheduling configuration must return the authenticated owner");
+    assert!(matches!(
+        refusal.error(),
+        ManagedEndpointError::InvalidConfig(_)
+    ));
+    let owner = refusal.into_connection();
+    assert_eq!(owner.local_addr(), local);
+    assert_eq!(owner.peer_addr(), peer);
+    assert_eq!(owner.local_connection_id(), local_cid);
+    assert_eq!(owner.peer_connection_id(), peer_cid);
+    assert_eq!(owner.negotiated_alpn(), MANAGED_ALPN);
+    assert!(owner.connection().can_send_app_data());
+    let mut endpoint = owner
+        .into_managed(cx, config)
+        .expect("lossless managed adoption");
+    assert_eq!(endpoint.local_addr(), local);
+    assert_eq!(endpoint.negotiated_alpn(local_cid).unwrap(), MANAGED_ALPN);
+    assert_eq!(endpoint.connection_stats().active_connections, 1);
+    assert_eq!(endpoint.connection_stats().established_connections, 1);
+    endpoint
+        .with_connection_mut(cx, local_cid, |connection| {
+            assert!(connection.can_send_app_data());
+        })
+        .unwrap();
+    assert!(matches!(
+        endpoint.take_connection(cx, local_cid),
+        Err(ManagedEndpointError::ConnectionRouter(
+            asupersync::net::quic_native::ConnectionRouterError::InvalidConnectionState { .. }
+        ))
+    ));
+    assert_eq!(endpoint.connection_stats().active_connections, 1);
+    endpoint
+}
+
+async fn managed_exchange(
+    cx: &Cx,
+    endpoint: &mut ManagedQuicEndpoint,
+    metrics: &asupersync::net::quic_native::endpoint::EndpointMetrics,
+    server: bool,
+    round: usize,
+) -> serde_json::Value {
+    let (_, client_cid, server_cid) = managed_ids();
+    let cid = if server { server_cid } else { client_cid };
+    let payload = format!(
+        "managed-public-round-{round}:{}",
+        "abcdef0123456789".repeat(32)
+    );
+    let sent_before = metrics.packets_sent.load(Ordering::SeqCst);
+    let received_before = metrics.packets_received.load(Ordering::SeqCst);
+    let mut stream = if server {
+        None
+    } else {
+        Some(
+            endpoint
+                .with_connection_mut(cx, cid, |connection| {
+                    let stream = connection.open_bidi_stream(cx).unwrap();
+                    connection
+                        .write_stream(cx, stream, Bytes::from(payload.clone()), true)
+                        .unwrap();
+                    stream
+                })
+                .unwrap(),
+        )
+    };
+    let mut received = Vec::new();
+    let mut fin = false;
+    let mut reply_queued = !server;
+    let mut send_floor = None;
+    let mut polls = 0_u64;
+    let started = Instant::now();
+    endpoint.run_event_loop_with_application(cx, |cx, endpoint, task_cx| {
+        polls += 1;
+        assert!(polls <= 1_000_000 && started.elapsed() < Duration::from_secs(15),
+            "managed public exchange must progress despite a self-waking application; server={server} round={round} polls={polls} received={}", received.len());
+        let settled = endpoint.with_connection_mut(cx, cid, |connection| {
+            for _ in 0..8 {
+                let readiness = match connection.poll_next_readable_stream(cx, task_cx) {
+                    Poll::Ready(Ok(readiness)) => readiness,
+                    Poll::Ready(Err(error)) => panic!("authenticated stream readiness: {error}"),
+                    Poll::Pending => break,
+                };
+                if let Some(expected) = stream {
+                    assert_eq!(readiness.stream_id, expected, "one stream per exchange");
+                } else {
+                    stream = Some(readiness.stream_id);
+                }
+                let bytes = connection.read_stream(cx, readiness.stream_id, 256).unwrap();
+                received.extend_from_slice(&bytes);
+                assert!(received.len() <= payload.len(), "no duplicated or extra application bytes");
+                fin |= connection.is_control_eof(readiness.stream_id).unwrap();
+            }
+            if fin && received.len() == payload.len() {
+                assert_eq!(received.as_slice(), payload.as_bytes());
+                send_floor.get_or_insert_with(|| metrics.packets_sent.load(Ordering::SeqCst));
+                if !reply_queued {
+                    connection.write_stream(cx, stream.unwrap(), Bytes::from(payload.clone()), true).unwrap();
+                    reply_queued = true;
+                }
+                !connection.has_pending_stream_frames(stream.unwrap())
+                    && connection.path_stats().bytes_in_flight == 0
+                    && metrics.packets_sent.load(Ordering::SeqCst) > send_floor.unwrap()
+            } else {
+                false
+            }
+        }).unwrap();
+        if settled {
+            Poll::Ready(Ok(()))
+        } else {
+            // Intentional adversarial application readiness. Before the
+            // fairness repair this selects the callback forever before UDP.
+            task_cx.waker().wake_by_ref();
+            Poll::Pending
+        }
+    }).await.expect("actual managed UDP application exchange");
+    let sent = metrics.packets_sent.load(Ordering::SeqCst) - sent_before;
+    let ingress = metrics.packets_received.load(Ordering::SeqCst) - received_before;
+    assert!(
+        sent > 0 && ingress > 0,
+        "both native UDP directions must progress"
+    );
+    assert!(fin && reply_queued);
+    assert_eq!(received.len(), payload.len());
+    let receipt = serde_json::json!({
+        "server": server, "round": round, "application_polls": polls,
+        "received_bytes": received.len(), "packets_sent": sent,
+        "packets_received": ingress, "elapsed_micros": started.elapsed().as_micros(),
+        "stream": stream.unwrap().0, "fin": fin,
+        "intentional_self_wake": true, "performance_claim": false,
+    });
+    println!("MANAGED_QUIC_ROUND {receipt}");
+    receipt
+}
+
+struct ManagedParentWake {
+    parent: Waker,
+    wakes: AtomicUsize,
+}
+
+impl Wake for ManagedParentWake {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.wakes.fetch_add(1, Ordering::SeqCst);
+        self.parent.wake_by_ref();
+    }
+}
+
+async fn managed_park_drop(cx: &Cx, endpoint: &mut ManagedQuicEndpoint) -> Waker {
+    let proxy = std::sync::Mutex::new(None::<Waker>);
+    let mut driver = Box::pin(
+        endpoint.run_event_loop_with_application(cx, |_, _, task_cx| {
+            *proxy.lock().unwrap() = Some(task_cx.waker().clone());
+            Poll::<Result<(), ManagedEndpointError>>::Pending
+        }),
+    );
+    let mut parent = None::<Arc<ManagedParentWake>>;
+    let mut attempts = 0;
+    std::future::poll_fn(|task_cx| {
+        attempts += 1;
+        assert!(
+            attempts <= 512,
+            "managed loop must actually park without application self-wakes"
+        );
+        let parent = parent.get_or_insert_with(|| {
+            Arc::new(ManagedParentWake {
+                parent: task_cx.waker().clone(),
+                wakes: AtomicUsize::new(0),
+            })
+        });
+        let waker = Waker::from(Arc::clone(parent));
+        let before = parent.wakes.load(Ordering::SeqCst);
+        let pending = driver
+            .as_mut()
+            .poll(&mut Context::from_waker(&waker))
+            .is_pending();
+        assert!(pending, "idle managed driver cannot complete spontaneously");
+        if proxy.lock().unwrap().is_some() && parent.wakes.load(Ordering::SeqCst) == before {
+            Poll::Ready(())
+        } else {
+            task_cx.waker().wake_by_ref();
+            Poll::Pending
+        }
+    })
+    .await;
+    drop(driver);
+    let parent = parent.unwrap();
+    let retained = proxy.into_inner().unwrap().unwrap();
+    let before = parent.wakes.load(Ordering::SeqCst);
+    retained.wake_by_ref();
+    assert_eq!(
+        parent.wakes.load(Ordering::SeqCst),
+        before,
+        "dropping the parked driver must detach its retained application proxy"
+    );
+    println!("MANAGED_QUIC_PARK_DROP attempts={attempts} old_parent_wakes={before} detached=true");
+    retained
+}
+
+async fn managed_cancel_parked(cx: &Cx, mut endpoint: ManagedQuicEndpoint) -> ManagedQuicEndpoint {
+    let parked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let child_parked = Arc::clone(&parked);
+    let mut task = cx
+        .spawn(move |child_cx| {
+            // Keep the native nested task Send check explicit without asking
+            // the TLS lane to recursively expand both complete task types.
+            let future: std::pin::Pin<
+                Box<
+                    dyn Future<Output = (ManagedQuicEndpoint, Result<(), ManagedEndpointError>)>
+                        + Send,
+                >,
+            > = Box::pin(async move {
+                let mut driver = Box::pin(
+                    endpoint.run_event_loop_with_application(&child_cx, |_, _, _| {
+                        Poll::<Result<(), ManagedEndpointError>>::Pending
+                    }),
+                );
+                let mut parent = None::<Arc<ManagedParentWake>>;
+                let result = std::future::poll_fn(|task_cx| {
+                    let parent = parent.get_or_insert_with(|| {
+                        Arc::new(ManagedParentWake {
+                            parent: task_cx.waker().clone(),
+                            wakes: AtomicUsize::new(0),
+                        })
+                    });
+                    let waker = Waker::from(Arc::clone(parent));
+                    let before = parent.wakes.load(Ordering::SeqCst);
+                    let result = driver.as_mut().poll(&mut Context::from_waker(&waker));
+                    if result.is_pending() && parent.wakes.load(Ordering::SeqCst) == before {
+                        child_parked.store(true, Ordering::SeqCst);
+                    }
+                    result
+                })
+                .await;
+                drop(driver);
+                (endpoint, result)
+            });
+            future
+        })
+        .expect("spawn native managed driver with an owned authenticated endpoint");
+    let started = Instant::now();
+    while !parked.load(Ordering::SeqCst) {
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "native driver must reach actual Pending before abort"
+        );
+        asupersync::runtime::yield_now().await;
+    }
+    task.abort();
+    let (endpoint, result) =
+        asupersync::time::timeout(cx.now(), Duration::from_secs(5), task.join(cx))
+            .await
+            .expect("parked native cancellation watchdog")
+            .expect("acknowledged native cancellation retains the owner and typed result");
+    assert_eq!(result, Err(ManagedEndpointError::Cancelled));
+    assert_eq!(endpoint.connection_stats().active_connections, 1);
+    println!("MANAGED_QUIC_CANCEL parked=true result=Cancelled retained_connections=1");
+    endpoint
+}
+
+#[test]
+fn authenticated_managed_public_handoff_self_wake_and_restart_cross_real_udp() {
+    let runtime = managed_runtime();
+    runtime.block_on(runtime.handle().spawn(async {
+        let cx = Cx::current().expect("actual native task Cx");
+        assert!(cx.has_timer());
+        let client_socket = QuicUdpEndpoint::bind(
+            &cx,
+            "127.0.0.1:0".parse().unwrap(),
+            QuicUdpEndpointConfig::default(),
+        )
+        .await
+        .unwrap();
+        let server_socket = QuicUdpEndpoint::bind(
+            &cx,
+            "127.0.0.1:0".parse().unwrap(),
+            QuicUdpEndpointConfig::default(),
+        )
+        .await
+        .unwrap();
+        let server_addr = server_socket.local_addr();
+        let client_metrics = client_socket.metrics();
+        let server_metrics = server_socket.metrics();
+        let (client, server) = zip(
+            managed_handshake(&cx, client_socket, false, server_addr),
+            managed_handshake(&cx, server_socket, true, server_addr),
+        )
+        .await;
+        let mut client = managed_import(&cx, client, false);
+        let mut server = managed_import(&cx, server, true);
+        for round in 0..2 {
+            let (client_receipt, server_receipt) = zip(
+                managed_exchange(&cx, &mut client, &client_metrics, false, round),
+                managed_exchange(&cx, &mut server, &server_metrics, true, round),
+            )
+            .await;
+            assert_eq!(
+                client_receipt["received_bytes"],
+                server_receipt["received_bytes"]
+            );
+            assert_eq!(client_receipt["stream"], server_receipt["stream"]);
+            if round == 0 {
+                let old_client = managed_park_drop(&cx, &mut client).await;
+                let old_server = managed_park_drop(&cx, &mut server).await;
+                old_client.wake_by_ref();
+                old_server.wake_by_ref();
+                server = managed_cancel_parked(&cx, server).await;
+            }
+        }
+        client.shutdown(&cx).await.unwrap();
+        server.shutdown(&cx).await.unwrap();
+        assert_eq!(client.connection_stats().active_connections, 0);
+        assert_eq!(server.connection_stats().active_connections, 0);
+        assert_eq!(cx.timer_driver().unwrap().pending_count(), 0);
+    }));
+    managed_assert_runtime_cleanup(&runtime);
+}
+
+fn managed_sha256(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+fn managed_source_identity() -> serde_json::Value {
+    serde_json::json!({
+        "test": managed_sha256(include_bytes!("quic_h3_live_udp.rs")),
+        "runner": managed_sha256(include_bytes!("../scripts/run_quic_application_data_loopback_e2e.sh")),
+        "manager": managed_sha256(include_bytes!("../src/net/quic_native/connection_manager.rs")),
+        "managed": managed_sha256(include_bytes!("../src/net/quic_native/managed_endpoint.rs")),
+        "owner": managed_sha256(include_bytes!("../src/net/quic_native/udp_connection.rs")),
+        "endpoint": managed_sha256(include_bytes!("../src/net/quic_native/endpoint.rs")),
+        "application": managed_sha256(include_bytes!("../src/net/quic_native/endpoint_api.rs")),
+        "exports": managed_sha256(include_bytes!("../src/net/quic_native/mod.rs")),
+    })
+}
+
+fn managed_executable_sha256() -> String {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let mut file = std::fs::File::open(std::env::current_exe().unwrap()).unwrap();
+    let expected = file.metadata().unwrap().len();
+    assert!(
+        expected > 0 && expected <= 512 * 1024 * 1024,
+        "bounded executable identity"
+    );
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0_u8; 64 * 1024];
+    let mut total = 0_u64;
+    loop {
+        let count = file.read(&mut buffer).unwrap();
+        if count == 0 {
+            break;
+        }
+        total += count as u64;
+        assert!(total <= expected);
+        hasher.update(&buffer[..count]);
+    }
+    assert_eq!(total, expected);
+    format!("{:x}", hasher.finalize())
+}
+
+fn managed_write_receipt(path: &std::path::Path, value: &serde_json::Value) {
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .unwrap();
+    serde_json::to_writer(&mut file, value).unwrap();
+    file.write_all(b"\n").unwrap();
+    file.sync_all().unwrap();
+}
+
+#[test]
+#[ignore = "selected explicitly by the managed two-process parent with a bounded artifact directory"]
+fn authenticated_managed_process_peer() {
+    let role =
+        std::env::var("ASUPERSYNC_MANAGED_QUIC_ROLE").expect("parent supplies the child role");
+    assert!(role == "server" || role == "client");
+    let server = role == "server";
+    let artifacts = std::path::PathBuf::from(
+        std::env::var_os("ASUPERSYNC_MANAGED_QUIC_ARTIFACT_DIR")
+            .expect("parent artifact directory"),
+    );
+    assert!(artifacts.is_dir());
+    let source = managed_source_identity();
+    let executable = managed_executable_sha256();
+    let runtime = managed_runtime();
+    let receipt = runtime.block_on(runtime.handle().spawn(async move {
+        let cx = Cx::current().expect("actual native child-process task Cx");
+        assert!(cx.has_timer());
+        let socket = QuicUdpEndpoint::bind(&cx, "127.0.0.1:0".parse().unwrap(), QuicUdpEndpointConfig::default()).await.unwrap();
+        let local = socket.local_addr();
+        let metrics = socket.metrics();
+        let server_addr = if server {
+            managed_write_receipt(&artifacts.join("server-ready.json"), &serde_json::json!({
+                "server_addr": local.to_string(), "pid": std::process::id(),
+                "source": source, "executable_sha256": executable,
+            }));
+            local
+        } else {
+            let address: std::net::SocketAddr = std::env::var("ASUPERSYNC_MANAGED_QUIC_SERVER_ADDR").expect("parent supplies actual bound server address").parse().unwrap();
+            assert!(address.ip().is_loopback() && address.port() != 0);
+            address
+        };
+        let owner = managed_handshake(&cx, socket, server, server_addr).await;
+        let peer = owner.peer_addr();
+        let local_cid = format!("{:?}", owner.local_connection_id());
+        let peer_cid = format!("{:?}", owner.peer_connection_id());
+        let handshake_sent = metrics.packets_sent.load(Ordering::SeqCst);
+        let handshake_received = metrics.packets_received.load(Ordering::SeqCst);
+        assert!(handshake_sent > 0 && handshake_received > 0);
+        let mut endpoint = managed_import(&cx, owner, server);
+        let mut rounds = Vec::new();
+        for round in 0..2 {
+            rounds.push(managed_exchange(&cx, &mut endpoint, &metrics, server, round).await);
+            if round == 0 {
+                let old_proxy = managed_park_drop(&cx, &mut endpoint).await;
+                endpoint = managed_cancel_parked(&cx, endpoint).await;
+                old_proxy.wake_by_ref();
+                // Both peers finish the parked cancellation before the next
+                // request. This is process orchestration, not UDP evidence.
+                managed_write_receipt(&artifacts.join(format!("{role}-restart-ready.json")), &serde_json::json!({"pid": std::process::id()}));
+                let other = artifacts.join(if server { "client-restart-ready.json" } else { "server-restart-ready.json" });
+                let started = Instant::now();
+                while !other.exists() {
+                    assert!(started.elapsed() < Duration::from_secs(10), "other real peer did not complete cancellation; artifacts={artifacts:?}");
+                    asupersync::time::sleep(cx.now(), Duration::from_millis(10)).await;
+                }
+            }
+        }
+        endpoint.shutdown(&cx).await.unwrap();
+        assert_eq!(endpoint.connection_stats().active_connections, 0);
+        assert_eq!(cx.timer_driver().unwrap().pending_count(), 0);
+        let receipt = serde_json::json!({
+            "schema": "asupersync.managed_quic.process.v1", "role": role,
+            "pid": std::process::id(), "source": source, "executable_sha256": executable,
+            "local_addr": local.to_string(), "peer_addr": peer.to_string(),
+            "local_cid": local_cid, "peer_cid": peer_cid,
+            "alpn": String::from_utf8(MANAGED_ALPN.to_vec()).unwrap(),
+            "handshake_packets_sent": handshake_sent, "handshake_packets_received": handshake_received,
+            "rounds": rounds, "active_connections_after_shutdown": endpoint.connection_stats().active_connections,
+            "parked_cancelled_and_restarted": true,
+            "same_router_multi_peer_proof": false, "socket_would_block_proof": false,
+            "performance_claim": false,
+        });
+        (artifacts, role, receipt)
+    }));
+    managed_assert_runtime_cleanup(&runtime);
+    let (artifacts, role, mut receipt) = receipt;
+    receipt["runtime_quiescent"] = serde_json::json!(runtime.is_quiescent());
+    managed_write_receipt(&artifacts.join(format!("{role}-receipt.json")), &receipt);
+    println!("MANAGED_QUIC_PROCESS {receipt}");
+}
+
+struct ManagedChild(std::process::Child);
+
+impl Drop for ManagedChild {
+    fn drop(&mut self) {
+        if matches!(self.0.try_wait(), Ok(None)) {
+            // Only this harness's own child is stopped, and all output files
+            // survive a failed assertion or watchdog for independent review.
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+}
+
+fn managed_spawn_peer(
+    artifacts: &std::path::Path,
+    role: &str,
+    server_addr: Option<&str>,
+) -> ManagedChild {
+    let stdout = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(artifacts.join(format!("{role}.stdout.log")))
+        .unwrap();
+    let stderr = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(artifacts.join(format!("{role}.stderr.log")))
+        .unwrap();
+    let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+    command
+        .args([
+            "--exact",
+            "authenticated_managed_process_peer",
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("ASUPERSYNC_MANAGED_QUIC_ROLE", role)
+        .env("ASUPERSYNC_MANAGED_QUIC_ARTIFACT_DIR", artifacts)
+        .stdout(stdout)
+        .stderr(stderr);
+    if let Some(address) = server_addr {
+        command.env("ASUPERSYNC_MANAGED_QUIC_SERVER_ADDR", address);
+    } else {
+        command.env_remove("ASUPERSYNC_MANAGED_QUIC_SERVER_ADDR");
+    }
+    ManagedChild(
+        command
+            .spawn()
+            .expect("spawn the actual current public test executable"),
+    )
+}
+
+fn managed_print_child_logs(artifacts: &std::path::Path, role: &str) {
+    for stream in ["stdout", "stderr"] {
+        let path = artifacts.join(format!("{role}.{stream}.log"));
+        eprintln!(
+            "MANAGED_QUIC_CHILD_LOG {}\n{}",
+            path.display(),
+            std::fs::read_to_string(&path).unwrap()
+        );
+    }
+}
+
+#[test]
+fn authenticated_managed_two_process_public_exchange_cancel_and_restart() {
+    let base = std::env::var_os("ASUPERSYNC_MANAGED_QUIC_ARTIFACT_BASE")
+        .map_or_else(std::env::temp_dir, std::path::PathBuf::from);
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let artifacts = base.join(format!(
+        "asupersync-managed-quic-{}-{nonce}",
+        std::process::id()
+    ));
+    std::fs::create_dir(&artifacts).expect("fresh, retained process artifact directory");
+    println!("MANAGED_QUIC_ARTIFACTS {}", artifacts.display());
+    let expected_source = managed_source_identity();
+    let expected_executable = managed_executable_sha256();
+    let mut server = managed_spawn_peer(&artifacts, "server", None);
+    let started = Instant::now();
+    let ready: serde_json::Value = loop {
+        if let Some(status) = server.0.try_wait().unwrap() {
+            managed_print_child_logs(&artifacts, "server");
+            panic!("server exited before publishing its actual UDP bind: {status}");
+        }
+        if let Ok(bytes) = std::fs::read(artifacts.join("server-ready.json")) {
+            if let Ok(value) = serde_json::from_slice(&bytes) {
+                break value;
+            }
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(15),
+            "server bind watchdog; artifacts={artifacts:?}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert_eq!(ready["pid"], server.0.id());
+    assert_eq!(ready["source"], expected_source);
+    assert_eq!(ready["executable_sha256"], expected_executable);
+    let address = ready["server_addr"].as_str().unwrap();
+    let mut client = managed_spawn_peer(&artifacts, "client", Some(address));
+    assert_ne!(client.0.id(), server.0.id());
+    assert_ne!(client.0.id(), std::process::id());
+    assert_ne!(server.0.id(), std::process::id());
+    loop {
+        let server_status = server.0.try_wait().unwrap();
+        let client_status = client.0.try_wait().unwrap();
+        if server_status.is_some_and(|status| !status.success())
+            || client_status.is_some_and(|status| !status.success())
+        {
+            managed_print_child_logs(&artifacts, "server");
+            managed_print_child_logs(&artifacts, "client");
+            panic!(
+                "actual managed child failure: server={server_status:?} client={client_status:?}; artifacts={artifacts:?}"
+            );
+        }
+        if server_status.is_some() && client_status.is_some() {
+            break;
+        }
+        if started.elapsed() >= Duration::from_secs(45) {
+            managed_print_child_logs(&artifacts, "server");
+            managed_print_child_logs(&artifacts, "client");
+            panic!("actual managed two-process watchdog; artifacts={artifacts:?}");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let mut receipts = Vec::new();
+    for (role, pid) in [("client", client.0.id()), ("server", server.0.id())] {
+        managed_print_child_logs(&artifacts, role);
+        let receipt: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(artifacts.join(format!("{role}-receipt.json"))).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(receipt["pid"], pid);
+        assert_eq!(receipt["role"], role);
+        assert_eq!(receipt["source"], expected_source);
+        assert_eq!(receipt["executable_sha256"], expected_executable);
+        assert_eq!(receipt["alpn"], std::str::from_utf8(MANAGED_ALPN).unwrap());
+        assert_eq!(receipt["runtime_quiescent"], true);
+        assert_eq!(receipt["active_connections_after_shutdown"], 0);
+        assert_eq!(receipt["parked_cancelled_and_restarted"], true);
+        let rounds = receipt["rounds"].as_array().unwrap();
+        assert_eq!(rounds.len(), 2);
+        for (index, round) in rounds.iter().enumerate() {
+            assert_eq!(round["round"], index);
+            assert_eq!(
+                round["received_bytes"],
+                format!(
+                    "managed-public-round-{index}:{}",
+                    "abcdef0123456789".repeat(32)
+                )
+                .len()
+            );
+            assert!(round["packets_sent"].as_u64().unwrap() > 0);
+            assert!(round["packets_received"].as_u64().unwrap() > 0);
+            assert!(round["application_polls"].as_u64().unwrap() > 0);
+            assert_eq!(round["fin"], true);
+        }
+        let stdout = std::fs::read_to_string(artifacts.join(format!("{role}.stdout.log"))).unwrap();
+        assert!(
+            stdout.contains("test result: ok. 1 passed; 0 failed; 0 ignored;"),
+            "each helper must actually execute one successful test"
+        );
+        let emitted = stdout
+            .lines()
+            .filter_map(|line| {
+                line.split_once("MANAGED_QUIC_PROCESS ")
+                    .map(|(_, json)| json)
+            })
+            .map(|json| serde_json::from_str::<serde_json::Value>(json).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(emitted, vec![receipt.clone()]);
+        receipts.push(receipt);
+    }
+    assert_eq!(receipts[0]["local_addr"], receipts[1]["peer_addr"]);
+    assert_eq!(receipts[1]["local_addr"], receipts[0]["peer_addr"]);
+    assert_eq!(receipts[0]["local_cid"], receipts[1]["peer_cid"]);
+    assert_eq!(receipts[1]["local_cid"], receipts[0]["peer_cid"]);
+    for round in 0..2 {
+        assert_eq!(
+            receipts[0]["rounds"][round]["stream"],
+            receipts[1]["rounds"][round]["stream"]
+        );
+    }
+    let summary = serde_json::json!({
+        "schema": "asupersync.managed_quic.two_process.v1", "children": receipts,
+        "actual_child_count": 2, "actual_authenticated_sessions": 1,
+        "source": expected_source, "executable_sha256": expected_executable,
+        "same_router_multi_peer_proof": false, "socket_would_block_proof": false,
+        "performance_claim": false,
+    });
+    managed_write_receipt(&artifacts.join("summary.json"), &summary);
+    println!("MANAGED_QUIC_TWO_PROCESS {summary}");
 }

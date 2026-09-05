@@ -44,7 +44,7 @@ pub struct ManagedQuicEndpoint {
     pending_outgoing: VecDeque<RoutedOutgoingPacket>,
     /// Receive ownership survives cancellation and preserves handshake-buffered
     /// application packets ahead of fresh socket input.
-    pending_incoming: VecDeque<ReceivedPacket>,
+    pending_incoming: VecDeque<ManagedIncomingPacket>,
     /// An imported authenticated socket cannot create an unauthenticated route
     /// merely because another datagram resembles an Initial packet.
     authenticated_only: bool,
@@ -59,6 +59,30 @@ enum EndpointEvent<T> {
     Timer(Instant),
     ApplicationTurn,
     ApplicationComplete(T),
+}
+
+#[derive(Debug)]
+struct ManagedIncomingPacket {
+    packet: ReceivedPacket,
+    needs_clock_stamp: bool,
+}
+
+struct ManagedApplicationRegistration(Option<Arc<ManagedApplicationWake>>);
+
+impl Drop for ManagedApplicationRegistration {
+    fn drop(&mut self) {
+        if let Some(wake) = &self.0 {
+            let retired = wake
+                .parent
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            // A retained application readiness source may outlive this loop.
+            // Detach its parent on return, error, unwind, and future drop.
+            // RawWaker destruction must run outside the registration lock.
+            drop(retired);
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -258,9 +282,13 @@ impl ManagedQuicEndpoint {
                 .connection
                 .inner()
                 .pto_deadline_micros(cx, now_micros)
-                .map_err(|error| ConnectionRouterError::PacketProcessingFailed {
-                    connection_id: parts.local_cid,
-                    reason: error.to_string(),
+                .map_err(|error| match error {
+                    super::NativeQuicConnectionError::Cancelled => ManagedEndpointError::Cancelled,
+                    other => ConnectionRouterError::PacketProcessingFailed {
+                        connection_id: parts.local_cid,
+                        reason: other.to_string(),
+                    }
+                    .into(),
                 })?;
             deadline
                 .map(|deadline| {
@@ -299,7 +327,13 @@ impl ManagedQuicEndpoint {
             config,
             shutting_down: false,
             pending_outgoing: VecDeque::new(),
-            pending_incoming,
+            pending_incoming: pending_incoming
+                .into_iter()
+                .map(|packet| ManagedIncomingPacket {
+                    packet,
+                    needs_clock_stamp: false,
+                })
+                .collect(),
             authenticated_only: true,
             prefer_send: true,
         })
@@ -551,6 +585,8 @@ impl ManagedQuicEndpoint {
                 parent: std::sync::Mutex::new(None),
             })
         });
+        let _application_registration =
+            ManagedApplicationRegistration(application_wake.as_ref().map(Arc::clone));
         let mut application_yielded = false;
         while !self.shutting_down {
             if cx.checkpoint().is_err() {
@@ -679,7 +715,7 @@ impl ManagedQuicEndpoint {
                             self.pending_outgoing
                                 .retain(|packet| packet.packet.dst_addr != peer);
                             self.pending_incoming
-                                .retain(|packet| packet.src_addr != peer);
+                                .retain(|packet| packet.packet.src_addr != peer);
                             let retired = self.connection_router.discard_peer_connections(peer);
                             cx.trace(&format!("QUIC peer {peer} send failed ({error}); retired {retired} connections and {} unsent packets", queued - self.pending_outgoing.len()));
                         }
@@ -731,7 +767,27 @@ impl ManagedQuicEndpoint {
         // Own the entire received batch before checking cancellation. The
         // front packet is retained until routing completes, and later packets
         // never disappear when an earlier asynchronous operation is dropped.
-        self.pending_incoming.extend(packets);
+        self.pending_incoming
+            .extend(packets.into_iter().map(|packet| ManagedIncomingPacket {
+                packet,
+                needs_clock_stamp: true,
+            }));
+        // Stamp fresh socket input once, before cancellation can park this
+        // batch. Handshake-buffered input already carries its original epoch.
+        // A clock-binding failure still leaves every datagram owned for retry.
+        if self
+            .pending_incoming
+            .iter()
+            .any(|packet| packet.needs_clock_stamp)
+        {
+            let now = self.timer_scheduler.now(cx)?;
+            for packet in &mut self.pending_incoming {
+                if packet.needs_clock_stamp {
+                    packet.packet.receive_time = now;
+                    packet.needs_clock_stamp = false;
+                }
+            }
+        }
         if cx.checkpoint().is_err() {
             return Err(ManagedEndpointError::Cancelled);
         }
@@ -749,14 +805,12 @@ impl ManagedQuicEndpoint {
             .packet_batch_size
             .min(self.pending_incoming.len());
         for _ in 0..count {
-            let mut packet = self
+            let packet = self
                 .pending_incoming
                 .front()
                 .expect("owned receive prefix")
+                .packet
                 .clone();
-            if !self.authenticated_only {
-                packet.receive_time = self.timer_scheduler.now(cx)?;
-            }
             // Route packet through connection router
             let emit_output = self.pending_outgoing.len() < self.config.packet_batch_size;
             let routed = match self
@@ -840,6 +894,11 @@ impl ManagedQuicEndpoint {
                     cx.trace(&format!("Dropped packet: {reason}"));
                 }
             }
+            // An authenticated packet commits synchronously once its replay
+            // number is accepted. Retire that packet before observing a cancel
+            // raised by a stream waker during commitment; preserve the suffix.
+            cx.checkpoint()
+                .map_err(|_| ManagedEndpointError::Cancelled)?;
         }
 
         Ok(())
@@ -1112,6 +1171,261 @@ mod tests {
             }
         }
         panic!("managed selection: registered native read interest lost its UDP wake");
+    }
+
+    #[test]
+    fn application_self_wake_services_ready_udp_and_protected_output() {
+        let runtime = crate::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .unwrap();
+        runtime.block_on(runtime.handle().spawn(async {
+            let owner = Cx::current().unwrap();
+            let (cx, clock, driver, mut endpoint, peer, cid) = selection_fixture(&owner).await;
+            let deadline = endpoint.connection_router.next_timer_deadline().unwrap();
+            let advance = deadline.duration_since(endpoint.timer_scheduler.now(&cx).unwrap());
+            clock.advance(u64::try_from(advance.as_nanos()).unwrap());
+            endpoint.process_timer_events(&cx, deadline).await.unwrap();
+            assert_eq!(
+                endpoint.pending_outgoing.len(),
+                1,
+                "one real protected PTO packet"
+            );
+            let expected = endpoint
+                .pending_outgoing
+                .front()
+                .unwrap()
+                .packet
+                .data
+                .clone();
+            let address = endpoint.local_addr();
+            assert_eq!(peer.send_to(b"invalid QUIC", address).unwrap(), 12);
+            let metrics = endpoint.udp_endpoint.metrics();
+            let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let observed_calls = Arc::clone(&calls);
+            let observed_metrics = Arc::clone(&metrics);
+            let wake = Arc::new(SelectionWake::default());
+            let waker = Waker::from(Arc::clone(&wake));
+            let mut completed = false;
+            {
+                let mut run =
+                    std::pin::pin!(endpoint.drive_event_loop(&cx, true, move |_, _, task_cx| {
+                        observed_calls.fetch_add(1, Ordering::SeqCst);
+                        if observed_metrics.packets_sent.load(Ordering::Relaxed) == 1
+                            && observed_metrics.packets_received.load(Ordering::Relaxed) == 1
+                        {
+                            return Poll::Ready(Ok(()));
+                        }
+                        task_cx.waker().wake_by_ref();
+                        Poll::Pending
+                    }));
+                for _ in 0..16 {
+                    match run.as_mut().poll(&mut Context::from_waker(&waker)) {
+                        Poll::Ready(result) => {
+                            assert_eq!(result, Ok(Some(())));
+                            completed = true;
+                            break;
+                        }
+                        Poll::Pending => {
+                            owner
+                                .io_driver_handle()
+                                .unwrap()
+                                .turn_with(Some(Duration::ZERO), |_, _| {})
+                                .unwrap();
+                        }
+                    }
+                }
+            }
+            assert!(
+                completed,
+                "self-waking application must permit both I/O directions"
+            );
+            assert!(calls.load(Ordering::SeqCst) >= 3);
+            assert!(endpoint.pending_outgoing.is_empty());
+            let mut bytes = [0_u8; 1_200];
+            let (length, from) = peer.recv_from(&mut bytes).unwrap();
+            assert_eq!(from, address);
+            assert_eq!(&bytes[..length], expected.as_slice());
+            let (header, header_len) =
+                crate::net::quic_core::PacketHeader::decode(&bytes[..length], cid.len()).unwrap();
+            let crate::net::quic_core::PacketHeader::Short(header) = header else {
+                panic!("actual output must carry a protected 1-RTT header");
+            };
+            let mut verifier = selection_packet_protection(&cx).await;
+            let plaintext = crate::net::quic_native::connection_manager::unprotect_1rtt_packet(
+                &cx,
+                cid,
+                &mut verifier,
+                &bytes[..header_len],
+                &bytes[header_len..length],
+                header.packet_number,
+                header.key_phase,
+            )
+            .await
+            .unwrap();
+            assert!(
+                crate::net::quic_native::NativeQuicConnection::decode_frames(&plaintext)
+                    .unwrap()
+                    .iter()
+                    .any(|frame| matches!(
+                        frame,
+                        crate::net::atp::protocol::quic_frames::QuicFrame::Ping
+                    ))
+            );
+            endpoint.shutdown(&cx).await.unwrap();
+            assert_eq!(driver.pending_count(), 0);
+        }));
+    }
+
+    #[test]
+    fn application_proxy_detaches_parent_and_does_not_poll_on_waker_replacement() {
+        let runtime = crate::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .unwrap();
+        runtime.block_on(runtime.handle().spawn(async {
+            let owner = Cx::current().unwrap();
+            let (cx, _, driver, mut endpoint, _, _) = selection_fixture(&owner).await;
+            let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let retained = Arc::new(std::sync::Mutex::new(None::<Waker>));
+            let observed_calls = Arc::clone(&calls);
+            let observed_retained = Arc::clone(&retained);
+            let old = Arc::new(SelectionWake::default());
+            let new = Arc::new(SelectionWake::default());
+            let old_waker = Waker::from(Arc::clone(&old));
+            let new_waker = Waker::from(Arc::clone(&new));
+            {
+                let mut run =
+                    std::pin::pin!(endpoint.drive_event_loop(&cx, true, move |_, _, task_cx| {
+                        observed_calls.fetch_add(1, Ordering::SeqCst);
+                        *observed_retained.lock().unwrap() = Some(task_cx.waker().clone());
+                        Poll::<Result<(), ManagedEndpointError>>::Pending
+                    }));
+                assert!(
+                    run.as_mut()
+                        .poll(&mut Context::from_waker(&old_waker))
+                        .is_pending()
+                );
+                assert!(
+                    run.as_mut()
+                        .poll(&mut Context::from_waker(&old_waker))
+                        .is_pending()
+                );
+                assert_eq!(calls.load(Ordering::SeqCst), 1);
+                assert!(
+                    run.as_mut()
+                        .poll(&mut Context::from_waker(&new_waker))
+                        .is_pending()
+                );
+                assert_eq!(
+                    calls.load(Ordering::SeqCst),
+                    1,
+                    "changing parent is not application readiness"
+                );
+                let before_old = old.0.load(Ordering::SeqCst);
+                let before_new = new.0.load(Ordering::SeqCst);
+                retained.lock().unwrap().as_ref().unwrap().wake_by_ref();
+                assert_eq!(old.0.load(Ordering::SeqCst), before_old);
+                assert_eq!(new.0.load(Ordering::SeqCst), before_new + 1);
+                assert!(
+                    run.as_mut()
+                        .poll(&mut Context::from_waker(&new_waker))
+                        .is_pending()
+                );
+                assert_eq!(calls.load(Ordering::SeqCst), 2);
+            }
+            let before_old = old.0.load(Ordering::SeqCst);
+            let before_new = new.0.load(Ordering::SeqCst);
+            retained.lock().unwrap().as_ref().unwrap().wake_by_ref();
+            assert_eq!(old.0.load(Ordering::SeqCst), before_old);
+            assert_eq!(
+                new.0.load(Ordering::SeqCst),
+                before_new,
+                "dropped driver's proxy is detached"
+            );
+            // Isolate the registration's owned parent reference from independent
+            // socket/timer registrations to prove that reference is released.
+            let parent = Arc::new(SelectionWake::default());
+            let parent_waker = Waker::from(Arc::clone(&parent));
+            let proxy = Arc::new(ManagedApplicationWake {
+                ready: AtomicBool::new(false),
+                parent: std::sync::Mutex::new(None),
+            });
+            let baseline = Arc::strong_count(&parent);
+            {
+                let _registration = ManagedApplicationRegistration(Some(Arc::clone(&proxy)));
+                proxy.register_parent(&parent_waker);
+                assert_eq!(Arc::strong_count(&parent), baseline + 1);
+            }
+            assert_eq!(Arc::strong_count(&parent), baseline);
+            proxy.wake_by_ref();
+            assert_eq!(parent.0.load(Ordering::SeqCst), 0);
+            endpoint.shutdown(&cx).await.unwrap();
+            assert_eq!(driver.pending_count(), 0);
+        }));
+    }
+
+    #[test]
+    fn received_batch_keeps_early_epoch_and_stamps_fresh_input_once_before_cancel() {
+        let runtime = crate::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .unwrap();
+        runtime.block_on(runtime.handle().spawn(async {
+            let owner = Cx::current().unwrap();
+            let (cx, clock, _, mut endpoint, peer, _) = selection_fixture(&owner).await;
+            let original = endpoint.timer_scheduler.now(&cx).unwrap();
+            let early_time = original.checked_sub(Duration::from_millis(1)).unwrap();
+            endpoint.authenticated_only = true;
+            endpoint.pending_incoming.push_back(ManagedIncomingPacket {
+                packet: ReceivedPacket {
+                    src_addr: peer.local_addr().unwrap(),
+                    data: b"retained early input".to_vec(),
+                    receive_time: early_time,
+                    transmit_time: None,
+                },
+                needs_clock_stamp: false,
+            });
+            assert_eq!(
+                peer.send_to(b"fresh kernel input", endpoint.local_addr())
+                    .unwrap(),
+                18
+            );
+            let packets = endpoint.udp_endpoint.receive_batch(&cx, 1).await.unwrap();
+            assert_eq!(packets.len(), 1);
+            let wall_received = packets[0].receive_time;
+            clock.advance(10_000_000_000);
+            let mapped = endpoint.timer_scheduler.now(&cx).unwrap();
+            assert_eq!(mapped.duration_since(original), Duration::from_secs(10));
+            assert!(mapped.duration_since(wall_received) >= Duration::from_secs(9));
+            cx.cancel_with(crate::types::CancelKind::User, None);
+            assert_eq!(
+                endpoint.process_packet_batch(&cx, packets).await,
+                Err(ManagedEndpointError::Cancelled)
+            );
+            assert_eq!(endpoint.pending_incoming.len(), 2);
+            assert_eq!(endpoint.pending_incoming[0].packet.receive_time, early_time);
+            assert_eq!(endpoint.pending_incoming[1].packet.receive_time, mapped);
+            assert_eq!(
+                endpoint.pending_incoming[1].packet.data,
+                b"fresh kernel input"
+            );
+            clock.advance(20_000_000_000);
+            assert_eq!(
+                endpoint.process_packet_batch(&cx, Vec::new()).await,
+                Err(ManagedEndpointError::Cancelled)
+            );
+            assert_eq!(endpoint.pending_incoming[0].packet.receive_time, early_time);
+            assert_eq!(endpoint.pending_incoming[1].packet.receive_time, mapped);
+            assert!(
+                endpoint
+                    .pending_incoming
+                    .iter()
+                    .all(|packet| !packet.needs_clock_stamp)
+            );
+            assert_eq!(
+                endpoint.shutdown(&cx).await,
+                Err(ManagedEndpointError::Cancelled)
+            );
+            assert!(endpoint.pending_incoming.is_empty());
+        }));
     }
 
     #[test]

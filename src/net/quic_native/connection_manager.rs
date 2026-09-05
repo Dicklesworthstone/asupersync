@@ -467,7 +467,7 @@ impl ConnectionRouter {
                         reason: "packet source does not match the authenticated peer".to_string(),
                     });
                 }
-                if routing_info.space != PacketNumberSpace::ApplicationData {
+                if routing_info.kind != PacketRoutingKind::OneRtt {
                     // These encrypted handshake bytes belong to the retained
                     // TLS flight, never the legacy plaintext-frame path.
                     if authenticated.pending_final_flight_packets == 0
@@ -500,16 +500,78 @@ impl ConnectionRouter {
                 }
             }
             let authenticated = handle.clock_origin.is_some();
-            if !authenticated {
-                handle.last_activity = packet.receive_time;
-                handle
-                    .connection
-                    .on_datagram_received(cx, packet.data.len() as u64)
-                    .map_err(|err| ConnectionRouterError::PacketProcessingFailed {
-                        connection_id,
-                        reason: err.to_string(),
+            if authenticated {
+                // Replay admission and payload commitment are one bounded,
+                // synchronous cancellation transaction. In particular a stream
+                // waker may request cancellation while processing the first
+                // frame: the remaining frames must still commit exactly once.
+                // No socket, timer, or other asynchronous wait is masked.
+                cx.masked(|| -> Result<(), ConnectionRouterError> {
+                    let payload = packet.data.get(routing_info.header_len..).ok_or_else(|| {
+                        ConnectionRouterError::PacketProcessingFailed {
+                            connection_id,
+                            reason: "header length exceeded datagram length".to_string(),
+                        }
                     })?;
+                    let protection = handle.packet_protection.as_mut().ok_or(
+                        ConnectionRouterError::PacketProtectionUnavailable { connection_id },
+                    )?;
+                    let plaintext = unprotect_1rtt_packet_now(
+                        cx,
+                        connection_id,
+                        &mut protection.protection,
+                        &packet.data[..routing_info.header_len],
+                        payload,
+                        routing_info.packet_number,
+                        routing_info.key_phase,
+                    )?;
+                    handle
+                        .connection
+                        .on_datagram_received(cx, packet.data.len() as u64)
+                        .map_err(|error| ConnectionRouterError::PacketProcessingFailed {
+                            connection_id,
+                            reason: error.to_string(),
+                        })?;
+                    handle.last_activity = packet.receive_time;
+                    handle
+                        .connection
+                        .process_packet_payload(
+                            cx,
+                            routing_info.space,
+                            routing_info.packet_number,
+                            &plaintext,
+                            now_micros,
+                        )
+                        .map_err(|error| ConnectionRouterError::PacketProcessingFailed {
+                            connection_id,
+                            reason: error.to_string(),
+                        })?;
+                    handle.deferred_spaces[packet_space_index(routing_info.space)] = true;
+                    Self::refresh_connection_timer(
+                        cx,
+                        connection_id,
+                        handle,
+                        self.clock_origin,
+                        now_micros,
+                        packet.receive_time,
+                    )
+                })?;
+                // Always acknowledge committed input before a later checkpoint
+                // or await. The driver owns deferred output, so cancellation
+                // cannot turn this accepted ciphertext into a replay retry.
+                return Ok(RoutingResult::Routed {
+                    connection_id,
+                    outgoing_packets: Vec::new(),
+                });
             }
+            handle.last_activity = packet.receive_time;
+            handle
+                .connection
+                .on_datagram_received(cx, packet.data.len() as u64)
+                .map_err(|err| ConnectionRouterError::PacketProcessingFailed {
+                    connection_id,
+                    reason: err.to_string(),
+                })?;
             let payload = packet.data.get(routing_info.header_len..).ok_or_else(|| {
                 ConnectionRouterError::PacketProcessingFailed {
                     connection_id,
@@ -534,18 +596,6 @@ impl ConnectionRouter {
             } else {
                 payload.to_vec()
             };
-            if authenticated {
-                // Rejected ciphertext cannot extend idle activity or increase
-                // the authenticated connection's datagram accounting.
-                handle
-                    .connection
-                    .on_datagram_received(cx, packet.data.len() as u64)
-                    .map_err(|err| ConnectionRouterError::PacketProcessingFailed {
-                        connection_id,
-                        reason: err.to_string(),
-                    })?;
-                handle.last_activity = packet.receive_time;
-            }
             handle
                 .connection
                 .process_packet_payload(
@@ -1629,6 +1679,26 @@ pub(crate) async fn unprotect_1rtt_packet(
     packet_number: u64,
     key_phase: bool,
 ) -> Result<Vec<u8>, ConnectionRouterError> {
+    unprotect_1rtt_packet_now(
+        cx,
+        connection_id,
+        packet_protection,
+        associated_data,
+        protected_payload,
+        packet_number,
+        key_phase,
+    )
+}
+
+fn unprotect_1rtt_packet_now(
+    cx: &Cx,
+    connection_id: ConnectionId,
+    packet_protection: &mut AtpPacketProtection,
+    associated_data: &[u8],
+    protected_payload: &[u8],
+    packet_number: u64,
+    key_phase: bool,
+) -> Result<Vec<u8>, ConnectionRouterError> {
     if protected_payload.len() < PROTECTED_1RTT_TAG_LEN {
         return Err(ConnectionRouterError::PacketProcessingFailed {
             connection_id,
@@ -1659,10 +1729,7 @@ pub(crate) async fn unprotect_1rtt_packet(
         },
     };
 
-    match packet_protection
-        .unprotect_packet(cx, &protected, associated_data)
-        .await
-    {
+    match packet_protection.unprotect_packet_now(cx, &protected, associated_data) {
         Outcome::Ok(packet) => Ok(packet.plaintext),
         Outcome::Err(err) => Err(ConnectionRouterError::PacketProcessingFailed {
             connection_id,
@@ -3773,6 +3840,136 @@ mod tests {
             cx,
             &mut router.connections.get_mut(&cid).unwrap().connection,
         );
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn authenticated_input_commits_all_frames_when_stream_wake_requests_cancel() {
+        struct CancelOnReadable {
+            cx: Cx,
+            calls: std::sync::atomic::AtomicUsize,
+        }
+        impl std::task::Wake for CancelOnReadable {
+            fn wake(self: std::sync::Arc<Self>) {
+                self.wake_by_ref();
+            }
+            fn wake_by_ref(self: &std::sync::Arc<Self>) {
+                self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                self.cx.cancel_with(crate::types::CancelKind::User, None);
+            }
+        }
+        run_test_with_cx(|cx| async move {
+            let observer = Cx::for_testing();
+            let config = NativeQuicConnectionConfig::default();
+            let mut receiver = ConnectionRouter::new(config);
+            let cid = ConnectionId::new(b"receive").unwrap();
+            let peer_cid = ConnectionId::new(b"other-cid").unwrap();
+            let peer: SocketAddr = "127.0.0.1:4459".parse().unwrap();
+            add_protected_test_connection(&cx, &mut receiver, cid, peer).await;
+            // This deliberately establishes unit state and fixture keys. It
+            // tests the real imported-input transaction, not TLS authentication.
+            let origin = receiver.clock_origin;
+            let handle = receiver.connections.get_mut(&cid).unwrap();
+            let mut application = super::super::QuicConnection::client(config);
+            establish_for_application_data(&cx, application.inner_mut());
+            handle.connection = RoutedConnection::Authenticated(application);
+            handle.peer_connection_id = Some(peer_cid);
+            handle.clock_origin = Some(origin);
+            handle.authenticated = Some(AuthenticatedRouting {
+                negotiated_alpn: b"h3".to_vec(),
+                final_handshake_flight: Vec::new(),
+                last_final_flight_retransmit: None,
+                pending_final_flight_packets: 0,
+            });
+            let wake = std::sync::Arc::new(CancelOnReadable {
+                cx: cx.clone(),
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            });
+            let waker = Waker::from(std::sync::Arc::clone(&wake));
+            assert!(
+                handle
+                    .connection
+                    .poll_next_readable_stream(&cx, &mut Context::from_waker(&waker),)
+                    .is_pending()
+            );
+            let frames = [
+                QuicFrame::Stream {
+                    stream_id: crate::net::VarInt(1),
+                    offset: None,
+                    data: Bytes::from_static(b"first"),
+                    fin: false,
+                },
+                QuicFrame::Stream {
+                    stream_id: crate::net::VarInt(1),
+                    offset: Some(crate::net::VarInt(5)),
+                    data: Bytes::from_static(b"-last"),
+                    fin: true,
+                },
+            ];
+            let mut payload = BytesMut::new();
+            NativeQuicConnection::encode_frames(&frames, &mut payload).unwrap();
+            let mut sender = NativeQuicConnection::new(config);
+            establish_for_application_data(&cx, &mut sender);
+            let mut sender_protection = deterministic_one_rtt_protection(&cx).await;
+            let data = assemble_protected_1rtt_packet(
+                &cx,
+                cid,
+                &mut sender,
+                &mut sender_protection,
+                &frames,
+                &payload,
+                13_000,
+                true,
+            )
+            .await
+            .unwrap();
+            let packet = ReceivedPacket {
+                src_addr: peer,
+                data,
+                receive_time: origin + Duration::from_micros(13_000),
+                transmit_time: None,
+            };
+            assert!(
+                matches!(receiver.route_packet_with_output(&cx, packet.clone(), true).await,
+                Ok(RoutingResult::Routed { connection_id, outgoing_packets })
+                    if connection_id == cid && outgoing_packets.is_empty())
+            );
+            assert!(
+                wake.calls.load(std::sync::atomic::Ordering::SeqCst) > 0,
+                "first STREAM frame must invoke the registered cancelling waker"
+            );
+            assert!(
+                cx.checkpoint().is_err(),
+                "cancel is visible after bounded commitment"
+            );
+            let handle = receiver.connections.get_mut(&cid).unwrap();
+            assert!(
+                handle.deferred_spaces[2],
+                "ACK/control output remains owned"
+            );
+            let stream = crate::net::quic_native::StreamId(1);
+            assert_eq!(
+                handle
+                    .connection
+                    .read_stream_bytes(&observer, stream, 32)
+                    .unwrap()
+                    .as_ref(),
+                b"first-last"
+            );
+            assert!(
+                handle
+                    .connection
+                    .read_stream_bytes(&observer, stream, 32)
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(
+                matches!(receiver.route_packet_with_output(&observer, packet, false).await,
+                Err(ConnectionRouterError::PacketProcessingFailed { reason, .. })
+                    if reason.contains("ReplayedNonce")),
+                "the fully committed packet is accepted by the replay window exactly once"
+            );
+        });
     }
 
     fn establish_for_application_data(cx: &Cx, connection: &mut NativeQuicConnection) {
