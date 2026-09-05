@@ -1122,6 +1122,23 @@ mod tests {
         (holder, cx)
     }
 
+    fn checked_child_holder(limit: usize) -> (LabRuntime, RegionId, RegionId, TaskId, Cx) {
+        let mut runtime = lab();
+        let root = runtime.state.create_root_region(Budget::INFINITE);
+        let region = runtime
+            .state
+            .create_child_region(root, Budget::INFINITE)
+            .expect("source child under the sole runtime root");
+        let (holder, cx) = transfer_holder(&mut runtime, region);
+        let record = runtime.state.region(region).unwrap();
+        let mut limits = record.limits();
+        limits.max_obligations = Some(limit);
+        record.set_limits(limits);
+        // Exactly two regions: closing the source child cannot cancel its
+        // parent, which is the destination/spare accounting region.
+        (runtime, root, region, holder, cx)
+    }
+
     fn complete_transfer_holder(runtime: &mut LabRuntime, holder: TaskId) {
         assert!(
             runtime
@@ -1134,6 +1151,7 @@ mod tests {
 
     fn handoff_messages(runtime: &LabRuntime) -> Vec<String> {
         runtime
+            .state
             .trace_handle()
             .snapshot()
             .into_iter()
@@ -1178,7 +1196,7 @@ mod tests {
         completed_live: usize,
         completed_transferred_source: usize,
         applied: usize,
-        closed_with_barrier: usize,
+        close_with_unapplied: usize,
     }
 
     // The same checker serves every real-state prefix and both planted faults.
@@ -1196,7 +1214,7 @@ mod tests {
         let mut expected_live = [0_usize; 2];
         let mut pending_terminal = false;
         let mut original_ids = std::collections::BTreeSet::new();
-        let events = runtime.trace_handle().snapshot();
+        let events = runtime.state.trace_handle().snapshot();
         for (index, slot) in owned.iter_mut().enumerate() {
             let Some(slot) = slot else {
                 if physical[index] {
@@ -1293,6 +1311,11 @@ mod tests {
                     Some(next) => credit = next,
                     None => break,
                 }
+            }
+            if projected.is_none() && slot.original_id.is_none() {
+                return Err(format!(
+                    "missing_original_reservation: retired slot {index}"
+                ));
             }
             if let Some(id) = slot.original_id {
                 let record = runtime
@@ -1396,8 +1419,8 @@ mod tests {
         order: &[FiniteAction],
         coverage: &mut FiniteCoverage,
     ) {
-        let (mut runtime, first_region, first, first_cx) = checked_holder(limits[0]);
-        let second_region = runtime.state.create_root_region(Budget::INFINITE);
+        let (mut runtime, second_region, first_region, first, first_cx) =
+            checked_child_holder(limits[0]);
         let second_owner = if cross_region {
             second_region
         } else {
@@ -1575,8 +1598,10 @@ mod tests {
                         .region(first_region)
                         .is_some_and(|region| region.unapplied_obligation_count() != 0)
                     {
+                        // Co-occurrence only: a live holder and the region
+                        // phase can independently prevent complete close.
                         assert!(!runtime.state.can_region_complete_close(first_region));
-                        coverage.closed_with_barrier += 1;
+                        coverage.close_with_unapplied += 1;
                     }
                 }
             }
@@ -1696,7 +1721,7 @@ mod tests {
         assert!(coverage.admitted > 0 && coverage.denied > 0 && coverage.applied > 0);
         assert!(coverage.handed_off > 0 && coverage.refused_handoffs > 0);
         assert!(coverage.completed_live > 0 && coverage.completed_transferred_source > 0);
-        assert!(coverage.closed_with_barrier > 0 && coverage.checks > replayed);
+        assert!(coverage.close_with_unapplied > 0 && coverage.checks > replayed);
     }
 
     struct FiniteWithheldPost<'a> {
@@ -1749,8 +1774,7 @@ mod tests {
     #[test]
     fn checked_finite_checker_detects_actual_physical_admission_bypass() {
         for limit in [0, 1] {
-            let (mut runtime, region, holder, cx) = checked_holder(limit);
-            let spare = runtime.state.create_root_region(Budget::INFINITE);
+            let (mut runtime, spare, region, holder, cx) = checked_child_holder(limit);
             let regions = [region, spare];
             let mailbox = mailbox_of(&runtime);
             let (sender, mut receiver) = crate::channel::mpsc::channel::<u64>(1);
@@ -1824,8 +1848,7 @@ mod tests {
 
     #[test]
     fn checked_finite_checker_detects_and_restores_actual_withheld_terminal() {
-        let (mut runtime, region, holder, cx) = checked_holder(1);
-        let spare = runtime.state.create_root_region(Budget::INFINITE);
+        let (mut runtime, spare, region, holder, cx) = checked_child_holder(1);
         let regions = [region, spare];
         let mailbox = mailbox_of(&runtime);
         let (sender, mut receiver) = crate::channel::mpsc::channel::<u64>(1);
@@ -1889,7 +1912,37 @@ mod tests {
                 .unwrap_err()
                 .starts_with("lost_terminal_post:")
         );
-        drop(withheld); // The exact actual receipt is back before any completion.
+        // This is the real terminal-before-cleanup boundary: complete_task
+        // records the outcome; task_completed later reconciles obligations
+        // and unlinks the holder. Do not run that reconciliation while the
+        // genuine receipt is withheld, because it would mask the fault.
+        assert!(
+            runtime
+                .state
+                .complete_task(holder, crate::types::Outcome::Ok(()))
+        );
+        assert!(runtime.state.task(holder).unwrap().state.is_terminal());
+        let record = runtime.state.region(region).unwrap();
+        assert_eq!(record.task_count(), 1);
+        assert_eq!(record.child_count(), 0);
+        assert_eq!(record.pending_obligations(), 0);
+        assert_eq!(record.unapplied_obligation_count(), 1);
+        assert!(!record.ready_to_finalize(&|task| {
+            runtime
+                .state
+                .task(task)
+                .is_some_and(|task| task.state.is_terminal())
+        }));
+        // This stronger full-close predicate remains false independently of
+        // U because the terminal holder is still linked to the region.
+        assert!(!runtime.state.can_region_complete_close(region));
+        assert!(runtime.state.obligation(id).unwrap().is_pending());
+        assert!(
+            check_finite_conservation(&runtime, &mailbox, regions, &mut owned, [false; 2])
+                .unwrap_err()
+                .starts_with("lost_terminal_post:")
+        );
+        drop(withheld); // Restore the exact receipt before completion reconciliation.
         check_finite_conservation(&runtime, &mailbox, regions, &mut owned, [false; 2]).unwrap();
         assert_eq!(runtime.state.drain_obligation_posts(1), 1);
         check_finite_conservation(&runtime, &mailbox, regions, &mut owned, [false; 2]).unwrap();
@@ -1908,7 +1961,22 @@ mod tests {
         assert_eq!(mailbox.stats().reserved, 1);
         assert_eq!(mailbox.stats().committed, 1);
         assert_eq!(mailbox.stats().posted, mailbox.stats().applied);
-        complete_transfer_holder(&mut runtime, holder);
+        assert!(runtime.state.task(holder).unwrap().state.is_terminal());
+        let record = runtime.state.region(region).unwrap();
+        assert_eq!(record.task_count(), 1);
+        assert_eq!(record.child_count(), 0);
+        assert_eq!(record.pending_obligations(), 0);
+        // Same linked terminal holder, no children and L=0: applying the
+        // actual Commit changed only U among ready_to_finalize's inputs.
+        assert!(record.ready_to_finalize(&|task| {
+            runtime
+                .state
+                .task(task)
+                .is_some_and(|task| task.state.is_terminal())
+        }));
+        assert!(!runtime.state.can_region_complete_close(region));
+        let _effects = runtime.state.task_completed(holder);
+        assert!(runtime.state.task(holder).is_none());
         for region in regions {
             if runtime.state.region(region).is_some() {
                 runtime.state.close_region_command(
@@ -1925,7 +1993,7 @@ mod tests {
         assert!(mailbox.is_empty());
         assert_eq!(sender.debug_counts(), (0, 0));
         eprintln!(
-            "finite actual withheld terminal id={id:?} detected={error} restored_same_receipt=true payload=91 stats={:?}",
+            "finite actual withheld terminal id={id:?} detected={error} restored_same_receipt=true ready_to_finalize_U1=false ready_to_finalize_U0=true complete_close_before_holder_cleanup=false payload=91 stats={:?}",
             mailbox.stats()
         );
     }
@@ -1989,8 +2057,9 @@ mod tests {
                 runtime
                     .state
                     .obligations
-                    .sorted_pending_ids_for_holder(target),
-                vec![id]
+                    .sorted_pending_ids_for_holder(target)
+                    .as_slice(),
+                &[id]
             );
             let record = runtime.state.obligation(id).unwrap();
             assert_eq!(
@@ -2074,8 +2143,7 @@ mod tests {
 
     #[test]
     fn checked_transfer_cross_region_refusal_returns_source_and_success_reuses_quota() {
-        let (mut runtime, source_region, source, cx) = checked_holder(1);
-        let destination_region = runtime.state.create_root_region(Budget::INFINITE);
+        let (mut runtime, destination_region, source_region, source, cx) = checked_child_holder(1);
         let (target, destination) = transfer_holder(&mut runtime, destination_region);
         let mut limits = runtime.state.region(destination_region).unwrap().limits();
         limits.max_obligations = Some(0);
@@ -2083,7 +2151,7 @@ mod tests {
             .state
             .region(destination_region)
             .unwrap()
-            .set_limits(limits);
+            .set_limits(limits.clone());
         let mailbox = mailbox_of(&runtime);
         let token = cx
             .try_register_obligation_checked(ObligationKind::SendPermit, source)
@@ -2285,8 +2353,7 @@ mod tests {
             "cancelled",
             "legacy",
         ] {
-            let (mut runtime, region, source, cx) = checked_holder(1);
-            let target_region = runtime.state.create_root_region(Budget::INFINITE);
+            let (mut runtime, target_region, region, source, cx) = checked_child_holder(1);
             let (target, destination) = transfer_holder(&mut runtime, target_region);
             let (other_runtime, _other_region, _other_holder, other_cx) = checked_holder(1);
             let mailbox = mailbox_of(&runtime);
@@ -2384,8 +2451,7 @@ mod tests {
 
     #[test]
     fn checked_transfer_closing_source_discharges_and_plain_move_retains_liability() {
-        let (mut runtime, source_region, source, cx) = checked_holder(1);
-        let target_region = runtime.state.create_root_region(Budget::INFINITE);
+        let (mut runtime, target_region, source_region, source, cx) = checked_child_holder(1);
         let (target, destination) = transfer_holder(&mut runtime, target_region);
         let mailbox = mailbox_of(&runtime);
         let token = cx
@@ -2709,12 +2775,18 @@ mod tests {
                     if let Some(shards) = &shards {
                         assert!(runtime.obligations.is_empty());
                         let obligations = shards.obligations.lock().unwrap();
-                        assert_eq!(obligations.sorted_pending_ids_for_holder(target), vec![id]);
+                        assert_eq!(
+                            obligations.sorted_pending_ids_for_holder(target).as_slice(),
+                            &[id]
+                        );
                         assert!(obligations.sorted_pending_ids_for_holder(source).is_empty());
                     } else {
                         assert_eq!(
-                            runtime.obligations.sorted_pending_ids_for_holder(target),
-                            vec![id]
+                            runtime
+                                .obligations
+                                .sorted_pending_ids_for_holder(target)
+                                .as_slice(),
+                            &[id]
                         );
                         assert!(
                             runtime
@@ -2947,8 +3019,7 @@ mod tests {
 
     #[test]
     fn checked_transfer_opposite_region_gates_make_bounded_concurrent_progress() {
-        let (mut runtime, first_region, first, first_cx) = checked_holder(2);
-        let second_region = runtime.state.create_root_region(Budget::INFINITE);
+        let (mut runtime, second_region, first_region, first, first_cx) = checked_child_holder(2);
         let (second, second_cx) = transfer_holder(&mut runtime, second_region);
         assert!(runtime.state.set_region_limits(
             second_region,
@@ -3041,18 +3112,21 @@ mod tests {
     fn checked_transfer_actual_lab_run_closes_source_and_accepts_destination_terminal() {
         for cross_region in [false, true] {
             let mut runtime = lab();
-            let source_region = runtime.state.create_root_region(Budget::INFINITE);
-            let destination_region = if cross_region {
-                runtime.state.create_root_region(Budget::INFINITE)
-            } else {
-                source_region
-            };
+            let root = runtime.state.create_root_region(Budget::INFINITE);
+            let source_region = runtime
+                .state
+                .create_child_region(root, Budget::INFINITE)
+                .unwrap();
+            let destination_region = if cross_region { root } else { source_region };
             let delivery = Arc::new(Mutex::new(None::<ObligationToken>));
             let received = Arc::clone(&delivery);
+            let (release_destination, mut destination_gate) =
+                crate::channel::mpsc::channel::<()>(1);
             let (destination, mut destination_join) = runtime
                 .state
                 .create_task(destination_region, Budget::INFINITE, async move {
                     let cx = Cx::current().expect("Lab polls real destination context");
+                    destination_gate.recv(&cx).await.unwrap();
                     let token = received
                         .lock()
                         .unwrap()
@@ -3064,6 +3138,23 @@ mod tests {
                 })
                 .unwrap();
             let destination_cx = runtime.state.task(destination).unwrap().cx.clone().unwrap();
+            // The legacy direct creation path emits Spawn on its first
+            // actual poll. Publish and park this live destination before
+            // transferring; never manufacture a missing trace event.
+            runtime.scheduler.lock().schedule(destination, 0);
+            assert!(runtime.run_until_idle() > 0);
+            assert_eq!(destination_join.try_join().unwrap(), None);
+            assert_eq!(
+                release_destination
+                    .telemetry_snapshot(2801)
+                    .recv_waiter_count,
+                1
+            );
+            assert!(runtime.state.trace_handle().snapshot().iter().any(|event| {
+                event.kind == TraceEventKind::Spawn
+                    && matches!(event.data, crate::trace::TraceData::Task { task, region, .. }
+                        if task == destination && region == destination_region)
+            }));
             let (source, mut source_join) = runtime
                 .state
                 .create_task(source_region, Budget::INFINITE, async move {
@@ -3099,15 +3190,22 @@ mod tests {
                 assert!(runtime.state.region(source_region).is_none());
             }
             let before = crate::trace::refinement_firewall::check_refinement_firewall(
-                &runtime.trace_handle().snapshot(),
+                &runtime.state.trace_handle().snapshot(),
             );
             assert!(
                 before.first_violation.is_none(),
                 "source completion/close after handoff: {before:?}"
             );
-            runtime.scheduler.lock().schedule(destination, 0);
+            release_destination.try_send(()).unwrap();
             let report = runtime.run_until_quiescent_with_report();
             assert_eq!(destination_join.try_join().unwrap(), Some(73));
+            assert_eq!(
+                release_destination
+                    .telemetry_snapshot(2801)
+                    .recv_waiter_count,
+                0
+            );
+            assert_eq!(release_destination.debug_counts(), (0, 0));
             assert!(
                 report.lab_test_passed(),
                 "actual transfer Lab report: {report:?}"
@@ -4041,6 +4139,7 @@ mod tests {
         assert!(runtime.state.region(region).is_none());
         assert_eq!(
             runtime
+                .state
                 .trace_handle()
                 .snapshot()
                 .iter()

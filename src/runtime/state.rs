@@ -10969,7 +10969,9 @@ mod obligation_transfer_epoch_tests {
                 let mut lab = crate::lab::LabRuntime::new(crate::lab::LabConfig::new(0x28_E0));
                 let source_region = lab.state.create_root_region(Budget::INFINITE);
                 let destination_region = if cross_region {
-                    lab.state.create_root_region(Budget::INFINITE)
+                    lab.state
+                        .create_child_region(source_region, Budget::INFINITE)
+                        .unwrap()
                 } else {
                     source_region
                 };
