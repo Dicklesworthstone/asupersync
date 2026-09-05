@@ -1114,6 +1114,56 @@ impl ClientHello {
         .map_err(SessionError::Frame)
     }
 
+    /// Decode a canonical client hello received in an ATP handshake frame.
+    ///
+    /// This validates wire structure, bounds and canonical ordering. Decoded
+    /// grants are unverified assertions: their issuer fields are not signatures.
+    /// Independently admit them against trusted locally issued/pinned grants
+    /// before calling [`SessionNegotiator::accept_client_hello`], which applies
+    /// identity, nonce, scope and feature policy, not cryptographic grant
+    /// verification. Header extensions remain in
+    /// the caller's frame; they are not fields of this hello payload. Sets must
+    /// have the serializer's strict order and grant ids must be unique. Decode
+    /// the outer frame with `AtpFrameCodec` first to validate its extensions.
+    pub fn from_frame(frame: &Frame) -> Result<Self, SessionError> {
+        let mut wire = HelloReader::new(frame, FrameType::Handshake)?;
+        let initiator = PeerId(wire.array()?);
+        let responder = PeerId(wire.array()?);
+        let nonce = TransferNonce(wire.array()?);
+        let version = wire.version(frame.version())?;
+        let manifest_root = wire.optional(HelloReader::array)?;
+        let path_id = wire.optional(|wire| Ok(PathCandidateId::new(wire.u64()?)))?;
+        let relay_peer = wire.optional(|wire| Ok(PeerId(wire.array()?)))?;
+        let context = wire.context()?;
+        let offered_features = FeatureSet {
+            features: wire.set(1, HelloReader::feature)?,
+        };
+        let requested_actions = wire.set(1, HelloReader::action)?;
+        let trace_id = SessionTraceId(wire.u64()?);
+        let grants = wire.list(80, HelloReader::grant)?;
+        let mut ids = BTreeSet::new();
+        for grant in &grants {
+            if !ids.insert(grant.id) {
+                return Err(HelloReader::invalid("duplicate capability grant id"));
+            }
+        }
+        wire.finish()?;
+        Ok(Self {
+            initiator,
+            responder,
+            nonce,
+            version,
+            manifest_root,
+            path_id,
+            relay_peer,
+            context,
+            offered_features,
+            grants,
+            requested_actions,
+            trace_id,
+        })
+    }
+
     fn to_canonical_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::new();
         put_peer_id(&mut bytes, self.initiator);
@@ -1166,6 +1216,62 @@ impl ServerHello {
             self.to_canonical_bytes(),
         )
         .map_err(SessionError::Frame)
+    }
+
+    /// Decode a canonical server acknowledgement received from the peer.
+    ///
+    /// Warning reasons must be the protocol's per-feature
+    /// [`AtpFeature::downgrade_reason_code`] strings. Unknown strings are
+    /// refused without interning untrusted input into the public static field.
+    /// Session identity and selected features must subsequently be checked by
+    /// [`SessionNegotiator::finish_client`]. Decode the outer frame with
+    /// `AtpFrameCodec` first to validate its extensions.
+    pub fn from_frame(frame: &Frame) -> Result<Self, SessionError> {
+        let mut wire = HelloReader::new(frame, FrameType::HandshakeAck)?;
+        let session_id = SessionId(wire.array()?);
+        let acceptor = PeerId(wire.array()?);
+        let initiator = PeerId(wire.array()?);
+        let nonce = TransferNonce(wire.array()?);
+        let version = wire.version(frame.version())?;
+        let context = wire.context()?;
+        let selected_features = FeatureSet {
+            features: wire.set(1, HelloReader::feature)?,
+        };
+        let downgrade_warnings = wire.list(5, |wire| {
+            let feature = wire.feature()?;
+            let reason_code = feature.downgrade_reason_code();
+            if wire.string()? != reason_code {
+                return Err(HelloReader::invalid("unknown downgrade reason"));
+            }
+            Ok(DowngradeWarning {
+                feature,
+                reason_code,
+            })
+        })?;
+        if downgrade_warnings
+            .windows(2)
+            .any(|pair| pair[0].feature >= pair[1].feature)
+        {
+            return Err(HelloReader::invalid("noncanonical downgrade feature order"));
+        }
+        let accepted_grants = wire
+            .set(16, |wire| Ok(CapabilityGrantId(wire.array()?)))?
+            .into_iter()
+            .collect();
+        let trace_id = SessionTraceId(wire.u64()?);
+        wire.finish()?;
+        Ok(Self {
+            session_id,
+            acceptor,
+            initiator,
+            nonce,
+            version,
+            context,
+            selected_features,
+            downgrade_warnings,
+            accepted_grants,
+            trace_id,
+        })
     }
 
     fn to_canonical_bytes(&self) -> Vec<u8> {
@@ -1840,6 +1946,210 @@ fn redact_transcript_hash(hash: TranscriptHash) -> String {
     hex::encode(&hash.as_bytes()[..12])
 }
 
+/// Bounded inverse of the hello serializers below. Counts cannot reserve
+/// memory: each collection grows only after a complete element is decoded.
+struct HelloReader<'a> {
+    remaining: &'a [u8],
+}
+
+impl<'a> HelloReader<'a> {
+    fn invalid(message: &str) -> SessionError {
+        FrameError::InvalidFormat(message.to_owned()).into()
+    }
+
+    fn new(frame: &'a Frame, expected: FrameType) -> Result<Self, SessionError> {
+        use crate::net::atp::protocol::frames::MAX_FRAME_SIZE;
+        if frame.version() != ProtocolVersion::CURRENT {
+            return Err(SessionError::UnsupportedVersion(frame.version().0));
+        }
+        if frame.frame_type() != expected {
+            return Err(Self::invalid("wrong hello frame type"));
+        }
+        if frame.payload().len() as u64 > MAX_FRAME_SIZE {
+            return Err(FrameError::FrameTooLarge {
+                size: frame.payload().len() as u64,
+                max: MAX_FRAME_SIZE,
+            }
+            .into());
+        }
+        if frame.header.payload_length.value() != frame.payload().len() as u64 {
+            return Err(Self::invalid("hello payload length mismatch"));
+        }
+        Ok(Self {
+            remaining: frame.payload(),
+        })
+    }
+
+    fn take(&mut self, count: usize) -> Result<&'a [u8], SessionError> {
+        if count > self.remaining.len() {
+            return Err(FrameError::UnexpectedEof.into());
+        }
+        let (value, rest) = self.remaining.split_at(count);
+        self.remaining = rest;
+        Ok(value)
+    }
+
+    fn array<const N: usize>(&mut self) -> Result<[u8; N], SessionError> {
+        let mut value = [0; N];
+        value.copy_from_slice(self.take(N)?);
+        Ok(value)
+    }
+
+    fn byte(&mut self) -> Result<u8, SessionError> {
+        Ok(self.array::<1>()?[0])
+    }
+    fn u64(&mut self) -> Result<u64, SessionError> {
+        Ok(u64::from_be_bytes(self.array()?))
+    }
+
+    fn boolean(&mut self) -> Result<bool, SessionError> {
+        match self.byte()? {
+            0 => Ok(false),
+            1 => Ok(true),
+            _ => Err(Self::invalid("noncanonical boolean or optional tag")),
+        }
+    }
+
+    fn optional<T>(
+        &mut self,
+        read: impl FnOnce(&mut Self) -> Result<T, SessionError>,
+    ) -> Result<Option<T>, SessionError> {
+        if self.boolean()? {
+            read(self).map(Some)
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn count(&mut self, minimum_bytes: usize) -> Result<usize, SessionError> {
+        let count = u32::from_be_bytes(self.array()?) as usize;
+        if count > self.remaining.len() / minimum_bytes {
+            return Err(Self::invalid("hello field count exceeds remaining payload"));
+        }
+        Ok(count)
+    }
+
+    fn list<T>(
+        &mut self,
+        minimum_bytes: usize,
+        mut read: impl FnMut(&mut Self) -> Result<T, SessionError>,
+    ) -> Result<Vec<T>, SessionError> {
+        let count = self.count(minimum_bytes)?;
+        let mut values = Vec::new();
+        for _ in 0..count {
+            values.push(read(self)?);
+        }
+        Ok(values)
+    }
+
+    fn set<T: Ord>(
+        &mut self,
+        minimum_bytes: usize,
+        mut read: impl FnMut(&mut Self) -> Result<T, SessionError>,
+    ) -> Result<BTreeSet<T>, SessionError> {
+        let count = self.count(minimum_bytes)?;
+        let mut values = BTreeSet::new();
+        for _ in 0..count {
+            let value = read(self)?;
+            if values.last().is_some_and(|previous| previous >= &value) {
+                return Err(Self::invalid("duplicate or noncanonical hello set entry"));
+            }
+            values.insert(value);
+        }
+        Ok(values)
+    }
+
+    fn string(&mut self) -> Result<&'a str, SessionError> {
+        let length = self.count(1)?;
+        std::str::from_utf8(self.take(length)?)
+            .map_err(|_| Self::invalid("hello string is not UTF-8"))
+    }
+
+    fn version(&mut self, outer: ProtocolVersion) -> Result<ProtocolVersion, SessionError> {
+        let value = ProtocolVersion(u32::from_be_bytes(self.array()?));
+        if value != outer {
+            return Err(Self::invalid("hello inner/outer version mismatch"));
+        }
+        Ok(value)
+    }
+
+    fn feature(&mut self) -> Result<AtpFeature, SessionError> {
+        let code = self.byte()?;
+        AtpFeature::ALL
+            .into_iter()
+            .find(|feature| feature_code(*feature) == code)
+            .ok_or_else(|| Self::invalid("unknown hello feature"))
+    }
+
+    fn context(&mut self) -> Result<SessionContextKind, SessionError> {
+        let code = self.byte()?;
+        SessionContextKind::ALL
+            .into_iter()
+            .find(|context| context_code(*context) == code)
+            .ok_or_else(|| Self::invalid("unknown hello context"))
+    }
+
+    fn action(&mut self) -> Result<CapabilityAction, SessionError> {
+        let code = self.byte()?;
+        [
+            CapabilityAction::Read,
+            CapabilityAction::Write,
+            CapabilityAction::Receive,
+            CapabilityAction::Share,
+            CapabilityAction::Relay,
+            CapabilityAction::Seed,
+            CapabilityAction::Mailbox,
+            CapabilityAction::Delegate,
+            CapabilityAction::Invite,
+        ]
+        .into_iter()
+        .find(|action| action_code(*action) == code)
+        .ok_or_else(|| Self::invalid("unknown hello action"))
+    }
+
+    fn grant(&mut self) -> Result<CapabilityGrant, SessionError> {
+        let id = CapabilityGrantId(self.array()?);
+        let issuer = PeerId(self.array()?);
+        let subject = PeerId(self.array()?);
+        let actions = self.set(1, Self::action)?;
+        let valid_from_micros = self.u64()?;
+        let expires_at_micros = self.optional(Self::u64)?;
+        let revoked = self.boolean()?;
+        let delegation_depth = self.byte()?;
+        let invite_scope = self.boolean()?;
+        let scope = CapabilityScope {
+            allow_any_path: self.boolean()?,
+            allowed_path_ids: self.set(8, |wire| Ok(PathCandidateId::new(wire.u64()?)))?,
+            allowed_path_prefixes: self.set(4, |wire| Ok(wire.string()?.to_owned()))?,
+            allow_any_relay_peer: self.boolean()?,
+            allowed_relay_peers: self.set(32, |wire| Ok(PeerId(wire.array()?)))?,
+            allow_any_manifest_root: self.boolean()?,
+            allowed_manifest_roots: self.set(32, Self::array)?,
+            allowed_contexts: self.set(1, Self::context)?,
+        };
+        Ok(CapabilityGrant {
+            id,
+            issuer,
+            subject,
+            actions,
+            scope,
+            valid_from_micros,
+            expires_at_micros,
+            revoked,
+            delegation_depth,
+            invite_scope,
+        })
+    }
+
+    fn finish(self) -> Result<(), SessionError> {
+        if self.remaining.is_empty() {
+            Ok(())
+        } else {
+            Err(Self::invalid("trailing hello payload bytes"))
+        }
+    }
+}
+
 fn put_peer_id(bytes: &mut Vec<u8>, peer_id: PeerId) {
     bytes.extend_from_slice(peer_id.as_bytes());
 }
@@ -2103,6 +2413,224 @@ mod tests {
         } else {
             policy
         }
+    }
+
+    #[test]
+    fn received_hello_roundtrips_full_schema_and_known_downgrade_reasons() {
+        for context in SessionContextKind::ALL {
+            let mut hello = hello_for(context)
+                .with_features(&AtpFeature::ALL)
+                .with_manifest_root([5; 32])
+                .with_path_id(PathCandidateId::new(7));
+            let grant = &mut hello.grants[0];
+            grant.expires_at_micros = Some(900);
+            grant.delegation_depth = 3;
+            grant.invite_scope = true;
+            grant
+                .scope
+                .allowed_path_ids
+                .extend([PathCandidateId::new(7), PathCandidateId::new(9)]);
+            grant
+                .scope
+                .allowed_path_prefixes
+                .extend(["/a".to_owned(), "/z/é".to_owned()]);
+            grant.scope.allowed_relay_peers.insert(relay_peer());
+            grant
+                .scope
+                .allowed_manifest_roots
+                .extend([[1; 32], [5; 32]]);
+            let encoded = hello.to_frame().unwrap();
+            let decoded = ClientHello::from_frame(&encoded).unwrap();
+            assert_eq!(decoded, hello);
+            assert_eq!(decoded.to_frame().unwrap(), encoded);
+            let mut supported = vec![AtpFeature::EncryptionPolicy];
+            supported.extend(context.required_feature());
+            let mut policy = policy_for(context).with_supported_features(&supported);
+            let mut server = SessionNegotiator::server(hello.responder);
+            let (ack, encoded, _) = server.accept_client_hello(&decoded, &mut policy).unwrap();
+            assert_eq!(
+                ack.downgrade_warnings.len(),
+                AtpFeature::ALL.len() - supported.len()
+            );
+            let decoded = ServerHello::from_frame(&encoded).unwrap();
+            assert_eq!(decoded, ack);
+            assert_eq!(decoded.to_frame().unwrap(), encoded);
+        }
+    }
+
+    #[test]
+    fn received_hellos_refuse_every_truncation_wrong_type_size_and_trailing_byte() {
+        let hello = hello_for(SessionContextKind::Direct);
+        let mut policy = policy_for(SessionContextKind::Direct);
+        let (_, ack, _) = SessionNegotiator::server(hello.responder)
+            .accept_client_hello(&hello, &mut policy)
+            .unwrap();
+        let client = hello.to_frame().unwrap();
+        for (frame, is_client) in [(&client, true), (&ack, false)] {
+            let decode = |frame: &Frame| {
+                if is_client {
+                    ClientHello::from_frame(frame).map(|_| ())
+                } else {
+                    ServerHello::from_frame(frame).map(|_| ())
+                }
+            };
+            for cut in 0..frame.payload.len() {
+                let truncated = Frame::new(
+                    frame.version(),
+                    frame.frame_type(),
+                    frame.payload[..cut].to_vec(),
+                )
+                .unwrap();
+                assert!(
+                    matches!(decode(&truncated), Err(SessionError::Frame(_))),
+                    "cut={cut}"
+                );
+            }
+            let mut trailing = frame.clone();
+            trailing.payload.push(0);
+            trailing.header.payload_length =
+                crate::net::atp::protocol::VarInt(trailing.payload.len() as u64);
+            assert!(matches!(
+                decode(&trailing),
+                Err(SessionError::Frame(FrameError::InvalidFormat(_)))
+            ));
+            let mut wrong = frame.clone();
+            wrong.header.frame_type = FrameType::Data;
+            assert!(matches!(
+                decode(&wrong),
+                Err(SessionError::Frame(FrameError::InvalidFormat(_)))
+            ));
+            wrong = frame.clone();
+            wrong.header.version = ProtocolVersion(1);
+            assert!(matches!(
+                decode(&wrong),
+                Err(SessionError::UnsupportedVersion(1))
+            ));
+            wrong = frame.clone();
+            wrong.header.payload_length = crate::net::atp::protocol::VarInt(0);
+            assert!(matches!(
+                decode(&wrong),
+                Err(SessionError::Frame(FrameError::InvalidFormat(_)))
+            ));
+            let oversized = Frame::new(
+                frame.version(),
+                frame.frame_type(),
+                vec![0; crate::net::atp::protocol::MAX_FRAME_SIZE as usize + 1],
+            )
+            .unwrap();
+            assert!(matches!(
+                decode(&oversized),
+                Err(SessionError::Frame(FrameError::FrameTooLarge { .. }))
+            ));
+        }
+    }
+
+    #[test]
+    fn received_hello_counts_tags_duplicates_and_unknown_reasons_fail_closed() {
+        let hello = hello_for(SessionContextKind::Direct).with_features(&AtpFeature::ALL);
+        let encoded = hello.to_frame().unwrap();
+        // Two peer ids, nonce, version, three absent optional fields, context,
+        // then the u32 feature count and the sorted one-byte feature codes.
+        for (offset, bytes) in [
+            (96, vec![0, 0, 0, 1]),
+            (100, vec![2]),
+            (103, vec![255]),
+            (104, u32::MAX.to_be_bytes().to_vec()),
+            (108, vec![255]),
+            (108, vec![1, 0]),
+            (108, vec![0, 0]),
+            (126, u32::MAX.to_be_bytes().to_vec()), // Requested action count.
+            (130, vec![255]),                       // Requested action code.
+            (139, u32::MAX.to_be_bytes().to_vec()), // Capability grant count.
+        ] {
+            let mut malformed = encoded.clone();
+            malformed.payload[offset..offset + bytes.len()].copy_from_slice(&bytes);
+            assert!(matches!(
+                ClientHello::from_frame(&malformed),
+                Err(SessionError::Frame(FrameError::InvalidFormat(_)))
+            ));
+        }
+        let mut duplicate_grant = hello.clone();
+        duplicate_grant.grants.push(hello.grants[0].clone());
+        assert!(matches!(
+            ClientHello::from_frame(&duplicate_grant.to_frame().unwrap()),
+            Err(SessionError::Frame(FrameError::InvalidFormat(_)))
+        ));
+        let mut policy = policy_for(SessionContextKind::Direct);
+        let (mut ack, _, _) = SessionNegotiator::server(hello.responder)
+            .accept_client_hello(&hello, &mut policy)
+            .unwrap();
+        let mut duplicate_ack = ack.clone();
+        duplicate_ack.accepted_grants.push(ack.accepted_grants[0]);
+        assert!(matches!(
+            ServerHello::from_frame(&duplicate_ack.to_frame().unwrap()),
+            Err(SessionError::Frame(FrameError::InvalidFormat(_)))
+        ));
+        ack.downgrade_warnings[0].reason_code = "arbitrary_caller_reason";
+        assert!(matches!(ServerHello::from_frame(&ack.to_frame().unwrap()),
+            Err(SessionError::Frame(FrameError::InvalidFormat(message))) if message == "unknown downgrade reason"));
+    }
+
+    #[test]
+    fn received_hello_nested_strings_are_length_bounded_utf8_and_unique() {
+        let mut hello = hello_for(SessionContextKind::Direct);
+        hello.grants[0].scope.allowed_path_prefixes =
+            ["prefix-a".to_owned(), "prefix-b".to_owned()].into();
+        let frame = hello.to_frame().unwrap();
+        let offsets = frame
+            .payload
+            .windows(8)
+            .enumerate()
+            .filter_map(|(index, bytes)| (bytes == b"prefix-b").then_some(index))
+            .collect::<Vec<_>>();
+        assert_eq!(offsets.len(), 1);
+        let offset = offsets[0];
+        for (start, bytes, expected) in [
+            (
+                offset - 4,
+                u32::MAX.to_be_bytes().to_vec(),
+                "hello field count exceeds remaining payload",
+            ),
+            (offset, vec![255], "hello string is not UTF-8"),
+            (
+                offset,
+                b"prefix-a".to_vec(),
+                "duplicate or noncanonical hello set entry",
+            ),
+        ] {
+            let mut changed = frame.clone();
+            changed.payload[start..start + bytes.len()].copy_from_slice(&bytes);
+            assert!(matches!(ClientHello::from_frame(&changed),
+                Err(SessionError::Frame(FrameError::InvalidFormat(message))) if message == expected));
+        }
+    }
+
+    #[test]
+    fn received_hello_identity_and_ack_tampering_reach_real_policy_refusal() {
+        let hello = hello_for(SessionContextKind::Direct);
+        let mut policy = policy_for(SessionContextKind::Direct);
+        let mut changed = hello.to_frame().unwrap();
+        changed.payload[32] ^= 1; // Actual received responder identity byte.
+        let received = ClientHello::from_frame(&changed).unwrap();
+        let error = SessionNegotiator::server(hello.responder)
+            .accept_client_hello(&received, &mut policy)
+            .unwrap_err();
+        assert_eq!(error.code(), "peer_confusion");
+        assert!(!policy.seen_nonces.contains(&hello.nonce));
+        let (_, mut ack, _) = SessionNegotiator::server(hello.responder)
+            .accept_client_hello(&hello, &mut policy)
+            .unwrap();
+        ack.payload[0] ^= 1; // Session id remains structurally valid, semantically wrong.
+        let received = ServerHello::from_frame(&ack).unwrap();
+        let mut client = SessionNegotiator::client(hello.initiator);
+        client.start_client_hello(&hello).unwrap();
+        assert_eq!(
+            client
+                .finish_client(&hello, &received, &policy)
+                .unwrap_err()
+                .code(),
+            "session_id_mismatch"
+        );
     }
 
     fn negotiate(

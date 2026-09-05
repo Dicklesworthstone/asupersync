@@ -495,7 +495,10 @@ mod tests {
         for split in 0..wire.len() {
             let mut codec = AtpFrameCodec::new();
             let mut buffer = BytesMut::from(&wire[..split]);
-            assert!(codec.decode(&mut buffer).unwrap().is_none(), "split={split}");
+            assert!(
+                codec.decode(&mut buffer).unwrap().is_none(),
+                "split={split}"
+            );
             if split < header_len {
                 assert_eq!(buffer.as_ref(), &wire[..split], "partial header consumed");
             }
