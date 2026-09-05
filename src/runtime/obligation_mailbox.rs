@@ -525,16 +525,23 @@ mod tests {
         fn checkpoint_interval(&self, _: &str, _: std::time::Duration) {}
         fn task_stuck_detected(&self, _: &str) {}
         fn obligation_created(&self, _: RegionId) {
-            if self
-                .remaining
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
-                .is_ok()
-            {
+            let mut remaining = self.remaining.load(Ordering::SeqCst);
+            while remaining > 0 {
+                if let Err(observed) = self.remaining.compare_exchange_weak(
+                    remaining,
+                    remaining - 1,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                ) {
+                    remaining = observed;
+                    continue;
+                }
                 let token = self
                     .cx
                     .try_register_obligation(ObligationKind::SendPermit, self.cx.task_id())
                     .expect("producer posts while the captured backlog is draining");
                 assert!(token.commit());
+                break;
             }
         }
         fn obligation_discharged(&self, _: RegionId) {}

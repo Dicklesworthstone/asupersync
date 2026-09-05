@@ -1238,6 +1238,7 @@ mod tests {
     #[derive(Clone, Copy, Debug)]
     enum ObligationCompletionMode {
         Ready,
+        PendingThenReady,
         Error,
         Cancelled,
         PollPanic,
@@ -1261,8 +1262,13 @@ mod tests {
     impl std::future::Future for CompletionObligationFuture {
         type Output = crate::types::Outcome<(), ()>;
 
-        fn poll(self: std::pin::Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Self::Output> {
+        fn poll(self: std::pin::Pin<&mut Self>, task_cx: &mut Context<'_>) -> Poll<Self::Output> {
             let this = self.get_mut();
+            if matches!(this.mode, ObligationCompletionMode::PendingThenReady)
+                && this.field_permit.is_some()
+            {
+                return Poll::Ready(crate::types::Outcome::Ok(()));
+            }
             let cx = crate::cx::Cx::current().expect("native worker installs its Cx");
             for _ in 0..17 {
                 let _ = cx.logical_tick();
@@ -1300,6 +1306,10 @@ mod tests {
                 this.field_receiver = Some(receiver);
             }
             match this.mode {
+                ObligationCompletionMode::PendingThenReady => {
+                    task_cx.waker().wake_by_ref();
+                    Poll::Pending
+                }
                 ObligationCompletionMode::Cancelled => {
                     cx.cancel_with(
                         crate::types::CancelKind::User,
@@ -1446,9 +1456,33 @@ mod tests {
                 32,
             );
             let mut worker = scheduler.take_workers().remove(0);
-            thread::spawn(move || worker.execute(task))
-                .join()
-                .expect("native three-lane worker survives");
+            let posts = mailbox.clone();
+            let delivered = observed.clone();
+            let retired = drops.clone();
+            let holder_table = dispatch_tasks.clone();
+            thread::spawn(move || {
+                worker.execute(task);
+                if matches!(mode, ObligationCompletionMode::PendingThenReady) {
+                    assert_eq!(delivered.load(Ordering::SeqCst), 65);
+                    assert_eq!(retired.load(Ordering::SeqCst), 0);
+                    assert_eq!(posts.stats().posted, 131);
+                    assert_eq!(posts.stats().applied, 0);
+                    let table = holder_table.as_ref().expect("external dispatch fixture");
+                    assert!(table.lock().unwrap().task(task).is_some());
+                    // Drive the ordinary native selection path, which drains
+                    // posts before the terminal path gets another opportunity.
+                    assert_eq!(worker.next_task(), Some(task));
+                    let partial = posts.stats();
+                    assert_eq!(partial.applied, 64);
+                    assert_eq!(partial.reserved, 32);
+                    assert_eq!(partial.committed, 32);
+                    assert_eq!(partial.refused, 0);
+                    assert!(table.lock().unwrap().task(task).is_some());
+                    worker.execute(task);
+                }
+            })
+            .join()
+            .expect("native three-lane worker survives");
         }
         assert_eq!(observed.load(Ordering::SeqCst), 65);
         assert_eq!(drops.load(Ordering::SeqCst), 1);
@@ -1628,6 +1662,11 @@ mod tests {
             assert_native_obligation_completion(scheduler, ObligationCompletionMode::RetainedToken);
             assert_native_obligation_completion(scheduler, ObligationCompletionMode::DroppedToken);
         }
+    }
+
+    #[test]
+    fn native_obligation_completion_survives_external_ordinary_drain_after_pending() {
+        assert_native_obligation_completion(2, ObligationCompletionMode::PendingThenReady);
     }
 
     // ========== Parker Basic Tests ==========

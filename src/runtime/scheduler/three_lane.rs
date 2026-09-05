@@ -5706,7 +5706,10 @@ impl ThreeLaneWorker {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             if state.has_pending_obligation_posts() {
-                let _ = state.drain_obligation_posts(OBLIGATION_POST_BATCH);
+                let _ = state.drain_obligation_posts_with_task_table(
+                    OBLIGATION_POST_BATCH,
+                    self.task_table.as_ref(),
+                );
             }
         }
 

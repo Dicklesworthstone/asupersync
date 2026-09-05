@@ -2341,11 +2341,31 @@ impl RuntimeState {
     /// authoritative obligation methods. Called where spawn admissions are
     /// drained. Returns how many posts were applied; `0` without a gateway.
     pub fn drain_obligation_posts(&mut self, max: usize) -> usize {
+        self.drain_obligation_posts_with_task_table(max, None)
+    }
+
+    /// Uses the scheduler's authoritative holder table for ordinary bounded
+    /// drains as well as the final completion drain.
+    pub(crate) fn drain_obligation_posts_with_task_table(
+        &mut self,
+        max: usize,
+        dispatch_tasks: Option<&Arc<crate::sync::ContendedMutex<TaskTable>>>,
+    ) -> usize {
         let Some(gateway) = self.obligation_gateway.clone() else {
             return 0;
         };
         let mailbox = std::sync::Arc::clone(gateway.mailbox());
-        crate::runtime::obligation_mailbox::apply_obligation_posts(self, &mailbox, max)
+        match dispatch_tasks {
+            Some(tasks) => {
+                crate::runtime::obligation_mailbox::apply_obligation_posts_with_task_table(
+                    self,
+                    &mailbox,
+                    max,
+                    Some(tasks),
+                )
+            }
+            None => crate::runtime::obligation_mailbox::apply_obligation_posts(self, &mailbox, max),
+        }
     }
 
     /// Settles a finite backlog before a native worker retires a task holder.
