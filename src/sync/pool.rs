@@ -3289,6 +3289,156 @@ mod tests {
         assert!(matches!(futures_lite::future::block_on(pool.acquire_checked(&cx)), Err(CheckedPoolError::Pool(PoolError::Closed))));
     }
 
+    #[test]
+    fn checked_pool_native_send_not_sync_holder_cancel_wakes_real_pool_waiter() {
+        use crate::record::{ObligationKind, ObligationState};
+        use crate::runtime::{RuntimeBuilder, yield_now};
+        use crate::sync::{LockError, Mutex, OwnedMutexGuard};
+        use crate::trace::TraceData;
+        fn assert_send<T: Send>() {}
+        assert_send::<PooledResource<Cell<u32>>>();
+        assert_send::<CheckedPooledResource<Cell<u32>>>();
+
+        for sharded in [false, true] {
+            let (done_tx, done_rx) = mpsc::channel();
+            // An owned worker and completion channel bound regressions even
+            // when a broken native executor never polls the observer again.
+            let worker = std::thread::spawn(move || {
+                for limit in [0, 1] {
+                    let builder = if sharded {
+                        RuntimeBuilder::multi_thread().worker_threads(2).with_sharded_state(true)
+                    } else {
+                        RuntimeBuilder::current_thread()
+                    };
+                    let runtime = builder.root_region_limits(crate::record::RegionLimits {
+                        max_obligations: Some(limit),
+                        ..crate::record::RegionLimits::UNLIMITED
+                    }).build().unwrap();
+                    let observer = runtime.handle();
+                    let pool = Arc::new(GenericPool::new(
+                        || std::future::ready(Ok::<_, std::io::Error>(Cell::new(41_u32))),
+                        PoolConfig::with_max_size(1),
+                    ));
+                    let task_pool = Arc::clone(&pool);
+                    let parent: Pin<Box<dyn Future<Output = Option<(TaskId, TaskId)>> + Send>> = Box::pin(async move {
+                        let cx = Cx::current().expect("native parent context");
+                        if limit == 0 {
+                            for denial in [
+                                task_pool.acquire_checked(&cx).await,
+                                task_pool.try_acquire_checked(&cx).map(|resource| resource.unwrap()),
+                            ] {
+                                assert!(matches!(denial, Err(CheckedPoolError::Admission(
+                                    crate::runtime::obligation_mailbox::ObligationAdmissionError::LimitReached { limit: 0, live: 0 }
+                                ))));
+                            }
+                            assert_eq!(task_pool.stats().active, 0);
+                            assert_eq!(task_pool.stats().idle, 1);
+                            return None;
+                        }
+
+                        let mutex = Arc::new(Mutex::new(()));
+                        let mutex_owner = mutex.try_lock_owned().unwrap();
+                        let held_pool = Arc::clone(&task_pool);
+                        let held_mutex = Arc::clone(&mutex);
+                        let holder_context = Arc::new(PoolMutex::new(None));
+                        let published_context = Arc::clone(&holder_context);
+                        let mut holder = cx.spawn(move |holder_cx| {
+                            let future: Pin<Box<dyn Future<Output = Result<(), LockError>> + Send>> = Box::pin(async move {
+                                let resource = held_pool.acquire_checked(&holder_cx).await.unwrap();
+                                assert!(resource.obligation.is_some());
+                                resource.get().set(73);
+                                *published_context.lock() = Some(holder_cx.clone());
+                                let result = OwnedMutexGuard::lock(held_mutex, &holder_cx).await.map(drop);
+                                // Cell is Send but !Sync and remains in the
+                                // real task future across this native Pending.
+                                assert_eq!(resource.get().get(), 73);
+                                drop(resource);
+                                result
+                            });
+                            future
+                        }).unwrap();
+                        let started = Instant::now();
+                        let holder_cx = loop {
+                            let context = holder_context.lock().clone();
+                            if let Some(context) = context {
+                                let task = observer.task_inspector(Default::default()).unwrap().inspect_task(context.task_id());
+                                if mutex.waiters() == 1 && task.as_ref().is_some_and(|task| task.obligations.len() == 1) {
+                                    break context;
+                                }
+                            }
+                            assert!(started.elapsed() < Duration::from_secs(5), "native checked holder must reach a real parked state with an arena obligation");
+                            yield_now().await;
+                        };
+                        let successor_pool = Arc::clone(&task_pool);
+                        let mut successor = cx.spawn(move |waiter_cx| {
+                            let future: Pin<Box<dyn Future<Output = (TaskId, u32)> + Send>> = Box::pin(async move {
+                                let resource = successor_pool.acquire_checked(&waiter_cx).await.unwrap();
+                                let value = resource.get().get();
+                                resource.return_to_pool();
+                                (waiter_cx.task_id(), value)
+                            });
+                            future
+                        }).unwrap();
+                        let waiting = Instant::now();
+                        while task_pool.stats().waiters != 1 {
+                            assert!(waiting.elapsed() < Duration::from_secs(5), "native successor must park in the actual pool queue");
+                            yield_now().await;
+                        }
+                        assert_eq!(task_pool.stats().active, 1);
+                        holder.abort();
+                        assert_eq!(holder.join(&cx).await, Ok(Err(LockError::Cancelled)));
+                        let (successor_id, value) = successor.join(&cx).await.unwrap();
+                        assert_eq!(value, 73, "cancellation returns the actual Cell resource to the parked successor");
+                        assert_eq!(mutex.waiters(), 0);
+                        drop(mutex_owner);
+                        assert_eq!(task_pool.stats().active, 0);
+                        assert_eq!(task_pool.stats().idle, 1);
+                        assert_eq!(task_pool.stats().waiters, 0);
+                        Some((holder_cx.task_id(), successor_id))
+                    });
+                    let holders = runtime.block_on(runtime.handle().spawn(parent));
+                    runtime.block_on(async {
+                        let started = Instant::now();
+                        while !runtime.is_quiescent() {
+                            assert!(started.elapsed() < Duration::from_secs(5), "native pool obligations and task retirement must drain");
+                            yield_now().await;
+                        }
+                    });
+                    assert!(runtime.task_inspector(Default::default()).list_tasks().is_empty());
+                    assert!(runtime.diagnostics().find_leaked_obligations().is_empty());
+                    let mut records = std::collections::BTreeMap::new();
+                    for event in runtime.trace_snapshot() {
+                        if let TraceData::Obligation { obligation, task, kind: ObligationKind::Lease, state, .. } = event.data {
+                            let entry = records.entry(obligation).or_insert((task, Vec::new()));
+                            assert_eq!(entry.0, task);
+                            entry.1.push(state);
+                        }
+                    }
+                    if let Some((holder, successor)) = holders {
+                        assert_eq!(records.len(), 2);
+                        for (task, states) in records.values() {
+                            if *task == holder {
+                                assert_eq!(states, &[ObligationState::Reserved, ObligationState::Aborted]);
+                            } else {
+                                assert_eq!(*task, successor);
+                                assert_eq!(states, &[ObligationState::Reserved, ObligationState::Committed]);
+                            }
+                        }
+                    } else {
+                        assert!(records.is_empty(), "zero quota cannot produce a false reservation");
+                    }
+                    assert_eq!(pool.stats().active, 0);
+                    assert_eq!(pool.stats().idle, 1);
+                    eprintln!("bead=asupersync-bi2462.29 scenario=checked_pool_native sharded={sharded} limit={limit} holders={holders:?} trace={records:?}");
+                    assert!(runtime.shutdown_timeout(Duration::from_secs(5)));
+                }
+                done_tx.send(()).unwrap();
+            });
+            done_rx.recv_timeout(Duration::from_secs(20)).expect("native checked Pool must complete both quotas and shutdown within the watchdog bound");
+            worker.join().unwrap();
+        }
+    }
+
     std::thread_local! {
         static TEST_POOL_TIME_BASE: RefCell<Option<Instant>> = const { RefCell::new(None) };
         static TEST_POOL_TIME_OFFSET_NANOS: Cell<u64> = const { Cell::new(0) };
