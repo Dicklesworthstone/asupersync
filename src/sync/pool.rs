@@ -664,6 +664,216 @@ impl<R> std::ops::DerefMut for PooledResource<R> {
 // (Option<R>, ReturnObligation, mpsc::Sender<PoolReturn<R>>, Instant) are Send.
 // No manual unsafe impl needed.
 
+/// A pool checkout whose return liability was admitted before acquisition
+/// succeeded.
+///
+/// [`GenericPool::acquire_checked`] and [`GenericPool::try_acquire_checked`]
+/// account this as a runtime [`crate::record::ObligationKind::Lease`]. Explicit
+/// healthy return commits the lease; dropping, discarding, or returning a
+/// resource marked broken aborts it. Healthy resources are physically returned
+/// even on abort. Moving this wrapper does not transfer its original holder's
+/// liability. An explicitly stateless context has no runtime token.
+///
+/// This separate wrapper leaves the legacy [`PooledResource`] representation
+/// and auto traits unchanged. A resource need only be `Send`, not `Sync`, to
+/// move the checked checkout between threads.
+#[must_use = "a checked pool resource must be returned or dropped"]
+pub struct CheckedPooledResource<R> {
+    pooled: Option<PooledResource<R>>,
+    obligation: Option<crate::runtime::obligation_mailbox::ObligationToken>,
+}
+
+impl<R> CheckedPooledResource<R> {
+    fn admit(pooled: PooledResource<R>, cx: &Cx) -> Result<Self, CheckedPoolError> {
+        // Own physical rollback before admission publishes or calls notify.
+        let mut checked = Self {
+            pooled: Some(pooled),
+            obligation: None,
+        };
+        checked.obligation = cx.try_register_obligation_checked(
+            crate::record::ObligationKind::Lease,
+            cx.task_id(),
+        )?;
+        Ok(checked)
+    }
+
+    /// Borrow the checked-out resource.
+    #[must_use]
+    pub fn get(&self) -> &R {
+        self.pooled.as_ref().expect("active checked checkout").get()
+    }
+
+    /// Mutably borrow the checked-out resource.
+    pub fn get_mut(&mut self) -> &mut R {
+        self.pooled.as_mut().expect("active checked checkout").get_mut()
+    }
+
+    /// Mark the resource for destruction instead of reuse on any return path.
+    pub fn mark_broken(&mut self) {
+        self.pooled
+            .as_mut()
+            .expect("active checked checkout")
+            .mark_broken();
+    }
+
+    /// Whether the resource has been marked for destruction.
+    #[must_use]
+    pub fn is_broken(&self) -> bool {
+        self.pooled
+            .as_ref()
+            .expect("active checked checkout")
+            .is_broken()
+    }
+
+    /// Elapsed hold time from the pool's configured clock.
+    #[must_use]
+    pub fn held_duration(&self) -> Duration {
+        self.pooled
+            .as_ref()
+            .expect("active checked checkout")
+            .held_duration()
+    }
+
+    /// Return a healthy resource and commit its admitted lease.
+    /// A resource marked broken is discarded and its lease aborted.
+    pub fn return_to_pool(mut self) {
+        self.finish(true, false);
+    }
+
+    /// Destroy the resource and abort its admitted lease.
+    pub fn discard(mut self) {
+        self.finish(false, true);
+    }
+
+    fn finish(&mut self, explicit_return: bool, discard: bool) {
+        let Some(mut pooled) = self.pooled.take() else {
+            return;
+        };
+        // Retire the legacy destructor before any callback can unwind. Each
+        // detached resource, notifier and waker below has one cleanup owner.
+        pooled.return_obligation.discharge();
+        let mut resource = pooled.resource.take();
+        let discard = discard || pooled.is_broken;
+        let mut panics = CheckedPoolCleanupPanics::new();
+        let mut hold_duration = Duration::ZERO;
+        panics.run(|| hold_duration = pooled.held_duration());
+        // ZERO is used only if the injected clock panicked; that same panic
+        // is propagated after cleanup. It is not a successful duration sample.
+        let message = if discard {
+            PoolReturn::Discard { hold_duration }
+        } else {
+            PoolReturn::Return {
+                resource: resource.take().expect("active checked resource"),
+                hold_duration,
+                created_at: pooled.created_at,
+            }
+        };
+        let returned = match pooled.return_tx.send(message) {
+            Ok(()) => true,
+            Err(mpsc::SendError(PoolReturn::Return { resource: lost, .. })) => {
+                resource = Some(lost);
+                false
+            }
+            Err(mpsc::SendError(PoolReturn::Discard { .. })) => false,
+        };
+        // Physical cleanup is queued before quota is synchronously released.
+        // No notifier, waker or resource destructor runs during settlement.
+        let notification = self.obligation.take().and_then(|token| {
+            let (_, notification) = if explicit_return && !discard && returned {
+                token.commit_deferred()
+            } else {
+                token.abort_deferred(crate::record::ObligationAbortReason::Explicit)
+            };
+            notification
+        });
+        let waker = pooled.return_wakers.as_ref().and_then(|wakers| {
+            wakers
+                .lock()
+                .first()
+                .map(|(_, waker)| waker.clone_waker())
+        });
+        if let Some(gateway) = notification {
+            panics.run(|| gateway.notify());
+            panics.run(|| drop(gateway));
+        }
+        if let Some(waker) = waker {
+            // Keep the owner outside the callback catch: consuming wake can
+            // combine a wake panic and final-payload Drop panic into an abort.
+            panics.run(|| waker.wake_by_ref());
+            panics.run(|| drop(waker));
+        }
+        panics.run(|| drop(resource));
+        panics.run(|| drop(pooled));
+    }
+}
+
+impl<R> Drop for CheckedPooledResource<R> {
+    fn drop(&mut self) {
+        self.finish(false, false);
+    }
+}
+
+impl<R> std::ops::Deref for CheckedPooledResource<R> {
+    type Target = R;
+
+    fn deref(&self) -> &R {
+        self.get()
+    }
+}
+
+impl<R> std::ops::DerefMut for CheckedPooledResource<R> {
+    fn deref_mut(&mut self) -> &mut R {
+        self.get_mut()
+    }
+}
+
+impl<R: std::fmt::Debug> std::fmt::Debug for CheckedPooledResource<R> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CheckedPooledResource")
+            .field("resource", &self.pooled.as_ref().and_then(PooledResource::try_get))
+            .field("tracked", &self.obligation.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+/// Complete every independent callback, preserving the original failure even
+/// when another callback or its panic payload also has a panicking destructor.
+struct CheckedPoolCleanupPanics {
+    already_unwinding: bool,
+    first: Option<Box<dyn std::any::Any + Send>>,
+}
+
+impl CheckedPoolCleanupPanics {
+    fn new() -> Self {
+        Self {
+            already_unwinding: std::thread::panicking(),
+            first: None,
+        }
+    }
+
+    fn run(&mut self, callback: impl FnOnce()) {
+        if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(callback)) {
+            if self.already_unwinding || self.first.is_some() {
+                std::mem::forget(payload);
+            } else {
+                self.first = Some(payload);
+            }
+        }
+    }
+}
+
+impl Drop for CheckedPoolCleanupPanics {
+    fn drop(&mut self) {
+        if let Some(payload) = self.first.take() {
+            if std::thread::panicking() {
+                std::mem::forget(payload);
+            } else {
+                std::panic::resume_unwind(payload);
+            }
+        }
+    }
+}
+
 // ============================================================================
 // PoolConfig and GenericPool
 // ============================================================================
@@ -851,6 +1061,21 @@ impl std::error::Error for PoolError {
             _ => None,
         }
     }
+}
+
+/// Failure of an explicitly checked pool acquisition.
+///
+/// Admission refusal returns the physical checkout to the pool and never
+/// changes the existing [`PoolError`] variants or legacy acquisition behavior.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum CheckedPoolError {
+    /// The underlying pool acquisition failed.
+    #[error(transparent)]
+    Pool(#[from] PoolError),
+    /// The runtime refused the return liability before acquisition succeeded.
+    #[error(transparent)]
+    Admission(#[from] crate::runtime::obligation_mailbox::ObligationAdmissionError),
 }
 
 /// An idle resource in the pool.
@@ -1368,6 +1593,41 @@ where
     #[must_use]
     pub const fn time_getter(&self) -> fn() -> Instant {
         self.time_getter
+    }
+
+    /// Acquire a resource and admit its return liability before returning it.
+    ///
+    /// Waiting, creation, cancellation and timeout retain [`Pool::acquire`]
+    /// semantics. Admission happens after physical checkout, outside pool
+    /// locks; a refused or unwinding admission returns that resource. A
+    /// runtime-associated context without a live holder is refused, while an
+    /// explicitly stateless context returns a wrapper without a runtime token.
+    pub fn acquire_checked<'a>(
+        &'a self,
+        cx: &'a Cx,
+    ) -> PoolFuture<'a, Result<CheckedPooledResource<R>, CheckedPoolError>> {
+        Box::pin(async move {
+            let pooled = self.acquire(cx).await?;
+            CheckedPooledResource::admit(pooled, cx)
+        })
+    }
+
+    /// Try to check out an idle resource with checked return liability.
+    ///
+    /// `Ok(None)` means an idle resource is unavailable or an earlier FIFO
+    /// waiter has priority; this method does not create a resource. Closed,
+    /// cancelled and admission-refused operations return distinct typed errors.
+    pub fn try_acquire_checked(
+        &self,
+        cx: &Cx,
+    ) -> Result<Option<CheckedPooledResource<R>>, CheckedPoolError> {
+        cx.checkpoint().map_err(|_| PoolError::Cancelled)?;
+        if self.closed.load(Ordering::Acquire) {
+            return Err(PoolError::Closed.into());
+        }
+        self.try_acquire()
+            .map(|pooled| CheckedPooledResource::admit(pooled, cx))
+            .transpose()
     }
 
     /// Configures metrics collection for this pool.
@@ -2811,6 +3071,223 @@ mod tests {
     use crate::Time;
     use crate::time::{TimerDriverHandle, VirtualClock};
     use crate::types::{Budget, RegionId, TaskId};
+
+    fn checked_pool_fixture(
+        limit: usize,
+    ) -> (crate::lab::LabRuntime, Cx, crate::runtime::TaskHandle<()>) {
+        let mut lab =
+            crate::lab::LabRuntime::new(crate::lab::LabConfig::new(0x28_9001).max_steps(128));
+        let region = lab.state.create_root_region(Budget::INFINITE);
+        assert!(lab.state.set_region_limits(
+            region,
+            crate::record::region::RegionLimits {
+                max_obligations: Some(limit),
+                ..crate::record::region::RegionLimits::UNLIMITED
+            },
+        ));
+        let (holder, handle) = lab
+            .state
+            .create_task(region, Budget::INFINITE, async {})
+            .unwrap();
+        let cx = lab.state.task(holder).unwrap().cx.clone().unwrap();
+        (lab, cx, handle)
+    }
+
+    fn assert_checked_pool_ledger(lab: &crate::lab::LabRuntime, committed: u64, aborted: u64) {
+        let gateway = lab.state.obligation_gateway().unwrap();
+        let mailbox = gateway.mailbox();
+        let stats = mailbox.stats();
+        assert_eq!(stats.reserved, committed + aborted);
+        assert_eq!(stats.committed, committed);
+        assert_eq!(stats.aborted, aborted);
+        assert_eq!(stats.refused, 0);
+        assert_eq!(stats.leaked, 0);
+        assert_eq!(stats.posted, stats.applied);
+        assert_eq!(mailbox.open_tickets(), 0);
+        assert_eq!(lab.state.pending_obligation_count(), 0);
+        assert_eq!(lab.state.leak_count(), 0);
+    }
+
+    fn finish_checked_pool_fixture(
+        mut lab: crate::lab::LabRuntime,
+        cx: &Cx,
+        mut handle: crate::runtime::TaskHandle<()>,
+        committed: u64,
+        aborted: u64,
+    ) {
+        lab.scheduler.lock().schedule(cx.task_id(), 0);
+        let report = lab.run_until_quiescent_with_report();
+        assert!(report.lab_test_passed(), "{report:?}");
+        assert_eq!(handle.try_join().unwrap(), Some(()));
+        assert_checked_pool_ledger(&lab, committed, aborted);
+    }
+
+    #[test]
+    fn checked_pool_actual_lab_quota_rollback_and_terminal_matrix() {
+        use crate::runtime::obligation_mailbox::ObligationAdmissionError;
+        for limit in [0, 1, 2] {
+            let mut lab = crate::lab::LabRuntime::new(
+                crate::lab::LabConfig::new(0x28_9002 + limit as u64).max_steps(128),
+            );
+            let region = lab.state.create_root_region(Budget::INFINITE);
+            assert!(lab.state.set_region_limits(
+                region,
+                crate::record::region::RegionLimits {
+                    max_obligations: Some(limit),
+                    ..crate::record::region::RegionLimits::UNLIMITED
+                },
+            ));
+            let pool = Arc::new(GenericPool::with_time_getter(
+                simple_factory,
+                PoolConfig::with_max_size(limit + 1).min_size(limit + 1),
+                test_pool_time_now,
+            ));
+            let task_pool = Arc::clone(&pool);
+            let (task, mut handle) = lab
+                .state
+                .create_task(region, Budget::INFINITE, async move {
+                    let cx = Cx::current().expect("actual scheduled Lab pool holder");
+                    assert_eq!(task_pool.warmup(&cx).await.unwrap(), limit + 1);
+                    let mut held = Vec::new();
+                    for _ in 0..limit {
+                        let resource = task_pool.acquire_checked(&cx).await.unwrap();
+                        assert_eq!(resource.obligation.as_ref().unwrap().holder(), cx.task_id());
+                        assert_eq!(*resource, 42);
+                        held.push(resource);
+                    }
+                    for refusal in [
+                        task_pool.try_acquire_checked(&cx).map(|value| value.unwrap()),
+                        task_pool.acquire_checked(&cx).await,
+                    ] {
+                        assert!(matches!(refusal,
+                            Err(CheckedPoolError::Admission(
+                                ObligationAdmissionError::LimitReached { limit: maximum, live }
+                            )) if maximum == limit && live == limit
+                        ));
+                        let stats = task_pool.stats();
+                        assert_eq!(stats.active, limit);
+                        assert_eq!(stats.idle, 1, "refused physical checkout is reusable");
+                        assert_eq!(stats.waiters, 0);
+                    }
+                    drop(held);
+                    if limit > 0 {
+                        // No runtime step separates release and readmission.
+                        let mut returned = task_pool.try_acquire_checked(&cx).unwrap().unwrap();
+                        *returned = 73;
+                        returned.return_to_pool();
+                        task_pool.acquire_checked(&cx).await.unwrap().discard();
+                        let mut broken = task_pool.acquire_checked(&cx).await.unwrap();
+                        broken.mark_broken();
+                        assert!(broken.is_broken());
+                        broken.return_to_pool();
+                        let mut broken = task_pool.acquire_checked(&cx).await.unwrap();
+                        broken.mark_broken();
+                        drop(broken);
+                        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            let _held = futures_lite::future::block_on(task_pool.acquire_checked(&cx))
+                                .unwrap();
+                            panic!("checked pool body panic");
+                        }));
+                        assert_eq!(result.unwrap_err().downcast_ref::<&str>(), Some(&"checked pool body panic"));
+                    }
+                    let stats = task_pool.stats();
+                    assert_eq!(stats.active, 0);
+                    assert_eq!(stats.waiters, 0);
+                    assert!(stats.idle > 0);
+                    assert!(stats.total <= limit + 1);
+                    limit
+                })
+                .unwrap();
+            lab.scheduler.lock().schedule(task, 0);
+            let report = lab.run_until_quiescent_with_report();
+            assert!(report.lab_test_passed(), "limit={limit}: {report:?}");
+            assert_eq!(handle.try_join().unwrap(), Some(limit));
+            assert_checked_pool_ledger(&lab, u64::from(limit > 0), limit as u64 + if limit > 0 { 4 } else { 0 });
+            assert_eq!(pool.stats().active, 0);
+            eprintln!("bead=asupersync-bi2462.29 scenario=checked_pool_lab limit={limit} report={}", report.to_json());
+        }
+    }
+
+    #[test]
+    fn checked_pool_admission_notify_panic_rolls_back_real_checkout() {
+        use crate::runtime::obligation_mailbox::ObligationGateway;
+        let (lab, cx, handle) = checked_pool_fixture(1);
+        let mailbox = Arc::clone(lab.state.obligation_gateway().unwrap().mailbox());
+        let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let notified = Arc::clone(&count);
+        let live = Arc::new(());
+        let cx = cx.with_obligation_gateway(
+            Some(Arc::new(ObligationGateway::new(
+                mailbox,
+                Arc::new(move || {
+                    assert_ne!(notified.fetch_add(1, Ordering::SeqCst), 0, "pool admission notify panic");
+                }),
+                Arc::downgrade(&live),
+            ))),
+            None,
+        );
+        let pool = GenericPool::with_time_getter(simple_factory, PoolConfig::with_max_size(1), test_pool_time_now);
+        let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _held = futures_lite::future::block_on(pool.acquire_checked(&cx)).unwrap();
+        }));
+        assert!(failed.is_err());
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+        assert_eq!(pool.stats().active, 0);
+        assert_eq!(pool.stats().idle, 1);
+        let recovered = pool.try_acquire_checked(&cx).unwrap().unwrap();
+        assert!(recovered.obligation.is_some());
+        assert_eq!(*recovered, 42);
+        recovered.return_to_pool();
+        assert_eq!(pool.stats().active, 0);
+        finish_checked_pool_fixture(lab, &cx, handle, 1, 1);
+    }
+
+    #[test]
+    fn checked_pool_clock_panic_and_body_unwind_settle_once() {
+        reset_test_pool_time();
+        let (lab, cx, handle) = checked_pool_fixture(1);
+        let pool = GenericPool::with_time_getter(simple_factory, PoolConfig::with_max_size(1), panic_once_test_pool_time_now);
+        for body_panics in [false, true] {
+            let held = futures_lite::future::block_on(pool.acquire_checked(&cx)).unwrap();
+            panic_test_pool_time_on_call(1);
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _held = held;
+                if body_panics {
+                    panic!("primary checked pool body panic");
+                }
+            }));
+            let failure = result.unwrap_err();
+            if body_panics {
+                assert_eq!(failure.downcast_ref::<&str>(), Some(&"primary checked pool body panic"));
+            } else {
+                assert!(failure.downcast_ref::<String>().unwrap().contains("intentional pool time panic"));
+            }
+            assert_eq!(test_pool_time_probe_state(), (1, None));
+            assert_eq!(pool.stats().active, 0);
+            assert_eq!(pool.stats().idle, 1);
+        }
+        pool.try_acquire_checked(&cx).unwrap().unwrap().return_to_pool();
+        finish_checked_pool_fixture(lab, &cx, handle, 1, 2);
+    }
+
+    #[test]
+    fn checked_pool_stateless_unavailable_closed_and_cancelled_are_distinct() {
+        let pool = GenericPool::new(simple_factory, PoolConfig::with_max_size(1));
+        let cx = Cx::for_testing();
+        assert!(pool.try_acquire_checked(&cx).unwrap().is_none());
+        let held = futures_lite::future::block_on(pool.acquire_checked(&cx)).unwrap();
+        assert!(held.obligation.is_none());
+        assert!(pool.try_acquire_checked(&cx).unwrap().is_none());
+        held.return_to_pool();
+        let cancelled = Cx::for_testing();
+        cancelled.set_cancel_requested(true);
+        assert!(matches!(pool.try_acquire_checked(&cancelled), Err(CheckedPoolError::Pool(PoolError::Cancelled))));
+        assert!(matches!(futures_lite::future::block_on(pool.acquire_checked(&cancelled)), Err(CheckedPoolError::Pool(PoolError::Cancelled))));
+        assert_eq!(pool.stats().idle, 1);
+        futures_lite::future::block_on(pool.close());
+        assert!(matches!(pool.try_acquire_checked(&cx), Err(CheckedPoolError::Pool(PoolError::Closed))));
+        assert!(matches!(futures_lite::future::block_on(pool.acquire_checked(&cx)), Err(CheckedPoolError::Pool(PoolError::Closed))));
+    }
 
     std::thread_local! {
         static TEST_POOL_TIME_BASE: RefCell<Option<Instant>> = const { RefCell::new(None) };

@@ -124,7 +124,7 @@ pub use mutex::{LockError, Mutex, MutexGuard, OwnedMutexGuard, TryLockError};
 pub use notify::{Notified, Notify};
 pub use once_cell::{OnceCell, OnceCellError};
 pub use pool::{
-    AsyncResourceFactory, DestroyReason, GenericPool, Pool, PoolConfig, PoolError, PoolFuture,
+    AsyncResourceFactory, CheckedPoolError, CheckedPooledResource, DestroyReason, GenericPool, Pool, PoolConfig, PoolError, PoolFuture,
     PoolReturn, PoolReturnReceiver, PoolReturnSender, PoolStats, PooledResource, WarmupStrategy,
 };
 #[cfg(feature = "metrics")]
