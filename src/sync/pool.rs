@@ -3077,6 +3077,7 @@ mod tests {
     fn checked_pool_fixture(
         limit: usize,
     ) -> (crate::lab::LabRuntime, Cx, crate::runtime::TaskHandle<()>) {
+        reset_test_pool_time();
         let mut lab =
             crate::lab::LabRuntime::new(crate::lab::LabConfig::new(0x28_9001).max_steps(128));
         let region = lab.state.create_root_region(Budget::INFINITE);
@@ -3127,6 +3128,7 @@ mod tests {
     #[test]
     fn checked_pool_actual_lab_quota_rollback_and_terminal_matrix() {
         use crate::runtime::obligation_mailbox::ObligationAdmissionError;
+        reset_test_pool_time();
         for limit in [0, 1, 2] {
             let mut lab = crate::lab::LabRuntime::new(
                 crate::lab::LabConfig::new(0x28_9002 + limit as u64).max_steps(128),
@@ -3308,8 +3310,7 @@ mod tests {
         finish_checked_pool_fixture(lab, &cx, handle, 1, 2);
     }
 
-    #[test]
-    fn checked_pool_notifier_wake_retirement_and_resource_panics_preserve_primary() {
+    fn assert_checked_pool_callback_panics() {
         use crate::runtime::obligation_mailbox::ObligationGateway;
         use std::sync::atomic::AtomicUsize;
         struct PanickingWake {
@@ -3448,6 +3449,19 @@ mod tests {
         assert_eq!(pool.stats().waiters, 0);
         drop(successor);
         finish_checked_pool_fixture(lab, &cx, handle, 1, 1);
+    }
+
+    #[test]
+    fn checked_pool_notifier_wake_retirement_and_resource_panics_preserve_primary() {
+        let (done_tx, done_rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            assert_checked_pool_callback_panics();
+            done_tx.send(()).unwrap();
+        });
+        done_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("reentrant checked cleanup must complete without a pool-lock deadlock");
+        worker.join().unwrap();
     }
 
     #[test]
