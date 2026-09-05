@@ -301,6 +301,9 @@ pub struct NativeQuicConnection {
     anti_amplification_bytes_received: u64,
     anti_amplification_bytes_sent: u64,
     pending_control_frames: VecDeque<QuicFrame>,
+    /// One managed PTO may commit one PING packet outside cwnd. This permit
+    /// never admits ordinary control, STREAM, or DATAGRAM frames.
+    pending_pto_probe: bool,
     /// Whether this connection owns reliable frame ACK/loss recovery. ATP
     /// disables this because its native link has an external packet/frame
     /// ledger with pacing-aware recovery.
@@ -452,6 +455,7 @@ impl NativeQuicConnection {
             anti_amplification_bytes_received: 0,
             anti_amplification_bytes_sent: 0,
             pending_control_frames: VecDeque::new(),
+            pending_pto_probe: false,
             internal_retransmission_tracking: true,
             in_flight_retransmittable_frames: std::array::from_fn(|_| BTreeMap::new()),
             inbound_datagrams: VecDeque::new(),
@@ -1706,6 +1710,88 @@ impl NativeQuicConnection {
         }
         self.pending_control_frames.push_back(QuicFrame::Ping);
         Ok(())
+    }
+
+    /// Rearm a due managed PTO and authorize one bounded 1-RTT PING probe.
+    /// Unlike the legacy queue-based callback, repeated expirations never add
+    /// control frames or copy the reliable-frame ledger. ACK/loss processing
+    /// still owns retransmission of the original flight.
+    pub(crate) fn on_managed_probe_timeout(
+        &mut self,
+        cx: &Cx,
+        now_micros: u64,
+    ) -> Result<Option<u64>, NativeQuicConnectionError> {
+        checkpoint(cx)?;
+        let Some(deadline) = self.transport.pto_deadline_micros(now_micros) else {
+            self.pending_pto_probe = false;
+            return Ok(None);
+        };
+        if deadline > now_micros {
+            return Ok(Some(deadline));
+        }
+        let next_deadline = self.transport.on_pto_expired_at(now_micros);
+        self.pending_pto_probe = next_deadline.is_some();
+        Ok(next_deadline)
+    }
+
+    /// Build only the PING authorized by the latest managed PTO, without
+    /// draining any queued application or control frames. Failed packet
+    /// protection leaves the permit available for another attempt; only packet
+    /// commitment consumes it.
+    pub(crate) fn generate_pto_probe_frames(
+        &self,
+        cx: &Cx,
+        max_frame_bytes: usize,
+    ) -> Result<Vec<QuicFrame>, NativeQuicConnectionError> {
+        checkpoint(cx)?;
+        if !self.pending_pto_probe || max_frame_bytes == 0 {
+            return Ok(Vec::new());
+        }
+        if !self.can_send_1rtt() {
+            return Err(NativeQuicConnectionError::InvalidState(
+                "managed PTO probe requires established 1-RTT state",
+            ));
+        }
+        Ok(vec![QuicFrame::Ping])
+    }
+
+    /// Commit the managed probe after packet protection succeeds. Only one
+    /// PING packet of at most 1200 bytes may bypass cwnd for each fired PTO
+    /// (RFC 9002 section 7.5). State, anti-amplification, packet numbers, and
+    /// in-flight accounting use the ordinary send path. No reliable frames
+    /// need ledger entries because this seam admits only PING.
+    pub(crate) fn on_pto_probe_packet_sent(
+        &mut self,
+        cx: &Cx,
+        bytes: u64,
+        time_sent_micros: u64,
+        frames: &[QuicFrame],
+    ) -> Result<u64, NativeQuicConnectionError> {
+        checkpoint(cx)?;
+        if !self.can_send_1rtt() {
+            return Err(NativeQuicConnectionError::InvalidState(
+                "managed PTO probe requires established 1-RTT state",
+            ));
+        }
+        if !self.pending_pto_probe
+            || !(1..=1_200).contains(&bytes)
+            || !matches!(frames, [QuicFrame::Ping])
+        {
+            return Err(NativeQuicConnectionError::InvalidState(
+                "managed PTO permits one PING packet of at most 1200 bytes",
+            ));
+        }
+        let packet_number = self.on_packet_sent_inner(
+            cx,
+            PacketNumberSpace::ApplicationData,
+            bytes,
+            true,
+            true,
+            time_sent_micros,
+            false,
+        )?;
+        self.pending_pto_probe = false;
+        Ok(packet_number)
     }
 
     /// Record successful delivery by a deterministic/in-memory transport that
@@ -4306,6 +4392,387 @@ mod tests {
         )));
         assert_eq!(conn.pending_outbound_datagram_count(), 0);
         assert_eq!(conn.datagrams_sent(), 1);
+    }
+
+    // br-asupersync-bi2462.75: explicit connection/clock fixtures. Native UDP
+    // wakeup, encryption, and delivery remain the managed endpoint lane's proof.
+    #[test]
+    fn managed_pto_probe_crosses_full_cwnd_once_without_draining_queues() {
+        let cx = test_cx();
+        let mut conn = established_conn();
+        for _ in 0..10 {
+            conn.on_packet_sent(
+                &cx,
+                PacketNumberSpace::ApplicationData,
+                1_200,
+                true,
+                true,
+                10_000,
+            )
+            .expect("fill congestion window");
+        }
+        assert_eq!(conn.transport().bytes_in_flight(), 12_000);
+        assert!(!conn.transport().can_send(1));
+        let stream = conn.open_local_bidi(&cx).expect("open stream");
+        conn.write_stream_bytes(&cx, stream, Bytes::from_static(b"keep-stream"), true)
+            .expect("queue stream");
+        conn.send_datagram(&cx, Bytes::from_static(b"keep-datagram"))
+            .expect("queue datagram");
+        conn.pending_control_frames.push_back(QuicFrame::MaxData {
+            maximum_data: VarInt::from_u64_unchecked(4096),
+        });
+        let control_before = conn.pending_control_frames.clone();
+        let stream_bytes_before = conn.pending_stream_data_bytes();
+        let fired_at = conn
+            .pto_deadline_micros(&cx, 10_000)
+            .expect("clock")
+            .expect("PTO");
+        let rearmed = conn
+            .on_managed_probe_timeout(&cx, fired_at)
+            .expect("fire")
+            .expect("rearm");
+        assert_eq!(rearmed - fired_at, 2_048_000);
+        // An obsolete readiness notification cannot grant another expiration.
+        assert_eq!(
+            conn.on_managed_probe_timeout(&cx, fired_at)
+                .expect("obsolete timer"),
+            Some(rearmed)
+        );
+        assert_eq!(conn.transport().pto_count(), 1);
+        assert!(
+            conn.generate_pto_probe_frames(&cx, 0)
+                .expect("zero budget")
+                .is_empty()
+        );
+        let probe = conn.generate_pto_probe_frames(&cx, 1).expect("PING");
+        assert_eq!(probe, vec![QuicFrame::Ping]);
+        assert!(matches!(
+            conn.on_packet_sent(
+                &cx,
+                PacketNumberSpace::ApplicationData,
+                40,
+                true,
+                true,
+                fired_at,
+            ),
+            Err(NativeQuicConnectionError::CongestionLimited { .. })
+        ));
+        let packet_number = conn
+            .on_pto_probe_packet_sent(&cx, 40, fired_at, &probe)
+            .expect("one congestion-exempt probe");
+        assert_eq!(packet_number, 10);
+        assert_eq!(conn.transport().bytes_in_flight(), 12_040);
+        assert_eq!(conn.transport().packets_lost_total(), 0);
+        assert_eq!(conn.transport().congestion_window_bytes(), 12_000);
+        assert!(
+            conn.generate_pto_probe_frames(&cx, 1)
+                .expect("spent permit")
+                .is_empty()
+        );
+        assert!(matches!(
+            conn.on_pto_probe_packet_sent(&cx, 40, fired_at, &probe),
+            Err(NativeQuicConnectionError::InvalidState(_))
+        ));
+        assert!(!conn.transport().can_send(1));
+        assert_eq!(conn.pending_control_frames, control_before);
+        assert_eq!(conn.pending_stream_data_bytes(), stream_bytes_before);
+        assert_eq!(conn.pending_outbound_datagram_count(), 1);
+        assert_eq!(conn.datagrams_sent(), 0);
+        assert_eq!(
+            conn.next_packet_number_for_protection(PacketNumberSpace::ApplicationData)
+                .expect("next packet"),
+            11
+        );
+        let event = conn
+            .on_ack_received(
+                &cx,
+                PacketNumberSpace::ApplicationData,
+                &[packet_number],
+                0,
+                fired_at + 1_000,
+            )
+            .expect("probe ACK drives ordinary recovery");
+        assert_eq!(event.acked_packets, 1);
+        assert_eq!(event.acked_bytes, 40);
+        assert_eq!(event.lost_packets, 10);
+        assert_eq!(conn.transport().bytes_in_flight(), 0);
+    }
+
+    #[test]
+    fn managed_pto_probe_preserves_anti_amplification_and_failed_commit_state() {
+        let cx = test_cx();
+        let mut conn = established_server_conn();
+        // Keep valid 1-RTT state while planting an unvalidated path with
+        // exactly the initial 3x credit exhausted by three real send commits.
+        conn.peer_address_validated = false;
+        for _ in 0..3 {
+            conn.on_packet_sent(
+                &cx,
+                PacketNumberSpace::ApplicationData,
+                1_200,
+                true,
+                true,
+                10_000,
+            )
+            .expect("use amplification credit");
+        }
+        let fired_at = conn
+            .pto_deadline_micros(&cx, 10_000)
+            .expect("clock")
+            .expect("PTO");
+        conn.on_managed_probe_timeout(&cx, fired_at).expect("fire");
+        let frames = conn.generate_pto_probe_frames(&cx, 1).expect("PING");
+        assert!(matches!(
+            conn.on_pto_probe_packet_sent(&cx, 40, fired_at, &frames),
+            Err(NativeQuicConnectionError::AmplificationLimited {
+                requested: 40,
+                bytes_sent: 3_600,
+                bytes_received: 1_200,
+                limit: 3_600,
+            })
+        ));
+        assert_eq!(conn.transport().bytes_in_flight(), 3_600);
+        assert_eq!(conn.anti_amplification_bytes_sent, 3_600);
+        assert_eq!(
+            conn.next_packet_number_for_protection(PacketNumberSpace::ApplicationData)
+                .expect("unchanged packet number"),
+            3
+        );
+        assert_eq!(
+            conn.generate_pto_probe_frames(&cx, 1)
+                .expect("retry permit"),
+            frames
+        );
+        conn.on_datagram_received(&cx, 40)
+            .expect("new peer traffic adds credit");
+        assert_eq!(
+            conn.on_pto_probe_packet_sent(&cx, 40, fired_at, &frames)
+                .expect("probe now fits amplification credit"),
+            3
+        );
+        assert_eq!(conn.anti_amplification_bytes_sent, 3_640);
+        assert_eq!(conn.transport().bytes_in_flight(), 3_640);
+    }
+
+    #[test]
+    fn managed_pto_probe_refuses_ordinary_frames_oversize_and_cancelled_commits() {
+        let cx = test_cx();
+        let cancelled = test_cx();
+        cancelled.set_cancel_requested(true);
+        let mut conn = established_conn();
+        conn.on_packet_sent(
+            &cx,
+            PacketNumberSpace::ApplicationData,
+            1_200,
+            true,
+            true,
+            10_000,
+        )
+        .expect("original flight");
+        let fired_at = conn
+            .pto_deadline_micros(&cx, 10_000)
+            .expect("clock")
+            .expect("PTO");
+        assert_eq!(
+            conn.on_managed_probe_timeout(&cancelled, fired_at),
+            Err(NativeQuicConnectionError::Cancelled)
+        );
+        assert_eq!(conn.transport().pto_count(), 0);
+        assert!(
+            conn.generate_pto_probe_frames(&cx, 1)
+                .expect("no permit")
+                .is_empty()
+        );
+        conn.on_managed_probe_timeout(&cx, fired_at).expect("fire");
+        for (bytes, frames) in [
+            (0, vec![QuicFrame::Ping]),
+            (1_201, vec![QuicFrame::Ping]),
+            (40, Vec::new()),
+            (40, vec![QuicFrame::Ping, QuicFrame::Ping]),
+            (
+                40,
+                vec![QuicFrame::Datagram {
+                    data: Bytes::from_static(b"forbidden"),
+                }],
+            ),
+        ] {
+            assert!(matches!(
+                conn.on_pto_probe_packet_sent(&cx, bytes, fired_at, &frames),
+                Err(NativeQuicConnectionError::InvalidState(_))
+            ));
+        }
+        assert_eq!(
+            conn.generate_pto_probe_frames(&cancelled, 1),
+            Err(NativeQuicConnectionError::Cancelled)
+        );
+        assert_eq!(
+            conn.on_pto_probe_packet_sent(&cancelled, 40, fired_at, &[QuicFrame::Ping]),
+            Err(NativeQuicConnectionError::Cancelled)
+        );
+        assert_eq!(conn.transport().bytes_in_flight(), 1_200);
+        assert_eq!(
+            conn.next_packet_number_for_protection(PacketNumberSpace::ApplicationData)
+                .expect("failed attempts consume no packet number"),
+            1
+        );
+        assert_eq!(
+            conn.on_pto_probe_packet_sent(&cx, 1_200, fired_at, &[QuicFrame::Ping])
+                .expect("one valid bounded retry"),
+            1
+        );
+        assert_eq!(conn.transport().bytes_in_flight(), 2_400);
+    }
+
+    #[test]
+    fn managed_pto_repeated_unsent_probes_do_not_grow_control_queue() {
+        let cx = test_cx();
+        let mut conn = established_conn();
+        conn.on_packet_sent(
+            &cx,
+            PacketNumberSpace::ApplicationData,
+            1_200,
+            true,
+            true,
+            10_000,
+        )
+        .expect("original flight");
+        let control_before = conn.pending_control_frames.clone();
+        let mut deadline = conn
+            .pto_deadline_micros(&cx, 10_000)
+            .expect("clock")
+            .expect("PTO");
+        for expiration in 1u32..=14 {
+            let fired_at = deadline + 5_000_000;
+            deadline = conn
+                .on_managed_probe_timeout(&cx, fired_at)
+                .expect("fire")
+                .expect("rearm");
+            assert_eq!(
+                deadline - fired_at,
+                1_024_000 * (1u64 << expiration.min(10))
+            );
+            assert_eq!(
+                conn.generate_pto_probe_frames(&cx, 1)
+                    .expect("bounded probe"),
+                vec![QuicFrame::Ping]
+            );
+            assert_eq!(conn.pending_control_frames, control_before);
+            assert_eq!(conn.transport().bytes_in_flight(), 1_200);
+            assert_eq!(conn.transport().packets_lost_total(), 0);
+        }
+    }
+
+    #[test]
+    fn managed_pto_probe_ack_requeues_lost_reliable_stream_data() {
+        let cx = test_cx();
+        let mut conn = established_conn();
+        let stream = conn.open_local_bidi(&cx).expect("open stream");
+        conn.write_stream_bytes(&cx, stream, Bytes::from_static(b"recover-me"), true)
+            .expect("queue reliable data");
+        let original_frames = conn
+            .generate_frames(&cx, PacketNumberSpace::ApplicationData, 128)
+            .expect("original frames");
+        assert!(original_frames.iter().any(|frame| matches!(
+            frame,
+            QuicFrame::Stream { data, fin: true, .. } if data.as_ref() == b"recover-me"
+        )));
+        conn.on_packet_sent_with_frames(
+            &cx,
+            PacketNumberSpace::ApplicationData,
+            1_200,
+            true,
+            true,
+            10_000,
+            &original_frames,
+        )
+        .expect("retain original packet recovery references");
+        let fired_at = conn
+            .pto_deadline_micros(&cx, 10_000)
+            .expect("clock")
+            .expect("PTO");
+        conn.on_managed_probe_timeout(&cx, fired_at).expect("fire");
+        assert!(!conn.has_pending_stream_frames_for(stream));
+        let probe_number = conn
+            .on_pto_probe_packet_sent(&cx, 40, fired_at, &[QuicFrame::Ping])
+            .expect("probe packet");
+        assert_eq!(conn.transport().packets_lost_total(), 0);
+        let event = conn
+            .on_ack_received(
+                &cx,
+                PacketNumberSpace::ApplicationData,
+                &[probe_number],
+                0,
+                fired_at + 1_000,
+            )
+            .expect("probe ACK");
+        assert_eq!(event.acked_packets, 1);
+        assert_eq!(event.lost_packets, 1);
+        assert!(conn.has_pending_stream_frames_for(stream));
+        let retransmission = conn
+            .generate_frames(&cx, PacketNumberSpace::ApplicationData, 128)
+            .expect("ordinary reliable retransmission");
+        assert!(retransmission.iter().any(|frame| matches!(
+            frame,
+            QuicFrame::Stream { stream_id, offset, data, fin: true, .. }
+                if stream_id.value() == stream.0
+                    && offset.map_or(0, VarInt::value) == 0
+                    && data.as_ref() == b"recover-me"
+        )));
+    }
+
+    #[test]
+    fn managed_pto_probe_preserves_packet_number_exhaustion_and_1rtt_gates() {
+        let cx = test_cx();
+        let mut conn = established_conn();
+        conn.on_packet_sent(
+            &cx,
+            PacketNumberSpace::ApplicationData,
+            1_200,
+            true,
+            true,
+            10_000,
+        )
+        .expect("original flight");
+        let fired_at = conn
+            .pto_deadline_micros(&cx, 10_000)
+            .expect("clock")
+            .expect("PTO");
+        conn.on_managed_probe_timeout(&cx, fired_at).expect("fire");
+        conn.next_packet_numbers[packet_number_space_idx(PacketNumberSpace::ApplicationData)] =
+            1u64 << 62;
+        assert_eq!(
+            conn.on_pto_probe_packet_sent(&cx, 40, fired_at, &[QuicFrame::Ping]),
+            Err(NativeQuicConnectionError::InvalidState(
+                "packet number limit reached; connection must be closed"
+            ))
+        );
+        assert_eq!(conn.transport().bytes_in_flight(), 1_200);
+        assert!(conn.pending_pto_probe);
+
+        let mut handshaking = NativeQuicConnection::new(NativeQuicConnectionConfig::default());
+        handshaking.begin_handshake(&cx).expect("handshaking");
+        handshaking
+            .on_packet_sent(&cx, PacketNumberSpace::Initial, 1_200, true, true, 10_000)
+            .expect("initial flight");
+        let deadline = handshaking
+            .pto_deadline_micros(&cx, 10_000)
+            .expect("clock")
+            .expect("initial PTO");
+        handshaking
+            .on_managed_probe_timeout(&cx, deadline)
+            .expect("initial timer rearmed");
+        let expected = NativeQuicConnectionError::InvalidState(
+            "managed PTO probe requires established 1-RTT state",
+        );
+        assert_eq!(
+            handshaking.generate_pto_probe_frames(&cx, 1),
+            Err(expected.clone())
+        );
+        assert_eq!(
+            handshaking.on_pto_probe_packet_sent(&cx, 40, deadline, &[QuicFrame::Ping]),
+            Err(expected)
+        );
+        assert_eq!(handshaking.transport().bytes_in_flight(), 1_200);
     }
 
     #[test]

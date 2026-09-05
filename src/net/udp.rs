@@ -2005,6 +2005,74 @@ impl UdpSocket {
         }
     }
 
+    /// Poll one bounded send batch, returning every committed send before waiting.
+    ///
+    /// Unlike the all-packets async helper, this may return a successful prefix
+    /// without an error. Its caller owns and retries the unsent suffix. No
+    /// datagram has been sent when this returns Pending.
+    pub(crate) fn poll_send_batch_to_with_strategy(
+        &mut self,
+        cx: &Context<'_>,
+        packets: &[UdpOutboundDatagram<'_>],
+        strategy: UdpSendBatchStrategy,
+    ) -> Poll<io::Result<UdpBatchIoReport>> {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = (cx, packets, strategy);
+            browser_udp_poll_unsupported("UdpSocket::poll_send_batch_to_with_strategy")
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if packets.len() > UDP_MAX_BATCH_SIZE {
+                return Poll::Ready(Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "UDP send batch exceeds UDP_MAX_BATCH_SIZE",
+                )));
+            }
+            match self.try_send_batch_to_native(packets, strategy.clamped())? {
+                NativeSendBatchAttempt::Sent(report) => return Poll::Ready(Ok(report)),
+                NativeSendBatchAttempt::WouldBlock => {
+                    self.register_interest(cx, Interest::WRITABLE)?;
+                    return Poll::Pending;
+                }
+                NativeSendBatchAttempt::Unavailable => {}
+            }
+            let mut report = UdpBatchIoReport {
+                fallback_used: packets.len() > 1,
+                ..UdpBatchIoReport::default()
+            };
+            let connected_peer = self.inner.peer_addr().ok();
+            for packet in packets {
+                let result = if connected_peer == Some(packet.dst_addr) {
+                    self.inner.send(packet.payload)
+                } else {
+                    self.inner.send_to(packet.payload, packet.dst_addr)
+                };
+                match result {
+                    Ok(bytes) => {
+                        report.packets_processed += 1;
+                        report.bytes_processed += bytes;
+                    }
+                    Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+                        if report.packets_processed > 0 {
+                            return Poll::Ready(Ok(report));
+                        }
+                        self.register_interest(cx, Interest::WRITABLE)?;
+                        return Poll::Pending;
+                    }
+                    Err(err) if report.packets_processed == 0 => {
+                        return Poll::Ready(Err(err));
+                    }
+                    // Report the committed prefix first. The next poll of the
+                    // unchanged tail retains the concrete I/O error kind.
+                    Err(_) => break,
+                }
+            }
+            Poll::Ready(Ok(report))
+        }
+    }
+
     /// Send connected payloads using an explicit send-acceleration strategy.
     pub async fn send_connected_batch_with_strategy(
         &mut self,
@@ -2691,39 +2759,53 @@ impl UdpSocket {
         packet_size: usize,
         spare_payloads: &mut Vec<Vec<u8>>,
     ) -> io::Result<UdpRecvBatch> {
+        std::future::poll_fn(|cx| {
+            self.poll_recv_batch_from_reusing(cx, max_packets, packet_size, spare_payloads)
+        })
+        .await
+    }
+
+    /// Poll one receive batch without consuming any packet on Pending.
+    pub(crate) fn poll_recv_batch_from_reusing(
+        &mut self,
+        cx: &Context<'_>,
+        max_packets: usize,
+        packet_size: usize,
+        spare_payloads: &mut Vec<Vec<u8>>,
+    ) -> Poll<io::Result<UdpRecvBatch>> {
         #[cfg(target_arch = "wasm32")]
         {
-            let _ = (max_packets, packet_size, spare_payloads);
-            browser_udp_unsupported_result("UdpSocket::recv_batch_from")
+            let _ = (cx, max_packets, packet_size, spare_payloads);
+            browser_udp_poll_unsupported("UdpSocket::recv_batch_from")
         }
 
         #[cfg(not(target_arch = "wasm32"))]
         {
             if max_packets == 0 {
-                return Ok(UdpRecvBatch::default());
+                return Poll::Ready(Ok(UdpRecvBatch::default()));
             }
             if packet_size == 0 {
-                return Err(empty_udp_receive_buffer_error("recv_batch_from"));
+                return Poll::Ready(Err(empty_udp_receive_buffer_error("recv_batch_from")));
             }
 
             // Prevent DoS via unbounded memory allocation (asupersync-z30chg)
             if max_packets > UDP_MAX_BATCH_SIZE {
-                return Err(io::Error::new(
+                return Poll::Ready(Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     format!(
                         "max_packets ({}) exceeds UDP_MAX_BATCH_SIZE ({})",
                         max_packets, UDP_MAX_BATCH_SIZE
                     ),
-                ));
+                )));
             }
             if packet_size > UDP_MAX_PACKET_SIZE {
-                return Err(io::Error::new(
+                return Poll::Ready(Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     format!(
                         "packet_size ({}) exceeds UDP_MAX_PACKET_SIZE ({})",
                         packet_size, UDP_MAX_PACKET_SIZE
                     ),
-                ));
+                )));
             }
 
             // One reusable scratch buffer serves every receive in the batch;
@@ -2733,11 +2815,15 @@ impl UdpSocket {
             // keeps downstream zero-copy consumers (which hold the payload
             // alive as shared `Bytes` backing) from pinning oversized buffers.
             let mut scratch = recv_batch_payload_buffer(spare_payloads, packet_size);
-            let (bytes_read, src_addr) = match self.recv_from(&mut scratch).await {
-                Ok(received) => received,
-                Err(err) => {
+            let (bytes_read, src_addr) = match self.poll_recv_from(cx, &mut scratch) {
+                Poll::Ready(Ok(received)) => received,
+                Poll::Ready(Err(err)) => {
                     recycle_unused_recv_batch_payload(spare_payloads, scratch);
-                    return Err(err);
+                    return Poll::Ready(Err(err));
+                }
+                Poll::Pending => {
+                    recycle_unused_recv_batch_payload(spare_payloads, scratch);
+                    return Poll::Pending;
                 }
             };
 
@@ -2785,7 +2871,7 @@ impl UdpSocket {
             }
             recycle_unused_recv_batch_payload(spare_payloads, scratch);
 
-            Ok(batch)
+            Poll::Ready(Ok(batch))
         }
     }
 
@@ -2798,6 +2884,11 @@ impl UdpSocket {
             registration: None,
             gso_demoted: self.gso_demoted,
         })
+    }
+
+    /// Release readiness ownership without requiring a live cancellation context.
+    pub(crate) fn clear_registration(&mut self) {
+        self.registration = None;
     }
 
     /// Consume this wrapper and return the underlying std socket if unique.
@@ -4251,6 +4342,104 @@ mod tests {
             let (n, peer) = server.recv_from(&mut buf).await.unwrap();
             assert_eq!(&buf[..n], b"ping");
             assert_eq!(peer, client_addr);
+        });
+    }
+
+    #[test]
+    fn polled_batch_reports_sent_prefix_before_destination_error_without_replaying_it() {
+        future::block_on(async {
+            let peer = StdUdpSocket::bind("127.0.0.1:0").unwrap();
+            peer.set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                .unwrap();
+            let mut sender = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let packets = [
+                UdpOutboundDatagram {
+                    dst_addr: peer.local_addr().unwrap(),
+                    payload: b"first",
+                },
+                UdpOutboundDatagram {
+                    dst_addr: "127.0.0.1:0".parse().unwrap(),
+                    payload: b"second",
+                },
+            ];
+            let task_cx = Context::from_waker(std::task::Waker::noop());
+            let Poll::Ready(Ok(report)) = sender.poll_send_batch_to_with_strategy(
+                &task_cx,
+                &packets,
+                UdpSendBatchStrategy::default(),
+            ) else {
+                panic!("first datagram should be committed")
+            };
+            assert_eq!(report.packets_processed, 1);
+            assert_eq!(report.bytes_processed, b"first".len());
+            assert!(
+                report.error.is_none(),
+                "progress precedes the next concrete error"
+            );
+            assert!(matches!(
+                sender.poll_send_batch_to_with_strategy(
+                    &task_cx,
+                    &packets[1..],
+                    UdpSendBatchStrategy::default()
+                ),
+                Poll::Ready(Err(_))
+            ));
+            let repaired = [UdpOutboundDatagram {
+                dst_addr: peer.local_addr().unwrap(),
+                payload: b"second",
+            }];
+            let Poll::Ready(Ok(report)) = sender.poll_send_batch_to_with_strategy(
+                &task_cx,
+                &repaired,
+                UdpSendBatchStrategy::default(),
+            ) else {
+                panic!("repaired suffix should send")
+            };
+            assert_eq!(report.packets_processed, 1);
+            let mut payload = [0u8; 16];
+            for expected in [b"first".as_slice(), b"second".as_slice()] {
+                let (length, source) = peer.recv_from(&mut payload).unwrap();
+                assert_eq!(source, sender.local_addr().unwrap());
+                assert_eq!(&payload[..length], expected);
+            }
+            peer.set_nonblocking(true).unwrap();
+            assert_eq!(
+                peer.recv_from(&mut payload).unwrap_err().kind(),
+                io::ErrorKind::WouldBlock
+            );
+        });
+    }
+
+    #[test]
+    fn polled_receive_keeps_scratch_and_consumes_nothing_until_ready() {
+        future::block_on(async {
+            let mut receiver = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let peer = StdUdpSocket::bind("127.0.0.1:0").unwrap();
+            let task_cx = Context::from_waker(std::task::Waker::noop());
+            let mut spare = Vec::new();
+            for _ in 0..4 {
+                assert!(
+                    receiver
+                        .poll_recv_batch_from_reusing(&task_cx, 4, 64, &mut spare)
+                        .is_pending()
+                );
+                assert_eq!(spare.len(), 1, "losing polls retain reusable scratch");
+            }
+            peer.send_to(b"after pending", receiver.local_addr().unwrap())
+                .unwrap();
+            let Poll::Ready(Ok(batch)) =
+                receiver.poll_recv_batch_from_reusing(&task_cx, 4, 64, &mut spare)
+            else {
+                panic!("queued loopback packet must be ready")
+            };
+            assert_eq!(batch.report.packets_processed, 1);
+            assert_eq!(batch.packets[0].payload, b"after pending");
+            assert_eq!(spare.len(), 1);
+            assert!(
+                receiver
+                    .poll_recv_batch_from_reusing(&task_cx, 4, 64, &mut spare)
+                    .is_pending()
+            );
         });
     }
 

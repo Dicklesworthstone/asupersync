@@ -205,6 +205,8 @@ struct LossRecovery {
     packets_acked_total: u64,
     packets_lost_total: u64,
     pto_count: u32,
+    latest_ack_eliciting_sent_micros: [Option<u64>; 3],
+    pto_rearmed_at_micros: Option<u64>,
     max_ack_delay_micros: u64,
     rtt: RttEstimator,
     congestion_window_bytes: u64,
@@ -225,6 +227,8 @@ impl Default for LossRecovery {
             packets_acked_total: 0,
             packets_lost_total: 0,
             pto_count: 0,
+            latest_ack_eliciting_sent_micros: [None; 3],
+            pto_rearmed_at_micros: None,
             max_ack_delay_micros: 25_000,
             rtt: RttEstimator::default(),
             congestion_window_bytes: 12_000,
@@ -246,11 +250,14 @@ impl LossRecovery {
         self.packets_acked_total = 0;
         self.packets_lost_total = 0;
         self.pto_count = 0;
+        self.latest_ack_eliciting_sent_micros = [None; 3];
+        self.pto_rearmed_at_micros = None;
         self.congestion_recovery_start_time = None;
     }
 
     pub fn discard_space(&mut self, space: PacketNumberSpace) {
         self.newly_lost_packet_numbers[space.idx()].clear();
+        self.latest_ack_eliciting_sent_micros[space.idx()] = None;
         let mut retained = VecDeque::with_capacity(self.sent_packets.len());
         while let Some(pkt) = self.sent_packets.pop_front() {
             if pkt.space == space {
@@ -265,6 +272,12 @@ impl LossRecovery {
     }
 
     fn on_packet_sent(&mut self, packet: SentPacketMeta) {
+        if packet.ack_eliciting && packet.in_flight {
+            let latest = &mut self.latest_ack_eliciting_sent_micros[packet.space.idx()];
+            *latest = Some(latest.map_or(packet.time_sent_micros, |seen| {
+                seen.max(packet.time_sent_micros)
+            }));
+        }
         if packet.in_flight {
             self.bytes_in_flight = self.bytes_in_flight.saturating_add(packet.bytes);
         }
@@ -396,6 +409,7 @@ impl LossRecovery {
 
         if event.acked_packets > 0 {
             self.pto_count = 0;
+            self.pto_rearmed_at_micros = None;
             if acked_bytes_for_growth > 0 {
                 self.on_ack_congestion(acked_bytes_for_growth);
             }
@@ -454,25 +468,37 @@ impl LossRecovery {
         let backoff = 1u64 << self.pto_count.min(10);
         let base_timeout = srtt.saturating_add(4u64.saturating_mul(rttvar).max(granularity));
 
-        let mut oldest_ack_eliciting_in_flight: [Option<u64>; 3] = [None; 3];
+        let mut ack_eliciting_in_flight = [false; 3];
         for pkt in &self.sent_packets {
             if !pkt.in_flight || !pkt.ack_eliciting {
                 continue;
             }
-            let slot = &mut oldest_ack_eliciting_in_flight[pkt.space.idx()];
-            *slot = Some(slot.map_or(pkt.time_sent_micros, |seen| seen.min(pkt.time_sent_micros)));
+            ack_eliciting_in_flight[pkt.space.idx()] = true;
         }
 
         let mut deadline: Option<u64> = None;
-        for (idx, oldest_sent) in oldest_ack_eliciting_in_flight.iter().copied().enumerate() {
-            let Some(oldest_sent) = oldest_sent else {
+        for (idx, in_flight) in ack_eliciting_in_flight.iter().copied().enumerate() {
+            if !in_flight {
+                continue;
+            }
+            // Sending another ack-eliciting packet restarts this space's PTO,
+            // even if that newer packet is subsequently acknowledged while an
+            // older packet remains in flight (RFC 9002 sections 6.2.1/6.2.4).
+            let Some(latest_sent) = self.latest_ack_eliciting_sent_micros[idx] else {
                 continue;
             };
             let mut timeout = base_timeout;
             if idx == PacketNumberSpace::ApplicationData.idx() {
                 timeout = timeout.saturating_add(self.max_ack_delay_micros);
             }
-            let candidate = oldest_sent.saturating_add(timeout.saturating_mul(backoff));
+            // A delayed or capped timeout must still wait a complete backed-off
+            // PTO after firing, including when anti-amplification blocks its
+            // probe. Merely reusing a past send timestamp would busy-loop.
+            let anchor = latest_sent.max(self.pto_rearmed_at_micros.unwrap_or(latest_sent));
+            let Some(candidate) = anchor.checked_add(timeout.saturating_mul(backoff)) else {
+                // No representable future deadline; never arm an expired one.
+                continue;
+            };
             deadline = Some(match deadline {
                 Some(seen) => seen.min(candidate),
                 None => candidate,
@@ -753,6 +779,15 @@ impl QuicTransportMachine {
     /// Record a PTO timer expiration (backoff signal).
     pub fn on_pto_expired(&mut self) {
         self.recovery.pto_count = self.recovery.pto_count.saturating_add(1);
+    }
+
+    /// Rearm a fired managed PTO from the supplied clock using the newly
+    /// backed-off duration. Returns `None` when no ack-eliciting flight remains
+    /// or the next deadline cannot be represented.
+    pub(crate) fn on_pto_expired_at(&mut self, now_micros: u64) -> Option<u64> {
+        self.on_pto_expired();
+        self.recovery.pto_rearmed_at_micros = Some(now_micros);
+        self.pto_deadline_micros(now_micros)
     }
 
     /// Declare ack-eliciting in-flight packets in `space` lost after a
@@ -1521,7 +1556,7 @@ mod tests {
         );
 
         // Verify the backoff is indeed 2^10 = 1024 times the base timeout,
-        // anchored to the oldest ack-eliciting packet send time.
+        // anchored to the latest ack-eliciting packet send time.
         let sent_at = 1_000;
         let mut t3 = QuicTransportMachine::new();
         t3.on_packet_sent(sent(PacketNumberSpace::Initial, 1, sent_at));
@@ -1816,7 +1851,7 @@ mod tests {
     }
 
     #[test]
-    fn pto_deadline_is_anchored_to_oldest_ack_eliciting_send_time() {
+    fn pto_deadline_does_not_slide_without_a_new_ack_eliciting_send() {
         let mut t = QuicTransportMachine::new();
         t.on_packet_sent(sent(PacketNumberSpace::Initial, 1, 1_000));
 
@@ -1825,6 +1860,75 @@ mod tests {
 
         assert_eq!(first, later);
         assert_eq!(first, 1_000_000);
+    }
+
+    // br-asupersync-bi2462.75: explicit microsecond fixtures exercise the
+    // managed PTO repair without substituting wall-clock timing for behavior.
+    #[test]
+    fn managed_pto_latest_send_restarts_deadline_and_survives_its_ack() {
+        let mut t = QuicTransportMachine::new();
+        t.on_packet_sent(sent(PacketNumberSpace::Initial, 1, 1_000));
+        t.on_packet_sent(sent(PacketNumberSpace::Initial, 2, 3_000));
+        assert_eq!(t.pto_deadline_micros(3_000), Some(1_002_000));
+
+        let mut ack_only = sent(PacketNumberSpace::Initial, 3, 4_000);
+        ack_only.ack_eliciting = false;
+        ack_only.in_flight = false;
+        t.on_packet_sent(ack_only);
+        assert_eq!(t.pto_deadline_micros(4_000), Some(1_002_000));
+
+        let event = t.on_ack_received(PacketNumberSpace::Initial, &[2], 0, 4_000);
+        assert_eq!(event.acked_packets, 1);
+        assert_eq!(event.lost_packets, 0);
+        assert_eq!(t.bytes_in_flight(), 100);
+        // The fresh RTT is 1000us with 500us variance: 3000us PTO. The
+        // acknowledged latest send remains the anchor while packet 1 waits.
+        assert_eq!(t.pto_deadline_micros(4_000), Some(6_000));
+    }
+
+    #[test]
+    fn managed_pto_selects_earliest_space_and_discards_retired_space() {
+        let mut t = QuicTransportMachine::new();
+        t.on_packet_sent(sent(PacketNumberSpace::Initial, 0, 10_000));
+        t.on_packet_sent(sent(PacketNumberSpace::Handshake, 0, 5_000));
+        t.on_packet_sent(sent(PacketNumberSpace::ApplicationData, 0, 1_000));
+        assert_eq!(t.pto_deadline_micros(10_000), Some(1_004_000));
+        t.on_packet_sent(sent(PacketNumberSpace::Handshake, 1, 50_000));
+        assert_eq!(t.pto_deadline_micros(50_000), Some(1_009_000));
+        t.discard_space(PacketNumberSpace::Initial);
+        assert_eq!(t.pto_deadline_micros(50_000), Some(1_025_000));
+        t.discard_space(PacketNumberSpace::ApplicationData);
+        assert_eq!(t.pto_deadline_micros(50_000), Some(1_049_000));
+        t.discard_space(PacketNumberSpace::Handshake);
+        assert_eq!(t.pto_deadline_micros(50_000), None);
+    }
+
+    #[test]
+    fn managed_pto_late_and_capped_expirations_wait_a_full_backed_off_duration() {
+        let mut t = QuicTransportMachine::new();
+        t.on_packet_sent(sent(PacketNumberSpace::ApplicationData, 0, 1_000));
+        let mut deadline = t.pto_deadline_micros(1_000).expect("first PTO");
+        for expiration in 1u32..=14 {
+            let fired_at = deadline + 3_000_000;
+            deadline = t.on_pto_expired_at(fired_at).expect("rearmed PTO");
+            let backed_off_duration = 1_024_000 * (1u64 << expiration.min(10));
+            assert_eq!(t.pto_count(), expiration);
+            assert_eq!(deadline - fired_at, backed_off_duration);
+            assert!(deadline > fired_at);
+            assert_eq!(t.pto_deadline_micros(fired_at + 1), Some(deadline));
+            assert_eq!(t.bytes_in_flight(), 100);
+            assert_eq!(t.packets_lost_total(), 0);
+        }
+    }
+
+    #[test]
+    fn managed_pto_unrepresentable_rearm_never_returns_an_expired_deadline() {
+        let mut t = QuicTransportMachine::new();
+        t.on_packet_sent(sent(PacketNumberSpace::Initial, 0, 1_000));
+        assert_eq!(t.on_pto_expired_at(u64::MAX), None);
+        assert_eq!(t.pto_deadline_micros(u64::MAX), None);
+        assert_eq!(t.bytes_in_flight(), 100);
+        assert_eq!(t.packets_lost_total(), 0);
     }
 
     #[test]

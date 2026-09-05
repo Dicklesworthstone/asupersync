@@ -21,6 +21,7 @@ use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 const QUIC_UDP_DEFAULT_RECV_BUFFER_BYTES: usize = 16 * 1024 * 1024;
@@ -185,6 +186,8 @@ fn linux_udp_kernel_receive_snapshot(local_addr: SocketAddr) -> Option<UdpKernel
 #[derive(Debug)]
 pub struct QuicUdpEndpoint {
     socket: UdpSocket,
+    /// Separate registration prevents pending reads and writes replacing each other's interest.
+    managed_send_socket: Option<UdpSocket>,
     config: QuicUdpEndpointConfig,
     local_addr: SocketAddr,
     socket_capabilities: UdpSocketCapabilities,
@@ -327,6 +330,7 @@ impl QuicUdpEndpoint {
 
         Ok(Self {
             socket,
+            managed_send_socket: None,
             config,
             local_addr,
             socket_capabilities,
@@ -377,34 +381,44 @@ impl QuicUdpEndpoint {
         cx: &Cx,
         max_packets: usize,
     ) -> Result<Vec<ReceivedPacket>, QuicUdpEndpointError> {
+        std::future::poll_fn(|task_cx| self.poll_receive_batch(cx, task_cx, max_packets)).await
+    }
+
+    pub(crate) fn poll_receive_batch(
+        &mut self,
+        cx: &Cx,
+        task_cx: &Context<'_>,
+        max_packets: usize,
+    ) -> Poll<Result<Vec<ReceivedPacket>, QuicUdpEndpointError>> {
+        // UDP's low-level polling API selects its driver from the current Cx.
+        // Install the supplied owner only for this synchronous poll.
+        let _current = Cx::set_current(Some(cx.clone()));
         let effective_max = std::cmp::min(max_packets, self.config.max_batch_size);
         let batch_start = Instant::now();
 
         if effective_max == 0 {
-            return Ok(Vec::new());
+            return Poll::Ready(Ok(Vec::new()));
         }
         if cx.checkpoint().is_err() {
-            return Err(QuicUdpEndpointError::Cancelled);
+            return Poll::Ready(Err(QuicUdpEndpointError::Cancelled));
         }
 
-        let batch = match self
-            .socket
-            .recv_batch_from_reusing(
-                effective_max,
-                self.config.max_packet_size,
-                &mut self.recv_payload_pool,
-            )
-            .await
-        {
-            Ok(batch) => batch,
-            Err(e) if e.kind() == io::ErrorKind::Interrupted => {
-                return Err(QuicUdpEndpointError::Cancelled);
+        let batch = match self.socket.poll_recv_batch_from_reusing(
+            task_cx,
+            effective_max,
+            self.config.max_packet_size,
+            &mut self.recv_payload_pool,
+        ) {
+            Poll::Ready(Ok(batch)) => batch,
+            Poll::Pending => return Poll::Pending,
+            Poll::Ready(Err(e)) if e.kind() == io::ErrorKind::Interrupted => {
+                return Poll::Ready(Err(QuicUdpEndpointError::Cancelled));
             }
-            Err(e) => {
+            Poll::Ready(Err(e)) => {
                 self.metrics
                     .receive_errors
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                return Err(e.into());
+                return Poll::Ready(Err(e.into()));
             }
         };
 
@@ -515,7 +529,89 @@ impl QuicUdpEndpoint {
             );
         }
 
-        Ok(packets)
+        Poll::Ready(Ok(packets))
+    }
+
+    /// Return an acknowledged prefix before any wait, so a racing timer cannot
+    /// discard send progress. The managed endpoint retains the entire unsent tail.
+    pub(crate) fn poll_send_batch<'a>(
+        &mut self,
+        cx: &Cx,
+        task_cx: &Context<'_>,
+        packets: impl IntoIterator<Item = &'a OutgoingPacket>,
+    ) -> Poll<io::Result<BatchResult>> {
+        let _current = Cx::set_current(Some(cx.clone()));
+        if cx.checkpoint().is_err() {
+            return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+        }
+        let batch_start = Instant::now();
+        let mut packets = packets.into_iter();
+        let Some(first) = packets.next() else {
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "empty managed send batch",
+            )));
+        };
+        let run = std::iter::once(first)
+            .chain(packets)
+            .take(self.config.max_batch_size)
+            .take_while(|packet| {
+                packet.dst_addr == first.dst_addr && packet.data.len() == first.data.len()
+            });
+        let mut datagrams: SmallVec<[UdpOutboundDatagram<'_>; 32]> = SmallVec::new();
+        for packet in run {
+            if packet.data.len() > self.config.max_packet_size {
+                return Poll::Ready(Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "packet size {} exceeds endpoint limit {}",
+                        packet.data.len(),
+                        self.config.max_packet_size
+                    ),
+                )));
+            }
+            datagrams.push(UdpOutboundDatagram {
+                dst_addr: packet.dst_addr,
+                payload: &packet.data,
+            });
+        }
+        if self.managed_send_socket.is_none() {
+            self.managed_send_socket = Some(self.socket.try_clone()?);
+        }
+        let socket = self
+            .managed_send_socket
+            .as_mut()
+            .expect("send socket initialized");
+        let mut strategy = UdpSendBatchStrategy::default();
+        if datagrams.len() > 1 {
+            strategy.gso_segment_bytes = first.data.len();
+        }
+        let report = match socket.poll_send_batch_to_with_strategy(task_cx, &datagrams, strategy) {
+            Poll::Pending => return Poll::Pending,
+            Poll::Ready(Ok(report)) => report,
+            Poll::Ready(Err(err)) => {
+                self.metrics.send_errors.fetch_add(1, Ordering::Relaxed);
+                return Poll::Ready(Err(err));
+            }
+        };
+        self.metrics
+            .packets_sent
+            .fetch_add(report.packets_processed as u64, Ordering::Relaxed);
+        self.metrics
+            .bytes_sent
+            .fetch_add(report.bytes_processed as u64, Ordering::Relaxed);
+        if report.error.is_some() {
+            self.metrics.send_errors.fetch_add(1, Ordering::Relaxed);
+        }
+        Poll::Ready(Ok(BatchResult {
+            packets_processed: report.packets_processed,
+            bytes_processed: report.bytes_processed,
+            duration: batch_start.elapsed(),
+            fallback_used: report.fallback_used,
+            native_send_batch_used: report.native_send_batch_used,
+            gso_send_used: report.gso_send_used,
+            error: report.error,
+        }))
     }
 
     /// Send a batch of packets with cancellation support.
@@ -639,14 +735,15 @@ impl QuicUdpEndpoint {
     ///
     /// Ensures all reactor registrations are cleaned up and no obligations leak.
     pub async fn shutdown(&mut self, cx: &Cx) -> Result<(), QuicUdpEndpointError> {
+        self.socket.clear_registration();
+        self.managed_send_socket = None;
         if cx.checkpoint().is_err() {
             return Err(QuicUdpEndpointError::Cancelled);
         }
 
         cx.trace(&format!("endpoint: {}: shutting down", self.endpoint_id));
 
-        // The socket will be dropped, which should clean up reactor registrations
-        // The UdpSocket implementation handles this automatically
+        // Local registrations are already retired even if the owner is cancelled.
 
         Ok(())
     }
@@ -695,6 +792,66 @@ mod tests {
             assert!(endpoint.socket_capabilities().batching.portable_recv_batch);
             assert!(endpoint.buffer_report().applied_recv_buffer_bytes.is_some());
         });
+    }
+
+    #[test]
+    fn explicit_owner_controls_native_polling_and_shutdown_releases_registration() {
+        let runtime = crate::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .unwrap();
+        runtime.block_on(runtime.handle().spawn(async {
+            let owner = Cx::current().expect("native worker context");
+            let driver = owner.io_driver_handle().expect("native I/O driver");
+            let baseline = driver.waker_count();
+            let mut endpoint = QuicUdpEndpoint::bind(
+                &owner,
+                "127.0.0.1:0".parse().unwrap(),
+                QuicUdpEndpointConfig::default(),
+            )
+            .await
+            .unwrap();
+            let peer = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+            peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+            let unrelated = Cx::for_testing();
+            unrelated.cancel_with(crate::types::CancelKind::User, None);
+            {
+                let _ambient = Cx::set_current(Some(unrelated));
+                let task_cx = Context::from_waker(std::task::Waker::noop());
+                assert!(
+                    endpoint
+                        .poll_receive_batch(&owner, &task_cx, 4)
+                        .is_pending()
+                );
+                assert_eq!(driver.waker_count(), baseline + 1);
+                let outgoing = [OutgoingPacket {
+                    dst_addr: peer.local_addr().unwrap(),
+                    data: b"explicit owner".to_vec(),
+                    send_time: None,
+                }];
+                let Poll::Ready(Ok(sent)) = endpoint.poll_send_batch(&owner, &task_cx, &outgoing)
+                else {
+                    panic!("local UDP send must make progress")
+                };
+                assert_eq!(sent.packets_processed, 1);
+                assert_eq!(sent.bytes_processed, b"explicit owner".len());
+                assert!(endpoint.managed_send_socket.is_some());
+            }
+            let mut buffer = [0u8; 32];
+            let (length, source) = peer.recv_from(&mut buffer).unwrap();
+            assert_eq!(source, endpoint.local_addr());
+            assert_eq!(&buffer[..length], b"explicit owner");
+            owner.cancel_with(crate::types::CancelKind::User, None);
+            assert_eq!(
+                endpoint.shutdown(&owner).await,
+                Err(QuicUdpEndpointError::Cancelled)
+            );
+            assert_eq!(
+                driver.waker_count(),
+                baseline,
+                "retained endpoint must release its read registration"
+            );
+            assert!(endpoint.managed_send_socket.is_none());
+        }));
     }
 
     #[test]

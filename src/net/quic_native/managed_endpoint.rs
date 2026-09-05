@@ -11,15 +11,18 @@
 use crate::cx::Cx;
 use crate::net::quic_core::ConnectionId;
 use crate::net::quic_native::ReceivedPacket;
-use crate::net::quic_native::connection_manager::AcceptedNativeQuicConnection;
+use crate::net::quic_native::connection_manager::{
+    AcceptedNativeQuicConnection, QuicCancelWake, RoutedOutgoingPacket,
+};
 use crate::net::quic_native::{
     ConnectionRouter, ConnectionRouterError, ConnectionRouterStats, NativeQuicConnectionConfig,
     OutgoingPacket, QuicTimerScheduler, QuicUdpEndpoint, QuicUdpEndpointConfig,
     QuicUdpEndpointError, RoutingResult,
 };
-use crate::time::sleep;
+use std::collections::VecDeque;
+use std::future::poll_fn;
 use std::net::SocketAddr;
-use std::time::Duration;
+use std::task::Poll;
 use std::time::Instant;
 
 /// Complete managed QUIC endpoint with connection routing and timer integration.
@@ -35,6 +38,16 @@ pub struct ManagedQuicEndpoint {
     config: ManagedEndpointConfig,
     /// Whether the endpoint is shutting down.
     shutting_down: bool,
+    /// Packets stay owned by the endpoint until the socket acknowledges a sent prefix.
+    pending_outgoing: VecDeque<RoutedOutgoingPacket>,
+    /// Alternate ready read/write batches; timers and cancellation always get a turn.
+    prefer_send: bool,
+}
+
+enum EndpointEvent {
+    Packets(Vec<ReceivedPacket>),
+    Sent(std::io::Result<crate::net::quic_native::BatchResult>),
+    Timer(Instant),
 }
 
 /// Configuration for the managed QUIC endpoint.
@@ -86,13 +99,19 @@ pub enum ManagedEndpointError {
 
 impl From<QuicUdpEndpointError> for ManagedEndpointError {
     fn from(e: QuicUdpEndpointError) -> Self {
-        Self::UdpEndpoint(e.to_string())
+        match e {
+            QuicUdpEndpointError::Cancelled => Self::Cancelled,
+            other => Self::UdpEndpoint(other.to_string()),
+        }
     }
 }
 
 impl From<ConnectionRouterError> for ManagedEndpointError {
     fn from(e: ConnectionRouterError) -> Self {
-        Self::ConnectionRouter(e)
+        match e {
+            ConnectionRouterError::Cancelled => Self::Cancelled,
+            other => Self::ConnectionRouter(other),
+        }
     }
 }
 
@@ -164,6 +183,8 @@ impl ManagedQuicEndpoint {
             timer_scheduler,
             config,
             shutting_down: false,
+            pending_outgoing: VecDeque::new(),
+            prefer_send: true,
         })
     }
 
@@ -214,9 +235,14 @@ impl ManagedQuicEndpoint {
             return Err(ManagedEndpointError::ShuttingDown);
         }
 
-        self.connection_router
+        let connection = self
+            .connection_router
             .take_connection(cx, connection_id)
-            .map_err(Into::into)
+            .map_err(ManagedEndpointError::from)?;
+        self.pending_outgoing
+            .retain(|packet| packet.connection_id != connection_id);
+        self.timer_scheduler.cancel();
+        Ok(connection)
     }
 
     /// Remove the next routed native connection using deterministic router order.
@@ -232,9 +258,16 @@ impl ManagedQuicEndpoint {
             return Err(ManagedEndpointError::ShuttingDown);
         }
 
-        self.connection_router
+        let connection = self
+            .connection_router
             .take_next_connection(cx)
-            .map_err(Into::into)
+            .map_err(ManagedEndpointError::from)?;
+        if let Some(connection) = &connection {
+            self.pending_outgoing
+                .retain(|packet| packet.connection_id != connection.connection_id);
+        }
+        self.timer_scheduler.cancel();
+        Ok(connection)
     }
 
     /// Run the main endpoint event loop.
@@ -242,6 +275,12 @@ impl ManagedQuicEndpoint {
     /// This processes incoming packets, handles timer events, and manages
     /// connection lifecycle until cancellation or shutdown.
     pub async fn run_event_loop(&mut self, cx: &Cx) -> Result<(), ManagedEndpointError> {
+        let result = self.drive_event_loop(cx).await;
+        self.timer_scheduler.cancel();
+        result
+    }
+
+    async fn drive_event_loop(&mut self, cx: &Cx) -> Result<(), ManagedEndpointError> {
         if cx.checkpoint().is_err() {
             return Err(ManagedEndpointError::Cancelled);
         }
@@ -251,43 +290,127 @@ impl ManagedQuicEndpoint {
             self.endpoint_id()
         ));
 
+        // Bind once, before network waits, so all subsequent deadlines and
+        // packet timestamps use the same explicit runtime-clock mapping.
+        self.timer_scheduler.now(cx)?;
+        let mut cancel = QuicCancelWake::new(cx);
         while !self.shutting_down {
             if cx.checkpoint().is_err() {
                 return Err(ManagedEndpointError::Cancelled);
             }
 
-            // Process packets first
-            if let Err(e) = self.process_packet_batch(cx).await {
-                match e {
-                    ManagedEndpointError::Cancelled => return Err(e),
-                    ManagedEndpointError::ShuttingDown => break,
-                    _ => {
-                        cx.trace(&format!("Packet processing error: {e}"));
-                        // Continue running on non-fatal errors
+            let available = self
+                .config
+                .packet_batch_size
+                .saturating_sub(self.pending_outgoing.len());
+            self.pending_outgoing
+                .extend(self.connection_router.take_pending_timer_output(available));
+            let available = self
+                .config
+                .packet_batch_size
+                .saturating_sub(self.pending_outgoing.len());
+            if available > 0 {
+                let now = self.timer_scheduler.now(cx)?;
+                self.pending_outgoing.extend(
+                    self.connection_router
+                        .drain_deferred_output(cx, now, available)
+                        .await?,
+                );
+            }
+            self.refresh_timer(cx).await?;
+            let event = poll_fn(|task_cx| {
+                let _current = Cx::set_current(Some(cx.clone()));
+                if cancel.checkpoint(task_cx.waker()).is_err() {
+                    return Poll::Ready(Err(ManagedEndpointError::Cancelled));
+                }
+                if let Poll::Ready(Some(deadline)) = self.timer_scheduler.poll_timer(task_cx) {
+                    return Poll::Ready(Ok(EndpointEvent::Timer(deadline)));
+                }
+                for send in [self.prefer_send, !self.prefer_send] {
+                    if send {
+                        if !self.pending_outgoing.is_empty() {
+                            let pending = self
+                                .pending_outgoing
+                                .iter()
+                                .take(self.config.packet_batch_size)
+                                .map(|outgoing| &outgoing.packet);
+                            match self.udp_endpoint.poll_send_batch(cx, task_cx, pending) {
+                                Poll::Ready(result) => {
+                                    self.prefer_send = false;
+                                    return Poll::Ready(Ok(EndpointEvent::Sent(result)));
+                                }
+                                Poll::Pending => {}
+                            }
+                        }
+                    } else {
+                        // ACKs and other peers must progress even when writes are blocked.
+                        // Packet processing defers output generation when the queue is full.
+                        match self.udp_endpoint.poll_receive_batch(
+                            cx,
+                            task_cx,
+                            self.config.packet_batch_size,
+                        ) {
+                            Poll::Ready(result) => {
+                                self.prefer_send = true;
+                                return Poll::Ready(
+                                    result.map(EndpointEvent::Packets).map_err(Into::into),
+                                );
+                            }
+                            Poll::Pending => {}
+                        }
+                    }
+                }
+                Poll::Pending
+            })
+            .await?;
+            match event {
+                EndpointEvent::Packets(packets) => self.process_packet_batch(cx, packets).await?,
+                EndpointEvent::Timer(deadline) => self.process_timer_events(cx, deadline).await?,
+                EndpointEvent::Sent(Err(error)) => {
+                    use std::io::ErrorKind;
+                    if error.kind() == ErrorKind::Interrupted {
+                        return Err(ManagedEndpointError::Cancelled);
+                    }
+                    if matches!(
+                        error.kind(),
+                        ErrorKind::ConnectionRefused
+                            | ErrorKind::ConnectionReset
+                            | ErrorKind::AddrNotAvailable
+                            | ErrorKind::InvalidInput
+                            | ErrorKind::HostUnreachable
+                            | ErrorKind::NetworkUnreachable
+                            | ErrorKind::PermissionDenied
+                    ) {
+                        if let Some(packet) = self.pending_outgoing.front() {
+                            let peer = packet.packet.dst_addr;
+                            let queued = self.pending_outgoing.len();
+                            self.pending_outgoing
+                                .retain(|packet| packet.packet.dst_addr != peer);
+                            let retired = self.connection_router.discard_peer_connections(peer);
+                            cx.trace(&format!("QUIC peer {peer} send failed ({error}); retired {retired} connections and {} unsent packets", queued - self.pending_outgoing.len()));
+                        }
+                    } else {
+                        return Err(ManagedEndpointError::UdpEndpoint(error.to_string()));
+                    }
+                }
+                EndpointEvent::Sent(Ok(result)) => {
+                    if result.packets_processed == 0
+                        || result.packets_processed > self.pending_outgoing.len()
+                    {
+                        return Err(ManagedEndpointError::UdpEndpoint(
+                            "UDP send made invalid progress".to_string(),
+                        ));
+                    }
+                    self.pending_outgoing.drain(..result.packets_processed);
+                    if let Some(error) = result.error {
+                        // The unsent suffix remains available if the owner retries this loop.
+                        return Err(ManagedEndpointError::UdpEndpoint(error));
                     }
                 }
             }
-
-            // Then process timer events
-            if let Err(e) = self.process_timer_events(cx).await {
-                match e {
-                    ManagedEndpointError::Cancelled => return Err(e),
-                    ManagedEndpointError::ShuttingDown => break,
-                    _ => {
-                        cx.trace(&format!("Timer processing error: {e}"));
-                        // Continue running on non-fatal errors
-                    }
-                }
-            }
-
-            // Brief yield to prevent busy loop
-            let now = crate::Time::from_nanos(
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or(std::time::Duration::ZERO)
-                    .as_nanos() as u64,
-            );
-            sleep(now, Duration::from_millis(1)).await;
+            // A perpetually readable socket must not monopolize a worker.
+            // This is one cooperative turn, with no wall-clock polling delay.
+            crate::runtime::yield_now().await;
         }
 
         cx.trace(&format!(
@@ -299,7 +422,11 @@ impl ManagedQuicEndpoint {
     }
 
     /// Process a batch of incoming packets.
-    async fn process_packet_batch(&mut self, cx: &Cx) -> Result<(), ManagedEndpointError> {
+    async fn process_packet_batch(
+        &mut self,
+        cx: &Cx,
+        packets: Vec<ReceivedPacket>,
+    ) -> Result<(), ManagedEndpointError> {
         if cx.checkpoint().is_err() {
             return Err(ManagedEndpointError::Cancelled);
         }
@@ -308,33 +435,41 @@ impl ManagedQuicEndpoint {
             return Err(ManagedEndpointError::ShuttingDown);
         }
 
-        // Receive packet batch
-        let packets = self
-            .udp_endpoint
-            .receive_batch(cx, self.config.packet_batch_size)
-            .await?;
-
         if packets.is_empty() {
             return Ok(()); // No packets to process
         }
 
-        let mut outgoing_packets: Vec<OutgoingPacket> = Vec::new();
-
-        for packet in packets {
+        for mut packet in packets {
+            packet.receive_time = self.timer_scheduler.now(cx)?;
             // Route packet through connection router
-            match self.connection_router.route_packet(cx, packet).await? {
+            let emit_output = self.pending_outgoing.len() < self.config.packet_batch_size;
+            let routed = match self
+                .connection_router
+                .route_packet_with_output(cx, packet, emit_output)
+                .await
+            {
+                Ok(routed) => routed,
+                Err(ConnectionRouterError::Cancelled) => {
+                    return Err(ManagedEndpointError::Cancelled);
+                }
+                Err(error) => {
+                    cx.trace(&format!("Packet processing error: {error}"));
+                    continue;
+                }
+            };
+            match routed {
                 RoutingResult::Routed {
                     connection_id,
-                    outgoing_packets: mut packets,
+                    outgoing_packets: packets,
                 } => {
                     cx.trace(&format!("Routed packet to connection {connection_id:?}"));
-                    outgoing_packets.append(&mut packets);
+                    self.queue_connection_packets(connection_id, packets);
                 }
                 RoutingResult::NewConnection {
                     connection_id,
                     peer_addr,
                     triggering_packet,
-                    outgoing_packets: mut packets,
+                    outgoing_packets: packets,
                 } => {
                     // Check connection limit
                     let stats = self.connection_router.connection_stats();
@@ -358,28 +493,29 @@ impl ManagedQuicEndpoint {
                     }
 
                     cx.trace(&format!("Created new connection {connection_id:?}"));
-                    outgoing_packets.append(&mut packets);
-                    self.reroute_triggering_new_connection_packet(
-                        cx,
-                        connection_id,
-                        triggering_packet,
-                        &mut outgoing_packets,
-                    )
-                    .await?;
+                    self.queue_connection_packets(connection_id, packets);
+                    let mut outgoing_packets = Vec::new();
+                    let rerouted = self
+                        .reroute_triggering_new_connection_packet(
+                            cx,
+                            connection_id,
+                            triggering_packet,
+                            &mut outgoing_packets,
+                        )
+                        .await;
+                    self.queue_connection_packets(connection_id, outgoing_packets);
+                    match rerouted {
+                        Ok(()) => {}
+                        Err(ManagedEndpointError::Cancelled) => {
+                            return Err(ManagedEndpointError::Cancelled);
+                        }
+                        Err(error) => cx.trace(&format!("Initial processing error: {error}")),
+                    }
                 }
                 RoutingResult::Drop { reason } => {
                     cx.trace(&format!("Dropped packet: {reason}"));
                 }
             }
-        }
-
-        // Send outgoing packets
-        if !outgoing_packets.is_empty() {
-            let result = self.udp_endpoint.send_batch(cx, &outgoing_packets).await?;
-            cx.trace(&format!(
-                "Sent {} outgoing packets ({} bytes)",
-                result.packets_processed, result.bytes_processed
-            ));
         }
 
         Ok(())
@@ -394,7 +530,11 @@ impl ManagedQuicEndpoint {
     ) -> Result<(), ManagedEndpointError> {
         match self
             .connection_router
-            .route_packet(cx, triggering_packet)
+            .route_packet_with_output(
+                cx,
+                triggering_packet,
+                self.pending_outgoing.len() < self.config.packet_batch_size,
+            )
             .await?
         {
             RoutingResult::Routed {
@@ -423,8 +563,35 @@ impl ManagedQuicEndpoint {
         Ok(())
     }
 
+    fn queue_connection_packets(
+        &mut self,
+        connection_id: ConnectionId,
+        packets: impl IntoIterator<Item = OutgoingPacket>,
+    ) {
+        self.pending_outgoing
+            .extend(packets.into_iter().map(|packet| RoutedOutgoingPacket {
+                connection_id,
+                packet,
+            }));
+    }
+
     /// Process timer events for all connections.
-    async fn process_timer_events(&mut self, cx: &Cx) -> Result<(), ManagedEndpointError> {
+    async fn refresh_timer(&mut self, cx: &Cx) -> Result<(), ManagedEndpointError> {
+        let next = self.connection_router.next_timer_deadline();
+        if self.timer_scheduler.current_deadline() != next {
+            self.timer_scheduler.cancel();
+            if let Some(deadline) = next {
+                self.timer_scheduler.schedule_timer(cx, deadline).await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn process_timer_events(
+        &mut self,
+        cx: &Cx,
+        deadline: Instant,
+    ) -> Result<(), ManagedEndpointError> {
         if cx.checkpoint().is_err() {
             return Err(ManagedEndpointError::Cancelled);
         }
@@ -433,25 +600,17 @@ impl ManagedQuicEndpoint {
             return Err(ManagedEndpointError::ShuttingDown);
         }
 
-        // Check for next timer deadline
-        if let Some(deadline) = self.connection_router.next_timer_deadline() {
-            // Schedule timer if needed
-            self.timer_scheduler.schedule_timer(cx, deadline).await?;
-        }
-
-        // Check if timer fired
-        if let Some(_deadline) = self.timer_scheduler.wait_for_timer(cx).await? {
-            let now = Instant::now();
-            let outgoing_packets = self.connection_router.process_timer_events(cx, now).await?;
-
-            if !outgoing_packets.is_empty() {
-                let result = self.udp_endpoint.send_batch(cx, &outgoing_packets).await?;
-                cx.trace(&format!(
-                    "Sent {} timer-triggered packets ({} bytes)",
-                    result.packets_processed, result.bytes_processed
-                ));
-            }
-        }
+        let now = self.timer_scheduler.now(cx)?.max(deadline);
+        let pending_connections = self
+            .pending_outgoing
+            .iter()
+            .map(|packet| packet.connection_id)
+            .collect();
+        let outgoing_packets = self
+            .connection_router
+            .process_managed_timer_events(cx, now, &pending_connections)
+            .await?;
+        self.pending_outgoing.extend(outgoing_packets);
 
         Ok(())
     }
@@ -461,10 +620,6 @@ impl ManagedQuicEndpoint {
     /// This stops accepting new connections, drains existing connections,
     /// and ensures all resources are cleaned up properly.
     pub async fn shutdown(&mut self, cx: &Cx) -> Result<(), ManagedEndpointError> {
-        if cx.checkpoint().is_err() {
-            return Err(ManagedEndpointError::Cancelled);
-        }
-
         cx.trace(&format!(
             "Shutting down managed QUIC endpoint {}",
             self.endpoint_id()
@@ -472,11 +627,20 @@ impl ManagedQuicEndpoint {
 
         self.shutting_down = true;
 
-        // Shut down UDP endpoint
-        self.udp_endpoint.shutdown(cx).await?;
-
-        let closed_connections = self.connection_router.close_all(cx, Instant::now(), 0)?;
+        let closed_connections = self.connection_router.connection_stats().active_connections;
+        let now = self
+            .timer_scheduler
+            .now(cx)
+            .unwrap_or_else(|_| Instant::now());
+        let close_result = self.connection_router.close_all(cx, now, 0);
+        // Terminal cleanup is local ownership release, not new runtime work.
+        // Keep it unconditional so cancellation cannot strand a retained endpoint.
+        self.connection_router.discard_all();
+        self.pending_outgoing.clear();
         self.timer_scheduler.cancel();
+        let udp_result = self.udp_endpoint.shutdown(cx).await;
+        close_result?;
+        udp_result?;
 
         cx.trace(&format!(
             "Managed QUIC endpoint {} shutdown complete; closed {} connections",
@@ -493,6 +657,481 @@ mod tests {
     use super::*;
     use crate::net::quic_core::ConnectionId;
     use crate::test_utils::run_test_with_cx;
+    use std::future::Future;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
+    #[test]
+    fn native_idle_loop_parks_and_acknowledges_cancellation_without_packets() {
+        let runtime = crate::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .unwrap();
+        runtime.block_on(runtime.handle().spawn(async {
+            let cx = Cx::current().expect("native worker context");
+            let parked = Arc::new(AtomicBool::new(false));
+            let parked_child = parked.clone();
+            let mut child = cx
+                .spawn(move |child_cx| async move {
+                    let mut endpoint = ManagedQuicEndpoint::bind(
+                        &child_cx,
+                        "127.0.0.1:0".parse().unwrap(),
+                        ManagedEndpointConfig::default(),
+                    )
+                    .await
+                    .unwrap();
+                    let result = {
+                        let mut run = std::pin::pin!(endpoint.run_event_loop(&child_cx));
+                        poll_fn(|task_cx| {
+                            let poll = run.as_mut().poll(task_cx);
+                            if poll.is_pending() {
+                                parked_child.store(true, Ordering::SeqCst);
+                            }
+                            poll
+                        })
+                        .await
+                    };
+                    assert_eq!(
+                        endpoint
+                            .udp_endpoint
+                            .metrics()
+                            .packets_received
+                            .load(Ordering::Relaxed),
+                        0
+                    );
+                    assert!(!endpoint.timer_scheduler.has_pending_timer());
+                    assert!(endpoint.pending_outgoing.is_empty());
+                    result
+                })
+                .unwrap();
+            for _ in 0..512 {
+                if parked.load(Ordering::SeqCst) {
+                    break;
+                }
+                crate::runtime::yield_now().await;
+            }
+            assert!(
+                parked.load(Ordering::SeqCst),
+                "native UDP receive must park before cancellation"
+            );
+            child.abort();
+            let result = crate::time::timeout(cx.now(), Duration::from_secs(5), child.join(&cx))
+                .await
+                .unwrap();
+            assert_eq!(result.unwrap(), Err(ManagedEndpointError::Cancelled));
+        }));
+    }
+
+    #[test]
+    fn native_loop_sends_healthy_peer_after_bad_destination_and_receives_during_load() {
+        let runtime = crate::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .unwrap();
+        runtime.block_on(runtime.handle().spawn(async {
+            let cx = Cx::current().expect("native worker context");
+            let peer = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+            peer.set_nonblocking(true).unwrap();
+            let peer_addr = peer.local_addr().unwrap();
+            let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+            let mut child = cx
+                .spawn(move |child_cx| async move {
+                    let config = ManagedEndpointConfig {
+                        packet_batch_size: 4,
+                        ..ManagedEndpointConfig::default()
+                    };
+                    let mut endpoint = ManagedQuicEndpoint::bind(
+                        &child_cx,
+                        "127.0.0.1:0".parse().unwrap(),
+                        config,
+                    )
+                    .await
+                    .unwrap();
+                    endpoint.queue_connection_packets(
+                        ConnectionId::default(),
+                        [OutgoingPacket {
+                            dst_addr: "127.0.0.1:0".parse().unwrap(),
+                            data: vec![0xff],
+                            send_time: None,
+                        }],
+                    );
+                    for index in 0..65u8 {
+                        endpoint.queue_connection_packets(
+                            ConnectionId::default(),
+                            [OutgoingPacket {
+                                dst_addr: peer_addr,
+                                data: vec![index],
+                                send_time: None,
+                            }],
+                        );
+                    }
+                    let metrics = endpoint.udp_endpoint.metrics();
+                    ready_tx.send((endpoint.local_addr(), metrics)).unwrap();
+                    let result = endpoint.run_event_loop(&child_cx).await;
+                    assert!(
+                        endpoint.pending_outgoing.is_empty(),
+                        "all permitted output must reach the socket before cancellation"
+                    );
+                    result
+                })
+                .unwrap();
+            let mut ready = None;
+            for _ in 0..512 {
+                if let Ok(value) = ready_rx.try_recv() {
+                    ready = Some(value);
+                    break;
+                }
+                crate::runtime::yield_now().await;
+            }
+            let (endpoint_addr, metrics) = ready.expect("endpoint started on native worker");
+            let mut observed = Vec::new();
+            let mut ingress_with_multiple_output_batches_pending = false;
+            let mut buffer = [0u8; 16];
+            for _ in 0..2048 {
+                // Keep ingress readable while checking both egress and scheduler progress.
+                for _ in 0..8 {
+                    peer.send_to(b"invalid QUIC", endpoint_addr).unwrap();
+                }
+                loop {
+                    match peer.recv_from(&mut buffer) {
+                        Ok((length, source)) => {
+                            assert_eq!(source, endpoint_addr);
+                            assert_eq!(length, 1);
+                            observed.push(buffer[0]);
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                        Err(error) => panic!("native receive failed: {error}"),
+                    }
+                }
+                ingress_with_multiple_output_batches_pending |=
+                    metrics.packets_received.load(Ordering::Relaxed) > 0
+                        && metrics.packets_sent.load(Ordering::Relaxed) <= 60;
+                if observed.len() == 65 && metrics.packets_received.load(Ordering::Relaxed) > 0 {
+                    break;
+                }
+                crate::runtime::yield_now().await;
+            }
+            assert_eq!(observed, (0..65u8).collect::<Vec<_>>());
+            assert_eq!(metrics.packets_sent.load(Ordering::Relaxed), 65);
+            assert!(
+                metrics.send_errors.load(Ordering::Relaxed) > 0,
+                "planted destination failure was reached"
+            );
+            assert!(metrics.packets_received.load(Ordering::Relaxed) > 0);
+            assert!(
+                ingress_with_multiple_output_batches_pending,
+                "receives must progress before the output queue falls below one batch"
+            );
+            child.abort();
+            let result = crate::time::timeout(cx.now(), Duration::from_secs(5), child.join(&cx))
+                .await
+                .unwrap();
+            assert_eq!(result.unwrap(), Err(ManagedEndpointError::Cancelled));
+        }));
+    }
+
+    #[test]
+    fn handoff_after_dropped_loop_retires_only_that_connections_unsent_packets() {
+        let runtime = crate::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .unwrap();
+        runtime.block_on(runtime.handle().spawn(async {
+            let cx = Cx::current().expect("native worker context");
+            for take_next in [false, true] {
+                let peer = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+                peer.set_nonblocking(true).unwrap();
+                let peer_addr = peer.local_addr().unwrap();
+                let mut endpoint = ManagedQuicEndpoint::bind(
+                    &cx,
+                    "127.0.0.1:0".parse().unwrap(),
+                    ManagedEndpointConfig::default(),
+                )
+                .await
+                .unwrap();
+                let ids = [
+                    ConnectionId::new(&[1]).unwrap(),
+                    ConnectionId::new(&[2]).unwrap(),
+                ];
+                for (index, id) in ids.into_iter().enumerate() {
+                    endpoint
+                        .create_connection_for_testing(&cx, id, peer_addr)
+                        .await
+                        .unwrap();
+                    endpoint.queue_connection_packets(
+                        id,
+                        [OutgoingPacket {
+                            dst_addr: peer_addr,
+                            data: vec![u8::try_from(index).unwrap()],
+                            send_time: None,
+                        }],
+                    );
+                }
+                // Force a real receive turn followed by a cooperative yield while
+                // both packets are still locally owned, then drop the loop future.
+                endpoint.prefer_send = false;
+                peer.send_to(b"invalid QUIC", endpoint.local_addr())
+                    .unwrap();
+                let mut task_cx = std::task::Context::from_waker(std::task::Waker::noop());
+                {
+                    let mut drive = std::pin::pin!(endpoint.run_event_loop(&cx));
+                    assert!(drive.as_mut().poll(&mut task_cx).is_pending());
+                }
+                assert_eq!(endpoint.pending_outgoing.len(), 2);
+                assert_eq!(
+                    endpoint
+                        .udp_endpoint
+                        .metrics()
+                        .packets_received
+                        .load(Ordering::Relaxed),
+                    1
+                );
+                assert_eq!(
+                    endpoint
+                        .udp_endpoint
+                        .metrics()
+                        .packets_sent
+                        .load(Ordering::Relaxed),
+                    0
+                );
+                let accepted = if take_next {
+                    endpoint.take_next_connection(&cx).unwrap().unwrap()
+                } else {
+                    endpoint.take_connection(&cx, ids[0]).unwrap()
+                };
+                assert_eq!(accepted.connection_id, ids[0]);
+                assert_eq!(endpoint.pending_outgoing.len(), 1);
+                assert_eq!(endpoint.pending_outgoing[0].connection_id, ids[1]);
+                {
+                    let mut drive = std::pin::pin!(endpoint.run_event_loop(&cx));
+                    assert!(drive.as_mut().poll(&mut task_cx).is_pending());
+                }
+                assert!(endpoint.pending_outgoing.is_empty());
+                let mut buffer = [0u8; 16];
+                let (length, source) = peer.recv_from(&mut buffer).unwrap();
+                assert_eq!(source, endpoint.local_addr());
+                assert_eq!(&buffer[..length], &[1]);
+                assert_eq!(
+                    peer.recv_from(&mut buffer).unwrap_err().kind(),
+                    std::io::ErrorKind::WouldBlock
+                );
+                endpoint.shutdown(&cx).await.unwrap();
+            }
+        }));
+    }
+
+    #[test]
+    fn restart_sends_retained_timer_prefix_before_another_deadline() {
+        use crate::net::atp::quic::AtpPacketProtection;
+        use crate::net::quic_native::{
+            PacketNumberSpace, PacketProtectionSpace, QuicHandshakeTranscript,
+        };
+        use crate::time::{TimerDriverHandle, VirtualClock};
+        let runtime = crate::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .unwrap();
+        runtime.block_on(runtime.handle().spawn(async {
+            let owner = Cx::current().unwrap();
+            let clock = Arc::new(VirtualClock::starting_at(crate::Time::from_secs(37)));
+            let driver = TimerDriverHandle::with_virtual_clock(clock.clone());
+            let cx = Cx::new_with_drivers(
+                crate::types::RegionId::new_for_test(0, 1),
+                crate::types::TaskId::new_for_test(0, 0),
+                crate::types::Budget::INFINITE,
+                None,
+                owner.io_driver_handle(),
+                None,
+                Some(driver.clone()),
+                None,
+            );
+            let peer = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+            peer.set_nonblocking(true).unwrap();
+            let peer_addr = peer.local_addr().unwrap();
+            let mut endpoint = ManagedQuicEndpoint::bind(
+                &cx,
+                "127.0.0.1:0".parse().unwrap(),
+                ManagedEndpointConfig {
+                    packet_batch_size: 4,
+                    ..ManagedEndpointConfig::default()
+                },
+            )
+            .await
+            .unwrap();
+            endpoint.timer_scheduler.now(&cx).unwrap();
+            // Recovery fixture only: real frame protection and real UDP, with
+            // explicit test keys/state rather than a claimed TLS handshake.
+            for index in 0..33u64 {
+                let cid = ConnectionId::new(&index.to_be_bytes()).unwrap();
+                endpoint
+                    .create_connection_for_testing(&cx, cid, peer_addr)
+                    .await
+                    .unwrap();
+                if index == 32 {
+                    continue;
+                } // Idle tail: no overdue timer on restart.
+                let mut transcript = QuicHandshakeTranscript::new();
+                transcript.record("client_initial", b"retained timer client");
+                transcript.record("server_handshake", b"retained timer server");
+                let mut protection = AtpPacketProtection::new_client(true).unwrap();
+                protection
+                    .derive_keys(
+                        &cx,
+                        PacketProtectionSpace::OneRtt,
+                        &transcript,
+                        b"retained timer unit fixture",
+                    )
+                    .await
+                    .unwrap();
+                endpoint
+                    .connection_router
+                    .install_packet_protection(&cx, cid, protection)
+                    .unwrap();
+                let connection = endpoint
+                    .connection_router
+                    .connection_mut_for_testing(&cx, cid)
+                    .unwrap();
+                connection.begin_handshake(&cx).unwrap();
+                connection.on_handshake_keys_available(&cx).unwrap();
+                connection.on_1rtt_keys_available(&cx).unwrap();
+                connection.record_verified_server_identity();
+                connection.on_handshake_confirmed(&cx).unwrap();
+                connection
+                    .on_packet_sent(
+                        &cx,
+                        PacketNumberSpace::ApplicationData,
+                        1_200,
+                        true,
+                        true,
+                        1_000,
+                    )
+                    .unwrap();
+                endpoint
+                    .connection_router
+                    .refresh_connection_timer_for_testing(&cx, cid, 1_000)
+                    .unwrap();
+            }
+            let deadline = endpoint.connection_router.next_timer_deadline().unwrap();
+            endpoint.refresh_timer(&cx).await.unwrap();
+            let mut task_cx = std::task::Context::from_waker(std::task::Waker::noop());
+            assert!(
+                endpoint
+                    .timer_scheduler
+                    .poll_timer(&mut task_cx)
+                    .is_pending()
+            );
+            clock.advance(
+                u64::try_from(
+                    deadline
+                        .duration_since(endpoint.timer_scheduler.now(&cx).unwrap())
+                        .as_nanos(),
+                )
+                .unwrap(),
+            );
+            assert_eq!(driver.process_timers(), 1);
+            assert_eq!(
+                endpoint.timer_scheduler.poll_timer(&mut task_cx),
+                Poll::Ready(Some(deadline))
+            );
+            {
+                // This is the same timer branch awaited by the main loop. Drop
+                // it at the cooperative yield with its committed prefix retained.
+                let mut timer_turn = std::pin::pin!(endpoint.process_timer_events(&cx, deadline));
+                assert!(timer_turn.as_mut().poll(&mut task_cx).is_pending());
+            }
+            assert!(endpoint.pending_outgoing.is_empty());
+            let next = endpoint.connection_router.next_timer_deadline().unwrap();
+            assert!(next > endpoint.timer_scheduler.now(&cx).unwrap());
+            let metrics = endpoint.udp_endpoint.metrics();
+            {
+                let mut restarted = std::pin::pin!(endpoint.run_event_loop(&cx));
+                for _ in 0..64 {
+                    assert!(restarted.as_mut().poll(&mut task_cx).is_pending());
+                    if metrics.packets_sent.load(Ordering::Relaxed) == 32 {
+                        break;
+                    }
+                }
+            }
+            assert_eq!(metrics.packets_sent.load(Ordering::Relaxed), 32);
+            assert_eq!(metrics.packets_received.load(Ordering::Relaxed), 0);
+            assert!(
+                next > endpoint.timer_scheduler.now(&cx).unwrap(),
+                "no second PTO was needed"
+            );
+            let mut observed = std::collections::HashSet::new();
+            let mut payload = [0u8; 1_200];
+            for _ in 0..32 {
+                let (length, source) = peer.recv_from(&mut payload).unwrap();
+                assert_eq!(source, endpoint.local_addr());
+                let (crate::net::quic_core::PacketHeader::Short(header), _) =
+                    crate::net::quic_core::PacketHeader::decode(&payload[..length], 8).unwrap()
+                else {
+                    panic!("actual protected short packet expected")
+                };
+                assert!(observed.insert(header.dst_cid));
+                assert_eq!(header.packet_number, 1);
+            }
+            assert_eq!(observed.len(), 32);
+            assert_eq!(
+                peer.recv_from(&mut payload).unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock
+            );
+            endpoint.shutdown(&cx).await.unwrap();
+            assert_eq!(driver.pending_count(), 0);
+        }));
+    }
+
+    #[test]
+    fn cancelled_shutdown_retires_queued_work_and_obsolete_timer_on_retained_endpoint() {
+        let runtime = crate::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .unwrap();
+        runtime.block_on(runtime.handle().spawn(async {
+            let cx = Cx::current().expect("native worker context");
+            let mut endpoint = ManagedQuicEndpoint::bind(
+                &cx,
+                "127.0.0.1:0".parse().unwrap(),
+                ManagedEndpointConfig::default(),
+            )
+            .await
+            .unwrap();
+            let deadline = endpoint.timer_scheduler.now(&cx).unwrap() + Duration::from_secs(60);
+            endpoint
+                .timer_scheduler
+                .schedule_timer(&cx, deadline)
+                .await
+                .unwrap();
+            assert!(
+                endpoint
+                    .timer_scheduler
+                    .poll_timer(&mut std::task::Context::from_waker(std::task::Waker::noop()))
+                    .is_pending()
+            );
+            let driver = cx.timer_driver().unwrap();
+            let armed = driver.pending_count();
+            assert!(armed > 0);
+            endpoint.refresh_timer(&cx).await.unwrap();
+            assert_eq!(
+                driver.pending_count(),
+                armed - 1,
+                "no connections means no timer"
+            );
+            endpoint.queue_connection_packets(
+                ConnectionId::default(),
+                [OutgoingPacket {
+                    dst_addr: "127.0.0.1:9".parse().unwrap(),
+                    data: vec![1],
+                    send_time: None,
+                }],
+            );
+            cx.cancel_with(crate::types::CancelKind::User, None);
+            assert_eq!(
+                endpoint.shutdown(&cx).await,
+                Err(ManagedEndpointError::Cancelled)
+            );
+            assert!(endpoint.shutting_down);
+            assert!(endpoint.pending_outgoing.is_empty());
+            assert!(!endpoint.timer_scheduler.has_pending_timer());
+            assert_eq!(endpoint.connection_stats().active_connections, 0);
+        }));
+    }
 
     #[test]
     fn test_managed_endpoint_bind() {
