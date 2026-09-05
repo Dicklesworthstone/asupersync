@@ -838,13 +838,15 @@ impl TaskSpawnSource {
 
 /// Owned one-shot task-spawn observer effects.
 ///
-/// Creation and admission paths build this token while runtime state is
-/// locked, but must not dispatch it until the stored task and its executable
-/// lane are visible. Dispatch consumes the token, contains metrics/tracing
-/// panics, and retires the arbitrary metrics provider behind a separate unwind
-/// boundary. Legacy state-threaded paths that own no scheduler lane may place
+/// Creation and admission paths record the callback-free `Spawn` witness
+/// when the canonical task and its holder authority have been admitted.
+/// This witnesses task existence, not runnable publication. They build this
+/// observer token while runtime state is locked, but must not dispatch it
+/// until the stored task and its executable lane are visible. Dispatch
+/// contains metrics/tracing panics and retires the arbitrary metrics provider
+/// behind a separate unwind boundary. Legacy state-threaded paths may place
 /// the token at the front of the stored future so first poll becomes the
-/// out-of-lock delivery boundary.
+/// out-of-lock observer-delivery boundary.
 #[must_use = "task spawn effects must be dispatched after executable publication"]
 pub struct TaskSpawnEffects {
     payload: Option<TaskSpawnEffectsPayload>,
@@ -861,18 +863,8 @@ struct TaskSpawnEffectsPayload {
     logical_time: Option<LogicalTime>,
     budget: Budget,
     source: TaskSpawnSource,
-    /// Trace seq for the Spawn event, allocated at admission (under the
-    /// state lock, before the task is injected) rather than at dispatch
-    /// (br-asupersync-xh4efw). Deferred dispatch races the worker: the
-    /// task can complete — and record its Complete event — before the
-    /// spawning thread dispatches these effects, so a dispatch-time seq
-    /// put Complete BEFORE Spawn in seq order for the same task
-    /// (observed live, br-asupersync-7amdgn). Consumers such as the
-    /// causal-order verifier assume per-task Spawn < Complete in seq;
-    /// admission-time allocation restores that contract structurally
-    /// (the completion path allocates its seq strictly later).
-    spawn_seq: u64,
-    /// Trace seq for the optional TaskAdmitted event, same contract.
+    /// Admission-allocated seq for optional deferred `TaskAdmitted` output.
+    /// The callback-free `Spawn` event is already recorded at construction.
     admitted_seq: Option<u64>,
 }
 
@@ -894,6 +886,16 @@ impl TaskSpawnEffects {
         // smaller than any seq the task's own execution can allocate.
         let spawn_seq = trace.next_seq();
         let admitted_seq = source.emits_admitted_trace().then(|| trace.next_seq());
+        // A Created task already has real holder authority: another task can
+        // transfer an obligation to it before its first poll or before the
+        // publication owner dispatches arbitrary observers. Publish its
+        // canonical identity now so every such trace prefix is complete.
+        // This concrete buffer operation has no user/metrics callbacks.
+        let spawn = TraceEvent::spawn(spawn_seq, spawned_at, task_id, region_id);
+        trace.push_event(match logical_time.clone() {
+            Some(logical_time) => spawn.with_logical_time(logical_time),
+            None => spawn,
+        });
         Self {
             payload: Some(TaskSpawnEffectsPayload {
                 metrics,
@@ -904,7 +906,6 @@ impl TaskSpawnEffects {
                 logical_time,
                 budget,
                 source,
-                spawn_seq,
                 admitted_seq,
             }),
             panic_count: Some(Arc::clone(panic_count)),
@@ -919,11 +920,11 @@ impl TaskSpawnEffects {
         }
     }
 
-    /// Delivers the spawn trace/metric/diagnostic once, outside runtime locks.
+    /// Delivers spawn observers once, outside runtime locks.
     ///
-    /// The trace and metric preserve their historical order. Mailbox and local
-    /// admissions then emit `TaskAdmitted`; the publication diagnostic follows
-    /// last.
+    /// The `Spawn` witness was recorded at admission. The metric runs before
+    /// the optional mailbox/local `TaskAdmitted` event and the publication
+    /// diagnostic, preserving their historical callback order.
     /// A panic skips the remaining callbacks rather than retrying and risking
     /// duplicate spawn observations.
     pub fn dispatch(mut self) {
@@ -942,7 +943,6 @@ impl TaskSpawnEffects {
             logical_time,
             budget,
             source,
-            spawn_seq,
             admitted_seq,
         } = payload;
 
@@ -951,20 +951,10 @@ impl TaskSpawnEffects {
         }
 
         let callback_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            // br-asupersync-xh4efw: push with the admission-allocated seqs
-            // (see TaskSpawnEffectsPayload::spawn_seq). Buffer INSERTION
-            // order can still trail other events; seq order is the
-            // per-task causal contract and snapshot() returns seq order.
-            {
-                let event = TraceEvent::spawn(spawn_seq, spawned_at, task_id, region_id);
-                let event = match logical_time.clone() {
-                    Some(logical_time) => event.with_logical_time(logical_time),
-                    None => event,
-                };
-                trace.push_event(event);
-            }
             metrics.task_spawned(region_id, task_id);
             if let Some(admitted_seq) = admitted_seq {
+                // This observer event retains its admission-allocated seq;
+                // snapshot() sorts it with any later execution events.
                 let event = TraceEvent::task_admitted(admitted_seq, spawned_at, task_id, region_id);
                 let event = match logical_time {
                     Some(logical_time) => event.with_logical_time(logical_time),
