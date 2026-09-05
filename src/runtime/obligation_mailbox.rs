@@ -91,6 +91,73 @@ pub enum ObligationAdmissionError {
     CapacityExhausted,
 }
 
+/// Why an explicit consuming handoff did not acquire destination ownership.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum ObligationTransferError {
+    /// Legacy tokens retain their original holder's liability.
+    #[error("only checked obligation tokens can be transferred")]
+    SourceNotChecked,
+    /// A terminal outcome already won the source credit.
+    #[error("source obligation is already resolved")]
+    SourceResolved,
+    /// Completion revoked the source generation.
+    #[error("source obligation holder is no longer live")]
+    SourceHolderNotLive,
+    /// Either runtime gateway is unavailable.
+    #[error("obligation transfer runtime is unavailable")]
+    RuntimeUnavailable,
+    /// A handoff cannot cross runtime arenas.
+    #[error("obligation transfer requires the same runtime")]
+    DifferentRuntime,
+    /// Ownership already belongs to this holder.
+    #[error("obligation transfer requires a different holder")]
+    SameHolder,
+    /// The destination context has a cancellation request.
+    #[error("obligation transfer destination is cancelled")]
+    DestinationCancelled,
+    /// Destination admission refused before either credit changed.
+    #[error("obligation transfer destination refused admission: {0}")]
+    Destination(ObligationAdmissionError),
+}
+
+/// A refused handoff retaining the original token for explicit recovery.
+/// Dropping the failure retains the token's ordinary unresolved-drop behavior.
+#[derive(Debug)]
+pub struct ObligationTransferFailure {
+    reason: ObligationTransferError,
+    token: ObligationToken,
+}
+
+impl ObligationTransferFailure {
+    /// The reason the handoff was refused.
+    #[must_use]
+    pub fn reason(&self) -> ObligationTransferError {
+        self.reason
+    }
+
+    /// Recover the reason and original token, with its original ticket/holder.
+    #[must_use]
+    pub fn into_parts(self) -> (ObligationTransferError, ObligationToken) {
+        (self.reason, self.token)
+    }
+}
+
+impl std::fmt::Display for ObligationTransferFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.reason, f)
+    }
+}
+
+impl std::error::Error for ObligationTransferFailure {}
+
+#[derive(Debug)]
+enum AdmissionDecision {
+    Pending,
+    Terminal(ObligationResolution),
+    HandedOff(Arc<AdmittedObligation>),
+}
+
 /// Owned, preaccepted admission; the arena is its delayed lifecycle projection.
 #[derive(Debug)]
 pub(crate) struct AdmittedObligation {
@@ -98,7 +165,8 @@ pub(crate) struct AdmittedObligation {
     mailbox: Weak<ObligationMailbox>,
     ticket: u64,
     active: AtomicBool,
-    resolution: Mutex<Option<ObligationResolution>>,
+    resolution: Mutex<AdmissionDecision>,
+    predecessor: Weak<AdmittedObligation>,
     application_finished: AtomicBool,
 }
 
@@ -112,10 +180,10 @@ impl AdmittedObligation {
                 .resolution
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if terminal.is_some() {
+            if !matches!(*terminal, AdmissionDecision::Pending) {
                 return false;
             }
-            *terminal = Some(resolution);
+            *terminal = AdmissionDecision::Terminal(resolution);
             publish();
             true
         })
@@ -124,12 +192,51 @@ impl AdmittedObligation {
     pub(crate) fn claim_resolution(
         &self,
         resolution: ObligationResolution,
-    ) -> ObligationResolution {
+    ) -> Option<ObligationResolution> {
         self.resolve(resolution, || {});
-        self.resolution
+        match &*self
+            .resolution
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .expect("an active admitted obligation has one terminal decision")
+        {
+            AdmissionDecision::Terminal(resolution) => Some(*resolution),
+            AdmissionDecision::HandedOff(_) => None,
+            AdmissionDecision::Pending => unreachable!("active credit has a decision"),
+        }
+    }
+
+    pub(crate) fn successor(&self) -> Option<Arc<Self>> {
+        match &*self
+            .resolution
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        {
+            AdmissionDecision::HandedOff(next) => Some(Arc::clone(next)),
+            AdmissionDecision::Pending | AdmissionDecision::Terminal(_) => None,
+        }
+    }
+
+    pub(crate) fn binding(&self) -> (u64, TaskId, RegionId) {
+        (self.ticket, self.handle.holder(), self.handle.region())
+    }
+
+    pub(crate) fn bind_ticket(&self, id: ObligationId) {
+        if let Some(mailbox) = self.mailbox.upgrade() {
+            mailbox
+                .tickets
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(self.ticket, id);
+        }
+    }
+
+    fn finish_lineage_after_runtime_drop(&self) {
+        self.finish_application();
+        let mut previous = self.predecessor.upgrade();
+        while let Some(credit) = previous {
+            credit.finish_application();
+            previous = credit.predecessor.upgrade();
+        }
     }
 
     pub(crate) fn finish_application(&self) {
@@ -147,9 +254,22 @@ impl AdmittedObligation {
 }
 
 #[derive(Debug)]
-struct QueuedObligationPost {
-    post: ObligationPost,
-    admission: Option<Arc<AdmittedObligation>>,
+pub(crate) enum QueuedObligationPost {
+    Operation {
+        post: ObligationPost,
+        admission: Option<Arc<AdmittedObligation>>,
+    },
+    Handoff {
+        source: Arc<AdmittedObligation>,
+    },
+}
+
+struct PendingReceipt<'a>(&'a AtomicU64);
+
+impl Drop for PendingReceipt<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 /// What a post asks the runtime to do with an obligation ticket.
@@ -221,6 +341,8 @@ pub struct ObligationMailbox {
     aborted: AtomicU64,
     leaked: AtomicU64,
     refused: AtomicU64,
+    pending_handoffs: AtomicU64,
+    pending_admissions: AtomicU64,
     /// ticket -> obligation id for reservations the runtime has applied and
     /// not yet resolved. Only the drainer touches it (under the state lock),
     /// so an uncontended mutex is enough.
@@ -255,9 +377,21 @@ impl ObligationMailbox {
     }
 
     fn push_admitted(&self, post: ObligationPost, admission: Option<Arc<AdmittedObligation>>) {
+        if post.op == ObligationOp::Reserve && admission.is_some() {
+            self.pending_admissions.fetch_add(1, Ordering::Release);
+        }
         // Count before publishing so observers see posted >= applied.
         self.posted.fetch_add(1, Ordering::Relaxed);
-        self.queue.push(QueuedObligationPost { post, admission });
+        self.queue
+            .push(QueuedObligationPost::Operation { post, admission });
+    }
+
+    pub(crate) fn has_pending_handoffs(&self) -> bool {
+        self.pending_handoffs.load(Ordering::Acquire) != 0
+    }
+
+    pub(crate) fn has_pending_ownership_projection(&self) -> bool {
+        self.has_pending_handoffs() || self.pending_admissions.load(Ordering::Acquire) != 0
     }
 
     /// Whether no post is waiting to be applied.
@@ -422,7 +556,8 @@ impl ObligationGateway {
             mailbox: Arc::downgrade(&self.mailbox),
             ticket,
             active: AtomicBool::new(false),
-            resolution: Mutex::new(None),
+            resolution: Mutex::new(AdmissionDecision::Pending),
+            predecessor: Weak::new(),
             application_finished: AtomicBool::new(false),
         });
         // Ownership is installed before publication and before arbitrary notify.
@@ -507,6 +642,115 @@ impl ObligationToken {
         self.region
     }
 
+    /// Transfer a checked obligation to another live holder in the same runtime.
+    ///
+    /// This consumes the old token, preserves its logical obligation identity
+    /// and reservation age, and returns a new ticket bound to `destination`.
+    /// A plain Rust move does not transfer holder liability. Same-region
+    /// handoffs reuse live quota, including a region already at its limit.
+    ///
+    /// # Errors
+    /// Refusal returns the original token inside [`ObligationTransferFailure`].
+    /// A completion which already resolved that credit is not undone.
+    /// A panicking notification aborts the accepted, unreturned destination
+    /// credit; it cannot restore ownership to the consumed source.
+    #[allow(clippy::result_large_err)]
+    pub fn try_transfer<Caps>(
+        mut self,
+        destination: &crate::cx::Cx<Caps>,
+    ) -> Result<Self, ObligationTransferFailure> {
+        match self.prepare_transfer(destination) {
+            Err(reason) => Err(ObligationTransferFailure {
+                reason,
+                token: self,
+            }),
+            Ok((mut next, gateway)) => {
+                self.resolved = true;
+                gateway.notify();
+                next.abort_on_drop = false;
+                Ok(next)
+            }
+        }
+    }
+
+    fn prepare_transfer<Caps>(
+        &self,
+        destination: &crate::cx::Cx<Caps>,
+    ) -> Result<(Self, Arc<ObligationGateway>), ObligationTransferError> {
+        use ObligationTransferError as Error;
+        let source = self.admission.as_ref().ok_or(Error::SourceNotChecked)?;
+        let source_gateway = self.gateway.upgrade().ok_or(Error::RuntimeUnavailable)?;
+        let _source_liveness = source_gateway
+            .runtime_liveness
+            .upgrade()
+            .ok_or(Error::RuntimeUnavailable)?;
+        let (gateway, handle) = destination
+            .obligation_transfer_destination()
+            .map_err(Error::Destination)?;
+        let _destination_liveness = gateway
+            .runtime_liveness
+            .upgrade()
+            .ok_or(Error::RuntimeUnavailable)?;
+        if !Arc::ptr_eq(&source_gateway.mailbox, &gateway.mailbox) {
+            return Err(Error::DifferentRuntime);
+        }
+        if self.holder == handle.holder() {
+            return Err(Error::SameHolder);
+        }
+        if destination.is_cancel_requested() {
+            return Err(Error::DestinationCancelled);
+        }
+        let ticket = gateway.mailbox.mint_ticket().ok_or(Error::Destination(
+            ObligationAdmissionError::CapacityExhausted,
+        ))?;
+        let admission = Arc::new(AdmittedObligation {
+            handle: Arc::clone(handle),
+            mailbox: Arc::downgrade(&gateway.mailbox),
+            ticket,
+            active: AtomicBool::new(false),
+            resolution: Mutex::new(AdmissionDecision::Pending),
+            predecessor: Arc::downgrade(source),
+            application_finished: AtomicBool::new(false),
+        });
+        let next = Self {
+            ticket,
+            kind: self.kind,
+            holder: handle.holder(),
+            region: handle.region(),
+            gateway: Arc::downgrade(gateway),
+            _pending: None,
+            resolved: false,
+            admission: Some(Arc::clone(&admission)),
+            abort_on_drop: true,
+        };
+        source.handle.transfer_to(
+            handle,
+            || {
+                let mut decision = source
+                    .resolution
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if !matches!(*decision, AdmissionDecision::Pending) {
+                    return false;
+                }
+                *decision = AdmissionDecision::HandedOff(Arc::clone(&admission));
+                true
+            },
+            || {
+                admission.active.store(true, Ordering::Release);
+                gateway
+                    .mailbox
+                    .pending_handoffs
+                    .fetch_add(1, Ordering::Release);
+                gateway.mailbox.posted.fetch_add(1, Ordering::Relaxed);
+                gateway.mailbox.queue.push(QueuedObligationPost::Handoff {
+                    source: Arc::clone(source),
+                });
+            },
+        )?;
+        Ok((next, Arc::clone(gateway)))
+    }
+
     fn resolve_deferred(
         mut self,
         op: ObligationOp,
@@ -554,7 +798,7 @@ impl ObligationToken {
             }
         });
         if gateway.is_none() && admission.active.load(Ordering::Acquire) {
-            admission.finish_application();
+            admission.finish_lineage_after_runtime_drop();
         }
         let accepted = won && gateway.is_some();
         let notification = if won && !std::thread::panicking() {
@@ -660,7 +904,34 @@ pub(crate) fn apply_obligation_posts_with_task_table(
         return 0;
     }
     for queued in posts {
-        let QueuedObligationPost { post, admission } = queued;
+        let (post, admission) = match queued {
+            QueuedObligationPost::Operation { post, admission } => (post, admission),
+            QueuedObligationPost::Handoff { source } => {
+                let _pending_receipt = PendingReceipt(&mailbox.pending_handoffs);
+                if !source.application_finished.load(Ordering::Acquire) {
+                    let id = mailbox
+                        .tickets
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .get(&source.ticket)
+                        .copied();
+                    if state
+                        .apply_obligation_post_from_dispatch_table(
+                            QueuedObligationPost::Handoff { source },
+                            id,
+                            dispatch_tasks,
+                        )
+                        .is_err()
+                    {
+                        mailbox.refused.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+                mailbox.applied.fetch_add(1, Ordering::Relaxed);
+                continue;
+            }
+        };
+        let _pending_receipt = (post.op == ObligationOp::Reserve && admission.is_some())
+            .then(|| PendingReceipt(&mailbox.pending_admissions));
         // A completion audit can apply the shared terminal decision before a
         // late queued receipt reaches this bounded drain. It is not a refusal.
         if admission
@@ -679,10 +950,12 @@ pub(crate) fn apply_obligation_posts_with_task_table(
         let apply = |state: &mut RuntimeState, id: Option<ObligationId>| {
             if dispatch_tasks.is_some() || admission.is_some() || post.op == ObligationOp::Reserve {
                 return state.apply_obligation_post_from_dispatch_table(
-                    post,
+                    QueuedObligationPost::Operation {
+                        post,
+                        admission: admission.clone(),
+                    },
                     id,
                     dispatch_tasks,
-                    admission.clone(),
                 );
             }
             match post.op {
@@ -796,6 +1069,1126 @@ mod tests {
         record.set_limits(limits);
         let cx = runtime.state.task(holder).unwrap().cx.clone().unwrap();
         (runtime, region, holder, cx)
+    }
+
+    fn transfer_holder(runtime: &mut LabRuntime, region: RegionId) -> (TaskId, Cx) {
+        let (holder, _handle) = runtime
+            .state
+            .create_task(region, Budget::INFINITE, std::future::pending::<()>())
+            .unwrap();
+        let cx = runtime.state.task(holder).unwrap().cx.clone().unwrap();
+        (holder, cx)
+    }
+
+    fn complete_transfer_holder(runtime: &mut LabRuntime, holder: TaskId) {
+        assert!(
+            runtime
+                .state
+                .complete_task(holder, crate::types::Outcome::Ok(()))
+        );
+        let _effects = runtime.state.task_completed(holder);
+        assert!(runtime.state.task(holder).is_none());
+    }
+
+    fn handoff_messages(runtime: &LabRuntime) -> Vec<String> {
+        runtime
+            .trace_handle()
+            .snapshot()
+            .into_iter()
+            .filter_map(|event| match event.data {
+                crate::trace::TraceData::Message(message)
+                    if message.starts_with("obligation_handoff_v1 ") =>
+                {
+                    Some(message)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn checked_transfer_full_same_region_keeps_one_id_age_and_holder_index() {
+        for materialized in [false, true] {
+            let (mut runtime, region, source, cx) = checked_holder(1);
+            let (target, destination) = transfer_holder(&mut runtime, region);
+            let mailbox = mailbox_of(&runtime);
+            let token = cx
+                .try_register_obligation_checked(ObligationKind::SendPermit, source)
+                .unwrap()
+                .unwrap();
+            let old_ticket = token.ticket();
+            if materialized {
+                assert_eq!(runtime.state.drain_obligation_posts(1), 1);
+            }
+            let token = token.try_transfer(&destination).unwrap();
+            let new_ticket = token.ticket();
+            assert_ne!(new_ticket, old_ticket);
+            assert_eq!((token.holder(), token.region()), (target, region));
+            assert_eq!(
+                runtime.state.region(region).unwrap().pending_obligations(),
+                1
+            );
+            assert_eq!(
+                runtime
+                    .state
+                    .region(region)
+                    .unwrap()
+                    .unapplied_obligation_count(),
+                2
+            );
+            assert!(matches!(
+                cx.try_register_obligation_checked(ObligationKind::SendPermit, source),
+                Err(ObligationAdmissionError::LimitReached { limit: 1, live: 1 })
+            ));
+            if !materialized {
+                assert_eq!(runtime.state.drain_obligation_posts(1), 1);
+            }
+            let id = mailbox.tickets.lock().unwrap()[&old_ticket];
+            let reserved_at = runtime.state.obligation(id).unwrap().reserved_at;
+            assert_eq!(runtime.state.obligation(id).unwrap().holder, source);
+            runtime.advance_time(700);
+            assert!(
+                runtime.now() > reserved_at,
+                "handoff projection occurs after reservation"
+            );
+            assert_eq!(runtime.state.drain_obligation_posts(1), 1);
+            assert_eq!(mailbox.tickets.lock().unwrap().get(&new_ticket), Some(&id));
+            assert!(!mailbox.tickets.lock().unwrap().contains_key(&old_ticket));
+            assert!(
+                runtime
+                    .state
+                    .obligations
+                    .sorted_pending_ids_for_holder(source)
+                    .is_empty()
+            );
+            assert_eq!(
+                runtime
+                    .state
+                    .obligations
+                    .sorted_pending_ids_for_holder(target),
+                vec![id]
+            );
+            let record = runtime.state.obligation(id).unwrap();
+            assert_eq!(
+                (record.id, record.holder, record.region, record.reserved_at),
+                (id, target, region, reserved_at)
+            );
+            assert_eq!(
+                runtime
+                    .state
+                    .region(region)
+                    .unwrap()
+                    .unapplied_obligation_count(),
+                1
+            );
+            complete_transfer_holder(&mut runtime, source);
+            assert!(runtime.state.obligation(id).unwrap().is_pending());
+            assert_eq!(runtime.state.leak_count(), 0);
+            assert!(token.commit());
+            assert_eq!(
+                runtime.state.region(region).unwrap().pending_obligations(),
+                0
+            );
+            assert_eq!(runtime.state.drain_obligation_posts(64), 1);
+            assert_eq!(
+                runtime.state.obligation(id).unwrap().state,
+                crate::record::ObligationState::Committed
+            );
+            assert_eq!(
+                mailbox.stats(),
+                ObligationMailboxStats {
+                    posted: 3,
+                    applied: 3,
+                    reserved: 1,
+                    committed: 1,
+                    ..Default::default()
+                }
+            );
+            let messages = handoff_messages(&runtime);
+            assert_eq!(messages.len(), 1);
+            assert!(messages[0].contains(&format!("id={id:?}")));
+            assert!(messages[0].contains(&format!("source_ticket={old_ticket}")));
+            assert!(messages[0].contains(&format!("destination_ticket={new_ticket}")));
+            assert_eq!(mailbox.open_tickets(), 0);
+            assert!(!mailbox.has_pending_handoffs());
+            assert_eq!(
+                runtime
+                    .state
+                    .region(region)
+                    .unwrap()
+                    .unapplied_obligation_count(),
+                0
+            );
+            eprintln!(
+                "same-region transfer materialized={materialized} id={id:?} source={source:?} target={target:?} stats={:?}",
+                mailbox.stats()
+            );
+        }
+    }
+
+    #[test]
+    fn checked_transfer_cross_region_refusal_returns_source_and_success_reuses_quota() {
+        let (mut runtime, source_region, source, cx) = checked_holder(1);
+        let destination_region = runtime.state.create_root_region(Budget::INFINITE);
+        let (target, destination) = transfer_holder(&mut runtime, destination_region);
+        let mut limits = runtime.state.region(destination_region).unwrap().limits();
+        limits.max_obligations = Some(0);
+        runtime
+            .state
+            .region(destination_region)
+            .unwrap()
+            .set_limits(limits);
+        let mailbox = mailbox_of(&runtime);
+        let token = cx
+            .try_register_obligation_checked(ObligationKind::SendPermit, source)
+            .unwrap()
+            .unwrap();
+        let ticket = token.ticket();
+        let (reason, token) = token.try_transfer(&destination).unwrap_err().into_parts();
+        assert_eq!(
+            reason,
+            ObligationTransferError::Destination(ObligationAdmissionError::LimitReached {
+                limit: 0,
+                live: 0
+            })
+        );
+        assert_eq!(
+            (token.ticket(), token.holder(), token.region()),
+            (ticket, source, source_region)
+        );
+        assert_eq!(
+            runtime
+                .state
+                .region(source_region)
+                .unwrap()
+                .pending_obligations(),
+            1
+        );
+        assert_eq!(
+            runtime
+                .state
+                .region(destination_region)
+                .unwrap()
+                .pending_obligations(),
+            0
+        );
+        assert_eq!(
+            runtime
+                .state
+                .region(destination_region)
+                .unwrap()
+                .unapplied_obligation_count(),
+            0
+        );
+        assert_eq!(mailbox.len(), 1);
+        limits.max_obligations = Some(1);
+        runtime
+            .state
+            .region(destination_region)
+            .unwrap()
+            .set_limits(limits);
+        let token = token.try_transfer(&destination).unwrap();
+        assert_eq!(token.holder(), target);
+        assert_eq!(
+            runtime
+                .state
+                .region(source_region)
+                .unwrap()
+                .pending_obligations(),
+            0
+        );
+        assert_eq!(
+            runtime
+                .state
+                .region(source_region)
+                .unwrap()
+                .unapplied_obligation_count(),
+            1
+        );
+        assert_eq!(
+            runtime
+                .state
+                .region(destination_region)
+                .unwrap()
+                .pending_obligations(),
+            1
+        );
+        let replacement = cx
+            .try_register_obligation_checked(ObligationKind::SendPermit, source)
+            .unwrap()
+            .unwrap();
+        assert!(replacement.abort(ObligationAbortReason::Explicit));
+        assert!(token.commit());
+        assert_eq!(runtime.state.drain_obligation_posts(64), 5);
+        assert_eq!(
+            mailbox.stats(),
+            ObligationMailboxStats {
+                posted: 5,
+                applied: 5,
+                reserved: 2,
+                committed: 1,
+                aborted: 1,
+                ..Default::default()
+            }
+        );
+        for region in [source_region, destination_region] {
+            assert_eq!(
+                runtime.state.region(region).unwrap().pending_obligations(),
+                0
+            );
+            assert_eq!(
+                runtime
+                    .state
+                    .region(region)
+                    .unwrap()
+                    .unapplied_obligation_count(),
+                0
+            );
+        }
+        assert_eq!(runtime.state.pending_obligation_count(), 0);
+        assert_eq!(mailbox.open_tickets(), 0);
+    }
+
+    #[test]
+    fn checked_transfer_direct_completion_projects_unseen_chain_before_holder_retirement() {
+        for destination_first in [false, true] {
+            for materialized in [false, true] {
+                let (mut runtime, region, source, cx) = checked_holder(1);
+                let (middle, middle_cx) = transfer_holder(&mut runtime, region);
+                let (target, destination) = transfer_holder(&mut runtime, region);
+                let mailbox = mailbox_of(&runtime);
+                let token = cx
+                    .try_register_obligation_checked(ObligationKind::SendPermit, source)
+                    .unwrap()
+                    .unwrap();
+                if materialized {
+                    assert_eq!(runtime.state.drain_obligation_posts(1), 1);
+                }
+                let token = token
+                    .try_transfer(&middle_cx)
+                    .unwrap()
+                    .try_transfer(&destination)
+                    .unwrap();
+                assert_eq!(
+                    runtime
+                        .state
+                        .region(region)
+                        .unwrap()
+                        .unapplied_obligation_count(),
+                    3
+                );
+                // No manual projection: both source-only and destination-first
+                // direct bookkeeping must handle the accepted, queued chain.
+                let first = if destination_first { target } else { source };
+                complete_transfer_holder(&mut runtime, first);
+                assert!(!mailbox.has_pending_handoffs());
+                assert!(mailbox.is_empty());
+                let records: Vec<_> = runtime.state.obligations_iter().map(|(_, r)| r).collect();
+                assert_eq!(records.len(), 1);
+                let id = records[0].id;
+                assert_eq!(records[0].holder, target);
+                assert_eq!(records[0].is_pending(), !destination_first);
+                assert_eq!(runtime.state.leak_count(), u64::from(destination_first));
+                assert_eq!(handoff_messages(&runtime).len(), 2);
+                complete_transfer_holder(&mut runtime, middle);
+                if !destination_first {
+                    assert!(runtime.state.obligation(id).unwrap().is_pending());
+                    complete_transfer_holder(&mut runtime, target);
+                } else {
+                    complete_transfer_holder(&mut runtime, source);
+                }
+                assert!(
+                    !token.commit(),
+                    "retired destination already won the terminal"
+                );
+                assert_eq!(runtime.state.leak_count(), 1);
+                assert_eq!(
+                    runtime.state.region(region).unwrap().pending_obligations(),
+                    0
+                );
+                assert_eq!(
+                    runtime
+                        .state
+                        .region(region)
+                        .unwrap()
+                        .unapplied_obligation_count(),
+                    0
+                );
+                assert_eq!(runtime.state.pending_obligation_count(), 0);
+                assert_eq!(mailbox.open_tickets(), 0);
+                assert_eq!(mailbox.stats().reserved, 1);
+                assert_eq!(mailbox.stats().refused, 0);
+                assert_eq!(mailbox.stats().posted, mailbox.stats().applied);
+                eprintln!(
+                    "direct transfer completion destination_first={destination_first} materialized={materialized} id={id:?} leaks=1 stats={:?}",
+                    mailbox.stats()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn checked_transfer_refuses_closed_retired_cross_runtime_and_terminal_authority() {
+        for refusal in [
+            "same",
+            "closed",
+            "retired",
+            "cross_runtime",
+            "terminal",
+            "source_retired",
+            "cancelled",
+            "legacy",
+        ] {
+            let (mut runtime, region, source, cx) = checked_holder(1);
+            let target_region = runtime.state.create_root_region(Budget::INFINITE);
+            let (target, destination) = transfer_holder(&mut runtime, target_region);
+            let (other_runtime, _other_region, _other_holder, other_cx) = checked_holder(1);
+            let mailbox = mailbox_of(&runtime);
+            let token = if refusal == "legacy" {
+                cx.try_register_obligation(ObligationKind::SendPermit, source)
+                    .unwrap()
+            } else {
+                cx.try_register_obligation_checked(ObligationKind::SendPermit, source)
+                    .unwrap()
+                    .unwrap()
+            };
+            let ticket = token.ticket();
+            assert_eq!(runtime.state.drain_obligation_posts(1), 1);
+            let id = mailbox.tickets.lock().unwrap()[&ticket];
+            let expected = match refusal {
+                "same" => ObligationTransferError::SameHolder,
+                "closed" => {
+                    assert!(
+                        runtime
+                            .state
+                            .region(target_region)
+                            .unwrap()
+                            .begin_close(None)
+                    );
+                    ObligationTransferError::Destination(ObligationAdmissionError::RegionClosed)
+                }
+                "retired" => {
+                    complete_transfer_holder(&mut runtime, target);
+                    let (replacement, _replacement_cx) =
+                        transfer_holder(&mut runtime, target_region);
+                    assert_eq!(
+                        replacement.arena_index().index(),
+                        target.arena_index().index()
+                    );
+                    assert_ne!(
+                        replacement, target,
+                        "same slot has a fresh holder generation"
+                    );
+                    ObligationTransferError::Destination(ObligationAdmissionError::HolderNotLive)
+                }
+                "cancelled" => {
+                    destination.set_cancel_requested(true);
+                    ObligationTransferError::DestinationCancelled
+                }
+                "legacy" => ObligationTransferError::SourceNotChecked,
+                "cross_runtime" => ObligationTransferError::DifferentRuntime,
+                "terminal" => {
+                    runtime.state.commit_obligation(id).unwrap();
+                    ObligationTransferError::SourceResolved
+                }
+                "source_retired" => {
+                    complete_transfer_holder(&mut runtime, source);
+                    ObligationTransferError::SourceHolderNotLive
+                }
+                _ => unreachable!(),
+            };
+            let destination = match refusal {
+                "same" => &cx,
+                "cross_runtime" => &other_cx,
+                _ => &destination,
+            };
+            let (reason, token) = token.try_transfer(destination).unwrap_err().into_parts();
+            assert_eq!(reason, expected, "{refusal}");
+            assert_eq!(
+                (token.ticket(), token.holder(), token.region()),
+                (ticket, source, region)
+            );
+            assert_eq!(
+                token.commit(),
+                !matches!(refusal, "terminal" | "source_retired")
+            );
+            assert_eq!(
+                runtime.state.drain_obligation_posts(64),
+                usize::from(!matches!(refusal, "terminal" | "source_retired"))
+            );
+            assert_eq!(runtime.state.pending_obligation_count(), 0);
+            assert_eq!(
+                runtime.state.region(region).unwrap().pending_obligations(),
+                0
+            );
+            assert_eq!(
+                runtime
+                    .state
+                    .region(region)
+                    .unwrap()
+                    .unapplied_obligation_count(),
+                0
+            );
+            assert_eq!(mailbox.open_tickets(), 0);
+            assert_eq!(mailbox.stats().refused, 0);
+            assert!(handoff_messages(&runtime).is_empty());
+            drop(other_runtime);
+        }
+    }
+
+    #[test]
+    fn checked_transfer_closing_source_discharges_and_plain_move_retains_liability() {
+        let (mut runtime, source_region, source, cx) = checked_holder(1);
+        let target_region = runtime.state.create_root_region(Budget::INFINITE);
+        let (target, destination) = transfer_holder(&mut runtime, target_region);
+        let mailbox = mailbox_of(&runtime);
+        let token = cx
+            .try_register_obligation_checked(ObligationKind::SendPermit, source)
+            .unwrap()
+            .unwrap();
+        assert!(
+            runtime
+                .state
+                .region(source_region)
+                .unwrap()
+                .begin_close(None)
+        );
+        let token = token.try_transfer(&destination).unwrap();
+        assert_eq!(token.holder(), target);
+        assert!(token.abort(ObligationAbortReason::Explicit));
+        assert_eq!(runtime.state.drain_obligation_posts(64), 3);
+        assert_eq!(mailbox.stats().aborted, 1);
+        assert_eq!(mailbox.stats().refused, 0);
+        assert_eq!(
+            runtime
+                .state
+                .region(source_region)
+                .unwrap()
+                .pending_obligations(),
+            0
+        );
+        assert_eq!(
+            runtime
+                .state
+                .region(source_region)
+                .unwrap()
+                .unapplied_obligation_count(),
+            0
+        );
+        // A plain consuming move does not perform a handoff or change liability.
+        let token = destination
+            .try_register_obligation_checked(ObligationKind::SendPermit, target)
+            .unwrap()
+            .unwrap();
+        let moved = token;
+        assert_eq!(moved.holder(), target);
+        assert_eq!(runtime.state.drain_obligation_posts(1), 1);
+        complete_transfer_holder(&mut runtime, source);
+        assert_eq!(runtime.state.leak_count(), 0);
+        complete_transfer_holder(&mut runtime, target);
+        assert!(!moved.commit());
+        assert_eq!(runtime.state.leak_count(), 1);
+        assert_eq!(mailbox.open_tickets(), 0);
+        assert_eq!(handoff_messages(&runtime).len(), 1);
+    }
+
+    #[test]
+    fn checked_transfer_notify_unwind_aborts_destination_once_without_secondary_notify() {
+        for materialized in [false, true] {
+            let (mut runtime, region, source, cx) = checked_holder(1);
+            let (_target, destination) = transfer_holder(&mut runtime, region);
+            let mailbox = mailbox_of(&runtime);
+            let token = cx
+                .try_register_obligation_checked(ObligationKind::SendPermit, source)
+                .unwrap()
+                .unwrap();
+            if materialized {
+                assert_eq!(runtime.state.drain_obligation_posts(1), 1);
+            }
+            let liveness = Arc::new(());
+            let notifications = Arc::new(AtomicUsize::new(0));
+            let observed = Arc::clone(&notifications);
+            let gateway = Arc::new(ObligationGateway::new(
+                Arc::clone(&mailbox),
+                Arc::new(move || {
+                    observed.fetch_add(1, Ordering::SeqCst);
+                    panic!("handoff notifier primary");
+                }),
+                Arc::downgrade(&liveness),
+            ));
+            let destination = destination.with_obligation_gateway(Some(gateway), None);
+            let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _transferred = token.try_transfer(&destination).unwrap();
+            }))
+            .expect_err("accepted handoff invokes the actual notifier");
+            assert_eq!(
+                panic.downcast_ref::<&str>(),
+                Some(&"handoff notifier primary")
+            );
+            assert_eq!(
+                notifications.load(Ordering::SeqCst),
+                1,
+                "cleanup never invokes a secondary notifier"
+            );
+            assert_eq!(
+                runtime.state.region(region).unwrap().pending_obligations(),
+                0
+            );
+            assert_eq!(
+                runtime
+                    .state
+                    .region(region)
+                    .unwrap()
+                    .unapplied_obligation_count(),
+                2
+            );
+            assert_eq!(
+                runtime.state.drain_obligation_posts(64),
+                3 - usize::from(materialized)
+            );
+            assert_eq!(
+                mailbox.stats(),
+                ObligationMailboxStats {
+                    posted: 3,
+                    applied: 3,
+                    reserved: 1,
+                    aborted: 1,
+                    ..Default::default()
+                }
+            );
+            assert_eq!(
+                runtime
+                    .state
+                    .region(region)
+                    .unwrap()
+                    .unapplied_obligation_count(),
+                0
+            );
+            assert_eq!(mailbox.open_tickets(), 0);
+            assert_eq!(handoff_messages(&runtime).len(), 1);
+        }
+    }
+
+    #[test]
+    fn checked_transfer_late_settlement_after_runtime_drop_retires_predecessor_tickets() {
+        for materialized in [false, true] {
+            for terminal in ["commit", "abort", "drop"] {
+                let (mut runtime, region, source, cx) = checked_holder(1);
+                let (_middle, middle_cx) = transfer_holder(&mut runtime, region);
+                let (_target, destination) = transfer_holder(&mut runtime, region);
+                let mailbox = mailbox_of(&runtime);
+                let token = cx
+                    .try_register_obligation_checked(ObligationKind::SendPermit, source)
+                    .unwrap()
+                    .unwrap();
+                let source_credit = Arc::clone(token.admission.as_ref().unwrap());
+                if materialized {
+                    assert_eq!(runtime.state.drain_obligation_posts(1), 1);
+                }
+                let token = token.try_transfer(&middle_cx).unwrap();
+                let middle_credit = Arc::clone(token.admission.as_ref().unwrap());
+                let token = token.try_transfer(&destination).unwrap();
+                let destination_credit = Arc::clone(token.admission.as_ref().unwrap());
+                assert_eq!(mailbox.open_tickets(), usize::from(materialized));
+                let before = mailbox.stats();
+                drop(runtime);
+                match terminal {
+                    "commit" => assert!(!token.commit()),
+                    "abort" => assert!(!token.abort(ObligationAbortReason::Explicit)),
+                    "drop" => drop(token),
+                    _ => unreachable!(),
+                }
+                assert_eq!(mailbox.open_tickets(), 0);
+                for credit in [&source_credit, &middle_credit, &destination_credit] {
+                    assert!(credit.application_finished.load(Ordering::Acquire));
+                }
+                assert_eq!(
+                    mailbox.stats(),
+                    before,
+                    "a retired runtime applied no new receipts"
+                );
+                assert_eq!(mailbox.len(), 3 - usize::from(materialized));
+            }
+        }
+    }
+
+    #[test]
+    fn checked_transfer_native_external_and_sharded_completion_use_actual_holder_tables() {
+        use crate::runtime::scheduler::three_lane::ThreeLaneScheduler;
+        use crate::runtime::state::{AdmissionRegionTarget, AdmissionTaskTarget};
+        use crate::sync::ContendedMutex;
+        for sharded in [false, true] {
+            let (done_tx, done_rx) = std::sync::mpsc::sync_channel(1);
+            let thread = std::thread::spawn(move || {
+                let state = Arc::new(ContendedMutex::new("transfer_state", RuntimeState::new()));
+                let mailbox = Arc::new(ObligationMailbox::new());
+                let liveness = Arc::new(());
+                let output = Arc::new(Mutex::new(None::<ObligationToken>));
+                let received = Arc::clone(&output);
+                let (
+                    tasks,
+                    shards,
+                    region,
+                    source,
+                    target,
+                    mut source_join,
+                    mut target_join,
+                    effects,
+                ) = {
+                    let mut runtime = state.lock().unwrap();
+                    runtime.set_obligation_leak_response(ObligationLeakResponse::Silent);
+                    runtime.set_obligation_gateway(Arc::new(ObligationGateway::new(
+                        Arc::clone(&mailbox),
+                        Arc::new(|| {}),
+                        Arc::downgrade(&liveness),
+                    )));
+                    let shards = sharded.then(|| {
+                        Arc::new(crate::runtime::sharded_state::ShardedState::new(
+                            runtime.trace_handle(),
+                            runtime.metrics_provider(),
+                            runtime.sharded_construction_config(),
+                        ))
+                    });
+                    let tasks = if let Some(shards) = &shards {
+                        runtime.install_shard_tables(Arc::clone(shards));
+                        Arc::clone(&shards.tasks)
+                    } else {
+                        Arc::new(ContendedMutex::new(
+                            "transfer_external_tasks",
+                            crate::runtime::TaskTable::new(),
+                        ))
+                    };
+                    let region = runtime.create_root_region(Budget::INFINITE);
+                    assert!(runtime.set_region_limits(
+                        region,
+                        crate::record::region::RegionLimits {
+                            max_obligations: Some(1),
+                            ..crate::record::region::RegionLimits::UNLIMITED
+                        }
+                    ));
+                    let mut table = AdmissionTaskTarget::External(tasks.lock().unwrap());
+                    let (source, source_join, source_effects) = runtime
+                        .create_task_with_deferred_spawn_effects_in(
+                            region,
+                            Budget::INFINITE,
+                            async { 41_u32 },
+                            &mut table,
+                            &AdmissionRegionTarget::Embedded,
+                        )
+                        .unwrap();
+                    let (target, target_join, target_effects) = runtime
+                        .create_task_with_deferred_spawn_effects_in(
+                            region,
+                            Budget::INFINITE,
+                            async move {
+                                let cx = Cx::current().expect("actual native destination poll");
+                                let token = received
+                                    .lock()
+                                    .unwrap()
+                                    .take()
+                                    .expect("accepted handoff delivered");
+                                assert_eq!(token.holder(), cx.task_id());
+                                assert!(token.commit());
+                                73_u32
+                            },
+                            &mut table,
+                            &AdmissionRegionTarget::Embedded,
+                        )
+                        .unwrap();
+                    drop(table);
+                    assert!(runtime.tasks.is_empty());
+                    (
+                        tasks,
+                        shards,
+                        region,
+                        source,
+                        target,
+                        source_join,
+                        target_join,
+                        [source_effects, target_effects],
+                    )
+                };
+                for effect in effects {
+                    effect.dispatch();
+                }
+                let source_cx = tasks
+                    .lock()
+                    .unwrap()
+                    .task(source)
+                    .unwrap()
+                    .cx
+                    .clone()
+                    .unwrap();
+                let destination = tasks
+                    .lock()
+                    .unwrap()
+                    .task(target)
+                    .unwrap()
+                    .cx
+                    .clone()
+                    .unwrap();
+                let token = source_cx
+                    .try_register_obligation_checked(ObligationKind::SendPermit, source)
+                    .unwrap()
+                    .unwrap()
+                    .try_transfer(&destination)
+                    .unwrap();
+                let ticket = token.ticket();
+                *output.lock().unwrap() = Some(token);
+                assert_eq!(
+                    mailbox.len(),
+                    2,
+                    "no projection before actual source completion"
+                );
+                let mut scheduler = ThreeLaneScheduler::new_with_options_and_task_table(
+                    1,
+                    &state,
+                    Some(Arc::clone(&tasks)),
+                    16,
+                    false,
+                    32,
+                );
+                let mut worker = scheduler.take_workers().remove(0);
+                worker.execute(source);
+                assert_eq!(source_join.try_join().unwrap(), Some(41));
+                assert!(tasks.lock().unwrap().task(source).is_none());
+                assert!(tasks.lock().unwrap().task(target).is_some());
+                assert_eq!(mailbox.stats().reserved, 1);
+                let id = mailbox.tickets.lock().unwrap()[&ticket];
+                {
+                    let runtime = state.lock().unwrap();
+                    assert!(runtime.tasks.is_empty());
+                    assert_eq!(runtime.leak_count(), 0);
+                    assert_eq!(runtime.region(region).unwrap().pending_obligations(), 1);
+                    if let Some(shards) = &shards {
+                        assert!(runtime.obligations.is_empty());
+                        let obligations = shards.obligations.lock().unwrap();
+                        assert_eq!(obligations.sorted_pending_ids_for_holder(target), vec![id]);
+                        assert!(obligations.sorted_pending_ids_for_holder(source).is_empty());
+                    } else {
+                        assert_eq!(
+                            runtime.obligations.sorted_pending_ids_for_holder(target),
+                            vec![id]
+                        );
+                        assert!(
+                            runtime
+                                .obligations
+                                .sorted_pending_ids_for_holder(source)
+                                .is_empty()
+                        );
+                    }
+                }
+                worker.execute(target);
+                assert_eq!(target_join.try_join().unwrap(), Some(73));
+                drop(worker);
+                assert!(tasks.lock().unwrap().is_empty());
+                assert_eq!(tasks.lock().unwrap().stored_future_count(), 0);
+                let runtime = state.lock().unwrap();
+                assert!(runtime.tasks.is_empty());
+                assert_eq!(runtime.region(region).unwrap().pending_obligations(), 0);
+                assert_eq!(
+                    runtime.region(region).unwrap().unapplied_obligation_count(),
+                    0
+                );
+                assert_eq!(runtime.leak_count(), 0);
+                let terminal = if let Some(shards) = &shards {
+                    shards
+                        .obligations
+                        .lock()
+                        .unwrap()
+                        .get(id.arena_index())
+                        .unwrap()
+                        .state
+                } else {
+                    runtime.obligation(id).unwrap().state
+                };
+                assert_eq!(terminal, crate::record::ObligationState::Committed);
+                assert_eq!(mailbox.open_tickets(), 0);
+                assert!(mailbox.is_empty());
+                assert_eq!(
+                    mailbox.stats(),
+                    ObligationMailboxStats {
+                        posted: 3,
+                        applied: 3,
+                        reserved: 1,
+                        committed: 1,
+                        ..Default::default()
+                    }
+                );
+                assert!(matches!(
+                    destination.try_register_obligation_checked(ObligationKind::SendPermit, target),
+                    Err(ObligationAdmissionError::HolderNotLive)
+                ));
+                eprintln!(
+                    "native checked transfer sharded={sharded} id={id:?} source={source:?} target={target:?} results=41,73 stats={:?}",
+                    mailbox.stats()
+                );
+                done_tx.send(()).unwrap();
+            });
+            done_rx
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .unwrap_or_else(|error| panic!("native transfer sharded={sharded}: {error}"));
+            thread.join().expect("native transfer assertions complete");
+        }
+    }
+
+    #[test]
+    fn checked_transfer_and_source_retirement_each_win_before_initial_projection() {
+        for transfer_first in [false, true] {
+            let (mut runtime, region, source, cx) = checked_holder(1);
+            let (target, destination) = transfer_holder(&mut runtime, region);
+            let mailbox = mailbox_of(&runtime);
+            let token = cx
+                .try_register_obligation_checked(ObligationKind::Lease, source)
+                .unwrap()
+                .unwrap();
+            assert_eq!(mailbox.stats().applied, 0);
+            if transfer_first {
+                let token = token.try_transfer(&destination).unwrap();
+                complete_transfer_holder(&mut runtime, source);
+                assert_eq!(runtime.state.leak_count(), 0);
+                assert_eq!(token.holder(), target);
+                assert!(token.commit());
+                assert_eq!(runtime.state.drain_obligation_posts(64), 1);
+            } else {
+                complete_transfer_holder(&mut runtime, source);
+                assert_eq!(
+                    mailbox.stats().reserved,
+                    1,
+                    "unseen acceptance materialized before audit"
+                );
+                assert_eq!(runtime.state.leak_count(), 1);
+                let (reason, token) = token.try_transfer(&destination).unwrap_err().into_parts();
+                assert_eq!(reason, ObligationTransferError::SourceHolderNotLive);
+                assert_eq!(token.holder(), source);
+                assert!(
+                    !token.commit(),
+                    "retirement already settled original liability"
+                );
+            }
+            assert_eq!(
+                runtime.state.region(region).unwrap().pending_obligations(),
+                0
+            );
+            assert_eq!(
+                runtime
+                    .state
+                    .region(region)
+                    .unwrap()
+                    .unapplied_obligation_count(),
+                0
+            );
+            assert_eq!(runtime.state.pending_obligation_count(), 0);
+            assert_eq!(mailbox.open_tickets(), 0);
+            assert_eq!(mailbox.stats().refused, 0);
+            assert!(mailbox.is_empty());
+            assert!(!mailbox.has_pending_ownership_projection());
+            assert_eq!(
+                handoff_messages(&runtime).len(),
+                usize::from(transfer_first)
+            );
+            eprintln!(
+                "unprojected source race transfer_first={transfer_first} holder={source:?} target={target:?} stats={:?}",
+                mailbox.stats()
+            );
+        }
+    }
+
+    #[test]
+    fn checked_transfer_direct_id_settlement_reconciles_return_handoff_once() {
+        for terminal in ["commit", "abort", "leak", "drop"] {
+            let (mut runtime, region, source, cx) = checked_holder(1);
+            let (middle, middle_cx) = transfer_holder(&mut runtime, region);
+            let mailbox = mailbox_of(&runtime);
+            let token = cx
+                .try_register_obligation_checked(ObligationKind::Lease, source)
+                .unwrap()
+                .unwrap();
+            let first_ticket = token.ticket();
+            assert_eq!(runtime.state.drain_obligation_posts(1), 1);
+            let id = mailbox.tickets.lock().unwrap()[&first_ticket];
+            let reserved_at = runtime.state.obligation(id).unwrap().reserved_at;
+            let token = token
+                .try_transfer(&middle_cx)
+                .unwrap()
+                .try_transfer(&cx)
+                .unwrap();
+            runtime.advance_time(1_900);
+            let expected = match terminal {
+                "commit" => {
+                    assert_eq!(runtime.state.commit_obligation(id).unwrap(), 1_900);
+                    assert!(!token.commit());
+                    crate::record::ObligationState::Committed
+                }
+                "abort" => {
+                    assert_eq!(
+                        runtime
+                            .state
+                            .abort_obligation(id, ObligationAbortReason::Explicit)
+                            .unwrap(),
+                        1_900
+                    );
+                    assert!(!token.abort(ObligationAbortReason::Cancel));
+                    crate::record::ObligationState::Aborted
+                }
+                "leak" => {
+                    runtime.state.report_obligation_leak(id).unwrap();
+                    assert!(!token.commit());
+                    crate::record::ObligationState::Leaked
+                }
+                "drop" => {
+                    drop(token);
+                    crate::record::ObligationState::Leaked
+                }
+                _ => unreachable!(),
+            };
+            assert_eq!(
+                runtime.state.drain_obligation_posts(64),
+                2 + usize::from(terminal == "drop")
+            );
+            let record = runtime.state.obligation(id).unwrap();
+            assert_eq!(
+                (
+                    record.holder,
+                    record.region,
+                    record.reserved_at,
+                    record.state
+                ),
+                (source, region, reserved_at, expected)
+            );
+            assert!(
+                runtime
+                    .state
+                    .obligations
+                    .sorted_pending_ids_for_holder(middle)
+                    .is_empty()
+            );
+            assert!(
+                runtime
+                    .state
+                    .obligations
+                    .sorted_pending_ids_for_holder(source)
+                    .is_empty()
+            );
+            assert_eq!(runtime.state.obligations_len(), 1);
+            assert_eq!(
+                runtime.state.region(region).unwrap().pending_obligations(),
+                0
+            );
+            assert_eq!(
+                runtime
+                    .state
+                    .region(region)
+                    .unwrap()
+                    .unapplied_obligation_count(),
+                0
+            );
+            assert_eq!(
+                runtime.state.leak_count(),
+                u64::from(matches!(terminal, "leak" | "drop"))
+            );
+            assert_eq!(mailbox.stats().refused, 0);
+            assert_eq!(mailbox.stats().reserved, 1);
+            assert_eq!(mailbox.stats().posted, mailbox.stats().applied);
+            assert_eq!(mailbox.open_tickets(), 0);
+            assert_eq!(
+                handoff_messages(&runtime).len(),
+                2,
+                "late receipts do not duplicate lineage"
+            );
+        }
+    }
+
+    #[test]
+    fn checked_transfer_opposite_region_gates_make_bounded_concurrent_progress() {
+        let (mut runtime, first_region, first, first_cx) = checked_holder(2);
+        let second_region = runtime.state.create_root_region(Budget::INFINITE);
+        let (second, second_cx) = transfer_holder(&mut runtime, second_region);
+        assert!(runtime.state.set_region_limits(
+            second_region,
+            crate::record::region::RegionLimits {
+                max_obligations: Some(2),
+                ..crate::record::region::RegionLimits::UNLIMITED
+            }
+        ));
+        let mailbox = mailbox_of(&runtime);
+        let first_token = first_cx
+            .try_register_obligation_checked(ObligationKind::Lease, first)
+            .unwrap()
+            .unwrap();
+        let second_token = second_cx
+            .try_register_obligation_checked(ObligationKind::Lease, second)
+            .unwrap()
+            .unwrap();
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let first_barrier = Arc::clone(&barrier);
+        let (first_tx, first_rx) = std::sync::mpsc::sync_channel(1);
+        let (second_tx, second_rx) = std::sync::mpsc::sync_channel(1);
+        let first_thread = std::thread::spawn(move || {
+            first_barrier.wait();
+            first_tx.send(first_token.try_transfer(&second_cx)).unwrap();
+        });
+        let second_thread = std::thread::spawn(move || {
+            barrier.wait();
+            second_tx
+                .send(second_token.try_transfer(&first_cx))
+                .unwrap();
+        });
+        let first_token = first_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("first ordered region gate completes")
+            .unwrap();
+        let second_token = second_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("opposite ordered region gate completes")
+            .unwrap();
+        first_thread.join().unwrap();
+        second_thread.join().unwrap();
+        assert_eq!(first_token.holder(), second);
+        assert_eq!(second_token.holder(), first);
+        for region in [first_region, second_region] {
+            assert_eq!(
+                runtime.state.region(region).unwrap().pending_obligations(),
+                1
+            );
+            assert_eq!(
+                runtime
+                    .state
+                    .region(region)
+                    .unwrap()
+                    .unapplied_obligation_count(),
+                2
+            );
+        }
+        assert!(first_token.commit());
+        assert!(second_token.commit());
+        assert_eq!(runtime.state.drain_obligation_posts(64), 6);
+        assert_eq!(
+            mailbox.stats(),
+            ObligationMailboxStats {
+                posted: 6,
+                applied: 6,
+                reserved: 2,
+                committed: 2,
+                ..Default::default()
+            }
+        );
+        assert_eq!(handoff_messages(&runtime).len(), 2);
+        assert_eq!(mailbox.open_tickets(), 0);
+        for region in [first_region, second_region] {
+            assert_eq!(
+                runtime.state.region(region).unwrap().pending_obligations(),
+                0
+            );
+            assert_eq!(
+                runtime
+                    .state
+                    .region(region)
+                    .unwrap()
+                    .unapplied_obligation_count(),
+                0
+            );
+        }
     }
 
     #[test]
@@ -1396,6 +2789,7 @@ mod tests {
             .try_register_obligation_checked(ObligationKind::SendPermit, holder)
             .unwrap()
             .unwrap();
+        let credit = Arc::clone(token.admission.as_ref().unwrap());
         assert!(token.commit());
         let record = runtime.state.region(region).unwrap();
         record.remove_task(holder);
@@ -1415,17 +2809,24 @@ mod tests {
         assert_eq!(mailbox_of(&runtime).stats().reserved, 1);
         assert_eq!(mailbox_of(&runtime).stats().committed, 1);
         assert_eq!(mailbox_of(&runtime).stats().refused, 0);
+        assert!(credit.application_finished.load(Ordering::Acquire));
+        assert_eq!(mailbox_of(&runtime).open_tickets(), 0);
+        assert_eq!(runtime.state.pending_obligation_count(), 0);
+        // The terminal advance completes close and reclaims the record. A
+        // retained Closed record is not this runtime's completed-close shape.
+        assert!(runtime.state.region(region).is_none());
         assert_eq!(
             runtime
-                .state
-                .region(region)
-                .unwrap()
-                .unapplied_obligation_count(),
-            0
-        );
-        assert_eq!(
-            runtime.state.region(region).unwrap().state(),
-            crate::record::region::RegionState::Closed
+                .trace_handle()
+                .snapshot()
+                .iter()
+                .filter(|event| {
+                    event.kind == TraceEventKind::RegionCloseComplete
+                        && matches!(event.data,
+                crate::trace::TraceData::Region { region: closed, .. } if closed == region)
+                })
+                .count(),
+            1
         );
     }
 
@@ -1474,7 +2875,7 @@ mod tests {
             for terminal in ["commit", "abort", "drop"] {
                 let (mut runtime, _region, holder, cx) = checked_holder(1);
                 let mailbox = mailbox_of(&runtime);
-                let gateway = Arc::clone(runtime.state.obligation_gateway().unwrap());
+                let gateway = runtime.state.obligation_gateway().unwrap();
                 let token = cx
                     .try_register_obligation_checked(ObligationKind::SendPermit, holder)
                     .unwrap()
@@ -1540,18 +2941,15 @@ mod tests {
         let region = lab.state.create_root_region(Budget::INFINITE);
         let observed = Arc::new(AtomicUsize::new(0));
         let finalizer_observed = Arc::clone(&observed);
+        assert!(lab.state.register_async_finalizer(region, async move {
+            let cx = Cx::current().expect("inline cleanup installs its restricted runtime context");
+            assert!(matches!(
+                cx.try_register_obligation_checked(ObligationKind::SendPermit, cx.task_id()),
+                Err(ObligationAdmissionError::HolderNotLive)
+            ));
+            finalizer_observed.fetch_add(1, Ordering::SeqCst);
+        }));
         let record = lab.state.region(region).unwrap();
-        record.add_finalizer(crate::record::finalizer::Finalizer::Async(Box::pin(
-            async move {
-                let cx =
-                    Cx::current().expect("inline cleanup installs its restricted runtime context");
-                assert!(matches!(
-                    cx.try_register_obligation_checked(ObligationKind::SendPermit, cx.task_id()),
-                    Err(ObligationAdmissionError::HolderNotLive)
-                ));
-                finalizer_observed.fetch_add(1, Ordering::SeqCst);
-            },
-        )));
         assert!(record.begin_close(None));
         assert!(record.begin_finalize());
         assert!(lab.state.drive_failed_start_async_finalizer_inline(region));

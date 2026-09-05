@@ -326,6 +326,44 @@ impl ObligationTable {
         entries.push((holder, ids));
     }
 
+    /// Rebind an accepted handoff without changing identity, age, or counts.
+    #[allow(clippy::result_large_err)]
+    pub(crate) fn rebind_pending(
+        &mut self,
+        id: ObligationId,
+        holder: TaskId,
+        region: RegionId,
+    ) -> Result<(), Error> {
+        let record = self
+            .obligations
+            .get(id.arena_index())
+            .filter(|record| record.is_pending())
+            .ok_or_else(|| Error::new(ErrorKind::ObligationAlreadyResolved))?;
+        let old_holder = record.holder;
+        // Allocate the destination index before retiring the old index.
+        self.push_holder_id(holder, id);
+        let slot = old_holder.arena_index().index() as usize;
+        if let Some(entries) = self.by_holder.get_mut(slot) {
+            if let Some(entry) = entries.iter().position(|(task, _)| *task == old_holder) {
+                let (_, ids) = &mut entries[entry];
+                if let Some(index) = ids.iter().position(|candidate| *candidate == id) {
+                    ids.swap_remove(index);
+                }
+                if ids.is_empty() {
+                    entries.swap_remove(entry);
+                }
+            }
+        }
+        let record = self
+            .obligations
+            .get_mut(id.arena_index())
+            .expect("pending record retained across index update");
+        record.holder = holder;
+        record.region = region;
+        self.debug_assert_pending_counters_match();
+        Ok(())
+    }
+
     /// Inserts a new obligation record produced by `f` into the arena.
     ///
     /// The closure receives the assigned `ArenaIndex`.

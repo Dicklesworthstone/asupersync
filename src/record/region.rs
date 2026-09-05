@@ -362,6 +362,101 @@ impl ObligationAdmissionHandle {
         self.live.load(Ordering::Acquire)
     }
 
+    pub(crate) fn holder(&self) -> TaskId {
+        self.holder
+    }
+
+    pub(crate) fn region(&self) -> RegionId {
+        self.region
+    }
+
+    /// Move one accepted credit. Region gates precede the credit decision;
+    /// publication remains inside both gates, notification stays outside.
+    pub(crate) fn transfer_to(
+        &self,
+        destination: &Self,
+        claim: impl FnOnce() -> bool,
+        publish: impl FnOnce(),
+    ) -> Result<(), crate::runtime::obligation_mailbox::ObligationTransferError> {
+        use crate::runtime::obligation_mailbox::{
+            ObligationAdmissionError as Admission, ObligationTransferError as Error,
+        };
+        let source = self.inner.upgrade().ok_or(Error::SourceHolderNotLive)?;
+        let target = destination
+            .inner
+            .upgrade()
+            .ok_or(Error::Destination(Admission::RegionClosed))?;
+        let target_state = destination
+            .state
+            .upgrade()
+            .ok_or(Error::Destination(Admission::RegionClosed))?;
+        let validate = |source: &RegionInner, target: &RegionInner, shared: bool| {
+            if !source.obligation_handles_live || !self.live.load(Ordering::Acquire) {
+                return Err(Error::SourceHolderNotLive);
+            }
+            if !target.obligation_handles_live || !target_state.load().can_accept_work() {
+                return Err(Error::Destination(Admission::RegionClosed));
+            }
+            if !destination.live.load(Ordering::Acquire) {
+                return Err(Error::Destination(Admission::HolderNotLive));
+            }
+            if !shared {
+                if let Some(limit) = target.limits.max_obligations {
+                    if target.pending_obligations >= limit {
+                        return Err(Error::Destination(Admission::LimitReached {
+                            limit,
+                            live: target.pending_obligations,
+                        }));
+                    }
+                }
+                target
+                    .pending_obligations
+                    .checked_add(1)
+                    .ok_or(Error::Destination(Admission::CapacityExhausted))?;
+            }
+            target
+                .unapplied_obligations
+                .checked_add(1)
+                .ok_or(Error::Destination(Admission::CapacityExhausted))?;
+            Ok(())
+        };
+        if Arc::ptr_eq(&source, &target) {
+            let mut inner = source.write();
+            validate(&inner, &inner, true)?;
+            if !claim() {
+                return Err(Error::SourceResolved);
+            }
+            inner.unapplied_obligations += 1;
+            publish();
+            return Ok(());
+        }
+        // Equal IDs with distinct storage are not identities in one runtime.
+        if self.region == destination.region {
+            return Err(Error::DifferentRuntime);
+        }
+        let (mut source, mut target) = if self.region < destination.region {
+            let source = source.write();
+            let target = target.write();
+            (source, target)
+        } else {
+            let target = target.write();
+            let source = source.write();
+            (source, target)
+        };
+        validate(&source, &target, false)?;
+        if !claim() {
+            return Err(Error::SourceResolved);
+        }
+        target.pending_obligations += 1;
+        target.unapplied_obligations += 1;
+        source.pending_obligations = source
+            .pending_obligations
+            .checked_sub(1)
+            .expect("handoff releases one accepted source credit");
+        publish();
+        Ok(())
+    }
+
     /// `publish` must contain only ownership setup and queue publication. In
     /// particular it must not notify, trace, drop user values, or acquire a
     /// runtime/table/primitive lock. Revocation cannot pass a published credit.

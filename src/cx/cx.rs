@@ -1508,6 +1508,29 @@ impl<Caps> Cx<Caps> {
             .map(Some)
     }
 
+    pub(crate) fn obligation_transfer_destination(
+        &self,
+    ) -> Result<
+        (
+            &Arc<crate::runtime::obligation_mailbox::ObligationGateway>,
+            &Arc<crate::record::region::ObligationAdmissionHandle>,
+        ),
+        crate::runtime::obligation_mailbox::ObligationAdmissionError,
+    > {
+        use crate::runtime::obligation_mailbox::ObligationAdmissionError as Error;
+        let gateway = self
+            .handles
+            .obligation_gateway
+            .as_ref()
+            .ok_or(Error::RuntimeUnavailable)?;
+        let admission = self
+            .handles
+            .obligation_admission
+            .as_ref()
+            .ok_or(Error::HolderNotLive)?;
+        Ok((gateway, admission))
+    }
+
     /// Mint a runtime-tracked obligation of `kind` held by `holder` in this
     /// context's region (br-asupersync-bi2462.13).
     ///

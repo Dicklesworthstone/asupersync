@@ -1176,6 +1176,8 @@ struct ObligationSettleReads {
 /// position; the guard-held completion arm buffers them for post-release
 /// dispatch — the twin of [`RegionLifecycleEffect`].
 pub(crate) enum ObligationLifecycleEffect {
+    /// Actual ownership projection; no synthetic reserve/terminal event.
+    Handoff { message: String, now: Time },
     /// Validator registration + Reserve transition, span/log, trace event,
     /// metrics, and both epoch advances for a freshly minted obligation.
     Reserve {
@@ -4902,27 +4904,25 @@ impl RuntimeState {
             return;
         }
 
-        let new_leaks: Vec<LeakedObligationInfo> = {
-            let table = obligations.resolve_ref(&self.obligations);
-            error
-                .leaks
-                .iter()
-                .filter(|leak| {
-                    table
-                        .get(leak.id.arena_index())
-                        .is_some_and(ObligationRecord::is_pending)
-                        && !self.in_flight_leak_ids.contains(&leak.id)
-                        && self
-                            .admitted_obligations
-                            .get(&leak.id)
-                            .is_none_or(|credit| {
-                                credit.claim_resolution(ObligationResolution::Leak)
-                                    == ObligationResolution::Leak
-                            })
-                })
-                .cloned()
-                .collect()
-        };
+        let mut new_leaks = Vec::new();
+        for leak in &error.leaks {
+            if !self.in_flight_leak_ids.contains(&leak.id)
+                && matches!(
+                    self.claim_obligation_resolution_in(
+                        regions,
+                        tasks,
+                        obligations,
+                        effects,
+                        leak.id,
+                        Some(leak.holder),
+                        ObligationResolution::Leak,
+                    ),
+                    Ok(Some(ObligationResolution::Leak))
+                )
+            {
+                new_leaks.push(leak.clone());
+            }
+        }
 
         if new_leaks.is_empty() {
             return;
@@ -5102,12 +5102,11 @@ impl RuntimeState {
     #[allow(clippy::result_large_err)]
     pub(crate) fn apply_obligation_post_from_dispatch_table(
         &mut self,
-        post: crate::runtime::obligation_mailbox::ObligationPost,
+        request: crate::runtime::obligation_mailbox::QueuedObligationPost,
         obligation: Option<ObligationId>,
         dispatch_tasks: Option<&Arc<crate::sync::ContendedMutex<TaskTable>>>,
-        admission: Option<Arc<crate::runtime::obligation_mailbox::AdmittedObligation>>,
     ) -> Result<Option<ObligationId>, Error> {
-        use crate::runtime::obligation_mailbox::ObligationOp;
+        use crate::runtime::obligation_mailbox::{ObligationOp, QueuedObligationPost};
         let mut deferred = Vec::new();
         let result = {
             let shards = self.shard_tables.clone();
@@ -5131,60 +5130,149 @@ impl RuntimeState {
             };
             let mut regions = AdmissionRegionTarget::Embedded;
             let mut effects = LifecycleEffectsSink::Buffered(&mut deferred);
-            match post.op {
-                ObligationOp::Reserve => self
-                    .create_obligation_in(
-                        &regions,
+            match request {
+                QueuedObligationPost::Handoff { .. } => {
+                    let id = obligation
+                        .ok_or_else(|| Error::new(ErrorKind::ObligationAlreadyResolved))?;
+                    self.project_obligation_handoff_in(
+                        &mut regions,
                         &tasks,
                         &mut obligations,
                         &mut effects,
-                        post.kind,
-                        post.holder,
-                        post.region,
-                        None,
-                        admission,
-                        false,
+                        id,
                     )
-                    .map(Some),
-                ObligationOp::Commit | ObligationOp::Abort | ObligationOp::Leak => {
-                    let id = obligation
-                        .ok_or_else(|| Error::new(ErrorKind::ObligationAlreadyResolved))?;
-                    match post.op {
-                        ObligationOp::Commit => self
-                            .commit_obligation_in(
-                                &mut regions,
-                                &tasks,
-                                &mut obligations,
-                                &mut effects,
-                                id,
-                            )
-                            .map(|_| None),
-                        ObligationOp::Abort => self
-                            .abort_obligation_in(
-                                &mut regions,
-                                &tasks,
-                                &mut obligations,
-                                &mut effects,
-                                id,
-                                post.abort_reason,
-                            )
-                            .map(|_| None),
-                        ObligationOp::Leak => self
-                            .report_obligation_leak_in(
-                                &mut regions,
-                                &tasks,
-                                &mut obligations,
-                                &mut effects,
-                                id,
-                            )
-                            .map(|()| None),
-                        ObligationOp::Reserve => unreachable!("handled reserve above"),
-                    }
+                    .map(|()| None)
                 }
+                QueuedObligationPost::Operation { post, admission } => match post.op {
+                    ObligationOp::Reserve => self
+                        .create_obligation_in(
+                            &regions,
+                            &tasks,
+                            &mut obligations,
+                            &mut effects,
+                            post.kind,
+                            post.holder,
+                            post.region,
+                            None,
+                            admission,
+                            false,
+                        )
+                        .map(Some),
+                    ObligationOp::Commit | ObligationOp::Abort | ObligationOp::Leak => {
+                        let id = obligation
+                            .ok_or_else(|| Error::new(ErrorKind::ObligationAlreadyResolved))?;
+                        match post.op {
+                            ObligationOp::Commit => self
+                                .commit_obligation_in(
+                                    &mut regions,
+                                    &tasks,
+                                    &mut obligations,
+                                    &mut effects,
+                                    id,
+                                )
+                                .map(|_| None),
+                            ObligationOp::Abort => self
+                                .abort_obligation_in(
+                                    &mut regions,
+                                    &tasks,
+                                    &mut obligations,
+                                    &mut effects,
+                                    id,
+                                    post.abort_reason,
+                                )
+                                .map(|_| None),
+                            ObligationOp::Leak => self
+                                .report_obligation_leak_in(
+                                    &mut regions,
+                                    &tasks,
+                                    &mut obligations,
+                                    &mut effects,
+                                    id,
+                                )
+                                .map(|()| None),
+                            ObligationOp::Reserve => unreachable!("handled reserve above"),
+                        }
+                    }
+                },
             }
         };
         self.dispatch_lifecycle_effects(deferred);
         result
+    }
+
+    /// Apply one accepted successor once, preserving the original arena ID.
+    /// One receipt cannot chase an unbounded stream of concurrent transfers.
+    /// Callers already own A/C targets. Admission gates never acquire them.
+    #[allow(clippy::result_large_err)]
+    fn project_obligation_handoff_in(
+        &mut self,
+        regions: &mut AdmissionRegionTarget<'_>,
+        tasks: &AdmissionTaskTarget<'_>,
+        obligations: &mut CompletionObligationTarget<'_>,
+        effects: &mut LifecycleEffectsSink<'_>,
+        obligation: ObligationId,
+    ) -> Result<(), Error> {
+        let Some(source) = self.admitted_obligations.get(&obligation).cloned() else {
+            return Ok(());
+        };
+        let Some(destination) = source.successor() else {
+            return Ok(());
+        };
+        let (old_ticket, old_holder, old_region) = source.binding();
+        let (new_ticket, new_holder, new_region) = destination.binding();
+        obligations
+            .resolve_mut(&mut self.obligations)
+            .rebind_pending(obligation, new_holder, new_region)?;
+        destination.bind_ticket(obligation);
+        self.admitted_obligations.insert(obligation, destination);
+        source.finish_application();
+        let message = format!(
+            "obligation_handoff_v1 id={obligation:?} source_ticket={old_ticket} destination_ticket={new_ticket} source_holder={old_holder:?} destination_holder={new_holder:?} source_region={old_region:?} destination_region={new_region:?}"
+        );
+        let now = self.current_runtime_time();
+        self.emit_obligation_lifecycle_effect(
+            effects,
+            ObligationLifecycleEffect::Handoff { message, now },
+        );
+        // The source application barrier is retired only after the arena
+        // and destination ticket agree on the new owner.
+        if old_region != new_region {
+            self.advance_region_state_in(regions, tasks, obligations, effects, old_region);
+        }
+        Ok(())
+    }
+
+    /// Atomically claim the current owner, rechecking after any handoff race.
+    /// `holder` fences completion audits; direct ID-based settlement uses None.
+    #[allow(clippy::too_many_arguments, clippy::result_large_err)]
+    fn claim_obligation_resolution_in(
+        &mut self,
+        regions: &mut AdmissionRegionTarget<'_>,
+        tasks: &AdmissionTaskTarget<'_>,
+        obligations: &mut CompletionObligationTarget<'_>,
+        effects: &mut LifecycleEffectsSink<'_>,
+        obligation: ObligationId,
+        holder: Option<TaskId>,
+        desired: ObligationResolution,
+    ) -> Result<Option<ObligationResolution>, Error> {
+        loop {
+            if let Some(holder) = holder {
+                if obligations
+                    .resolve_ref(&self.obligations)
+                    .get(obligation.arena_index())
+                    .is_none_or(|record| record.holder != holder || !record.is_pending())
+                {
+                    return Ok(None);
+                }
+            }
+            let Some(credit) = self.admitted_obligations.get(&obligation) else {
+                return Ok(Some(desired));
+            };
+            if let Some(winner) = credit.claim_resolution(desired) {
+                return Ok(Some(winner));
+            }
+            self.project_obligation_handoff_in(regions, tasks, obligations, effects, obligation)?;
+        }
     }
 
     /// Core of [`Self::create_obligation`] against explicit table targets
@@ -5390,6 +5478,9 @@ impl RuntimeState {
     /// payloads through exactly the code the embedded shape exercises.
     fn dispatch_obligation_lifecycle_effect(&mut self, effect: ObligationLifecycleEffect) {
         match effect {
+            ObligationLifecycleEffect::Handoff { message, now } => {
+                self.record_trace_event(|seq| TraceEvent::user_trace(seq, now, message));
+            }
             ObligationLifecycleEffect::Reserve {
                 obligation,
                 kind,
@@ -5679,8 +5770,16 @@ impl RuntimeState {
         effects: &mut LifecycleEffectsSink<'_>,
         obligation: ObligationId,
     ) -> Result<u64, Error> {
-        if let Some(credit) = self.admitted_obligations.get(&obligation) {
-            match credit.claim_resolution(ObligationResolution::Commit) {
+        if let Some(winner) = self.claim_obligation_resolution_in(
+            regions,
+            tasks,
+            obligations,
+            effects,
+            obligation,
+            None,
+            ObligationResolution::Commit,
+        )? {
+            match winner {
                 ObligationResolution::Commit => {}
                 ObligationResolution::Abort(reason) => {
                     return self.abort_obligation_in(
@@ -5882,8 +5981,16 @@ impl RuntimeState {
         obligation: ObligationId,
         reason: ObligationAbortReason,
     ) -> Result<u64, Error> {
-        if let Some(credit) = self.admitted_obligations.get(&obligation) {
-            match credit.claim_resolution(ObligationResolution::Abort(reason)) {
+        if let Some(winner) = self.claim_obligation_resolution_in(
+            regions,
+            tasks,
+            obligations,
+            effects,
+            obligation,
+            None,
+            ObligationResolution::Abort(reason),
+        )? {
+            match winner {
                 ObligationResolution::Commit => {
                     return self.commit_obligation_in(
                         regions,
@@ -6075,6 +6182,27 @@ impl RuntimeState {
         effects: &mut LifecycleEffectsSink<'_>,
         obligation: ObligationId,
     ) -> Result<(), Error> {
+        match self.claim_obligation_resolution_in(
+            regions,
+            tasks,
+            obligations,
+            effects,
+            obligation,
+            None,
+            ObligationResolution::Leak,
+        )? {
+            Some(ObligationResolution::Commit) => {
+                return self
+                    .commit_obligation_in(regions, tasks, obligations, effects, obligation)
+                    .map(|_| ());
+            }
+            Some(ObligationResolution::Abort(reason)) => {
+                return self
+                    .abort_obligation_in(regions, tasks, obligations, effects, obligation, reason)
+                    .map(|_| ());
+            }
+            Some(ObligationResolution::Leak) | None => {}
+        }
         let now = self.current_runtime_time();
         let leak = {
             let record = obligations
@@ -6113,8 +6241,16 @@ impl RuntimeState {
         effects: &mut LifecycleEffectsSink<'_>,
         obligation: ObligationId,
     ) -> Result<u64, Error> {
-        if let Some(credit) = self.admitted_obligations.get(&obligation) {
-            match credit.claim_resolution(ObligationResolution::Leak) {
+        if let Some(winner) = self.claim_obligation_resolution_in(
+            regions,
+            tasks,
+            obligations,
+            effects,
+            obligation,
+            None,
+            ObligationResolution::Leak,
+        )? {
+            match winner {
                 ObligationResolution::Commit => {
                     return self.commit_obligation_in(
                         regions,
@@ -7009,6 +7145,18 @@ impl RuntimeState {
             return TaskCompletionEffects::unknown(task_id, &self.task_completion_observer_panics);
         };
 
+        self.revoke_obligation_admission_before_completion(task_id, None);
+        // Preserve legacy receipt timing and already-materialized terminal
+        // timing. Accepted ownership must be materialized before the holder
+        // disappears, including direct calls outside the native scheduler.
+        if self
+            .obligation_gateway
+            .as_ref()
+            .is_some_and(|gateway| gateway.mailbox().has_pending_ownership_projection())
+        {
+            self.drain_obligation_posts_before_completion(None);
+        }
+
         let waiter_count = waiters.len();
         let (owner, completion, close_outcome, observer, retired_cancel_wakers) = {
             let Some(task) = self.task(task_id) else {
@@ -7367,6 +7515,20 @@ impl RuntimeState {
             .resolve_ref(&self.obligations)
             .sorted_pending_ids_for_holder(task_id);
         for ob_id in orphaned {
+            if !matches!(
+                self.claim_obligation_resolution_in(
+                    regions,
+                    tasks,
+                    obligations,
+                    effects,
+                    ob_id,
+                    Some(task_id),
+                    ObligationResolution::Abort(ObligationAbortReason::Cancel),
+                ),
+                Ok(Some(_))
+            ) {
+                continue;
+            }
             let _ = self.abort_obligation_in(
                 regions,
                 tasks,
