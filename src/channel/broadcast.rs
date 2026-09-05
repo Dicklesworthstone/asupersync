@@ -448,7 +448,10 @@ impl<T: Clone> Sender<T> {
         }
 
         let obligation = cx
-            .try_register_obligation_checked(crate::record::ObligationKind::SendPermit, cx.task_id())
+            .try_register_obligation_checked(
+                crate::record::ObligationKind::SendPermit,
+                cx.task_id(),
+            )
             .map_err(|error| CheckedSendError::Admission { error, value: () })?;
         Ok(SendPermit {
             sender: self,
@@ -635,9 +638,7 @@ impl Drop for CheckedSendNotifications {
         let already_panicking = std::thread::panicking();
         let mut first_panic = None;
         let mut invoke = |callback: &mut dyn FnMut()| {
-            if let Err(payload) =
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(callback))
-            {
+            if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(callback)) {
                 if already_panicking || first_panic.is_some() {
                     std::mem::forget(payload);
                 } else {
@@ -663,9 +664,15 @@ impl Drop for CheckedSendNotifications {
 }
 
 impl<T: Clone> SendPermit<'_, T> {
-    fn checked_notifications(&mut self, receivers: SmallVec<[Waker; 4]>) -> CheckedSendNotifications {
+    fn checked_notifications(
+        &mut self,
+        receivers: SmallVec<[Waker; 4]>,
+    ) -> CheckedSendNotifications {
         CheckedSendNotifications {
-            obligation: self.obligation.take().and_then(|token| token.commit_deferred().1),
+            obligation: self
+                .obligation
+                .take()
+                .and_then(|token| token.commit_deferred().1),
             receivers,
         }
     }
@@ -696,7 +703,9 @@ impl<T: Clone> SendPermit<'_, T> {
 
     #[inline]
     fn send_impl(mut self, msg: T, final_liveness_action: FinalLivenessAction) -> usize {
-        if !self.checked && let Some(token) = self.obligation.take() {
+        if !self.checked
+            && let Some(token) = self.obligation.take()
+        {
             let _ = token.commit();
         }
         let mut inner = self.sender.channel.inner.lock();
@@ -706,7 +715,9 @@ impl<T: Clone> SendPermit<'_, T> {
         // is waiting to acquire `inner`.
         if self.sender.channel.receiver_count.load(Ordering::Acquire) == 0 {
             drop(inner);
-            let _notifications = self.checked.then(|| self.checked_notifications(SmallVec::new()));
+            let _notifications = self
+                .checked
+                .then(|| self.checked_notifications(SmallVec::new()));
             drop(msg);
             return 0;
         }
@@ -738,7 +749,9 @@ impl<T: Clone> SendPermit<'_, T> {
                 inner.buffer.push_front(slot);
             }
             drop(inner);
-            let _notifications = self.checked.then(|| self.checked_notifications(SmallVec::new()));
+            let _notifications = self
+                .checked
+                .then(|| self.checked_notifications(SmallVec::new()));
             drop(rolled_back);
             return 0;
         }
@@ -1141,6 +1154,377 @@ mod tests {
         fn wake_by_ref(self: &Arc<Self>) {
             self.wakes.fetch_add(1, AtomicOrdering::AcqRel);
         }
+    }
+
+    fn checked_admission_fixture(
+        limit: usize,
+    ) -> (crate::lab::LabRuntime, Cx, crate::runtime::TaskHandle<()>) {
+        let mut lab =
+            crate::lab::LabRuntime::new(crate::lab::LabConfig::new(0x28_c003).max_steps(128));
+        let region = lab.state.create_root_region(Budget::INFINITE);
+        assert!(lab.state.set_region_limits(
+            region,
+            crate::record::region::RegionLimits {
+                max_obligations: Some(limit),
+                ..crate::record::region::RegionLimits::UNLIMITED
+            }
+        ));
+        let (task, handle) = lab
+            .state
+            .create_task(region, Budget::INFINITE, async {})
+            .unwrap();
+        let cx = lab.state.task(task).unwrap().cx.clone().unwrap();
+        (lab, cx, handle)
+    }
+
+    fn finish_checked_admission_fixture(
+        mut lab: crate::lab::LabRuntime,
+        cx: &Cx,
+        mut handle: crate::runtime::TaskHandle<()>,
+        committed: u64,
+        aborted: u64,
+    ) {
+        let region = lab.state.region(cx.region_id()).unwrap();
+        assert_eq!(
+            region.pending_obligations(),
+            0,
+            "quota must settle before draining"
+        );
+        let mailbox = Arc::clone(lab.state.obligation_gateway().unwrap().mailbox());
+        lab.scheduler.lock().schedule(cx.task_id(), 0);
+        let report = lab.run_until_quiescent_with_report();
+        assert!(
+            report.oracle_report.all_passed(),
+            "{:?}",
+            report.oracle_report.failures()
+        );
+        assert!(report.invariant_violations.is_empty());
+        assert!(handle.try_join().unwrap().is_some());
+        let stats = mailbox.stats();
+        assert_eq!(stats.posted, stats.applied);
+        assert_eq!(stats.reserved, committed + aborted);
+        assert_eq!(stats.committed, committed);
+        assert_eq!(stats.aborted, aborted);
+        assert_eq!(stats.refused, 0);
+        assert_eq!(stats.leaked, 0);
+        assert_eq!(mailbox.open_tickets(), 0);
+        assert_eq!(lab.state.pending_obligation_count(), 0);
+        assert_eq!(lab.state.leak_count(), 0);
+        assert_eq!(
+            lab.state
+                .region(cx.region_id())
+                .unwrap()
+                .unapplied_obligation_count(),
+            0
+        );
+    }
+
+    fn checked_panic_notifier<T: Send + 'static>(
+        lab: &crate::lab::LabRuntime,
+        cx: Cx,
+        tx: &Sender<T>,
+        panic_at: usize,
+    ) -> (Cx, Arc<()>, Arc<AtomicUsize>) {
+        let mailbox = Arc::clone(lab.state.obligation_gateway().unwrap().mailbox());
+        let notifications = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&notifications);
+        let channel = Arc::downgrade(&tx.channel);
+        let liveness = Arc::new(());
+        let gateway = Arc::new(crate::runtime::obligation_mailbox::ObligationGateway::new(
+            mailbox,
+            Arc::new(move || {
+                assert!(channel.upgrade().unwrap().inner.try_lock().is_some());
+                assert_ne!(
+                    observed.fetch_add(1, AtomicOrdering::SeqCst),
+                    panic_at,
+                    "planted broadcast obligation notification panic"
+                );
+            }),
+            Arc::downgrade(&liveness),
+        ));
+        (
+            cx.with_obligation_gateway(Some(gateway), None),
+            liveness,
+            notifications,
+        )
+    }
+
+    struct CheckedPanicWaker<T> {
+        channel: std::sync::Weak<Channel<T>>,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl<T: Send + 'static> std::task::Wake for CheckedPanicWaker<T> {
+        fn wake(self: Arc<Self>) {
+            assert!(self.channel.upgrade().unwrap().inner.try_lock().is_some());
+            self.calls.fetch_add(1, AtomicOrdering::SeqCst);
+            panic!("planted broadcast receiver wake panic");
+        }
+    }
+
+    #[test]
+    fn checked_admission_denial_preserves_ring_and_parked_receivers() {
+        use crate::runtime::obligation_mailbox::ObligationAdmissionError;
+        for limit in [0, 1, 3] {
+            let (lab, cx, handle) = checked_admission_fixture(limit);
+            let (tx, mut slow) = channel::<u32>(1);
+            assert_eq!(tx.send(&test_cx(), 11), Ok(1));
+            let mut fast = tx.subscribe();
+            let wakes = CountingWaker::new();
+            let waker = Waker::from(Arc::clone(&wakes));
+            let mut context = Context::from_waker(&waker);
+            let mut receiver = Box::pin(fast.recv(&cx));
+            assert!(receiver.as_mut().poll(&mut context).is_pending());
+            let mut permits = Vec::new();
+            for _ in 0..limit {
+                permits.push(tx.reserve_checked(&cx).unwrap());
+            }
+            let cancellations = tx.telemetry_snapshot(0).cancellation_count;
+            assert_eq!(
+                tx.send_checked(&cx, 17),
+                Err(CheckedSendError::Admission {
+                    error: ObligationAdmissionError::LimitReached { limit, live: limit },
+                    value: 17,
+                })
+            );
+            assert_eq!(tx.channel.inner.lock().total_sent, 1);
+            assert_eq!(tx.channel.inner.lock().wakers.len(), 1);
+            assert_eq!(wakes.wake_count(), 0);
+            assert_eq!(tx.telemetry_snapshot(0).cancellation_count, cancellations);
+            assert_eq!(
+                slow.try_recv(),
+                Ok(11),
+                "denial must not evict the old value"
+            );
+            if let Some(permit) = permits.pop() {
+                assert_eq!(permit.send(23), 2);
+                assert_eq!(wakes.wake_count(), 1);
+                assert!(matches!(
+                    receiver.as_mut().poll(&mut context),
+                    Poll::Ready(Ok(23))
+                ));
+            }
+            drop(receiver);
+            drop(permits);
+            if limit > 0 {
+                // No task poll or mailbox drain: every commit and unsent drop
+                // must already have made its quota available to the next send.
+                for value in 100..165 {
+                    assert_eq!(tx.send_checked(&cx, value), Ok(2));
+                    assert_eq!(fast.try_recv(), Ok(value));
+                }
+            }
+            finish_checked_admission_fixture(
+                lab,
+                &cx,
+                handle,
+                if limit > 0 { 66 } else { 0 },
+                limit.saturating_sub(1) as u64,
+            );
+        }
+    }
+
+    #[test]
+    fn checked_admission_notifier_panic_aborts_before_any_publication() {
+        let (lab, cx, handle) = checked_admission_fixture(1);
+        let (tx, mut rx) = channel::<u32>(1);
+        let (cx, _liveness, notifications) = checked_panic_notifier(&lab, cx, &tx, 0);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _permit = tx.reserve_checked(&cx).unwrap();
+        }));
+        assert!(
+            result.is_err(),
+            "the admission callback must actually panic"
+        );
+        assert_eq!(notifications.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(tx.channel.inner.lock().total_sent, 0);
+        assert_eq!(rx.try_recv(), Err(TryRecvError::Empty));
+        assert_eq!(tx.send_checked(&cx, 31), Ok(1));
+        assert_eq!(rx.try_recv(), Ok(31));
+        assert_eq!(notifications.load(AtomicOrdering::SeqCst), 3);
+        finish_checked_admission_fixture(lab, &cx, handle, 1, 1);
+    }
+
+    #[test]
+    fn checked_commit_notifier_panic_preserves_fanout_and_later_wakes() {
+        for panic_notifier in [false, true] {
+            let (lab, cx, handle) = checked_admission_fixture(1);
+            let (tx, mut first) = channel::<u32>(2);
+            let mut second = tx.subscribe();
+            let (cx, _liveness, notifications) =
+                checked_panic_notifier(&lab, cx, &tx, if panic_notifier { 1 } else { usize::MAX });
+            let first_calls = Arc::new(AtomicUsize::new(0));
+            let first_waker = Waker::from(Arc::new(CheckedPanicWaker {
+                channel: Arc::downgrade(&tx.channel),
+                calls: Arc::clone(&first_calls),
+            }));
+            let second_calls = CountingWaker::new();
+            let second_waker = Waker::from(Arc::clone(&second_calls));
+            let mut first_context = Context::from_waker(&first_waker);
+            let mut second_context = Context::from_waker(&second_waker);
+            let mut first_recv = Box::pin(first.recv(&cx));
+            let mut second_recv = Box::pin(second.recv(&cx));
+            assert!(first_recv.as_mut().poll(&mut first_context).is_pending());
+            assert!(second_recv.as_mut().poll(&mut second_context).is_pending());
+            assert_eq!(tx.channel.inner.lock().wakers.len(), 2);
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                tx.send_checked(&cx, 41).unwrap();
+            }));
+            let payload = result.expect_err("the planted callback must execute");
+            if panic_notifier {
+                assert!(payload.downcast_ref::<String>().is_some_and(|text| {
+                    text.contains("planted broadcast obligation notification panic")
+                }));
+            } else {
+                assert_eq!(
+                    payload.downcast_ref::<&str>(),
+                    Some(&"planted broadcast receiver wake panic")
+                );
+            }
+            assert_eq!(notifications.load(AtomicOrdering::SeqCst), 2);
+            assert_eq!(first_calls.load(AtomicOrdering::SeqCst), 1);
+            assert_eq!(second_calls.wake_count(), 1);
+            assert_eq!(tx.channel.inner.lock().wakers.len(), 0);
+            assert!(matches!(
+                first_recv.as_mut().poll(&mut first_context),
+                Poll::Ready(Ok(41))
+            ));
+            assert!(matches!(
+                second_recv.as_mut().poll(&mut second_context),
+                Poll::Ready(Ok(41))
+            ));
+            drop(first_recv);
+            drop(second_recv);
+            assert_eq!(tx.send_checked(&cx, 43), Ok(2));
+            assert_eq!(first.try_recv(), Ok(43));
+            assert_eq!(second.try_recv(), Ok(43));
+            finish_checked_admission_fixture(lab, &cx, handle, 2, 0);
+        }
+    }
+
+    #[test]
+    fn checked_permit_drop_notifier_panic_releases_quota() {
+        let (lab, cx, handle) = checked_admission_fixture(1);
+        let (tx, mut rx) = channel::<u32>(1);
+        let (cx, _liveness, notifications) = checked_panic_notifier(&lab, cx, &tx, 1);
+        let permit = tx.reserve_checked(&cx).unwrap();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(permit)));
+        assert!(result.is_err(), "the abort notifier must execute");
+        assert_eq!(notifications.load(AtomicOrdering::SeqCst), 2);
+        assert_eq!(tx.channel.inner.lock().total_sent, 0);
+        assert_eq!(rx.try_recv(), Err(TryRecvError::Empty));
+        assert_eq!(tx.send_checked(&cx, 47), Ok(1));
+        assert_eq!(rx.try_recv(), Ok(47));
+        finish_checked_admission_fixture(lab, &cx, handle, 1, 1);
+    }
+
+    #[derive(Debug, Clone)]
+    struct CheckedPanicPayload {
+        value: u32,
+        armed: Arc<AtomicBool>,
+        channel: std::sync::Weak<Channel<Self>>,
+    }
+
+    impl Drop for CheckedPanicPayload {
+        fn drop(&mut self) {
+            if self.armed.swap(false, AtomicOrdering::SeqCst) {
+                assert!(self.channel.upgrade().unwrap().inner.try_lock().is_some());
+                panic!("planted broadcast eviction drop panic");
+            }
+        }
+    }
+
+    #[test]
+    fn checked_eviction_panic_keeps_primary_panic_and_wakes_all_receivers() {
+        let (lab, cx, handle) = checked_admission_fixture(1);
+        let (tx, mut slow) = channel::<CheckedPanicPayload>(1);
+        assert_eq!(
+            tx.send(
+                &test_cx(),
+                CheckedPanicPayload {
+                    value: 51,
+                    armed: Arc::new(AtomicBool::new(true)),
+                    channel: Arc::downgrade(&tx.channel),
+                }
+            )
+            .unwrap(),
+            1
+        );
+        let mut first = tx.subscribe();
+        let mut second = tx.subscribe();
+        let (cx, _liveness, notifications) = checked_panic_notifier(&lab, cx, &tx, 1);
+        let first_calls = Arc::new(AtomicUsize::new(0));
+        let first_waker = Waker::from(Arc::new(CheckedPanicWaker {
+            channel: Arc::downgrade(&tx.channel),
+            calls: Arc::clone(&first_calls),
+        }));
+        let second_calls = CountingWaker::new();
+        let second_waker = Waker::from(Arc::clone(&second_calls));
+        let mut first_context = Context::from_waker(&first_waker);
+        let mut second_context = Context::from_waker(&second_waker);
+        let mut first_recv = Box::pin(first.recv(&cx));
+        let mut second_recv = Box::pin(second.recv(&cx));
+        assert!(first_recv.as_mut().poll(&mut first_context).is_pending());
+        assert!(second_recv.as_mut().poll(&mut second_context).is_pending());
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            tx.send_checked(
+                &cx,
+                CheckedPanicPayload {
+                    value: 53,
+                    armed: Arc::new(AtomicBool::new(false)),
+                    channel: Arc::downgrade(&tx.channel),
+                },
+            )
+            .unwrap();
+        }));
+        let payload = result.expect_err("the evicted payload destructor must execute");
+        assert_eq!(
+            payload.downcast_ref::<&str>(),
+            Some(&"planted broadcast eviction drop panic")
+        );
+        assert_eq!(notifications.load(AtomicOrdering::SeqCst), 2);
+        assert_eq!(first_calls.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(second_calls.wake_count(), 1);
+        assert!(
+            matches!(first_recv.as_mut().poll(&mut first_context), Poll::Ready(Ok(value)) if value.value == 53)
+        );
+        assert!(
+            matches!(second_recv.as_mut().poll(&mut second_context), Poll::Ready(Ok(value)) if value.value == 53)
+        );
+        assert!(matches!(slow.try_recv(), Err(TryRecvError::Lagged(1))));
+        assert_eq!(slow.try_recv().unwrap().value, 53);
+        finish_checked_admission_fixture(lab, &cx, handle, 1, 0);
+    }
+
+    #[test]
+    fn checked_send_preserves_stateless_channel_errors_and_zero_receiver_commit() {
+        let cx = test_cx();
+        let (tx, mut rx) = channel::<u32>(1);
+        assert_eq!(tx.send_checked(&cx, 61), Ok(1));
+        assert_eq!(rx.try_recv(), Ok(61));
+        cx.set_cancel_requested(true);
+        assert_eq!(
+            tx.send_checked(&cx, 67),
+            Err(CheckedSendError::Channel(SendError::Cancelled(67)))
+        );
+        cx.set_cancel_requested(false);
+        drop(rx);
+        assert_eq!(
+            tx.send_checked(&cx, 71),
+            Err(CheckedSendError::Channel(SendError::Closed(71)))
+        );
+
+        let (lab, cx, handle) = checked_admission_fixture(1);
+        let (tx, rx) = channel::<u32>(1);
+        let permit = tx.reserve_checked(&cx).unwrap();
+        drop(rx);
+        assert_eq!(permit.send(73), 0);
+        assert_eq!(tx.channel.inner.lock().total_sent, 0);
+        assert!(tx.is_empty());
+        let mut next = tx.subscribe();
+        assert_eq!(tx.send_checked(&cx, 79), Ok(1));
+        assert_eq!(next.try_recv(), Ok(79));
+        finish_checked_admission_fixture(lab, &cx, handle, 2, 0);
     }
 
     #[derive(Debug)]
