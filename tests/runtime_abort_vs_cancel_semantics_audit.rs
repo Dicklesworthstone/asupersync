@@ -2329,3 +2329,370 @@ fn checked_owned_permit_cancellation_and_same_poll_reuse_on_native_current_threa
 fn checked_owned_permit_cancellation_and_same_poll_reuse_on_native_sharded_workers() {
     checked_native_one_quota(true);
 }
+
+#[derive(Clone, Copy, Debug)]
+enum CheckedNativePrimitive {
+    Oneshot,
+    Broadcast,
+    Semaphore,
+}
+
+impl CheckedNativePrimitive {
+    fn obligation_kind(self) -> asupersync::record::ObligationKind {
+        match self {
+            Self::Oneshot | Self::Broadcast => asupersync::record::ObligationKind::SendPermit,
+            Self::Semaphore => asupersync::record::ObligationKind::SemaphorePermit,
+        }
+    }
+
+    async fn assert_refusal(self, cx: &Cx, limit: usize, live: usize) {
+        use asupersync::channel::broadcast;
+        use asupersync::runtime::obligation_mailbox::ObligationAdmissionError;
+        use asupersync::sync::semaphore::CheckedAcquireError;
+
+        let expected = ObligationAdmissionError::LimitReached { limit, live };
+        match self {
+            Self::Oneshot => {
+                let (sender, mut receiver) = oneshot::channel::<u32>();
+                assert!(matches!(
+                    sender.reserve_checked(cx),
+                    Err(oneshot::CheckedSendError::Admission { error, value: () })
+                        if error == expected
+                ));
+                // This consuming API drops its sender on refusal. The receiver
+                // must close without receiving a value or retaining a permit.
+                assert_eq!(receiver.try_recv(), Err(oneshot::TryRecvError::Closed));
+                let (sender, mut receiver) = oneshot::channel();
+                assert_eq!(
+                    sender.send_checked(cx, 101_u32),
+                    Err(oneshot::CheckedSendError::Admission {
+                        error: expected,
+                        value: 101,
+                    })
+                );
+                assert_eq!(receiver.try_recv(), Err(oneshot::TryRecvError::Closed));
+            }
+            Self::Broadcast => {
+                let (sender, mut receiver) = broadcast::channel::<u32>(2);
+                assert!(matches!(
+                    sender.reserve_checked(cx),
+                    Err(broadcast::CheckedSendError::Admission { error, value: () })
+                        if error == expected
+                ));
+                assert_eq!(
+                    sender.send_checked(cx, 103),
+                    Err(broadcast::CheckedSendError::Admission {
+                        error: expected,
+                        value: 103,
+                    })
+                );
+                assert!(sender.is_empty());
+                assert_eq!(receiver.try_recv(), Err(broadcast::TryRecvError::Empty));
+            }
+            Self::Semaphore => {
+                let semaphore = Arc::new(Semaphore::new(2));
+                assert!(matches!(
+                    OwnedSemaphorePermit::try_acquire_checked(Arc::clone(&semaphore), cx, 1),
+                    Err(CheckedAcquireError::Admission(error)) if error == expected
+                ));
+                assert!(matches!(
+                    OwnedSemaphorePermit::acquire_checked(Arc::clone(&semaphore), cx, 1).await,
+                    Err(CheckedAcquireError::Admission(error)) if error == expected
+                ));
+                assert_eq!(semaphore.available_permits(), 2);
+            }
+        }
+    }
+}
+
+async fn park_checked_native_resource<P: Send>(
+    permit: P,
+    cx: Cx,
+    mutex: Arc<Mutex<()>>,
+    context_slot: Arc<std::sync::Mutex<Option<Cx>>>,
+) -> Result<(), LockError> {
+    *context_slot
+        .lock()
+        .expect("publish the real resource holder") = Some(cx.clone());
+    let result = OwnedMutexGuard::lock(mutex, &cx).await.map(drop);
+    drop(permit);
+    result
+}
+
+fn checked_native_other_primitive(sharded: bool, limit: usize, primitive: CheckedNativePrimitive) {
+    use asupersync::channel::broadcast;
+    use asupersync::record::ObligationState;
+    use asupersync::trace::TraceData;
+    use asupersync::types::TaskId;
+
+    let runtime = checked_native_runtime(sharded, limit);
+    let observer = runtime.handle();
+    let parent: Pin<Box<dyn Future<Output = (TaskId, Option<TaskId>)> + Send>> =
+        Box::pin(async move {
+            let cx = Cx::current().expect("actual native checked-admission context");
+            if limit == 0 {
+                primitive.assert_refusal(&cx, 0, 0).await;
+                return (cx.task_id(), None);
+            }
+            assert_eq!(limit, 1);
+            let mutex = Arc::new(Mutex::new(()));
+            let held_lock = mutex.try_lock_owned().expect("hold native parking mutex");
+            let child_mutex = Arc::clone(&mutex);
+            let context_slot = Arc::new(std::sync::Mutex::new(None));
+            let child_slot = Arc::clone(&context_slot);
+            let (oneshot_sender, mut oneshot_receiver) = oneshot::channel::<u32>();
+            let (broadcast_sender, mut broadcast_receiver) = broadcast::channel::<u32>(2);
+            let child_broadcast = broadcast_sender.clone();
+            let semaphore = Arc::new(Semaphore::new(2));
+            let child_semaphore = Arc::clone(&semaphore);
+            let child = cx
+                .spawn(move |child_cx| {
+                    let future: Pin<Box<dyn Future<Output = Result<(), LockError>> + Send>> =
+                        Box::pin(async move {
+                            match primitive {
+                                CheckedNativePrimitive::Oneshot => {
+                                    let permit = oneshot_sender
+                                        .reserve_checked(&child_cx)
+                                        .expect("admit owned oneshot permit");
+                                    park_checked_native_resource(
+                                        permit,
+                                        child_cx,
+                                        child_mutex,
+                                        child_slot,
+                                    )
+                                    .await
+                                }
+                                CheckedNativePrimitive::Broadcast => {
+                                    let permit = child_broadcast
+                                        .reserve_checked(&child_cx)
+                                        .expect("admit broadcast permit");
+                                    park_checked_native_resource(
+                                        permit,
+                                        child_cx,
+                                        child_mutex,
+                                        child_slot,
+                                    )
+                                    .await
+                                }
+                                CheckedNativePrimitive::Semaphore => {
+                                    let permit = OwnedSemaphorePermit::acquire_checked(
+                                        child_semaphore,
+                                        &child_cx,
+                                        1,
+                                    )
+                                    .await
+                                    .expect("admit owned semaphore permit");
+                                    park_checked_native_resource(
+                                        permit,
+                                        child_cx,
+                                        child_mutex,
+                                        child_slot,
+                                    )
+                                    .await
+                                }
+                            }
+                        });
+                    future
+                })
+                .expect("spawn real native resource holder");
+            let started = Instant::now();
+            let retained_cx = loop {
+                let retained = context_slot.lock().expect("read holder context").clone();
+                if let Some(retained) = retained {
+                    let details = observer
+                        .task_inspector(Default::default())
+                        .expect("live inspector")
+                        .inspect_task(retained.task_id());
+                    if mutex.waiters() == 1
+                        && details.as_ref().is_some_and(|task| {
+                            task.obligations.len() == 1
+                                && observer.trace_snapshot().expect("live trace").iter().any(
+                                    |event| {
+                                        matches!(&event.data, TraceData::Obligation {
+                                        obligation, task: holder, kind,
+                                        state: ObligationState::Reserved, ..
+                                    } if *holder == retained.task_id()
+                                        && *kind == primitive.obligation_kind()
+                                        && task.obligations.contains(obligation))
+                                    },
+                                )
+                        })
+                    {
+                        break retained;
+                    }
+                }
+                assert!(
+                    started.elapsed() < Duration::from_secs(5),
+                    "{primitive:?}: actual permit must materialize while the holder is parked"
+                );
+                yield_now().await;
+            };
+            match primitive {
+                CheckedNativePrimitive::Oneshot => {
+                    assert_eq!(
+                        oneshot_receiver.try_recv(),
+                        Err(oneshot::TryRecvError::Empty)
+                    );
+                }
+                CheckedNativePrimitive::Broadcast => {
+                    assert!(broadcast_sender.is_empty());
+                    assert_eq!(
+                        broadcast_receiver.try_recv(),
+                        Err(broadcast::TryRecvError::Empty)
+                    );
+                }
+                CheckedNativePrimitive::Semaphore => assert_eq!(semaphore.available_permits(), 1),
+            }
+            // Fresh physical capacity rules out capacity exhaustion as the cause
+            // of refusal. Both live holders compete for the same region credit.
+            primitive.assert_refusal(&cx, 1, 1).await;
+            let mut child = std::thread::spawn(move || {
+                child.abort();
+                child
+            })
+            .join()
+            .expect("cross-thread cancellation caller");
+            let mut join = std::pin::pin!(child.join(&cx));
+            let started = Instant::now();
+            let result = std::future::poll_fn(|poll_cx| {
+                let result = join.as_mut().poll(poll_cx);
+                if result.is_pending() {
+                    assert!(
+                        started.elapsed() < Duration::from_secs(5),
+                        "{primitive:?}: cancelled parked holder must wake and finish"
+                    );
+                    poll_cx.waker().wake_by_ref();
+                }
+                result
+            })
+            .await;
+            assert_eq!(result, Ok(Err(LockError::Cancelled)));
+            assert_eq!(mutex.waiters(), 0);
+            drop(held_lock);
+            match primitive {
+                CheckedNativePrimitive::Oneshot => {
+                    assert_eq!(
+                        oneshot_receiver.try_recv(),
+                        Err(oneshot::TryRecvError::Closed)
+                    );
+                    // The old one-shot stays closed. Reuse refers to region
+                    // admission credit, exercised by a genuinely new channel.
+                    let (sender, mut receiver) = oneshot::channel();
+                    sender
+                        .reserve_checked(&cx)
+                        .expect("reuse oneshot credit")
+                        .send(107_u32)
+                        .expect("publish checked oneshot payload");
+                    assert_eq!(receiver.try_recv(), Ok(107));
+                }
+                CheckedNativePrimitive::Broadcast => {
+                    assert_eq!(
+                        broadcast_receiver.try_recv(),
+                        Err(broadcast::TryRecvError::Empty)
+                    );
+                    assert_eq!(
+                        broadcast_sender
+                            .reserve_checked(&cx)
+                            .expect("reuse broadcast credit")
+                            .send(109),
+                        1
+                    );
+                    assert_eq!(broadcast_receiver.try_recv(), Ok(109));
+                }
+                CheckedNativePrimitive::Semaphore => {
+                    assert_eq!(semaphore.available_permits(), 2);
+                    let permit =
+                        OwnedSemaphorePermit::try_acquire_checked(Arc::clone(&semaphore), &cx, 1)
+                            .expect("reuse semaphore capacity and admission credit");
+                    assert_eq!(semaphore.available_permits(), 1);
+                    permit.commit();
+                    assert_eq!(semaphore.available_permits(), 2);
+                }
+            }
+            (cx.task_id(), Some(retained_cx.task_id()))
+        });
+    let (parent_id, child_id) = runtime.block_on(runtime.handle().spawn(parent));
+    assert_checked_native_cleanup(&runtime);
+    let mut observed = BTreeMap::new();
+    for event in runtime.trace_snapshot() {
+        if let TraceData::Obligation {
+            obligation,
+            task,
+            kind,
+            state,
+            ..
+        } = event.data
+        {
+            assert_eq!(kind, primitive.obligation_kind());
+            let entry = observed.entry(obligation).or_insert((task, Vec::new()));
+            assert_eq!(entry.0, task);
+            entry.1.push(state);
+        }
+    }
+    assert_eq!(observed.len(), if limit == 0 { 0 } else { 2 });
+    if let Some(child_id) = child_id {
+        let mut holders = BTreeMap::new();
+        for (holder, states) in observed.values() {
+            assert!(
+                holders.insert(*holder, states).is_none(),
+                "one ID per real holder"
+            );
+        }
+        assert_eq!(
+            holders.get(&parent_id).copied(),
+            Some(&vec![ObligationState::Reserved, ObligationState::Committed])
+        );
+        assert_eq!(
+            holders.get(&child_id).copied(),
+            Some(&vec![
+                ObligationState::Reserved,
+                match primitive {
+                    // Returning semaphore capacity fulfils its liability even
+                    // when cancellation caused the guard to be dropped.
+                    CheckedNativePrimitive::Semaphore => ObligationState::Committed,
+                    CheckedNativePrimitive::Oneshot | CheckedNativePrimitive::Broadcast =>
+                        ObligationState::Aborted,
+                },
+            ])
+        );
+    }
+    eprintln!(
+        "{}",
+        serde_json::json!({
+            "bead_id": "asupersync-bi2462.29", "scenario": "native_checked_primitive",
+            "primitive": format!("{primitive:?}"), "sharded": sharded, "limit": limit,
+            "actual_obligation_ids": observed.len(), "runtime_quiescent": runtime.is_quiescent(),
+            "result": "pass"
+        })
+    );
+    assert!(
+        runtime.shutdown_timeout(Duration::from_secs(5)),
+        "native workers must join"
+    );
+}
+
+#[test]
+fn checked_other_primitives_refuse_cancel_and_reuse_on_native_current_thread() {
+    for primitive in [
+        CheckedNativePrimitive::Oneshot,
+        CheckedNativePrimitive::Broadcast,
+        CheckedNativePrimitive::Semaphore,
+    ] {
+        for limit in [0, 1] {
+            checked_native_other_primitive(false, limit, primitive);
+        }
+    }
+}
+
+#[test]
+fn checked_other_primitives_refuse_cancel_and_reuse_on_native_sharded_workers() {
+    for primitive in [
+        CheckedNativePrimitive::Oneshot,
+        CheckedNativePrimitive::Broadcast,
+        CheckedNativePrimitive::Semaphore,
+    ] {
+        for limit in [0, 1] {
+            checked_native_other_primitive(true, limit, primitive);
+        }
+    }
+}

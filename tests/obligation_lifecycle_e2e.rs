@@ -1059,3 +1059,436 @@ fn obligation_commit_records_hold_duration() {
         "obligation_commit_records_hold_duration failed"
     );
 }
+
+/// Exercise public physical primitives from an actually polled Lab task. With
+/// quota two, distinct send/semaphore liabilities remain live across Pending;
+/// every later primitive competes for those same credits. With quota zero,
+/// every operation refuses without publishing a value or retaining capacity.
+#[test]
+fn checked_public_primitives_share_lab_region_quota() {
+    use asupersync::channel::{broadcast, oneshot};
+    use asupersync::runtime::obligation_mailbox::ObligationAdmissionError;
+    use asupersync::sync::semaphore::CheckedAcquireError;
+    use asupersync::sync::{
+        CheckedPoolError, GenericPool, Mutex, OwnedMutexGuard, OwnedSemaphorePermit, PoolConfig,
+        PoolError, Semaphore,
+    };
+    use std::sync::Arc;
+
+    for limit in [0, 2] {
+        let mut lab = LabRuntime::new(LabConfig::new(0x29_0500 + limit as u64).max_steps(256));
+        let root = lab.state.create_root_region(Budget::INFINITE);
+        assert!(lab.state.set_region_limits(
+            root,
+            asupersync::record::RegionLimits {
+                max_obligations: Some(limit),
+                ..asupersync::record::RegionLimits::UNLIMITED
+            }
+        ));
+        let mutex = Arc::new(Mutex::new(()));
+        let held_lock = mutex
+            .try_lock_owned()
+            .expect("hold the actual Lab parking mutex");
+        let task_mutex = Arc::clone(&mutex);
+        let semaphore = Arc::new(Semaphore::new(2));
+        let task_semaphore = Arc::clone(&semaphore);
+        let (mpsc_sender, mut mpsc_receiver) = mpsc::channel::<u32>(2);
+        let observed_mpsc = mpsc_sender.clone();
+        let (broadcast_sender, mut broadcast_receiver) = broadcast::channel::<u32>(2);
+        let observed_broadcast = broadcast_sender.clone();
+        // The factory completes immediately. This case makes no timing or
+        // virtual-clock claim about pool lifetime/timeout policy.
+        let pool = Arc::new(GenericPool::new(
+            || async { Ok::<_, PoolError>(113_u32) },
+            PoolConfig::with_max_size(1).warmup_connections(1),
+        ));
+        let task_pool = Arc::clone(&pool);
+        let (holder, mut handle) = lab
+            .state
+            .create_task(root, Budget::INFINITE, async move {
+                let cx = Cx::current().expect("actual scheduled Lab holder context");
+                assert_eq!(task_pool.warmup().await.unwrap(), 1);
+                let (oneshot_sender, mut oneshot_receiver) = oneshot::channel::<u32>();
+                let held = if limit == 2 {
+                    let send = oneshot_sender
+                        .reserve_checked(&cx)
+                        .expect("first shared credit");
+                    let semaphore =
+                        OwnedSemaphorePermit::acquire_checked(Arc::clone(&task_semaphore), &cx, 1)
+                            .await
+                            .expect("second shared credit of a different kind");
+                    assert_eq!(task_semaphore.available_permits(), 1);
+                    Some((send, semaphore))
+                } else {
+                    assert!(matches!(
+                        oneshot_sender.reserve_checked(&cx),
+                        Err(oneshot::CheckedSendError::Admission {
+                            error: ObligationAdmissionError::LimitReached { limit: 0, live: 0 },
+                            value: (),
+                        })
+                    ));
+                    assert_eq!(
+                        oneshot_receiver.try_recv(),
+                        Err(oneshot::TryRecvError::Closed)
+                    );
+                    None
+                };
+                let expected = ObligationAdmissionError::LimitReached { limit, live: limit };
+                assert_eq!(
+                    mpsc_sender.try_send_checked(&cx, 127),
+                    Err(mpsc::CheckedSendError::Admission {
+                        error: expected,
+                        value: 127
+                    })
+                );
+                assert_eq!(
+                    broadcast_sender.send_checked(&cx, 131),
+                    Err(broadcast::CheckedSendError::Admission {
+                        error: expected,
+                        value: 131
+                    })
+                );
+                assert!(matches!(OwnedSemaphorePermit::try_acquire_checked(
+                Arc::clone(&task_semaphore), &cx, 1,
+            ), Err(CheckedAcquireError::Admission(error)) if error == expected));
+                assert!(matches!(task_pool.acquire_checked(&cx).await,
+                Err(CheckedPoolError::Admission(error)) if error == expected));
+                let stats = task_pool.stats();
+                assert_eq!((stats.active, stats.idle, stats.waiters), (0, 1, 0));
+                assert_eq!(mpsc_receiver.try_recv(), Err(mpsc::RecvError::Empty));
+                assert_eq!(
+                    broadcast_receiver.try_recv(),
+                    Err(broadcast::TryRecvError::Empty)
+                );
+                assert_eq!(
+                    mpsc_sender
+                        .telemetry_snapshot(2905)
+                        .reserved_uncommitted_obligations,
+                    0
+                );
+                if let Some((send, semaphore)) = held {
+                    // The outer test observes these exact physical owners and the
+                    // two materialized arena IDs before it releases the mutex.
+                    drop(OwnedMutexGuard::lock(task_mutex, &cx).await.unwrap());
+                    send.send(137)
+                        .expect("publish the original checked one-shot");
+                    assert_eq!(oneshot_receiver.try_recv(), Ok(137));
+                    assert_eq!(
+                        broadcast_sender
+                            .reserve_checked(&cx)
+                            .expect("reuse released credit for broadcast")
+                            .send(139),
+                        1
+                    );
+                    assert_eq!(broadcast_receiver.try_recv(), Ok(139));
+                    mpsc_sender
+                        .try_reserve_checked(&cx)
+                        .expect("reuse the same credit for MPSC")
+                        .try_send(149)
+                        .unwrap();
+                    assert_eq!(mpsc_receiver.try_recv(), Ok(149));
+                    let mut resource = task_pool
+                        .try_acquire_checked(&cx)
+                        .unwrap()
+                        .expect("reuse the same credit for a physical pool checkout");
+                    assert_eq!(*resource, 113);
+                    *resource = 151;
+                    resource.return_to_pool();
+                    // The original semaphore liability stays live throughout all
+                    // four send/lease operations, then capacity return commits it.
+                    assert_eq!(task_semaphore.available_permits(), 1);
+                    semaphore.commit();
+                    assert_eq!(task_semaphore.available_permits(), 2);
+                }
+                let stats = task_pool.stats();
+                assert_eq!((stats.active, stats.idle, stats.waiters), (0, 1, 0));
+                limit
+            })
+            .expect("create actual Lab task");
+        lab.scheduler.lock().schedule(holder, 0);
+        if limit == 2 {
+            lab.run_until_idle();
+            assert_eq!(mutex.waiters(), 1, "holder reached real Pending");
+            assert!(handle.try_join().unwrap().is_none());
+            assert_eq!(semaphore.available_permits(), 1);
+            assert_eq!(lab.state.pending_obligation_count(), 2);
+            assert!(lab.state.task(holder).is_some(), "holder is still live");
+            let records: Vec<_> = lab
+                .state
+                .obligations
+                .iter()
+                .filter(|(_, record)| record.is_pending())
+                .collect();
+            assert_eq!(records.len(), 2);
+            assert_ne!(records[0].0, records[1].0);
+            assert!(
+                records
+                    .iter()
+                    .all(|(_, record)| record.holder == holder && record.region == root)
+            );
+            assert_eq!(
+                lab.state
+                    .pending_obligation_count_for_kind(ObligationKind::SendPermit),
+                1
+            );
+            assert_eq!(
+                lab.state
+                    .pending_obligation_count_for_kind(ObligationKind::SemaphorePermit),
+                1
+            );
+            let gateway = lab.state.obligation_gateway().unwrap();
+            let mailbox = gateway.mailbox();
+            assert_eq!(mailbox.stats().reserved, 2);
+            assert_eq!(mailbox.stats().committed, 0);
+        }
+        drop(held_lock);
+        let report = lab.run_until_quiescent_with_report();
+        assert!(report.lab_test_passed(), "limit={limit}: {report:?}");
+        assert_eq!(handle.try_join().unwrap(), Some(limit));
+        assert_eq!(mutex.waiters(), 0);
+        assert_eq!(semaphore.available_permits(), 2);
+        assert!(observed_broadcast.is_empty());
+        let physical = observed_mpsc.telemetry_snapshot(2905);
+        assert_eq!(physical.reserved_uncommitted_obligations, 0);
+        assert_eq!(physical.queued_messages, 0);
+        assert_eq!(physical.send_waiter_count, 0);
+        assert_eq!(physical.recv_waiter_count, 0);
+        let gateway = lab.state.obligation_gateway().unwrap();
+        let mailbox = gateway.mailbox();
+        let stats = mailbox.stats();
+        assert_eq!(stats.reserved, if limit == 0 { 0 } else { 5 });
+        assert_eq!(stats.committed, stats.reserved);
+        assert_eq!(stats.aborted, 0);
+        assert_eq!(stats.leaked, 0);
+        assert_eq!(stats.refused, 0);
+        assert_eq!(stats.posted, stats.applied);
+        assert_eq!(mailbox.open_tickets(), 0);
+        assert_eq!(lab.state.pending_obligation_count(), 0);
+        assert_eq!(lab.state.leak_count(), 0);
+        assert!(lab.state.task(holder).is_none(), "actual holder retired");
+        eprintln!(
+            "bead=asupersync-bi2462.29 scenario=checked_public_mixed_lab limit={limit} report={}",
+            report.to_json()
+        );
+    }
+}
+
+/// A normal Rust move can carry physical ownership through a task result, but
+/// it does not transfer the original task's admitted return liability.
+#[test]
+fn checked_owned_permit_outlives_retired_holder_without_reattribution() {
+    use asupersync::channel::oneshot;
+    use asupersync::sync::{OwnedSemaphorePermit, Semaphore};
+    use asupersync::trace::{TraceData, TraceEventKind};
+    use std::sync::Arc;
+
+    #[derive(Debug)]
+    enum PhysicalPermit {
+        Oneshot(oneshot::SendPermit<u32>),
+        Semaphore(OwnedSemaphorePermit),
+    }
+
+    for oneshot_case in [true, false] {
+        // This test deliberately violates the holder-lifetime contract. Keep
+        // normal leak diagnosis enabled, but collect its exact failed report
+        // instead of stopping at the runtime's configured panic response.
+        let mut lab = LabRuntime::new(
+            LabConfig::new(0x29_0610 + u64::from(oneshot_case))
+                .max_steps(128)
+                .panic_on_leak(false),
+        );
+        let root = lab.state.create_root_region(Budget::INFINITE);
+        assert!(lab.state.set_region_limits(
+            root,
+            asupersync::record::RegionLimits {
+                max_obligations: Some(1),
+                ..asupersync::record::RegionLimits::UNLIMITED
+            },
+        ));
+        let (sender, mut receiver) = oneshot::channel::<u32>();
+        let semaphore = Arc::new(Semaphore::new(1));
+        let task_semaphore = Arc::clone(&semaphore);
+        let (holder, mut handle) = lab
+            .state
+            .create_task(root, Budget::INFINITE, async move {
+                let cx = Cx::current().expect("actual scheduled permit owner");
+                let permit = if oneshot_case {
+                    PhysicalPermit::Oneshot(sender.reserve_checked(&cx).unwrap())
+                } else {
+                    let permit = OwnedSemaphorePermit::acquire_checked(task_semaphore, &cx, 1)
+                        .await
+                        .unwrap();
+                    assert_eq!(permit.count(), 1);
+                    PhysicalPermit::Semaphore(permit)
+                };
+                // Return the actual owned wrapper through the runtime's result
+                // slot. No explicit token handoff or new holder is introduced.
+                (cx.task_id(), cx.region_id(), permit)
+            })
+            .expect("create scheduled owner");
+        lab.scheduler.lock().schedule(holder, 0);
+        let retained_report = lab.run_until_quiescent_with_report();
+        assert!(retained_report.steps_total > 0);
+        let (returned_holder, returned_region, permit) = handle
+            .try_join()
+            .expect("original task completed normally")
+            .expect("real task result retains the physical permit");
+        assert_eq!((returned_holder, returned_region), (holder, root));
+        assert!(
+            lab.state.task(holder).is_none(),
+            "original owner is retired"
+        );
+        assert_eq!(lab.state.tasks_iter().count(), 0);
+
+        let kind = if oneshot_case {
+            ObligationKind::SendPermit
+        } else {
+            ObligationKind::SemaphorePermit
+        };
+        let records: Vec<_> = lab.state.obligations_iter().collect();
+        assert_eq!(records.len(), 1, "one original admitted liability");
+        let record = records[0].1;
+        let id = record.id;
+        assert_eq!(
+            (record.holder, record.region, record.kind, record.state),
+            (holder, root, kind, ObligationState::Leaked),
+        );
+        assert_eq!(lab.state.leak_count(), 1);
+        assert_eq!(lab.state.pending_obligation_count(), 0);
+        let region = lab.state.region(root).unwrap();
+        assert_eq!(region.task_count(), 0);
+        assert_eq!(region.pending_obligations(), 0);
+        assert_eq!(region.unapplied_obligation_count(), 0);
+        let mailbox = Arc::clone(lab.state.obligation_gateway().unwrap().mailbox());
+        let before_drop = mailbox.stats();
+        assert_eq!(before_drop.reserved, 1);
+        assert_eq!(before_drop.posted, 1);
+        assert_eq!(before_drop.applied, 1);
+        assert_eq!(before_drop.committed, 0);
+        assert_eq!(before_drop.aborted, 0);
+        // Completion diagnosed the leak directly; no wrapper-originated Leak
+        // receipt was fabricated to inflate these queue-application counters.
+        assert_eq!(before_drop.leaked, 0);
+        assert_eq!(before_drop.refused, 0);
+        assert_eq!(mailbox.open_tickets(), 0);
+        assert!(mailbox.is_empty());
+
+        let history = |lab: &LabRuntime| {
+            lab.state
+                .trace_handle()
+                .snapshot()
+                .into_iter()
+                .filter_map(|event| match event.data {
+                    TraceData::Obligation {
+                        obligation,
+                        task,
+                        region,
+                        kind,
+                        state,
+                        ..
+                    } => Some((obligation, task, region, kind, event.kind, state)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        let expected_history = vec![
+            (
+                id,
+                holder,
+                root,
+                kind,
+                TraceEventKind::ObligationReserve,
+                ObligationState::Reserved,
+            ),
+            (
+                id,
+                holder,
+                root,
+                kind,
+                TraceEventKind::ObligationLeak,
+                ObligationState::Leaked,
+            ),
+        ];
+        assert_eq!(history(&lab), expected_history);
+
+        match &permit {
+            PhysicalPermit::Oneshot(permit) => {
+                assert!(oneshot_case);
+                assert_eq!(receiver.try_recv(), Err(oneshot::TryRecvError::Empty));
+                assert_eq!(
+                    permit
+                        .telemetry_snapshot(2906)
+                        .reserved_uncommitted_obligations,
+                    1
+                );
+            }
+            PhysicalPermit::Semaphore(permit) => {
+                assert!(!oneshot_case);
+                assert_eq!(permit.count(), 1);
+                assert_eq!(semaphore.available_permits(), 0);
+            }
+        }
+        drop(permit);
+        if oneshot_case {
+            assert_eq!(receiver.try_recv(), Err(oneshot::TryRecvError::Closed));
+            let physical = receiver.telemetry_snapshot(2906);
+            assert_eq!(physical.reserved_uncommitted_obligations, 0);
+            assert_eq!(physical.queued_messages, 0);
+            assert_eq!(physical.send_waiter_count, 0);
+            assert_eq!(physical.recv_waiter_count, 0);
+        } else {
+            assert_eq!(semaphore.available_permits(), 1);
+            assert_eq!(semaphore.telemetry_snapshot(2906).waiter_count, 0);
+        }
+        let released_report = lab.run_until_quiescent_with_report();
+        assert_eq!(
+            mailbox.stats(),
+            before_drop,
+            "late physical cleanup cannot resolve the diagnosed liability twice"
+        );
+        assert_eq!(history(&lab), expected_history);
+        assert_eq!(
+            lab.state.obligation(id).unwrap().state,
+            ObligationState::Leaked
+        );
+        assert_eq!(lab.state.obligations_iter().count(), 1);
+        assert_eq!(lab.state.pending_obligation_count(), 0);
+        assert_eq!(lab.state.leak_count(), 1);
+        assert_eq!(lab.state.tasks_iter().count(), 0);
+
+        for (stage, report) in [
+            ("physically_retained", retained_report),
+            ("physically_released", released_report),
+        ] {
+            eprintln!(
+                "bead=asupersync-bi2462.29 scenario=owned_permit_outlives_holder oneshot={oneshot_case} stage={stage} holder={holder:?} region={root:?} obligation={id:?} expected_violation=original_holder_liability stats={before_drop:?} history={expected_history:?} report={}",
+                report.to_json(),
+            );
+            assert!(
+                report.quiescent,
+                "actual task and runtime credit cleanup completed"
+            );
+            assert!(!report.refinement_firewall_skipped_due_to_trace_truncation);
+            let leak = report
+                .oracle_report
+                .entry("obligation_leak")
+                .expect("maintained obligation oracle");
+            assert!(
+                !leak.passed,
+                "a deliberate owner-lifetime violation cannot pass its actual oracle: {stage} {report:?}"
+            );
+            assert!(leak.violation.is_some());
+            assert_eq!(leak.stats.entities_tracked, 1);
+            assert!(
+                !report.lab_test_passed(),
+                "physical release cannot erase the diagnosed violation"
+            );
+            assert!(
+                report
+                    .invariant_violations
+                    .iter()
+                    .any(|failure| failure == "oracle:obligation_leak")
+            );
+        }
+    }
+}

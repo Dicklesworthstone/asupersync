@@ -7,11 +7,267 @@
 #
 # Usage:
 #   bash scripts/test_obligation_cleanup_e2e.sh [test_filter]
+#   bash scripts/test_obligation_cleanup_e2e.sh --checked-admission \
+#     --base FULL_COMMIT_SHA --overlay-path src/owned.rs [--overlay-path ...]
+#   Use --no-overlay instead of overlay paths for a committed candidate.
+#   Optional --features CSV defaults to test-internals,channel-mpsc-select-e2e.
+#   CHECKED_ADMISSION_BUILD_JOBS defaults to 8. CHECKED_ADMISSION_CARGO_HOME
+#   (or CARGO_HOME) is forwarded to each remote Cargo command when supplied.
+#   Checked mode preserves the legacy cleanup routes below and runs native,
+#   lifecycle and public-channel stages against one explicitly selected source.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+
+checked_selection_json() {
+    local files='[]' path digest mode
+    for path in "${CHECKED_OVERLAYS[@]}"; do
+        [[ -f "$PROJECT_ROOT/$path" && ! -L "$PROJECT_ROOT/$path" ]] || return 86
+        digest=$(sha256sum -- "$PROJECT_ROOT/$path") || return 86
+        digest="${digest%% *}"
+        mode=$(stat -c '%a' -- "$PROJECT_ROOT/$path") || return 86
+        files=$(jq -cn --argjson files "$files" --arg path "$path" \
+            --arg sha256 "$digest" --arg mode "$mode" \
+            '$files + [{path:$path,sha256:$sha256,mode:$mode}]') || return 86
+    done
+    jq -cnS --arg base "$CHECKED_BASE" --arg features "$CHECKED_FEATURES" \
+        --arg build_jobs "$CHECKED_BUILD_JOBS" --arg cargo_home "$CHECKED_CARGO_HOME" \
+        --argjson files "$files" \
+        '{base:$base,features:$features,build_jobs:$build_jobs,cargo_home:$cargo_home,
+          overlays:($files|sort_by(.path))}'
+}
+
+checked_finish_summary() {
+    local status=$?
+    trap - EXIT
+    jq -n --arg status "$CHECKED_STATUS" --arg phase "$CHECKED_PHASE" \
+        --argjson exit_code "$status" --arg started "$CHECKED_STARTED" \
+        --arg ended "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        --slurpfile source "$CHECKED_DIR/source-selection.json" \
+        --slurpfile stages "$CHECKED_DIR/stages.ndjson" \
+        '{schema_version:"asupersync.checked_obligation_runner.v1",
+          bead_id:"asupersync-bi2462.29",status:$status,phase:$phase,
+          exit_code:$exit_code,started:$started,ended:$ended,
+          source:$source[0],stages:$stages,
+          source_evidence:"clean-overlay-admission-and-local-selected-file-hashes",
+          worker_content_manifest_verified:false}' > "$CHECKED_DIR/summary.json" || {
+        printf 'FATAL: checked admission summary could not be preserved\n' >&2
+        (( status != 0 )) && exit "$status"
+        exit 86
+    }
+    printf 'Checked admission summary: %s\n' "$CHECKED_DIR/summary.json"
+    exit "$status"
+}
+
+checked_verify_source() {
+    local stage="$1"
+    checked_selection_json > "$CHECKED_DIR/$stage.selection.json" || return 86
+    if ! cmp -s "$CHECKED_DIR/source-selection.json" "$CHECKED_DIR/$stage.selection.json"; then
+        printf 'FATAL: selected source changed at %s\n' "$stage" >&2
+        return 86
+    fi
+}
+
+checked_verify_receipt() {
+    local stage="$1" log="$2" selected terminal source fingerprint
+    selected=$(sed -nE 's/.*Selected worker: ([A-Za-z0-9_.-]+) at .*/\1/p' "$log")
+    terminal=$(sed -nE 's/^\[RCH\] remote ([A-Za-z0-9_.-]+) \([^)]*\)$/\1/p' "$log")
+    [[ "$selected" =~ ^[A-Za-z0-9_.-]+$ && "$terminal" == "$selected" ]] || {
+        printf 'FATAL: %s requires one selected worker and its actual remote terminal\n' "$stage" >&2
+        return 86
+    }
+    if [[ -n "$CHECKED_WORKER" && "$selected" != "$CHECKED_WORKER" ]]; then
+        printf 'FATAL: %s selected a different worker\n' "$stage" >&2
+        return 86
+    fi
+    source=$(sed -nE 's/^\[RCH\] clean-overlay receipt: base=([0-9a-f]{40}) overlay-fingerprint=([0-9a-f]{64})$/\1 \2/p' "$log")
+    [[ "$source" =~ ^[0-9a-f]{40}\ [0-9a-f]{64}$ && "${source%% *}" == "$CHECKED_BASE" ]] || {
+        printf 'FATAL: %s lacks one admitted receipt for the requested base\n' "$stage" >&2
+        return 86
+    }
+    fingerprint="${source##* }"
+    if [[ -n "$CHECKED_OVERLAY_FINGERPRINT" && "$fingerprint" != "$CHECKED_OVERLAY_FINGERPRINT" ]]; then
+        printf 'FATAL: %s overlay fingerprint differs from the native baseline\n' "$stage" >&2
+        return 86
+    fi
+    CHECKED_WORKER="$selected"
+    CHECKED_OVERLAY_FINGERPRINT="$fingerprint"
+    # Installed RCH refuses combining clean-overlay and source-content-receipt.
+    # This joins actual admission/terminal evidence and local selected hashes;
+    # it does not claim an independently hashed worker content manifest.
+    jq -cn --arg worker "$selected" --arg base "$CHECKED_BASE" \
+        --arg fingerprint "$fingerprint" \
+        '{worker:$worker,base:$base,overlay_fingerprint:$fingerprint,
+          worker_content_manifest_verified:false}' > "$CHECKED_DIR/$stage.source-receipt.json" || return 86
+}
+
+checked_stage() {
+    local stage="$1" status=0 log
+    shift
+    CHECKED_PHASE="$stage"
+    log="$CHECKED_DIR/$stage.log"
+    checked_verify_source "$stage.before" || return $?
+    printf 'Checked stage %s command:' "$stage"
+    printf ' %q' "$CHECKED_RCH" exec "${CHECKED_SOURCE_ARGS[@]}" -- env "${CHECKED_REMOTE_CARGO_ENV[@]}" \
+        CARGO_TARGET_DIR="$CHECKED_TARGET/$stage" CARGO_INCREMENTAL=0 \
+        CARGO_PROFILE_TEST_DEBUG=0 CARGO_PROFILE_DEV_DEBUG=0 \
+        'RUSTFLAGS=-D warnings -C debuginfo=0' cargo "$@"
+    printf '\n'
+    if RCH_REQUIRE_REMOTE=1 RCH_DISABLE_TARGET_REUSE=1 RCH_VISIBILITY=verbose \
+        RCH_WORKER="$CHECKED_WORKER" RCH_WORKERS='' NO_COLOR=1 \
+        timeout "${CHECKED_STAGE_TIMEOUT:-1800}" "$CHECKED_RCH" --no-color exec \
+        "${CHECKED_SOURCE_ARGS[@]}" -- env "${CHECKED_REMOTE_CARGO_ENV[@]}" \
+        CARGO_TARGET_DIR="$CHECKED_TARGET/$stage" CARGO_INCREMENTAL=0 \
+        CARGO_PROFILE_TEST_DEBUG=0 CARGO_PROFILE_DEV_DEBUG=0 \
+        RUSTFLAGS='-D warnings -C debuginfo=0' cargo "$@" 2>&1 | tee "$log"; then
+        status=0
+    else
+        status=$?
+    fi
+    jq -cn --arg stage "$stage" --arg log "$log" --argjson exit_code "$status" \
+        '{stage:$stage,log:$log,cargo_exit_code:$exit_code,
+          target_reuse_disabled:true}' >> "$CHECKED_DIR/stages.ndjson" || return 86
+    [[ "$status" -eq 0 ]] || return "$status"
+    if rg -q '^\[RCH\] local \(|falling back to local|local fallback|\[rch-ci-fallback\] executing locally:' "$log"; then
+        printf 'FATAL: %s used local fallback\n' "$stage" >&2
+        return 86
+    fi
+    checked_verify_source "$stage.after" || return $?
+    checked_verify_receipt "$stage" "$log" || return $?
+    if [[ "$stage" != public ]]; then
+        rg -q '^test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;' "$log" || {
+            printf 'FATAL: %s must execute a nonzero, unfiltered, unignored test suite\n' "$stage" >&2
+            return 87
+        }
+        if rg -q '^test result: (FAILED|ok\. 0 passed)|^test result:.*[1-9][0-9]* (failed|ignored|filtered out)' "$log"; then
+            printf 'FATAL: %s includes an unsuccessful or incomplete test result\n' "$stage" >&2
+            return 87
+        fi
+    fi
+}
+
+run_checked_admission_mode() {
+    CHECKED_BASE=''
+    CHECKED_FEATURES='test-internals,channel-mpsc-select-e2e'
+    CHECKED_OVERLAYS=()
+    CHECKED_BUILD_JOBS="${CHECKED_ADMISSION_BUILD_JOBS:-8}"
+    CHECKED_CARGO_HOME="${CHECKED_ADMISSION_CARGO_HOME:-${CARGO_HOME:-}}"
+    CHECKED_WORKER="${RCH_WORKER:-}"
+    [[ "$CHECKED_BUILD_JOBS" =~ ^[1-9][0-9]*$ ]] || {
+        printf 'CHECKED_ADMISSION_BUILD_JOBS must be a positive integer\n' >&2; return 86;
+    }
+    CHECKED_REMOTE_CARGO_ENV=()
+    if [[ -n "$CHECKED_CARGO_HOME" ]]; then
+        CHECKED_REMOTE_CARGO_ENV+=("CARGO_HOME=$CHECKED_CARGO_HOME")
+    fi
+    local no_overlay=0 path resolved option
+    shift
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --base|--overlay-path|--features)
+                option="$1"
+                [[ $# -ge 2 ]] || { printf 'Missing value for %s\n' "$1" >&2; return 86; }
+                case "$option" in
+                    --base) CHECKED_BASE="$2" ;;
+                    --features) CHECKED_FEATURES="$2" ;;
+                    --overlay-path) CHECKED_OVERLAYS+=("$2") ;;
+                esac
+                shift 2 ;;
+            --no-overlay) no_overlay=1; shift ;;
+            *) printf 'Unknown checked admission option: %s\n' "$1" >&2; return 86 ;;
+        esac
+    done
+    [[ "$CHECKED_BASE" =~ ^[0-9a-f]{40}$ ]] || { printf 'A full explicit --base commit is required\n' >&2; return 86; }
+    [[ "$CHECKED_FEATURES" =~ ^[a-zA-Z0-9_,-]+$ ]] || return 86
+    [[ ",$CHECKED_FEATURES," == *,test-internals,* && ",$CHECKED_FEATURES," == *,channel-mpsc-select-e2e,* ]] || {
+        printf 'Checked mode requires test-internals and channel-mpsc-select-e2e in --features\n' >&2; return 86;
+    }
+    if (( (no_overlay == 1 && ${#CHECKED_OVERLAYS[@]} != 0) || (no_overlay == 0 && ${#CHECKED_OVERLAYS[@]} == 0) )); then
+        printf 'Select either --no-overlay or explicit --overlay-path files\n' >&2; return 86
+    fi
+    cd "$PROJECT_ROOT"
+    [[ "$(git rev-parse --verify "$CHECKED_BASE^{commit}")" == "$CHECKED_BASE" ]] || return 86
+    [[ "$(git branch --show-current)" == main ]] || return 86
+    for option in jq rg sha256sum stat realpath timeout; do command -v "$option" >/dev/null || return 86; done
+    for path in "${CHECKED_OVERLAYS[@]}"; do
+        [[ "$path" != /* && "$path" != *$'\n'* && "$path" != *$'\r'* && "$path" != *$'\t'* && "/$path/" != */../* && "/$path/" != */./* ]] || return 86
+        resolved=$(realpath --relative-to="$PROJECT_ROOT" -- "$path") || return 86
+        [[ "$resolved" == "$path" && -f "$path" && ! -L "$path" ]] || {
+            printf 'Overlay must name one canonical regular repository file: %s\n' "$path" >&2; return 86;
+        }
+    done
+    CHECKED_RCH=$(command -v "${RCH_BIN:-rch}") || return 86
+    [[ "$(basename "$CHECKED_RCH")" == rch ]] || return 86
+    [[ "$(realpath "$CHECKED_RCH")" != "$PROJECT_ROOT/scripts/rch_ci_fallback.sh" ]] || return 86
+    CHECKED_DIR="${CHECKED_ADMISSION_ARTIFACT_DIR:-$PROJECT_ROOT/target/e2e-results/obligation-cleanup/checked-$(date -u +%Y%m%dT%H%M%S)-$$}"
+    CHECKED_TARGET="${RCH_TARGET_DIR:-${TMPDIR:-/tmp}/rch_target_checked_obligation_journey}"
+    if [[ -e "$CHECKED_DIR" || -L "$CHECKED_DIR" ]]; then
+        printf 'FATAL: evidence directory already exists; preserving %s\n' "$CHECKED_DIR" >&2
+        return 86
+    fi
+    mkdir -p "$(dirname "$CHECKED_DIR")"
+    mkdir "$CHECKED_DIR" || return 86
+    "$CHECKED_RCH" exec --help > "$CHECKED_DIR/rch-capabilities.txt"
+    for option in --base --clean-overlay --overlay-path --no-overlay; do
+        rg -q -- "$option" "$CHECKED_DIR/rch-capabilities.txt" || { printf 'Installed RCH lacks %s\n' "$option" >&2; return 86; }
+    done
+    CHECKED_SOURCE_ARGS=(--base "$CHECKED_BASE" --clean-overlay)
+    if (( no_overlay )); then
+        CHECKED_SOURCE_ARGS+=(--no-overlay)
+    else
+        for path in "${CHECKED_OVERLAYS[@]}"; do CHECKED_SOURCE_ARGS+=(--overlay-path "$path"); done
+    fi
+    checked_selection_json > "$CHECKED_DIR/source-selection.json"
+    : > "$CHECKED_DIR/stages.ndjson"
+    CHECKED_STATUS=failed
+    CHECKED_PHASE=admitted
+    CHECKED_STARTED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    CHECKED_OVERLAY_FINGERPRINT=''
+    trap checked_finish_summary EXIT
+    # Keep every stage on a fresh target: source-inspection tests can otherwise
+    # reuse a stale CARGO_MANIFEST_DIR baked into a pooled-target binary.
+    checked_stage native test --jobs "$CHECKED_BUILD_JOBS" -p asupersync --locked --features "$CHECKED_FEATURES" \
+        --test runtime_abort_vs_cancel_semantics_audit -- --nocapture --test-threads=1 || return $?
+    for option in \
+        abort_repolls_a_mutex_parked_operation_to_graceful_cancellation \
+        abort_repolls_a_capacity_parked_send_to_graceful_cancellation \
+        abort_repolls_a_semaphore_parked_acquire_to_graceful_cancellation \
+        checked_zero_quota_refuses_before_publication_on_native_current_thread \
+        checked_zero_quota_refuses_before_publication_on_native_sharded_workers \
+        checked_owned_permit_cancellation_and_same_poll_reuse_on_native_current_thread \
+        checked_owned_permit_cancellation_and_same_poll_reuse_on_native_sharded_workers \
+        checked_other_primitives_refuse_cancel_and_reuse_on_native_current_thread \
+        checked_other_primitives_refuse_cancel_and_reuse_on_native_sharded_workers; do
+        rg -Fq "test $option ... ok" "$CHECKED_DIR/native.log" || { printf 'Missing native sentinel %s\n' "$option" >&2; return 88; }
+    done
+    checked_stage lifecycle test --jobs "$CHECKED_BUILD_JOBS" -p asupersync --locked --features "$CHECKED_FEATURES" \
+        --test obligation_lifecycle_e2e -- --nocapture --test-threads=1 || return $?
+    rg -Fq 'test checked_public_primitives_share_lab_region_quota ... ok' "$CHECKED_DIR/lifecycle.log" || return 88
+    checked_stage public run --jobs "$CHECKED_BUILD_JOBS" -p asupersync --locked --features "$CHECKED_FEATURES" \
+        --bin channel_mpsc_select_e2e || return $?
+    sed -n 's/^ASUPERSYNC_CHECKED_OBLIGATION_JOURNEY //p' "$CHECKED_DIR/public.log" > "$CHECKED_DIR/public-journey.json"
+    jq -es 'length == 1 and (.[0] |
+        .schema_version == "asupersync.checked_obligation_journey.v1" and
+        .delivered_bytes > 0 and .disconnect_preserved_bytes > 0 and
+        .reserved == 5 and .committed == 2 and .aborted == 3 and
+        .refused == 0 and .leaked == 0 and .pending == 0 and .open_tickets == 0 and
+        .posted == .applied and .finalizers_started == 1 and .finalizers_finished == 1 and
+        .physical_reserved == 0 and .queued_messages == 0 and .send_waiters == 0 and .recv_waiters == 0 and
+        .same_channel_reused_after_close == true and .report.quiescent == true and
+        .report.refinement_firewall.rule_id == null and
+        .report.refinement_firewall.skipped_due_to_trace_truncation == false)
+    ' "$CHECKED_DIR/public-journey.json" >/dev/null || return 89
+    CHECKED_PHASE=complete
+    CHECKED_STATUS=passed
+}
+
+if [[ "${1:-}" == --checked-admission ]]; then
+    run_checked_admission_mode "$@"
+    exit $?
+fi
+
 OUTPUT_DIR="${PROJECT_ROOT}/target/e2e-results/obligation-cleanup"
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 RUN_STARTED_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
