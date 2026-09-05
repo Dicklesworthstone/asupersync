@@ -630,9 +630,9 @@ impl Worker {
                 // Map Outcome<(), ()> to Outcome<(), Error> for record.complete()
                 let mut task_outcome = outcome
                     .map_err(|()| crate::error::Error::new(crate::error::ErrorKind::Internal));
-                if let Some(panic) = retire_terminal_task(
-                    guard.stored.take().expect("completed task storage"),
-                ) {
+                if let Some(panic) =
+                    retire_terminal_task(guard.stored.take().expect("completed task storage"))
+                {
                     if !matches!(task_outcome, crate::types::Outcome::Panicked(_)) {
                         task_outcome = crate::types::Outcome::Panicked(panic);
                     }
@@ -813,9 +813,7 @@ impl Worker {
                 let panic_outcome = self.panic_isolator.panic_to_outcome(&panic_context);
                 // Preserve the original poll panic if retiring its remaining
                 // fields also panics. Field drops still publish their posts.
-                let _ = retire_terminal_task(
-                    guard.stored.take().expect("panicked task storage"),
-                );
+                let _ = retire_terminal_task(guard.stored.take().expect("panicked task storage"));
 
                 // Complete the task with panic outcome (similar to Ready case but with panic outcome)
                 let mut state = self
@@ -1228,6 +1226,323 @@ mod tests {
     use std::sync::{Arc, Barrier};
     use std::thread;
     use std::time::{Duration, Instant};
+
+    #[derive(Clone, Copy, Debug)]
+    enum ObligationCompletionMode {
+        Ready,
+        Error,
+        PollPanic,
+        DropPanic,
+        PollAndDropPanic,
+        RetainedToken,
+    }
+
+    struct CompletionObligationFuture {
+        state: Arc<ContendedMutex<RuntimeState>>,
+        dispatch_tasks: Option<Arc<ContendedMutex<crate::runtime::TaskTable>>>,
+        mode: ObligationCompletionMode,
+        field_permit: Option<crate::channel::oneshot::SendPermit<u8>>,
+        field_receiver: Option<crate::channel::oneshot::Receiver<u8>>,
+        retained: Arc<Mutex<Option<crate::runtime::obligation_mailbox::ObligationToken>>>,
+        observed: Arc<AtomicUsize>,
+        drops: Arc<AtomicUsize>,
+    }
+
+    impl std::future::Future for CompletionObligationFuture {
+        type Output = crate::types::Outcome<(), ()>;
+
+        fn poll(self: std::pin::Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Self::Output> {
+            let this = self.get_mut();
+            let cx = crate::cx::Cx::current().expect("native worker installs its Cx");
+            // 130 real send posts in this one poll exceed the old 64-post
+            // completion drain. Assert delivered values, not only counters.
+            for value in 0..65_u8 {
+                let (sender, mut receiver) = crate::channel::oneshot::channel();
+                sender
+                    .reserve(&cx)
+                    .expect("reserve real send")
+                    .send(value)
+                    .expect("deliver real send");
+                assert_eq!(receiver.try_recv(), Ok(value));
+                this.observed.fetch_add(1, Ordering::SeqCst);
+            }
+            if matches!(this.mode, ObligationCompletionMode::RetainedToken) {
+                *this.retained.lock().unwrap() = Some(
+                    cx.try_register_obligation(
+                        crate::record::ObligationKind::SendPermit,
+                        cx.task_id(),
+                    )
+                    .expect("retain the actual unresolved tail ticket"),
+                );
+            } else {
+                let (sender, receiver) = crate::channel::oneshot::channel();
+                this.field_permit = Some(sender.reserve(&cx).expect("permit field"));
+                this.field_receiver = Some(receiver);
+            }
+            match this.mode {
+                ObligationCompletionMode::PollPanic
+                | ObligationCompletionMode::PollAndDropPanic => {
+                    panic!("obligation completion primary poll panic")
+                }
+                ObligationCompletionMode::Error => Poll::Ready(crate::types::Outcome::Err(())),
+                _ => Poll::Ready(crate::types::Outcome::Ok(())),
+            }
+        }
+    }
+
+    impl Drop for CompletionObligationFuture {
+        fn drop(&mut self) {
+            assert!(
+                self.state.try_lock().is_ok(),
+                "future drop holds no state lock"
+            );
+            if let Some(tasks) = self.dispatch_tasks.as_ref() {
+                assert!(tasks.try_lock().is_ok(), "future drop holds no task shard");
+            }
+            assert!(
+                crate::cx::Cx::current().is_some(),
+                "Cx remains installed during drop"
+            );
+            self.drops.fetch_add(1, Ordering::SeqCst);
+            // Leave the permit in its field: Rust must drop it after this
+            // destructor, including the secondary-panic path below.
+            if matches!(
+                self.mode,
+                ObligationCompletionMode::DropPanic | ObligationCompletionMode::PollAndDropPanic
+            ) {
+                panic!("obligation completion secondary drop panic");
+            }
+        }
+    }
+
+    fn assert_native_obligation_completion(scheduler_mode: u8, mode: ObligationCompletionMode) {
+        use crate::runtime::config::ObligationLeakResponse;
+        use crate::runtime::obligation_mailbox::{ObligationGateway, ObligationMailbox};
+        use crate::runtime::scheduler::three_lane::ThreeLaneScheduler;
+        use crate::runtime::stored_task::StoredTask;
+        use crate::types::{Budget, Outcome};
+
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+        let mailbox = Arc::new(ObligationMailbox::new());
+        let liveness = Arc::new(());
+        let (root, task) = {
+            let mut runtime = state.lock().unwrap();
+            runtime.set_obligation_leak_response(ObligationLeakResponse::Log);
+            runtime.set_obligation_gateway(Arc::new(ObligationGateway::new(
+                mailbox.clone(),
+                Arc::new(|| {}),
+                Arc::downgrade(&liveness),
+            )));
+            let root = runtime.create_root_region(Budget::INFINITE);
+            let task = runtime
+                .create_task(root, Budget::INFINITE, std::future::pending::<()>())
+                .expect("native task infrastructure")
+                .0;
+            (root, task)
+        };
+        let shards = if scheduler_mode == 3 {
+            let mut runtime = state.lock().unwrap();
+            let shards = Arc::new(crate::runtime::ShardedState::new(
+                runtime.trace_handle(),
+                runtime.metrics_provider(),
+                runtime.sharded_construction_config(),
+            ));
+            runtime.install_shard_tables(shards.clone());
+            Some(shards)
+        } else {
+            None
+        };
+        let dispatch_tasks = match scheduler_mode {
+            2 => Some(Arc::new(ContendedMutex::new(
+                "dispatch_tasks",
+                crate::runtime::TaskTable::new(),
+            ))),
+            3 => Some(shards.as_ref().unwrap().task_shard_handle()),
+            _ => None,
+        };
+        let observed = Arc::new(AtomicUsize::new(0));
+        let drops = Arc::new(AtomicUsize::new(0));
+        let retained = Arc::new(Mutex::new(None));
+        {
+            let mut runtime = state.lock().unwrap();
+            runtime.store_spawned_task(
+                task,
+                StoredTask::new(CompletionObligationFuture {
+                    state: state.clone(),
+                    dispatch_tasks: dispatch_tasks.clone(),
+                    mode,
+                    field_permit: None,
+                    field_receiver: None,
+                    retained: retained.clone(),
+                    observed: observed.clone(),
+                    drops: drops.clone(),
+                }),
+            );
+        }
+        if let Some(tasks) = dispatch_tasks.as_ref() {
+            let (record, stored) = {
+                let mut runtime = state.lock().unwrap();
+                let stored = runtime.remove_stored_future(task).unwrap();
+                let record = runtime.remove_task(task).unwrap();
+                (record, stored)
+            };
+            let mut tasks = tasks.lock().unwrap();
+            assert_eq!(TaskId::from_arena(tasks.insert(record)), task);
+            tasks.store_spawned_task(task, stored);
+        }
+        if scheduler_mode == 0 {
+            let worker = Worker::new(
+                0,
+                Vec::new(),
+                Arc::new(GlobalQueue::new()),
+                state.clone(),
+                Arc::new(AtomicBool::new(false)),
+            );
+            thread::spawn(move || worker.execute(task))
+                .join()
+                .expect("native legacy worker survives");
+        } else {
+            let mut scheduler = ThreeLaneScheduler::new_with_options_and_task_table(
+                1,
+                &state,
+                dispatch_tasks.clone(),
+                16,
+                false,
+                32,
+            );
+            let mut worker = scheduler.take_workers().remove(0);
+            thread::spawn(move || worker.execute(task))
+                .join()
+                .expect("native three-lane worker survives");
+        }
+        assert_eq!(observed.load(Ordering::SeqCst), 65);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        let stats = mailbox.stats();
+        assert_eq!(
+            stats.reserved, 66,
+            "mode={scheduler_mode}/{mode:?}, {stats:?}"
+        );
+        assert_eq!(stats.committed, 65, "{stats:?}");
+        assert_eq!(stats.refused, 0, "{stats:?}");
+        assert!(mailbox.is_empty());
+        let runtime = state.lock().unwrap();
+        assert_eq!(runtime.pending_obligation_count(), 0);
+        assert!(runtime.task(task).is_none());
+        if let Some(tasks) = dispatch_tasks.as_ref() {
+            assert!(tasks.lock().unwrap().task(task).is_none());
+        }
+        let outcome = runtime
+            .region(root)
+            .unwrap()
+            .close_outcome()
+            .expect("completion attributed to region");
+        match mode {
+            ObligationCompletionMode::Error => assert!(matches!(outcome, Outcome::Err(_))),
+            ObligationCompletionMode::PollPanic | ObligationCompletionMode::PollAndDropPanic => {
+                assert!(
+                    matches!(outcome, Outcome::Panicked(ref p) if p.message().contains("primary poll panic")),
+                    "{outcome:?}"
+                );
+            }
+            ObligationCompletionMode::DropPanic => {
+                assert!(
+                    matches!(outcome, Outcome::Panicked(ref p) if p.message().contains("secondary drop panic")),
+                    "{outcome:?}"
+                );
+            }
+            _ => assert!(matches!(outcome, Outcome::Ok(())), "{outcome:?}"),
+        }
+        if matches!(mode, ObligationCompletionMode::RetainedToken) {
+            let retained = retained.lock().unwrap();
+            let token = retained
+                .as_ref()
+                .expect("actual tail token retained across completion");
+            assert_eq!(token.holder(), task);
+            assert_eq!(token.region(), root);
+            assert_eq!(token.ticket(), 65);
+            assert_eq!(stats.posted, 131);
+            assert_eq!(stats.applied, 131);
+            assert_eq!(stats.aborted, 0);
+            assert_eq!(
+                runtime.leak_count(),
+                1,
+                "tail leak must be attributed at completion"
+            );
+            assert_eq!(
+                mailbox.open_tickets(),
+                1,
+                "late ticket reconciliation remains full .28 work"
+            );
+            let assert_tail = |obligations: &crate::runtime::ObligationTable| {
+                let leaked: Vec<_> = obligations
+                    .iter()
+                    .filter(|(_, record)| record.is_leaked())
+                    .collect();
+                assert_eq!(leaked.len(), 1);
+                assert_eq!(leaked[0].1.holder, task);
+                assert_eq!(leaked[0].1.region, root);
+            };
+            if let Some(shards) = shards.as_ref() {
+                assert_tail(&shards.obligations.lock().unwrap());
+            } else {
+                assert_tail(&runtime.obligations);
+            }
+        } else {
+            assert_eq!(stats.posted, 132);
+            assert_eq!(stats.applied, 132);
+            assert_eq!(stats.aborted, 1, "field permit drops as normal abort");
+            assert_eq!(stats.leaked, 0);
+            assert_eq!(runtime.leak_count(), 0);
+            assert_eq!(mailbox.open_tickets(), 0);
+            assert_eq!(
+                runtime
+                    .region(root)
+                    .unwrap()
+                    .pending_obligation_post_count(),
+                0
+            );
+        }
+        eprintln!(
+            "native obligation completion scheduler={scheduler_mode} outcome={mode:?} task={task:?} region={root:?} delivered=65 drops=1 stats={stats:?}"
+        );
+        drop(runtime);
+        // The retained-token negative deliberately leaves late reconciliation
+        // outside this repair; teardown prevents its final Drop posting anew.
+        drop(liveness);
+        drop(retained.lock().unwrap().take());
+    }
+
+    #[test]
+    fn native_obligation_completion_drains_beyond_64_before_holder_retirement() {
+        for scheduler in 0..4 {
+            for mode in [
+                ObligationCompletionMode::Ready,
+                ObligationCompletionMode::Error,
+            ] {
+                assert_native_obligation_completion(scheduler, mode);
+            }
+        }
+    }
+
+    #[test]
+    fn native_obligation_completion_retires_panicking_future_fields_before_audit() {
+        for scheduler in 0..4 {
+            for mode in [
+                ObligationCompletionMode::PollPanic,
+                ObligationCompletionMode::DropPanic,
+                ObligationCompletionMode::PollAndDropPanic,
+            ] {
+                assert_native_obligation_completion(scheduler, mode);
+            }
+        }
+    }
+
+    #[test]
+    fn native_obligation_completion_attributes_unresolved_tail_once() {
+        for scheduler in 0..4 {
+            assert_native_obligation_completion(scheduler, ObligationCompletionMode::RetainedToken);
+        }
+    }
 
     // ========== Parker Basic Tests ==========
 

@@ -412,7 +412,10 @@ pub(crate) fn apply_obligation_posts_with_task_table(
             ObligationOp::Reserve => {
                 let admission = match dispatch_tasks {
                     Some(tasks) => state.create_obligation_from_dispatch_table(
-                        post.kind, post.holder, post.region, tasks,
+                        post.kind,
+                        post.holder,
+                        post.region,
+                        tasks,
                     ),
                     None => state.create_obligation(post.kind, post.holder, post.region, None),
                 };
