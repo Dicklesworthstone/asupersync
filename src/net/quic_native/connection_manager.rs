@@ -1469,11 +1469,11 @@ pub struct QuicTimerScheduler {
     current_sleep: Option<Sleep>,
     /// Next deadline we're sleeping until.
     current_deadline: Option<Instant>,
-    /// One fixed mapping from the public Instant domain to the explicit runtime clock.
+    /// Mapping for the currently owned driver; managed cancellation preserves it.
     clock: Option<QuicClock>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct QuicClock {
     instant_origin: Instant,
     runtime_origin: crate::Time,
@@ -1561,6 +1561,12 @@ impl QuicTimerScheduler {
     /// If a timer is already scheduled for an earlier time, this is a no-op.
     /// If the new deadline is earlier, the current timer is cancelled and
     /// a new one is scheduled.
+    ///
+    /// A new timer uses the supplied context's driver when present, otherwise
+    /// the established shared wall-clock `Sleep` fallback. A later-deadline
+    /// no-op leaves the original driver and registration intact. Cancellation
+    /// still observes the supplied context. [`Self::cancel`] permits reuse
+    /// with another driver.
     pub async fn schedule_timer(
         &mut self,
         cx: &Cx,
@@ -1570,15 +1576,46 @@ impl QuicTimerScheduler {
             return Err(ConnectionRouterError::Cancelled);
         }
 
-        // Check if we need to reschedule
-        self.bind_clock(cx)?;
-        let should_reschedule = match self.current_deadline {
-            Some(current) => deadline < current,
-            None => true,
-        };
+        if self.current_deadline.is_some_and(|current| current <= deadline) {
+            return Ok(());
+        }
+        let clock = cx.timer_driver().map(|driver| {
+            self.clock
+                .as_ref()
+                .filter(|clock| clock.driver.ptr_eq(&driver))
+                .cloned()
+                .unwrap_or_else(|| QuicClock {
+                    instant_origin: Instant::now(),
+                    runtime_origin: driver.now(),
+                    driver,
+                })
+        });
+        self.arm_timer(cx, deadline, clock)
+    }
 
-        if should_reschedule {
-            let clock = self.bind_clock(cx)?;
+    /// Managed endpoints keep one explicit clock across timer replacement and
+    /// losing event-loop branches. Even a no-op must validate that owner.
+    pub(crate) async fn schedule_timer_bound(
+        &mut self,
+        cx: &Cx,
+        deadline: Instant,
+    ) -> Result<(), ConnectionRouterError> {
+        cx.checkpoint()
+            .map_err(|_| ConnectionRouterError::Cancelled)?;
+        let clock = self.bind_clock(cx)?.clone();
+        if self.current_deadline.is_some_and(|current| current <= deadline) {
+            return Ok(());
+        }
+        self.arm_timer(cx, deadline, Some(clock))
+    }
+
+    fn arm_timer(
+        &mut self,
+        cx: &Cx,
+        deadline: Instant,
+        clock: Option<QuicClock>,
+    ) -> Result<(), ConnectionRouterError> {
+        let sleep = if let Some(clock) = &clock {
             let time_deadline = if deadline >= clock.instant_origin {
                 let delta = deadline.duration_since(clock.instant_origin).as_nanos();
                 u64::try_from(delta)
@@ -1596,22 +1633,39 @@ impl QuicTimerScheduler {
                         .unwrap_or(u64::MAX),
                 )
             };
-            let sleep = Sleep::with_timer_driver(
+            Sleep::with_timer_driver(
                 crate::Time::from_nanos(time_deadline),
                 clock.driver.clone(),
-            );
-            self.current_sleep = Some(sleep);
-            self.current_deadline = Some(deadline);
-
-            cx.trace(&format!("Scheduled QUIC timer for {deadline:?}"));
-        }
-
+            )
+        } else {
+            // Sleep's shared fallback and WallClock use this exact process
+            // epoch. A duration from now is not an absolute Time deadline.
+            let nanos = u64::try_from(
+                deadline
+                    .saturating_duration_since(crate::time::process_epoch())
+                    .as_nanos(),
+            )
+            .map_err(|_| {
+                ConnectionRouterError::TimerSchedulingFailed(
+                    "QUIC deadline exceeds the wall-clock range".to_string(),
+                )
+            })?;
+            Sleep::new(crate::Time::from_nanos(nanos))
+        };
+        // Construct and range-check before dropping the previous registration.
+        self.current_sleep = Some(sleep);
+        self.current_deadline = Some(deadline);
+        self.clock = clock;
+        cx.trace(&format!("Scheduled QUIC timer for {deadline:?}"));
         Ok(())
     }
 
     /// Wait for the next timer to fire.
     ///
     /// Returns the deadline that was reached, or None if no timer was scheduled.
+    /// An already bound timer keeps its driver while cancellation observes the
+    /// caller. A wall-clock fallback timer adopts a newly supplied driver by
+    /// translating its Instant deadline into that driver's epoch before polling.
     pub async fn wait_for_timer(
         &mut self,
         cx: &Cx,
@@ -1619,8 +1673,18 @@ impl QuicTimerScheduler {
         if cx.checkpoint().is_err() {
             return Err(ConnectionRouterError::Cancelled);
         }
-        if self.has_pending_timer() {
-            self.bind_clock(cx)?;
+        if self.clock.is_none() {
+            if let (Some(deadline), Some(driver)) = (self.current_deadline, cx.timer_driver()) {
+                self.arm_timer(
+                    cx,
+                    deadline,
+                    Some(QuicClock {
+                        instant_origin: Instant::now(),
+                        runtime_origin: driver.now(),
+                        driver,
+                    }),
+                )?;
+            }
         }
         let mut cancel = QuicCancelWake::new(cx);
         poll_fn(|task_cx| {
@@ -1661,8 +1725,14 @@ impl QuicTimerScheduler {
         self.current_deadline
     }
 
-    /// Cancel the pending timer, if one is armed.
+    /// Cancel the pending timer, if one is armed, and release its clock binding.
     pub fn cancel(&mut self) {
+        self.cancel_pending();
+        self.clock = None;
+    }
+
+    /// Drop pending work while retaining the managed owner's fixed epoch.
+    pub(crate) fn cancel_pending(&mut self) {
         self.current_sleep = None;
         self.current_deadline = None;
     }

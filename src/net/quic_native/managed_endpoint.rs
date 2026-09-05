@@ -235,7 +235,7 @@ impl ManagedQuicEndpoint {
             .map_err(ManagedEndpointError::from)?;
         self.pending_outgoing
             .retain(|packet| packet.connection_id != connection_id);
-        self.timer_scheduler.cancel();
+        self.timer_scheduler.cancel_pending();
         Ok(connection)
     }
 
@@ -260,7 +260,7 @@ impl ManagedQuicEndpoint {
             self.pending_outgoing
                 .retain(|packet| packet.connection_id != connection.connection_id);
         }
-        self.timer_scheduler.cancel();
+        self.timer_scheduler.cancel_pending();
         Ok(connection)
     }
 
@@ -270,7 +270,7 @@ impl ManagedQuicEndpoint {
     /// connection lifecycle until cancellation or shutdown.
     pub async fn run_event_loop(&mut self, cx: &Cx) -> Result<(), ManagedEndpointError> {
         let result = self.drive_event_loop(cx).await;
-        self.timer_scheduler.cancel();
+        self.timer_scheduler.cancel_pending();
         match result {
             Err(ManagedEndpointError::ConnectionRouter(ConnectionRouterError::Cancelled)) => {
                 Err(ManagedEndpointError::Cancelled)
@@ -351,12 +351,14 @@ impl ManagedQuicEndpoint {
                         ) {
                             Poll::Ready(result) => {
                                 self.prefer_send = true;
-                                return Poll::Ready(
-                                    result.map(EndpointEvent::Packets).map_err(|error| match error {
-                                        QuicUdpEndpointError::Cancelled => ManagedEndpointError::Cancelled,
+                                return Poll::Ready(result.map(EndpointEvent::Packets).map_err(
+                                    |error| match error {
+                                        QuicUdpEndpointError::Cancelled => {
+                                            ManagedEndpointError::Cancelled
+                                        }
                                         other => other.into(),
-                                    }),
-                                );
+                                    },
+                                ));
                             }
                             Poll::Pending => {}
                         }
@@ -581,9 +583,11 @@ impl ManagedQuicEndpoint {
     async fn refresh_timer(&mut self, cx: &Cx) -> Result<(), ManagedEndpointError> {
         let next = self.connection_router.next_timer_deadline();
         if self.timer_scheduler.current_deadline() != next {
-            self.timer_scheduler.cancel();
+            self.timer_scheduler.cancel_pending();
             if let Some(deadline) = next {
-                self.timer_scheduler.schedule_timer(cx, deadline).await?;
+                self.timer_scheduler
+                    .schedule_timer_bound(cx, deadline)
+                    .await?;
             }
         }
         Ok(())
@@ -639,7 +643,7 @@ impl ManagedQuicEndpoint {
         // Keep it unconditional so cancellation cannot strand a retained endpoint.
         self.connection_router.discard_all();
         self.pending_outgoing.clear();
-        self.timer_scheduler.cancel();
+        self.timer_scheduler.cancel_pending();
         let udp_result = self.udp_endpoint.shutdown(cx).await;
         close_result.map_err(|error| match error {
             ConnectionRouterError::Cancelled => ManagedEndpointError::Cancelled,
@@ -976,7 +980,7 @@ mod tests {
             )
             .await
             .unwrap();
-            let mut expected = bytes::BytesMut::new();
+            let mut expected = crate::bytes::BytesMut::new();
             crate::net::atp::protocol::quic_frames::QuicFrame::Ping.encode(&mut expected).unwrap();
             assert_eq!(plaintext, expected.as_ref());
             assert_eq!(peer.recv_from(&mut bytes).unwrap_err().kind(), std::io::ErrorKind::WouldBlock);

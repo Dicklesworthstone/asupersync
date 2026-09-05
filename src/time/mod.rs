@@ -70,6 +70,7 @@ pub use driver::{
 };
 pub use elapsed::Elapsed;
 pub use interval::{Interval, MissedTickBehavior, interval, interval_at};
+pub(crate) use sleep::process_epoch;
 pub use sleep::{Sleep, sleep, sleep_until, wall_now};
 pub use timeout_future::{TimeoutFuture, timeout, timeout_at};
 pub use utc::format_unix_nanos_rfc3339;

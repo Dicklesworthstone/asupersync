@@ -24,6 +24,55 @@ fn test_cx() -> Cx {
     Cx::for_testing()
 }
 
+#[test]
+fn managed_public_types_preserve_config_traits_and_error_conversions() {
+    use asupersync::net::quic_native::{
+        ConnectionRouter, ConnectionRouterError, ManagedEndpointConfig, ManagedEndpointError,
+        ManagedQuicEndpoint, NativeQuicConnection, QuicTimerScheduler, QuicTransportMachine,
+        QuicUdpEndpoint, QuicUdpEndpointConfig, QuicUdpEndpointError,
+    };
+
+    fn assert_owner_traits<T: Send + Sync + Unpin>() {}
+    assert_owner_traits::<ConnectionRouter>();
+    assert_owner_traits::<ManagedQuicEndpoint>();
+    assert_owner_traits::<NativeQuicConnection>();
+    assert_owner_traits::<QuicTimerScheduler>();
+    assert_owner_traits::<QuicTransportMachine>();
+    assert_owner_traits::<QuicUdpEndpoint>();
+
+    // Exhaustive downstream literal: private implementation growth must not
+    // require callers to supply another field or opt into a new default.
+    let config = ManagedEndpointConfig {
+        udp_config: QuicUdpEndpointConfig::default(),
+        connection_config: NativeQuicConnectionConfig::default(),
+        is_server: false,
+        connection_idle_timeout_micros: 30_000_000,
+        max_connections: 1_000,
+        packet_batch_size: 32,
+    };
+    assert_eq!(config.packet_batch_size, 32);
+    assert_eq!(
+        ManagedEndpointError::from(QuicUdpEndpointError::Cancelled),
+        ManagedEndpointError::UdpEndpoint("operation cancelled".to_owned())
+    );
+    assert_eq!(
+        ManagedEndpointError::from(ConnectionRouterError::Cancelled),
+        ManagedEndpointError::ConnectionRouter(ConnectionRouterError::Cancelled)
+    );
+
+    fn assert_send_future<T: std::future::Future + Send>(_: T) {}
+    let cx = test_cx();
+    let mut timer = QuicTimerScheduler::new();
+    assert_send_future(timer.schedule_timer(&cx, std::time::Instant::now()));
+    assert_send_future(timer.wait_for_timer(&cx));
+    // Type-check the public native owner future without opening a socket.
+    assert_send_future(ManagedQuicEndpoint::bind(
+        &cx,
+        "127.0.0.1:0".parse().unwrap(),
+        config,
+    ));
+}
+
 fn fresh_pair() -> (QuicConnection, QuicConnection) {
     let cfg = NativeQuicConnectionConfig::default();
     (QuicConnection::client(cfg), QuicConnection::server(cfg))
