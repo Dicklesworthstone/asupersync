@@ -1530,6 +1530,326 @@ mod tests {
     use crate::{RegionId, TaskId};
     use futures_lite::future::block_on;
 
+    fn checked_admission_fixture(
+        limit: usize,
+    ) -> (crate::lab::LabRuntime, Cx, crate::runtime::TaskHandle<()>) {
+        let mut lab =
+            crate::lab::LabRuntime::new(crate::lab::LabConfig::new(0x28_5e00).max_steps(128));
+        let root = lab.state.create_root_region(Budget::INFINITE);
+        assert!(lab.state.set_region_limits(
+            root,
+            crate::record::region::RegionLimits {
+                max_obligations: Some(limit),
+                ..crate::record::region::RegionLimits::UNLIMITED
+            },
+        ));
+        let (task, handle) = lab
+            .state
+            .create_task(root, Budget::INFINITE, async {})
+            .unwrap();
+        let cx = lab.state.task(task).unwrap().cx.clone().unwrap();
+        (lab, cx, handle)
+    }
+
+    fn finish_checked_admission_fixture(
+        mut lab: crate::lab::LabRuntime,
+        cx: &Cx,
+        mut handle: crate::runtime::TaskHandle<()>,
+        reservations: u64,
+    ) {
+        let mailbox = Arc::clone(lab.state.obligation_gateway().unwrap().mailbox());
+        lab.scheduler.lock().schedule(cx.task_id(), 0);
+        let report = lab.run_until_quiescent_with_report();
+        assert!(
+            report.oracle_report.all_passed(),
+            "{:?}",
+            report.oracle_report.failures()
+        );
+        assert!(report.invariant_violations.is_empty());
+        assert!(handle.try_join().unwrap().is_some());
+        let stats = mailbox.stats();
+        assert_eq!(stats.posted, stats.applied);
+        assert_eq!(stats.reserved, reservations);
+        assert_eq!(stats.committed + stats.aborted, reservations);
+        assert_eq!(stats.refused, 0);
+        assert_eq!(stats.leaked, 0);
+        assert_eq!(mailbox.open_tickets(), 0);
+        assert_eq!(lab.state.pending_obligation_count(), 0);
+        assert_eq!(lab.state.leak_count(), 0);
+    }
+
+    #[test]
+    fn checked_admission_bulk_quota_and_owned_conversion_reuse_one_credit() {
+        use crate::runtime::obligation_mailbox::ObligationAdmissionError;
+        for limit in [0, 1, 3] {
+            let (lab, cx, handle) = checked_admission_fixture(limit);
+            let semaphore = Arc::new(Semaphore::new(16));
+            // An unrelated ambient context must not replace explicit authority.
+            let _ambient = Cx::set_current(Some(Cx::for_testing()));
+            let zero = block_on(semaphore.acquire_many_checked(&cx, 0)).unwrap();
+            assert!(zero.runtime_obligation.is_none());
+            drop(zero);
+            let mut held = Vec::new();
+            for _ in 0..limit {
+                held.push(semaphore.try_acquire_many_checked(&cx, 2).unwrap());
+            }
+            let available = 16 - limit * 2;
+            let refused = CheckedAcquireError::Admission(ObligationAdmissionError::LimitReached {
+                limit,
+                live: limit,
+            });
+            assert_eq!(semaphore.try_acquire_checked(&cx, 1).unwrap_err(), refused);
+            assert_eq!(
+                block_on(semaphore.acquire_checked(&cx, 1)).unwrap_err(),
+                refused
+            );
+            assert_eq!(
+                OwnedSemaphorePermit::try_acquire_checked(semaphore.clone(), &cx, 1).unwrap_err(),
+                refused
+            );
+            assert_eq!(
+                OwnedSemaphorePermit::try_acquire_arc_checked(&semaphore, &cx, 1).unwrap_err(),
+                refused
+            );
+            assert_eq!(
+                block_on(OwnedSemaphorePermit::acquire_checked(
+                    semaphore.clone(),
+                    &cx,
+                    1
+                ))
+                .unwrap_err(),
+                refused
+            );
+            assert_eq!(semaphore.available_permits(), available);
+            assert_eq!(semaphore.telemetry_snapshot(0).waiter_count, 0);
+            drop(held);
+            assert_eq!(semaphore.available_permits(), 16);
+            if limit != 0 {
+                // No runtime drain or yield separates these bulk permit sets.
+                for index in 0..65 {
+                    match index % 4 {
+                        0 => OwnedSemaphorePermit::try_acquire_checked(semaphore.clone(), &cx, 3)
+                            .unwrap()
+                            .commit(),
+                        1 => drop(
+                            OwnedSemaphorePermit::try_acquire_arc_checked(&semaphore, &cx, 3)
+                                .unwrap(),
+                        ),
+                        2 => block_on(OwnedSemaphorePermit::acquire_checked(
+                            semaphore.clone(),
+                            &cx,
+                            3,
+                        ))
+                        .unwrap()
+                        .commit(),
+                        _ => block_on(semaphore.acquire_many_checked(&cx, 3))
+                            .unwrap()
+                            .commit(),
+                    }
+                    assert_eq!(semaphore.available_permits(), 16);
+                }
+            }
+            finish_checked_admission_fixture(
+                lab,
+                &cx,
+                handle,
+                limit as u64 + if limit == 0 { 0 } else { 65 },
+            );
+        }
+    }
+
+    #[test]
+    fn checked_admission_fifo_refusal_returns_full_set_and_wakes_owned_successor() {
+        use crate::runtime::obligation_mailbox::ObligationAdmissionError;
+        let (denied_lab, denied_cx, denied_handle) = checked_admission_fixture(0);
+        let (allowed_lab, allowed_cx, allowed_handle) = checked_admission_fixture(1);
+        let semaphore = Arc::new(Semaphore::new(0));
+        let mut first = semaphore.acquire_checked(&denied_cx, 2);
+        let mut second = Box::pin(OwnedSemaphorePermit::acquire_checked(
+            semaphore.clone(),
+            &allowed_cx,
+            1,
+        ));
+        let wakes = CountingWaker::new();
+        let waker = Waker::from(wakes.clone());
+        assert!(poll_once(&mut first).is_none());
+        assert!(poll_once_with_waker(&mut second, &waker).is_none());
+        assert_eq!(semaphore.telemetry_snapshot(0).waiter_count, 2);
+        semaphore.add_permits(2);
+        assert_eq!(wakes.count(), 0);
+        assert_eq!(
+            poll_once(&mut first).unwrap().unwrap_err(),
+            CheckedAcquireError::Admission(ObligationAdmissionError::LimitReached {
+                limit: 0,
+                live: 0
+            },)
+        );
+        assert_eq!(semaphore.available_permits(), 2);
+        assert_eq!(wakes.count(), 1);
+        assert_eq!(
+            poll_once(&mut first).unwrap().unwrap_err(),
+            CheckedAcquireError::Semaphore(AcquireError::PolledAfterCompletion)
+        );
+        let permit = poll_once_with_waker(&mut second, &waker).unwrap().unwrap();
+        assert_eq!(permit.count(), 1);
+        assert_eq!(semaphore.available_permits(), 1);
+        drop(permit);
+        assert_eq!(semaphore.available_permits(), 2);
+        assert_eq!(semaphore.telemetry_snapshot(0).waiter_count, 0);
+        drop(first);
+        drop(second);
+        finish_checked_admission_fixture(denied_lab, &denied_cx, denied_handle, 0);
+        finish_checked_admission_fixture(allowed_lab, &allowed_cx, allowed_handle, 1);
+    }
+
+    #[test]
+    fn checked_admission_zero_units_and_existing_cancellation_semantics() {
+        let cx = Cx::for_testing();
+        let semaphore = Arc::new(Semaphore::new(2));
+        let permit = semaphore.try_acquire_checked(&cx, 2).unwrap();
+        assert!(permit.runtime_obligation.is_none());
+        assert_eq!(
+            semaphore.try_acquire_checked(&cx, 1).unwrap_err(),
+            CheckedAcquireError::Unavailable(TryAcquireError)
+        );
+        drop(permit);
+        cx.set_cancel_requested(true);
+        assert_eq!(
+            semaphore.try_acquire_checked(&cx, 1).unwrap_err(),
+            CheckedAcquireError::Semaphore(AcquireError::Cancelled)
+        );
+        assert_eq!(
+            block_on(semaphore.acquire_checked(&cx, 1)).unwrap_err(),
+            CheckedAcquireError::Semaphore(AcquireError::Cancelled)
+        );
+        semaphore.close();
+        let borrowed = block_on(semaphore.acquire_checked(&cx, 0)).unwrap();
+        let owned = block_on(OwnedSemaphorePermit::acquire_checked(
+            semaphore.clone(),
+            &cx,
+            0,
+        ))
+        .unwrap();
+        assert_eq!((borrowed.count(), owned.count()), (0, 0));
+        assert!(borrowed.runtime_obligation.is_none() && owned.runtime_obligation.is_none());
+        drop(borrowed);
+        drop(owned);
+        assert_eq!(semaphore.available_permits(), 0);
+        let live_cx = Cx::for_testing();
+        assert_eq!(
+            semaphore.try_acquire_checked(&live_cx, 1).unwrap_err(),
+            CheckedAcquireError::Semaphore(AcquireError::Closed)
+        );
+        assert_eq!(
+            block_on(semaphore.acquire_checked(&live_cx, 1)).unwrap_err(),
+            CheckedAcquireError::Semaphore(AcquireError::Closed)
+        );
+    }
+
+    #[test]
+    fn checked_admission_notifier_panic_restores_units_wake_and_quota() {
+        use crate::runtime::obligation_mailbox::ObligationGateway;
+        for operation in [
+            "admission",
+            "borrowed_commit",
+            "borrowed_drop",
+            "owned_commit",
+            "owned_drop",
+        ] {
+            let (lab, cx, handle) = checked_admission_fixture(1);
+            let notifications = Arc::new(AtomicUsize::new(0));
+            let observed = notifications.clone();
+            let liveness = Arc::new(());
+            let semaphore = Arc::new(Semaphore::with_name(
+                "tasks",
+                usize::from(operation != "admission"),
+            ));
+            let observed_semaphore = semaphore.clone();
+            let panic_at = usize::from(operation != "admission");
+            let gateway = Arc::new(ObligationGateway::new(
+                Arc::clone(lab.state.obligation_gateway().unwrap().mailbox()),
+                Arc::new(move || {
+                    assert!(
+                        observed_semaphore.state.try_lock().is_some(),
+                        "notifier under semaphore lock"
+                    );
+                    assert_ne!(
+                        observed.fetch_add(1, Ordering::SeqCst),
+                        panic_at,
+                        "planted semaphore {operation} notifier panic"
+                    );
+                }),
+                Arc::downgrade(&liveness),
+            ));
+            let cx = cx.with_obligation_gateway(Some(gateway), None);
+            let mut borrowed = None;
+            let mut owned = None;
+            if operation.starts_with("borrowed") {
+                borrowed = Some(semaphore.try_acquire_checked(&cx, 1).unwrap());
+            } else if operation.starts_with("owned") {
+                owned = Some(
+                    block_on(OwnedSemaphorePermit::acquire_checked(
+                        semaphore.clone(),
+                        &cx,
+                        1,
+                    ))
+                    .unwrap(),
+                );
+            }
+            let mut first = semaphore.acquire_checked(&cx, 1);
+            if operation == "admission" {
+                assert!(poll_once(&mut first).is_none());
+            }
+            let successor_cx = Cx::for_testing();
+            let mut successor = semaphore.acquire(&successor_cx, 1);
+            let wakes = CountingWaker::new();
+            let waker = Waker::from(wakes.clone());
+            assert!(poll_once_with_waker(&mut successor, &waker).is_none());
+            assert_eq!(
+                semaphore.telemetry_snapshot(0).waiter_count,
+                if operation == "admission" { 2 } else { 1 }
+            );
+            if operation == "admission" {
+                semaphore.add_permits(1);
+            }
+            let failure =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match operation {
+                    "admission" => {
+                        let _permit = poll_once(&mut first).unwrap().unwrap();
+                    }
+                    "borrowed_commit" => borrowed.take().unwrap().commit(),
+                    "borrowed_drop" => drop(borrowed.take().unwrap()),
+                    "owned_commit" => owned.take().unwrap().commit(),
+                    "owned_drop" => drop(owned.take().unwrap()),
+                    _ => unreachable!(),
+                }))
+                .expect_err("the planted notifier must run");
+            assert!(
+                failure
+                    .downcast_ref::<String>()
+                    .unwrap()
+                    .contains(&format!("planted semaphore {operation} notifier panic"))
+            );
+            assert_eq!(wakes.count(), 1);
+            assert_eq!(semaphore.available_permits(), 1);
+            #[cfg(any(debug_assertions, feature = "lock-metrics"))]
+            assert!(lock_ordering::current_held_locks().is_empty());
+            let permit = poll_once_with_waker(&mut successor, &waker)
+                .unwrap()
+                .unwrap();
+            assert_eq!(semaphore.available_permits(), 0);
+            drop(permit);
+            // Credit must be reusable before any arena/mailbox drain.
+            semaphore.try_acquire_checked(&cx, 1).unwrap().commit();
+            assert_eq!(notifications.load(Ordering::SeqCst), panic_at + 3);
+            assert_eq!(semaphore.available_permits(), 1);
+            assert_eq!(semaphore.telemetry_snapshot(0).waiter_count, 0);
+            drop(first);
+            drop(successor);
+            finish_checked_admission_fixture(lab, &cx, handle, 2);
+        }
+    }
+
     thread_local! {
         static TEST_CURRENT_CX_GUARD: std::cell::RefCell<Option<crate::cx::cx::CurrentCxGuard>> =
             const { std::cell::RefCell::new(None) };
