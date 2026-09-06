@@ -601,7 +601,7 @@ assert "ConnectionCreationFailed" in negative["duplicate_cid"]["typed_refusal"]
 assert all(negative[field] is True for field in ("pending_handshake_cancel", "fatal_tls_no_client_certificate", "post_tls_alpn_refusal"))
 print("verified same-socket authenticated A/B admission, cancellation/refusals/removal/readmission, ordered actual payloads, A timer progress and four real task completions before two region closes; no ciphertext, kernel or performance claim")
 PY
-run_stage authenticated-quiet http3,tls quic_native_handshake_udp_loopback --exact managed_quiet::native_managed_quiet_burst_and_timer_recovery --test-threads=1
+run_stage authenticated-quiet http3,tls,test-internals quic_native_handshake_udp_loopback --exact managed_quiet::native_managed_quiet_burst_and_timer_recovery --test-threads=1
 python3 - "${OUTPUT_ROOT}/authenticated-quiet.log" <<'PY'
 import hashlib, json, pathlib, re, sys
 log = re.sub(r"\x1b\[[0-9;]*m", "", pathlib.Path(sys.argv[1]).read_text())
