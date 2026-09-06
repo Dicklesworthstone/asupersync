@@ -15,6 +15,9 @@
 #   (or CARGO_HOME) is forwarded to each remote Cargo command when supplied.
 #   Checked mode preserves the legacy cleanup routes below and runs native,
 #   lifecycle and public-channel stages against one explicitly selected source.
+#   --managed-supervision uses the same source selection and remote execution
+#   with native, supervisor/finalizer unit, and public supervision stages.
+#   It defaults to tls,test-internals and uses MANAGED_SUPERVISION_ARTIFACT_DIR.
 
 set -euo pipefail
 
@@ -43,12 +46,13 @@ checked_finish_summary() {
     local status=$?
     trap - EXIT
     jq -n --arg status "$CHECKED_STATUS" --arg phase "$CHECKED_PHASE" \
+        --arg schema "$CHECKED_SCHEMA" --arg bead "$CHECKED_BEAD" \
         --argjson exit_code "$status" --arg started "$CHECKED_STARTED" \
         --arg ended "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
         --slurpfile source "$CHECKED_DIR/source-selection.json" \
         --slurpfile stages "$CHECKED_DIR/stages.ndjson" \
-        '{schema_version:"asupersync.checked_obligation_runner.v1",
-          bead_id:"asupersync-bi2462.29",status:$status,phase:$phase,
+        '{schema_version:$schema,
+          bead_id:$bead,status:$status,phase:$phase,
           exit_code:$exit_code,started:$started,ended:$ended,
           source:$source[0],stages:$stages,
           source_evidence:"clean-overlay-admission-and-local-selected-file-hashes",
@@ -57,7 +61,7 @@ checked_finish_summary() {
         (( status != 0 )) && exit "$status"
         exit 86
     }
-    printf 'Checked admission summary: %s\n' "$CHECKED_DIR/summary.json"
+    printf '%s summary: %s\n' "$CHECKED_MODE" "$CHECKED_DIR/summary.json"
     exit "$status"
 }
 
@@ -140,7 +144,16 @@ checked_stage() {
     fi
     checked_verify_source "$stage.after" || return $?
     checked_verify_receipt "$stage" "$log" || return $?
-    if [[ "$stage" != public ]]; then
+    if [[ "$CHECKED_MODE" == managed-supervision && "$stage" == units ]]; then
+        # This deliberately selects affected modules from the large lib suite.
+        # Public journeys and the native prerequisite remain unfiltered.
+        python3 - "$log" <<'PY' || return 87
+import pathlib, re, sys
+log = pathlib.Path(sys.argv[1]).read_text()
+counts = re.findall(r"^test result: ok\. (\d+) passed; (\d+) failed; (\d+) ignored; (\d+) measured; (\d+) filtered out;", log, re.M)
+assert len(counts) == 1 and int(counts[0][0]) > 0 and counts[0][1:4] == ("0", "0", "0"), counts
+PY
+    elif [[ "$stage" != public ]]; then
         rg -q '^test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;' "$log" || {
             printf 'FATAL: %s must execute a nonzero, unfiltered, unignored test suite\n' "$stage" >&2
             return 87
@@ -153,8 +166,16 @@ checked_stage() {
 }
 
 run_checked_admission_mode() {
+    CHECKED_MODE="${1#--}"
+    CHECKED_SCHEMA='asupersync.checked_obligation_runner.v1'
+    CHECKED_BEAD='asupersync-bi2462.29'
     CHECKED_BASE=''
     CHECKED_FEATURES='test-internals,channel-mpsc-select-e2e'
+    if [[ "$CHECKED_MODE" == managed-supervision ]]; then
+        CHECKED_SCHEMA='asupersync.managed_supervision_runner.v1'
+        CHECKED_BEAD='asupersync-bi2462.35'
+        CHECKED_FEATURES='tls,test-internals'
+    fi
     CHECKED_OVERLAYS=()
     CHECKED_BUILD_JOBS="${CHECKED_ADMISSION_BUILD_JOBS:-8}"
     CHECKED_CARGO_HOME="${CHECKED_ADMISSION_CARGO_HOME:-${CARGO_HOME:-}}"
@@ -185,16 +206,22 @@ run_checked_admission_mode() {
     done
     [[ "$CHECKED_BASE" =~ ^[0-9a-f]{40}$ ]] || { printf 'A full explicit --base commit is required\n' >&2; return 86; }
     [[ "$CHECKED_FEATURES" =~ ^[a-zA-Z0-9_,-]+$ ]] || return 86
+    if [[ "$CHECKED_MODE" == managed-supervision ]]; then
+        [[ "$CHECKED_FEATURES" == 'tls,test-internals' ]] || {
+            printf 'Managed supervision requires --features tls,test-internals\n' >&2; return 86;
+        }
+    else
     [[ ",$CHECKED_FEATURES," == *,test-internals,* && ",$CHECKED_FEATURES," == *,channel-mpsc-select-e2e,* ]] || {
         printf 'Checked mode requires test-internals and channel-mpsc-select-e2e in --features\n' >&2; return 86;
     }
+    fi
     if (( (no_overlay == 1 && ${#CHECKED_OVERLAYS[@]} != 0) || (no_overlay == 0 && ${#CHECKED_OVERLAYS[@]} == 0) )); then
         printf 'Select either --no-overlay or explicit --overlay-path files\n' >&2; return 86
     fi
     cd "$PROJECT_ROOT"
     [[ "$(git rev-parse --verify "$CHECKED_BASE^{commit}")" == "$CHECKED_BASE" ]] || return 86
     [[ "$(git branch --show-current)" == main ]] || return 86
-    for option in jq rg sha256sum stat realpath timeout; do command -v "$option" >/dev/null || return 86; done
+    for option in jq rg sha256sum stat realpath timeout python3; do command -v "$option" >/dev/null || return 86; done
     for path in "${CHECKED_OVERLAYS[@]}"; do
         [[ "$path" != /* && "$path" != *$'\n'* && "$path" != *$'\r'* && "$path" != *$'\t'* && "/$path/" != */../* && "/$path/" != */./* ]] || return 86
         resolved=$(realpath --relative-to="$PROJECT_ROOT" -- "$path") || return 86
@@ -207,6 +234,10 @@ run_checked_admission_mode() {
     [[ "$(realpath "$CHECKED_RCH")" != "$PROJECT_ROOT/scripts/rch_ci_fallback.sh" ]] || return 86
     CHECKED_DIR="${CHECKED_ADMISSION_ARTIFACT_DIR:-$PROJECT_ROOT/target/e2e-results/obligation-cleanup/checked-$(date -u +%Y%m%dT%H%M%S)-$$}"
     CHECKED_TARGET="${RCH_TARGET_DIR:-${TMPDIR:-/tmp}/rch_target_checked_obligation_journey}"
+    if [[ "$CHECKED_MODE" == managed-supervision ]]; then
+        CHECKED_DIR="${MANAGED_SUPERVISION_ARTIFACT_DIR:-${TMPDIR:-/tmp}/asupersync-managed-supervision-$(date -u +%Y%m%dT%H%M%S)-$$}"
+        CHECKED_TARGET="${RCH_TARGET_DIR:-${TMPDIR:-/tmp}/rch_target_managed_supervision}"
+    fi
     if [[ -e "$CHECKED_DIR" || -L "$CHECKED_DIR" ]]; then
         printf 'FATAL: evidence directory already exists; preserving %s\n' "$CHECKED_DIR" >&2
         return 86
@@ -234,6 +265,12 @@ run_checked_admission_mode() {
     # reuse a stale CARGO_MANIFEST_DIR baked into a pooled-target binary.
     checked_stage native test --jobs "$CHECKED_BUILD_JOBS" -p asupersync --locked --features "$CHECKED_FEATURES" \
         --test runtime_abort_vs_cancel_semantics_audit -- --nocapture --test-threads=1 || return $?
+    if [[ "$CHECKED_MODE" == managed-supervision ]]; then
+        run_managed_supervision_stages || return $?
+        CHECKED_PHASE=complete
+        CHECKED_STATUS=passed
+        return 0
+    fi
     for option in \
         abort_repolls_a_mutex_parked_operation_to_graceful_cancellation \
         abort_repolls_a_capacity_parked_send_to_graceful_cancellation \
@@ -270,7 +307,80 @@ run_checked_admission_mode() {
     CHECKED_STATUS=passed
 }
 
-if [[ "${1:-}" == --checked-admission ]]; then
+run_managed_supervision_stages() {
+    checked_stage units test --jobs "$CHECKED_BUILD_JOBS" -p asupersync --locked \
+        --features "$CHECKED_FEATURES" --lib -- \
+        supervision:: record::finalizer:: record::region:: cx::child_region:: runtime::state:: \
+        native_current_thread_shutdown_budget_runs_and_retires_real_finalizers \
+        native_sharded_shutdown_budget_runs_and_retires_real_finalizers \
+        external_only_finalizer_budget_activation_wakes_and_retires_actual_cleanup \
+        managed_supervisor_runtime_signal_source \
+        --nocapture --test-threads=1 || return $?
+    local name
+    for name in \
+        managed_real_generations_cover_all_restart_modes_and_outcomes \
+        managed_three_strategies_drain_actual_finalizers_before_replacement \
+        managed_parent_cancel_during_root_finalizer_precedes_success_publication \
+        managed_shutdown_enforces_actual_finalizers_and_retains_reclaimed_receipts \
+        managed_close_distinguishes_cancelled_body_from_descendant_cleanup_failure \
+        explicit_finalizer_actual_lab_task_deadline_wakes_through_cancel_mask \
+        native_current_thread_shutdown_budget_runs_and_retires_real_finalizers \
+        native_sharded_shutdown_budget_runs_and_retires_real_finalizers \
+        external_only_finalizer_budget_activation_wakes_and_retires_actual_cleanup \
+        managed_supervisor_runtime_signal_source; do
+        [[ "$(rg -c "^test .*::$name \\.\\.\\. " "$CHECKED_DIR/units.log")" == 1 ]] || {
+            printf 'Missing or duplicate supervisor unit sentinel %s\n' "$name" >&2; return 88;
+        }
+    done
+    checked_stage supervision test --jobs "$CHECKED_BUILD_JOBS" -p asupersync --locked \
+        --features "$CHECKED_FEATURES" --test supervision_regression -- \
+        --nocapture --test-threads=1 || return $?
+    python3 - "$CHECKED_DIR/supervision.log" > "$CHECKED_DIR/supervision-journeys.json" <<'PY' || return 89
+import json, pathlib, re, sys
+log = pathlib.Path(sys.argv[1]).read_text()
+for name in ("public_managed_supervisor_seeded_lab_work_and_cleanup",
+             "public_managed_supervisor_native_work_and_cleanup",
+             "public_managed_supervisor_owned_sigterm_shutdown"):
+    assert len(re.findall(r"^test managed_public::" + name + r" \.\.\. ", log, re.M)) == 1, name
+def rows(marker):
+    return [json.loads(line.split(marker, 1)[1]) for line in log.splitlines() if marker in line]
+journeys = rows("ASUPERSYNC_MANAGED_SUPERVISOR ")
+assert len(journeys) == 5
+assert sorted(row["seed"] for row in journeys if row["backend"] == "lab") == [0x3501, 0x3502, 0x3503]
+native = ["native_current_thread", "native_two_worker_sharded"]
+assert sorted(row["backend"] for row in journeys if row["backend"] != "lab") == native
+for row in journeys:
+    assert row["live_tasks"] == row["leaks"] == 0
+    assert row["pending_obligations"] == 0 if row["backend"] == "lab" else row["shutdown_completed"]
+    cases = row["journeys"]
+    assert len(cases) == 18
+    modes = [case for case in cases if case["scenario"] == "public_restart_mode"]
+    assert {(case["mode"], case["terminal"]) for case in modes} == {
+        (mode, terminal) for mode in ("Permanent", "Transient", "Temporary") for terminal in range(3)}
+    for case in modes:
+        restarts = int(case["mode"] == "Permanent" or (case["mode"] == "Transient" and case["terminal"] != 0))
+        assert case["started"] == case["joined"] == 1 + restarts and case["restart_batches"] == restarts
+    sets = [case for case in cases if case["scenario"] == "public_restart_sets"]
+    assert len(sets) == 6 and sorted(case["policy"] for case in sets) == sorted(["OneForOne", "OneForAll", "RestForOne"] * 2)
+    for case in cases:
+        if case["scenario"] in ("public_cancel_during_factory", "public_cancel_during_actual_backoff"):
+            assert case["started"] == case["joined"] == 1 and case["restart_batches"] == 0
+        if case["scenario"] == "public_shared_intensity_actual_parent_escalation":
+            assert case["started"] == case["joined"] == 3 and case["restart_batches"] == case["escalations"] == 1
+signals = rows("ASUPERSYNC_SUPERVISOR_SIGTERM_COMPLETE ")
+assert len(signals) == 2 and sorted(row["backend"] for row in signals) == native
+for row in signals:
+    assert row["runtime_shutdown"] and row["live_tasks"] == row["leaks"] == 0
+    case = row["journey"]
+    assert case["signal"] == "actual_process_SIGTERM"
+    assert case["selected"] == case["started"] == case["joined"] == 4 and case["restart_batches"] == 0
+    assert case["payloads"] == [700, 701, 702, 703]
+    assert case["negative_controls"] == ["zero_selected_generations", "premature_generation_completion"]
+print(json.dumps(dict(journeys=journeys, native_signal_shutdown=signals), sort_keys=True))
+PY
+}
+
+if [[ "${1:-}" == --checked-admission || "${1:-}" == --managed-supervision ]]; then
     run_checked_admission_mode "$@"
     exit $?
 fi
