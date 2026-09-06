@@ -1177,7 +1177,7 @@ mod stock_responsiveness_runtime {
     use asupersync::io::{AsyncRead, AsyncWrite, ReadBuf};
     use asupersync::lab::{LabConfig, LabRuntime};
     use asupersync::runtime::RuntimeBuilder;
-    use asupersync::sync::{Barrier, Mutex, Notify, OnceCell, RwLock, Semaphore};
+    use asupersync::sync::{Barrier, Mutex, Notify, OnceCell, Pool, RwLock, Semaphore};
     use asupersync::trace::{TraceData, TraceEvent, TraceEventKind};
     use asupersync::types::{Budget, CancelKind, CancelReason, RegionId, TaskId};
     use std::future::{Future, poll_fn};
