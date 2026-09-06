@@ -2087,3 +2087,528 @@ fn authenticated_managed_two_process_public_exchange_cancel_and_restart() {
     managed_write_receipt(&artifacts.join("summary.json"), &summary);
     println!("MANAGED_QUIC_TWO_PROCESS {summary}");
 }
+
+#[test]
+#[ignore = "selected by the maintained runner; requires isolated Linux network namespaces and actual kernel EAGAIN"]
+fn authenticated_managed_kernel_backpressure() {
+    #[cfg(target_os = "linux")]
+    managed_kernel_backpressure::run();
+    #[cfg(not(target_os = "linux"))]
+    panic!(
+        "declared_unavailable: authenticated kernel backpressure requires Linux network namespaces"
+    );
+}
+
+#[cfg(target_os = "linux")]
+mod managed_kernel_backpressure {
+    use super::*;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::AtomicBool;
+
+    const ENTRY: &str = "authenticated_managed_kernel_backpressure";
+    const PAYLOAD_LEN: usize = 32 * 1024;
+
+    fn payload() -> Bytes {
+        Bytes::from(
+            (0..PAYLOAD_LEN)
+                .map(|index| u8::try_from(index % 251).unwrap())
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    fn optional_receipt(path: &Path) -> Option<serde_json::Value> {
+        match std::fs::read(path) {
+            Ok(bytes) => {
+                assert!(bytes.len() <= 64 * 1024, "bounded orchestration receipt");
+                // A create_new writer may still be completing its first write.
+                serde_json::from_slice(&bytes).ok()
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => panic!("read retained kernel receipt {path:?}: {error}"),
+        }
+    }
+
+    async fn wait_receipt(cx: &Cx, path: &Path) -> serde_json::Value {
+        let started = Instant::now();
+        loop {
+            if let Some(value) = optional_receipt(path) {
+                return value;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(15),
+                "kernel orchestration watchdog: {path:?}"
+            );
+            // This is bounded external-process orchestration, not an idle-loop
+            // or timer-performance observation of the managed driver.
+            asupersync::time::sleep(cx.now(), Duration::from_millis(10)).await;
+        }
+    }
+
+    #[derive(Default)]
+    struct ParkState {
+        parked: AtomicBool,
+        polls: AtomicUsize,
+        wakes: AtomicUsize,
+    }
+
+    struct DriverWake {
+        parent: Waker,
+        state: Arc<ParkState>,
+    }
+
+    impl Wake for DriverWake {
+        fn wake(self: Arc<Self>) {
+            self.wake_by_ref();
+        }
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.state.wakes.fetch_add(1, Ordering::SeqCst);
+            self.parent.wake_by_ref();
+        }
+    }
+
+    async fn cancel_after_kernel_wait(
+        cx: &Cx,
+        mut endpoint: ManagedQuicEndpoint,
+        artifacts: &Path,
+    ) -> ManagedQuicEndpoint {
+        let state = Arc::new(ParkState::default());
+        let child_state = Arc::clone(&state);
+        let mut task = cx
+            .spawn(move |child_cx| {
+                let future: std::pin::Pin<
+                    Box<
+                        dyn Future<Output = (ManagedQuicEndpoint, Result<(), ManagedEndpointError>)>
+                            + Send,
+                    >,
+                > = Box::pin(async move {
+                    let mut driver = Box::pin(
+                        endpoint.run_event_loop_with_application(&child_cx, |_, _, _| {
+                            Poll::<Result<(), ManagedEndpointError>>::Pending
+                        }),
+                    );
+                    let mut wake = None::<Arc<DriverWake>>;
+                    let result = std::future::poll_fn(|task_cx| {
+                        child_state.parked.store(false, Ordering::SeqCst);
+                        let polls = child_state.polls.fetch_add(1, Ordering::SeqCst) + 1;
+                        assert!(
+                            polls <= 1_000_000,
+                            "bounded actual backpressure driver polls"
+                        );
+                        let wake = wake.get_or_insert_with(|| {
+                            Arc::new(DriverWake {
+                                parent: task_cx.waker().clone(),
+                                state: Arc::clone(&child_state),
+                            })
+                        });
+                        let waker = Waker::from(Arc::clone(wake));
+                        let before = child_state.wakes.load(Ordering::SeqCst);
+                        let result = driver.as_mut().poll(&mut Context::from_waker(&waker));
+                        if result.is_pending() && child_state.wakes.load(Ordering::SeqCst) == before
+                        {
+                            child_state.parked.store(true, Ordering::SeqCst);
+                        }
+                        result
+                    })
+                    .await;
+                    drop(driver);
+                    (endpoint, result)
+                });
+                future
+            })
+            .expect("native task owns the actual authenticated backpressured endpoint");
+        let started = Instant::now();
+        let witness = loop {
+            assert!(
+                started.elapsed() < Duration::from_secs(15),
+                "real EAGAIN and stable Pending required before abort; artifacts={artifacts:?}"
+            );
+            if let Some(witness) = optional_receipt(&artifacts.join("kernel-eagain.json")) {
+                // This parent and the driver run on the same current-thread
+                // runtime. Clearing on every poll excludes an earlier idle
+                // Pending while the driver is now making synchronous progress.
+                if state.parked.load(Ordering::SeqCst) {
+                    break witness;
+                }
+            }
+            asupersync::runtime::yield_now().await;
+        };
+        assert_eq!(witness["pid"], std::process::id());
+        assert_eq!(witness["errno"], "EAGAIN");
+        assert!(witness["ciphertext_bytes"].as_u64().unwrap() > 20);
+        assert!(witness["accepted_prefix_packets"].as_u64().unwrap() > 0);
+        let polls_before = state.polls.load(Ordering::SeqCst);
+        let wakes_before = state.wakes.load(Ordering::SeqCst);
+        assert!(polls_before > 0);
+        task.abort();
+        let (endpoint, result) =
+            asupersync::time::timeout(cx.now(), Duration::from_secs(5), task.join(cx))
+                .await
+                .expect("actual parked abort wakes the driver")
+                .expect("acknowledged cancellation returns its owned endpoint");
+        assert_eq!(result, Err(ManagedEndpointError::Cancelled));
+        assert!(
+            state.polls.load(Ordering::SeqCst) > polls_before,
+            "cancel must cause an actual driver repoll"
+        );
+        assert!(
+            state.wakes.load(Ordering::SeqCst) > wakes_before,
+            "cancel must wake the registered parked task"
+        );
+        assert_eq!(endpoint.connection_stats().active_connections, 1);
+        assert!(
+            cx.checkpoint().is_ok(),
+            "the healthy parent Cx was never cleared or cancelled"
+        );
+        managed_write_receipt(
+            &artifacts.join("kernel-cancelled.json"),
+            &serde_json::json!({
+                "pid": std::process::id(), "typed_result": "Cancelled", "parked_before_abort": true,
+                "polls_before_abort": polls_before, "polls_after_abort": state.polls.load(Ordering::SeqCst),
+                "wakes_before_abort": wakes_before, "wakes_after_abort": state.wakes.load(Ordering::SeqCst),
+                "retained_connections": endpoint.connection_stats().active_connections,
+                "ciphertext_sha256": witness["ciphertext_sha256"],
+            }),
+        );
+        println!(
+            "MANAGED_QUIC_KERNEL_CANCEL parked=true syscall=EAGAIN result=Cancelled retained_connections=1"
+        );
+        endpoint
+    }
+
+    async fn finish_payload(
+        cx: &Cx,
+        endpoint: &mut ManagedQuicEndpoint,
+        metrics: &asupersync::net::quic_native::endpoint::EndpointMetrics,
+        server: bool,
+    ) -> serde_json::Value {
+        let (_, client_cid, server_cid) = managed_ids();
+        let cid = if server { server_cid } else { client_cid };
+        let expected = payload();
+        let stream = asupersync::net::quic_native::StreamId(4);
+        let mut received = Vec::new();
+        let mut fin = false;
+        let mut response_queued = !server;
+        let mut application_writes = 0_u64;
+        let mut send_floor = None;
+        let mut polls = 0_u64;
+        let started = Instant::now();
+        let sent_before = metrics.packets_sent.load(Ordering::SeqCst);
+        let received_before = metrics.packets_received.load(Ordering::SeqCst);
+        endpoint
+            .run_event_loop_with_application(cx, |cx, endpoint, task_cx| {
+                polls += 1;
+                assert!(
+                    polls <= 1_000_000 && started.elapsed() < Duration::from_secs(20),
+                    "bounded authenticated retained-payload recovery; server={server}"
+                );
+                let settled = endpoint
+                    .with_connection_mut(cx, cid, |connection| {
+                        for _ in 0..32 {
+                            let readiness = match connection.poll_next_readable_stream(cx, task_cx)
+                            {
+                                Poll::Ready(Ok(readiness)) => readiness,
+                                Poll::Ready(Err(error)) => {
+                                    panic!("live kernel recovery stream readiness: {error}")
+                                }
+                                Poll::Pending => break,
+                            };
+                            assert_eq!(readiness.stream_id, stream);
+                            assert_eq!(readiness.reset, None);
+                            assert_eq!(readiness.receive_stopped, None);
+                            let bytes = connection.read_stream(cx, stream, 4096).unwrap();
+                            received.extend_from_slice(&bytes);
+                            assert!(
+                                received.len() <= expected.len(),
+                                "no duplicate application bytes"
+                            );
+                            fin |= connection.is_control_eof(stream).unwrap();
+                        }
+                        if fin && received.len() == expected.len() {
+                            assert_eq!(received.as_slice(), expected.as_ref());
+                            send_floor
+                                .get_or_insert_with(|| metrics.packets_sent.load(Ordering::SeqCst));
+                            if !response_queued {
+                                connection
+                                    .write_stream(cx, stream, expected.clone(), true)
+                                    .unwrap();
+                                application_writes += 1;
+                                response_queued = true;
+                            }
+                            !connection.has_pending_stream_frames(stream)
+                                && connection.path_stats().bytes_in_flight == 0
+                                && metrics.packets_sent.load(Ordering::SeqCst) > send_floor.unwrap()
+                        } else {
+                            false
+                        }
+                    })
+                    .unwrap();
+                if settled {
+                    Poll::Ready(Ok(()))
+                } else {
+                    Poll::Pending
+                }
+            })
+            .await
+            .expect(
+                "same authenticated owner completes retained bytes after actual kernel recovery",
+            );
+        let sent = metrics.packets_sent.load(Ordering::SeqCst) - sent_before;
+        let ingress = metrics.packets_received.load(Ordering::SeqCst) - received_before;
+        assert!(sent > 0 && ingress > 0 && fin && response_queued);
+        assert_eq!(received.len(), PAYLOAD_LEN);
+        serde_json::json!({
+            "stream": stream.0, "received_bytes": received.len(), "sha256": managed_sha256(&received),
+            "fin": fin, "packets_sent": sent, "packets_received": ingress,
+            "application_polls": polls, "application_self_wake": false,
+            "application_writes": application_writes,
+            "elapsed_micros": started.elapsed().as_micros(), "performance_claim": false,
+        })
+    }
+
+    fn peer(role: String, artifacts: PathBuf) {
+        let server = role == "server";
+        assert!(server || role == "client");
+        let runtime = managed_runtime();
+        let parent: std::pin::Pin<Box<dyn Future<Output = serde_json::Value> + Send>> = Box::pin(
+            async move {
+                let cx = Cx::current().expect("actual native kernel peer task Cx");
+                let socket = QuicUdpEndpoint::bind(
+                    &cx,
+                    if server { "192.0.2.2:0" } else { "192.0.2.1:0" }
+                        .parse()
+                        .unwrap(),
+                    QuicUdpEndpointConfig {
+                        socket_send_buffer_size: Some(
+                            asupersync::net::udp::UDP_MIN_SOCKET_BUFFER_BYTES,
+                        ),
+                        max_batch_size: 1,
+                        ..QuicUdpEndpointConfig::default()
+                    },
+                )
+                .await
+                .unwrap();
+                let local = socket.local_addr();
+                let metrics = socket.metrics();
+                let buffers = socket.buffer_report();
+                assert_eq!(
+                    buffers.requested_send_buffer_bytes,
+                    Some(asupersync::net::udp::UDP_MIN_SOCKET_BUFFER_BYTES)
+                );
+                assert!(
+                    buffers.applied_send_buffer_bytes.unwrap()
+                        >= buffers.requested_send_buffer_bytes.unwrap()
+                );
+                let source = managed_source_identity();
+                let executable = managed_executable_sha256();
+                let server_addr = if server {
+                    managed_write_receipt(
+                        &artifacts.join("kernel-server-ready.json"),
+                        &serde_json::json!({
+                            "pid": std::process::id(), "server_addr": local.to_string(),
+                            "source": source, "executable_sha256": executable,
+                        }),
+                    );
+                    local
+                } else {
+                    std::env::var("ASUPERSYNC_MANAGED_QUIC_SERVER_ADDR")
+                        .unwrap()
+                        .parse()
+                        .unwrap()
+                };
+                let owner = managed_handshake(&cx, socket, server, server_addr).await;
+                let peer = owner.peer_addr();
+                let local_cid = owner.local_connection_id();
+                let peer_cid = owner.peer_connection_id();
+                let mut endpoint = managed_import(&cx, owner, server);
+                let healthy = managed_exchange(&cx, &mut endpoint, &metrics, server, 0).await;
+                let identity = serde_json::json!({
+                    "pid": std::process::id(), "role": role, "source": source,
+                    "executable_sha256": executable, "local_addr": local.to_string(), "peer_addr": peer.to_string(),
+                    "local_cid": format!("{local_cid:?}"), "peer_cid": format!("{peer_cid:?}"),
+                    "alpn": std::str::from_utf8(endpoint.negotiated_alpn(local_cid).unwrap()).unwrap(),
+                    "netns": std::fs::read_link("/proc/self/ns/net").unwrap().to_string_lossy(),
+                    "requested_send_buffer": buffers.requested_send_buffer_bytes,
+                    "applied_send_buffer": buffers.applied_send_buffer_bytes,
+                    "healthy_round": healthy,
+                });
+                managed_write_receipt(
+                    &artifacts.join(format!("kernel-{role}-healthy.json")),
+                    &identity,
+                );
+                let mut application_writes = 0_u64;
+                if !server {
+                    let blocked = wait_receipt(&cx, &artifacts.join("kernel-blocked.json")).await;
+                    assert_eq!(blocked["client_pid"], std::process::id());
+                    assert_eq!(blocked["peer_addr"], peer.to_string());
+                    let stream = endpoint
+                        .with_connection_mut(&cx, local_cid, |connection| {
+                            let stream = connection.open_bidi_stream(&cx).unwrap();
+                            // Exactly one application write; recovery never recreates
+                            // these bytes or clears the cancellation on the old task.
+                            connection
+                                .write_stream(&cx, stream, payload(), true)
+                                .unwrap();
+                            application_writes += 1;
+                            stream
+                        })
+                        .unwrap();
+                    assert_eq!(stream.0, 4);
+                    endpoint = cancel_after_kernel_wait(&cx, endpoint, &artifacts).await;
+                    assert_eq!(endpoint.negotiated_alpn(local_cid).unwrap(), MANAGED_ALPN);
+                    endpoint
+                        .with_connection_mut(&cx, local_cid, |connection| {
+                            assert!(connection.can_send_app_data())
+                        })
+                        .unwrap();
+                    let recovered =
+                        wait_receipt(&cx, &artifacts.join("kernel-recovered.json")).await;
+                    assert_eq!(recovered["client_pid"], std::process::id());
+                }
+                let recovery = finish_payload(&cx, &mut endpoint, &metrics, server).await;
+                application_writes += recovery["application_writes"].as_u64().unwrap();
+                assert_eq!(
+                    application_writes, 1,
+                    "one successful payload publication across cancellation and recovery"
+                );
+                endpoint.shutdown(&cx).await.unwrap();
+                assert_eq!(endpoint.connection_stats().active_connections, 0);
+                assert_eq!(cx.timer_driver().unwrap().pending_count(), 0);
+                serde_json::json!({
+                    "identity": identity, "recovery": recovery,
+                    "application_payload_writes": application_writes, "active_connections_after_shutdown": endpoint.connection_stats().active_connections,
+                    "pending_timers_after_shutdown": cx.timer_driver().unwrap().pending_count(),
+                    "same_router_multi_peer_proof": false, "performance_claim": false,
+                })
+            },
+        );
+        let mut receipt = runtime.block_on(runtime.handle().spawn(parent));
+        managed_assert_runtime_cleanup(&runtime);
+        receipt["runtime_quiescent"] = serde_json::json!(runtime.is_quiescent());
+        let role = receipt["identity"]["role"].as_str().unwrap();
+        let artifacts =
+            PathBuf::from(std::env::var_os("ASUPERSYNC_MANAGED_QUIC_KERNEL_DIR").unwrap());
+        managed_write_receipt(
+            &artifacts.join(format!("kernel-{role}-receipt.json")),
+            &receipt,
+        );
+        println!("MANAGED_QUIC_KERNEL_PEER {receipt}");
+    }
+
+    pub(super) fn run() {
+        if let Ok(role) = std::env::var("ASUPERSYNC_MANAGED_QUIC_KERNEL_ROLE") {
+            peer(
+                role,
+                PathBuf::from(std::env::var_os("ASUPERSYNC_MANAGED_QUIC_KERNEL_DIR").unwrap()),
+            );
+            return;
+        }
+        let base = std::env::var_os("ASUPERSYNC_MANAGED_QUIC_ARTIFACT_BASE")
+            .map_or_else(std::env::temp_dir, PathBuf::from);
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let artifacts = base.join(format!(
+            "asupersync-managed-quic-kernel-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&artifacts).expect("fresh retained kernel artifact directory");
+        let expected = serde_json::json!({
+            "pid": std::process::id(), "source": managed_source_identity(),
+            "executable_sha256": managed_executable_sha256(),
+        });
+        managed_write_receipt(&artifacts.join("kernel-parent.json"), &expected);
+        println!("MANAGED_QUIC_KERNEL_ARTIFACTS {}", artifacts.display());
+        let stdout = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(artifacts.join("kernel-controller.stdout.log"))
+            .unwrap();
+        let stderr = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(artifacts.join("kernel-controller.stderr.log"))
+            .unwrap();
+        let runner = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("scripts/run_quic_application_data_loopback_e2e.sh");
+        let mut controller = ManagedChild(
+            std::process::Command::new("sudo")
+                .args([
+                    "-n",
+                    "timeout",
+                    "--signal=TERM",
+                    "--kill-after=10s",
+                    "55s",
+                    "unshare",
+                    "--net",
+                    "bash",
+                ])
+                .arg(runner)
+                .arg("--kernel-controller")
+                .arg(std::env::current_exe().unwrap())
+                .arg(&artifacts)
+                .stdout(stdout)
+                .stderr(stderr)
+                .spawn()
+                .expect("start owned isolated kernel controller"),
+        );
+        let started = Instant::now();
+        let status = loop {
+            if let Some(status) = controller.0.try_wait().unwrap() {
+                break status;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(75),
+                "kernel controller watchdog; retained artifacts={artifacts:?}"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        for role in ["controller", "client", "server"] {
+            for stream in ["stdout", "stderr"] {
+                let path = artifacts.join(format!("kernel-{role}.{stream}.log"));
+                if path.exists() {
+                    eprintln!(
+                        "MANAGED_QUIC_KERNEL_LOG {}\n{}",
+                        path.display(),
+                        std::fs::read_to_string(path).unwrap()
+                    );
+                }
+            }
+        }
+        assert!(
+            status.success(),
+            "kernel capability/setup/syscall/peer failure: {status}; artifacts={artifacts:?}"
+        );
+        let summary = optional_receipt(&artifacts.join("kernel-summary.json"))
+            .expect("actual controller summary");
+        assert_eq!(summary["source"], expected["source"]);
+        assert_eq!(summary["executable_sha256"], expected["executable_sha256"]);
+        assert_eq!(summary["actual_authenticated_sessions"], 1);
+        assert_eq!(summary["actual_child_count"], 2);
+        assert_eq!(summary["syscall_errno"], "EAGAIN");
+        assert_eq!(summary["same_ciphertext_retry"], true);
+        assert_eq!(summary["parked_cancellation_and_recovery"], true);
+        for role in ["client", "server"] {
+            let receipt =
+                optional_receipt(&artifacts.join(format!("kernel-{role}-receipt.json"))).unwrap();
+            assert_eq!(receipt["identity"]["source"], expected["source"]);
+            assert_eq!(
+                receipt["identity"]["executable_sha256"],
+                expected["executable_sha256"]
+            );
+            assert_eq!(receipt["recovery"]["received_bytes"], PAYLOAD_LEN);
+            assert_eq!(receipt["recovery"]["sha256"], managed_sha256(&payload()));
+            assert_eq!(receipt["recovery"]["fin"], true);
+            assert_eq!(receipt["application_payload_writes"], 1);
+            assert_eq!(receipt["active_connections_after_shutdown"], 0);
+            assert_eq!(receipt["pending_timers_after_shutdown"], 0);
+            assert_eq!(receipt["runtime_quiescent"], true);
+            let stdout =
+                std::fs::read_to_string(artifacts.join(format!("kernel-{role}.stdout.log")))
+                    .unwrap();
+            assert!(stdout.contains(&format!("test {ENTRY} ...")));
+            assert!(stdout.contains("test result: ok. 1 passed; 0 failed; 0 ignored;"));
+        }
+        println!("MANAGED_QUIC_KERNEL_TWO_PROCESS {summary}");
+    }
+}
