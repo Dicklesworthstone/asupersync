@@ -115,6 +115,11 @@ impl PendingAuthenticatedAccept {
             PacketHeader::Long(header) => {
                 header.dst_cid == initial_cid || header.dst_cid == local_cid
             }
+            // A Retry is a long-header packet addressed to the client's
+            // connection ID, so it is routed exactly like `Long`.
+            PacketHeader::Retry(header) => {
+                header.dst_cid == initial_cid || header.dst_cid == local_cid
+            }
             PacketHeader::Short(header) => header.dst_cid == local_cid,
         })
     }
