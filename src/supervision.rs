@@ -1999,6 +1999,9 @@ mod managed {
         /// Explicit supervisor-region cleanup outcome, when recorded.
         pub cleanup_outcome: Option<crate::record::task::TaskOutcome>,
         /// Controller stop reason. Child domain errors remain in `children`.
+        /// Cancellation before successful close/report publication changes Ok
+        /// to Cancelled; an explicit infrastructure/cleanup error or panic is
+        /// retained. Cancellation after publication cannot rewrite the report.
         pub outcome: Outcome<(), ManagedSupervisorError>,
         /// Latest completed result per child, in compiled start order.
         ///
@@ -2944,6 +2947,14 @@ mod managed {
                     }
                 }
             }
+            // The root's own finalizers can suspend after execute() has
+            // finished all child generations. Cancellation during that close
+            // precedes report publication, rather than being a late request
+            // against an already completed report. Observe it once here;
+            // preserve an explicit failure already diagnosed while draining.
+            if matches!(self.report.outcome, Outcome::Ok(())) && self.cancelled() {
+                self.record_cancel();
+            }
             if let Some(token) = self.cancel_waker.take() {
                 self.cx.clear_cancel_waker(token);
             }
@@ -3816,6 +3827,147 @@ mod managed {
             assert!(report.children[0].region_outcome.is_some());
             assert!(lab.state.region(generation.region).is_none());
             clean(&mut lab, root);
+        }
+
+        #[test]
+        fn managed_parent_cancel_during_root_finalizer_precedes_success_publication() {
+            for cancel_before_close in [true, false] {
+                let mut lab = LabRuntime::new(LabConfig::new(0x34_0011).max_steps(8192));
+                let root = lab.state.create_root_region(Budget::INFINITE);
+                let started: StartedLog = Arc::new(Mutex::new(Vec::new()));
+                let child_started = Arc::clone(&started);
+                let binding = ManagedChildBinding::new(
+                    "child",
+                    ManagedRestartMode::Temporary,
+                    move |child: Cx, generation: ManagedGeneration| {
+                        let (sender, mut receiver) = mpsc::channel::<()>(1);
+                        child_started
+                            .lock()
+                            .push(("child".to_owned(), generation, sender));
+                        async move {
+                            receiver.recv(&child).await.unwrap();
+                            Outcome::<(), ()>::Ok(())
+                        }
+                    },
+                );
+                let managed = topology(&["child"], RestartPolicy::OneForOne)
+                    .bind_managed(vec![binding], config(RestartPolicy::OneForOne, 3))
+                    .unwrap();
+                let launched = Arc::new(Mutex::new(None));
+                let publication = Arc::clone(&launched);
+                let (launcher, mut launcher_join) = lab
+                    .state
+                    .create_task(root, Budget::INFINITE, async move {
+                        let cx = Cx::current().unwrap();
+                        *publication.lock() = Some(managed.spawn(&cx).unwrap());
+                    })
+                    .unwrap();
+                lab.scheduler.lock().schedule(launcher, 0);
+                lab.run_until_idle();
+                assert_eq!(launcher_join.try_join(), Ok(Some(())));
+                let mut handle = launched
+                    .lock()
+                    .take()
+                    .expect("actual managed controller admitted");
+                assert_eq!(started.lock().len(), 1);
+                let generation = started.lock()[0].1;
+                let supervisor_region =
+                    lab.state.region(generation.region).unwrap().parent.unwrap();
+                assert_ne!(supervisor_region, root);
+                assert_eq!(
+                    started.lock()[0].2.telemetry_snapshot(0).recv_waiter_count,
+                    1
+                );
+                let entered = Arc::new(AtomicUsize::new(0));
+                let completed = Arc::new(AtomicUsize::new(0));
+                let finalizer_entered = Arc::clone(&entered);
+                let finalizer_completed = Arc::clone(&completed);
+                let (release, mut finalizer_gate) = oneshot::channel::<()>();
+                assert!(
+                    lab.state
+                        .register_async_finalizer(supervisor_region, async move {
+                            finalizer_entered.fetch_add(1, Ordering::SeqCst);
+                            finalizer_gate.recv_uninterruptible().await.unwrap();
+                            finalizer_completed.fetch_add(1, Ordering::SeqCst);
+                        })
+                );
+                started.lock()[0].2.try_send(()).unwrap();
+                lab.run_until_idle();
+                assert_eq!(entered.load(Ordering::SeqCst), 1);
+                assert_eq!(completed.load(Ordering::SeqCst), 0);
+                assert!(lab.state.task(generation.task).is_none());
+                assert!(lab.state.region(generation.region).is_none());
+                assert!(lab.state.region(supervisor_region).is_some());
+                assert!(lab.state.task(handle.task_id()).is_some());
+                let mut poll_cx = std::task::Context::from_waker(std::task::Waker::noop());
+                assert!(
+                    Box::pin(handle.join())
+                        .as_mut()
+                        .poll(&mut poll_cx)
+                        .is_pending(),
+                    "a completed Temporary child is not a completed supervisor root close"
+                );
+                if cancel_before_close {
+                    handle.abort();
+                    lab.run_until_idle();
+                    assert_eq!(completed.load(Ordering::SeqCst), 0);
+                    assert!(lab.state.region(supervisor_region).is_some());
+                    assert!(
+                        Box::pin(handle.join())
+                            .as_mut()
+                            .poll(&mut poll_cx)
+                            .is_pending()
+                    );
+                }
+                release.send_blocking(()).unwrap();
+                lab.run_until_idle();
+                assert_eq!(completed.load(Ordering::SeqCst), 1);
+                assert!(lab.state.region(supervisor_region).is_none());
+                assert!(
+                    lab.state.task(handle.task_id()).is_none(),
+                    "actual controller terminal precedes the late-cancel branch"
+                );
+                if !cancel_before_close {
+                    handle.abort();
+                }
+                let Poll::Ready(Ok(report)) = Box::pin(handle.join()).as_mut().poll(&mut poll_cx)
+                else {
+                    panic!("actual terminated controller must retain its completed report");
+                };
+                if cancel_before_close {
+                    assert!(report.outcome.is_cancelled(), "{report:?}");
+                } else {
+                    assert!(
+                        report.outcome.is_ok(),
+                        "late cancellation cannot rewrite a published report: {report:?}"
+                    );
+                }
+                assert_eq!(
+                    (
+                        report.started,
+                        report.joined,
+                        report.restart_batches,
+                        report.escalations
+                    ),
+                    (1, 1, 0, 0)
+                );
+                assert_eq!(report.children.len(), 1);
+                assert_eq!(report.children[0].generation, generation);
+                assert!(report.children[0].outcome.is_ok());
+                assert_eq!(report.children[0].task_outcome, Ok(()));
+                assert!(report.children[0].region_outcome.is_some());
+                assert!(report.region_outcome.is_some());
+                assert!(
+                    matches!(report.cleanup_outcome, Some(Outcome::Ok(()))),
+                    "{report:?}"
+                );
+                let trace = lab.state.trace_handle().snapshot();
+                for task in [generation.task, handle.task_id()] {
+                    assert_eq!(trace.iter().filter(|event| event.kind == crate::trace::TraceEventKind::Complete &&
+                        matches!(event.data, crate::trace::TraceData::Task { task: actual, .. } if actual == task)).count(), 1);
+                }
+                clean(&mut lab, root);
+            }
         }
 
         #[test]
