@@ -10,7 +10,8 @@
 #     --overlay-path src/owned.rs [--overlay-path ...]
 #   Select --no-overlay for a committed executing-combinator candidate.
 #   Executing mode requires strict remote source selection and runs the full
-#   native audit, both real engine unit suites and the public stream journeys.
+#   native audit, both real engine unit suites, public stream journeys and an
+#   external consumer built with the runtime's default public feature profile.
 #
 # Environment Variables:
 #   RUST_LOG - Log level (default: info)
@@ -74,21 +75,30 @@ run_executing_mode() {
     [[ -z "$cargo_home" ]] || cargo_env+=("CARGO_HOME=$cargo_home")
     python3 - "$base" "${overlays[@]}" > "$output/source.json" <<'PY'
 import hashlib, json, pathlib, sys
-print(json.dumps(dict(base=sys.argv[1], features="tls,test-internals", overlays=[
+print(json.dumps(dict(base=sys.argv[1], features="tls,test-internals",
+    external_consumer=dict(manifest="tests/fixtures/downstream-consumer-proof/Cargo.toml",
+                           bin="default_consumer", features=[]), overlays=[
     dict(path=p,sha256=hashlib.sha256(pathlib.Path(p).read_bytes()).hexdigest(),
          mode=pathlib.Path(p).stat().st_mode) for p in sys.argv[2:]
 ]), sort_keys=True))
 PY
     local stage status receipt
-    for stage in native units journeys; do
+    # Test-only stages may retrieve no target artifacts. Ensure the parent of
+    # the external binary's rsync destination exists before RCH copies it back.
+    mkdir -p "$target"
+    for stage in native units journeys external; do
         case "$stage" in
             native) command=(test --test runtime_abort_vs_cancel_semantics_audit) ;;
             units) command=(test --lib) ;;
             journeys) command=(test --test e2e_stream_pipeline) ;;
+            external) command=(run --manifest-path tests/fixtures/downstream-consumer-proof/Cargo.toml --bin default_consumer) ;;
         esac
-        command+=(--jobs "$jobs" -p asupersync --locked --features 'tls,test-internals' --)
-        if [[ "$stage" == units ]]; then command+=(combinator::map_reduce:: combinator::pipeline::); fi
-        command+=(--nocapture --test-threads=1)
+        command+=(--jobs "$jobs" --locked)
+        if [[ "$stage" != external ]]; then
+            command+=(-p asupersync --features 'tls,test-internals' --)
+            if [[ "$stage" == units ]]; then command+=(combinator::map_reduce:: combinator::pipeline::); fi
+            command+=(--nocapture --test-threads=1)
+        fi
         printf 'Executing stage %s command:' "$stage"
         printf ' %q' "$rch_bin" exec "${source_args[@]}" -- env "${cargo_env[@]}" "CARGO_TARGET_DIR=$target/$stage" cargo "${command[@]}"
         printf '\n'
@@ -125,8 +135,19 @@ receipts=re.findall(r"^\[RCH\] clean-overlay receipt: base=([0-9a-f]{40}) overla
 assert len(receipts)==1 and receipts[0][0]==source["base"]
 assert not fingerprint or receipts[0][1]==fingerprint
 counts=re.findall(r"^test result: ok\. (\d+) passed; (\d+) failed; (\d+) ignored; (\d+) measured; (\d+) filtered out;",log,re.M)
-assert len(counts)==1 and int(counts[0][0])>0 and counts[0][1:4]==("0","0","0"), counts
-assert stage=="units" or counts[0][4]=="0", counts
+if stage=="external":
+    assert not counts, "external proof must execute its consumer binary"
+    marker="ASUPERSYNC_DOWNSTREAM_EXECUTING_COMBINATORS "
+    rows=[json.loads(line.split(marker,1)[1]) for line in log.splitlines() if marker in line]
+    assert len(rows)==2 and sorted(row["backend"] for row in rows)==["native_current_thread","native_two_worker_sharded"]
+    for row in rows:
+        assert row["mapped"]==row["reduced"]==row["admitted"]==row["consumed"]==16
+        assert row["expected_outputs"]==row["observed_outputs"]==16 and row["exact_order_and_bytes"]
+        assert 1<=row["map_max_in_flight"]<=2 and 1<=row["max_retained"]<=3 and 1<=row["max_in_flight"]<=3
+        assert row["stages"]==2 and row["live_tasks"]==row["leaks"]==0 and row["shutdown_completed"]
+else:
+    assert len(counts)==1 and int(counts[0][0])>0 and counts[0][1:4]==("0","0","0"), counts
+    assert stage=="units" or counts[0][4]=="0", counts
 if stage=="units":
     for name in ("executing_map_held_first_input_keeps_completed_results_in_retained_window",
                  "executing_pipeline_heterogeneous_sink_ack_bounds_all_work"):
@@ -136,7 +157,9 @@ if stage=="units":
         assert re.search(r"^test [^\n]*::"+name+r" \.\.\.",log,re.M), name
 if stage=="journeys":
     for name in ("public_executing_combinators_seeded_lab_delivery_and_backpressure",
-                 "public_executing_combinators_native_delivery_and_backpressure"):
+                 "public_executing_combinators_native_delivery_and_backpressure",
+                 "public_executing_pipeline_seeded_lab_failure_cleanup_controls",
+                 "public_executing_pipeline_native_failure_cleanup_controls"):
         assert re.search(r"^test [^\n]*::"+name+r" \.\.\.",log,re.M), name
     rows=[json.loads(line.split("ASUPERSYNC_EXECUTING_COMBINATORS ",1)[1]) for line in log.splitlines() if "ASUPERSYNC_EXECUTING_COMBINATORS " in line]
     assert len(rows)==5 and sorted(row["seed"] for row in rows if row["backend"]=="lab")==[0x3301,0x3302,0x3303]
@@ -154,12 +177,49 @@ if stage=="journeys":
             assert result["admitted"]==result["acknowledged"]==result["expected_outputs"]==24 and result["held_sink_published"]==0
         assert positive["observed_outputs"]==24 and positive["delivery_refusal"] is None
         assert negative["observed_outputs"]==23 and negative["delivery_refusal"]=="delivery_mismatch"
+    marker="ASUPERSYNC_EXECUTING_PIPELINE_CONTROLS "
+    controls=[json.loads(line.split(marker,1)[1]) for line in log.splitlines() if marker in line]
+    assert len(controls)==5 and sorted(row["seed"] for row in controls if row["backend"]=="lab")==[0x3311,0x3312,0x3313]
+    assert sorted(row["backend"] for row in controls if row["backend"]!="lab")==["native_current_thread","native_two_worker_sharded"]
+    expected={(failure,stage) for failure in ("typed_error","actual_future_panic","encoded_panicked_outcome","cancelled_outcome") for stage in range(3)}
+    expected.add(("explicit_caller_cancellation",None))
+    for row in controls:
+        assert row["live_tasks"]==row["leaks"]==0 and len(row["journeys"])==13
+        if row["backend"]=="lab": assert row["pending_obligations"]==0 and row["original_region_closed"]
+        else: assert row["shutdown_completed"]
+        assert {(case["failure"],case["target_stage"]) for case in row["journeys"]}==expected
+        for case in row["journeys"]:
+            failure,stage=case["failure"],case["target_stage"]
+            caller=failure=="explicit_caller_cancellation"
+            assert case["target_input"]==(None if caller else 3-stage)
+            assert case["callback_calls"]==[4,3,2] and case["delivered"]==[0]
+            assert case["admitted"]==case["window"]==4 and case["acknowledged"]==case["edge_capacity"]==1
+            assert 1<=case["max_in_flight"]<=4
+            assert case["cancelled_losers"]==case["cleanup_pending"]==case["cleanup_completed"]==(3 if caller else 2)
+            assert case["actual_child_completions"]==3 and case["premature_success_refusal"]=="owned_cleanup_pending"
+            assert case["withheld_child_observed"]==caller and case["withheld_observation_yields"]==(8 if caller else 0)
+            assert case["terminal_cleanup_accepted"] and len(case["workers"])==3
+            assert len({worker["task"] for worker in case["workers"]})==3
+            assert all(worker["task"]!=case["owner"] and worker["region"]==case["region"] for worker in case["workers"])
+            assert 4<=len(case["lease_ids"])<=5 and len(set(case["lease_ids"]))==len(case["lease_ids"])
+            assert case["lease_commits"]==1 and case["lease_aborts"]==len(case["lease_ids"])-1 and case["lease_leaks"]==0
+            assert case["all_owned_credit_reservations"]==case["all_owned_credit_terminals"]>len(case["lease_ids"])
+            assert case["typed_trigger_preserved"]==(failure=="typed_error")
+            if failure in ("actual_future_panic","encoded_panicked_outcome"):
+                assert case["terminal_outcome"]=="panicked" and case["terminal_cancel_reason"] is None
+                assert case["terminal_panic_message"]==("public pipeline actual callback panic" if failure=="actual_future_panic" else "public pipeline encoded panic")
+            else:
+                assert case["terminal_outcome"]=="cancelled" and case["terminal_panic_message"] is None
+                reason=case["terminal_cancel_reason"]
+                assert reason["kind"]==("User" if caller else "FailFast") and reason["cause"] is None
+                assert reason["message"]==("public pipeline caller cancellation" if caller else None)
+            assert case["terminal_typed_trigger"]==({"stage":stage,"input":3-stage,"error":"public pipeline stage failure"} if failure=="typed_error" else None)
 print(selected[0],receipts[0][1])
 PY
         ) || return 87
         read -r worker fingerprint <<< "$receipt"
     done
-    printf 'Executed native audit, engine units and 15 public journeys; logs: %s\n' "$output"
+    printf 'Executed native audit, engine units, public journeys and both external native consumers; logs: %s\n' "$output"
 }
 
 if [[ "${1:-}" == --executing ]]; then

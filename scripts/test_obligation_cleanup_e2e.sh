@@ -109,6 +109,10 @@ checked_stage() {
     CHECKED_PHASE="$stage"
     log="$CHECKED_DIR/$stage.log"
     checked_verify_source "$stage.before" || return $?
+    # RCH creates the final rsync destination, but its parent must already
+    # exist locally. Test-only stages may return no binary artifacts and
+    # therefore never create this parent before the public cargo-run stage.
+    mkdir -p "$CHECKED_TARGET" || return $?
     printf 'Checked stage %s command:' "$stage"
     printf ' %q' "$CHECKED_RCH" exec "${CHECKED_SOURCE_ARGS[@]}" -- env "${CHECKED_REMOTE_CARGO_ENV[@]}" \
         CARGO_TARGET_DIR="$CHECKED_TARGET/$stage" CARGO_INCREMENTAL=0 \

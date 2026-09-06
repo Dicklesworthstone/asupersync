@@ -112,7 +112,7 @@ dependencies = [
 
 [[package]]
 name = "asupersync"
-version = "0.4.9"
+version = "0.4.10"
 dependencies = [
  "aes-gcm",
  "asupersync-macros",
@@ -171,7 +171,7 @@ name = "asupersync-downstream-consumer-proof"
 version = "0.0.0"
 dependencies = [
  "asupersync 0.4.4",
- "asupersync 0.4.9",
+ "asupersync 0.4.10",
 ]
 
 [[package]]
