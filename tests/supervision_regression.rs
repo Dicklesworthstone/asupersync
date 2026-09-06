@@ -189,7 +189,7 @@ mod managed_public {
     use std::time::Duration;
 
     const NAMES: [&str; 4] = ["a", "b", "c", "d"];
-    type Snapshot = Box<dyn Fn() -> Vec<TraceEvent> + Send>;
+    type Snapshot = Box<dyn Fn() -> Vec<TraceEvent> + Send + Sync>;
 
     fn legacy_start(
         _: &Scope<'static, FailFast>,
@@ -867,20 +867,22 @@ mod managed_public {
         let mut handle = bind(
             vec![binding],
             config(RestartPolicy::OneForOne, 3)
-                .with_backoff(BackoffStrategy::Fixed(Duration::from_secs(30))),
+                .with_backoff(BackoffStrategy::Fixed(Duration::from_secs(300))),
         )
         .spawn(&cx)
         .unwrap();
         let ready = ready_set(&cx, &mut handle, &mut receiver, &[0]).await;
         perform_work(&cx, &mut handle, &mut receiver, &ready, 500).await;
+        let timer = cx.timer_driver().expect("actual owned runtime clock");
+        assert!(timer.next_deadline().is_none());
         ready[0].mailbox.try_send(Command::Error).unwrap();
         match next_event(&cx, &mut handle, &mut receiver).await {
             Event::Observed(entry) => assert_eq!(entry.action, Action::Failed),
             Event::Ready(_) => panic!("backoff allowed immediate replacement"),
         }
         // The runtime's real timer registration, not a planning delay field,
-        // proves the backoff is parked. There are no other sleeps in this run.
-        let timer = cx.timer_driver().expect("actual owned runtime clock");
+        // proves the backoff is parked. There were no timers before this
+        // failure, and the delay exceeds the whole native-run watchdog.
         let mut observed_backoff = false;
         for _ in 0..4096 {
             let trace = snapshot();
@@ -890,7 +892,7 @@ mod managed_public {
                     if task == ready[0].generation.task && region == ready[0].generation.region)
             }) && timer
                 .next_deadline()
-                .is_some_and(|deadline| deadline.duration_since(cx.now()) > 29_000_000_000);
+                .is_some_and(|deadline| deadline > cx.now());
             if observed_backoff {
                 break;
             }
@@ -909,7 +911,7 @@ mod managed_public {
             Outcome::Err("controlled mailbox failure")
         ));
         terminal_witnesses(&events.log.lock().unwrap(), &snapshot());
-        serde_json::json!({"scenario":"public_cancel_during_actual_backoff","delay_seconds":30,
+        serde_json::json!({"scenario":"public_cancel_during_actual_backoff","delay_seconds":300,
             "started":1,"joined":1,"restart_batches":0,"actual_sleep_witness":true})
     }
 
@@ -1384,115 +1386,169 @@ mod managed_public {
     }
 
     #[cfg(unix)]
-    #[test]
-    fn public_managed_supervisor_owned_sigterm_shutdown() {
+    const SIGNAL_CHILD_MARKER: &str = "ASUPERSYNC_MANAGED_SIGTERM_OWNED_CHILD";
+
+    #[cfg(unix)]
+    const SIGNAL_TEST: &str = "managed_public::public_managed_supervisor_owned_sigterm_shutdown";
+
+    #[cfg(unix)]
+    #[derive(Debug, PartialEq, Eq)]
+    enum SignalRunRefusal {
+        ZeroSelectedTests,
+        MissingSelectionReceipt,
+        MissingDrainReceipt,
+    }
+
+    #[cfg(unix)]
+    fn run_owned_signal_subprocess(
+        mode: &str,
+        exact_filter: &str,
+    ) -> Result<serde_json::Value, SignalRunRefusal> {
         use std::io::{BufRead, Write};
         use std::process::{Command as ProcessCommand, Stdio};
-        const MARKER: &str = "ASUPERSYNC_MANAGED_SIGTERM_OWNED_CHILD";
-        if let Ok(mode) = std::env::var(MARKER) {
-            assert!(mode == "current" || mode == "sharded");
-            signal_child(mode == "sharded");
+        let mut child = OwnedSignalChild(
+            ProcessCommand::new(std::env::current_exe().unwrap())
+                .args(["--exact", exact_filter, "--nocapture", "--test-threads=1"])
+                .env(SIGNAL_CHILD_MARKER, mode)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::inherit())
+                .spawn()
+                .expect("launch exact owned test subprocess"),
+        );
+        let pid = child.0.id();
+        let stdout = child.0.stdout.take().unwrap();
+        let mut stdin = child.0.stdin.take().unwrap();
+        let (sent, received) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            for line in std::io::BufReader::new(stdout).lines() {
+                if sent.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(45);
+        let mut ready = false;
+        let mut held = false;
+        let mut complete = None;
+        let mut harness_pass = false;
+        let mut zero_selected = false;
+        loop {
+            let remaining = deadline
+                .checked_duration_since(std::time::Instant::now())
+                .expect("whole SIGTERM subprocess watchdog elapsed");
+            let line = match received.recv_timeout(remaining) {
+                Ok(line) => line.expect("owned child stdout read"),
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    panic!("owned SIGTERM child stalled; no success")
+                }
+            };
+            eprintln!("SIGTERM_CHILD backend={mode} pid={pid} {line}");
+            if line.contains("ASUPERSYNC_SUPERVISOR_SIGTERM_READY") {
+                assert!(!ready);
+                ready = true;
+                assert!(line.contains(&format!("pid={pid}")));
+                assert!(child.0.try_wait().unwrap().is_none());
+                let status = ProcessCommand::new("/bin/kill")
+                    .args(["-TERM", &pid.to_string()])
+                    .status()
+                    .expect("deliver real SIGTERM to the owned child only");
+                assert!(status.success());
+            }
+            if line.contains("ASUPERSYNC_SUPERVISOR_SIGTERM_CLEANUP_PENDING") {
+                assert!(ready && !held);
+                held = true;
+                assert!(line.contains("selected=4"));
+                assert!(
+                    child.0.try_wait().unwrap().is_none(),
+                    "early child exit cannot pass the cleanup claim"
+                );
+                stdin.write_all(b"release\n").unwrap();
+                stdin.flush().unwrap();
+            }
+            if let Some((_, json)) = line.split_once("ASUPERSYNC_SUPERVISOR_SIGTERM_COMPLETE ") {
+                assert!(held && complete.is_none());
+                let report: serde_json::Value = serde_json::from_str(json).unwrap();
+                assert_eq!(report["runtime_shutdown"], true);
+                assert_eq!(report["journey"]["selected"], 4);
+                assert_eq!(report["journey"]["joined"], 4);
+                assert_eq!(
+                    report["journey"]["payloads"],
+                    serde_json::json!([700, 701, 702, 703])
+                );
+                complete = Some(report);
+            }
+            if line.contains("test result: ok. 1 passed; 0 failed; 0 ignored;") {
+                harness_pass = true;
+            }
+            if line.contains("test result: ok. 0 passed; 0 failed; 0 ignored;") {
+                zero_selected = true;
+            }
+        }
+        loop {
+            if let Some(status) = child.0.try_wait().unwrap() {
+                assert!(status.success());
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "child did not exit after its report"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        reader.join().expect("owned stdout reader terminated");
+        // The same gate judges real positive and planted negative subprocesses
+        // only after their actual harness output and terminal status exist.
+        if zero_selected {
+            return Err(SignalRunRefusal::ZeroSelectedTests);
+        }
+        if !harness_pass {
+            return Err(SignalRunRefusal::MissingSelectionReceipt);
+        }
+        if !(ready && held && complete.is_some()) {
+            return Err(SignalRunRefusal::MissingDrainReceipt);
+        }
+        Ok(complete.unwrap())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn public_managed_supervisor_owned_sigterm_shutdown() {
+        if let Ok(mode) = std::env::var(SIGNAL_CHILD_MARKER) {
+            match mode.as_str() {
+                "current" | "sharded" => signal_child(mode == "sharded"),
+                "early_exit" => {
+                    // This selected test exits normally before creating a
+                    // runtime. Its successful harness status must be rejected
+                    // by the very same gate as the two real SIGTERM journeys.
+                    println!("ASUPERSYNC_SUPERVISOR_NEGATIVE_EARLY_EXIT no_runtime_or_drain");
+                }
+                _ => panic!("unknown owned SIGTERM subprocess mode"),
+            }
             return;
         }
         for mode in ["current", "sharded"] {
-            let mut child = OwnedSignalChild(
-                ProcessCommand::new(std::env::current_exe().unwrap())
-                    .args([
-                        "--exact",
-                        "managed_public::public_managed_supervisor_owned_sigterm_shutdown",
-                        "--nocapture",
-                        "--test-threads=1",
-                    ])
-                    .env(MARKER, mode)
-                    .stdin(Stdio::piped())
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::inherit())
-                    .spawn()
-                    .expect("launch exact owned test subprocess"),
-            );
-            let pid = child.0.id();
-            let stdout = child.0.stdout.take().unwrap();
-            let mut stdin = child.0.stdin.take().unwrap();
-            let (sent, received) = std::sync::mpsc::channel();
-            let reader = std::thread::spawn(move || {
-                for line in std::io::BufReader::new(stdout).lines() {
-                    if sent.send(line).is_err() {
-                        break;
-                    }
-                }
-            });
-            let deadline = std::time::Instant::now() + Duration::from_secs(45);
-            let mut ready = false;
-            let mut held = false;
-            let mut complete = None;
-            let mut harness_pass = false;
-            loop {
-                let remaining = deadline
-                    .checked_duration_since(std::time::Instant::now())
-                    .expect("whole SIGTERM subprocess watchdog elapsed");
-                let line = match received.recv_timeout(remaining) {
-                    Ok(line) => line.expect("owned child stdout read"),
-                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
-                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                        panic!("owned SIGTERM child stalled; no success")
-                    }
-                };
-                eprintln!("SIGTERM_CHILD backend={mode} pid={pid} {line}");
-                if line.contains("ASUPERSYNC_SUPERVISOR_SIGTERM_READY") {
-                    assert!(!ready);
-                    ready = true;
-                    assert!(line.contains(&format!("pid={pid}")));
-                    assert!(child.0.try_wait().unwrap().is_none());
-                    let status = ProcessCommand::new("/bin/kill")
-                        .args(["-TERM", &pid.to_string()])
-                        .status()
-                        .expect("deliver real SIGTERM to the owned child only");
-                    assert!(status.success());
-                }
-                if line.contains("ASUPERSYNC_SUPERVISOR_SIGTERM_CLEANUP_PENDING") {
-                    assert!(ready && !held);
-                    held = true;
-                    assert!(line.contains("selected=4"));
-                    assert!(
-                        child.0.try_wait().unwrap().is_none(),
-                        "early child exit cannot pass the cleanup claim"
-                    );
-                    stdin.write_all(b"release\n").unwrap();
-                    stdin.flush().unwrap();
-                }
-                if let Some((_, json)) = line.split_once("ASUPERSYNC_SUPERVISOR_SIGTERM_COMPLETE ")
-                {
-                    assert!(held && complete.is_none());
-                    let report: serde_json::Value = serde_json::from_str(json).unwrap();
-                    assert_eq!(report["runtime_shutdown"], true);
-                    assert_eq!(report["journey"]["selected"], 4);
-                    assert_eq!(report["journey"]["joined"], 4);
-                    assert_eq!(
-                        report["journey"]["payloads"],
-                        serde_json::json!([700, 701, 702, 703])
-                    );
-                    complete = Some(report);
-                }
-                if line.contains("test result: ok. 1 passed; 0 failed; 0 ignored;") {
-                    harness_pass = true;
-                }
-            }
-            assert!(
-                ready && held && complete.is_some() && harness_pass,
-                "zero selection, early exit, or missing cleanup report is not a pass"
-            );
-            loop {
-                if let Some(status) = child.0.try_wait().unwrap() {
-                    assert!(status.success());
-                    break;
-                }
-                assert!(
-                    std::time::Instant::now() < deadline,
-                    "child did not exit after its report"
-                );
-                std::thread::sleep(Duration::from_millis(5));
-            }
-            reader.join().expect("owned stdout reader terminated");
+            run_owned_signal_subprocess(mode, SIGNAL_TEST)
+                .expect("selected real SIGTERM journey drained and exited");
         }
+        assert_eq!(
+            run_owned_signal_subprocess(
+                "current",
+                "managed_public::definitely_missing_managed_supervisor_case",
+            ),
+            Err(SignalRunRefusal::ZeroSelectedTests),
+            "actual zero-test libtest success must not pass the journey gate"
+        );
+        assert_eq!(
+            run_owned_signal_subprocess("early_exit", SIGNAL_TEST),
+            Err(SignalRunRefusal::MissingDrainReceipt),
+            "actual selected-but-early test success must not pass the journey gate"
+        );
+        println!(
+            "ASUPERSYNC_SUPERVISOR_HARNESS_NEGATIVES {}",
+            serde_json::json!({"zero_filter":"ZeroSelectedTests",
+                "early_exit":"MissingDrainReceipt","actual_terminal_subprocesses":2})
+        );
     }
 }
