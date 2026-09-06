@@ -6,6 +6,11 @@
 #
 # Usage:
 #   ./scripts/test_combinators.sh
+#   ./scripts/test_combinators.sh --executing --base FULL_COMMIT_SHA \
+#     --overlay-path src/owned.rs [--overlay-path ...]
+#   Select --no-overlay for a committed executing-combinator candidate.
+#   Executing mode requires strict remote source selection and runs the full
+#   native audit, both real engine unit suites and the public stream journeys.
 #
 # Environment Variables:
 #   RUST_LOG - Log level (default: info)
@@ -17,6 +22,151 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+
+run_executing_mode() {
+    local base='' no_overlay=0 option path resolved
+    local jobs="${EXECUTING_COMBINATOR_BUILD_JOBS:-8}"
+    local cargo_home="${EXECUTING_COMBINATOR_CARGO_HOME:-${CARGO_HOME:-}}"
+    local worker="${RCH_WORKER:-}" fingerprint=''
+    local output="${EXECUTING_COMBINATOR_ARTIFACT_DIR:-${TMPDIR:-/tmp}/asupersync-executing-combinators-$(date -u +%Y%m%dT%H%M%S)-$$}"
+    local target="${CARGO_TARGET_DIR_BASE:-${TMPDIR:-/tmp}/rch_target_executing_combinators}"
+    local rch_bin
+    local -a overlays=() source_args=() cargo_env=() command=()
+    shift
+    while (( $# )); do
+        case "$1" in
+            --base|--overlay-path)
+                option="$1"
+                (( $# >= 2 )) || { echo "Missing value for $1" >&2; return 86; }
+                if [[ "$option" == --base ]]; then base="$2"; else overlays+=("$2"); fi
+                shift 2 ;;
+            --no-overlay) no_overlay=1; shift ;;
+            *) echo "Unknown executing mode option: $1" >&2; return 86 ;;
+        esac
+    done
+    [[ "$base" =~ ^[0-9a-f]{40}$ && "$jobs" =~ ^[1-9][0-9]*$ ]] || {
+        echo "A full --base commit and positive EXECUTING_COMBINATOR_BUILD_JOBS are required" >&2; return 86;
+    }
+    if (( (no_overlay && ${#overlays[@]}) || (!no_overlay && !${#overlays[@]}) )); then
+        echo "Select --no-overlay or explicit --overlay-path files" >&2; return 86
+    fi
+    cd "$PROJECT_ROOT"
+    [[ "$(git branch --show-current)" == main && "$(git rev-parse --verify "$base^{commit}")" == "$base" ]] || return 86
+    for option in python3 rg realpath timeout; do command -v "$option" >/dev/null || return 86; done
+    for path in "${overlays[@]}"; do
+        [[ "$path" != /* && "$path" != *$'\n'* && "$path" != *$'\r'* && "$path" != *$'\t'* && "/$path/" != */../* && "/$path/" != */./* ]] || return 86
+        resolved=$(realpath --relative-to="$PROJECT_ROOT" -- "$path") || return 86
+        [[ "$resolved" == "$path" && -f "$path" && ! -L "$path" ]] || return 86
+    done
+    rch_bin=$(command -v "${RCH_BIN:-rch}") || return 86
+    [[ "$(basename "$rch_bin")" == rch && "$(realpath "$rch_bin")" != "$PROJECT_ROOT/scripts/rch_ci_fallback.sh" ]] || return 86
+    [[ ! -e "$output" && ! -L "$output" ]] || { echo "Preserving existing evidence: $output" >&2; return 86; }
+    mkdir -p "$(dirname "$output")"
+    mkdir "$output"
+    "$rch_bin" exec --help > "$output/rch-capabilities.txt"
+    for option in --base --clean-overlay --overlay-path --no-overlay; do
+        rg -q -- "$option" "$output/rch-capabilities.txt" || { echo "Installed RCH lacks $option" >&2; return 86; }
+    done
+    source_args=(--base "$base" --clean-overlay)
+    if (( no_overlay )); then source_args+=(--no-overlay); else
+        for path in "${overlays[@]}"; do source_args+=(--overlay-path "$path"); done
+    fi
+    [[ -z "$cargo_home" ]] || cargo_env+=("CARGO_HOME=$cargo_home")
+    python3 - "$base" "${overlays[@]}" > "$output/source.json" <<'PY'
+import hashlib, json, pathlib, sys
+print(json.dumps(dict(base=sys.argv[1], features="tls,test-internals", overlays=[
+    dict(path=p,sha256=hashlib.sha256(pathlib.Path(p).read_bytes()).hexdigest(),
+         mode=pathlib.Path(p).stat().st_mode) for p in sys.argv[2:]
+]), sort_keys=True))
+PY
+    local stage status receipt
+    for stage in native units journeys; do
+        case "$stage" in
+            native) command=(test --test runtime_abort_vs_cancel_semantics_audit) ;;
+            units) command=(test --lib) ;;
+            journeys) command=(test --test e2e_stream_pipeline) ;;
+        esac
+        command+=(--jobs "$jobs" -p asupersync --locked --features 'tls,test-internals' --)
+        if [[ "$stage" == units ]]; then command+=(combinator::map_reduce:: combinator::pipeline::); fi
+        command+=(--nocapture --test-threads=1)
+        printf 'Executing stage %s command:' "$stage"
+        printf ' %q' "$rch_bin" exec "${source_args[@]}" -- env "${cargo_env[@]}" "CARGO_TARGET_DIR=$target/$stage" cargo "${command[@]}"
+        printf '\n'
+        python3 - "$output/source.json" <<'PY'
+import hashlib, json, pathlib, sys
+for row in json.loads(pathlib.Path(sys.argv[1]).read_text())["overlays"]:
+    path=pathlib.Path(row["path"])
+    assert not path.is_symlink() and path.stat().st_mode==row["mode"]
+    assert hashlib.sha256(path.read_bytes()).hexdigest()==row["sha256"], row["path"]
+PY
+        status=0
+        RCH_REQUIRE_REMOTE=1 RCH_DISABLE_TARGET_REUSE=1 RCH_VISIBILITY=verbose \
+            RCH_WORKER="$worker" RCH_WORKERS='' NO_COLOR=1 \
+            timeout "${EXECUTING_COMBINATOR_STAGE_TIMEOUT:-1800}" "$rch_bin" --no-color exec "${source_args[@]}" -- \
+            env "${cargo_env[@]}" CARGO_TARGET_DIR="$target/$stage" CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 \
+            RUSTFLAGS='-D warnings -C debuginfo=0' cargo "${command[@]}" \
+            2>&1 | tee "$output/$stage.log" || status=$?
+        printf '%s terminal_exit=%s\n' "$stage" "$status" | tee -a "$output/stages.txt"
+        (( status == 0 )) || return "$status"
+        receipt=$(python3 - "$output/$stage.log" "$output/source.json" "$stage" "$worker" "$fingerprint" <<'PY'
+import hashlib, json, pathlib, re, sys
+log_path,source_path,stage,worker,fingerprint=sys.argv[1:]
+log=re.sub(r"\x1b\[[0-9;]*m", "", pathlib.Path(log_path).read_text())
+source=json.loads(pathlib.Path(source_path).read_text())
+for row in source["overlays"]:
+    path=pathlib.Path(row["path"])
+    assert not path.is_symlink() and path.stat().st_mode==row["mode"]
+    assert hashlib.sha256(path.read_bytes()).hexdigest()==row["sha256"], row["path"]
+selected=re.findall(r"Selected worker: ([A-Za-z0-9_.-]+) at ",log)
+terminal=re.findall(r"^\[RCH\] remote ([A-Za-z0-9_.-]+) \([^\n]+\)$",log,re.M)
+assert len(selected)==1 and terminal==selected and (not worker or selected==[worker])
+assert not re.search(r"^\[RCH\] local \(|falling back to local|local fallback|executing locally",log,re.M)
+receipts=re.findall(r"^\[RCH\] clean-overlay receipt: base=([0-9a-f]{40}) overlay-fingerprint=([0-9a-f]{64})$",log,re.M)
+assert len(receipts)==1 and receipts[0][0]==source["base"]
+assert not fingerprint or receipts[0][1]==fingerprint
+counts=re.findall(r"^test result: ok\. (\d+) passed; (\d+) failed; (\d+) ignored; (\d+) measured; (\d+) filtered out;",log,re.M)
+assert len(counts)==1 and int(counts[0][0])>0 and counts[0][1:4]==("0","0","0"), counts
+assert stage=="units" or counts[0][4]=="0", counts
+if stage=="units":
+    for name in ("executing_map_held_first_input_keeps_completed_results_in_retained_window",
+                 "executing_pipeline_heterogeneous_sink_ack_bounds_all_work"):
+        # With one libtest thread and --nocapture, scenario output can appear
+        # between this test-start prefix and its final `ok`. The aggregate
+        # above requires every selected test to pass, with no ignored tests.
+        assert re.search(r"^test [^\n]*::"+name+r" \.\.\.",log,re.M), name
+if stage=="journeys":
+    for name in ("public_executing_combinators_seeded_lab_delivery_and_backpressure",
+                 "public_executing_combinators_native_delivery_and_backpressure"):
+        assert re.search(r"^test [^\n]*::"+name+r" \.\.\.",log,re.M), name
+    rows=[json.loads(line.split("ASUPERSYNC_EXECUTING_COMBINATORS ",1)[1]) for line in log.splitlines() if "ASUPERSYNC_EXECUTING_COMBINATORS " in line]
+    assert len(rows)==5 and sorted(row["seed"] for row in rows if row["backend"]=="lab")==[0x3301,0x3302,0x3303]
+    assert sorted(row["backend"] for row in rows if row["backend"]!="lab")==["native_current_thread","native_two_worker_sharded"]
+    for row in rows:
+        assert row["live_tasks"]==row["leaks"]==0 and len(row["journeys"])==3
+        if row["backend"]=="lab": assert row["pending_obligations"]==0 and row["original_region_closed"]
+        else: assert row["shutdown_completed"]
+        mapped,positive,negative=row["journeys"]
+        assert mapped["admitted"]==mapped["joined"]==mapped["reduced"]==24
+        assert mapped["max_active"]<=2 and mapped["max_retained"]==mapped["held_prefix_pulled"]==3
+        assert mapped["held_prefix_later_tasks_completed"]==2 and mapped["noncommutative_order_matches"]
+        for result in (positive,negative):
+            assert result["stages"]==2 and result["edge_capacity"]==1 and result["max_in_flight"]==result["held_sink_pulled"]==3
+            assert result["admitted"]==result["acknowledged"]==result["expected_outputs"]==24 and result["held_sink_published"]==0
+        assert positive["observed_outputs"]==24 and positive["delivery_refusal"] is None
+        assert negative["observed_outputs"]==23 and negative["delivery_refusal"]=="delivery_mismatch"
+print(selected[0],receipts[0][1])
+PY
+        ) || return 87
+        read -r worker fingerprint <<< "$receipt"
+    done
+    printf 'Executed native audit, engine units and 15 public journeys; logs: %s\n' "$output"
+}
+
+if [[ "${1:-}" == --executing ]]; then
+    run_executing_mode "$@"
+    exit $?
+fi
+
 LOG_DIR="$PROJECT_ROOT/test_logs/combinators_$(date +%Y%m%d_%H%M%S)"
 RUN_STARTED_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 RCH_BIN="${RCH_BIN:-rch}"
