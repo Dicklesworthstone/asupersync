@@ -4074,6 +4074,74 @@ fn lab_runtime_validator_tracks_async_finalizer_registration_start_and_completio
 }
 
 #[test]
+fn region_close_validates_before_retiring_unified_and_sharded_validator_state() {
+    use crate::runtime::ShardedState;
+    use crate::runtime::sharded_state::ShardedConfig;
+
+    for sharded in [false, true] {
+        let mut state = RuntimeState::new();
+        if sharded {
+            let config = ShardedConfig {
+                io_driver: None,
+                timer_driver: None,
+                logical_clock_mode: LogicalClockMode::Lamport,
+                cancel_attribution: CancelAttributionConfig::default(),
+                entropy_source: Arc::new(OsEntropy),
+                blocking_pool: None,
+                obligation_leak_response: ObligationLeakResponse::Panic,
+                leak_escalation: None,
+                observability: None,
+            };
+            let metrics: Arc<dyn MetricsProvider> = Arc::new(TestMetrics::default());
+            state.install_shard_tables(Arc::new(ShardedState::new(
+                state.trace_handle(),
+                metrics,
+                config,
+            )));
+        }
+        let region = state.create_root_region(Budget::INFINITE);
+        {
+            let validator = state.cancel_protocol_validator().lock();
+            assert!(validator.region_state(region).is_some());
+            assert_eq!(validator.stats().0, 1);
+            assert_eq!(validator.violation_count(), 0);
+        }
+
+        // Use the real close walk and its selected inline/buffered dispatch.
+        // The sharded walk used to remove the validator while its close
+        // checks were still buffered, reporting a violation for valid close.
+        state.close_region_command(region, &CancelReason::user("validator close ordering"));
+        assert!(state.region(region).is_none());
+        assert_eq!(state.live_task_count(), 0);
+        assert_eq!(state.pending_obligation_count(), 0);
+        {
+            let validator = state.cancel_protocol_validator().lock();
+            assert_eq!(validator.violation_count(), 0, "sharded={sharded}");
+            assert!(validator.region_state(region).is_none());
+            assert_eq!(validator.stats().0, 0, "validator retirement must not leak");
+        }
+        assert_eq!(
+            state
+                .trace_handle()
+                .snapshot()
+                .iter()
+                .filter(|event| event.kind == crate::trace::TraceEventKind::RegionCloseComplete
+                    && matches!(event.data, crate::trace::TraceData::Region { region: actual, .. }
+                        if actual == region))
+                .count(),
+            1
+        );
+
+        // An absent machine really is invalid. The repair must preserve this
+        // strict check rather than treating premature retirement as success.
+        state.dispatch_region_close_validation(region);
+        let validator = state.cancel_protocol_validator().lock();
+        assert_eq!(validator.violation_count(), 1);
+        assert_eq!(validator.stats().0, 0);
+    }
+}
+
+#[test]
 fn runtime_validator_counts_each_sync_finalizer_completion() {
     init_test("runtime_validator_counts_each_sync_finalizer_completion");
     let mut state = RuntimeState::new();

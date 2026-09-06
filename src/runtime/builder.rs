@@ -9946,7 +9946,7 @@ worker_threads = 16
         observed_cx: Arc<parking_lot::Mutex<Option<Cx>>>,
         wake_again: bool,
         retired: std::sync::mpsc::Sender<()>,
-        _resource: crate::sync::mutex::OwnedMutexGuard<()>,
+        _resource: crate::sync::OwnedMutexGuard<()>,
     }
 
     impl Future for NativeShutdownProbe {
@@ -9990,27 +9990,33 @@ worker_threads = 16
     fn wait_native_shutdown_parked(runtime: &Runtime, task: crate::types::TaskId) {
         wait_native_shutdown_condition(
             || {
-                if let Some(table) = runtime.inner.scheduler.dispatch_task_table() {
-                    let mut table = table
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    table.get_stored_future(task).is_some()
-                        && table
-                            .task(task)
-                            .is_some_and(|record| !record.wake_state.is_notified())
-                } else {
-                    let mut state = runtime
-                        .inner
-                        .state
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    state.get_stored_future(task).is_some()
-                        && state
-                            .task(task)
-                            .is_some_and(|record| !record.wake_state.is_notified())
+                let injector = runtime.inner.scheduler.global_injector();
+                if injector.cancel_count() != 0 {
+                    return false;
                 }
+                let stored_without_wake =
+                    if let Some(table) = runtime.inner.scheduler.dispatch_task_table() {
+                        let mut table = table
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        table.get_stored_future(task).is_some()
+                            && table
+                                .task(task)
+                                .is_some_and(|record| !record.wake_state.is_notified())
+                    } else {
+                        let mut state = runtime
+                            .inner
+                            .state
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        state.get_stored_future(task).is_some()
+                            && state
+                                .task(task)
+                                .is_some_and(|record| !record.wake_state.is_notified())
+                    };
+                stored_without_wake && injector.cancel_count() == 0
             },
-            "actual Pending finalizer must return to its dispatch table without a pending wake",
+            "actual Pending finalizer must return to its dispatch table without a pending wake or queued cancellation",
         );
     }
 
@@ -10073,13 +10079,14 @@ worker_threads = 16
         let resource = Arc::new(crate::sync::Mutex::new(()));
         let resource_guard = resource.try_lock_owned().unwrap();
         let (retired_tx, retired_rx) = std::sync::mpsc::channel();
-        let (receipt, driver) = {
+        let (receipt, driver, shutdown_budget) = {
             let mut state = runtime
                 .inner
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let receipt = state.region(region).unwrap().close_receipt_handle();
+            let shutdown_budget = state.region(region).unwrap().shutdown_budget_handle();
             assert!(state.register_async_finalizer(
                 region,
                 NativeShutdownProbe {
@@ -10098,11 +10105,13 @@ worker_threads = 16
                 state
                     .timer_driver_handle()
                     .expect("native runtime timer authority"),
+                shutdown_budget,
             )
         };
         assert!(resource.try_lock_owned().is_err());
         assert_eq!(driver.pending_count(), 0);
         let mut expected_deadline = None;
+        let mut activation_poll_receipt = None;
         if case == 3 {
             commands.try_send(NativeShutdownCommand::Legacy).unwrap();
             wait_native_shutdown_condition(
@@ -10130,31 +10139,54 @@ worker_threads = 16
                     .is_none()
             );
             let activated_deadline = driver.now().saturating_add_nanos(20_000_000_000);
+            let activated_budget = Budget::INFINITE
+                .with_poll_quota(8)
+                .with_deadline(activated_deadline);
             commands
-                .try_send(NativeShutdownCommand::Bounded(
-                    Budget::INFINITE
-                        .with_poll_quota(8)
-                        .with_deadline(activated_deadline),
-                ))
+                .try_send(NativeShutdownCommand::Bounded(activated_budget))
                 .unwrap();
             wait_native_shutdown_condition(
-                || polls.load(Ordering::SeqCst) == 2,
+                || polls.load(Ordering::SeqCst) >= 2,
                 "activation must publish a real wake to the parked legacy task",
             );
             wait_native_shutdown_parked(&runtime, finalizer_cx.task_id());
+            // First cancellation publishes both the cancel route and the
+            // installed CancelLaneWaker. Concurrent notification can also
+            // reschedule a Pending poll. Bound actual callbacks by the
+            // installed quota, rather than assuming one poll per command.
+            let activation_polls = polls.load(Ordering::SeqCst);
+            let active_poll_limit = usize::try_from(activated_budget.poll_quota).unwrap();
+            assert!(activation_polls >= 2);
+            assert!(activation_polls - 1 < active_poll_limit);
+            assert_eq!(*shutdown_budget.read(), Some(activated_budget));
             assert_eq!(driver.pending_count(), 1);
             assert_eq!(driver.next_deadline(), Some(activated_deadline));
             assert_eq!(drops.load(Ordering::SeqCst), 0);
             assert!(receipt.lock().is_none());
             let tightened_deadline = driver.now();
             expected_deadline = Some(tightened_deadline);
+            let tightened_budget = Budget::INFINITE
+                .with_poll_quota(4)
+                .with_deadline(tightened_deadline);
             commands
-                .try_send(NativeShutdownCommand::Bounded(
-                    Budget::INFINITE
-                        .with_poll_quota(4)
-                        .with_deadline(tightened_deadline),
-                ))
+                .try_send(NativeShutdownCommand::Bounded(tightened_budget))
                 .unwrap();
+            // Enqueueing the command is not the tightening receipt. Observe
+            // the actual shared ceiling, which survives region retirement.
+            wait_native_shutdown_condition(
+                || *shutdown_budget.read() == Some(tightened_budget),
+                "native command must apply the expired finalizer ceiling",
+            );
+            // A poll already admitted under the old ceiling can still enter
+            // its callback while the command applies. This wrapper does not
+            // preempt that poll. Wait for actual retirement before measuring
+            // the finite callback count; the typed Deadline receipt below
+            // proves the newly applied deadline caused cleanup termination.
+            wait_native_shutdown_condition(
+                || receipt.lock().is_some(),
+                "expired ceiling must retire cleanup and publish actual close",
+            );
+            activation_poll_receipt = Some((activation_polls, active_poll_limit));
         } else {
             let budget = match case {
                 0 => Budget::INFINITE.with_poll_quota(0),
@@ -10194,10 +10226,13 @@ worker_threads = 16
             || receipt.lock().is_some(),
             "runtime must publish actual quiescent close receipt",
         );
-        assert_eq!(
-            polls.load(Ordering::SeqCst),
-            [0, 3, 1, 2][usize::from(case)]
-        );
+        if let Some((activation_polls, active_poll_limit)) = activation_poll_receipt {
+            let final_polls = polls.load(Ordering::SeqCst);
+            assert!(final_polls >= activation_polls);
+            assert!(final_polls - 1 < active_poll_limit);
+        } else {
+            assert_eq!(polls.load(Ordering::SeqCst), [0, 3, 1][usize::from(case)]);
+        }
         assert_eq!(wakes.load(Ordering::SeqCst), if case == 1 { 3 } else { 0 });
         assert_eq!(drops.load(Ordering::SeqCst), 1);
         assert_eq!(driver.pending_count(), 0);
@@ -10260,6 +10295,11 @@ worker_threads = 16
         assert_eq!(state.live_task_count(), 0);
         assert_eq!(state.pending_obligation_count(), 0);
         assert_eq!(state.leak_count(), 0);
+        assert_eq!(
+            state.cancel_protocol_validator().lock().violation_count(),
+            0,
+            "actual finalizer retirement and region close preserve protocol accounting"
+        );
         let trace = state.trace_handle().snapshot();
         drop(state);
         let finalizer_tasks: Vec<_> = trace

@@ -11968,6 +11968,29 @@ fn external_only_finalizer_budget_activation_wakes_and_retires_actual_cleanup() 
         }
     }
 
+    // A failed assertion must not destroy the last table/state owners before
+    // its still-parked callback checks lock freedom. This failure-only guard
+    // retires the actual stored future unlocked; it neither completes a task
+    // record nor manufactures a close receipt or successful cleanup witness.
+    struct RetireAfterTestFailure {
+        _state: Arc<ContendedMutex<RuntimeState>>,
+        table: Arc<ContendedMutex<TaskTable>>,
+        task: TaskId,
+    }
+
+    impl Drop for RetireAfterTestFailure {
+        fn drop(&mut self) {
+            if std::thread::panicking() {
+                let stored = self
+                    .table
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .remove_stored_future(self.task);
+                drop(stored);
+            }
+        }
+    }
+
     fn dispatch_actual(worker: &mut ThreeLaneWorker, expected: TaskId) {
         let selected = worker
             .next_task()
@@ -12035,6 +12058,11 @@ fn external_only_finalizer_budget_activation_wakes_and_retires_actual_cleanup() 
             assert_eq!(table.stored_future_count(), 1);
             live[0]
         };
+        let _failure_retirement = RetireAfterTestFailure {
+            _state: Arc::clone(&state),
+            table: Arc::clone(&table),
+            task: finalizer,
+        };
         assert_eq!(state.lock().unwrap().live_task_count(), 0);
         dispatch_actual(&mut worker, finalizer);
         assert_eq!(polls.load(Ordering::SeqCst), 1);
@@ -12054,6 +12082,11 @@ fn external_only_finalizer_budget_activation_wakes_and_retires_actual_cleanup() 
         worker.drain_region_commands();
         dispatch_actual(&mut worker, finalizer);
         assert_eq!(polls.load(Ordering::SeqCst), 2);
+        // Deferred cancellation publishes its task lane, then dispatches the
+        // installed CancelWaker, which also injects this same task. Execute
+        // both real entries before testing that masked cleanup is parked.
+        dispatch_actual(&mut worker, finalizer);
+        assert_eq!(polls.load(Ordering::SeqCst), 3);
         assert!(worker.next_task().is_none());
         let old_cleanup_budget = {
             let table = table
@@ -12089,11 +12122,11 @@ fn external_only_finalizer_budget_activation_wakes_and_retires_actual_cleanup() 
         }
         assert_eq!(
             polls.load(Ordering::SeqCst),
-            2,
+            3,
             "publication does not poll callbacks"
         );
         dispatch_actual(&mut worker, finalizer);
-        assert_eq!(polls.load(Ordering::SeqCst), 3);
+        assert_eq!(polls.load(Ordering::SeqCst), 4);
         assert!(worker.next_task().is_none());
         assert_eq!(drops.load(Ordering::SeqCst), 0);
         assert!(receipt.lock().is_none());
@@ -12120,7 +12153,7 @@ fn external_only_finalizer_budget_activation_wakes_and_retires_actual_cleanup() 
         worker.drain_region_commands();
         dispatch_actual(&mut worker, finalizer);
         if deadline_case {
-            assert_eq!(polls.load(Ordering::SeqCst), 4);
+            assert_eq!(polls.load(Ordering::SeqCst), 5);
             assert_eq!(driver.pending_count(), 1);
             assert_eq!(driver.next_deadline(), Some(deadline));
             assert!(receipt.lock().is_none());
@@ -12143,7 +12176,7 @@ fn external_only_finalizer_budget_activation_wakes_and_retires_actual_cleanup() 
 
         assert_eq!(
             polls.load(Ordering::SeqCst),
-            if deadline_case { 4 } else { 3 }
+            if deadline_case { 5 } else { 4 }
         );
         assert_eq!(drops.load(Ordering::SeqCst), 1);
         assert_eq!(driver.pending_count(), 0);

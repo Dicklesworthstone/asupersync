@@ -1332,6 +1332,8 @@ pub(crate) enum RegionLifecycleEffect {
         parent: Option<RegionId>,
         created_at: Time,
     },
+    /// Retire validator state after the queued close checks and instrumentation.
+    RemoveValidator { region_id: RegionId },
 }
 
 /// Outcome of `RuntimeState::admit_local_spawn_request_in`
@@ -9119,6 +9121,11 @@ impl RuntimeState {
             } => {
                 self.dispatch_region_closed_effects(region_id, parent, created_at);
             }
+            RegionLifecycleEffect::RemoveValidator { region_id } => {
+                self.cancel_protocol_validator
+                    .lock()
+                    .remove_region(region_id);
+            }
         }
     }
 
@@ -9471,13 +9478,14 @@ impl RuntimeState {
                             regions
                                 .resolve_mut(&mut self.regions)
                                 .remove(region_id.arena_index());
-                            // Drop the region's cancel-protocol state machine too;
-                            // otherwise `region_machines` leaks one entry per
-                            // region ever opened
-                            // (br-asupersync-cancelvalidator-leak-mdvuf9).
-                            self.cancel_protocol_validator
-                                .lock()
-                                .remove_region(region_id);
+                            // Keep the validator alive until the preceding
+                            // close check and instrumentation have dispatched.
+                            // Buffered shard walks must also retire it outside
+                            // the table guards, in the same ordered effect sink.
+                            self.emit_region_lifecycle_effect(
+                                effects,
+                                RegionLifecycleEffect::RemoveValidator { region_id },
+                            );
                             self.notify_runtime_epoch_advance(
                                 super::epoch_tracker::ModuleId::RegionTable,
                             );

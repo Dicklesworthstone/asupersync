@@ -614,6 +614,7 @@ mod tests {
             let result = Arc::new(Mutex::new(None));
             let result_slot = Arc::clone(&result);
             let (release, mut wait) = crate::channel::oneshot::channel();
+            let (begin_legacy, mut legacy_wait) = crate::channel::oneshot::channel();
             let budget = match case {
                 0 => Budget::INFINITE.with_poll_quota(0),
                 1 => Budget::INFINITE.with_poll_quota(2),
@@ -629,6 +630,12 @@ mod tests {
                         .await
                         .unwrap();
                     *child_slot.lock() = Some(child.region_id());
+                    if case == 3 {
+                        legacy_wait.recv_uninterruptible().await.unwrap();
+                        child
+                            .cancel(CancelReason::user("legacy close first"))
+                            .unwrap();
+                    }
                     wait.recv_uninterruptible().await.unwrap();
                     child
                         .cancel_with_budget(CancelReason::user("bounded cleanup test"), budget)
@@ -650,16 +657,18 @@ mod tests {
                     wake_again: case == 1,
                 }
             ));
+            let owner_cx = lab.state.task(owner).unwrap().cx.clone().unwrap();
             if case == 3 {
-                lab.state
-                    .close_region_command(child, &CancelReason::user("legacy close first"));
+                // Drive the real registered owner's command. Mutating state
+                // directly while the scheduler is idle does not admit a
+                // finalizer task through run_until_idle.
+                begin_legacy.send(&owner_cx, ()).unwrap();
                 lab.run_until_idle();
                 assert_eq!(polls.load(Ordering::SeqCst), 1);
                 assert_eq!(drops.load(Ordering::SeqCst), 0);
                 assert!(lab.state.region(child).unwrap().shutdown_budget().is_none());
                 assert!(receipt.lock().is_none());
             }
-            let owner_cx = lab.state.task(owner).unwrap().cx.clone().unwrap();
             release.send(&owner_cx, ()).unwrap();
             lab.run_until_idle();
             if case == 2 {
