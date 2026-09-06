@@ -240,7 +240,7 @@ impl Future for RegionCloseFuture {
     }
 }
 
-impl<P: Policy> Scope<'_, P> {
+impl<'scope, P: Policy> Scope<'scope, P> {
     /// Creates a new scope (internal use).
     #[must_use]
     #[allow(dead_code)]
@@ -307,6 +307,38 @@ impl<P: Policy> Scope<'_, P> {
     #[must_use]
     pub fn capability_budget(&self) -> CapabilityBudget {
         self.capability_budget
+    }
+
+    /// Execute bounded map tasks in this scope and reduce values in input order.
+    ///
+    /// The concurrency limit bounds active maps. The separate retained-work
+    /// limit also includes completed values waiting for an earlier input, so
+    /// out-of-order completion cannot create an unbounded result backlog.
+    /// Reduction is a left fold and does not require a commutative reducer or
+    /// cloning mapped values. Empty input produces a successful `None`.
+    ///
+    /// A terminal result is returned only after every admitted child finishes,
+    /// including cancellation cleanup. Dropping the execution requests child
+    /// cancellation; the owning region still enforces their eventual drain.
+    pub async fn map_reduce<I, M, F, T, E, R>(
+        &self,
+        cx: &Cx,
+        limits: crate::combinator::map_reduce::MapReduceLimits,
+        inputs: I,
+        map: M,
+        reduce: R,
+    ) -> crate::combinator::map_reduce::MapReduceExecution<T, E>
+    where
+        I: IntoIterator,
+        I::Item: Send + 'static,
+        M: Fn(Cx, I::Item) -> F + Send + Sync + 'static,
+        F: Future<Output = Outcome<T, E>> + Send + 'static,
+        T: Send + 'static,
+        E: Send + 'static,
+        R: FnMut(T, T) -> T,
+    {
+        crate::combinator::map_reduce::execute_map_reduce(cx, self, limits, inputs, map, reduce)
+            .await
     }
 
     // =========================================================================
@@ -666,6 +698,28 @@ impl<P: Policy> Scope<'_, P> {
             f,
         )
         .await
+    }
+
+    /// Build a streaming pipeline whose workers belong to this scope.
+    ///
+    /// Every edge has an explicit capacity. The total in-flight limit holds
+    /// each input's credit until the asynchronous sink acknowledges it,
+    /// including time spent queued, transforming, or awaiting consumption.
+    /// Append typed stages with `then` and start execution with `run`; building
+    /// the pipeline alone spawns no tasks. With no stages, inputs stream
+    /// directly to the sink.
+    pub fn pipeline<I, E>(
+        &self,
+        cx: &Cx,
+        config: crate::combinator::pipeline::PipelineExecutionConfig,
+        inputs: I,
+    ) -> crate::combinator::pipeline::PipelineExecution<'scope, I, I::Item, E, P>
+    where
+        I: IntoIterator,
+        I::Item: Send + 'static,
+        E: Send + 'static,
+    {
+        crate::combinator::pipeline::PipelineExecution::new(self, cx, inputs, config)
     }
 
     /// Creates a child region with explicit scheduler and capability budgets.

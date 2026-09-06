@@ -112,13 +112,15 @@ pub use join::{
 };
 pub use join_set::{JoinSet, JoinSummary};
 pub use map_reduce::{
-    MapReduce, MapReduceError, MapReduceResult, make_map_reduce_result, map_reduce_outcomes,
-    map_reduce_to_result, reduce_successes,
+    MapReduce, MapReduceError, MapReduceExecution, MapReduceExecutionError, MapReduceLimits,
+    MapReduceResult, MapReduceStopCause, execute_map_reduce, make_map_reduce_result,
+    map_reduce_outcomes, map_reduce_to_result, reduce_successes,
 };
 pub use pipeline::{
-    FailedStage, Pipeline, PipelineConfig, PipelineError, PipelineResult, pipeline_n_outcomes,
-    pipeline_to_result, pipeline_with_final, pipeline2_outcomes, pipeline3_outcomes,
-    stage_outcome_to_result,
+    FailedStage, Pipeline, PipelineConfig, PipelineError, PipelineExecution,
+    PipelineExecutionConfig, PipelineExecutionError, PipelineExecutionReport,
+    PipelineExecutionSummary, PipelineResult, pipeline_n_outcomes, pipeline_to_result,
+    pipeline_with_final, pipeline2_outcomes, pipeline3_outcomes, stage_outcome_to_result,
 };
 pub use quorum::{
     Quorum, QuorumError, QuorumFailure, QuorumResult, quorum_achieved, quorum_outcomes,
