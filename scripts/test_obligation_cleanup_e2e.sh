@@ -211,9 +211,9 @@ run_checked_admission_mode() {
             printf 'Managed supervision requires --features tls,test-internals\n' >&2; return 86;
         }
     else
-    [[ ",$CHECKED_FEATURES," == *,test-internals,* && ",$CHECKED_FEATURES," == *,channel-mpsc-select-e2e,* ]] || {
-        printf 'Checked mode requires test-internals and channel-mpsc-select-e2e in --features\n' >&2; return 86;
-    }
+        [[ ",$CHECKED_FEATURES," == *,test-internals,* && ",$CHECKED_FEATURES," == *,channel-mpsc-select-e2e,* ]] || {
+            printf 'Checked mode requires test-internals and channel-mpsc-select-e2e in --features\n' >&2; return 86;
+        }
     fi
     if (( (no_overlay == 1 && ${#CHECKED_OVERLAYS[@]} != 0) || (no_overlay == 0 && ${#CHECKED_OVERLAYS[@]} == 0) )); then
         printf 'Select either --no-overlay or explicit --overlay-path files\n' >&2; return 86
@@ -351,7 +351,10 @@ native = ["native_current_thread", "native_two_worker_sharded"]
 assert sorted(row["backend"] for row in journeys if row["backend"] != "lab") == native
 for row in journeys:
     assert row["live_tasks"] == row["leaks"] == 0
-    assert row["pending_obligations"] == 0 if row["backend"] == "lab" else row["shutdown_completed"]
+    if row["backend"] == "lab":
+        assert row["pending_obligations"] == 0
+    else:
+        assert row["shutdown_completed"]
     cases = row["journeys"]
     assert len(cases) == 18
     modes = [case for case in cases if case["scenario"] == "public_restart_mode"]
@@ -363,8 +366,10 @@ for row in journeys:
     sets = [case for case in cases if case["scenario"] == "public_restart_sets"]
     assert len(sets) == 6 and sorted(case["policy"] for case in sets) == sorted(["OneForOne", "OneForAll", "RestForOne"] * 2)
     for case in cases:
-        if case["scenario"] in ("public_cancel_during_factory", "public_cancel_during_actual_backoff"):
-            assert case["started"] == case["joined"] == 1 and case["restart_batches"] == 0
+        if case["scenario"] == "public_cancel_during_factory":
+            assert case["started"] == case["joined"] == 1 and case["never_started_child"] == "b" and case["cleanup_crossed_pending"]
+        if case["scenario"] == "public_cancel_during_actual_backoff":
+            assert case["started"] == case["joined"] == 1 and case["restart_batches"] == 0 and case["actual_sleep_witness"]
         if case["scenario"] == "public_shared_intensity_actual_parent_escalation":
             assert case["started"] == case["joined"] == 3 and case["restart_batches"] == case["escalations"] == 1
 signals = rows("ASUPERSYNC_SUPERVISOR_SIGTERM_COMPLETE ")
