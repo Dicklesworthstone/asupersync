@@ -1,6 +1,6 @@
 # Signal Delivery and Managed Supervisor Shutdown
 
-The maintained public target is [`tests/supervision_regression.rs`](../tests/supervision_regression.rs), driven by [`scripts/test_obligation_cleanup_e2e.sh`](../scripts/test_obligation_cleanup_e2e.sh) in `--managed-supervision` mode. The candidate source has been authored and reviewed; the complete runner has **not yet been executed**. Successful compilation, static review, and earlier component tests do not establish this full journey.
+The maintained public target is [`tests/supervision_regression.rs`](../tests/supervision_regression.rs), driven by [`scripts/test_obligation_cleanup_e2e.sh`](../scripts/test_obligation_cleanup_e2e.sh) in `--managed-supervision` mode. Its remote run on 2026-09-06 UTC passed both actual native SIGTERM subprocesses and rejected the planted zero-selection and early-exit controls. The separate deterministic signal-source tests also passed on three Lab seeds. The additional native registered-finalizer/replacement matrix described in [the channel recipe](channel_supervision_e2e.md) remains unexecuted; the expanded runner still needs a fresh complete result.
 
 The native public path creates `signal::sigterm()`, awaits `Signal::recv()`, calls `ManagedSupervisorHandle::abort()`, and awaits `join()`. It uses the same compiled topology and `ManagedChildBinding` API as [the channel recipe](channel_supervision_e2e.md). The application connects signal delivery to controller cancellation explicitly.
 

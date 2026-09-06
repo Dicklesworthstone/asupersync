@@ -10381,4 +10381,701 @@ worker_threads = 16
     fn native_sharded_shutdown_budget_runs_and_retires_real_finalizers() {
         native_shutdown_budget_matrix(true);
     }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum NativeManagedFinalizerAction {
+        Started,
+        Work(u32),
+        Failed(&'static str),
+        FinalizerPending(crate::types::TaskId),
+        FinalizerDone(crate::types::TaskId),
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    struct NativeManagedFinalizerEvent {
+        child: usize,
+        generation: crate::supervision::ManagedGeneration,
+        action: NativeManagedFinalizerAction,
+    }
+
+    type NativeManagedFinalizerLog = Arc<parking_lot::Mutex<Vec<NativeManagedFinalizerEvent>>>;
+
+    #[derive(Debug)]
+    enum NativeManagedFinalizerCommand {
+        Work(u32),
+        Fail,
+        Finish,
+    }
+
+    struct NativeManagedFinalizerReady {
+        child: usize,
+        generation: crate::supervision::ManagedGeneration,
+        commands: crate::channel::mpsc::Sender<NativeManagedFinalizerCommand>,
+    }
+
+    struct NativeManagedHeldFinalizer {
+        child: usize,
+        generation: crate::supervision::ManagedGeneration,
+        wait: Pin<Box<dyn Future<Output = ()> + Send>>,
+        log: NativeManagedFinalizerLog,
+        observed: Arc<parking_lot::Mutex<Option<Cx>>>,
+        pending: bool,
+        done: bool,
+        _resource: crate::sync::OwnedMutexGuard<()>,
+    }
+
+    impl Future for NativeManagedHeldFinalizer {
+        type Output = ();
+
+        fn poll(self: Pin<&mut Self>, poll_cx: &mut Context<'_>) -> Poll<()> {
+            let this = self.get_mut();
+            let cx = Cx::current().expect("registered native finalizer has its actual task Cx");
+            assert_eq!(cx.region_id(), this.generation.region);
+            assert_ne!(cx.task_id(), this.generation.task);
+            assert!(cx.inner.read().mask_depth > 0);
+            let task = cx.task_id();
+            *this.observed.lock() = Some(cx);
+            match this.wait.as_mut().poll(poll_cx) {
+                Poll::Pending => {
+                    if !this.pending {
+                        this.pending = true;
+                        this.log.lock().push(NativeManagedFinalizerEvent {
+                            child: this.child,
+                            generation: this.generation,
+                            action: NativeManagedFinalizerAction::FinalizerPending(task),
+                        });
+                    }
+                    Poll::Pending
+                }
+                Poll::Ready(()) => {
+                    assert!(
+                        this.pending,
+                        "release follows actual Pending, not admission alone"
+                    );
+                    assert!(!this.done, "finalizer finishes exactly once");
+                    this.done = true;
+                    this.log.lock().push(NativeManagedFinalizerEvent {
+                        child: this.child,
+                        generation: this.generation,
+                        action: NativeManagedFinalizerAction::FinalizerDone(task),
+                    });
+                    Poll::Ready(())
+                }
+            }
+        }
+    }
+
+    fn native_managed_finalizer_replacement_claim(
+        log: &[NativeManagedFinalizerEvent],
+        affected: &[usize],
+        claimed_replacement: bool,
+    ) -> Result<(), &'static str> {
+        if affected.is_empty() {
+            return Err("zero_selected_finalizers");
+        }
+        let drained = |prefix: &[NativeManagedFinalizerEvent]| {
+            affected.iter().all(|child| {
+                prefix.iter().any(|event| {
+                    event.child == *child
+                        && event.generation.number == 1
+                        && matches!(event.action, NativeManagedFinalizerAction::FinalizerDone(_))
+                })
+            })
+        };
+        for (index, event) in log.iter().enumerate() {
+            if event.generation.number == 2
+                && event.action == NativeManagedFinalizerAction::Started
+                && !drained(&log[..index])
+            {
+                return Err("replacement_before_registered_finalizer_completion");
+            }
+        }
+        if claimed_replacement && !drained(log) {
+            return Err("replacement_before_registered_finalizer_completion");
+        }
+        Ok(())
+    }
+
+    fn native_managed_finalizer_generation_json(
+        generation: crate::supervision::ManagedGeneration,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "number": generation.number,
+            "region": generation.region,
+            "task": generation.task,
+        })
+    }
+
+    fn native_managed_finalizer_replacement_case(
+        sharded: bool,
+        policy: crate::supervision::RestartPolicy,
+    ) {
+        use crate::channel::{mpsc, oneshot};
+        use crate::supervision::{
+            BackoffStrategy, ChildSpec, ManagedChildBinding, ManagedGeneration, ManagedRestartMode,
+            ManagedSupervisorReport, RestartPolicy, SupervisionConfig, SupervisorBuilder,
+        };
+        use crate::trace::TraceData;
+        use crate::types::Outcome;
+
+        fn legacy_must_not_run(
+            _: &crate::cx::Scope<'static, crate::types::policy::FailFast>,
+            _: &mut RuntimeState,
+            _: &Cx,
+        ) -> Result<crate::types::TaskId, SpawnError> {
+            panic!("managed binding must not invoke the legacy starter");
+        }
+
+        let runtime = if sharded {
+            RuntimeBuilder::new()
+                .worker_threads(2)
+                .with_sharded_state(true)
+        } else {
+            RuntimeBuilder::current_thread()
+        }
+        .build()
+        .expect("native managed finalizer runtime");
+        assert_eq!(runtime.config().worker_threads, if sharded { 2 } else { 1 });
+        assert_eq!(runtime.inner.sharded_state.is_some(), sharded);
+        assert_eq!(
+            runtime.inner.scheduler.dispatch_task_table().is_some(),
+            sharded
+        );
+        let affected: &[usize] = match policy {
+            RestartPolicy::OneForOne => &[1],
+            RestartPolicy::OneForAll => &[0, 1, 2],
+            RestartPolicy::RestForOne => &[1, 2],
+        };
+        let log: NativeManagedFinalizerLog = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let resources: Arc<Vec<_>> = Arc::new(
+            (0..3)
+                .map(|_| Arc::new(crate::sync::Mutex::new(())))
+                .collect(),
+        );
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let mut builder = SupervisorBuilder::new("native-registered-finalizer-replacement")
+            .with_restart_policy(policy);
+        let mut bindings = Vec::new();
+        for (child, name) in ["a", "b", "c"].into_iter().enumerate() {
+            let mut spec = ChildSpec::new(name, legacy_must_not_run)
+                .with_shutdown_budget(Budget::new().with_poll_quota(17));
+            if child != 0 {
+                spec = spec.depends_on(["a", "b"][child - 1]);
+            }
+            builder = builder.child(spec);
+            let ready_tx = ready_tx.clone();
+            let log = Arc::clone(&log);
+            let resources = Arc::clone(&resources);
+            bindings.push(ManagedChildBinding::new(
+                name,
+                ManagedRestartMode::Transient,
+                move |cx: Cx, generation: ManagedGeneration| {
+                    let ready_tx = ready_tx.clone();
+                    let log = Arc::clone(&log);
+                    let resources = Arc::clone(&resources);
+                    async move {
+                        assert_eq!(cx.task_id(), generation.task);
+                        assert_eq!(cx.region_id(), generation.region);
+                        if generation.number == 2 {
+                            assert!(resources.iter().all(|resource| resource.try_lock_owned().is_ok()),
+                                "replacement cannot run while any original finalizer owns its resource");
+                        }
+                        let (commands, mut receiver) = mpsc::channel(2);
+                        log.lock().push(NativeManagedFinalizerEvent {
+                            child,
+                            generation,
+                            action: NativeManagedFinalizerAction::Started,
+                        });
+                        ready_tx.send(NativeManagedFinalizerReady { child, generation, commands }).unwrap();
+                        loop {
+                            match receiver.recv(&cx).await {
+                                Ok(NativeManagedFinalizerCommand::Work(value)) => {
+                                    log.lock().push(NativeManagedFinalizerEvent {
+                                        child,
+                                        generation,
+                                        action: NativeManagedFinalizerAction::Work(value),
+                                    });
+                                }
+                                Ok(NativeManagedFinalizerCommand::Fail) => {
+                                    let error = "native registered-finalizer trigger";
+                                    log.lock().push(NativeManagedFinalizerEvent {
+                                        child,
+                                        generation,
+                                        action: NativeManagedFinalizerAction::Failed(error),
+                                    });
+                                    return Outcome::Err(error);
+                                }
+                                Ok(NativeManagedFinalizerCommand::Finish) => return Outcome::Ok(()),
+                                Err(mpsc::RecvError::Cancelled) => return Outcome::Cancelled(
+                                    cx.cancel_reason().expect("affected child receives actual cancellation"),
+                                ),
+                                Err(error) => panic!("unexpected managed command loss: {error:?}"),
+                            }
+                        }
+                    }
+                },
+            ));
+        }
+        drop(ready_tx);
+        let managed = builder
+            .compile()
+            .unwrap()
+            .bind_managed(
+                bindings,
+                SupervisionConfig::new(4, Duration::from_secs(60))
+                    .with_restart_policy(policy)
+                    .with_backoff(BackoffStrategy::None),
+            )
+            .unwrap();
+        let owner_future: Pin<
+            Box<
+                dyn Future<Output = (ManagedSupervisorReport<&'static str>, crate::types::TaskId)>
+                    + Send,
+            >,
+        > = Box::pin(async move {
+            let cx = Cx::current().expect("actual registered native supervisor owner");
+            let task = cx.task_id();
+            (managed.run(&cx).await, task)
+        });
+        let owner = runtime.handle().spawn(owner_future);
+        let mut original_ready = [None, None, None];
+        for _ in 0..3 {
+            let ready = ready_rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("actual original managed factory");
+            assert!(ready.child < original_ready.len());
+            assert_eq!(ready.generation.number, 1);
+            let child = ready.child;
+            assert!(original_ready[child].replace(ready).is_none());
+        }
+        let mut current: Vec<_> = original_ready
+            .into_iter()
+            .map(|ready| ready.expect("every original child starts exactly once"))
+            .collect();
+        let originals: Vec<_> = current.iter().map(|ready| ready.generation).collect();
+        let perform_work = |children: &[NativeManagedFinalizerReady], offset: u32| {
+            for ready in children {
+                let value = offset + u32::try_from(ready.child).unwrap();
+                ready
+                    .commands
+                    .try_send(NativeManagedFinalizerCommand::Work(value))
+                    .unwrap();
+                wait_native_shutdown_condition(
+                    || {
+                        log.lock().contains(&NativeManagedFinalizerEvent {
+                            child: ready.child,
+                            generation: ready.generation,
+                            action: NativeManagedFinalizerAction::Work(value),
+                        })
+                    },
+                    "exact native worker payload acknowledgement",
+                );
+            }
+        };
+        perform_work(&current, 100);
+        let mut releases = Vec::new();
+        let mut observed = Vec::new();
+        let mut receipts = Vec::new();
+        for &child in affected {
+            let (release, mut wait) = oneshot::channel();
+            let observed_cx = Arc::new(parking_lot::Mutex::new(None));
+            let resource = resources[child].try_lock_owned().unwrap();
+            let finalizer = NativeManagedHeldFinalizer {
+                child,
+                generation: originals[child],
+                wait: Box::pin(async move {
+                    wait.recv_uninterruptible().await.unwrap();
+                }),
+                log: Arc::clone(&log),
+                observed: Arc::clone(&observed_cx),
+                pending: false,
+                done: false,
+                _resource: resource,
+            };
+            let mut state = runtime
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            receipts.push(
+                state
+                    .region(originals[child].region)
+                    .unwrap()
+                    .close_receipt_handle(),
+            );
+            assert!(state.register_async_finalizer(originals[child].region, finalizer));
+            releases.push(Some(release));
+            observed.push(observed_cx);
+        }
+        let driver = runtime
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .timer_driver_handle()
+            .unwrap();
+        assert_eq!(driver.pending_count(), 0);
+        current[1]
+            .commands
+            .try_send(NativeManagedFinalizerCommand::Fail)
+            .unwrap();
+        wait_native_shutdown_condition(
+            || {
+                log.lock().contains(&NativeManagedFinalizerEvent {
+                    child: 1,
+                    generation: originals[1],
+                    action: NativeManagedFinalizerAction::Failed(
+                        "native registered-finalizer trigger",
+                    ),
+                })
+            },
+            "the original generation returns its real typed domain error",
+        );
+
+        // Cancellation can activate finalizers before the controller reaches
+        // their close awaits. Observe actual Pending independently of that
+        // scheduling order, releasing in the controller's reverse drain order.
+        // The final held region outlives all previously released regions.
+        let mut finalizer_tasks = Vec::new();
+        for position in (0..affected.len()).rev() {
+            let child = affected[position];
+            wait_native_shutdown_condition(
+                || {
+                    log.lock().iter().any(|event| {
+                        event.child == child
+                            && event.generation == originals[child]
+                            && matches!(
+                                event.action,
+                                NativeManagedFinalizerAction::FinalizerPending(_)
+                            )
+                    })
+                },
+                "actual registered finalizer crosses Pending",
+            );
+            let finalizer_cx = observed[position].lock().clone().unwrap();
+            wait_native_shutdown_parked(&runtime, finalizer_cx.task_id());
+            finalizer_tasks.push((child, finalizer_cx.task_id()));
+            assert!(!owner.is_finished());
+            assert!(!runtime.is_quiescent());
+            assert!(resources[child].try_lock_owned().is_err());
+            assert!(receipts[position].lock().is_none());
+            let held = log.lock().clone();
+            assert_eq!(
+                native_managed_finalizer_replacement_claim(&held, affected, false),
+                Ok(())
+            );
+            assert_eq!(
+                native_managed_finalizer_replacement_claim(&held, affected, true),
+                Err("replacement_before_registered_finalizer_completion")
+            );
+            assert_eq!(
+                native_managed_finalizer_replacement_claim(&held, &[], true),
+                Err("zero_selected_finalizers")
+            );
+            assert_eq!(
+                held.iter()
+                    .filter(|event| event.action == NativeManagedFinalizerAction::Started)
+                    .count(),
+                3
+            );
+            assert!(matches!(
+                ready_rx.try_recv(),
+                Err(std::sync::mpsc::TryRecvError::Empty)
+            ));
+            {
+                let state = runtime
+                    .inner
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                assert!(state.region(originals[child].region).is_some());
+                for &closed in &affected[position + 1..] {
+                    assert!(
+                        state.region(originals[closed].region).is_none(),
+                        "the last held finalizer must outlive preceding affected closes"
+                    );
+                }
+            }
+            releases[position]
+                .take()
+                .unwrap()
+                .send_blocking(())
+                .unwrap();
+            wait_native_shutdown_condition(
+                || {
+                    runtime
+                        .inner
+                        .state
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .region(originals[child].region)
+                        .is_none()
+                },
+                "released native registered finalizer closes its original region",
+            );
+            assert!(resources[child].try_lock_owned().is_ok());
+            let receipt = receipts[position].lock().clone().unwrap();
+            assert!(
+                matches!(receipt.cleanup_outcome.as_ref(), Some(Outcome::Ok(()))),
+                "{receipt:?}"
+            );
+        }
+        let mut replacement_ready = [None, None, None];
+        for _ in affected {
+            let ready = ready_rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("replacement after actual registered finalizer drain");
+            let child = ready.child;
+            assert!(affected.contains(&child));
+            assert_eq!(ready.generation.number, 2);
+            assert_ne!(ready.generation.task, originals[child].task);
+            assert_ne!(ready.generation.region, originals[child].region);
+            assert!(replacement_ready[child].replace(ready).is_none());
+        }
+        for &child in affected {
+            let ready = replacement_ready[child]
+                .take()
+                .expect("every affected child restarts exactly once");
+            assert!(matches!(
+                current[child]
+                    .commands
+                    .try_send(NativeManagedFinalizerCommand::Fail),
+                Err(mpsc::SendError::Disconnected(
+                    NativeManagedFinalizerCommand::Fail
+                ))
+            ));
+            current[child] = ready;
+        }
+        for ready in &current {
+            if !affected.contains(&ready.child) {
+                assert_eq!(ready.generation, originals[ready.child]);
+            }
+        }
+        assert_eq!(
+            native_managed_finalizer_replacement_claim(&log.lock(), affected, true),
+            Ok(())
+        );
+        perform_work(&current, 200);
+        for ready in &current {
+            ready
+                .commands
+                .try_send(NativeManagedFinalizerCommand::Finish)
+                .unwrap();
+        }
+        let (report, owner_task) = runtime.block_on(owner);
+        assert!(report.outcome.is_ok(), "{report:?}");
+        assert_eq!(report.started, 3 + affected.len() as u64);
+        assert_eq!(report.joined, report.started);
+        assert_eq!(report.restart_batches, 1);
+        assert_eq!(report.escalations, 0);
+        assert_eq!(report.children.len(), 3);
+        for completed in &report.children {
+            assert!(
+                current
+                    .iter()
+                    .any(|ready| ready.generation == completed.generation)
+            );
+            assert!(
+                completed.outcome.is_ok(),
+                "latest generation finished its healthy work: {completed:?}"
+            );
+            assert!(completed.task_outcome.is_ok(), "{completed:?}");
+            assert!(completed.region_outcome.is_some());
+        }
+        wait_native_shutdown_condition(
+            || runtime.is_quiescent(),
+            "all native managed generations and finalizers retire",
+        );
+        let state = runtime
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for generation in originals
+            .iter()
+            .chain(current.iter().map(|ready| &ready.generation))
+        {
+            assert!(state.region(generation.region).is_none());
+        }
+        assert!(state.region(report.region.unwrap()).is_none());
+        assert_eq!(
+            state.live_region_count(),
+            1,
+            "only the native runtime root remains before shutdown"
+        );
+        assert_eq!(state.live_task_count(), 0);
+        assert_eq!(state.pending_obligation_count(), 0);
+        assert_eq!(state.leak_count(), 0);
+        assert_eq!(
+            state.cancel_protocol_validator().lock().violation_count(),
+            0
+        );
+        let trace = state.trace_handle().snapshot();
+        drop(state);
+        assert_eq!(driver.pending_count(), 0);
+        if let Some(table) = runtime.inner.scheduler.dispatch_task_table() {
+            assert_eq!(
+                table
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .live_task_count(),
+                0
+            );
+        }
+        if let Some(shards) = &runtime.inner.sharded_state {
+            assert_eq!(
+                shards
+                    .obligations
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .pending_count(),
+                0
+            );
+            assert_eq!(shards.leak_count(), 0);
+        }
+        let log = log.lock().clone();
+        let starts: Vec<_> = log
+            .iter()
+            .filter(|event| event.action == NativeManagedFinalizerAction::Started)
+            .collect();
+        let all_tasks: std::collections::BTreeSet<_> = starts
+            .iter()
+            .map(|event| event.generation.task)
+            .chain(finalizer_tasks.iter().map(|(_, task)| *task))
+            .chain([owner_task])
+            .collect();
+        assert_eq!(all_tasks.len(), starts.len() + finalizer_tasks.len() + 1);
+        let task_seq = |task, region, kind| {
+            let matches: Vec<_> = trace.iter().filter(|event| event.kind == kind &&
+                matches!(event.data, TraceData::Task { task: actual, region: actual_region }
+                    if actual == task && actual_region == region)).collect();
+            assert_eq!(
+                matches.len(),
+                1,
+                "exact canonical {kind:?} for {task:?}/{region:?}"
+            );
+            matches[0].seq
+        };
+        let close_seq = |region| {
+            let matches: Vec<_> = trace.iter().filter(|event| event.kind == TraceEventKind::RegionCloseComplete &&
+                matches!(event.data, TraceData::Region { region: actual, .. } if actual == region)).collect();
+            assert_eq!(matches.len(), 1, "exact canonical close for {region:?}");
+            matches[0].seq
+        };
+        for event in &starts {
+            let generation = event.generation;
+            assert!(
+                task_seq(generation.task, generation.region, TraceEventKind::Complete)
+                    < close_seq(generation.region)
+            );
+        }
+        let mut ordered_joins = Vec::new();
+        for &(child, finalizer) in &finalizer_tasks {
+            let region = originals[child].region;
+            let finalizer_start = task_seq(finalizer, region, TraceEventKind::Spawn);
+            let finalizer_complete = task_seq(finalizer, region, TraceEventKind::Complete);
+            let closed = close_seq(region);
+            assert!(
+                task_seq(originals[child].task, region, TraceEventKind::Complete) < finalizer_start
+            );
+            assert!(finalizer_start < finalizer_complete && finalizer_complete < closed);
+            let replacements: Vec<_> = current.iter().filter(|ready| ready.generation.number == 2).map(|ready| {
+                let spawned = task_seq(ready.generation.task, ready.generation.region, TraceEventKind::Spawn);
+                assert!(closed < spawned, "every affected old finalizer/region closes before any replacement admission");
+                spawned
+            }).collect();
+            ordered_joins.push(serde_json::json!({"child":child,"finalizer_task":finalizer,
+                "original_region":region,"finalizer_spawn_seq":finalizer_start,
+                "finalizer_complete_seq":finalizer_complete,"old_region_close_seq":closed,
+                "replacement_spawn_seqs":replacements}));
+        }
+        let payloads: Vec<_> = log
+            .iter()
+            .filter_map(|event| match event.action {
+                NativeManagedFinalizerAction::Work(value) => Some(value),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(payloads, [100, 101, 102, 200, 201, 202]);
+        assert_eq!(
+            log.iter()
+                .filter(|event| matches!(event.action, NativeManagedFinalizerAction::Failed(_)))
+                .count(),
+            1
+        );
+        assert_eq!(
+            log.iter()
+                .filter(|event| matches!(
+                    event.action,
+                    NativeManagedFinalizerAction::FinalizerPending(_)
+                ))
+                .count(),
+            affected.len()
+        );
+        assert_eq!(
+            log.iter()
+                .filter(|event| matches!(
+                    event.action,
+                    NativeManagedFinalizerAction::FinalizerDone(_)
+                ))
+                .count(),
+            affected.len()
+        );
+        let receipt = serde_json::json!({
+            "backend":if sharded {"native_two_worker_sharded"} else {"native_current_thread"},
+            "strategy":format!("{policy:?}"),"affected":affected,
+            "originals":originals.iter().copied().map(native_managed_finalizer_generation_json).collect::<Vec<_>>(),
+            "current":current.iter().map(|ready|native_managed_finalizer_generation_json(ready.generation)).collect::<Vec<_>>(),
+            "started":report.started,"joined":report.joined,"restart_batches":report.restart_batches,
+            "held_finalizer_witnesses":finalizer_tasks.len(),"ordered_joins":ordered_joins,"payloads":payloads,
+            "trigger_error":"native registered-finalizer trigger","latest_outcomes":"Ok",
+            "negative_controls":["zero_selected_finalizers","replacement_before_registered_finalizer_completion"],
+            "live_tasks":0,"owned_regions":0,"runtime_roots_before_shutdown":1,
+            "pending_obligations":0,"leaks":0,"pending_timers":0,"runtime_shutdown":true,
+        });
+        drop(current);
+        drop(observed);
+        let inner = Arc::downgrade(&runtime.inner);
+        assert!(runtime.shutdown_timeout(Duration::from_secs(5)));
+        assert!(inner.upgrade().is_none());
+        println!("ASUPERSYNC_NATIVE_MANAGED_FINALIZER_REPLACEMENT {receipt}");
+    }
+
+    fn native_managed_finalizer_replacement_matrix(sharded: bool) {
+        let (finished, result) = std::sync::mpsc::sync_channel(1);
+        let owned = std::thread::Builder::new()
+            .name(format!("native-managed-finalizer-{sharded}"))
+            .spawn(move || {
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    for policy in [
+                        crate::supervision::RestartPolicy::OneForOne,
+                        crate::supervision::RestartPolicy::OneForAll,
+                        crate::supervision::RestartPolicy::RestForOne,
+                    ] {
+                        native_managed_finalizer_replacement_case(sharded, policy);
+                    }
+                }));
+                finished
+                    .send(outcome)
+                    .expect("owned native matrix watchdog remains alive");
+            })
+            .unwrap();
+        let outcome = result
+            .recv_timeout(Duration::from_secs(45))
+            .expect("native registered-finalizer replacement matrix exceeded 45 seconds");
+        owned.join().unwrap();
+        if let Err(payload) = outcome {
+            std::panic::resume_unwind(payload);
+        }
+    }
+
+    #[test]
+    fn native_current_thread_managed_replacement_waits_for_registered_finalizers() {
+        native_managed_finalizer_replacement_matrix(false);
+    }
+
+    #[test]
+    fn native_sharded_managed_replacement_waits_for_registered_finalizers() {
+        native_managed_finalizer_replacement_matrix(true);
+    }
 }

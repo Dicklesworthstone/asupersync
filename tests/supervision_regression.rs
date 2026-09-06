@@ -653,7 +653,7 @@ mod managed_public {
         assert!(
             matches!(
                 old_mailbox.try_send(Command::Error),
-                Err(mpsc::SendError::Closed(Command::Error))
+                Err(mpsc::SendError::Disconnected(Command::Error))
             ),
             "a late command addressed to the retired generation cannot fail its replacement"
         );

@@ -1,6 +1,6 @@
 # Managed Channel and Supervisor E2E
 
-The maintained target is [`tests/supervision_regression.rs`](../tests/supervision_regression.rs), using the managed API in [`src/supervision.rs`](../src/supervision.rs). The candidate source has been authored and statically reviewed; the complete `--managed-supervision` runner has **not yet been executed**. This recipe describes its intended checks, not a passing receipt.
+The maintained target is [`tests/supervision_regression.rs`](../tests/supervision_regression.rs), using the managed API in [`src/supervision.rs`](../src/supervision.rs). Its remote public run on 2026-09-06 UTC passed all six tests, including the 90 journeys below and two native SIGTERM subprocesses. The 40-test native prerequisite and 504 focused units passed separately on unchanged production code. The runner is being extended with native registered-finalizer-before-replacement tests; those additional checks have not yet run. The complete expanded lane still needs a fresh result for its selected source.
 
 The public path compiles a `SupervisorBuilder`, supplies named `ManagedChildBinding` factories through `bind_managed`, and calls `ManagedSupervisor::spawn(&Cx)`. Each factory receives its actual child `Cx` and `ManagedGeneration`. Workers use bounded MPSC mailboxes. The retained `ManagedSupervisorHandle` requests cancellation through `abort()` and waits for the controller's report through `join()`.
 
@@ -10,7 +10,7 @@ The public tests define 18 journeys, repeated on three seeded `LabRuntime` runs,
 - Nine journeys cross `Permanent`, `Transient`, and `Temporary` restart modes with normal completion, typed error, and actual panic.
 - Three journeys cancel inside a child factory, cancel while an actual backoff timer is registered, and exhaust the shared restart intensity while observing escalation to a real parked sibling.
 
-The assertions hold asynchronous cleanup at a real `Pending`, reject premature completion, and require canonical `Complete` events for the actual task/region identities. The interdependent case makes one child's cleanup await another child's witness. An old mailbox must return `Closed` with its unsent value after replacement. Runtime checks require no live tasks or leaked obligations; native runs also require successful shutdown. These are task-owned cleanup callbacks; runtime region finalizers have separate focused tests in the same runner.
+The assertions hold asynchronous cleanup at a real `Pending`, reject premature completion, and require canonical `Complete` events for the actual task/region identities. The interdependent case makes one child's cleanup await another child's witness. An old mailbox must return `SendError::Disconnected` with its unsent value after replacement. Runtime checks require no live tasks or leaked obligations; native runs also require successful shutdown. These are task-owned cleanup callbacks; runtime region finalizers have separate focused tests in the same runner.
 
 Run from `main` after the candidate runner, runtime, and tests are committed at the selected revision:
 
