@@ -4198,7 +4198,7 @@ mod tests {
         assert_eq!(in_flight.load(Ordering::SeqCst), 1);
         assert!(result.lock().is_none());
         assert_eq!(lab.run_until_idle(), 0, "cancelled drain really parks");
-        release_body.send(()).unwrap();
+        release_body.send_blocking(()).unwrap();
         assert!(lab.run_until_idle() < 2048);
         assert_eq!(dropped.load(Ordering::SeqCst), 1);
         assert_eq!(cancelled.load(Ordering::SeqCst), 1);
@@ -4208,7 +4208,7 @@ mod tests {
         );
         assert_eq!(in_flight.load(Ordering::SeqCst), 1);
         assert_eq!(lab.run_until_idle(), 0);
-        release_child.send(()).unwrap();
+        release_child.send_blocking(()).unwrap();
         assert!(lab.run_until_idle() < 2048);
         if parent_cancel {
             assert!(
@@ -4490,7 +4490,7 @@ mod tests {
             assert!(lab.run_until_idle() < 2048);
             assert!(blocked_polls.load(Ordering::SeqCst) > 0);
             assert_eq!(dropped.load(Ordering::SeqCst), 0);
-            release.send(()).unwrap();
+            release.send_blocking(()).unwrap();
             assert!(lab.run_until_idle() < 2048);
             assert_eq!(dropped.load(Ordering::SeqCst), 1);
             assert_eq!(cancelled.load(Ordering::SeqCst), 0);
