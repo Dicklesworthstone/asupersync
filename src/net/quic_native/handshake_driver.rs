@@ -538,6 +538,11 @@ fn long_packet_type_space(packet_type: LongPacketType) -> Option<PacketProtectio
 }
 
 impl QuicHandshakeDriver {
+    /// The actual TLS role, used before admitting a managed server handshake.
+    pub(crate) fn is_server(&self) -> bool {
+        matches!(self.tls, Connection::Server(_))
+    }
+
     /// Start a client handshake against `server_name`, advertising `transport_params`.
     pub fn client(
         config: Arc<ClientConfig>,

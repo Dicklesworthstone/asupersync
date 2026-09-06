@@ -182,6 +182,17 @@ pub(crate) struct NativeQuicUdpHandoffParts {
     pub(crate) clock_origin: Instant,
 }
 
+/// TLS-derived application ownership independent of the socket that drove it.
+/// Only the completed-driver validator below creates these parts; managed
+/// admission keeps its original UDP endpoint throughout the handshake.
+pub(crate) struct AuthenticatedQuicParts {
+    pub(crate) connection: QuicConnection,
+    pub(crate) protection: AtpPacketProtection,
+    pub(crate) peer_cid: ConnectionId,
+    pub(crate) negotiated_alpn: Vec<u8>,
+    pub(crate) final_handshake_flight: Vec<OutgoingPacket>,
+}
+
 /// A refused managed handoff, retaining the original authenticated UDP owner.
 ///
 /// No connection, socket, queued stream data, packet-protection state, or
@@ -443,13 +454,42 @@ impl NativeQuicUdpConnection {
         cx: &Cx,
         endpoint: QuicUdpEndpoint,
         peer_addr: SocketAddr,
-        mut driver: QuicHandshakeDriver,
+        driver: QuicHandshakeDriver,
         local_cid: ConnectionId,
         connection_config: NativeQuicConnectionConfig,
         required_alpn: &[u8],
         role: StreamRole,
         early_one_rtt_packets: Vec<ReceivedPacket>,
     ) -> Result<Self, NativeQuicUdpConnectionError> {
+        let parts = Self::finish_authenticated_handshake(
+            cx,
+            driver,
+            connection_config,
+            required_alpn,
+            role,
+        )?;
+        Ok(Self {
+            connection: parts.connection,
+            endpoint,
+            protection: parts.protection,
+            local_cid,
+            peer_cid: parts.peer_cid,
+            peer_addr,
+            negotiated_alpn: parts.negotiated_alpn,
+            final_handshake_flight: parts.final_handshake_flight,
+            early_one_rtt_packets,
+            last_final_flight_retransmit: None,
+            clock_origin: Instant::now(),
+        })
+    }
+
+    pub(crate) fn finish_authenticated_handshake(
+        cx: &Cx,
+        mut driver: QuicHandshakeDriver,
+        connection_config: NativeQuicConnectionConfig,
+        required_alpn: &[u8],
+        role: StreamRole,
+    ) -> Result<AuthenticatedQuicParts, NativeQuicUdpConnectionError> {
         if !driver.is_complete() || !driver.one_rtt_keys_installed() {
             return Err(NativeQuicUdpConnectionError::HandshakeIncomplete(
                 "TLS did not complete with installed 1-RTT keys",
@@ -513,18 +553,12 @@ impl NativeQuicUdpConnection {
             Box::new(driver.into_provider()),
             AtpPacketProtectionConfig::default(),
         );
-        Ok(Self {
+        Ok(AuthenticatedQuicParts {
             connection,
-            endpoint,
             protection,
-            local_cid,
             peer_cid,
-            peer_addr,
             negotiated_alpn,
             final_handshake_flight,
-            early_one_rtt_packets,
-            last_final_flight_retransmit: None,
-            clock_origin: Instant::now(),
         })
     }
 

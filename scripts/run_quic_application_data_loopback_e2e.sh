@@ -18,7 +18,7 @@ entry = "authenticated_managed_kernel_backpressure"
 parent = json.loads((artifacts / "kernel-parent.json").read_text())
 assert os.geteuid() == 0, "declared_unavailable: isolated kernel setup needs noninteractive sudo"
 assert os.readlink("/proc/self/ns/net") != os.readlink(f"/proc/{parent['pid']}/ns/net"), "controller must be in a fresh network namespace"
-paths = dict(test="tests/quic_h3_live_udp.rs", runner="scripts/run_quic_application_data_loopback_e2e.sh", manager="src/net/quic_native/connection_manager.rs", managed="src/net/quic_native/managed_endpoint.rs", owner="src/net/quic_native/udp_connection.rs", endpoint="src/net/quic_native/endpoint.rs", application="src/net/quic_native/endpoint_api.rs", exports="src/net/quic_native/mod.rs")
+paths = dict(test="tests/quic_h3_live_udp.rs", runner="scripts/run_quic_application_data_loopback_e2e.sh", manager="src/net/quic_native/connection_manager.rs", managed="src/net/quic_native/managed_endpoint.rs", owner="src/net/quic_native/udp_connection.rs", handshake_driver="src/net/quic_native/handshake_driver.rs", endpoint="src/net/quic_native/endpoint.rs", application="src/net/quic_native/endpoint_api.rs", exports="src/net/quic_native/mod.rs")
 assert {key: hashlib.sha256((root / path).read_bytes()).hexdigest() for key, path in paths.items()} == parent["source"], "compiled/actual controller source identity"
 
 def file_sha(path):
@@ -328,11 +328,16 @@ BASE_REV="$(git rev-parse "${ASUPERSYNC_QUIC_BASE:-HEAD}^{commit}")"
 OVERLAY_MODE="${ASUPERSYNC_QUIC_CLEAN_OVERLAY:-0}"
 QUIC_WORKER="${ASUPERSYNC_QUIC_RCH_WORKER:-${RCH_WORKER:-}}"
 BUILD_JOBS="${ASUPERSYNC_QUIC_BUILD_JOBS:-8}"
+STAGE_TIMEOUT="${ASUPERSYNC_QUIC_STAGE_TIMEOUT:-1800}"
 QUIC_CARGO_HOME="${ASUPERSYNC_QUIC_CARGO_HOME:-${CARGO_HOME:-}}"
 QUIC_ARTIFACT_BASE="${ASUPERSYNC_MANAGED_QUIC_ARTIFACT_BASE:-}"
 OVERLAY_FINGERPRINT=""
-if [[ ! "${BUILD_JOBS}" =~ ^[1-9][0-9]*$ ]]; then
-  echo "refused: ASUPERSYNC_QUIC_BUILD_JOBS must be a positive integer" >&2
+if [[ ! "${BUILD_JOBS}" =~ ^[1-9][0-9]*$ || ! "${STAGE_TIMEOUT}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "refused: build jobs and stage timeout must be positive integers" >&2
+  exit 2
+fi
+if [[ "$(git branch --show-current)" != main ]]; then
+  echo "refused: this proof runner operates on main" >&2
   exit 2
 fi
 REMOTE_CARGO_ENV=()
@@ -353,7 +358,7 @@ if [[ -e "${OUTPUT_ROOT}" ]]; then
   echo "refused: OUTPUT_ROOT already exists; preserve its earlier evidence: ${OUTPUT_ROOT}" >&2
   exit 2
 fi
-mkdir -p "${OUTPUT_ROOT}"
+mkdir -p "${OUTPUT_ROOT}" "${TARGET_DIR}"
 
 # Installed executable evidence, not a version-number assumption. Refuse before
 # issuing proof commands if the complete source-selection surface is missing.
@@ -370,7 +375,8 @@ if [[ "${OVERLAY_MODE}" == 1 ]]; then
   # coordinates these exact reservations; unselected peer dirt stays excluded.
   SOURCE_ARGS+=(--clean-overlay)
   for path in src/net/quic_native/connection_manager.rs src/net/quic_native/managed_endpoint.rs \
-    src/net/quic_native/udp_connection.rs src/net/quic_native/endpoint.rs \
+    src/net/quic_native/udp_connection.rs src/net/quic_native/handshake_driver.rs \
+    src/net/quic_native/endpoint.rs \
     src/net/quic_native/endpoint_api.rs src/net/quic_native/mod.rs \
     tests/quic_h3_live_udp.rs scripts/run_quic_application_data_loopback_e2e.sh; do
     SOURCE_ARGS+=(--overlay-path "${path}")
@@ -390,14 +396,21 @@ echo "base=${BASE_REV} overlay_mode=${OVERLAY_MODE} logs=${OUTPUT_ROOT}"
 
 run_stage() {
   local stage="$1" features="$2" target="$3" status=0 receipt
+  local -a target_args
   shift 3
-  env RCH_REQUIRE_REMOTE=1 RCH_VISIBILITY=verbose RCH_WORKER="${QUIC_WORKER}" RCH_WORKERS= NO_COLOR=1 \
+  if [[ "${target}" == --lib ]]; then
+    target_args=(--lib)
+  else
+    target_args=(--test "${target}")
+  fi
+  timeout --signal=TERM --kill-after=30s "${STAGE_TIMEOUT}s" \
+    env RCH_REQUIRE_REMOTE=1 RCH_DISABLE_TARGET_REUSE=1 RCH_VISIBILITY=verbose RCH_WORKER="${QUIC_WORKER}" RCH_WORKERS= NO_COLOR=1 \
     rch exec "${SOURCE_ARGS[@]}" -- env "${REMOTE_CARGO_ENV[@]}" \
     ATP_QUIC_TRACE="${ATP_QUIC_TRACE:-1}" \
-    CARGO_TARGET_DIR="${TARGET_DIR}" CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 \
+    CARGO_TARGET_DIR="${TARGET_DIR}/${stage}" CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 \
     RUSTFLAGS='-D warnings -C debuginfo=0' \
     cargo test --jobs "${BUILD_JOBS}" -p asupersync --locked \
-    --features "${features}" --test "${target}" -- --nocapture "$@" \
+    --features "${features}" "${target_args[@]}" -- --nocapture "$@" \
     2>&1 | tee "${OUTPUT_ROOT}/${stage}.log" || status=$?
   if [[ "${status}" != 0 ]]; then
     echo "failed: ${stage} terminal_exit=${status}; original output retained" >&2
@@ -421,6 +434,37 @@ PY
   read -r QUIC_WORKER OVERLAY_FINGERPRINT <<< "${receipt}"
 }
 
+# Native cancellation semantics are the prerequisite for every runtime change.
+run_stage native test-internals,tls runtime_abort_vs_cancel_semantics_audit --test-threads=1
+python3 - "${OUTPUT_ROOT}/native.log" <<'PY'
+import pathlib, re, sys
+log = pathlib.Path(sys.argv[1]).read_text()
+counts = re.findall(r"test result: ok\. (\d+) passed; (\d+) failed; (\d+) ignored; (\d+) measured; (\d+) filtered out", log)
+assert len(counts) == 1 and int(counts[0][0]) > 0 and counts[0][1:] == ("0", "0", "0", "0"), ("complete unfiltered native prerequisite required", counts)
+PY
+# The retained TLS driver must preserve the existing public owner's auto-traits.
+run_stage public-api-traits http3,tls quic_endpoint_api_roundtrip
+python3 - "${OUTPUT_ROOT}/public-api-traits.log" <<'PY'
+import pathlib, re, sys
+log = pathlib.Path(sys.argv[1]).read_text()
+assert re.findall(r"test result: ok\. (\d+) passed; (\d+) failed; (\d+) ignored; (\d+) measured; (\d+) filtered out", log) == [("8", "0", "0", "0", "0")]
+assert len(re.findall(r"^test managed_public_types_preserve_config_traits_and_error_conversions \.\.\. ok$", log, re.M)) == 1
+PY
+run_stage managed-mechanics http3,tls --lib net::quic_native::managed_endpoint::tests --test-threads=1
+python3 - "${OUTPUT_ROOT}/managed-mechanics.log" <<'PY'
+import pathlib, re, sys
+log = pathlib.Path(sys.argv[1]).read_text()
+counts = re.findall(r"test result: ok\. (\d+) passed; (\d+) failed; (\d+) ignored; (\d+) measured; (\d+) filtered out", log)
+assert len(counts) == 1 and counts[0][:4] == ("19", "0", "0", "0"), ("all 15 original and four new managed mechanics required", counts)
+tests = re.findall(r"^test net::quic_native::managed_endpoint::tests::authenticated_accept_tests::([A-Za-z0-9_]+) \.\.\. ok$", log, re.M)
+expected = {
+    "managed_accept_preflight_receipt_and_packet_bounds_preserve_existing_owner",
+    "managed_accept_actual_initial_credit_bounds_queued_prefix_and_pto_replay",
+    "managed_accept_tls_callback_cancellation_stops_at_one_packet_and_keeps_other_cid",
+    "managed_remove_connection_preserves_same_address_peer_queues_and_timer",
+}
+assert len(tests) == len(expected) and set(tests) == expected, ("all four named authenticated admission mechanics required", tests)
+PY
 # Preserve the original protocol fixture stage and its assertions. Its keys and
 # manually established state are not credited as authenticated managed proof.
 run_stage protocol-fixture test-internals,tls quic_application_data_udp_loopback
@@ -450,7 +494,7 @@ assert len(ignored) == 2 and set(ignored) == {"authenticated_managed_process_pee
 rows = [json.loads(line.split("MANAGED_QUIC_TWO_PROCESS ", 1)[1]) for line in log.splitlines() if "MANAGED_QUIC_TWO_PROCESS " in line]
 assert len(rows) == 1, "one actual two-process summary required"
 summary = rows[0]
-paths = dict(test="tests/quic_h3_live_udp.rs", runner="scripts/run_quic_application_data_loopback_e2e.sh", manager="src/net/quic_native/connection_manager.rs", managed="src/net/quic_native/managed_endpoint.rs", owner="src/net/quic_native/udp_connection.rs", endpoint="src/net/quic_native/endpoint.rs", application="src/net/quic_native/endpoint_api.rs", exports="src/net/quic_native/mod.rs")
+paths = dict(test="tests/quic_h3_live_udp.rs", runner="scripts/run_quic_application_data_loopback_e2e.sh", manager="src/net/quic_native/connection_manager.rs", managed="src/net/quic_native/managed_endpoint.rs", owner="src/net/quic_native/udp_connection.rs", handshake_driver="src/net/quic_native/handshake_driver.rs", endpoint="src/net/quic_native/endpoint.rs", application="src/net/quic_native/endpoint_api.rs", exports="src/net/quic_native/mod.rs")
 expected = {key: hashlib.sha256(pathlib.Path(value).read_bytes() if overlay == "1" else subprocess.check_output(["git", "show", f"{base}:{value}"])).hexdigest() for key, value in paths.items()}
 assert summary["source"] == expected, "compiled source identity differs from the selected revision/overlay"
 children = summary["children"]

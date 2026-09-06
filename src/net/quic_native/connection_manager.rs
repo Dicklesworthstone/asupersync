@@ -283,6 +283,100 @@ impl std::fmt::Display for ConnectionRouterError {
 impl std::error::Error for ConnectionRouterError {}
 
 impl ConnectionRouter {
+    #[cfg(feature = "tls")]
+    pub(crate) fn validate_authenticated_cids(
+        &self,
+        initial_cid: ConnectionId,
+        local_cid: ConnectionId,
+    ) -> Result<(), ConnectionRouterError> {
+        if self.connections.len() >= self.max_connections {
+            return Err(ConnectionRouterError::ConnectionCreationFailed(
+                "authenticated connection capacity exhausted".to_string(),
+            ));
+        }
+        if initial_cid.is_empty()
+            || local_cid.is_empty()
+            || self.connections.contains_key(&initial_cid)
+            || self.connections.keys().any(|existing| {
+                existing.as_bytes().starts_with(local_cid.as_bytes())
+                    || local_cid.as_bytes().starts_with(existing.as_bytes())
+            })
+        {
+            return Err(ConnectionRouterError::ConnectionCreationFailed(
+                "empty, occupied, or ambiguous authenticated connection ID".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "tls")]
+    pub(crate) fn insert_authenticated_connection(
+        &mut self,
+        cx: &Cx,
+        initial_cid: ConnectionId,
+        local_cid: ConnectionId,
+        peer_addr: SocketAddr,
+        mut parts: super::udp_connection::AuthenticatedQuicParts,
+        now: Instant,
+    ) -> Result<(), ConnectionRouterError> {
+        cx.checkpoint()
+            .map_err(|_| ConnectionRouterError::Cancelled)?;
+        self.validate_authenticated_cids(initial_cid, local_cid)?;
+        let deadline = parts
+            .connection
+            .inner_mut()
+            .pto_deadline_micros(cx, 0)
+            .map_err(|error| match error {
+                super::NativeQuicConnectionError::Cancelled => ConnectionRouterError::Cancelled,
+                other => ConnectionRouterError::PacketProcessingFailed {
+                    connection_id: local_cid,
+                    reason: other.to_string(),
+                },
+            })?
+            .map(|micros| {
+                now.checked_add(Duration::from_micros(micros))
+                    .ok_or_else(|| {
+                        ConnectionRouterError::TimerSchedulingFailed(
+                            "authenticated deadline exceeds the managed clock range".to_string(),
+                        )
+                    })
+            })
+            .transpose()?;
+        self.connections.insert(
+            local_cid,
+            ConnectionHandle {
+                connection: RoutedConnection::Authenticated(parts.connection),
+                packet_protection: Some(ConnectionPacketProtection {
+                    protection: parts.protection,
+                }),
+                peer_addr,
+                last_activity: now,
+                established_at: Some(now),
+                next_timer_deadline: deadline,
+                deferred_spaces: [false, false, true],
+                next_deferred_space: 0,
+                peer_connection_id: Some(parts.peer_cid),
+                clock_origin: Some(now),
+                authenticated: Some(AuthenticatedRouting {
+                    negotiated_alpn: parts.negotiated_alpn,
+                    final_handshake_flight: parts.final_handshake_flight,
+                    last_final_flight_retransmit: None,
+                    pending_final_flight_packets: 0,
+                }),
+            },
+        );
+        Ok(())
+    }
+
+    pub(crate) fn retained_packet_connection_id(
+        &self,
+        packet: &ReceivedPacket,
+    ) -> Option<ConnectionId> {
+        self.decode_routing_info(packet)
+            .ok()
+            .map(|info| info.destination_cid)
+    }
+
     /// All fallible validation precedes this owned move. No negotiated state
     /// is recreated from the template or from handshake transition flags.
     #[cfg(feature = "tls")]
