@@ -52,7 +52,7 @@ fn exercise_executing_combinators(sharded: bool) {
         }
     );
     let future: std::pin::Pin<Box<dyn std::future::Future<Output = (usize, usize, usize)> + Send>> =
-        Box::pin(execute_public_journeys());
+        Box::pin(execute_public_journeys(sharded));
     let (map_in_flight, retained_maps, pipeline_window) =
         runtime.block_on(runtime.handle().spawn(future));
     runtime.block_on(async {
@@ -83,7 +83,7 @@ fn exercise_executing_combinators(sharded: bool) {
     );
 }
 
-async fn execute_public_journeys() -> (usize, usize, usize) {
+async fn execute_public_journeys(sharded: bool) -> (usize, usize, usize) {
     use asupersync::combinator::{MapReduceLimits, PipelineExecutionConfig};
     use asupersync::runtime::yield_now;
     use asupersync::{Cx, Outcome};
@@ -162,9 +162,147 @@ async fn execute_public_journeys() -> (usize, usize, usize) {
         .map(|n| format!("wire:{}:ready", n * 7).into_bytes())
         .collect();
     assert_eq!(*observed.lock().unwrap(), expected);
+    execute_owned_transfer(sharded).await;
     (
         mapped.max_in_flight,
         mapped.max_retained,
         pipeline.summary.max_in_flight,
     )
+}
+
+async fn execute_owned_transfer(sharded: bool) {
+    use asupersync::Cx;
+    use asupersync::channel::oneshot;
+    use asupersync::net::atp::protocol::AtpOutcome;
+    use asupersync::net::atp::sdk::{
+        ActiveTransfer, ActiveTransferState, TransferId, TransferOptions, TransferPhase,
+        TransferProgress, TransferProgressReporter, TransferTerminal,
+    };
+    use std::future::{Future, poll_fn};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::task::{Context, Waker};
+
+    fn public_traits<T: Send + Sync + Unpin + std::fmt::Debug>() {}
+    public_traits::<ActiveTransfer>();
+    public_traits::<TransferProgressReporter>();
+    public_traits::<TransferTerminal>();
+
+    struct WorkerResource(Arc<AtomicUsize>);
+    impl Drop for WorkerResource {
+        fn drop(&mut self) {
+            assert_eq!(self.0.fetch_add(1, Ordering::SeqCst), 0);
+        }
+    }
+    fn progress(bytes: u64, phase: TransferPhase) -> TransferProgress {
+        TransferProgress {
+            transfer_id: TransferId::new("external-owned-worker"),
+            bytes_transferred: bytes,
+            total_bytes: 32,
+            speed_bytes_per_sec: 0,
+            eta_ms: None,
+            phase,
+            active_paths: 0,
+            repair_symbols_active: false,
+        }
+    }
+
+    let cx = Cx::current().expect("public native coordinator context");
+    let scope = cx.scope();
+    let input: Vec<u8> = (0u8..32).map(|byte| byte * 3).collect();
+    let expected: Vec<u8> = input.iter().map(|byte| byte + 7).collect();
+    let published = Arc::new(Mutex::new(None));
+    let publication = Arc::clone(&published);
+    let drops = Arc::new(AtomicUsize::new(0));
+    let resource = WorkerResource(Arc::clone(&drops));
+    let (ready, mut parked) = oneshot::channel();
+    let (release, mut commit) = oneshot::channel::<()>();
+    let mut transfer = ActiveTransfer::spawn_worker(
+        &cx,
+        &scope,
+        TransferId::new("external-owned-worker"),
+        TransferOptions::default(),
+        move |child, reporter| async move {
+            let _resource = resource;
+            let mut output = Vec::with_capacity(input.len());
+            for byte in input {
+                output.push(byte.wrapping_add(7));
+                reporter
+                    .report(progress(output.len() as u64, TransferPhase::DataTransfer))
+                    .expect("public progress reporter accepts actual processed bytes");
+            }
+            let mut waiting = std::pin::pin!(commit.recv(&child));
+            let mut ready = Some(ready);
+            poll_fn(|ctx| {
+                let result = waiting.as_mut().poll(ctx);
+                if result.is_pending() {
+                    if let Some(ready) = ready.take() {
+                        ready
+                            .send_blocking((child.task_id(), child.region_id()))
+                            .unwrap();
+                    }
+                }
+                result
+            })
+            .await
+            .expect("caller released the real publication gate");
+            assert!(publication.lock().unwrap().replace(output).is_none());
+            AtpOutcome::Ok(progress(32, TransferPhase::Completed))
+        },
+    )
+    .expect("public Scope admits the owned worker");
+
+    let (worker_task, worker_region) = parked.recv(&cx).await.unwrap();
+    assert_ne!(worker_task, cx.task_id());
+    assert_eq!(worker_region, scope.region_id());
+    assert_eq!(transfer.state(), ActiveTransferState::Running);
+    for _ in 0..3 {
+        assert!(!transfer.is_complete().await);
+    }
+    assert!(published.lock().unwrap().is_none());
+    assert_eq!(drops.load(Ordering::SeqCst), 0);
+    let snapshot = transfer.next_progress_snapshot().await.unwrap();
+    assert_eq!((snapshot.sequence, snapshot.skipped), (32, 31));
+    assert_eq!(snapshot.progress, progress(32, TransferPhase::DataTransfer));
+    {
+        let mut empty = std::pin::pin!(transfer.next_progress());
+        assert!(
+            empty
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_pending()
+        );
+    }
+    assert!(published.lock().unwrap().is_none());
+    release.send_blocking(()).unwrap();
+    let terminal: TransferTerminal = transfer.wait_for_terminal().await.clone();
+    assert_eq!(terminal.worker_join, Ok(()));
+    assert_eq!(terminal.cleanup_panic, None);
+    assert_eq!(
+        terminal.outcome,
+        AtpOutcome::Ok(progress(32, TransferPhase::Completed))
+    );
+    assert_eq!(terminal.worker_outcome, Some(terminal.outcome.clone()));
+    assert_eq!(published.lock().unwrap().as_ref(), Some(&expected));
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
+    for _ in 0..3 {
+        assert!(transfer.is_complete().await);
+        assert_eq!(transfer.terminal(), Some(&terminal));
+    }
+    assert_eq!(
+        transfer.next_progress().await,
+        Some(progress(32, TransferPhase::Completed))
+    );
+    assert_eq!(transfer.next_progress().await, None);
+    assert_eq!(transfer.next_progress_snapshot().await, None);
+    assert_eq!(transfer.terminal(), Some(&terminal));
+    assert_eq!(transfer.state(), ActiveTransferState::Terminal);
+    let backend = if sharded {
+        "native_two_worker_sharded"
+    } else {
+        "native_current_thread"
+    };
+    println!(
+        "ASUPERSYNC_DOWNSTREAM_ATP_WORKER {{\"backend\":\"{backend}\",\"scope\":\"owned-local-worker-only\",\"bytes\":32,\"observations\":32,\"sequence\":32,\"skipped\":31,\"worker_task\":\"{worker_task:?}\",\"worker_region\":\"{worker_region:?}\",\"published_exact_bytes\":true,\"drops\":1,\"canonical_joined\":true,\"terminal_retained\":true}}"
+    );
 }
