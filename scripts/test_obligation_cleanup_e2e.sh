@@ -18,6 +18,9 @@
 #   --managed-supervision uses the same source selection and remote execution
 #   with native, supervisor/finalizer unit, and public supervision stages.
 #   It defaults to tls,test-internals and uses MANAGED_SUPERVISION_ARTIFACT_DIR.
+#   --responsiveness runs the native prerequisite, the stock registry units,
+#   and actual native/Lab cancellation journeys with test-internals. Set
+#   RESPONSIVENESS_ARTIFACT_DIR to retain its complete source and stage logs.
 
 set -euo pipefail
 
@@ -144,7 +147,15 @@ checked_stage() {
     fi
     checked_verify_source "$stage.after" || return $?
     checked_verify_receipt "$stage" "$log" || return $?
-    if [[ "$CHECKED_MODE" == managed-supervision && "$stage" == units ]]; then
+    if [[ "$CHECKED_MODE" == responsiveness && "$stage" != native ]]; then
+        python3 - "$log" "$stage" <<'PY' || return 87
+import pathlib, re, sys
+log = pathlib.Path(sys.argv[1]).read_text()
+expected = {"units": "11", "journeys": "3"}[sys.argv[2]]
+counts = re.findall(r"^test result: ok\. (\d+) passed; (\d+) failed; (\d+) ignored; (\d+) measured; (\d+) filtered out;", log, re.M)
+assert len(counts) == 1 and counts[0][:4] == (expected, "0", "0", "0"), counts
+PY
+    elif [[ "$CHECKED_MODE" == managed-supervision && "$stage" == units ]]; then
         # This deliberately selects affected modules from the large lib suite.
         # Public journeys and the native prerequisite remain unfiltered.
         python3 - "$log" <<'PY' || return 87
@@ -175,6 +186,10 @@ run_checked_admission_mode() {
         CHECKED_SCHEMA='asupersync.managed_supervision_runner.v1'
         CHECKED_BEAD='asupersync-bi2462.35'
         CHECKED_FEATURES='tls,test-internals'
+    elif [[ "$CHECKED_MODE" == responsiveness ]]; then
+        CHECKED_SCHEMA='asupersync.responsiveness_runner.v1'
+        CHECKED_BEAD='asupersync-bi2462.31'
+        CHECKED_FEATURES='test-internals'
     fi
     CHECKED_OVERLAYS=()
     CHECKED_BUILD_JOBS="${CHECKED_ADMISSION_BUILD_JOBS:-8}"
@@ -210,6 +225,10 @@ run_checked_admission_mode() {
         [[ "$CHECKED_FEATURES" == 'tls,test-internals' ]] || {
             printf 'Managed supervision requires --features tls,test-internals\n' >&2; return 86;
         }
+    elif [[ "$CHECKED_MODE" == responsiveness ]]; then
+        [[ "$CHECKED_FEATURES" == test-internals ]] || {
+            printf 'Responsiveness requires --features test-internals\n' >&2; return 86;
+        }
     else
         [[ ",$CHECKED_FEATURES," == *,test-internals,* && ",$CHECKED_FEATURES," == *,channel-mpsc-select-e2e,* ]] || {
             printf 'Checked mode requires test-internals and channel-mpsc-select-e2e in --features\n' >&2; return 86;
@@ -237,6 +256,9 @@ run_checked_admission_mode() {
     if [[ "$CHECKED_MODE" == managed-supervision ]]; then
         CHECKED_DIR="${MANAGED_SUPERVISION_ARTIFACT_DIR:-${TMPDIR:-/tmp}/asupersync-managed-supervision-$(date -u +%Y%m%dT%H%M%S)-$$}"
         CHECKED_TARGET="${RCH_TARGET_DIR:-${TMPDIR:-/tmp}/rch_target_managed_supervision}"
+    elif [[ "$CHECKED_MODE" == responsiveness ]]; then
+        CHECKED_DIR="${RESPONSIVENESS_ARTIFACT_DIR:-${TMPDIR:-/tmp}/asupersync-responsiveness-$(date -u +%Y%m%dT%H%M%S)-$$}"
+        CHECKED_TARGET="${RCH_TARGET_DIR:-${TMPDIR:-/tmp}/rch_target_responsiveness}"
     fi
     if [[ -e "$CHECKED_DIR" || -L "$CHECKED_DIR" ]]; then
         printf 'FATAL: evidence directory already exists; preserving %s\n' "$CHECKED_DIR" >&2
@@ -267,6 +289,11 @@ run_checked_admission_mode() {
         --test runtime_abort_vs_cancel_semantics_audit -- --nocapture --test-threads=1 || return $?
     if [[ "$CHECKED_MODE" == managed-supervision ]]; then
         run_managed_supervision_stages || return $?
+        CHECKED_PHASE=complete
+        CHECKED_STATUS=passed
+        return 0
+    elif [[ "$CHECKED_MODE" == responsiveness ]]; then
+        run_responsiveness_stages || return $?
         CHECKED_PHASE=complete
         CHECKED_STATUS=passed
         return 0
@@ -307,12 +334,146 @@ run_checked_admission_mode() {
     CHECKED_STATUS=passed
 }
 
+run_responsiveness_stages() {
+    checked_stage units test --jobs "$CHECKED_BUILD_JOBS" -p asupersync --locked \
+        --features "$CHECKED_FEATURES" --lib -- cancel::responsiveness_tests:: \
+        --nocapture --test-threads=1 || return $?
+    checked_stage journeys test --jobs "$CHECKED_BUILD_JOBS" -p asupersync --locked \
+        --features "$CHECKED_FEATURES" --test cancellation_conformance -- \
+        stock_responsiveness_runtime:: --nocapture --test-threads=1 || return $?
+    python3 - "$CHECKED_DIR/journeys.log" > "$CHECKED_DIR/responsiveness.json" <<'PY' || return 89
+import json, pathlib, re, sys
+log = pathlib.Path(sys.argv[1]).read_text()
+names = {
+    "stock_responsiveness_runtime_seeded_lab_park_cancel_and_drain",
+    "stock_responsiveness_runtime_native_park_cancel_and_drain",
+    "stock_responsiveness_runtime_lab_charges_real_finite_task_budgets",
+}
+started = re.findall(r"^test stock_responsiveness_runtime::(\w+) \.\.\. ", log, re.M)
+assert len(started) == 3 and set(started) == names, started
+def rows(marker):
+    return [json.loads(value) for value in re.findall(
+        r"^(?:test stock_responsiveness_runtime::\w+ \.\.\. )?" + marker + r" (.+)$", log, re.M)]
+def identity(value, kind):
+    assert set(value) == {"kind", "index", "generation"} and value["kind"] == kind, value
+    assert all(type(value[key]) is int and value[key] >= 0 for key in ("index", "generation"))
+    return value["index"], value["generation"]
+finite = {
+    "cx.checkpoint", "mpsc.reserve", "mpsc.receive", "oneshot.receive", "broadcast.receive",
+    "watch.changed", "session.reserve", "mutex.lock", "rwlock.acquire", "semaphore.acquire",
+    "semaphore.zero", "pool.capacity-wait", "once-cell.wait", "barrier.wait", "sleep.cancel",
+    "io.copy", "io.copy-buf", "io.copy-bidirectional", "net.tcp-wait", "net.udp-wait",
+}
+typed_results = {
+    "cx.checkpoint": "checkpoint_cancelled", "mpsc.reserve": "checked_send_cancelled",
+    "session.reserve": "checked_send_cancelled", "mpsc.receive": "mpsc_receive_cancelled",
+    "oneshot.receive": "oneshot_receive_cancelled", "broadcast.receive": "broadcast_receive_cancelled",
+    "watch.changed": "watch_changed_cancelled", "mutex.lock": "mutex_lock_cancelled",
+    "rwlock.acquire": "rwlock_write_cancelled", "semaphore.acquire": "checked_semaphore_cancelled",
+    "semaphore.zero": "zero_permits_ready_without_acknowledgement",
+    "pool.capacity-wait": "checked_pool_capacity_cancelled", "once-cell.wait": "once_cell_wait_cancelled",
+    "barrier.wait": "barrier_arrival_cancelled", "sleep.cancel": "sleep_user_cancelled",
+    "io.copy": "copy_interrupted_after_observable_bytes", "io.copy-buf": "copy_interrupted_after_observable_bytes",
+    "io.copy-bidirectional": "copy_interrupted_after_observable_bytes",
+    "net.tcp-wait": "tcp_accept_interrupted", "net.udp-wait": "udp_peek_interrupted",
+}
+expected_refusals = {
+    **dict.fromkeys(("channel.synchronous", "channel.commit", "session.synchronous", "sync.synchronous",
+        "pool.return", "notify.publish"), "SynchronousCode"),
+    **dict.fromkeys(("channel.adapters", "pool.full-acquire", "once-cell.initialize", "notify.wait",
+        "oneshot.closed", "io.generic", "io.buffered", "io.write-commit", "io.host-provider", "net.composite"), "ExternalProgress"),
+    **dict.fromkeys(("time.deadline", "time.interval"), "TimerProgress"),
+    **dict.fromkeys(("task.join", "structured.drain", "finalizer.legacy", "finalizer.envelope", "runtime.blocking"), "OwnerProgress"),
+    "cx.mask": "UnboundedMaskBody",
+}
+runtime = rows("ASUPERSYNC_RESPONSIVENESS_RUNTIME")
+assert len(runtime) == 5
+assert {(row["backend"], row.get("seed")) for row in runtime} == {
+    ("lab", 0x3101), ("lab", 0x3102), ("lab", 0x3103),
+    ("native_current_thread", None), ("native_two_worker_sharded", None),
+}
+for row in runtime:
+    assert row["live_tasks"] == row["leaks"] == 0
+    if row["backend"] == "lab":
+        assert row["pending_obligations"] == 0 and row["region_closed"] is True
+        expected = finite - {"net.tcp-wait", "net.udp-wait"}
+    else:
+        assert row["shutdown_completed"] is True
+        expected = finite
+    evidence = row["evidence"]
+    journeys = evidence["journeys"]
+    assert len(journeys) == len(expected) and {item["entry"] for item in journeys} == expected
+    tasks = set()
+    for item in journeys:
+        tasks.add(identity(item["task"], "TaskId"))
+        identity(item["region"], "RegionId")
+        assert item["observed"] == item["bound"] == 1
+        assert item["result"] == typed_results[item["entry"]]
+        assert item["unit"] == ("checkpoint_calls" if item["entry"] == "cx.checkpoint" else "operation_polls")
+        immediate = item["entry"] in {"cx.checkpoint", "semaphore.zero"}
+        assert item["setup_gate_only"] is immediate and item["operation_was_parked"] is (not immediate)
+        assert item["cleanup_crossed_pending"] is True and item["cleanup_completed"] is True
+        assert item["actual_cancel_reason"]["kind"] == "User"
+        assert item["actual_cancel_reason"]["message"] == "responsiveness runtime boundary"
+        assert item["post_cancel_checkpoints"] >= (0 if item["entry"] == "semaphore.zero" else 1)
+        if item["entry"] == "semaphore.zero":
+            assert item["post_cancel_checkpoints"] == 0
+    assert len(tasks) == len(journeys)
+    controls = evidence["controls"]
+    assert len(controls) == 5
+    withheld = [item for item in controls if item["control"] in {"notify_withheld_delivery", "generic_read_withheld_provider"}]
+    assert len(withheld) == 2 and len({item["control"] for item in withheld}) == 2
+    for item in withheld:
+        assert item["classification"] == "ExternalProgress" and item["planted_finite_label_refused"] == "GoalNotObserved"
+        assert item["post_cancel_operation_checkpoints"] == item["remaining_waiters"] == 0
+        assert item["post_cancel_operation_polls"] >= 4 and item["real_release_completed"] is True
+    masks = [item for item in controls if item["control"] == "actual_masked_lock"]
+    assert len(masks) == 2 and {item["depth"] for item in masks} == {1, 64}
+    for item in masks:
+        assert item["masked_checkpoints"] > 0 and item["masked_result"] == "Pending"
+        assert item["finite_query_refusal"] == "Masked" and item["after_unmask_polls"] == 1
+        assert item["actual_result"] == "LockError::Cancelled" and item["waiters"] == 0
+    composed = [item for item in controls if item["control"] == "actual_three_phase_composition"]
+    assert len(composed) == 1
+    item = composed[0]
+    assert item["unit"] == "operation_polls" and item["observed"] == 3
+    assert item["typed_results"] == ["Cancelled"] * 3
+    assert [item[key] for key in ("headroom_below", "headroom_at", "headroom_above")] == [2, 3, 4]
+    assert item["below_refusal"] == "InsufficientPollBudget" and item["zero_and_overflow_refused"] is True
+    refusals = evidence["explicit_refusals"]
+    assert len(refusals) == 24 and len({item["entry"] for item in refusals}) == 24
+    assert {item["entry"]: item["refusal"] for item in refusals} == expected_refusals
+budgets = rows("ASUPERSYNC_RESPONSIVENESS_LAB_BUDGET")
+assert len(budgets) == 9 and {(row["seed"], row["initial_task_poll_quota"]) for row in budgets} == {
+    (seed, quota) for seed in (0x3101, 0x3102, 0x3103) for quota in (3, 4, 5)}
+for row in budgets:
+    identity(row["task"], "TaskId")
+    identity(row["region"], "RegionId")
+    quota = row["initial_task_poll_quota"]
+    actual = row["actual_dispatched_remaining_quotas"]
+    assert actual[:3] == [quota - 1, quota - 2, quota - 3]
+    assert row["actual_scheduler_dispatches"] == len(actual)
+    assert row["actual_minimum_for_three_reads_and_cleanup"] == 4 and row["operation_calls"] == 3
+    assert row["cleanup_was_pending"] is True and row["checked_permits_before_release"] == 1
+    assert row["live_tasks"] == row["pending_obligations"] == row["leaks"] == 0 and row["region_closed"] is True
+    if quota == 3:
+        assert row["delivered"] == [71, 73] and row["actual_failure"]["kind"] == "PollQuota"
+        assert len(actual) >= 4, "held cleanup requires a later delivered dispatch"
+    else:
+        assert row["delivered"] == [71, 73, 79] and row["actual_failure"] is None and len(actual) == 4
+print(json.dumps(dict(runtime=runtime, lab_budgets=budgets,
+    claim_boundary="conditional delivered operation boundaries and actual Lab task charges; no wall-time or native charging bound"), sort_keys=True))
+PY
+}
+
 run_managed_supervision_stages() {
     checked_stage units test --jobs "$CHECKED_BUILD_JOBS" -p asupersync --locked \
         --features "$CHECKED_FEATURES" --lib -- \
         supervision:: record::finalizer:: record::region:: cx::child_region:: runtime::state:: \
         native_current_thread_shutdown_budget_runs_and_retires_real_finalizers \
         native_sharded_shutdown_budget_runs_and_retires_real_finalizers \
+        native_current_thread_managed_replacement_waits_for_registered_finalizers \
+        native_sharded_managed_replacement_waits_for_registered_finalizers \
         external_only_finalizer_budget_activation_wakes_and_retires_actual_cleanup \
         managed_supervisor_runtime_signal_source \
         --nocapture --test-threads=1 || return $?
@@ -326,6 +487,8 @@ run_managed_supervision_stages() {
         explicit_finalizer_actual_lab_task_deadline_wakes_through_cancel_mask \
         native_current_thread_shutdown_budget_runs_and_retires_real_finalizers \
         native_sharded_shutdown_budget_runs_and_retires_real_finalizers \
+        native_current_thread_managed_replacement_waits_for_registered_finalizers \
+        native_sharded_managed_replacement_waits_for_registered_finalizers \
         external_only_finalizer_budget_activation_wakes_and_retires_actual_cleanup \
         managed_supervisor_runtime_signal_source; do
         [[ "$(rg -c "^test .*::$name \\.\\.\\. " "$CHECKED_DIR/units.log")" == 1 ]] || {
@@ -349,6 +512,59 @@ for row in rows:
     assert len(row["events"]) == 14 and {(event["child"], event["action"]) for event in row["events"]} == {
         (child, action) for child in (0, 1) for action in (
             "started", "work", "cancelled", "cleanup_pending", "cleanup_done", "finalizer_pending", "finalizer_done")}
+print(json.dumps(rows, sort_keys=True))
+PY
+    python3 - "$CHECKED_DIR/units.log" > "$CHECKED_DIR/native-finalizer-replacements.json" <<'PY' || return 89
+import json, pathlib, sys
+marker = "ASUPERSYNC_NATIVE_MANAGED_FINALIZER_REPLACEMENT "
+rows = [json.loads(line.split(marker, 1)[1]) for line in pathlib.Path(sys.argv[1]).read_text().splitlines() if marker in line]
+backends = ("native_current_thread", "native_two_worker_sharded")
+affected_by_strategy = {"OneForOne": [1], "OneForAll": [0, 1, 2], "RestForOne": [1, 2]}
+assert len(rows) == 6 and {(row["backend"], row["strategy"]) for row in rows} == {
+    (backend, strategy) for backend in backends for strategy in affected_by_strategy}
+def identity(value):
+    # Keep the complete serialized generation-bearing ID, including its type.
+    assert set(value) == {"kind", "index", "generation"}
+    assert value["kind"] in ("TaskId", "RegionId")
+    assert type(value["index"]) is int and 0 <= value["index"] <= 0xffffffff
+    assert type(value["generation"]) is int and 0 <= value["generation"] <= 0xffffffff
+    return json.dumps(value, sort_keys=True, separators=(",", ":"))
+for row in rows:
+    affected = affected_by_strategy[row["strategy"]]
+    assert row["affected"] == affected and row["held_finalizer_witnesses"] == len(affected)
+    assert row["started"] == row["joined"] == 3 + len(affected) and row["restart_batches"] == 1
+    assert row["payloads"] == [100, 101, 102, 200, 201, 202]
+    assert row["trigger_error"] == "native registered-finalizer trigger" and row["latest_outcomes"] == "Ok"
+    assert row["negative_controls"] == ["zero_selected_finalizers", "replacement_before_registered_finalizer_completion"]
+    assert row["live_tasks"] == row["owned_regions"] == row["pending_obligations"] == row["leaks"] == row["pending_timers"] == 0
+    assert row["runtime_roots_before_shutdown"] == 1 and row["runtime_shutdown"] is True
+    originals, current = row["originals"], row["current"]
+    assert len(originals) == len(current) == 3 and all(generation["number"] == 1 for generation in originals)
+    for field in ("task", "region"):
+        assert all(generation[field]["kind"] == {"task": "TaskId", "region": "RegionId"}[field] for generation in originals + current)
+        original_ids = {identity(generation[field]) for generation in originals}
+        assert len(original_ids) == 3 and len({identity(generation[field]) for generation in current}) == 3
+        for child, generation in enumerate(current):
+            if child in affected:
+                assert generation["number"] == 2 and identity(generation[field]) not in original_ids
+            else:
+                assert generation == originals[child]
+    joins = row["ordered_joins"]
+    assert len(joins) == len(affected) and sorted(join["child"] for join in joins) == affected
+    finalizers = {identity(join["finalizer_task"]) for join in joins}
+    assert all(join["finalizer_task"]["kind"] == "TaskId" for join in joins)
+    bodies = {identity(generation["task"]) for generation in originals + current}
+    assert len(finalizers) == len(affected) and finalizers.isdisjoint(bodies)
+    replacements = None
+    for join in joins:
+        assert join["original_region"] == originals[join["child"]]["region"]
+        spawned = join["replacement_spawn_seqs"]
+        assert len(spawned) == len(set(spawned)) == len(affected)
+        assert join["finalizer_spawn_seq"] < join["finalizer_complete_seq"] < join["old_region_close_seq"] < min(spawned)
+        if replacements is None:
+            replacements = spawned
+        else:
+            assert replacements == spawned
 print(json.dumps(rows, sort_keys=True))
 PY
     checked_stage supervision test --jobs "$CHECKED_BUILD_JOBS" -p asupersync --locked \
@@ -411,7 +627,7 @@ print(json.dumps(dict(journeys=journeys, native_signal_shutdown=signals, harness
 PY
 }
 
-if [[ "${1:-}" == --checked-admission || "${1:-}" == --managed-supervision ]]; then
+if [[ "${1:-}" == --checked-admission || "${1:-}" == --managed-supervision || "${1:-}" == --responsiveness ]]; then
     run_checked_admission_mode "$@"
     exit $?
 fi
