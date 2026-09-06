@@ -3594,8 +3594,10 @@ mod managed {
                             let mut cleanup = receiver.lock().take().unwrap();
                             let entered = Arc::clone(&child_entered);
                             let finished = Arc::clone(&child_finished);
-                            cancel_parent
-                                .cancel_with(CancelReason::user("cancel during actual start"));
+                            cancel_parent.cancel_with(
+                                crate::types::CancelKind::User,
+                                Some("cancel during actual start"),
+                            );
                             async move {
                                 let (_keep_sender, mut receiver) = mpsc::channel::<()>(1);
                                 assert!(receiver.recv(&child).await.is_err());
@@ -4144,9 +4146,10 @@ mod managed {
                         "child",
                         ManagedRestartMode::Transient,
                         move |child: Cx, _| async move {
-                            child.cancel_with(CancelReason::user(
-                                "independent unacknowledged cancellation",
-                            ));
+                            child.cancel_with(
+                                crate::types::CancelKind::User,
+                                Some("independent unacknowledged cancellation"),
+                            );
                             // Deliberately no checkpoint acknowledgement: the
                             // raw return must not become an actual task success.
                             if returned_error {
