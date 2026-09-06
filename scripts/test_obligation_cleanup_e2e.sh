@@ -332,6 +332,25 @@ run_managed_supervision_stages() {
             printf 'Missing or duplicate supervisor unit sentinel %s\n' "$name" >&2; return 88;
         }
     done
+    python3 - "$CHECKED_DIR/units.log" > "$CHECKED_DIR/signal-model.json" <<'PY' || return 89
+import json, pathlib, sys
+marker = "ASUPERSYNC_MANAGED_SIGNAL_MODEL "
+rows = [json.loads(line.split(marker, 1)[1]) for line in pathlib.Path(sys.argv[1]).read_text().splitlines() if marker in line]
+assert len(rows) == 3 and sorted(row["seed"] for row in rows) == [0x350101, 0x350102, 0x350103]
+for row in rows:
+    assert row["backend"] == "lab" and row["signal"] == "SIGTERM"
+    assert row["delivered"] == 1 and row["consumed_sequence"] == [1]
+    assert row["source_waiters"] == row["live_tasks"] == row["live_regions"] == row["pending_obligations"] == row["leaks"] == 0
+    assert row["started"] == row["joined"] == row["actual_child_terminals"] == 2
+    assert row["restart_batches"] == row["escalations"] == 0 and row["join_pending_polls"] > 0
+    assert row["terminal_outcome"] == "cancelled"
+    assert row["negative_controls"] == ["zero_selected_generations", "premature_generation_completion"]
+    assert len(row["generations"]) == 2 and all(generation["number"] == 1 for generation in row["generations"])
+    assert len(row["events"]) == 14 and {(event["child"], event["action"]) for event in row["events"]} == {
+        (child, action) for child in (0, 1) for action in (
+            "started", "work", "cancelled", "cleanup_pending", "cleanup_done", "finalizer_pending", "finalizer_done")}
+print(json.dumps(rows, sort_keys=True))
+PY
     checked_stage supervision test --jobs "$CHECKED_BUILD_JOBS" -p asupersync --locked \
         --features "$CHECKED_FEATURES" --test supervision_regression -- \
         --nocapture --test-threads=1 || return $?
@@ -357,14 +376,19 @@ for row in journeys:
         assert row["shutdown_completed"]
     cases = row["journeys"]
     assert len(cases) == 18
+    assert sorted(case["scenario"] for case in cases) == sorted(
+        ["public_restart_mode"] * 9 + ["public_restart_sets"] * 6 + [
+            "public_cancel_during_factory", "public_cancel_during_actual_backoff",
+            "public_shared_intensity_actual_parent_escalation"])
     modes = [case for case in cases if case["scenario"] == "public_restart_mode"]
-    assert {(case["mode"], case["terminal"]) for case in modes} == {
+    assert len(modes) == 9 and {(case["mode"], case["terminal"]) for case in modes} == {
         (mode, terminal) for mode in ("Permanent", "Transient", "Temporary") for terminal in range(3)}
     for case in modes:
         restarts = int(case["mode"] == "Permanent" or (case["mode"] == "Transient" and case["terminal"] != 0))
         assert case["started"] == case["joined"] == 1 + restarts and case["restart_batches"] == restarts
     sets = [case for case in cases if case["scenario"] == "public_restart_sets"]
-    assert len(sets) == 6 and sorted(case["policy"] for case in sets) == sorted(["OneForOne", "OneForAll", "RestForOne"] * 2)
+    assert len(sets) == 6 and {(case["policy"], case["actual_panic"]) for case in sets} == {
+        (policy, panic) for policy in ("OneForOne", "OneForAll", "RestForOne") for panic in (False, True)}
     for case in cases:
         if case["scenario"] == "public_cancel_during_factory":
             assert case["started"] == case["joined"] == 1 and case["never_started_child"] == "b" and case["cleanup_crossed_pending"]
@@ -381,7 +405,9 @@ for row in signals:
     assert case["selected"] == case["started"] == case["joined"] == 4 and case["restart_batches"] == 0
     assert case["payloads"] == [700, 701, 702, 703]
     assert case["negative_controls"] == ["zero_selected_generations", "premature_generation_completion"]
-print(json.dumps(dict(journeys=journeys, native_signal_shutdown=signals), sort_keys=True))
+negatives = rows("ASUPERSYNC_SUPERVISOR_HARNESS_NEGATIVES ")
+assert negatives == [dict(zero_filter="ZeroSelectedTests", early_exit="MissingDrainReceipt", actual_terminal_subprocesses=2)]
+print(json.dumps(dict(journeys=journeys, native_signal_shutdown=signals, harness_negatives=negatives), sort_keys=True))
 PY
 }
 
