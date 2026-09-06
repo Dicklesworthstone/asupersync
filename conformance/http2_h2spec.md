@@ -1,42 +1,98 @@
-# HTTP/2 h2spec Status
+# Native HTTP/2 h2spec conformance
 
-Date: 2026-04-24
-Bead: `asupersync-h8pga6`
+Updated: 2026-09-06. Active bead: `asupersync-bi2462.36`.
 
-## Status
+The independent harness is implemented in
+`tests/e2e_h2_graceful_drain.rs`, under
+`external_h2spec::native_h2spec_strict_conformance`. Its first remote execution
+is pending. Tool installation and discovery have succeeded; neither is a
+conformance result. Static review also identified request-task admission and
+force-close cancellation gaps in the existing listener. The strict ownership
+checks remain in place while those paths are repaired.
 
-`h2spec` is not installed in this checkout, so the full external conformance sweep could not be executed directly in this pass.
+## Pinned external tool
 
-## Focused Work Shipped
+Use the Linux x86_64 executable from the official
+[h2spec v2.6.0 release](https://github.com/summerwind/h2spec/releases/tag/v2.6.0).
+The harness verifies the executable before and after running it and requires
+this exact version output:
 
-This bead tightened the internal RFC 7540 stream-state conformance harness instead of leaving priority/dependency coverage as prose-only evidence:
+```text
+Version: 2.6.0 (70ac2294010887f48b18e2d64f5cccd48421fad1)
+```
 
-- `tests/conformance/h2_rfc7540/stream_tests.rs`
-  - added executable assertions that `HEADERS`, `PRIORITY`, and `CONTINUATION` reject stream ID `0`
-  - added executable assertions that self-dependent `PRIORITY` frames fail with stream-scoped `PROTOCOL_ERROR`
-  - added executable assertions that valid root and non-root dependencies parse correctly
-  - added executable assertions for exclusive-bit parsing, encoded weight preservation, and short `PRIORITY` frame `FRAME_SIZE_ERROR`
+| Artifact | SHA-256 |
+| --- | --- |
+| `h2spec_linux_amd64.tar.gz` | `157ee0de702e01ad40e752dbf074b366027e550c8e7504f9450da2809e279318` |
+| Extracted `h2spec` executable | `ac679b916bcd46c52314b17c8903d8dffebf0f2357586d272731f6d8bfd5e9f7` |
 
-## Required External Follow-Up
+These are measured content pins. The release supplied no publisher digest.
+Install the executable on the explicitly selected RCH worker; the test also
+uses that worker's `python3` standard library to parse JUnit XML.
 
-Run `h2spec` against the HTTP/2 implementation once the tool is available and the shared tree is green enough to compile all targets:
+## Run the maintained workflow
 
-- CONTINUATION sequencing / wrong-stream handling
-- PRIORITY self-dependency / dependency loop behavior
-- WINDOW_UPDATE zero-increment handling
-- SETTINGS edge cases
-- PING ACK timing
+From shared `main`, select a full commit and only your reserved overlay files.
+For a fully committed candidate, replace the overlay arguments with
+`--no-overlay`. `H2SPEC_BIN` names the executable on the worker, not a local
+file to be uploaded by RCH.
 
-## Current Validation Blockers
+```bash
+RCH_REQUIRE_REMOTE=1 RCH_WORKER="$H2_WORKER" \
+H2SPEC_BIN="$H2_WORKER_BINARY" \
+H2SPEC_CARGO_HOME="$H2_WORKER_CARGO_HOME" \
+H2SPEC_RUN_DIR="$H2_LOCAL_EVIDENCE_DIR" \
+H2SPEC_ARTIFACT_DIR="$H2_WORKER_EVIDENCE_DIR" \
+RCH_TARGET_DIR="$H2_TARGET_DIR" \
+bash scripts/run_h2_conformance_evidence.sh --h2spec \
+  --base "$H2_SOURCE_COMMIT" \
+  --overlay-path tests/e2e_h2_graceful_drain.rs \
+  --overlay-path scripts/run_h2_conformance_evidence.sh
+```
 
-Remote validation of this bead was attempted with:
+Include every uncommitted production repair needed by the candidate as another
+explicit overlay. Both evidence directory leaves must be fresh. The worker
+directory's parent must exist. `H2SPEC_CARGO_HOME` is optional;
+`H2SPEC_BUILD_JOBS` defaults to 8 and `H2SPEC_STAGE_TIMEOUT` to 1800 seconds.
 
-- `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_http2_h2spec_docs cargo check --all-targets`
-- `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_http2_h2spec_docs cargo test --lib h2`
+The runner requires installed RCH clean-overlay support and remote execution,
+disables target reuse, and first runs the unfiltered native cancellation audit.
+It then explicitly selects the external test with `--ignored --exact`.
+Ordinary test runs leave this tool-dependent test ignored and provide no
+external conformance evidence.
 
-The shared tree is currently blocked by unrelated existing compile failures outside the reserved HTTP/2 surface, including:
+The test starts the real two-worker native H2 listener, verifies actual GET
+and POST responses, and invokes `h2spec --strict --verbose` over the full
+`generic`, `http2`, and `hpack` groups using cleartext prior-knowledge H2. JUnit
+case identities must match discovery from the same executable. A separate
+owned negative listener completes SETTINGS exchange and returns one wrong
+PING payload; the external oracle must reject exactly that case without a
+startup failure or timeout. The native shutdown case parks a real request,
+checks its registered task identity, then verifies cancellation, terminal
+completion, connection/task cleanup, and runtime shutdown.
 
-- `src/messaging/kafka_consumer.rs`
-- `src/messaging/kafka.rs`
-- `src/record/task.rs`
-- `src/runtime/panic_isolation.rs`
+## Read the result
+
+`summary.json` in the local evidence directory records each command's actual
+exit, selected worker, admitted source fingerprint, and test counts. Raw
+external stdout, stderr, XML, parsed case reports, tool identity, and shutdown
+receipts are copied into `external-artifacts/`, including on an unsuccessful
+sweep. The runner joins these receipts to the accepted external summary.
+Missing cases, skips, zero selection, failed ownership checks, timeouts, or a
+nonzero remote exit cannot pass.
+
+Source selection records admission and local file hashes. It explicitly does
+not claim an independently hashed worker content manifest. Even a successful
+run covers this native cleartext H2 service and the pinned external suite;
+it does not establish H3, browser interoperability, TLS ecosystem coverage,
+all RFC requirements, or broad workspace health.
+
+## Historical internal checks
+
+The 2026-04-24 `asupersync-h8pga6` work added internal assertions in
+`tests/conformance/h2_rfc7540/stream_tests.rs` for stream ID zero,
+self-dependent PRIORITY, dependency parsing, exclusive/weight preservation,
+and short PRIORITY frames. Its external sweep was unavailable, and its remote
+build attempts were blocked. Those historical assertions and blocker reports
+are separate from the current independent run and are not a fresh external
+conformance result.

@@ -17,6 +17,7 @@
 use crate::channel::mpsc;
 use crate::codec::Framed;
 use crate::cx::Cx;
+use crate::cx::child_region::{ChildRegion, ChildRegionSpec};
 use crate::http::body::{Body as _, Frame as BodyFrame, HeaderMap};
 use crate::http::h1::HttpError;
 use crate::http::h1::server::{HostPolicy, parse_request_timeout_header, validate_host_header};
@@ -31,7 +32,7 @@ use crate::http::h2::stream::StreamState;
 use crate::io::AsyncReadExt as _;
 use crate::net::tcp::listener::TcpListener;
 use crate::net::tcp::stream::TcpStream;
-use crate::runtime::{JoinHandle, RuntimeHandle, SpawnError};
+use crate::runtime::{JoinError, JoinHandle, RuntimeHandle, SpawnError, TaskHandle};
 use crate::server::connection::ConnectionManager;
 use crate::server::shutdown::{
     DrainStep, GracefulDrainReport, GracefulDrainSupervisor, ShutdownPhase, ShutdownSignal,
@@ -39,11 +40,12 @@ use crate::server::shutdown::{
 };
 use crate::stream::Stream;
 use crate::tracing_compat::error;
-use crate::types::Time;
+use crate::types::{Budget, CancelKind, CancelReason, Time};
 use crate::web::WebBodyDiagnostic;
 use crate::web::request_region::{
-    HTTP_DEADLINE_EXHAUSTED_DIAGNOSTIC, ServerHopOutcome, ServerProducerCancellation,
-    ServerRequestRegion, classify_server_producer_cancellation, derive_request_budget,
+    HTTP_DEADLINE_EXHAUSTED_DIAGNOSTIC, RequestBudgetSource, ServerHopOutcome,
+    ServerProducerCancellation, ServerRequestDeadline, ServerRequestRegion,
+    classify_server_producer_cancellation, derive_request_budget,
 };
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::future::Future;
@@ -1007,6 +1009,283 @@ async fn race_force_close<F: Future>(signal: &ShutdownSignal, fut: F) -> Option<
     .await
 }
 
+#[derive(Clone, Copy)]
+struct OwnedH2HopConfig {
+    budget: Budget,
+    started_at: Time,
+    source: RequestBudgetSource,
+    drain_grace: Duration,
+    idle_timeout: Option<Duration>,
+}
+
+struct OwnedH2HopCompletion {
+    /// The actual protocol return is distinct from task-level cancellation.
+    hop: ServerHopOutcome<H2DispatchResponse>,
+    task_outcome: Option<Result<(), JoinError>>,
+    idle_expired: bool,
+}
+
+struct OwnedH2Request {
+    region: Option<ChildRegion>,
+    body: Option<TaskHandle<()>>,
+}
+
+struct H2ParentCancellation<'a> {
+    cx: &'a Cx,
+    registration: Option<crate::cx::CancelWakerToken>,
+}
+
+impl H2ParentCancellation<'_> {
+    fn clear(&mut self) {
+        if let Some(registration) = self.registration.take() {
+            self.cx.clear_cancel_waker(registration);
+        }
+    }
+}
+
+impl Drop for H2ParentCancellation<'_> {
+    fn drop(&mut self) {
+        self.clear();
+    }
+}
+
+impl Drop for OwnedH2Request {
+    fn drop(&mut self) {
+        // Abandonment requests cancellation; it cannot certify quiescence.
+        // Normal dispatch always joins and closes before releasing its guard.
+        if let Some(body) = &self.body {
+            body.abort();
+        }
+    }
+}
+
+fn h2_request_cancel_reason(cx: &Cx, kind: CancelKind) -> CancelReason {
+    let mut reason = CancelReason::with_origin(kind, cx.region_id(), cx.now());
+    reason.origin_task = Some(cx.task_id());
+    reason
+}
+
+impl OwnedH2Request {
+    async fn join(
+        &mut self,
+        cx: &Cx,
+        signal: &ShutdownSignal,
+        mut idle: Option<(Time, ServerRequestDeadline)>,
+    ) -> (Result<(), JoinError>, bool) {
+        let mut force = std::pin::pin!(signal.wait_for_phase(ShutdownPhase::ForceClosing));
+        let mut cancellation_sent = false;
+        let mut idle_expired = false;
+        let mut parent = H2ParentCancellation {
+            cx,
+            registration: None,
+        };
+        let result = std::future::poll_fn(|poll_cx| {
+            if !cancellation_sent {
+                parent.registration =
+                    Some(cx.refresh_cancel_waker(parent.registration, poll_cx.waker()));
+                let forced = signal.phase() as u8 >= ShutdownPhase::ForceClosing as u8
+                    || force.as_mut().poll(poll_cx).is_ready();
+                let cancelled = cx.is_cancel_requested();
+                if forced || cancelled {
+                    let reason = if forced {
+                        h2_request_cancel_reason(cx, CancelKind::Shutdown)
+                    } else {
+                        cx.cancel_reason().unwrap_or_else(|| {
+                            h2_request_cancel_reason(cx, CancelKind::ParentCancelled)
+                        })
+                    };
+                    self.cancel(cx, reason);
+                    cancellation_sent = true;
+                    idle = None;
+                    parent.clear();
+                }
+            }
+            // Match timeout_at's strict-overdue rule before observing ready
+            // work. A body can finish while its coordinator is not scheduled;
+            // that delayed join does not extend the admitted idle deadline.
+            // At exact equality, the completed body still wins below.
+            if !cancellation_sent
+                && idle
+                    .as_ref()
+                    .is_some_and(|(deadline, _)| cx.now() > *deadline)
+            {
+                idle_expired = true;
+                cancellation_sent = true;
+                idle = None;
+                parent.clear();
+                self.cancel(cx, h2_request_cancel_reason(cx, CancelKind::Timeout));
+            }
+            // No join(cx) cancellation shortcut: retain the actual body until
+            // it has finished protocol cleanup and terminal publication.
+            let joined = self.body.as_mut().expect("owned body").poll_join(poll_cx);
+            if joined.is_ready() {
+                return joined;
+            }
+            if !cancellation_sent
+                && idle
+                    .as_mut()
+                    .is_some_and(|(_, wait)| Pin::new(wait).poll(poll_cx).is_ready())
+            {
+                idle_expired = true;
+                cancellation_sent = true;
+                idle = None;
+                parent.clear();
+                self.cancel(cx, h2_request_cancel_reason(cx, CancelKind::Timeout));
+            }
+            Poll::Pending
+        })
+        .await;
+        self.body = None;
+        (result, idle_expired)
+    }
+
+    fn cancel(&self, cx: &Cx, reason: CancelReason) {
+        if let Err(error) = self.region.as_ref().expect("owned region").cancel(reason) {
+            cx.trace(&format!("h2_owned_request_cancel_failed: {error}"));
+        }
+    }
+}
+
+async fn execute_owned_h2_body<F, Fut>(
+    body_cx: Cx,
+    config: OwnedH2HopConfig,
+    signal: ShutdownSignal,
+    factory: F,
+) -> ServerHopOutcome<H2DispatchResponse>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = H2DispatchResponse>,
+{
+    let region = ServerRequestRegion::from_body_cx("h2", body_cx.clone(), config.started_at);
+    // A shutdown may win after the spawn post but before its first poll. Do
+    // not invoke user code in that interval; the owner still joins and closes.
+    if signal.phase() as u8 >= ShutdownPhase::ForceClosing as u8 {
+        region.finish("cancelled");
+        return ServerHopOutcome::Cancelled;
+    }
+    let mut execution = Box::pin(CatchUnwind {
+        inner: region.run_with_protocol_drain(
+            config.source,
+            Some(body_cx),
+            config.drain_grace,
+            async move { factory().await },
+        ),
+    });
+    let returned = execution.as_mut().await;
+    let retired = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(execution)));
+    match (returned, retired) {
+        (Err(payload), retirement) => {
+            if let Err(secondary) = retirement {
+                std::mem::forget(secondary);
+            }
+            ServerHopOutcome::Panicked(crate::cx::scope::payload_to_string(&payload))
+        }
+        (Ok(_), Err(payload)) => {
+            ServerHopOutcome::Panicked(crate::cx::scope::payload_to_string(&payload))
+        }
+        (Ok(outcome), Ok(())) => outcome,
+    }
+}
+
+async fn run_owned_h2_hop<F, Fut>(
+    cx: &Cx,
+    signal: &ShutdownSignal,
+    config: OwnedH2HopConfig,
+    factory: F,
+) -> Result<OwnedH2HopCompletion, String>
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: Future<Output = H2DispatchResponse> + Send + 'static,
+{
+    let timer = cx
+        .timer_driver()
+        .ok_or("H2 owned request requires a timer driver")?;
+    // Opening has no Drop close backstop. Always obtain actual ownership even
+    // when shutdown arrives while the admission command is pending.
+    let region = cx
+        .open_child_region(ChildRegionSpec::inherit().with_budget(config.budget))
+        .await
+        .map_err(|error| error.to_string())?;
+    let mut owner = OwnedH2Request {
+        region: Some(region),
+        body: None,
+    };
+    let idle_expired = config
+        .idle_timeout
+        .is_some_and(|timeout| timer.now() > config.started_at + timeout);
+    if signal.phase() as u8 >= ShutdownPhase::ForceClosing as u8
+        || cx.is_cancel_requested()
+        || idle_expired
+    {
+        let kind = if idle_expired {
+            CancelKind::Timeout
+        } else {
+            CancelKind::Shutdown
+        };
+        owner.cancel(cx, h2_request_cancel_reason(cx, kind));
+        owner
+            .region
+            .take()
+            .expect("owned region")
+            .close()
+            .await
+            .map_err(|error| error.to_string())?;
+        return Ok(OwnedH2HopCompletion {
+            hop: ServerHopOutcome::Cancelled,
+            task_outcome: None,
+            idle_expired,
+        });
+    }
+    let publication = Arc::new(parking_lot::Mutex::new(None));
+    let body_publication = Arc::clone(&publication);
+    let body_signal = signal.clone();
+    let region = owner.region.as_ref().expect("owned region");
+    let scope = region.cx().scope();
+    let spawned = region
+        .cx()
+        .spawn_in_cancellation_dominant(&scope, move |body_cx| async move {
+            let outcome = execute_owned_h2_body(body_cx, config, body_signal, factory).await;
+            *body_publication.lock() = Some(outcome);
+        });
+    match spawned {
+        Ok(body) => owner.body = Some(body),
+        Err(error) => {
+            owner
+                .region
+                .take()
+                .expect("owned region")
+                .close()
+                .await
+                .map_err(|close_error| close_error.to_string())?;
+            return Err(error.to_string());
+        }
+    }
+    let idle = config.idle_timeout.map(|timeout| {
+        let deadline = config.started_at + timeout;
+        (deadline, ServerRequestDeadline::new(timer, deadline))
+    });
+    let (task_outcome, idle_expired) = owner.join(cx, signal, idle).await;
+    owner
+        .region
+        .take()
+        .expect("owned region")
+        .close()
+        .await
+        .map_err(|error| error.to_string())?;
+    let returned = publication.lock().take();
+    let hop = match (&task_outcome, returned) {
+        (Err(JoinError::Panicked(payload)), _) => ServerHopOutcome::Panicked(payload.to_string()),
+        (_, Some(outcome)) => outcome,
+        (Err(JoinError::Cancelled(_)), None) => ServerHopOutcome::Cancelled,
+        (_, None) => ServerHopOutcome::Panicked("H2 body omitted terminal publication".to_owned()),
+    };
+    Ok(OwnedH2HopCompletion {
+        hop,
+        task_outcome: Some(task_outcome),
+        idle_expired,
+    })
+}
+
 /// A handler outcome travelling back to the connection driver.
 enum FunnelItem {
     /// A completed response. The guard is retained until its queued frames
@@ -1918,6 +2197,7 @@ fn dispatch_h2_request<F, Fut>(
     request_timeout_header_cap: Option<Duration>,
     request_drain_grace: Duration,
     stream_idle_timeout: Option<Duration>,
+    owned_request: bool,
 ) -> bool
 where
     F: Fn(Request) -> Fut + Send + Sync + 'static,
@@ -1978,8 +2258,10 @@ where
         // via `ServerRequestRegion`). The request budget is the connection
         // budget tightened by the configured request timeout and the (opt-in,
         // cap-clamped) client `Request-Timeout` header (meet semantics — it
-        // can only tighten, never extend). When no runtime is installed (mint
-        // returns `None`) the legacy direct-call path is preserved unchanged.
+        // can only tighten, never extend). Buffered listeners use an actual
+        // admitted child task. Produced listeners retain their existing
+        // handler lifetime because the returned producer may release work
+        // started by that handler.
         let request_now = cx
             .timer_driver()
             .map_or_else(crate::time::wall_now, |timer| timer.now());
@@ -1994,92 +2276,155 @@ where
         );
 
         let producer_signal = signal.clone();
-        let handler_future = async move {
-            match ServerRequestRegion::mint("h2", request_budget, request_now) {
-                Some(region) => {
-                    // Race the whole hop against ForceClosing so a slow handler
-                    // cannot block shutdown (drop is the backstop, h1 parity).
-                    let hop = race_force_close(
-                        &signal,
-                        region.run_with_protocol_drain(
-                            budget_source,
-                            None,
-                            request_drain_grace,
-                            handler(request),
-                        ),
-                    )
-                    .await;
-                    match hop {
-                        None => None,
-                        Some(ServerHopOutcome::Ok(response)) => Some(response),
-                        Some(ServerHopOutcome::Cancelled | ServerHopOutcome::ConnectionLost) => {
-                            None
-                        }
-                        Some(ServerHopOutcome::Panicked(message)) => {
-                            // Panic isolation (h1 parity): the connection driver
-                            // survives and the stream completes with a 500 instead
-                            // of staying active forever.
-                            let _ = &message;
-                            error!(message = %message, "h2 handler task panicked");
-                            Some(H2DispatchResponse::Buffered(
-                                Response::new(500, "Internal Server Error", Vec::new())
-                                    .into_h2_response(),
-                            ))
-                        }
-                        Some(ServerHopOutcome::DeadlineExceeded) => {
-                            Some(H2DispatchResponse::Buffered(
-                                Response::new(
-                                    503,
-                                    "Service Unavailable",
-                                    HTTP_DEADLINE_EXHAUSTED_DIAGNOSTIC.as_bytes().to_vec(),
-                                )
-                                .into_h2_response(),
-                            ))
-                        }
-                    }
-                }
-                None => {
-                    // No runtime installed on this thread: preserve the legacy
-                    // direct-call path (force-close race + panic isolation, no
-                    // request region).
-                    let handler_result = race_force_close(
-                        &signal,
-                        CatchUnwind {
-                            inner: handler(request),
-                        },
-                    )
-                    .await?;
-                    match handler_result {
-                        Ok(response) => Some(response),
-                        Err(payload) => {
-                            let message = crate::cx::scope::payload_to_string(&payload);
-                            let _ = &message;
-                            error!(
-                                message = %message,
-                                "h2 handler task panicked"
-                            );
-                            Some(H2DispatchResponse::Buffered(
-                                Response::new(500, "Internal Server Error", Vec::new())
-                                    .into_h2_response(),
-                            ))
-                        }
-                    }
-                }
+        let response = if owned_request {
+            let completed = run_owned_h2_hop(
+                &cx,
+                &signal,
+                OwnedH2HopConfig {
+                    budget: request_budget,
+                    started_at: request_now,
+                    source: budget_source,
+                    drain_grace: request_drain_grace,
+                    idle_timeout: stream_idle_timeout,
+                },
+                move || handler(request),
+            )
+            .await;
+            // Closing the child can itself wait for descendants/finalizers.
+            // A response completed before ForceClosing still cannot escape
+            // after shutdown won during that owned close.
+            if signal.phase() as u8 >= ShutdownPhase::ForceClosing as u8 {
+                drop(guard);
+                return;
             }
-        };
-
-        let response = if let Some(timeout) = stream_idle_timeout {
-            match crate::time::timeout_at(request_now + timeout, handler_future).await {
-                Ok(response) => response,
-                Err(_) => {
-                    if let Ok(permit) = resp_tx.reserve(&cx).await {
-                        permit.send(FunnelItem::StreamIdleTimeout { stream_id, guard });
+            match completed {
+                Ok(completed) => {
+                    if let Some(Err(error)) = &completed.task_outcome {
+                        cx.trace(&format!("h2_owned_handler_task_terminal: {error:?}"));
                     }
-                    return;
+                    if completed.idle_expired {
+                        if let Ok(permit) = resp_tx.reserve(&cx).await {
+                            permit.send(FunnelItem::StreamIdleTimeout { stream_id, guard });
+                        }
+                        return;
+                    }
+                    match completed.hop {
+                        ServerHopOutcome::Ok(response) => Some(response),
+                        ServerHopOutcome::Cancelled | ServerHopOutcome::ConnectionLost => None,
+                        ServerHopOutcome::Panicked(message) => {
+                            cx.trace(&format!("h2_owned_handler_panicked: {message}"));
+                            Some(H2DispatchResponse::Buffered(
+                                Response::new(500, "Internal Server Error", Vec::new())
+                                    .into_h2_response(),
+                            ))
+                        }
+                        ServerHopOutcome::DeadlineExceeded => Some(H2DispatchResponse::Buffered(
+                            Response::new(
+                                503,
+                                "Service Unavailable",
+                                HTTP_DEADLINE_EXHAUSTED_DIAGNOSTIC.as_bytes().to_vec(),
+                            )
+                            .into_h2_response(),
+                        )),
+                    }
+                }
+                Err(error) => {
+                    cx.trace(&format!(
+                        "h2_owned_handler_admission_or_close_failed: {error}"
+                    ));
+                    Some(H2DispatchResponse::Buffered(
+                        Response::new(500, "Internal Server Error", Vec::new()).into_h2_response(),
+                    ))
                 }
             }
         } else {
-            handler_future.await
+            let handler_future = async move {
+                match ServerRequestRegion::mint("h2", request_budget, request_now) {
+                    Some(region) => {
+                        // Race the whole hop against ForceClosing so a slow handler
+                        // cannot block shutdown (drop is the backstop, h1 parity).
+                        let hop = race_force_close(
+                            &signal,
+                            region.run_with_protocol_drain(
+                                budget_source,
+                                None,
+                                request_drain_grace,
+                                handler(request),
+                            ),
+                        )
+                        .await;
+                        match hop {
+                            None => None,
+                            Some(ServerHopOutcome::Ok(response)) => Some(response),
+                            Some(
+                                ServerHopOutcome::Cancelled | ServerHopOutcome::ConnectionLost,
+                            ) => None,
+                            Some(ServerHopOutcome::Panicked(message)) => {
+                                // Panic isolation (h1 parity): the connection driver
+                                // survives and the stream completes with a 500 instead
+                                // of staying active forever.
+                                let _ = &message;
+                                error!(message = %message, "h2 handler task panicked");
+                                Some(H2DispatchResponse::Buffered(
+                                    Response::new(500, "Internal Server Error", Vec::new())
+                                        .into_h2_response(),
+                                ))
+                            }
+                            Some(ServerHopOutcome::DeadlineExceeded) => {
+                                Some(H2DispatchResponse::Buffered(
+                                    Response::new(
+                                        503,
+                                        "Service Unavailable",
+                                        HTTP_DEADLINE_EXHAUSTED_DIAGNOSTIC.as_bytes().to_vec(),
+                                    )
+                                    .into_h2_response(),
+                                ))
+                            }
+                        }
+                    }
+                    None => {
+                        // No runtime installed on this thread: preserve the legacy
+                        // direct-call path (force-close race + panic isolation, no
+                        // request region).
+                        let handler_result = race_force_close(
+                            &signal,
+                            CatchUnwind {
+                                inner: handler(request),
+                            },
+                        )
+                        .await?;
+                        match handler_result {
+                            Ok(response) => Some(response),
+                            Err(payload) => {
+                                let message = crate::cx::scope::payload_to_string(&payload);
+                                let _ = &message;
+                                error!(
+                                    message = %message,
+                                    "h2 handler task panicked"
+                                );
+                                Some(H2DispatchResponse::Buffered(
+                                    Response::new(500, "Internal Server Error", Vec::new())
+                                        .into_h2_response(),
+                                ))
+                            }
+                        }
+                    }
+                }
+            };
+
+            if let Some(timeout) = stream_idle_timeout {
+                match crate::time::timeout_at(request_now + timeout, handler_future).await {
+                    Ok(response) => response,
+                    Err(_) => {
+                        if let Ok(permit) = resp_tx.reserve(&cx).await {
+                            permit.send(FunnelItem::StreamIdleTimeout { stream_id, guard });
+                        }
+                        return;
+                    }
+                }
+            } else {
+                handler_future.await
+            }
         };
         let Some(response) = response else {
             drop(guard);
@@ -2088,6 +2433,15 @@ where
         match response {
             H2DispatchResponse::Buffered(response) => {
                 if let Ok(permit) = resp_tx.reserve(&cx).await {
+                    if owned_request
+                        && producer_signal.phase() as u8 >= ShutdownPhase::ForceClosing as u8
+                    {
+                        // Capacity becoming available is not permission to
+                        // publish a completed response after forced shutdown.
+                        drop(permit);
+                        drop(guard);
+                        return;
+                    }
                     permit.send(FunnelItem::Response {
                         stream_id,
                         response,
@@ -2221,6 +2575,7 @@ async fn serve_h2_connection<F, Fut>(
     idle_timeout: Option<Duration>,
     stream_idle_timeout: Option<Duration>,
     time_getter: fn() -> Time,
+    owned_request: bool,
 ) -> io::Result<()>
 where
     F: Fn(Request) -> Fut + Send + Sync + 'static,
@@ -2602,6 +2957,7 @@ where
                             request_timeout_header_cap,
                             request_drain_grace,
                             stream_idle_timeout,
+                            owned_request,
                         ) {
                             dispatched_streams.insert(stream_id);
                             requests_dispatched = requests_dispatched.saturating_add(1);
@@ -2624,6 +2980,7 @@ where
                             request_timeout_header_cap,
                             request_drain_grace,
                             stream_idle_timeout,
+                            owned_request,
                         ) {
                             dispatched_streams.insert(stream_id);
                             requests_dispatched = requests_dispatched.saturating_add(1);
@@ -2679,6 +3036,7 @@ where
                                     request_timeout_header_cap,
                                     request_drain_grace,
                                     stream_idle_timeout,
+                                    owned_request,
                                 ) {
                                     dispatched_streams.insert(stream_id);
                                     requests_dispatched = requests_dispatched.saturating_add(1);
@@ -3268,7 +3626,7 @@ where
     /// supervision and return the shutdown statistics (including the
     /// graceful-drain report).
     pub async fn run(self, runtime: &RuntimeHandle) -> io::Result<ShutdownStats> {
-        self.run_mapped(runtime, |handler, request| async move {
+        self.run_mapped(runtime, true, |handler, request| async move {
             H2DispatchResponse::Buffered(handler(request).await.into_h2_response())
         })
         .await
@@ -3377,7 +3735,7 @@ impl<F> Http2Listener<F> {
         F: Fn(Request) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Http2ProducedResponse> + Send + 'static,
     {
-        self.run_mapped(runtime, |handler, request| async move {
+        self.run_mapped(runtime, false, |handler, request| async move {
             handler(request).await.into_driver_response()
         })
         .await
@@ -3387,6 +3745,7 @@ impl<F> Http2Listener<F> {
     async fn run_mapped<M, MFut>(
         self,
         runtime: &RuntimeHandle,
+        owned_request: bool,
         map_response: M,
     ) -> io::Result<ShutdownStats>
     where
@@ -3499,6 +3858,7 @@ impl<F> Http2Listener<F> {
                     idle_timeout,
                     stream_idle_timeout,
                     conn_time_getter,
+                    owned_request,
                 )
                 .await
                 {
@@ -3676,6 +4036,515 @@ impl<F: Future> Future for CatchUnwind<F> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn owned_hop_config() -> OwnedH2HopConfig {
+        OwnedH2HopConfig {
+            budget: Budget::INFINITE,
+            started_at: Time::ZERO,
+            source: RequestBudgetSource::Inherited,
+            drain_grace: Duration::from_nanos(100),
+            idle_timeout: None,
+        }
+    }
+
+    struct OwnedBodyDrop {
+        cx: Cx,
+        dropped: Arc<AtomicUsize>,
+        cancelled: Arc<AtomicUsize>,
+    }
+
+    impl Drop for OwnedBodyDrop {
+        fn drop(&mut self) {
+            self.dropped.fetch_add(1, Ordering::SeqCst);
+            if self.cx.is_cancel_requested() {
+                self.cancelled.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }
+
+    fn finish_owned_h2_lab(lab: &mut crate::lab::LabRuntime, root: crate::types::RegionId) {
+        assert_eq!(lab.state.live_task_count(), 0);
+        assert_eq!(lab.state.pending_obligation_count(), 0);
+        assert_eq!(lab.state.regions_len(), 1, "only the actual root remains");
+        assert!(lab.state.region(root).is_some());
+        assert!(
+            lab.state
+                .timer_driver_handle()
+                .unwrap()
+                .next_deadline()
+                .is_none()
+        );
+        assert!(lab.run_until_quiescent_with_report().lab_test_passed());
+        lab.state
+            .close_region_command(root, &CancelReason::user("owned H2 test finished"));
+        assert!(lab.run_until_idle() < 1024);
+        assert_eq!(lab.state.regions_len(), 0);
+        assert_eq!(lab.state.pending_obligation_count(), 0);
+        assert!(
+            lab.state
+                .timer_driver_handle()
+                .unwrap()
+                .next_deadline()
+                .is_none()
+        );
+        assert!(lab.run_until_quiescent_with_report().lab_test_passed());
+    }
+
+    #[test]
+    fn owned_h2_request_force_close_drains_actual_body_and_descendant() {
+        for seed in [0x36_100, 0x36_101, 0x36_102] {
+            for parent_cancel in [false, true] {
+                owned_h2_force_close_case(seed, parent_cancel);
+            }
+        }
+    }
+
+    fn owned_h2_force_close_case(seed: u64, parent_cancel: bool) {
+        use crate::channel::oneshot;
+        use crate::lab::{LabConfig, LabRuntime};
+        let mut lab = LabRuntime::new(LabConfig::new(seed).max_steps(2048));
+        let root = lab.state.create_root_region(Budget::INFINITE);
+        let signal = ShutdownSignal::new();
+        let task_signal = signal.clone();
+        let body_cx = Arc::new(parking_lot::Mutex::new(None::<Cx>));
+        let identity = Arc::clone(&body_cx);
+        let cleanup = Arc::new(AtomicUsize::new(0));
+        let entered = Arc::clone(&cleanup);
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let retired = Arc::clone(&dropped);
+        let cancelled = Arc::new(AtomicUsize::new(0));
+        let observed_cancel = Arc::clone(&cancelled);
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&in_flight);
+        let result = Arc::new(parking_lot::Mutex::new(None));
+        let published = Arc::clone(&result);
+        let (release_body, mut body_cleanup) = oneshot::channel();
+        let (release_child, mut child_cleanup) = oneshot::channel();
+        let (owner, mut join) = lab
+            .state
+            .create_task(root, Budget::INFINITE, async move {
+                let cx = Cx::current().unwrap();
+                let _guard = InFlightRequestGuard::acquire(Some(&counter));
+                let completed =
+                    run_owned_h2_hop(&cx, &task_signal, owned_hop_config(), move || async move {
+                        let cx = Cx::current().expect("actual body context");
+                        *identity.lock() = Some(cx.clone());
+                        let _drop = OwnedBodyDrop {
+                            cx: cx.clone(),
+                            dropped: retired,
+                            cancelled: observed_cancel,
+                        };
+                        let child_entered = Arc::clone(&entered);
+                        let _descendant = cx
+                            .spawn(move |child| async move {
+                                let (_sender, mut receiver) = mpsc::channel::<()>(1);
+                                assert_eq!(
+                                    receiver.recv(&child).await,
+                                    Err(mpsc::RecvError::Cancelled)
+                                );
+                                child_entered.fetch_add(1, Ordering::SeqCst);
+                                child_cleanup.recv_uninterruptible().await.unwrap();
+                            })
+                            .unwrap();
+                        let token = cx
+                            .try_register_obligation_checked(
+                                crate::record::ObligationKind::Lease,
+                                cx.task_id(),
+                            )
+                            .unwrap()
+                            .unwrap();
+                        assert!(token.commit(), "actual admitted body retains its gateway");
+                        let (_sender, mut receiver) = mpsc::channel::<()>(1);
+                        assert_eq!(receiver.recv(&cx).await, Err(mpsc::RecvError::Cancelled));
+                        entered.fetch_add(1, Ordering::SeqCst);
+                        body_cleanup.recv_uninterruptible().await.unwrap();
+                        H2DispatchResponse::Buffered(
+                            Response::new(200, "OK", b"drained".to_vec()).into_h2_response(),
+                        )
+                    })
+                    .await
+                    .unwrap();
+                *published.lock() = Some(completed);
+            })
+            .unwrap();
+        lab.scheduler.lock().schedule(owner, 0);
+        assert!(lab.run_until_idle() < 2048);
+        let body = body_cx.lock().clone().expect("body actually polled");
+        assert_ne!(body.task_id(), owner);
+        assert_ne!(body.region_id(), root);
+        assert_eq!(
+            lab.state.task(body.task_id()).unwrap().owner,
+            body.region_id()
+        );
+        assert_eq!(lab.state.tasks_len(), 3);
+        if parent_cancel {
+            lab.state
+                .task(owner)
+                .unwrap()
+                .cx
+                .as_ref()
+                .unwrap()
+                .cancel_with(CancelKind::User, Some("explicit parent Cx cancellation"));
+        } else {
+            assert!(signal.begin_drain(Duration::from_nanos(1)));
+            assert!(signal.begin_force_close());
+        }
+        assert!(lab.run_until_idle() < 2048);
+        assert_eq!(cleanup.load(Ordering::SeqCst), 2);
+        assert_eq!(dropped.load(Ordering::SeqCst), 0);
+        assert_eq!(in_flight.load(Ordering::SeqCst), 1);
+        assert!(result.lock().is_none());
+        assert_eq!(lab.run_until_idle(), 0, "cancelled drain really parks");
+        release_body.send(()).unwrap();
+        assert!(lab.run_until_idle() < 2048);
+        assert_eq!(dropped.load(Ordering::SeqCst), 1);
+        assert_eq!(cancelled.load(Ordering::SeqCst), 1);
+        assert!(
+            result.lock().is_none(),
+            "body join cannot substitute for descendant close"
+        );
+        assert_eq!(in_flight.load(Ordering::SeqCst), 1);
+        assert_eq!(lab.run_until_idle(), 0);
+        release_child.send(()).unwrap();
+        assert!(lab.run_until_idle() < 2048);
+        if parent_cancel {
+            assert!(
+                matches!(join.try_join(), Err(JoinError::Cancelled(reason)) if reason.kind == CancelKind::User)
+            );
+        } else {
+            assert_eq!(join.try_join(), Ok(Some(())));
+        }
+        let completed = result.lock().take().unwrap();
+        assert!(matches!(
+            completed.hop,
+            ServerHopOutcome::Ok(H2DispatchResponse::Buffered(_))
+        ));
+        assert!(matches!(
+            completed.task_outcome,
+            Some(Err(JoinError::Cancelled(_)))
+        ));
+        assert!(!completed.idle_expired);
+        assert_eq!(in_flight.load(Ordering::SeqCst), 0);
+        assert_eq!(lab.state.live_task_count(), 0);
+        assert_eq!(lab.state.pending_obligation_count(), 0);
+        assert_owned_h2_terminal_trace(&lab.state.trace_handle().snapshot(), &body, owner);
+        finish_owned_h2_lab(&mut lab, root);
+    }
+
+    fn assert_owned_h2_terminal_trace(
+        events: &[crate::trace::TraceEvent],
+        body: &Cx,
+        owner: crate::types::TaskId,
+    ) {
+        use crate::trace::{TraceData, TraceEventKind};
+        let terminal = |task| {
+            events.iter().filter(|event| {
+            event.kind == TraceEventKind::Complete
+                && matches!(event.data, TraceData::Task { task: actual, .. } if actual == task)
+        }).collect::<Vec<_>>()
+        };
+        let body_terminal = terminal(body.task_id());
+        let owner_terminal = terminal(owner);
+        assert_eq!(body_terminal.len(), 1);
+        assert_eq!(owner_terminal.len(), 1);
+        assert!(
+            matches!(body_terminal[0].data, TraceData::Task { region, .. } if region == body.region_id())
+        );
+        let closed = events.iter().filter(|event| {
+            event.kind == TraceEventKind::RegionCloseComplete
+                && matches!(event.data, TraceData::Region { region, .. } if region == body.region_id())
+        }).collect::<Vec<_>>();
+        assert_eq!(closed.len(), 1);
+        assert!(body_terminal[0].seq < closed[0].seq);
+        assert!(closed[0].seq < owner_terminal[0].seq);
+    }
+
+    #[test]
+    fn owned_h2_request_shutdown_during_admission_never_starts_factory() {
+        use crate::lab::{LabConfig, LabRuntime};
+        let mut lab = LabRuntime::new(LabConfig::new(0x36_200).max_steps(1024));
+        let root = lab.state.create_root_region(Budget::INFINITE);
+        let signal = ShutdownSignal::new();
+        let task_signal = signal.clone();
+        let invoked = Arc::new(AtomicUsize::new(0));
+        let called = Arc::clone(&invoked);
+        let (owner, mut join) = lab
+            .state
+            .create_task(root, Budget::INFINITE, async move {
+                let cx = Cx::current().unwrap();
+                let mut hop = Box::pin(run_owned_h2_hop(
+                    &cx,
+                    &task_signal,
+                    owned_hop_config(),
+                    move || async move {
+                        called.fetch_add(1, Ordering::SeqCst);
+                        H2DispatchResponse::Buffered(
+                            Response::new(200, "OK", b"forbidden".to_vec()).into_h2_response(),
+                        )
+                    },
+                ));
+                std::future::poll_fn(|poll_cx| {
+                    assert!(
+                        hop.as_mut().poll(poll_cx).is_pending(),
+                        "actual opening must await scheduler admission"
+                    );
+                    Poll::Ready(())
+                })
+                .await;
+                assert!(task_signal.begin_drain(Duration::from_nanos(1)));
+                assert!(task_signal.begin_force_close());
+                let completed = hop.await.unwrap();
+                assert!(matches!(completed.hop, ServerHopOutcome::Cancelled));
+                assert!(completed.task_outcome.is_none());
+            })
+            .unwrap();
+        lab.scheduler.lock().schedule(owner, 0);
+        assert!(lab.run_until_idle() < 1024);
+        assert_eq!(join.try_join(), Ok(Some(())));
+        assert_eq!(invoked.load(Ordering::SeqCst), 0);
+        assert_eq!(lab.state.live_task_count(), 0);
+        let events = lab.state.trace_handle().snapshot();
+        let opened = events
+            .iter()
+            .filter(|event| event.kind == crate::trace::TraceEventKind::RegionCreated)
+            .count();
+        let closed = events
+            .iter()
+            .filter(|event| event.kind == crate::trace::TraceEventKind::RegionCloseComplete)
+            .count();
+        assert_eq!(
+            opened, 2,
+            "one actual root and one admitted empty request region"
+        );
+        assert_eq!(closed, 1, "the admitted request is actually closed");
+        finish_owned_h2_lab(&mut lab, root);
+    }
+
+    #[test]
+    fn owned_h2_request_deadline_and_idle_expiry_retire_only_after_grace() {
+        use crate::lab::{LabConfig, LabRuntime};
+        for idle in [false, true] {
+            let mut lab =
+                LabRuntime::new(LabConfig::new(0x36_300 + u64::from(idle)).max_steps(1024));
+            let root = lab.state.create_root_region(Budget::INFINITE);
+            let signal = ShutdownSignal::new();
+            let dropped = Arc::new(AtomicUsize::new(0));
+            let retired = Arc::clone(&dropped);
+            let cancelled = Arc::new(AtomicUsize::new(0));
+            let observed = Arc::clone(&cancelled);
+            let output = Arc::new(parking_lot::Mutex::new(None));
+            let returned = Arc::clone(&output);
+            let mut config = owned_hop_config();
+            config.drain_grace = Duration::from_nanos(10);
+            if idle {
+                config.idle_timeout = Some(Duration::from_nanos(100));
+            } else {
+                config.budget = config.budget.with_deadline(Time::from_nanos(100));
+            }
+            let (owner, mut join) = lab
+                .state
+                .create_task(root, Budget::INFINITE, async move {
+                    let cx = Cx::current().unwrap();
+                    let completed = run_owned_h2_hop(&cx, &signal, config, move || async move {
+                        let _drop = OwnedBodyDrop {
+                            cx: Cx::current().unwrap(),
+                            dropped: retired,
+                            cancelled: observed,
+                        };
+                        std::future::pending::<H2DispatchResponse>().await
+                    })
+                    .await
+                    .unwrap();
+                    *returned.lock() = Some(completed);
+                })
+                .unwrap();
+            lab.scheduler.lock().schedule(owner, 0);
+            assert!(lab.run_until_idle() < 1024);
+            assert_eq!(dropped.load(Ordering::SeqCst), 0);
+            lab.advance_time_to(Time::from_nanos(100));
+            assert!(lab.state.timer_driver_handle().unwrap().process_timers() > 0);
+            assert!(lab.run_until_idle() < 1024);
+            assert!(output.lock().is_none());
+            assert_eq!(
+                dropped.load(Ordering::SeqCst),
+                0,
+                "expiry requests cancellation before retiring the body"
+            );
+            assert_eq!(lab.run_until_idle(), 0, "grace waits on its owned timer");
+            lab.advance_time_to(Time::from_nanos(110));
+            assert!(lab.state.timer_driver_handle().unwrap().process_timers() > 0);
+            assert!(lab.run_until_idle() < 1024);
+            assert_eq!(join.try_join(), Ok(Some(())));
+            assert_eq!(dropped.load(Ordering::SeqCst), 1);
+            assert_eq!(cancelled.load(Ordering::SeqCst), 1);
+            let completed = output.lock().take().unwrap();
+            assert_eq!(completed.idle_expired, idle);
+            assert!(matches!(
+                completed.task_outcome,
+                Some(Err(JoinError::Cancelled(_)))
+            ));
+            if idle {
+                assert!(matches!(completed.hop, ServerHopOutcome::ConnectionLost));
+            } else {
+                assert!(matches!(completed.hop, ServerHopOutcome::DeadlineExceeded));
+            }
+            assert_eq!(lab.state.live_task_count(), 0);
+            assert!(
+                lab.state
+                    .timer_driver_handle()
+                    .unwrap()
+                    .next_deadline()
+                    .is_none()
+            );
+            finish_owned_h2_lab(&mut lab, root);
+        }
+    }
+
+    #[test]
+    fn owned_h2_request_delayed_join_preserves_strict_idle_deadline_and_exact_boundary() {
+        use crate::channel::oneshot;
+        use crate::lab::{LabConfig, LabRuntime};
+
+        for completed_at in [100u64, 101] {
+            let mut lab = LabRuntime::new(LabConfig::new(0x36_400 + completed_at).max_steps(2048));
+            let root = lab.state.create_root_region(Budget::INFINITE);
+            let signal = ShutdownSignal::new();
+            let allow_coordinator = Arc::new(std::sync::atomic::AtomicBool::new(true));
+            let gate = Arc::clone(&allow_coordinator);
+            let blocked_polls = Arc::new(AtomicUsize::new(0));
+            let blocked = Arc::clone(&blocked_polls);
+            let coordinator_waker = Arc::new(parking_lot::Mutex::new(None::<std::task::Waker>));
+            let waiter = Arc::clone(&coordinator_waker);
+            let body_cx = Arc::new(parking_lot::Mutex::new(None::<Cx>));
+            let identity = Arc::clone(&body_cx);
+            let dropped = Arc::new(AtomicUsize::new(0));
+            let retired = Arc::clone(&dropped);
+            let cancelled = Arc::new(AtomicUsize::new(0));
+            let cancelled_body = Arc::clone(&cancelled);
+            let in_flight = Arc::new(AtomicUsize::new(0));
+            let counter = Arc::clone(&in_flight);
+            let published = Arc::new(parking_lot::Mutex::new(None));
+            let result = Arc::clone(&published);
+            let (release, mut body_wait) = oneshot::channel::<()>();
+            let mut config = owned_hop_config();
+            config.idle_timeout = Some(Duration::from_nanos(100));
+            let (owner, mut join) = lab
+                .state
+                .create_task(root, Budget::INFINITE, async move {
+                    let cx = Cx::current().unwrap();
+                    let _guard = InFlightRequestGuard::acquire(Some(&counter));
+                    let mut hop =
+                        Box::pin(run_owned_h2_hop(&cx, &signal, config, move || async move {
+                            let body = Cx::current().expect("actual admitted body");
+                            *identity.lock() = Some(body.clone());
+                            let _drop = OwnedBodyDrop {
+                                cx: body.clone(),
+                                dropped: retired,
+                                cancelled: cancelled_body,
+                            };
+                            body_wait.recv_uninterruptible().await.unwrap();
+                            assert_eq!(body.now(), Time::from_nanos(completed_at));
+                            H2DispatchResponse::Buffered(
+                                Response::new(200, "OK", b"completed body".to_vec())
+                                    .into_h2_response(),
+                            )
+                        }));
+                    let completed = std::future::poll_fn(|poll_cx| {
+                        if !gate.load(Ordering::SeqCst) {
+                            *waiter.lock() = Some(poll_cx.waker().clone());
+                            blocked.fetch_add(1, Ordering::SeqCst);
+                            return Poll::Pending;
+                        }
+                        hop.as_mut().poll(poll_cx)
+                    })
+                    .await
+                    .unwrap();
+                    *result.lock() = Some(completed);
+                })
+                .unwrap();
+            lab.scheduler.lock().schedule(owner, 0);
+            assert!(lab.run_until_idle() < 2048);
+            let body = body_cx
+                .lock()
+                .clone()
+                .expect("actual body reached its wait");
+            assert_ne!(body.task_id(), owner);
+            assert_ne!(body.region_id(), root);
+            assert_eq!(
+                lab.state.task(body.task_id()).unwrap().owner,
+                body.region_id()
+            );
+            assert_eq!(lab.state.live_task_count(), 2);
+            assert_eq!(in_flight.load(Ordering::SeqCst), 1);
+            assert!(published.lock().is_none());
+
+            // The real timer wakes the coordinator, but this owned test gate
+            // deliberately withholds its next hop poll. The separately
+            // scheduled body still runs and reaches its actual terminal.
+            allow_coordinator.store(false, Ordering::SeqCst);
+            lab.advance_time_to(Time::from_nanos(completed_at));
+            assert!(lab.state.timer_driver_handle().unwrap().process_timers() > 0);
+            assert!(lab.run_until_idle() < 2048);
+            assert!(blocked_polls.load(Ordering::SeqCst) > 0);
+            assert_eq!(dropped.load(Ordering::SeqCst), 0);
+            release.send(()).unwrap();
+            assert!(lab.run_until_idle() < 2048);
+            assert_eq!(dropped.load(Ordering::SeqCst), 1);
+            assert_eq!(cancelled.load(Ordering::SeqCst), 0);
+            assert_eq!(
+                lab.state.live_task_count(),
+                1,
+                "only the held coordinator is live"
+            );
+            assert_eq!(
+                lab.state.regions_len(),
+                2,
+                "request region remains owned before join"
+            );
+            assert!(published.lock().is_none());
+            assert_eq!(in_flight.load(Ordering::SeqCst), 1);
+            assert_eq!(join.try_join(), Ok(None));
+            let before = lab.state.trace_handle().snapshot();
+            assert_eq!(
+                before
+                    .iter()
+                    .filter(|event| event.kind == crate::trace::TraceEventKind::Complete
+                        && matches!(event.data, crate::trace::TraceData::Task { task, region }
+                    if task == body.task_id() && region == body.region_id()))
+                    .count(),
+                1
+            );
+            assert!(!before.iter().any(|event|
+                event.kind == crate::trace::TraceEventKind::Complete &&
+                matches!(event.data, crate::trace::TraceData::Task { task, .. } if task == owner)));
+
+            allow_coordinator.store(true, Ordering::SeqCst);
+            let wake = coordinator_waker
+                .lock()
+                .take()
+                .expect("actual registered coordinator waiter");
+            wake.wake();
+            assert!(lab.run_until_idle() < 2048);
+            assert_eq!(join.try_join(), Ok(Some(())));
+            let completed = published.lock().take().unwrap();
+            assert_eq!(
+                completed.idle_expired,
+                completed_at > 100,
+                "strict overdue must reject; exactly at the boundary ready work wins"
+            );
+            assert!(matches!(completed.hop,
+                ServerHopOutcome::Ok(H2DispatchResponse::Buffered(response))
+                    if response.response.body.as_slice() == b"completed body"));
+            assert!(
+                matches!(completed.task_outcome, Some(Ok(()))),
+                "late join cannot fabricate cancellation of an already completed body"
+            );
+            assert_eq!(cancelled.load(Ordering::SeqCst), 0);
+            assert_eq!(in_flight.load(Ordering::SeqCst), 0);
+            assert_owned_h2_terminal_trace(&lab.state.trace_handle().snapshot(), &body, owner);
+            finish_owned_h2_lab(&mut lab, root);
+        }
+    }
 
     thread_local! {
         static H2_LISTENER_TEST_NOW: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
@@ -4017,6 +4886,7 @@ mod tests {
                 None,
                 Duration::from_millis(500),
                 None,
+                false,
             );
 
             let start = resp_rx
@@ -4096,6 +4966,7 @@ mod tests {
                 None,
                 Duration::from_millis(500),
                 None,
+                false,
             );
 
             let item = resp_rx
@@ -4823,6 +5694,7 @@ mod tests {
                 None,
                 Duration::from_millis(500),
                 None,
+                true,
             );
 
             let item = resp_rx
@@ -4923,6 +5795,7 @@ mod tests {
                 None,
                 Duration::from_millis(500),
                 None,
+                true,
             );
 
             let item = resp_rx
@@ -4998,6 +5871,7 @@ mod tests {
                 None,
                 Duration::from_millis(500),
                 None,
+                true,
             );
 
             let item = resp_rx
@@ -5055,6 +5929,7 @@ mod tests {
                 None,
                 Duration::from_millis(500),
                 Some(Duration::ZERO),
+                true,
             );
 
             let item = resp_rx

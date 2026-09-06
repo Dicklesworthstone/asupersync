@@ -9,6 +9,249 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+
+# Independent h2spec mode keeps its raw external results, including failures,
+# separate from the historical in-process scenario reports below.
+run_h2spec() {
+    python3 - "$PROJECT_ROOT" "$@" <<'PY'
+import argparse
+import base64
+import datetime
+import hashlib
+import json
+import os
+import pathlib
+import re
+import shutil
+import subprocess
+import sys
+
+root = pathlib.Path(sys.argv[1]).resolve()
+parser = argparse.ArgumentParser(description="Run native cancellation tests and independent h2spec through RCH")
+parser.add_argument("--base", required=True)
+parser.add_argument("--overlay-path", action="append", default=[])
+parser.add_argument("--no-overlay", action="store_true")
+args = parser.parse_args(sys.argv[2:])
+
+def require(condition, message):
+    if not condition:
+        raise RuntimeError(message)
+
+def capture(command):
+    return subprocess.check_output(command, cwd=root, text=True).strip()
+
+def write_json(path, value):
+    with path.open("x") as output:
+        json.dump(value, output, indent=2, sort_keys=True)
+        output.write("\n")
+
+def source_selection():
+    files = []
+    for name in args.overlay_path:
+        path = root / name
+        require(path.is_file() and not path.is_symlink(), f"overlay is not a regular file: {name}")
+        require(path.resolve().relative_to(root).as_posix() == name, f"overlay is not canonical: {name}")
+        files.append(dict(path=name, sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+                          mode=oct(path.stat().st_mode & 0o7777)))
+    return dict(base=args.base, features="tls,test-internals", overlays=sorted(files, key=lambda row: row["path"]))
+
+try:
+    require(re.fullmatch(r"[0-9a-f]{40}", args.base), "an explicit full commit SHA is required")
+    require(args.no_overlay != bool(args.overlay_path), "select --no-overlay or explicit overlay files")
+    require(len(set(args.overlay_path)) == len(args.overlay_path), "duplicate overlay paths")
+    require(all(not pathlib.Path(name).is_absolute() and not any(c in name for c in "\n\r\t")
+                for name in args.overlay_path), "invalid overlay path")
+    require(capture(["git", "branch", "--show-current"]) == "main", "run on main")
+    require(capture(["git", "rev-parse", "--verify", args.base + "^{commit}"]) == args.base, "unknown base")
+    source = source_selection()
+    binary = os.environ.get("H2SPEC_BIN", "")
+    require(pathlib.Path(binary).is_absolute(), "H2SPEC_BIN must name the pinned binary on the selected worker")
+    worker = os.environ.get("RCH_WORKER", "")
+    require(re.fullmatch(r"[A-Za-z0-9_.-]+", worker), "RCH_WORKER must explicitly select the worker with h2spec installed")
+    rch = shutil.which(os.environ.get("RCH_BIN", "rch"))
+    require(rch and pathlib.Path(rch).name == "rch", "installed rch is required")
+    require(pathlib.Path(rch).resolve() != root / "scripts/rch_ci_fallback.sh", "local fallback is forbidden")
+    require(shutil.which("timeout"), "timeout is required")
+    jobs = os.environ.get("H2SPEC_BUILD_JOBS", "8")
+    require(re.fullmatch(r"[1-9][0-9]*", jobs), "H2SPEC_BUILD_JOBS must be positive")
+    timeout = os.environ.get("H2SPEC_STAGE_TIMEOUT", "1800")
+    require(re.fullmatch(r"[1-9][0-9]*", timeout), "H2SPEC_STAGE_TIMEOUT must be positive seconds")
+    stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%S") + f"-{os.getpid()}"
+    directory = pathlib.Path(os.environ.get("H2SPEC_RUN_DIR", f"/tmp/asupersync-h2spec-run-{stamp}")).absolute()
+    directory.mkdir(parents=True, exist_ok=False)
+    remote_directory = os.environ.get("H2SPEC_ARTIFACT_DIR", f"/tmp/asupersync-h2spec-raw-{stamp}")
+    require(pathlib.Path(remote_directory).is_absolute(), "H2SPEC_ARTIFACT_DIR must be an absolute worker path")
+    target = pathlib.Path(os.environ.get("RCH_TARGET_DIR", f"/tmp/rch_target_h2spec_{stamp}")).absolute()
+    target.mkdir(parents=True, exist_ok=True)
+    capabilities = capture([rch, "exec", "--help"])
+    with (directory / "rch-capabilities.txt").open("x") as output:
+        output.write(capabilities + "\n")
+    for option in ("--base", "--clean-overlay", "--overlay-path", "--no-overlay"):
+        require(option in capabilities, f"installed RCH lacks {option}")
+    write_json(directory / "source-selection.json", source)
+except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
+    print(f"h2spec admission refused: {error}", file=sys.stderr)
+    sys.exit(86)
+
+source_args = ["--base", args.base, "--clean-overlay"]
+if args.no_overlay:
+    source_args.append("--no-overlay")
+else:
+    for name in args.overlay_path:
+        source_args.extend(["--overlay-path", name])
+environment = dict(os.environ, RCH_REQUIRE_REMOTE="1", RCH_DISABLE_TARGET_REUSE="1",
+                   RCH_VISIBILITY="verbose", RCH_WORKER=worker, RCH_WORKERS="", NO_COLOR="1")
+cargo_environment = ["CARGO_INCREMENTAL=0", "CARGO_PROFILE_TEST_DEBUG=0", "CARGO_PROFILE_DEV_DEBUG=0",
+                     "RUSTFLAGS=-D warnings -C debuginfo=0"]
+cargo_home = os.environ.get("H2SPEC_CARGO_HOME", os.environ.get("CARGO_HOME", ""))
+if cargo_home:
+    cargo_environment.append("CARGO_HOME=" + cargo_home)
+summary = dict(schema_version="asupersync.native_h2spec_runner.v1", bead_id="asupersync-bi2462.36",
+               status="failed", source=source, stages=[], worker_content_manifest_verified=False)
+fingerprint = None
+exit_code = 86
+
+def preserve_exports(text):
+    exported = directory / "external-artifacts"
+    rows = re.findall(r"^ASUPERSYNC_H2SPEC_ARTIFACT (.+)$", text, re.M)
+    if rows:
+        exported.mkdir(exist_ok=False)
+    for encoded in rows:
+        row = json.loads(encoded)
+        name = row["name"]
+        require(re.fullmatch(r"[A-Za-z0-9_.-]+", name) and name not in (".", ".."), "unsafe artifact name")
+        data = base64.b64decode(row["base64"], validate=True)
+        require(len(data) == row["bytes"] and hashlib.sha256(data).hexdigest() == row["sha256"],
+                f"external artifact digest mismatch: {name}")
+        with (exported / name).open("xb") as output:
+            output.write(data)
+    return len(rows)
+
+def stage(name, test_args, extra_environment=()):
+    global fingerprint, exit_code
+    require(source_selection() == source, f"selected source changed before {name}")
+    command = ["timeout", timeout, rch, "--no-color", "exec", *source_args, "--", "env",
+               *cargo_environment, f"CARGO_TARGET_DIR={target / name}", *extra_environment,
+               "cargo", "test", "--jobs", jobs, "-p", "asupersync", "--locked",
+               "--features", "tls,test-internals", *test_args]
+    write_json(directory / f"{name}.command.json", command)
+    log_path = directory / f"{name}.log"
+    with log_path.open("x") as log:
+        process = subprocess.Popen(command, cwd=root, env=environment, stdout=subprocess.PIPE,
+                                   stderr=subprocess.STDOUT, text=True)
+        for line in process.stdout:
+            log.write(line)
+            log.flush()
+            print(line, end="", flush=True)
+        status = process.wait()
+    receipt = dict(stage=name, exit_code=status, log=str(log_path), target_reuse_disabled=True)
+    summary["stages"].append(receipt)
+    if status != 0:
+        # Keep the real command's failure even if subsequent artifact decoding
+        # also fails. Its raw log is already safely retained.
+        exit_code = status if status > 0 else 128 - status
+    text = re.sub(r"\x1b\[[0-9;]*m", "", log_path.read_text())
+    if name == "external":
+        receipt["exported_artifacts"] = preserve_exports(text)
+    if status != 0:
+        raise RuntimeError(f"{name} exited {status}; retained raw output is not a pass")
+    require(not re.search(r"\[RCH\] local \(|falling back to local|local fallback|\[rch-ci-fallback\] executing locally:", text),
+            f"{name} used local fallback")
+    require(source_selection() == source, f"selected source changed after {name}")
+    selected = re.findall(r"Selected worker: ([A-Za-z0-9_.-]+) at ", text)
+    terminal = re.findall(r"^\[RCH\] remote ([A-Za-z0-9_.-]+) \([^)]*\)$", text, re.M)
+    require(selected == [worker] and terminal == [worker], f"{name} lacks exact selected-worker and terminal evidence")
+    sources = re.findall(r"^\[RCH\] clean-overlay receipt: base=([0-9a-f]{40}) overlay-fingerprint=([0-9a-f]{64})$", text, re.M)
+    require(len(sources) == 1 and sources[0][0] == args.base, f"{name} lacks exact clean-overlay admission")
+    if fingerprint is None:
+        fingerprint = sources[0][1]
+    require(sources[0][1] == fingerprint, f"{name} overlay differs from native prerequisite")
+    receipt.update(worker=worker, base=args.base, overlay_fingerprint=fingerprint)
+    counts = re.findall(r"^test result: ok\. (\d+) passed; (\d+) failed; (\d+) ignored; (\d+) measured; (\d+) filtered out;", text, re.M)
+    require(len(counts) == 1 and int(counts[0][0]) > 0 and counts[0][1:4] == ("0", "0", "0"),
+            f"{name} requires a positive terminal test count without failure, ignored or measured tests")
+    require(not re.search(r"^test result: FAILED", text, re.M), f"{name} contains a failed test result")
+    if name == "native":
+        require(counts[0][4] == "0", "native prerequisite must remain unfiltered")
+    else:
+        require(counts[0][0] == "1", "external mode must execute exactly its one independent test")
+        rows = re.findall(r"^ASUPERSYNC_H2SPEC_SUMMARY (.+)$", text, re.M)
+        require(len(rows) == 1, "external summary absent or duplicated")
+        evidence = json.loads(rows[0])
+        require(evidence["schema_version"] == "asupersync.native_h2spec.v1" and evidence["passed"] is True,
+                "external conformance did not pass")
+        require(evidence["source_base"] == args.base and evidence["source_fingerprint"] == fingerprint,
+                "external caller source identity differs from actual admission")
+        require(evidence["features"] == "tls,test-internals" and evidence["binary_sha256"] ==
+                "ac679b916bcd46c52314b17c8903d8dffebf0f2357586d272731f6d8bfd5e9f7", "external tool/profile drift")
+        report = evidence["full"]["report"]
+        require(report["selected"] > 0 and report["passed"] == report["selected"] and
+                all(report[key] == 0 for key in ("failed", "errors", "skipped")), "external suite is incomplete")
+        require(len(report["cases"]) == report["selected"] and
+                len({row["id"] for row in report["cases"]}) == report["selected"], "external case identities are incomplete")
+        require(evidence["full"]["terminal"]["exit_code"] == 0 and
+                evidence["full"]["terminal"]["timed_out"] is False, "external process lacked successful termination")
+        negative = evidence["negative"]
+        require(negative["terminal"]["exit_code"] == 1 and negative["terminal"]["timed_out"] is False and
+                negative["report"]["selected"] == 1 and negative["report"]["passed"] == 0 and
+                negative["report"]["skipped"] == 0 and
+                negative["report"]["failed"] + negative["report"]["errors"] == 1 and
+                negative["peer"]["wrong_ping_responses"] == 1, "external oracle control did not reject the wrong PING")
+        require(receipt["exported_artifacts"] > 0, "raw external artifacts were not retained")
+        for artifact in ("identity.json", "discovery.stdout", "full.xml", "full.stdout", "full.stderr",
+                         "full.terminal.json", "full.parse.stdout", "negative.xml", "negative.verdict.json",
+                         "open-stream.parked.json", "open-stream.shutdown.json"):
+            require((directory / "external-artifacts" / artifact).is_file(), f"missing raw evidence: {artifact}")
+        cleanup = evidence["cleanup"]
+        require(cleanup["actual_recv_pending"] is True and cleanup["registered_owner_at_pending"] is True and
+                cleanup["handler_dropped"] == 1 and
+                cleanup["handler_cancel_seen"] == 1 and cleanup["task_complete_events"] == 1 and
+                all(cleanup[key] == 0 for key in ("active_connections", "in_flight", "live_tasks", "leaks")) and
+                cleanup["runtime_shutdown"] is True and cleanup["reached_quiescence"] is True and
+                cleanup["hard_deadline_hit"] is False, "native open-stream cancellation or cleanup was incomplete")
+        def artifact_json(name):
+            return json.loads((directory / "external-artifacts" / name).read_text())
+        for name, expected in (("full.parse.stdout", report),
+                               ("full.terminal.json", evidence["full"]["terminal"]),
+                               ("negative.verdict.json", negative),
+                               ("open-stream.shutdown.json", cleanup)):
+            require(artifact_json(name) == expected, f"summary differs from actual exported evidence: {name}")
+        identity = artifact_json("identity.json")
+        for key in ("binary_sha256", "version", "package_version", "source_base", "source_fingerprint",
+                    "source_authority", "features"):
+            require(identity[key] == evidence[key], f"external identity differs from summary: {key}")
+        parked = artifact_json("open-stream.parked.json")
+        require(parked["registered_owner"] is True and parked["actual_recv_pending"] is True and
+                parked["task"] == cleanup["task"] and parked["region"] == cleanup["region"],
+                "cleanup identity differs from the actual registered parked handler")
+        write_json(directory / "external-summary.json", evidence)
+    receipt["test_counts"] = dict(zip(("passed", "failed", "ignored", "measured", "filtered"), map(int, counts[0])))
+
+try:
+    stage("native", ["--test", "runtime_abort_vs_cancel_semantics_audit", "--", "--nocapture", "--test-threads=1"])
+    stage("external", ["--test", "e2e_h2_graceful_drain", "--", "--ignored", "--exact",
+                       "external_h2spec::native_h2spec_strict_conformance", "--nocapture", "--test-threads=1"],
+          [f"H2SPEC_BIN={binary}", f"H2SPEC_ARTIFACT_DIR={remote_directory}",
+           f"H2SPEC_SOURCE_BASE={args.base}", f"H2SPEC_SOURCE_FINGERPRINT={fingerprint}"])
+    summary["status"] = "passed"
+    exit_code = 0
+except (OSError, ValueError, KeyError, RuntimeError, subprocess.SubprocessError) as error:
+    summary["error"] = str(error)
+    print(f"h2spec run failed: {error}", file=sys.stderr)
+finally:
+    summary["exit_code"] = exit_code
+    write_json(directory / "summary.json", summary)
+    print(f"h2spec summary: {directory / 'summary.json'}")
+sys.exit(exit_code)
+PY
+}
+
+if [[ "${1:-}" == --h2spec ]]; then
+    shift
+    run_h2spec "$@"
+    exit $?
+fi
+
 CONTRACT="${PROJECT_ROOT}/artifacts/mock_code_finder_verification_contract_v1.json"
 VALIDATOR="${PROJECT_ROOT}/scripts/validate_mock_code_finder_evidence.py"
 RCH_BIN="${RCH_BIN:-rch}"
@@ -41,6 +284,13 @@ usage() {
 Usage: bash scripts/run_h2_conformance_evidence.sh [options]
 
 Options:
+  --h2spec --base SHA        Run native prerequisite and independent strict h2spec
+    --overlay-path FILE     Explicit owned source files (repeatable)
+    --no-overlay            Use the committed base without overlays
+    H2SPEC_BIN, RCH_WORKER  Required pinned worker binary and worker selection
+    H2SPEC_RUN_DIR          Fresh local evidence directory (default: unique /tmp path)
+    H2SPEC_ARTIFACT_DIR     Fresh worker evidence directory (default: unique /tmp path)
+    H2SPEC_CARGO_HOME       Optional remote Cargo cache; H2SPEC_BUILD_JOBS defaults to 8
   --execute                 Run selected HTTP/2 proof scenarios (default)
   --dry-run                 List commands and artifact paths without running cargo
   --self-test               Validate script fixtures and shared negative cases without cargo
@@ -509,9 +759,7 @@ run_scenario() {
         fi
     fi
 
-    if [[ "$verdict" == "pass" && "$rc" -ne 0 && "$USE_RCH" -eq 1 ]]; then
-        actual="${actual}; rch wrapper exited ${rc} after emitting valid proof output"
-    elif [[ "$verdict" == "pass" && "$rc" -ne 0 ]]; then
+    if [[ "$verdict" == "pass" && "$rc" -ne 0 ]]; then
         verdict="fail"
         actual="command exited ${rc}; ${actual}"
         first_failure="$(first_failure_line_from "$combined_path")"
