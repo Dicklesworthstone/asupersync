@@ -184,6 +184,7 @@ mod managed_public {
     use asupersync::types::{Budget, CancelReason, Outcome, TaskId, policy::FailFast};
     use std::collections::BTreeSet;
     use std::future::{Future, poll_fn};
+    use std::pin::Pin;
     use std::sync::{Arc, Mutex};
     use std::task::{Poll, Waker};
     use std::time::Duration;
@@ -1080,11 +1081,13 @@ mod managed_public {
             );
             let root = lab.state.create_root_region(Budget::INFINITE);
             let trace = lab.state.trace_handle();
+            let coordinator: Pin<Box<dyn Future<Output = Vec<serde_json::Value>> + Send>> =
+                Box::pin(async move {
+                    journeys(Cx::current().unwrap(), Box::new(move || trace.snapshot())).await
+                });
             let (task, mut joined) = lab
                 .state
-                .create_task(root, Budget::INFINITE, async move {
-                    journeys(Cx::current().unwrap(), Box::new(move || trace.snapshot())).await
-                })
+                .create_task(root, Budget::INFINITE, coordinator)
                 .unwrap();
             lab.scheduler.lock().schedule(task, 0);
             lab.run_until_idle();
@@ -1138,13 +1141,15 @@ mod managed_public {
             }
         );
         let observer = runtime.handle();
-        let reports = runtime.block_on(runtime.handle().spawn(async move {
-            journeys(
-                Cx::current().unwrap(),
-                Box::new(move || observer.trace_snapshot().unwrap()),
-            )
-            .await
-        }));
+        let coordinator: Pin<Box<dyn Future<Output = Vec<serde_json::Value>> + Send>> =
+            Box::pin(async move {
+                journeys(
+                    Cx::current().unwrap(),
+                    Box::new(move || observer.trace_snapshot().unwrap()),
+                )
+                .await
+            });
+        let reports = runtime.block_on(runtime.handle().spawn(coordinator));
         runtime.block_on(async {
             for _ in 0..4096 {
                 if runtime.is_quiescent() {
@@ -1332,14 +1337,16 @@ mod managed_public {
         .unwrap();
         assert_eq!(runtime.config().worker_threads, if sharded { 2 } else { 1 });
         let observer = runtime.handle();
-        let report = runtime.block_on(runtime.handle().spawn(async move {
-            signalled_journey(
-                Cx::current().unwrap(),
-                Box::new(move || observer.trace_snapshot().unwrap()),
-                external,
-            )
-            .await
-        }));
+        let coordinator: Pin<Box<dyn Future<Output = serde_json::Value> + Send>> =
+            Box::pin(async move {
+                signalled_journey(
+                    Cx::current().unwrap(),
+                    Box::new(move || observer.trace_snapshot().unwrap()),
+                    external,
+                )
+                .await
+            });
+        let report = runtime.block_on(runtime.handle().spawn(coordinator));
         input.join().expect("owned release reader terminated");
         runtime.block_on(async {
             for _ in 0..4096 {
