@@ -175,7 +175,8 @@ pub struct TransferTerminal {
     /// The worker's original returned result or caught poll panic, if it ran.
     /// This may be absent if runtime admission or execution terminated first.
     pub worker_outcome: Option<AtpOutcome<TransferProgress>>,
-    /// A separately caught panic while destroying the worker future.
+    /// A separately caught panic while destroying the worker future or an
+    /// unstarted factory rejected before runtime admission.
     /// A primary worker panic retains precedence over this secondary panic.
     pub cleanup_panic: Option<PanicPayload>,
     /// The actual runtime task's canonical terminal result.
@@ -227,6 +228,33 @@ struct TransferShared {
     // Arc cloning is callback-free under the lock. Waker clone/drop/wake are
     // arbitrary user code and always happen after unlocking.
     waiter: Option<Arc<Waker>>,
+}
+
+// The runtime may reject an enqueued spawn without ever polling its adapter.
+// Its rejection path destroys the payload before resolving the canonical join.
+// Keep arbitrary factory-capture destruction from unwinding past that receipt.
+struct PendingTransferFactory<F> {
+    factory: Option<F>,
+    shared: Arc<parking_lot::Mutex<TransferShared>>,
+}
+
+impl<F> PendingTransferFactory<F> {
+    fn take(&mut self) -> F {
+        self.factory.take().expect("transfer factory invoked once")
+    }
+}
+
+impl<F> Drop for PendingTransferFactory<F> {
+    fn drop(&mut self) {
+        if let Some(factory) = self.factory.take()
+            && let Err(payload) = catch_unwind(AssertUnwindSafe(|| drop(factory)))
+        {
+            let panic = transfer_worker_panic(payload);
+            // Canonical admission rejection will wake the joining owner.
+            // Do not invoke an arbitrary observer while dropping a request.
+            self.shared.lock().cleanup_panic.get_or_insert(panic);
+        }
+    }
 }
 
 impl TransferProgressReporter {
@@ -349,7 +377,13 @@ impl AtpSession {
         self.send_object(cx, request).await
     }
 
-    /// Verify an object's integrity and authenticity.
+    /// Check an object's hash and the legacy session-bound sidecar checksum.
+    ///
+    /// The v1 sidecar derives its HMAC key from public session fields. A matching
+    /// sidecar does not authenticate a peer or establish who produced the object,
+    /// even when the legacy `verified` and `signature_valid` fields are true.
+    /// Do not use this result as an authorization decision. An expected hash
+    /// must come from an independently trusted source to establish integrity.
     pub async fn verify_object(
         &self,
         cx: &Cx,
@@ -967,36 +1001,42 @@ impl ActiveTransfer {
             shared: Arc::downgrade(&shared),
         };
         let worker_shared = Arc::clone(&shared);
+        let mut worker = PendingTransferFactory {
+            factory: Some(worker),
+            shared: Arc::clone(&shared),
+        };
         let handle = cx.spawn_in_cancellation_dominant(scope, move |child| {
             // Erase the internal adapter, while still checking Send, before
             // runtime admission wraps it in its task storage machinery.
             let future: Pin<Box<dyn Future<Output = ()> + Send>> = Box::pin(async move {
                 worker_shared.lock().started = true;
-                let (result, cleanup_panic) = match catch_unwind(AssertUnwindSafe(|| {
-                    worker(child.clone(), reporter)
-                })) {
-                    Ok(future) => {
-                        let mut future = Box::pin(future);
-                        let polled = poll_fn(|ctx| {
-                            match catch_unwind(AssertUnwindSafe(|| future.as_mut().poll(ctx))) {
-                                Ok(Poll::Pending) => Poll::Pending,
-                                Ok(Poll::Ready(outcome)) => Poll::Ready(outcome),
-                                Err(payload) => Poll::Ready(AtpOutcome::Panicked(
-                                    transfer_worker_panic(payload),
-                                )),
-                            }
-                        })
-                        .await;
-                        // Retire user captures before terminal publication or
-                        // cancellation observation. A second panic must not
-                        // replace the primary poll/encoded panic.
-                        let cleanup = catch_unwind(AssertUnwindSafe(|| drop(future)))
-                            .err()
-                            .map(transfer_worker_panic);
-                        (polled, cleanup)
-                    }
-                    Err(payload) => (AtpOutcome::Panicked(transfer_worker_panic(payload)), None),
-                };
+                let (result, cleanup_panic) =
+                    match catch_unwind(AssertUnwindSafe(|| worker.take()(child.clone(), reporter)))
+                    {
+                        Ok(future) => {
+                            let mut future = Box::pin(future);
+                            let polled = poll_fn(|ctx| {
+                                match catch_unwind(AssertUnwindSafe(|| future.as_mut().poll(ctx))) {
+                                    Ok(Poll::Pending) => Poll::Pending,
+                                    Ok(Poll::Ready(outcome)) => Poll::Ready(outcome),
+                                    Err(payload) => Poll::Ready(AtpOutcome::Panicked(
+                                        transfer_worker_panic(payload),
+                                    )),
+                                }
+                            })
+                            .await;
+                            // Retire user captures before terminal publication or
+                            // cancellation observation. A second panic must not
+                            // replace the primary poll/encoded panic.
+                            let cleanup = catch_unwind(AssertUnwindSafe(|| drop(future)))
+                                .err()
+                                .map(transfer_worker_panic);
+                            (polled, cleanup)
+                        }
+                        Err(payload) => {
+                            (AtpOutcome::Panicked(transfer_worker_panic(payload)), None)
+                        }
+                    };
                 let wake = {
                     let mut state = worker_shared.lock();
                     state.worker_outcome = Some(result);
@@ -1256,14 +1296,18 @@ pub struct ObjectVerification {
     pub hash: Vec<u8>,
     /// Object size in bytes.
     pub size_bytes: u64,
-    /// Whether verification was successful.
+    /// Whether the legacy integrity and sidecar checks both passed.
+    /// This does not establish peer or object-producer authenticity; see
+    /// [`AtpSession::verify_object`].
     pub verified: bool,
     /// Whether integrity check passed.
     pub integrity_check_passed: bool,
-    /// Whether detached signature verification passed.
+    /// Whether the legacy detached sidecar checksum matched.
     ///
     /// `None` means the detached signature was absent. Missing signatures still
     /// allow integrity-only hash checks, but they never make `verified` true.
+    /// `Some(true)` is not evidence of a secret-key signature: the v1 key is
+    /// reproducible from public session fields.
     pub signature_valid: Option<bool>,
 }
 
@@ -1638,6 +1682,7 @@ mod tests {
     #[test]
     fn detached_object_signature_is_session_bound_and_constant_time_checked() {
         futures_lite::future::block_on(async {
+            use hmac::{Hmac, KeyInit, Mac};
             use sha2::{Digest, Sha256};
 
             let config = SessionConfig::default();
@@ -1656,7 +1701,37 @@ mod tests {
             let mut hasher = Sha256::new();
             hasher.update(object);
             let hash: [u8; 32] = hasher.finalize().into();
-            let signature = session.compute_detached_object_signature(&hash, object.len() as u64);
+            // Reconstruct the legacy sidecar using only public getters and
+            // protocol constants, without calling either production key/tag
+            // helper. This pins compatibility and demonstrates why a matching
+            // v1 checksum is not evidence of authenticated object authorship.
+            let public_material = [
+                session.session_id().as_bytes().as_slice(),
+                session.local_peer().as_bytes().as_slice(),
+                session.remote_peer().as_bytes().as_slice(),
+                session.transfer_nonce().as_bytes().as_slice(),
+                session.transcript_hash().as_bytes().as_slice(),
+            ]
+            .concat();
+            let mut extract =
+                Hmac::<Sha256>::new_from_slice(b"asupersync-atp-sdk-object-signature-key-v1")
+                    .unwrap();
+            extract.update(&public_material);
+            let mut expand =
+                Hmac::<Sha256>::new_from_slice(&extract.finalize().into_bytes()).unwrap();
+            expand.update(b"session-bound-object-verification\x01");
+            let mut attacker_mac =
+                Hmac::<Sha256>::new_from_slice(&expand.finalize().into_bytes()).unwrap();
+            attacker_mac.update(b"asupersync::net::atp::sdk::object-signature::v1");
+            attacker_mac.update(session.session_id().as_bytes());
+            attacker_mac.update(&32u64.to_be_bytes());
+            attacker_mac.update(&hash);
+            attacker_mac.update(&(object.len() as u64).to_be_bytes());
+            let signature: [u8; 32] = attacker_mac.finalize().into_bytes().into();
+            assert_eq!(
+                signature,
+                session.compute_detached_object_signature(&hash, object.len() as u64)
+            );
             let envelope = serde_json::json!({
                 "algorithm": OBJECT_SIGNATURE_ALGORITHM,
                 "session_id_hex": hex::encode(session.session_id().as_bytes()),
@@ -2423,10 +2498,34 @@ mod tests {
 
         #[test]
         fn owned_transfer_cancel_before_admission_never_enters_worker_factory() {
+            cancelled_before_admission(false);
+        }
+
+        #[test]
+        fn owned_transfer_unadmitted_factory_drop_panic_preserves_join_and_cleanup() {
+            cancelled_before_admission(true);
+        }
+
+        struct UnstartedFactoryCapture {
+            drops: Arc<AtomicUsize>,
+            panic_on_drop: bool,
+        }
+
+        impl Drop for UnstartedFactoryCapture {
+            fn drop(&mut self) {
+                assert_eq!(self.drops.fetch_add(1, Ordering::SeqCst), 0);
+                assert!(!self.panic_on_drop, "ATP unadmitted factory capture panic");
+            }
+        }
+
+        fn cancelled_before_admission(panic_on_drop: bool) {
             let (mut lab, root) = lab(0x53_0070);
             let calls = Arc::new(AtomicUsize::new(0));
             let drops = Arc::new(AtomicUsize::new(0));
-            let resource = Dropped(Arc::clone(&drops));
+            let resource = UnstartedFactoryCapture {
+                drops: Arc::clone(&drops),
+                panic_on_drop,
+            };
             let worker_calls = Arc::clone(&calls);
             let publication = Arc::new(parking_lot::Mutex::new(None));
             let slot = Arc::clone(&publication);
@@ -2497,12 +2596,17 @@ mod tests {
                 .expect("actual unadmitted cancellation")
                 .clone();
             assert_eq!(terminal.worker_outcome, None);
-            assert_eq!(terminal.cleanup_panic, None);
+            let cleanup_panic =
+                panic_on_drop.then(|| PanicPayload::new("ATP unadmitted factory capture panic"));
+            assert_eq!(terminal.cleanup_panic, cleanup_panic);
             assert_eq!(
                 terminal.worker_join,
                 Err(JoinError::Cancelled(reason.clone()))
             );
-            assert_eq!(terminal.outcome, AtpOutcome::Cancelled(reason));
+            assert_eq!(
+                terminal.outcome,
+                cleanup_panic.map_or_else(|| AtpOutcome::Cancelled(reason), AtpOutcome::Panicked,)
+            );
             assert!(futures_lite::future::block_on(transfer.is_complete()));
             assert_eq!(
                 futures_lite::future::block_on(transfer.next_progress()),
