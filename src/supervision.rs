@@ -1775,6 +1775,1999 @@ pub struct StartedChild {
     pub task_id: TaskId,
 }
 
+// The managed entry point is additive: the state-threaded ChildStart and the
+// declarative restart planners above keep their original contracts.
+pub use managed::{
+    ManagedChildBinding, ManagedChildCompletion, ManagedChildFactory, ManagedChildFuture,
+    ManagedGeneration, ManagedRestartMode, ManagedSupervisor, ManagedSupervisorBindError,
+    ManagedSupervisorError, ManagedSupervisorHandle, ManagedSupervisorReport,
+};
+
+mod managed {
+    use super::*;
+    use crate::cx::{ChildRegion, ChildRegionError, ChildRegionSpec, Cx};
+    use crate::runtime::{JoinError, TaskHandle};
+    use crate::types::PanicPayload;
+    use parking_lot::Mutex;
+    use std::future::{Future, poll_fn};
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    use std::pin::Pin;
+    use std::task::{Poll, Waker};
+
+    const SCAN_QUANTUM: usize = 32;
+
+    /// Restart eligibility for the executing managed entry point.
+    ///
+    /// Controller-initiated shutdown and parent cancellation never restart a
+    /// child, regardless of this mode. These modes do not change the legacy
+    /// Err-only [`SupervisionStrategy`] planning functions.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum ManagedRestartMode {
+        /// Restart any independently terminated generation, including success.
+        Permanent,
+        /// Restart application errors and panics; success and cancellation stop.
+        Transient,
+        /// Never replace this child, including collateral strategy shutdown.
+        Temporary,
+    }
+
+    impl ManagedRestartMode {
+        fn eligible<E>(self, outcome: &Outcome<(), E>) -> bool {
+            match self {
+                Self::Permanent => true,
+                Self::Transient => matches!(outcome, Outcome::Err(_) | Outcome::Panicked(_)),
+                Self::Temporary => false,
+            }
+        }
+    }
+
+    /// Identity of one actually admitted child generation.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct ManagedGeneration {
+        /// Monotone per-child generation, starting at one.
+        pub number: u64,
+        /// Region exclusively owning this generation and its descendants.
+        pub region: RegionId,
+        /// Canonical task ID, including its arena generation.
+        pub task: TaskId,
+    }
+
+    /// A managed factory's owned asynchronous body.
+    pub type ManagedChildFuture<E> = Pin<Box<dyn Future<Output = Outcome<(), E>> + Send + 'static>>;
+
+    /// Retained factory invoked inside each real, region-owned child task.
+    ///
+    /// Invocation never holds RuntimeState or a supervisor lock. Its returned
+    /// future need not be Sync. A new invocation cannot overlap an old
+    /// generation's task or region finalizers.
+    pub trait ManagedChildFactory<E>: Send + Sync + 'static {
+        /// Construct one generation using its registered task authority.
+        fn start(&self, cx: Cx, generation: ManagedGeneration) -> ManagedChildFuture<E>;
+    }
+
+    impl<E, F, Fut> ManagedChildFactory<E> for F
+    where
+        F: Fn(Cx, ManagedGeneration) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Outcome<(), E>> + Send + 'static,
+    {
+        fn start(&self, cx: Cx, generation: ManagedGeneration) -> ManagedChildFuture<E> {
+            Box::pin(self(cx, generation))
+        }
+    }
+
+    /// Binds a compiled child name to the additive managed factory contract.
+    pub struct ManagedChildBinding<E> {
+        name: ChildName,
+        mode: ManagedRestartMode,
+        factory: Arc<dyn ManagedChildFactory<E>>,
+    }
+
+    impl<E> std::fmt::Debug for ManagedChildBinding<E> {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("ManagedChildBinding")
+                .field("name", &self.name)
+                .field("mode", &self.mode)
+                .finish_non_exhaustive()
+        }
+    }
+
+    impl<E> ManagedChildBinding<E> {
+        /// Retain a factory and its explicit managed restart mode.
+        #[must_use]
+        pub fn new(
+            name: impl Into<ChildName>,
+            mode: ManagedRestartMode,
+            factory: impl ManagedChildFactory<E>,
+        ) -> Self {
+            Self {
+                name: name.into(),
+                mode,
+                factory: Arc::new(factory),
+            }
+        }
+    }
+
+    /// Invalid binding or mutated public compiled topology.
+    #[derive(Debug)]
+    #[non_exhaustive]
+    pub enum ManagedSupervisorBindError {
+        /// A compiled topology no longer passes its original validation.
+        Topology(SupervisorCompileError),
+        /// Public start_order was not the compiled topological order.
+        StartOrder,
+        /// A managed binding occurred twice.
+        Duplicate(ChildName),
+        /// A binding names no compiled child.
+        Unknown(ChildName),
+        /// A compiled child has no managed factory.
+        Missing(ChildName),
+        /// The two explicit supervisor strategies disagree.
+        RestartPolicyMismatch,
+        /// Registration requires the registry-owned implementation, not a no-op.
+        UnsupportedRegistration(ChildName),
+        /// The optional restart storm threshold is invalid.
+        InvalidStormThreshold,
+    }
+
+    /// Infrastructure or policy reason for stopping the managed controller.
+    #[derive(Debug)]
+    #[non_exhaustive]
+    pub enum ManagedSupervisorError {
+        /// Child-region admission or close failed.
+        Region(ChildRegionError),
+        /// The actual spawn gateway refused a task.
+        Spawn(SpawnError),
+        /// A returned task handle terminated before the managed factory ran.
+        ChildNotStarted {
+            /// Child whose admission/start failed.
+            child: ChildName,
+            /// Full terminal identity, including the failed generation.
+            generation: ManagedGeneration,
+            /// Runtime terminal reason, without inventing a domain error.
+            outcome: Outcome<(), ()>,
+        },
+        /// A required child's dependency is unavailable.
+        DependencyUnavailable {
+            child: ChildName,
+            dependency: ChildName,
+        },
+        /// Shared restart intensity refused another replacement batch.
+        RestartLimit {
+            child: ChildName,
+            refusal: BudgetRefusal,
+        },
+        /// No representable successor generation remains.
+        GenerationExhausted(ChildName),
+        /// The old generation reached quiescence with unsuccessful cleanup.
+        Cleanup {
+            /// Child whose cleanup failed.
+            child: ChildName,
+            /// Actual retired generation.
+            generation: ManagedGeneration,
+            /// Explicit finalizer outcome, distinct from ordinary cancellation.
+            outcome: crate::record::task::TaskOutcome,
+        },
+        /// The supervisor region itself reached quiescence with failed cleanup.
+        SupervisorCleanup(crate::record::task::TaskOutcome),
+        /// Parent escalation could not be enqueued to a live runtime.
+        Escalation(SpawnError),
+    }
+
+    /// The last completed generation of a child, retained without E: Clone.
+    #[derive(Debug)]
+    pub struct ManagedChildCompletion<E> {
+        /// Compiled child identity.
+        pub name: ChildName,
+        /// Exact generation that produced this result.
+        pub generation: ManagedGeneration,
+        /// User result, read only after the actual task terminal was joined.
+        pub outcome: Outcome<(), E>,
+        /// User-return time, or join-observation time for a runtime panic/cancel.
+        pub completed_at: Time,
+        /// Canonical region outcome after actual quiescence, including the
+        /// region's ordinary shutdown cancellation. None means close failed.
+        pub region_outcome: Option<crate::record::task::TaskOutcome>,
+        /// Explicit cleanup outcome, separate from ordinary child cancellation.
+        /// A failed cleanup forbids replacement even when the region is closed.
+        pub cleanup_outcome: Option<crate::record::task::TaskOutcome>,
+    }
+
+    /// Terminal controller receipt, available only after all owned regions close.
+    #[derive(Debug)]
+    pub struct ManagedSupervisorReport<E> {
+        /// Supervisor name.
+        pub name: ChildName,
+        /// Supervisor child region, if admission succeeded.
+        pub region: Option<RegionId>,
+        /// Canonical supervisor-region outcome after quiescence.
+        pub region_outcome: Option<crate::record::task::TaskOutcome>,
+        /// Explicit supervisor-region cleanup outcome, when recorded.
+        pub cleanup_outcome: Option<crate::record::task::TaskOutcome>,
+        /// Controller stop reason. Child domain errors remain in `children`.
+        pub outcome: Outcome<(), ManagedSupervisorError>,
+        /// Latest completed result per child, in compiled start order.
+        ///
+        /// Older generations are replaced only after their result is consumed
+        /// by the controller; storage is bounded by the compiled child count.
+        pub children: Vec<ManagedChildCompletion<E>>,
+        /// Actual child tasks whose factory construction was attempted.
+        pub started: u64,
+        /// Actual child terminal joins, including cancellation before start.
+        pub joined: u64,
+        /// Replacement batches admitted by the shared restart tracker.
+        pub restart_batches: u64,
+        /// Successful parent-region escalation publications (zero or one).
+        pub escalations: u8,
+    }
+
+    /// Retained factories and validated compiled supervisor metadata.
+    pub struct ManagedSupervisor<E> {
+        name: ChildName,
+        budget: Option<Budget>,
+        children: Vec<ChildSpec>,
+        bindings: Vec<ManagedChildBinding<E>>,
+        config: SupervisionConfig,
+    }
+
+    impl<E> std::fmt::Debug for ManagedSupervisor<E> {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("ManagedSupervisor")
+                .field("name", &self.name)
+                .field("children", &self.children.len())
+                .field("config", &self.config)
+                .finish_non_exhaustive()
+        }
+    }
+
+    impl CompiledSupervisor {
+        /// Bind retained managed factories without invoking legacy ChildStart.
+        ///
+        /// The compiled topology supplies names, order, dependencies, required/
+        /// deferred flags, and shutdown budgets. The bindings supply restart
+        /// modes; `config` supplies one shared intensity/backoff policy. Legacy
+        /// per-child SupervisionStrategy remains exclusive to the old APIs.
+        /// Registry-bearing specs are refused until an actual registry binding
+        /// is supplied by a separate integration; they never silently register.
+        pub fn bind_managed<E>(
+            self,
+            bindings: Vec<ManagedChildBinding<E>>,
+            config: SupervisionConfig,
+        ) -> Result<ManagedSupervisor<E>, ManagedSupervisorBindError> {
+            if config.restart_policy != self.restart_policy {
+                return Err(ManagedSupervisorBindError::RestartPolicyMismatch);
+            }
+            if config
+                .storm_threshold
+                .is_some_and(|n| !n.is_finite() || n <= 0.0)
+            {
+                return Err(ManagedSupervisorBindError::InvalidStormThreshold);
+            }
+            let supplied_order = self.start_order;
+            let compiled = SupervisorBuilder {
+                name: self.name,
+                budget: self.budget,
+                tie_break: self.tie_break,
+                restart_policy: self.restart_policy,
+                children: self.children,
+            }
+            .compile()
+            .map_err(ManagedSupervisorBindError::Topology)?;
+            if supplied_order != compiled.start_order {
+                return Err(ManagedSupervisorBindError::StartOrder);
+            }
+            let mut by_name = BTreeMap::new();
+            for binding in bindings {
+                if !compiled.children.iter().any(|c| c.name == binding.name) {
+                    return Err(ManagedSupervisorBindError::Unknown(binding.name));
+                }
+                let name = binding.name.clone();
+                if by_name.insert(name.clone(), binding).is_some() {
+                    return Err(ManagedSupervisorBindError::Duplicate(name));
+                }
+            }
+            let mut children: Vec<_> = compiled.children.into_iter().map(Some).collect();
+            let mut ordered = Vec::with_capacity(children.len());
+            let mut factories = Vec::with_capacity(children.len());
+            for index in compiled.start_order {
+                let child = children[index]
+                    .take()
+                    .expect("validated unique start order");
+                if !matches!(child.registration, NameRegistrationPolicy::None) {
+                    return Err(ManagedSupervisorBindError::UnsupportedRegistration(
+                        child.name,
+                    ));
+                }
+                factories.push(
+                    by_name
+                        .remove(&child.name)
+                        .ok_or_else(|| ManagedSupervisorBindError::Missing(child.name.clone()))?,
+                );
+                ordered.push(child);
+            }
+            Ok(ManagedSupervisor {
+                name: compiled.name,
+                budget: compiled.budget,
+                children: ordered,
+                bindings: factories,
+                config,
+            })
+        }
+    }
+
+    struct ChildPublication<E> {
+        started: bool,
+        identity: Option<ManagedGeneration>,
+        terminal: Option<(Time, Outcome<(), E>)>,
+        waiter: Option<Waker>,
+    }
+
+    struct RunningChild<E> {
+        number: u64,
+        region: Option<ChildRegion>,
+        handle: Option<TaskHandle<()>>,
+        publication: Arc<Mutex<ChildPublication<E>>>,
+        shutdown_budget: Budget,
+        cancellation_sent: bool,
+        start_observed: bool,
+        terminal_observed: bool,
+    }
+
+    impl<E> RunningChild<E> {
+        fn cancel(&mut self) -> Result<(), ChildRegionError> {
+            if !self.cancellation_sent {
+                self.cancellation_sent = true;
+                if let Some(region) = &self.region {
+                    let mut reason = CancelReason::with_origin(
+                        crate::types::CancelKind::User,
+                        region.region_id(),
+                        region.cx().now(),
+                    )
+                    .with_message("managed supervisor generation drain");
+                    if let Some(handle) = &self.handle {
+                        reason = reason.with_task(handle.task_id());
+                    }
+                    region.cancel_with_budget(reason, self.shutdown_budget)?;
+                }
+            }
+            Ok(())
+        }
+    }
+
+    impl<E> Drop for RunningChild<E> {
+        fn drop(&mut self) {
+            let _ = self.cancel();
+            if let Some(handle) = &self.handle {
+                handle.abort();
+            }
+            // ChildRegion's Drop requests close. It cannot claim synchronous
+            // quiescence; the enclosing runtime region remains the backstop.
+        }
+    }
+
+    struct Controller<E> {
+        supervisor: ManagedSupervisor<E>,
+        cx: Cx,
+        root: Option<ChildRegion>,
+        running: Vec<Option<RunningChild<E>>>,
+        latest: Vec<Option<ManagedChildCompletion<E>>>,
+        numbers: Vec<u64>,
+        ready: Vec<(usize, ManagedGeneration)>,
+        cancel_waker: Option<crate::cx::cx::CancelWakerToken>,
+        tracker: RestartTracker,
+        report: ManagedSupervisorReport<E>,
+    }
+
+    fn panic_payload(payload: Box<dyn std::any::Any + Send>) -> PanicPayload {
+        let message = crate::cx::scope::payload_to_string(&payload);
+        std::mem::forget(payload);
+        PanicPayload::new(message)
+    }
+
+    impl<E: Send + 'static> Controller<E> {
+        fn new(supervisor: ManagedSupervisor<E>, cx: &Cx) -> Self {
+            let count = supervisor.children.len();
+            let tracker = supervisor.config.restart_tracker();
+            let report = ManagedSupervisorReport {
+                name: supervisor.name.clone(),
+                region: None,
+                region_outcome: None,
+                cleanup_outcome: None,
+                outcome: Outcome::Ok(()),
+                children: Vec::new(),
+                started: 0,
+                joined: 0,
+                restart_batches: 0,
+                escalations: 0,
+            };
+            Self {
+                supervisor,
+                cx: cx.clone(),
+                root: None,
+                running: (0..count).map(|_| None).collect(),
+                latest: (0..count).map(|_| None).collect(),
+                numbers: vec![0; count],
+                ready: Vec::new(),
+                cancel_waker: None,
+                tracker,
+                report,
+            }
+        }
+
+        fn cancelled(&self) -> bool {
+            self.cx.checkpoint().is_err()
+        }
+
+        fn record_cancel(&mut self) {
+            if !matches!(self.report.outcome, Outcome::Panicked(_)) {
+                self.report.outcome = Outcome::Cancelled(
+                    self.cx
+                        .cancel_reason()
+                        .unwrap_or_else(|| CancelReason::user("managed supervisor cancelled")),
+                );
+            }
+        }
+
+        fn record_error(&mut self, error: ManagedSupervisorError) {
+            let cleanup = match &error {
+                ManagedSupervisorError::Cleanup { child, .. } => Some(
+                    self.supervisor
+                        .children
+                        .iter()
+                        .position(|spec| &spec.name == child),
+                ),
+                ManagedSupervisorError::SupervisorCleanup(_) => Some(None),
+                _ => None,
+            };
+            let panic = match &error {
+                ManagedSupervisorError::Cleanup {
+                    outcome: Outcome::Panicked(payload),
+                    ..
+                }
+                | ManagedSupervisorError::SupervisorCleanup(Outcome::Panicked(payload)) => {
+                    Some(payload.clone())
+                }
+                _ => None,
+            };
+            if !matches!(self.report.outcome, Outcome::Panicked(_)) {
+                self.report.outcome = panic.map_or_else(|| Outcome::Err(error), Outcome::Panicked);
+            }
+            if let Some(source) = cleanup {
+                self.escalate(source);
+            }
+        }
+
+        fn trace(&self, action: &str, index: usize, identity: ManagedGeneration) {
+            if let Some(trace) = self.cx.trace_buffer() {
+                let now = self.cx.now();
+                let outcome = self.latest[index]
+                    .as_ref()
+                    .filter(|completed| completed.generation == identity)
+                    .map_or("pending", |completed| match completed.outcome {
+                        Outcome::Ok(()) => "ok",
+                        Outcome::Err(_) => "err",
+                        Outcome::Cancelled(_) => "cancelled",
+                        Outcome::Panicked(_) => "panicked",
+                    });
+                let message = format!(
+                    "managed_supervisor_v1 action={action} supervisor={:?} child={:?} generation={} region={:?} task={:?} outcome={outcome}",
+                    self.supervisor.name,
+                    self.supervisor.children[index].name,
+                    identity.number,
+                    identity.region,
+                    identity.task,
+                );
+                trace.record_event(|seq| crate::trace::TraceEvent::user_trace(seq, now, &message));
+            }
+        }
+
+        fn observe_start(&mut self, index: usize) {
+            let Some(child) = self.running[index].as_mut() else {
+                return;
+            };
+            let identity = {
+                let publication = child.publication.lock();
+                if child.start_observed || !publication.started {
+                    return;
+                }
+                child.start_observed = true;
+                publication
+                    .identity
+                    .expect("started generation has a canonical identity")
+            };
+            self.report.started += 1;
+            self.trace("started", index, identity);
+        }
+
+        fn queue_terminal(&mut self, index: usize) {
+            let identity = self.latest[index]
+                .as_ref()
+                .expect("joined terminal")
+                .generation;
+            self.ready.push((index, identity));
+        }
+
+        fn accepts_terminal(&self, index: usize, identity: ManagedGeneration) -> bool {
+            self.running[index].as_ref().is_some_and(|child| {
+                child.terminal_observed
+                    && child.number == identity.number
+                    && self.latest[index]
+                        .as_ref()
+                        .is_some_and(|completed| completed.generation == identity)
+            })
+        }
+
+        fn joined(&mut self, index: usize, result: Result<(), JoinError>) {
+            self.observe_start(index);
+            let child = self.running[index]
+                .as_mut()
+                .expect("joined owned generation");
+            child.terminal_observed = true;
+            let handle = child.handle.take().expect("terminal is consumed once");
+            let (identity, terminal) = {
+                let mut publication = child.publication.lock();
+                (
+                    publication.identity.unwrap_or(ManagedGeneration {
+                        number: child.number,
+                        region: child.region.as_ref().expect("owned region").region_id(),
+                        task: handle.task_id(),
+                    }),
+                    publication.terminal.take(),
+                )
+            };
+            let (completed_at, outcome) = match result {
+                Err(JoinError::Panicked(payload)) => {
+                    if let Err(secondary) = catch_unwind(AssertUnwindSafe(|| drop(terminal))) {
+                        std::mem::forget(secondary);
+                    }
+                    (self.cx.now(), Outcome::Panicked(payload))
+                }
+                Err(JoinError::PolledAfterCompletion) => {
+                    unreachable!("managed terminal consumed twice")
+                }
+                Ok(()) | Err(JoinError::Cancelled(_)) if terminal.is_some() => {
+                    // A later region cancellation cannot rewrite a completed
+                    // typed result, including an encoded Panicked outcome.
+                    terminal.expect("checked terminal")
+                }
+                Err(JoinError::Cancelled(reason)) => (self.cx.now(), Outcome::Cancelled(reason)),
+                Ok(()) => (
+                    self.cx.now(),
+                    Outcome::Panicked(PanicPayload::new(
+                        "managed child returned without its terminal publication",
+                    )),
+                ),
+            };
+            self.report.joined += 1;
+            let previous = self.latest[index].replace(ManagedChildCompletion {
+                name: self.supervisor.children[index].name.clone(),
+                generation: identity,
+                completed_at,
+                outcome,
+                region_outcome: None,
+                cleanup_outcome: None,
+            });
+            if let Err(payload) = catch_unwind(AssertUnwindSafe(|| drop(previous))) {
+                self.report.outcome = Outcome::Panicked(panic_payload(payload));
+            }
+            self.trace("terminal", index, identity);
+        }
+
+        async fn start(&mut self, index: usize) -> Result<(), ManagedSupervisorError> {
+            if self.cancelled() {
+                self.record_cancel();
+                return Ok(());
+            }
+            let number = self.numbers[index].checked_add(1).ok_or_else(|| {
+                ManagedSupervisorError::GenerationExhausted(
+                    self.supervisor.children[index].name.clone(),
+                )
+            })?;
+            let region = self
+                .root
+                .as_ref()
+                .expect("admitted supervisor region")
+                .cx()
+                .open_child_region(ChildRegionSpec::inherit())
+                .await
+                .map_err(ManagedSupervisorError::Region)?;
+            if self.cancelled() {
+                self.record_cancel();
+                region
+                    .close()
+                    .await
+                    .map_err(ManagedSupervisorError::Region)?;
+                return Ok(());
+            }
+            let publication = Arc::new(Mutex::new(ChildPublication {
+                started: false,
+                identity: None,
+                terminal: None,
+                waiter: None,
+            }));
+            let child_publication = Arc::clone(&publication);
+            let factory = Arc::clone(&self.supervisor.bindings[index].factory);
+            let region_id = region.region_id();
+            let handle = region
+                .cx()
+                .spawn(move |cx| async move {
+                    let identity = ManagedGeneration {
+                        number,
+                        region: region_id,
+                        task: cx.task_id(),
+                    };
+                    child_publication.lock().identity = Some(identity);
+                    let constructed =
+                        catch_unwind(AssertUnwindSafe(|| factory.start(cx.clone(), identity)));
+                    let waiter = {
+                        let mut publication = child_publication.lock();
+                        publication.started = true;
+                        publication.waiter.take()
+                    };
+                    if let Some(waiter) = waiter {
+                        waiter.wake();
+                    }
+                    let outcome = match constructed {
+                        Err(payload) => Outcome::Panicked(panic_payload(payload)),
+                        Ok(future) => {
+                            let mut execution =
+                                Box::pin(crate::cx::scope::CatchUnwind { inner: future });
+                            let returned = execution.as_mut().await;
+                            let retired = catch_unwind(AssertUnwindSafe(|| drop(execution)));
+                            match (returned, retired) {
+                                (Err(payload), retirement) => {
+                                    if let Err(secondary) = retirement {
+                                        std::mem::forget(secondary);
+                                    }
+                                    Outcome::Panicked(panic_payload(payload))
+                                }
+                                (Ok(outcome), Err(payload)) => {
+                                    if let Err(secondary) =
+                                        catch_unwind(AssertUnwindSafe(|| drop(outcome)))
+                                    {
+                                        std::mem::forget(secondary);
+                                    }
+                                    Outcome::Panicked(panic_payload(payload))
+                                }
+                                (Ok(outcome), Ok(())) => outcome,
+                            }
+                        }
+                    };
+                    child_publication.lock().terminal = Some((cx.now(), outcome));
+                })
+                .map_err(ManagedSupervisorError::Spawn)?;
+            self.numbers[index] = number;
+            self.running[index] = Some(RunningChild {
+                number,
+                region: Some(region),
+                handle: Some(handle),
+                publication,
+                shutdown_budget: self.supervisor.children[index].shutdown_budget,
+                cancellation_sent: false,
+                start_observed: false,
+                terminal_observed: false,
+            });
+            // Start means actual factory construction, not a provisional
+            // mailbox TaskId. A panic/admission denial also wakes via join.
+            poll_fn(|poll_cx| {
+                self.cancel_waker = Some(
+                    self.cx
+                        .refresh_cancel_waker(self.cancel_waker, poll_cx.waker()),
+                );
+                if self.cancelled() {
+                    self.record_cancel();
+                    return Poll::Ready(());
+                }
+                let child = self.running[index].as_mut().expect("owned child");
+                if let Poll::Ready(result) = child
+                    .handle
+                    .as_mut()
+                    .expect("unjoined child")
+                    .poll_join(poll_cx)
+                {
+                    self.joined(index, result);
+                    self.queue_terminal(index);
+                    return Poll::Ready(());
+                }
+                let waiter = poll_cx.waker().clone();
+                let (started, old) = {
+                    let mut publication = child.publication.lock();
+                    (publication.started, publication.waiter.replace(waiter))
+                };
+                drop(old);
+                if started {
+                    self.observe_start(index);
+                    Poll::Ready(())
+                } else {
+                    Poll::Pending
+                }
+            })
+            .await;
+            if self.running[index]
+                .as_ref()
+                .is_some_and(|child| child.terminal_observed && !child.start_observed)
+            {
+                let completed = self.latest[index]
+                    .as_ref()
+                    .expect("observed unstarted terminal");
+                let outcome = match &completed.outcome {
+                    Outcome::Ok(()) => Outcome::Ok(()),
+                    Outcome::Err(_) => Outcome::Err(()),
+                    Outcome::Cancelled(reason) => Outcome::Cancelled(reason.clone()),
+                    Outcome::Panicked(payload) => Outcome::Panicked(payload.clone()),
+                };
+                return Err(ManagedSupervisorError::ChildNotStarted {
+                    child: completed.name.clone(),
+                    generation: completed.generation,
+                    outcome,
+                });
+            }
+            Ok(())
+        }
+
+        async fn drain(&mut self, index: usize) -> Result<(), ManagedSupervisorError> {
+            if self.running[index].is_none() {
+                return Ok(());
+            }
+            self.running[index]
+                .as_mut()
+                .expect("owned child")
+                .cancel()
+                .map_err(ManagedSupervisorError::Region)?;
+            if self.running[index]
+                .as_ref()
+                .expect("owned child")
+                .handle
+                .is_some()
+            {
+                let result = poll_fn(|cx| {
+                    self.running[index]
+                        .as_mut()
+                        .expect("owned child")
+                        .handle
+                        .as_mut()
+                        .expect("unjoined child")
+                        .poll_join(cx)
+                })
+                .await;
+                self.joined(index, result);
+            }
+            let mut child = self.running[index].take().expect("owned child");
+            let region = child.region.take().expect("owned region");
+            let receipt = region
+                .close_with_outcome()
+                .await
+                .map_err(ManagedSupervisorError::Region)?;
+            let completed = self.latest[index]
+                .as_mut()
+                .expect("joined generation before close");
+            completed.region_outcome = Some(receipt.outcome);
+            completed.cleanup_outcome = receipt.cleanup_outcome;
+            let identity = completed.generation;
+            let failure = completed
+                .cleanup_outcome
+                .as_ref()
+                .filter(|outcome| !outcome.is_ok())
+                .map(|outcome| ManagedSupervisorError::Cleanup {
+                    child: completed.name.clone(),
+                    generation: identity,
+                    outcome: outcome.clone(),
+                });
+            self.trace("drained", index, identity);
+            if let Some(error) = failure {
+                return Err(error);
+            }
+            Ok(())
+        }
+
+        fn dependency_unavailable(&self, index: usize) -> Option<ChildName> {
+            self.supervisor.children[index]
+                .depends_on
+                .iter()
+                .find(|name| {
+                    let dependency = self
+                        .supervisor
+                        .children
+                        .iter()
+                        .position(|child| &child.name == *name)
+                        .expect("validated dependency");
+                    self.running[dependency].is_none()
+                })
+                .cloned()
+        }
+
+        async fn wait_exit(&mut self) -> Option<usize> {
+            let mut cursor: usize = 0;
+            poll_fn(|poll_cx| {
+                self.cancel_waker = Some(
+                    self.cx
+                        .refresh_cancel_waker(self.cancel_waker, poll_cx.waker()),
+                );
+                if self.cancelled() {
+                    self.record_cancel();
+                    return Poll::Ready(None);
+                }
+                if !matches!(self.report.outcome, Outcome::Ok(())) {
+                    return Poll::Ready(None);
+                }
+                let end = cursor.saturating_add(SCAN_QUANTUM).min(self.running.len());
+                while cursor < end {
+                    let index = cursor;
+                    cursor += 1;
+                    if let Some(child) = self.running[index].as_mut() {
+                        if let Some(handle) = &mut child.handle {
+                            if let Poll::Ready(result) = handle.poll_join(poll_cx) {
+                                self.joined(index, result);
+                                self.queue_terminal(index);
+                            }
+                        }
+                    }
+                }
+                if cursor < self.running.len() {
+                    poll_cx.waker().wake_by_ref();
+                    return Poll::Pending;
+                }
+                cursor = 0;
+                if !matches!(self.report.outcome, Outcome::Ok(())) {
+                    return Poll::Ready(None);
+                }
+                let ready = std::mem::take(&mut self.ready);
+                self.ready = ready
+                    .into_iter()
+                    .filter(|&(index, identity)| self.accepts_terminal(index, identity))
+                    .collect();
+                self.ready.sort_by_key(|&(index, _)| {
+                    let completed = self.latest[index].as_ref().expect("current terminal");
+                    (completed.completed_at, completed.generation.task)
+                });
+                if !self.ready.is_empty() {
+                    return Poll::Ready(Some(self.ready.remove(0).0));
+                }
+                if self.running.iter().all(Option::is_none) {
+                    Poll::Ready(None)
+                } else {
+                    Poll::Pending
+                }
+            })
+            .await
+        }
+
+        async fn backoff(&mut self, delay: Option<Duration>) -> bool {
+            if self.cancelled() {
+                self.record_cancel();
+                return false;
+            }
+            if let Some(delay) = delay.filter(|delay| !delay.is_zero()) {
+                let mut sleep = Box::pin(crate::time::sleep(self.cx.now(), delay));
+                let completed = poll_fn(|poll_cx| {
+                    self.cancel_waker = Some(
+                        self.cx
+                            .refresh_cancel_waker(self.cancel_waker, poll_cx.waker()),
+                    );
+                    if self.cancelled() {
+                        self.record_cancel();
+                        return Poll::Ready(false);
+                    }
+                    sleep.as_mut().poll(poll_cx).map(|()| true)
+                })
+                .await;
+                if !completed {
+                    return false;
+                }
+            }
+            if self.cancelled() {
+                self.record_cancel();
+                false
+            } else {
+                true
+            }
+        }
+
+        fn escalate(&mut self, source: Option<usize>) {
+            if self.report.escalations != 0 {
+                return;
+            }
+            let identity = source.map_or(
+                ManagedGeneration {
+                    number: 0,
+                    region: self.report.region.unwrap_or(self.cx.region_id()),
+                    task: self.cx.task_id(),
+                },
+                |index| {
+                    self.latest[index]
+                        .as_ref()
+                        .expect("escalating an observed terminal")
+                        .generation
+                },
+            );
+            let reason = CancelReason::with_origin(
+                crate::types::CancelKind::FailFast,
+                identity.region,
+                self.cx.now(),
+            )
+            .with_task(identity.task)
+            .with_message("managed supervisor restart intensity exhausted");
+            let result = self
+                .cx
+                .spawn_gateway_handle()
+                .ok_or(SpawnError::RuntimeUnavailable)
+                .and_then(|gateway| {
+                    gateway.enqueue_region_command(
+                        crate::runtime::spawn_mailbox::RegionCommand::Cancel {
+                            region_id: self.cx.region_id(),
+                            reason,
+                        },
+                    )
+                });
+            match result {
+                Ok(()) => {
+                    self.report.escalations = 1;
+                    if let Some(index) = source {
+                        self.trace("parent_escalated", index, identity);
+                    }
+                }
+                Err(error) => {
+                    self.report.outcome = Outcome::Err(ManagedSupervisorError::Escalation(error))
+                }
+            }
+        }
+
+        async fn execute(&mut self) {
+            if self.cancelled() {
+                self.record_cancel();
+                return;
+            }
+            let mut spec = ChildRegionSpec::inherit();
+            spec.budget = self.supervisor.budget;
+            match self.cx.open_child_region(spec).await {
+                Ok(region) => {
+                    self.report.region = Some(region.region_id());
+                    self.root = Some(region);
+                }
+                Err(error) => {
+                    self.report.outcome = Outcome::Err(ManagedSupervisorError::Region(error));
+                    return;
+                }
+            }
+            for index in 0..self.running.len() {
+                if self.cancelled() {
+                    self.record_cancel();
+                    return;
+                }
+                if !self.supervisor.children[index].start_immediately {
+                    continue;
+                }
+                if let Some(dependency) = self.dependency_unavailable(index) {
+                    if self.supervisor.children[index].required {
+                        self.report.outcome =
+                            Outcome::Err(ManagedSupervisorError::DependencyUnavailable {
+                                child: self.supervisor.children[index].name.clone(),
+                                dependency,
+                            });
+                        return;
+                    }
+                    continue;
+                }
+                if let Err(error) = self.start(index).await {
+                    if self.supervisor.children[index].required {
+                        self.record_error(error);
+                        return;
+                    } else if let Err(cleanup) = self.drain(index).await {
+                        self.record_error(cleanup);
+                        return;
+                    }
+                }
+                if !matches!(self.report.outcome, Outcome::Ok(())) {
+                    return;
+                }
+            }
+            while let Some(failed) = self.wait_exit().await {
+                let eligible = self.supervisor.bindings[failed].mode.eligible(
+                    &self.latest[failed]
+                        .as_ref()
+                        .expect("joined terminal")
+                        .outcome,
+                );
+                if !eligible {
+                    if let Err(error) = self.drain(failed).await {
+                        self.record_error(error);
+                        return;
+                    }
+                    continue;
+                }
+                let now = self.cx.now().as_nanos();
+                let mut verdict = self.tracker.evaluate_with_budget(now, &self.cx.budget());
+                if matches!(verdict, RestartVerdict::Denied { .. })
+                    && self.supervisor.config.escalation == EscalationPolicy::ResetCounter
+                {
+                    self.tracker.reset();
+                    verdict = self.tracker.evaluate_with_budget(now, &self.cx.budget());
+                }
+                let delay = match verdict {
+                    RestartVerdict::Allowed { delay, .. } => delay,
+                    RestartVerdict::Denied { refusal } => {
+                        if self.supervisor.config.escalation == EscalationPolicy::Stop {
+                            if let Err(error) = self.drain(failed).await {
+                                self.record_error(error);
+                                return;
+                            }
+                            continue;
+                        }
+                        self.report.outcome = Outcome::Err(ManagedSupervisorError::RestartLimit {
+                            child: self.supervisor.children[failed].name.clone(),
+                            refusal,
+                        });
+                        if self.supervisor.config.escalation == EscalationPolicy::Escalate {
+                            self.escalate(Some(failed));
+                        }
+                        return;
+                    }
+                };
+                let affected: Vec<_> = (0..self.running.len())
+                    .filter(|&index| {
+                        self.running[index].is_some()
+                            && match self.supervisor.config.restart_policy {
+                                RestartPolicy::OneForOne => index == failed,
+                                RestartPolicy::OneForAll => true,
+                                RestartPolicy::RestForOne => index >= failed,
+                            }
+                    })
+                    .collect();
+                // A live transient sibling is restarted after intentional
+                // collateral shutdown. An already completed normal transient
+                // child must not be resurrected by a delayed sibling event.
+                let restart: Vec<_> = affected
+                    .iter()
+                    .copied()
+                    .filter(|&index| {
+                        let mode = self.supervisor.bindings[index].mode;
+                        mode != ManagedRestartMode::Temporary
+                            && (self.running[index]
+                                .as_ref()
+                                .is_some_and(|child| !child.terminal_observed)
+                                || self.latest[index]
+                                    .as_ref()
+                                    .is_some_and(|completed| mode.eligible(&completed.outcome)))
+                    })
+                    .collect();
+                for &index in affected.iter().rev() {
+                    if let Err(error) = self.drain(index).await {
+                        self.record_error(error);
+                        return;
+                    }
+                }
+                if !self.backoff(delay).await {
+                    return;
+                }
+                let mut counted = false;
+                for index in restart {
+                    if self.dependency_unavailable(index).is_some() {
+                        continue;
+                    }
+                    if self.cancelled() {
+                        self.record_cancel();
+                        return;
+                    }
+                    if !counted {
+                        self.tracker.record(self.cx.now().as_nanos());
+                        self.report.restart_batches += 1;
+                        counted = true;
+                    }
+                    if let Err(error) = self.start(index).await {
+                        if self.supervisor.children[index].required {
+                            self.record_error(error);
+                            return;
+                        } else if let Err(cleanup) = self.drain(index).await {
+                            self.record_error(cleanup);
+                            return;
+                        }
+                    }
+                    if !matches!(self.report.outcome, Outcome::Ok(())) {
+                        return;
+                    }
+                }
+            }
+        }
+
+        async fn finish(&mut self) {
+            for index in (0..self.running.len()).rev() {
+                if let Err(error) = self.drain(index).await {
+                    self.record_error(error);
+                }
+            }
+            if let Some(region) = self.root.take() {
+                match region.close_with_outcome().await {
+                    Err(error) => self.record_error(ManagedSupervisorError::Region(error)),
+                    Ok(receipt) => {
+                        self.report.region_outcome = Some(receipt.outcome);
+                        self.report.cleanup_outcome = receipt.cleanup_outcome;
+                        let failure = self
+                            .report
+                            .cleanup_outcome
+                            .as_ref()
+                            .filter(|outcome| !outcome.is_ok())
+                            .cloned();
+                        if let Some(outcome) = failure {
+                            self.record_error(ManagedSupervisorError::SupervisorCleanup(outcome));
+                        }
+                    }
+                }
+            }
+            if let Some(token) = self.cancel_waker.take() {
+                self.cx.clear_cancel_waker(token);
+            }
+            self.report
+                .children
+                .extend(self.latest.iter_mut().filter_map(Option::take));
+        }
+    }
+
+    impl<E> Drop for Controller<E> {
+        fn drop(&mut self) {
+            if let Some(token) = self.cancel_waker.take() {
+                self.cx.clear_cancel_waker(token);
+            }
+            for child in self.running.iter_mut().rev().flatten() {
+                let _ = child.cancel();
+            }
+        }
+    }
+
+    /// Owned actual controller task, located outside every region it drains.
+    pub struct ManagedSupervisorHandle<E> {
+        task: TaskHandle<()>,
+        report: Arc<Mutex<Option<ManagedSupervisorReport<E>>>>,
+    }
+
+    impl<E> std::fmt::Debug for ManagedSupervisorHandle<E> {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("ManagedSupervisorHandle")
+                .field("task", &self.task.task_id())
+                .finish_non_exhaustive()
+        }
+    }
+
+    impl<E> ManagedSupervisorHandle<E> {
+        /// Canonical controller task ID after admission.
+        #[must_use]
+        pub fn task_id(&self) -> TaskId {
+            self.task.task_id()
+        }
+
+        /// Request controller cancellation; joining still waits for child drain.
+        pub fn abort(&self) {
+            self.task.abort();
+        }
+
+        /// Await the actual controller terminal without cancellation shortcuts.
+        /// A completed report survives a later controller cancellation.
+        pub async fn join(&mut self) -> Result<ManagedSupervisorReport<E>, JoinError> {
+            let terminal = poll_fn(|cx| self.task.poll_join(cx)).await;
+            if let Some(mut report) = self.report.lock().take() {
+                if let Err(JoinError::Panicked(payload)) = terminal {
+                    report.outcome = Outcome::Panicked(payload);
+                }
+                return Ok(report);
+            }
+            match terminal {
+                Err(error) => Err(error),
+                Ok(()) => Err(JoinError::Panicked(PanicPayload::new(
+                    "managed controller omitted its report",
+                ))),
+            }
+        }
+    }
+
+    impl<E> Drop for ManagedSupervisorHandle<E> {
+        fn drop(&mut self) {
+            self.task.abort();
+        }
+    }
+
+    impl<E: Send + 'static> ManagedSupervisor<E> {
+        /// Run the controller in this task, outside its new supervisor region.
+        ///
+        /// Each replacement waits for the preceding actual task terminal and
+        /// region quiescence (including finalizers). Cancellation during start
+        /// or backoff stops admission and drains all generations. Dropping this
+        /// future requests cancellation/close; it cannot synchronously drain.
+        pub async fn run(self, cx: &Cx) -> ManagedSupervisorReport<E> {
+            let mut controller = Controller::new(self, cx);
+            controller.execute().await;
+            controller.finish().await;
+            let empty = ManagedSupervisorReport {
+                name: controller.report.name.clone(),
+                region: controller.report.region,
+                region_outcome: None,
+                cleanup_outcome: None,
+                outcome: Outcome::Ok(()),
+                children: Vec::new(),
+                started: 0,
+                joined: 0,
+                restart_batches: 0,
+                escalations: 0,
+            };
+            std::mem::replace(&mut controller.report, empty)
+        }
+
+        /// Spawn a retained controller in the caller's current parent region.
+        /// The returned handle owns cancellation; all child work lives below a
+        /// distinct supervisor region, never around the controller itself.
+        pub fn spawn(self, cx: &Cx) -> Result<ManagedSupervisorHandle<E>, SpawnError> {
+            let report = Arc::new(Mutex::new(None));
+            let publication = Arc::clone(&report);
+            let task = cx.spawn(move |controller_cx| async move {
+                let result = self.run(&controller_cx).await;
+                *publication.lock() = Some(result);
+            })?;
+            Ok(ManagedSupervisorHandle { task, report })
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        #![allow(clippy::pedantic, clippy::nursery, clippy::future_not_send)]
+        use super::*;
+        use crate::channel::{mpsc, oneshot};
+        use crate::lab::{LabConfig, LabRuntime};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        fn legacy_must_not_run(
+            _: &crate::cx::Scope<'static, crate::types::policy::FailFast>,
+            _: &mut RuntimeState,
+            _: &Cx,
+        ) -> Result<TaskId, SpawnError> {
+            panic!("managed binding must not invoke a consumed legacy ChildStart")
+        }
+
+        fn forbidden_generation(
+            _: Cx,
+            _: ManagedGeneration,
+        ) -> std::future::Ready<Outcome<(), ()>> {
+            panic!("second child must never be started after parent cancellation")
+        }
+
+        fn topology(names: &[&str], policy: RestartPolicy) -> CompiledSupervisor {
+            let mut builder = SupervisorBuilder::new("managed-test").with_restart_policy(policy);
+            for name in names {
+                builder = builder.child(
+                    ChildSpec::new(*name, legacy_must_not_run)
+                        .with_shutdown_budget(Budget::new().with_poll_quota(17)),
+                );
+            }
+            builder.compile().unwrap()
+        }
+
+        fn config(policy: RestartPolicy, restarts: u32) -> SupervisionConfig {
+            SupervisionConfig::new(restarts, Duration::from_secs(60))
+                .with_restart_policy(policy)
+                .with_backoff(BackoffStrategy::None)
+        }
+
+        fn clean(lab: &mut LabRuntime, root: RegionId) {
+            assert_eq!(lab.state.live_task_count(), 0);
+            assert_eq!(lab.state.pending_obligation_count(), 0);
+            assert!(lab.run_until_quiescent_with_report().lab_test_passed());
+            if lab.state.region(root).is_some() {
+                let (tasks, wakes) = lab
+                    .state
+                    .cancel_request(root, &CancelReason::user("managed test finished"), None)
+                    .into_parts();
+                assert!(tasks.is_empty());
+                wakes.dispatch();
+                lab.state.advance_region_state(root);
+            }
+            assert!(lab.state.region(root).is_none());
+            assert!(lab.run_until_quiescent_with_report().lab_test_passed());
+        }
+
+        fn run_case<F, Fut, T>(factory: F) -> T
+        where
+            F: FnOnce(Cx) -> Fut + Send + 'static,
+            Fut: Future<Output = T> + Send + 'static,
+            T: Send + 'static,
+        {
+            let mut lab = LabRuntime::new(LabConfig::new(0x34_0001).max_steps(8192));
+            let root = lab.state.create_root_region(Budget::INFINITE);
+            let (task, mut join) = lab
+                .state
+                .create_task(root, Budget::INFINITE, async move {
+                    factory(Cx::current().expect("registered managed controller")).await
+                })
+                .unwrap();
+            lab.scheduler.lock().schedule(task, 0);
+            lab.run_until_idle();
+            let result = join
+                .try_join()
+                .unwrap()
+                .expect("actual managed controller finished");
+            clean(&mut lab, root);
+            result
+        }
+
+        #[test]
+        fn managed_real_generations_cover_all_restart_modes_and_outcomes() {
+            for mode in [
+                ManagedRestartMode::Permanent,
+                ManagedRestartMode::Transient,
+                ManagedRestartMode::Temporary,
+            ] {
+                for first in 0..6 {
+                    let report = run_case(move |cx| async move {
+                        let binding = ManagedChildBinding::new(
+                            "child",
+                            mode,
+                            move |_child: Cx, generation: ManagedGeneration| {
+                                if first == 4 && generation.number == 1 {
+                                    panic!("actual factory panic");
+                                }
+                                async move {
+                                    if generation.number > 1 {
+                                        return Outcome::Ok(());
+                                    }
+                                    match first {
+                                        0 => Outcome::Ok(()),
+                                        1 => Outcome::Err(String::from("domain failure")),
+                                        2 => Outcome::Cancelled(CancelReason::user(
+                                            "child finished cancelled",
+                                        )),
+                                        3 => Outcome::Panicked(PanicPayload::new("encoded panic")),
+                                        5 => panic!("actual child future poll panic"),
+                                        _ => unreachable!(),
+                                    }
+                                }
+                            },
+                        );
+                        let managed = topology(&["child"], RestartPolicy::OneForOne)
+                            .bind_managed(vec![binding], config(RestartPolicy::OneForOne, 1))
+                            .unwrap();
+                        let mut handle = managed.spawn(&cx).unwrap();
+                        let report = handle.join().await.unwrap();
+                        assert_ne!(handle.task_id(), report.children[0].generation.task);
+                        report
+                    });
+                    let restarted = mode == ManagedRestartMode::Permanent
+                        || (mode == ManagedRestartMode::Transient
+                            && matches!(first, 1 | 3 | 4 | 5));
+                    assert!(matches!(report.outcome, Outcome::Ok(())));
+                    assert_eq!(report.started, 1 + u64::from(restarted));
+                    assert_eq!(report.joined, report.started);
+                    assert_eq!(report.restart_batches, u64::from(restarted));
+                    assert_eq!(report.escalations, 0);
+                    assert_eq!(report.children.len(), 1);
+                    assert_eq!(report.children[0].generation.number, report.started);
+                    if restarted || first == 0 {
+                        assert!(report.children[0].outcome.is_ok());
+                    } else if first == 1 {
+                        assert!(
+                            matches!(&report.children[0].outcome, Outcome::Err(error) if error == "domain failure")
+                        );
+                    } else if first == 2 {
+                        assert!(report.children[0].outcome.is_cancelled());
+                    } else {
+                        assert!(report.children[0].outcome.is_panicked());
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn managed_empty_topology_and_send_only_error_need_no_fake_child() {
+            let report = run_case(|cx| async move {
+                let managed = topology(&[], RestartPolicy::OneForOne)
+                    .bind_managed(
+                        Vec::<ManagedChildBinding<std::cell::Cell<u8>>>::new(),
+                        config(RestartPolicy::OneForOne, 1),
+                    )
+                    .unwrap();
+                managed.run(&cx).await
+            });
+            assert!(report.outcome.is_ok());
+            assert_eq!(report.started, 0);
+            assert_eq!(report.joined, 0);
+            assert!(report.region.is_some());
+            assert!(report.children.is_empty());
+        }
+
+        type StartedLog = Arc<Mutex<Vec<(String, ManagedGeneration, mpsc::Sender<()>)>>>;
+
+        fn parked_binding(
+            name: &'static str,
+            log: StartedLog,
+        ) -> ManagedChildBinding<&'static str> {
+            ManagedChildBinding::new(
+                name,
+                ManagedRestartMode::Transient,
+                move |cx: Cx, generation| {
+                    let (sender, mut receiver) = mpsc::channel(1);
+                    log.lock().push((name.to_string(), generation, sender));
+                    async move {
+                        match receiver.recv(&cx).await {
+                            Ok(()) => Outcome::Err("triggered child failure"),
+                            Err(_) => Outcome::Cancelled(
+                                cx.cancel_reason().expect("real region cancellation"),
+                            ),
+                        }
+                    }
+                },
+            )
+        }
+
+        #[test]
+        fn managed_three_strategies_drain_actual_finalizers_before_replacement() {
+            for policy in [
+                RestartPolicy::OneForOne,
+                RestartPolicy::OneForAll,
+                RestartPolicy::RestForOne,
+            ] {
+                let mut lab = LabRuntime::new(LabConfig::new(0x34_0002).max_steps(8192));
+                let root = lab.state.create_root_region(Budget::INFINITE);
+                let log: StartedLog = Arc::new(Mutex::new(Vec::new()));
+                let bindings = ["a", "b", "c"]
+                    .into_iter()
+                    .map(|name| parked_binding(name, Arc::clone(&log)))
+                    .collect();
+                let managed = topology(&["a", "b", "c"], policy)
+                    .bind_managed(bindings, config(policy, 4))
+                    .unwrap();
+                let result = Arc::new(Mutex::new(None));
+                let publication = Arc::clone(&result);
+                let (parent, mut join) = lab
+                    .state
+                    .create_task(root, Budget::INFINITE, async move {
+                        let cx = Cx::current().unwrap();
+                        *publication.lock() = Some(managed.run(&cx).await);
+                    })
+                    .unwrap();
+                let parent_cx = lab.state.task(parent).unwrap().cx.clone().unwrap();
+                lab.scheduler.lock().schedule(parent, 0);
+                lab.run_until_idle();
+                assert_eq!(
+                    log.lock()
+                        .iter()
+                        .map(|entry| entry.0.as_str())
+                        .collect::<Vec<_>>(),
+                    ["a", "b", "c"]
+                );
+                let old_b = log.lock()[1].1;
+                let (release, mut wait) = oneshot::channel();
+                let finalizer_polled = Arc::new(AtomicUsize::new(0));
+                let finalizer_done = Arc::new(AtomicUsize::new(0));
+                let polled = Arc::clone(&finalizer_polled);
+                let done = Arc::clone(&finalizer_done);
+                assert!(
+                    lab.state
+                        .register_async_finalizer(old_b.region, async move {
+                            polled.fetch_add(1, Ordering::SeqCst);
+                            wait.recv_uninterruptible().await.unwrap();
+                            done.fetch_add(1, Ordering::SeqCst);
+                        })
+                );
+                log.lock()[1].2.try_send(()).unwrap();
+                lab.run_until_idle();
+                assert_eq!(finalizer_polled.load(Ordering::SeqCst), 1);
+                assert_eq!(finalizer_done.load(Ordering::SeqCst), 0);
+                assert_eq!(
+                    log.lock().len(),
+                    3,
+                    "replacement cannot start while an old region finalizer is Pending"
+                );
+                assert!(result.lock().is_none());
+                assert!(join.try_join().unwrap().is_none());
+                release.send(&parent_cx, ()).unwrap();
+                lab.run_until_idle();
+                let names: Vec<_> = log
+                    .lock()
+                    .iter()
+                    .skip(3)
+                    .map(|entry| entry.0.clone())
+                    .collect();
+                let expected: &[&str] = match policy {
+                    RestartPolicy::OneForOne => &["b"],
+                    RestartPolicy::OneForAll => &["a", "b", "c"],
+                    RestartPolicy::RestForOne => &["b", "c"],
+                };
+                assert_eq!(names, expected);
+                assert_eq!(finalizer_done.load(Ordering::SeqCst), 1);
+                assert!(lab.state.region(old_b.region).is_none());
+                for (_, replacement, _) in log.lock().iter().skip(3) {
+                    assert_eq!(replacement.number, 2);
+                    assert_ne!(replacement.region, old_b.region);
+                    assert!(lab.state.task(replacement.task).is_some());
+                }
+                join.abort();
+                lab.run_until_idle();
+                assert!(matches!(join.try_join(), Err(JoinError::Cancelled(_))));
+                let report = result
+                    .lock()
+                    .take()
+                    .expect("cancelled controller drains then publishes report");
+                assert!(report.outcome.is_cancelled());
+                assert_eq!(report.restart_batches, 1);
+                assert_eq!(report.started, (3 + expected.len()) as u64);
+                assert_eq!(report.joined, report.started);
+                assert_eq!(report.children.len(), 3);
+                clean(&mut lab, root);
+            }
+        }
+
+        #[test]
+        fn managed_parent_cancellation_during_backoff_forbids_resurrection() {
+            let mut lab = LabRuntime::new(LabConfig::new(0x34_0003).max_steps(4096));
+            let root = lab.state.create_root_region(Budget::INFINITE);
+            let started = Arc::new(AtomicUsize::new(0));
+            let counter = Arc::clone(&started);
+            let binding = ManagedChildBinding::new(
+                "child",
+                ManagedRestartMode::Permanent,
+                move |_: Cx, _| {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    async { Outcome::<(), ()>::Err(()) }
+                },
+            );
+            let managed = topology(&["child"], RestartPolicy::OneForOne)
+                .bind_managed(
+                    vec![binding],
+                    config(RestartPolicy::OneForOne, 4)
+                        .with_backoff(BackoffStrategy::Fixed(Duration::from_secs(30))),
+                )
+                .unwrap();
+            let result = Arc::new(Mutex::new(None));
+            let publication = Arc::clone(&result);
+            let (parent, mut join) = lab
+                .state
+                .create_task(root, Budget::INFINITE, async move {
+                    *publication.lock() = Some(managed.run(&Cx::current().unwrap()).await);
+                })
+                .unwrap();
+            lab.scheduler.lock().schedule(parent, 0);
+            lab.run_until_idle();
+            assert_eq!(started.load(Ordering::SeqCst), 1);
+            assert!(result.lock().is_none());
+            assert!(join.try_join().unwrap().is_none());
+            join.abort();
+            lab.run_until_idle();
+            assert!(matches!(join.try_join(), Err(JoinError::Cancelled(_))));
+            let report = result.lock().take().unwrap();
+            assert!(report.outcome.is_cancelled());
+            assert_eq!(report.started, 1);
+            assert_eq!(report.joined, 1);
+            assert_eq!(report.restart_batches, 0);
+            assert_eq!(started.load(Ordering::SeqCst), 1);
+            assert!(matches!(report.children[0].outcome, Outcome::Err(())));
+            clean(&mut lab, root);
+        }
+
+        #[test]
+        fn managed_intensity_exhaustion_cancels_actual_parent_region_once() {
+            let mut lab = LabRuntime::new(LabConfig::new(0x34_0004).max_steps(8192));
+            let root = lab.state.create_root_region(Budget::INFINITE);
+            let (sender, mut receiver) = mpsc::channel::<()>(1);
+            let cancelled_sibling = Arc::new(AtomicUsize::new(0));
+            let witnessed = Arc::clone(&cancelled_sibling);
+            let (sibling, mut sibling_join) = lab
+                .state
+                .create_task(root, Budget::INFINITE, async move {
+                    let cx = Cx::current().unwrap();
+                    assert!(receiver.recv(&cx).await.is_err());
+                    assert!(cx.cancel_reason().is_some());
+                    witnessed.fetch_add(1, Ordering::SeqCst);
+                })
+                .unwrap();
+            lab.scheduler.lock().schedule(sibling, 0);
+            lab.run_until_idle();
+            assert_eq!(sender.telemetry_snapshot(0).recv_waiter_count, 1);
+            let bindings = ["a", "b"]
+                .into_iter()
+                .map(|name| {
+                    ManagedChildBinding::new(
+                        name,
+                        ManagedRestartMode::Permanent,
+                        |_: Cx, _| async { Outcome::<(), ()>::Err(()) },
+                    )
+                })
+                .collect();
+            let managed = topology(&["a", "b"], RestartPolicy::OneForOne)
+                .bind_managed(
+                    bindings,
+                    config(RestartPolicy::OneForOne, 1).with_escalation(EscalationPolicy::Escalate),
+                )
+                .unwrap();
+            let result = Arc::new(Mutex::new(None));
+            let publication = Arc::clone(&result);
+            let (parent, mut join) = lab
+                .state
+                .create_task(root, Budget::INFINITE, async move {
+                    *publication.lock() = Some(managed.run(&Cx::current().unwrap()).await);
+                })
+                .unwrap();
+            lab.scheduler.lock().schedule(parent, 0);
+            lab.run_until_idle();
+            let report = result
+                .lock()
+                .take()
+                .expect("parent escalation still drains controller children");
+            assert!(matches!(
+                report.outcome,
+                Outcome::Err(ManagedSupervisorError::RestartLimit { .. })
+            ));
+            assert_eq!(report.escalations, 1);
+            assert_eq!(
+                report.restart_batches, 1,
+                "two failing children share one allowance"
+            );
+            assert_eq!(report.started, 3);
+            assert_eq!(report.joined, 3);
+            assert_eq!(cancelled_sibling.load(Ordering::SeqCst), 1);
+            assert_eq!(sender.telemetry_snapshot(0).recv_waiter_count, 0);
+            assert!(matches!(
+                sibling_join.try_join(),
+                Err(JoinError::Cancelled(_))
+            ));
+            assert!(matches!(
+                join.try_join(),
+                Ok(Some(())) | Err(JoinError::Cancelled(_))
+            ));
+            let events = lab.state.trace_handle().snapshot();
+            assert_eq!(events.iter().filter(|event| matches!(&event.data,
+                crate::trace::TraceData::Message(message) if message.contains("action=parent_escalated"))).count(), 1);
+            clean(&mut lab, root);
+        }
+
+        #[test]
+        fn managed_old_generation_event_cannot_drain_a_live_replacement() {
+            run_case(|cx| async move {
+                let (sender, receiver) = mpsc::channel::<()>(1);
+                let receiver = Arc::new(Mutex::new(Some(receiver)));
+                let held = Arc::clone(&receiver);
+                let binding = ManagedChildBinding::new(
+                    "child",
+                    ManagedRestartMode::Transient,
+                    move |child: Cx, generation: ManagedGeneration| {
+                        let receiver = (generation.number > 1).then(|| held.lock().take().unwrap());
+                        async move {
+                            let Some(mut receiver) = receiver else {
+                                return Outcome::Err(());
+                            };
+                            assert!(receiver.recv(&child).await.is_err());
+                            Outcome::Cancelled(child.cancel_reason().unwrap())
+                        }
+                    },
+                );
+                let managed = topology(&["child"], RestartPolicy::OneForOne)
+                    .bind_managed(vec![binding], config(RestartPolicy::OneForOne, 2))
+                    .unwrap();
+                let mut controller = Controller::new(managed, &cx);
+                controller.root = Some(
+                    cx.open_child_region(ChildRegionSpec::inherit())
+                        .await
+                        .unwrap(),
+                );
+                controller.start(0).await.unwrap();
+                assert_eq!(controller.wait_exit().await, Some(0));
+                let old = controller.latest[0].as_ref().unwrap().generation;
+                controller.drain(0).await.unwrap();
+                controller.start(0).await.unwrap();
+                controller.ready.push((0, old));
+                assert!(!controller.accepts_terminal(0, old));
+                let mut wait = Box::pin(controller.wait_exit());
+                poll_fn(|poll_cx| {
+                    assert!(wait.as_mut().poll(poll_cx).is_pending());
+                    Poll::Ready(())
+                })
+                .await;
+                drop(wait);
+                assert_eq!(
+                    sender.telemetry_snapshot(0).recv_waiter_count,
+                    1,
+                    "stale event neither cancels nor consumes replacement"
+                );
+                assert_eq!(controller.running[0].as_ref().unwrap().number, 2);
+                controller.finish().await;
+                assert_eq!(controller.report.joined, 2);
+                assert_eq!(controller.report.children[0].generation.number, 2);
+                assert_eq!(sender.telemetry_snapshot(0).recv_waiter_count, 0);
+            });
+        }
+
+        #[test]
+        fn managed_binding_refuses_missing_duplicate_and_unimplemented_registration() {
+            let binding = || {
+                ManagedChildBinding::new("child", ManagedRestartMode::Temporary, |_: Cx, _| async {
+                    Outcome::<(), ()>::Ok(())
+                })
+            };
+            assert!(matches!(
+                topology(&["child"], RestartPolicy::OneForOne).bind_managed(
+                    Vec::<ManagedChildBinding<()>>::new(),
+                    config(RestartPolicy::OneForOne, 1)
+                ),
+                Err(ManagedSupervisorBindError::Missing(_))
+            ));
+            assert!(matches!(
+                topology(&["child"], RestartPolicy::OneForOne).bind_managed(
+                    vec![binding(), binding()],
+                    config(RestartPolicy::OneForOne, 1)
+                ),
+                Err(ManagedSupervisorBindError::Duplicate(_))
+            ));
+            let mut compiled = topology(&["child"], RestartPolicy::OneForOne);
+            compiled.children[0].registration = NameRegistrationPolicy::Register {
+                name: "actual-registry-required".to_string(),
+                collision: NameCollisionPolicy::Fail,
+            };
+            assert!(matches!(
+                compiled.bind_managed(vec![binding()], config(RestartPolicy::OneForOne, 1)),
+                Err(ManagedSupervisorBindError::UnsupportedRegistration(_))
+            ));
+        }
+
+        #[test]
+        fn managed_cancellation_inside_factory_stops_next_start_and_joins_pending_cleanup() {
+            let mut lab = LabRuntime::new(LabConfig::new(0x34_0005).max_steps(8192));
+            let root = lab.state.create_root_region(Budget::INFINITE);
+            let started = Arc::new(AtomicUsize::new(0));
+            let cleanup_started = Arc::new(AtomicUsize::new(0));
+            let cleanup_finished = Arc::new(AtomicUsize::new(0));
+            let identity = Arc::new(Mutex::new(None));
+            let (release, receiver) = oneshot::channel::<()>();
+            let receiver = Arc::new(Mutex::new(Some(receiver)));
+            let output = Arc::new(Mutex::new(None));
+            let published = Arc::clone(&output);
+            let factory_started = Arc::clone(&started);
+            let child_entered = Arc::clone(&cleanup_started);
+            let child_finished = Arc::clone(&cleanup_finished);
+            let child_identity = Arc::clone(&identity);
+            let (parent, mut join) = lab
+                .state
+                .create_task(root, Budget::INFINITE, async move {
+                    let parent_cx = Cx::current().unwrap();
+                    let cancel_parent = parent_cx.clone();
+                    let first = ManagedChildBinding::new(
+                        "a",
+                        ManagedRestartMode::Permanent,
+                        move |child: Cx, generation| {
+                            factory_started.fetch_add(1, Ordering::SeqCst);
+                            *child_identity.lock() = Some(generation);
+                            let mut cleanup = receiver.lock().take().unwrap();
+                            let entered = Arc::clone(&child_entered);
+                            let finished = Arc::clone(&child_finished);
+                            cancel_parent
+                                .cancel_with(CancelReason::user("cancel during actual start"));
+                            async move {
+                                let (_keep_sender, mut receiver) = mpsc::channel::<()>(1);
+                                assert!(receiver.recv(&child).await.is_err());
+                                entered.fetch_add(1, Ordering::SeqCst);
+                                cleanup.recv_uninterruptible().await.unwrap();
+                                finished.fetch_add(1, Ordering::SeqCst);
+                                Outcome::<(), ()>::Cancelled(child.cancel_reason().unwrap())
+                            }
+                        },
+                    );
+                    let second = ManagedChildBinding::new(
+                        "b",
+                        ManagedRestartMode::Permanent,
+                        forbidden_generation,
+                    );
+                    let managed = topology(&["a", "b"], RestartPolicy::OneForAll)
+                        .bind_managed(vec![first, second], config(RestartPolicy::OneForAll, 4))
+                        .unwrap();
+                    *published.lock() = Some(managed.run(&parent_cx).await);
+                })
+                .unwrap();
+            lab.scheduler.lock().schedule(parent, 0);
+            lab.run_until_idle();
+            assert_eq!(started.load(Ordering::SeqCst), 1);
+            assert_eq!(cleanup_started.load(Ordering::SeqCst), 1);
+            assert_eq!(cleanup_finished.load(Ordering::SeqCst), 0);
+            assert!(
+                output.lock().is_none(),
+                "controller must retain its actual Pending child"
+            );
+            assert!(join.try_join().unwrap().is_none());
+            let generation = identity.lock().unwrap();
+            let task = lab
+                .state
+                .task(generation.task)
+                .expect("cleanup child remains runtime-owned");
+            let cleanup_budget = task
+                .cleanup_budget()
+                .expect("real cancellation state installed");
+            assert!(
+                cleanup_budget.poll_quota <= 17,
+                "compiled budget must constrain the actual task, got {cleanup_budget:?}"
+            );
+            release.send_blocking(()).unwrap();
+            lab.run_until_idle();
+            assert!(matches!(join.try_join(), Err(JoinError::Cancelled(_))));
+            let report = output
+                .lock()
+                .take()
+                .expect("drained cancelled controller report");
+            assert!(report.outcome.is_cancelled());
+            assert_eq!(report.started, 1);
+            assert_eq!(report.joined, 1);
+            assert_eq!(report.restart_batches, 0);
+            assert_eq!(cleanup_finished.load(Ordering::SeqCst), 1);
+            assert!(lab.state.region(generation.region).is_none());
+            clean(&mut lab, root);
+        }
+
+        #[test]
+        fn managed_one_for_all_does_not_resurrect_completed_transient_or_temporary_children() {
+            let starts = Arc::new(Mutex::new(Vec::new()));
+            let observed = Arc::clone(&starts);
+            let report = run_case(move |cx| async move {
+                let mut bindings = Vec::new();
+                for (name, mode) in [
+                    ("a", ManagedRestartMode::Transient),
+                    ("b", ManagedRestartMode::Transient),
+                    ("c", ManagedRestartMode::Temporary),
+                ] {
+                    let log = Arc::clone(&starts);
+                    bindings.push(ManagedChildBinding::new(
+                        name,
+                        mode,
+                        move |_: Cx, generation: ManagedGeneration| {
+                            log.lock().push((name, generation.number));
+                            async move {
+                                if name == "a" && generation.number == 1 {
+                                    Outcome::Err(())
+                                } else {
+                                    Outcome::Ok(())
+                                }
+                            }
+                        },
+                    ));
+                }
+                topology(&["a", "b", "c"], RestartPolicy::OneForAll)
+                    .bind_managed(bindings, config(RestartPolicy::OneForAll, 1))
+                    .unwrap()
+                    .run(&cx)
+                    .await
+            });
+            assert_eq!(*observed.lock(), [("a", 1), ("b", 1), ("c", 1), ("a", 2)]);
+            assert_eq!(report.started, 4);
+            assert_eq!(report.joined, 4);
+            assert_eq!(report.restart_batches, 1);
+            assert!(report.children.iter().all(|child| child.outcome.is_ok()));
+        }
+
+        #[test]
+        fn managed_shared_window_boundary_uses_actual_runtime_time() {
+            for elapsed in [10_u64, 11] {
+                let mut lab = LabRuntime::new(LabConfig::new(0x34_0006).max_steps(8192));
+                let root = lab.state.create_root_region(Budget::INFINITE);
+                let trigger = Arc::new(Mutex::new(None));
+                let published_trigger = Arc::clone(&trigger);
+                let binding = ManagedChildBinding::new(
+                    "child",
+                    ManagedRestartMode::Transient,
+                    move |child: Cx, generation: ManagedGeneration| {
+                        let receiver = if generation.number == 2 {
+                            let (sender, receiver) = mpsc::channel::<()>(1);
+                            *published_trigger.lock() = Some(sender);
+                            Some(receiver)
+                        } else {
+                            None
+                        };
+                        async move {
+                            if generation.number == 1 {
+                                return Outcome::Err(());
+                            }
+                            if let Some(mut receiver) = receiver {
+                                receiver.recv(&child).await.unwrap();
+                                return Outcome::Err(());
+                            }
+                            Outcome::Ok(())
+                        }
+                    },
+                );
+                let managed = topology(&["child"], RestartPolicy::OneForOne)
+                    .bind_managed(
+                        vec![binding],
+                        SupervisionConfig::new(1, Duration::from_nanos(10))
+                            .with_backoff(BackoffStrategy::None),
+                    )
+                    .unwrap();
+                let (parent, mut join) = lab
+                    .state
+                    .create_task(root, Budget::INFINITE, async move {
+                        managed.run(&Cx::current().unwrap()).await
+                    })
+                    .unwrap();
+                lab.scheduler.lock().schedule(parent, 0);
+                lab.run_until_idle();
+                assert!(join.try_join().unwrap().is_none());
+                let sender = trigger
+                    .lock()
+                    .take()
+                    .expect("actual second generation admitted");
+                assert_eq!(sender.telemetry_snapshot(0).recv_waiter_count, 1);
+                lab.advance_time(elapsed);
+                sender.try_send(()).unwrap();
+                lab.run_until_idle();
+                let report = join
+                    .try_join()
+                    .unwrap()
+                    .expect("window decision reaches terminal controller");
+                let expired = elapsed == 11;
+                assert_eq!(report.restart_batches, 1 + u64::from(expired));
+                assert_eq!(report.started, 2 + u64::from(expired));
+                assert_eq!(report.joined, report.started);
+                assert_eq!(report.children[0].generation.number, report.started);
+                assert_eq!(report.children[0].outcome.is_ok(), expired);
+                assert_eq!(report.children[0].completed_at.as_nanos(), elapsed);
+                assert!(report.children[0].region_outcome.is_some());
+                clean(&mut lab, root);
+            }
+        }
+
+        #[test]
+        fn managed_actual_finalizer_panic_forbids_replacement_and_escalates_once() {
+            let mut lab = LabRuntime::new(LabConfig::new(0x34_0007).max_steps(8192));
+            let root = lab.state.create_root_region(Budget::INFINITE);
+            let log: StartedLog = Arc::new(Mutex::new(Vec::new()));
+            let binding = parked_binding("child", Arc::clone(&log));
+            let managed = topology(&["child"], RestartPolicy::OneForOne)
+                .bind_managed(vec![binding], config(RestartPolicy::OneForOne, 8))
+                .unwrap();
+            let output = Arc::new(Mutex::new(None));
+            let published = Arc::clone(&output);
+            let (parent, mut join) = lab
+                .state
+                .create_task(root, Budget::INFINITE, async move {
+                    *published.lock() = Some(managed.run(&Cx::current().unwrap()).await);
+                })
+                .unwrap();
+            lab.scheduler.lock().schedule(parent, 0);
+            lab.run_until_idle();
+            assert_eq!(log.lock().len(), 1);
+            let generation = log.lock()[0].1;
+            let finalized = Arc::new(AtomicUsize::new(0));
+            let counter = Arc::clone(&finalized);
+            assert!(
+                lab.state
+                    .register_async_finalizer(generation.region, async move {
+                        counter.fetch_add(1, Ordering::SeqCst);
+                        panic!("actual managed finalizer failure");
+                    })
+            );
+            log.lock()[0].2.try_send(()).unwrap();
+            lab.run_until_idle();
+            assert!(matches!(
+                join.try_join(),
+                Ok(Some(())) | Err(JoinError::Cancelled(_))
+            ));
+            let report = output
+                .lock()
+                .take()
+                .expect("failed cleanup still publishes an honest terminal receipt");
+            assert!(report.outcome.is_panicked(), "{report:?}");
+            assert_eq!(report.escalations, 1);
+            assert_eq!(report.started, 1);
+            assert_eq!(report.joined, 1);
+            assert_eq!(report.restart_batches, 0);
+            assert_eq!(
+                log.lock().len(),
+                1,
+                "quiescent but failed cleanup cannot authorize replacement"
+            );
+            assert_eq!(finalized.load(Ordering::SeqCst), 1);
+            assert!(matches!(
+                report.children[0].outcome,
+                Outcome::Err("triggered child failure")
+            ));
+            assert!(matches!(
+                report.children[0].cleanup_outcome,
+                Some(Outcome::Panicked(_))
+            ));
+            assert!(report.children[0].region_outcome.is_some());
+            assert!(lab.state.region(generation.region).is_none());
+            clean(&mut lab, root);
+        }
+    }
+}
+
 /// Stable identifier for a dynamically supervised child.
 ///
 /// The slot keeps lookup compact, while generation prevents stale handles from
