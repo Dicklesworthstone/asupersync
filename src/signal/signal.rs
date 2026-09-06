@@ -1631,4 +1631,464 @@ mod tests {
 
         crate::test_complete!("sigpipe_ctrl_c_event_interaction");
     }
+
+    #[cfg(unix)]
+    mod managed_signal_model {
+        use super::*;
+        use crate::channel::mpsc;
+        use crate::cx::{Cx, Scope};
+        use crate::lab::{LabConfig, LabRuntime};
+        use crate::runtime::{JoinError, RuntimeState, SpawnError};
+        use crate::supervision::{
+            ChildSpec, ManagedChildBinding, ManagedGeneration, ManagedRestartMode,
+            SupervisionConfig, SupervisorBuilder,
+        };
+        use crate::trace::{TraceData, TraceEvent, TraceEventKind};
+        use crate::types::{Budget, CancelKind, CancelReason, Outcome, TaskId, policy::FailFast};
+        use parking_lot::Mutex;
+        use std::future::poll_fn;
+        use std::sync::atomic::{AtomicBool, AtomicUsize};
+        use std::time::Duration;
+
+        // Test inputs own real Notify registrations; no self-waking polling or
+        // manufactured task/region/terminal records stand in for cleanup.
+        #[derive(Debug, Default)]
+        struct CleanupGate {
+            notify: Notify,
+            released: AtomicBool,
+        }
+
+        impl CleanupGate {
+            async fn wait(&self, on_pending: impl FnOnce()) {
+                let mut on_pending = Some(on_pending);
+                let mut notified = std::pin::pin!(self.notify.notified());
+                poll_fn(|cx| {
+                    let result = notified.as_mut().poll(cx);
+                    if result.is_pending() {
+                        if let Some(observe) = on_pending.take() {
+                            observe();
+                        }
+                    }
+                    result
+                })
+                .await;
+                assert!(self.released.load(Ordering::Acquire));
+            }
+
+            fn release(&self) {
+                assert!(!self.released.swap(true, Ordering::AcqRel));
+                self.notify.notify_one();
+            }
+        }
+
+        #[derive(Clone, Debug)]
+        struct Observed {
+            child: usize,
+            generation: ManagedGeneration,
+            action: &'static str,
+        }
+
+        type Log = Arc<Mutex<Vec<Observed>>>;
+
+        fn observe(log: &Log, child: usize, generation: ManagedGeneration, action: &'static str) {
+            log.lock().push(Observed {
+                child,
+                generation,
+                action,
+            });
+        }
+
+        fn legacy_must_not_run(
+            _: &Scope<'static, FailFast>,
+            _: &mut RuntimeState,
+            _: &Cx,
+        ) -> Result<TaskId, SpawnError> {
+            panic!("signal model must execute the maintained managed factory")
+        }
+
+        fn terminal_count(trace: &[TraceEvent], generation: ManagedGeneration) -> usize {
+            trace
+                .iter()
+                .filter(|event| {
+                    event.kind == TraceEventKind::Complete
+                        && matches!(event.data, TraceData::Task { task, region }
+                            if task == generation.task && region == generation.region)
+                })
+                .count()
+        }
+
+        // The same checker examines actual held and completed runs. The negative
+        // control makes an early-success claim; it does not alter runtime input
+        // or feed a fabricated terminal into a Lab oracle.
+        fn completion_claim(
+            log: &[Observed],
+            required: &[ManagedGeneration],
+            trace: &[TraceEvent],
+        ) -> Result<(), &'static str> {
+            if required.is_empty() {
+                return Err("zero_selected_generations");
+            }
+            for generation in required {
+                if terminal_count(trace, *generation) != 1
+                    || ["cleanup_done", "finalizer_done"]
+                        .into_iter()
+                        .any(|action| {
+                            log.iter()
+                                .filter(|event| {
+                                    event.generation == *generation && event.action == action
+                                })
+                                .count()
+                                != 1
+                        })
+                {
+                    return Err("premature_generation_completion");
+                }
+            }
+            Ok(())
+        }
+
+        #[test]
+        fn managed_supervisor_runtime_signal_source() {
+            for seed in [0x35_0101, 0x35_0102, 0x35_0103] {
+                let mut lab =
+                    LabRuntime::new(LabConfig::new(seed).max_steps(8192).trace_capacity(32_768));
+                let root = lab.state.create_root_region(Budget::INFINITE);
+                let trace = lab.state.trace_handle();
+                let log: Log = Arc::new(Mutex::new(Vec::new()));
+                let started = Arc::new(Mutex::new(Vec::new()));
+                let cleanup: [Arc<CleanupGate>; 2] =
+                    std::array::from_fn(|_| Arc::new(CleanupGate::default()));
+                let finalizers: [Arc<CleanupGate>; 2] =
+                    std::array::from_fn(|_| Arc::new(CleanupGate::default()));
+                let mut builder = SupervisorBuilder::new("signal-model");
+                let mut bindings = Vec::new();
+                for (index, name) in ["a", "b"].into_iter().enumerate() {
+                    builder = builder.child(
+                        ChildSpec::new(name, legacy_must_not_run)
+                            .with_shutdown_budget(Budget::new().with_poll_quota(10_000)),
+                    );
+                    let starts = Arc::clone(&started);
+                    let events = Arc::clone(&log);
+                    let held = Arc::clone(&cleanup[index]);
+                    bindings.push(ManagedChildBinding::new(
+                        name,
+                        ManagedRestartMode::Permanent,
+                        move |cx: Cx, generation: ManagedGeneration| {
+                            assert_eq!(generation.number, 1, "shutdown cannot restart children");
+                            let (sender, mut receiver) = mpsc::channel::<u64>(1);
+                            starts.lock().push((index, generation, sender));
+                            let events = Arc::clone(&events);
+                            let held = Arc::clone(&held);
+                            async move {
+                                observe(&events, index, generation, "started");
+                                let value = receiver.recv(&cx).await.unwrap();
+                                assert_eq!(value, 100 + index as u64);
+                                observe(&events, index, generation, "work");
+                                assert_eq!(
+                                    receiver.recv(&cx).await,
+                                    Err(mpsc::RecvError::Cancelled)
+                                );
+                                let reason =
+                                    cx.cancel_reason().expect("actual managed cancellation");
+                                assert_eq!(reason.kind(), CancelKind::User);
+                                assert_eq!(
+                                    reason.message(),
+                                    Some("managed supervisor generation drain")
+                                );
+                                observe(&events, index, generation, "cancelled");
+                                held.wait(|| {
+                                    observe(&events, index, generation, "cleanup_pending")
+                                })
+                                .await;
+                                observe(&events, index, generation, "cleanup_done");
+                                Outcome::<(), &'static str>::Cancelled(reason)
+                            }
+                        },
+                    ));
+                }
+                let managed = builder
+                    .compile()
+                    .unwrap()
+                    .bind_managed(bindings, SupervisionConfig::new(3, Duration::from_secs(60)))
+                    .unwrap();
+
+                // The isolated slot is the production runtime delivery source.
+                // record_delivery is also called by the Unix OS dispatcher, but
+                // this test intentionally injects its deterministic model input:
+                // no process signal is sent and no OS handler is installed here.
+                let slot = Arc::new(SignalSlot::new());
+                let mut signal = Signal {
+                    kind: SignalKind::Terminate,
+                    slot: Arc::clone(&slot),
+                    seen_deliveries: 0,
+                };
+                let consumed = Arc::new(Mutex::new(Vec::new()));
+                let received = Arc::clone(&consumed);
+                let controller_id = Arc::new(Mutex::new(None));
+                let identity = Arc::clone(&controller_id);
+                let join_pending = Arc::new(AtomicUsize::new(0));
+                let pending = Arc::clone(&join_pending);
+                let (listener, mut joined) = lab
+                    .state
+                    .create_task(root, Budget::INFINITE, async move {
+                        let cx = Cx::current().expect("actual registered signal listener");
+                        let mut handle = managed.spawn(&cx).unwrap();
+                        assert_eq!(signal.recv().await, Some(()));
+                        // Spawn initially reports a provisional mailbox ID. The
+                        // host delivers only after both generations do work, so
+                        // this public handle now resolves the admitted owner.
+                        *identity.lock() = Some(handle.task_id());
+                        assert_eq!(signal.kind(), SignalKind::Terminate);
+                        received.lock().push(signal.seen_deliveries);
+                        handle.abort();
+                        let mut terminal = std::pin::pin!(handle.join());
+                        poll_fn(|cx| {
+                            let result = terminal.as_mut().poll(cx);
+                            if result.is_pending() {
+                                pending.fetch_add(1, Ordering::SeqCst);
+                            }
+                            result
+                        })
+                        .await
+                        .unwrap()
+                    })
+                    .unwrap();
+                lab.scheduler.lock().schedule(listener, 0);
+                lab.run_until_idle();
+                assert_eq!(
+                    slot.notify.waiter_count(),
+                    1,
+                    "real recv registered Pending"
+                );
+                assert_eq!(slot.deliveries.load(Ordering::Acquire), 0);
+                assert!(consumed.lock().is_empty());
+                assert!(joined.try_join().unwrap().is_none());
+                let current = started.lock().clone();
+                assert_eq!(current.len(), 2);
+                assert_eq!(
+                    current.iter().map(|entry| entry.0).collect::<Vec<_>>(),
+                    [0, 1]
+                );
+                let generations: Vec<_> = current.iter().map(|entry| entry.1).collect();
+                assert_ne!(generations[0].task, generations[1].task);
+                assert_ne!(generations[0].region, generations[1].region);
+                for (index, generation, sender) in &current {
+                    sender.try_send(100 + *index as u64).unwrap();
+                    let events = Arc::clone(&log);
+                    let gate = Arc::clone(&finalizers[*index]);
+                    let dependent = (*index == 1).then(|| Arc::clone(&cleanup[0]));
+                    let (index, generation) = (*index, *generation);
+                    assert!(
+                        lab.state
+                            .register_async_finalizer(generation.region, async move {
+                                gate.wait(|| {
+                                    observe(&events, index, generation, "finalizer_pending")
+                                })
+                                .await;
+                                observe(&events, index, generation, "finalizer_done");
+                                if let Some(dependent) = dependent {
+                                    dependent.release();
+                                }
+                            })
+                    );
+                }
+                lab.run_until_idle();
+                assert_eq!(
+                    log.lock()
+                        .iter()
+                        .filter(|event| event.action == "work")
+                        .count(),
+                    2
+                );
+                assert_eq!(slot.notify.waiter_count(), 1);
+                assert!(joined.try_join().unwrap().is_none());
+                assert!(cleanup.iter().all(|gate| gate.notify.waiter_count() == 0));
+
+                // Only this real source delivery wakes the parked signal reader.
+                slot.record_delivery();
+                lab.run_until_idle();
+                let controller = controller_id
+                    .lock()
+                    .expect("actual managed controller admitted before signal consumption");
+                assert_eq!(slot.deliveries.load(Ordering::Acquire), 1);
+                assert_eq!(*consumed.lock(), [1]);
+                assert_eq!(slot.notify.waiter_count(), 0);
+                assert!(join_pending.load(Ordering::SeqCst) > 0);
+                assert!(cleanup.iter().all(|gate| gate.notify.waiter_count() == 1));
+                assert!(
+                    finalizers
+                        .iter()
+                        .all(|gate| gate.notify.waiter_count() == 0)
+                );
+                assert_eq!(
+                    log.lock()
+                        .iter()
+                        .filter(|event| event.action == "cancelled")
+                        .count(),
+                    2
+                );
+                for generation in &generations {
+                    assert!(lab.state.task(generation.task).is_some());
+                    assert!(lab.state.region(generation.region).is_some());
+                    assert_eq!(terminal_count(&trace.snapshot(), *generation), 0);
+                }
+                assert!(lab.state.task(controller).is_some());
+                assert!(joined.try_join().unwrap().is_none());
+                assert_eq!(
+                    completion_claim(&log.lock(), &generations, &trace.snapshot()),
+                    Err("premature_generation_completion")
+                );
+                assert_eq!(
+                    completion_claim(&log.lock(), &[], &trace.snapshot()),
+                    Err("zero_selected_generations")
+                );
+
+                // B's body can finish, but its actual region finalizer remains
+                // Pending. A waits for that finalizer, so cancellation of all
+                // siblings must precede the controller's ordered join/close.
+                cleanup[1].release();
+                lab.run_until_idle();
+                assert_eq!(terminal_count(&trace.snapshot(), generations[1]), 1);
+                assert_eq!(terminal_count(&trace.snapshot(), generations[0]), 0);
+                assert_eq!(finalizers[1].notify.waiter_count(), 1);
+                assert_eq!(cleanup[0].notify.waiter_count(), 1);
+                assert!(lab.state.region(generations[1].region).is_some());
+                assert!(joined.try_join().unwrap().is_none());
+                assert_eq!(
+                    completion_claim(&log.lock(), &generations, &trace.snapshot()),
+                    Err("premature_generation_completion")
+                );
+
+                finalizers[1].release();
+                lab.run_until_idle();
+                assert!(lab.state.region(generations[1].region).is_none());
+                assert_eq!(terminal_count(&trace.snapshot(), generations[0]), 1);
+                assert_eq!(finalizers[0].notify.waiter_count(), 1);
+                assert!(lab.state.region(generations[0].region).is_some());
+                assert!(lab.state.task(controller).is_some());
+                assert!(joined.try_join().unwrap().is_none());
+                assert_eq!(
+                    completion_claim(&log.lock(), &generations, &trace.snapshot()),
+                    Err("premature_generation_completion")
+                );
+
+                finalizers[0].release();
+                lab.run_until_idle();
+                let report = joined
+                    .try_join()
+                    .unwrap()
+                    .expect("real signal-triggered drain completed");
+                let Outcome::Cancelled(reason) = &report.outcome else {
+                    panic!("signal-triggered controller must retain cancellation: {report:?}");
+                };
+                assert_eq!(reason.kind(), CancelKind::User);
+                assert_eq!(reason.message(), Some("abort"));
+                assert_eq!(
+                    (
+                        report.started,
+                        report.joined,
+                        report.restart_batches,
+                        report.escalations
+                    ),
+                    (2, 2, 0, 0)
+                );
+                assert_eq!(report.children.len(), 2);
+                for (index, child) in report.children.iter().enumerate() {
+                    assert_eq!(child.generation, generations[index]);
+                    assert!(child.shutdown_requested_before_completion);
+                    let Outcome::Cancelled(reason) = &child.outcome else {
+                        panic!("real child cancellation missing: {child:?}");
+                    };
+                    assert_eq!(reason.kind(), CancelKind::User);
+                    assert_eq!(
+                        reason.message(),
+                        Some("managed supervisor generation drain")
+                    );
+                    assert_eq!(child.task_outcome, Ok::<(), JoinError>(()));
+                    assert!(matches!(child.cleanup_outcome, Some(Outcome::Ok(()))));
+                    assert!(lab.state.region(child.generation.region).is_none());
+                }
+                let events = log.lock().clone();
+                let history = trace.snapshot();
+                assert_eq!(completion_claim(&events, &generations, &history), Ok(()));
+                for (index, generation) in generations.iter().enumerate() {
+                    for action in [
+                        "started",
+                        "work",
+                        "cancelled",
+                        "cleanup_pending",
+                        "cleanup_done",
+                        "finalizer_pending",
+                        "finalizer_done",
+                    ] {
+                        assert_eq!(
+                            events
+                                .iter()
+                                .filter(|event| event.child == index
+                                    && event.generation == *generation
+                                    && event.action == action)
+                                .count(),
+                            1
+                        );
+                    }
+                }
+                let position = |child, action| {
+                    events
+                        .iter()
+                        .position(|event| event.child == child && event.action == action)
+                        .unwrap()
+                };
+                assert!(position(1, "finalizer_done") < position(0, "cleanup_done"));
+                assert!(position(0, "cleanup_done") < position(0, "finalizer_done"));
+                assert_eq!(started.lock().len(), 2);
+                for task in [controller, listener] {
+                    assert_eq!(history.iter().filter(|event| event.kind == TraceEventKind::Complete && matches!(event.data, TraceData::Task { task: actual, region } if actual == task && region == root)).count(), 1);
+                }
+                assert!(
+                    cleanup
+                        .iter()
+                        .chain(finalizers.iter())
+                        .all(|gate| gate.notify.waiter_count() == 0
+                            && gate.released.load(Ordering::Acquire))
+                );
+                assert_eq!(slot.notify.waiter_count(), 0);
+                assert_eq!(lab.state.live_task_count(), 0);
+                assert_eq!(lab.state.pending_obligation_count(), 0);
+                assert_eq!(lab.state.leak_count(), 0);
+                assert!(lab.state.region(report.region.unwrap()).is_none());
+                let (tasks, wakes) = lab
+                    .state
+                    .cancel_request(root, &CancelReason::user("signal model complete"), None)
+                    .into_parts();
+                assert!(tasks.is_empty());
+                wakes.dispatch();
+                lab.state.advance_region_state(root);
+                assert_eq!(lab.state.live_region_count(), 0);
+                let lab_report = lab.run_until_quiescent_with_report();
+                assert!(!lab_report.refinement_firewall_skipped_due_to_trace_truncation);
+                assert!(lab_report.lab_test_passed(), "{lab_report:?}");
+                assert_eq!(lab.state.timer_driver().unwrap().pending_count(), 0);
+                eprintln!(
+                    "ASUPERSYNC_MANAGED_SIGNAL_MODEL {}",
+                    serde_json::json!({
+                        "backend":"lab", "seed":seed,
+                        "evidence":"owned runtime SignalSlot delivery model; no OS signal delivery",
+                        "signal":"SIGTERM", "delivered":slot.deliveries.load(Ordering::Acquire),
+                        "consumed_sequence":*consumed.lock(), "source_waiters":slot.notify.waiter_count(),
+                        "listener":listener, "controller":controller,
+                        "generations":generations.iter().map(|generation| serde_json::json!({"number":generation.number,"task":generation.task,"region":generation.region})).collect::<Vec<_>>(),
+                        "events":events.iter().map(|event| serde_json::json!({"child":event.child,"generation":event.generation.number,"task":event.generation.task,"region":event.generation.region,"action":event.action})).collect::<Vec<_>>(),
+                        "started":report.started,"joined":report.joined,"restart_batches":report.restart_batches,"escalations":report.escalations,
+                        "terminal_outcome":"cancelled","cancel_reason":reason,
+                        "actual_child_terminals":generations.iter().map(|generation| terminal_count(&history,*generation)).sum::<usize>(),
+                        "join_pending_polls":join_pending.load(Ordering::SeqCst),
+                        "negative_controls":["zero_selected_generations","premature_generation_completion"],
+                        "live_tasks":lab.state.live_task_count(),"live_regions":lab.state.live_region_count(),
+                        "pending_obligations":lab.state.pending_obligation_count(),"leaks":lab.state.leak_count(),
+                        "lab_report":lab_report.to_json()
+                    })
+                );
+            }
+        }
+    }
 }
