@@ -355,6 +355,224 @@ impl FinalizerStack {
     }
 }
 
+/// Failure of an explicitly bounded, runtime-owned finalizer execution.
+///
+/// These are per-finalizer ceilings. Copying a region's shutdown envelope into
+/// several finalizers does not establish an aggregate subtree work bound.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FinalizerBudgetError {
+    /// The user future used every allowed poll and still needed another poll.
+    PollQuota { limit: u32, polled: u32 },
+    /// The captured runtime clock reached the absolute shutdown deadline.
+    Deadline {
+        deadline: crate::types::Time,
+        observed: crate::types::Time,
+    },
+    /// A deadline cannot be enforced without an explicit runtime timer driver.
+    TimerUnavailable { deadline: crate::types::Time },
+}
+
+impl fmt::Display for FinalizerBudgetError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::PollQuota { limit, polled } => write!(
+                formatter,
+                "finalizer poll quota exhausted: limit={limit}, polled={polled}"
+            ),
+            Self::Deadline { deadline, observed } => write!(
+                formatter,
+                "finalizer deadline exceeded: deadline={deadline:?}, observed={observed:?}"
+            ),
+            Self::TimerUnavailable { deadline } => write!(
+                formatter,
+                "finalizer deadline requires a runtime timer driver: deadline={deadline:?}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for FinalizerBudgetError {}
+
+/// Enforces an explicit shutdown envelope at an unlocked task-poll boundary.
+///
+/// Runtime integration constructs this only for an explicitly selected cleanup
+/// envelope. Legacy finalizers continue through their existing masked path.
+/// The wrapper owns the original pinned future, including its destructor; zero
+/// quota, expired deadlines and missing timer authority retire that future and
+/// return failure, without polling it or silently treating it as completed.
+///
+/// The poll quota counts actual polls of the user future. A final permitted poll
+/// may return Ready successfully; Pending on that poll exhausts immediately.
+/// Deadline checks precede quota checks and also run after a user poll returns.
+/// A synchronous poll that never returns cannot be preempted by this wrapper.
+/// Cost quota and priority remain scheduler concerns, not additional guarantees
+/// made by this per-finalizer poll/deadline wrapper.
+///
+/// Its captured driver registration wakes even while task cancellation is
+/// masked. It uses neither ambient time nor Sleep's cancellation-as-readiness
+/// behavior. Timer-horizon wakes simply rearm against the original deadline.
+pub(crate) struct BudgetedFinalizer {
+    inner: Option<Pin<Box<dyn Future<Output = ()> + Send>>>,
+    budget: Budget,
+    timer: Option<crate::time::TimerDriverHandle>,
+    registration: Option<crate::time::TimerHandle>,
+    polled: u32,
+    finished: bool,
+}
+
+impl BudgetedFinalizer {
+    pub(crate) fn new(
+        inner: Pin<Box<dyn Future<Output = ()> + Send>>,
+        budget: Budget,
+        timer: Option<crate::time::TimerDriverHandle>,
+    ) -> Self {
+        Self {
+            inner: Some(inner),
+            budget,
+            timer,
+            registration: None,
+            polled: 0,
+            finished: false,
+        }
+    }
+
+    fn deadline_failure(&self) -> Option<FinalizerBudgetError> {
+        let deadline = self.budget.deadline?;
+        let Some(timer) = &self.timer else {
+            return Some(FinalizerBudgetError::TimerUnavailable { deadline });
+        };
+        let observed = timer.now();
+        (observed >= deadline).then_some(FinalizerBudgetError::Deadline { deadline, observed })
+    }
+
+    fn cancel_registration(&mut self) {
+        if let Some(registration) = self.registration.take() {
+            let timer = self.timer.as_ref().expect("registration owns its driver");
+            let _ = timer.cancel(&registration);
+        }
+    }
+
+    fn poll_inner(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<crate::types::Outcome<(), FinalizerBudgetError>> {
+        use crate::types::Outcome;
+        use std::task::Poll;
+        if let Some(error) = self.deadline_failure() {
+            return Poll::Ready(Outcome::Err(error));
+        }
+        if self.polled == self.budget.poll_quota {
+            return Poll::Ready(Outcome::Err(FinalizerBudgetError::PollQuota {
+                limit: self.budget.poll_quota,
+                polled: self.polled,
+            }));
+        }
+        if let Some(deadline) = self.budget.deadline {
+            // Refresh the actual task Waker and recover from an already-fired
+            // wheel-horizon registration. There is at most one active timer.
+            self.cancel_registration();
+            let timer = self.timer.as_ref().expect("deadline authority checked");
+            self.registration = Some(timer.register(deadline, cx.waker().clone()));
+        }
+        self.polled += 1;
+        let result = self
+            .inner
+            .as_mut()
+            .expect("unfinished finalizer owns its future")
+            .as_mut()
+            .poll(cx);
+        if let Some(error) = self.deadline_failure() {
+            return Poll::Ready(Outcome::Err(error));
+        }
+        match result {
+            Poll::Ready(()) => Poll::Ready(Outcome::Ok(())),
+            Poll::Pending if self.polled == self.budget.poll_quota => {
+                Poll::Ready(Outcome::Err(FinalizerBudgetError::PollQuota {
+                    limit: self.budget.poll_quota,
+                    polled: self.polled,
+                }))
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    }
+
+    fn retire(
+        &mut self,
+        outcome: crate::types::Outcome<(), FinalizerBudgetError>,
+    ) -> crate::types::Outcome<(), FinalizerBudgetError> {
+        self.finished = true;
+        // Retire the user future before publishing a terminal result. This is
+        // called from the task poll/completion boundary, never under a region
+        // or RuntimeState lock. A user destructor panic outranks both a budget
+        // failure and an earlier body panic; secondary timer-retirement panics
+        // cannot replace that first destructor failure.
+        let inner = self.inner.take();
+        let mut retirement_panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            drop(inner);
+        }))
+        .err()
+        .map(finalizer_panic_payload);
+        if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.cancel_registration();
+        })) {
+            if retirement_panic.is_none() {
+                retirement_panic = Some(finalizer_panic_payload(payload));
+            } else {
+                // Arbitrary panic-payload destructors must not cause a second
+                // unwind while the already selected failure is being retired.
+                std::mem::forget(payload);
+            }
+        }
+        retirement_panic.map_or(outcome, crate::types::Outcome::Panicked)
+    }
+}
+
+fn finalizer_panic_payload(payload: Box<dyn std::any::Any + Send>) -> crate::types::PanicPayload {
+    let message = crate::cx::scope::payload_to_string(&payload);
+    // Retain the observed message without running arbitrary payload Drop code
+    // during panic retirement, matching the runtime's existing unwind boundary.
+    std::mem::forget(payload);
+    crate::types::PanicPayload::new(message)
+}
+
+impl Future for BudgetedFinalizer {
+    type Output = crate::types::Outcome<(), FinalizerBudgetError>;
+
+    fn poll(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        let this = self.get_mut();
+        assert!(!this.finished, "BudgetedFinalizer polled after completion");
+        let outcome = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            this.poll_inner(cx)
+        })) {
+            Ok(std::task::Poll::Pending) => return std::task::Poll::Pending,
+            Ok(std::task::Poll::Ready(outcome)) => outcome,
+            Err(payload) => crate::types::Outcome::Panicked(finalizer_panic_payload(payload)),
+        };
+        std::task::Poll::Ready(this.retire(outcome))
+    }
+}
+
+impl Drop for BudgetedFinalizer {
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+        let unwinding = std::thread::panicking();
+        let retired = self.retire(crate::types::Outcome::Ok(()));
+        if let crate::types::Outcome::Panicked(payload) = retired {
+            // On ordinary abandonment the enclosing runtime boundary must see
+            // destructor failure. During an unrelated unwind, retain its
+            // primary panic rather than initiate an aborting double unwind.
+            if !unwinding {
+                std::panic::panic_any(payload.message().to_owned());
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(
