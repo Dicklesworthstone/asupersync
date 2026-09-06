@@ -3838,7 +3838,9 @@ impl<F> Http2Listener<F> {
             let idle_timeout = self.config.idle_timeout;
             let stream_idle_timeout = self.config.stream_idle_timeout;
             let conn_time_getter = self.config.time_getter;
-            let spawn_result = runtime.try_spawn(async move {
+            // Check the connection's Send boundary once before the runtime's
+            // nested task wrappers instantiate it for each handler type.
+            let connection: Pin<Box<dyn Future<Output = ()> + Send>> = Box::pin(async move {
                 let peer_addr = Some(addr);
                 if let Err(err) = serve_h2_connection(
                     stream,
@@ -3869,6 +3871,7 @@ impl<F> Http2Listener<F> {
                 }
                 drop(guard);
             });
+            let spawn_result = runtime.try_spawn(connection);
             match spawn_result {
                 Ok(handle) => {
                     tasks.push(handle);

@@ -1014,6 +1014,9 @@ print(json.dumps(summary,sort_keys=True))
 
     impl NativeServer {
         fn start() -> Self {
+            type HandlerFuture = std::pin::Pin<Box<dyn Future<Output = Response> + Send>>;
+            type Handler =
+                Box<dyn Fn(asupersync::http::h1::types::Request) -> HandlerFuture + Send + Sync>;
             let runtime = RuntimeBuilder::multi_thread()
                 .worker_threads(2)
                 .build()
@@ -1027,39 +1030,41 @@ print(json.dumps(summary,sort_keys=True))
             let listener = runtime
                 .block_on(Http2Listener::bind_with_config(
                     "127.0.0.1:0",
-                    move |req| -> std::pin::Pin<Box<dyn Future<Output = Response> + Send>> {
-                        let sent = sent.clone();
-                        let dropped = Arc::clone(&handler_dropped);
-                        let cancelled = Arc::clone(&handler_cancelled);
-                        Box::pin(async move {
-                            if req.uri == "/__h2spec_open_stream" {
-                                let cx = Cx::current().expect("real native request context");
-                                let _held = HeldRequest {
-                                    cx: cx.clone(),
-                                    dropped,
-                                    cancelled,
-                                };
-                                let (_keep_open, mut receiver) =
-                                    asupersync::channel::mpsc::channel::<()>(1);
-                                let mut receiving = Box::pin(receiver.recv(&cx));
-                                let mut announced = false;
-                                let result = poll_fn(|poll_cx| {
-                                    let result = receiving.as_mut().poll(poll_cx);
-                                    if result.is_pending() && !announced {
-                                        sent.try_send((cx.task_id(), cx.region_id())).unwrap();
-                                        announced = true;
-                                    }
-                                    result
-                                })
-                                .await;
-                                assert_eq!(
-                                    result,
-                                    Err(asupersync::channel::mpsc::RecvError::Cancelled)
-                                );
-                            }
-                            Response::new(200, "OK", BODY.to_vec())
-                        })
-                    },
+                    Box::new(
+                        move |req: asupersync::http::h1::types::Request| -> HandlerFuture {
+                            let sent = sent.clone();
+                            let dropped = Arc::clone(&handler_dropped);
+                            let cancelled = Arc::clone(&handler_cancelled);
+                            Box::pin(async move {
+                                if req.uri == "/__h2spec_open_stream" {
+                                    let cx = Cx::current().expect("real native request context");
+                                    let _held = HeldRequest {
+                                        cx: cx.clone(),
+                                        dropped,
+                                        cancelled,
+                                    };
+                                    let (_keep_open, mut receiver) =
+                                        asupersync::channel::mpsc::channel::<()>(1);
+                                    let mut receiving = Box::pin(receiver.recv(&cx));
+                                    let mut announced = false;
+                                    let result = poll_fn(|poll_cx| {
+                                        let result = receiving.as_mut().poll(poll_cx);
+                                        if result.is_pending() && !announced {
+                                            sent.try_send((cx.task_id(), cx.region_id())).unwrap();
+                                            announced = true;
+                                        }
+                                        result
+                                    })
+                                    .await;
+                                    assert_eq!(
+                                        result,
+                                        Err(asupersync::channel::mpsc::RecvError::Cancelled)
+                                    );
+                                }
+                                Response::new(200, "OK", BODY.to_vec())
+                            })
+                        },
+                    ) as Handler,
                     Http2ListenerConfig::default()
                         // h2spec constructs authority from the ephemeral endpoint.
                         // This is explicit test-service policy, not a default flip.
@@ -1076,10 +1081,15 @@ print(json.dumps(summary,sort_keys=True))
             let stats = listener.stats_handle();
             let in_flight = listener.in_flight_requests();
             let handle = runtime.handle();
-            let run = handle
-                .clone()
-                .try_spawn(async move { listener.run(&handle).await })
-                .unwrap();
+            let spawner = handle.clone();
+            let serving: std::pin::Pin<
+                Box<
+                    dyn Future<
+                            Output = std::io::Result<asupersync::server::shutdown::ShutdownStats>,
+                        > + Send,
+                >,
+            > = Box::pin(async move { listener.run(&handle).await });
+            let run = spawner.try_spawn(serving).unwrap();
             Self {
                 runtime: Some(runtime),
                 run: Some(run),

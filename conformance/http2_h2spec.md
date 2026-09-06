@@ -4,8 +4,15 @@ Updated: 2026-09-06. Active bead: `asupersync-bi2462.36`.
 
 The independent harness is implemented in
 `tests/e2e_h2_graceful_drain.rs`, under
-`external_h2spec::native_h2spec_strict_conformance`. Its first remote execution
-is pending. Tool installation and discovery have succeeded; neither is a
+`external_h2spec::native_h2spec_strict_conformance`. Three remote attempts
+passed the 40-test native prerequisite, then failed to compile the external
+test because its listener future exceeded the compiler's trait recursion depth.
+Boxing the handler's returned `Send` future, callable, and outer listener
+future was insufficient; the private connection-spawn boundary is being
+repaired without changing the test's body or assertions. The next run includes
+that correction and the request-ownership repairs. No external case has
+executed, so no pre-repair behavioral baseline exists. Tool installation and
+discovery have succeeded; neither is a
 conformance result. Static review also identified request-task admission and
 force-close cancellation gaps in the existing listener. The strict ownership
 checks remain in place while those paths are repaired.
