@@ -590,15 +590,19 @@ mod executing_scope {
             );
             let root = lab.state.create_root_region(Budget::INFINITE);
             let trace = lab.state.trace_handle();
-            let (parent, mut joined) = lab
-                .state
-                .create_task(root, Budget::INFINITE, async move {
+            // Keep the complete journey Send-checked without recursively
+            // expanding it through the Lab task-storage wrappers as well.
+            let coordinator: Pin<Box<dyn Future<Output = Vec<serde_json::Value>> + Send>> =
+                Box::pin(async move {
                     journeys(
                         Cx::current().expect("actual Lab coordinator"),
                         Box::new(move || trace.snapshot()),
                     )
                     .await
-                })
+                });
+            let (parent, mut joined) = lab
+                .state
+                .create_task(root, Budget::INFINITE, coordinator)
                 .unwrap();
             lab.scheduler.lock().schedule(parent, 0);
             lab.run_until_idle();
@@ -1443,15 +1447,19 @@ mod executing_scope {
             );
             let root = lab.state.create_root_region(Budget::INFINITE);
             let trace = lab.state.trace_handle();
-            let (parent, mut joined) = lab
-                .state
-                .create_task(root, Budget::INFINITE, async move {
+            // Use the same checked boundary for every actual failure journey;
+            // task admission, scheduling and terminal assertions stay intact.
+            let coordinator: Pin<Box<dyn Future<Output = Vec<serde_json::Value>> + Send>> =
+                Box::pin(async move {
                     failure_journeys(
                         Cx::current().expect("actual Lab coordinator"),
                         Box::new(move || trace.snapshot()),
                     )
                     .await
-                })
+                });
+            let (parent, mut joined) = lab
+                .state
+                .create_task(root, Budget::INFINITE, coordinator)
                 .unwrap();
             lab.scheduler.lock().schedule(parent, 0);
             lab.run_until_idle();
