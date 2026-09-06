@@ -1557,7 +1557,7 @@ mod responsiveness_tests {
             assert_eq!(barrier.telemetry_snapshot(10).occupied_units, 1);
             assert!(matches!(
                 cancel_parked(&cx, "barrier.wait", wait.as_mut()),
-                Err(crate::sync::barrier::BarrierWaitError::Cancelled)
+                Err(crate::sync::BarrierWaitError::Cancelled)
             ));
             drop(wait);
             assert_eq!(barrier.telemetry_snapshot(10).waiter_count, 0);
@@ -1904,12 +1904,17 @@ mod responsiveness_tests {
             let mut copy = Box::pin(crate::io::copy_buf(&mut reader, &mut writer));
             cancel_copy(&cx, "io.copy-buf", copy.as_mut(), &[state], 0);
             drop(copy);
+            // End the cancelled ambient scope before resuming. Installing None
+            // is a no-op on the context stack; it does not hide an outer Cx.
+            drop(_ambient);
+            assert!(Cx::current().is_none());
             let mut retained = Vec::new();
             let mut continuation = Box::pin(crate::io::copy_buf(&mut reader, &mut retained));
-            // Clearing ambient scope changes the provider's cancellation source,
-            // not the already measured result. The buffered prefix must survive.
-            let _without = Cx::set_current(None);
-            assert!(matches!(poll(continuation.as_mut()), Poll::Ready(Ok(16))));
+            let resumed = poll(continuation.as_mut());
+            assert!(
+                matches!(&resumed, Poll::Ready(Ok(16))),
+                "the full buffered prefix survives cancellation: {resumed:?}"
+            );
             drop(continuation);
             assert_eq!(retained, b"0123456789abcdef");
         }

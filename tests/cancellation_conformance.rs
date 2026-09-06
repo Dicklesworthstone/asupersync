@@ -1647,7 +1647,7 @@ mod stock_responsiveness_runtime {
                         assert_eq!(barrier.telemetry_snapshot(9).occupied_units, 1);
                     })
                     .await,
-                    Err(asupersync::sync::barrier::BarrierWaitError::Cancelled)
+                    Err(asupersync::sync::BarrierWaitError::Cancelled)
                 ));
                 assert_eq!(barrier.telemetry_snapshot(9).waiter_count, 0);
                 assert_eq!(barrier.telemetry_snapshot(9).occupied_units, 0);
