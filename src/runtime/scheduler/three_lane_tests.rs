@@ -11915,3 +11915,313 @@ fn convenience_constructor_installs_pending_cancel_dispatch_coordinator() {
         );
     }
 }
+
+/// Exercise the external-only dispatch seam, without installing ShardedState or
+/// moving fabricated task records. The runtime mints and retires the actual
+/// finalizer in the same table this worker dispatches against.
+#[test]
+fn external_only_finalizer_budget_activation_wakes_and_retires_actual_cleanup() {
+    use crate::record::finalizer::FinalizerBudgetError;
+    use crate::record::task::TaskState;
+    use crate::runtime::spawn_mailbox::{RegionCommand, SpawnMailbox};
+    use crate::runtime::state::FinalizerHistoryEvent;
+    use crate::trace::{TraceData, TraceEventKind};
+    use crate::types::{Outcome, Time};
+
+    struct ParkedCleanup {
+        state: Weak<ContendedMutex<RuntimeState>>,
+        table: Weak<ContendedMutex<TaskTable>>,
+        polls: Arc<AtomicUsize>,
+        drops: Arc<AtomicUsize>,
+    }
+
+    impl ParkedCleanup {
+        fn assert_unlocked(&self) {
+            assert!(
+                self.state.upgrade().unwrap().try_lock().is_ok(),
+                "user callback must run outside the RuntimeState lock"
+            );
+            assert!(
+                self.table.upgrade().unwrap().try_lock().is_ok(),
+                "user callback must run outside the external task-table lock"
+            );
+        }
+    }
+
+    impl std::future::Future for ParkedCleanup {
+        type Output = ();
+
+        fn poll(self: std::pin::Pin<&mut Self>, _: &mut Context<'_>) -> Poll<()> {
+            self.assert_unlocked();
+            let cx = crate::Cx::current().expect("runtime-installed finalizer Cx");
+            assert!(cx.checkpoint().is_ok(), "actual cleanup remains masked");
+            self.polls.fetch_add(1, Ordering::SeqCst);
+            // Deliberately retain ownership without scheduling another poll.
+            Poll::Pending
+        }
+    }
+
+    impl Drop for ParkedCleanup {
+        fn drop(&mut self) {
+            self.assert_unlocked();
+            assert_eq!(self.drops.fetch_add(1, Ordering::SeqCst), 0);
+        }
+    }
+
+    fn dispatch_actual(worker: &mut ThreeLaneWorker, expected: TaskId) {
+        let selected = worker
+            .next_task()
+            .expect("actual finalizer lane publication");
+        assert_eq!(selected, expected, "the original finalizer owns this wake");
+        worker.execute(selected);
+    }
+
+    for deadline_case in [false, true] {
+        let epoch = Time::from_secs(7);
+        let clock = Arc::new(VirtualClock::starting_at(epoch));
+        let driver = TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
+        let mut runtime = RuntimeState::new();
+        runtime.set_timer_driver(driver.clone());
+        let region = runtime.create_root_region(Budget::INFINITE);
+        let receipt = runtime.region(region).unwrap().close_receipt_handle();
+        let trace = runtime.trace_handle();
+        let state = Arc::new(ContendedMutex::new("runtime_state", runtime));
+        let table = Arc::new(ContendedMutex::new("external_task_table", TaskTable::new()));
+        let polls = Arc::new(AtomicUsize::new(0));
+        let drops = Arc::new(AtomicUsize::new(0));
+        assert!(
+            state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .register_async_finalizer(
+                    region,
+                    ParkedCleanup {
+                        state: Arc::downgrade(&state),
+                        table: Arc::downgrade(&table),
+                        polls: Arc::clone(&polls),
+                        drops: Arc::clone(&drops),
+                    },
+                )
+        );
+        let mut scheduler = ThreeLaneScheduler::new_with_options_and_task_table(
+            1,
+            &state,
+            Some(Arc::clone(&table)),
+            DEFAULT_CANCEL_STREAK_LIMIT,
+            false,
+            32,
+        );
+        let mailbox = Arc::new(SpawnMailbox::new());
+        scheduler.attach_spawn_mailbox(Arc::clone(&mailbox));
+        let mut worker = scheduler.take_workers().remove(0);
+
+        mailbox.enqueue_region_command(RegionCommand::Close { region_id: region });
+        worker.drain_region_commands();
+        assert!(mailbox.region_commands_are_empty());
+        assert!(
+            worker.schedule_ready_finalizers(),
+            "real close schedules cleanup"
+        );
+        let finalizer = {
+            let table = table
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let live: Vec<_> = table
+                .iter()
+                .map(|(index, _)| TaskId::from_arena(index))
+                .collect();
+            assert_eq!(live.len(), 1);
+            assert_eq!(table.live_task_count(), 1);
+            assert_eq!(table.stored_future_count(), 1);
+            live[0]
+        };
+        assert_eq!(state.lock().unwrap().live_task_count(), 0);
+        dispatch_actual(&mut worker, finalizer);
+        assert_eq!(polls.load(Ordering::SeqCst), 1);
+        assert!(
+            worker.next_task().is_none(),
+            "legacy cleanup is really parked"
+        );
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        assert_eq!(driver.pending_count(), 0);
+        assert!(receipt.lock().is_none());
+
+        let reason = CancelReason::user("external-only cleanup cancel");
+        mailbox.enqueue_region_command(RegionCommand::Cancel {
+            region_id: region,
+            reason: reason.clone(),
+        });
+        worker.drain_region_commands();
+        dispatch_actual(&mut worker, finalizer);
+        assert_eq!(polls.load(Ordering::SeqCst), 2);
+        assert!(worker.next_task().is_none());
+        let old_cleanup_budget = {
+            let table = table
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match &table.task(finalizer).unwrap().state {
+                TaskState::CancelRequested {
+                    reason: actual,
+                    cleanup_budget,
+                } => {
+                    assert_eq!(actual, &reason);
+                    *cleanup_budget
+                }
+                other => panic!("actual cancellation must reach the external owner: {other:?}"),
+            }
+        };
+
+        // This activation cannot rely on a changed ordinary task budget or
+        // reason. The new per-finalizer ceiling itself must publish a wake.
+        mailbox.enqueue_region_command(RegionCommand::CancelWithBudget {
+            region_id: region,
+            reason: reason.clone(),
+            shutdown_budget: Budget::INFINITE,
+        });
+        worker.drain_region_commands();
+        {
+            let table = table
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert!(matches!(&table.task(finalizer).unwrap().state,
+                TaskState::CancelRequested { reason: actual, cleanup_budget }
+                    if actual == &reason && *cleanup_budget == old_cleanup_budget));
+        }
+        assert_eq!(
+            polls.load(Ordering::SeqCst),
+            2,
+            "publication does not poll callbacks"
+        );
+        dispatch_actual(&mut worker, finalizer);
+        assert_eq!(polls.load(Ordering::SeqCst), 3);
+        assert!(worker.next_task().is_none());
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        assert!(receipt.lock().is_none());
+        assert_eq!(
+            state
+                .lock()
+                .unwrap()
+                .region(region)
+                .unwrap()
+                .shutdown_budget(),
+            Some(Budget::INFINITE)
+        );
+
+        let deadline = epoch.saturating_add_nanos(5_000_000);
+        mailbox.enqueue_region_command(RegionCommand::CancelWithBudget {
+            region_id: region,
+            reason: reason.clone(),
+            shutdown_budget: if deadline_case {
+                Budget::INFINITE.with_deadline(deadline)
+            } else {
+                Budget::INFINITE.with_poll_quota(1)
+            },
+        });
+        worker.drain_region_commands();
+        dispatch_actual(&mut worker, finalizer);
+        if deadline_case {
+            assert_eq!(polls.load(Ordering::SeqCst), 4);
+            assert_eq!(driver.pending_count(), 1);
+            assert_eq!(driver.next_deadline(), Some(deadline));
+            assert!(receipt.lock().is_none());
+            assert_eq!(drops.load(Ordering::SeqCst), 0);
+            assert!(
+                worker.next_task().is_none(),
+                "only the real deadline can wake cleanup"
+            );
+            clock.advance_to(Time::from_nanos(deadline.as_nanos() - 1));
+            assert_eq!(driver.process_timers(), 0);
+            assert!(worker.next_task().is_none());
+            clock.advance_to(deadline);
+            assert_eq!(
+                driver.process_timers(),
+                1,
+                "actual registered task Waker fires"
+            );
+            dispatch_actual(&mut worker, finalizer);
+        }
+
+        assert_eq!(
+            polls.load(Ordering::SeqCst),
+            if deadline_case { 4 } else { 3 }
+        );
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert_eq!(driver.pending_count(), 0);
+        let outcome = receipt
+            .lock()
+            .clone()
+            .expect("actual task retirement publishes close");
+        assert!(matches!(&outcome.outcome, Outcome::Cancelled(actual) if actual == &reason));
+        let Some(Outcome::Err(error)) = &outcome.cleanup_outcome else {
+            panic!("cleanup exhaustion must retain typed non-success: {outcome:?}");
+        };
+        let cause = std::error::Error::source(error)
+            .unwrap()
+            .downcast_ref::<FinalizerBudgetError>()
+            .expect("private receipt preserves the actual wrapper's typed cause");
+        assert_eq!(
+            cause,
+            &if deadline_case {
+                FinalizerBudgetError::Deadline {
+                    deadline,
+                    observed: deadline,
+                }
+            } else {
+                FinalizerBudgetError::PollQuota {
+                    limit: 1,
+                    polled: 1,
+                }
+            }
+        );
+        {
+            let table = table
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert!(table.task(finalizer).is_none());
+            assert_eq!(table.live_task_count(), 0);
+            assert_eq!(table.stored_future_count(), 0);
+        }
+        {
+            let state = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert!(state.region(region).is_none());
+            assert_eq!(state.live_region_count(), 0);
+            assert_eq!(state.live_task_count(), 0);
+            assert_eq!(state.pending_obligation_count(), 0);
+            assert_eq!(state.leak_count(), 0);
+            assert!(!state.has_finalizing_regions());
+            let history = state.finalizer_history();
+            assert!(matches!(history, [
+                FinalizerHistoryEvent::Registered { id, region: registered_region, .. },
+                FinalizerHistoryEvent::Ran { id: ran, .. },
+                FinalizerHistoryEvent::RegionClosed { region: closed, .. }
+            ] if id == ran && *registered_region == region && *closed == region));
+            assert!(
+                state
+                    .cancel_protocol_validator()
+                    .lock()
+                    .task_state(finalizer)
+                    .is_none()
+            );
+        }
+        assert!(worker.next_task().is_none());
+        assert!(mailbox.region_commands_are_empty());
+        let events = trace.snapshot();
+        for kind in [TraceEventKind::Spawn, TraceEventKind::Complete] {
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| event.kind == kind
+                        && matches!(&event.data, TraceData::Task { task, region: owner }
+                    if *task == finalizer && *owner == region))
+                    .count(),
+                1
+            );
+        }
+        eprintln!(
+            "external_only_finalizer_cleanup deadline_case={deadline_case} region={region:?} task={finalizer:?} user_polls={} callback_drops=1 external_live=0 embedded_live=0 timers=0 receipt={outcome:?}",
+            polls.load(Ordering::SeqCst)
+        );
+    }
+}

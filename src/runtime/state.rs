@@ -1850,6 +1850,10 @@ pub struct RuntimeState {
     pending_finalizer_ids: HashMap<RegionId, Vec<u64>>,
     /// Async finalizer tasks mapped back to the logical finalizer they are running.
     async_finalizer_tasks: HashMap<TaskId, u64>,
+    /// Logical cleanup results retained until the actual task completes. The
+    /// scheduler's historical StoredTask error remains unit-typed.
+    async_finalizer_outcomes:
+        HashMap<TaskId, Arc<parking_lot::Mutex<Option<crate::record::task::TaskOutcome>>>>,
     /// Regions currently blocked on an in-flight async finalizer barrier.
     ///
     /// While a region is present here, lower finalizers in its stack must not
@@ -2056,6 +2060,7 @@ impl RuntimeState {
             recently_closed_region_order: VecDeque::new(),
             pending_finalizer_ids: HashMap::new(),
             async_finalizer_tasks: HashMap::new(),
+            async_finalizer_outcomes: HashMap::new(),
             active_async_finalizers: HashMap::new(),
             active_manual_finalizers: HashMap::new(),
             finalizer_history: Vec::new(),
@@ -4313,6 +4318,64 @@ impl RuntimeState {
         self.defer_cancel_dispatch(effects);
     }
 
+    pub(crate) fn close_region_command_with_budget(
+        &mut self,
+        region_id: RegionId,
+        reason: &CancelReason,
+        shutdown_budget: Budget,
+    ) {
+        self.close_region_command_in_task_table(region_id, reason, Some(shutdown_budget), None);
+    }
+
+    /// Scheduler routing includes its external-only task table, which need
+    /// not install a complete ShardedState bundle.
+    pub(crate) fn close_region_command_in_task_table(
+        &mut self,
+        region_id: RegionId,
+        reason: &CancelReason,
+        shutdown_budget: Option<Budget>,
+        task_table: Option<&Arc<crate::sync::ContendedMutex<TaskTable>>>,
+    ) {
+        if self.shard_tables.is_some() || task_table.is_none() {
+            let effects =
+                self.cancel_request_with_shutdown_budget(region_id, reason, None, shutdown_budget);
+            self.advance_region_state(region_id);
+            self.defer_cancel_dispatch(effects);
+            return;
+        }
+        let mut deferred = Vec::new();
+        let effects = {
+            let table = task_table.expect("external-only table selected above");
+            let guard = table
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut tasks = AdmissionTaskTarget::External(guard);
+            let mut regions = AdmissionRegionTarget::Embedded;
+            let mut obligations = CompletionObligationTarget::Embedded;
+            let mut sink = LifecycleEffectsSink::Buffered(&mut deferred);
+            let effects = self.cancel_request_in(
+                &mut regions,
+                &mut tasks,
+                &mut obligations,
+                &mut sink,
+                region_id,
+                reason,
+                None,
+                shutdown_budget,
+            );
+            self.advance_region_state_in(
+                &mut regions,
+                &tasks,
+                &mut obligations,
+                &mut sink,
+                region_id,
+            );
+            effects
+        };
+        self.dispatch_lifecycle_effects(deferred);
+        self.defer_cancel_dispatch(effects);
+    }
+
     /// Mint-and-wire core behind [`Self::open_child_region_command`].
     fn mint_child_region_parts(
         &mut self,
@@ -4380,6 +4443,10 @@ impl RuntimeState {
             region_id: child_region,
             cx: principal_cx,
             close_notify,
+            close_receipt: self
+                .region(child_region)
+                .expect("child region record was minted above")
+                .close_receipt_handle(),
         })
     }
 
@@ -6741,6 +6808,16 @@ impl RuntimeState {
         reason: &CancelReason,
         source_task: Option<TaskId>,
     ) -> CancellationEffects<Vec<(TaskId, u8)>> {
+        self.cancel_request_with_shutdown_budget(region_id, reason, source_task, None)
+    }
+
+    fn cancel_request_with_shutdown_budget(
+        &mut self,
+        region_id: RegionId,
+        reason: &CancelReason,
+        source_task: Option<TaskId>,
+        shutdown_budget: Option<Budget>,
+    ) -> CancellationEffects<Vec<(TaskId, u8)>> {
         // E2 S4c-2c-iv (fork option C; closes br-asupersync-mnebts): on
         // sharded builds the task pass writes through shard A — the
         // embedded pass silently missed shard-A-resident tasks — and the
@@ -6770,6 +6847,7 @@ impl RuntimeState {
                         region_id,
                         reason,
                         source_task,
+                        shutdown_budget,
                     )
                 };
                 self.dispatch_lifecycle_effects(deferred);
@@ -6783,6 +6861,7 @@ impl RuntimeState {
                 region_id,
                 reason,
                 source_task,
+                shutdown_budget,
             ),
         }
     }
@@ -6810,6 +6889,7 @@ impl RuntimeState {
         region_id: RegionId,
         reason: &CancelReason,
         source_task: Option<TaskId>,
+        shutdown_budget: Option<Budget>,
     ) -> CancellationEffects<Vec<(TaskId, u8)>> {
         // Use a modest initial capacity instead of scanning the entire task
         // arena for live_task_count(). The Vec will grow if needed, but avoids
@@ -6834,10 +6914,30 @@ impl RuntimeState {
         // Each child region's reason chains to its parent's reason.
         let mut region_reasons: HashMap<RegionId, CancelReason> =
             HashMap::with_capacity(regions_to_cancel.len());
+        let mut shutdown_budgets = HashMap::with_capacity(regions_to_cancel.len());
+        let mut tightened_finalizers = HashSet::new();
 
         // First pass: mark regions with cancellation reason and transition to Closing
         for node in &regions_to_cancel {
             let rid = node.id;
+
+            // Parents precede descendants. Preserve an existing ceiling even
+            // when this is a later ordinary Close/cancel command, and never
+            // recompute an absolute deadline relative to the new request.
+            let inherited = if rid == region_id {
+                shutdown_budget
+            } else {
+                node.parent
+                    .and_then(|parent| shutdown_budgets.get(&parent).copied().flatten())
+            };
+            if let Some(region) = regions.resolve_ref(&self.regions).get(rid.arena_index()) {
+                if let Some(budget) = inherited
+                    && region.tighten_shutdown_budget(budget)
+                {
+                    tightened_finalizers.insert(rid);
+                }
+                shutdown_budgets.insert(rid, region.shutdown_budget());
+            }
 
             // Build the cancel reason with proper cause chain:
             // - Root region gets the original reason
@@ -6968,14 +7068,18 @@ impl RuntimeState {
                 .unwrap_or_else(|| reason.clone());
 
             for &task_id in &task_id_buf {
-                let Some((effects, task_budget_res)) =
+                let Some((effects, task_budget_res, task_live)) =
                     tasks.resolve(&mut self.tasks).update_task(task_id, |task| {
-                        let task_budget = task_reason.cleanup_budget();
+                        let task_budget =
+                            shutdown_budgets.get(&rid).copied().flatten().map_or_else(
+                                || task_reason.cleanup_budget(),
+                                |ceiling| task_reason.cleanup_budget().combine_untraced(ceiling),
+                            );
                         let effects = task.request_cancel_with_budget_and_publication(
                             task_reason.clone(),
                             task_budget,
                         );
-                        (effects, task_budget)
+                        (effects, task_budget, !task.state.is_terminal())
                     })
                 else {
                     continue;
@@ -7004,7 +7108,13 @@ impl RuntimeState {
                     });
                 }
 
-                if changed && publication.is_published() {
+                // An already-cancelled masked finalizer may have the same task
+                // budget while its separate explicit wrapper ceiling just
+                // activated. It still needs a real scheduler publication.
+                let finalizer_tightened = tightened_finalizers.contains(&rid)
+                    && task_live
+                    && self.async_finalizer_tasks.contains_key(&task_id);
+                if (changed || finalizer_tightened) && publication.is_published() {
                     tasks_to_cancel.push((task_id, task_budget_res.priority));
                 }
             }
@@ -7356,7 +7466,7 @@ impl RuntimeState {
                         owner,
                         completion,
                     );
-                    self.retire_completed_finalizer_barrier(task_id, owner);
+                    self.retire_completed_finalizer_barrier(task_id, owner, close_outcome.as_ref());
                     self.abort_orphaned_obligations_for_holder(
                         &mut regions,
                         &tasks,
@@ -7391,7 +7501,7 @@ impl RuntimeState {
                     owner,
                     completion,
                 );
-                self.retire_completed_finalizer_barrier(task_id, owner);
+                self.retire_completed_finalizer_barrier(task_id, owner, close_outcome.as_ref());
                 self.abort_orphaned_obligations_for_holder(
                     &mut regions,
                     &tasks,
@@ -7456,8 +7566,33 @@ impl RuntimeState {
     /// Completion phase (Shard B): clears the per-region async-finalizer
     /// barrier when the completed task was a tracked finalizer task, and
     /// records the finalizer run in region lifecycle history.
-    fn retire_completed_finalizer_barrier(&mut self, task_id: TaskId, owner: RegionId) {
+    fn retire_completed_finalizer_barrier(
+        &mut self,
+        task_id: TaskId,
+        owner: RegionId,
+        outcome: Option<&Outcome<(), Error>>,
+    ) {
         if let Some(finalizer_id) = self.async_finalizer_tasks.remove(&task_id) {
+            let logical = self
+                .async_finalizer_outcomes
+                .remove(&task_id)
+                .and_then(|slot| slot.lock().take());
+            let cleanup = match outcome {
+                // A panic during actual task retirement outranks the already
+                // observed callback result. Mere task cancellation after a
+                // successfully retired masked callback does not undo cleanup.
+                Some(Outcome::Panicked(payload)) => Outcome::Panicked(payload.clone()),
+                _ => logical.or_else(|| outcome.cloned()).unwrap_or_else(|| {
+                    Outcome::Cancelled(CancelReason::user(
+                        "finalizer retired without terminal outcome",
+                    ))
+                }),
+            };
+            if let Some(region) = self.regions.get(owner.arena_index()) {
+                // Record the real scheduled finalizer terminal before retiring
+                // its identity/barrier. Ordinary child outcomes stay separate.
+                region.record_cleanup_receipt(cleanup);
+            }
             let should_clear_barrier = self
                 .active_async_finalizers
                 .get(&owner)
@@ -7673,7 +7808,18 @@ impl RuntimeState {
                 Finalizer::Sync(finalizer) => Box::pin(async move { finalizer() }),
                 Finalizer::Async(future) => future,
             };
-            match self.spawn_finalizer_task_in(region_id, finalizer_id, future, tasks) {
+            let shutdown_budget = regions
+                .resolve_ref(&self.regions)
+                .get(region_id.arena_index())
+                .expect("tracked finalizer belongs to a live region")
+                .shutdown_budget_handle();
+            match self.spawn_finalizer_task_in(
+                region_id,
+                finalizer_id,
+                future,
+                shutdown_budget,
+                tasks,
+            ) {
                 Ok((task_id, priority, spawn_effects)) => {
                     scheduled.push((task_id, priority, spawn_effects));
                 }
@@ -7794,7 +7940,7 @@ impl RuntimeState {
                     .resolve_ref(&self.regions)
                     .get(region_id.arena_index())
                 {
-                    region.record_close_outcome(Outcome::Panicked(
+                    region.record_cleanup_outcome(Outcome::Panicked(
                         crate::types::PanicPayload::new(message),
                     ));
                 }
@@ -7823,7 +7969,7 @@ impl RuntimeState {
                     .resolve_ref(&self.regions)
                     .get(region_id.arena_index())
                 {
-                    region.record_close_outcome(Outcome::Panicked(
+                    region.record_cleanup_outcome(Outcome::Panicked(
                         crate::types::PanicPayload::new(message),
                     ));
                 }
@@ -7892,7 +8038,7 @@ impl RuntimeState {
             .resolve_ref(&self.regions)
             .get(region_id.arena_index())
         {
-            region.record_close_outcome(close_outcome);
+            region.record_cleanup_outcome(close_outcome);
         }
         self.record_finalizer_run(&regions, region_id, finalizer_id);
         true
@@ -7909,6 +8055,7 @@ impl RuntimeState {
         region_id: RegionId,
         finalizer_id: u64,
         future: BoxedAsyncFinalizer,
+        shutdown_budget: crate::record::finalizer::ShutdownBudget,
         tasks: &mut AdmissionTaskTarget<'_>,
     ) -> Result<(TaskId, u8, TaskSpawnEffects), BoxedAsyncFinalizer> {
         // EDGE CASE VALIDATION: Check async finalizer barrier consistency before spawning
@@ -7970,12 +8117,64 @@ impl RuntimeState {
         };
         let cx_inner = Arc::clone(&cx.inner);
         let masked = MaskedFinalizer::new(future, cx_inner);
+        // Keep task admission runnable under the legacy infrastructure budget;
+        // the owned wrapper enforces even zero/expired explicit user ceilings
+        // at the unlocked poll boundary, including later tightening.
+        let bounded = crate::record::finalizer::BudgetedFinalizer::new(
+            Box::pin(masked),
+            shutdown_budget,
+            self.timer_driver_handle(),
+        );
+        let terminal_outcome = Arc::new(parking_lot::Mutex::new(None));
+        let terminal_publication = Arc::clone(&terminal_outcome);
 
         let wrapped_future = async move {
-            match (CatchUnwind { inner: masked }).await {
-                Ok(()) => {
+            let outcome: Outcome<(), Error> = match (CatchUnwind { inner: bounded }).await {
+                Ok(Outcome::Ok(())) => {
                     crate::runtime::task_handle::publish_terminal_result(result_tx, Ok(()));
                     Outcome::Ok(())
+                }
+                Ok(Outcome::Err(error)) => {
+                    use crate::record::finalizer::FinalizerBudgetError;
+                    let kind = match error {
+                        FinalizerBudgetError::PollQuota { .. } => {
+                            crate::error::ErrorKind::PollQuotaExhausted
+                        }
+                        FinalizerBudgetError::Deadline { .. } => {
+                            crate::error::ErrorKind::DeadlineExceeded
+                        }
+                        FinalizerBudgetError::TimerUnavailable { .. } => {
+                            crate::error::ErrorKind::InvalidStateTransition
+                        }
+                    };
+                    // This infrastructure handle is not exposed. Its failure
+                    // attribution accompanies the exact typed terminal error
+                    // retained in the region's finalizer-only receipt.
+                    crate::runtime::task_handle::publish_terminal_result(
+                        result_tx,
+                        Err(JoinError::Cancelled(CancelReason::user(
+                            "finalizer shutdown budget exhausted",
+                        ))),
+                    );
+                    Outcome::Err(
+                        Error::new(kind)
+                            .with_message(error.to_string())
+                            .with_source(error),
+                    )
+                }
+                Ok(Outcome::Cancelled(reason)) => {
+                    crate::runtime::task_handle::publish_terminal_result(
+                        result_tx,
+                        Err(JoinError::Cancelled(reason.clone())),
+                    );
+                    Outcome::Cancelled(reason)
+                }
+                Ok(Outcome::Panicked(payload)) => {
+                    crate::runtime::task_handle::publish_terminal_result(
+                        result_tx,
+                        Err(JoinError::Panicked(payload.clone())),
+                    );
+                    Outcome::Panicked(payload)
                 }
                 Err(payload) => {
                     let message = payload_to_string(&payload);
@@ -7987,7 +8186,12 @@ impl RuntimeState {
                     );
                     Outcome::Panicked(panic_payload)
                 }
-            }
+            };
+            // BudgetedFinalizer has already retired its pinned callback and
+            // timer. Completion bookkeeping reads this only after the real
+            // task terminal, preserving later retirement panic precedence.
+            *terminal_publication.lock() = Some(outcome.clone());
+            outcome.map_err(|_| ())
         };
 
         tasks
@@ -8002,6 +8206,8 @@ impl RuntimeState {
         }
 
         self.async_finalizer_tasks.insert(task_id, finalizer_id);
+        self.async_finalizer_outcomes
+            .insert(task_id, terminal_outcome);
         let previous = self.active_async_finalizers.insert(region_id, task_id);
         debug_assert!(
             previous.is_none(),
@@ -8403,14 +8609,17 @@ impl RuntimeState {
 
         // E2 S4c-2c-i (br-asupersync-m9wsza): see register_sync_finalizer.
         let regions = AdmissionRegionTarget::Embedded;
-        if abandoned
-            && let Some(region) = regions
-                .resolve_ref(&self.regions)
-                .get(receipt.region_id.arena_index())
+        if let Some(region) = regions
+            .resolve_ref(&self.regions)
+            .get(receipt.region_id.arena_index())
         {
-            region.record_close_outcome(Outcome::Cancelled(CancelReason::user(
-                "manual finalizer abandoned",
-            )));
+            if abandoned {
+                region.record_cleanup_outcome(Outcome::Cancelled(CancelReason::user(
+                    "manual finalizer abandoned",
+                )));
+            } else {
+                region.record_cleanup_receipt(Outcome::Ok(()));
+            }
         }
         self.record_finalizer_run(&regions, receipt.region_id, receipt.finalizer_id);
         self.active_manual_finalizers.remove(&receipt.region_id);
@@ -8501,19 +8710,28 @@ impl RuntimeState {
                     // Run synchronously, catching panics to ensure remaining
                     // finalizers still execute and the region is not permanently
                     // stuck in Finalizing state.
-                    if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f))
-                    {
-                        // Log but continue — a panicking finalizer must not
-                        // block region close or skip sibling finalizers.
-                        let message = payload_to_string(&payload);
-                        std::mem::forget(payload);
-                        if let Some(region) = regions
-                            .resolve_ref(&self.regions)
-                            .get(region_id.arena_index())
-                        {
-                            region.record_close_outcome(Outcome::Panicked(
-                                crate::types::outcome::PanicPayload::new(message),
-                            ));
+                    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+                        Ok(()) => {
+                            if let Some(region) = regions
+                                .resolve_ref(&self.regions)
+                                .get(region_id.arena_index())
+                            {
+                                region.record_cleanup_receipt(Outcome::Ok(()));
+                            }
+                        }
+                        Err(payload) => {
+                            // Log but continue — a panicking finalizer must not
+                            // block region close or skip sibling finalizers.
+                            let message = payload_to_string(&payload);
+                            std::mem::forget(payload);
+                            if let Some(region) = regions
+                                .resolve_ref(&self.regions)
+                                .get(region_id.arena_index())
+                            {
+                                region.record_cleanup_outcome(Outcome::Panicked(
+                                    crate::types::outcome::PanicPayload::new(message),
+                                ));
+                            }
                         }
                     }
 
@@ -9222,11 +9440,19 @@ impl RuntimeState {
                             self.resource_monitor.clear_region_priority(region_id);
 
                             if let Some(parent_id) = parent {
+                                let cleanup_outcome = regions
+                                    .resolve_ref(&self.regions)
+                                    .get(region_id.arena_index())
+                                    .and_then(|region| region.close_receipt_handle().lock().clone())
+                                    .and_then(|receipt| receipt.cleanup_outcome);
                                 // Remove from parent
                                 if let Some(parent_record) = regions
                                     .resolve_ref(&self.regions)
                                     .get(parent_id.arena_index())
                                 {
+                                    if let Some(outcome) = cleanup_outcome {
+                                        parent_record.record_cleanup_receipt(outcome);
+                                    }
                                     parent_record.remove_child(region_id);
                                 }
                                 // Advance parent in next iteration

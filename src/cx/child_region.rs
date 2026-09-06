@@ -198,6 +198,7 @@ pub struct ChildRegion {
     region_id: RegionId,
     cx: crate::cx::Cx,
     close_notify: Arc<Mutex<RegionCloseState>>,
+    close_receipt: Arc<Mutex<Option<crate::record::region::RegionCloseOutcome>>>,
     gateway: Option<Arc<SpawnGateway>>,
     /// Set once a structured close has been requested for this handle
     /// ([`Self::close`]); defuses the [`Drop`] backstop so a completed close
@@ -222,6 +223,7 @@ impl ChildRegion {
             region_id: admitted.region_id,
             cx: admitted.cx,
             close_notify: admitted.close_notify,
+            close_receipt: admitted.close_receipt,
             gateway: handles,
             closed: false,
         }
@@ -265,6 +267,36 @@ impl ChildRegion {
             region_id: self.region_id,
             reason,
         })
+    }
+
+    pub(crate) fn cancel_with_budget(
+        &self,
+        reason: CancelReason,
+        shutdown_budget: Budget,
+    ) -> Result<(), ChildRegionError> {
+        self.enqueue(RegionCommand::CancelWithBudget {
+            region_id: self.region_id,
+            reason,
+            shutdown_budget,
+        })
+    }
+
+    /// Await actual quiescence and retain both child and cleanup outcomes.
+    pub(crate) async fn close_with_outcome(
+        mut self,
+    ) -> Result<crate::record::region::RegionCloseOutcome, ChildRegionError> {
+        self.closed = true;
+        self.enqueue(RegionCommand::Close {
+            region_id: self.region_id,
+        })?;
+        RegionQuiescence {
+            state: Arc::clone(&self.close_notify),
+        }
+        .await;
+        self.close_receipt
+            .lock()
+            .clone()
+            .ok_or(ChildRegionError::RuntimeUnavailable)
     }
 
     /// Begins the close protocol and awaits quiescence.
@@ -536,5 +568,243 @@ mod tests {
             assert_eq!(body.join(child.cx()).await.expect("body joins"), 3);
             child.close().await.expect("lab quiescence reached");
         });
+    }
+
+    /// The runtime owns this future, including its retirement. Counting actual
+    /// polls and Drop distinguishes refusal from silently skipping cleanup.
+    struct ShutdownProbe {
+        polls: Arc<std::sync::atomic::AtomicUsize>,
+        drops: Arc<std::sync::atomic::AtomicUsize>,
+        wake_again: bool,
+    }
+
+    impl Future for ShutdownProbe {
+        type Output = ();
+
+        fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+            self.polls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.wake_again {
+                cx.waker().wake_by_ref();
+            }
+            Poll::Pending
+        }
+    }
+
+    impl Drop for ShutdownProbe {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn managed_shutdown_enforces_actual_finalizers_and_retains_reclaimed_receipts() {
+        use crate::error::ErrorKind;
+        use crate::lab::{LabConfig, LabRuntime};
+        use crate::types::{Outcome, Time};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        // First two cases enforce exact zero/two polls. Third uses a real timer
+        // to wake cleanup that never wakes itself. Fourth activates an expired
+        // ceiling after legacy cleanup has already parked without a timer.
+        for case in 0..4 {
+            let mut lab = LabRuntime::new(LabConfig::new(0x34_C100 + case).max_steps(4096));
+            let root = lab.state.create_root_region(Budget::INFINITE);
+            let opened = Arc::new(Mutex::new(None));
+            let child_slot = Arc::clone(&opened);
+            let result = Arc::new(Mutex::new(None));
+            let result_slot = Arc::clone(&result);
+            let (release, mut wait) = crate::channel::oneshot::channel();
+            let budget = match case {
+                0 => Budget::INFINITE.with_poll_quota(0),
+                1 => Budget::INFINITE.with_poll_quota(2),
+                2 => Budget::INFINITE.with_deadline(Time::from_nanos(100)),
+                _ => Budget::INFINITE.with_deadline(Time::ZERO),
+            };
+            let (owner, mut join) = lab
+                .state
+                .create_task(root, Budget::INFINITE, async move {
+                    let cx = Cx::current().expect("registered owner");
+                    let child = cx
+                        .open_child_region(ChildRegionSpec::inherit())
+                        .await
+                        .unwrap();
+                    *child_slot.lock() = Some(child.region_id());
+                    wait.recv_uninterruptible().await.unwrap();
+                    child
+                        .cancel_with_budget(CancelReason::user("bounded cleanup test"), budget)
+                        .unwrap();
+                    *result_slot.lock() = Some(child.close_with_outcome().await.unwrap());
+                })
+                .unwrap();
+            lab.scheduler.lock().schedule(owner, 0);
+            lab.run_until_idle();
+            let child = opened.lock().expect("actual child region opened");
+            let receipt = lab.state.region(child).unwrap().close_receipt_handle();
+            let polls = Arc::new(AtomicUsize::new(0));
+            let drops = Arc::new(AtomicUsize::new(0));
+            assert!(lab.state.register_async_finalizer(
+                child,
+                ShutdownProbe {
+                    polls: Arc::clone(&polls),
+                    drops: Arc::clone(&drops),
+                    wake_again: case == 1,
+                }
+            ));
+            if case == 3 {
+                lab.state
+                    .close_region_command(child, &CancelReason::user("legacy close first"));
+                lab.run_until_idle();
+                assert_eq!(polls.load(Ordering::SeqCst), 1);
+                assert_eq!(drops.load(Ordering::SeqCst), 0);
+                assert!(lab.state.region(child).unwrap().shutdown_budget().is_none());
+                assert!(receipt.lock().is_none());
+            }
+            let owner_cx = lab.state.task(owner).unwrap().cx.clone().unwrap();
+            release.send(&owner_cx, ()).unwrap();
+            lab.run_until_idle();
+            if case == 2 {
+                assert_eq!(polls.load(Ordering::SeqCst), 1);
+                assert_eq!(drops.load(Ordering::SeqCst), 0);
+                assert!(result.lock().is_none());
+                assert!(join.try_join().unwrap().is_none());
+                assert!(receipt.lock().is_none());
+                assert_eq!(lab.advance_to_next_timer(), 1);
+                lab.run_until_idle();
+            }
+            assert!(
+                join.try_join().unwrap().is_some(),
+                "case {case} owner awaits real close"
+            );
+            let outcome = result
+                .lock()
+                .take()
+                .expect("actual close receipt published");
+            let expected = if case < 2 {
+                ErrorKind::PollQuotaExhausted
+            } else {
+                ErrorKind::DeadlineExceeded
+            };
+            assert!(
+                matches!(&outcome.cleanup_outcome, Some(Outcome::Err(error)) if error.kind() == expected)
+            );
+            if case == 3 {
+                assert!(matches!(outcome.outcome, Outcome::Cancelled(ref reason)
+                    if *reason == CancelReason::user("bounded cleanup test")));
+            } else {
+                assert!(
+                    outcome.outcome.is_err(),
+                    "canonical scheduler error remains unit-derived"
+                );
+            }
+            assert_eq!(polls.load(Ordering::SeqCst), [0, 2, 1, 1][case as usize]);
+            assert_eq!(drops.load(Ordering::SeqCst), 1);
+            assert!(
+                lab.state.region(child).is_none(),
+                "close reclaims original generation"
+            );
+            assert!(
+                matches!(&receipt.lock().as_ref().unwrap().cleanup_outcome, Some(Outcome::Err(error)) if error.kind() == expected)
+            );
+            assert_eq!(lab.state.live_task_count(), 0);
+            assert_eq!(lab.state.pending_obligation_count(), 0);
+            assert!(lab.run_until_quiescent_with_report().lab_test_passed());
+            lab.state
+                .close_region_command(root, &CancelReason::user("test complete"));
+            lab.run_until_idle();
+            assert!(lab.state.region(root).is_none());
+            assert!(lab.run_until_quiescent_with_report().lab_test_passed());
+        }
+    }
+
+    #[test]
+    fn managed_close_distinguishes_cancelled_body_from_descendant_cleanup_failure() {
+        use crate::lab::{LabConfig, LabRuntime};
+        use crate::types::Outcome;
+
+        for failing_cleanup in [false, true] {
+            let mut lab = LabRuntime::new(LabConfig::new(0x34_C200).max_steps(4096));
+            let root = lab.state.create_root_region(Budget::INFINITE);
+            let opened = Arc::new(Mutex::new(None));
+            let opened_slot = Arc::clone(&opened);
+            let result = Arc::new(Mutex::new(None));
+            let result_slot = Arc::clone(&result);
+            let (release, mut wait) = crate::channel::oneshot::channel();
+            let (owner, mut join) = lab
+                .state
+                .create_task(root, Budget::INFINITE, async move {
+                    let cx = Cx::current().unwrap();
+                    let child = cx
+                        .open_child_region(ChildRegionSpec::inherit())
+                        .await
+                        .unwrap();
+                    let grandchild = child
+                        .cx()
+                        .open_child_region(ChildRegionSpec::inherit())
+                        .await
+                        .unwrap();
+                    let mut body = child
+                        .cx()
+                        .spawn(|body_cx| async move {
+                            loop {
+                                if body_cx.is_cancel_requested() {
+                                    return;
+                                }
+                                crate::runtime::yield_now().await;
+                            }
+                        })
+                        .unwrap();
+                    *opened_slot.lock() = Some((child.region_id(), grandchild.region_id()));
+                    wait.recv_uninterruptible().await.unwrap();
+                    child
+                        .cancel_with_budget(
+                            CancelReason::user("subtree cleanup"),
+                            Budget::INFINITE.with_poll_quota(2),
+                        )
+                        .unwrap();
+                    // Observe real task cancellation; its terminal must not enter
+                    // the separate cleanup-failure field.
+                    let _ = body.join(&cx).await;
+                    *result_slot.lock() = Some(child.close_with_outcome().await.unwrap());
+                    drop(grandchild);
+                })
+                .unwrap();
+            lab.scheduler.lock().schedule(owner, 0);
+            // The body yields continuously: use a bounded scheduler prefix to
+            // obtain the actual admitted subtree, then request cancellation.
+            for _ in 0..256 {
+                if opened.lock().is_some() {
+                    break;
+                }
+                lab.step_for_test();
+            }
+            let (child, grandchild) = opened.lock().expect("actual subtree admitted");
+            assert!(lab.state.register_sync_finalizer(grandchild, move || {
+                assert!(!failing_cleanup, "actual descendant cleanup panic");
+            }));
+            let owner_cx = lab.state.task(owner).unwrap().cx.clone().unwrap();
+            release.send(&owner_cx, ()).unwrap();
+            lab.run_until_idle();
+            assert!(join.try_join().unwrap().is_some());
+            let outcome = result.lock().take().unwrap();
+            assert!(
+                outcome.outcome.is_cancelled(),
+                "legacy canonical child outcome preserved"
+            );
+            if failing_cleanup {
+                assert!(
+                    matches!(outcome.cleanup_outcome, Some(Outcome::Panicked(ref payload)) if payload.message() == "actual descendant cleanup panic")
+                );
+            } else {
+                assert!(matches!(outcome.cleanup_outcome, Some(Outcome::Ok(()))));
+            }
+            assert!(lab.state.region(child).is_none());
+            assert!(lab.state.region(grandchild).is_none());
+            assert_eq!(lab.state.live_task_count(), 0);
+            assert!(lab.run_until_quiescent_with_report().lab_test_passed());
+            lab.state
+                .close_region_command(root, &CancelReason::user("test complete"));
+            lab.run_until_idle();
+            assert!(lab.state.region(root).is_none());
+        }
     }
 }

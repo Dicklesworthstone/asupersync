@@ -393,27 +393,37 @@ impl fmt::Display for FinalizerBudgetError {
 
 impl std::error::Error for FinalizerBudgetError {}
 
+/// Region-owned shutdown ceiling shared with already-running finalizers.
+///
+/// The region updates this monotonically before dispatching cancellation wakes.
+/// Reading a snapshot invokes no user callback under runtime or region locks.
+pub(crate) type ShutdownBudget = std::sync::Arc<parking_lot::RwLock<Option<Budget>>>;
+
 /// Enforces an explicit shutdown envelope at an unlocked task-poll boundary.
 ///
-/// Runtime integration constructs this only for an explicitly selected cleanup
-/// envelope. Legacy finalizers continue through their existing masked path.
+/// A None shutdown ceiling is the legacy path, without poll/deadline enforcement.
+/// The first observed Some activates enforcement; later ceilings meet the
+/// previous ceiling and never loosen it, including if a caller restores None.
 /// The wrapper owns the original pinned future, including its destructor; zero
 /// quota, expired deadlines and missing timer authority retire that future and
 /// return failure, without polling it or silently treating it as completed.
 ///
-/// The poll quota counts actual polls of the user future. A final permitted poll
-/// may return Ready successfully; Pending on that poll exhausts immediately.
+/// The poll quota counts actual polls admitted after first activation; preceding
+/// legacy polls do not consume a shutdown budget that did not yet exist. A
+/// final permitted poll may return Ready successfully; Pending on that poll
+/// exhausts immediately.
 /// Deadline checks precede quota checks and also run after a user poll returns.
 /// A synchronous poll that never returns cannot be preempted by this wrapper.
-/// Cost quota and priority remain scheduler concerns, not additional guarantees
-/// made by this per-finalizer poll/deadline wrapper.
+/// This wrapper charges no abstract cost units and does not enforce cost quota
+/// or priority. Cost bounds require a separate charging/admission contract.
 ///
 /// Its captured driver registration wakes even while task cancellation is
 /// masked. It uses neither ambient time nor Sleep's cancellation-as-readiness
 /// behavior. Timer-horizon wakes simply rearm against the original deadline.
 pub(crate) struct BudgetedFinalizer {
     inner: Option<Pin<Box<dyn Future<Output = ()> + Send>>>,
-    budget: Budget,
+    budget: ShutdownBudget,
+    observed_budget: Option<Budget>,
     timer: Option<crate::time::TimerDriverHandle>,
     registration: Option<crate::time::TimerHandle>,
     polled: u32,
@@ -423,12 +433,13 @@ pub(crate) struct BudgetedFinalizer {
 impl BudgetedFinalizer {
     pub(crate) fn new(
         inner: Pin<Box<dyn Future<Output = ()> + Send>>,
-        budget: Budget,
+        budget: ShutdownBudget,
         timer: Option<crate::time::TimerDriverHandle>,
     ) -> Self {
         Self {
             inner: Some(inner),
             budget,
+            observed_budget: None,
             timer,
             registration: None,
             polled: 0,
@@ -436,8 +447,18 @@ impl BudgetedFinalizer {
         }
     }
 
-    fn deadline_failure(&self) -> Option<FinalizerBudgetError> {
-        let deadline = self.budget.deadline?;
+    fn snapshot_budget(&mut self) -> Option<Budget> {
+        let current = *self.budget.read();
+        self.observed_budget = match (self.observed_budget, current) {
+            (Some(previous), Some(current)) => Some(previous.meet(current)),
+            (Some(previous), None) => Some(previous),
+            (None, current) => current,
+        };
+        self.observed_budget
+    }
+
+    fn deadline_failure(&self, budget: Option<Budget>) -> Option<FinalizerBudgetError> {
+        let deadline = budget?.deadline?;
         let Some(timer) = &self.timer else {
             return Some(FinalizerBudgetError::TimerUnavailable { deadline });
         };
@@ -452,47 +473,83 @@ impl BudgetedFinalizer {
         }
     }
 
+    fn arm_deadline(&mut self, deadline: crate::types::Time, waker: &std::task::Waker) {
+        // Refresh the actual task Waker and recover from an already-fired
+        // wheel-horizon registration. There is at most one active timer.
+        self.cancel_registration();
+        let timer = self.timer.as_ref().expect("deadline authority checked");
+        self.registration = Some(timer.register(deadline, waker.clone()));
+    }
+
     fn poll_inner(
         &mut self,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<crate::types::Outcome<(), FinalizerBudgetError>> {
         use crate::types::Outcome;
         use std::task::Poll;
-        if let Some(error) = self.deadline_failure() {
+        let admitted_budget = self.snapshot_budget();
+        if let Some(error) = self.deadline_failure(admitted_budget) {
             return Poll::Ready(Outcome::Err(error));
         }
-        if self.polled == self.budget.poll_quota {
+        if let Some(budget) = admitted_budget
+            && self.polled >= budget.poll_quota
+        {
             return Poll::Ready(Outcome::Err(FinalizerBudgetError::PollQuota {
-                limit: self.budget.poll_quota,
+                limit: budget.poll_quota,
                 polled: self.polled,
             }));
         }
-        if let Some(deadline) = self.budget.deadline {
-            // Refresh the actual task Waker and recover from an already-fired
-            // wheel-horizon registration. There is at most one active timer.
-            self.cancel_registration();
-            let timer = self.timer.as_ref().expect("deadline authority checked");
-            self.registration = Some(timer.register(deadline, cx.waker().clone()));
+        if let Some(deadline) = admitted_budget.and_then(|budget| budget.deadline) {
+            self.arm_deadline(deadline, cx.waker());
         }
-        self.polled += 1;
+        if admitted_budget.is_some() {
+            self.polled += 1;
+        }
         let result = self
             .inner
             .as_mut()
             .expect("unfinished finalizer owns its future")
             .as_mut()
             .poll(cx);
-        if let Some(error) = self.deadline_failure() {
+        let completion_budget = self.snapshot_budget();
+        if let Some(error) = self.deadline_failure(completion_budget) {
             return Poll::Ready(Outcome::Err(error));
+        }
+        // A limit can tighten while a synchronous poll is running. Recheck
+        // before publishing its result; zero or a now-exceeded ceiling refuses
+        // even a Ready result. This cannot preempt the running poll itself.
+        if let Some(budget) = completion_budget
+            && (budget.poll_quota == 0 || self.polled > budget.poll_quota)
+        {
+            return Poll::Ready(Outcome::Err(FinalizerBudgetError::PollQuota {
+                limit: budget.poll_quota,
+                polled: self.polled,
+            }));
         }
         match result {
             Poll::Ready(()) => Poll::Ready(Outcome::Ok(())),
-            Poll::Pending if self.polled == self.budget.poll_quota => {
+            Poll::Pending
+                if completion_budget.is_some_and(|budget| self.polled >= budget.poll_quota) =>
+            {
                 Poll::Ready(Outcome::Err(FinalizerBudgetError::PollQuota {
-                    limit: self.budget.poll_quota,
+                    limit: completion_budget
+                        .expect("quota guard selected an active budget")
+                        .poll_quota,
                     polled: self.polled,
                 }))
             }
-            Poll::Pending => Poll::Pending,
+            Poll::Pending => {
+                // Activation/tightening during user poll must arm the new
+                // deadline before returning Pending, even if user code never
+                // wakes again. Later updates are woken by the region owner.
+                if completion_budget.and_then(|budget| budget.deadline)
+                    != admitted_budget.and_then(|budget| budget.deadline)
+                    && let Some(deadline) = completion_budget.and_then(|budget| budget.deadline)
+                {
+                    self.arm_deadline(deadline, cx.waker());
+                }
+                Poll::Pending
+            }
         }
     }
 
@@ -544,13 +601,12 @@ impl Future for BudgetedFinalizer {
     ) -> std::task::Poll<Self::Output> {
         let this = self.get_mut();
         assert!(!this.finished, "BudgetedFinalizer polled after completion");
-        let outcome = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            this.poll_inner(cx)
-        })) {
-            Ok(std::task::Poll::Pending) => return std::task::Poll::Pending,
-            Ok(std::task::Poll::Ready(outcome)) => outcome,
-            Err(payload) => crate::types::Outcome::Panicked(finalizer_panic_payload(payload)),
-        };
+        let outcome =
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| this.poll_inner(cx))) {
+                Ok(std::task::Poll::Pending) => return std::task::Poll::Pending,
+                Ok(std::task::Poll::Ready(outcome)) => outcome,
+                Err(payload) => crate::types::Outcome::Panicked(finalizer_panic_payload(payload)),
+            };
         std::task::Poll::Ready(this.retire(outcome))
     }
 }
@@ -930,5 +986,606 @@ mod tests {
     #[test]
     fn finalizer_stack_debug_variants() {
         insta::assert_snapshot!("stack_debug_output", finalizer_stack_debug_output());
+    }
+
+    struct BudgetProbe {
+        polls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        drops: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        ready_at: Option<usize>,
+        panic_poll: bool,
+        panic_drop: bool,
+        wake_pending: bool,
+        advance: Option<(
+            std::sync::Arc<crate::time::VirtualClock>,
+            crate::types::Time,
+        )>,
+        update_budget: Option<(ShutdownBudget, Option<Budget>)>,
+    }
+
+    impl BudgetProbe {
+        fn new(ready_at: Option<usize>) -> Self {
+            Self {
+                polls: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                drops: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                ready_at,
+                panic_poll: false,
+                panic_drop: false,
+                wake_pending: false,
+                advance: None,
+                update_budget: None,
+            }
+        }
+    }
+
+    impl Future for BudgetProbe {
+        type Output = ();
+
+        fn poll(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<()> {
+            let polled = self.polls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            assert!(!self.panic_poll, "budgeted finalizer body panic");
+            if let Some((clock, time)) = self.advance.take() {
+                clock.advance_to(time);
+            }
+            if let Some((shared, next)) = self.update_budget.take() {
+                *shared.write() = next;
+            }
+            if self.ready_at == Some(polled) {
+                std::task::Poll::Ready(())
+            } else {
+                if self.wake_pending {
+                    cx.waker().wake_by_ref();
+                }
+                std::task::Poll::Pending
+            }
+        }
+    }
+
+    impl Drop for BudgetProbe {
+        fn drop(&mut self) {
+            assert_eq!(
+                self.drops.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
+                0
+            );
+            assert!(!self.panic_drop, "budgeted finalizer destructor panic");
+        }
+    }
+
+    #[derive(Default)]
+    struct BudgetWake(std::sync::atomic::AtomicUsize);
+
+    impl std::task::Wake for BudgetWake {
+        fn wake(self: std::sync::Arc<Self>) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        fn wake_by_ref(self: &std::sync::Arc<Self>) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    fn shutdown_budget(budget: Option<Budget>) -> ShutdownBudget {
+        std::sync::Arc::new(parking_lot::RwLock::new(budget))
+    }
+
+    #[test]
+    fn explicit_finalizer_poll_budget_counts_actual_work_and_retires_once() {
+        use crate::types::Outcome;
+        use std::sync::atomic::Ordering;
+        use std::task::Poll;
+        for limit in [0, 1, 3] {
+            let mut probe = BudgetProbe::new(None);
+            probe.wake_pending = true;
+            let polls = probe.polls.clone();
+            let drops = probe.drops.clone();
+            let mut bounded = BudgetedFinalizer::new(
+                Box::pin(probe),
+                shutdown_budget(Some(Budget::INFINITE.with_poll_quota(limit))),
+                None,
+            );
+            let wake = std::sync::Arc::new(BudgetWake::default());
+            let waker = std::task::Waker::from(wake.clone());
+            let mut cx = std::task::Context::from_waker(&waker);
+            for _ in 0..limit.saturating_sub(1) {
+                assert!(Pin::new(&mut bounded).poll(&mut cx).is_pending());
+                assert_eq!(drops.load(Ordering::SeqCst), 0);
+            }
+            assert_eq!(
+                Pin::new(&mut bounded).poll(&mut cx),
+                Poll::Ready(Outcome::Err(FinalizerBudgetError::PollQuota {
+                    limit,
+                    polled: limit
+                }))
+            );
+            assert_eq!(polls.load(Ordering::SeqCst), limit as usize);
+            assert_eq!(wake.0.load(Ordering::SeqCst), limit as usize);
+            assert_eq!(drops.load(Ordering::SeqCst), 1);
+            drop(bounded);
+            assert_eq!(drops.load(Ordering::SeqCst), 1);
+        }
+        // Ready on the last permitted user poll is real successful cleanup.
+        for limit in [1, 3] {
+            let probe = BudgetProbe::new(Some(limit as usize));
+            let polls = probe.polls.clone();
+            let drops = probe.drops.clone();
+            let mut bounded = BudgetedFinalizer::new(
+                Box::pin(probe),
+                shutdown_budget(Some(Budget::INFINITE.with_poll_quota(limit))),
+                None,
+            );
+            let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+            for _ in 1..limit {
+                assert!(Pin::new(&mut bounded).poll(&mut cx).is_pending());
+            }
+            assert_eq!(
+                Pin::new(&mut bounded).poll(&mut cx),
+                Poll::Ready(Outcome::Ok(()))
+            );
+            assert_eq!(polls.load(Ordering::SeqCst), limit as usize);
+            assert_eq!(drops.load(Ordering::SeqCst), 1);
+            drop(bounded);
+            assert_eq!(drops.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    #[test]
+    fn explicit_finalizer_deadline_owns_real_wake_and_refuses_missing_clock() {
+        use crate::time::{TimerDriverHandle, VirtualClock};
+        use crate::types::{Outcome, Time};
+        use std::sync::atomic::Ordering;
+        use std::task::Poll;
+        let start = Time::from_secs(7);
+        let deadline = start.saturating_add_nanos(2_000_000);
+        let clock = std::sync::Arc::new(VirtualClock::starting_at(start));
+        let driver = TimerDriverHandle::with_virtual_clock(clock.clone());
+        let probe = BudgetProbe::new(None);
+        let polls = probe.polls.clone();
+        let drops = probe.drops.clone();
+        let wake = std::sync::Arc::new(BudgetWake::default());
+        let waker = std::task::Waker::from(wake.clone());
+        let mut cx = std::task::Context::from_waker(&waker);
+        let mut bounded = BudgetedFinalizer::new(
+            Box::pin(probe),
+            shutdown_budget(Some(
+                Budget::INFINITE.with_poll_quota(3).with_deadline(deadline),
+            )),
+            Some(driver.clone()),
+        );
+        assert!(Pin::new(&mut bounded).poll(&mut cx).is_pending());
+        assert_eq!(driver.pending_count(), 1);
+        assert_eq!(polls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            wake.0.load(Ordering::SeqCst),
+            0,
+            "user future did not wake itself"
+        );
+        clock.advance_to(Time::from_nanos(deadline.as_nanos() - 1));
+        assert_eq!(driver.process_timers(), 0);
+        clock.advance_to(deadline);
+        assert_eq!(driver.process_timers(), 1);
+        assert_eq!(wake.0.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            Pin::new(&mut bounded).poll(&mut cx),
+            Poll::Ready(Outcome::Err(FinalizerBudgetError::Deadline {
+                deadline,
+                observed: deadline
+            }))
+        );
+        assert_eq!(
+            polls.load(Ordering::SeqCst),
+            1,
+            "deadline wake never repolls expired user work"
+        );
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert_eq!(driver.pending_count(), 0);
+
+        for missing_driver in [false, true] {
+            let probe = BudgetProbe::new(Some(1));
+            let polls = probe.polls.clone();
+            let drops = probe.drops.clone();
+            let mut bounded = BudgetedFinalizer::new(
+                Box::pin(probe),
+                shutdown_budget(Some(
+                    Budget::INFINITE.with_poll_quota(0).with_deadline(deadline),
+                )),
+                (!missing_driver).then(|| driver.clone()),
+            );
+            let expected = if missing_driver {
+                FinalizerBudgetError::TimerUnavailable { deadline }
+            } else {
+                FinalizerBudgetError::Deadline {
+                    deadline,
+                    observed: deadline,
+                }
+            };
+            assert_eq!(
+                Pin::new(&mut bounded).poll(&mut cx),
+                Poll::Ready(Outcome::Err(expected))
+            );
+            assert_eq!(polls.load(Ordering::SeqCst), 0);
+            assert_eq!(drops.load(Ordering::SeqCst), 1);
+            assert_eq!(driver.pending_count(), 0);
+        }
+    }
+
+    #[test]
+    fn explicit_finalizer_post_poll_deadline_and_destructor_panic_precedence() {
+        use crate::time::{TimerDriverHandle, VirtualClock};
+        use crate::types::{Outcome, Time};
+        use std::sync::atomic::Ordering;
+        use std::task::Poll;
+        for cause in 0..6 {
+            let start = Time::from_secs(11);
+            let deadline = start.saturating_add_nanos(3_000_000);
+            let clock = std::sync::Arc::new(VirtualClock::starting_at(start));
+            let driver = TimerDriverHandle::with_virtual_clock(clock.clone());
+            let mut probe = BudgetProbe::new((cause == 0 || cause == 5).then_some(1));
+            probe.panic_poll = cause == 2 || cause == 3;
+            probe.panic_drop = matches!(cause, 1 | 3 | 4 | 5);
+            if cause == 0 {
+                probe.advance = Some((clock, deadline));
+            }
+            let polls = probe.polls.clone();
+            let drops = probe.drops.clone();
+            let quota = if cause == 4 { 0 } else { 1 };
+            let mut bounded = BudgetedFinalizer::new(
+                Box::pin(probe),
+                shutdown_budget(Some(
+                    Budget::INFINITE
+                        .with_poll_quota(quota)
+                        .with_deadline(deadline),
+                )),
+                Some(driver.clone()),
+            );
+            let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+            let Poll::Ready(outcome) = Pin::new(&mut bounded).poll(&mut cx) else {
+                panic!("this bounded control must terminate in one wrapper poll");
+            };
+            match cause {
+                0 => assert_eq!(
+                    outcome,
+                    Outcome::Err(FinalizerBudgetError::Deadline {
+                        deadline,
+                        observed: deadline
+                    })
+                ),
+                2 => assert!(
+                    matches!(outcome, Outcome::Panicked(ref payload) if payload.message() == "budgeted finalizer body panic")
+                ),
+                _ => assert!(
+                    matches!(outcome, Outcome::Panicked(ref payload) if payload.message() == "budgeted finalizer destructor panic")
+                ),
+            }
+            assert_eq!(polls.load(Ordering::SeqCst), usize::from(cause != 4));
+            assert_eq!(drops.load(Ordering::SeqCst), 1);
+            assert_eq!(driver.pending_count(), 0);
+            drop(bounded);
+            assert_eq!(drops.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    #[test]
+    fn explicit_finalizer_abandonment_retires_future_and_timer_without_double_drop() {
+        use crate::time::{TimerDriverHandle, VirtualClock};
+        use crate::types::Time;
+        use std::sync::atomic::Ordering;
+        for panic_drop in [false, true] {
+            let clock = std::sync::Arc::new(VirtualClock::starting_at(Time::from_secs(19)));
+            let driver = TimerDriverHandle::with_virtual_clock(clock);
+            let mut probe = BudgetProbe::new(None);
+            probe.panic_drop = panic_drop;
+            let drops = probe.drops.clone();
+            let mut bounded = BudgetedFinalizer::new(
+                Box::pin(probe),
+                shutdown_budget(Some(
+                    Budget::INFINITE
+                        .with_poll_quota(3)
+                        .with_deadline(Time::from_secs(20)),
+                )),
+                Some(driver.clone()),
+            );
+            let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+            assert!(Pin::new(&mut bounded).poll(&mut cx).is_pending());
+            assert_eq!(driver.pending_count(), 1);
+            let retired = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(bounded)));
+            assert_eq!(retired.is_err(), panic_drop);
+            if let Err(payload) = retired {
+                assert_eq!(
+                    crate::cx::scope::payload_to_string(&payload),
+                    "budgeted finalizer destructor panic"
+                );
+            }
+            assert_eq!(driver.pending_count(), 0);
+            assert_eq!(drops.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    #[test]
+    fn explicit_finalizer_late_activation_and_tightening_are_monotone() {
+        use crate::types::Outcome;
+        use std::sync::atomic::Ordering;
+        use std::task::Poll;
+        let shared = shutdown_budget(None);
+        let probe = BudgetProbe::new(None);
+        let polls = probe.polls.clone();
+        let drops = probe.drops.clone();
+        let mut bounded = BudgetedFinalizer::new(Box::pin(probe), shared.clone(), None);
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        for _ in 0..150 {
+            assert!(Pin::new(&mut bounded).poll(&mut cx).is_pending());
+        }
+        assert_eq!(
+            polls.load(Ordering::SeqCst),
+            150,
+            "None retains legacy progress beyond the old nominal 100-poll budget"
+        );
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        *shared.write() = Some(Budget::INFINITE.with_poll_quota(3));
+        assert!(Pin::new(&mut bounded).poll(&mut cx).is_pending());
+        *shared.write() = Some(Budget::INFINITE.with_poll_quota(5));
+        assert!(Pin::new(&mut bounded).poll(&mut cx).is_pending());
+        *shared.write() = None;
+        assert_eq!(
+            Pin::new(&mut bounded).poll(&mut cx),
+            Poll::Ready(Outcome::Err(FinalizerBudgetError::PollQuota {
+                limit: 3,
+                polled: 3
+            }))
+        );
+        assert_eq!(polls.load(Ordering::SeqCst), 153);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+
+        let shared = shutdown_budget(Some(Budget::INFINITE.with_poll_quota(5)));
+        let probe = BudgetProbe::new(None);
+        let polls = probe.polls.clone();
+        let drops = probe.drops.clone();
+        let mut bounded = BudgetedFinalizer::new(Box::pin(probe), shared.clone(), None);
+        assert!(Pin::new(&mut bounded).poll(&mut cx).is_pending());
+        *shared.write() = Some(Budget::INFINITE.with_poll_quota(0));
+        assert_eq!(
+            Pin::new(&mut bounded).poll(&mut cx),
+            Poll::Ready(Outcome::Err(FinalizerBudgetError::PollQuota {
+                limit: 0,
+                polled: 1
+            }))
+        );
+        assert_eq!(
+            polls.load(Ordering::SeqCst),
+            1,
+            "tightened zero ceiling never grants another poll"
+        );
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+
+        // Activation during a returning user poll cannot retroactively stop
+        // that poll, but zero still refuses its completion and retires it.
+        let shared = shutdown_budget(None);
+        let mut probe = BudgetProbe::new(Some(1));
+        probe.update_budget = Some((shared.clone(), Some(Budget::INFINITE.with_poll_quota(0))));
+        let polls = probe.polls.clone();
+        let drops = probe.drops.clone();
+        let mut bounded = BudgetedFinalizer::new(Box::pin(probe), shared, None);
+        assert_eq!(
+            Pin::new(&mut bounded).poll(&mut cx),
+            Poll::Ready(Outcome::Err(FinalizerBudgetError::PollQuota {
+                limit: 0,
+                polled: 0
+            }))
+        );
+        assert_eq!(
+            polls.load(Ordering::SeqCst),
+            1,
+            "the sole poll began before activation"
+        );
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn explicit_finalizer_late_deadline_arms_and_tightening_replaces_real_timer() {
+        use crate::time::{TimerDriverHandle, VirtualClock};
+        use crate::types::{Outcome, Time};
+        use std::sync::atomic::Ordering;
+        use std::task::Poll;
+        for activate_during_poll in [false, true] {
+            let start = Time::from_secs(31);
+            let deadline = start.saturating_add_nanos(2_000_000);
+            let later = start.saturating_add_nanos(6_000_000);
+            let clock = std::sync::Arc::new(VirtualClock::starting_at(start));
+            let driver = TimerDriverHandle::with_virtual_clock(clock.clone());
+            let shared = shutdown_budget(
+                (!activate_during_poll)
+                    .then_some(Budget::INFINITE.with_poll_quota(8).with_deadline(later)),
+            );
+            let mut probe = BudgetProbe::new(None);
+            if activate_during_poll {
+                probe.update_budget = Some((
+                    shared.clone(),
+                    Some(Budget::INFINITE.with_poll_quota(8).with_deadline(deadline)),
+                ));
+            }
+            let polls = probe.polls.clone();
+            let drops = probe.drops.clone();
+            let wake = std::sync::Arc::new(BudgetWake::default());
+            let waker = std::task::Waker::from(wake.clone());
+            let mut cx = std::task::Context::from_waker(&waker);
+            let mut bounded =
+                BudgetedFinalizer::new(Box::pin(probe), shared.clone(), Some(driver.clone()));
+            assert!(Pin::new(&mut bounded).poll(&mut cx).is_pending());
+            if !activate_during_poll {
+                assert_eq!(driver.next_deadline(), Some(later));
+                *shared.write() = Some(Budget::INFINITE.with_poll_quota(8).with_deadline(deadline));
+                assert!(Pin::new(&mut bounded).poll(&mut cx).is_pending());
+            }
+            assert_eq!(driver.pending_count(), 1);
+            assert_eq!(driver.next_deadline(), Some(deadline));
+            let observed_polls = polls.load(Ordering::SeqCst);
+            assert_eq!(observed_polls, if activate_during_poll { 1 } else { 2 });
+            clock.advance_to(deadline);
+            assert_eq!(driver.process_timers(), 1);
+            assert_eq!(wake.0.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                Pin::new(&mut bounded).poll(&mut cx),
+                Poll::Ready(Outcome::Err(FinalizerBudgetError::Deadline {
+                    deadline,
+                    observed: deadline
+                }))
+            );
+            assert_eq!(polls.load(Ordering::SeqCst), observed_polls);
+            assert_eq!(drops.load(Ordering::SeqCst), 1);
+            assert_eq!(driver.pending_count(), 0);
+        }
+    }
+
+    #[test]
+    fn explicit_finalizer_timer_horizon_wake_is_not_the_true_deadline() {
+        use crate::time::{TimerDriverHandle, VirtualClock};
+        use crate::types::{Outcome, Time};
+        use std::sync::atomic::Ordering;
+        use std::task::Poll;
+        let start = Time::from_secs(37);
+        let clock = std::sync::Arc::new(VirtualClock::starting_at(start));
+        let driver = TimerDriverHandle::with_virtual_clock(clock.clone());
+        let horizon = u64::try_from(driver.max_timer_duration().as_nanos()).unwrap();
+        let partial = start.saturating_add_nanos(horizon);
+        let deadline = partial.saturating_add_nanos(horizon);
+        let probe = BudgetProbe::new(None);
+        let polls = probe.polls.clone();
+        let drops = probe.drops.clone();
+        let mut bounded = BudgetedFinalizer::new(
+            Box::pin(probe),
+            shutdown_budget(Some(
+                Budget::INFINITE.with_poll_quota(4).with_deadline(deadline),
+            )),
+            Some(driver.clone()),
+        );
+        let first = std::sync::Arc::new(BudgetWake::default());
+        let first_waker = std::task::Waker::from(first.clone());
+        let mut first_cx = std::task::Context::from_waker(&first_waker);
+        assert!(Pin::new(&mut bounded).poll(&mut first_cx).is_pending());
+        assert_eq!(driver.next_deadline(), Some(partial));
+        clock.advance_to(partial);
+        assert_eq!(driver.process_timers(), 1);
+        assert_eq!(first.0.load(Ordering::SeqCst), 1);
+        let second = std::sync::Arc::new(BudgetWake::default());
+        let second_waker = std::task::Waker::from(second.clone());
+        let mut second_cx = std::task::Context::from_waker(&second_waker);
+        assert!(Pin::new(&mut bounded).poll(&mut second_cx).is_pending());
+        assert_eq!(polls.load(Ordering::SeqCst), 2);
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        assert_eq!(driver.pending_count(), 1);
+        assert_eq!(driver.next_deadline(), Some(deadline));
+        clock.advance_to(deadline);
+        assert_eq!(driver.process_timers(), 1);
+        assert_eq!(second.0.load(Ordering::SeqCst), 1);
+        assert_eq!(first.0.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            Pin::new(&mut bounded).poll(&mut second_cx),
+            Poll::Ready(Outcome::Err(FinalizerBudgetError::Deadline {
+                deadline,
+                observed: deadline
+            }))
+        );
+        assert_eq!(polls.load(Ordering::SeqCst), 2);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert_eq!(driver.pending_count(), 0);
+    }
+
+    #[test]
+    fn explicit_finalizer_actual_lab_task_deadline_wakes_through_cancel_mask() {
+        use crate::lab::{LabConfig, LabRuntime};
+        use crate::types::{CancelReason, Outcome, Time};
+        use std::sync::atomic::Ordering;
+        let mut lab = LabRuntime::new(
+            LabConfig::new(3401)
+                .max_steps(10_000)
+                .trace_capacity(10_000),
+        );
+        lab.advance_time_to(Time::from_secs(23));
+        let root = lab.state.create_root_region(Budget::INFINITE);
+        let probe = BudgetProbe::new(None);
+        let polls = probe.polls.clone();
+        let drops = probe.drops.clone();
+        let deadline = Time::from_secs(23).saturating_add_nanos(2_000_000);
+        let observed_outcome = std::sync::Arc::new(parking_lot::Mutex::new(None));
+        let completed_outcome = std::sync::Arc::clone(&observed_outcome);
+        let (task, mut joined) = lab
+            .state
+            .create_task(root, Budget::INFINITE, async move {
+                let cx = crate::Cx::current().expect("real scheduled finalizer-wrapper owner");
+                let mut bounded = BudgetedFinalizer::new(
+                    Box::pin(probe),
+                    shutdown_budget(Some(
+                        Budget::INFINITE.with_poll_quota(8).with_deadline(deadline),
+                    )),
+                    cx.timer_driver(),
+                );
+                let outcome = std::future::poll_fn(|poll_cx| {
+                    cx.masked(|| {
+                        assert!(
+                            cx.checkpoint().is_ok(),
+                            "the actual task is masked during finalizer polling"
+                        );
+                        Pin::new(&mut bounded).poll(poll_cx)
+                    })
+                })
+                .await;
+                assert!(
+                    cx.checkpoint().is_err(),
+                    "acknowledge the caller's real cancellation after cleanup"
+                );
+                *completed_outcome.lock() = Some(outcome);
+            })
+            .unwrap();
+        lab.scheduler.lock().schedule(task, 0);
+        lab.run_until_idle();
+        assert_eq!(polls.load(Ordering::SeqCst), 1);
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        let driver = lab.state.timer_driver_handle().unwrap();
+        assert_eq!(driver.pending_count(), 1);
+        assert!(joined.try_join().unwrap().is_none());
+        let cancellation = CancelReason::user("finalizer wrapper test cancellation");
+        joined.abort_with_reason(cancellation.clone());
+        lab.run_until_idle();
+        assert!(
+            joined.try_join().unwrap().is_none(),
+            "mask does not turn cancellation into timeout readiness"
+        );
+        assert_eq!(lab.state.live_task_count(), 1);
+        assert_eq!(driver.pending_count(), 1);
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        let before_deadline = polls.load(Ordering::SeqCst);
+        assert!((1..8).contains(&before_deadline));
+        assert_eq!(lab.advance_to_next_timer(), 1);
+        lab.run_until_idle();
+        assert_eq!(
+            joined.try_join(),
+            Err(crate::runtime::task_handle::JoinError::Cancelled(
+                cancellation
+            )),
+            "the low-level owner retains actual cancellation attribution"
+        );
+        assert_eq!(
+            observed_outcome
+                .lock()
+                .take()
+                .expect("actual timer woke and retired the wrapper"),
+            Outcome::Err(FinalizerBudgetError::Deadline {
+                deadline,
+                observed: deadline
+            })
+        );
+        assert_eq!(polls.load(Ordering::SeqCst), before_deadline);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert_eq!(driver.pending_count(), 0);
+        assert_eq!(lab.state.live_task_count(), 0);
+        assert_eq!(lab.state.pending_obligation_count(), 0);
+        assert_eq!(lab.state.leak_count(), 0);
+        lab.state
+            .close_region_command(root, &CancelReason::user("finalizer wrapper test complete"));
+        assert!(lab.state.region(root).is_none());
+        let report = lab.run_until_quiescent_with_report();
+        assert!(report.lab_test_passed(), "{report:?}");
+        assert!(!report.refinement_firewall_skipped_due_to_trace_truncation);
+        eprintln!(
+            "explicit_finalizer_deadline task={task:?} region={root:?} deadline={deadline:?} user_polls={before_deadline} retired=1 timer_pending=0 report={report:?}"
+        );
     }
 }

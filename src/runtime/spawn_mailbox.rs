@@ -1272,6 +1272,12 @@ pub(crate) enum RegionCommand {
         region_id: RegionId,
         reason: CancelReason,
     },
+    /// Managed shutdown installs a monotone ceiling before propagating cancel.
+    CancelWithBudget {
+        region_id: RegionId,
+        reason: CancelReason,
+        shutdown_budget: Budget,
+    },
     /// Begin the close protocol for a region. Emitted both by
     /// [`crate::cx::ChildRegion::close`] after body work finishes and by the
     /// `Drop` backstop for abandoned handles (whose body may still be
@@ -1288,6 +1294,7 @@ pub struct AdmittedRegion {
     pub(crate) region_id: RegionId,
     pub(crate) cx: crate::cx::Cx,
     pub(crate) close_notify: Arc<Mutex<crate::record::region::RegionCloseState>>,
+    pub(crate) close_receipt: Arc<Mutex<Option<crate::record::region::RegionCloseOutcome>>>,
 }
 
 /// One-shot slot the worker fills when a [`RegionCommand::Create`] resolves.

@@ -9930,4 +9930,415 @@ worker_threads = 16
              before worker threads start parking"
         );
     }
+
+    #[derive(Debug)]
+    enum NativeShutdownCommand {
+        Legacy,
+        Bounded(Budget),
+        Close,
+    }
+
+    struct NativeShutdownProbe {
+        region: crate::types::RegionId,
+        polls: Arc<AtomicUsize>,
+        wakes: Arc<AtomicUsize>,
+        drops: Arc<AtomicUsize>,
+        observed_cx: Arc<parking_lot::Mutex<Option<Cx>>>,
+        wake_again: bool,
+        retired: std::sync::mpsc::Sender<()>,
+        _resource: crate::sync::mutex::OwnedMutexGuard<()>,
+    }
+
+    impl Future for NativeShutdownProbe {
+        type Output = ();
+
+        fn poll(self: Pin<&mut Self>, poll_cx: &mut Context<'_>) -> Poll<()> {
+            let cx = Cx::current().expect("actual native finalizer task context");
+            assert_eq!(cx.region_id(), self.region);
+            assert!(cx.inner.read().mask_depth > 0);
+            assert!(
+                cx.checkpoint().is_ok(),
+                "cleanup really runs under its mask"
+            );
+            *self.observed_cx.lock() = Some(cx);
+            self.polls.fetch_add(1, Ordering::SeqCst);
+            if self.wake_again {
+                self.wakes.fetch_add(1, Ordering::SeqCst);
+                poll_cx.waker().wake_by_ref();
+            }
+            Poll::Pending
+        }
+    }
+
+    impl Drop for NativeShutdownProbe {
+        fn drop(&mut self) {
+            assert_eq!(self.drops.fetch_add(1, Ordering::SeqCst), 0);
+            self.retired
+                .send(())
+                .expect("owned test still awaits retirement");
+        }
+    }
+
+    fn wait_native_shutdown_condition(mut ready: impl FnMut() -> bool, message: &str) {
+        let started = Instant::now();
+        while !ready() {
+            assert!(started.elapsed() < Duration::from_secs(10), "{message}");
+            std::thread::yield_now();
+        }
+    }
+
+    fn wait_native_shutdown_parked(runtime: &Runtime, task: crate::types::TaskId) {
+        wait_native_shutdown_condition(
+            || {
+                if let Some(table) = runtime.inner.scheduler.dispatch_task_table() {
+                    let mut table = table
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    table.get_stored_future(task).is_some()
+                        && table
+                            .task(task)
+                            .is_some_and(|record| !record.wake_state.is_notified())
+                } else {
+                    let mut state = runtime
+                        .inner
+                        .state
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    state.get_stored_future(task).is_some()
+                        && state
+                            .task(task)
+                            .is_some_and(|record| !record.wake_state.is_notified())
+                }
+            },
+            "actual Pending finalizer must return to its dispatch table without a pending wake",
+        );
+    }
+
+    fn native_shutdown_budget_case(sharded: bool, case: u8) {
+        use crate::cx::ChildRegionSpec;
+        use crate::error::ErrorKind;
+        use crate::record::finalizer::FinalizerBudgetError;
+        use crate::record::region::RegionCloseOutcome;
+        use crate::types::Outcome;
+
+        let runtime = if sharded {
+            RuntimeBuilder::new()
+                .worker_threads(2)
+                .with_sharded_state(true)
+        } else {
+            RuntimeBuilder::current_thread()
+        }
+        .build()
+        .expect("native cleanup runtime");
+        assert_eq!(runtime.config().worker_threads, if sharded { 2 } else { 1 });
+        assert_eq!(runtime.inner.sharded_state.is_some(), sharded);
+        assert_eq!(
+            runtime.inner.scheduler.dispatch_task_table().is_some(),
+            sharded
+        );
+        let (opened_tx, opened_rx) = std::sync::mpsc::channel();
+        let (commands, mut command_rx) = crate::channel::mpsc::channel(4);
+        let reason = CancelReason::user("native bounded finalizer cleanup");
+        let owner_reason = reason.clone();
+        let owner: Pin<Box<dyn Future<Output = (RegionCloseOutcome, Time)> + Send>> =
+            Box::pin(async move {
+                let cx = Cx::current().expect("actual native region owner");
+                let child = cx
+                    .open_child_region(ChildRegionSpec::inherit())
+                    .await
+                    .unwrap();
+                opened_tx.send((child.region_id(), cx.task_id())).unwrap();
+                loop {
+                    match command_rx.recv(&cx).await.unwrap() {
+                        NativeShutdownCommand::Legacy => child
+                            .cancel(CancelReason::user("native legacy cleanup first"))
+                            .unwrap(),
+                        NativeShutdownCommand::Bounded(budget) => child
+                            .cancel_with_budget(owner_reason.clone(), budget)
+                            .unwrap(),
+                        NativeShutdownCommand::Close => {
+                            return (child.close_with_outcome().await.unwrap(), cx.now());
+                        }
+                    }
+                }
+            });
+        let owner = runtime.handle().spawn(owner);
+        let (region, owner_task) = opened_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("native child region admission");
+        let polls = Arc::new(AtomicUsize::new(0));
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let drops = Arc::new(AtomicUsize::new(0));
+        let observed_cx = Arc::new(parking_lot::Mutex::new(None));
+        let resource = Arc::new(crate::sync::Mutex::new(()));
+        let resource_guard = resource.try_lock_owned().unwrap();
+        let (retired_tx, retired_rx) = std::sync::mpsc::channel();
+        let (receipt, driver) = {
+            let mut state = runtime
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let receipt = state.region(region).unwrap().close_receipt_handle();
+            assert!(state.register_async_finalizer(
+                region,
+                NativeShutdownProbe {
+                    region,
+                    polls: Arc::clone(&polls),
+                    wakes: Arc::clone(&wakes),
+                    drops: Arc::clone(&drops),
+                    observed_cx: Arc::clone(&observed_cx),
+                    wake_again: case == 1,
+                    retired: retired_tx,
+                    _resource: resource_guard,
+                }
+            ));
+            (
+                receipt,
+                state
+                    .timer_driver_handle()
+                    .expect("native runtime timer authority"),
+            )
+        };
+        assert!(resource.try_lock_owned().is_err());
+        assert_eq!(driver.pending_count(), 0);
+        let mut expected_deadline = None;
+        if case == 3 {
+            commands.try_send(NativeShutdownCommand::Legacy).unwrap();
+            wait_native_shutdown_condition(
+                || polls.load(Ordering::SeqCst) == 1,
+                "legacy finalizer is actually polled",
+            );
+            let finalizer_cx = observed_cx.lock().clone().unwrap();
+            wait_native_shutdown_parked(&runtime, finalizer_cx.task_id());
+            assert_eq!(drops.load(Ordering::SeqCst), 0);
+            assert_eq!(
+                driver.pending_count(),
+                0,
+                "legacy None must not install a budget timer"
+            );
+            assert!(receipt.lock().is_none());
+            assert!(
+                runtime
+                    .inner
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .region(region)
+                    .unwrap()
+                    .shutdown_budget()
+                    .is_none()
+            );
+            let activated_deadline = driver.now().saturating_add_nanos(20_000_000_000);
+            commands
+                .try_send(NativeShutdownCommand::Bounded(
+                    Budget::INFINITE
+                        .with_poll_quota(8)
+                        .with_deadline(activated_deadline),
+                ))
+                .unwrap();
+            wait_native_shutdown_condition(
+                || polls.load(Ordering::SeqCst) == 2,
+                "activation must publish a real wake to the parked legacy task",
+            );
+            wait_native_shutdown_parked(&runtime, finalizer_cx.task_id());
+            assert_eq!(driver.pending_count(), 1);
+            assert_eq!(driver.next_deadline(), Some(activated_deadline));
+            assert_eq!(drops.load(Ordering::SeqCst), 0);
+            assert!(receipt.lock().is_none());
+            let tightened_deadline = driver.now();
+            expected_deadline = Some(tightened_deadline);
+            commands
+                .try_send(NativeShutdownCommand::Bounded(
+                    Budget::INFINITE
+                        .with_poll_quota(4)
+                        .with_deadline(tightened_deadline),
+                ))
+                .unwrap();
+        } else {
+            let budget = match case {
+                0 => Budget::INFINITE.with_poll_quota(0),
+                1 => Budget::INFINITE.with_poll_quota(3),
+                2 => {
+                    let deadline = driver.now().saturating_add_nanos(5_000_000_000);
+                    expected_deadline = Some(deadline);
+                    Budget::INFINITE.with_poll_quota(8).with_deadline(deadline)
+                }
+                _ => unreachable!(),
+            };
+            commands
+                .try_send(NativeShutdownCommand::Bounded(budget))
+                .unwrap();
+            if case == 2 {
+                wait_native_shutdown_condition(
+                    || polls.load(Ordering::SeqCst) == 1,
+                    "deadline cleanup actually parks",
+                );
+                let finalizer_cx = observed_cx.lock().clone().unwrap();
+                assert!(driver.ptr_eq(&finalizer_cx.timer_driver().unwrap()));
+                wait_native_shutdown_parked(&runtime, finalizer_cx.task_id());
+                assert_eq!(driver.pending_count(), 1);
+                assert_eq!(driver.next_deadline(), expected_deadline);
+                assert!(driver.now() < expected_deadline.unwrap());
+                assert_eq!(wakes.load(Ordering::SeqCst), 0);
+                assert_eq!(drops.load(Ordering::SeqCst), 0);
+                assert!(receipt.lock().is_none());
+            }
+        }
+        // This receive observes the actual future destructor. No host sleep,
+        // manual timer processing, or synthetic wake drives deadline progress.
+        retired_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("runtime must retire the actual bounded finalizer");
+        wait_native_shutdown_condition(
+            || receipt.lock().is_some(),
+            "runtime must publish actual quiescent close receipt",
+        );
+        assert_eq!(
+            polls.load(Ordering::SeqCst),
+            [0, 3, 1, 2][usize::from(case)]
+        );
+        assert_eq!(wakes.load(Ordering::SeqCst), if case == 1 { 3 } else { 0 });
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert_eq!(driver.pending_count(), 0);
+        drop(
+            resource
+                .try_lock_owned()
+                .expect("retirement releases the actual physical guard"),
+        );
+        commands.try_send(NativeShutdownCommand::Close).unwrap();
+        let (outcome, completed_at) = runtime.block_on(owner);
+        let retained = receipt.lock().clone().unwrap();
+        for actual in [&outcome, &retained] {
+            let Some(Outcome::Err(error)) = &actual.cleanup_outcome else {
+                panic!("exact finalizer-only budget failure missing: {actual:?}");
+            };
+            assert_eq!(
+                error.kind(),
+                if case < 2 {
+                    ErrorKind::PollQuotaExhausted
+                } else {
+                    ErrorKind::DeadlineExceeded
+                }
+            );
+            let failure = std::error::Error::source(error)
+                .unwrap()
+                .downcast_ref::<FinalizerBudgetError>()
+                .expect("retained actual typed budget cause");
+            if let Some(deadline) = expected_deadline {
+                assert!(
+                    matches!(failure, FinalizerBudgetError::Deadline { deadline: actual, observed } if *actual == deadline && *observed >= deadline && *observed <= completed_at)
+                );
+            } else {
+                let limit = if case == 0 { 0 } else { 3 };
+                assert_eq!(
+                    *failure,
+                    FinalizerBudgetError::PollQuota {
+                        limit,
+                        polled: limit
+                    }
+                );
+            }
+            if case == 3 {
+                assert!(matches!(&actual.outcome, Outcome::Cancelled(actual) if actual == &reason));
+            } else {
+                assert!(
+                    matches!(&actual.outcome, Outcome::Err(error) if error.kind() == ErrorKind::Internal)
+                );
+            }
+        }
+        wait_native_shutdown_condition(
+            || runtime.is_quiescent(),
+            "owner and finalizer really leave native dispatch",
+        );
+        let state = runtime
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(state.region(region).is_none());
+        assert_eq!(state.live_task_count(), 0);
+        assert_eq!(state.pending_obligation_count(), 0);
+        assert_eq!(state.leak_count(), 0);
+        let trace = state.trace_handle().snapshot();
+        drop(state);
+        let finalizer_tasks: Vec<_> = trace
+            .iter()
+            .filter_map(|event| match event.data {
+                crate::trace::TraceData::Task {
+                    task,
+                    region: actual,
+                } if event.kind == TraceEventKind::Spawn && actual == region => Some(task),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(finalizer_tasks.len(), 1);
+        assert_ne!(finalizer_tasks[0], owner_task);
+        assert_eq!(trace.iter().filter(|event| event.kind == TraceEventKind::Complete && matches!(event.data, crate::trace::TraceData::Task { task, region: actual } if task == finalizer_tasks[0] && actual == region)).count(), 1);
+        if let Some(table) = runtime.inner.scheduler.dispatch_task_table() {
+            assert_eq!(
+                table
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .live_task_count(),
+                0
+            );
+        }
+        if let Some(shards) = &runtime.inner.sharded_state {
+            assert_eq!(
+                shards
+                    .obligations
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .pending_count(),
+                0
+            );
+            assert_eq!(shards.leak_count(), 0);
+        }
+        eprintln!(
+            "native_shutdown_budget sharded={sharded} case={case} owner={owner_task:?} finalizer={:?} region={region:?} polls={} wakes={} drops=1 deadline={expected_deadline:?} completed_at={completed_at:?} receipt={outcome:?}",
+            finalizer_tasks[0],
+            polls.load(Ordering::SeqCst),
+            wakes.load(Ordering::SeqCst)
+        );
+        drop(commands);
+        drop(observed_cx);
+        let inner = Arc::downgrade(&runtime.inner);
+        assert!(runtime.shutdown_timeout(Duration::from_secs(5)));
+        assert!(inner.upgrade().is_none());
+    }
+
+    fn native_shutdown_budget_matrix(sharded: bool) {
+        let (finished, result) = std::sync::mpsc::sync_channel(1);
+        let owned = std::thread::Builder::new()
+            .name(format!("native-shutdown-budget-{sharded}"))
+            .spawn(move || {
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    for case in 0..4 {
+                        native_shutdown_budget_case(sharded, case);
+                    }
+                }));
+                finished
+                    .send(outcome)
+                    .expect("whole native journey watchdog remains alive");
+            })
+            .unwrap();
+        let outcome = result
+            .recv_timeout(Duration::from_secs(45))
+            .expect("whole owned native cleanup journey exceeded 45 seconds");
+        owned.join().unwrap();
+        if let Err(payload) = outcome {
+            std::panic::resume_unwind(payload);
+        }
+    }
+
+    #[test]
+    fn native_current_thread_shutdown_budget_runs_and_retires_real_finalizers() {
+        native_shutdown_budget_matrix(false);
+    }
+
+    #[test]
+    fn native_sharded_shutdown_budget_runs_and_retires_real_finalizers() {
+        native_shutdown_budget_matrix(true);
+    }
 }

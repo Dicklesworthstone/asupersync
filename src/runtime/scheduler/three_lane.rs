@@ -6000,12 +6000,34 @@ impl ThreeLaneWorker {
                         publications.push((slot, outcome));
                     }
                     crate::runtime::spawn_mailbox::RegionCommand::Cancel { region_id, reason } => {
-                        state.close_region_command(region_id, &reason);
+                        state.close_region_command_in_task_table(
+                            region_id,
+                            &reason,
+                            None,
+                            self.task_table.as_ref(),
+                        );
+                    }
+                    crate::runtime::spawn_mailbox::RegionCommand::CancelWithBudget {
+                        region_id,
+                        reason,
+                        shutdown_budget,
+                    } => {
+                        state.close_region_command_in_task_table(
+                            region_id,
+                            &reason,
+                            Some(shutdown_budget),
+                            self.task_table.as_ref(),
+                        );
                     }
                     crate::runtime::spawn_mailbox::RegionCommand::Close { region_id } => {
                         let completion =
                             crate::types::CancelReason::user("owned child region body finished");
-                        state.close_region_command(region_id, &completion);
+                        state.close_region_command_in_task_table(
+                            region_id,
+                            &completion,
+                            None,
+                            self.task_table.as_ref(),
+                        );
                     }
                 }
             }

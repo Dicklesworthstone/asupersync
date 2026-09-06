@@ -3973,6 +3973,17 @@ impl LabRuntime {
                 crate::runtime::spawn_mailbox::RegionCommand::Cancel { region_id, reason } => {
                     self.state.close_region_command(region_id, &reason);
                 }
+                crate::runtime::spawn_mailbox::RegionCommand::CancelWithBudget {
+                    region_id,
+                    reason,
+                    shutdown_budget,
+                } => {
+                    self.state.close_region_command_with_budget(
+                        region_id,
+                        &reason,
+                        shutdown_budget,
+                    );
+                }
                 crate::runtime::spawn_mailbox::RegionCommand::Close { region_id } => {
                     let completion =
                         crate::types::CancelReason::user("owned child region body finished");

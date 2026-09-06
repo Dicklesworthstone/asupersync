@@ -325,6 +325,9 @@ struct RegionInner {
     tasks: Vec<TaskId>,
     cancel_reason: Option<CancelReason>,
     close_outcome: Option<TaskOutcome>,
+    /// Finalizer terminals only; ordinary cancelled children must not masquerade
+    /// as failed cleanup when a supervisor decides whether it may restart.
+    cleanup_outcome: Option<TaskOutcome>,
     limits: RegionLimits,
     pending_obligations: usize,
     /// Accepted checked obligations whose terminal lifecycle has not yet been
@@ -642,6 +645,13 @@ impl Drop for PendingSpawnReservation {
     }
 }
 
+/// Retained close result for internal structured owners.
+#[derive(Debug, Clone)]
+pub(crate) struct RegionCloseOutcome {
+    pub(crate) outcome: TaskOutcome,
+    pub(crate) cleanup_outcome: Option<TaskOutcome>,
+}
+
 /// Internal record for a region in the runtime.
 #[derive(Debug)]
 pub struct RegionRecord {
@@ -653,6 +663,12 @@ pub struct RegionRecord {
     pub created_at: Time,
     /// Notification state for tasks waiting on this region to close.
     pub close_notify: std::sync::Arc<parking_lot::Mutex<RegionCloseState>>,
+    /// Retained outside the region heap so an owned handle can observe close
+    /// even after the runtime reclaims this generation's record.
+    close_receipt: Arc<parking_lot::Mutex<Option<RegionCloseOutcome>>>,
+    /// Explicit shutdown ceiling, separate from the ordinary work budget.
+    /// Finalizers retain this same handle and observe later tightening.
+    shutdown_budget: crate::record::finalizer::ShutdownBudget,
     /// Current state (atomic for concurrent access).
     state: Arc<AtomicRegionState>,
     /// Finalizers may be Send without Sync. Keep their ownership on the record,
@@ -764,6 +780,8 @@ impl RegionRecord {
                 closed: false,
                 waiters: Vec::new(),
             })),
+            close_receipt: Arc::new(parking_lot::Mutex::new(None)),
+            shutdown_budget: Arc::new(RwLock::new(None)),
             state: Arc::new(AtomicRegionState::new(RegionState::Open)),
             finalizers: RwLock::new(FinalizerStack::new()),
             inner: Arc::new(RwLock::new(RegionInner {
@@ -773,6 +791,7 @@ impl RegionRecord {
                 tasks: Vec::new(),
                 cancel_reason: None,
                 close_outcome: None,
+                cleanup_outcome: None,
                 limits: RegionLimits::UNLIMITED,
                 pending_obligations: 0,
                 unapplied_obligations: 0,
@@ -884,6 +903,52 @@ impl RegionRecord {
             Some(existing) => existing.join(outcome),
             None => outcome,
         });
+    }
+
+    /// Records only actual finalizer retirement, preserving the public aggregate.
+    pub(crate) fn record_cleanup_outcome(&self, outcome: TaskOutcome) {
+        let mut inner = self.inner.write();
+        inner.cleanup_outcome = Some(match inner.cleanup_outcome.take() {
+            Some(existing) => existing.join(outcome.clone()),
+            None => outcome.clone(),
+        });
+        inner.close_outcome = Some(match inner.close_outcome.take() {
+            Some(existing) => existing.join(outcome),
+            None => outcome,
+        });
+    }
+
+    /// Aggregate descendant/manual success evidence without changing the
+    /// historical public close-outcome folding policy.
+    pub(crate) fn record_cleanup_receipt(&self, outcome: TaskOutcome) {
+        let mut inner = self.inner.write();
+        inner.cleanup_outcome = Some(match inner.cleanup_outcome.take() {
+            Some(existing) => existing.join(outcome),
+            None => outcome,
+        });
+    }
+
+    pub(crate) fn close_receipt_handle(
+        &self,
+    ) -> Arc<parking_lot::Mutex<Option<RegionCloseOutcome>>> {
+        Arc::clone(&self.close_receipt)
+    }
+
+    pub(crate) fn shutdown_budget_handle(&self) -> crate::record::finalizer::ShutdownBudget {
+        Arc::clone(&self.shutdown_budget)
+    }
+
+    pub(crate) fn shutdown_budget(&self) -> Option<Budget> {
+        *self.shutdown_budget.read()
+    }
+
+    /// Called before publishing cancellation. No user callback runs here.
+    pub(crate) fn tighten_shutdown_budget(&self, budget: Budget) -> bool {
+        let mut current = self.shutdown_budget.write();
+        let next = current.map_or(budget, |old| old.combine_untraced(budget));
+        let changed = *current != Some(next);
+        *current = Some(next);
+        changed
     }
 
     /// Strengthens or sets the cancel reason.
@@ -1487,6 +1552,13 @@ impl RegionRecord {
         if transitioned {
             self.trace_state_change(RegionState::Closed);
             inner.heap.reclaim_all();
+            *self.close_receipt.lock() = Some(RegionCloseOutcome {
+                outcome: inner
+                    .close_outcome
+                    .clone()
+                    .expect("close outcome set above"),
+                cleanup_outcome: inner.cleanup_outcome.clone(),
+            });
             let waiters = {
                 let mut notify = self.close_notify.lock();
                 notify.closed = true;
