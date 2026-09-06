@@ -205,9 +205,10 @@ impl TraceBufferHandle {
     /// newest).
     ///
     /// br-asupersync-xh4efw: insertion order and seq order can differ —
-    /// spawn-effect events allocate their seq at admission (via
-    /// [`next_seq`](Self::next_seq)) but are pushed at deferred dispatch,
-    /// after later-sequenced events may already be in the ring. The
+    /// optional `TaskAdmitted` observer events allocate their seq at admission
+    /// (via [`next_seq`](Self::next_seq)) but are pushed at deferred dispatch,
+    /// after later-sequenced events may already be in the ring. `Spawn`
+    /// witnesses are recorded immediately when task admission succeeds. The
     /// snapshot sorts by seq so consumers observe the per-task causal
     /// contract (a task's Spawn seq precedes its Complete seq). Seqs may
     /// have gaps (an allocated-but-abandoned spawn effect never pushes);

@@ -240,11 +240,14 @@ run_checked_admission_mode() {
         checked_owned_permit_cancellation_and_same_poll_reuse_on_native_sharded_workers \
         checked_other_primitives_refuse_cancel_and_reuse_on_native_current_thread \
         checked_other_primitives_refuse_cancel_and_reuse_on_native_sharded_workers; do
-        rg -Fq "test $option ... ok" "$CHECKED_DIR/native.log" || { printf 'Missing native sentinel %s\n' "$option" >&2; return 88; }
+        # In single-threaded --nocapture output, scenario logging can split
+        # the test-start prefix from its final ok. checked_stage has already
+        # required an unfiltered suite with zero failures and ignored tests.
+        [[ "$(rg -c "^test $option \\.\\.\\. " "$CHECKED_DIR/native.log")" == 1 ]] || { printf 'Missing or duplicate native sentinel %s\n' "$option" >&2; return 88; }
     done
     checked_stage lifecycle test --jobs "$CHECKED_BUILD_JOBS" -p asupersync --locked --features "$CHECKED_FEATURES" \
         --test obligation_lifecycle_e2e -- --nocapture --test-threads=1 || return $?
-    rg -Fq 'test checked_public_primitives_share_lab_region_quota ... ok' "$CHECKED_DIR/lifecycle.log" || return 88
+    [[ "$(rg -c '^test checked_public_primitives_share_lab_region_quota \.\.\. ' "$CHECKED_DIR/lifecycle.log")" == 1 ]] || return 88
     checked_stage public run --jobs "$CHECKED_BUILD_JOBS" -p asupersync --locked --features "$CHECKED_FEATURES" \
         --bin channel_mpsc_select_e2e || return $?
     sed -n 's/^ASUPERSYNC_CHECKED_OBLIGATION_JOURNEY //p' "$CHECKED_DIR/public.log" > "$CHECKED_DIR/public-journey.json"

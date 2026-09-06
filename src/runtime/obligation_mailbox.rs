@@ -3138,9 +3138,9 @@ mod tests {
                 })
                 .unwrap();
             let destination_cx = runtime.state.task(destination).unwrap().cx.clone().unwrap();
-            // The legacy direct creation path emits Spawn on its first
-            // actual poll. Publish and park this live destination before
-            // transferring; never manufacture a missing trace event.
+            // Spawn witnesses admission. This scenario additionally parks
+            // the actual destination on a receiver before transferring;
+            // its later progress must come from the channel's real wakeup.
             runtime.scheduler.lock().schedule(destination, 0);
             assert!(runtime.run_until_idle() > 0);
             assert_eq!(destination_join.try_join().unwrap(), None);
@@ -3221,6 +3221,303 @@ mod tests {
                 "actual Lab handoff cross_region={cross_region} source={source:?} destination={destination:?} results=41,73 report={}",
                 report.to_json()
             );
+        }
+    }
+
+    #[test]
+    fn checked_transfer_created_destination_has_complete_trace_before_observer_dispatch() {
+        for deferred in [false, true] {
+            for cross_region in [false, true] {
+                let mut runtime = lab();
+                let root = runtime.state.create_root_region(Budget::INFINITE);
+                let source_region = runtime
+                    .state
+                    .create_child_region(root, Budget::INFINITE)
+                    .unwrap();
+                let destination_region = if cross_region { root } else { source_region };
+                let delivery = Arc::new(Mutex::new(None::<ObligationToken>));
+                let received = Arc::clone(&delivery);
+                let destination_polls = Arc::new(AtomicUsize::new(0));
+                let polled = Arc::clone(&destination_polls);
+                let destination_future = async move {
+                    polled.fetch_add(1, Ordering::SeqCst);
+                    let cx = Cx::current().expect("actual destination first poll");
+                    let token = received.lock().unwrap().take().unwrap();
+                    assert_eq!(token.holder(), cx.task_id());
+                    assert_eq!(token.region(), cx.region_id());
+                    assert!(token.commit());
+                    73_u32
+                };
+                let (destination, mut destination_join, mut observer) = if deferred {
+                    let (task, handle, effects) = runtime
+                        .state
+                        .create_task_with_deferred_spawn_effects(
+                            destination_region,
+                            Budget::INFINITE,
+                            destination_future,
+                        )
+                        .unwrap();
+                    (task, handle, Some(effects))
+                } else {
+                    let (task, handle) = runtime
+                        .state
+                        .create_task(destination_region, Budget::INFINITE, destination_future)
+                        .unwrap();
+                    (task, handle, None)
+                };
+                let destination_cx = runtime.state.task(destination).unwrap().cx.clone().unwrap();
+                let destination_logical_time = destination_cx.logical_now();
+                let spawns = |events: &[crate::trace::TraceEvent], task| {
+                    events
+                        .iter()
+                        .filter(|event| {
+                            event.kind == TraceEventKind::Spawn
+                                && matches!(event.data, crate::trace::TraceData::Task { task: actual, .. }
+                                    if actual == task)
+                        })
+                        .cloned()
+                        .collect::<Vec<_>>()
+                };
+                let destination_spawn =
+                    spawns(&runtime.state.trace_handle().snapshot(), destination);
+                assert_eq!(destination_spawn.len(), 1, "admission is already witnessed");
+                assert_eq!(
+                    destination_spawn[0].data,
+                    crate::trace::TraceData::Task {
+                        task: destination,
+                        region: destination_region,
+                    }
+                );
+                assert_eq!(
+                    destination_spawn[0].logical_time,
+                    Some(destination_logical_time)
+                );
+                let (source, mut source_join) = runtime
+                    .state
+                    .create_task(source_region, Budget::INFINITE, async move {
+                        let cx = Cx::current().expect("actual source transfer poll");
+                        let token = cx
+                            .try_register_obligation_checked(ObligationKind::Lease, cx.task_id())
+                            .unwrap()
+                            .unwrap()
+                            .try_transfer(&destination_cx)
+                            .unwrap();
+                        *delivery.lock().unwrap() = Some(token);
+                        41_u32
+                    })
+                    .unwrap();
+                let source_logical_time = runtime
+                    .state
+                    .task(source)
+                    .unwrap()
+                    .cx
+                    .as_ref()
+                    .unwrap()
+                    .logical_now();
+                let source_spawn = spawns(&runtime.state.trace_handle().snapshot(), source);
+                assert_eq!(source_spawn.len(), 1);
+                assert_eq!(source_spawn[0].logical_time, Some(source_logical_time));
+                assert_eq!(
+                    source_spawn[0].data,
+                    crate::trace::TraceData::Task {
+                        task: source,
+                        region: source_region
+                    }
+                );
+                runtime.scheduler.lock().schedule(source, 0);
+                assert!(runtime.run_until_idle() > 0);
+                assert_eq!(source_join.try_join().unwrap(), Some(41));
+                assert!(runtime.state.task(source).is_none());
+                assert!(matches!(
+                    runtime.state.task(destination).unwrap().state,
+                    crate::record::task::TaskState::Created
+                ));
+                assert_eq!(destination_polls.load(Ordering::SeqCst), 0);
+                assert_eq!(destination_join.try_join().unwrap(), None);
+                assert_eq!(
+                    observer.is_some(),
+                    deferred,
+                    "observer remains undispatched"
+                );
+
+                let prefix = runtime.state.trace_handle().snapshot();
+                let reservations: Vec<_> = prefix
+                    .iter()
+                    .filter_map(|event| {
+                        if event.kind == TraceEventKind::ObligationReserve {
+                            if let crate::trace::TraceData::Obligation {
+                                obligation,
+                                task,
+                                region,
+                                kind,
+                                ..
+                            } = event.data
+                            {
+                                assert_eq!(
+                                    (task, region, kind),
+                                    (source, source_region, ObligationKind::Lease)
+                                );
+                                return Some(obligation);
+                            }
+                        }
+                        None
+                    })
+                    .collect();
+                assert_eq!(reservations.len(), 1);
+                let original_id = reservations[0];
+                let record = runtime.state.obligation(original_id).unwrap();
+                let reserved_at = record.reserved_at;
+                assert!(record.is_pending());
+                assert_eq!(
+                    (record.holder, record.region),
+                    (destination, destination_region)
+                );
+                let handoffs: Vec<_> = prefix
+                    .iter()
+                    .filter_map(|event| {
+                        crate::trace::event::decode_obligation_handoff(event).unwrap()
+                    })
+                    .collect();
+                assert_eq!(handoffs.len(), 1);
+                assert_eq!(handoffs[0].id, original_id);
+                assert_eq!(
+                    (handoffs[0].source_holder, handoffs[0].source_region),
+                    (source, source_region)
+                );
+                assert_eq!(
+                    (
+                        handoffs[0].destination_holder,
+                        handoffs[0].destination_region
+                    ),
+                    (destination, destination_region)
+                );
+                let check_consumers = |events: &[crate::trace::TraceEvent], pending: u32| {
+                    let firewall =
+                        crate::trace::refinement_firewall::check_refinement_firewall(events);
+                    assert!(firewall.first_violation.is_none(), "{firewall:?}");
+                    assert_eq!(firewall.checked_events, events.len());
+                    let exporter = crate::trace::tla_export::TlaExporter::try_from_trace(events)
+                        .expect("actual admitted destination is a valid transfer owner");
+                    assert!(exporter.validation_error().is_none());
+                    assert!(
+                        exporter
+                            .export_behavior("CreatedDestination")
+                            .source
+                            .contains("Spec ==")
+                    );
+                    let marking =
+                        crate::obligation::marking::MarkingAnalyzer::new().analyze_trace(events);
+                    assert!(marking.is_safe(), "{marking}");
+                    // Marking counts semantic transitions, not every raw
+                    // scheduler/clock event: Reserve + Handoff + source
+                    // Complete, then Commit + destination Complete + 2 closes.
+                    assert_eq!(marking.events_processed, if pending == 1 { 3 } else { 7 });
+                    assert_eq!(marking.stats.total_reserved, 1);
+                    assert_eq!(marking.stats.total_committed, 1 - pending);
+                    assert_eq!(marking.stats.total_aborted, 0);
+                    assert_eq!(marking.stats.total_leaked, 0);
+                    let final_marking = marking.timeline.final_marking().unwrap();
+                    assert_eq!(final_marking.total_pending(), pending);
+                    assert_eq!(
+                        final_marking.get(ObligationKind::Lease, destination_region),
+                        pending
+                    );
+                };
+                check_consumers(&prefix, 1);
+                assert_eq!(spawns(&prefix, destination), destination_spawn);
+                assert_eq!(spawns(&prefix, source), source_spawn);
+
+                // Only after all pre-poll prefix checks, publish the actual
+                // executable lane and deliver the held arbitrary observers.
+                runtime.scheduler.lock().schedule(destination, 0);
+                if let Some(effects) = observer.take() {
+                    effects.dispatch();
+                }
+                assert_eq!(destination_polls.load(Ordering::SeqCst), 0);
+                let dispatched = runtime.state.trace_handle().snapshot();
+                assert_eq!(spawns(&dispatched, destination), destination_spawn);
+                assert_eq!(spawns(&dispatched, source), source_spawn);
+                check_consumers(&dispatched, 1);
+                let report = runtime.run_until_quiescent_with_report();
+                assert_eq!(destination_join.try_join().unwrap(), Some(73));
+                assert_eq!(destination_polls.load(Ordering::SeqCst), 1);
+                assert!(report.lab_test_passed(), "{report:?}");
+                assert!(report.refinement_firewall_rule_id.is_none());
+                assert!(!report.refinement_firewall_skipped_due_to_trace_truncation);
+                let record = runtime.state.obligation(original_id).unwrap();
+                assert_eq!(record.state, crate::record::ObligationState::Committed);
+                assert_eq!(
+                    (record.id, record.holder, record.region, record.reserved_at),
+                    (original_id, destination, destination_region, reserved_at)
+                );
+                assert_eq!(runtime.state.obligations.iter().count(), 1);
+                assert_eq!(runtime.state.tasks_iter().count(), 0);
+                assert_eq!(runtime.state.pending_obligation_count(), 0);
+                assert_eq!(runtime.state.leak_count(), 0);
+                let mailbox = mailbox_of(&runtime);
+                assert_eq!(
+                    mailbox.stats(),
+                    ObligationMailboxStats {
+                        posted: 3,
+                        applied: 3,
+                        reserved: 1,
+                        committed: 1,
+                        ..Default::default()
+                    }
+                );
+                assert_eq!(mailbox.open_tickets(), 0);
+                assert!(mailbox.is_empty());
+                for region in [source_region, root] {
+                    let record = runtime.state.region(region).unwrap();
+                    assert_eq!(record.pending_obligations(), 0);
+                    assert_eq!(record.unapplied_obligation_count(), 0);
+                    runtime.state.close_region_command(
+                        region,
+                        &crate::types::CancelReason::user("created destination done"),
+                    );
+                    assert!(runtime.state.region(region).is_none());
+                }
+                let closed_report = runtime.run_until_quiescent_with_report();
+                assert!(closed_report.lab_test_passed(), "{closed_report:?}");
+                assert!(!closed_report.refinement_firewall_skipped_due_to_trace_truncation);
+                let terminal = runtime.state.trace_handle().snapshot();
+                check_consumers(&terminal, 0);
+                assert_eq!(spawns(&terminal, destination), destination_spawn);
+                assert_eq!(spawns(&terminal, source), source_spawn);
+                let commits: Vec<_> = terminal
+                    .iter()
+                    .filter_map(|event| {
+                        if event.kind == TraceEventKind::ObligationCommit {
+                            if let crate::trace::TraceData::Obligation {
+                                obligation,
+                                task,
+                                region,
+                                kind,
+                                ..
+                            } = event.data
+                            {
+                                return Some((obligation, task, region, kind));
+                            }
+                        }
+                        None
+                    })
+                    .collect();
+                assert_eq!(
+                    commits,
+                    vec![(
+                        original_id,
+                        destination,
+                        destination_region,
+                        ObligationKind::Lease
+                    )]
+                );
+                eprintln!(
+                    "bead=asupersync-bi2462.28 scenario=created_destination_transfer deferred={deferred} cross_region={cross_region} source={source:?} destination={destination:?} id={original_id:?} pre_poll_count=0 final_poll_count=1 stats={:?} report={} closed_report={}",
+                    mailbox.stats(),
+                    report.to_json(),
+                    closed_report.to_json()
+                );
+            }
         }
     }
 

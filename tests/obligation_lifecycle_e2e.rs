@@ -1070,8 +1070,8 @@ fn checked_public_primitives_share_lab_region_quota() {
     use asupersync::runtime::obligation_mailbox::ObligationAdmissionError;
     use asupersync::sync::semaphore::CheckedAcquireError;
     use asupersync::sync::{
-        CheckedPoolError, GenericPool, Mutex, OwnedMutexGuard, OwnedSemaphorePermit, PoolConfig,
-        PoolError, Semaphore,
+        CheckedPoolError, GenericPool, Mutex, OwnedMutexGuard, OwnedSemaphorePermit, Pool,
+        PoolConfig, PoolError, Semaphore,
     };
     use std::sync::Arc;
 
