@@ -177,8 +177,8 @@ mod managed_public {
     use asupersync::runtime::{RuntimeBuilder, RuntimeState, SpawnError};
     use asupersync::supervision::{
         BackoffStrategy, ChildSpec, EscalationPolicy, ManagedChildBinding, ManagedGeneration,
-        ManagedRestartMode, ManagedSupervisor, ManagedSupervisorHandle, ManagedSupervisorReport,
-        RestartPolicy, SupervisionConfig, SupervisorBuilder,
+        ManagedRestartMode, ManagedSupervisor, ManagedSupervisorHandle, RestartPolicy,
+        SupervisionConfig, SupervisorBuilder,
     };
     use asupersync::trace::{TraceData, TraceEvent, TraceEventKind};
     use asupersync::types::{Budget, CancelReason, Outcome, TaskId, policy::FailFast};
@@ -189,7 +189,6 @@ mod managed_public {
     use std::time::Duration;
 
     const NAMES: [&str; 4] = ["a", "b", "c", "d"];
-    type Report = ManagedSupervisorReport<&'static str>;
     type Snapshot = Box<dyn Fn() -> Vec<TraceEvent> + Send>;
 
     fn legacy_start(
@@ -552,6 +551,7 @@ mod managed_public {
         let mut current = ready_set(&cx, &mut handle, &mut receiver, &[0, 1, 2, 3]).await;
         perform_work(&cx, &mut handle, &mut receiver, &current, 100).await;
         let originals: Vec<_> = current.iter().map(|child| child.generation).collect();
+        let old_mailbox = current[1].mailbox.clone();
         let affected: &[usize] = match policy {
             RestartPolicy::OneForOne => &[1],
             RestartPolicy::OneForAll => &[0, 1, 2, 3],
@@ -649,6 +649,13 @@ mod managed_public {
                 assert_eq!(child.generation, originals[index]);
             }
         }
+        assert!(
+            matches!(
+                old_mailbox.try_send(Command::Error),
+                Err(mpsc::SendError::Closed(Command::Error))
+            ),
+            "a late command addressed to the retired generation cannot fail its replacement"
+        );
         perform_work(&cx, &mut handle, &mut receiver, &current, 200).await;
         handle.abort();
         let mut stopped = BTreeSet::new();
