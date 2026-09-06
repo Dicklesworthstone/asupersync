@@ -115,11 +115,12 @@ impl PendingAuthenticatedAccept {
             PacketHeader::Long(header) => {
                 header.dst_cid == initial_cid || header.dst_cid == local_cid
             }
-            // A Retry is a long-header packet addressed to the client's
-            // connection ID, so it is routed exactly like `Long`.
-            PacketHeader::Retry(header) => {
-                header.dst_cid == initial_cid || header.dst_cid == local_cid
-            }
+            // Exhaustive match keeps the crate compiling (E0004). This
+            // admission owns a server TLS driver; Retry travels server-to-
+            // client, so a matching dst_cid is not authority to feed it into
+            // this pending server handshake. Client-side routing still uses
+            // dst_cid in connection_manager.
+            PacketHeader::Retry(_) => false,
             PacketHeader::Short(header) => header.dst_cid == local_cid,
         })
     }
@@ -187,6 +188,11 @@ impl PendingAuthenticatedAccept {
         }
         let (header, _) =
             PacketHeader::decode(&packet.data, self.local_cid.len()).map_err(accept_error)?;
+        if matches!(header, PacketHeader::Retry(_)) {
+            // Defensive role check for direct callers as well as owns_packet.
+            // Retry supplies neither authenticated input credit nor TLS work.
+            return Ok(());
+        }
         if let PacketHeader::Short(_) = header {
             if self.driver.peer_connection_id().is_none() {
                 return Ok(());
@@ -3041,6 +3047,62 @@ mod tests {
                 receive_time: now,
                 transmit_time: None,
             }
+        }
+
+        #[test]
+        fn managed_accept_server_rejects_encoded_retry_without_claiming_other_cids() {
+            let initial = ConnectionId::new(&[0x91; 8]).unwrap();
+            let local = ConnectionId::new(&[0x92; 8]).unwrap();
+            let other = ConnectionId::new(&[0x93; 8]).unwrap();
+            let peer: SocketAddr = "127.0.0.1:9123".parse().unwrap();
+            let now = Instant::now();
+            let mut retained = Vec::new();
+            for destination in [initial, local, other] {
+                let header = PacketHeader::Retry(crate::net::quic_core::RetryHeader {
+                    version: 1,
+                    dst_cid: destination,
+                    src_cid: ConnectionId::new(&[0x94; 8]).unwrap(),
+                    token: b"actual encoded Retry token".to_vec(),
+                    integrity_tag: [0x95; 16],
+                });
+                let mut data = Vec::new();
+                header.encode(&mut data).unwrap();
+                let (decoded, consumed) = PacketHeader::decode(&data, 0).unwrap();
+                assert_eq!(decoded, header);
+                assert_eq!(consumed, data.len());
+                let packet = ReceivedPacket {
+                    src_addr: peer,
+                    data,
+                    receive_time: now,
+                    transmit_time: None,
+                };
+                assert!(!PendingAuthenticatedAccept::packet_matches(
+                    &packet, initial, local
+                ));
+                retained.push(packet);
+            }
+            let a = short_packet(other, peer, now);
+            let b = short_packet(local, peer, now);
+            assert!(!PendingAuthenticatedAccept::packet_matches(
+                &a, initial, local
+            ));
+            assert!(PendingAuthenticatedAccept::packet_matches(
+                &b, initial, local
+            ));
+            retained.push(a.clone());
+            retained.push(b);
+            retained.retain(|packet| {
+                !PendingAuthenticatedAccept::packet_matches(packet, initial, local)
+            });
+            assert_eq!(
+                retained.len(),
+                4,
+                "only the pending server's short packet was claimed"
+            );
+            assert_eq!(retained.last().unwrap().data, a.data);
+            // Header classification is not Retry integrity verification or an
+            // authenticated peer exchange; all unclaimed packets stay with the
+            // established router and its own role/authentication checks.
         }
 
         #[test]

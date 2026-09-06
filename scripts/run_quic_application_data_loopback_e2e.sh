@@ -283,7 +283,7 @@ os.execv(sys.argv[1],[sys.argv[1],'--exact','authenticated_managed_kernel_backpr
         assert result["received_bytes"] == len(expected_payload) and result["sha256"] == hashlib.sha256(expected_payload).hexdigest() and result["fin"]
         assert result["packets_sent"] > 0 and result["packets_received"] > 0 and result["application_polls"] > 0 and result["application_self_wake"] is False
         stdout = (artifacts / f"kernel-{role}.stdout.log").read_text()
-        assert re.findall(r"test result: ok\. (\d+) passed; (\d+) failed; (\d+) ignored; (\d+) measured; (\d+) filtered out", stdout) == [("1", "0", "0", "0", "7")]
+        assert re.findall(r"test result: ok\. (\d+) passed; (\d+) failed; (\d+) ignored; (\d+) measured; (\d+) filtered out", stdout) == [("1", "0", "0", "0", "9")]
         emitted = [json.loads(line.split("MANAGED_QUIC_KERNEL_PEER ", 1)[1]) for line in stdout.splitlines() if "MANAGED_QUIC_KERNEL_PEER " in line]
         assert emitted == [receipt]
         receipts.append(receipt)
@@ -378,7 +378,8 @@ if [[ "${OVERLAY_MODE}" == 1 ]]; then
     src/net/quic_native/udp_connection.rs src/net/quic_native/handshake_driver.rs \
     src/net/quic_native/endpoint.rs \
     src/net/quic_native/endpoint_api.rs src/net/quic_native/mod.rs \
-    tests/quic_h3_live_udp.rs scripts/run_quic_application_data_loopback_e2e.sh; do
+    tests/quic_h3_live_udp.rs tests/quic_native_handshake_udp_loopback.rs \
+    scripts/run_quic_application_data_loopback_e2e.sh; do
     SOURCE_ARGS+=(--overlay-path "${path}")
   done
 elif [[ "${OVERLAY_MODE}" == 0 ]]; then
@@ -455,30 +456,36 @@ python3 - "${OUTPUT_ROOT}/managed-mechanics.log" <<'PY'
 import pathlib, re, sys
 log = pathlib.Path(sys.argv[1]).read_text()
 counts = re.findall(r"test result: ok\. (\d+) passed; (\d+) failed; (\d+) ignored; (\d+) measured; (\d+) filtered out", log)
-assert len(counts) == 1 and counts[0][:4] == ("19", "0", "0", "0"), ("all 15 original and four new managed mechanics required", counts)
+assert len(counts) == 1 and counts[0][:4] == ("20", "0", "0", "0"), ("all 15 original and five new managed mechanics required", counts)
 tests = re.findall(r"^test net::quic_native::managed_endpoint::tests::authenticated_accept_tests::([A-Za-z0-9_]+) \.\.\. ok$", log, re.M)
 expected = {
+    "managed_accept_server_rejects_encoded_retry_without_claiming_other_cids",
     "managed_accept_preflight_receipt_and_packet_bounds_preserve_existing_owner",
     "managed_accept_actual_initial_credit_bounds_queued_prefix_and_pto_replay",
     "managed_accept_tls_callback_cancellation_stops_at_one_packet_and_keeps_other_cid",
     "managed_remove_connection_preserves_same_address_peer_queues_and_timer",
 }
-assert len(tests) == len(expected) and set(tests) == expected, ("all four named authenticated admission mechanics required", tests)
+assert len(tests) == len(expected) and set(tests) == expected, ("all five named authenticated admission mechanics required", tests)
 PY
 # Preserve the original protocol fixture stage and its assertions. Its keys and
 # manually established state are not credited as authenticated managed proof.
 run_stage protocol-fixture test-internals,tls quic_application_data_udp_loopback
+python3 - "${OUTPUT_ROOT}/protocol-fixture.log" <<'PY'
+import pathlib, re, sys
+log = pathlib.Path(sys.argv[1]).read_text()
+assert re.findall(r"test result: ok\. (\d+) passed; (\d+) failed; (\d+) ignored; (\d+) measured; (\d+) filtered out", log) == [("6", "0", "0", "0", "0")]
+PY
 # The managed tests use public APIs for real TLS handshakes and consuming
 # handoffs. The conformance dev-dependency unifies test-internals into this
-# target, so all four original tests and both managed parents must execute.
-# The ignored peer is explicitly executed twice by its parent.
+# target, so all four original tests and three managed parents must execute.
+# Two parents explicitly execute their ignored helpers in four owned processes.
 run_stage authenticated-managed http3,tls quic_h3_live_udp
 python3 - "${OUTPUT_ROOT}/authenticated-managed.log" "${BASE_REV}" "${OVERLAY_MODE}" <<'PY'
-import hashlib, json, pathlib, re, subprocess, sys
+import hashlib, json, pathlib, re, ssl, subprocess, sys
 path, base, overlay = sys.argv[1:]
 log = re.sub(r"\x1b\[[0-9;]*m", "", pathlib.Path(path).read_text())
 counts = re.findall(r"test result: ok\. (\d+) passed; (\d+) failed; (\d+) ignored; (\d+) measured; (\d+) filtered out", log)
-assert counts[-1:] == [("6", "0", "2", "0", "0")], ("all public parents and both intentional helpers required", counts)
+assert counts == [("1", "0", "0", "0", "9")] * 4 + [("7", "0", "3", "0", "0")], ("all seven public parents, four executed child helpers and three intentional ignores required", counts)
 parents = {
     "authenticated_h3_router_request_response_crosses_real_udp",
     "authenticated_h3_produced_response_obeys_live_udp_credit_and_quiesces",
@@ -486,11 +493,12 @@ parents = {
     "negotiated_non_h3_alpn_refuses_live_application_handles",
     "authenticated_managed_public_handoff_self_wake_and_restart_cross_real_udp",
     "authenticated_managed_two_process_public_exchange_cancel_and_restart",
+    "managed_multi_peer::authenticated_same_socket_multi_peer",
 }
-passed = re.findall(r"^test ([A-Za-z0-9_]+) \.\.\. ok$", log, re.M)
-assert len(passed) == len(parents) and set(passed) == parents, ("all six named parents must pass exactly once", passed)
-ignored = re.findall(r"^test ([A-Za-z0-9_]+) \.\.\. ignored(?:, [^\n]*)?$", log, re.M)
-assert len(ignored) == 2 and set(ignored) == {"authenticated_managed_process_peer", "authenticated_managed_kernel_backpressure"}, ("only the two explicitly selected helpers may be ignored", ignored)
+passed = re.findall(r"^test ([A-Za-z0-9_:]+) \.\.\. ok$", log, re.M)
+assert len(passed) == len(parents) and set(passed) == parents, ("all seven named parents must pass exactly once", passed)
+ignored = re.findall(r"^test ([A-Za-z0-9_:]+) \.\.\. ignored(?:, [^\n]*)?$", log, re.M)
+assert len(ignored) == 3 and set(ignored) == {"authenticated_managed_process_peer", "authenticated_managed_kernel_backpressure", "managed_multi_peer::authenticated_same_socket_process_peer"}, ("only the three explicitly selected helpers may be ignored", ignored)
 rows = [json.loads(line.split("MANAGED_QUIC_TWO_PROCESS ", 1)[1]) for line in log.splitlines() if "MANAGED_QUIC_TWO_PROCESS " in line]
 assert len(rows) == 1, "one actual two-process summary required"
 summary = rows[0]
@@ -508,14 +516,190 @@ for child in children:
     assert child["runtime_quiescent"] and child["parked_cancelled_and_restarted"]
     assert child["active_connections_after_shutdown"] == 0 and len(child["rounds"]) == 2
     assert all(round["received_bytes"] > 0 and round["packets_sent"] > 0 and round["packets_received"] > 0 for round in child["rounds"])
-print("verified managed public proof: 6 parent tests; 2 executed child helpers; 1 authenticated session; 2 exchange rounds; managed tests use public APIs; no same-router, WouldBlock, or performance claim")
+print("verified original managed public proof: two executed child helpers, one authenticated session and two exchange rounds")
+
+def rows_for(marker):
+    return [json.loads(line.split(marker, 1)[1]) for line in log.splitlines() if marker in line]
+
+multi_rows = rows_for("MANAGED_QUIC_MULTI_PEER ")
+assert len(multi_rows) == 1, "one actual same-socket multi-peer summary required"
+multi = multi_rows[0]
+assert multi["schema"] == "asupersync.managed_quic.multi_peer.v1"
+assert multi["source"] == expected and multi["executable_sha256"] == summary["executable_sha256"]
+assert multi["actual_children"] == 2 and multi["elapsed_micros"] > 0
+assert all(multi[field] is True for field in ("same_server_socket", "distinct_verified_client_identities", "same_router_multi_peer_proof"))
+assert all(multi[field] is False for field in ("kernel_would_block_claim", "retained_ciphertext_queue_claim", "performance_claim"))
+server, clients = multi["server"], multi["clients"]
+emitted = rows_for("MANAGED_QUIC_MULTI_PEER_PROCESS ")
+assert len(emitted) == 2 and {row["role"] for row in emitted} == {"server", "clients"}
+assert {row["role"]: row for row in emitted} == {"server": server, "clients": clients}, "actual process stdout must join the parent receipts"
+assert server["pid"] != clients["pid"] and min(server["pid"], clients["pid"]) > 0
+for child, task_count in ((server, 1), (clients, 3)):
+    assert child["schema"] == "asupersync.managed_quic.multi_peer.process.v1"
+    assert child["source"] == expected and child["executable_sha256"] == multi["executable_sha256"]
+    assert child["runtime_quiescent"] is True and child["owned_region_reclaimed"] is True
+    assert all(child[field] == 0 for field in ("tasks_after_cleanup", "leaked_obligations_after_cleanup", "draining_regions_after_cleanup", "active_connections_after_shutdown", "pending_timers_after_shutdown"))
+    assert min(child["packets_sent"], child["packets_received"], child["elapsed_micros"]) > 0
+    terminals = child["actual_terminal_sequences"]
+    assert len(terminals) == task_count and len(set(terminals.values())) == task_count
+    assert all(isinstance(seq, int) and 0 <= seq < child["owned_region_close_sequence"] for seq in terminals.values()), "actual full-ID completion must precede owned region close"
+    assert child["owned_region"] and all(terminals)
+assert len(clients["joined_client_tasks"]) == len(set(clients["joined_client_tasks"])) == 2
+assert set(clients["joined_client_tasks"]) < set(clients["actual_terminal_sequences"])
+assert server["server_addr"] == clients["server_addr"] == clients["a"]["peer_addr"]
+assert server["a_peer"] == clients["a"]["local_addr"] != server["server_addr"]
+assert server["a_fin"] is True and clients["a"]["fin"] is True
+a_records = server["a_records"]
+assert a_records == clients["a"]["records"] and 0 < len(a_records) <= 8192
+def record_sha(sequence, tag):
+    return hashlib.sha256(sequence.to_bytes(8, "big") + bytes((tag + index % 251) & 255 for index in range(512))).hexdigest()
+assert a_records == [record_sha(sequence, ord("A")) for sequence in range(len(a_records))], "independent actual A byte/order comparison"
+test_bytes = pathlib.Path(paths["test"]).read_bytes() if overlay == "1" else subprocess.check_output(["git", "show", f"{base}:{paths['test']}"])
+def client_identity(name):
+    certificates = re.findall(r'const ' + name + r': &str = "(-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----)";', test_bytes.decode(), re.S)
+    assert len(certificates) == 1
+    return hashlib.sha256(ssl.PEM_cert_to_DER_cert(certificates[0])).hexdigest()
+a_identity, b_identity = client_identity("CLIENT_A"), client_identity("CLIENT_B")
+assert a_identity != b_identity
+assert server["verified_client_signatures"] == [a_identity, b_identity, b_identity, b_identity], "actual TLS signature verification must bind distinct input certificates"
+outcomes = ["accepted_removed", "cancelled", "client_certificate_refused", "alpn_refused", "accepted_removed"]
+assert len(server["attempts"]) == len(clients["attempts"]) == len(outcomes)
+for index, (accepted, client, result) in enumerate(zip(server["attempts"], clients["attempts"], outcomes), 1):
+    assert accepted["attempt"] == client["attempt"] == index
+    assert accepted["result"] == client["result"] == result
+    assert accepted["peer"] == client["local_addr"] != server["a_peer"]
+    assert accepted["active_connections"] == 1
+    assert 0 <= accepted["a_records_before"] <= accepted["a_records_after"] <= len(a_records)
+    if result == "accepted_removed":
+        assert accepted["b_records"] == client["payload"]["records"] == [record_sha(0, ord("B"))]
+        assert accepted["b_fin"] is True and client["payload"]["fin"] is True
+        assert accepted["client_cid"] == client["client_cid"] and accepted["server_cid"] == client["server_cid"]
+        assert accepted["verified_client_sha256"] == b_identity and accepted["alpn"] == "asupersync-managed-test"
+        assert accepted["queued_application_suffix"] is True and accepted["retained_ciphertext_queue_claim"] is False
+        assert accepted["a_records_before"] <= accepted["a_records_at_removal"] < accepted["a_records_after"]
+    elif result == "cancelled":
+        assert accepted["actual_initial_sent"] is True and client["initial_packets_sent"] > 0 and client["owned_connect_future_retired"] is True
+        assert accepted["a_records_after"] > accepted["a_records_before"]
+    elif result == "client_certificate_refused":
+        assert "read_hs_fatal_alert" in accepted["error"] and client["server_refusal"] == accepted["error"]
+        assert client["owned_connect_future_retired"] is True and min(client["packets_sent"], client["packets_received"]) > 0
+    else:
+        assert "alpn" in accepted["error"].lower()
+assert server["attempts"][0]["server_cid"] != server["attempts"][4]["server_cid"]
+witness = server["timer_witness"]
+assert 0 <= witness["a_records_before"] < witness["a_records_during_b_handshake"] <= len(a_records)
+assert witness["a_pto_after"] > witness["a_pto_before"] and witness["sent_after_pto_observation"] > 0
+assert witness["egress_counter_scope"] == "shared_socket_not_CID_specific_probe_delivery"
+assert witness["b_tls_held_after_real_initial"] is True and witness["a_reply_queued_after_pause"] is True
+observed = witness["a_peer_observed_record"]
+assert observed["bytes"] == 520 and observed["b_attempt"] == 1
+assert 0 <= observed["sequence"] < len(a_records) and observed["sha256"] == a_records[observed["sequence"]]
+assert observed["a_records_before"] == witness["a_records_before"]
+assert witness["a_last_record_sha256"] == a_records[witness["a_records_during_b_handshake"] - 1]
+negative = multi["negative_controls"]
+assert "ConnectionCreationFailed" in negative["duplicate_cid"]["typed_refusal"]
+assert all(negative[field] is True for field in ("pending_handshake_cancel", "fatal_tls_no_client_certificate", "post_tls_alpn_refusal"))
+print("verified same-socket authenticated A/B admission, cancellation/refusals/removal/readmission, ordered actual payloads, A timer progress and four real task completions before two region closes; no ciphertext, kernel or performance claim")
 PY
+run_stage authenticated-quiet http3,tls quic_native_handshake_udp_loopback --exact managed_quiet::native_managed_quiet_burst_and_timer_recovery --test-threads=1
+python3 - "${OUTPUT_ROOT}/authenticated-quiet.log" <<'PY'
+import hashlib, json, pathlib, re, sys
+log = re.sub(r"\x1b\[[0-9;]*m", "", pathlib.Path(sys.argv[1]).read_text())
+counts = re.findall(r"test result: ok\. (\d+) passed; (\d+) failed; (\d+) ignored; (\d+) measured; (\d+) filtered out", log)
+assert counts == [("1", "0", "0", "0", "4")], ("actual quiet parent required", counts)
+rows = re.findall(r"^MANAGED_QUIC_QUIET_SUMMARY (.+)$", log, re.M)
+assert len(rows) == 1, "one complete actual two-process quiet receipt"
+summary = json.loads(rows[0])
+assert summary["schema"] == "asupersync.managed_quic_quiet.v1"
+paths = {
+    "test": "tests/quic_native_handshake_udp_loopback.rs",
+    "manager": "src/net/quic_native/connection_manager.rs",
+    "managed": "src/net/quic_native/managed_endpoint.rs",
+    "owner": "src/net/quic_native/udp_connection.rs",
+    "endpoint": "src/net/quic_native/endpoint.rs",
+    "application": "src/net/quic_native/endpoint_api.rs",
+    "exports": "src/net/quic_native/mod.rs",
+    "handshake_driver": "src/net/quic_native/handshake_driver.rs",
+    "transport": "src/net/quic_native/transport.rs",
+    "connection": "src/net/quic_native/connection.rs",
+}
+assert summary["source"] == {key: hashlib.sha256(pathlib.Path(path).read_bytes()).hexdigest() for key, path in paths.items()}
+assert len({summary[key] for key in ("parent_pid", "server_pid", "client_pid")}) == 3
+assert all(type(summary[key]) is int and summary[key] > 0 for key in ("parent_pid", "server_pid", "client_pid"))
+executable = summary["executable"]
+assert re.fullmatch(r"[0-9a-f]{64}", executable["sha256"]) and executable["bytes"] > 0
+assert pathlib.Path(executable["path"]).is_absolute()
+assert summary["clock_ticks_per_second"] > 0 and 0 < summary["elapsed_nanos"] < 120_000_000_000
+def record_hash(sequence):
+    data = sequence.to_bytes(8, "big") + bytes(((sequence & 255) + i % 251) & 255 for i in range(512))
+    return hashlib.sha256(data).hexdigest()
+sent, echoed = [0, 1, 2, 3, 4, 5], [0, 1, 2, 9000, 3, 9001, 4, 5]
+for role, received, outbound in (("server", sent, echoed), ("client", echoed, sent)):
+    child = summary[role]
+    assert child["role"] == role and child["pid"] == summary[role + "_pid"]
+    assert child["source"] == summary["source"] and child["executable"] == executable
+    terminal = child["libtest"]
+    assert [terminal[key] for key in ("passed", "failed", "ignored", "measured", "filtered")] == [1, 0, 0, 0, 4]
+    assert re.fullmatch(r"test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in [0-9]+(?:\.[0-9]+)?s", terminal["raw"])
+    assert child["driver_instances"] == 1 and child["runtime_shutdown"] is True
+    assert re.fullmatch(r"TaskId\([0-9]+:[0-9]+\)", child["task"])
+    assert re.fullmatch(r"RegionId\([0-9]+:[0-9]+\)", child["region"])
+    assert child["complete_seq"] < child["region_close_seq"]
+    assert all(child[key] == 0 for key in ("tasks_after_cleanup", "leaked_obligations_after_cleanup",
+        "draining_regions_after_cleanup", "active_connections_after_shutdown", "pending_timers_after_shutdown"))
+    state = child["state"]
+    assert state["received"] == received and state["sent"] == outbound
+    assert state["received_bytes"] == 520 * len(received)
+    assert state["received_sha256"] == [record_hash(sequence) for sequence in received]
+    assert state["fin"] is True and state["fin_sent"] is True
+quiet = summary["quiet_intervals"]
+assert len(quiet) == 7 and len({row["phase"] for row in quiet}) == 7
+for row in quiet:
+    assert row["oracle"] == "quiet" and row["injected_periodic_wake"] is False
+    assert row["elapsed_nanos"] >= 400_000_000
+    before, after = row["before"], row["after"]
+    assert before["pid"] == after["pid"] == summary["server_pid"]
+    assert before["polls"] == after["polls"] and before["wakes"] == after["wakes"]
+    for sample in (before, after):
+        assert sample["parked"] is True and sample["paused"] is False
+        assert sample["pending_timers"] == 0 and sample["deadline"] is None
+        assert sample["state"]["bytes_in_flight"] == sample["state"]["queued_stream_bytes"] == 0
+        assert sample["state"]["pending_stream_frames"] is False
+    for key in ("packets_sent", "packets_received"):
+        assert before["state"][key] == after["state"][key]
+    assert row["cpu_before"]["pid"] == row["cpu_after"]["pid"] == summary["server_pid"]
+    assert row["cpu_before"]["start_ticks"] == row["cpu_after"]["start_ticks"]
+    assert all(row["cpu_after"][key] >= row["cpu_before"][key] for key in ("user_ticks", "system_ticks"))
+assert [row["sequence"] for row in summary["bursts"]] == [0, 1, 2, 4, 5]
+assert all(row["record_sha256"] == record_hash(row["sequence"]) for row in summary["bursts"])
+recovery = summary["recovery"]
+first, later = recovery["initial"], recovery["later"]
+assert 0 < recovery["setup_wait_limit_nanos"] <= 90_000_000_000
+assert later["state"]["pto_count"] >= first["state"]["pto_count"] + 6
+assert later["state"]["packets_sent"] > first["state"]["packets_sent"]
+assert later["state"]["packets_received"] == first["state"]["packets_received"]
+assert later["deadline"] > first["deadline"] and later["deadline"] > later["now"] + 800_000_000
+assert recovery["packet_received_at"] < recovery["retained_deadline"] == later["deadline"]
+assert 3 in recovery["packet_before_deadline"]["state"]["received"]
+assert recovery["removed_by_ack"]["pending_timers"] == recovery["removed_by_ack"]["state"]["pto_count"] == 0
+assert recovery["earlier_rearm_after_ack"]["deadline"] < recovery["retained_deadline"]
+negative = summary["periodic_wake_negative"]
+assert negative["oracle"] == "PeriodicWake" and negative["injected_periodic_wake"] is True
+assert negative["after"]["polls"] > negative["before"]["polls"]
+assert negative["after"]["wakes"] > negative["before"]["wakes"]
+assert summary["claim_boundary"] == "actual candidate measurements and planted wake control; no incumbent comparison"
+assert summary["remaining_acceptance"] == ["identical-workload real incumbent distributions",
+    "simultaneous packet/deadline readiness", "active earlier/later timer replacement",
+    "relative-clock/receive-first/missing-wake mutations", "saturated cancellation and fresh endpoint recovery"]
+print("verified actual retained-driver quiet intervals, protected bursts, PTO/ACK timer recovery and planted periodic wake refusal; no incumbent or performance comparison")
+PY
+
 run_stage authenticated-kernel-backpressure http3,tls quic_h3_live_udp --exact authenticated_managed_kernel_backpressure --ignored --test-threads=1
 python3 - "${OUTPUT_ROOT}/authenticated-kernel-backpressure.log" "${OUTPUT_ROOT}/authenticated-managed.log" <<'PY'
 import json, pathlib, re, sys
 kernel, public = [re.sub(r"\x1b\[[0-9;]*m", "", pathlib.Path(path).read_text()) for path in sys.argv[1:]]
 counts = re.findall(r"test result: ok\. (\d+) passed; (\d+) failed; (\d+) ignored; (\d+) measured; (\d+) filtered out", kernel)
-assert counts == [("1", "0", "0", "0", "7")] * 3, ("actual two kernel peers and explicitly selected parent must each execute", counts)
+assert counts == [("1", "0", "0", "0", "9")] * 3, ("actual two kernel peers and explicitly selected parent must each execute", counts)
 def summaries(log, marker):
     return [json.loads(line.split(marker, 1)[1]) for line in log.splitlines() if marker in line]
 rows = summaries(kernel, "MANAGED_QUIC_KERNEL_TWO_PROCESS ")

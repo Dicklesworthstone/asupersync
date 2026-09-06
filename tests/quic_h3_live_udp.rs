@@ -2367,6 +2367,8 @@ mod managed_kernel_backpressure {
     }
 
     fn peer(role: String, artifacts: PathBuf) {
+        // Request the maintained UDP normalization floor through the public config.
+        const REQUESTED_SEND_BUFFER_BYTES: usize = 8 * 1024;
         let server = role == "server";
         assert!(server || role == "client");
         let runtime = managed_runtime();
@@ -2379,9 +2381,7 @@ mod managed_kernel_backpressure {
                         .parse()
                         .unwrap(),
                     QuicUdpEndpointConfig {
-                        socket_send_buffer_size: Some(
-                            asupersync::net::udp::UDP_MIN_SOCKET_BUFFER_BYTES,
-                        ),
+                        socket_send_buffer_size: Some(REQUESTED_SEND_BUFFER_BYTES),
                         max_batch_size: 1,
                         ..QuicUdpEndpointConfig::default()
                     },
@@ -2393,7 +2393,7 @@ mod managed_kernel_backpressure {
                 let buffers = socket.buffer_report();
                 assert_eq!(
                     buffers.requested_send_buffer_bytes,
-                    Some(asupersync::net::udp::UDP_MIN_SOCKET_BUFFER_BYTES)
+                    Some(REQUESTED_SEND_BUFFER_BYTES)
                 );
                 assert!(
                     buffers.applied_send_buffer_bytes.unwrap()
@@ -2571,7 +2571,7 @@ mod managed_kernel_backpressure {
                     eprintln!(
                         "MANAGED_QUIC_KERNEL_LOG {}\n{}",
                         path.display(),
-                        std::fs::read_to_string(path).unwrap()
+                        std::fs::read_to_string(&path).unwrap()
                     );
                 }
             }
