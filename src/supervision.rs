@@ -1798,8 +1798,9 @@ mod managed {
 
     /// Restart eligibility for the executing managed entry point.
     ///
-    /// Controller-initiated shutdown and parent cancellation never restart a
-    /// child, regardless of this mode. These modes do not change the legacy
+    /// Stopping the controller or cancelling its parent never restarts a child.
+    /// A replacement batch may restart live collateral siblings according to
+    /// these modes. These modes do not change the legacy
     /// Err-only [`SupervisionStrategy`] planning functions.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum ManagedRestartMode {
@@ -1812,10 +1813,15 @@ mod managed {
     }
 
     impl ManagedRestartMode {
-        fn eligible<E>(self, outcome: &Outcome<(), E>) -> bool {
+        fn eligible<E>(self, completed: &ManagedChildCompletion<E>) -> bool {
             match self {
                 Self::Permanent => true,
-                Self::Transient => matches!(outcome, Outcome::Err(_) | Outcome::Panicked(_)),
+                Self::Transient => {
+                    matches!(completed.outcome, Outcome::Panicked(_))
+                        || matches!(completed.task_outcome, Err(JoinError::Panicked(_)))
+                        || (completed.task_outcome.is_ok()
+                            && matches!(completed.outcome, Outcome::Err(_)))
+                }
                 Self::Temporary => false,
             }
         }
@@ -1961,7 +1967,16 @@ mod managed {
         /// Exact generation that produced this result.
         pub generation: ManagedGeneration,
         /// User result, read only after the actual task terminal was joined.
+        /// This raw return does not imply task success: cancellation may
+        /// dominate it in the separately retained `task_outcome`.
         pub outcome: Outcome<(), E>,
+        /// Actual classified TaskHandle terminal, including cancellation that
+        /// dominated a cancellation-blind or unacknowledged user return.
+        pub task_outcome: Result<(), JoinError>,
+        /// Whether controller shutdown won the publication lock before this
+        /// generation published its typed terminal. Used for collateral
+        /// restart eligibility; later cancellation cannot rewrite this fact.
+        pub shutdown_requested_before_completion: bool,
         /// User-return time, or join-observation time for a runtime panic/cancel.
         pub completed_at: Time,
         /// Canonical region outcome after actual quiescence, including the
@@ -2097,7 +2112,8 @@ mod managed {
     struct ChildPublication<E> {
         started: bool,
         identity: Option<ManagedGeneration>,
-        terminal: Option<(Time, Outcome<(), E>)>,
+        terminal: Option<(Time, Outcome<(), E>, bool)>,
+        shutdown_requested: bool,
         waiter: Option<Waker>,
     }
 
@@ -2116,6 +2132,9 @@ mod managed {
         fn cancel(&mut self) -> Result<(), ChildRegionError> {
             if !self.cancellation_sent {
                 self.cancellation_sent = true;
+                // Share the terminal publication's lock: observation of a
+                // TaskHandle alone cannot fence a concurrently returning child.
+                self.publication.lock().shutdown_requested = true;
                 if let Some(region) = &self.region {
                     let mut reason = CancelReason::with_origin(
                         crate::types::CancelKind::User,
@@ -2303,7 +2322,8 @@ mod managed {
                 .expect("joined owned generation");
             child.terminal_observed = true;
             let handle = child.handle.take().expect("terminal is consumed once");
-            let (identity, terminal) = {
+            let task_outcome = result.clone();
+            let (identity, terminal, shutdown_requested) = {
                 let mut publication = child.publication.lock();
                 (
                     publication.identity.unwrap_or(ManagedGeneration {
@@ -2312,14 +2332,19 @@ mod managed {
                         task: handle.task_id(),
                     }),
                     publication.terminal.take(),
+                    publication.shutdown_requested,
                 )
             };
-            let (completed_at, outcome) = match result {
+            let (completed_at, outcome, shutdown_requested_before_completion) = match result {
                 Err(JoinError::Panicked(payload)) => {
                     if let Err(secondary) = catch_unwind(AssertUnwindSafe(|| drop(terminal))) {
                         std::mem::forget(secondary);
                     }
-                    (self.cx.now(), Outcome::Panicked(payload))
+                    (
+                        self.cx.now(),
+                        Outcome::Panicked(payload),
+                        shutdown_requested,
+                    )
                 }
                 Err(JoinError::PolledAfterCompletion) => {
                     unreachable!("managed terminal consumed twice")
@@ -2329,12 +2354,17 @@ mod managed {
                     // typed result, including an encoded Panicked outcome.
                     terminal.expect("checked terminal")
                 }
-                Err(JoinError::Cancelled(reason)) => (self.cx.now(), Outcome::Cancelled(reason)),
+                Err(JoinError::Cancelled(reason)) => (
+                    self.cx.now(),
+                    Outcome::Cancelled(reason),
+                    shutdown_requested,
+                ),
                 Ok(()) => (
                     self.cx.now(),
                     Outcome::Panicked(PanicPayload::new(
                         "managed child returned without its terminal publication",
                     )),
+                    shutdown_requested,
                 ),
             };
             self.report.joined += 1;
@@ -2343,6 +2373,8 @@ mod managed {
                 generation: identity,
                 completed_at,
                 outcome,
+                task_outcome,
+                shutdown_requested_before_completion,
                 region_outcome: None,
                 cleanup_outcome: None,
             });
@@ -2382,6 +2414,7 @@ mod managed {
                 started: false,
                 identity: None,
                 terminal: None,
+                shutdown_requested: false,
                 waiter: None,
             }));
             let child_publication = Arc::clone(&publication);
@@ -2432,7 +2465,10 @@ mod managed {
                             }
                         }
                     };
-                    child_publication.lock().terminal = Some((cx.now(), outcome));
+                    let completed_at = cx.now();
+                    let mut publication = child_publication.lock();
+                    let shutdown_requested = publication.shutdown_requested;
+                    publication.terminal = Some((completed_at, outcome, shutdown_requested));
                 })
                 .map_err(ManagedSupervisorError::Spawn)?;
             self.numbers[index] = number;
@@ -2557,6 +2593,19 @@ mod managed {
                 return Err(error);
             }
             Ok(())
+        }
+
+        fn cancel_children(&mut self, indices: impl Iterator<Item = usize>) -> bool {
+            let mut accepted = true;
+            for index in indices {
+                if let Some(child) = self.running[index].as_mut() {
+                    if let Err(error) = child.cancel() {
+                        accepted = false;
+                        self.record_error(ManagedSupervisorError::Region(error));
+                    }
+                }
+            }
+            accepted
         }
 
         fn dependency_unavailable(&self, index: usize) -> Option<ChildName> {
@@ -2761,12 +2810,9 @@ mod managed {
                 }
             }
             while let Some(failed) = self.wait_exit().await {
-                let eligible = self.supervisor.bindings[failed].mode.eligible(
-                    &self.latest[failed]
-                        .as_ref()
-                        .expect("joined terminal")
-                        .outcome,
-                );
+                let eligible = self.supervisor.bindings[failed]
+                    .mode
+                    .eligible(self.latest[failed].as_ref().expect("joined terminal"));
                 if !eligible {
                     if let Err(error) = self.drain(failed).await {
                         self.record_error(error);
@@ -2812,29 +2858,34 @@ mod managed {
                             }
                     })
                     .collect();
-                // A live transient sibling is restarted after intentional
-                // collateral shutdown. An already completed normal transient
-                // child must not be resurrected by a delayed sibling event.
+                // Publish cancellation to every affected sibling before any
+                // join: one child's asynchronous cleanup may require another
+                // sibling to observe cancellation before it can finish.
+                let cancelled = self.cancel_children(affected.iter().rev().copied());
+                let mut drained = true;
+                for &index in affected.iter().rev() {
+                    if let Err(error) = self.drain(index).await {
+                        self.record_error(error);
+                        drained = false;
+                    }
+                }
+                if !cancelled || !drained {
+                    return;
+                }
+                // An already completed but unobserved normal transient child
+                // must stay stopped. Derive eligibility only after real joins
+                // using the atomic shutdown-versus-terminal ordering.
                 let restart: Vec<_> = affected
                     .iter()
                     .copied()
                     .filter(|&index| {
                         let mode = self.supervisor.bindings[index].mode;
+                        let completed = self.latest[index].as_ref().expect("drained generation");
                         mode != ManagedRestartMode::Temporary
-                            && (self.running[index]
-                                .as_ref()
-                                .is_some_and(|child| !child.terminal_observed)
-                                || self.latest[index]
-                                    .as_ref()
-                                    .is_some_and(|completed| mode.eligible(&completed.outcome)))
+                            && (completed.shutdown_requested_before_completion
+                                || mode.eligible(completed))
                     })
                     .collect();
-                for &index in affected.iter().rev() {
-                    if let Err(error) = self.drain(index).await {
-                        self.record_error(error);
-                        return;
-                    }
-                }
                 if !self.backoff(delay).await {
                     return;
                 }
@@ -2869,6 +2920,7 @@ mod managed {
         }
 
         async fn finish(&mut self) {
+            self.cancel_children((0..self.running.len()).rev());
             for index in (0..self.running.len()).rev() {
                 if let Err(error) = self.drain(index).await {
                     self.record_error(error);
@@ -3763,6 +3815,368 @@ mod managed {
             ));
             assert!(report.children[0].region_outcome.is_some());
             assert!(lab.state.region(generation.region).is_none());
+            clean(&mut lab, root);
+        }
+
+        #[test]
+        fn managed_cancel_all_precedes_cleanup_that_waits_for_sibling_cancellation() {
+            for restart_policy in [
+                Some(RestartPolicy::OneForAll),
+                Some(RestartPolicy::RestForOne),
+                None,
+            ] {
+                let policy = restart_policy.unwrap_or(RestartPolicy::OneForOne);
+                let mut lab = LabRuntime::new(LabConfig::new(0x34_0008).max_steps(8192));
+                let root = lab.state.create_root_region(Budget::INFINITE);
+                let starts = Arc::new(AtomicUsize::new(0));
+                let b_cancelled = Arc::new(AtomicUsize::new(0));
+                let c_pending = Arc::new(AtomicUsize::new(0));
+                let c_finished = Arc::new(AtomicUsize::new(0));
+                let trigger = Arc::new(Mutex::new(None));
+                let published_trigger = Arc::clone(&trigger);
+                let a_starts = Arc::clone(&starts);
+                let a = ManagedChildBinding::new(
+                    "a",
+                    ManagedRestartMode::Transient,
+                    move |cx: Cx, generation: ManagedGeneration| {
+                        a_starts.fetch_add(1, Ordering::SeqCst);
+                        let (sender, mut receiver) = mpsc::channel::<()>(1);
+                        *published_trigger.lock() = Some(sender);
+                        async move {
+                            if generation.number > 1 {
+                                return Outcome::Ok(());
+                            }
+                            match receiver.recv(&cx).await {
+                                Ok(()) => Outcome::Err("restart trigger"),
+                                Err(_) => Outcome::Cancelled(cx.cancel_reason().unwrap()),
+                            }
+                        }
+                    },
+                );
+                let (release_b, b_gate) = oneshot::channel::<()>();
+                let (witness, c_gate) = oneshot::channel::<()>();
+                let b_state = Arc::new(Mutex::new(Some((b_gate, witness))));
+                let b_starts = Arc::clone(&starts);
+                let b_observed = Arc::clone(&b_cancelled);
+                let b = ManagedChildBinding::new(
+                    "b",
+                    ManagedRestartMode::Transient,
+                    move |cx: Cx, generation: ManagedGeneration| {
+                        b_starts.fetch_add(1, Ordering::SeqCst);
+                        let gates =
+                            (generation.number == 1).then(|| b_state.lock().take().unwrap());
+                        let observed = Arc::clone(&b_observed);
+                        async move {
+                            let Some((mut release, witness)) = gates else {
+                                return Outcome::Ok(());
+                            };
+                            let (_keep_sender, mut receiver) = mpsc::channel::<()>(1);
+                            assert!(receiver.recv(&cx).await.is_err());
+                            assert!(cx.cancel_reason().is_some());
+                            observed.fetch_add(1, Ordering::SeqCst);
+                            release.recv_uninterruptible().await.unwrap();
+                            witness.send_blocking(()).unwrap();
+                            Outcome::<(), &'static str>::Cancelled(cx.cancel_reason().unwrap())
+                        }
+                    },
+                );
+                let c_state = Arc::new(Mutex::new(Some(c_gate)));
+                let c_starts = Arc::clone(&starts);
+                let c_waited = Arc::clone(&c_pending);
+                let c_done = Arc::clone(&c_finished);
+                let c = ManagedChildBinding::new(
+                    "c",
+                    ManagedRestartMode::Transient,
+                    move |cx: Cx, generation: ManagedGeneration| {
+                        c_starts.fetch_add(1, Ordering::SeqCst);
+                        let gate = (generation.number == 1).then(|| c_state.lock().take().unwrap());
+                        let waited = Arc::clone(&c_waited);
+                        let done = Arc::clone(&c_done);
+                        async move {
+                            let Some(mut witness) = gate else {
+                                return Outcome::Ok(());
+                            };
+                            let (_keep_sender, mut receiver) = mpsc::channel::<()>(1);
+                            assert!(receiver.recv(&cx).await.is_err());
+                            assert!(cx.cancel_reason().is_some());
+                            let mut waiting = std::pin::pin!(witness.recv_uninterruptible());
+                            poll_fn(|poll_cx| {
+                                let result = waiting.as_mut().poll(poll_cx);
+                                if result.is_pending() {
+                                    waited.fetch_add(1, Ordering::SeqCst);
+                                }
+                                result
+                            })
+                            .await
+                            .unwrap();
+                            done.fetch_add(1, Ordering::SeqCst);
+                            Outcome::<(), &'static str>::Cancelled(cx.cancel_reason().unwrap())
+                        }
+                    },
+                );
+                let managed = topology(&["a", "b", "c"], policy)
+                    .bind_managed(vec![a, b, c], config(policy, 1))
+                    .unwrap();
+                let output = Arc::new(Mutex::new(None));
+                let published = Arc::clone(&output);
+                let (parent, mut join) = lab
+                    .state
+                    .create_task(root, Budget::INFINITE, async move {
+                        *published.lock() = Some(managed.run(&Cx::current().unwrap()).await);
+                    })
+                    .unwrap();
+                lab.scheduler.lock().schedule(parent, 0);
+                lab.run_until_idle();
+                assert_eq!(starts.load(Ordering::SeqCst), 3);
+                assert!(join.try_join().unwrap().is_none());
+                if restart_policy.is_some() {
+                    trigger.lock().as_ref().unwrap().try_send(()).unwrap();
+                } else {
+                    join.abort();
+                }
+                lab.run_until_idle();
+                assert!(
+                    c_pending.load(Ordering::SeqCst) > 0,
+                    "first drained child's actual cleanup must park"
+                );
+                assert_eq!(
+                    b_cancelled.load(Ordering::SeqCst),
+                    1,
+                    "second sibling must observe cancellation while first cleanup is still Pending"
+                );
+                assert_eq!(c_finished.load(Ordering::SeqCst), 0);
+                assert_eq!(
+                    starts.load(Ordering::SeqCst),
+                    3,
+                    "no generation can replace undrained work"
+                );
+                assert!(output.lock().is_none());
+                assert!(join.try_join().unwrap().is_none());
+                release_b.send_blocking(()).unwrap();
+                lab.run_until_idle();
+                if restart_policy.is_some() {
+                    assert!(matches!(join.try_join(), Ok(Some(()))));
+                } else {
+                    assert!(matches!(join.try_join(), Err(JoinError::Cancelled(_))));
+                }
+                let report = output
+                    .lock()
+                    .take()
+                    .expect("all acknowledged cleanup joins before report");
+                assert_eq!(c_finished.load(Ordering::SeqCst), 1);
+                assert_eq!(b_cancelled.load(Ordering::SeqCst), 1);
+                assert_eq!(report.restart_batches, u64::from(restart_policy.is_some()));
+                assert_eq!(report.started, if restart_policy.is_some() { 6 } else { 3 });
+                assert_eq!(report.joined, report.started);
+                assert_eq!(report.outcome.is_ok(), restart_policy.is_some());
+                assert_eq!(report.outcome.is_cancelled(), restart_policy.is_none());
+                if restart_policy.is_none() {
+                    for completed in report.children.iter().filter(|child| child.name != "a") {
+                        assert!(completed.shutdown_requested_before_completion);
+                        assert!(completed.outcome.is_cancelled());
+                        assert!(
+                            completed.task_outcome.is_ok(),
+                            "acknowledged cleanup returns its actual task value"
+                        );
+                    }
+                }
+                clean(&mut lab, root);
+            }
+        }
+
+        #[test]
+        fn managed_raw_user_return_does_not_hide_actual_unacknowledged_cancellation() {
+            for returned_error in [false, true] {
+                let report = run_case(move |cx| async move {
+                    let binding = ManagedChildBinding::new(
+                        "child",
+                        ManagedRestartMode::Transient,
+                        move |child: Cx, _| async move {
+                            child.cancel_with(CancelReason::user(
+                                "independent unacknowledged cancellation",
+                            ));
+                            // Deliberately no checkpoint acknowledgement: the
+                            // raw return must not become an actual task success.
+                            if returned_error {
+                                Outcome::Err("late domain error")
+                            } else {
+                                Outcome::Ok(())
+                            }
+                        },
+                    );
+                    topology(&["child"], RestartPolicy::OneForOne)
+                        .bind_managed(vec![binding], config(RestartPolicy::OneForOne, 3))
+                        .unwrap()
+                        .run(&cx)
+                        .await
+                });
+                assert_eq!(report.started, 1);
+                assert_eq!(report.joined, 1);
+                assert_eq!(
+                    report.restart_batches, 0,
+                    "transient cancellation cannot be recast as restartable raw Err"
+                );
+                let completed = &report.children[0];
+                assert_eq!(completed.outcome.is_err(), returned_error);
+                assert_eq!(completed.outcome.is_ok(), !returned_error);
+                assert!(matches!(
+                    completed.task_outcome,
+                    Err(JoinError::Cancelled(_))
+                ));
+                assert!(!completed.shutdown_requested_before_completion);
+            }
+        }
+
+        #[test]
+        fn managed_transient_completion_during_bounded_scan_is_not_resurrected() {
+            use std::sync::atomic::AtomicBool;
+
+            let mut lab = LabRuntime::new(LabConfig::new(0x34_0009).max_steps(32_768));
+            let root = lab.state.create_root_region(Budget::INFINITE);
+            let names: Vec<_> = (0..33).map(|index| format!("child-{index:02}")).collect();
+            let name_refs: Vec<_> = names.iter().map(String::as_str).collect();
+            let starts = Arc::new(Mutex::new(Vec::new()));
+            let (release_first, wait_first) = oneshot::channel::<()>();
+            let first_gate = Arc::new(Mutex::new(Some(wait_first)));
+            let mut bindings = Vec::new();
+            for (index, name) in names.iter().enumerate() {
+                let log = Arc::clone(&starts);
+                let gate = Arc::clone(&first_gate);
+                let mode = if index == 0 || index == 32 {
+                    ManagedRestartMode::Transient
+                } else {
+                    ManagedRestartMode::Temporary
+                };
+                bindings.push(ManagedChildBinding::new(
+                    name.clone(),
+                    mode,
+                    move |child: Cx, generation: ManagedGeneration| {
+                        log.lock().push((index, generation));
+                        let first = (index == 0 && generation.number == 1)
+                            .then(|| gate.lock().take().unwrap());
+                        async move {
+                            if generation.number > 1 {
+                                return Outcome::Ok(());
+                            }
+                            if let Some(mut wait) = first {
+                                wait.recv_uninterruptible().await.unwrap();
+                                return Outcome::Ok(());
+                            }
+                            if index == 32 {
+                                return Outcome::Err(());
+                            }
+                            let (_keep_sender, mut receiver) = mpsc::channel::<()>(1);
+                            assert!(receiver.recv(&child).await.is_err());
+                            Outcome::Cancelled(child.cancel_reason().unwrap())
+                        }
+                    },
+                ));
+            }
+            let managed = topology(&name_refs, RestartPolicy::OneForAll)
+                .bind_managed(bindings, config(RestartPolicy::OneForAll, 1))
+                .unwrap();
+            let permit_poll = Arc::new(AtomicBool::new(false));
+            let permitted = Arc::clone(&permit_poll);
+            let inner_polls = Arc::new(AtomicUsize::new(0));
+            let observed_polls = Arc::clone(&inner_polls);
+            let (parent, mut join) = lab
+                .state
+                .create_task(root, Budget::INFINITE, async move {
+                    let cx = Cx::current().unwrap();
+                    let mut execution = Box::pin(managed.run(&cx));
+                    poll_fn(|poll_cx| {
+                        if !permitted.swap(false, Ordering::SeqCst) {
+                            return Poll::Pending;
+                        }
+                        observed_polls.fetch_add(1, Ordering::SeqCst);
+                        execution.as_mut().poll(poll_cx)
+                    })
+                    .await
+                })
+                .unwrap();
+            // Host-controlled actual scheduler polls make the scan yield
+            // observable without changing the engine or its event queue.
+            for _ in 0..256 {
+                if starts.lock().len() == 33 {
+                    break;
+                }
+                permit_poll.store(true, Ordering::SeqCst);
+                lab.scheduler.lock().schedule(parent, 0);
+                lab.run_until_idle();
+            }
+            assert_eq!(starts.lock().len(), 33);
+            let first = starts.lock()[0].1;
+            let trigger = starts.lock()[32].1;
+            assert!(lab.state.task(first.task).is_some());
+            assert!(
+                lab.state.task(trigger.task).is_none(),
+                "actual final block's failing child already completed"
+            );
+            // Acknowledge the last start, then execute exactly the first
+            // bounded 32-slot scan; the trigger is in the unscanned last slot.
+            let before = inner_polls.load(Ordering::SeqCst);
+            permit_poll.store(true, Ordering::SeqCst);
+            lab.scheduler.lock().schedule(parent, 0);
+            lab.run_until_idle();
+            assert_eq!(inner_polls.load(Ordering::SeqCst), before + 1);
+            assert!(join.try_join().unwrap().is_none());
+            release_first.send_blocking(()).unwrap();
+            lab.run_until_idle();
+            assert_eq!(
+                inner_polls.load(Ordering::SeqCst),
+                before + 1,
+                "normal completion occurs while the controller scan remains suspended"
+            );
+            assert!(lab.state.task(first.task).is_none());
+            assert!(
+                lab.state
+                    .trace_handle()
+                    .snapshot()
+                    .iter()
+                    .any(|event| event.kind == crate::trace::TraceEventKind::Complete
+                        && matches!(event.data, crate::trace::TraceData::Task { task, region }
+                        if task == first.task && region == first.region)),
+                "full canonical task/region completion is the causal witness"
+            );
+            let mut result = None;
+            for _ in 0..512 {
+                permit_poll.store(true, Ordering::SeqCst);
+                lab.scheduler.lock().schedule(parent, 0);
+                lab.run_until_idle();
+                if let Some(report) = join.try_join().unwrap() {
+                    result = Some(report);
+                    break;
+                }
+            }
+            let report = result.expect("bounded actual controller resumes, drains and finishes");
+            assert_eq!(
+                report.started, 34,
+                "only the failed last child gets a replacement"
+            );
+            assert_eq!(report.joined, 34);
+            assert_eq!(report.restart_batches, 1);
+            assert_eq!(
+                starts
+                    .lock()
+                    .iter()
+                    .filter(|(index, _)| *index == 0)
+                    .count(),
+                1
+            );
+            assert_eq!(
+                starts
+                    .lock()
+                    .iter()
+                    .filter(|(index, _)| *index == 32)
+                    .count(),
+                2
+            );
+            let completed = &report.children[0];
+            assert_eq!(completed.generation, first);
+            assert!(completed.outcome.is_ok());
+            assert!(completed.task_outcome.is_ok());
+            assert!(!completed.shutdown_requested_before_completion);
+            assert!(report.outcome.is_ok());
             clean(&mut lab, root);
         }
     }
