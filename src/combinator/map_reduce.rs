@@ -709,6 +709,10 @@ impl<E> ExecutingMapFailures<E> {
         self.stop(index, MapReduceStopCause::Cancelled);
         if self.cancelled.as_ref().is_none_or(|(old, _)| index < *old) {
             self.cancelled = Some((index, reason));
+        } else if let Some((old, retained)) = &mut self.cancelled
+            && *old == index
+        {
+            retained.strengthen(&reason);
         }
     }
 
@@ -748,6 +752,43 @@ fn executing_map_panic(payload: Box<dyn std::any::Any + Send>) -> PanicPayload {
     // not replace the original panic while owned children still need draining.
     std::mem::forget(payload);
     PanicPayload::new(message)
+}
+
+fn executing_map_caller_cancel<E>(
+    cx: &Cx,
+    observed: &mut Option<(usize, CancelReason)>,
+    failures: &mut ExecutingMapFailures<E>,
+    index: usize,
+) -> bool {
+    // A checkpoint publishes an acknowledgement consumed by the scheduler.
+    // Re-acknowledging on every Pending cleanup poll would continuously
+    // reschedule the coordinator even when only an external child wake can
+    // make progress. Keep the owned cancellation registration, but acknowledge
+    // once per reason. A stronger explicit request still needs one new
+    // acknowledgement to reconcile the authoritative task state/budget.
+    if let Some((first_index, acknowledged)) = observed {
+        let changed = cx.cancel_reason().is_some_and(|current| {
+            let mut merged = acknowledged.clone();
+            merged.strengthen(&current)
+        });
+        if changed
+            && cx.checkpoint().is_err()
+            && let Some(current) = cx.cancel_reason()
+        {
+            acknowledged.strengthen(&current);
+        }
+        failures.cancel(*first_index, acknowledged.clone());
+        true
+    } else if cx.checkpoint().is_err() {
+        let reason = cx
+            .cancel_reason()
+            .unwrap_or_else(|| CancelReason::user("map-reduce cancelled"));
+        failures.cancel(index, reason.clone());
+        *observed = Some((index, reason));
+        true
+    } else {
+        false
+    }
 }
 
 /// Lazily maps inputs as real scoped children and folds results in input order.
@@ -813,6 +854,7 @@ where
     let map = Arc::new(map);
     let mut exhausted = false;
     let mut abort_requested = false;
+    let mut caller_cancel_observed = None;
     let mut admitted = 0_usize;
     let mut completed = 0_usize;
     let mut reduced = 0_usize;
@@ -821,13 +863,7 @@ where
 
     std::future::poll_fn(|poll_cx| {
         owner.cancel_waker = Some(cx.refresh_cancel_waker(owner.cancel_waker, poll_cx.waker()));
-        if cx.checkpoint().is_err() {
-            failures.cancel(
-                admitted,
-                cx.cancel_reason()
-                    .unwrap_or_else(|| CancelReason::user("map-reduce cancelled")),
-            );
-        }
+        executing_map_caller_cancel(cx, &mut caller_cancel_observed, &mut failures, admitted);
         // Snapshot a finite input-index sweep. Absolute indices stay valid
         // when front folds remove slots; later admissions receive a subsequent
         // sweep. This bounds both terminal polling and canceled-value disposal.
@@ -923,12 +959,12 @@ where
                 folded += 1;
                 // A reducer can publish cancellation even when no input is
                 // left to admit. Observe it before any further fold or result.
-                if cx.checkpoint().is_err() {
-                    failures.cancel(
-                        slot.index,
-                        cx.cancel_reason()
-                            .unwrap_or_else(|| CancelReason::user("map-reduce cancelled")),
-                    );
+                if executing_map_caller_cancel(
+                    cx,
+                    &mut caller_cancel_observed,
+                    &mut failures,
+                    slot.index,
+                ) {
                     break;
                 }
             }
@@ -963,12 +999,8 @@ where
         {
             // A synchronous reducer/input callback can itself publish caller
             // cancellation. Recheck immediately before every admission.
-            if cx.checkpoint().is_err() {
-                failures.cancel(
-                    admitted,
-                    cx.cancel_reason()
-                        .unwrap_or_else(|| CancelReason::user("map-reduce cancelled")),
-                );
+            if executing_map_caller_cancel(cx, &mut caller_cancel_observed, &mut failures, admitted)
+            {
                 break;
             }
             let item = match catch_unwind(AssertUnwindSafe(|| {
@@ -992,12 +1024,8 @@ where
                 failures.error(admitted, MapReduceExecutionError::InputIndexExhausted);
                 break;
             };
-            if cx.checkpoint().is_err() {
-                failures.cancel(
-                    admitted,
-                    cx.cancel_reason()
-                        .unwrap_or_else(|| CancelReason::user("map-reduce cancelled")),
-                );
+            if executing_map_caller_cancel(cx, &mut caller_cancel_observed, &mut failures, admitted)
+            {
                 break;
             }
             let mapper = Arc::clone(&map);
@@ -1028,13 +1056,7 @@ where
         }
         // next() can request cancellation and return None. This checkpoint is
         // also the success-publication boundary when no admission was needed.
-        if cx.checkpoint().is_err() {
-            failures.cancel(
-                admitted,
-                cx.cancel_reason()
-                    .unwrap_or_else(|| CancelReason::user("map-reduce cancelled")),
-            );
-        }
+        executing_map_caller_cancel(cx, &mut caller_cancel_observed, &mut failures, admitted);
         if failures.stopped_by.is_some() {
             owner.abort(&cx.cancel_reason().unwrap_or_else(CancelReason::race_loser));
             abort_requested = true;
@@ -1133,18 +1155,28 @@ mod tests {
     {
         let mut lab = LabRuntime::new(LabConfig::new(0x32_0100).max_steps(4096));
         let root = lab.state.create_root_region(Budget::INFINITE);
+        let returned = Arc::new(parking_lot::Mutex::new(None));
+        let publication = Arc::clone(&returned);
         let (parent, mut join) = lab
             .state
             .create_task(root, Budget::INFINITE, async move {
-                factory(Cx::current().expect("actual map coordinator")).await
+                let cx = Cx::current().expect("actual map coordinator");
+                let value = factory(cx.clone()).await;
+                *publication.lock() = Some((value, cx.cancel_reason()));
             })
             .unwrap();
         lab.scheduler.lock().schedule(parent, 0);
         lab.run_until_idle();
-        let result = join
-            .try_join()
-            .unwrap()
-            .expect("bounded map execution terminates");
+        let (result, cancelled) = returned
+            .lock()
+            .take()
+            .expect("bounded map execution returned");
+        // RuntimeState::create_task deliberately uses cancellation-dominant
+        // delivery. Its terminal receipt is distinct from the engine report.
+        match cancelled {
+            Some(reason) => assert_eq!(join.try_join(), Err(JoinError::Cancelled(reason))),
+            None => assert_eq!(join.try_join(), Ok(Some(()))),
+        }
         assert_executing_lab_clean(&mut lab, root);
         result
     }
@@ -1272,11 +1304,14 @@ mod tests {
         let pulled = Arc::new(AtomicUsize::new(0));
         let input_pulled = Arc::clone(&pulled);
         let child_gate = Arc::clone(&gate);
+        let returned = Arc::new(parking_lot::Mutex::new(None));
+        let publication = Arc::clone(&returned);
         let (parent, mut join) = lab
             .state
             .create_task(root, Budget::INFINITE, async move {
                 let cx = Cx::current().unwrap();
-                cx.scope()
+                let report = cx
+                    .scope()
                     .map_reduce(
                         &cx,
                         executing_limits(4096, 4096),
@@ -1301,7 +1336,8 @@ mod tests {
                         },
                         |left, right| left + right,
                     )
-                    .await
+                    .await;
+                *publication.lock() = Some(report);
             })
             .unwrap();
         let parent_cx = lab.state.task(parent).unwrap().cx.clone().unwrap();
@@ -1332,7 +1368,27 @@ mod tests {
             (64..4096).contains(&seen),
             "other task must execute before a large window is exhausted: {seen}"
         );
-        let report = join.try_join().unwrap().unwrap();
+        assert_eq!(
+            join.try_join(),
+            Err(JoinError::Cancelled(
+                lab.state
+                    .trace_handle()
+                    .snapshot()
+                    .iter()
+                    .find_map(|event| {
+                        match &event.data {
+                            crate::trace::TraceData::Cancel { task, reason, .. }
+                                if *task == parent =>
+                            {
+                                Some(reason.clone())
+                            }
+                            _ => None,
+                        }
+                    })
+                    .expect("actual parent cancellation trace")
+            ))
+        );
+        let report = returned.lock().take().expect("actual map engine report");
         assert!(report.outcome.is_cancelled());
         assert_eq!(report.admitted, pulled.load(Ordering::SeqCst));
         assert_eq!(report.completed, report.admitted);
@@ -1503,6 +1559,132 @@ mod tests {
             (0, 0, 0)
         );
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn executing_map_stronger_caller_cancel_reconciles_once_at_original_reducer_index() {
+        let mut lab = LabRuntime::new(LabConfig::new(0x32_0110).max_steps(8192));
+        let root = lab.state.create_root_region(Budget::INFINITE);
+        let (started, first_wait) = crate::channel::oneshot::channel::<()>();
+        let started = Arc::new(parking_lot::Mutex::new(Some(started)));
+        let first_wait = Arc::new(parking_lot::Mutex::new(Some(first_wait)));
+        let (release, held) = crate::channel::oneshot::channel::<()>();
+        let held = Arc::new(parking_lot::Mutex::new(Some(held)));
+        let returned = Arc::new(parking_lot::Mutex::new(None));
+        let publication = Arc::clone(&returned);
+        let third_id = Arc::new(parking_lot::Mutex::new(None));
+        let actual_third = Arc::clone(&third_id);
+        let (parent, mut joined) = lab
+            .state
+            .create_task(root, Budget::INFINITE, async move {
+                let cx = Cx::current().unwrap();
+                let reducer_cx = cx.clone();
+                let report = cx
+                    .scope()
+                    .map_reduce(
+                        &cx,
+                        executing_limits(3, 3),
+                        [0, 1, 2],
+                        move |child, index| {
+                            let started = Arc::clone(&started);
+                            let first_wait = Arc::clone(&first_wait);
+                            let held = Arc::clone(&held);
+                            let actual_third = Arc::clone(&actual_third);
+                            async move {
+                                if index == 0 {
+                                    let mut receiver = first_wait.lock().take().unwrap();
+                                    receiver.recv_uninterruptible().await.unwrap();
+                                } else if index == 2 {
+                                    *actual_third.lock() = Some(child.task_id());
+                                    started.lock().take().unwrap().send_blocking(()).unwrap();
+                                    let mut receiver = held.lock().take().unwrap();
+                                    receiver.recv_uninterruptible().await.unwrap();
+                                }
+                                Outcome::<_, ()>::Ok(index)
+                            }
+                        },
+                        move |left, right| {
+                            reducer_cx.cancel_with(
+                                crate::types::CancelKind::User,
+                                Some("reducer owns first cancellation"),
+                            );
+                            left + right
+                        },
+                    )
+                    .await;
+                *publication.lock() = Some(report);
+            })
+            .unwrap();
+        let parent_cx = lab.state.task(parent).unwrap().cx.clone().unwrap();
+        lab.scheduler.lock().schedule(parent, 0);
+        lab.run_until_idle();
+        assert!(lab.steps() < 8192);
+        assert!(lab.scheduler.lock().is_empty());
+        assert_eq!(lab.run_until_idle(), 0);
+        assert_eq!(joined.try_join(), Ok(None));
+        assert!(returned.lock().is_none());
+        let third = third_id.lock().unwrap();
+        assert!(
+            lab.state.task(third).is_some(),
+            "the higher input really remains owned"
+        );
+        assert_eq!(lab.state.live_task_count(), 2);
+        assert_eq!(
+            lab.state
+                .task(parent)
+                .unwrap()
+                .cancel_reason()
+                .unwrap()
+                .kind,
+            crate::types::CancelKind::User
+        );
+
+        parent_cx.cancel_with(
+            crate::types::CancelKind::Timeout,
+            Some("stronger request during held cleanup"),
+        );
+        let stronger = parent_cx.cancel_reason().unwrap();
+        assert_eq!(stronger.kind, crate::types::CancelKind::Timeout);
+        let progress = lab.run_until_idle();
+        assert!(
+            progress > 0,
+            "the owned cancellation waker must publish real progress"
+        );
+        assert!(lab.steps() < 8192);
+        assert!(
+            lab.scheduler.lock().is_empty(),
+            "unchanged strengthened cancellation must park again"
+        );
+        assert_eq!(lab.run_until_idle(), 0);
+        let holder = lab.state.task(parent).unwrap();
+        assert_eq!(holder.cancel_reason(), Some(&stronger));
+        assert_eq!(holder.cleanup_budget(), Some(stronger.cleanup_budget()));
+        assert_eq!(joined.try_join(), Ok(None));
+        assert!(returned.lock().is_none());
+        assert!(lab.state.task(third).is_some());
+
+        release.send_blocking(()).unwrap();
+        lab.run_until_idle();
+        assert_eq!(
+            joined.try_join(),
+            Err(JoinError::Cancelled(stronger.clone()))
+        );
+        let report = returned
+            .lock()
+            .take()
+            .expect("engine waits for the actual third terminal");
+        assert_eq!(
+            report.failure_index,
+            Some(1),
+            "caller attribution stays at the actual reducer"
+        );
+        assert_eq!(report.stopped_by, Some((1, MapReduceStopCause::Cancelled)));
+        assert!(matches!(report.outcome, Outcome::Cancelled(reason) if reason == stronger));
+        assert_eq!(
+            (report.admitted, report.completed, report.reduced),
+            (3, 3, 2)
+        );
+        assert_executing_lab_clean(&mut lab, root);
     }
 
     #[test]
@@ -1767,11 +1949,14 @@ mod tests {
         let gate = Arc::new(parking_lot::Mutex::new(Some(gate)));
         let started = Arc::new(AtomicUsize::new(0));
         let child_started = Arc::clone(&started);
+        let returned = Arc::new(parking_lot::Mutex::new(None));
+        let publication = Arc::clone(&returned);
         let (parent, mut join) = lab
             .state
             .create_task(root, Budget::INFINITE, async move {
                 let cx = Cx::current().unwrap();
-                cx.scope()
+                let report = cx
+                    .scope()
                     .map_reduce(
                         &cx,
                         executing_limits(1, 1),
@@ -1788,7 +1973,8 @@ mod tests {
                         },
                         |left, right| left + right,
                     )
-                    .await
+                    .await;
+                *publication.lock() = Some(report);
             })
             .unwrap();
         let parent_cx = lab.state.task(parent).unwrap().cx.clone().unwrap();
@@ -1817,9 +2003,33 @@ mod tests {
         assert!(lab.state.task(child).is_some());
         assert_eq!(lab.state.live_task_count(), 2);
         assert_eq!(started.load(Ordering::SeqCst), 1);
+        assert!(
+            lab.steps() < 4096,
+            "parked cleanup must not exhaust the step bound"
+        );
+        assert!(
+            lab.scheduler.lock().is_empty(),
+            "cancellation is acknowledged once, then the coordinator parks"
+        );
+        assert_eq!(
+            lab.run_until_idle(),
+            0,
+            "no input or child wake means no draining polls"
+        );
+        assert!(
+            returned.lock().is_none(),
+            "no report before the actual child terminal"
+        );
         release.send_blocking(()).unwrap();
         lab.run_until_idle();
-        let report = join.try_join().unwrap().unwrap();
+        assert_eq!(
+            join.try_join(),
+            Err(JoinError::Cancelled(parent_cx.cancel_reason().unwrap()))
+        );
+        let report = returned
+            .lock()
+            .take()
+            .expect("actual map engine report after child join");
         assert!(report.outcome.is_cancelled());
         assert_eq!(report.admitted, 1);
         assert_eq!(report.completed, 1);
@@ -1987,6 +2197,8 @@ mod tests {
             let child_dropped = Arc::clone(&dropped);
             let child_started = Arc::clone(&cleanup_started);
             let child_finished = Arc::clone(&cleanup_finished);
+            let returned = Arc::new(parking_lot::Mutex::new(None));
+            let publication = Arc::clone(&returned);
             let (parent, mut join) = lab
                 .state
                 .create_task(root, Budget::INFINITE, async move {
@@ -2032,7 +2244,7 @@ mod tests {
                             panic!("a held first input prevents any reduction")
                         },
                     ));
-                    if drop_execution {
+                    let report = if drop_execution {
                         let mut requested = std::pin::pin!(drop_requested.recv_uninterruptible());
                         std::future::poll_fn(|poll_cx| {
                             if let Poll::Ready(result) = requested.as_mut().poll(poll_cx) {
@@ -2047,7 +2259,8 @@ mod tests {
                         None
                     } else {
                         Some(execution.await)
-                    }
+                    };
+                    *publication.lock() = Some(report);
                 })
                 .unwrap();
             let parent_cx = lab.state.task(parent).unwrap().cx.clone().unwrap();
@@ -2071,8 +2284,18 @@ mod tests {
             assert_eq!(dropped.load(Ordering::SeqCst), if buffered { 2 } else { 1 });
             assert_eq!(cleanup_started.load(Ordering::SeqCst), 1);
             assert_eq!(cleanup_finished.load(Ordering::SeqCst), 0);
+            assert!(
+                lab.steps() < 8192,
+                "cleanup Pending must park before the step bound"
+            );
+            assert!(
+                lab.scheduler.lock().is_empty(),
+                "all held cleanup tasks really parked"
+            );
+            assert_eq!(lab.run_until_idle(), 0);
             if drop_execution {
-                assert!(matches!(join.try_join().unwrap(), Some(None)));
+                assert_eq!(join.try_join(), Ok(Some(())));
+                assert!(matches!(returned.lock().take(), Some(None)));
                 assert_eq!(
                     lab.state.live_task_count(),
                     1,
@@ -2083,13 +2306,22 @@ mod tests {
                     join.try_join().unwrap().is_none(),
                     "Panicked is not permission to abandon asynchronous cleanup"
                 );
+                assert!(returned.lock().is_none());
             }
             finish_cleanup.send_blocking(()).unwrap();
             lab.run_until_idle();
             assert_eq!(cleanup_finished.load(Ordering::SeqCst), 1);
             assert_eq!(dropped.load(Ordering::SeqCst), count);
             if !drop_execution {
-                let report = join.try_join().unwrap().unwrap().unwrap();
+                assert_eq!(
+                    join.try_join(),
+                    Err(JoinError::Cancelled(parent_cx.cancel_reason().unwrap()))
+                );
+                let report = returned
+                    .lock()
+                    .take()
+                    .expect("actual engine return")
+                    .unwrap();
                 let Outcome::Panicked(payload) = report.outcome else {
                     panic!("actual result destructor panic must dominate cancellation")
                 };
