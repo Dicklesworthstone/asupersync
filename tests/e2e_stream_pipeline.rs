@@ -668,17 +668,21 @@ mod executing_scope {
             }
         );
         let trace_runtime = runtime.handle();
-        let reports = runtime.block_on(runtime.handle().spawn(async move {
-            journeys(
-                Cx::current().expect("actual native coordinator"),
-                Box::new(move || {
-                    trace_runtime
-                        .trace_snapshot()
-                        .expect("owned runtime remains live")
-                }),
-            )
-            .await
-        }));
+        // Check Send here before embedding the complete journey future in the
+        // runtime's completion and panic-isolation wrappers.
+        let parent: Pin<Box<dyn Future<Output = Vec<serde_json::Value>> + Send>> =
+            Box::pin(async move {
+                journeys(
+                    Cx::current().expect("actual native coordinator"),
+                    Box::new(move || {
+                        trace_runtime
+                            .trace_snapshot()
+                            .expect("owned runtime remains live")
+                    }),
+                )
+                .await
+            });
+        let reports = runtime.block_on(runtime.handle().spawn(parent));
         assert_eq!(reports.len(), 3);
         runtime.block_on(async {
             let started = Instant::now();
@@ -1543,17 +1547,21 @@ mod executing_scope {
             }
         );
         let trace_runtime = runtime.handle();
-        let reports = runtime.block_on(runtime.handle().spawn(async move {
-            failure_journeys(
-                Cx::current().expect("actual native coordinator"),
-                Box::new(move || {
-                    trace_runtime
-                        .trace_snapshot()
-                        .expect("owned native runtime remains live")
-                }),
-            )
-            .await
-        }));
+        // Preserve the Send requirement without recursively expanding the
+        // whole failure journey through each native task wrapper.
+        let parent: Pin<Box<dyn Future<Output = Vec<serde_json::Value>> + Send>> =
+            Box::pin(async move {
+                failure_journeys(
+                    Cx::current().expect("actual native coordinator"),
+                    Box::new(move || {
+                        trace_runtime
+                            .trace_snapshot()
+                            .expect("owned native runtime remains live")
+                    }),
+                )
+                .await
+            });
+        let reports = runtime.block_on(runtime.handle().spawn(parent));
         assert_eq!(reports.len(), 13);
         runtime.block_on(async {
             let started = Instant::now();

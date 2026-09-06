@@ -36,6 +36,7 @@
 use std::fmt;
 use std::future::Future;
 use std::marker::PhantomData;
+use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::Waker;
@@ -745,6 +746,54 @@ pub struct ServerRequestRegion {
     /// Set once `server.budget_consumed` has been emitted, so the event fires
     /// exactly once across the normal finish paths and the [`Drop`] backstop.
     consumed: AtomicBool,
+    /// Only scheduler-owned bodies use a cancellation-independent drain
+    /// timer. Legacy borrowed/non-Send hop execution keeps its existing path.
+    owned_drain_timer: Option<crate::time::TimerDriverHandle>,
+}
+
+/// An owned absolute timer whose readiness does not acknowledge or mask task
+/// cancellation. Used only after admission of a runtime-owned server body.
+pub(crate) struct ServerRequestDeadline {
+    timer: crate::time::TimerDriverHandle,
+    deadline: Time,
+    registration: Option<crate::time::TimerHandle>,
+}
+
+impl ServerRequestDeadline {
+    pub(crate) fn new(timer: crate::time::TimerDriverHandle, deadline: Time) -> Self {
+        Self {
+            timer,
+            deadline,
+            registration: None,
+        }
+    }
+
+    fn clear(&mut self) {
+        if let Some(registration) = self.registration.take() {
+            let _ = self.timer.cancel(&registration);
+        }
+    }
+}
+
+impl Future for ServerRequestDeadline {
+    type Output = ();
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<()> {
+        self.clear();
+        if self.timer.now() >= self.deadline {
+            return std::task::Poll::Ready(());
+        }
+        // Refresh the actual waiter, including after an early wheel-horizon
+        // wake. Rearming never advances the admitted absolute deadline.
+        self.registration = Some(self.timer.register(self.deadline, cx.waker().clone()));
+        std::task::Poll::Pending
+    }
+}
+
+impl Drop for ServerRequestDeadline {
+    fn drop(&mut self) {
+        self.clear();
+    }
 }
 
 #[derive(Debug)]
@@ -827,7 +876,20 @@ impl ServerRequestRegion {
             started_at: now,
             protocol,
             consumed: AtomicBool::new(false),
+            owned_drain_timer: None,
         })
+    }
+
+    /// Retain the exact scheduler-admitted body authority: identity, gateway,
+    /// cancellation state and budget are never minted or reconstructed here.
+    pub(crate) fn from_body_cx(protocol: &'static str, cx: Cx, now: Time) -> Self {
+        Self {
+            owned_drain_timer: cx.timer_driver(),
+            cx,
+            started_at: now,
+            protocol,
+            consumed: AtomicBool::new(false),
+        }
     }
 
     /// Mints a request region from an explicit connection capability context.
@@ -849,6 +911,7 @@ impl ServerRequestRegion {
             started_at: now,
             protocol,
             consumed: AtomicBool::new(false),
+            owned_drain_timer: None,
         }
     }
 
@@ -1115,7 +1178,7 @@ impl ServerRequestRegion {
                     CancelKind::ParentCancelled,
                     Some("connection cancelled while request in flight"),
                 );
-                match drain_until(&self.cx, drain_grace, fut.as_mut()).await {
+                match self.drain_handler(drain_grace, fut.as_mut()).await {
                     Some(Ok(response)) => {
                         // Commit a response completed during drain: the
                         // handler's work is a discharged obligation.
@@ -1138,7 +1201,7 @@ impl ServerRequestRegion {
                     CancelKind::Timeout,
                     Some(HTTP_DEADLINE_EXHAUSTED_DIAGNOSTIC),
                 );
-                match drain_until(&self.cx, drain_grace, fut.as_mut()).await {
+                match self.drain_handler(drain_grace, fut.as_mut()).await {
                     Some(Ok(response)) => {
                         self.finish("ok");
                         ServerHopOutcome::Ok(response)
@@ -1155,6 +1218,30 @@ impl ServerRequestRegion {
                 }
             }
         }
+    }
+
+    async fn drain_handler<F>(&self, grace: Duration, mut fut: F) -> Option<F::Output>
+    where
+        F: Future + Unpin,
+    {
+        let Some(timer) = &self.owned_drain_timer else {
+            return drain_until(&self.cx, grace, fut).await;
+        };
+        if grace.is_zero() {
+            return None;
+        }
+        let deadline = timer.now() + grace;
+        let mut wait = ServerRequestDeadline::new(timer.clone(), deadline);
+        std::future::poll_fn(|cx| {
+            if timer.now() > deadline {
+                return std::task::Poll::Ready(None);
+            }
+            if let std::task::Poll::Ready(output) = Pin::new(&mut fut).poll(cx) {
+                return std::task::Poll::Ready(Some(output));
+            }
+            Pin::new(&mut wait).poll(cx).map(|()| None)
+        })
+        .await
     }
 }
 
