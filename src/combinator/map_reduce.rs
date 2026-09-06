@@ -1358,45 +1358,60 @@ mod tests {
                     crate::types::CancelKind::User,
                     Some("observer made progress"),
                 );
-                seen
+                // cancel_with publishes the real Cx reason and wakes its
+                // registered waiters. It does not call the region cancellation
+                // path that emits a canonical TraceData::Cancel event.
+                let reason = parent_cx
+                    .cancel_reason()
+                    .expect("observer published actual parent cancellation");
+                (seen, reason)
             })
             .unwrap();
         lab.scheduler.lock().schedule(observer, 255);
         lab.run_until_idle();
-        let seen = observation.try_join().unwrap().unwrap();
+        let (seen, published_reason) = observation.try_join().unwrap().unwrap();
         assert!(
             (64..4096).contains(&seen),
             "other task must execute before a large window is exhausted: {seen}"
         );
+        assert_eq!(published_reason.kind(), crate::types::CancelKind::User);
+        assert_eq!(published_reason.message(), Some("observer made progress"));
+        assert_eq!(published_reason.origin_task, Some(parent));
+        assert_eq!(published_reason.origin_region, root);
         assert_eq!(
             join.try_join(),
-            Err(JoinError::Cancelled(
-                lab.state
-                    .trace_handle()
-                    .snapshot()
-                    .iter()
-                    .find_map(|event| {
-                        match &event.data {
-                            crate::trace::TraceData::Cancel { task, reason, .. }
-                                if *task == parent =>
-                            {
-                                Some(reason.clone())
-                            }
-                            _ => None,
-                        }
-                    })
-                    .expect("actual parent cancellation trace")
-            ))
+            Err(JoinError::Cancelled(published_reason.clone()))
         );
         let report = returned.lock().take().expect("actual map engine report");
-        assert!(report.outcome.is_cancelled());
+        assert!(
+            matches!(&report.outcome, Outcome::Cancelled(reason) if reason == &published_reason)
+        );
+        let trace = lab.state.trace_handle().snapshot();
+        let completion = |expected| {
+            let events: Vec<_> = trace
+                .iter()
+                .filter(|event| {
+                    event.kind == crate::trace::TraceEventKind::Complete
+                        && matches!(event.data, crate::trace::TraceData::Task { task, region }
+                            if task == expected && region == root)
+                })
+                .collect();
+            assert_eq!(events.len(), 1, "exact real terminal for {expected:?}");
+            events[0].seq
+        };
+        let observer_complete = completion(observer);
+        let parent_complete = completion(parent);
+        assert!(
+            observer_complete < parent_complete,
+            "actual observer publication must precede the parent terminal"
+        );
         assert_eq!(report.admitted, pulled.load(Ordering::SeqCst));
         assert_eq!(report.completed, report.admitted);
         assert_eq!(gate.waiters(), 0);
         drop(held);
         assert_executing_lab_clean(&mut lab, root);
         eprintln!(
-            "map admission fairness: first_poll=64 observer_at={seen} admitted={} joined={}",
+            "map admission fairness: first_poll=64 observer_at={seen} admitted={} joined={} observer={observer:?} parent={parent:?} observer_complete={observer_complete} parent_complete={parent_complete} published_reason={published_reason:?}",
             report.admitted, report.completed
         );
     }
