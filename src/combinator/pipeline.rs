@@ -857,6 +857,13 @@ impl<E> PipelineOwner<E> {
     }
 
     fn finish(mut self) -> PipelineExecutionReport<E> {
+        // The owned execution future and every worker have now retired their
+        // iterator/transform/sink captures. Their destructors can request caller
+        // cancellation after the last input or ACK poll, so include that request
+        // in the same severity join before publishing the terminal report.
+        if self.cx.checkpoint().is_err() {
+            self.record(usize::MAX, pipeline_cancelled(&self.cx));
+        }
         let outcome = match self.failure.take().map(|(_, outcome)| outcome) {
             None | Some(Outcome::Ok(())) => Outcome::Ok(self.summary),
             Some(Outcome::Err(error)) => Outcome::Err(error),
@@ -2034,6 +2041,251 @@ mod tests {
                         .collect::<Vec<_>>()
                 );
                 execution_cleanup(&mut lab, region);
+            }
+        }
+    }
+
+    #[test]
+    fn executing_pipeline_owned_capture_retirement_precedes_terminal_publication() {
+        struct Capture {
+            cx: Cx,
+            drops: Arc<[AtomicUsize; 3]>,
+            index: usize,
+            cancel: bool,
+            panic: bool,
+        }
+
+        impl Capture {
+            fn observe(&self) {
+                assert_eq!(self.drops[self.index].load(Ordering::SeqCst), 0);
+            }
+        }
+
+        impl Drop for Capture {
+            fn drop(&mut self) {
+                assert_eq!(self.drops[self.index].fetch_add(1, Ordering::SeqCst), 0);
+                if self.cancel {
+                    self.cx.cancel_with(
+                        crate::types::CancelKind::User,
+                        Some("pipeline owned-capture retirement"),
+                    );
+                }
+                if self.panic {
+                    panic!("pipeline capture {} retirement panic", self.index);
+                }
+            }
+        }
+
+        struct Inputs {
+            capture: Capture,
+            fail_construction: bool,
+        }
+
+        struct Iter {
+            capture: Capture,
+            next: u32,
+        }
+
+        impl IntoIterator for Inputs {
+            type Item = u32;
+            type IntoIter = Iter;
+
+            fn into_iter(self) -> Iter {
+                assert!(
+                    !self.fail_construction,
+                    "pipeline primary construction panic"
+                );
+                Iter {
+                    capture: self.capture,
+                    next: 0,
+                }
+            }
+        }
+
+        impl Iterator for Iter {
+            type Item = u32;
+
+            fn next(&mut self) -> Option<u32> {
+                self.capture.observe();
+                let value = self.next;
+                self.next += 1;
+                (value < 3).then_some(value)
+            }
+        }
+
+        for mode in 0..10 {
+            let mut lab = execution_lab(0x32_1900 + mode);
+            let root = lab.state.create_root_region(Budget::INFINITE);
+            let drops = Arc::new(std::array::from_fn::<_, 3, _>(|_| AtomicUsize::new(0)));
+            let outputs = Arc::new(Mutex::new(Vec::new()));
+            let publication = Arc::new(Mutex::new(None));
+            let task_drops = Arc::clone(&drops);
+            let task_outputs = Arc::clone(&outputs);
+            let task_publication = Arc::clone(&publication);
+            let future: Pin<Box<dyn Future<Output = ()> + Send>> = Box::pin(async move {
+                let cx = Cx::current().expect("actual pipeline retirement coordinator");
+                let capture = |index| Capture {
+                    cx: cx.clone(),
+                    drops: Arc::clone(&task_drops),
+                    index,
+                    cancel: mode == index as u64 + 1 || (mode >= 7 && index == 0),
+                    panic: mode == index as u64 + 4 || (mode == 7 && index == 0),
+                };
+                let inputs = Inputs {
+                    capture: capture(0),
+                    fail_construction: mode == 9,
+                };
+                let transform = capture(1);
+                let sink = capture(2);
+                let report = cx
+                    .scope()
+                    .pipeline::<_, &'static str>(&cx, execution_config(1), inputs)
+                    .then(NonZeroUsize::new(1).unwrap(), move |_, value| {
+                        transform.observe();
+                        async move {
+                            if value == 1 && mode == 7 {
+                                Outcome::Panicked(PanicPayload::new("pipeline primary stage panic"))
+                            } else if value == 1 && mode == 8 {
+                                Outcome::Err("pipeline primary error")
+                            } else {
+                                Outcome::Ok(value)
+                            }
+                        }
+                    })
+                    .run(move |_, value| {
+                        sink.observe();
+                        task_outputs.lock().unwrap().push(value);
+                        async { Outcome::Ok(()) }
+                    })
+                    .await;
+                *task_publication.lock().unwrap() = Some((report, cx.cancel_reason()));
+            });
+            let (parent, mut join) = lab
+                .state
+                .create_task(root, Budget::INFINITE, future)
+                .unwrap();
+            lab.scheduler.lock().schedule(parent, 0);
+            lab.run_until_idle();
+            let (report, reason) = publication
+                .lock()
+                .unwrap()
+                .take()
+                .expect("actual terminal report");
+            match &reason {
+                Some(reason) => {
+                    assert_eq!(reason.kind(), crate::types::CancelKind::User);
+                    assert_eq!(
+                        reason.message.as_deref(),
+                        Some("pipeline owned-capture retirement")
+                    );
+                    assert_eq!(join.try_join(), Err(JoinError::Cancelled(reason.clone())));
+                }
+                None => assert_eq!(join.try_join(), Ok(Some(()))),
+            }
+            assert!(drops.iter().all(|count| count.load(Ordering::SeqCst) == 1));
+            let (admitted, consumed) = match mode {
+                7 | 8 => (2, 1),
+                9 => (0, 0),
+                _ => (3, 3),
+            };
+            assert_eq!(report.summary.admitted, admitted);
+            assert_eq!(report.summary.consumed, consumed);
+            assert_eq!(report.summary.stages, 1);
+            assert_eq!(report.summary.max_in_flight, usize::from(admitted != 0));
+            assert_eq!(
+                *outputs.lock().unwrap(),
+                (0..consumed as u32).collect::<Vec<_>>()
+            );
+            let credits: Vec<_> = lab
+                .state
+                .obligations
+                .iter()
+                .filter_map(|(_, record)| {
+                    (record.holder == parent && record.kind == ObligationKind::Lease)
+                        .then_some(record)
+                })
+                .collect();
+            assert_eq!(credits.len(), admitted + usize::from(mode < 7));
+            assert_eq!(
+                credits
+                    .iter()
+                    .filter(|record| record.state == ObligationState::Committed)
+                    .count(),
+                consumed
+            );
+            assert_eq!(
+                credits
+                    .iter()
+                    .filter(|record| record.state == ObligationState::Aborted)
+                    .count(),
+                credits.len() - consumed
+            );
+            let trace = lab.state.trace_handle().snapshot();
+            let completion =
+                |expected| {
+                    let matches: Vec<_> = trace.iter().filter(|event| {
+                    event.kind == crate::trace::TraceEventKind::Complete
+                        && matches!(event.data, crate::trace::TraceData::Task { task, region }
+                            if task == expected && region == root)
+                }).collect();
+                    assert_eq!(matches.len(), 1, "exact terminal for {expected:?}");
+                    matches[0].seq
+                };
+            let parent_complete = completion(parent);
+            let children: Vec<_> = trace
+                .iter()
+                .filter_map(|event| {
+                    if event.kind == crate::trace::TraceEventKind::Spawn {
+                        if let crate::trace::TraceData::Task { task, region } = event.data {
+                            if task != parent && region == root {
+                                return Some(task);
+                            }
+                        }
+                    }
+                    None
+                })
+                .collect();
+            assert_eq!(children.len(), 2, "actual transform and sink admissions");
+            assert_ne!(children[0], children[1]);
+            assert!(
+                children
+                    .iter()
+                    .all(|child| completion(*child) < parent_complete)
+            );
+            execution_cleanup(&mut lab, root);
+            eprintln!(
+                "pipeline capture retirement mode={mode} parent={parent:?} children={children:?} report={report:?} reason={reason:?}"
+            );
+            match mode {
+                0 => assert!(
+                    matches!(report.outcome, Outcome::Ok(summary) if summary == report.summary)
+                ),
+                1..=3 | 8 => {
+                    assert!(
+                        matches!(&report.outcome, Outcome::Cancelled(actual) if Some(actual) == reason.as_ref())
+                    );
+                    if mode == 8 {
+                        assert!(matches!(
+                            report.error(),
+                            Some(PipelineExecutionError::Stage {
+                                stage: 0,
+                                input: 1,
+                                error: "pipeline primary error"
+                            })
+                        ));
+                    }
+                }
+                _ => {
+                    let message = match mode {
+                        4..=6 => format!("pipeline capture {} retirement panic", mode - 4),
+                        7 => "pipeline primary stage panic".to_owned(),
+                        9 => "pipeline primary construction panic".to_owned(),
+                        _ => unreachable!(),
+                    };
+                    assert!(
+                        matches!(&report.outcome, Outcome::Panicked(payload) if payload.message() == message)
+                    );
+                }
             }
         }
     }

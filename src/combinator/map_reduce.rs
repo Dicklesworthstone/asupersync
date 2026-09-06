@@ -1084,6 +1084,35 @@ where
     })
     .await;
 
+    // These captures may run arbitrary destructors, including a new caller
+    // cancellation request. Retire them before choosing the report, even when
+    // iterator construction failed. Admitted children have all joined, so the
+    // mapper Arc is no longer shared with any child execution.
+    for (cause, panic) in [
+        (
+            MapReduceStopCause::InputPanicked,
+            executing_map_discard(inputs.take()),
+        ),
+        (MapReduceStopCause::MapPanicked, executing_map_discard(map)),
+        (
+            MapReduceStopCause::ReducerPanicked,
+            executing_map_discard(reduce),
+        ),
+    ] {
+        if let Some(payload) = panic {
+            failures.panic(admitted, cause, payload);
+        }
+    }
+    executing_map_caller_cancel(cx, &mut caller_cancel_observed, &mut failures, admitted);
+    if failures.stopped_by.is_some() {
+        // A late cleanup failure must retire the formerly successful fold;
+        // an actual successful return keeps its accumulator alive for callers.
+        while owner.discard_completed_values(&mut failures, reduced) {
+            crate::runtime::yield_now().await;
+        }
+        executing_map_caller_cancel(cx, &mut caller_cancel_observed, &mut failures, admitted);
+    }
+
     failures.errors.sort_by_key(|(index, _)| *index);
     let (failure_index, outcome) = if let Some((index, payload)) = failures.panicked.take() {
         (Some(index), Outcome::Panicked(payload))
@@ -1121,6 +1150,7 @@ mod tests {
     use super::*;
     use crate::lab::{LabConfig, LabRuntime};
     use crate::types::Budget;
+    use std::pin::Pin;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn executing_limits(concurrency: usize, retained: usize) -> MapReduceLimits {
@@ -1215,6 +1245,249 @@ mod tests {
                         .map(|i| i.to_string())
                         .collect::<Vec<_>>()
                         .join(">"))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn executing_map_owned_capture_retirement_precedes_terminal_publication() {
+        struct Capture {
+            cx: Cx,
+            drops: Arc<[AtomicUsize; 3]>,
+            index: usize,
+            cancel: bool,
+            panic: bool,
+        }
+
+        impl Capture {
+            fn observe(&self) {
+                assert_eq!(self.drops[self.index].load(Ordering::SeqCst), 0);
+            }
+        }
+
+        impl Drop for Capture {
+            fn drop(&mut self) {
+                assert_eq!(self.drops[self.index].fetch_add(1, Ordering::SeqCst), 0);
+                if self.cancel {
+                    self.cx.cancel_with(
+                        crate::types::CancelKind::User,
+                        Some("map owned-capture retirement"),
+                    );
+                }
+                if self.panic {
+                    panic!("map capture {} retirement panic", self.index);
+                }
+            }
+        }
+
+        struct Inputs {
+            capture: Capture,
+            fail_construction: bool,
+        }
+
+        struct Iter {
+            capture: Capture,
+            next: u32,
+        }
+
+        impl IntoIterator for Inputs {
+            type Item = u32;
+            type IntoIter = Iter;
+
+            fn into_iter(self) -> Iter {
+                assert!(!self.fail_construction, "map primary construction panic");
+                Iter {
+                    capture: self.capture,
+                    next: 0,
+                }
+            }
+        }
+
+        impl Iterator for Iter {
+            type Item = u32;
+
+            fn next(&mut self) -> Option<u32> {
+                self.capture.observe();
+                let value = self.next;
+                self.next += 1;
+                (value < 3).then_some(value)
+            }
+        }
+
+        #[derive(Debug)]
+        struct Value {
+            text: String,
+            drops: Arc<AtomicUsize>,
+        }
+
+        impl Drop for Value {
+            fn drop(&mut self) {
+                self.drops.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        for mode in 0..12 {
+            let mut lab = LabRuntime::new(LabConfig::new(0x32_0900 + mode).max_steps(4096));
+            let root = lab.state.create_root_region(Budget::INFINITE);
+            let drops = Arc::new(std::array::from_fn::<_, 3, _>(|_| AtomicUsize::new(0)));
+            let value_drops = Arc::new(AtomicUsize::new(0));
+            let children = Arc::new(parking_lot::Mutex::new(Vec::new()));
+            let publication = Arc::new(parking_lot::Mutex::new(None));
+            let task_drops = Arc::clone(&drops);
+            let task_values = Arc::clone(&value_drops);
+            let task_children = Arc::clone(&children);
+            let task_publication = Arc::clone(&publication);
+            let future: Pin<Box<dyn Future<Output = ()> + Send>> = Box::pin(async move {
+                let cx = Cx::current().expect("actual retirement coordinator");
+                let capture = |index| Capture {
+                    cx: cx.clone(),
+                    drops: Arc::clone(&task_drops),
+                    index,
+                    cancel: mode == index as u64 + 1 || (mode >= 7 && index == 0),
+                    panic: mode == index as u64 + 4
+                        || ((7..=9).contains(&mode) && index != 0)
+                        || (mode == 11 && index == 0),
+                };
+                let inputs = Inputs {
+                    capture: capture(0),
+                    fail_construction: mode == 7,
+                };
+                let mapper = capture(1);
+                let reducer = capture(2);
+                let report = cx
+                    .scope()
+                    .map_reduce(
+                        &cx,
+                        executing_limits(1, 1),
+                        inputs,
+                        move |child, value| {
+                            mapper.observe();
+                            task_children.lock().push(child.task_id());
+                            let drops = Arc::clone(&task_values);
+                            async move {
+                                if mode == 8 {
+                                    panic!("map primary mapper panic");
+                                }
+                                if mode == 10 {
+                                    Outcome::Err("map primary error")
+                                } else {
+                                    Outcome::Ok(Value {
+                                        text: value.to_string(),
+                                        drops,
+                                    })
+                                }
+                            }
+                        },
+                        move |mut left: Value, right: Value| {
+                            reducer.observe();
+                            if mode == 9 {
+                                panic!("map primary reducer panic");
+                            }
+                            left.text = format!("({}|{})", left.text, right.text);
+                            left
+                        },
+                    )
+                    .await;
+                *task_publication.lock() = Some((report, cx.cancel_reason()));
+            });
+            let (parent, mut join) = lab
+                .state
+                .create_task(root, Budget::INFINITE, future)
+                .unwrap();
+            lab.scheduler.lock().schedule(parent, 0);
+            lab.run_until_idle();
+            let (report, reason) = publication.lock().take().expect("actual terminal report");
+            match &reason {
+                Some(reason) => {
+                    assert_eq!(reason.kind(), crate::types::CancelKind::User);
+                    assert_eq!(
+                        reason.message.as_deref(),
+                        Some("map owned-capture retirement")
+                    );
+                    assert_eq!(join.try_join(), Err(JoinError::Cancelled(reason.clone())));
+                }
+                None => assert_eq!(join.try_join(), Ok(Some(()))),
+            }
+            assert!(drops.iter().all(|count| count.load(Ordering::SeqCst) == 1));
+            let counts = match mode {
+                7 => (0, 0, 0),
+                8 | 10 => (1, 1, 0),
+                9 => (2, 2, 1),
+                _ => (3, 3, 3),
+            };
+            assert_eq!((report.admitted, report.completed, report.reduced), counts);
+            let trace = lab.state.trace_handle().snapshot();
+            let completion =
+                |expected| {
+                    let matches: Vec<_> = trace.iter().filter(|event| {
+                    event.kind == crate::trace::TraceEventKind::Complete
+                        && matches!(event.data, crate::trace::TraceData::Task { task, region }
+                            if task == expected && region == root)
+                }).collect();
+                    assert_eq!(matches.len(), 1, "exact terminal for {expected:?}");
+                    matches[0].seq
+                };
+            let parent_complete = completion(parent);
+            let children = children.lock();
+            assert_eq!(children.len(), report.admitted);
+            for (index, child) in children.iter().enumerate() {
+                assert!(!children[..index].contains(child));
+                assert!(completion(*child) < parent_complete);
+            }
+            assert_executing_lab_clean(&mut lab, root);
+            eprintln!(
+                "map capture retirement mode={mode} parent={parent:?} children={children:?} report={report:?} reason={reason:?}"
+            );
+            if mode == 0 {
+                assert_eq!(report.failure_index, None);
+                assert_eq!(
+                    value_drops.load(Ordering::SeqCst),
+                    2,
+                    "returned accumulator remains live"
+                );
+                let Outcome::Ok(Some(value)) = report.outcome else {
+                    panic!("successful retirement preserves the returned value");
+                };
+                assert_eq!(value.text, "((0|1)|2)");
+                drop(value);
+                assert_eq!(value_drops.load(Ordering::SeqCst), 3);
+            } else if matches!(mode, 1..=3 | 10) {
+                assert!(
+                    matches!(&report.outcome, Outcome::Cancelled(actual) if Some(actual) == reason.as_ref())
+                );
+                assert_eq!(report.failure_index, Some(if mode == 10 { 1 } else { 3 }));
+                if mode == 10 {
+                    assert_eq!(report.stopped_by, Some((0, MapReduceStopCause::Error)));
+                    assert!(matches!(
+                        report.errors.as_slice(),
+                        [(0, MapReduceExecutionError::Map("map primary error"))]
+                    ));
+                }
+                assert_eq!(
+                    value_drops.load(Ordering::SeqCst),
+                    if mode == 10 { 0 } else { 3 }
+                );
+            } else {
+                let (index, message) = match mode {
+                    4..=6 => (3, format!("map capture {} retirement panic", mode - 4)),
+                    7 => (0, "map primary construction panic".to_owned()),
+                    8 => (0, "map primary mapper panic".to_owned()),
+                    9 => (1, "map primary reducer panic".to_owned()),
+                    11 => (3, "map capture 0 retirement panic".to_owned()),
+                    _ => unreachable!(),
+                };
+                assert_eq!(report.failure_index, Some(index));
+                assert!(
+                    matches!(&report.outcome, Outcome::Panicked(payload) if payload.message() == message)
+                );
+                assert_eq!(
+                    value_drops.load(Ordering::SeqCst),
+                    match mode {
+                        7 | 8 => 0,
+                        9 => 2,
+                        _ => 3,
+                    }
                 );
             }
         }

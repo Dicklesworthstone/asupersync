@@ -1332,13 +1332,25 @@ Beyond `join`, `race`, and `timeout`, the combinator library includes patterns f
 | **quorum** | `Scope::quorum` (`src/cx/scope.rs`) + `src/combinator/quorum.rs` | M-of-N completion: spawns every branch, returns once M succeed or success is impossible, then cancels and drains every remaining branch |
 | **hedge** | `Scope::hedge` (`src/cx/scope.rs`); the `hedge()` future in `src/combinator/hedge.rs` | Start backup after delay, first response wins. `Scope::hedge` aborts and joins the loser; the standalone `hedge()` future drops it |
 | **first_ok** | `Scope::first_ok` (`src/cx/scope.rs`) + `src/combinator/first_ok.rs` | Try lazy operations sequentially until one succeeds; an in-flight attempt is drained on cancellation |
-| **pipeline** | `src/combinator/pipeline.rs` | Outcome aggregation for staged transformations; the module does not execute stages or apply backpressure itself |
-| **map_reduce** | `src/combinator/map_reduce.rs` | Monoid reduction over already-collected outcomes; the module does not spawn the map phase itself |
+| **pipeline** | `Scope::pipeline` (`src/cx/scope.rs`) + `src/combinator/pipeline.rs` | Executes typed, channel-connected stages and an async sink as scoped tasks, with explicit edge capacities and an overall admitted-work limit |
+| **map_reduce** | `Scope::map_reduce` (`src/cx/scope.rs`) + `src/combinator/map_reduce.rs` | Spawns bounded scoped map tasks and reduces in input order, with separate limits for concurrency and retained work |
 | **circuit_breaker** | `src/combinator/circuit_breaker.rs` | Failure detection, open/half-open/closed states |
 | **bulkhead** | `src/combinator/bulkhead.rs` | Concurrency isolation (bounded parallelism) |
 | **rate_limit** | `src/combinator/rate_limit.rs` | Token bucket throughput control |
 | **bracket** | `src/combinator/bracket.rs` | Acquire/use/release with guaranteed cleanup |
 | **retry** | `src/combinator/retry.rs` | Exponential backoff, budget-aware |
+
+Use `PipelineExecutionConfig` with `.pipeline(...).then(...).run(...).await`, or
+`MapReduceLimits` with `.map_reduce(...).await`. The existing outcome-fold APIs
+remain available. Retained-work credit includes completed maps waiting for an
+earlier input; pipeline credit remains held until the sink consumes the item.
+These limits count work items, not payload bytes or the reducer's accumulator.
+Errors, panics and cancellation stop admission and drain admitted children
+before returning. A noncooperative child keeps the operation pending; dropping
+the operation requests cancellation while its region retains cleanup ownership.
+The [downstream consumer](tests/fixtures/downstream-consumer-proof/src/bin/default_consumer.rs)
+exercises both APIs with public default features on current-thread and
+two-worker native runtimes, including exact ordered output and shutdown checks.
 
 The core combinators publish cancel-safety contracts, and race/select-style winners drain losers through dedicated drain paths. Outcomes aggregate via the severity lattice. An explicit law sheet (`src/combinator/laws.rs`) documents algebraic properties (associativity, commutativity, distributivity), while the rewrite engine (`src/plan/rewrite.rs`) optimizes only through explicit `RewritePolicy` gates and conservative `src/plan/analysis.rs` side-condition checks. `Unknown`, `MayLeak`, or `MayOrphan` analysis results are not proof that a rewrite preserves cancel/drain/quiescence invariants.
 
