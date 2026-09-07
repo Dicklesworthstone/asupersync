@@ -26,6 +26,10 @@ use asupersync::net::quic_native::{QuicConnectionState, StreamRole};
 // connection regressions below independently exercise the linked runtime crate.
 pub use asupersync::{bytes, io, net};
 /// The production stream module and its focused unit tests.
+#[expect(
+    dead_code,
+    reason = "isolated source tests omit the connection module's callers of crate-private helpers"
+)]
 #[path = "../src/net/quic_native/streams.rs"]
 pub mod stream_module_tests;
 
