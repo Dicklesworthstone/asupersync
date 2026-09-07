@@ -20,7 +20,9 @@
 //! 9. **Stats tracking**: All operations are counted accurately.
 //! 10. **Two-phase commit safety**: Crash after reserve aborts cleanly.
 
-use asupersync::channel::crash::{CrashConfig, CrashSender, RestartMode, crash_channel};
+use asupersync::channel::crash::{
+    CrashConfig, CrashSender, CrashStatsSnapshot, RestartMode, crash_channel,
+};
 use asupersync::channel::mpsc;
 use asupersync::evidence_sink::{CollectorSink, EvidenceSink};
 use std::future::Future;
@@ -205,17 +207,148 @@ fn warm_restart_keeps_send_counter() {
         block_on(tx.send(&cx, i)).unwrap();
     }
     assert!(block_on(tx.send(&cx, 3)).is_err());
+    let before_restart = ctrl.stats().snapshot();
 
     // Warm restart: counter preserved at 3, so immediate crash on next send.
     assert!(ctrl.restart());
     assert_eq!(tx.send_count(), 3);
+    assert_eq!(
+        ctrl.stats().snapshot(),
+        CrashStatsSnapshot {
+            restarts: before_restart.restarts + 1,
+            ..before_restart
+        }
+    );
     assert!(block_on(tx.send(&cx, 4)).is_err());
     assert!(ctrl.is_crashed());
+}
+
+fn pending_send_across_restart(mode: RestartMode) {
+    let config = CrashConfig::new(42).with_restart_mode(mode);
+    let sink: Arc<dyn EvidenceSink> = Arc::new(CollectorSink::new());
+    let (sender1, mut rx, ctrl) = crash_channel::<u32>(1, config.clone(), sink.clone());
+    let sender2 = CrashSender::new(sender1.inner().clone(), ctrl.clone(), config, sink);
+    let cx = test_cx();
+
+    block_on(sender1.send(&cx, 10)).unwrap();
+    assert_eq!(sender2.send_count(), 1);
+    let mut stale_send = Box::pin(sender1.send(&cx, 20));
+    let mut task_cx = Context::from_waker(Waker::noop());
+    assert!(stale_send.as_mut().poll(&mut task_cx).is_pending());
+    assert_eq!(ctrl.stats().snapshot().sends_attempted, 2);
+
+    // The first incarnation has a committed value and an observed pending
+    // send. Restart must invalidate that send without discarding queued data.
+    assert!(ctrl.crash());
+    assert!(matches!(
+        block_on(sender2.send(&cx, 21)),
+        Err(mpsc::SendError::Disconnected(21))
+    ));
+    assert!(ctrl.restart());
+    let cold = mode == RestartMode::Cold;
+    let restarted = CrashStatsSnapshot {
+        sends_attempted: if cold { 0 } else { 3 },
+        sends_succeeded: u64::from(!cold),
+        sends_rejected: u64::from(!cold),
+        crashes: 1,
+        restarts: 1,
+    };
+    assert_eq!(ctrl.stats().snapshot(), restarted);
+    assert_eq!(sender1.send_count(), u64::from(!cold));
+    assert_eq!(sender2.send_count(), u64::from(!cold));
+
+    assert_eq!(rx.try_recv(), Ok(10));
+    assert!(matches!(
+        stale_send.as_mut().poll(&mut task_cx),
+        Poll::Ready(Err(mpsc::SendError::Disconnected(20)))
+    ));
+    assert!(rx.is_empty(), "prior-incarnation send must not publish");
+    let rejected = CrashStatsSnapshot {
+        sends_rejected: if cold { 0 } else { 2 },
+        ..restarted
+    };
+    assert_eq!(ctrl.stats().snapshot(), rejected);
+
+    // A second wrapper sees the same new incarnation, and the rejected send
+    // released its capacity reservation so the next commit can complete.
+    block_on(sender2.send(&cx, 30)).unwrap();
+    assert_eq!(rx.try_recv(), Ok(30));
+    assert!(rx.is_empty());
+    assert_eq!(sender1.send_count(), if cold { 1 } else { 2 });
+    assert_eq!(sender2.send_count(), sender1.send_count());
+    assert_eq!(
+        ctrl.stats().snapshot(),
+        CrashStatsSnapshot {
+            sends_attempted: rejected.sends_attempted + 1,
+            sends_succeeded: rejected.sends_succeeded + 1,
+            ..rejected
+        }
+    );
+    assert!(!ctrl.is_crashed());
+}
+
+#[test]
+fn cold_restart_rejects_pending_prior_incarnation_without_polluting_fresh_stats() {
+    pending_send_across_restart(RestartMode::Cold);
+}
+
+#[test]
+fn warm_restart_rejects_pending_prior_incarnation_and_retains_its_stats() {
+    pending_send_across_restart(RestartMode::Warm);
 }
 
 // ---------------------------------------------------------------------------
 // Criterion 5: Restart exhaustion
 // ---------------------------------------------------------------------------
+
+#[test]
+fn cold_restart_send_resets_cannot_replenish_restart_budget() {
+    let config = CrashConfig::new(42)
+        .with_crash_after_sends(1)
+        .with_max_restarts(2)
+        .with_restart_mode(RestartMode::Cold);
+    let (tx, mut rx, ctrl, _) = make_crash_channel(config);
+    let cx = test_cx();
+
+    for incarnation in 0..=2 {
+        assert_eq!(tx.send_count(), 0);
+        block_on(tx.send(&cx, incarnation)).unwrap();
+        assert_eq!(rx.try_recv(), Ok(incarnation));
+        assert!(matches!(
+            block_on(tx.send(&cx, 100 + incarnation)),
+            Err(mpsc::SendError::Disconnected(value)) if value == 100 + incarnation
+        ));
+        let crashed = ctrl.stats().snapshot();
+        assert_eq!(crashed.sends_attempted, 2);
+        assert_eq!(crashed.sends_succeeded, 1);
+        assert_eq!(crashed.sends_rejected, 1);
+        assert_eq!(crashed.crashes, u64::from(incarnation) + 1);
+        assert_eq!(crashed.restarts, u64::from(incarnation));
+
+        if incarnation < 2 {
+            assert!(ctrl.restart());
+            assert_eq!(
+                ctrl.stats().snapshot(),
+                CrashStatsSnapshot {
+                    sends_attempted: 0,
+                    sends_succeeded: 0,
+                    sends_rejected: 0,
+                    crashes: crashed.crashes,
+                    restarts: crashed.restarts + 1,
+                }
+            );
+        } else {
+            assert!(!ctrl.restart());
+            assert!(ctrl.is_exhausted());
+            assert!(ctrl.is_crashed());
+            assert_eq!(tx.send_count(), 1);
+            assert_eq!(ctrl.stats().snapshot(), crashed);
+            assert!(!ctrl.restart(), "exhaustion must remain permanent");
+            assert_eq!(ctrl.stats().snapshot(), crashed);
+        }
+    }
+    assert!(rx.is_empty());
+}
 
 #[test]
 fn max_restarts_enforced() {
