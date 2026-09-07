@@ -122,7 +122,7 @@ impl AtpFrameCodec {
         Ok(total_size)
     }
 
-    /// Decode frame header from buffer (zero-copy optimization).
+    /// Decode and validate a complete frame header before consuming it.
     ///
     /// `max_frame_size` is the codec's configured frame-size limit; the payload
     /// length is bounded against it (not a hardcoded constant) so a codec built
@@ -133,7 +133,6 @@ impl AtpFrameCodec {
         max_frame_size: u64,
     ) -> Result<Option<FrameHeader>, FrameError> {
         // First pass: check if we have enough bytes for complete header without consuming
-        let _original_len = buf.len();
         let mut cursor = 0;
 
         // Helper to try parsing varint at cursor position
@@ -143,10 +142,9 @@ impl AtpFrameCodec {
                     return Ok(None);
                 }
 
-                let mut temp = BytesMut::from(&buf[*pos..]);
-                match VarInt::decode(&mut temp) {
-                    Outcome::Ok(Some(varint)) => {
-                        *pos += (buf.len() - *pos) - temp.len();
+                match VarInt::decode_prefix(&buf[*pos..]) {
+                    Outcome::Ok(Some((varint, length))) => {
+                        *pos += length;
                         Ok(Some(varint))
                     }
                     Outcome::Ok(None) => Ok(None),
@@ -249,15 +247,23 @@ impl AtpFrameCodec {
             }
         }
 
-        // Success - advance original buffer by consumed bytes
-        let _ = buf.split_to(cursor);
-
-        Ok(Some(FrameHeader {
+        let header = FrameHeader {
             version,
             frame_type,
             payload_length,
             extensions,
-        }))
+        };
+        let total_size = Self::checked_frame_size(&header, payload_length.value())?;
+        if total_size > max_frame_size {
+            return Err(FrameError::FrameTooLarge {
+                size: total_size,
+                max: max_frame_size,
+            });
+        }
+
+        // All header and total-size checks passed; errors above preserve input.
+        let _ = buf.split_to(cursor);
+        Ok(Some(header))
     }
 }
 
@@ -280,13 +286,6 @@ impl Decoder for AtpFrameCodec {
                     match Self::decode_header(src, max_frame_size)? {
                         Some(header) => {
                             let payload_len = header.payload_length.value();
-                            let total_size = Self::checked_frame_size(&header, payload_len)?;
-                            if total_size > self.max_frame_size {
-                                return Err(FrameError::FrameTooLarge {
-                                    size: total_size,
-                                    max: self.max_frame_size,
-                                });
-                            }
 
                             if payload_len == 0 {
                                 // Empty payload frame
@@ -336,6 +335,17 @@ impl Decoder for AtpFrameCodec {
                     return Ok(Some(frame));
                 }
             }
+        }
+    }
+
+    fn decode_eof(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+        match self.decode(src)? {
+            Some(frame) => Ok(Some(frame)),
+            None if src.is_empty() && matches!(self.decode_state, DecodeState::Header) => Ok(None),
+            // A consumed header can leave an empty buffer while its declared
+            // payload is still missing. The default Decoder implementation
+            // inspects only that buffer and would silently accept truncation.
+            None => Err(FrameError::UnexpectedEof),
         }
     }
 }
@@ -547,6 +557,90 @@ mod tests {
             let frame = AtpFrameCodec::new().decode(&mut buffer).unwrap().unwrap();
             assert_eq!(frame.to_wire_bytes().unwrap(), wire.as_ref());
             assert!(buffer.is_empty());
+        }
+    }
+
+    #[test]
+    fn eof_rejects_every_truncated_frame_prefix_including_consumed_header() {
+        let frame = Frame::new(
+            ProtocolVersion::V0,
+            FrameType::ObjectData,
+            b"payload".to_vec(),
+        )
+        .unwrap();
+        let wire = frame.to_wire_bytes().unwrap();
+        let header_len = frame.header.encoded_len();
+        for split in 1..wire.len() {
+            // Cover EOF both on the first decode and after an ordinary read
+            // has moved the complete header into the codec's private state.
+            for decode_before_eof in [false, true] {
+                let mut codec = AtpFrameCodec::new();
+                let mut buffer = BytesMut::from(&wire[..split]);
+                if decode_before_eof {
+                    assert!(codec.decode(&mut buffer).unwrap().is_none());
+                    if split == header_len {
+                        assert!(buffer.is_empty(), "header must already be consumed");
+                        assert!(matches!(codec.decode_state, DecodeState::Payload { .. }));
+                    }
+                }
+                assert!(
+                    matches!(codec.decode_eof(&mut buffer), Err(FrameError::UnexpectedEof)),
+                    "split={split}, decode_before_eof={decode_before_eof}",
+                );
+                // EOF failure does not discard the partial payload or header;
+                // explicit decoder reuse can still supply the missing bytes.
+                buffer.extend_from_slice(&wire[split..]);
+                assert_eq!(codec.decode_eof(&mut buffer).unwrap(), Some(frame.clone()));
+                assert!(codec.decode_eof(&mut buffer).unwrap().is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn framed_reader_surfaces_header_only_truncation_once() {
+        use crate::codec::FramedRead;
+        use crate::stream::Stream;
+        use std::pin::Pin;
+        use std::task::{Context, Poll, Waker};
+
+        let frame = Frame::new(ProtocolVersion::V0, FrameType::ObjectData, vec![42]).unwrap();
+        let wire = frame.to_wire_bytes().unwrap();
+        let reader = &wire[..frame.header.encoded_len()];
+        let mut framed = FramedRead::new(reader, AtpFrameCodec::new());
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(matches!(
+            Pin::new(&mut framed).poll_next(&mut cx),
+            Poll::Ready(Some(Err(FrameError::UnexpectedEof)))
+        ));
+        assert!(matches!(
+            Pin::new(&mut framed).poll_next(&mut cx),
+            Poll::Ready(None)
+        ));
+    }
+
+    #[test]
+    fn total_frame_size_refusal_preserves_input_and_decoder_state() {
+        let mut frame =
+            Frame::new(ProtocolVersion::V0, FrameType::ObjectData, vec![42; 8]).unwrap();
+        frame.header.extensions.insert(7, b"extension".to_vec());
+        let wire = frame.to_wire_bytes().unwrap();
+        let limit = wire.len() as u64 - 1;
+        for split in frame.header.encoded_len()..=wire.len() {
+            let mut codec = AtpFrameCodec::with_max_frame_size(limit);
+            let mut buffer = BytesMut::from(&wire[..split]);
+            assert!(matches!(
+                codec.decode(&mut buffer),
+                Err(FrameError::FrameTooLarge { size, max })
+                    if size == wire.len() as u64 && max == limit
+            ));
+            assert_eq!(buffer.as_ref(), &wire[..split], "split={split}");
+            assert!(matches!(codec.decode_state, DecodeState::Header));
+
+            // A separate valid frame remains decodable without a reset.
+            let valid = Frame::new(ProtocolVersion::V0, FrameType::KeepAlive, vec![]).unwrap();
+            let mut next = BytesMut::from(valid.to_wire_bytes().unwrap().as_slice());
+            assert_eq!(codec.decode(&mut next).unwrap(), Some(valid));
+            assert!(next.is_empty());
         }
     }
 
