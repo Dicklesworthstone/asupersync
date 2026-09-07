@@ -86,6 +86,21 @@ impl VarInt {
 
     /// Decode a varint from a buffer.
     pub fn decode(buf: &mut BytesMut) -> AtpOutcome<Option<Self>> {
+        match Self::decode_prefix(buf) {
+            Outcome::Ok(Some((varint, length))) => {
+                let _ = buf.split_to(length);
+                Outcome::Ok(Some(varint))
+            }
+            Outcome::Ok(None) => Outcome::Ok(None),
+            Outcome::Err(error) => Outcome::Err(error),
+            Outcome::Cancelled(reason) => Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => Outcome::Panicked(payload),
+        }
+    }
+
+    /// Parse at most eight prefix bytes without copying or consuming the input.
+    /// Header parsing uses this to validate a whole frame before advancing it.
+    pub(super) fn decode_prefix(buf: &[u8]) -> AtpOutcome<Option<(Self, usize)>> {
         if buf.is_empty() {
             return Outcome::Ok(None);
         }
@@ -119,8 +134,7 @@ impl VarInt {
             return AtpOutcome::protocol_error(ProtocolError::InvalidVarInt);
         }
 
-        let _ = buf.split_to(length);
-        Outcome::Ok(Some(VarInt(value)))
+        Outcome::Ok(Some((VarInt(value), length)))
     }
 
     /// Peek at the length of the next varint without consuming it.
