@@ -1485,33 +1485,48 @@ This is the natural formal home for “structured concurrency is local reasoning
 
 ## 6. Progress Properties
 
-Under fair scheduling:
+These are conditional liveness properties, not consequences of fairness alone.
+Fairness applies to runnable tasks; it cannot make a nonreturning poll finish,
+create a missing wake, end an arbitrary mask body, or complete withheld I/O.
+Each implication below assumes finite admitted work and the stated progress
+premises. Runtime budgets and watchdogs do not prove those premises.
 
 ### PROG-TASK: Tasks eventually terminate
 
 ```
-T[t].state ∈ {Created, Running} ∧ fair
+T[t].state ∈ {Created, Running} ∧ fair ∧ finite_work(t)
+  ∧ returning_polls(t) ∧ eventual_required_wakes(t)
   ⟹ eventually T[t].state = Completed(_)
 ```
 
 ### PROG-CANCEL: Cancelled tasks drain
 
 ```
-T[t].state = CancelRequested(_) ∧ fair
-  ⟹ eventually T[t].state = Completed(Cancelled(_))
+T[t].state = CancelRequested(_) ∧ fair ∧ returning_polls(t)
+  ∧ eventual_required_wakes(t) ∧ eventual_cancel_checkpoint(t)
+  ∧ masks_eventually_end(t) ∧ finite_progressing_cleanup(t)
+  ⟹ eventually T[t].state = Completed(_)
 ```
+
+The terminal outcome follows the runtime's canonical outcome rules. A prior
+result or cleanup panic can affect that outcome; requesting cancellation does
+not by itself prove `Completed(Cancelled(_))`. Primitive acknowledgement bounds
+in `cancel::ResponsivenessRegistry` do not establish whole-task cleanup bounds.
 
 ### PROG-REGION: Closing regions close
 
 ```
-R[r].state = Closing ∧ fair
+R[r].state = Closing ∧ fair ∧ finite_admitted_work(r)
+  ∧ all_children_eventually_complete(r)
+  ∧ all_obligation_owners_eventually_resolve(r)
+  ∧ all_finalizers_eventually_complete(r)
   ⟹ eventually R[r].state = Closed(_)
 ```
 
 ### PROG-OBLIGATION: Obligations resolve
 
 ```
-O[o].state = Reserved ∧ fair
+O[o].state = Reserved ∧ owner_eventually_commits_or_aborts(o)
   ⟹ eventually O[o].state ∈ {Committed, Aborted}
   // Leaked is an error state that triggers detection
 ```
@@ -1645,7 +1660,12 @@ Adequacy (“operational steps generate exactly the denotation”) is the target
 
 ## 8. Test Oracle Usage [Implementation]
 
-The lab runtime implements these semantics exactly. Property tests verify:
+The lab runtime supplies executable checks for selected invariants from this
+model. Passing a finite trace or seeded test does not prove exact refinement
+of the complete operational semantics, all possible schedules, or the liveness
+premises above. The implementation mapping and its remaining proof obligations
+are tracked in `formal/lean/coverage/runtime_state_refinement_map.json`.
+Representative trace predicates are:
 
 ```rust
 fn test_property(trace: &[TraceEvent]) -> bool {

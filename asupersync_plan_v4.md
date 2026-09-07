@@ -529,12 +529,11 @@ Think of it as a two‑player game with bounded resources:
 * Task moves: `checkpoint`, `mask(k)` (bounded), `work`
 * System wins iff the task reaches `Completed(Cancelled(_))` (or other terminal) within the budget under fair scheduling.
 
-Spec requirement (the real "math" promise): primitives must publish a **cancellation responsiveness bound**—at least "max polls between checkpoints" and "max masking depth." Budgets are then not vibes; they are **sufficient conditions** for the system to have a winning strategy (LaSalle/Lyapunov style arguments in §11.5 can mechanize this).
+Spec requirement: primitives must publish a **cancellation responsiveness bound** with its unit, goal, and progress assumptions. A bound on acknowledging cancellation is distinct from a bound on returning from the primitive or draining its owning region. Budget composition must preserve those distinctions.
 
-Implementation status: this is not yet a blanket public/runtime registry. Today the code enforces or models bounded cancellation on specific surfaces, including bounded commit sections, mask-depth limits, scheduler fairness bounds, static plan analysis, and lab cancellation oracles. New primitive claims should cite a concrete bound and test before presenting budgets as sufficient conditions.
+Implementation status: `cancel::ResponsivenessRegistry` in `src/cancel/mod.rs` inventories stock waits, commits, masks, joins, and finalizers. `lookup` identifies an entry; `ResponsivenessEntry::bound` checks a query against its implementation assumptions and either returns a finite bound or a typed refusal. Finite bounds count delivered polls or explicit checkpoint calls after cancellation is published, with separate best-effort I/O write-attempt accounting. They require the invoked poll, lock acquisition, callback, and destructor to return. Unknown operations, unsupported progress assumptions, and unbounded cleanup remain explicit. Registry unit tests and the responsiveness cases in `tests/cancellation_conformance.rs` exercise these boundaries; they do not establish termination of arbitrary user futures.
 
-**Theorem (Cancellation Completeness):**
-For any task with mask depth `M` and checkpoint interval `C`, if `cleanup_budget ≥ M × C × poll_cost`, then System wins (task reaches terminal state within budget under fair scheduling).
+**Cancellation completeness requires additional premises.** Mask depth bounds nesting, not work inside a mask: a depth-one masked future can wait forever. Therefore `M × C × poll_cost` is not a sufficient cleanup budget. Use the registry's checked, same-goal/same-unit composition only where its premises hold. A whole-region termination argument additionally needs finite admitted work, eventual wake delivery and returning polls, bounded masking duration, and progress of every retained child, obligation owner, and finalizer. Fairness alone supplies neither those premises nor a wall-clock deadline.
 
 ### 7.7 (Optional) Cancellation as annihilation (Geometry of Interaction intuition)
 
@@ -546,7 +545,7 @@ For deep reasoning and future tooling, it is useful to view cancellation as intr
 
 You do not need this to implement Phase‑0, but it is a powerful conceptual model for bounding cleanup cost and proving "cancellation cannot silently drop linear effects."
 
-*Practical note:* The full GoI formalism (nilpotent operators, trace in a *‑algebra) would require encoding programs as interaction nets—a research project. The operational approach (bounded masks + checkpoint contracts + the Completeness theorem in §7.6) provides equivalent static guarantees with far less machinery.
+*Practical note:* Encoding programs as interaction nets for the full GoI formalism (nilpotent operators, trace in a *-algebra) remains a research project. The implemented operational approach exposes checkable primitive bounds and explicit refusals under §7.6's assumptions. It does not establish an equivalent whole-program termination theorem.
 
 ---
 
@@ -592,7 +591,8 @@ Reading: Sender (`S`) outputs `reserve`, then either inputs `abort` and terminat
 
 ```
 let permit = tx.reserve(cx).await?;
-permit.send(msg);
+let outcome = permit.send(msg);
+// Handle publication or a disconnect that returns the original value.
 ```
 
 Drop permit => abort and release capacity; message not moved => no silent loss.
@@ -624,25 +624,21 @@ Reserve slot + idempotency key; commit sends; cancel triggers best-effort cancel
 * `ResultDelivery { remote_task_id, outcome, execution_time }`
 * `LeaseRenewal { remote_task_id, new_lease, current_state, node }`
 
-**Envelope + serialization (Phase 1+)**
+**Envelope + serialization**
 
-* All messages are carried inside an explicit envelope:
+* The abstract message model uses an explicit envelope:
   * `RemoteEnvelope { version, sender, sender_time, payload }`
   * `sender_time` is a logical clock snapshot (vector clock or equivalent).
 * Transport framing is transport-specific (length prefix; optional magic for stream resync).
-* Serialization is **canonical CBOR (RFC 8949)**:
-  * Deterministic map key ordering; no map-order dependence.
-  * Sets/collections must be encoded in deterministic order.
-  * JSON is allowed for debug/test vectors only (not the wire format).
-* Unknown fields: ignored for forward compatibility; unknown variants: reject.
+* The shipped service protocols V1, V2, and V3 use strict JSON through the versioned request/response and session command/event types in `src/remote.rs`, with bounded length-delimited transport frames. The abstract envelope above is not a serialization template for those service messages.
+* Preserve the exact existing serialization goldens, including field order, tags, and byte representation. Unknown fields and variants are rejected, including nested metadata.
+* Canonical CBOR was an earlier design proposal. Adopting it would require a separately versioned protocol and explicit negotiation; it is not the current wire format or an authorized same-version migration.
 
 **Versioning rules**
 
-* `major.minor` versioning is carried in `RemoteEnvelope.version`:
-  * Unknown major: reject the message and close transport.
-  * Unknown minor: accept if all required fields are present; ignore unknown fields.
-* Any change to semantics of existing fields requires a major bump.
-* New optional fields require a minor bump and must be ignorable.
+* The shipped `RemoteProtocolVersion` has explicit V1, V2, and V3 identities; admission requires an exact supported version match.
+* Do not add, remove, rename, retype, retag, or reorder serialized fields under an existing version. Even a new optional field is incompatible with strict older readers.
+* A new encoding or field layout requires a new protocol version, deliberate negotiation, and compatibility/golden tests. There is no implicit unknown-minor or unknown-field acceptance.
 
 **Handshake + capability checks**
 
@@ -888,7 +884,7 @@ Define a **potential function** `V(Σ)` over runtime state (regions/tasks/obliga
 * deadline slack / poll quota pressure.
 
 Then require the governor/scheduler to choose steps that (in expectation or under a bound) **decrease `V`**, or decrease it under cancellation lanes first.
-Under standard assumptions (cooperative checkpoints, bounded masking, fairness), LaSalle‑style arguments give: **cancellation converges to quiescence** rather than "we hope it drains."
+Convergence to quiescence is a conditional proof obligation: admitted work must be finite, runnable tasks must receive returning polls, masks must end, and retained children, obligation owners, and finalizers must make progress. A governor recommendation or bounded mask depth does not establish these premises. A LaSalle-style argument must identify a well-founded decrease and justify every step that can preserve or increase `V`; fairness alone is insufficient.
 
 *Implementation note:* This is no longer a future seam: the repository already ships `LyapunovGovernor` in `src/obligation/lyapunov.rs` and wires it into the live three-lane scheduler through `src/runtime/scheduler/three_lane.rs::governor_suggest`, including drain/deadline suggestions, adaptive fairness hooks, and decision-contract evidence emission. The remaining documentation debt is to keep the written operational semantics aligned with that implemented scheduler/governor path by formalizing the concrete `V(Σ)` transition rules now that the scheduler exists and is under active hardening.
 

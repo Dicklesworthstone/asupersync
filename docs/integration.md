@@ -2135,10 +2135,14 @@ cancellation-before-next-dial, and enforced pin-mismatch non-fallthrough.
 
 ### 6) Remote Protocol Spec (Named Computations)
 
-This section defines the current **remote structured concurrency protocol**.
-It is transport-agnostic and uses the message types defined in `src/remote.rs`
+This section describes the transport-independent **remote structured concurrency
+model** and the shipped service compatibility boundary. The abstract message
+examples use the message types defined in `src/remote.rs`
 (`RemoteMessage`, `SpawnRequest`, `SpawnAck`, `CancelRequest`, `ResultDelivery`,
-`LeaseRenewal`).
+`LeaseRenewal`); they are not byte-for-byte service requests. The shipped V1/V2/V3
+service uses `RemotePeerHello`, versioned requests/responses, and V3 session
+commands/events from that file. Its exact JSON goldens and the production
+transport description above govern existing wire compatibility.
 
 **Goals**
 - Deterministic, replayable message encoding.
@@ -2149,8 +2153,11 @@ It is transport-agnostic and uses the message types defined in `src/remote.rs`
 
 #### 6.1 Handshake (transport-level)
 
-Before exchanging `RemoteMessage` envelopes, peers perform a transport-level
-handshake:
+Before dispatch, the service validates peer metadata and an exact supported
+`RemoteProtocolVersion`; network adapters must bind the asserted NodeId to an
+authenticated transport identity. `RemotePeerHello` carries `peer_node`,
+`protocol_version`, and `registry_fingerprint`. The following richer handshake
+is a conceptual negotiation sketch, not the shipped hello JSON:
 
 ```
 Hello = {
@@ -2163,8 +2170,8 @@ Hello = {
 ```
 
 Rules:
-- **Major version mismatch** -> connection rejected.
-- **Minor version mismatch** -> allowed if receiver supports the sender's minor.
+- **Version mismatch** -> rejected unless the selected service path explicitly
+  supports that exact version; no implicit minor-version compatibility.
 - `registry_hash` is the hash of the *named computation registry*; mismatch
   is allowed but MUST be logged and MAY trigger `UnknownComputation` rejections.
 - Capability negotiation is **deny by default**: if the receiver does not list
@@ -2175,17 +2182,22 @@ handshake completion and version checks.
 
 #### 6.2 Serialization Format (deterministic)
 
-All protocol frames use **canonical CBOR (RFC 8949)** with deterministic
-map key ordering. Implementations MAY additionally expose JSON debug encoding
-for test vectors, but canonical CBOR is the wire format.
+Shipped V1/V2/V3 service frames use strict JSON with bounded big-endian
+length-delimited framing. `encode_remote_service_frame` and
+`read_remote_service_frame` in `src/remote.rs` implement that boundary.
+Serialization goldens freeze the existing field order, tags, and byte encoding;
+do not substitute a generic canonicalizer or a new encoding under those versions.
+Canonical CBOR was an earlier design proposal and would need a new, explicitly
+negotiated protocol version before adoption.
 
-Canonical type mappings:
+Abstract model type mappings (not service serialization instructions):
 - `NodeId` -> UTF-8 string
 - `RemoteTaskId` -> u64
 - `IdempotencyKey` -> hex string `"IK-<32 hex>"` (lowercase)
 - `Time` / `Duration` -> u64 nanoseconds
 - `RegionId`, `TaskId` -> `{ "index": u32, "generation": u32 }`
-- `RemoteInput` / `RemoteOutcome::Success` payload -> byte string (CBOR bytes)
+- `RemoteInput` / `RemoteOutcome::Success` payload -> an opaque byte sequence;
+  preserve the representation encoded by the existing service types and goldens.
 
 #### 6.3 Envelope Schema
 
@@ -2323,15 +2335,22 @@ Capability checks:
 
 #### 6.7 Compatibility & Versioning
 
-- Unknown fields MUST be ignored (forward compatibility).
+- Shipped service messages reject unknown fields, including nested metadata;
+  unknown variants are rejected as well.
 - Missing required fields MUST reject the message.
-- Major version mismatch => disconnect; minor mismatch => accept if supported.
+- Admission requires an exact supported protocol version. Field additions,
+  removals, renames, type/tag changes, and reordering require a new version with
+  explicit negotiation and goldens; optional fields are not silently compatible.
 - `sender_time` kinds may differ; if incompatible, receivers treat causal order
   as `Concurrent` and proceed without ordering assumptions.
 
-#### 6.8 Test Vectors (JSON, debug-only)
+#### 6.8 Abstract Model Examples (not service wire goldens)
 
-For JSON debug vectors, `input` / `output` byte fields are base64 strings.
+These historical envelope examples use base64 strings for `input` / `output`.
+They illustrate the abstract model; do not send them to the shipped service or
+use them to rewrite its JSON byte representation. Executable service wire
+goldens live in `tests/remote_transport_lifecycle_contract.rs`, alongside the
+unknown-field rejection tests for the types in `src/remote.rs`.
 
 **SpawnRequest**
 ```json

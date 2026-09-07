@@ -162,7 +162,7 @@ async fn main() {
 
 ```rust
 use asupersync::channel::mpsc;
-use asupersync::Cx;
+use asupersync::{Cx, Outcome};
 use asupersync::time::sleep;
 use std::time::Duration;
 
@@ -171,8 +171,12 @@ async fn run(cx: &Cx) {
 
     let mut producer = cx.spawn(move |cx| async move {
         for i in 0..5 {
-            let permit = tx.reserve(&cx).await.unwrap(); // cancel-safe
-            permit.send(i);                               // cannot fail
+            let Ok(permit) = tx.reserve(&cx).await else {
+                break; // cancellation or a closed receiver stops production
+            };
+            let Outcome::Ok(()) = permit.send(i) else {
+                break; // the receiver may disconnect after reservation
+            };
             sleep(cx.now(), Duration::from_millis(100)).await;
         }
     }).expect("spawn producer");
@@ -242,11 +246,19 @@ Running → CancelRequested → Cancelling → Finalizing → Completed(Cancelle
 ```
 
 - **Request**: propagates down the tree
-- **Drain**: tasks run to cleanup points (bounded by budgets)
+- **Drain**: cooperative tasks reach cleanup points and finish owned work
 - **Finalize**: finalizers run (masked, budgeted)
-- **Complete**: outcome is `Cancelled(reason)`
+- **Complete**: publishes the canonical outcome, including `Cancelled(reason)` when cancellation wins
 
-Some primitives and proof surfaces publish explicit cancellation responsiveness bounds, such as bounded commit sections, mask-depth limits, scheduler cancel-streak fairness, static plan analysis, and lab cancellation oracles. A blanket per-primitive responsiveness-bound registry is still a design requirement, not a universal runtime guarantee today; budgets are sufficient conditions only for paths with a concrete published bound.
+Stock operations publish conditional bounds through
+[`ResponsivenessRegistry`](src/cancel/mod.rs): `lookup` resolves an operation,
+and its entry's `bound` checks the requested goal and context. Finite results
+count delivered operation polls or explicit checkpoint calls under the entry's
+published assumptions. Masked operations, external or timer progress, blocking
+work, and unknown operations return typed refusals where a finite bound cannot
+be established. `OwnerQuiescent` explicitly requires independent owner progress;
+an operation bound alone cannot establish region drain or a wall-clock deadline.
+Budgets are sufficient conditions only for paths with a concrete published bound.
 
 The native parked-task cancellation contract is a release-blocking behavioral
 boundary. It parks real current-thread and owner-local tasks, and exercises a
@@ -274,11 +286,13 @@ Cancellation progress is observable through `ProgressCertificate` where the runt
 For covered two-phase communication surfaces where cancellation could otherwise lose a message, Asupersync uses reserve/commit:
 
 ```rust
-let permit = tx.reserve(cx).await?;  // ← cancel-safe: nothing committed yet
-permit.send(message);                 // ← linear: must happen or abort
+let permit = tx.reserve(cx).await?; // nothing committed yet
+let outcome = permit.send(message);
+// Inspect outcome: success publishes; disconnect returns the original value.
 ```
 
-Dropping a permit aborts cleanly. Message never partially sent.
+Dropping a permit aborts the reservation and releases capacity. The commit
+outcome determines whether the message was published or returned to the caller.
 
 This is not a blanket claim for every effect. Inherently partial I/O and adapter surfaces publish their own cancel-safety boundaries, including operations such as `read_exact` and `write_all` that are explicitly not cancel-safe.
 
@@ -1291,7 +1305,12 @@ rather than guessing.
 | **Watch** | `src/channel/watch.rs` | Last-value multicast | Always-current read |
 | **Session** | `src/channel/session.rs` | Typed RPC with reply obligation | Reply is a linear resource |
 
-The two-phase pattern (reserve a permit, then commit the send) is central to cancel-correctness. A reserved-but-uncommitted permit aborts cleanly on cancellation. A committed send is guaranteed delivered. No half-sent messages.
+The two-phase pattern separates reservation from publication. Dropping an
+uncommitted permit aborts the reservation and releases its capacity. Inspect
+the commit outcome: for MPSC, `SendPermit::send` returns
+`Outcome::Err(SendError::Disconnected(value))` with the original value if the
+receiver has gone away. A successful commit publishes the message to the
+channel; application consumption still depends on the receiver making progress.
 
 ### Synchronization
 
@@ -1976,16 +1995,20 @@ let cleanup_budget = Budget::new()
 
 ### "ObligationLeak detected"
 
-Your task completed while holding an obligation (permit, ack, lease).
+The oracle found an unresolved registered obligation. Inspect its task, region,
+and terminal transition to locate the owner or adapter that lost it. Ordinary
+MPSC permit destruction aborts and resolves the reservation; dropping that
+permit is a supported path, not itself a leak.
 
 ```rust
-// Wrong: permit dropped without send/abort
+// Abort an unused reservation and release its capacity.
 let permit = tx.reserve(cx).await?;
-return Outcome::ok(());  // Leak!
+drop(permit);
 
-// Right: always resolve obligations
+// Or commit and handle a possible receiver disconnect.
 let permit = tx.reserve(cx).await?;
-permit.send(message);  // Resolved
+let outcome = permit.send(message);
+// Inspect outcome before deciding whether to retry or discard a returned value.
 ```
 
 ### "RegionCloseTimeout"
@@ -2009,7 +2032,8 @@ A task is holding obligations but not making progress.
 // while holding a permit/lock
 let permit = tx.reserve(cx).await?;
 other_thing.await;  // If this blocks forever → futurelock
-permit.send(msg);
+let outcome = permit.send(msg);
+// Handle the commit outcome if other_thing eventually completes.
 ```
 
 ### Deterministic test failures
